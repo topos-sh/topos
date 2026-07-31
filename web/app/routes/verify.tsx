@@ -44,7 +44,12 @@ import {
   NAME_REQUIRED,
   SLUG_SHAPE,
 } from "@/lib/workspace-create-copy";
-import { isWorkspaceNameShape, toWorkspaceSlug, WORKSPACE_NAME_MAX } from "@/lib/workspace-name";
+import {
+  isWorkspaceNameShape,
+  toWorkspaceSlug,
+  toWorkspaceSlugDraft,
+  WORKSPACE_NAME_MAX,
+} from "@/lib/workspace-name";
 
 export const meta: MetaFunction = () => [{ title: "Approve a login · Topos" }];
 
@@ -156,7 +161,10 @@ function choiceFromPick(
     return {
       kind: "create",
       displayName: String(form.get("displayName") ?? "").trim(),
-      slug: String(form.get("slug") ?? "").trim(),
+      // The FULL slug rule applies at submit: the field holds the keystroke-tolerant draft
+      // (a trailing hyphen mid-typing survives there), and the canonical spelling is what
+      // the ceremony sees — same rule the form applies on blur.
+      slug: toWorkspaceSlug(String(form.get("slug") ?? "")),
     };
   }
   return { invalid: true };
@@ -527,19 +535,37 @@ function PendingRequest({
     </>
   );
 
-  const oneSeatOnly =
-    liveInvite === null && chooser.seats.length === 1 && chooser.invitations.length === 0;
+  // ONE obvious option renders as PROSE + the one button, never radio chrome — and on single
+  // tenancy the chooser must never offer a phantom pick at all: the install IS its one
+  // workspace, so a seat wins outright (a stale invitation to the same workspace decides
+  // nothing) and radios cannot exist there by construction.
+  const soloSeat =
+    liveInvite === null &&
+    chooser.seats.length === 1 &&
+    (chooser.invitations.length === 0 || !multi);
+  const soloInvitation =
+    liveInvite === null &&
+    !soloSeat &&
+    chooser.seats.length === 0 &&
+    chooser.invitations.length > 0 &&
+    (!multi || chooser.invitations.length === 1)
+      ? chooser.invitations[0]
+      : undefined;
   const noStanding =
     liveInvite === null && chooser.seats.length === 0 && chooser.invitations.length === 0;
   const guidanceOnly = noStanding && !chooser.createAllowed;
+  // The label follows the RENDERED arm (a solo arm's hidden pick outranks any radio state a
+  // preselect may have seeded).
   const approveLabel =
-    liveInvite !== null
+    liveInvite !== null || soloInvitation !== undefined
       ? "Accept and connect"
-      : pick === "create"
-        ? "Create and connect"
-        : pick?.startsWith("invitation:")
-          ? "Accept and connect"
-          : "Connect and approve this device";
+      : soloSeat
+        ? "Connect and approve this device"
+        : pick === "create"
+          ? "Create and connect"
+          : pick?.startsWith("invitation:")
+            ? "Accept and connect"
+            : "Connect and approve this device";
 
   return (
     <div className="flex flex-col gap-4 rounded-md border border-line-soft bg-ground p-4">
@@ -572,7 +598,7 @@ function PendingRequest({
                 {liveInvite.awaitsApproval && <AwaitsApprovalNote />}
               </div>
             </>
-          ) : oneSeatOnly ? (
+          ) : soloSeat ? (
             <>
               <input type="hidden" name="pick" value={`seat:${chooser.seats[0]?.name}`} />
               <div className="text-dim text-sm">
@@ -582,6 +608,20 @@ function PendingRequest({
                   <span className="font-mono text-faint">({chooser.seats[0]?.name})</span>.
                 </p>
                 {chooser.seats[0]?.awaitsApproval && <AwaitsApprovalNote />}
+              </div>
+            </>
+          ) : soloInvitation !== undefined ? (
+            // A lone invitation takes the same prose-and-one-button shape a lone seat gets —
+            // one obvious option is a sentence, never a radio group of one.
+            <>
+              <input type="hidden" name="pick" value={`invitation:${soloInvitation.id}`} />
+              <div className="text-dim text-sm">
+                <p>
+                  You’re invited to{" "}
+                  <span className="font-medium text-ink">{soloInvitation.workspaceDisplay}</span> —
+                  accepting connects this machine.
+                </p>
+                {soloInvitation.awaitsApproval && <AwaitsApprovalNote />}
               </div>
             </>
           ) : guidanceOnly ? (
@@ -833,6 +873,9 @@ function CreateFields({
 
   const checkData = check.data && "available" in check.data ? check.data : undefined;
   const forCurrent = checkData !== undefined && checkData.name === slug;
+  // One refusal, once: while the SERVER's typed error stands for the value in the field, the
+  // live probe says nothing — two identical "taken" lines for one slug is noise, not honesty.
+  const serverErrorStands = createRefusal !== null && createRefusal.slug === slug;
 
   return (
     <div className="flex flex-col gap-3">
@@ -849,6 +892,8 @@ function CreateFields({
           onChange={(e) => {
             setDisplayName(e.target.value);
             if (!slugEdited) {
+              // Deriving re-reads the WHOLE display name each keystroke, so the full rule is
+              // loss-free here (unlike the address field's own feedback loop below).
               setSlug(toWorkspaceSlug(e.target.value));
             }
           }}
@@ -868,8 +913,11 @@ function CreateFields({
           value={slug}
           onChange={(e) => {
             setSlugEdited(true);
-            setSlug(toWorkspaceSlug(e.target.value));
+            // The DRAFT rule per keystroke — full canonicalization here would eat the hyphen
+            // just typed ("stranger-" → "stranger", so "stranger-team" lands "strangerteam").
+            setSlug(toWorkspaceSlugDraft(e.target.value));
           }}
+          onBlur={() => setSlug(toWorkspaceSlug(slug))}
           className={`${INPUT} font-mono`}
         />
         {slug.length > 0 && (
@@ -879,7 +927,7 @@ function CreateFields({
                 {origin}/{slug}
               </span>
             </p>
-            {!isWorkspaceNameShape(slug) ? (
+            {serverErrorStands ? null : !isWorkspaceNameShape(slug) ? (
               <p className="text-faint text-xs">
                 Use lowercase letters, numbers, and hyphens for the address.
               </p>

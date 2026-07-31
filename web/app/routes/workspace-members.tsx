@@ -362,8 +362,8 @@ function MembersSection({
           <span id="members-heading">Members</span>
         </SectionHeading>
         <p className="text-dim text-sm">
-          A seat is membership — who can sign in here, enroll devices, and publish. Reviewers can
-          also approve proposals.
+          A seat is membership — who can sign in here, connect their machines, and publish.
+          Reviewers can also approve proposals.
         </p>
       </div>
       <Card className="overflow-hidden">

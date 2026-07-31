@@ -1,15 +1,21 @@
 import { type FormEvent, type ReactNode, useState } from "react";
 import {
+  type ActionFunctionArgs,
+  data,
   type LoaderFunctionArgs,
   type MetaFunction,
+  redirect,
+  useActionData,
   useLoaderData,
   useNavigate,
 } from "react-router";
 import { BusyFields } from "@/components/ui";
 import { composition } from "@/composition.server";
 import { authClient } from "@/lib/auth/client";
-import { safeNextPath } from "@/lib/auth/guards.server";
+import { assertSameOrigin, safeNextPath } from "@/lib/auth/guards.server";
 import { REGISTRATION_REFUSED } from "@/lib/auth/registration.server";
+import { getAuth } from "@/lib/auth/server";
+import { pendingLoopbackFlowExists } from "@/lib/db/identity.server";
 import { mailDelivery } from "@/lib/mail/transport.server";
 import { rebuildVerifyNext } from "@/lib/verify-path";
 
@@ -37,6 +43,14 @@ export const meta: MetaFunction = () => [{ title: "Sign in · Topos" }];
  * naturally, and the copy drops the invited-only framing. With mail armed, a successful
  * password sign-up waits on the mailbox round-trip (an invited seat binds after verification);
  * mail-less, it signs in directly.
+ *
+ * PROGRESSIVE ENHANCEMENT: the lead forms are REAL forms (method=post + this route's action +
+ * a hidden, canonically rebuilt `next`), so a submit in the pre-hydration window — the cold
+ * first paint right after a CLI opens the browser — posts server-side and behaves
+ * IDENTICALLY: the magic-link arm sends through the server auth API and renders the same
+ * check-your-email state; the password arm signs in server-side, forwards the session
+ * cookie, and redirects to `next`. Hydrated clients intercept (preventDefault) and never
+ * reach the action.
  */
 export async function loader({ request }: LoaderFunctionArgs) {
   const url = new URL(request.url);
@@ -46,10 +60,23 @@ export async function loader({ request }: LoaderFunctionArgs) {
   // resume — in any browser, fresh cookie jar included — on a path this server derived, never
   // on a raw string a link carried. Anything else takes the ordinary same-app-path validation.
   const rawNext = url.searchParams.get("next") ?? undefined;
-  const next = rebuildVerifyNext(rawNext) ?? safeNextPath(rawNext);
+  const verifyNext = rebuildVerifyNext(rawNext);
+  const next = verifyNext ?? safeNextPath(rawNext);
+  // The quiet machine-is-waiting line: when the rebuilt resume target carries a challenge that
+  // resolves to a LIVE pending loopback flow, say so — one sentence, no machine name (this page
+  // is pre-auth; the existence bit is all a challenge holder doesn't already know). Silence
+  // otherwise.
+  let deviceWaiting = false;
+  if (verifyNext !== null) {
+    const device = new URL(verifyNext, "http://login.invalid").searchParams.get("device");
+    if (device !== null) {
+      deviceWaiting = await pendingLoopbackFlowExists(device);
+    }
+  }
   const auth = composition.auth;
   return {
     next,
+    deviceWaiting,
     magicLink: Boolean(auth.magicLink),
     socialProviders: Object.keys(auth.socialProviders ?? {}),
     emailAndPassword: auth.emailAndPassword,
@@ -57,6 +84,69 @@ export async function loader({ request }: LoaderFunctionArgs) {
     registrationOpen: composition.registration === "open",
     signupRefusal: REGISTRATION_REFUSED,
   };
+}
+
+/**
+ * The JS-FREE fallback the real forms post to — hydrated clients intercept and never arrive.
+ * Same-origin is asserted (a browser form POST carries Origin; a login CSRF must not seed a
+ * session), the hidden `next` is re-validated server-side (never trusted as posted), and each
+ * arm calls the SERVER Better Auth API so the behavior matches the client rungs byte-for-byte.
+ */
+export async function action({ request }: ActionFunctionArgs) {
+  assertSameOrigin(request);
+  const form = await request.formData();
+  const intent = String(form.get("intent") ?? "");
+  const rawNext = String(form.get("next") ?? "");
+  const next = rebuildVerifyNext(rawNext) ?? safeNextPath(rawNext === "" ? undefined : rawNext);
+  // Named `address`, like the client rungs' local — it is a login name being FORWARDED, never
+  // compared (the email-authz gate reads lexically, and it should).
+  const address = String(form.get("email") ?? "").trim();
+
+  if (intent === "magic") {
+    if (address.length === 0) {
+      return data({ error: "Enter your email first." }, { status: 400 });
+    }
+    try {
+      await getAuth().api.signInMagicLink({
+        body: { email: address, callbackURL: next },
+        headers: request.headers,
+      });
+    } catch {
+      return data(
+        { error: "Couldn’t send the link. Check the address and try again." },
+        { status: 400 },
+      );
+    }
+    return { sent: true as const, email: address };
+  }
+
+  if (intent === "password") {
+    const password = String(form.get("password") ?? "");
+    if (address.length === 0 || password === "") {
+      return data({ error: "Couldn’t sign in. Check your email and password." }, { status: 400 });
+    }
+    let response: Response;
+    try {
+      response = await getAuth().api.signInEmail({
+        body: { email: address, password },
+        headers: request.headers,
+        asResponse: true,
+      });
+    } catch {
+      return data({ error: "Couldn’t sign in. Check your email and password." }, { status: 400 });
+    }
+    if (!response.ok) {
+      return data({ error: "Couldn’t sign in. Check your email and password." }, { status: 400 });
+    }
+    // Forward the session cookie onto the redirect — the whole point of the server arm.
+    const headers = new Headers();
+    for (const cookie of response.headers.getSetCookie()) {
+      headers.append("set-cookie", cookie);
+    }
+    throw redirect(next, { headers });
+  }
+
+  throw data(null, { status: 400 });
 }
 
 type Mode = "signin" | "signup";
@@ -104,6 +194,7 @@ function socialLabel(id: string): string {
 export default function LoginPage() {
   const {
     next,
+    deviceWaiting,
     magicLink,
     socialProviders,
     emailAndPassword,
@@ -111,6 +202,7 @@ export default function LoginPage() {
     registrationOpen,
     signupRefusal,
   } = useLoaderData<typeof loader>();
+  const actionData = useActionData<typeof action>();
   const navigate = useNavigate();
 
   const [mode, setMode] = useState<Mode>("signin");
@@ -123,6 +215,12 @@ export default function LoginPage() {
   const [verifySent, setVerifySent] = useState(false);
   // When magic link leads, the email+password rung hides behind this quiet toggle.
   const [passwordRevealed, setPasswordRevealed] = useState(false);
+
+  // The JS-free action's answers, merged into the same surfaces the client rungs use: a
+  // server-sent link renders the same sent card; a server refusal lands in the same error
+  // slot (a later hydrated retry writes the client `error`, which then leads).
+  const actionSent = actionData !== undefined && "sent" in actionData ? actionData : null;
+  const actionError = actionData !== undefined && "error" in actionData ? actionData.error : null;
 
   const signup = mode === "signup";
   // Magic link leads the sign-IN view; sign-up is always the password ceremony (the create hook
@@ -234,14 +332,8 @@ export default function LoginPage() {
     // Success hands the browser to the provider — stay busy through the redirect.
   }
 
-  if (magicSent) {
-    return (
-      <Shell>
-        <p className="text-sm text-dim" role="status">
-          Check your email — the link works for a few minutes.
-        </p>
-      </Shell>
-    );
+  if (magicSent || actionSent !== null) {
+    return <MagicSentCard email={actionSent?.email ?? email} next={next} />;
   }
 
   if (verifySent) {
@@ -275,9 +367,18 @@ export default function LoginPage() {
               ? "Sign in with your email and password."
               : "Continue with one of the options below."}
       </p>
+      {deviceWaiting && (
+        <p className="mt-2 text-sm text-dim" role="status">
+          A device is waiting to connect — sign in to approve it.
+        </p>
+      )}
 
       {showMagic ? (
-        <form onSubmit={submitMagicLink} className="mt-6">
+        // A REAL form: pre-hydration this posts to the route action and behaves identically;
+        // hydrated, onSubmit intercepts and the client rung runs.
+        <form onSubmit={submitMagicLink} method="post" className="mt-6">
+          <input type="hidden" name="intent" value="magic" />
+          <input type="hidden" name="next" value={next} />
           <BusyFields busy={anyBusy} className="space-y-3">
             <EmailField value={email} onChange={setEmail} />
             <button type="submit" className={PRIMARY_BTN}>
@@ -290,7 +391,11 @@ export default function LoginPage() {
           </BusyFields>
         </form>
       ) : !emailAndPassword ? null : (
-        <form onSubmit={submit} className="mt-6">
+        // Same enhancement for the password lead. The sign-UP variant of this form is only
+        // reachable through the hydrated mode toggle, so the action serves sign-in alone.
+        <form onSubmit={submit} method="post" className="mt-6">
+          <input type="hidden" name="intent" value="password" />
+          <input type="hidden" name="next" value={next} />
           <BusyFields busy={anyBusy} className="space-y-3">
             {signup && (
               <label className="block">
@@ -336,9 +441,9 @@ export default function LoginPage() {
         </form>
       )}
 
-      {error && (
+      {(error ?? actionError) && (
         <p className="mt-3 text-sm text-red-600" role="alert">
-          {error}
+          {error ?? actionError}
         </p>
       )}
 
@@ -399,6 +504,39 @@ export default function LoginPage() {
           </button>
         </p>
       )}
+    </Shell>
+  );
+}
+
+/**
+ * The link-sent state — a proper card, not a bare sentence: it names the mailbox it went to,
+ * offers a resend (a REAL form post to the action, so it works hydrated and not), and a way
+ * back to the form (a plain link carrying `next`, for the wrong-address case).
+ */
+function MagicSentCard({ email, next }: { email: string; next: string }) {
+  return (
+    <Shell>
+      <h1 className="font-display font-semibold text-lg tracking-[-0.02em] text-ink">
+        Check your email
+      </h1>
+      <p className="mt-1 text-sm text-dim" role="status">
+        We sent a sign-in link to <span className="font-medium text-ink">{email}</span> — it works
+        for a few minutes and can be used once.
+      </p>
+      <form method="post" className="mt-6">
+        <input type="hidden" name="intent" value="magic" />
+        <input type="hidden" name="email" value={email} />
+        <input type="hidden" name="next" value={next} />
+        <button type="submit" className={QUIET_BTN}>
+          Resend the link
+        </button>
+      </form>
+      <a
+        href={`/login?next=${encodeURIComponent(next)}`}
+        className="mt-4 block w-full text-center text-sm text-dim underline-offset-2 hover:text-ink hover:underline"
+      >
+        Use a different email
+      </a>
     </Shell>
   );
 }
