@@ -20,18 +20,18 @@ use topos_types::{Receipt, TerminalOutcome, WireCurrentRecord, WireError};
 
 use crate::error::ClientError;
 
-/// A device↔workspace LINK's status, as the wire spells it — the client branches only on the
-/// pending/active split (an unrecognized value reads as the stricter PENDING: no data flows).
+/// A SESSION's standing, as the wire spells it — the client branches only on the pending/active
+/// split (an unrecognized value reads as the stricter PENDING: no data flows).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum LinkStatus {
-    /// The link is live — data flows.
+    /// The session is live — data flows.
     Active,
-    /// The link awaits an owner's approval — no data flows; the sweep stays quiet.
+    /// The session awaits an owner's approval — no data flows; the sweep stays quiet.
     Pending,
 }
 
 impl LinkStatus {
-    /// Parse a wire `link_status` field. Absent (an older producer) reads as ACTIVE — such a
+    /// Parse a wire `session_status` field. Absent (an older producer) reads as ACTIVE — such a
     /// producer serves only active-equivalent access; any present-but-unrecognized value reads as
     /// the stricter PENDING.
     pub(crate) fn from_wire(raw: Option<&str>) -> Self {
@@ -463,25 +463,23 @@ pub(crate) struct GrantHint {
     pub name: String,
 }
 
-/// A GRANTED device-authorization poll: the device's ONE bearer credential (the promoted device code),
-/// the registered device's id, and the joined workspace. Hand-written `Debug` redacts the credential.
+/// A GRANTED login poll: the SESSION's workspace-scoped bearer credential (the promoted flow
+/// code), the minted session's id, and the workspace the human chose in the browser. Hand-written
+/// `Debug` redacts the credential.
 #[derive(Clone)]
 pub(crate) struct EnrolledGrant {
-    /// **SECRET** — the device's plaintext bearer credential (returned by the poll; stored `0600`).
+    /// **SECRET** — the session's plaintext bearer credential (returned by the poll; stored `0600`).
     pub credential: String,
-    /// The registered device's id (the non-secret handle a self-revoke names). On the SESSION
-    /// wire this carries the minted session id when the producer sent no device id.
-    pub device_id: String,
-    /// The minted SESSION's id (the session-model wire; `None` from an older producer).
-    pub session_id: Option<String>,
-    /// The joined workspace.
+    /// The minted SESSION's id (the non-secret handle the web sessions pages show).
+    pub session_id: String,
+    /// The workspace the approval recorded — a seat picked, an invitation accepted, or a
+    /// workspace created there. The CLI never chose it.
     pub workspace: EnrolledWorkspace,
     /// The invitation's first-destination hint — present when the flow carried an invite token
     /// whose (now accepted) invitation named one.
     pub hint: Option<GrantHint>,
-    /// The FIRST device↔workspace link's born status (approval mints registration + link
-    /// together server-side). PENDING ⇒ persist the enrollment, then the waiting receipt — no
-    /// subscribe attempt.
+    /// The session's born status. PENDING ⇒ persist the session, then the waiting receipt — no
+    /// delivery read (nothing flows over a pending session).
     pub link_status: LinkStatus,
 }
 
@@ -489,10 +487,36 @@ impl std::fmt::Debug for EnrolledGrant {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("EnrolledGrant")
             .field("credential", &"<redacted>")
-            .field("device_id", &self.device_id)
             .field("session_id", &self.session_id)
             .field("workspace", &self.workspace)
             .field("hint", &self.hint)
+            .field("link_status", &self.link_status)
+            .finish()
+    }
+}
+
+/// A session minted by the LANE-SIDE connect (`POST /v1/login/connect`) — the same facts a granted
+/// poll carries, without the browser: an already-credentialed machine asked for a further
+/// workspace and the server minted it against the acting user's seat. `Debug` redacts the
+/// credential, like every other carrier of one.
+#[derive(Clone)]
+pub(crate) struct ConnectedSession {
+    /// **SECRET** — the new session's workspace-scoped bearer credential (returned exactly once).
+    pub credential: String,
+    /// The new session's id.
+    pub session_id: String,
+    /// The connected workspace (the server's own spelling of the slug the caller named).
+    pub workspace: EnrolledWorkspace,
+    /// The session's born status (PENDING while the workspace's approval knob holds it).
+    pub link_status: LinkStatus,
+}
+
+impl std::fmt::Debug for ConnectedSession {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ConnectedSession")
+            .field("credential", &"<redacted>")
+            .field("session_id", &self.session_id)
+            .field("workspace", &self.workspace)
             .field("link_status", &self.link_status)
             .finish()
     }
@@ -511,16 +535,12 @@ pub(crate) enum DeviceAuthPoll {
     Expired,
     /// Approved — the session credential and workspace are present.
     Granted(EnrolledGrant),
-    /// A LOOPBACK flow already approved by a human, polled without its authorization code. The
-    /// credential exists but this caller has not proved it is the machine that asked; the answer
-    /// is to re-open the local hand-off, not to keep waiting.
-    AwaitingRedirect,
 }
 
 /// The login transport (the RFC-8628-shaped flow the app serves at `/v1/login/*`). `topos login`
-/// drives it: read the constant protocol card, start an authorization toward a workspace
-/// ADDRESS, and poll for the outcome — the granted poll carries the SESSION's workspace-scoped
-/// bearer credential (no separate redeem round-trip exists). The real impl is
+/// drives it: read the constant protocol card, start an authorization toward a SERVER, and poll
+/// for the outcome — the granted poll carries the SESSION's workspace-scoped bearer credential
+/// (no separate redeem round-trip exists). The real impl is
 /// [`crate::plane_http::UreqDeviceClient`]; the fakes live in the in-crate tests.
 pub(crate) trait EnrollSource {
     /// `GET <url>` with `Accept: application/json` — the unauthenticated CARD read of any resource
@@ -532,44 +552,41 @@ pub(crate) trait EnrollSource {
     /// that is not a protocol card.
     fn fetch_card(&self, url: &str) -> Result<WireProtocolCard, ClientError>;
 
-    /// `POST /v1/login/authorize` — begin a login flow toward the workspace named by its ADDRESS
-    /// slug (whether the name exists is never disclosed here — an unknown name runs the same flow
-    /// to the same uniform denial). `requested_name` is the human-readable machine name shown on
-    /// the approval page (a confused-deputy aid, not authority). `invite_token` is the invitation
-    /// link's token when this login came from `login <invite-url>` — recorded on the flow so the
-    /// approval weaves the accept in; never validated at this unauthenticated start.
+    /// `POST /v1/login/authorize` — begin a login flow toward THIS SERVER. The workspace is
+    /// chosen (or created) by the signed-in human at the browser approval, where their seats are
+    /// known; nothing about workspaces or accounts is disclosed on this unauthenticated route.
     ///
-    /// # Errors
+    /// `requested_name` is the human-readable machine name shown on the approval page (a
+    /// confused-deputy aid, not authority). `preselect` is the workspace ADDRESS slug a
+    /// `login <workspace>` shortcut named — a preselection for the browser chooser, carried
+    /// shape-checked but unresolved (this start is never an existence oracle). `invite_token` is
+    /// the invitation link's token when this login came from `login <invite-url>` — recorded on
+    /// the flow so the approval weaves the accept in; never validated here.
+    ///
     /// `loopback` is `true` when this client has a 127.0.0.1 listener bound and a browser it can
-    /// open on THIS machine. The flow is then LOOPBACK-bound: its credential can only be redeemed
-    /// with the authorization code the approval redirect delivers to that listener, so a stranger
-    /// who gets the flow approved by mailing someone a link never collects it.
+    /// open on THIS machine: the approval page then resolves from the URL-borne challenge with
+    /// nothing typed, and its redirect wakes the waiting client. The poll remains the one
+    /// completion mechanism either way.
     ///
     /// # Errors
     /// [`ClientError::Plane`] on a transport fault / non-OK status; [`ClientError::WireInvalid`] on a
     /// malformed body.
     fn device_auth_start(
         &self,
-        workspace: &str,
         requested_name: &str,
+        preselect: Option<&str>,
         invite_token: Option<&str>,
         loopback: bool,
     ) -> Result<DeviceAuthStart, ClientError>;
 
     /// `POST /v1/login/token` — one poll of the flow. The poll STATE (pending / denied / expired /
-    /// granted) is the `Ok` value; only a transport/parse fault is an `Err`.
+    /// granted) is the `Ok` value; only a transport/parse fault is an `Err`. The flow code is the
+    /// whole exchange: an approval that happened on another device completes here too.
     ///
     /// # Errors
     /// [`ClientError::Plane`] on a transport fault; [`ClientError::WireInvalid`] on a malformed body
-    /// (including a `granted` poll missing its credential / device / workspace).
-    ///
-    /// `auth_code` is the loopback hand-off's authorization code. A loopback-bound flow polled
-    /// without it answers `AwaitingRedirect`, never `Granted`.
-    fn device_auth_poll(
-        &self,
-        device_code: &str,
-        auth_code: Option<&str>,
-    ) -> Result<DeviceAuthPoll, ClientError>;
+    /// (including a `granted` poll missing its credential / session / workspace).
+    fn device_auth_poll(&self, device_code: &str) -> Result<DeviceAuthPoll, ClientError>;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -611,6 +628,26 @@ pub(crate) trait GovernanceSource {
     fn revoke_session(&self) -> Result<(), ClientError> {
         Err(ClientError::Plane(
             "this transport serves no session revoke".into(),
+        ))
+    }
+
+    /// `POST /v1/login/connect` — the LANE-SIDE second connect: this transport's own credential
+    /// (a live session on the server) asks for a FURTHER workspace's session with no browser
+    /// round-trip. Seat standing is the whole trust basis: the server mints only where the acting
+    /// user already holds a seat, and answers the uniform 404 otherwise — no seat there, or this
+    /// session is itself gone. Default: an erroring body, so fakes that never connect need no impl.
+    ///
+    /// # Errors
+    /// [`ClientError::TargetNotFound`] on the uniform 404 (the caller falls back to the browser,
+    /// which shows what is actually true: an invitation, a create, or the honest miss);
+    /// [`ClientError::Plane`] on a transport fault; [`ClientError::WireInvalid`] on a malformed body.
+    fn login_connect(
+        &self,
+        _workspace: &str,
+        _requested_name: &str,
+    ) -> Result<ConnectedSession, ClientError> {
+        Err(ClientError::Plane(
+            "this transport serves no login connect".into(),
         ))
     }
 }

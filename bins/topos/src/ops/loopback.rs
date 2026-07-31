@@ -1,27 +1,22 @@
 //! The loopback hand-off — the local half of an RFC 8252 login.
 //!
 //! An ephemeral `127.0.0.1` listener, bound BEFORE the flow starts (its existence is what lets
-//! the start declare the flow loopback-bound), receives the approval redirect. For a
-//! loopback-bound flow that redirect CARRIES THE AUTHORIZATION CODE — the second of the two
-//! secrets the token exchange needs — so this is no longer an advisory wake-up: losing it means
-//! the login cannot complete, and receiving it is what proves this machine is the one that
-//! asked. The `state` parameter binds the redirect to this ceremony; a stray or mismatched
-//! request is 404'd and kept listening for.
+//! the start declare the flow loopback-bound), receives the approval redirect. The redirect is a
+//! pure WAKE-UP: it carries no secret and completes nothing. The POLL is the completion
+//! mechanism, so an approval given on a phone, or a redirect that never arrives, still finishes
+//! the login on the ordinary poll interval — the listener only makes the common case instant.
+//! The `state` parameter binds the redirect to this ceremony; a stray or mismatched request is
+//! 404'd and kept listening for.
 
 use std::io::{Read, Write};
 use std::net::{Ipv4Addr, TcpListener, TcpStream};
 use std::time::Duration;
 
-/// What the localhost redirect reported.
-///
-/// For a LOOPBACK-bound flow the approved arm carries the ceremony's AUTHORIZATION CODE — the
-/// second secret the exchange needs, and the reason this hand-off is no longer advisory: the
-/// server will not release the credential to a poll that cannot present it. Only a browser on
-/// THIS machine can deliver it here, which is what makes a mailed approve-link useless to its
-/// sender.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// What the localhost redirect reported — an accelerator's two outcomes, each carrying nothing
+/// but itself. Either one simply makes the next poll immediate; the poll's answer is the truth.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum LoopbackOutcome {
-    Approved { auth_code: Option<String> },
+    Approved,
     Denied,
 }
 
@@ -77,10 +72,10 @@ impl LoopbackListener {
 fn answer_connection(mut stream: TcpStream, state: &str) -> Option<LoopbackOutcome> {
     let _ = stream.set_nonblocking(false);
     let _ = stream.set_read_timeout(Some(Duration::from_millis(500)));
-    // Read until the REQUEST LINE is complete, not just once. A single read can return a short
-    // buffer, and this hand-off now carries the authorization code — a truncated first line used
-    // to cost a wake-up, and would now cost the login. Bounded: the line is a path plus two
-    // short query values, so anything past the cap is not our redirect.
+    // Read until the REQUEST LINE is complete, not just once: a single read can return a short
+    // buffer, and a truncated first line costs the wake-up (never the login — the poll settles it
+    // regardless). Bounded: the line is a path plus two short query values, so anything past the
+    // cap is not our redirect.
     let mut raw = Vec::new();
     let mut buf = [0u8; 1024];
     // WALL-CLOCK bounded, not just per-read: the 500 ms timeout above resets on every byte, so a
@@ -103,7 +98,7 @@ fn answer_connection(mut stream: TcpStream, state: &str) -> Option<LoopbackOutco
     match parse_callback(path, state) {
         Some(outcome) => {
             let body = match outcome {
-                LoopbackOutcome::Approved { .. } => handoff_page(
+                LoopbackOutcome::Approved => handoff_page(
                     "Login approved",
                     "You're set — this device is approved.",
                     "Return to your terminal.",
@@ -166,21 +161,18 @@ fn handoff_page(title: &str, heading: &str, detail: &str) -> String {
     )
 }
 
-/// Parse a redirect path (`/cb?state=…&outcome=approved|denied[&code=…]`) against the
-/// ceremony's state. Pure — unit-tested. A missing/mismatched state or an unknown outcome is
-/// `None` (404'd, kept listening): the state binds the redirect to the CLI process that started
-/// the flow. `code`, when present, is the authorization code the exchange must carry; it is
-/// percent-decoded because it rides a query value.
+/// Parse a redirect path (`/cb?state=…&outcome=approved|denied`) against the ceremony's state.
+/// Pure — unit-tested. A missing/mismatched state or an unknown outcome is `None` (404'd, kept
+/// listening): the state binds the redirect to the CLI process that started the flow. Nothing
+/// else is read off the query — the redirect carries no secret, so there is nothing to decode.
 pub(crate) fn parse_callback(path: &str, expected_state: &str) -> Option<LoopbackOutcome> {
     let query = path.strip_prefix("/cb?")?;
     let mut state = None;
     let mut outcome = None;
-    let mut code = None;
     for pair in query.split('&') {
         match pair.split_once('=') {
             Some(("state", v)) => state = Some(v),
             Some(("outcome", v)) => outcome = Some(v),
-            Some(("code", v)) => code = Some(v),
             _ => {}
         }
     }
@@ -188,35 +180,10 @@ pub(crate) fn parse_callback(path: &str, expected_state: &str) -> Option<Loopbac
         return None;
     }
     match outcome {
-        Some("approved") => Some(LoopbackOutcome::Approved {
-            auth_code: code.map(percent_decode),
-        }),
+        Some("approved") => Some(LoopbackOutcome::Approved),
         Some("denied") => Some(LoopbackOutcome::Denied),
         _ => None,
     }
-}
-
-/// Percent-decode a query value. The authorization code is base64url (no reserved characters),
-/// so this is belt-and-braces against an encoder that escapes anyway — a malformed escape keeps
-/// its literal bytes rather than dropping them, so a wrong code is refused by the server rather
-/// than silently becoming a different one.
-fn percent_decode(value: &str) -> String {
-    let bytes = value.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'%' && i + 2 < bytes.len() {
-            let hex = std::str::from_utf8(&bytes[i + 1..i + 3]).ok();
-            if let Some(b) = hex.and_then(|h| u8::from_str_radix(h, 16).ok()) {
-                out.push(b);
-                i += 3;
-                continue;
-            }
-        }
-        out.push(bytes[i]);
-        i += 1;
-    }
-    String::from_utf8_lossy(&out).into_owned()
 }
 
 /// The full auto-open URL: the pending disclosure's approval page + the flow challenge (when the
@@ -381,7 +348,12 @@ mod tests {
         let s = "st-0123456789";
         assert_eq!(
             parse_callback("/cb?state=st-0123456789&outcome=approved", s),
-            Some(LoopbackOutcome::Approved { auth_code: None })
+            Some(LoopbackOutcome::Approved)
+        );
+        // A stray extra query value changes nothing — the redirect carries no secret to read.
+        assert_eq!(
+            parse_callback("/cb?state=st-0123456789&outcome=approved&code=whatever", s),
+            Some(LoopbackOutcome::Approved)
         );
         assert_eq!(
             parse_callback("/cb?outcome=denied&state=st-0123456789", s),
@@ -486,7 +458,7 @@ mod tests {
             );
             std::thread::sleep(std::time::Duration::from_millis(5));
         };
-        assert_eq!(outcome, LoopbackOutcome::Approved { auth_code: None });
+        assert_eq!(outcome, LoopbackOutcome::Approved);
         let mut answer = String::new();
         let _ = real.read_to_string(&mut answer);
         assert!(answer.starts_with("HTTP/1.1 200"), "{answer}");

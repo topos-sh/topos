@@ -353,9 +353,11 @@ fn run_command(json: bool, workspace: Option<String>, command: Command, bare: bo
             render::fmt_tty,
             &diag,
         ),
-        // `login <address>` — mint ONE workspace-scoped session (the gh-style browser approval;
-        // re-invoking resumes). The same blocking idiom as `follow`: a TTY (or `--wait`) run
-        // re-polls until the approval settles; piped/`--json` without `--wait` never hangs.
+        // `login [<address>]` — mint ONE workspace-scoped session against a SERVER (the workspace
+        // is chosen in the browser; a machine already logged into that server takes the
+        // browser-free lane). The same blocking idiom as every device-auth verb: a TTY (or
+        // `--wait`) run re-polls until the approval settles; piped/`--json` without `--wait`
+        // never hangs.
         Command::Login { address, wait } => {
             let connect_session_delivery =
                 |base: &str, cred: &str, ws: &str| -> Box<dyn crate::plane::DeliverySource> {
@@ -364,9 +366,16 @@ fn run_command(json: bool, workspace: Option<String>, command: Command, bare: bo
                             .with_workspaces(vec![ws.to_owned()]),
                     )
                 };
+            let connect_session_lane = |base: &str, cred: &str| -> Box<dyn GovernanceSource> {
+                Box::new(UreqDeviceClient::new(
+                    base.to_owned(),
+                    Some(cred.to_owned()),
+                ))
+            };
             let connectors = ops::LoginConnectors {
                 enroll: &connect_enroll,
                 delivery: &connect_session_delivery,
+                lane: &connect_session_lane,
                 web_origin: web_origin.clone(),
             };
             let stdout_tty = {
@@ -375,12 +384,11 @@ fn run_command(json: bool, workspace: Option<String>, command: Command, bare: bo
             };
             let policy = WaitPolicy::resolve(json, wait, stdout_tty, &clock);
             // THE BINDING IS DECIDED BEFORE THE FLOW IS STARTED, because it is what the flow is
-            // started AS. A loopback-bound flow's credential can only be redeemed with the
-            // authorization code the approval redirect hands to this listener, so the listener
-            // must already exist when we declare it — and the server records the binding
-            // write-once, so there is no way to change our mind afterwards. Bind first, declare
-            // second: if the bind fails we say so and run the classic typed-code flow, rather
-            // than promising a hand-off we cannot receive.
+            // started AS: the approval page pre-arms from the URL-borne challenge and redirects
+            // to this listener, so the listener must already exist when we declare it — and the
+            // server records the binding write-once. Bind first, declare second: if the bind
+            // fails we say so and run the classic typed-code flow, rather than promising a
+            // hand-off we cannot receive.
             let opener = if policy.block && !json {
                 let interactive = {
                     use std::io::IsTerminal;
@@ -407,25 +415,11 @@ fn run_command(json: bool, workspace: Option<String>, command: Command, bare: bo
                 );
             }
             let holds_listener = bound.is_some();
-            // TWO facts, deliberately split. `bind_loopback: holds_listener` — a FRESH start must
-            // declare the flow loopback-bound exactly when this invocation holds the listener the
-            // approval page will redirect to (declaring less once shipped a device-bound flow
-            // behind a loopback terminal: the page could not pre-arm, the suppressed code was
-            // nowhere, and the wait ran out the whole TTL). `listening: false` on the FIRST poll —
-            // an `awaiting_redirect` here means the approval happened before this process existed,
-            // so the code it minted went to a listener that is gone — terminal, and the resume
-            // path says so. Only the polls AFTER this invocation opened its own browser may
-            // tolerate the wait (the closure below).
-            let first = ops::session_login(
-                &ctx,
-                &connectors,
-                address.as_deref(),
-                ops::Handoff {
-                    bind_loopback: holds_listener,
-                    listening: false,
-                    auth_code: None,
-                },
-            );
+            // A FRESH start declares the flow loopback-bound exactly when this invocation holds
+            // the listener the approval page will redirect to (declaring less once shipped a
+            // device-bound flow behind a loopback terminal: the page could not pre-arm, the
+            // suppressed code was nowhere, and the wait ran out the whole TTL).
+            let first = ops::session_login(&ctx, &connectors, address.as_deref(), holds_listener);
             // The auto-open plan: the page URL needs the flow's challenge, which only exists once
             // the start above has written the WAL. Only a LOOPBACK-BOUND flow gets the plan — a
             // resumed device-bound flow (started piped, resumed on a TTY) keeps the typed-code
@@ -443,27 +437,13 @@ fn run_command(json: bool, workspace: Option<String>, command: Command, bare: bo
                     state,
                 })
             });
-            let listening = loopback_plan.is_some();
             let result = block_on_pending(
                 &clock,
                 &policy,
                 first,
                 session_login_pending_disclosure,
                 loopback_plan,
-                |auth_code| {
-                    ops::session_login(
-                        &ctx,
-                        &connectors,
-                        address.as_deref(),
-                        ops::Handoff {
-                            bind_loopback: holds_listener,
-                            // Whether THIS invocation armed its listener in the wait. Polls from
-                            // here on wait on a redirect this process can genuinely receive.
-                            listening,
-                            auth_code,
-                        },
-                    )
-                },
+                || ops::session_login(&ctx, &connectors, address.as_deref(), holds_listener),
             );
             // The breadth arming sweep + the built-in skill ride the completed login (the
             // acceptance event is the trigger-arming moment), exactly as on `follow`'s receipt.
@@ -2301,7 +2281,7 @@ struct LoopbackPlan<'a> {
     runner: &'a dyn topos_harness::CommandRunner,
     challenge: String,
     /// Bound BEFORE the flow was started — its existence is what let the start declare the flow
-    /// loopback-bound, and it is the only place the authorization code can arrive.
+    /// loopback-bound, and it is where the approval redirect wakes this wait.
     listener: ops::loopback::LoopbackListener,
     state: String,
 }
@@ -2315,17 +2295,16 @@ struct LoopbackPlan<'a> {
 ///
 /// With a `loopback` plan, the wait ALSO binds an ephemeral 127.0.0.1 listener and auto-opens the
 /// approval page carrying the state-bound return coordinates — the browser's redirect wakes the
-/// next poll immediately (zero typing). For a LOOPBACK-bound flow the redirect carries the
-/// authorization code the exchange needs, so the listener is kept even when the auto-open fails
-/// (the URL is printed to paste instead) — falling back to the bare typed-code page there would
-/// strand the login, because approving it hands the code to a listener that no longer exists.
+/// next poll immediately (zero typing). The redirect is only an ACCELERATOR: it carries no
+/// secret, and the ordinary poll interval completes the login just the same when it never arrives
+/// (the human approved on their phone, or the auto-open failed and they pasted the URL elsewhere).
 fn block_on_pending<T>(
     clock: &dyn Clock,
     policy: &WaitPolicy,
     first: Result<T, ClientError>,
     pending_of: impl Fn(&T) -> Option<PendingDisclosure>,
     loopback: Option<LoopbackPlan<'_>>,
-    mut repoll: impl FnMut(Option<&str>) -> Result<T, ClientError>,
+    mut repoll: impl FnMut() -> Result<T, ClientError>,
 ) -> Result<T, ClientError> {
     if !policy.block {
         return first;
@@ -2341,9 +2320,10 @@ fn block_on_pending<T>(
     // The waiting disclosure on STDERR (stdout stays the clean final envelope/TTY): the URL and
     // the short code on separate lines (the code never rides a URL), and the one line that makes
     // the wait unscary — interrupting loses nothing.
-    // A LOOPBACK flow deliberately does NOT print the bare page + code: approving there cannot
-    // hand the authorization code back to this terminal, so the page refuses it. Its own URL is
-    // printed by the listener arm below (auto-opened, or to paste when the open fails).
+    // A LOOPBACK flow deliberately does NOT print the bare page + code: this machine's browser is
+    // about to open on a page that needs no typing, and a code on screen only invites typing it
+    // where nothing asked for it. Its own URL is printed by the listener arm below (auto-opened,
+    // or to paste when the open fails).
     if loopback.is_none() {
         eprintln!(
             "Open: {}\nCode: {} (the page shows the same code — confirm it matches)",
@@ -2354,11 +2334,8 @@ fn block_on_pending<T>(
         "Ctrl-C is safe — the same command resumes this enrollment; `--wait <seconds>` caps the \
          wait."
     );
-    // The loopback arm: bind, auto-open, and let the redirect wake the poll. Every fault here is
-    // silent — the typed-code lines above already carry the whole ceremony.
-    // The authorization code the local hand-off delivered, once it has. Held here rather than
-    // re-derived: it exists exactly once, in exactly one place.
-    let mut captured: Option<String> = None;
+    // The loopback arm: auto-open, and let the redirect wake the poll. Every fault here is
+    // silent — the poll behind it settles the login either way.
     let mut listener = loopback.map(|plan| {
         let bound = plan.listener;
         let url = ops::loopback::approval_url(
@@ -2375,19 +2352,16 @@ fn block_on_pending<T>(
         if opened {
             eprintln!("Opening your browser to approve.");
         } else {
-            // The open failed, but the FLOW IS ALREADY LOOPBACK-BOUND — its credential can only
-            // be redeemed with the code this listener receives. Falling back to the bare
-            // typed-code page would strand the login: approving there mints a code with nowhere
-            // to go, and the CLI would wait out the whole TTL for a redirect that can never
-            // come. So keep listening and hand the person the URL that carries the return
-            // coordinates; pasting it completes the ceremony exactly as the auto-open would.
+            // The open failed; the flow is unharmed. This URL needs no typing and returns the
+            // approval straight to this terminal — and approving anywhere else still completes
+            // here on the next poll, so nothing is stranded either way.
             eprintln!(
                 "Could not open a browser. Open this URL to approve:\n  {url}\n\
-                 (it returns the approval to this terminal — the code above is only for a \
-                 different machine's browser, which cannot complete this login)"
+                 (it returns you here immediately; approving elsewhere finishes this login too, \
+                 on the next check)"
             );
         }
-        // Kept either way: the listener is the only door for a loopback-bound flow.
+        // Kept either way: it costs nothing and turns a click into an instant finish.
         bound
     });
     let interval = disc.poll_interval();
@@ -2455,14 +2429,11 @@ fn block_on_pending<T>(
                     break;
                 }
                 if let Some(bound) = &listener
-                    && let Some(outcome) = bound.try_receive()
+                    && bound.try_receive().is_some()
                 {
-                    // The redirect landed (single-use — stop listening) → exchange NOW, carrying
-                    // the authorization code it brought. That code is the half of the exchange
-                    // only a browser on THIS machine could have delivered.
-                    if let ops::loopback::LoopbackOutcome::Approved { auth_code } = outcome {
-                        captured = auth_code;
-                    }
+                    // The redirect landed (single-use — stop listening) → poll NOW. Approved, the
+                    // poll returns the grant; denied, one confirming poll ends the wait with the
+                    // server's own answer, which is the only one this client trusts.
                     listener = None;
                     break;
                 }
@@ -2474,7 +2445,7 @@ fn block_on_pending<T>(
         } else {
             std::thread::sleep(nap);
         }
-        let next = repoll(captured.as_deref());
+        let next = repoll();
         if matches!(&next, Ok(o) if pending_of(o).is_some()) {
             // Still waiting on the human — keep polling (the deadline is re-checked at the loop top).
             last = next;
@@ -2842,7 +2813,7 @@ mod tests {
                 })
             },
             None,
-            |_auth_code| panic!("a non-blocking wait must never re-poll"),
+            || panic!("a non-blocking wait must never re-poll"),
         );
         assert_eq!(out.unwrap(), "pending-marker");
     }
@@ -2868,7 +2839,7 @@ mod tests {
                 })
             },
             None,
-            |_auth_code| panic!("the elapsed deadline never re-polls"),
+            || panic!("the elapsed deadline never re-polls"),
         );
         assert_eq!(out.unwrap(), "still-pending");
     }
