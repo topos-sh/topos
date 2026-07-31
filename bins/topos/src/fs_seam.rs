@@ -15,26 +15,33 @@
 //! writes themselves refuse to follow links:
 //!
 //! - every file create/open in this seam carries `O_NOFOLLOW` (a symlink at the final component
-//!   is met as itself and refused, never written through);
-//! - [`FsOps::create_dir_nofollow`] builds directories ONE component at a time below a proven
-//!   base, `lstat`-ing each existing component and refusing any symlink — `mkdir -p` through a
-//!   swapped ancestor is structurally impossible on the walked components (the residual is the
-//!   per-component check-to-`mkdir` beat, which the caller's post-create re-proof backstops);
+//!   is met as itself and refused, never written through), and the mode a staged/private write
+//!   forces is applied through the ALREADY-OPEN descriptor (`fchmod`), never the path — the
+//!   `O_NOFOLLOW` protection would otherwise end at the open, and a symlink swapped in behind it
+//!   would take the chmod instead;
+//! - [`FsOps::create_dir_nofollow`] builds directories at DIRECTORY HANDLES below a proven base:
+//!   each component is reached from its PARENT's held fd (`openat(O_NOFOLLOW | O_DIRECTORY)` to
+//!   descend, `mkdirat` when absent, re-`openat` after a create), so no path-based syscall runs
+//!   below the base and `mkdir -p` through a swapped ancestor is structurally impossible — the
+//!   held fd keeps naming the directory object that was proven or created, wherever its path now
+//!   points (the caller's post-create re-proof still backstops the final SPELLING);
 //! - [`DirHandle`] pins a PROVEN parent directory open across the window: the landing
 //!   rename/exchange runs *at the held fd* ([`FsOps::rename_at`] / [`FsOps::exchange_at`], safe
 //!   `rustix` `renameat`), after an `lstat`-vs-fd identity check, so even a swap in the final
 //!   beat moves bytes inside the directory object that was proven — never through the swapped
-//!   path.
+//!   path — and the litter/probe removals beside it ride the same handle
+//!   ([`FsOps::remove_dir_all_at`]: `openat` + fd-anchored iteration + `unlinkat`).
 //!
 //! Named residuals: `O_NOFOLLOW` guards only the final component (the directory walk + handle
 //! anchoring cover the ancestors); a whole REAL directory relocated after the proof keeps its
 //! identity and the held fd writes into it wherever it now sits (an attacker placing bytes in a
-//! tree they could already write — not a redirect into a victim path); recursive removals stay
-//! path-based (each is preceded by a handle identity check where one is held, and the parked
-//! trees they act on are settle-rail-judged). On non-unix targets these primitives would degrade
-//! to the path-based checks alone — this crate currently builds on unix only, and a port must
-//! revisit this boundary (Windows has no `O_NOFOLLOW`; junction/reparse-point checks would take
-//! its place).
+//! tree they could already write — not a redirect into a victim path); content READS of parked
+//! trees (the settle rail's scans) and the park-journal restores of arbitrary paths stay
+//! path-based — each destructive conclusion they feed is preceded by a handle identity check
+//! where one is held, and the trees they act on are settle-rail-judged. On non-unix targets
+//! these primitives would degrade to the path-based checks alone — this crate currently builds
+//! on unix only, and a port must revisit this boundary (Windows has no `O_NOFOLLOW`;
+//! junction/reparse-point checks would take its place).
 
 use std::fs::File;
 use std::io;
@@ -129,6 +136,12 @@ pub(crate) trait FsOps {
     fn remove_dir_all(&self, path: &Path) -> io::Result<()>;
     /// Read a file, or `None` if it does not exist.
     fn read_opt(&self, path: &Path) -> io::Result<Option<Vec<u8>>>;
+    /// [`FsOps::read_opt`] that refuses to FOLLOW a final-component symlink (`O_NOFOLLOW` open) —
+    /// the read for topos's OWN persisted documents (lock/map/sync/journal/…), which topos only
+    /// ever writes as regular files. Following a link there turns a DANGLING symlink into a lying
+    /// "absent" (and recovery deletes on "absent"), so a symlink reads as an ERROR — unreadable,
+    /// fail-closed — never as `None`.
+    fn read_opt_nofollow(&self, path: &Path) -> io::Result<Option<Vec<u8>>>;
     /// The immediate entries of a directory (full paths), or empty if it does not exist.
     fn read_dir(&self, dir: &Path) -> io::Result<Vec<PathBuf>>;
     /// Whether a path exists (following symlinks).
@@ -153,18 +166,6 @@ pub(crate) trait FsOps {
     /// Whether `path` is owner-only (`mode & 0o077 == 0`) — the refuse-on-permissive gate a secret read
     /// uses to fail closed before trusting bytes a wider audience could have written. A pure read.
     fn private_perms_ok(&self, path: &Path) -> io::Result<bool>;
-    /// Atomically exchange two EXISTING directories in one namespace operation (`RENAME_EXCHANGE` on
-    /// Linux / `RENAME_SWAP` via `renameatx_np` on macOS — safe `rustix`, no `unsafe`). After it, each
-    /// path names what the other held. The single primitive that lets an *update* land new bytes onto a
-    /// populated harness dir with no torn/mixed/partial state. Errors typed (e.g. `ENOTSUP` on an FS
-    /// without the syscall) so the caller can fall back.
-    fn exchange_dir(&self, a: &Path, b: &Path) -> io::Result<()>;
-    /// EXCLUSIVE create: write `bytes` to a file that must **not** already exist (`O_EXCL` —
-    /// `create_new`), then fsync it. A true kernel-level exclusive, not a check-then-write: two
-    /// racing creators get exactly one winner, and the loser's [`io::ErrorKind::AlreadyExists`]
-    /// leaves the winner's file untouched. No temp file, no rename — so no shared temp name for a
-    /// concurrent writer to tear.
-    fn write_new(&self, path: &Path, bytes: &[u8]) -> io::Result<()>;
     /// Open a directory (`O_NOFOLLOW | O_DIRECTORY`) as a held [`DirHandle`], capturing its
     /// `(dev, ino)` — called immediately after a containment proof so the proven object is
     /// pinned across the proof-to-write window. A pure open; nothing is mutated.
@@ -177,15 +178,45 @@ pub(crate) trait FsOps {
     /// held directory. The check runs at the held fd (`statat`, no-follow); the caller's writer
     /// lock closes the check→rename beat against topos's own writers.
     fn rename_at_noreplace(&self, h: &DirHandle, from: &str, to: &str) -> io::Result<()>;
-    /// [`FsOps::exchange_dir`] by LEAF names inside the held directory — the atomic swap run at
-    /// the handle's fd, after [`DirHandle::verify_unmoved`]. Errors typed exactly like
-    /// [`FsOps::exchange_dir`] so the caller's capability fallback still works.
+    /// Atomically exchange two EXISTING directories by LEAF names inside the held directory —
+    /// one namespace operation (`RENAME_EXCHANGE` on Linux / `RENAME_SWAP` via `renameatx_np` on
+    /// macOS — safe `rustix`, no `unsafe`) run at the handle's fd, after
+    /// [`DirHandle::verify_unmoved`]. After it, each name holds what the other did — the single
+    /// primitive that lets an *update* land new bytes onto a populated harness dir with no
+    /// torn/mixed/partial state. Errors typed (e.g. `ENOTSUP` on an FS without the syscall) so
+    /// the caller's capability fallback still works.
     fn exchange_at(&self, h: &DirHandle, a: &str, b: &str) -> io::Result<()>;
-    /// `mkdir -p` that REFUSES to follow a symlink: `dir` must sit lexically under `base` (an
-    /// already-proven directory), and each component below `base` is `lstat`-ed and created ONE
-    /// level at a time — an existing symlink (or non-directory) component fails the whole call,
-    /// so a swapped ancestor is met as itself, never traversed. `..`/root components refuse.
-    fn create_dir_nofollow(&self, base: &Path, dir: &Path) -> io::Result<()>;
+    /// [`FsOps::remove_dir_all`] by LEAF name AT the held handle: the tree is opened
+    /// `openat(O_NOFOLLOW | O_DIRECTORY)` from the handle's fd (after
+    /// [`DirHandle::verify_unmoved`]) and deleted by fd-anchored iteration (`rustix` `Dir` +
+    /// `unlinkat`/`REMOVEDIR`) — no path-based syscall anywhere, so a parent swapped after the
+    /// proof cannot re-aim a removal outside the proven directory object. A symlink at the leaf
+    /// is unlinked as ITSELF, never followed; an absent leaf is success (NotFound-tolerant,
+    /// like [`FsOps::remove_dir_all`]).
+    fn remove_dir_all_at(&self, h: &DirHandle, leaf: &str) -> io::Result<()>;
+    /// `mkdir` ONE level by LEAF name at the held handle (`mkdirat` after
+    /// [`DirHandle::verify_unmoved`]). Strict: an existing entry (whatever it is) is
+    /// `AlreadyExists`, never adopted — the probe dirs this creates were removed a beat earlier
+    /// under the same handle.
+    fn create_dir_at(&self, h: &DirHandle, leaf: &str) -> io::Result<()>;
+    /// EXCLUSIVE create + fsync by LEAF name AT the held handle — a true kernel-level exclusive
+    /// (two racing creators get exactly one winner; the loser's `AlreadyExists` leaves the
+    /// winner's file untouched):
+    /// `openat(O_CREAT | O_EXCL | O_NOFOLLOW)` from the handle's fd after
+    /// [`DirHandle::verify_unmoved`], then fsync the file AND the directory entry (a plain fsync
+    /// of the held fd) — the write lands in the very directory object the walk proved, so a path
+    /// swapped after the proof cannot re-aim it.
+    fn write_new_at(&self, h: &DirHandle, leaf: &str, bytes: &[u8]) -> io::Result<()>;
+    /// `mkdir -p` that REFUSES to follow a symlink, walked at DIRECTORY HANDLES: `dir` must sit
+    /// lexically under `base` (an already-proven directory), and each component below `base` is
+    /// reached from its PARENT's held fd — `openat(O_NOFOLLOW | O_DIRECTORY)` to descend,
+    /// `mkdirat` from the same fd when absent, a re-`openat` after a create — so no path-based
+    /// syscall runs below the base: a swapped ancestor is met as itself (refused at its own
+    /// level) and can never re-aim the walk, because the walk never re-resolves a path it
+    /// already holds. `..`/root components refuse. Returns the HELD handle of the final
+    /// directory so the caller's next write can run at the very object the walk proved
+    /// ([`FsOps::write_new_at`]).
+    fn create_dir_nofollow(&self, base: &Path, dir: &Path) -> io::Result<DirHandle>;
 }
 
 /// The production seam: `std::fs` + `rustix` safe syscalls.
@@ -204,6 +235,204 @@ impl RealFs {
             rustix::fs::fsync(file).map_err(io::Error::from)
         }
     }
+
+    /// [`FsOps::write_staged`]'s body, with a test-only beat (`before_chmod`) fired between the
+    /// write through the opened descriptor and the `fchmod` that forces the exact mode — the seam
+    /// a chmod-follows-a-swapped-symlink race would land in. Production passes a no-op.
+    fn write_staged_hooked(
+        path: &Path,
+        bytes: &[u8],
+        executable: bool,
+        before_chmod: &dyn Fn(),
+    ) -> io::Result<()> {
+        use std::io::Write;
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        let mode: u32 = if executable { 0o755 } else { 0o644 };
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(mode)
+            .custom_flags(nofollow_flag())
+            .open(path)?;
+        f.write_all(bytes)?;
+        before_chmod();
+        // `create(mode)` is masked by `umask` and ignored if the file already existed, so force
+        // the exact mode — the executable bit is part of the bundle digest, so the placed bytes
+        // must match it. Through the ALREADY-OPEN descriptor (`fchmod`), never the path: the
+        // `O_NOFOLLOW` protection ends at the open, and a symlink swapped in at the path after it
+        // would take a path-chmod onto its target instead.
+        f.set_permissions(std::fs::Permissions::from_mode(mode))?;
+        Ok(())
+    }
+
+    /// [`FsOps::write_private`]'s body — the same test-only beat as
+    /// [`RealFs::write_staged_hooked`], for the 0600 secret arm.
+    fn write_private_hooked(path: &Path, bytes: &[u8], before_chmod: &dyn Fn()) -> io::Result<()> {
+        use std::io::Write;
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .custom_flags(nofollow_flag())
+            .open(path)?;
+        f.write_all(bytes)?;
+        before_chmod();
+        // `mode(0o600)` is masked by `umask` and ignored if the file already existed, so force
+        // 0600 — a secret must never have a group/other-accessible window. Through the
+        // ALREADY-OPEN descriptor (`fchmod`), never the path (same reasoning as the staged arm:
+        // a path-chmod after the open can be re-aimed by a swapped-in symlink — here it would
+        // REVOKE access on an unrelated file). This only tightens a pre-existing looser file; a
+        // fresh file is already private from creation, so there is no chmod-after-write race.
+        f.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+        Ok(())
+    }
+
+    /// The fd-anchored walk behind [`FsOps::create_dir_nofollow`]: the proven base is opened ONCE
+    /// (`O_DIRECTORY`; its identity is the caller's containment proof), and every component below
+    /// it is reached from its PARENT's held descriptor — `openat(O_NOFOLLOW | O_DIRECTORY)` to
+    /// descend, `mkdirat` from the same fd when absent, then a re-`openat` of what was created
+    /// (a symlink or non-directory that appeared in the beat is met as itself and refused). No
+    /// path-based syscall runs below the base, so an ancestor swapped for a symlink mid-walk
+    /// cannot re-aim the walk: the held fd keeps naming the directory object that was proven or
+    /// created, wherever its path now points. `observe` is the test seam's beat — fired with each
+    /// component's full path immediately before that component is opened-or-created.
+    fn create_dir_walk(base: &Path, dir: &Path, observe: &dyn Fn(&Path)) -> io::Result<DirHandle> {
+        use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+        use std::path::Component;
+        let rel = dir.strip_prefix(base).map_err(|_| {
+            io::Error::other(format!(
+                "{} is not under {}; refusing the no-follow create",
+                dir.display(),
+                base.display()
+            ))
+        })?;
+        let base_flags = rustix::fs::OFlags::DIRECTORY.bits() as i32;
+        let mut cur = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(base_flags)
+            .open(base)?;
+        let mut cur_path = base.to_path_buf();
+        for comp in rel.components() {
+            let name = match comp {
+                Component::Normal(c) => c,
+                Component::CurDir => continue,
+                // `..` (or a root/prefix) would climb out of the proven base — refuse it whole.
+                _ => {
+                    return Err(io::Error::other(format!(
+                        "{} climbs out of {}; refusing the no-follow create",
+                        dir.display(),
+                        base.display()
+                    )));
+                }
+            };
+            cur_path.push(name);
+            observe(&cur_path);
+            let next = match openat_dir_nofollow(&cur, name) {
+                Ok(fd) => fd,
+                Err(rustix::io::Errno::NOENT) => {
+                    match rustix::fs::mkdirat(
+                        &cur,
+                        name,
+                        rustix::fs::Mode::from_bits_truncate(0o777),
+                    ) {
+                        // A racing creator won the level — the re-open below meets what appeared
+                        // as ITSELF (a symlink that landed in the beat is exactly the swap this
+                        // walk exists to refuse).
+                        Ok(()) | Err(rustix::io::Errno::EXIST) => {}
+                        Err(e) => return Err(io::Error::from(e)),
+                    }
+                    match openat_dir_nofollow(&cur, name) {
+                        Ok(fd) => fd,
+                        Err(e) => return Err(refuse_component(&cur_path, e)),
+                    }
+                }
+                Err(e) => return Err(refuse_component(&cur_path, e)),
+            };
+            cur = next;
+        }
+        let meta = cur.metadata()?;
+        Ok(DirHandle {
+            file: cur,
+            path: dir.to_path_buf(),
+            dev: meta.dev(),
+            ino: meta.ino(),
+        })
+    }
+}
+
+/// `openat` a DIRECTORY child from a held parent fd, refusing to follow a symlink at the name.
+fn openat_dir_nofollow(
+    parent: &File,
+    name: impl rustix::path::Arg,
+) -> Result<File, rustix::io::Errno> {
+    let flags = rustix::fs::OFlags::RDONLY
+        | rustix::fs::OFlags::DIRECTORY
+        | rustix::fs::OFlags::NOFOLLOW
+        | rustix::fs::OFlags::CLOEXEC;
+    rustix::fs::openat(parent, name, flags, rustix::fs::Mode::empty()).map(File::from)
+}
+
+/// The typed refusal for a walk component that is not an openable real directory: a symlink is
+/// met as itself (`ELOOP`/`EMLINK` under `O_NOFOLLOW`), a non-directory as `ENOTDIR`.
+fn refuse_component(at: &Path, e: rustix::io::Errno) -> io::Error {
+    match e {
+        rustix::io::Errno::LOOP | rustix::io::Errno::MLINK => io::Error::other(format!(
+            "{} is a symlink; refusing to create through it",
+            at.display()
+        )),
+        rustix::io::Errno::NOTDIR => {
+            io::Error::other(format!("{} exists and is not a directory", at.display()))
+        }
+        e => io::Error::from(e),
+    }
+}
+
+/// Delete one ENTRY (by name) from an open directory fd, recursively and fd-anchored: a child
+/// directory is descended via [`openat_dir_nofollow`] and emptied entry-by-entry (`rustix`
+/// `Dir` iteration over the held fd), every removal an `unlinkat` from its parent's fd; a
+/// symlink or non-directory at any name is unlinked as ITSELF, never followed. NotFound at any
+/// step is tolerated (a concurrent remover concluding first is success, matching
+/// [`FsOps::remove_dir_all`]).
+fn remove_entry_at(dir: &File, name: &std::ffi::CStr) -> io::Result<()> {
+    use rustix::io::Errno;
+    match openat_dir_nofollow(dir, name) {
+        Ok(sub) => {
+            let mut names: Vec<std::ffi::CString> = Vec::new();
+            for entry in rustix::fs::Dir::read_from(&sub).map_err(io::Error::from)? {
+                let entry = entry.map_err(io::Error::from)?;
+                let bytes = entry.file_name().to_bytes();
+                if bytes == b"." || bytes == b".." {
+                    continue;
+                }
+                names.push(entry.file_name().to_owned());
+            }
+            for child in names {
+                remove_entry_at(&sub, &child)?;
+            }
+            match rustix::fs::unlinkat(dir, name, rustix::fs::AtFlags::REMOVEDIR) {
+                Ok(()) | Err(Errno::NOENT) => Ok(()),
+                Err(e) => Err(io::Error::from(e)),
+            }
+        }
+        Err(Errno::NOENT) => Ok(()),
+        // Not an openable real directory (a symlink, a file, a device): unlink the entry itself.
+        Err(Errno::LOOP | Errno::MLINK | Errno::NOTDIR) => {
+            match rustix::fs::unlinkat(dir, name, rustix::fs::AtFlags::empty()) {
+                Ok(()) | Err(Errno::NOENT) => Ok(()),
+                Err(e) => Err(io::Error::from(e)),
+            }
+        }
+        Err(e) => Err(io::Error::from(e)),
+    }
+}
+
+/// A leaf name as the `CString` the `*at` syscalls take (an interior NUL cannot name a real file).
+fn leaf_cstr(leaf: &str) -> io::Result<std::ffi::CString> {
+    std::ffi::CString::new(leaf)
+        .map_err(|_| io::Error::other(format!("{leaf:?} contains an interior NUL")))
 }
 
 impl FsOps for RealFs {
@@ -292,6 +521,25 @@ impl FsOps for RealFs {
         }
     }
 
+    fn read_opt_nofollow(&self, path: &Path) -> io::Result<Option<Vec<u8>>> {
+        use std::io::Read;
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut f = match std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(nofollow_flag())
+            .open(path)
+        {
+            Ok(f) => f,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+            // A symlink at the final component (ELOOP under O_NOFOLLOW) — or anything else —
+            // surfaces as the error it is: UNREADABLE, never "absent".
+            Err(e) => return Err(e),
+        };
+        let mut out = Vec::new();
+        f.read_to_end(&mut out)?;
+        Ok(Some(out))
+    }
+
     fn read_dir(&self, dir: &Path) -> io::Result<Vec<PathBuf>> {
         match std::fs::read_dir(dir) {
             Ok(rd) => {
@@ -337,88 +585,17 @@ impl FsOps for RealFs {
     }
 
     fn write_staged(&self, path: &Path, bytes: &[u8], executable: bool) -> io::Result<()> {
-        use std::io::Write;
-        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-        let mode: u32 = if executable { 0o755 } else { 0o644 };
-        let mut f = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(mode)
-            .custom_flags(nofollow_flag())
-            .open(path)?;
-        f.write_all(bytes)?;
-        // `create(mode)` is masked by `umask` and ignored if the file already existed, so force the exact
-        // mode — the executable bit is part of the bundle digest, so the placed bytes must match it.
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))?;
-        Ok(())
+        Self::write_staged_hooked(path, bytes, executable, &|| {})
     }
 
     fn write_private(&self, path: &Path, bytes: &[u8]) -> io::Result<()> {
-        use std::io::Write;
-        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-        let mut f = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .custom_flags(nofollow_flag())
-            .open(path)?;
-        f.write_all(bytes)?;
-        // `mode(0o600)` is masked by `umask` and ignored if the file already existed, so force 0600 — a
-        // secret must never have a group/other-accessible window. This only tightens a pre-existing looser
-        // file; a fresh file is already private from creation, so there is no chmod-after-write race.
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
-        Ok(())
+        Self::write_private_hooked(path, bytes, &|| {})
     }
 
     fn private_perms_ok(&self, path: &Path) -> io::Result<bool> {
         use std::os::unix::fs::PermissionsExt;
         let mode = std::fs::metadata(path)?.permissions().mode();
         Ok(mode & 0o077 == 0)
-    }
-
-    fn write_new(&self, path: &Path, bytes: &[u8]) -> io::Result<()> {
-        use std::io::Write;
-        use std::os::unix::fs::OpenOptionsExt;
-        let mut f = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .custom_flags(nofollow_flag())
-            .open(path)?;
-        f.write_all(bytes)?;
-        Self::fsync_handle(&f)
-    }
-
-    fn exchange_dir(&self, a: &Path, b: &Path) -> io::Result<()> {
-        #[cfg(any(
-            target_os = "linux",
-            target_os = "android",
-            target_os = "macos",
-            target_os = "ios"
-        ))]
-        {
-            // EXCHANGE = renameat2(RENAME_EXCHANGE) on Linux / renameatx_np(RENAME_SWAP) on macOS — one
-            // atomic namespace swap of two existing dirs. Safe rustix wrapper (no `unsafe`).
-            rustix::fs::renameat_with(
-                rustix::fs::CWD,
-                a,
-                rustix::fs::CWD,
-                b,
-                rustix::fs::RenameFlags::EXCHANGE,
-            )
-            .map_err(io::Error::from)
-        }
-        #[cfg(not(any(
-            target_os = "linux",
-            target_os = "android",
-            target_os = "macos",
-            target_os = "ios"
-        )))]
-        {
-            let _ = (a, b);
-            Err(io::Error::from(rustix::io::Errno::NOSYS))
-        }
     }
 
     fn open_dir_handle(&self, dir: &Path) -> io::Result<DirHandle> {
@@ -484,65 +661,42 @@ impl FsOps for RealFs {
         }
     }
 
-    fn create_dir_nofollow(&self, base: &Path, dir: &Path) -> io::Result<()> {
-        use std::path::Component;
-        let rel = dir.strip_prefix(base).map_err(|_| {
-            io::Error::other(format!(
-                "{} is not under {}; refusing the no-follow create",
-                dir.display(),
-                base.display()
-            ))
-        })?;
-        let mut cur = base.to_path_buf();
-        for comp in rel.components() {
-            match comp {
-                Component::Normal(c) => cur.push(c),
-                Component::CurDir => continue,
-                // `..` (or a root/prefix) would climb out of the proven base — refuse it whole.
-                _ => {
-                    return Err(io::Error::other(format!(
-                        "{} climbs out of {}; refusing the no-follow create",
-                        dir.display(),
-                        base.display()
-                    )));
-                }
-            }
-            match std::fs::symlink_metadata(&cur) {
-                Ok(m) if m.file_type().is_symlink() => {
-                    return Err(io::Error::other(format!(
-                        "{} is a symlink; refusing to create through it",
-                        cur.display()
-                    )));
-                }
-                Ok(m) if m.is_dir() => continue,
-                Ok(_) => {
-                    return Err(io::Error::other(format!(
-                        "{} exists and is not a directory",
-                        cur.display()
-                    )));
-                }
-                Err(e) if e.kind() == io::ErrorKind::NotFound => {
-                    match std::fs::create_dir(&cur) {
-                        Ok(()) => {}
-                        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
-                            // A racing creator won the level — accept it ONLY as a plain
-                            // directory (a symlink that appeared in the beat is exactly the
-                            // swap this walk exists to refuse).
-                            let m = std::fs::symlink_metadata(&cur)?;
-                            if m.file_type().is_symlink() || !m.is_dir() {
-                                return Err(io::Error::other(format!(
-                                    "{} appeared as a non-directory mid-create; refusing",
-                                    cur.display()
-                                )));
-                            }
-                        }
-                        Err(e) => return Err(e),
-                    }
-                }
-                Err(e) => return Err(e),
-            }
-        }
-        Ok(())
+    fn remove_dir_all_at(&self, h: &DirHandle, leaf: &str) -> io::Result<()> {
+        h.verify_unmoved()?;
+        let name = leaf_cstr(leaf)?;
+        remove_entry_at(&h.file, &name)
+    }
+
+    fn create_dir_at(&self, h: &DirHandle, leaf: &str) -> io::Result<()> {
+        h.verify_unmoved()?;
+        rustix::fs::mkdirat(&h.file, leaf, rustix::fs::Mode::from_bits_truncate(0o777))
+            .map_err(io::Error::from)
+    }
+
+    fn write_new_at(&self, h: &DirHandle, leaf: &str, bytes: &[u8]) -> io::Result<()> {
+        use std::io::Write;
+        h.verify_unmoved()?;
+        let flags = rustix::fs::OFlags::WRONLY
+            | rustix::fs::OFlags::CREATE
+            | rustix::fs::OFlags::EXCL
+            | rustix::fs::OFlags::NOFOLLOW
+            | rustix::fs::OFlags::CLOEXEC;
+        let fd = rustix::fs::openat(
+            &h.file,
+            leaf,
+            flags,
+            rustix::fs::Mode::from_bits_truncate(0o666),
+        )
+        .map_err(io::Error::from)?;
+        let mut f = File::from(fd);
+        f.write_all(bytes)?;
+        Self::fsync_handle(&f)?;
+        // The directory ENTRY, through the held fd (a plain fsync persists entries).
+        rustix::fs::fsync(&h.file).map_err(io::Error::from)
+    }
+
+    fn create_dir_nofollow(&self, base: &Path, dir: &Path) -> io::Result<DirHandle> {
+        Self::create_dir_walk(base, dir, &|_| {})
     }
 }
 
@@ -562,6 +716,116 @@ fn open_lock_file(path: &Path) -> io::Result<File> {
 pub(crate) use fault::FaultFs;
 #[cfg(test)]
 pub(crate) use hook::HookFs;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    fn scratch(tag: &str) -> PathBuf {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static N: AtomicU32 = AtomicU32::new(0);
+        let n = N.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("topos-seam-{tag}-{}-{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn mode_of(p: &Path) -> u32 {
+        std::fs::metadata(p).unwrap().permissions().mode() & 0o777
+    }
+
+    /// P1: the `O_NOFOLLOW` protection must not end at the open. The mode is forced through the
+    /// ALREADY-OPEN descriptor (`fchmod`), so a symlink swapped in at the path BETWEEN the open
+    /// and the chmod — the exact beat this hook lands in — chmods nothing but the opened inode:
+    /// the staged arm can no longer make an unrelated private file 0644.
+    #[test]
+    fn a_symlink_swapped_in_after_the_open_never_takes_the_staged_chmod() {
+        let dir = scratch("chmod-staged");
+        let vdir = scratch("chmod-staged-victim");
+        let victim = vdir.join("secret");
+        std::fs::write(&victim, b"private bytes\n").unwrap();
+        std::fs::set_permissions(&victim, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let target = dir.join("staged.txt");
+        let (t, v) = (target.clone(), victim.clone());
+        let fs = HookFs::before_chmod_of(&target, move || {
+            // The swap: the just-opened file leaves the path, a symlink to the victim takes it.
+            std::fs::remove_file(&t).unwrap();
+            std::os::unix::fs::symlink(&v, &t).unwrap();
+        });
+        fs.write_staged(&target, b"payload\n", false).unwrap();
+        assert_eq!(mode_of(&victim), 0o600, "the victim's mode is untouched");
+        assert_eq!(std::fs::read(&victim).unwrap(), b"private bytes\n");
+        assert!(
+            std::fs::symlink_metadata(&target)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "the swapped-in link itself is what remains at the path"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&vdir);
+    }
+
+    /// P1, the private arm: the same swap must not REVOKE access on an unrelated file (a
+    /// path-chmod to 0600 through the link would).
+    #[test]
+    fn a_symlink_swapped_in_after_the_open_never_takes_the_private_chmod() {
+        let dir = scratch("chmod-private");
+        let vdir = scratch("chmod-private-victim");
+        let victim = vdir.join("shared.txt");
+        std::fs::write(&victim, b"world-readable\n").unwrap();
+        std::fs::set_permissions(&victim, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let target = dir.join("secret.json");
+        let (t, v) = (target.clone(), victim.clone());
+        let fs = HookFs::before_chmod_of(&target, move || {
+            std::fs::remove_file(&t).unwrap();
+            std::os::unix::fs::symlink(&v, &t).unwrap();
+        });
+        fs.write_private(&target, b"{}\n").unwrap();
+        assert_eq!(
+            mode_of(&victim),
+            0o644,
+            "the victim's access is not revoked"
+        );
+        assert_eq!(std::fs::read(&victim).unwrap(), b"world-readable\n");
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&vdir);
+    }
+
+    /// P1 (the dangling-lock class at its root): a symlink at a persisted-doc path reads as an
+    /// ERROR through the no-follow read — never as "absent". The dangling case is the trap: a
+    /// follow-read maps the target's NotFound to `None`, and recovery deletes on `None`.
+    #[test]
+    fn read_opt_nofollow_reads_a_symlink_as_an_error_never_as_absent() {
+        let dir = scratch("nofollow-read");
+        let dangling = dir.join("lock.json");
+        std::os::unix::fs::symlink(dir.join("nowhere"), &dangling).unwrap();
+        assert!(
+            RealFs.read_opt_nofollow(&dangling).is_err(),
+            "a dangling symlink is UNREADABLE, not absent"
+        );
+        // A live symlink is refused the same way — the bytes behind it are not this doc's.
+        let real = dir.join("real.json");
+        std::fs::write(&real, b"{}").unwrap();
+        let live = dir.join("map.json");
+        std::os::unix::fs::symlink(&real, &live).unwrap();
+        assert!(RealFs.read_opt_nofollow(&live).is_err());
+        // An absent path is still a plain None; a regular file still reads.
+        assert!(
+            RealFs
+                .read_opt_nofollow(&dir.join("gone"))
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            RealFs.read_opt_nofollow(&real).unwrap().unwrap(),
+            b"{}".to_vec()
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
 
 /// A test-only seam that lets a test act BETWEEN two of an operation's syscalls — the way a
 /// concurrent process (or a person with a shell) would. `FaultFs` models a crash; this models a
@@ -589,10 +853,21 @@ mod hook {
         /// BETWEEN the read that decides an act and the read that re-proves it.
         NthRead { target: PathBuf, nth: usize },
         /// The FIRST namespace move of ONE directory — the [`FsOps::rename`] that PARKS it or the
-        /// [`FsOps::exchange_dir`] that swaps it. The park-then-verify rail's race point: after
+        /// [`FsOps::exchange_at`] that swaps it. The park-then-verify rail's race point: after
         /// this instant the tree is parked (or replaced) and no path reaches it, so an edit
         /// landing here is the last one a run can lose.
         FirstMoveOf { dir: PathBuf },
+        /// Immediately AFTER [`FsOps::open_dir_handle`] pins ONE named directory — the first beat
+        /// of the proof-to-write window, where a concurrent process swaps the proven parent's
+        /// PATH out from under the held fd.
+        AfterHandleOpen { target: PathBuf },
+        /// Between a staged/private write's (`O_NOFOLLOW`) open+write and the `fchmod` that
+        /// forces its mode — the beat where a path-based chmod would follow a swapped-in symlink.
+        BeforeChmodOf { target: PathBuf },
+        /// Immediately before a [`FsOps::create_dir_nofollow`] walk descends to ONE named
+        /// component (its `openat`-or-`mkdirat`) — the mid-walk beat where an already-walked
+        /// ancestor is swapped for a symlink.
+        BeforeComponentOf { target: PathBuf },
     }
 
     /// Wraps `RealFs` and runs a hook exactly once, immediately before the op its [`Trigger`]
@@ -663,6 +938,33 @@ mod hook {
             )
         }
 
+        pub(crate) fn after_dir_handle_open(target: &Path, hook: impl Fn() + 'a) -> Self {
+            Self::with(
+                Trigger::AfterHandleOpen {
+                    target: target.to_path_buf(),
+                },
+                hook,
+            )
+        }
+
+        pub(crate) fn before_chmod_of(target: &Path, hook: impl Fn() + 'a) -> Self {
+            Self::with(
+                Trigger::BeforeChmodOf {
+                    target: target.to_path_buf(),
+                },
+                hook,
+            )
+        }
+
+        pub(crate) fn before_component_of(target: &Path, hook: impl Fn() + 'a) -> Self {
+            Self::with(
+                Trigger::BeforeComponentOf {
+                    target: target.to_path_buf(),
+                },
+                hook,
+            )
+        }
+
         /// Fire once when `matched` and the trigger's own counter reaches `nth`.
         fn maybe_fire(&self, matched: bool, nth: usize) {
             if !matched {
@@ -679,6 +981,13 @@ mod hook {
     impl FsOps for HookFs<'_> {
         fn write_staged(&self, path: &Path, bytes: &[u8], executable: bool) -> io::Result<()> {
             self.maybe_fire(matches!(self.trigger, Trigger::FirstStagedWrite), 1);
+            if matches!(&self.trigger, Trigger::BeforeChmodOf { target } if target == path) {
+                // Land the hook INSIDE the op, between the (O_NOFOLLOW) open+write and the fchmod
+                // — the exact beat a path-swapped symlink would catch a path-based chmod.
+                return RealFs::write_staged_hooked(path, bytes, executable, &|| {
+                    self.maybe_fire(true, 1);
+                });
+            }
             self.inner.write_staged(path, bytes, executable)
         }
         fn write_temp(&self, path: &Path, bytes: &[u8]) -> io::Result<()> {
@@ -722,20 +1031,21 @@ mod hook {
             self.inner.remove_dir_all(path)
         }
         fn write_private(&self, path: &Path, bytes: &[u8]) -> io::Result<()> {
+            if matches!(&self.trigger, Trigger::BeforeChmodOf { target } if target == path) {
+                return RealFs::write_private_hooked(path, bytes, &|| {
+                    self.maybe_fire(true, 1);
+                });
+            }
             self.inner.write_private(path, bytes)
         }
-        fn exchange_dir(&self, a: &Path, b: &Path) -> io::Result<()> {
+        fn open_dir_handle(&self, dir: &Path) -> io::Result<DirHandle> {
+            let h = self.inner.open_dir_handle(dir)?;
+            // AFTER the open: the handle is pinned, and the hook models the swap that follows it.
             self.maybe_fire(
-                matches!(&self.trigger, Trigger::FirstMoveOf { dir } if dir == a || dir == b),
+                matches!(&self.trigger, Trigger::AfterHandleOpen { target } if target == dir),
                 1,
             );
-            self.inner.exchange_dir(a, b)
-        }
-        fn write_new(&self, path: &Path, bytes: &[u8]) -> io::Result<()> {
-            self.inner.write_new(path, bytes)
-        }
-        fn open_dir_handle(&self, dir: &Path) -> io::Result<DirHandle> {
-            self.inner.open_dir_handle(dir)
+            Ok(h)
         }
         fn rename_at(&self, h: &DirHandle, from: &str, to: &str) -> io::Result<()> {
             let joined = h.path().join(from);
@@ -761,13 +1071,32 @@ mod hook {
             );
             self.inner.exchange_at(h, a, b)
         }
-        fn create_dir_nofollow(&self, base: &Path, dir: &Path) -> io::Result<()> {
+        fn create_dir_nofollow(&self, base: &Path, dir: &Path) -> io::Result<DirHandle> {
             let (matched, nth) = match &self.trigger {
                 Trigger::NthCreateDirAll { target, nth } => (target == dir, *nth),
                 _ => (false, 0),
             };
             self.maybe_fire(matched, nth);
+            if matches!(&self.trigger, Trigger::BeforeComponentOf { .. }) {
+                // Land the hook INSIDE the walk: immediately before the named component's
+                // openat-or-mkdirat, with every prior component's fd already held.
+                return RealFs::create_dir_walk(base, dir, &|cur| {
+                    self.maybe_fire(
+                        matches!(&self.trigger, Trigger::BeforeComponentOf { target } if target == cur),
+                        1,
+                    );
+                });
+            }
             self.inner.create_dir_nofollow(base, dir)
+        }
+        fn remove_dir_all_at(&self, h: &DirHandle, leaf: &str) -> io::Result<()> {
+            self.inner.remove_dir_all_at(h, leaf)
+        }
+        fn create_dir_at(&self, h: &DirHandle, leaf: &str) -> io::Result<()> {
+            self.inner.create_dir_at(h, leaf)
+        }
+        fn write_new_at(&self, h: &DirHandle, leaf: &str, bytes: &[u8]) -> io::Result<()> {
+            self.inner.write_new_at(h, leaf, bytes)
         }
         fn read_opt(&self, path: &Path) -> io::Result<Option<Vec<u8>>> {
             let (matched, nth) = match &self.trigger {
@@ -776,6 +1105,14 @@ mod hook {
             };
             self.maybe_fire(matched, nth);
             self.inner.read_opt(path)
+        }
+        fn read_opt_nofollow(&self, path: &Path) -> io::Result<Option<Vec<u8>>> {
+            let (matched, nth) = match &self.trigger {
+                Trigger::NthRead { target, nth } => (target == path, *nth),
+                _ => (false, 0),
+            };
+            self.maybe_fire(matched, nth);
+            self.inner.read_opt_nofollow(path)
         }
         fn read_dir(&self, dir: &Path) -> io::Result<Vec<PathBuf>> {
             self.inner.read_dir(dir)
@@ -889,14 +1226,6 @@ mod fault {
             self.tick()?;
             self.inner.write_private(path, bytes)
         }
-        fn exchange_dir(&self, a: &Path, b: &Path) -> io::Result<()> {
-            self.tick()?;
-            self.inner.exchange_dir(a, b)
-        }
-        fn write_new(&self, path: &Path, bytes: &[u8]) -> io::Result<()> {
-            self.tick()?;
-            self.inner.write_new(path, bytes)
-        }
         fn rename_at(&self, h: &DirHandle, from: &str, to: &str) -> io::Result<()> {
             self.tick()?;
             self.inner.rename_at(h, from, to)
@@ -909,9 +1238,21 @@ mod fault {
             self.tick()?;
             self.inner.exchange_at(h, a, b)
         }
-        fn create_dir_nofollow(&self, base: &Path, dir: &Path) -> io::Result<()> {
+        fn create_dir_nofollow(&self, base: &Path, dir: &Path) -> io::Result<DirHandle> {
             self.tick()?;
             self.inner.create_dir_nofollow(base, dir)
+        }
+        fn remove_dir_all_at(&self, h: &DirHandle, leaf: &str) -> io::Result<()> {
+            self.tick()?;
+            self.inner.remove_dir_all_at(h, leaf)
+        }
+        fn create_dir_at(&self, h: &DirHandle, leaf: &str) -> io::Result<()> {
+            self.tick()?;
+            self.inner.create_dir_at(h, leaf)
+        }
+        fn write_new_at(&self, h: &DirHandle, leaf: &str, bytes: &[u8]) -> io::Result<()> {
+            self.tick()?;
+            self.inner.write_new_at(h, leaf, bytes)
         }
         // Reads + locks never fault — only durable mutations are crash-relevant.
         fn open_dir_handle(&self, dir: &Path) -> io::Result<DirHandle> {
@@ -919,6 +1260,9 @@ mod fault {
         }
         fn read_opt(&self, path: &Path) -> io::Result<Option<Vec<u8>>> {
             self.inner.read_opt(path)
+        }
+        fn read_opt_nofollow(&self, path: &Path) -> io::Result<Option<Vec<u8>>> {
+            self.inner.read_opt_nofollow(path)
         }
         fn read_dir(&self, dir: &Path) -> io::Result<Vec<PathBuf>> {
             self.inner.read_dir(dir)

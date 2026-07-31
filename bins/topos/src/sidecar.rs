@@ -337,17 +337,22 @@ pub(crate) fn ensure_project_store(
     }
     let layout = project_store_layout(project_dir);
     // NO-FOLLOW creation (the proof-to-write boundary): each component below the checkout is
-    // lstat-ed and created ONE level at a time, so an ancestor that becomes a symlink mid-create
-    // is met as itself and REFUSED — `mkdir -p` through it is structurally impossible on the
-    // walked components (the per-component check-to-mkdir beat is backstopped by the re-proof
-    // below).
-    fs.create_dir_nofollow(project_dir, &store_dir)?;
-    let ignore = store_dir.join(crate::scan::IGNORE_FILE);
+    // reached from its PARENT's held fd (`openat`/`mkdirat` — no path-based syscall below the
+    // proven root), so an ancestor that becomes a symlink mid-create is met as itself and
+    // REFUSED — `mkdir -p` through it is structurally impossible, and the walk hands back the
+    // HELD handle of the store dir it proved.
+    let store_handle = fs.create_dir_nofollow(project_dir, &store_dir)?;
     // TRUE exclusive create (`O_EXCL`), not check-then-write: a file already at the path — a
     // hand-authored ignore, or a concurrent creator's — is NEVER overwritten, and two racing
     // creators get exactly one winner (the loser's AlreadyExists is success: the file exists).
-    match fs.write_new(&ignore, PROJECT_STORE_IGNORE) {
-        Ok(()) => fs.fsync_dir(&store_dir)?,
+    // The write runs AT the held store handle (`openat` + `O_NOFOLLOW` create, file + dir-entry
+    // fsync through the fd), so a `.topos` path swapped after the walk cannot re-aim it.
+    match fs.write_new_at(
+        &store_handle,
+        crate::scan::IGNORE_FILE,
+        PROJECT_STORE_IGNORE,
+    ) {
+        Ok(()) => {}
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
         Err(e) => return Err(e.into()),
     }
@@ -421,6 +426,7 @@ fn restore_default() -> bool {
 ///
 /// # Errors
 /// The lock or journal read/write failure (fail-closed on an unknown schema).
+#[cfg(test)] // production writers park through `park_aside_journaled`'s one critical section
 pub(crate) fn journal_park(
     fs: &dyn FsOps,
     layout: &Layout,
@@ -430,6 +436,21 @@ pub(crate) fn journal_park(
     owner: Option<&SkillId>,
 ) -> Result<(), ClientError> {
     let _guard = fs.lock_exclusive(&layout.park_journal_lock_file())?;
+    journal_park_locked(fs, layout, original, park, restore, owner)
+}
+
+/// [`journal_park`]'s body, for a caller that ALREADY holds the journal lock —
+/// [`crate::materialize::park_aside_journaled`] holds it across the entry-write AND the rename
+/// (one critical section), so concurrent recovery can never observe the entry-without-park
+/// in-between state and conclude it as "absent = concluded".
+pub(crate) fn journal_park_locked(
+    fs: &dyn FsOps,
+    layout: &Layout,
+    original: &Path,
+    park: &Path,
+    restore: bool,
+    owner: Option<&SkillId>,
+) -> Result<(), ClientError> {
     let path = layout.park_journal_path();
     let mut journal: ParkJournal = crate::doc::read_doc(fs, &path)?.unwrap_or_default();
     journal.schema_version = topos_types::PERSISTED_SCHEMA_VERSION;
@@ -454,6 +475,12 @@ pub(crate) fn settle_park_journal(fs: &dyn FsOps, layout: &Layout, park: &Path) 
     let Ok(_guard) = fs.lock_exclusive(&layout.park_journal_lock_file()) else {
         return;
     };
+    settle_park_journal_locked(fs, layout, park);
+}
+
+/// [`settle_park_journal`]'s body, for a caller that already holds the journal lock (the
+/// failed-rename arm of [`crate::materialize::park_aside_journaled`]'s critical section).
+pub(crate) fn settle_park_journal_locked(fs: &dyn FsOps, layout: &Layout, park: &Path) {
     let path = layout.park_journal_path();
     let Ok(Some(mut journal)) = crate::doc::read_doc::<ParkJournal>(fs, &path) else {
         return;
@@ -557,7 +584,7 @@ fn recover_park_journal(
             continue;
         }
         // The original was re-created (or the restore failed): preserve + disclose, never delete.
-        match crate::materialize::preserve_park(fs, &park) {
+        match crate::materialize::preserve_park(fs, &park, None) {
             Some(kept) => {
                 let _ = crate::logfile::append_event(
                     fs,
@@ -584,6 +611,11 @@ fn recover_park_journal(
 /// Why a park-journal entry may NOT be acted on — `None` means admissible. The journal names
 /// paths recovery will RENAME, so an entry is trusted only as far as its provenance:
 ///
+/// - EVERY store: a park path or restore target spelled with a `..` component is REJECTED
+///   outright — the park primitives build both from real, component-clean paths, so no
+///   legitimate entry ever carries one, while a hostile journal uses exactly that spelling to
+///   defeat lexical prefix checks (`<project>/.topos/../src` passes a `.topos` namespace
+///   `starts_with` while resolving into `src`).
 /// - EVERY store: the park's basename must be one of topos's own park names (`.topos-*` — the
 ///   ladder every park primitive mints). Recovery never renames a tree whose name topos cannot
 ///   have created.
@@ -595,6 +627,17 @@ fn recover_park_journal(
 ///   `path` override outside those namespaces fails toward preservation-in-place (the typed
 ///   warning says where the bytes sit), never toward a journal-directed rename.
 fn journal_entry_inadmissible(layout: &Layout, park: &Path, original: &Path) -> Option<String> {
+    use std::path::Component;
+    if park.components().any(|c| matches!(c, Component::ParentDir))
+        || original
+            .components()
+            .any(|c| matches!(c, Component::ParentDir))
+    {
+        return Some(
+            "its paths carry `..` components, which no topos-written park entry ever does"
+                .to_owned(),
+        );
+    }
     let park_name = park.file_name().and_then(|n| n.to_str()).unwrap_or("");
     if !park_name.starts_with(".topos-") {
         return Some("its park name is not a topos park".to_owned());
@@ -754,7 +797,7 @@ pub(crate) fn recover(
             let Ok(id) = SkillId::parse(name) else {
                 continue;
             };
-            recover_published(fs, layout, &id, &entry)?;
+            recover_published(fs, layout, &id, &entry, warnings)?;
         }
     }
     Ok(())
@@ -765,17 +808,48 @@ fn recover_published(
     layout: &Layout,
     id: &SkillId,
     skill_dir: &Path,
+    warnings: &mut Vec<String>,
 ) -> Result<(), ClientError> {
     // Claim the id; a held lock means a concurrent writer is mid-publish — leave it.
     let Some(_guard) = fs.try_lock_exclusive(&layout.lock_file(id))? else {
         return Ok(());
     };
     let paths = layout.published(id);
-    if fs.read_opt(&paths.lock)?.is_none() {
-        // No lock marker: an incomplete dir (can't arise via the atomic staging-rename, but never trust
-        // disk). The user's source bytes are untouched, so removing the half-built sidecar is safe.
-        fs.remove_dir_all(skill_dir)?;
-        return Ok(());
+    // LSTAT FIRST: the absence probe must never FOLLOW a link. A follow-read of a DANGLING
+    // `lock.json` symlink maps the target's NotFound to "absent" — and recovery deletes the
+    // whole sidecar on "absent", history and sole-copy draft snapshots included. A lock.json
+    // that exists as anything but a regular-file entry is UNREADABLE, never absent: fail
+    // closed — delete nothing, disclose. (The doc reads below are `O_NOFOLLOW` too, so a
+    // symlink swapped in after this probe still reads as an error, not as bytes.)
+    match fs.path_kind(&paths.lock)? {
+        None => {
+            // Genuinely absent by lstat: an incomplete dir (can't arise via the atomic
+            // staging-rename, but never trust disk). The user's source bytes are untouched, so
+            // removing the half-built sidecar is safe.
+            fs.remove_dir_all(skill_dir)?;
+            return Ok(());
+        }
+        // A regular-file-shaped entry — whether this binary can DECIDE with it is the no-follow
+        // doc read's call below (fail-closed there too).
+        Some(crate::fs_seam::PathKind::Other) => {}
+        Some(crate::fs_seam::PathKind::Symlink) | Some(crate::fs_seam::PathKind::Dir) => {
+            warnings.push(format!(
+                "SIDECAR_LOCK_UNREADABLE {}: lock.json is not a regular file — nothing was \
+                 deleted (the sidecar, its history, and any draft snapshots stay whole); \
+                 inspect it by hand",
+                skill_dir.display()
+            ));
+            let _ = crate::logfile::append_event(
+                fs,
+                &layout.log_path(),
+                &serde_json::json!({
+                    "action": "sidecar_lock_unreadable",
+                    "skill_id": id.as_str(),
+                    "path": paths.lock.to_string_lossy(),
+                }),
+            );
+            return Ok(());
+        }
     }
     // A lock marker is present (and, being atomically written, is whole) — never delete it; just sweep any
     // stray temp file a future in-place write might have left.
@@ -838,21 +912,29 @@ fn recover_published(
             let Some(parent) = Path::new(placement).parent() else {
                 continue;
             };
+            // The judgments + removals below run AT a held handle on the placement's parent —
+            // the same fd-discipline the materializer's litter sweep rides — so a parent whose
+            // path is swapped mid-sweep refuses instead of re-aiming a removal. A parent that
+            // cannot be pinned (gone, or itself a symlink) is not swept: nothing read, nothing
+            // moved.
+            let Ok(ph) = fs.open_dir_handle(parent) else {
+                continue;
+            };
             for litter in crate::materialize::litter_siblings(parent, id.as_str()) {
                 if !fs.exists(&litter) {
                     continue;
                 }
                 let name = litter.file_name().and_then(|n| n.to_str()).unwrap_or("");
                 if name.starts_with(".topos-probe-") {
-                    fs.remove_dir_all(&litter)?;
+                    fs.remove_dir_all_at(&ph, name)?;
                     continue;
                 }
                 let fate = if lock_readable {
-                    crate::materialize::settle_park_among(fs, &litter, &accounted, None)?
+                    crate::materialize::settle_park_among(fs, &litter, &accounted, None, Some(&ph))?
                 } else {
                     // Unreadable lock: preserve without judging — a deletion decided over an
                     // incomplete accounted set is exactly the loss this sweep exists to prevent.
-                    match crate::materialize::preserve_park(fs, &litter) {
+                    match crate::materialize::preserve_park(fs, &litter, Some(&ph)) {
                         Some(kept) => crate::materialize::ParkFate::Kept(kept),
                         None => crate::materialize::ParkFate::Stuck,
                     }
@@ -1200,6 +1282,13 @@ mod tests {
         let park_d = skills.join(".topos-retiring-d");
         std::fs::create_dir_all(&park_d).unwrap();
         std::fs::write(park_d.join("SKILL.md"), b"# d\n").unwrap();
+        // (f) the IN-PROJECT `..` spelling (`<proj>/.topos/../src/planted`): it resolves INSIDE
+        // the checkout and lexically passes a `.topos` namespace `starts_with` — the managed-
+        // namespace bypass. Parks never legitimately carry `..`, so admissibility rejects the
+        // spelling OUTRIGHT, before any containment arithmetic.
+        let park_f = skills.join(".topos-retiring-inproj");
+        std::fs::create_dir_all(&park_f).unwrap();
+        std::fs::write(park_f.join("SKILL.md"), b"# f\n").unwrap();
         // (e) the LAWFUL entry: park + original both in the harness skills dir.
         let park_e = skills.join(".topos-retiring-good");
         std::fs::create_dir_all(&park_e).unwrap();
@@ -1222,6 +1311,10 @@ mod tests {
                     &park_d,
                     &proj.join(".topos").join("..").join("..").join("planted"),
                 ),
+                entry(
+                    &park_f,
+                    &proj.join(".topos").join("..").join("src").join("planted"),
+                ),
                 entry(&park_e, &good_orig),
             ],
         };
@@ -1242,6 +1335,7 @@ mod tests {
         assert_eq!(std::fs::read(git_dir.join("config")).unwrap(), b"[core]\n");
         assert_eq!(std::fs::read(park_c.join("SKILL.md")).unwrap(), b"# c\n");
         assert_eq!(std::fs::read(park_d.join("SKILL.md")).unwrap(), b"# d\n");
+        assert_eq!(std::fs::read(park_f.join("SKILL.md")).unwrap(), b"# f\n");
         // The lawful entry still restored.
         assert_eq!(
             std::fs::read(good_orig.join("SKILL.md")).unwrap(),
@@ -1254,7 +1348,7 @@ mod tests {
                 .iter()
                 .filter(|w| w.starts_with("PARK_JOURNAL_REFUSED"))
                 .count(),
-            4,
+            5,
             "{warnings:?}"
         );
         let log = std::fs::read_to_string(layout.log_path()).unwrap();
@@ -1465,6 +1559,109 @@ mod tests {
         let _ = std::fs::remove_dir_all(&parent);
     }
 
+    /// P1: a DANGLING `lock.json` symlink must read as UNREADABLE, never as absent. A follow-read
+    /// maps the target's NotFound to `None`, and recovery deletes the whole sidecar on `None` —
+    /// history and sole-copy draft snapshots included. The lstat-first probe (+ the no-follow doc
+    /// reads) fails closed instead: nothing deleted, disclosed.
+    #[test]
+    fn a_dangling_lock_symlink_never_reads_as_absent_and_recovery_deletes_nothing() {
+        let home = scratch("danglock");
+        let layout = Layout::new(&home);
+        let fs = RealFs;
+        let id = SkillId::parse("topos_danglock1").unwrap();
+        let skill_dir = layout.skill_dir(&id);
+        let sp = layout.published(&id);
+        // The sidecar holds sole-copy bytes: an embedded store + a draft snapshot stand-in.
+        std::fs::create_dir_all(sp.store.join("objects")).unwrap();
+        std::fs::write(
+            sp.store.join("objects").join("draft-snapshot"),
+            b"the only copy of a draft\n",
+        )
+        .unwrap();
+        // lock.json exists — as a DANGLING symlink (the exact file-type case the finding names).
+        std::os::unix::fs::symlink(skill_dir.join("no-such-target"), &sp.lock).unwrap();
+
+        let mut warnings = Vec::new();
+        recover(&fs, &layout, 1, &mut warnings).unwrap();
+
+        assert_eq!(
+            std::fs::read(sp.store.join("objects").join("draft-snapshot")).unwrap(),
+            b"the only copy of a draft\n",
+            "nothing under the sidecar was deleted"
+        );
+        assert!(
+            std::fs::symlink_metadata(&sp.lock)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "the foreign link itself was left in place"
+        );
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.starts_with("SIDECAR_LOCK_UNREADABLE")),
+            "disclosed: {warnings:?}"
+        );
+        let log = std::fs::read_to_string(layout.log_path()).unwrap();
+        assert!(log.contains("sidecar_lock_unreadable"), "{log}");
+
+        // The contrast arm: a lock.json that is GENUINELY absent (by lstat) still sweeps the
+        // half-built dir — the fix narrows nothing about the legitimate recovery.
+        let id2 = SkillId::parse("topos_danglock2").unwrap();
+        std::fs::create_dir_all(layout.published(&id2).store).unwrap();
+        recover(&fs, &layout, 2, &mut Vec::new()).unwrap();
+        assert!(!layout.skill_dir(&id2).exists());
+
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// P1 (ownerless parks): the journal entry-write and the park RENAME are ONE critical
+    /// section under the journal lock. The hook lands in the exact in-between beat — entry
+    /// durably written, rename not yet run — and proves a concurrent recovery could not observe
+    /// it: the journal lock is HELD, so recovery (which takes the same lock for its whole
+    /// read→act→rewrite) blocks instead of reading the entry, finding no park, and concluding
+    /// "absent = concluded".
+    #[test]
+    fn the_journal_lock_is_held_across_the_entry_write_and_the_park_rename() {
+        let home = scratch("parkcrit");
+        let layout = Layout::new(&home);
+        std::fs::create_dir_all(layout.skills_dir()).unwrap();
+        let orig = home.join("place").join("demo");
+        std::fs::create_dir_all(&orig).unwrap();
+        std::fs::write(orig.join("SKILL.md"), b"# the only bytes\n").unwrap();
+
+        let lock_path = layout.park_journal_lock_file();
+        let journal_path = layout.park_journal_path();
+        let orig_s = orig.to_string_lossy().into_owned();
+        let lock_held = std::cell::Cell::new(false);
+        let entry_written = std::cell::Cell::new(false);
+        let fs = crate::fs_seam::HookFs::before_first_move_of(&orig, || {
+            // A would-be concurrent recovery probes the journal lock at this instant: HELD.
+            let held = crate::fs_seam::FsOps::try_lock_exclusive(&RealFs, &lock_path)
+                .map(|g| g.is_none())
+                .unwrap_or(false);
+            lock_held.set(held);
+            // And the entry is already durable — written BEFORE the rename, inside the section.
+            let j: Option<ParkJournal> = crate::doc::read_doc(&RealFs, &journal_path).unwrap();
+            entry_written.set(j.is_some_and(|j| j.parks.iter().any(|e| e.original == orig_s)));
+        });
+        // Ownerless (`owner: None`) — the arm with no per-skill liveness fence to fall back on.
+        let park =
+            crate::materialize::park_aside_journaled(&fs, &layout, &orig, "retiring", true, None)
+                .unwrap();
+        assert!(
+            lock_held.get(),
+            "the journal lock must be held at the instant before the rename"
+        );
+        assert!(
+            entry_written.get(),
+            "the entry must be durable before the rename"
+        );
+        assert!(park.exists());
+
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
     /// P1: the store-creation walk refuses a component that becomes a symlink BETWEEN the
     /// containment proof and the create — the mid-walk swap `mkdir -p` would have followed.
     #[test]
@@ -1486,6 +1683,43 @@ mod tests {
             std::fs::read_dir(&victim).unwrap().count(),
             0,
             "nothing was created through the symlink"
+        );
+
+        let _ = std::fs::remove_dir_all(&proj);
+        let _ = std::fs::remove_dir_all(&victim);
+    }
+
+    /// P1: the create walk is fd-anchored, proven at the EXACT mid-walk beat — an ancestor
+    /// swapped for a symlink BETWEEN two component steps (after `.topos` was opened and held,
+    /// immediately before `state` is created from its fd). The remaining creates land inside the
+    /// HELD directory object wherever it moved — never through the symlink — and the post-create
+    /// re-proof then refuses the store, because its SPELLING now escapes.
+    #[test]
+    fn the_store_walk_survives_an_ancestor_swapped_between_components() {
+        let proj = scratch("compswap");
+        let victim = scratch("compswap-victim");
+        let store_dir = proj.join(PROJECT_STORE_DIR);
+        let moved = proj.join(".topos-moved-aside");
+        // The trigger names the SECOND walk's second component — `.topos` is already held.
+        let state_component = store_dir.join("state");
+        let (sd, mv, vic) = (store_dir.clone(), moved.clone(), victim.clone());
+        let fs = crate::fs_seam::HookFs::before_component_of(&state_component, move || {
+            std::fs::rename(&sd, &mv).unwrap();
+            std::os::unix::fs::symlink(&vic, &sd).unwrap();
+        });
+
+        let err = ensure_project_store(&fs, &proj);
+        assert!(err.is_err(), "the store is refused — its spelling escapes");
+        assert_eq!(
+            std::fs::read_dir(&victim).unwrap().count(),
+            0,
+            "nothing was created (or written) through the symlink"
+        );
+        // The walk continued INSIDE the held (moved) directory object — proof the swap landed
+        // mid-walk and the creates were fd-anchored, not path-resolved.
+        assert!(
+            moved.join("state").is_dir(),
+            "the post-swap component landed at the held fd, not through the path"
         );
 
         let _ = std::fs::remove_dir_all(&proj);

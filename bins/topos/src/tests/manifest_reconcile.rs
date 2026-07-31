@@ -4776,8 +4776,10 @@ fn the_reproof_and_the_editor_read_one_document() {
     // The STRUCTURAL half of the refusal above. The reproof is only worth anything if it holds for
     // the EXACT document instance the write then emits — proving against one read and editing a
     // second leaves a window where an outside edit is proven against but not edited (or edited but
-    // not proven against). So the apply path reads the manifest ONCE and hands that text to both.
-    // The witness is an absence: after the plan's read there is exactly one more, never a third.
+    // not proven against). So the apply path reads the manifest ONCE and hands that text to both;
+    // the only read after it is the editor write's own PRE-RENAME COMPARE (the CAS — proven at
+    // the boundary by the test below). The witness is an absence: after the plan's read there is
+    // the apply read and the compare read, never a fourth.
     let rig = Rig::new("one-read");
     rig.seed_session();
     let log: CallLog = Arc::new(Mutex::new(Vec::new()));
@@ -4799,10 +4801,10 @@ fn the_reproof_and_the_editor_read_one_document() {
         "[bundles]\n\"{HOST}/{WS_NAME}/channels/backend\" = \"*\"\n"
     ));
 
-    // The tripwire sits on the read that would OPEN that window — the third. It never fires.
+    // The tripwire sits on the read that would OPEN that window — the fourth. It never fires.
     let fired = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let flag = std::sync::Arc::clone(&fired);
-    let fs = crate::fs_seam::HookFs::before_nth_read(&manifest, 3, move || {
+    let fs = crate::fs_seam::HookFs::before_nth_read(&manifest, 4, move || {
         flag.store(true, Ordering::Relaxed);
     });
     let ctx = Ctx {
@@ -4814,14 +4816,82 @@ fn the_reproof_and_the_editor_read_one_document() {
     assert!(matches!(out, ops::RemoveOutcome::Applied(_)), "{out:?}");
     assert!(
         !fired.load(Ordering::Relaxed),
-        "the apply path reads the manifest ONCE for the reproof AND the editor — a third read IS \
-         the window"
+        "the apply path reads the manifest ONCE for the reproof AND the editor, plus the write's \
+         one pre-rename compare — a fourth read IS the window"
     );
 
     // And the split it proved is the split it wrote.
     let text = std::fs::read_to_string(&manifest).unwrap();
     assert!(!text.contains("channels/backend"), "the line split: {text}");
     assert!(text.contains(&format!("{HOST}/{WS_NAME}/beta")), "{text}");
+}
+
+#[test]
+fn an_edit_landing_at_the_write_rename_boundary_is_refused_by_the_compare_and_swap() {
+    // The reproof (the test two above) closes the decision half; this closes the WRITE half. The
+    // outside edit lands at the LATEST catchable instant — after the arms were re-proven and the
+    // editor's document was STAGED (the temp is already on disk when the hook fires: the proof
+    // this injection sits at the write/rename boundary, not earlier), immediately before the
+    // pre-rename compare. The compare-and-swap must refuse: typed MANIFEST_CHANGED, the staged
+    // document discarded, the outside writer's bytes untouched on disk.
+    let rig = Rig::new("cas-boundary");
+    rig.seed_session();
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let a = one_file(b"# alpha\n");
+    let b = one_file(b"# beta\n");
+    let plane = FakePlane::new(log)
+        .with_version("s_a", &a)
+        .with_version("s_b", &b);
+    plane.serves(Vec::new());
+    let dir = FakeDirectory::new(
+        vec![
+            catalog_entry("s_a", "alpha", &a),
+            catalog_entry("s_b", "beta", &b),
+        ],
+        vec![channel("backend", &[("s_a", "alpha"), ("s_b", "beta")])],
+    );
+    let manifest = rig.layout().home().join(crate::manifest::MANIFEST_FILE);
+    let line = format!("\"{HOST}/{WS_NAME}/channels/backend\" = \"*\"\n");
+    rig.write_global(&format!("[bundles]\n{line}"));
+
+    // Read 1 = the plan/arms, read 2 = the apply's one document (reproof + editor), read 3 = the
+    // write's pre-rename compare. The racer fires immediately before read 3.
+    let tmp = crate::atomic::temp_path(&manifest);
+    let staged_when_fired = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let staged_flag = std::sync::Arc::clone(&staged_when_fired);
+    let racing = manifest.clone();
+    let raced = format!("[bundles]\n{line}\"{HOST}/{WS_NAME}/beta\" = \"*\"\n");
+    let tmp_probe = tmp.clone();
+    let fs = crate::fs_seam::HookFs::before_nth_read(&manifest, 3, move || {
+        staged_flag.store(tmp_probe.exists(), Ordering::Relaxed);
+        std::fs::write(&racing, &raced).unwrap();
+    });
+    let ctx = Ctx {
+        fs: &fs,
+        ..rig.ctx_at(Some(&rig.work.0))
+    };
+    let err = ops::remove_global(&ctx, &connect(&plane, &dir), &["alpha".into()], None, true)
+        .unwrap_err();
+    assert_eq!(err.code(), "MANIFEST_CHANGED", "{err:?}");
+    assert!(
+        staged_when_fired.load(Ordering::Relaxed),
+        "the staged temp must already exist when the edit lands — the injection sits at the \
+         write/rename boundary, after every earlier rail has passed"
+    );
+
+    // NOTHING was overwritten: the outside writer's document stands byte-for-byte, and the
+    // staged temp was discarded.
+    let text = std::fs::read_to_string(&manifest).unwrap();
+    assert!(text.contains("channels/backend"), "{text}");
+    assert!(text.contains(&format!("{HOST}/{WS_NAME}/beta")), "{text}");
+    assert!(!tmp.exists(), "the staged document was discarded");
+
+    // The re-run reads the file as it now is and applies (honouring beta's own row).
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    assert!(matches!(
+        ops::remove_global(&ctx, &connect(&plane, &dir), &["alpha".into()], None, true).unwrap(),
+        ops::RemoveOutcome::Applied(_)
+    ));
 }
 
 // =================================================================================================

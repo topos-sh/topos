@@ -31,7 +31,11 @@ pub(crate) fn write_doc<T: Serialize>(
 }
 
 /// Read + parse a document, returning `None` if the file does not exist. Fails closed on an
-/// unknown/newer `schema_version` (never silently parsed).
+/// unknown/newer `schema_version` (never silently parsed). The read is NO-FOLLOW
+/// ([`FsOps::read_opt_nofollow`]): topos writes its persisted docs only as regular files, so a
+/// symlink at a doc path is foreign — and following one would let a DANGLING link read as
+/// "absent", the exact lie a recovery sweep deletes on. A symlink is an ERROR (unreadable, so
+/// every caller fails closed), never `None`.
 ///
 /// # Errors
 /// As [`load_versioned`], plus the [`FsOps`] read failure.
@@ -39,7 +43,7 @@ pub(crate) fn read_doc<T: DeserializeOwned>(
     fs: &dyn FsOps,
     path: &Path,
 ) -> Result<Option<T>, ClientError> {
-    match fs.read_opt(path)? {
+    match fs.read_opt_nofollow(path)? {
         None => Ok(None),
         Some(bytes) => Ok(Some(load_versioned::<T>(&bytes, PERSISTED_SCHEMA_VERSION)?)),
     }
@@ -57,7 +61,7 @@ pub(crate) fn read_doc<T: DeserializeOwned>(
 /// As [`read_doc`]; additionally [`ClientError::Corrupt`] when a v2 document's `placement_state` is
 /// not 1:1 with `placements` (a hand-edited half state the engine must never guess over).
 pub(crate) fn read_map(fs: &dyn FsOps, path: &Path) -> Result<Option<PlacementMap>, ClientError> {
-    let Some(bytes) = fs.read_opt(path)? else {
+    let Some(bytes) = fs.read_opt_nofollow(path)? else {
         return Ok(None);
     };
     let mut map: PlacementMap = load_versioned(&bytes, PLACEMENT_MAP_SCHEMA_VERSION)?;
@@ -138,7 +142,7 @@ pub(crate) fn read_doc_private<T: DeserializeOwned>(
     fs: &dyn FsOps,
     path: &Path,
 ) -> Result<Option<T>, ClientError> {
-    match fs.read_opt(path)? {
+    match fs.read_opt_nofollow(path)? {
         None => Ok(None),
         Some(bytes) => {
             if !fs.private_perms_ok(path)? {
