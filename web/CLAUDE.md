@@ -1,426 +1,139 @@
 # `web/` — the product web app (TypeScript / React Router 8 on bun)
 
-> **The MANIFEST architecture is the model here:** sessions (user × workspace × installation,
-> workspace-scoped bearer credentials, the gh-style `/api/v1/login/*` flow, the Sessions
-> settings tab + account Your-sessions page) replaced device + device-link; ASSIGNMENTS +
-> DECLINES (one positive row PER PROVENANCE — bundle-or-channel × person-or-everyone, with a
-> `self` flag saying whether the person picked it themselves or a curator aimed it, so a
-> self-pick and a curator's aim COEXIST, each unassign arm deletes only its own provenance, and
-> delivery unions both; the workspace baseline is the default channel assigned to everyone — a row
-> the DATA LAYER refuses to unassign, because "no page offers it" is not a rule and a crafted intent
-> would otherwise empty every member's feed at once; one
-> negative row, per person per bundle, keyed to bundle identity)
-> replaced profile include/exclude rows — no route writes a feed, so the retired
-> `/api/v1/workspaces/{ws}/profile*` paths answer the uniform wire 404, and the `/profile` page
-> is the person-facing view of it (Mine, grouped by what puts each thing there · Library, the
-> catalog with one act) beside `/visibility`, the disclosure of what a workspace reads from a
-> member's machines; channels are pure curated bundle sets;
-> UPSTREAM provenance (bundle_upstream + version_upstream, the `skills/import` add-from-GitHub
-> flow, the skill-settings Upstream panel, and the always-propose upstream checker) is live —
-> member-triggered fetches wear a per-user belt + a process-wide concurrency cap, and manual
-> checks claim the poller's own 5-minute cooldown.
+**THE ONE PUBLIC SURFACE.** This app is everything the world reaches: the signed-in pages, the
+shareable resource addresses, the protocol card, `/docs`, AND the `/api/v1` session lane. It is
+the **authority for identity and the whole directory** (its own Postgres schema `web`); the vault
+(the Rust plane) is PURE BYTE CUSTODY behind it, internal-network-only, with this app as its one
+caller.
 
-**THE ONE PUBLIC SURFACE.** This app is everything the world reaches: the signed-in pages below, the
-shareable resource addresses, AND the device API — `/api/v1/…` is served here. Since the identity
-model landed, this tier is the **authority for identity and the whole directory**, in its own Postgres
-schema `web`; the vault (the Rust plane) is PURE BYTE CUSTODY behind it, internal-network-only, and the
-app is its one caller.
+## Architecture
 
-**The session lane terminates here.** Every `/api/v1/…` path is answered in this tier — there is no
-splat forwarder to the vault. The reads and row ops (delivery · the fleet report · me/channels/reach ·
-curation · protection · notices ack · invitations) are Drizzle queries
-against this app's OWN `web` schema, behind the session guard (the presented `Authorization: Bearer`
-resolved credential → live `web.cli_session` row → person's seat, the hash computed IN Postgres, so
-this tier holds zero crypto). A **session** is user × workspace × installation — minted by the login
-flow (`POST /api/v1/login/authorize|token`, the `/verify` approval a plain signed-in accept), severable
-by both sides (`DELETE /api/v1/session` is the client's self-end; the Sessions settings tab carries the
-owner's approve/reject/remove arms), DELETED never tombstoned. The default guard requires an ACTIVE
-session; exactly TWO routes answer typed for a PENDING one (`GET …/me` and `GET …/delivery`, each
-carrying `session_status` — delivery's pending body is shape-complete and EMPTY), and everything else
-folds pending/ended/unknown into the one uniform 404. The **born-status rule** is written once: an
-owner's approval is its own approval → born `active`; otherwise the workspace's `session_approval`
-knob decides (`off` → active, `on` → pending). The **byte/pointer** ops of a publish-family verb
-(ingest, the `current` CAS, revert, purge, the verified object/version/log reads) are the only things
-that leave this tier: they go through the ONE custody transport, `app/lib/plane/client.server.ts`
-(`vaultFetch` + a runtime route allowlist), to the vault's internal `/internal/v1` custody lane —
-authenticated by the shared internal bearer alone (the vault is identity-free; authorization already
-happened here). Every `/api/v1` miss answers the ONE uniform wire 404 (`api.v1.$.ts` catch-all — no path
-echo, no existence oracle); a rate belt wears the frozen 429.
+- **The session lane terminates here.** Every `/api/v1/…` path is answered in this tier — Drizzle
+  queries on schema `web` behind the session guard (Bearer → live `web.cli_session` row → person →
+  seat; hashes computed IN Postgres — this tier holds zero crypto). A **session** is user ×
+  workspace × installation, minted by the login flow, severable by both sides, DELETED never
+  tombstoned. The guard requires an ACTIVE session; exactly TWO routes answer typed for a PENDING
+  one (`GET …/me`, `GET …/delivery` — shape-complete and empty); every other miss folds into ONE
+  uniform wire 404 (`api.v1.$.ts` catch-all — no path echo, no existence oracle); a rate belt
+  wears the 429. Only the byte/pointer ops of a publish-family verb leave this tier: through the
+  ONE custody transport (`app/lib/plane/client.server.ts` — `vaultFetch` + a route allowlist) to
+  the vault's `/internal/v1` lane, authenticated by the shared internal bearer alone.
+- **One identity.** A person is a `user.id` (Better Auth); email is a mutable login attribute —
+  NOTHING authorizes by email equality (`check:email` enforces it). Human display is one rule
+  written twice in lockstep: `app/lib/person-display.ts` (TS) +
+  `app/lib/db/person-display.server.ts` (SQL).
+- **The directory** (schema `web`): Better Auth tables, seats, `cli_session` + login-flow rows,
+  invitations, the bundle catalog (a `kind` tag — displayed, never branched on), channels (pure
+  curated bundle sets, incl. the implicit default `everyone`), **assignment** + **decline** rows
+  (the whole delivery predicate: assigned to you or to everyone, minus your declines — one
+  positive row per provenance with a `self` flag, one negative per person per bundle; the
+  baseline everyone-row is unassignable at the data layer), upstream provenance
+  (`bundle_upstream`/`version_upstream`), notices, proposals + comments, op receipts,
+  `audit_event`, `mail_event`.
+- **The DAL** (`app/lib/db/queries*.server.ts`) is the one sanctioned door to `web` AND the
+  read-only `plane` custody mirror. Every function REQUIRES a branded actor as its first
+  argument; mutating ops emit their audit row in the SAME transaction. One named exception: the
+  mail transport's metadata-only `mail_event` send log is a system write with no actor. Policy is
+  TypeScript here — no guarded SQL functions, no plane row-writes.
+- **Auth guards fail closed** (`app/lib/auth/guards.server.ts` — the only minters of branded
+  actors: `requireSession → requireMember → requireWorkspaceOwner`/`requireReviewer`,
+  `requireDeviceActor`); the brand symbol is module-private. **Misses render 404, never 403.**
 
-**One identity, app-owned directory.** There is ONE identity: a person's `user.id` (Better Auth). Email
-is a login name and a mutable attribute — NOTHING authorizes by email equality. A person's
-human-facing DISPLAY is one rule, written twice in lockstep: the profile name, else the email (a
-magic-link sign-up is born with `name = ''`, and a blank never surfaces as a label) —
-`app/lib/person-display.ts` for TS compositions, `app/lib/db/person-display.server.ts` for the SQL
-selects (member lists, attribution, the device-lane actor). Every seat, CLI session,
-profile row, notice, and audit row references a `user.id`. The whole directory lives in schema `web`:
-the Better Auth tables (`user`/`session`/`account`/`verification`), **seats** (workspace membership +
-role), **`cli_session`** rows + the login-flow rows, invitations, the bundle catalog (each row carrying
-a `kind` tag — `'skill'` today — displayed, never branched on), channels (pure curated bundle sets,
-incl. the implicit default `everyone`), the **`assignment`** and **`decline`** rows (the whole
-delivery predicate: assigned to you or to everyone, minus what you declined, over active bundles),
-upstream provenance (`bundle_upstream`/`version_upstream`), notices with
-read-state, proposals + comments, op receipts, and the `audit_event` trail. The DATA ACCESS LAYER (`app/lib/db/queries*.server.ts`) is the one sanctioned
-door to `web` AND the read-only `plane` custody mirror; every function REQUIRES a branded actor as its
-first argument, and mutating ops emit their audit row in the SAME transaction. ONE named exception:
-the mail transport's `mail_event` send log (`mail-log.server.ts`) is a SYSTEM write with no actor —
-mail leaves the server, not a workspace, and the transport fires inside auth rungs where no workspace
-actor exists. There are NO guarded
-`topos_*` SQL functions and no plane row-writes — policy logic is written here, once, in TypeScript with
-the role gate carried by the actor's type.
+## The ceremonies (`app/lib/db/identity.server.ts` — FOR-UPDATE-fenced, audit inside)
 
-**The identity ceremonies** (`app/lib/db/identity.server.ts` — the concurrency-critical writes, each one
-transaction, FOR UPDATE-fenced or single-statement-atomic, audit row inside):
-- **Boot** — the `web` schema migrates EAGERLY at process start (a top-level await in
-  `entry.server.tsx`; loaders run BEFORE `handleRequest`, so an in-request gate can never protect
-  the first request): a virgin database serves its FIRST request 200, and a broken one crashes the
-  boot loudly instead of serving unmigrated.
-- **First boot** (`ensureSetup`) mints the workspace + its default `everyone` channel on a virgin
-  database (first-request-once — it needs the request origin for the printed link), and while
-  unclaimed (re)mints the claim code and prints ONE line to the logs
-  (`→ Finish setup: <origin>/claim?code=…`; `TOPOS_SETUP_CODE` presets it, `TOPOS_SETUP_LINK_FILE`
-  mirrors it to a file). Only the code's SHA-256 is stored.
-- **The claim** (`claim.tsx` → `consumeClaim`): one atomic UPDATE consumes the code and seats the first
-  **owner** (email + password). Single-use by construction.
-- **The gh-style device flow** (`verify.tsx` + `api.v1.device-authorize`/`api.v1.device-token`;
-  `startDeviceAuth`/`pollDeviceAuth`/`approveDeviceAuth`): the CLI prints the BARE `<origin>/verify`
-  and the short code on SEPARATE lines (the code never rides a URL — the retired code-embedding
-  `verification_uri_complete` left the wire) and polls; `/verify` is TWO-STATE — a POST code-lookup
-  form, then the resolved card showing the requesting device, the code for the glance-check, and
-  EVERY workspace the credential will reach (the approver's seats + the one being joined) — and the
-  signed-in person approves with a **plain accept** — a live session plus the explicit approve click
-  IS the whole ceremony — minting the CLI SESSION (owned by that person) + its workspace-scoped
-  bearer credential (the flow code is promoted to the credential — same plaintext, same stored
-  hash). The
-  flow row records the workspace ADDRESS SLUG the authorize call named — and, when the login
-  came from `login <invite-url>`, the invite token's hash (recorded UNVALIDATED — the start is
-  never a token oracle); the approval weaves accept-the-invitation into its own fence when the
-  approver is the invitation's addressee, and the granted poll decorates the invitation's
-  first-destination `hint`. Multi tenancy shape-checks the slug only (an unauthenticated start is
-  never a workspace-existence oracle — the workspace may be created mid-flow), and approval resolves
-  it under the tenancy grammar and requires the approver's SEAT in the resolved workspace, inside
-  the same FOR-UPDATE fence — a missing workspace or a seatless approver gets the same uniform
-  refusal an expired code does. Approval mints THE SESSION in that fence (born per the one rule;
-  the granted poll reports `session_status`; the /verify card shows THE ONE workspace being logged
-  into and says further workspaces each take their own login — and, knob-on with a non-owner
-  approver, that the session awaits an owner). On a multi-tenant deployment a signed-in approver
-  with zero seats
-  anywhere is first woven through workspace creation (`/verify` redirects to `/new` carrying itself
-  as `next` + the flow's slug as a `name` prefill) — unless the flow carries an invitation, whose
-  accept will seat them right there. A flow is BOUND at its
-  start, write-once, to how its credential may be collected. **`device`** (RFC 8628, the headless
-  rung): the human types the short code and whoever holds the device code polls — the typing is
-  the only thing binding the approver to the asker, so the card NEVER pre-arms for these.
-  **`loopback`** (RFC 8252, declared when the CLI has already bound a 127.0.0.1 listener and can
-  open a browser here): the card DOES pre-arm from the URL's `device` challenge. What makes that
-  safe is that approval **mints nothing** — it records consent and a one-time authorization code
-  that leaves the server only by redirecting the approver's browser to that listener. THE SESSION
-  IS MINTED AT THE EXCHANGE, which demands `device_code` + `auth_code`. That ordering is
-  load-bearing: the bearer credential IS the device code, so a session minted at approval would
-  be usable immediately by whoever started the flow — the phisher. With nothing minted, a mailed
-  approve-link leaves its sender holding a device code that resolves to no session at all, and a
-  poll that reads `awaiting_redirect`. Approving a loopback flow from a page with no return
-  coordinates is refused outright (nothing consumed, still finishable where it started), and the
-  code is non-consuming until the flow lapses so a crash between exchange and persist re-exchanges
-  cleanly. The DEVICE path remains phishable by construction (RFC 8628 says it must be) — the
-  typed code is its only control. And the loopback guarantee rests on one assumption worth
-  stating: that `127.0.0.1` reaches the approver's own machine. On a SHARED multi-user host (a
-  jump box, a shared dev VM) it does not — another user there can bind the port and receive the
-  code — so on such a host the typed-code flow is the safer one. The signed-out loader bounce carries the page (validated params only) as `next`.
-  Ending a session is immediate on either side (the client's `DELETE /api/v1/session`, the
-  Sessions tab's owner arms) — the row is deleted, the lane 404s from the next request.
-- **The tokened invitation** (`invite-redeem.tsx` at `/invite/<token>` — `/<ws>/invite/<token>` in
-  multi — + the ceremonies in `identity.server.ts`): inviting mints a long single-use token per
-  address (only its SHA-256 stored — the claim-code pattern; 7-day lapse; re-inviting mints a fresh
-  token over the pending row, killing the old link; revoke kills it too), optionally carrying ONE
-  first-destination hint (a bundle or channel of its own workspace, composite-FK-pinned with a
-  per-column SET NULL). The link travels ONLY in the invitation mail (three CTAs, in order: the
-  browser link, the agent paste-block, the terminal `topos login <invite-url>` line — hint-led);
-  the inviter's receipts carry the workspace address, never the token. The page is GET-safe
-  (viewing never consumes) and branches on the ONE sanctioned email-binding predicate beside
-  `bindInvitedSeats`: signed in as the invited address → one-click accept; no such account → the
-  page MINTS it (email locked to the invited address; PASSWORDLESS through Better Auth's own
-  magic-link door when the mail rung exists — the token's delivery IS the mailbox proof, so the
-  account is born verified with no verification mail; a password field on password-only
-  deployments) inside the invitation registration ceremony; signed in as someone else → the switch
-  page (names the invited address, offers sign-out-and-return, never accepts); an unverified squat
-  on the invited address → one mailbox round-trip first; already a member → redirect into the
-  workspace (nothing consumed). ACCEPT is ONE FOR-UPDATE-fenced transaction beside
-  `bindInvitedSeats`: consume the token, write the seat, apply the hint effects AFTER the seat
-  (an `assignment` row attributed to the inviter), audit — the hint lands among the person's
-  assignments; nothing
-  lands on any machine from a web accept. DECLINE is recorded (the members page shows it;
-  re-invitable) and deliberately session-less (token possession is the proof). Every dead token —
-  invalid, expired, revoked, used — renders ONE constant page naming neither workspace nor email,
-  behind the public-read belt. An already-enrolled device accepts with no browser at
-  `POST /api/v1/invitations/accept` behind `requireDevicePerson` (credential → device → user,
-  seat-LESS by construction). The skill FACE carries an invite affordance minting a
-  skill-hinted invitation. The legacy sign-up auto-bind (`bindInvitedSeats` on
-  `afterEmailVerification`) stays unchanged beside all of this.
-- **Recovery** (`app/lib/auth/recovery.server.ts` + `scripts/mint-recovery-code.mjs`): reset mail when
-  SMTP is armed; a mail-less solo owner runs the one-shot box-side script to print a single-use recovery
-  code (machine control is the proof).
+- **Boot:** the `web` schema migrates EAGERLY at process start (top-level await in
+  `entry.server.tsx`) — a virgin database serves its first request 200. **First boot** mints the
+  workspace + prints the claim link (single tenancy); `claim.tsx` seats the first owner.
+- **The login flow** (`verify.tsx` + `api.v1.device-authorize|device-token`): RFC-8628-shaped;
+  `/verify` is a POST code-lookup then a resolved card; approval is a plain signed-in accept.
+  Two rungs: **device** (typed code — the typing binds approver to asker; the card never
+  pre-arms) and **loopback** (RFC 8252 — approval records consent + a one-time auth code
+  delivered only via the approver's browser redirect to the CLI's 127.0.0.1 listener; THE
+  SESSION IS MINTED AT THE EXCHANGE, which demands both codes — that ordering is load-bearing).
+  Born-status rule, written once: an owner's approval → `active`; else the workspace's
+  `session_approval` knob decides. A seatless approver on multi tenancy is woven through `/new`.
+- **Invitations** (`invite-redeem.tsx` + `identity.server.ts`): mailed single-use hash-stored
+  token, 7-day lapse, re-invite supersedes; the accept ceremony is email-BOUND (one-click as the
+  invited address · passwordless account mint born verified · switch page for the wrong account ·
+  one constant dead-token page); optional ONE first-destination hint lands as an assignment.
+  Enrolled devices accept lane-side (`POST /api/v1/invitations/accept`).
+- **Ceremonies confirm, they don't re-authenticate** (`ceremony.server.ts` +
+  `app/components/confirm.tsx`): destructive acts type the CURRENT name (`requireTypedName`);
+  cross-person acts wear the in-place `<ConfirmButton>` two-step; settings saves are plain.
+  Every attempt lands an `admin_event` row.
+- **Registration is composition-owned** (`registration.server.ts`, wired as Better Auth's
+  `user.create.before` hook). OSS default **`gated`**: claim ceremony, pending invitation on
+  armed SMTP, or the single-tenancy-only `open` knob; everything else gets one constant refusal.
+  A superset may pass `open` — sign-up alone still grants no seat.
+- **Recovery:** reset mail when SMTP is armed; a mail-less solo owner runs the box-side
+  `scripts/mint-recovery-code.mjs`.
 
-Secrets are HASH-STORED, and the hashing happens IN Postgres (`sha256(convert_to(…))`) or inside Better
-Auth's own password hasher — this tier generates randomness (the two mints in `identity.server.ts` +
-`recovery.server.ts`) but computes no digest.
+## Surfaces
 
-**Registration is composition-owned** (`app/lib/auth/registration.server.ts`, wired as Better Auth's
-`user.create.before` hook so no rung can bypass it; the policy is `composition.registration`). The OSS
-default is **`gated`**: a sign-up succeeds only inside the claim ceremony, OR with a pending invitation
-on a deployment whose SMTP is armed (the invited seat binds only after the mailbox round-trip, via
-`bindInvitedSeats` on `afterEmailVerification` — and only in the invitation's own workspace), OR — in
-SINGLE tenancy only — under the one workspace's off-by-default `registration = 'open'` knob (a
-workspace-scoped knob never opens a multi-tenant server, so the knob's settings panel and its intent
-exist only in single tenancy). Everything else gets ONE constant, non-enumerating refusal. A downstream
-composition may return **`open`** instead: every rung then admits sign-up (the magic-link lead becomes
-"continue with email", creating an account for a new address) — sign-up alone still grants no seat.
+- **Two URL grammars, one route table** (`app/lib/ws-path.ts` + `ws-url.server.ts`): tenancy
+  **single** (OSS default — origin-rooted, the install IS its workspace) or **multi** (a superset
+  mounts the same modules under the `/:ws` name slug). No page hard-codes the grammar; the opaque
+  `workspace.id` never appears in a URL. `/new` (self-serve workspace creation) mounts in multi
+  only; reserved slugs (`app/topos-web/segments.ts` ∪ composition's list) refuse byte-identically
+  to taken names.
+- **Faces + the card:** workspace root / channel / skill are each ONE route under
+  `face-shell.tsx`. A non-browser document fetch gets the CONSTANT protocol card
+  (`card.server.ts`, byte-identical on every path; `api_base_url` = this origin's `/api`). Skill
+  and channel faces are members-only — anonymous/non-member gets the house 404,
+  existence-blind. Uniform miss surface: the root ErrorBoundary → `error-screen.tsx` (no
+  `error.data`, path, or stack).
+- **Machine discovery** (origin-rooted in both tenancies): `/llms.txt`,
+  `/.well-known/agent-skills/index.json` (+ `/.well-known/skills/` alias) serving the built-in
+  `topos` skill; its sha256 is computed in `agent-skills.server.ts` from the same bytes served —
+  the ONE sanctioned digest in this tier.
+- **`/docs`:** MDX source at the REPO root (`docs/`), compiled at generate time into a COMMITTED
+  module (`app/lib/docs/content.generated.server.ts`) by `scripts/gen-docs.mjs` (own
+  remark/rehype chain; closed component set; nav.json must match disk; the CLI reference page
+  splices the generated `docs/cli.md`). Edit the MDX → `bun run gen:docs` → commit; `check:docs`
+  fails on drift. `/docs/<page>.md` is the plain-markdown twin; `/docs/llms.txt` the index.
+- **Signed-in:** dashboard · skill browser + lifecycle ceremonies (tabs: Current · Proposals ·
+  History · owner Settings; `skills/import` add-from-GitHub + the Upstream panel) · the rendered
+  review UI (diff, approve/reject, comments, revert) · `/profile` (Mine grouped by provenance +
+  Library) · `/visibility` · channel pages (tabs: Skills/curation · Members · History ·
+  Settings) · roster · workspace Settings (General policy knobs · whole-catalog export ·
+  Sessions incl. the pending-approval queue · Archive) · the account Your-sessions list ·
+  claim. The left panel is one shadcn sidebar (`app/components/shell/`), loader-derived;
+  breadcrumbs render from one central registry.
+- **Mail — ONE transport** (`app/lib/mail/transport.server.ts`, the only module allowed an SMTP
+  client; the five `TOPOS_MAIL_SMTP_*` vars arm it all-or-nothing; armed mail is the identity
+  rung for multi-user installs). Send failures are coarse — no error ever echoes body, recipient,
+  or relay response; every attempt lands one metadata-only `mail_event` row.
 
-**Self-serve workspace creation (multi tenancy only).** `/new` (`workspace-new.tsx`, mounted only when
-`tenancy: "multi"`) is both onboarding and the panel dropdown's "New workspace" form: display name →
-an editable address slug with live availability (`?check=` on the same route), then ONE transaction in
-`app/lib/db/workspace-create.server.ts` — the workspace row born CLAIMED + its implicit `everyone`
-channel + the creator's owner seat + the audit row. A reserved slug (the route table's multi-mode
-statics in `app/topos-web/segments.ts` ∪ the future-reserve list ∪ `composition.reservedWorkspaceNames`)
-refuses byte-identically to a taken name and is never enumerable through the form; a vitest red-test
-locks the segment list to the real route table. The name `topos` is reserved where a real collision
-could occur — `CHANNEL_RESERVED` refuses it as a channel name (`bad_name`), and the bundle
-catalog mint (`RESERVED_BUNDLE_NAMES` in `queries.custody.server.ts`) treats it as always-taken —
-the genesis suffix walks past it (`topos-2`), byte-identical to a collision, no oracle. The
-WORKSPACE slug `topos` is deliberately NOT reserved: the built-in skill is never a workspace
-resource, and the CLI resolves a bare `topos` token to the built-in before the address grammar. A seatless signed-in visitor is routed here (`/app` →
-`/new`; the `/verify` weave preserves the device code); the dashboard's empty state is the first-skill
-card — the same publish-from-your-agent instructions the panel's `+ new` skill dialog shows. In single
-tenancy `/new` does not mount (the house 404) and the seatless answer stays the 404.
+## Composition — four additive seams
 
-**Ceremonies confirm, they don't re-authenticate** (`app/lib/auth/ceremony.server.ts` +
-`app/components/confirm.tsx`). A live session plus the guard-minted role IS the authority for every
-admin ceremony (roster mutations, skill lifecycle, purge, channel existence-admin, policy setters);
-what a ceremony adds is CONFIRMATION of intent, proportional to its reach — the GitHub-shaped posture
-(sudo scopes to account credentials, not org admin):
-- **Destructive ceremonies** (delete a skill, purge a version, delete a channel) require typing the
-  resource's exact CURRENT name — `requireTypedName` against the name the server re-reads, never a
-  form-supplied expected value (`<ConfirmNameField>` is the visible half).
-- **Acts with cross-person reach** that aren't type-the-name gated (remove member, role change, leave,
-  revert, rename, archive/unarchive, and the owner's assign-a-skill-or-channel-to-everyone arm on the
-  skill and channel faces — withdrawing included) wear the ONE shared in-place confirm
-  (`<ConfirmButton>`): the
-  action control arms in place to a "— confirm?" + Cancel pair — deliberately NOT a modal — and
-  disarms on its own (focus leaves, ~8 s timeout, or the submit going pending). Arming performs
-  nothing; only the armed submit posts.
-- **Settings/policy form saves** are plain submits behind their dirty-reveal Save/Cancel
-  (`<SaveControls>`) — no added friction.
-Every attempt lands an `admin_event` audit row, refused typed names included. The grade of a ceremony
-and the reach of its act stay matched IN THE DATABASE: the account page's session end is SELF-ONLY
-(`revokeOwnSession` — a session is a possession; no owner arm reaches into someone else's pocket),
-and seat removal ends the removed person's sessions in that workspace in the same transaction
-(cause-tagged audit). The SESSION ceremonies split by side: SELF end (the account Your-sessions page,
-per-session `end-session`) and the owner arms on the workspace Sessions tab — approve/reject a
-pending session, remove any session (`session_approved` / `session_rejected` / `session_ended`;
-removing ends delivery and reporting, never recalls bytes) — the people-affecting arms wearing the
-in-place `<ConfirmButton>` two-step. The `/verify` login-approve is a plain signed-in accept — a live
-session plus the explicit approve click is the whole ceremony there. Revoking a pending invitation is
-the same grade as the invite it undoes (the row flips to revoked; re-inviting mints a fresh link), so
-the owner gate + the audited act is the whole ceremony on the members page.
+`@topos/web` exports `./routes`, `./nav`, `./entitlements`, `./auth-config`. A superset composes
+`[...ossRoutes({ dir, tenancy }), ...ownRoutes]` and appends nav/entitlements/auth rungs —
+**additive-only**. The composition root also owns the registration policy and
+`reservedWorkspaceNames`; OSS statics live in the dev-free `app/topos-web/segments.ts`.
 
-**Mail — ONE transport, whole product.** `app/lib/mail/transport.server.ts` is the only module allowed to
-hold an SMTP client; every product mail rides it — the invite notice (`invite-mail.server.ts`), the
-verification + reset mails (`auth-mail.server.ts`), and a composition's magic links
-(`magic-link-mail.server.ts`). BRING YOUR OWN SMTP: the five `TOPOS_MAIL_SMTP_*` env vars arm it
-all-or-nothing; unarmed, `mailDelivery().canSend` is false and every flow keeps its honest no-send
-posture (and armed mail is the identity rung for a MULTI-USER install — inviting requires it). A send
-failure is COARSE — a body can carry a live credential, so no error ever echoes the message, the
-recipient, or the relay response. Every send ATTEMPT lands one metadata-only **`mail_event`** row
-(`app/lib/db/mail-log.server.ts` — the DAL's one actor-less system write): the message's `kind`, the
-recipient, ok/failed, and at most a coarse machine code — NEVER a subject, body, token, or relay
-response (the table has no column a message could land in). The log exists so an operator surface can
-answer "did the invite mail send"; this repo ships no reader for it.
+## Stack + gates
 
-**Two URL grammars, one route table (`app/lib/ws-path.ts` + `app/lib/ws-url.server.ts`).** The
-signed-in surface addresses workspaces by a TENANCY mode the composition passes to
-`ossRoutes({ tenancy })`: **single** (the OSS default) — the install IS its one workspace, so the whole
-surface is ORIGIN-ROOTED (`/`, `/members`, `/skills/:skill`) and a shareable address is the bare origin;
-**multi** (a downstream superset) — the same page modules mount under `/:ws`, where `:ws` is the
-workspace NAME slug (`workspace.name`), and an address is `<origin>/<name>`. No page hard-codes the
-grammar: `wsHref`/`useWsPath` build in-app links, `wsPathServer`/`workspaceAddress` build server-side
-redirects + the shareable address, and every workspace-scoped loader resolves through `workspaceInScope`
-(single → `theWorkspace()`, multi → look up by name) before the id-keyed guards run. The opaque
-`workspace.id` stays the wire/DB key but never appears in a browser URL.
+React Router 8 framework mode (SSR, Vite, bun) · React 19 · Better Auth on Drizzle/Postgres ·
+Tailwind 4 with the Klein token set (`DESIGN.md` is the source of truth) · self-hosted fonts ·
+`@pierre/diffs` behind a sanitizing wrapper · zod · Biome · Vitest + Playwright. Blocking SSR;
+every DB/vault read per-request fresh.
 
-**Resource addresses + the protocol card.** The three shareable FACES — the workspace ROOT, a channel,
-and a skill — are each ONE route (resource address AND canonical page) under `face-shell.tsx`, plus a
-catch-all. A non-browser DOCUMENT fetch gets the CONSTANT protocol card (`app/lib/card.server.ts` —
-served whole from the server entry's `handleRequest`, byte-identical on every path incl. `/`,
-`api_base_url` = this origin's own `/api` mount where the device lane is served). For an ANONYMOUS
-browser the faces split by kind: the workspace ROOT gets the constant teaser (the landing page at the
-single-tenant origin root, the constant resource teaser in multi), but a SKILL or CHANNEL face is
-members-only and gets the house 404 — indistinguishable from a mistyped path, so a signed-out visitor
-gets NO signal that the address shape names a resource (existence-blind: a real name and an invented
-one throw the same `notFound()` before any read). A signed-in member gets the canonical page with the
-app chrome; everyone else (a signed-in non-member, an unknown slug) gets the house 404. No face is an
-existence oracle. A browser on an ALIAS origin is 301'd to the canonical one (`TOPOS_PUBLIC_URL`). The
-uniform miss/fault surface is the root ErrorBoundary → `app/components/error-screen.tsx` (a Klein-voiced
-404/500 page carrying no `error.data`, path, or stack — so every 404 is byte-constant).
-
-**The machine-discovery lane** — four deployment-scoped resource routes, origin-rooted in BOTH
-tenancy modes (they describe the deployment, never a workspace): `/llms.txt` (the site-guide
-convention — a static constant, the agent.ts posture) and `/.well-known/agent-skills/index.json`,
-the agent-skills discovery index whose ONE entry is the repo's downloadable built-in `topos` skill;
-the skill's three files serve under the same well-known base (`…/agent-skills/topos/<file>`) so
-sibling references resolve, and `/.well-known/skills/index.json` aliases the index byte-identically.
-The advertised sha256 is computed in `app/lib/agent-skills.server.ts` from the SAME process-lifetime
-read the routes serve — no generation script, no committed digest, drift impossible — and that
-module is the ONE sanctioned digest computation in this tier (carved out by name in
-`check-boundary.mjs`; it hashes public bytes, never a secret).
-
-**The documentation is served BY THIS APP, at `/docs`** — same origin, same design system, so a
-self-hosted install ships its own docs and needs no third-party site. The MDX source lives at the
-REPO ROOT (`docs/`, outside `web/`, so the pages stay readable on GitHub) and is compiled ONCE, at
-generate time, into a COMMITTED module (`app/lib/docs/content.generated.server.ts`): the routes
-import it like any other module, so the runtime reads no files, the image carries no documentation,
-and a downstream superset inherits the docs by compiling this app's source unchanged. The
-GENERATE-AND-COMMIT loop is the repo's usual one — **edit the MDX, `bun run gen:docs`, commit the
-result**; `check:docs` (in `bun run check`) regenerates in memory and fails on any drift, so a
-content edit without a regenerate turns CI red instead of shipping stale docs.
-
-The pipeline (`scripts/gen-docs.mjs` + `scripts/docs/`) is the app's OWN remark/rehype chain, not a
-second markdown stack: remark-parse → remark-gfm → the component fold → remark-rehype →
-headings/anchors → code frames → shiki (both themes) → the colour pass → stringify.
-`TOPOS_DOCS_DIR` re-points the content root (tests aim it at
-`tests/fixtures/docs`). Four contracts are enforced at generate time, loudly, naming the file:
-frontmatter is exactly `title` + `description` (+ optional `sidebar_label`); `docs/nav.json` is the
-single source of the sidebar and must name exactly the pages on disk (a nav entry with no file, or
-a file no nav lists, fails); the component set is CLOSED (`Note`/`Warning`/`Tip`, `Steps`+`Step`,
-`Tabs`+`Tab`, `CardGrid`+`Card`, `Cta`, `Columns`+`Column`) and anything else fails rather than
-rendering empty; and the CLI
-reference page expands the marker `{/* GENERATED-CLI-REFERENCE */}` from the repo's generated
-`docs/cli.md` (never hand-written, never duplicated; its own H1 + provenance quote are stripped on
-splice so the reference's sections and commands land in the page TOC). remark-rehype runs WITHOUT
-`allowDangerousHtml`, so no raw HTML can reach the output — a stronger guarantee than sanitizing
-after the fact, and why this renderer carries no sanitizer. Highlighting happens at GENERATE time;
-the browser downloads no highlighter, and `<Tabs>` switches with a radio group and `:checked`.
-Every code block is framed with a generated copy button — the ONE bit of docs interactivity, wired
-as a single delegated click handler in `docs-shell.tsx` — and command fences (`bash`/`sh`/
-`console`) sit on the design system's dark terminal glass, recoloured to the dark shiki theme at
-generate time.
-
-Path SHAPE decides the face, as everywhere else here: `/docs/<page>` is the page (sidebar from
-`nav.json`, on-page contents from its own h2/h3, prev/next in nav order), `<the same path>.md` is
-the plain-markdown twin an agent fetches (components reduced to ordinary markdown — an aside
-becomes a labelled paragraph, steps become numbered lines — the author's fences and tables
-untouched), and `/docs/llms.txt` indexes the set with absolute urls on this deployment's own
-origin. All of it is public and sessionless, origin-rooted in BOTH tenancy modes; `docs` is a
-top-level static segment (registered in `app/topos-web/segments.ts`), so no workspace slug can take
-it.
-
-**The signed-in surface:** a workspace dashboard, the skill browser, the person's **assignments** page
-(`/profile` — MINE, grouped by what puts each thing there: the baseline, each carried channel, what a
-curator aimed at you, your own picks, every row carrying its attribution and its off switch, a declined
-row staying visible and dimmed; and LIBRARY, the catalog whose one act is adding a skill to your own
-feed, which also clears a standing decline) beside the **visibility** page (`/visibility` — what a
-workspace can never read from a machine, then what it does, then the reader's own reported rows as the
-proof), the rendered review UI (unified diff +
-Approve/Reject + comments + one-click revert), the verification page, the create/join flows, and the ADMIN
-surfaces — the roster page in full (invite / role change / remove / self-serve leave, sole-owner-fenced),
-the skill lifecycle ceremonies (archive / unarchive / delete / purge / rename-with-redirect —
-discoverable: the skill pages share one tab row, Current · Proposals · History plus an OWNER-ONLY
-**Settings** tab rendered from each loader's own owner fact, while the settings route re-guards
-regardless), the
-channel pages — TABBED into **Skills** (the face, hosting in-app curation: whoever may curate — any
-member of an open channel, reviewer+ of a curated one — adds/removes the channel's skill references
-through the same core the device lane runs) · **Members** · **History** · **Settings** (the owner
-rename/delete ceremonies) under one shared tab header (`app/components/channel/channel-tabs.tsx`) —
-the **Settings** page — TABBED into **General** (the workspace policy: review
-default · staleness window · the `session_approval` knob (member logins born pending until an owner
-approves, on the Sessions tab) · the `registration` knob (single tenancy) · an OWNER-ONLY
-whole-catalog **export** — a `settings/export` resource route streaming a zip of every skill at its
-current version plus a `manifest.json`, one object at a time through the custody transport's verified
-reads) and **Sessions** (the workspace's session view, `settings/sessions`: every live session with
-its applied state + staleness, the PENDING queue with the owner approve/reject arms, remove on any —
-ended sessions simply no longer appear) and **Archive** (the archived-skills list with the
-unarchive/delete ceremonies), all under one shared tab header (`app/components/settings-tabs.tsx`)),
-the account **Your sessions** self-service list (every session the person holds across workspaces,
-each with its own end-session arm), and the first-run claim. It renders state read from its own `web`
-schema and, read-only, from the vault's `plane` schema; it holds no signing key, computes no digest,
-and initiates no session-signed write — publishing stays on the logged-in machine.
-
-**The left panel** (`app/components/shell/{shell-chrome,app-sidebar}.tsx`, data from
-`app/lib/shell/chrome.server.ts`) is one shadcn collapsible sidebar shared by both signed-in layouts.
-The content column's header bar carries the `topos_` wordmark (linking to the workspace root); the
-global BREADCRUMB trail (`app/components/shell/breadcrumbs.tsx`: workspace → section → resource →
-tab, driven by the route match against one central registry) renders UNDER EVERY PAGE'S TITLE — the
-shared `PageHeader`/`SkillHeader` render it once, the bespoke-title pages place it directly; the
-component is self-sufficient (it shape-detects the chrome in `useMatches()` loader data, both layout
-shapes, no hardcoded route ids — composition-safe), so an anonymous teaser, carrying no chrome,
-renders no trail. The panel: a header strip carrying the workspace identity (STATIC name in single
-tenancy, a seat DROPDOWN in multi; the `topos_` wordmark as the off-workspace fallback) beside the
-ONE collapse toggle (reachable in the icon-collapsed state), the workspace's **Skills** and
-**Channels** lists (each row a name linking to its face, each section header a `+ new` — Skills opens
-a **publish-from-your-agent** dialog of copyable lines composed for this workspace's real address,
-since the app never authors a bundle; Channels links to the create form), the workspace nav
-(Members · Settings, from the registry's `workspace` section) as plain bottom items, and an account menu
-footer (the registry's non-`workspace` sections + Sign out). The Skills/Channels/nav sections render only
-when a workspace is in scope; every list is loader-derived, so the panel — living in the layout — never
-reads a child route's `:ws` param (it builds links from the loader-supplied address through
-`app/lib/ws-path.ts`). The chrome loader derives the active seat from the request's DESTINATION
-path — React Router's client navigations fetch loaders from `<path>.data`, and that suffix is
-normalized before the seat match (`destinationPathname`), so a client-side arrival at a workspace
-dashboard keeps the full panel. An OFF-workspace destination (the person-scoped `/account/devices`,
-`/new`) falls back to the LAST ACTIVE workspace — the `topos_active_ws` cookie the panel writes
-client-side, matched strictly against the person's proven memberships (else the first seat) — so
-navigating to a person-scoped page keeps the panel as it was instead of blanking it.
-
-**Stack.** React Router 8 in framework mode (SSR, Vite, bun) · React 19 · Better Auth on Drizzle /
-Postgres · Tailwind 4 with the Klein token set (`DESIGN.md` is the source of truth; the `--color-*` table
-in `app/app.css @theme` is kept identical to it by `check:tokens`) · Martian Mono + IBM Plex Sans/Mono
-self-hosted via `@fontsource` · `@pierre/diffs` behind a sanitizing wrapper · zod · Biome · Vitest +
-Playwright. Blocking SSR — every page ships one complete document; every DB/vault read is per-request
-fresh.
-
-**Composition — four additive seams.** The package (`@topos/web`) exports `./routes`, `./nav`,
-`./entitlements`, and `./auth-config`. A deployment's `app/routes.ts` is one line — `ossRoutes()` (single
-by default); a downstream superset build composes `[...ossRoutes({ dir, tenancy }), ...ownRoutes]` and
-appends its own nav entries, entitlements provider, and auth rungs. Composition is **additive-only**. The
-OSS build is **single-tenant** — one workspace per install, origin-rooted (`theWorkspace()`); a superset
-passes `tenancy: "multi"` to mount the same modules under the `/:ws` name slug (no boot workspace is
-minted, and the first-run claim ceremony does not exist). The composition root also owns the
-**registration policy** (`gated` — the OSS default — or `open`) and **`reservedWorkspaceNames`** (extra
-top-level segments a superset reserves so no workspace slug can occlude its own routes); the OSS statics
-themselves live in the dev-free `app/topos-web/segments.ts`, importable without dragging
-`@react-router/dev` into a server bundle.
-
-**Auth + authorization (fail-closed).** The OSS default rung is **email+password with zero delivery
-dependency** — a self-hosted team signs in with no SMTP or OAuth. A session is evidence, never authority:
-`app/lib/auth/guards.server.ts` is the only place that mints **branded actors**
-(`requireSession → requireMember → requireWorkspaceOwner`/`requireReviewer`, and `requireDeviceActor` for
-the device lane); the brand symbol is module-private, so a loader that skipped its guard cannot construct
-one. Every DAL function requires an actor, and workspace-scoped reads take (or assert) their scope from the
-actor. **Misses render 404, never 403.**
-
-**Gates** (`bun run check`, all in CI): `check:tokens` (DESIGN.md ↔ `app.css` color drift),
-`check:boundary` (no crypto/digest/signature anywhere; the vault URL + `fetch(` + `/internal/v1` confined
-to the one transport; the retired `x-topos-acting-email` header banned; server modules carry `.server`;
-every data-reading route guards or is on the sessionless allowlist; the raw DB surface stays inside the
-DAL; zero client env), `check:email` (nothing authorizes by email equality — the one-identity rule),
-`check:contract` (`app/lib/plane/contract/schema.d.ts` regenerated from the committed OpenAPI,
-drift-gated), `check:docs` (`app/lib/docs/content.generated.server.ts` regenerated from the repo's
-`docs/`, drift-gated — edit the MDX, run `bun run gen:docs`, commit), and `check:bundle` (post-build
-byte-scan of `build/client` for server secret names + that the emitted CSS carries app-only
-utilities). The repo-level `scripts/check-db-grants.sh` (run in CI) proves the cross-lane grant
-boundary by logging in as each role.
-
-**Run it.**
+Gates (`bun run check`, all in CI): `check:tokens` (DESIGN.md ↔ `app.css`), `check:boundary` (no
+crypto outside the named carve-out; vault URL/`fetch(`/`/internal/v1` confined to the one
+transport; `.server` discipline; route-guard allowlist; DAL confinement; zero client env),
+`check:email`, `check:contract` (OpenAPI-generated `schema.d.ts`), `check:docs`, `check:bundle`
+(post-build client-bundle byte-scan). Repo-level `scripts/check-db-grants.sh` proves the
+cross-lane grants by logging in as each role.
 
 ```sh
 bun install
 bun run dev          # needs DATABASE_URL + PLANE_INTERNAL_URL/PLANE_INTERNAL_TOKEN + BETTER_AUTH_SECRET/URL
-bun run db:migrate   # DATABASE_URL=… apply the web-schema migrations
-bun run test         # vitest unit — NOT `bun test`, which runs BUN's own runner and writes
-                     # snapshot entries vitest then reports as obsolete (CI fails on those)
-bun run test:e2e     # playwright — E2E_{PLANE,APP,SMTP}_PORT override the ports when two
-                     # checkouts run their suites side by side
+bun run db:migrate
+bun run test         # vitest unit — NOT `bun test` (bun's own runner writes snapshots vitest
+                     # then reports as obsolete; CI fails on those)
+bun run test:e2e     # playwright — E2E_{PLANE,APP,SMTP}_PORT override for side-by-side checkouts
 bun run gen:docs     # recompile /docs from the repo's docs/*.mdx into the committed module
-bun run check        # biome + the boundary/email/token/contract/docs gates + typecheck
+bun run check        # biome + the gates above + typecheck
 ```
 
 `AGENTS.md` symlinks to this file.

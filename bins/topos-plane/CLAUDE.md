@@ -5,64 +5,36 @@ product app — authenticated by the internal bearer token, and treats every req
 PRE-AUTHORIZED (authorization/protection/entitlement decided app-side, once). It must never be
 publicly reachable: no published port, no public router.
 
-## lib — the composable surface
+## lib
 
-- **The leak-free construction path:** `PlaneConfig { database_url, git_root, large_root }` +
-  `PlaneState::open(cfg)` (builds the `plane-store::Authority` internally; the composer names no
-  `plane_store` type). `PlaneState::new(Arc<Authority>)` stays the explicit test/advanced path.
-  `PlaneState::with_internal_token(token)` arms the custody lane (sha256-only retention; unarmed,
-  every `/internal/v1/*` route answers the uniform 404 so a composition can never expose an
-  unauthenticated custody lane).
+- **Construction:** `PlaneConfig { database_url, git_root, large_root }` + `PlaneState::open(cfg)`
+  (leak-free — the composer names no `plane_store` type); `PlaneState::new(Arc<Authority>)` for
+  tests. `PlaneState::with_internal_token(token)` arms the custody lane (sha256-only retention;
+  unarmed, every `/internal/v1/*` route answers the uniform 404).
 - **`router(state)`** — the whole HTTP surface: `GET /healthz` (unauthenticated liveness) + the
   bearer-gated `/internal/v1` custody lane; anything else is a uniform JSON 404. Request-level
-  tracing (method + matched route template + status + latency; never a raw path) wraps everything.
+  tracing wraps everything (matched route template, never a raw path).
 - **The internal custody lane** (`routes/internal.rs`) — lane-local snake_case DTOs (deliberately
-  NOT in `topos-types`, NOT in the committed OpenAPI):
-  - `POST /internal/v1/workspaces/{ws}/bundles/{bundle}/versions` — ingest + commit WITHOUT a
-    pointer move (the propose path). Body `{files:[{path, mode, content_base64}], parent?,
-    attribution, message}` → `{version_id, commit_id, bundle_digest, deduped}` (idempotent per
-    content).
-  - `POST …/publish` — the composite: ingest + commit + CAS, one flow. Adds
-    `expected_generation: Option<u64>` (absent = genesis) → the commit answer + `pointer
-    {version_id, generation, moved_at_ms, moved_by_display, replayed}`.
-  - `POST …/pointer` — CAS to an EXISTING version (the approve path): `{version_id,
-    expected_generation?, attribution}`.
-  - `POST …/revert` — forward commit `{tree: target.tree, parents: [current]}` + CAS:
-    `{to_version_id, expected_generation, attribution}` (the revert message is server-constructed
-    + deterministic, so retries re-derive the identical id).
-  - `GET …/current` · `GET …/versions/{version_id}` (meta + file listing) ·
-    `GET …/objects/{object_id}` (verified bytes, octet-stream) · `GET …/log?limit=N`
-    (the first-parent chain from current, capped).
-  - `GET /internal/v1/storage` — every workspace's stored byte total (`present` custody only,
-    ordered by workspace id): `{workspaces: [{workspace_id, stored_bytes}]}` — the operational
-    accounting read.
-  - `POST …/versions/{version_id}/purge` (`{attribution}`) · `DELETE …/bundles/{bundle}` ·
-    `DELETE /internal/v1/workspaces/{ws}`.
-  - Errors: 400 `BAD_REQUEST`/`REJECTED`, the uniform 404 `NOT_FOUND`, 409 `CONFLICT` (carrying the
-    live `generation` + `version_id`) / `TARGET_PURGED` / `POINTED_AT`, 500 `INTEGRITY`/`INTERNAL`
-    (chains logged server-side, never on the wire). 401 only on a wrong bearer; an UNARMED lane is
-    404-invisible.
-- **`routes/door.rs`** — contract-ONLY stubs (never routed) carrying the `#[utoipa::path]`
-  annotations for the PUBLIC session lane the product app serves: the login flow
-  (`POST /v1/login/authorize|token` — RFC-8628-shaped; on approval the flow code is promoted to
-  the SESSION's workspace-scoped bearer credential), the session self-end (`DELETE /v1/session`),
-  publish/propose/revert/review, the reads (current/catalog/version/object/proposals/delivery/
-  me/channels/inbox/log/reach), the server-stored profile row ops
-  (`PUT`/`DELETE /v1/workspaces/{ws}/profile/{skills|channels}/…`), channel curation, protection,
-  notices-ack, and invitations.
-  `openapi()` (emitted to `contracts/openapi/` by `xtask`) is generated from these stubs; the
-  internal custody lane stays OUT of the committed contract.
-- **The storage-maintenance scheduler** (`maintenance.rs`): `spawn_maintenance(state, every)` /
-  `run_maintenance_pass(state)` — recovery → janitor → per-workspace GC, faults logged + tallied,
-  never crashing the loop. The composition root spawns it once; `router()` deliberately does not.
+  NOT in `topos-types`, NOT in the committed OpenAPI). Per workspace/bundle: ingest-without-move
+  (`…/versions`, the propose path), `…/publish` (ingest + commit + CAS, `expected_generation`),
+  `…/pointer` (CAS to an existing version — the approve path), `…/revert` (forward commit),
+  verified reads (`current` · version meta/listing · object bytes · first-parent `log`),
+  `…/versions/{id}/purge`, bundle/workspace delete, and `GET /internal/v1/storage` (per-workspace
+  stored-byte accounting). Errors: 400, the uniform 404, 409 `CONFLICT`/`TARGET_PURGED`/
+  `POINTED_AT`, 500 `INTEGRITY`/`INTERNAL`; 401 only on a wrong bearer.
+- **`routes/door.rs`** — contract-ONLY `#[utoipa::path]` stubs (never routed) describing the
+  PUBLIC session lane the web app serves; `openapi()` is generated from them so the committed
+  contract pins that wire in one artifact.
+- **`maintenance.rs`** — `spawn_maintenance` / `run_maintenance_pass`: recovery → janitor →
+  per-workspace GC; the composition root spawns it once, `router()` deliberately does not.
 
 ## bin
 
 A thin `axum` main: parse config (`TOPOS_PLANE_BIND`, `DATABASE_URL`, `TOPOS_PLANE_GIT_ROOT`,
-`TOPOS_PLANE_LARGE_ROOT`, `TOPOS_PLANE_INTERNAL_TOKEN`, `TOPOS_PLANE_GC_INTERVAL_SECS`; pool tuning
-via `TOPOS_PLANE_DB_*`), open the state, arm the lane, spawn maintenance, serve. No subcommands, no
-trust logic.
+`TOPOS_PLANE_LARGE_ROOT`, `TOPOS_PLANE_INTERNAL_TOKEN`, `TOPOS_PLANE_GC_INTERVAL_SECS`; pool
+tuning via `TOPOS_PLANE_DB_*`), open the state, arm the lane, spawn maintenance, serve. No
+subcommands, no trust logic.
 
 Dependencies: `plane-store`, `topos-core` (sha256 for the token hash), `topos-types`
-(contract-derives — this crate is one of the two contract producers), `axum`, `utoipa`, `tokio`,
-`tracing`, `clap`, `serde`/`serde_json`, `base64`.
+(contract-derives — one of the two contract producers), `axum`, `utoipa`, `tokio`, `tracing`,
+`clap`, `serde`/`serde_json`, `base64`.
