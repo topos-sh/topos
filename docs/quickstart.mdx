@@ -1,24 +1,13 @@
 ---
 title: Quickstart
-description: Create a workspace, share a skill, and watch it reach your whole team — about five minutes.
+description: Create your workspace right inside the first login, share a skill, and watch it reach your whole team — about five minutes.
 sidebar_label: Quickstart
 ---
 
-Five steps. At the end your team has a shared workspace, one skill in it, and machines that keep
+Four steps. At the end your team has a shared workspace, one skill in it, and machines that keep
 themselves current — no one runs anything to receive updates.
 
 <Steps>
-  <Step title="Create a workspace">
-    A workspace is your team's shared home for skills: one address, one member list, one
-    catalog.
-
-    <Cta title="Create a workspace on Topos Cloud" href="https://topos.sh" />
-
-    Sign up, pick a name, and your team's address is `https://topos.sh/<name>`. You can also
-    [self-host](/docs/self-host) the whole product on your own server — then the address is
-    your own domain. Already invited by a teammate? The address is in the invitation mail —
-    go straight to step 2.
-  </Step>
   <Step title="Install the CLI">
     <Columns>
       <Column title="In a terminal">
@@ -28,7 +17,7 @@ themselves current — no one runs anything to receive updates.
       </Column>
       <Column title="Or paste to your agent">
         ```text
-        Set up Topos for us: fetch https://topos.sh/agent and follow it. Our workspace: https://topos.sh/acme
+        Set up Topos for us: fetch https://topos.sh/agent and follow it.
         ```
       </Column>
     </Columns>
@@ -37,15 +26,24 @@ themselves current — no one runs anything to receive updates.
     you — only the browser approval stays yours to click. Details and verification:
     [Install](/docs/install).
   </Step>
-  <Step title="Log in">
+  <Step title="Log in — your workspace is born right there">
     ```bash
-    topos login https://topos.sh/acme
+    topos login
     ```
 
-    Your browser opens — click **Approve**. That one click is the whole setup: connecting adopts
-    everything the workspace has given you, and updates apply silently at the start of each agent
-    session. There is no per-skill step to accept — your workspace's **Your skills** page always
-    shows what you have and why, with an off switch on every row.
+    Your browser opens: sign in, name your workspace, and click **Create and connect** — that
+    one pass is the whole setup. A workspace is your team's shared home for skills: one address
+    (`https://topos.sh/<name>`), one member list, one catalog. You can also
+    [self-host](/docs/self-host) the whole product — then the address is your own domain. Your
+    terminal and the approval page show the same short code — a glance that they match is the
+    whole security check.
+
+    Already have a workspace, or invited by a teammate? The same command shows yours to pick
+    from — one click connects — and the invitation mail's link works as the address:
+    `topos login <invite-url>`. Connecting adopts everything the workspace has given you, and
+    updates apply silently at the start of each agent session. There is no per-skill step to
+    accept — your workspace's **Your skills** page always shows what you have and why, with an
+    off switch on every row.
   </Step>
   <Step title="Share a skill">
     Point `publish` at any skill folder you already have — here, one in your agent's skills
