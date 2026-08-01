@@ -873,9 +873,14 @@ function CreateFields({
 
   const checkData = check.data && "available" in check.data ? check.data : undefined;
   const forCurrent = checkData !== undefined && checkData.name === slug;
-  // One refusal, once: while the SERVER's typed error stands for the value in the field, the
-  // live probe says nothing — two identical "taken" lines for one slug is noise, not honesty.
-  const serverErrorStands = createRefusal !== null && createRefusal.slug === slug;
+  // ONE truth at a time: the server's typed refusal renders only while it still DESCRIBES the
+  // values in the fields — editing either one retires it and the live probe takes over (a
+  // stale "taken" beside a fresh "Available." would be two answers to different questions) —
+  // and while it stands, the probe says nothing (two identical "taken" lines is noise).
+  const serverErrorStands =
+    createRefusal !== null &&
+    createRefusal.slug === slug &&
+    createRefusal.displayName === displayName;
 
   return (
     <div className="flex flex-col gap-3">
@@ -947,7 +952,7 @@ function CreateFields({
           </div>
         )}
       </label>
-      {createRefusal !== null && (
+      {serverErrorStands && createRefusal !== null && (
         <p className="text-red-600 text-sm" role="alert">
           {createRefusal.error}
         </p>

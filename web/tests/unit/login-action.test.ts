@@ -7,7 +7,11 @@ import { installTestEnv } from "./helpers/test-env";
  * this suite pins is the WEAVE: the hidden `next` is re-validated server-side (a /verify
  * target rebuilt canonically, an off-origin value refused by safeNextPath), the magic arm
  * lands the same callbackURL the client rung would, the password arm forwards the session
- * cookie onto the redirect, and a cross-origin POST is refused before any of it.
+ * cookie onto the redirect, a cross-origin POST is refused before any of it — and the BELTS
+ * hold: these arms bypass Better Auth's HTTP-handler limiter (they call the server API
+ * directly), so the action wears its own per-client buckets, proven here past the burst.
+ * Each ordinary test posts from its OWN client address (the belt keys on the trusted last
+ * XFF hop), so only the belt tests share one.
  */
 
 vi.mock("@/composition.server", () => ({
@@ -43,12 +47,17 @@ beforeEach(() => {
   signInEmail.mockReset();
 });
 
+let nextClient = 0;
+
 async function post(
   form: Record<string, string>,
-  opts: { origin?: string | null } = {},
+  opts: { origin?: string | null; ip?: string } = {},
 ): Promise<unknown> {
   const headers: Record<string, string> = {
     "content-type": "application/x-www-form-urlencoded",
+    // The belt keys on the trusted proxy's LAST hop — a fresh address per call unless a belt
+    // test pins one deliberately.
+    "x-forwarded-for": opts.ip ?? `10.0.0.${++nextClient}`,
   };
   if (opts.origin !== null) {
     headers.origin = opts.origin ?? ORIGIN;
@@ -143,6 +152,60 @@ describe("the password arm", () => {
     expect((result as { data: { error: string } }).data.error).toBe(
       "Couldn’t sign in. Check your email and password.",
     );
+  });
+});
+
+describe("the belts (the native arms bypass Better Auth's HTTP limiter)", () => {
+  const RATE_BELTED = "Too many attempts — wait a moment and try again.";
+
+  it("magic sends belt at burst 3 per client — the 4th answers 429 and sends NO mail", async () => {
+    const ip = "203.0.113.7";
+    for (let i = 0; i < 3; i++) {
+      const ok = await post({ intent: "magic", email: "belted@b.test", next: "/app" }, { ip });
+      expect(ok).toEqual({ sent: true, email: "belted@b.test" });
+    }
+    const belted = await post({ intent: "magic", email: "belted@b.test", next: "/app" }, { ip });
+    expect(statusOf(belted)).toBe(429);
+    expect((belted as { data: { error: string } }).data.error).toBe(RATE_BELTED);
+    expect(signInMagicLink).toHaveBeenCalledTimes(3);
+    // ANOTHER client is untouched — the belt is per address, not global.
+    const other = await post(
+      { intent: "magic", email: "other@b.test", next: "/app" },
+      { ip: "203.0.113.8" },
+    );
+    expect(other).toEqual({ sent: true, email: "other@b.test" });
+  });
+
+  it("the sent card's RESEND arm rides the same belt — it is the same post", async () => {
+    const ip = "203.0.113.9";
+    // The initial send, then resends: the card's resend form posts intent=magic with the same
+    // hidden fields, so the third resend (4th send) is the one the belt refuses.
+    for (let i = 0; i < 3; i++) {
+      await post({ intent: "magic", email: "resend@b.test", next: "/app" }, { ip });
+    }
+    const belted = await post({ intent: "magic", email: "resend@b.test", next: "/app" }, { ip });
+    expect(statusOf(belted)).toBe(429);
+    expect(signInMagicLink).toHaveBeenCalledTimes(3);
+  });
+
+  it("password attempts belt at burst 10 per client — the 11th answers 429, nothing signed in", async () => {
+    const ip = "203.0.113.10";
+    signInEmail.mockResolvedValue(new Response(null, { status: 401 }));
+    for (let i = 0; i < 10; i++) {
+      const tried = await post(
+        { intent: "password", email: "brute@b.test", password: `guess-${i}`, next: "/app" },
+        { ip },
+      );
+      expect(statusOf(tried)).toBe(400);
+    }
+    const belted = await post(
+      { intent: "password", email: "brute@b.test", password: "guess-11", next: "/app" },
+      { ip },
+    );
+    expect(statusOf(belted)).toBe(429);
+    expect((belted as { data: { error: string } }).data.error).toBe(RATE_BELTED);
+    // The credential check never ran past the burst — no online attempt beyond the limit.
+    expect(signInEmail).toHaveBeenCalledTimes(10);
   });
 });
 
