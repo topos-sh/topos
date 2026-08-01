@@ -88,11 +88,15 @@ export const allowVerifyLookup = bucketLimiter({ burst: 10, refillPerSec: 0.2, m
  * the native fallback calls the server auth API directly and would otherwise be an
  * UNLIMITED door (online password brute force; mail-amplified link sends — the resend arm
  * included). Keyed per client address by the door belt's exact discipline
- * (`clientKeyFromXff` — the LAST hop, never a caller-supplied prefix). Password attempts:
- * burst 10, one back every ~10 s. Magic sends are TIGHTER — each costs a mail: burst 3, one
- * back every ~20 s.
+ * (`clientKeyFromXff` — the LAST hop, never a caller-supplied prefix).
+ *
+ * `allowSignInAction` is the OUTER belt, spent before the request body is even parsed — it
+ * bounds body-parsing work itself alongside password attempts (burst 10, one back every
+ * ~10 s; there is no separate password belt — this is it). Magic sends wear a TIGHTER inner
+ * belt on top, spent once the intent is known — each send costs a mail: burst 3, one back
+ * every ~20 s.
  */
-export const allowPasswordSignIn = bucketLimiter({ burst: 10, refillPerSec: 0.1, maxKeys: 10_000 });
+export const allowSignInAction = bucketLimiter({ burst: 10, refillPerSec: 0.1, maxKeys: 10_000 });
 export const allowMagicLinkSend = bucketLimiter({ burst: 3, refillPerSec: 0.05, maxKeys: 10_000 });
 
 /**

@@ -17,7 +17,7 @@ import { REGISTRATION_REFUSED } from "@/lib/auth/registration.server";
 import { getAuth } from "@/lib/auth/server";
 import { pendingLoopbackFlowExists } from "@/lib/db/identity.server";
 import { mailDelivery } from "@/lib/mail/transport.server";
-import { allowMagicLinkSend, allowPasswordSignIn, clientKeyFromXff } from "@/lib/rate-limit.server";
+import { allowMagicLinkSend, allowSignInAction, clientKeyFromXff } from "@/lib/rate-limit.server";
 import { rebuildVerifyNext } from "@/lib/verify-path";
 
 export const meta: MetaFunction = () => [{ title: "Sign in · Topos" }];
@@ -99,6 +99,18 @@ export async function loader({ request }: LoaderFunctionArgs) {
  */
 export async function action({ request }: ActionFunctionArgs) {
   assertSameOrigin(request);
+  // THE OUTER BELT — spent before the body is even PARSED. These arms call the server auth
+  // API directly, so Better Auth's own limiter (which wears the hydrated rungs' `/api/auth/*`
+  // posts) never sees them; unbelted they would be an unlimited door: online password brute
+  // force, mail-amplified link sends (the sent card's resend arm rides the same forms), and —
+  // with the belt anywhere after `formData()` — free re-parsing of arbitrarily shaped bodies
+  // for a client whose bucket is already dry. Keyed by the door belt's exact discipline — the
+  // trusted proxy's LAST x-forwarded-for hop, never a caller-supplied prefix. One constant,
+  // non-oracling line, whatever tripped.
+  const clientKey = clientKeyFromXff(request.headers.get("x-forwarded-for"));
+  if (!allowSignInAction(clientKey)) {
+    return data({ error: RATE_BELTED }, { status: 429 });
+  }
   const form = await request.formData();
   const intent = String(form.get("intent") ?? "");
   const rawNext = String(form.get("next") ?? "");
@@ -106,15 +118,9 @@ export async function action({ request }: ActionFunctionArgs) {
   // Named `address`, like the client rungs' local — it is a login name being FORWARDED, never
   // compared (the email-authz gate reads lexically, and it should).
   const address = String(form.get("email") ?? "").trim();
-  // THE BELT — these arms call the server auth API directly, so Better Auth's own limiter
-  // (which wears the hydrated rungs' `/api/auth/*` posts) never sees them; unbelted they would
-  // be an unlimited door: online password brute force, mail-amplified link sends (the sent
-  // card's resend arm rides the same forms). Keyed by the door belt's exact discipline — the
-  // trusted proxy's LAST x-forwarded-for hop, never a caller-supplied prefix. One constant,
-  // non-oracling line for both arms.
-  const clientKey = clientKeyFromXff(request.headers.get("x-forwarded-for"));
 
   if (intent === "magic") {
+    // The tighter INNER belt — a send costs a mail, so magic runs well under the outer rate.
     if (!allowMagicLinkSend(clientKey)) {
       return data({ error: RATE_BELTED }, { status: 429 });
     }
@@ -136,9 +142,7 @@ export async function action({ request }: ActionFunctionArgs) {
   }
 
   if (intent === "password") {
-    if (!allowPasswordSignIn(clientKey)) {
-      return data({ error: RATE_BELTED }, { status: 429 });
-    }
+    // No inner belt: the OUTER belt's rate IS the password rate (burst 10, slow refill).
     const password = String(form.get("password") ?? "");
     if (address.length === 0 || password === "") {
       return data({ error: "Couldn’t sign in. Check your email and password." }, { status: 400 });
