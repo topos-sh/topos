@@ -5,6 +5,7 @@ import { FounderAddressBlock } from "@/components/landing/founder-email";
 import { HarnessMark, hasHarnessMark } from "@/components/landing/harness-marks";
 import { MicroLabel, SectionHeading, WRAP } from "@/components/landing/landing-kit";
 import { LoopBands } from "@/components/landing/loop-bands";
+import { PricingBand } from "@/components/landing/pricing-band";
 import { RoutingStar } from "@/components/landing/routing-star";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 
@@ -364,6 +365,9 @@ export function LandingPage({
             <a href="#demo" className="transition-colors hover:text-ink max-sm:hidden">
               How it works
             </a>
+            <a href="#pricing" className="transition-colors hover:text-ink max-sm:hidden">
+              Pricing
+            </a>
             <a href="#faq" className="transition-colors hover:text-ink max-sm:hidden">
               FAQ
             </a>
@@ -491,6 +495,8 @@ export function LandingPage({
 
       <LoopBands rail={FLEET_RAIL} />
 
+      <PricingBand ctaTo={ctaTo} ctaLabel={ctaLabel} docsHref={DOCS} />
+
       <section id="faq" className="pt-[84px] lg:pt-[116px]">
         <div className={WRAP}>
           <MicroLabel>FAQ</MicroLabel>
@@ -508,7 +514,7 @@ export function LandingPage({
         </div>
       </section>
 
-      <section className="pt-[84px] lg:pt-[116px]">
+      <section id="contact" className="pt-[84px] lg:pt-[116px]">
         <div className={WRAP}>
           <MicroLabel>Design partners</MicroLabel>
           <SectionHeading>Setting this up for a team? Email me.</SectionHeading>

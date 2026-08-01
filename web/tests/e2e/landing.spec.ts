@@ -84,18 +84,35 @@ test.describe("the public landing page", () => {
       page.getByText("Use sentence case for headings. No exclamation points."),
     ).toBeVisible();
 
-    // 6 — the FAQ, fully visible text (no accordion): six questions, six answers on the page.
+    // 6 — the pricing band: three tiers, the seat definition, and the one accent CTA. The tier
+    // figures are asserted as text because the hierarchy between the three cards is carried by the
+    // neutral ramp, which the DOM does not spell.
+    const pricing = page.locator("#pricing");
+    await expect(pricing).toContainText("Self-hosted");
+    await expect(pricing).toContainText("$0");
+    await expect(pricing).toContainText("Team");
+    await expect(pricing).toContainText("$20");
+    await expect(pricing).toContainText("Enterprise");
+    await expect(pricing).toContainText("$40");
+    await expect(pricing).toContainText("A seat is anyone who works with an AI agent");
+    await expect(pricing.getByRole("link", { name: "Talk to us" })).toHaveAttribute(
+      "href",
+      "#contact",
+    );
+
+    // 7 — the FAQ, fully visible text (no accordion): six questions, six answers on the page.
     const faq = page.locator("#faq");
     await expect(faq.locator("dt")).toHaveCount(6);
     await expect(faq.locator("dd")).toHaveCount(6);
     await expect(faq.locator("dd").first()).toBeVisible();
 
-    // 7 — the founder band.
+    // 8 — the founder band, which is also the pricing band's "Talk to us" destination.
+    await expect(page.locator("#contact")).toHaveCount(1);
     await expect(
       page.getByRole("heading", { name: "Setting this up for a team? Email me." }),
     ).toBeVisible();
 
-    // 8 — the footer: the browser-path button leads its link row; no security link, no address.
+    // 9 — the footer: the browser-path button leads its link row; no security link, no address.
     const footer = page.locator("footer");
     // Two matches are legitimate in single tenancy: the primary button (/login) plus the plain
     // "Sign in" link (/app). The button is the first — assert it specifically.
@@ -120,6 +137,7 @@ test.describe("the public landing page", () => {
     await expect(page.locator("#agent")).toHaveCount(0);
     await expect(page.getByRole("link", { name: "Why Topos" })).toHaveCount(0);
     await expect(page.getByRole("link", { name: "FAQ" })).toHaveAttribute("href", "#faq");
+    await expect(page.getByRole("link", { name: "Pricing" })).toHaveAttribute("href", "#pricing");
   });
 
   test("the founder's address is never in the served bytes, and never a mailto", async ({
