@@ -15,7 +15,7 @@ import { authClient } from "@/lib/auth/client";
 import { assertSameOrigin, safeNextPath } from "@/lib/auth/guards.server";
 import { REGISTRATION_REFUSED } from "@/lib/auth/registration.server";
 import { getAuth } from "@/lib/auth/server";
-import { pendingLoopbackFlowExists } from "@/lib/db/identity.server";
+import { pendingLoopbackFlowCode } from "@/lib/db/identity.server";
 import { mailDelivery } from "@/lib/mail/transport.server";
 import { allowMagicLinkSend, allowSignInAction, clientKeyFromXff } from "@/lib/rate-limit.server";
 import { rebuildVerifyNext } from "@/lib/verify-path";
@@ -25,6 +25,17 @@ export const meta: MetaFunction = () => [{ title: "Sign in · Topos" }];
 /** The belts' one constant answer — the same line for both arms, disclosing nothing about
  * which limit tripped or whether the address or password was even looked at. */
 const RATE_BELTED = "Too many attempts — wait a moment and try again.";
+
+/** The glance code behind a CANONICAL /verify resume target, or null. One spelling for the
+ * loader (GET with the query) and the action (a native POST whose loader saw none) — the hint
+ * must be true from first paint through the sent-card wait. */
+async function deviceCodeBehind(verifyNext: string | null): Promise<string | null> {
+  if (verifyNext === null) {
+    return null;
+  }
+  const device = new URL(verifyNext, "http://login.invalid").searchParams.get("device");
+  return device === null ? null : await pendingLoopbackFlowCode(device);
+}
 
 /**
  * The `next` query (where sign-in returns to — e.g. back to a /verify page) is request data,
@@ -68,20 +79,15 @@ export async function loader({ request }: LoaderFunctionArgs) {
   const verifyNext = rebuildVerifyNext(rawNext);
   const next = verifyNext ?? safeNextPath(rawNext);
   // The quiet machine-is-waiting line: when the rebuilt resume target carries a challenge that
-  // resolves to a LIVE pending loopback flow, say so — one sentence, no machine name (this page
-  // is pre-auth; the existence bit is all a challenge holder doesn't already know). Silence
-  // otherwise.
-  let deviceWaiting = false;
-  if (verifyNext !== null) {
-    const device = new URL(verifyNext, "http://login.invalid").searchParams.get("device");
-    if (device !== null) {
-      deviceWaiting = await pendingLoopbackFlowExists(device);
-    }
-  }
+  // resolves to a LIVE pending loopback flow, say so — one sentence WITH the glance code (the
+  // terminal's waiting line points at "the same code", and this page is the ceremony's first
+  // screen), no machine name (that stays post-auth; the probe's own comment carries the
+  // disclosure argument). Silence otherwise.
+  const deviceCode = await deviceCodeBehind(verifyNext);
   const auth = composition.auth;
   return {
     next,
-    deviceWaiting,
+    deviceCode,
     magicLink: Boolean(auth.magicLink),
     socialProviders: Object.keys(auth.socialProviders ?? {}),
     emailAndPassword: auth.emailAndPassword,
@@ -114,7 +120,8 @@ export async function action({ request }: ActionFunctionArgs) {
   const form = await request.formData();
   const intent = String(form.get("intent") ?? "");
   const rawNext = String(form.get("next") ?? "");
-  const next = rebuildVerifyNext(rawNext) ?? safeNextPath(rawNext === "" ? undefined : rawNext);
+  const verifyNext = rebuildVerifyNext(rawNext);
+  const next = verifyNext ?? safeNextPath(rawNext === "" ? undefined : rawNext);
   // Named `address`, like the client rungs' local — it is a login name being FORWARDED, never
   // compared (the email-authz gate reads lexically, and it should).
   const address = String(form.get("email") ?? "").trim();
@@ -141,7 +148,15 @@ export async function action({ request }: ActionFunctionArgs) {
     // The next the mail ACTUALLY carried rides the payload: the sent card's resend and
     // different-email arms re-render from it, never from the loader's query (a native POST
     // has no query string, and a loader fallback would orphan the pending flow).
-    return { sent: true as const, email: address, next };
+    // The glance code rides the payload beside `next`: a native POST re-renders the sent
+    // card with no query behind the loader, and the code must stay visible through the whole
+    // pre-approval wait (the terminal claims "the page shows the same code").
+    return {
+      sent: true as const,
+      email: address,
+      next,
+      deviceCode: await deviceCodeBehind(verifyNext),
+    };
   }
 
   if (intent === "password") {
@@ -219,7 +234,7 @@ function socialLabel(id: string): string {
 export default function LoginPage() {
   const {
     next,
-    deviceWaiting,
+    deviceCode,
     magicLink,
     socialProviders,
     emailAndPassword,
@@ -360,7 +375,13 @@ export default function LoginPage() {
   if (magicSent || actionSent !== null) {
     // The action's own next wins: on the no-JS path the loader saw no query string, and its
     // fallback would point the resend and different-email arms away from the pending flow.
-    return <MagicSentCard email={actionSent?.email ?? email} next={actionSent?.next ?? next} />;
+    return (
+      <MagicSentCard
+        email={actionSent?.email ?? email}
+        next={actionSent?.next ?? next}
+        deviceCode={actionSent !== null ? actionSent.deviceCode : deviceCode}
+      />
+    );
   }
 
   if (verifySent) {
@@ -394,9 +415,9 @@ export default function LoginPage() {
               ? "Sign in with your email and password."
               : "Continue with one of the options below."}
       </p>
-      {deviceWaiting && (
+      {deviceCode !== null && (
         <p className="mt-2 text-sm text-dim" role="status">
-          A device is waiting to connect — sign in to approve it.
+          A device is waiting to connect — code {deviceCode}. Sign in to approve it.
         </p>
       )}
 
@@ -540,7 +561,15 @@ export default function LoginPage() {
  * offers a resend (a REAL form post to the action, so it works hydrated and not), and a way
  * back to the form (a plain link carrying `next`, for the wrong-address case).
  */
-function MagicSentCard({ email, next }: { email: string; next: string }) {
+function MagicSentCard({
+  email,
+  next,
+  deviceCode,
+}: {
+  email: string;
+  next: string;
+  deviceCode: string | null;
+}) {
   return (
     <Shell>
       <h1 className="font-display font-semibold text-lg tracking-[-0.02em] text-ink">
@@ -550,6 +579,13 @@ function MagicSentCard({ email, next }: { email: string; next: string }) {
         We sent a sign-in link to <span className="font-medium text-ink">{email}</span> — it works
         for a few minutes and can be used once.
       </p>
+      {deviceCode !== null && (
+        // The glance code STAYS visible through the whole pre-approval wait — the terminal's
+        // waiting line points at "the same code", and this tab is what the person is looking at.
+        <p className="mt-2 text-sm text-dim" role="status">
+          A device is waiting to connect — code {deviceCode}. Sign in to approve it.
+        </p>
+      )}
       <form method="post" className="mt-6">
         <input type="hidden" name="intent" value="magic" />
         <input type="hidden" name="email" value={email} />

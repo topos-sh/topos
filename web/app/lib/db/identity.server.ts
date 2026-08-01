@@ -1194,16 +1194,23 @@ export async function pendingLoginFlowByChallenge(
  * page runs pre-auth, so this must open no new disclosure surface beyond what the challenge
  * holder — the flow's own starter — already knows). Loopback-fenced like the card pre-arm.
  */
-export async function pendingLoopbackFlowExists(challengeHex: string): Promise<boolean> {
+export async function pendingLoopbackFlowCode(challengeHex: string): Promise<string | null> {
   if (!/^[0-9a-f]{64}$/.test(challengeHex)) {
-    return false;
+    return null;
   }
+  // The GLANCE CODE rides the answer, not just existence: the sign-in page is the FIRST screen
+  // of the ceremony, and the terminal's waiting line points at "the same code" — so the code
+  // must be visible from first paint, not only after sign-in. Disclosing it to the
+  // challenge-holder adds no capability: this renders only under a challenge-bearing URL, and
+  // possession of that URL already suffices to approve after sign-in (the card pre-arms from
+  // the same challenge). Every fence stays: loopback-bound only, live-and-pending only,
+  // constant null for anything else.
   const rows = await getDb().execute(
-    sql`SELECT 1 FROM ${loginFlow}
+    sql`SELECT user_code FROM ${loginFlow}
         WHERE flow_code_sha256 = decode(${challengeHex}, 'hex') AND binding = 'loopback'
           AND status = 'pending' AND expires_at > now()`,
   );
-  return rows.rows.length > 0;
+  return (rows.rows[0] as { user_code: string } | undefined)?.user_code ?? null;
 }
 
 async function pendingLoginFlowWhere(

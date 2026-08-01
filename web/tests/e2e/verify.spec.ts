@@ -330,13 +330,20 @@ test("FRAGMENTATION RESUME: a magic link consumed in a fresh browser resolves th
   const second = await browser.newContext({ storageState: { cookies: [], origins: [] } });
   const other = await second.newPage();
   try {
-    // Signed out, the verify arrival bounces to /login carrying the canonical next.
+    // Signed out, the verify arrival bounces to /login carrying the canonical next — and the
+    // FIRST screen already shows the glance code (the terminal's waiting line says "the page
+    // shows the same code", which must be true from first paint, not only after sign-in).
     await other.goto(`/verify?device=${challenge}`);
     await other.waitForURL((u) => u.pathname === "/login");
+    const hint = `A device is waiting to connect — code ${flow.user_code}. Sign in to approve it.`;
+    await expect(other.getByText(hint)).toBeVisible();
     // Ask for the magic link (mail is armed suite-wide; the sink records the send).
     await other.getByLabel("Email").fill(MEMBER_EMAIL);
     await other.getByRole("button", { name: "Email me a sign-in link" }).click();
     await expect(other.getByText("Check your email")).toBeVisible();
+    // The hint (with the code) PERSISTS on the sent card — visible through the whole
+    // pre-approval stretch in this tab.
+    await expect(other.getByText(hint)).toBeVisible();
     const mail = await latestMail("magic-link", MEMBER_EMAIL);
     const link = mail.text.match(/https?:\/\/\S+/)?.[0];
     expect(link, "the magic-link mail carries the sign-in URL").toBeTruthy();
@@ -346,6 +353,8 @@ test("FRAGMENTATION RESUME: a magic link consumed in a fresh browser resolves th
     await other.goto(String(link).replace(/^https?:\/\/[^/]+/, BASE_URL));
     await other.waitForURL((u) => u.pathname === "/verify");
     await expect(other.getByText("“resumed-laptop”", { exact: true })).toBeVisible();
+    // The card's glance line shows THE SAME code the /login hint promised.
+    await expect(other.getByText(flow.user_code)).toBeVisible();
     await other.getByRole("button", { name: "Connect and approve this device" }).click();
     await expect(other.getByRole("heading", { name: "Approved" })).toBeVisible();
   } finally {

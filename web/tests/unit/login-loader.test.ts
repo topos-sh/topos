@@ -29,9 +29,9 @@ vi.mock("@/composition.server", () => ({
 
 // The loader's device-waiting probe + guards.server's transitive imports, mocked (this suite
 // runs DB-free; identity-core owns the probe's SQL).
-const pendingLoopbackFlowExists = vi.fn<(hex: string) => Promise<boolean>>();
+const pendingLoopbackFlowCode = vi.fn<(hex: string) => Promise<string | null>>();
 vi.mock("@/lib/db/identity.server", () => ({
-  pendingLoopbackFlowExists: (hex: string) => pendingLoopbackFlowExists(hex),
+  pendingLoopbackFlowCode: (hex: string) => pendingLoopbackFlowCode(hex),
   sessionActor: vi.fn(),
   seatOf: vi.fn(),
   theWorkspace: vi.fn(),
@@ -46,7 +46,7 @@ let loader: typeof import("@/routes/login").loader;
 
 beforeAll(async () => {
   installTestEnv();
-  pendingLoopbackFlowExists.mockResolvedValue(false);
+  pendingLoopbackFlowCode.mockResolvedValue(null);
   ({ loader } = await import("@/routes/login"));
 });
 
@@ -150,24 +150,26 @@ describe("a /verify `next` is REBUILT canonically, never echoed", () => {
 describe("the machine-is-waiting hint", () => {
   const device = "cd".repeat(32);
 
-  it("rides when the rebuilt verify next carries a challenge that RESOLVES", async () => {
-    pendingLoopbackFlowExists.mockResolvedValueOnce(true);
+  it("carries the GLANCE CODE when the rebuilt verify next names a challenge that RESOLVES", async () => {
+    // The terminal's waiting line says "the page shows the same code" — so the code must be on
+    // the ceremony's FIRST screen, not only on the post-auth card.
+    pendingLoopbackFlowCode.mockResolvedValueOnce("JXF7-XAM2");
     const raw = encodeURIComponent(`/verify?device=${device}`);
     const result = await call(`http://localhost/login?next=${raw}`);
-    expect(pendingLoopbackFlowExists).toHaveBeenCalledWith(device);
-    expect(result.deviceWaiting).toBe(true);
+    expect(pendingLoopbackFlowCode).toHaveBeenCalledWith(device);
+    expect(result.deviceCode).toBe("JXF7-XAM2");
   });
 
   it("says nothing when the challenge resolves to no live flow", async () => {
-    pendingLoopbackFlowExists.mockResolvedValueOnce(false);
+    pendingLoopbackFlowCode.mockResolvedValueOnce(null);
     const raw = encodeURIComponent(`/verify?device=${device}`);
-    expect((await call(`http://localhost/login?next=${raw}`)).deviceWaiting).toBe(false);
+    expect((await call(`http://localhost/login?next=${raw}`)).deviceCode).toBe(null);
   });
 
   it("never probes for a next that is not the verify page (or carries no challenge)", async () => {
-    pendingLoopbackFlowExists.mockClear();
-    expect((await call("http://localhost/login?next=/app")).deviceWaiting).toBe(false);
-    expect((await call("http://localhost/login?next=%2Fverify")).deviceWaiting).toBe(false);
-    expect(pendingLoopbackFlowExists).not.toHaveBeenCalled();
+    pendingLoopbackFlowCode.mockClear();
+    expect((await call("http://localhost/login?next=/app")).deviceCode).toBe(null);
+    expect((await call("http://localhost/login?next=%2Fverify")).deviceCode).toBe(null);
+    expect(pendingLoopbackFlowCode).not.toHaveBeenCalled();
   });
 });
