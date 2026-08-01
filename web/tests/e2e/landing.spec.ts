@@ -100,17 +100,29 @@ test.describe("the public landing page", () => {
       "#contact",
     );
 
-    // 7 — the FAQ, fully visible text (no accordion): six questions, six answers on the page.
+    // 7 — the founder band, the pricing band's "Talk to us" destination. It sits directly under
+    // pricing and ahead of the FAQ, and opens on its heading: no micro-label above it.
+    const contact = page.locator("#contact");
+    await expect(contact).toHaveCount(1);
+    await expect(
+      page.getByRole("heading", { name: "Setting this up for a team? Email me." }),
+    ).toBeVisible();
+    await expect(contact.getByText("Design partners")).toHaveCount(0);
+    // The order is the contract, not an accident of authoring: the band that answers the pricing
+    // CTA has to come before the FAQ, or the button jumps the reader past it.
+    const contactPrecedesFaq = await page.evaluate(() => {
+      const c = document.querySelector("#contact");
+      const f = document.querySelector("#faq");
+      if (!c || !f) return false;
+      return Boolean(c.compareDocumentPosition(f) & Node.DOCUMENT_POSITION_FOLLOWING);
+    });
+    expect(contactPrecedesFaq).toBe(true);
+
+    // 8 — the FAQ, fully visible text (no accordion): six questions, six answers on the page.
     const faq = page.locator("#faq");
     await expect(faq.locator("dt")).toHaveCount(6);
     await expect(faq.locator("dd")).toHaveCount(6);
     await expect(faq.locator("dd").first()).toBeVisible();
-
-    // 8 — the founder band, which is also the pricing band's "Talk to us" destination.
-    await expect(page.locator("#contact")).toHaveCount(1);
-    await expect(
-      page.getByRole("heading", { name: "Setting this up for a team? Email me." }),
-    ).toBeVisible();
 
     // 9 — the footer: the browser-path button leads its link row; no security link, no address.
     const footer = page.locator("footer");
