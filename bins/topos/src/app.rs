@@ -2211,30 +2211,15 @@ fn parse_rfc3339_utc_millis(s: &str) -> Option<i64> {
     Some((days * 86_400 + hh * 3600 + mm * 60 + ss) * 1000)
 }
 
-/// One `m:ss` (or `h:mm:ss`) spelling of a millisecond span, floored at zero — the waiting line's
-/// honest time.
-fn fmt_span(millis: i64) -> String {
-    let secs = millis.max(0) / 1000;
-    let (h, m, s) = (secs / 3600, (secs % 3600) / 60, secs % 60);
-    if h > 0 {
-        format!("{h}:{m:02}:{s:02}")
-    } else {
-        format!("{m}:{s:02}")
-    }
-}
-
-/// The live waiting line: elapsed time since the wait began, plus the code's expiry countdown when
-/// known. Rewritten in place on a TTY; plain otherwise.
-fn waiting_line(now_millis: u64, started_millis: u64, expires_at_millis: Option<i64>) -> String {
-    let mut line = format!(
-        "Waiting for approval… {} elapsed",
-        fmt_span(i64::try_from(now_millis.saturating_sub(started_millis)).unwrap_or(i64::MAX))
-    );
-    if let Some(exp) = expires_at_millis {
-        let left = exp.saturating_sub(i64::try_from(now_millis).unwrap_or(i64::MAX));
-        line.push_str(&format!(" · code expires in {}", fmt_span(left)));
-    }
-    line
+/// The waiting line — ONE static print, no timer. The device-flow precedent waits without a
+/// countdown, and elapsed/expiry arithmetic on screen only made the wait scarier; expiry stays
+/// visible where it matters (the expired-flow error, the settle refusal's named expiry). The
+/// GLANCE CODE rides it instead: with approval-from-anywhere first-class, the terminal-visible
+/// code is the human-verifiable cross-check against what the page shows.
+fn waiting_line(user_code: &str) -> String {
+    format!(
+        "Waiting for approval in your browser — code {user_code} (the page shows the same code)."
+    )
 }
 
 /// Whether this invocation blocks on a pending device-authorization, and until when.
@@ -2320,10 +2305,12 @@ fn block_on_pending<T>(
     // The waiting disclosure on STDERR (stdout stays the clean final envelope/TTY): the URL and
     // the short code on separate lines (the code never rides a URL), and the one line that makes
     // the wait unscary — interrupting loses nothing.
-    // A LOOPBACK flow deliberately does NOT print the bare page + code: this machine's browser is
-    // about to open on a page that needs no typing, and a code on screen only invites typing it
-    // where nothing asked for it. Its own URL is printed by the listener arm below (auto-opened,
-    // or to paste when the open fails).
+    // A LOOPBACK flow deliberately does NOT print the bare page + code pair: this machine's
+    // browser is about to open on a page that needs no typing, and a URL-plus-code invitation
+    // only tempts typing the code where nothing asked for it. Its own URL is printed by the
+    // listener arm below (auto-opened, or to paste when the open fails) — and the code itself
+    // still reaches the terminal on the waiting line, as the glance check against what the page
+    // shows (the human-verifiable cross-check, now that an approval can arrive from anywhere).
     if loopback.is_none() {
         eprintln!(
             "Open: {}\nCode: {} (the page shows the same code — confirm it matches)",
@@ -2365,26 +2352,13 @@ fn block_on_pending<T>(
         bound
     });
     let interval = disc.poll_interval();
-    // The live waiting line: honest time (elapsed + the code's expiry countdown), rewritten in
-    // place once a second when stderr is a TTY; a single plain line otherwise (no escape codes in
-    // a log file).
-    let live = {
-        use std::io::IsTerminal;
-        std::io::stderr().is_terminal()
-    };
-    let started = clock.now_unix_millis();
-    if !live {
-        eprintln!("{}", waiting_line(started, started, disc.expires_at_millis));
-    }
+    // The waiting line: ONE static print (no per-second rewrite, no countdown — the device-flow
+    // precedent waits quietly), carrying the glance code.
+    eprintln!("{}", waiting_line(&disc.user_code));
 
     // `last` is the most recent pending result, handed back verbatim if a numeric `--wait` deadline passes
     // (starts as `first`, so `--wait 0` returns immediately without polling again).
     let mut last = first;
-    let finish_line = |live: bool| {
-        if live {
-            eprintln!();
-        }
-    };
     loop {
         // Honor a numeric deadline precisely: stop the instant it passes (checked BEFORE sleeping, so a
         // short `--wait <n>` is not overshot by a whole poll interval).
@@ -2392,7 +2366,6 @@ fn block_on_pending<T>(
             .deadline_millis
             .is_some_and(|d| clock.now_unix_millis() >= d)
         {
-            finish_line(live);
             return last;
         }
         // The FLOW's own expiry is a hard stop too. The server is the usual source of the
@@ -2402,27 +2375,21 @@ fn block_on_pending<T>(
             .expires_at_millis
             .is_some_and(|e| e >= 0 && clock.now_unix_millis() >= e.unsigned_abs())
         {
-            finish_line(live);
             return last;
         }
-        // Sleep the poll interval, but never past the deadline — ticking the live line per second.
+        // Sleep the poll interval, but never past the deadline.
         let nap = match policy.deadline_millis {
             Some(d) => {
                 Duration::from_millis(d.saturating_sub(clock.now_unix_millis())).min(interval)
             }
             None => interval,
         };
-        if live {
+        if listener.is_some() {
+            // With a listener armed, sleep in short slices so the browser's redirect wakes the
+            // poll near-instantly.
             let nap_end = clock
                 .now_unix_millis()
                 .saturating_add(u64::try_from(nap.as_millis()).unwrap_or(u64::MAX));
-            // With a listener armed, tick in short slices so the browser's redirect wakes the
-            // poll near-instantly; a lone terminal keeps the calm one-second cadence.
-            let slice = if listener.is_some() {
-                Duration::from_millis(250)
-            } else {
-                Duration::from_secs(1)
-            };
             loop {
                 let now = clock.now_unix_millis();
                 if now >= nap_end {
@@ -2437,10 +2404,10 @@ fn block_on_pending<T>(
                     listener = None;
                     break;
                 }
-                use std::io::Write;
-                eprint!("\r{}  ", waiting_line(now, started, disc.expires_at_millis));
-                let _ = std::io::stderr().flush();
-                std::thread::sleep(Duration::from_millis(nap_end.saturating_sub(now)).min(slice));
+                std::thread::sleep(
+                    Duration::from_millis(nap_end.saturating_sub(now))
+                        .min(Duration::from_millis(250)),
+                );
             }
         } else {
             std::thread::sleep(nap);
@@ -2451,7 +2418,6 @@ fn block_on_pending<T>(
             last = next;
         } else {
             // Settled (enrolled / published) or a terminal error (incl. the device code's expiry) — done.
-            finish_line(live);
             return next;
         }
     }
@@ -2754,7 +2720,7 @@ fn list_discovery(tracked: bool) -> Option<ops::DiscoveryRoots> {
 mod tests {
     use super::{
         DEFAULT_WEB_ORIGIN, PendingDisclosure, WaitPolicy, block_on_pending, build_pull_scope,
-        fmt_span, list_page_argv, next_page_action, parse_rfc3339_utc_millis, resolve_web_origin,
+        list_page_argv, next_page_action, parse_rfc3339_utc_millis, resolve_web_origin,
         waiting_line,
     };
     use crate::ids::Clock;
@@ -2845,8 +2811,9 @@ mod tests {
     }
 
     #[test]
-    fn the_waiting_line_shows_honest_elapsed_and_expiry_time() {
-        // The RFC 3339 parser inverts the client's own spelling exactly.
+    fn the_waiting_line_shows_the_glance_code_and_no_timer() {
+        // The RFC 3339 parser inverts the client's own spelling exactly (the flow's expiry still
+        // ends the wait loop — it just never renders as a countdown).
         assert_eq!(parse_rfc3339_utc_millis("1970-01-01T00:00:00Z"), Some(0));
         assert_eq!(
             parse_rfc3339_utc_millis("2026-06-25T00:15:00Z"),
@@ -2862,21 +2829,16 @@ mod tests {
             assert_eq!(parse_rfc3339_utc_millis(bad), None, "{bad}");
         }
 
-        assert_eq!(fmt_span(7_000), "0:07");
-        assert_eq!(fmt_span(15 * 60_000 - 7_000), "14:53");
-        assert_eq!(fmt_span(3_600_000 + 61_000), "1:01:01");
-        assert_eq!(fmt_span(-5), "0:00", "a passed expiry never goes negative");
-
-        let line = waiting_line(1_000_000 + 7_000, 1_000_000, Some(1_007_000 + 893_000));
+        // ONE static line, no elapsed tick, no expiry countdown (the device-flow precedent waits
+        // without a timer) — and the GLANCE CODE is on it, the human-verifiable cross-check
+        // against what the approval page shows.
+        let line = waiting_line("S5CE-CL26");
         assert_eq!(
             line,
-            "Waiting for approval… 0:07 elapsed · code expires in 14:53"
+            "Waiting for approval in your browser — code S5CE-CL26 (the page shows the same code)."
         );
-        // No expiry known → elapsed only (never a guessed countdown).
-        assert_eq!(
-            waiting_line(1_000_000 + 7_000, 1_000_000, None),
-            "Waiting for approval… 0:07 elapsed"
-        );
+        assert!(!line.contains("elapsed"), "{line}");
+        assert!(!line.contains("expires"), "{line}");
     }
 
     #[test]

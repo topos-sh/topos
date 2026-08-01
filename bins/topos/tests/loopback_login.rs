@@ -354,11 +354,23 @@ fn a_tty_login_is_codeless_end_to_end() {
         printed.contains("Opening your browser to approve."),
         "the auto-open is disclosed: {printed}"
     );
-    // CODELESS: the short code never touches the terminal — approving happens in the browser this
-    // run just opened, and printing a code would invite typing one nothing asked for.
+    // CODELESS TO OPERATE, glance-checkable to trust: the loopback arm never prints the
+    // "Open:/Code:" instruction pair (nothing asks for typing), but the WAITING LINE carries the
+    // code — the human-verifiable cross-check against what the page shows, now that an approval
+    // can arrive from anywhere. Static, timer-free (the device-flow precedent waits quietly).
     assert!(
-        !printed.contains("WXYZ-3N3X") && !printed.contains("Code:"),
-        "the loopback posture keeps the code off the terminal: {printed}"
+        !printed.contains("Code:"),
+        "no typing instruction on the loopback arm: {printed}"
+    );
+    assert!(
+        printed.contains(
+            "Waiting for approval in your browser — code WXYZ-3N3X (the page shows the same code)."
+        ),
+        "the waiting line carries the glance code: {printed}"
+    );
+    assert!(
+        !printed.contains("elapsed") && !printed.contains("expires in"),
+        "no timer fragments on the wait: {printed}"
     );
     // The poll carries the flow code and NOTHING else — the redirect brought no second secret.
     {
