@@ -188,7 +188,7 @@ describe("the belts (the native arms bypass Better Auth's HTTP limiter)", () => 
     expect(signInMagicLink).toHaveBeenCalledTimes(3);
   });
 
-  it("password attempts belt at burst 10 per client — the 11th answers 429, nothing signed in", async () => {
+  it("the OUTER belt bounds password attempts at burst 10 — the 11th answers 429, nothing signed in", async () => {
     const ip = "203.0.113.10";
     signInEmail.mockResolvedValue(new Response(null, { status: 401 }));
     for (let i = 0; i < 10; i++) {
@@ -206,6 +206,40 @@ describe("the belts (the native arms bypass Better Auth's HTTP limiter)", () => 
     expect((belted as { data: { error: string } }).data.error).toBe(RATE_BELTED);
     // The credential check never ran past the burst — no online attempt beyond the limit.
     expect(signInEmail).toHaveBeenCalledTimes(10);
+  });
+
+  it("the outer belt lands BEFORE the body is parsed — a dry client's body is never read", async () => {
+    const ip = "203.0.113.77";
+    // Dry the outer bucket with ordinary posts…
+    signInEmail.mockResolvedValue(new Response(null, { status: 401 }));
+    for (let i = 0; i < 10; i++) {
+      await post(
+        { intent: "password", email: "dry@b.test", password: `guess-${i}`, next: "/app" },
+        { ip },
+      );
+    }
+    // …then present a request whose body access THROWS: the 429 must land without the
+    // action ever touching it (the belt is the first thing after the origin check, so an
+    // exhausted client cannot spend server work on parsing arbitrarily shaped bodies).
+    const req = new Request(`${ORIGIN}/login`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/x-www-form-urlencoded",
+        "x-forwarded-for": ip,
+        origin: ORIGIN,
+      },
+      body: "intent=password",
+    });
+    Object.defineProperty(req, "formData", {
+      value: () => {
+        throw new Error("the body was parsed past a dry belt");
+      },
+    });
+    const belted = await action({ request: req, params: {}, context: {} } as Parameters<
+      typeof action
+    >[0]);
+    expect(statusOf(belted)).toBe(429);
+    expect((belted as { data: { error: string } }).data.error).toBe(RATE_BELTED);
   });
 });
 
