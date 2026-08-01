@@ -3,17 +3,14 @@
 [![CI](https://github.com/topos-sh/topos/actions/workflows/ci.yml/badge.svg)](https://github.com/topos-sh/topos/actions/workflows/ci.yml)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
-Topos keeps every AI agent on your team up to date. Publish a skill once (the deploy checklist,
-the code-review standard, the release process) and every teammate's agent has it at the start of
-its next session — Claude Code, Cursor, Codex, and [70+ more](https://topos.sh/docs/harnesses).
-When someone improves a skill while working, the improvement comes back to the team as a
-reviewable change instead of dying on their machine.
+Topos keeps every AI agent in your team up to date. 
 
-Underneath is a git repo: every version is kept, any update can be rolled back, and you can take
-everything and leave at any time.
+It distributes skills, memory files, and other context bundles to each agent based on it's role, and lets anyone contribute improvements back.
+With topos you can set up and maintain useful agents for non-technical people or create a cross-project deterministic context for coding agents or create a cloud agent and update it with new behaviors on the fly.
 
-Use it with [Topos Cloud](https://topos.sh) or [self-host](#self-hosting) the whole product
-from this repository.
+Topos knows all major harnesses: Claude Code, Cursor, Codex, OpenClaw, Hermes and [70+ more](https://topos.sh/docs/harnesses) so you / your team can use different agents.
+
+Use it with [Topos Cloud](https://topos.sh) or [self-host](#self-hosting).
 
 ## Quickstart
 
