@@ -138,7 +138,10 @@ export async function action({ request }: ActionFunctionArgs) {
         { status: 400 },
       );
     }
-    return { sent: true as const, email: address };
+    // The next the mail ACTUALLY carried rides the payload: the sent card's resend and
+    // different-email arms re-render from it, never from the loader's query (a native POST
+    // has no query string, and a loader fallback would orphan the pending flow).
+    return { sent: true as const, email: address, next };
   }
 
   if (intent === "password") {
@@ -355,7 +358,9 @@ export default function LoginPage() {
   }
 
   if (magicSent || actionSent !== null) {
-    return <MagicSentCard email={actionSent?.email ?? email} next={next} />;
+    // The action's own next wins: on the no-JS path the loader saw no query string, and its
+    // fallback would point the resend and different-email arms away from the pending flow.
+    return <MagicSentCard email={actionSent?.email ?? email} next={actionSent?.next ?? next} />;
   }
 
   if (verifySent) {
