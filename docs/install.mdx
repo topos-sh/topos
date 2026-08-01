@@ -17,12 +17,12 @@ Two ways in, same result.
   </Tab>
   <Tab title="Ask your agent">
     ```text title="Paste to your agent"
-    Set up Topos for us: fetch https://topos.sh/agent and follow it. Our workspace: https://topos.sh/acme
+    Set up Topos for us: fetch https://topos.sh/agent and follow it.
     ```
 
     Your agent shows you the install command before running it, and it cannot approve the
-    browser login on your behalf — that click stays yours. No workspace yet? Leave that part
-    off.
+    browser login on your behalf — that click stays yours. You pick (or create) the workspace
+    in that browser approval, so there is nothing else to tell the agent up front.
   </Tab>
 </Tabs>
 
@@ -89,7 +89,7 @@ workspace, no account.
 | Variable | Default | Effect |
 |---|---|---|
 | `TOPOS_HOME` | `~/.topos` | Where topos keeps its state — logins, drafts, logs, and your own `topos.toml` |
-| `TOPOS_PLANE_URL` | `https://topos.sh` | The server a bare workspace name resolves against |
+| `TOPOS_PLANE_URL` | `https://topos.sh` | The server a bare `topos login` (or a bare workspace name) resolves against |
 | `TOPOS_DEBUG=1` | off | Print full error chains to stderr (always logged to `~/.topos/log.jsonl`) |
 | `TOPOS_NO_BROWSER` | unset | Never auto-open the login approval page |
 | `TOPOS_UPDATE_TTL` | `300` | The silent update's throttle window in seconds (`0` disables) |
@@ -119,8 +119,8 @@ printed so you can remove it with whatever installed it.
 ## Next
 
 ```bash
-topos login https://topos.sh/acme
+topos login
 ```
 
-That connects the machine to a workspace and turns on automatic updates. Full walkthrough:
-[Quickstart](/docs/quickstart).
+Pick your workspace in the browser — or create it right there — and one click connects the
+machine and turns on automatic updates. Full walkthrough: [Quickstart](/docs/quickstart).

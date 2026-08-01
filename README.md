@@ -14,28 +14,29 @@ Use it with [Topos Cloud](https://topos.sh) or [self-host](#self-hosting).
 
 ## Quickstart
 
-**1. Create a workspace** - your team's shared home for skills. Sign up at
-[topos.sh](https://topos.sh) and pick a name; your team's address is `https://topos.sh/<name>`.
-Already invited? The address is in the invitation mail - skip to step 2.
-
-**2. Set up.** Paste this to the agent you already use - it installs the CLI and logs in, and
+**1. Set up.** Paste this to the agent you already use - it installs the CLI and logs in, and
 the one browser approval stays yours:
 
 ```text
-Set up Topos for us: fetch https://topos.sh/agent and follow it. Our workspace: https://topos.sh/acme
+Set up Topos for us: fetch https://topos.sh/agent and follow it.
 ```
 
-Or by hand, with your workspace address (macOS and Linux, WSL2 on Windows; no sudo):
+Or by hand (macOS and Linux, WSL2 on Windows; no sudo):
 
 ```sh
 curl -fsSL https://topos.sh/install | sh
-topos login https://topos.sh/acme
+topos login
 ```
+
+Your browser opens: sign in, pick your workspace - or create it right there - and one click
+connects. A workspace is your team's shared home for skills; its address is
+`https://topos.sh/<name>`. Already invited? The invitation link works as the address:
+`topos login <invite-url>`.
 
 That is the whole setup: this machine receives everything the workspace has for you, and
 updates apply silently at the start of each agent session.
 
-**3. Share a skill.** Point `publish` at any skill folder you already have - here, a Claude
+**2. Share a skill.** Point `publish` at any skill folder you already have - here, a Claude
 Code one. A bare run is a preview - it prints what would happen and changes nothing; `--yes`
 applies it:
 
@@ -47,7 +48,7 @@ topos publish pr-describe --yes
 The skill is now the team's: one name, one history, one version everyone gets. Every teammate's
 machine picks it up on its own - they run nothing.
 
-**4. Bring the team in.**
+**3. Bring the team in.**
 
 ```sh
 topos invite dana@acme.com --yes
@@ -154,11 +155,11 @@ topos revert customer-lookup --to <version> --yes
 
 A scheduled agent triages new support tickets every night - labels them, routes escalations -
 with no human at the keyboard. Enroll it once, somewhere `~/.topos` persists (the login is one
-browser approval):
+browser approval; naming the workspace goes straight to it):
 
 ```sh
 curl -fsSL https://topos.sh/install | sh
-topos login https://topos.sh/acme
+topos login acme
 ```
 
 Still on that machine, provision it with its skill and a dedicated channel - anything the team
