@@ -497,6 +497,24 @@ export function LandingPage({
 
       <PricingBand ctaTo={ctaTo} ctaLabel={ctaLabel} docsHref={DOCS} />
 
+      {/* Directly under pricing, so the Enterprise arm's "Talk to us" lands on the next screen
+          rather than past the FAQ. It opens on its heading — no micro-label — which is what marks
+          it as the page's one personal address rather than another catalogued band. */}
+      <section id="contact" className="pt-[84px] lg:pt-[116px]">
+        <div className={WRAP}>
+          <SectionHeading>Setting this up for a team? Email me.</SectionHeading>
+          <p className="mt-4 max-w-[62ch] text-dim">
+            Topos is in closed beta and I set up the first teams personally. Tell me how your team
+            works with agents and I’ll get your first shared skills flowing, and your feedback
+            shapes what gets built next.
+          </p>
+          <p className="mt-3 text-[13px] text-faint">Robert, founder</p>
+          <div className="mt-5">
+            <FounderAddressBlock />
+          </div>
+        </div>
+      </section>
+
       <section id="faq" className="pt-[84px] lg:pt-[116px]">
         <div className={WRAP}>
           <MicroLabel>FAQ</MicroLabel>
@@ -511,22 +529,6 @@ export function LandingPage({
               </div>
             ))}
           </dl>
-        </div>
-      </section>
-
-      <section id="contact" className="pt-[84px] lg:pt-[116px]">
-        <div className={WRAP}>
-          <MicroLabel>Design partners</MicroLabel>
-          <SectionHeading>Setting this up for a team? Email me.</SectionHeading>
-          <p className="mt-4 max-w-[62ch] text-dim">
-            Topos is in closed beta and I set up the first teams personally. Tell me how your team
-            works with agents and I’ll get your first shared skills flowing, and your feedback
-            shapes what gets built next.
-          </p>
-          <p className="mt-3 text-[13px] text-faint">Robert, founder</p>
-          <div className="mt-5">
-            <FounderAddressBlock />
-          </div>
         </div>
       </section>
 
