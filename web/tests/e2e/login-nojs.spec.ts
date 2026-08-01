@@ -33,7 +33,21 @@ test("the magic-link arm works with JavaScript OFF — a native POST sends the l
   const link = mail.text.match(/https?:\/\/\S+/)?.[0] ?? "";
   expect(decodeURIComponent(link)).toContain(`/verify?device=${device}`);
 
-  // The resend arm is a real form too — it posts and lands the same card again.
+  // BOTH arms out of the sent card keep the flow: the native POST left the loader no query
+  // string, so the card must render from the ACTION's own next — the resend form's hidden
+  // field and the different-email link both carry the /verify resume, never a fallback.
+  await expect(page.locator('form input[name="next"]')).toHaveValue(`/verify?device=${device}`);
+  const differentEmail = page.getByRole("link", { name: "Use a different email" });
+  expect(decodeURIComponent((await differentEmail.getAttribute("href")) ?? "")).toContain(
+    `/verify?device=${device}`,
+  );
+
+  // The resend arm is a real form too — it posts, lands the same card again, and the SECOND
+  // mail resumes the same flow.
   await page.getByRole("button", { name: "Resend the link" }).click();
   await expect(page.getByRole("heading", { name: "Check your email" })).toBeVisible();
+  const resent = await latestMail("magic-link", email);
+  expect(resent.text).not.toBe(mail.text);
+  const resentLink = resent.text.match(/https?:\/\/\S+/)?.[0] ?? "";
+  expect(decodeURIComponent(resentLink)).toContain(`/verify?device=${device}`);
 });

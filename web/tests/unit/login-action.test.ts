@@ -88,7 +88,14 @@ describe("the magic arm", () => {
   it("sends through the server API with the CANONICALLY REBUILT next as callbackURL", async () => {
     const raw = `/verify?state=abcdefgh&device=${DEVICE}&port=4321`;
     const result = await post({ intent: "magic", email: "a@b.test", next: raw });
-    expect(result).toEqual({ sent: true, email: "a@b.test" });
+    // The payload carries the next the mail ACTUALLY used — the sent card's resend and
+    // different-email arms re-render from it (the no-JS POST has no query string for the
+    // loader, so a loader fallback would orphan the pending flow).
+    expect(result).toEqual({
+      sent: true,
+      email: "a@b.test",
+      next: `/verify?device=${DEVICE}&port=4321&state=abcdefgh`,
+    });
     expect(signInMagicLink).toHaveBeenCalledWith(
       expect.objectContaining({
         body: {
@@ -162,7 +169,7 @@ describe("the belts (the native arms bypass Better Auth's HTTP limiter)", () => 
     const ip = "203.0.113.7";
     for (let i = 0; i < 3; i++) {
       const ok = await post({ intent: "magic", email: "belted@b.test", next: "/app" }, { ip });
-      expect(ok).toEqual({ sent: true, email: "belted@b.test" });
+      expect(ok).toEqual({ sent: true, email: "belted@b.test", next: "/app" });
     }
     const belted = await post({ intent: "magic", email: "belted@b.test", next: "/app" }, { ip });
     expect(statusOf(belted)).toBe(429);
@@ -173,7 +180,7 @@ describe("the belts (the native arms bypass Better Auth's HTTP limiter)", () => 
       { intent: "magic", email: "other@b.test", next: "/app" },
       { ip: "203.0.113.8" },
     );
-    expect(other).toEqual({ sent: true, email: "other@b.test" });
+    expect(other).toEqual({ sent: true, email: "other@b.test", next: "/app" });
   });
 
   it("the sent card's RESEND arm rides the same belt — it is the same post", async () => {
