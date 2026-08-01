@@ -49,7 +49,7 @@ anyhow = "1"
 
 # default-features = false keeps the kernel's sha2 no_std (the default `std` feature would otherwise
 # pull std into topos-core's tree).
-sha2 = { version = "0.10", default-features = false }  # topos-core: byte-exact digest + the content-addressed identity derivations
+sha2 = { version = "0.10", default-features = false }  # topos-core: byte-exact digest + the content-addressed identity derivations; xtask: the dist archive's sha256 line
 unicode-normalization = { version = "0.1", default-features = false } # topos-core: NFC path-collision reject (no_std)
 base64 = "0.22"               # bins/topos: the contribute candidate's content_base64 codec (STANDARD alphabet)
 # bins/topos: the manifest files (`topos.toml`) — read AND format-preserving edit (the cargo-proven
@@ -70,7 +70,7 @@ sqlx = { version = "0.8.6", default-features = false } # plane-store: raw, no OR
 # this edge — check-arch forbids `topos -> plane-store` — so the CLI stays sync and tokio-free.
 tokio = { version = "1", default-features = false }
 axum = "0.8"                  # topos-plane HTTP
-utoipa = "5"                  # OpenAPI generation for the Rust plane (wired in xtask)
+utoipa = "5"                  # OpenAPI generation for the Rust plane (topos-plane's document assembly + topos-types' contract-derives impls)
 clap = { version = "4", features = ["derive"] }       # topos client bin
 ureq = "3"                    # topos client transport — default, blocking, rustls+ring
 rustix = { version = "1", features = ["fs"] } # topos client: safe fsync / F_FULLFSYNC / flock (no unsafe)
