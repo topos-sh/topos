@@ -9,9 +9,8 @@ its next session — Claude Code, Cursor, Codex, and [70+ more](https://topos.sh
 When someone improves a skill while working, the improvement comes back to the team as a
 reviewable change instead of dying on their machine.
 
-A skill is a plain folder with a `SKILL.md` — the same open format the
-[skills.sh](https://skills.sh) ecosystem already uses. Underneath is a git repo: every version
-is kept, any update can be rolled back, and you can take everything and leave at any time.
+Underneath is a git repo: every version is kept, any update can be rolled back, and you can take
+everything and leave at any time.
 
 Use it with [Topos Cloud](https://topos.sh) or [self-host](#self-hosting) the whole product
 from this repository.
