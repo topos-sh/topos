@@ -336,7 +336,6 @@ impl KindScope {
     };
     /// Channels + skills — the subscription verbs' dual kind (`unfollow` recognizes workspaces
     /// separately, to refuse them toward the web). Consumed by the batch resolver's callers.
-    #[allow(dead_code)]
     pub(crate) const SUBSCRIBABLE: KindScope = KindScope {
         workspaces: false,
         channels: true,

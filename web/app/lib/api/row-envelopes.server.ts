@@ -104,14 +104,3 @@ export function rowOpResponse(
   }
   return internalError();
 }
-
-/**
- * The server clock the route stamps ONCE per request (the client never supplies a wall clock): the
- * RFC-3339 `createdAt` string (SECONDS precision + `Z`, matching the vault's `now_utc`, which writes
- * no millis) and `nowMs` in epoch milliseconds. One clock, so two writes in one request agree.
- */
-export function nowUtc(): { createdAt: string; nowMs: number } {
-  const nowMs = Date.now();
-  const createdAt = new Date(nowMs).toISOString().replace(/\.\d{3}Z$/, "Z");
-  return { createdAt, nowMs };
-}

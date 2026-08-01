@@ -37,7 +37,6 @@
     "@fontsource/ibm-plex-sans": "^5.2.8",
     "@fontsource/martian-mono": "^5.2.7",
     "@pierre/diffs": "1.2.12",
-    "@radix-ui/react-dialog": "^1.1.18",
     "@react-router/node": "8.3.0",
     "@react-router/serve": "8.3.0",
     "@sentry/react-router": "^10.65.0",

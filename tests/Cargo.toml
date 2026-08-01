@@ -18,7 +18,6 @@ topos = { workspace = true, features = ["test-fixtures"] }
 # `test-fixtures` exposes the pool-injection constructor + the MIGRATOR (compiled out of production).
 plane-store = { workspace = true, features = ["test-fixtures"] }
 topos-plane.workspace = true
-topos-types.workspace = true
 # Provision the per-test Postgres by the production recipe (roles/schemas/grants + both lineages).
 # These harnesses run a blocking `ureq` client alongside a live axum server on a self-owned
 # multi-thread runtime, so they cannot use `#[sqlx::test]`'s current-thread runtime without

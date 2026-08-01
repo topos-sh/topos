@@ -3572,7 +3572,6 @@ checksum = "7d56353a2a665ad0f41a421187180aab746c8c325620617ad883a99a1cbe66d2"
 name = "topos"
 version = "0.1.15"
 dependencies = [
- "anyhow",
  "base64",
  "clap",
  "flate2",
@@ -3597,7 +3596,6 @@ dependencies = [
 name = "topos-core"
 version = "0.1.15"
 dependencies = [
- "hex",
  "sha2",
  "unicode-normalization",
 ]
@@ -3613,7 +3611,6 @@ dependencies = [
  "tokio",
  "topos",
  "topos-plane",
- "topos-types",
  "ureq",
 ]
 
@@ -3633,7 +3630,6 @@ name = "topos-harness"
 version = "0.1.15"
 dependencies = [
  "serde_json",
- "topos-core",
  "topos-types",
 ]
 
@@ -4317,7 +4313,6 @@ name = "xtask"
 version = "0.1.15"
 dependencies = [
  "anyhow",
- "clap",
  "flate2",
  "schemars",
  "serde",
@@ -4329,7 +4324,6 @@ dependencies = [
  "topos-plane",
  "topos-types",
  "ureq",
- "utoipa",
 ]
 
 [[package]]

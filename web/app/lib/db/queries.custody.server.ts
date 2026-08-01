@@ -68,16 +68,6 @@ export async function insertReceiptInTx(
   `);
 }
 
-/** The standalone variant for ops whose terminal writes need no other row (e.g. a conflict). */
-export async function insertReceipt(
-  actor: SessionActor,
-  opId: string,
-  rawBody: string,
-  outcome: unknown,
-): Promise<void> {
-  await getDb().transaction((tx) => insertReceiptInTx(tx, actor, opId, rawBody, outcome));
-}
-
 // ── The publish gate's reads ─────────────────────────────────────────────────────────────────
 
 export interface PublishTarget {

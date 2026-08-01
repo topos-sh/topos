@@ -37,8 +37,6 @@ export const ALLOWED_ROUTES = [
   "GET /internal/v1/storage",
 ] as const;
 
-export type AllowedRoute = (typeof ALLOWED_ROUTES)[number];
-
 const allowed = new Set<string>(ALLOWED_ROUTES);
 
 export function isAllowedRoute(method: string, template: string): boolean {

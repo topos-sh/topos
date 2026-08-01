@@ -324,9 +324,6 @@ pub(crate) trait DirectorySource {
     ///
     /// # Errors
     /// As [`me`](Self::me).
-    // Consumed by the review-inbox / log / reach describes — built alongside the subscribe
-    // methods so every verb shares ONE connector.
-    #[allow(dead_code)]
     fn proposals_index(&self, workspace_id: &str) -> Result<WireProposalIndex, ClientError>;
 
     /// `GET /v1/workspaces/{ws}/skills/{skill}/log` — the skill's history (purge tombstones + the
@@ -334,18 +331,12 @@ pub(crate) trait DirectorySource {
     ///
     /// # Errors
     /// As [`me`](Self::me).
-    // Consumed by the review-inbox / log / reach describes — built alongside the subscribe
-    // methods so every verb shares ONE connector.
-    #[allow(dead_code)]
     fn skill_log(&self, workspace_id: &str, skill_id: &str) -> Result<WireSkillLog, ClientError>;
 
     /// `GET /v1/workspaces/{ws}/skills/{skill}/reach` — the audience a change reaches.
     ///
     /// # Errors
     /// As [`me`](Self::me).
-    // Consumed by the review-inbox / log / reach describes — built alongside the subscribe
-    // methods so every verb shares ONE connector.
-    #[allow(dead_code)]
     fn reach(&self, workspace_id: &str, skill_id: &str) -> Result<WireReach, ClientError>;
 
     /// `PUT /v1/workspaces/{ws}/channels/{ch}/skills/{skill}` — place a skill's reference into a
@@ -378,7 +369,6 @@ pub(crate) trait DirectorySource {
     ///
     /// # Errors
     /// As [`me`](Self::me).
-    #[allow(dead_code)]
     fn protect_skill(
         &self,
         workspace_id: &str,
@@ -390,7 +380,6 @@ pub(crate) trait DirectorySource {
     ///
     /// # Errors
     /// As [`me`](Self::me).
-    #[allow(dead_code)]
     fn protect_channel(
         &self,
         workspace_id: &str,

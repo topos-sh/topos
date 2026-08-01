@@ -11,11 +11,11 @@ version = 2
 yanked = "deny"
 ignore = [
     # RUSTSEC-2023-0071 ("Marvin Attack" — RSA private-key decryption timing; no fixed release exists).
-    # `rsa` reaches the tree ONLY through the default-off `enroll-oidc` feature (openidconnect), which
-    # uses it to VERIFY provider JWT signatures — public-key operations. The advisory's timing channel
-    # requires RSA private-key decryption, and no RSA private key exists anywhere in this workspace
-    # (all signing here is Ed25519). Revisit if the OIDC connector ever gains an RSA private-key op.
-    { id = "RUSTSEC-2023-0071", reason = "verify-only RSA in the feature-gated OIDC connector; no RSA private-key operations in the workspace" },
+    # `rsa` sits in Cargo.lock ONLY as sqlx-mysql's dep (sqlx's macro machinery resolves every backend
+    # into the lock; no mysql feature is enabled, so the crate is never compiled here). The advisory's
+    # timing channel requires RSA private-key decryption, and no RSA private key exists anywhere in
+    # this workspace (all signing here is Ed25519).
+    { id = "RUSTSEC-2023-0071", reason = "rsa is lock-only via sqlx-mysql (never compiled); no RSA private-key operations in the workspace" },
 ]
 
 [licenses]

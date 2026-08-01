@@ -55,9 +55,3 @@ export function FounderAddressBlock() {
     </div>
   );
 }
-
-/** The footer's quiet copy of the same runtime address, sized to the link row beside it. */
-export function FounderAddressText() {
-  const address = useFounderAddress();
-  return <span className="font-mono text-[13px] text-faint">{address ?? SCRIPTLESS}</span>;
-}
