@@ -9,7 +9,6 @@ publish = false
 description = "The HarnessAdapter trait + the Claude Code reference impl (other harnesses land later) — the ONE real client-side port. Discovery + byte-exact placement + currency-trigger install. Content-blind: no translate/project. All platform/harness-version deps live here."
 
 [dependencies]
-topos-core.workspace = true
 topos-types.workspace = true
 serde_json.workspace = true # strict-JSON config edit for the Claude Code settings.json hook (content-blind)
 

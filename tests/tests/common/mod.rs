@@ -647,17 +647,6 @@ impl Stack {
         session
     }
 
-    /// A sign-up that must be REFUSED (registration closed, no invitation): returns the answer so
-    /// the caller asserts the one constant, non-enumerating refusal.
-    pub(crate) fn sign_up_expect_refused(&self, email: &str) -> HttpAnswer {
-        let session = Session::new(&self.origin);
-        let name = email.split('@').next().unwrap_or("user");
-        session.post_json(
-            "/api/auth/sign-up/email",
-            &serde_json::json!({ "email": email, "password": PASSWORD, "name": name }),
-        )
-    }
-
     /// Approve a pending device flow AS the sessioned person: the `/verify` ceremony's approve arm,
     /// picking the boot workspace's seat. This is a PLAIN signed-in accept — a live session plus the
     /// explicit approve click is the whole ceremony (no re-authentication; the admin ceremonies
@@ -821,16 +810,6 @@ impl Stack {
     /// PUT a bodyless device-lane row op.
     pub(crate) fn device_put(&self, credential: &str, path: &str) -> HttpAnswer {
         self.device_request("PUT", Some(credential), path, None)
-    }
-
-    /// DELETE a device-lane row op (bodyless unless `body`).
-    pub(crate) fn device_delete(
-        &self,
-        credential: &str,
-        path: &str,
-        body: Option<&serde_json::Value>,
-    ) -> HttpAnswer {
-        self.device_request("DELETE", Some(credential), path, body)
     }
 
     /// POST a JSON body on the device lane (`credential` optional — the device-auth start is bare).

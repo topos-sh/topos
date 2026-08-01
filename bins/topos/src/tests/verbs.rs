@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use serde_json::Value;
 use topos_harness::{ClaudeCode, DiscoveredPlacement, HarnessAdapter, PlacementTarget};
 use topos_types::persisted::Lock;
-use topos_types::{CurrencyKind, HarnessId, JsonEnvelope, TriggerReport, TriggerState};
+use topos_types::{CurrencyKind, HarnessId, TriggerReport, TriggerState};
 
 use crate::ctx::Ctx;
 use crate::doc;
@@ -1573,12 +1573,6 @@ fn fs_hashes(root: &Path) -> Vec<(String, String)> {
     walk(root, root, &mut out);
     out.sort();
     out
-}
-
-/// Used by the golden tests to surface the exact JSON during bring-up.
-#[allow(dead_code)]
-fn dump(value: &JsonEnvelope) -> String {
-    serde_json::to_string_pretty(value).unwrap()
 }
 
 // ── unfollow: flag-flip only — bytes kept, token retained, idempotent, sweep skips ──────────────────

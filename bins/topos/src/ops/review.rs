@@ -269,7 +269,6 @@ pub(crate) fn review(
     verdict: ReviewVerdict,
     workspace: Option<&str>,
 ) -> Result<ReviewData, ClientError> {
-    let _connect = connectors.contribute;
     // A reject must carry its reason (the plane requires it, and the author is owed one). Refused at the
     // argv boundary, before any resolution or network.
     if let ReviewVerdict::Reject { reason: None } = &verdict {

@@ -61,7 +61,6 @@ pub(crate) struct SessionTransports {
     /// The contribute-write lane (publish / propose / revert / review) under the same credential.
     pub contribute: Box<dyn crate::plane::ContributeSource>,
     /// The governance lane (invitations; the session self-revoke). Consumed by the invite fold.
-    #[allow(dead_code)]
     pub governance: Box<dyn crate::plane::GovernanceSource>,
 }
 
