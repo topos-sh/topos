@@ -83,6 +83,19 @@ export const allowUpstreamFetch = bucketLimiter({ burst: 3, refillPerSec: 0.05, 
 export const allowVerifyLookup = bucketLimiter({ burst: 10, refillPerSec: 0.2, maxKeys: 10_000 });
 
 /**
+ * The /login route action's belts — the JS-FREE sign-in arms. The hydrated rungs post to
+ * `/api/auth/*`, where Better Auth's own limiter applies over the app-resolved client key;
+ * the native fallback calls the server auth API directly and would otherwise be an
+ * UNLIMITED door (online password brute force; mail-amplified link sends — the resend arm
+ * included). Keyed per client address by the door belt's exact discipline
+ * (`clientKeyFromXff` — the LAST hop, never a caller-supplied prefix). Password attempts:
+ * burst 10, one back every ~10 s. Magic sends are TIGHTER — each costs a mail: burst 3, one
+ * back every ~20 s.
+ */
+export const allowPasswordSignIn = bucketLimiter({ burst: 10, refillPerSec: 0.1, maxKeys: 10_000 });
+export const allowMagicLinkSend = bucketLimiter({ burst: 3, refillPerSec: 0.05, maxKeys: 10_000 });
+
+/**
  * The per-client limiter key from an `x-forwarded-for` value: the LAST hop — the one address the
  * trusted edge itself appended from the socket peer. Earlier hops are client-supplied bytes (an
  * attacker rotating forged prefixes must not mint fresh buckets or poison a victim's). No header
