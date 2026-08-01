@@ -18,8 +18,9 @@ vi.mock("@/composition.server", () => ({
   composition: { auth: { emailAndPassword: true }, registration: "gated" },
 }));
 
+const pendingLoopbackFlowCode = vi.fn<(hex: string) => Promise<string | null>>();
 vi.mock("@/lib/db/identity.server", () => ({
-  pendingLoopbackFlowExists: vi.fn(),
+  pendingLoopbackFlowCode: (hex: string) => pendingLoopbackFlowCode(hex),
   sessionActor: vi.fn(),
   seatOf: vi.fn(),
   theWorkspace: vi.fn(),
@@ -45,6 +46,7 @@ beforeAll(async () => {
 beforeEach(() => {
   signInMagicLink.mockReset().mockResolvedValue({ status: true });
   signInEmail.mockReset();
+  pendingLoopbackFlowCode.mockReset().mockResolvedValue(null);
 });
 
 let nextClient = 0;
@@ -87,6 +89,7 @@ function statusOf(result: unknown): number | undefined {
 describe("the magic arm", () => {
   it("sends through the server API with the CANONICALLY REBUILT next as callbackURL", async () => {
     const raw = `/verify?state=abcdefgh&device=${DEVICE}&port=4321`;
+    pendingLoopbackFlowCode.mockResolvedValueOnce("JXF7-XAM2");
     const result = await post({ intent: "magic", email: "a@b.test", next: raw });
     // The payload carries the next the mail ACTUALLY used — the sent card's resend and
     // different-email arms re-render from it (the no-JS POST has no query string for the
@@ -95,7 +98,11 @@ describe("the magic arm", () => {
       sent: true,
       email: "a@b.test",
       next: `/verify?device=${DEVICE}&port=4321&state=abcdefgh`,
+      // The glance code rides the payload: the sent card must keep showing it (the native POST
+      // leaves the loader no query to re-probe from).
+      deviceCode: "JXF7-XAM2",
     });
+    expect(pendingLoopbackFlowCode).toHaveBeenCalledWith(DEVICE);
     expect(signInMagicLink).toHaveBeenCalledWith(
       expect.objectContaining({
         body: {
@@ -169,7 +176,7 @@ describe("the belts (the native arms bypass Better Auth's HTTP limiter)", () => 
     const ip = "203.0.113.7";
     for (let i = 0; i < 3; i++) {
       const ok = await post({ intent: "magic", email: "belted@b.test", next: "/app" }, { ip });
-      expect(ok).toEqual({ sent: true, email: "belted@b.test", next: "/app" });
+      expect(ok).toEqual({ sent: true, email: "belted@b.test", next: "/app", deviceCode: null });
     }
     const belted = await post({ intent: "magic", email: "belted@b.test", next: "/app" }, { ip });
     expect(statusOf(belted)).toBe(429);
@@ -180,7 +187,7 @@ describe("the belts (the native arms bypass Better Auth's HTTP limiter)", () => 
       { intent: "magic", email: "other@b.test", next: "/app" },
       { ip: "203.0.113.8" },
     );
-    expect(other).toEqual({ sent: true, email: "other@b.test", next: "/app" });
+    expect(other).toEqual({ sent: true, email: "other@b.test", next: "/app", deviceCode: null });
   });
 
   it("the sent card's RESEND arm rides the same belt — it is the same post", async () => {
