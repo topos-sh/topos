@@ -5745,12 +5745,32 @@ fn bare_plan(
     target: &str,
     subscribe: bool,
 ) -> Result<ops::BareAddPlan, ClientError> {
+    plan_bare_add_in(rig, plane, dir, target, subscribe, None)
+}
+
+/// [`bare_plan`] with the global `--workspace` selector (a canonicalized workspace id).
+fn plan_bare_add_in(
+    rig: &Rig,
+    plane: &FakePlane,
+    dir: &FakeDirectory,
+    target: &str,
+    subscribe: bool,
+    workspace: Option<&str>,
+) -> Result<ops::BareAddPlan, ClientError> {
     let ctx = rig.ctx_at(Some(&rig.work.0));
     let roots = ops::DiscoveryRoots {
         home: rig.home.0.clone(),
         cwd: Some(rig.work.0.clone()),
     };
-    ops::plan_bare_add(&ctx, &connect(plane, dir), &roots, target, subscribe, false)
+    ops::plan_bare_add(
+        &ctx,
+        &connect(plane, dir),
+        &roots,
+        target,
+        subscribe,
+        false,
+        workspace,
+    )
 }
 
 /// A SECOND connected workspace, on its own server — what makes a bare name ambiguous across
@@ -5906,6 +5926,19 @@ fn a_name_several_workspaces_publish_refuses_naming_every_spelling() {
         ]),
         "sorted by the spelling the message prints"
     );
+
+    // The global `--workspace` selector settles it: only the named workspace is probed, so the
+    // same machine subscribes deterministically to the one that was ASKED — never the other.
+    match plan_bare_add_in(&rig, &plane, &dir, BARE, true, Some("w_ops")).unwrap() {
+        ops::BareAddPlan::Subscribe {
+            reference,
+            workspace,
+        } => {
+            assert_eq!(reference, format!("beta.test/ops/{BARE}"));
+            assert_eq!(workspace, "ops");
+        }
+        other => panic!("the selector names the workspace: {other:?}"),
+    }
 
     // With a LOCAL copy in hand the adopt still wins — and carries no suggestion, because naming
     // one of two teams' copies beside an adopt that already landed would be a guess.

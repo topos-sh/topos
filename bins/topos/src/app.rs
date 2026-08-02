@@ -674,6 +674,7 @@ fn run_command(json: bool, workspace: Option<String>, command: Command, bare: bo
                             &name,
                             no_selectors,
                             global,
+                            workspace.as_deref(),
                         ) {
                             // Nothing local carries the name and exactly ONE workspace publishes
                             // it: record the canonical reference through the ordinary reference

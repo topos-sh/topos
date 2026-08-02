@@ -1316,8 +1316,9 @@ pub(crate) fn published_matches(
     ctx: &Ctx<'_>,
     connect: &super::reconcile::SessionConnect<'_>,
     name: &str,
+    workspace: Option<&str>,
 ) -> Vec<PublishedName> {
-    let active = active_sessions(ctx);
+    let active = active_sessions(ctx, workspace);
     let mut found = cached_matches(ctx, &active, name);
     for s in &active {
         let transports = connect(s);
@@ -1350,8 +1351,10 @@ pub(crate) fn published_matches(
 }
 
 /// The ACTIVE session roster — the gate both probe halves stand behind. An unreadable roster reads
-/// as empty: nothing subscribable, local-only resolution.
-fn active_sessions(ctx: &Ctx<'_>) -> Vec<crate::sessions::Session> {
+/// as empty: nothing subscribable, local-only resolution. `workspace` is the invocation's global
+/// `--workspace` selector (already canonicalized to an id): the flag exists to pick WHICH
+/// workspace an ambient verb means, so a bare name probes only that one — never silently another.
+fn active_sessions(ctx: &Ctx<'_>, workspace: Option<&str>) -> Vec<crate::sessions::Session> {
     let Ok(sessions) = crate::sessions::read_sessions(ctx.fs, &ctx.layout) else {
         return Vec::new();
     };
@@ -1360,6 +1363,7 @@ fn active_sessions(ctx: &Ctx<'_>) -> Vec<crate::sessions::Session> {
         .into_iter()
         // Only an ACTIVE session's catalog is this person's universe (pending delivers nothing).
         .filter(|s| s.status == crate::sessions::SESSION_ACTIVE)
+        .filter(|s| workspace.is_none_or(|id| s.workspace_id == id))
         .collect()
 }
 
@@ -1411,8 +1415,9 @@ fn confirmed_cached_match(
     ctx: &Ctx<'_>,
     connect: &super::reconcile::SessionConnect<'_>,
     name: &str,
+    workspace: Option<&str>,
 ) -> Option<PublishedName> {
-    let active = active_sessions(ctx);
+    let active = active_sessions(ctx, workspace);
     let cached = cached_matches(ctx, &active, name);
     // ONE workspace is a spelling worth naming; several is a choice no receipt should make.
     let mut values = cached.into_values();
@@ -1471,6 +1476,8 @@ pub(crate) enum BareAddPlan {
 /// carrying one keeps today's answers exactly. (A `<name>@<harness>` suffix cannot reach the
 /// subscribe arm at all — the harness filter resolves to its own typed refusals.) `global` is the
 /// invocation's `-g`, carried into every refusal so the spelled follow-ups keep its scope.
+/// `workspace` is the global `--workspace` selector (an id): set, the workspace half probes only
+/// that session — the selector picks which workspace an ambient verb means.
 ///
 /// # Errors
 /// The name-resolution family of [`resolve_add_target`], the two ambiguity shapes ENRICHED with
@@ -1483,6 +1490,7 @@ pub(crate) fn plan_bare_add(
     target: &str,
     subscribe: bool,
     global: bool,
+    workspace: Option<&str>,
 ) -> Result<BareAddPlan, ClientError> {
     let (name, harness) = split_target(target);
     // The same residual guard [`resolve_add_target`] carries: a `~`-prefixed bare token is never a
@@ -1502,7 +1510,7 @@ pub(crate) fn plan_bare_add(
         NameResolution::Resolved(path) => Ok(BareAddPlan::Adopt {
             path: PathBuf::from(path),
             name: name.to_owned(),
-            published: confirmed_cached_match(ctx, connect, name),
+            published: confirmed_cached_match(ctx, connect, name, workspace),
         }),
         NameResolution::AmbiguousHarness(harnesses) => Err(ClientError::AmbiguousHarness {
             name: name.to_owned(),
@@ -1510,13 +1518,17 @@ pub(crate) fn plan_bare_add(
             // Every discovered dir of this name is a candidate — the refusal lists harnesses, not
             // paths, so the identical-bytes proof reads the inventory itself.
             workspace: workspace_hint(
-                &published_matches(ctx, connect, name),
+                &published_matches(ctx, connect, name, workspace),
                 &paths_named(name, &untracked),
                 global,
             ),
         }),
         NameResolution::AmbiguousScope { harness, paths } => {
-            let workspace = workspace_hint(&published_matches(ctx, connect, name), &paths, global);
+            let workspace = workspace_hint(
+                &published_matches(ctx, connect, name, workspace),
+                &paths,
+                global,
+            );
             Err(ClientError::AmbiguousScope {
                 name: name.to_owned(),
                 harness,
@@ -1547,7 +1559,7 @@ pub(crate) fn plan_bare_add(
                     arg: target.to_owned(),
                 });
             }
-            let published = published_matches(ctx, connect, name);
+            let published = published_matches(ctx, connect, name, workspace);
             match published.as_slice() {
                 [one] if subscribe => Ok(BareAddPlan::Subscribe {
                     reference: one.reference.clone(),
