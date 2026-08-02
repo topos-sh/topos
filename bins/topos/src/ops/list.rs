@@ -51,6 +51,16 @@ pub(crate) struct ListOutcome {
     /// than failing the whole `list`. Empty on the local-only path. Rides the `--json` envelope's
     /// `warnings` + the TTY, outside the pinned `ListData`.
     pub warnings: Vec<String>,
+    /// How many bundles the covering `topos.toml` asks for — the TTY-only honesty belt under an
+    /// EMPTY tracked bucket. `list` inventories this machine's own records; a folder whose manifest
+    /// governs its own set delivers into that project's store, so "nothing tracked" alone reads as
+    /// "nothing here" in exactly the directory where the opposite is true.
+    ///
+    /// ZERO says "nothing to add" and covers all three quiet cases identically — no covering file,
+    /// a covering file with no bundle rows, no working directory to walk up from — because each
+    /// leaves the empty state byte-identical to what it has always been. TTY-only by construction:
+    /// it rides beside the pinned [`ListData`], never inside it.
+    pub project_bundles: usize,
 }
 
 /// The `--remote` scope: what `list` needs to read the followed workspaces' catalogs and annotate each
@@ -466,7 +476,33 @@ pub(crate) fn list_with(
         },
         enrollment,
         warnings,
+        project_bundles: covering_manifest_bundles(ctx),
     })
+}
+
+/// How many bundles the NEAREST `topos.toml` covering the working directory asks for — its THING
+/// rows plus its SET lines (a project manifest can hold neither a feed row nor an `"off"` switch;
+/// the grammar refuses both there).
+///
+/// Read from [`Ctx::roots`], the SAME source `status` walks from — so the two verbs can only name
+/// the same file, and the disclosure does not vanish under `--tracked` (which narrows DISCOVERY;
+/// what a folder asks for is not discovery, and the empty state is exactly as misleading there).
+///
+/// Purely offline (one walk up, one read, one parse) and FAIL-QUIET: a manifest the grammar
+/// refuses counts ZERO rather than failing the inventory. `status` is the verb that reports a bad
+/// file; `list` would be answering a question nobody asked, and refusing to inventory a machine
+/// because a neighbouring folder holds a broken file is the wrong trade.
+fn covering_manifest_bundles(ctx: &Ctx<'_>) -> usize {
+    let Some(roots) = &ctx.roots else {
+        return 0;
+    };
+    let Some(cwd) = roots.cwd.as_deref() else {
+        return 0;
+    };
+    crate::manifest::scopes::nearest_project_plan(ctx.fs, cwd, Some(&roots.home))
+        .ok()
+        .flatten()
+        .map_or(0, |(_, plan)| plan.things.len() + plan.sets.len())
 }
 
 /// Read each target workspace's catalog and merge every entry with the local follow-state.

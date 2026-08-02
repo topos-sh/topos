@@ -454,17 +454,28 @@ pub(crate) enum ClientError {
     /// [`ClientError::TargetNotFound`] template.
     #[error("{0}")]
     NotAvailable(String),
-    /// A name resolved to MORE than one workspace resource (across workspaces, or across the channel/skill
-    /// kinds). Carries the paste-ready qualified paths (`<workspace>/channels/<name>` /
-    /// `<workspace>/skills/<name>`) — the human list rides the message, and the envelope surfaces them
-    /// machine-readably as `data.candidates`.
-    #[error(
-        "'{name}' is ambiguous here — it matches {}; use one of those qualified paths",
-        candidates.join(", ")
-    )]
+    /// A name resolved to MORE than one thing the invocation could have meant — several workspace
+    /// resources (across workspaces, or across the channel/skill kinds), or several lines of one
+    /// manifest. Carries the paste-ready qualified spellings
+    /// (`<workspace>/channels/<name>` / `<workspace>/skills/<name>`, a manifest reference, or a
+    /// `<reference> --via <set-reference>` selection — several argv TOKENS, not one).
+    ///
+    /// The MESSAGE states the refusal only. The candidates are argv, so they ride the surfaces AS
+    /// argv: the envelope's `data.candidates` (machine-readably, unchanged) and one runnable
+    /// `next_actions` entry each, rebuilt around the verb that refused
+    /// ([`crate::render::next_actions`]) — which is what the TTY's `try:` block prints. Inlining
+    /// them into this sentence made a paste-ready command read as prose and hid the `--via` form's
+    /// token boundary.
+    ///
+    /// `global` preserves the refused invocation's `-g` in every rebuilt command, exactly as
+    /// [`WorkspaceHint::global`] does for the spellings it names: the two manifests are two
+    /// different files, so an offered command that drops the flag edits the OTHER one. A wrong
+    /// offered command is worse than none.
+    #[error("'{name}' is ambiguous here — more than one reference answers to it")]
     AmbiguousTarget {
         name: String,
         candidates: Vec<String>,
+        global: bool,
     },
 }
 

@@ -928,7 +928,9 @@ pub(crate) fn off_row_for(ctx: &Ctx<'_>, token: &str) -> Result<Option<String>, 
     match refs.len() {
         0 => Ok(None),
         1 => Ok(Some(refs.remove(0))),
-        _ => Err(ambiguous(token, refs)),
+        // A switch lives in the machine-wide file only, and this lookup reads exactly that file —
+        // so every re-spelling it offers is a `-g` one, whatever else the invocation carried.
+        _ => Err(ambiguous(token, refs, true)),
     }
 }
 
@@ -1197,7 +1199,14 @@ fn resolve_one(
     match found.len() {
         0 => Ok(None),
         1 => Ok(Some(found.remove(0).arm)),
-        _ => Err(ambiguous(token, seen)),
+        // The candidates are lines of THIS target's file, so the offered re-spellings must resolve
+        // against the same one: `-g` where this edit is the machine-wide file (including the
+        // home-routed project edit, which lands there too), bare where it is this folder's.
+        _ => Err(ambiguous(
+            token,
+            seen,
+            target.scope == ManifestScope::Global,
+        )),
     }
 }
 
@@ -1266,13 +1275,22 @@ fn resolve_via(
 /// The typed refusal for a token this file answers more than once — the paste-ready qualified
 /// references ride the error, so the caller re-spells one instead of guessing which was meant.
 /// Deduped + sorted, so the same ambiguity always reads the same way.
-fn ambiguous(token: &str, candidates: impl IntoIterator<Item = String>) -> ClientError {
+///
+/// `global` is the SCOPE THIS EDIT RESOLVED IN, and every rebuilt command the refusal offers
+/// carries it: each candidate names a line in ONE file, and the same token re-spelled without `-g`
+/// would be resolved against the other one.
+fn ambiguous(
+    token: &str,
+    candidates: impl IntoIterator<Item = String>,
+    global: bool,
+) -> ClientError {
     let mut candidates: Vec<String> = candidates.into_iter().collect();
     candidates.sort();
     candidates.dedup();
     ClientError::AmbiguousTarget {
         name: token.to_owned(),
         candidates,
+        global,
     }
 }
 

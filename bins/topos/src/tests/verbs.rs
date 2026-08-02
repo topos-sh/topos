@@ -155,6 +155,18 @@ impl Harness {
     fn ctx(&self) -> Ctx<'_> {
         self.ctx_with(&self.harness)
     }
+    /// A context that KNOWS where it stands — the machine roots (user home + working directory)
+    /// the manifest walk resolves against. `Ctx::roots = None` (the default above) is the honest
+    /// no-`$HOME` degradation, so anything reading a covering `topos.toml` needs this instead.
+    fn ctx_rooted(&self, home: &Path, cwd: &Path) -> Ctx<'_> {
+        Ctx {
+            roots: Some(crate::ctx::AgentRoots {
+                home: home.to_path_buf(),
+                cwd: Some(cwd.to_path_buf()),
+            }),
+            ..self.ctx_with(&self.harness)
+        }
+    }
     /// A context over an explicit harness adapter (for the Claude Code recognition / hook tests).
     fn ctx_with<'a>(&'a self, harness: &'a dyn HarnessAdapter) -> Ctx<'a> {
         Ctx {
@@ -1114,6 +1126,63 @@ fn list_discovers_untracked_registry_skills_then_dedups_an_adopted_one() {
             .any(|u| u.name == "my-skill" && u.path.contains("my-skill")),
         "an adopted skill is no longer reported as untracked"
     );
+}
+
+#[test]
+fn an_empty_inventory_names_the_covering_manifest_instead_of_claiming_nothing() {
+    // `list` inventories THIS MACHINE's own records; a folder governed by a `topos.toml` keeps its
+    // bundles in that project's own store. Standing in such a folder with nothing tracked here, the
+    // bare "No tracked skills." is true and misleading in one breath — so the covering file's demand
+    // rides the TTY-only channel (never the pinned `ListData`) and the empty state names it.
+    let h = Harness::new("list-covering");
+    let user_home = Scratch::new("list-covering-home");
+    let project = Scratch::new("list-covering-proj");
+    std::fs::write(
+        project.0.join("topos.toml"),
+        "[bundles]\n\"./tools/demo-skill\" = \"*\"\n\"topos.sh/acme/channels/backend\" = \"*\"\n",
+    )
+    .unwrap();
+    let discovery = ops::DiscoveryRoots {
+        home: user_home.0.clone(),
+        cwd: Some(project.0.clone()),
+    };
+    let in_project = h.ctx_rooted(&user_home.0, &project.0);
+
+    let covered = ops::list(&in_project, None, false, Some(discovery), None).unwrap();
+    assert!(covered.data.tracked.is_empty(), "nothing is tracked here");
+    assert_eq!(
+        covered.project_bundles, 2,
+        "a folder row and a channel line both count as demand"
+    );
+    let text = render::list_tty(&covered);
+    assert!(
+        text.starts_with(
+            "No tracked skills outside this folder's topos.toml — it tracks 2 bundles (run `topos \
+             status` to see them)."
+        ),
+        "{text}"
+    );
+
+    // `--tracked` (no discovery) narrows what is SWEPT, not what this folder asks for — the
+    // disclosure must not vanish with the flag, or the flag becomes a way to be lied to.
+    let tracked_only = ops::list(&in_project, None, false, None, None).unwrap();
+    assert_eq!(tracked_only.project_bundles, 2);
+    assert_eq!(render::list_tty(&tracked_only), text);
+
+    // No covering file (the walk stops at the passed home): the line is byte-identical to the one
+    // it has always been — no new noise where there is nothing to disclose.
+    let plain_cwd = user_home.0.join("nested");
+    std::fs::create_dir_all(&plain_cwd).unwrap();
+    let bare = ops::list(
+        &h.ctx_rooted(&user_home.0, &plain_cwd),
+        None,
+        false,
+        None,
+        None,
+    )
+    .unwrap();
+    assert_eq!(bare.project_bundles, 0);
+    assert_eq!(render::list_tty(&bare), "No tracked skills.");
 }
 
 #[test]

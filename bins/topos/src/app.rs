@@ -1526,7 +1526,7 @@ fn finish_status(
                 println!("{}", render::to_json(&render::err_envelope(command, &e)));
             } else {
                 eprintln!("{}", render::err_tty(&e));
-                if let Some(hint) = render::err_hint_tty(&e) {
+                if let Some(hint) = render::err_hint_tty(command, &e) {
                     eprintln!("{hint}");
                 }
             }
@@ -2629,8 +2629,9 @@ fn emit_err(json: bool, command: &str, err: &ClientError, diag: &Diag<'_>) -> Ex
         eprintln!("{}", render::err_tty(err));
         // The way out, between the refusal and the pointer: the SAME next actions the `--json`
         // envelope computes, as runnable lines (and the transience clause where the typed outcome
-        // says the failure is retryable). One source of truth — never a second hint table.
-        if let Some(hint) = render::err_hint_tty(err) {
+        // says the failure is retryable). One source of truth — never a second hint table. The
+        // verb rides along: an ambiguity's ways out ARE this invocation, re-spelled per candidate.
+        if let Some(hint) = render::err_hint_tty(command, err) {
             eprintln!("{hint}");
         }
         // Point a human at the detail the fixed message withheld — only when it actually landed.

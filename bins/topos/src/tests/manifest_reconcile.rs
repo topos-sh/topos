@@ -4053,6 +4053,14 @@ fn removing_two_members_of_one_set_leaves_neither() {
     );
 }
 
+/// The ways out an ambiguity refusal offers, as the runnable `topos remove …` lines both surfaces
+/// print. The candidates ride the ACTIONS (one per candidate, the failing verb re-spelled), not the
+/// sentence — so this, not `err.to_string()`, is where "every way out is named, paste-ready" is
+/// proven.
+fn ways_out(err: &ClientError) -> String {
+    crate::render::err_hint_tty("remove", err).unwrap_or_default()
+}
+
 #[test]
 fn a_bare_name_two_rows_answer_to_is_refused_not_guessed() {
     // Two rows deliver a `deploy` — one from a workspace, one from a repo. Taking the first is a
@@ -4076,7 +4084,7 @@ fn a_bare_name_two_rows_answer_to_is_refused_not_guessed() {
     )
     .unwrap_err();
     assert_eq!(err.code(), "AMBIGUOUS_NAME", "{err:?}");
-    let msg = err.to_string();
+    let msg = ways_out(&err);
     assert!(msg.contains(&format!("{HOST}/{WS_NAME}/deploy")), "{msg}");
     assert!(msg.contains("github.com/o/deploy"), "{msg}");
     // Nothing moved.
@@ -4541,7 +4549,7 @@ fn a_bare_name_a_row_and_a_set_both_answer_to_is_refused_not_guessed() {
     let err = ops::remove_global(&ctx, &connect(&plane, &dir), &["deploy".into()], None, true)
         .unwrap_err();
     assert_eq!(err.code(), "AMBIGUOUS_NAME", "{err:?}");
-    let msg = err.to_string();
+    let msg = ways_out(&err);
     assert!(msg.contains("github.com/o/r/deploy"), "{msg}");
     assert!(msg.contains("channels/backend"), "{msg}");
 
@@ -4586,7 +4594,7 @@ fn a_bare_name_two_sets_carry_is_refused_not_split_at_random() {
     let err = ops::remove_global(&ctx, &connect(&plane, &dir), &["deploy".into()], None, true)
         .unwrap_err();
     assert_eq!(err.code(), "AMBIGUOUS_NAME", "{err:?}");
-    let msg = err.to_string();
+    let msg = ways_out(&err);
     assert!(msg.contains("channels/backend"), "{msg}");
     assert!(msg.contains("channels/platform"), "{msg}");
     // And the candidates are PASTE-READY. A set member has no spelling of its own, so listing the
@@ -4604,6 +4612,18 @@ fn a_bare_name_two_sets_carry_is_refused_not_split_at_random() {
         )),
         "{msg}"
     );
+    // Each is a whole COMMAND — `topos remove <reference> --via <line>`, the verb that refused.
+    assert!(
+        msg.lines()
+            .filter(|l| l.trim_start().starts_with("topos remove "))
+            .count()
+            == 2,
+        "one runnable line per candidate: {msg}"
+    );
+    // And the refusal SENTENCE no longer inlines them: a paste-ready invocation buried in prose
+    // read as prose, and the `--via` form's token boundary vanished into the comma list.
+    let sentence = err.to_string();
+    assert!(!sentence.contains("--via"), "{sentence}");
     // Neither line was touched.
     let text =
         std::fs::read_to_string(rig.layout().home().join(crate::manifest::MANIFEST_FILE)).unwrap();
@@ -4805,7 +4825,7 @@ fn a_bare_name_the_feed_and_a_repo_set_both_deliver_is_refused() {
     let err = ops::remove_global(&ctx, &connect(&plane, &dir), &["deploy".into()], None, true)
         .unwrap_err();
     assert_eq!(err.code(), "AMBIGUOUS_NAME", "{err:?}");
-    let msg = err.to_string();
+    let msg = ways_out(&err);
     assert!(msg.contains(&format!("{HOST}/{WS_NAME}/deploy")), "{msg}");
     assert!(msg.contains("github.com/o/r/deploy"), "{msg}");
     let text =

@@ -31,13 +31,12 @@ pub(crate) fn ok_envelope(command: &str, data: serde_json::Value) -> JsonEnvelop
 }
 
 /// A failure envelope carrying the stable code, outcome, and machine-actionable next steps. An
-/// [`ClientError::AmbiguousTarget`] additionally surfaces its paste-ready qualified paths as
-/// `data.candidates` — the machine-readable half of the ambiguity refusal (the human list rides
-/// the message) — and an [`ClientError::AmbiguousWorkspace`] its canonical references the same
-/// way, as `data.references`.
+/// [`ClientError::AmbiguousTarget`] additionally surfaces its paste-ready qualified spellings as
+/// `data.candidates` — the machine-readable half of the ambiguity refusal — and an
+/// [`ClientError::AmbiguousWorkspace`] its canonical references the same way, as `data.references`.
 pub(crate) fn err_envelope(command: &str, err: &ClientError) -> JsonEnvelope {
     let outcome = err.outcome();
-    let next_actions = next_actions(err);
+    let next_actions = next_actions(command, err);
     let retryable = matches!(
         outcome,
         TerminalOutcome::RetryableFailure | TerminalOutcome::Unavailable
@@ -73,7 +72,10 @@ pub(crate) fn err_envelope(command: &str, err: &ClientError) -> JsonEnvelope {
     }
 }
 
-fn next_actions(err: &ClientError) -> Vec<NextAction> {
+/// The machine-actionable ways out of one failure. `command` is the VERB that refused (the same
+/// name the envelope carries) — the one input no error variant holds, and the one an ambiguity
+/// needs to rebuild the invocation the caller just made.
+fn next_actions(command: &str, err: &ClientError) -> Vec<NextAction> {
     match err {
         // A LOCAL ambiguity whose name a connected workspace ALSO publishes has more than one
         // real way out, so it carries them all: the inventory read that resolves the local pick,
@@ -247,6 +249,33 @@ fn next_actions(err: &ClientError) -> Vec<NextAction> {
             ActionCode::from("RUN_COMMAND".to_owned()),
             vec!["topos".into(), "add".into(), path.clone(), "--json".into()],
         )],
+        // An ambiguous name: ONE runnable way out per candidate, each the FAILING invocation
+        // re-spelled — same verb, this candidate's spelling. The verb is read from `command`, never
+        // assumed: the same refusal is raised by `remove`'s manifest resolution, by `add`'s lift of
+        // a switched-off row, and by the workspace-resource resolver every targeting verb shares.
+        //
+        // A candidate is ARGV, not a value: a set-member spelling carries its own selector
+        // (`<reference> --via <set-reference>`), so it splits on whitespace into the tokens it
+        // already is. Quoting it into one argument would hand the caller a command that cannot run
+        // — and the tokens are references (a path-safe grammar), never free text.
+        //
+        // The refused invocation's `-g` rides along (the same preservation `subscribe_action`
+        // makes): the machine-wide file and this folder's are two different documents, so a
+        // rebuilt command that dropped the flag would edit the one nobody asked about.
+        ClientError::AmbiguousTarget {
+            candidates, global, ..
+        } => candidates
+            .iter()
+            .map(|candidate| {
+                let mut argv = vec!["topos".to_owned(), command.to_owned()];
+                if *global {
+                    argv.push("-g".to_owned());
+                }
+                argv.extend(candidate.split_whitespace().map(str::to_owned));
+                argv.push("--json".to_owned());
+                crate::actions::next_action(ActionCode::from("RUN_COMMAND".to_owned()), argv)
+            })
+            .collect(),
         // Everything else: a refusal whose PROSE names one of the STATIC command spellings
         // mirrors it structurally. Prose text is never tokenized into argv — see the allowlist.
         other => mirror_prose_commands(&safe_message(other)),
@@ -755,6 +784,25 @@ pub(crate) fn withdrawn_next_actions(data: &PullData) -> Vec<NextAction> {
         .collect()
 }
 
+/// The empty tracked bucket, said honestly. With nothing covering the working directory the line
+/// is the plain one it has always been. With a `topos.toml` that asks for bundles of its own, the
+/// bare version is true and misleading in the same breath — this machine's own records are empty
+/// WHILE the folder tracks its own set — so the line names the file, counts what it asks for, and
+/// points at the verb that shows it. It never claims those bundles are installed: `status` is
+/// where a demand is read against what actually landed.
+fn empty_tracked_line(project_bundles: usize) -> String {
+    match project_bundles {
+        0 => "No tracked skills.\n".to_owned(),
+        1 => "No tracked skills outside this folder's topos.toml — it tracks 1 bundle (run \
+              `topos status` to see it).\n"
+            .to_owned(),
+        n => format!(
+            "No tracked skills outside this folder's topos.toml — it tracks {n} bundles (run \
+             `topos status` to see them).\n"
+        ),
+    }
+}
+
 pub(crate) fn list_tty(out: &ListOutcome) -> String {
     let data = &out.data;
     let mut s = String::new();
@@ -784,7 +832,7 @@ pub(crate) fn list_tty(out: &ListOutcome) -> String {
     // Tracked skills. An empty inventory still falls through to the untracked discovery below — a fresh
     // user's whole value is "here's what you could adopt", so we never early-return on no-tracked.
     if data.tracked.is_empty() {
-        s.push_str("No tracked skills.\n");
+        s.push_str(&empty_tracked_line(out.project_bundles));
     } else {
         match &out.enrollment {
             // Enrolled: group the tracked rows by workspace (named by the membership display label), with
@@ -2449,7 +2497,10 @@ pub(crate) fn err_tty(err: &ClientError) -> String {
 /// refusals teach their own fix in prose (that is how [`mirror_prose_commands`] derives the action
 /// in the first place), and printing it twice, two lines apart, reads as two different steps. The
 /// block is still built from `next_actions` alone; this only drops what the reader just read.
-pub(crate) fn err_hint_tty(err: &ClientError) -> Option<String> {
+///
+/// `command` is the verb that refused, passed straight through to [`next_actions`] — the surfaces
+/// stay one computation, so a human and an agent are offered the same commands.
+pub(crate) fn err_hint_tty(command: &str, err: &ClientError) -> Option<String> {
     let retryable = matches!(
         err.outcome(),
         TerminalOutcome::RetryableFailure | TerminalOutcome::Unavailable
@@ -2457,7 +2508,7 @@ pub(crate) fn err_hint_tty(err: &ClientError) -> Option<String> {
     let message = safe_message(err);
     let already_said = backtick_spans(&message);
     let mut lines: Vec<String> = Vec::new();
-    for action in next_actions(err) {
+    for action in next_actions(command, err) {
         let line = hint_line(&action.argv);
         if line.is_empty() || lines.contains(&line) || already_said.iter().any(|s| *s == line) {
             continue;
@@ -2912,6 +2963,7 @@ mod tests {
                 truncated: Vec::new(),
             },
             warnings: Vec::new(),
+            project_bundles: 0,
             enrollment: Some(ListEnrollment {
                 workspace_labels: vec![("w_acme".to_owned(), "Acme".to_owned())],
                 base_url: "https://topos.example".to_owned(),
@@ -2968,8 +3020,37 @@ mod tests {
             data: ListData::default(),
             enrollment: None,
             warnings: Vec::new(),
+            project_bundles: 0,
         };
         assert_eq!(list_tty(&unenrolled), "No tracked skills.");
+    }
+
+    #[test]
+    fn the_empty_inventory_names_a_covering_manifest_and_stays_plain_without_one() {
+        // Nothing tracked and nothing covering the folder: the line says exactly what it always
+        // said — a disclosure is added only where there is something to disclose.
+        let empty = |project_bundles| ListOutcome {
+            data: ListData::default(),
+            enrollment: None,
+            warnings: Vec::new(),
+            project_bundles,
+        };
+        assert_eq!(list_tty(&empty(0)), "No tracked skills.");
+
+        // A covering `topos.toml` with demand of its own: the empty state names the file, counts
+        // what it asks for, and hands over to the verb that shows it. It never claims those bundles
+        // are installed — `status` is where demand meets what actually landed.
+        assert_eq!(
+            list_tty(&empty(3)),
+            "No tracked skills outside this folder's topos.toml — it tracks 3 bundles (run `topos \
+             status` to see them)."
+        );
+        // One row reads as one row (the count is the file's, so it must agree with the file).
+        assert_eq!(
+            list_tty(&empty(1)),
+            "No tracked skills outside this folder's topos.toml — it tracks 1 bundle (run `topos \
+             status` to see it)."
+        );
     }
 
     #[test]
@@ -3005,6 +3086,7 @@ mod tests {
                 "could not read the catalog for workspace Beta (the server did not answer) — skipped"
                     .to_owned(),
             ],
+            project_bundles: 0,
         };
         let text = list_tty(&out);
         assert!(text.contains("Remote catalog:"), "{text}");
@@ -3047,6 +3129,7 @@ mod tests {
             },
             enrollment: None,
             warnings: Vec::new(),
+            project_bundles: 0,
         };
         let text = list_tty(&out);
         assert!(
@@ -3352,7 +3435,7 @@ mod tests {
 
     #[test]
     fn not_enrolled_carries_the_join_template_with_its_needs() {
-        let actions = super::next_actions(&crate::error::ClientError::NotEnrolled);
+        let actions = super::next_actions("update", &crate::error::ClientError::NotEnrolled);
         assert_eq!(actions.len(), 1, "{actions:?}");
         assert_eq!(actions[0].code.as_str(), "LOGIN_WORKSPACE");
         assert_eq!(
@@ -3368,20 +3451,26 @@ mod tests {
     #[test]
     fn prose_named_commands_mirror_structurally_on_the_fall_through() {
         // PATH_NOT_NAME's fix is TYPED — the envelope carries the concrete `topos add ./<arg>`.
-        let actions = super::next_actions(&crate::error::ClientError::PathNotName {
-            arg: "deploy".to_owned(),
-        });
+        let actions = super::next_actions(
+            "add",
+            &crate::error::ClientError::PathNotName {
+                arg: "deploy".to_owned(),
+            },
+        );
         assert_eq!(actions.len(), 1, "{actions:?}");
         assert_eq!(actions[0].code.as_str(), "RUN_COMMAND");
         assert_eq!(actions[0].argv, vec!["topos", "add", "./deploy", "--json"]);
         assert!(actions[0].needs.is_empty());
 
         // A SESSION-REQUIRED refusal carries its address as an EXECUTABLE argv, typed.
-        let actions = super::next_actions(&crate::error::ClientError::SessionRequired {
-            address: "acme.test/eng".to_owned(),
-            message: "not logged into acme.test/eng — run `topos login acme.test/eng` first"
-                .to_owned(),
-        });
+        let actions = super::next_actions(
+            "publish",
+            &crate::error::ClientError::SessionRequired {
+                address: "acme.test/eng".to_owned(),
+                message: "not logged into acme.test/eng — run `topos login acme.test/eng` first"
+                    .to_owned(),
+            },
+        );
         assert_eq!(actions.len(), 1, "{actions:?}");
         assert_eq!(actions[0].code.as_str(), "LOGIN_WORKSPACE");
         assert_eq!(
@@ -3391,32 +3480,38 @@ mod tests {
         assert!(actions[0].needs.is_empty());
 
         // An expired flow mirrors the join template, needs and all.
-        let actions = super::next_actions(&crate::error::ClientError::Enrollment(
-            "this login attempt expired — start over with `topos login <workspace-address>`"
-                .to_owned(),
-        ));
+        let actions = super::next_actions(
+            "login",
+            &crate::error::ClientError::Enrollment(
+                "this login attempt expired — start over with `topos login <workspace-address>`"
+                    .to_owned(),
+            ),
+        );
         assert_eq!(actions[0].code.as_str(), "LOGIN_WORKSPACE");
         assert_eq!(actions[0].needs, vec!["workspace-address"]);
 
         // "upgrade topos" is `topos self-update`, structurally.
-        let actions = super::next_actions(&crate::error::ClientError::UnknownSchemaVersion {
-            found: 9,
-            max: 1,
-        });
+        let actions = super::next_actions(
+            "list",
+            &crate::error::ClientError::UnknownSchemaVersion { found: 9, max: 1 },
+        );
         assert_eq!(actions.len(), 1, "{actions:?}");
         assert_eq!(actions[0].code.as_str(), "UPDATE_CLI");
 
         // Divergent placements name the loss-led reset (a describe — nothing dropped yet).
-        let actions = super::next_actions(&crate::error::ClientError::PlacementsDiverged {
-            skill: "deploy".to_owned(),
-            paths: vec!["/a".into(), "/b".into()],
-        });
+        let actions = super::next_actions(
+            "update",
+            &crate::error::ClientError::PlacementsDiverged {
+                skill: "deploy".to_owned(),
+                paths: vec!["/a".into(), "/b".into()],
+            },
+        );
         assert_eq!(actions.len(), 1, "{actions:?}");
         assert_eq!(actions[0].code.as_str(), "RESOLVE_DIVERGED_DRAFT");
         assert!(actions[0].argv.iter().any(|t| t == "--reset"));
 
         // A message without a backticked `topos …` command mirrors nothing.
-        assert!(super::next_actions(&crate::error::ClientError::EmptyBundle).is_empty());
+        assert!(super::next_actions("add", &crate::error::ClientError::EmptyBundle).is_empty());
     }
 
     #[test]
@@ -3424,9 +3519,12 @@ mod tests {
         // The classic injection: a directory literally named "skill --yes". The typed arm pushes
         // the value as ONE argv element — never re-tokenized — so no `--yes` token exists and the
         // consent flag cannot be smuggled into an executable next action.
-        let actions = super::next_actions(&crate::error::ClientError::PathNotName {
-            arg: "skill --yes".to_owned(),
-        });
+        let actions = super::next_actions(
+            "add",
+            &crate::error::ClientError::PathNotName {
+                arg: "skill --yes".to_owned(),
+            },
+        );
         assert_eq!(actions.len(), 1, "{actions:?}");
         assert_eq!(
             actions[0].argv,
@@ -3435,18 +3533,24 @@ mod tests {
         );
         assert!(!actions[0].argv.iter().any(|t| t == "--yes"), "{actions:?}");
         // Same discipline on the other typed value arms.
-        let actions = super::next_actions(&crate::error::ClientError::HarnessMismatch {
-            name: "pwn --yes".to_owned(),
-            requested: "cursor".to_owned(),
-            tracked: "claude-code".to_owned(),
-        });
+        let actions = super::next_actions(
+            "publish",
+            &crate::error::ClientError::HarnessMismatch {
+                name: "pwn --yes".to_owned(),
+                requested: "cursor".to_owned(),
+                tracked: "claude-code".to_owned(),
+            },
+        );
         assert_eq!(
             actions[0].argv,
             vec!["topos", "publish", "pwn --yes", "--json"]
         );
-        let actions = super::next_actions(&crate::error::ClientError::PlacementOccupied {
-            path: "/tmp/x --yes".to_owned(),
-        });
+        let actions = super::next_actions(
+            "add",
+            &crate::error::ClientError::PlacementOccupied {
+                path: "/tmp/x --yes".to_owned(),
+            },
+        );
         assert_eq!(
             actions[0].argv,
             vec!["topos", "add", "/tmp/x --yes", "--json"]
@@ -3518,9 +3622,12 @@ mod tests {
         // merely RE-DISCLOSES a recorded conflict (it never re-merges) — an agent following that
         // pointer looped publish→update→publish forever. The envelope names the two acts that
         // actually clear the block: the `--onto-current` escape and the `--reset` discard.
-        let actions = super::next_actions(&crate::error::ClientError::PublishBlocked {
-            skill: "deploy-checklist".to_owned(),
-        });
+        let actions = super::next_actions(
+            "publish",
+            &crate::error::ClientError::PublishBlocked {
+                skill: "deploy-checklist".to_owned(),
+            },
+        );
         assert_eq!(actions.len(), 2, "{actions:?}");
         assert!(
             actions[0].argv.iter().any(|t| t == "--onto-current"),
@@ -3537,6 +3644,130 @@ mod tests {
                 "the argv must name the blocked skill: {a:?}"
             );
         }
+    }
+
+    #[test]
+    fn an_ambiguous_name_offers_one_runnable_command_per_candidate() {
+        use crate::error::ClientError;
+
+        // The candidates ARE the ways out, so each becomes the FAILING invocation re-spelled: the
+        // verb that refused (read from the command, never assumed) plus that candidate's tokens.
+        let err = ClientError::AmbiguousTarget {
+            name: "rust-skills".to_owned(),
+            candidates: vec![
+                "github.com/leonardomso/rust-skills".to_owned(),
+                "github.com/leonardomso/rust-skills/rust-skills --via \
+                 github.com/leonardomso/rust-skills"
+                    .to_owned(),
+            ],
+            // This folder's file — the refused `topos remove rust-skills` carried no `-g`.
+            global: false,
+        };
+        let actions = super::next_actions("remove", &err);
+        assert_eq!(actions.len(), 2, "{actions:?}");
+        assert_eq!(
+            actions[0].argv,
+            vec![
+                "topos",
+                "remove",
+                "github.com/leonardomso/rust-skills",
+                "--json"
+            ]
+        );
+        // A set-member spelling carries its own selector: it stays the SEVERAL tokens it is, so the
+        // command runs — quoting it into one argument would hand back something unrunnable.
+        assert_eq!(
+            actions[1].argv,
+            vec![
+                "topos",
+                "remove",
+                "github.com/leonardomso/rust-skills/rust-skills",
+                "--via",
+                "github.com/leonardomso/rust-skills",
+                "--json"
+            ]
+        );
+        for a in &actions {
+            assert_eq!(a.code.as_str(), "RUN_COMMAND");
+            assert!(
+                a.needs.is_empty(),
+                "concrete argv, no template holes: {a:?}"
+            );
+        }
+
+        // The TTY prints those same commands under the one lead-in — and the message above them no
+        // longer inlines the list, so nothing is said twice.
+        let hint = super::err_hint_tty("remove", &err).expect("an ambiguity always has a way out");
+        assert_eq!(
+            hint,
+            "try:\n  topos remove github.com/leonardomso/rust-skills\n  topos remove \
+             github.com/leonardomso/rust-skills/rust-skills --via \
+             github.com/leonardomso/rust-skills"
+        );
+        let message = safe_message(&err);
+        assert_eq!(
+            message,
+            "'rust-skills' is ambiguous here — more than one reference answers to it"
+        );
+        assert!(
+            !message.contains("github.com"),
+            "the candidates ride the actions, not the sentence: {message}"
+        );
+
+        // The SAME refusal from another verb rebuilds THAT verb — `add`'s lift of a switched-off
+        // row must never be answered with a `remove` — and it keeps the invocation's `-g`: the two
+        // manifests are two files, so the bare form would edit the one nobody asked about.
+        let lift = ClientError::AmbiguousTarget {
+            name: "deploy".to_owned(),
+            candidates: vec![
+                "topos.sh/acme/deploy".to_owned(),
+                "topos.sh/beta/deploy".to_owned(),
+            ],
+            // The switch it lifts lives in the machine-wide file, and the invocation said so.
+            global: true,
+        };
+        let actions = super::next_actions("add", &lift);
+        assert_eq!(
+            actions[0].argv,
+            vec!["topos", "add", "-g", "topos.sh/acme/deploy", "--json"]
+        );
+        assert_eq!(
+            actions[1].argv,
+            vec!["topos", "add", "-g", "topos.sh/beta/deploy", "--json"]
+        );
+        // The flag reaches the human line too — one surface never offers what the other withholds.
+        assert_eq!(
+            super::err_hint_tty("add", &lift),
+            Some(
+                "try:\n  topos add -g topos.sh/acme/deploy\n  topos add -g topos.sh/beta/deploy"
+                    .to_owned()
+            )
+        );
+        // The scope rides the ERROR, not the verb: the same shape without `-g` stays bare.
+        let local = ClientError::AmbiguousTarget {
+            name: "deploy".to_owned(),
+            candidates: vec!["topos.sh/acme/deploy".to_owned()],
+            global: false,
+        };
+        assert_eq!(
+            super::next_actions("add", &local)[0].argv,
+            vec!["topos", "add", "topos.sh/acme/deploy", "--json"]
+        );
+
+        // The envelope keeps the machine-readable half unchanged (a consumer reading
+        // `data.candidates` is untouched by the message losing the list), and mirrors the actions.
+        let envelope = super::err_envelope("remove", &err);
+        assert_eq!(
+            envelope.data["candidates"],
+            serde_json::json!([
+                "github.com/leonardomso/rust-skills",
+                "github.com/leonardomso/rust-skills/rust-skills --via \
+                 github.com/leonardomso/rust-skills"
+            ])
+        );
+        let wire = envelope.error.expect("a refusal carries its error");
+        assert_eq!(wire.code, "AMBIGUOUS_NAME");
+        assert_eq!(wire.next_actions.len(), 2);
     }
 
     #[test]
@@ -3649,32 +3880,45 @@ mod tests {
         let blocked = ClientError::PublishBlocked {
             skill: "deploy".to_owned(),
         };
-        let hint = super::err_hint_tty(&blocked).expect("a blocked publish offers its two exits");
+        let hint = super::err_hint_tty("publish", &blocked)
+            .expect("a blocked publish offers its two exits");
         assert_eq!(
             hint, "try:\n  topos update deploy --onto-current\n  topos update deploy --reset",
             "the machine surface's argv, minus its `--json` tail"
         );
 
         // A refusal that already taught its fix in backticks adds nothing underneath it.
-        assert_eq!(super::err_hint_tty(&ClientError::UpgradeAmbiguous), None);
-        assert_eq!(super::err_hint_tty(&ClientError::NotEnrolled), None);
+        assert_eq!(
+            super::err_hint_tty("upgrade", &ClientError::UpgradeAmbiguous),
+            None
+        );
+        assert_eq!(
+            super::err_hint_tty("update", &ClientError::NotEnrolled),
+            None
+        );
 
         // A transient failure says so, driven by the TYPED outcome — never re-classified here.
         assert_eq!(
-            super::err_hint_tty(&ClientError::RemoteFetch {
-                msg: "acme/skills".to_owned(),
-                permanent: false
-            }),
+            super::err_hint_tty(
+                "add",
+                &ClientError::RemoteFetch {
+                    msg: "acme/skills".to_owned(),
+                    permanent: false
+                }
+            ),
             Some("this is often transient — running it again is safe".to_owned())
         );
 
         // A PERMANENT fetch failure (a 404, a malformed reference) must NOT invite a retry — the
         // hint is driven by the same typed outcome, so it stays silent here.
         assert_eq!(
-            super::err_hint_tty(&ClientError::RemoteFetch {
-                msg: "acme/skills".to_owned(),
-                permanent: true
-            }),
+            super::err_hint_tty(
+                "add",
+                &ClientError::RemoteFetch {
+                    msg: "acme/skills".to_owned(),
+                    permanent: true
+                }
+            ),
             None
         );
 
@@ -3685,13 +3929,13 @@ mod tests {
             message: "not logged in".to_owned(),
         };
         assert_eq!(
-            super::err_hint_tty(&session),
+            super::err_hint_tty("publish", &session),
             Some("try:\n  topos login 'acme test/eng'".to_owned())
         );
 
         // A permanent failure with nothing runnable adds no line at all.
         assert_eq!(
-            super::err_hint_tty(&ClientError::EmptyBundle),
+            super::err_hint_tty("add", &ClientError::EmptyBundle),
             None,
             "no invented hint where there is no way out"
         );

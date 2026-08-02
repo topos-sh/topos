@@ -419,6 +419,11 @@ pub(crate) fn resolve_one(
                     _ => Err(ClientError::AmbiguousTarget {
                         name: "this origin".to_owned(),
                         candidates: universe.iter().map(|w| w.name.clone()).collect(),
+                        // This resolver serves the verbs that target a WORKSPACE RESOURCE, none of
+                        // which reaches it under `-g` (the machine-wide manifest edit is
+                        // `manifest_edit`'s own resolution, and it raises its own refusal) — so the
+                        // rebuilt commands are the bare form the caller actually typed.
+                        global: false,
                     }),
                 };
             }
@@ -549,6 +554,8 @@ fn resolve_bare(
         _ => Err(ClientError::AmbiguousTarget {
             name: name.to_owned(),
             candidates: matches.into_iter().map(|(_, path)| path).collect(),
+            // Same reason as the origin arm above: no `-g` invocation reaches this resolver.
+            global: false,
         }),
     }
 }
@@ -846,10 +853,17 @@ mod tests {
         // "deploy" is a skill in BOTH workspaces → typed AMBIGUOUS_NAME with qualified candidates.
         let err =
             resolve_one(&u, &ParsedTarget::Bare("deploy".into()), KindScope::ALL).unwrap_err();
-        let ClientError::AmbiguousTarget { name, candidates } = err else {
+        let ClientError::AmbiguousTarget {
+            name,
+            candidates,
+            global,
+        } = err
+        else {
             panic!("expected AmbiguousTarget");
         };
         assert_eq!(name, "deploy");
+        // No `-g` invocation reaches this resolver — the offered re-spellings stay the bare form.
+        assert!(!global);
         assert_eq!(
             candidates,
             vec![
@@ -861,7 +875,8 @@ mod tests {
         assert_eq!(
             ClientError::AmbiguousTarget {
                 name,
-                candidates: Vec::new()
+                candidates: Vec::new(),
+                global: false
             }
             .code(),
             "AMBIGUOUS_NAME"
