@@ -13,10 +13,12 @@
 //!
 //! Per line: the winning reference, ONE source (which manifest row — or which workspace's feed —
 //! asked), the delivery attribution (`assigned by <name>` / `picked by you`), and an honest state
-//! (applied-as-of-the-last-sync / local edits / behind / off / not available / unknown). What a
+//! (applied-as-of-the-last-sync / local edits / behind / off / not available / never delivered
+//! from / unknown). What a
 //! row cannot carry rides `notes`: the loud "the global manifest does not adopt these
-//! assignments" line, rows that add nothing, `"off"` switches for bundles nobody assigns any
-//! more, set collisions, declined-but-delivered bundles, and cross-scope version splits.
+//! assignments" line, feeds whose exchange landed with nothing assigned, rows that add nothing,
+//! `"off"` switches for bundles nobody assigns any more, set collisions, declined-but-delivered
+//! bundles, and cross-scope version splits.
 //!
 //! The bare `topos` invocation renders this same snapshot on a TTY, so a human's first keystroke
 //! answers "what is this, and where am I" without dialing anything.
@@ -63,9 +65,34 @@ pub(crate) fn status_snapshot(
     // row is demand, not an assignment), and how much of it has never been applied here. A
     // delivery whose sidecar sync doc still holds the all-zero baseline has never been applied;
     // any unreadable doc makes the count honestly absent, never a partial number.
+    //
+    // Only a workspace this installation still holds a LIVE session for can assign anything here:
+    // the cache OUTLIVES a logout, so counting every cached entry would keep crediting a workspace
+    // nothing dials any more — and the number would sit beside a table that never shows its rows.
+    // The predicate is `live()`, the SAME one the feeds and the regimes resolve against, so the
+    // count can only name what the table can show. A PENDING session counts (the workspace
+    // assigns; only an owner's approval gates the bytes); an ENDED one does not (access is gone —
+    // what it delivered is frozen in place, not assigned).
+    //
+    // The key is `(host, workspace id)`, never the id alone: ids are opaque strings each SERVER
+    // mints on its own, so the same id on two hosts is two different workspaces — matching on the
+    // id would let a live session on one server resurrect another server's stale cache entry. A
+    // cache entry with NO recorded host (written before the session model) is not placeable on any
+    // server, so it counts for nobody: that is the same rule the table already follows (`ws_entry`
+    // resolves by host + address), and the count must not claim what no row can show.
+    let live: BTreeSet<(&str, &str)> = all
+        .live()
+        .map(|s| (s.host.as_str(), s.workspace_id.as_str()))
+        .collect();
     let mut assigned = 0u64;
     let mut awaiting = Some(0u64);
-    for entry in cache.workspaces.values() {
+    for (workspace_id, entry) in &cache.workspaces {
+        let Some(host) = entry.host.as_deref() else {
+            continue;
+        };
+        if !live.contains(&(host, workspace_id.as_str())) {
+            continue;
+        }
         for (skill_id, d) in &entry.delivered {
             if d.withdrawn || d.via_manifest {
                 continue;
@@ -161,6 +188,9 @@ struct ScopeOut {
     collisions: Vec<String>,
     /// `"off"` switches whose bundle is not in the cached feed any more.
     stale_offs: Vec<String>,
+    /// Feed ADDRESSES whose last exchange completed and assigned this person nothing. The fact is
+    /// the WORKSPACE's, not a scope's, so `resolve` says it once however many recipes adopt it.
+    empty_feeds: Vec<String>,
 }
 
 /// Resolve both scopes, the regimes, and the notes — the whole offline answer.
@@ -216,6 +246,18 @@ fn resolve(ctx: &Ctx<'_>, all: &Sessions, cache: &SyncStatus) -> Result<Resolved
                 "global manifest adopts {adopts} bundles; {unadopted} assigned bundles are not \
                  adopted here (no feed row) — `topos add -g @{ws}` restores them"
             ));
+        }
+    }
+    // A feed that HAS exchanged and brought nothing: the table can only fall silent, so the fact
+    // gets words. Said once per address — it is the workspace's answer, not each scope's.
+    let mut said: BTreeSet<&str> = BTreeSet::new();
+    for feed in person_out
+        .empty_feeds
+        .iter()
+        .chain(&project_out.empty_feeds)
+    {
+        if said.insert(feed.as_str()) {
+            notes.push(format!("{feed}: exchanged — nothing assigned to you yet"));
         }
     }
     // A bare `"*"` row for a bundle the flowing feed already delivers states nothing new.
@@ -481,31 +523,9 @@ fn scope_rows(
     // 3. The FEEDS that flow here (the global file's feed rows, or the implicit recipe's).
     for (host, workspace) in &plan.feeds {
         let feed = format!("{host}/{workspace}");
-        let Some(entry) = ws_entry(cache, host, workspace) else {
-            // A feed with nothing cached yet: ONE honest line for the workspace itself.
-            out.rows.push(Row {
-                item: StatusItem {
-                    name: workspace.clone(),
-                    reference: feed.clone(),
-                    source: format!("the {feed} feed"),
-                    scope: scope.to_owned(),
-                    via: None,
-                    attribution: None,
-                    version: None,
-                    applied_as_of: None,
-                    state: session_state(all, host, workspace),
-                    shadows: Vec::new(),
-                },
-                source_file: file.clone(),
-                source_key: file.as_ref().map(|_| feed.clone()),
-                feed: Some(feed.clone()),
-                pin: None,
-                placements: Vec::new(),
-                bundle: false,
-            });
-            continue;
-        };
-        for (skill_id, ds) in &entry.delivered {
+        let entry = ws_entry(cache, host, workspace);
+        let mut itemized = 0usize;
+        for (skill_id, ds) in entry.into_iter().flat_map(|e| &e.delivered) {
             if ds.withdrawn
                 || ds.via_manifest
                 || ds.name.is_empty()
@@ -530,7 +550,7 @@ fn scope_rows(
                 layout,
                 skill_id,
                 &ds.served_version,
-                entry.last_delivery_at,
+                entry.and_then(|e| e.last_delivery_at),
             );
             out.rows.push(Row {
                 item: StatusItem {
@@ -552,6 +572,51 @@ fn scope_rows(
                 placements: applied.placements,
                 bundle: true,
             });
+            itemized += 1;
+        }
+        // A feed that has itemized NOTHING and has no completed exchange behind it: ONE honest
+        // line for the workspace itself. The test is delivery PROVENANCE, never the existence of a
+        // cache entry — a landed publish SEEDS its workspace's entry (host, address, its own
+        // manifest-driven row) without any delivery having answered, and only the sweep ever
+        // stamps `last_delivery_at`. Reading the seed as an exchange would delete this line and
+        // drop the adopted feed out of the table entirely, since a `via_manifest` row itemizes
+        // nothing here.
+        //
+        // A live session that has never delivered here is missing the EXCHANGE, not an apply — the
+        // ordinary unknown state would promise `update` lands something, and this row cannot know
+        // that the workspace assigns anything at all. Every other verdict (`session_state`'s
+        // no-session and pending answers) is about access and stands.
+        let exchanged = entry.is_some_and(|e| e.last_delivery_at.is_some());
+        if !exchanged && itemized == 0 {
+            let state = match session_state(all, host, workspace) {
+                StatusItemState::Unknown => StatusItemState::NoDeliveryYet,
+                settled => settled,
+            };
+            out.rows.push(Row {
+                item: StatusItem {
+                    name: workspace.clone(),
+                    reference: feed.clone(),
+                    source: format!("the {feed} feed"),
+                    scope: scope.to_owned(),
+                    via: None,
+                    attribution: None,
+                    version: None,
+                    applied_as_of: None,
+                    state,
+                    shadows: Vec::new(),
+                },
+                source_file: file.clone(),
+                source_key: file.as_ref().map(|_| feed.clone()),
+                feed: Some(feed.clone()),
+                pin: None,
+                placements: Vec::new(),
+                bundle: false,
+            });
+        } else if exchanged && !entry.is_some_and(assigns_anything) {
+            // The other side of the same fact: the exchange DID complete and the workspace has
+            // nothing for this person. No row can say that — the table just falls silent — so it
+            // is said in words, the same words the sweep's receipt uses.
+            out.empty_feeds.push(feed.clone());
         }
     }
 
@@ -819,6 +884,16 @@ fn feed_delivers(cache: &SyncStatus, host: &str, workspace: &str, bundle: &str) 
     })
 }
 
+/// Whether the workspace's last delivery assigned this person ANYTHING at all — the same feed-row
+/// test [`feed_delivers`] applies, over every name. What a local `"off"` row then withholds is a
+/// separate, local fact: the workspace still assigned it.
+fn assigns_anything(entry: &WorkspaceSync) -> bool {
+    entry
+        .delivered
+        .values()
+        .any(|d| !d.withdrawn && !d.via_manifest && !d.name.is_empty())
+}
+
 /// The assigned bundles of one workspace a FILE-backed person plan does not adopt: its feed does
 /// not flow here, and no explicit row claims them.
 fn assigned_not_adopted(
@@ -1017,6 +1092,28 @@ mod tests {
             )
             .unwrap();
         }
+
+        /// A PRE-SESSION-MODEL cache entry: one the document still tolerates, with no host and no
+        /// address recorded.
+        fn hostless_cache(&self, ws_id: &str, delivered: Vec<(String, DeliveredSkill)>) {
+            crate::sync_status::record(
+                &RealFs,
+                &self.layout(),
+                &[(
+                    ws_id.to_owned(),
+                    WorkspaceSync {
+                        host: None,
+                        workspace_name: None,
+                        last_delivery_at: Some(1_700_000_000_000),
+                        last_report_at: None,
+                        staleness_window_ms: 0,
+                        delivered: delivered.into_iter().collect(),
+                        declined: BTreeMap::new(),
+                    },
+                )],
+            )
+            .unwrap();
+        }
     }
     impl Drop for TempHome {
         fn drop(&mut self) {
@@ -1107,6 +1204,268 @@ mod tests {
         assert_eq!(d.regimes.len(), 1);
         assert_eq!(d.regimes[0].regime, "adopting all assigned");
         assert!(d.notes.is_empty(), "{:?}", d.notes);
+    }
+
+    /// The delivery cache OUTLIVES a logout, so the count must be session-scoped or a workspace
+    /// nobody dials any more keeps claiming to assign bundles — beside a table that shows none of
+    /// them, next to the feed the person actually has.
+    #[test]
+    fn a_cached_workspace_without_a_session_assigns_nothing_here() {
+        let home = TempHome::new();
+        let cwd = home.0.join("plain");
+        std::fs::create_dir_all(&cwd).unwrap();
+        home.session(
+            "topos.sh",
+            "w_acme",
+            "acme",
+            crate::sessions::SESSION_ACTIVE,
+        );
+        // acme is logged in and assigns nothing; the logged-OUT workspace's cache entry survives.
+        home.cache("w_acme", "topos.sh", "acme", Vec::new(), Vec::new());
+        home.cache(
+            "w_gone",
+            "topos.sh",
+            "gone",
+            vec![assigned("ghost", Some("Dana"))],
+            Vec::new(),
+        );
+
+        let d = snapshot_at(&home, &cwd);
+        assert_eq!(d.profile_skills, 0);
+        assert_eq!(d.awaiting_first_sync, Some(0));
+        assert!(!d.items.iter().any(|i| i.name == "ghost"), "{:?}", d.items);
+
+        // A session for it — however it is minted — makes the same rows count again.
+        home.session(
+            "topos.sh",
+            "w_gone",
+            "gone",
+            crate::sessions::SESSION_ACTIVE,
+        );
+        let d = snapshot_at(&home, &cwd);
+        assert_eq!(d.profile_skills, 1);
+        assert_eq!(d.awaiting_first_sync, Some(1));
+        assert!(d.items.iter().any(|i| i.name == "ghost"));
+    }
+
+    /// PENDING counts, ENDED does not: a pending session's workspace still assigns (only an
+    /// owner's approval gates the bytes), while an ended one has taken its access away — what it
+    /// delivered is frozen in place, not assigned.
+    #[test]
+    fn a_pending_session_counts_and_an_ended_one_does_not() {
+        for (status, expected) in [
+            (crate::sessions::SESSION_PENDING, 1),
+            (crate::sessions::SESSION_ENDED, 0),
+        ] {
+            let home = TempHome::new();
+            let cwd = home.0.join("plain");
+            std::fs::create_dir_all(&cwd).unwrap();
+            home.session("topos.sh", "w_acme", "acme", status);
+            home.cache(
+                "w_acme",
+                "topos.sh",
+                "acme",
+                vec![assigned("deploy", None)],
+                Vec::new(),
+            );
+
+            let d = snapshot_at(&home, &cwd);
+            assert_eq!(d.profile_skills, expected, "status {status}");
+            assert_eq!(d.awaiting_first_sync, Some(expected), "status {status}");
+        }
+    }
+
+    /// A workspace id is an OPAQUE string each server mints on its own, so it is not an address.
+    /// Matching the live set on the id alone would let a session on one host resurrect another
+    /// host's stale cache entry — a count with no row anywhere in the table to back it.
+    #[test]
+    fn the_live_test_is_keyed_by_host_and_id_not_the_id_alone() {
+        let home = TempHome::new();
+        let cwd = home.0.join("plain");
+        std::fs::create_dir_all(&cwd).unwrap();
+        // Logged into `topos.sh`; the SAME id is cached from a different server.
+        home.session(
+            "topos.sh",
+            "w_shared",
+            "acme",
+            crate::sessions::SESSION_ACTIVE,
+        );
+        home.cache(
+            "w_shared",
+            "other.test",
+            "acme",
+            vec![assigned("ghost", Some("Dana"))],
+            Vec::new(),
+        );
+
+        let d = snapshot_at(&home, &cwd);
+        assert_eq!(d.profile_skills, 0);
+        assert_eq!(d.awaiting_first_sync, Some(0));
+        assert!(!d.items.iter().any(|i| i.name == "ghost"), "{:?}", d.items);
+
+        // The HOST is what decides: a session on the server that cached it counts the same rows.
+        home.session(
+            "other.test",
+            "w_shared",
+            "acme",
+            crate::sessions::SESSION_ACTIVE,
+        );
+        let d = snapshot_at(&home, &cwd);
+        assert_eq!(d.profile_skills, 1);
+        assert!(d.items.iter().any(|i| i.name == "ghost"), "{:?}", d.items);
+    }
+
+    /// A cache entry with no recorded host cannot be placed on any server — and `ws_entry` (the
+    /// table's own reader) needs a host, so no row can ever show it. It counts for nobody.
+    #[test]
+    fn a_cache_entry_with_no_recorded_host_counts_for_nobody() {
+        let home = TempHome::new();
+        let cwd = home.0.join("plain");
+        std::fs::create_dir_all(&cwd).unwrap();
+        home.session(
+            "topos.sh",
+            "w_acme",
+            "acme",
+            crate::sessions::SESSION_ACTIVE,
+        );
+        home.hostless_cache("w_acme", vec![assigned("ghost", Some("Dana"))]);
+
+        let d = snapshot_at(&home, &cwd);
+        assert_eq!(d.profile_skills, 0);
+        assert_eq!(d.awaiting_first_sync, Some(0));
+        assert!(!d.items.iter().any(|i| i.name == "ghost"), "{:?}", d.items);
+    }
+
+    /// A feed that has never delivered here is missing the EXCHANGE, not an apply — its one
+    /// placeholder line must not promise `update` lands something it cannot know exists.
+    #[test]
+    fn a_feed_with_no_delivery_yet_promises_only_the_exchange() {
+        let home = TempHome::new();
+        let cwd = home.0.join("plain");
+        std::fs::create_dir_all(&cwd).unwrap();
+        home.session(
+            "topos.sh",
+            "w_acme",
+            "acme",
+            crate::sessions::SESSION_ACTIVE,
+        );
+
+        let d = snapshot_at(&home, &cwd);
+        let row = d.items.iter().find(|i| i.name == "acme").expect("the feed");
+        assert_eq!(row.reference, "topos.sh/acme");
+        assert_eq!(row.source, "the topos.sh/acme feed");
+        assert!(
+            matches!(row.state, StatusItemState::NoDeliveryYet),
+            "{:?}",
+            row.state
+        );
+        // The access verdicts are a different fact and still stand.
+        home.session(
+            "topos.sh",
+            "w_acme",
+            "acme",
+            crate::sessions::SESSION_PENDING,
+        );
+        let d = snapshot_at(&home, &cwd);
+        let row = d.items.iter().find(|i| i.name == "acme").expect("the feed");
+        assert!(
+            matches!(row.state, StatusItemState::PendingSession),
+            "{:?}",
+            row.state
+        );
+    }
+
+    /// A cache ENTRY is not an exchange. A landed publish seeds its workspace's entry — host,
+    /// address, and its own manifest-driven row — with no delivery having answered; only the sweep
+    /// stamps `last_delivery_at`. A `via_manifest` row itemizes nothing under a feed, so reading
+    /// the seed as an exchange would drop the adopted feed out of the table with nothing said.
+    #[test]
+    fn a_publish_seeded_entry_keeps_the_never_delivered_placeholder() {
+        let home = TempHome::new();
+        let cwd = home.0.join("plain");
+        std::fs::create_dir_all(&cwd).unwrap();
+        home.session(
+            "topos.sh",
+            "w_acme",
+            "acme",
+            crate::sessions::SESSION_ACTIVE,
+        );
+        crate::sync_status::merge_delivered(
+            &RealFs,
+            &home.layout(),
+            "w_acme",
+            "topos.sh",
+            "acme",
+            "topos_pppppppppppppppppppppppppppppppp",
+            DeliveredSkill {
+                name: "deploy".to_owned(),
+                served_version: "d".repeat(64),
+                via_manifest: true,
+                ..DeliveredSkill::default()
+            },
+        )
+        .unwrap();
+        // The seed's shape is the whole point: an entry exists, no exchange is recorded.
+        let cache = crate::sync_status::read(&RealFs, &home.layout()).unwrap();
+        assert_eq!(cache.workspaces["w_acme"].last_delivery_at, None);
+
+        let d = snapshot_at(&home, &cwd);
+        let row = d.items.iter().find(|i| i.name == "acme").expect("the feed");
+        assert_eq!(row.reference, "topos.sh/acme");
+        assert_eq!(row.source, "the topos.sh/acme feed");
+        assert!(
+            matches!(row.state, StatusItemState::NoDeliveryYet),
+            "{:?}",
+            row.state
+        );
+        // A manifest-driven row is demand, not an assignment — it counts for nothing here, and
+        // nothing claims an exchange that never happened.
+        assert_eq!(d.profile_skills, 0);
+        assert!(
+            !d.notes.iter().any(|n| n.contains("exchanged")),
+            "{:?}",
+            d.notes
+        );
+    }
+
+    /// The other side of that fact: the exchange COMPLETED and the workspace had nothing for this
+    /// person. No row can carry that — the table simply falls silent — so it is said in words,
+    /// once, in the sweep receipt's own vocabulary.
+    #[test]
+    fn a_completed_exchange_that_brought_nothing_says_so() {
+        let home = TempHome::new();
+        let cwd = home.0.join("plain");
+        std::fs::create_dir_all(&cwd).unwrap();
+        home.session(
+            "topos.sh",
+            "w_acme",
+            "acme",
+            crate::sessions::SESSION_ACTIVE,
+        );
+        home.cache("w_acme", "topos.sh", "acme", Vec::new(), Vec::new());
+
+        let d = snapshot_at(&home, &cwd);
+        assert_eq!(
+            d.notes,
+            vec!["topos.sh/acme: exchanged — nothing assigned to you yet"]
+        );
+        // An exchanged feed never wears the never-delivered placeholder.
+        assert!(d.items.is_empty(), "{:?}", d.items);
+
+        // A workspace that DID assign something says nothing of the sort.
+        home.cache(
+            "w_acme",
+            "topos.sh",
+            "acme",
+            vec![assigned("deploy", None)],
+            Vec::new(),
+        );
+        let d = snapshot_at(&home, &cwd);
+        assert!(
+            !d.notes.iter().any(|n| n.contains("exchanged")),
+            "{:?}",
+            d.notes
+        );
     }
 
     /// A global file is COMPLETE: with no feed row the assignments do NOT flow — only the file's

@@ -660,6 +660,106 @@ fn a_global_file_withholds_the_feed_and_says_so_loudly() {
     assert!(loud.contains(&format!("topos add -g @{WS_NAME}")), "{loud}");
 }
 
+/// An exchange that lands EMPTY says so. Without the line the receipt names only what moved, so a
+/// person who was just told the feed would be applied reads the silence as a failed apply.
+#[test]
+fn an_exchange_that_serves_nothing_says_so_without_counting_as_a_failure() {
+    let rig = Rig::new("emptyserve");
+    rig.seed_session();
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let plane = FakePlane::new(log);
+    plane.serves(Vec::new());
+    let dir = FakeDirectory::new(Vec::new(), Vec::new());
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    let out = sweep(&ctx, &plane, &dir);
+
+    let line = out
+        .disclosures
+        .iter()
+        .find(|d| d.starts_with("NOTHING_ASSIGNED"))
+        .unwrap_or_else(|| panic!("the empty-serve line: {:?}", out.disclosures));
+    assert!(line.contains(&format!("{HOST}/{WS_NAME}")), "{line}");
+    assert!(line.contains("nothing assigned to you yet"), "{line}");
+    // A DISCLOSURE: the exchange worked, so nothing here may read as broken.
+    assert!(out.warnings.is_empty(), "{:?}", out.warnings);
+    assert!(out.data.skills.is_empty(), "{:?}", out.data.skills);
+}
+
+/// The line is the WORKSPACE's fact, said ONCE however many times a recipe adopts the address.
+/// The implicit person recipe holds one feed row per live SESSION, so a workspace whose id was
+/// re-minted (the old session row surviving beside the new one) adopts the same address twice and
+/// drives the feed reconcile twice — the receipt must still carry exactly one line.
+#[test]
+fn one_address_adopted_twice_earns_one_empty_exchange_line() {
+    let rig = Rig::new("emptytwice");
+    rig.seed_session();
+    sessions::upsert_session(
+        &rig.fs,
+        &rig.layout(),
+        Session {
+            host: HOST.into(),
+            base_url: format!("https://{HOST}/api"),
+            // A DIFFERENT opaque id for the SAME address — the session file keys on (host, id),
+            // so both rows live, and both name `acme.test/eng`.
+            workspace_id: "w_eng_reminted".into(),
+            workspace_name: WS_NAME.into(),
+            display_name: "Engineering".into(),
+            session_id: "sn_2".into(),
+            credential: "cred-2".into(),
+            status: SESSION_ACTIVE.into(),
+            logged_in_at: 2,
+        },
+    )
+    .unwrap();
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let plane = FakePlane::new(log);
+    plane.serves(Vec::new());
+    let dir = FakeDirectory::new(Vec::new(), Vec::new());
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    let out = sweep(&ctx, &plane, &dir);
+
+    assert_eq!(
+        out.disclosures
+            .iter()
+            .filter(|d| d.starts_with("NOTHING_ASSIGNED"))
+            .count(),
+        1,
+        "{:?}",
+        out.disclosures
+    );
+    assert!(out.warnings.is_empty(), "{:?}", out.warnings);
+}
+
+/// Bundles that ARRIVED and were skipped here are a local choice, not an empty workspace — the
+/// line must not fire on an `"off"` row's work.
+#[test]
+fn a_served_feed_never_earns_the_empty_exchange_line() {
+    let rig = Rig::new("servedfeed");
+    rig.seed_session();
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let noisy = one_file(b"# noisy\n");
+    rig.write_global(&format!(
+        "[bundles]\n\"{HOST}/{WS_NAME}\" = \"*\"\n\"{HOST}/{WS_NAME}/noisy\" = \"off\"\n"
+    ));
+    let plane = FakePlane::new(log).with_version("s_noisy", &noisy);
+    plane.serves(vec![delivered("s_noisy", "noisy", &noisy)]);
+    let dir = FakeDirectory::new(vec![catalog_entry("s_noisy", "noisy", &noisy)], Vec::new());
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    let out = sweep(&ctx, &plane, &dir);
+
+    assert!(
+        !rig.work.0.join("skills/noisy").exists(),
+        "the switch withholds it"
+    );
+    assert!(
+        !out.disclosures
+            .iter()
+            .any(|d| d.starts_with("NOTHING_ASSIGNED")),
+        "the workspace assigned something: {:?}",
+        out.disclosures
+    );
+}
+
 #[test]
 fn an_off_row_withholds_exactly_its_bundle_from_a_flowing_feed() {
     let rig = Rig::new("offrow");

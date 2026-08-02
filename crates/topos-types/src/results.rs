@@ -1423,6 +1423,10 @@ pub enum StatusItemState {
     NotAvailable,
     /// The session that would deliver it is pending an owner's approval.
     PendingSession,
+    /// An adopted feed this installation has never had a delivery from: the next `update` performs
+    /// the first exchange. What that exchange brings — including nothing — is not knowable here,
+    /// so the line promises an exchange, never an apply.
+    NoDeliveryYet,
     /// Not applied here yet — `topos update` applies it (or the state is not determinable
     /// offline).
     Unknown,
