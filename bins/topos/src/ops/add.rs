@@ -6,6 +6,7 @@
 //! version, and writes the sidecar docs — all staged and published with one directory rename, so it is
 //! all-or-nothing and the source bytes are never touched.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use topos_core::digest::{FileMode, to_hex};
@@ -18,7 +19,7 @@ use topos_types::persisted::{Lock, LockedFile, PlacementMap, SwapCapability, Syn
 use topos_types::results::{AddData, KeepAsYoursData, KeepReason, SkillOrigin, UntrackedEntry};
 
 use crate::ctx::Ctx;
-use crate::error::ClientError;
+use crate::error::{ClientError, WorkspaceHint};
 use crate::git_source::{GitTarballSource, RepoFile, extract_tree};
 use crate::id::SkillId;
 use crate::scan::{self, ScannedBundle};
@@ -270,6 +271,9 @@ pub(crate) fn add_with_name(
         reference: None,
         undo: Vec::new(),
         governed_copy: None,
+        // Set by the bare-NAME arm at the composition root when a connected workspace publishes
+        // the same name (the team-managed spelling, disclosed beside the local copy).
+        published_match: None,
         // Set by the manifest half when the edit was not the plain row write (a file born here, a
         // redundant row withheld, an `off` switch deleted, a standing web decline).
         note: None,
@@ -1178,14 +1182,19 @@ pub(crate) fn resolve_add_target(
     let untracked = super::list::discover_untracked(ctx, roots)?;
     match resolve_name(name, harness, &untracked) {
         NameResolution::Resolved(path) => Ok((std::path::PathBuf::from(path), name.to_owned())),
+        // No workspace disclosure here: this entry point serves the verbs that resolve a LOCAL
+        // directory (`publish`'s auto-add, `remove`'s path arm), where a team's copy of the name
+        // is not one of the ways out. The bare-`add` ladder ([`plan_bare_add`]) enriches it.
         NameResolution::AmbiguousHarness(harnesses) => Err(ClientError::AmbiguousHarness {
             name: name.to_owned(),
             harnesses,
+            workspace: None,
         }),
         NameResolution::AmbiguousScope { harness, paths } => Err(ClientError::AmbiguousScope {
             name: name.to_owned(),
             harness,
             paths,
+            workspace: None,
         }),
         // `@harness` matched no untracked placement. If the name is nowhere untracked but IS already
         // tracked, this is a re-add — report `ALREADY_TRACKED` the same as the bare form (so an agent
@@ -1220,6 +1229,268 @@ pub(crate) fn resolve_add_target(
             }
         }
     }
+}
+
+/// One connected workspace that publishes a bare NAME — the workspace half of the bare-name
+/// namespace (see [`published_matches`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PublishedName {
+    pub host: String,
+    pub workspace: String,
+    /// The bundle's catalog name (equal to the name that was probed for).
+    pub name: String,
+    /// The CANONICAL host-qualified spelling — a bare `@ws/name` is ambiguous when sessions on
+    /// different servers share a workspace slug.
+    pub reference: String,
+    /// The digest of the version that workspace serves right now, when a LIVE catalog read
+    /// answered. `None` for a cache-only match: the offline record keeps a served VERSION id,
+    /// which is a different hash from a bundle digest and must never be compared to one.
+    pub bundle_digest: Option<String>,
+}
+
+impl PublishedName {
+    /// The receipt disclosure for an adopt that landed `adopted_digest` bytes: the same workspace
+    /// spelling, plus whether those bytes are provably what the workspace serves today (an
+    /// unknown digest reads `false` — the disclosure never claims agreement it did not check).
+    pub(crate) fn suggestion(&self, adopted_digest: &str) -> topos_types::results::PublishedMatch {
+        topos_types::results::PublishedMatch {
+            workspace: self.workspace.clone(),
+            name: self.name.clone(),
+            reference: self.reference.clone(),
+            identical: self.bundle_digest.as_deref() == Some(adopted_digest),
+        }
+    }
+}
+
+/// Every connected workspace that publishes `name`, offline-first and best-effort — the workspace
+/// half of the namespace a bare `add <name>` resolves against.
+///
+/// Two sources, unioned by `(host, workspace)` with the LIVE read winning. The offline delivery
+/// cache costs nothing and keeps the answer useful on a plane nobody can reach right now, but it
+/// only knows what was delivered to THIS machine — and it carries no bundle digest, so a
+/// cache-only match can never support an identical-bytes claim. Each ACTIVE session's catalog is
+/// the authority on what its workspace actually publishes, and carries the digest.
+///
+/// A session that does not answer is SKIPPED, silently: this is a hint source, and folding a
+/// transport fault into "no workspace has it" would turn an unreachable server into a
+/// not-found. The authoritative read on the subscribe path happens inside `add_reference`, which
+/// refuses honestly when the catalog cannot be read.
+pub(crate) fn published_matches(
+    ctx: &Ctx<'_>,
+    connect: &super::reconcile::SessionConnect<'_>,
+    name: &str,
+) -> Vec<PublishedName> {
+    let mut found: BTreeMap<(String, String), PublishedName> = BTreeMap::new();
+    let cache = crate::sync_status::read(ctx.fs, &ctx.layout).unwrap_or_default();
+    for entry in cache.workspaces.values() {
+        let (Some(host), Some(workspace)) =
+            (entry.host.as_deref(), entry.workspace_name.as_deref())
+        else {
+            continue; // a pre-session record cannot be spelled as a reference
+        };
+        if !entry.delivered.values().any(|d| d.name == name) {
+            continue;
+        }
+        found.insert(
+            (host.to_owned(), workspace.to_owned()),
+            PublishedName {
+                host: host.to_owned(),
+                workspace: workspace.to_owned(),
+                name: name.to_owned(),
+                reference: format!("{host}/{workspace}/{name}"),
+                bundle_digest: None,
+            },
+        );
+    }
+    if let Ok(sessions) = crate::sessions::read_sessions(ctx.fs, &ctx.layout) {
+        for s in &sessions.sessions {
+            // Only an ACTIVE session's catalog is this person's universe (pending delivers nothing).
+            if s.status != crate::sessions::SESSION_ACTIVE {
+                continue;
+            }
+            let transports = connect(s);
+            let Ok(index) = transports.directory.skills_index(&s.workspace_id) else {
+                continue;
+            };
+            for e in index.skills {
+                if e.name != name || e.status != "active" {
+                    continue;
+                }
+                found.insert(
+                    (s.host.clone(), s.workspace_name.clone()),
+                    PublishedName {
+                        host: s.host.clone(),
+                        workspace: s.workspace_name.clone(),
+                        name: e.name.clone(),
+                        reference: format!("{}/{}/{}", s.host, s.workspace_name, e.name),
+                        bundle_digest: Some(e.bundle_digest.clone()),
+                    },
+                );
+            }
+        }
+    }
+    let mut out: Vec<PublishedName> = found.into_values().collect();
+    // Sorted by the spelling the messages print, so a refusal reads the same on every machine.
+    out.sort_by(|a, b| a.reference.cmp(&b.reference));
+    out
+}
+
+/// What a bare `add <name>` resolved to across BOTH namespaces (see [`plan_bare_add`]).
+#[derive(Debug)]
+pub(crate) enum BareAddPlan {
+    /// A local untracked directory to adopt in place — with the workspace spelling to disclose on
+    /// the receipt when exactly one workspace publishes the same name.
+    Adopt {
+        path: PathBuf,
+        name: String,
+        published: Option<PublishedName>,
+    },
+    /// Nothing local carries the name and exactly one connected workspace publishes it — the
+    /// canonical reference to record, through the ordinary reference arm.
+    Subscribe {
+        reference: String,
+        workspace: String,
+    },
+}
+
+/// Resolve a bare `add <name>` against the untracked local inventory AND the connected workspaces'
+/// catalogs — the two halves of the bare-name namespace.
+///
+/// The local half decides first and alone where it can: exactly one untracked directory adopts in
+/// place, as it always has. The workspace half is what a bare name could never reach before —
+/// when nothing local carries the name and exactly one workspace publishes it, the only thing that
+/// name can honestly mean is the team's copy, so the plan subscribes to it. Where BOTH namespaces
+/// answer, the local adopt still wins (the bytes in front of you are what you asked for) and the
+/// workspace spelling rides the receipt; where either is ambiguous, the refusal names every way
+/// out it knows, including the subscribe.
+///
+/// `subscribe` is the fully-bare gate: an `-s`/`-a` selector narrows a local adopt, so a form
+/// carrying one keeps today's answers exactly. (A `<name>@<harness>` suffix cannot reach the
+/// subscribe arm at all — the harness filter resolves to its own typed refusals.)
+///
+/// # Errors
+/// The name-resolution family of [`resolve_add_target`], the two ambiguity shapes ENRICHED with
+/// the workspace disclosure, plus [`ClientError::AmbiguousWorkspace`] when several workspaces
+/// publish a name nothing local carries.
+pub(crate) fn plan_bare_add(
+    ctx: &Ctx<'_>,
+    connect: &super::reconcile::SessionConnect<'_>,
+    roots: &super::DiscoveryRoots,
+    target: &str,
+    subscribe: bool,
+) -> Result<BareAddPlan, ClientError> {
+    let (name, harness) = split_target(target);
+    // The same residual guard [`resolve_add_target`] carries: a `~`-prefixed bare token is never a
+    // discovered skill NAME, so it gets path guidance rather than a confusing not-found — and the
+    // probe below never runs for it.
+    if is_path_shaped(name) {
+        return Err(ClientError::PathNotName {
+            arg: target.to_owned(),
+        });
+    }
+    let untracked = super::list::discover_untracked(ctx, roots)?;
+    let published = published_matches(ctx, connect, name);
+    match resolve_name(name, harness, &untracked) {
+        NameResolution::Resolved(path) => Ok(BareAddPlan::Adopt {
+            path: PathBuf::from(path),
+            name: name.to_owned(),
+            // ONE workspace is a spelling worth naming; several is a choice this receipt has no
+            // business making beside an adopt that already landed.
+            published: match published.as_slice() {
+                [one] => Some(one.clone()),
+                _ => None,
+            },
+        }),
+        NameResolution::AmbiguousHarness(harnesses) => Err(ClientError::AmbiguousHarness {
+            name: name.to_owned(),
+            harnesses,
+            // Every discovered dir of this name is a candidate — the refusal lists harnesses, not
+            // paths, so the identical-bytes proof reads the inventory itself.
+            workspace: workspace_hint(&published, &paths_named(name, &untracked)),
+        }),
+        NameResolution::AmbiguousScope { harness, paths } => {
+            let workspace = workspace_hint(&published, &paths);
+            Err(ClientError::AmbiguousScope {
+                name: name.to_owned(),
+                harness,
+                paths,
+                workspace,
+            })
+        }
+        NameResolution::HarnessNotFound { harness, available } => {
+            if available.is_empty() && tracked_by_name(ctx, name)? {
+                Err(ClientError::AlreadyTrackedName {
+                    name: name.to_owned(),
+                })
+            } else {
+                Err(ClientError::HarnessNotFound(harness_not_found_message(
+                    name, &harness, &available,
+                )))
+            }
+        }
+        NameResolution::NoMatch => {
+            if tracked_by_name(ctx, name)? {
+                return Err(ClientError::AlreadyTrackedName {
+                    name: name.to_owned(),
+                });
+            }
+            if Path::new(name).exists() {
+                // A bare word that is a real cwd entry but no skill — the user likely meant a path.
+                return Err(ClientError::PathNotName {
+                    arg: target.to_owned(),
+                });
+            }
+            match published.as_slice() {
+                [one] if subscribe => Ok(BareAddPlan::Subscribe {
+                    reference: one.reference.clone(),
+                    workspace: one.workspace.clone(),
+                }),
+                // Several teams publish the name: naming one for the user would be a guess about
+                // whose process they meant. Both spellings, and the user picks.
+                [_, _, ..] if subscribe => Err(ClientError::AmbiguousWorkspace {
+                    name: name.to_owned(),
+                    references: published.iter().map(|p| p.reference.clone()).collect(),
+                }),
+                _ => Err(ClientError::NoUntrackedSkill {
+                    name: name.to_owned(),
+                }),
+            }
+        }
+    }
+}
+
+/// The same-name disclosure for a LOCAL ambiguity, or `None` when no connected workspace publishes
+/// the name. `identical` is claimed only on proof: exactly one reference, its live catalog digest
+/// in hand, and every local candidate scanning to that digest — an unreadable directory or a
+/// cache-only match leaves the weaker (still useful) disclosure standing.
+fn workspace_hint(published: &[PublishedName], candidates: &[String]) -> Option<WorkspaceHint> {
+    if published.is_empty() {
+        return None;
+    }
+    let served = match published {
+        [one] => one.bundle_digest.as_deref(),
+        _ => None,
+    };
+    let identical = served.is_some_and(|digest| {
+        !candidates.is_empty()
+            && candidates
+                .iter()
+                .all(|p| scan::scan(Path::new(p)).is_ok_and(|b| to_hex(&b.bundle_digest) == digest))
+    });
+    Some(WorkspaceHint {
+        references: published.iter().map(|p| p.reference.clone()).collect(),
+        identical,
+    })
+}
+
+/// Every discovered untracked directory carrying `name` — the local candidate set behind an
+/// identical-bytes proof for a refusal that lists harnesses rather than paths.
+fn paths_named(name: &str, untracked: &[UntrackedEntry]) -> Vec<String> {
+    untracked
+        .iter()
+        .filter(|u| u.name == name)
+        .map(|u| u.path.clone())
+        .collect()
 }
 
 /// The outcome of matching a name (+ optional harness slug) against the discovered untracked inventory —

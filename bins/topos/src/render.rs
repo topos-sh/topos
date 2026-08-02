@@ -33,7 +33,8 @@ pub(crate) fn ok_envelope(command: &str, data: serde_json::Value) -> JsonEnvelop
 /// A failure envelope carrying the stable code, outcome, and machine-actionable next steps. An
 /// [`ClientError::AmbiguousTarget`] additionally surfaces its paste-ready qualified paths as
 /// `data.candidates` — the machine-readable half of the ambiguity refusal (the human list rides
-/// the message).
+/// the message) — and an [`ClientError::AmbiguousWorkspace`] its canonical references the same
+/// way, as `data.references`.
 pub(crate) fn err_envelope(command: &str, err: &ClientError) -> JsonEnvelope {
     let outcome = err.outcome();
     let next_actions = next_actions(err);
@@ -44,6 +45,9 @@ pub(crate) fn err_envelope(command: &str, err: &ClientError) -> JsonEnvelope {
     let data = match err {
         ClientError::AmbiguousTarget { candidates, .. } => {
             serde_json::json!({ "candidates": candidates })
+        }
+        ClientError::AmbiguousWorkspace { references, .. } => {
+            serde_json::json!({ "references": references })
         }
         _ => serde_json::json!({}),
     };
@@ -71,16 +75,54 @@ pub(crate) fn err_envelope(command: &str, err: &ClientError) -> JsonEnvelope {
 
 fn next_actions(err: &ClientError) -> Vec<NextAction> {
     match err {
+        // A LOCAL ambiguity whose name a connected workspace ALSO publishes has two real ways
+        // out, so it carries both: the inventory read that resolves the local pick, and the
+        // subscribe (the first canonical reference, as ONE argv token straight from the hint).
+        ClientError::AmbiguousHarness {
+            workspace: Some(hint),
+            ..
+        }
+        | ClientError::AmbiguousScope {
+            workspace: Some(hint),
+            ..
+        } => {
+            let mut out = vec![disambiguate_with_list()];
+            out.extend(hint.references.first().map(|reference| {
+                crate::actions::next_action(
+                    ActionCode::from("RUN_COMMAND".to_owned()),
+                    vec![
+                        "topos".into(),
+                        "add".into(),
+                        reference.clone(),
+                        "--json".into(),
+                    ],
+                )
+            }));
+            out
+        }
+        // Several workspaces publish the name: one executable subscribe per spelling, so the
+        // agent picks a reference instead of re-parsing the sentence that listed them.
+        ClientError::AmbiguousWorkspace { references, .. } => references
+            .iter()
+            .map(|reference| {
+                crate::actions::next_action(
+                    ActionCode::from("RUN_COMMAND".to_owned()),
+                    vec![
+                        "topos".into(),
+                        "add".into(),
+                        reference.clone(),
+                        "--json".into(),
+                    ],
+                )
+            })
+            .collect(),
         // Every "look at the discovered inventory to resolve this" error points the agent at `list` — the
         // ambiguity shapes plus the not-found cases from `add <skill>` name resolution.
         ClientError::AmbiguousName { .. }
         | ClientError::AmbiguousHarness { .. }
         | ClientError::AmbiguousScope { .. }
         | ClientError::NoUntrackedSkill { .. }
-        | ClientError::HarnessNotFound(_) => vec![crate::actions::next_action(
-            ActionCode::DisambiguateName,
-            vec!["topos".into(), "list".into(), "--json".into()],
-        )],
+        | ClientError::HarnessNotFound(_) => vec![disambiguate_with_list()],
         // A review verdict on a no-longer-open proposal — point the agent at the open inbox.
         ClientError::ReviewNotOpen(_) => vec![crate::actions::next_action(
             ActionCode::from("REVIEW_INBOX".to_owned()),
@@ -222,6 +264,14 @@ fn next_actions(err: &ClientError) -> Vec<NextAction> {
         // mirrors it structurally. Prose text is never tokenized into argv — see the allowlist.
         other => mirror_prose_commands(&safe_message(other)),
     }
+}
+
+/// The inventory read every name-resolution refusal offers: what is adoptable here, machine-readable.
+fn disambiguate_with_list() -> NextAction {
+    crate::actions::next_action(
+        ActionCode::DisambiguateName,
+        vec!["topos".into(), "list".into(), "--json".into()],
+    )
 }
 
 /// The STATIC command spellings a refusal's prose may name, each with its READY argv — the whole
@@ -550,6 +600,24 @@ pub(crate) fn add_tty(data: &AddData) -> String {
         });
     }
     out.push_str(&breadth_trigger_lines(&data.triggers));
+    // The same courtesy for a NAME: the local dir was adopted as asked, and a connected workspace
+    // publishes that name too — so the team-managed spelling is named beside it. Proven-identical
+    // bytes say so, because then the local copy has nothing the team's copy lacks.
+    if let Some(p) = &data.published_match {
+        out.push_str(&format!(
+            "\nAlso published: workspace '{}' has '{}' as {} — {} `topos add {}` subscribes to the \
+             team's copy (delivered and kept current), instead of this local one.",
+            p.workspace,
+            p.name,
+            p.reference,
+            if p.identical {
+                "the bytes you just adopted are identical to what it serves today;"
+            } else {
+                "its version may differ from yours;"
+            },
+            p.reference
+        ));
+    }
     // The DEDUP courtesy on a remote import: a connected workspace already governs this source —
     // name the reference (visible, never blocking; the import above landed as asked).
     if let Some(g) = &data.governed_copy {

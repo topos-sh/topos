@@ -6,6 +6,48 @@ use topos_types::TerminalOutcome;
 
 use topos_core::digest::RejectReason;
 
+/// The same-name disclosure a local-ambiguity refusal carries when the name the user typed is ALSO
+/// published in a connected workspace: the canonical references to subscribe to, and whether the
+/// local copies are provably the same bytes as the one version those references serve.
+///
+/// `identical` is a claim, so it is made only on proof — exactly one reference, its live catalog
+/// digest in hand, and every local candidate scanning to it. A cache-only match, several
+/// workspaces, or an unreadable directory all leave it `false`: the disclosure still names the
+/// team-managed spelling, it just does not say the bytes agree.
+#[derive(Debug, Clone)]
+pub(crate) struct WorkspaceHint {
+    /// The canonical host-qualified references (`<host>/<workspace>/<name>`), sorted.
+    pub references: Vec<String>,
+    /// Every local candidate is byte-identical to the ONE reference's current version.
+    pub identical: bool,
+}
+
+/// The clause an ambiguity refusal appends when a connected workspace publishes the same name —
+/// empty when none does, so the two messages stay byte-identical to their pre-disclosure form.
+/// Proven-identical bytes get the stronger reading (there is nothing to keep locally); otherwise
+/// the clause states the choice without judging it.
+fn workspace_sentence(name: &str, hint: Option<&WorkspaceHint>) -> String {
+    let Some(hint) = hint else {
+        return String::new();
+    };
+    let Some(first) = hint.references.first() else {
+        return String::new();
+    };
+    if hint.identical {
+        return format!(
+            "; every local copy above is byte-identical to what `{first}` serves today — \
+             `topos add {first}` subscribes to the team's copy, while adopting a path forks it \
+             into a new, unmanaged skill"
+        );
+    }
+    format!(
+        "; '{name}' is also published in {} — `topos add {first}` subscribes to the team's copy \
+         (delivered and kept current by topos), while the paths above adopt a local copy as a \
+         new, unmanaged skill",
+        hint.references.join(", ")
+    )
+}
+
 /// A local-core failure. `#[non_exhaustive]` so new verbs can add variants without breaking matches.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
@@ -116,25 +158,43 @@ pub(crate) enum ClientError {
     },
     /// `add <skill>` resolved a name that sits under more than one harness's skill dir. The caller must
     /// disambiguate with `<skill>@<harness>`. The `harnesses` are the registry slugs, shown VERBATIM.
+    /// `workspace` carries the same-name disclosure when a connected workspace publishes the name too.
     #[error(
-        "the skill name '{name}' is found in {} harnesses ({}) — disambiguate with `topos add {name}@<harness>`",
-        harnesses.len(), harnesses.join(", ")
+        "the skill name '{name}' is found in {} harnesses ({}) — disambiguate with `topos add {name}@<harness>`{}",
+        harnesses.len(), harnesses.join(", "), workspace_sentence(name, workspace.as_ref())
     )]
     AmbiguousHarness {
         name: String,
         harnesses: Vec<String>,
+        workspace: Option<WorkspaceHint>,
     },
     /// `add <skill>[@<harness>]` resolved to more than one directory within a SINGLE harness (a name in
     /// both the user- and project-scope dir, say). `@<harness>` cannot split them, so the caller adopts one
-    /// explicitly by path. The `paths` are the user's own directories, shown VERBATIM.
+    /// explicitly by path. The `paths` are the user's own directories, shown VERBATIM. `workspace` carries
+    /// the same-name disclosure when a connected workspace publishes the name too.
     #[error(
-        "the skill '{name}' in harness '{harness}' matches {} directories ({}) — adopt one by path (`topos add <dir>`)",
-        paths.len(), paths.join(", ")
+        "the skill '{name}' in harness '{harness}' matches {} directories ({}) — adopt one by path (`topos add <dir>`){}",
+        paths.len(), paths.join(", "), workspace_sentence(name, workspace.as_ref())
     )]
     AmbiguousScope {
         name: String,
         harness: String,
         paths: Vec<String>,
+        workspace: Option<WorkspaceHint>,
+    },
+    /// `add <name>` found no untracked local skill of that name, and MORE than one connected workspace
+    /// publishes it — the machine cannot pick between two teams' copies, so it names both spellings and
+    /// refuses. The `references` are the canonical host-qualified forms, shown VERBATIM (a workspace
+    /// address is a path-safe identifier, never a secret); they also ride the envelope's
+    /// `data.references` and one `next_actions` entry each.
+    #[error(
+        "'{name}' is published in {} of the workspaces this machine is connected to ({}) — name the one \
+         you mean (`topos add <reference>`)",
+        references.len(), references.join(", ")
+    )]
+    AmbiguousWorkspace {
+        name: String,
+        references: Vec<String>,
     },
     /// `add <skill>@<harness>` named a harness that holds no untracked skill of that name. The message
     /// names where the skill IS found (if anywhere), all shown VERBATIM (slugs + the user's own tokens).
@@ -410,6 +470,7 @@ impl ClientError {
             ClientError::HarnessMismatch { .. } => "HARNESS_MISMATCH",
             ClientError::AmbiguousHarness { .. } => "AMBIGUOUS_HARNESS",
             ClientError::AmbiguousScope { .. } => "AMBIGUOUS_SCOPE",
+            ClientError::AmbiguousWorkspace { .. } => "AMBIGUOUS_WORKSPACE",
             ClientError::HarnessNotFound(_) => "HARNESS_NOT_FOUND",
             ClientError::PathNotName { .. } => "PATH_NOT_NAME",
             ClientError::PlacementUnsupported { .. } => "PLACEMENT_UNSUPPORTED",
@@ -470,6 +531,8 @@ impl ClientError {
             ClientError::AmbiguousName { .. }
             | ClientError::AmbiguousHarness { .. }
             | ClientError::AmbiguousScope { .. }
+            // A name several connected workspaces publish is the same class — pick a spelling, retry.
+            | ClientError::AmbiguousWorkspace { .. }
             // A repo holding several skills (or several dirs of one name) is the same "disambiguate and
             // retry" class — as is a workspace-resource name matching across workspaces or kinds.
             | ClientError::AmbiguousSkillInRepo { .. }

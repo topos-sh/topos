@@ -464,6 +464,8 @@ fn fixtures() -> Vec<(&'static str, String)> {
             reference: None,
             undo: Vec::new(),
             governed_copy: None,
+            // The fixture rig has no session, so no workspace can publish the same name.
+            published_match: None,
             note: None,
         })
         .expect("AddData serializes"),

@@ -434,7 +434,7 @@ pub(super) fn all_rows(plan: &ScopePlan) -> Vec<PlanRow> {
 // ---------------------------------------------------------------------------------------------
 
 /// Append one disclosure to the receipt's note (several disclosures join with ` · `).
-pub(super) fn push_note(data: &mut AddData, line: impl Into<String>) {
+pub(crate) fn push_note(data: &mut AddData, line: impl Into<String>) {
     let line = line.into();
     data.note = Some(match data.note.take() {
         Some(prev) => format!("{prev} · {line}"),
