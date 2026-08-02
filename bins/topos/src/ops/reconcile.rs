@@ -1083,6 +1083,10 @@ fn reconcile_set<'a>(
             // line counts exactly what this run will sync — never "(6 of 20)" over nineteen skips.
             // (`targets.hit`/`mention`/`claimed` mutate sweep bookkeeping; hoisting them keeps each
             // evaluated once per member, in the same order the loop below visits.)
+            // `claimed` reads what EARLIER sources synced; a duplicate id WITHIN this channel's own
+            // index passes it every time (nothing syncs until the loop below), so the batch tracks
+            // its own picks too — a duplicate row is bookkept (hit/mention) but never counted.
+            let mut picked: HashSet<&str> = HashSet::new();
             let batch: Vec<&WireSkillIndexEntry> = members
                 .iter()
                 .filter_map(|member| {
@@ -1096,7 +1100,10 @@ fn reconcile_set<'a>(
                         return None;
                     }
                     sweep.mention(&sc.label, &entry.name);
-                    (!sweep.claimed(&sc.label, &entry.skill_id)).then_some(entry)
+                    if sweep.claimed(&sc.label, &entry.skill_id) {
+                        return None;
+                    }
+                    picked.insert(entry.skill_id.as_str()).then_some(entry)
                 })
                 .collect();
             let total = batch.len();
@@ -1177,6 +1184,9 @@ fn reconcile_feed<'a>(
             // `--target` narrowing skips, and what an earlier source in this sweep claimed. Every
             // filter runs HERE, in visit order, so the activity line counts exactly what this run
             // will sync (same hoisting rationale as the channel batch above).
+            // Same in-batch dedupe as the channel batch: a duplicate id in one delivery frame is
+            // bookkept but never counted (`claimed` cannot see it until something syncs).
+            let mut picked: HashSet<&str> = HashSet::new();
             let batch: Vec<&DeliverySkill> = served
                 .iter()
                 .filter(|ds| {
@@ -1189,7 +1199,10 @@ fn reconcile_feed<'a>(
                         return false;
                     }
                     sweep.mention(&sc.label, &ds.name);
-                    !sweep.claimed(&sc.label, &ds.skill_id)
+                    if sweep.claimed(&sc.label, &ds.skill_id) {
+                        return false;
+                    }
+                    picked.insert(ds.skill_id.as_str())
                 })
                 .collect();
             let total = batch.len();
