@@ -1,0 +1,61 @@
+{
+  "schema_version": 1,
+  "command": "add",
+  "ok": false,
+  "data": {
+    "references": [
+      "topos.sh/acme/code-review",
+      "topos.sh/beta/code-review"
+    ]
+  },
+  "warnings": [],
+  "next_actions": [
+    {
+      "code": "RUN_COMMAND",
+      "argv": [
+        "topos",
+        "add",
+        "topos.sh/acme/code-review",
+        "--json"
+      ]
+    },
+    {
+      "code": "RUN_COMMAND",
+      "argv": [
+        "topos",
+        "add",
+        "topos.sh/beta/code-review",
+        "--json"
+      ]
+    }
+  ],
+  "error": {
+    "code": "AMBIGUOUS_WORKSPACE",
+    "outcome": "AMBIGUOUS_NAME",
+    "retryable": false,
+    "affected": {},
+    "context": {
+      "message": "'code-review' is published in 2 of the workspaces this machine is connected to (topos.sh/acme/code-review, topos.sh/beta/code-review) — name the one you mean (`topos add <reference>`)"
+    },
+    "next_actions": [
+      {
+        "code": "RUN_COMMAND",
+        "argv": [
+          "topos",
+          "add",
+          "topos.sh/acme/code-review",
+          "--json"
+        ]
+      },
+      {
+        "code": "RUN_COMMAND",
+        "argv": [
+          "topos",
+          "add",
+          "topos.sh/beta/code-review",
+          "--json"
+        ]
+      }
+    ]
+  }
+}

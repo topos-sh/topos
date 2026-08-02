@@ -424,8 +424,8 @@ fn fixtures() -> Vec<(&'static str, String)> {
         AddData, Conflict, ConflictPathReport, DiffData, DiffPatchInfo, DiffSource,
         EnrollmentPending, InviteReadData, ListData, LogData, LoginData, LogoutData, MergePreview,
         MergePreviewVerdict, MergeReport, ProtectData, PublishData, PublishDescribeData,
-        PublishGate, PullAction, PullData, PullSkill, RemoveData, RemoveItem, RemoveKind,
-        ReviewIndexData, ReviewIndexEntry, SkillEntry, StatusData, StatusTrigger,
+        PublishGate, PublishedMatch, PullAction, PullData, PullSkill, RemoveData, RemoveItem,
+        RemoveKind, ReviewIndexData, ReviewIndexEntry, SkillEntry, StatusData, StatusTrigger,
         WorkspaceSyncReport,
     };
     use topos_types::{ActionCode, Affected, JsonEnvelope, Receipt, TerminalOutcome, WireError};
@@ -473,6 +473,163 @@ fn fixtures() -> Vec<(&'static str, String)> {
         next_actions: vec![],
         receipt: None,
         error: None,
+    };
+
+    // The bare-NAME arms, where the connected workspaces are part of the namespace.
+    //
+    // (a) Nothing local carries the name, ONE workspace publishes it: the row is that workspace's
+    //     canonical reference, and the note teaches the spelling it resolved to.
+    let add_subscribed = JsonEnvelope {
+        schema_version: 1,
+        command: "add".to_owned(),
+        ok: true,
+        data: serde_json::to_value(AddData {
+            skill_id: "s_codereview".to_owned(),
+            name: "code-review".to_owned(),
+            version_id: fx_version.to_owned(),
+            bundle_digest: fx_digest.to_owned(),
+            tracked: true,
+            harness: None,
+            harness_slug: None,
+            currency: None,
+            triggers: Vec::new(),
+            origin: None,
+            manifest: Some("/work/acme-api/topos.toml".to_owned()),
+            reference: Some("topos.sh/acme/code-review".to_owned()),
+            undo: argv(&["topos", "remove", "topos.sh/acme/code-review"]),
+            governed_copy: None,
+            // The subscribe IS the workspace copy — there is no local one to compare it against.
+            published_match: None,
+            note: Some(
+                "resolved 'code-review' to topos.sh/acme/code-review — no untracked skill of that \
+                 name is on this machine, and acme publishes it"
+                    .to_owned(),
+            ),
+        })
+        .expect("AddData serializes"),
+        warnings: vec![],
+        next_actions: vec![topos::actions::next_action(
+            ActionCode::from("UNDO".to_owned()),
+            argv(&["topos", "remove", "topos.sh/acme/code-review"]),
+        )],
+        receipt: None,
+        error: None,
+    };
+
+    // (b) A local directory carried the name and adopted in place — and a connected workspace
+    //     publishes the same name, so the team-managed spelling rides the receipt beside it.
+    let add_published_match = JsonEnvelope {
+        schema_version: 1,
+        command: "add".to_owned(),
+        ok: true,
+        data: serde_json::to_value(AddData {
+            skill_id: "topos_t00".to_owned(),
+            name: "pr-describe".to_owned(),
+            version_id: fx_version.to_owned(),
+            bundle_digest: fx_digest.to_owned(),
+            tracked: true,
+            harness: None,
+            harness_slug: None,
+            currency: None,
+            triggers: Vec::new(),
+            origin: None,
+            manifest: Some("/work/acme-api/topos.toml".to_owned()),
+            reference: Some("./tools/pr-describe".to_owned()),
+            undo: argv(&["topos", "remove", "./tools/pr-describe"]),
+            governed_copy: None,
+            published_match: Some(PublishedMatch {
+                workspace: "acme".to_owned(),
+                name: "pr-describe".to_owned(),
+                reference: "topos.sh/acme/pr-describe".to_owned(),
+                // The adopted bytes hash to exactly what the workspace serves today.
+                identical: true,
+            }),
+            note: None,
+        })
+        .expect("AddData serializes"),
+        warnings: vec![],
+        next_actions: vec![topos::actions::next_action(
+            ActionCode::from("UNDO".to_owned()),
+            argv(&["topos", "remove", "./tools/pr-describe"]),
+        )],
+        receipt: None,
+        error: None,
+    };
+
+    // (c) Nothing local carries the name and SEVERAL workspaces publish it — the refusal names
+    //     every spelling, machine-readably in `data.references` and as one runnable action each.
+    let ws_refs = ["topos.sh/acme/code-review", "topos.sh/beta/code-review"];
+    let ambiguous_workspace_actions: Vec<_> = ws_refs
+        .iter()
+        .map(|r| {
+            topos::actions::next_action(
+                ActionCode::from("RUN_COMMAND".to_owned()),
+                argv(&["topos", "add", r, "--json"]),
+            )
+        })
+        .collect();
+    let add_ambiguous_workspace = JsonEnvelope {
+        schema_version: 1,
+        command: "add".to_owned(),
+        ok: false,
+        data: serde_json::json!({ "references": ws_refs }),
+        warnings: vec![],
+        next_actions: ambiguous_workspace_actions.clone(),
+        receipt: None,
+        error: Some(WireError {
+            code: "AMBIGUOUS_WORKSPACE".to_owned(),
+            outcome: TerminalOutcome::AmbiguousName,
+            retryable: false,
+            affected: Affected::default(),
+            expected_generation: None,
+            current_generation: None,
+            context: serde_json::json!({
+                "message": "'code-review' is published in 2 of the workspaces this machine is \
+                            connected to (topos.sh/acme/code-review, topos.sh/beta/code-review) — \
+                            name the one you mean (`topos add <reference>`)"
+            }),
+            next_actions: ambiguous_workspace_actions,
+        }),
+    };
+
+    // (d) The LOCAL ambiguity, enriched: two directories carry the name in one harness, and a
+    //     workspace publishes it too — so the refusal offers the inventory read AND the subscribe.
+    let ambiguous_scope_actions = vec![
+        topos::actions::next_action(
+            ActionCode::DisambiguateName,
+            argv(&["topos", "list", "--json"]),
+        ),
+        topos::actions::next_action(
+            ActionCode::from("RUN_COMMAND".to_owned()),
+            argv(&["topos", "add", "topos.sh/acme/code-review", "--json"]),
+        ),
+    ];
+    let add_ambiguous_scope = JsonEnvelope {
+        schema_version: 1,
+        command: "add".to_owned(),
+        ok: false,
+        data: serde_json::json!({}),
+        warnings: vec![],
+        next_actions: ambiguous_scope_actions.clone(),
+        receipt: None,
+        error: Some(WireError {
+            code: "AMBIGUOUS_SCOPE".to_owned(),
+            outcome: TerminalOutcome::AmbiguousName,
+            retryable: false,
+            affected: Affected::default(),
+            expected_generation: None,
+            current_generation: None,
+            context: serde_json::json!({
+                "message": "the skill 'code-review' in harness 'claude-code' matches 2 directories \
+                            (/home/ada/.claude/skills/code-review, \
+                            /work/acme-api/.claude/skills/code-review) — adopt one by path (`topos \
+                            add <dir>`); every local copy above is byte-identical to what \
+                            `topos.sh/acme/code-review` serves today — `topos add \
+                            topos.sh/acme/code-review` subscribes to the team's copy, while \
+                            adopting a path forks it into a new, unmanaged skill"
+            }),
+            next_actions: ambiguous_scope_actions,
+        }),
     };
 
     // A clean `pull` that found one followed skill already current.
@@ -1401,6 +1558,13 @@ fn fixtures() -> Vec<(&'static str, String)> {
         ("json/pull.merged", emit_json(&pull_merged)),
         ("json/pull.conflicted", emit_json(&pull_conflicted)),
         ("json/add.ok", emit_json(&add_ok)),
+        ("json/add.subscribed", emit_json(&add_subscribed)),
+        ("json/add.published-match", emit_json(&add_published_match)),
+        (
+            "json/add.ambiguous-workspace",
+            emit_json(&add_ambiguous_workspace),
+        ),
+        ("json/add.ambiguous-scope", emit_json(&add_ambiguous_scope)),
         ("json/list.ok", emit_json(&list_ok)),
         ("json/diff.ok", emit_json(&diff_ok)),
         ("json/log.ok", emit_json(&log_ok)),

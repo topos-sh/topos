@@ -1,0 +1,38 @@
+{
+  "schema_version": 1,
+  "command": "add",
+  "ok": true,
+  "data": {
+    "bundle_digest": "c35004153b0f72e2e8363b557f36594319d5382eb9e4c7add5ff0feb3b15c369",
+    "manifest": "/work/acme-api/topos.toml",
+    "name": "pr-describe",
+    "published_match": {
+      "identical": true,
+      "name": "pr-describe",
+      "reference": "topos.sh/acme/pr-describe",
+      "workspace": "acme"
+    },
+    "reference": "./tools/pr-describe",
+    "skill_id": "topos_t00",
+    "tracked": true,
+    "undo": [
+      "topos",
+      "remove",
+      "./tools/pr-describe"
+    ],
+    "version_id": "d77b648d8149d63189864c6b6d06da4f7919935c4242cc197e708b1dafe941d5"
+  },
+  "warnings": [],
+  "next_actions": [
+    {
+      "code": "UNDO",
+      "argv": [
+        "topos",
+        "remove",
+        "./tools/pr-describe"
+      ],
+      "mutates": true,
+      "risk_note": "removes the skill from this machine (a team-managed skill keeps its canonical bytes)"
+    }
+  ]
+}
