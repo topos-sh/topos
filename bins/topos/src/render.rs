@@ -1927,11 +1927,10 @@ pub(crate) fn publish_tty(data: &PublishData) -> String {
     // Lead with the NAME — the handle the person publishes by; the opaque skill_id stays a
     // `--json` key, never the human line.
     out.push_str(&format!(
-        "Published {}@{} (digest {}) — current is now generation {}.",
+        "Published {}@{} (digest {}) — current now points at it.",
         data.name,
         short(&data.version_id),
         short(&data.bundle_digest),
-        data.current_generation,
     ));
     // A withheld placement is disclosed next to the success it qualifies: the publish landed,
     // the curated channel's reference did not — placement takes reviewer or owner.
@@ -2026,12 +2025,11 @@ pub(crate) fn propose_tty(data: &ProposeData) -> String {
 
 pub(crate) fn revert_tty(data: &RevertData) -> String {
     format!(
-        "Reverted {} to {} as forward commit {} — current is now generation {}. Nothing was \
-         deleted; move current forward again to redo.",
+        "Reverted {} to {} as forward commit {} — nothing was deleted; move current forward \
+         again to redo.",
         data.name,
         short(&data.reverted_to),
         short(&data.new_version_id),
-        data.current_generation,
     )
 }
 
@@ -2041,12 +2039,11 @@ pub(crate) fn revert_describe_tty(
     yes_argv: &[String],
 ) -> String {
     format!(
-        "Revert {} — move current @{} forward to restore @{} (from generation {}).\n  a forward \
+        "Revert {} — move current @{} forward to restore @{}.\n  a forward \
          move restoring older bytes; nothing deleted\nNothing has changed yet — apply with:\n  {}",
         data.skill,
         short(&data.current_version_id),
         short(&data.reverted_to),
-        data.current_generation,
         argv_line(yes_argv),
     )
 }
@@ -2147,16 +2144,12 @@ pub(crate) fn review_describe_tty(
 
 pub(crate) fn review_tty(data: &ReviewData) -> String {
     match data.decision {
-        ReviewDecision::Approve => {
-            let moved_to = data
-                .current_generation
-                .map(|g| format!("generation {g}"))
-                .unwrap_or_else(|| "the new version".to_owned());
-            format!(
-                "Approved {} — current moved to {moved_to}. Every follower picks it up on their next update.",
-                data.proposal,
-            )
-        }
+        ReviewDecision::Approve => format!(
+            // `proposal` is `<skill>@<version_id>` — the hash IS the destination, git-style; the
+            // pointer's internal edition count stays a `--json` field, never the human line.
+            "Approved {} — current moved to it. Every follower picks it up on their next update.",
+            data.proposal,
+        ),
         ReviewDecision::Reject => format!(
             "Rejected {}. It will no longer be applied; `current` is unchanged.",
             data.proposal,
@@ -2292,10 +2285,7 @@ fn pull_row(s: &PullSkill) -> (String, Vec<String>) {
     match s.action {
         // Handled by the caller's compact summary.
         PullAction::UpToDate => (String::from("up to date"), Vec::new()),
-        PullAction::FastForwarded => (
-            format!("fast-forwarded — now at generation {}", s.applied),
-            Vec::new(),
-        ),
+        PullAction::FastForwarded => (String::from("fast-forwarded"), Vec::new()),
         PullAction::Offered => {
             let v = s
                 .offer
@@ -2758,11 +2748,10 @@ mod tests {
             out.contains("update offered @ab12cd34ef56 — run `topos update docs`"),
             "{out}"
         );
-        // Fast-forwarded names the new generation.
-        assert!(
-            out.contains("fast-forwarded — now at generation 2"),
-            "{out}"
-        );
+        // Fast-forwarded says only that it moved — the pointer's internal edition count is a
+        // `--json` field, never the human line (versions are named by hash, git-style).
+        assert!(out.contains("fast-forwarded"), "{out}");
+        assert!(!out.contains("generation"), "{out}");
         // Diverged: both the merge command and the disclosed escape.
         assert!(out.contains("`topos update deploy`"), "{out}");
         assert!(
