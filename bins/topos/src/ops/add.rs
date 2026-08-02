@@ -1288,19 +1288,65 @@ pub(crate) fn published_matches(
     connect: &super::reconcile::SessionConnect<'_>,
     name: &str,
 ) -> Vec<PublishedName> {
-    let Ok(sessions) = crate::sessions::read_sessions(ctx.fs, &ctx.layout) else {
-        return Vec::new(); // no readable roster, nothing subscribable — local-only resolution
-    };
-    // Only an ACTIVE session's catalog is this person's universe (pending delivers nothing).
-    let active: Vec<_> = sessions
-        .sessions
-        .iter()
-        .filter(|s| s.status == crate::sessions::SESSION_ACTIVE)
-        .collect();
-    if active.is_empty() {
-        return Vec::new();
+    let active = active_sessions(ctx);
+    let mut found = cached_matches(ctx, &active, name);
+    for s in &active {
+        let transports = connect(s);
+        let Ok(index) = transports.directory.skills_index(&s.workspace_id) else {
+            continue;
+        };
+        // A catalog that ANSWERED is authoritative for its workspace: a cache candidate the index
+        // no longer carries (deleted or archived since the last delivery) is cleared here, never
+        // left to fabricate a match. A failed read above keeps the cache's answer — offline
+        // degradation, not truth decay.
+        found.remove(&(s.host.clone(), s.workspace_name.clone()));
+        for e in index.skills {
+            if e.name != name || e.status != "active" {
+                continue;
+            }
+            found.insert(
+                (s.host.clone(), s.workspace_name.clone()),
+                PublishedName {
+                    host: s.host.clone(),
+                    workspace: s.workspace_name.clone(),
+                    name: e.name.clone(),
+                    reference: format!("{}/{}/{}", s.host, s.workspace_name, e.name),
+                    bundle_digest: Some(e.bundle_digest.clone()),
+                },
+            );
+        }
     }
+    let mut out: Vec<PublishedName> = found.into_values().collect();
+    // Sorted by the spelling the messages print, so a refusal reads the same on every machine.
+    out.sort_by(|a, b| a.reference.cmp(&b.reference));
+    out
+}
+
+/// The ACTIVE session roster — the gate both probe halves stand behind. An unreadable roster reads
+/// as empty: nothing subscribable, local-only resolution.
+fn active_sessions(ctx: &Ctx<'_>) -> Vec<crate::sessions::Session> {
+    let Ok(sessions) = crate::sessions::read_sessions(ctx.fs, &ctx.layout) else {
+        return Vec::new();
+    };
+    sessions
+        .sessions
+        .into_iter()
+        // Only an ACTIVE session's catalog is this person's universe (pending delivers nothing).
+        .filter(|s| s.status == crate::sessions::SESSION_ACTIVE)
+        .collect()
+}
+
+/// The CACHE half of [`published_matches`]: what this machine's own delivery history says the
+/// still-connected workspaces publish. Costs no network at all.
+fn cached_matches(
+    ctx: &Ctx<'_>,
+    active: &[crate::sessions::Session],
+    name: &str,
+) -> BTreeMap<(String, String), PublishedName> {
     let mut found: BTreeMap<(String, String), PublishedName> = BTreeMap::new();
+    if active.is_empty() {
+        return found;
+    }
     let cache = crate::sync_status::read(ctx.fs, &ctx.layout).unwrap_or_default();
     for entry in cache.workspaces.values() {
         let (Some(host), Some(workspace)) =
@@ -1332,36 +1378,44 @@ pub(crate) fn published_matches(
             },
         );
     }
-    for s in &active {
-        let transports = connect(s);
-        let Ok(index) = transports.directory.skills_index(&s.workspace_id) else {
-            continue;
-        };
-        // A catalog that ANSWERED is authoritative for its workspace: a cache candidate the index
-        // no longer carries (deleted or archived since the last delivery) is cleared here, never
-        // left to fabricate a match. A failed read above keeps the cache's answer — offline
-        // degradation, not truth decay.
-        found.remove(&(s.host.clone(), s.workspace_name.clone()));
-        for e in index.skills {
-            if e.name != name || e.status != "active" {
-                continue;
-            }
-            found.insert(
-                (s.host.clone(), s.workspace_name.clone()),
-                PublishedName {
-                    host: s.host.clone(),
-                    workspace: s.workspace_name.clone(),
-                    name: e.name.clone(),
-                    reference: format!("{}/{}/{}", s.host, s.workspace_name, e.name),
-                    bundle_digest: Some(e.bundle_digest.clone()),
-                },
-            );
-        }
-    }
-    let mut out: Vec<PublishedName> = found.into_values().collect();
-    // Sorted by the spelling the messages print, so a refusal reads the same on every machine.
-    out.sort_by(|a, b| a.reference.cmp(&b.reference));
-    out
+    found
+}
+
+/// The receipt disclosure a CLEAN local resolve carries — bounded to at most ONE catalog read,
+/// because a local adopt must stay a local act: only this machine's own delivery history nominates
+/// a workspace (no fan-out probe across every session just for a courtesy line), and only that one
+/// workspace's catalog is then asked — for the digest the identical judgment wants, and to drop a
+/// row the workspace no longer serves. The confirming read is best-effort exactly like the full
+/// probe: unanswered keeps the cache's (digest-less) disclosure; answered-and-absent withdraws it.
+fn confirmed_cached_match(
+    ctx: &Ctx<'_>,
+    connect: &super::reconcile::SessionConnect<'_>,
+    name: &str,
+) -> Option<PublishedName> {
+    let active = active_sessions(ctx);
+    let cached = cached_matches(ctx, &active, name);
+    // ONE workspace is a spelling worth naming; several is a choice no receipt should make.
+    let mut values = cached.into_values();
+    let (candidate, None) = (values.next()?, values.next()) else {
+        return None;
+    };
+    let session = active
+        .iter()
+        .find(|s| s.host == candidate.host && s.workspace_name == candidate.workspace)?;
+    let Ok(index) = connect(session)
+        .directory
+        .skills_index(&session.workspace_id)
+    else {
+        return Some(candidate); // unanswered: the cache's word stands, claiming no digest
+    };
+    index
+        .skills
+        .into_iter()
+        .find(|e| e.name == name && e.status == "active")
+        .map(|e| PublishedName {
+            bundle_digest: Some(e.bundle_digest),
+            ..candidate
+        })
 }
 
 /// What a bare `add <name>` resolved to across BOTH namespaces (see [`plan_bare_add`]).
@@ -1418,27 +1472,28 @@ pub(crate) fn plan_bare_add(
         });
     }
     let untracked = super::list::discover_untracked(ctx, roots)?;
-    let published = published_matches(ctx, connect, name);
+    // The full fan-out probe (one catalog read per active session) runs only where its answer
+    // DECIDES something — the subscribe arm and the two ambiguity refusals. A clean local resolve
+    // stays a local act: its courtesy disclosure is bounded to at most one read, in
+    // [`confirmed_cached_match`], never the sum of every unreachable session's timeout.
     match resolve_name(name, harness, &untracked) {
         NameResolution::Resolved(path) => Ok(BareAddPlan::Adopt {
             path: PathBuf::from(path),
             name: name.to_owned(),
-            // ONE workspace is a spelling worth naming; several is a choice this receipt has no
-            // business making beside an adopt that already landed.
-            published: match published.as_slice() {
-                [one] => Some(one.clone()),
-                _ => None,
-            },
+            published: confirmed_cached_match(ctx, connect, name),
         }),
         NameResolution::AmbiguousHarness(harnesses) => Err(ClientError::AmbiguousHarness {
             name: name.to_owned(),
             harnesses,
             // Every discovered dir of this name is a candidate — the refusal lists harnesses, not
             // paths, so the identical-bytes proof reads the inventory itself.
-            workspace: workspace_hint(&published, &paths_named(name, &untracked)),
+            workspace: workspace_hint(
+                &published_matches(ctx, connect, name),
+                &paths_named(name, &untracked),
+            ),
         }),
         NameResolution::AmbiguousScope { harness, paths } => {
-            let workspace = workspace_hint(&published, &paths);
+            let workspace = workspace_hint(&published_matches(ctx, connect, name), &paths);
             Err(ClientError::AmbiguousScope {
                 name: name.to_owned(),
                 harness,
@@ -1469,6 +1524,7 @@ pub(crate) fn plan_bare_add(
                     arg: target.to_owned(),
                 });
             }
+            let published = published_matches(ctx, connect, name);
             match published.as_slice() {
                 [one] if subscribe => Ok(BareAddPlan::Subscribe {
                     reference: one.reference.clone(),
