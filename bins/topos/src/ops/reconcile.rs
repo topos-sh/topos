@@ -1078,25 +1078,29 @@ fn reconcile_set<'a>(
             let members: Vec<String> = ch.skills.iter().map(|s| s.skill_id.clone()).collect();
             // The batch this channel converges — its members the catalog still serves, minus the
             // ones an explicit row of the SAME scope owns (its version and fields win, and the set
-            // adds nothing). Resolved up front so the activity line can count them.
+            // adds nothing), minus what `--target` narrowing skips and what an earlier source in
+            // this sweep already claimed. Every filter runs HERE, in visit order, so the activity
+            // line counts exactly what this run will sync — never "(6 of 20)" over nineteen skips.
+            // (`targets.hit`/`mention`/`claimed` mutate sweep bookkeeping; hoisting them keeps each
+            // evaluated once per member, in the same order the loop below visits.)
             let batch: Vec<&WireSkillIndexEntry> = members
                 .iter()
                 .filter_map(|member| {
                     let entry = catalog.skills.iter().find(|e| &e.skill_id == member)?;
                     // Archived / no current members simply are not in the catalog — nothing to
                     // deliver, and nothing to count.
-                    (!sc.plan.explicit_claims(host, workspace, &entry.name)).then_some(entry)
+                    if sc.plan.explicit_claims(host, workspace, &entry.name) {
+                        return None;
+                    }
+                    if !set_selected && !targets.hit(&[entry.name.as_str()]) {
+                        return None;
+                    }
+                    sweep.mention(&sc.label, &entry.name);
+                    (!sweep.claimed(&sc.label, &entry.skill_id)).then_some(entry)
                 })
                 .collect();
             let total = batch.len();
             for (position, entry) in batch.into_iter().enumerate() {
-                if !set_selected && !targets.hit(&[entry.name.as_str()]) {
-                    continue;
-                }
-                sweep.mention(&sc.label, &entry.name);
-                if sweep.claimed(&sc.label, &entry.skill_id) {
-                    continue;
-                }
                 let target = CatalogTarget::from_entry(entry);
                 // Book the provenance BEFORE the sync (a per-item failure does not unmake the fact
                 // that this channel provides the name).
@@ -1169,24 +1173,27 @@ fn reconcile_feed<'a>(
                 sweep.disclosures.push(nothing_assigned_line(&address));
             }
             // The batch this feed converges — everything served, minus what this machine's own
-            // file withholds (an `"off"` switch) and what an explicit row already claims. Narrowed
-            // up front so the activity line counts what it will actually visit.
+            // file withholds (an `"off"` switch), what an explicit row already claims, what
+            // `--target` narrowing skips, and what an earlier source in this sweep claimed. Every
+            // filter runs HERE, in visit order, so the activity line counts exactly what this run
+            // will sync (same hoisting rationale as the channel batch above).
             let batch: Vec<&DeliverySkill> = served
                 .iter()
                 .filter(|ds| {
-                    sc.plan.off_for(host, workspace, &ds.name).is_none()
-                        && !sc.plan.explicit_claims(host, workspace, &ds.name)
+                    if sc.plan.off_for(host, workspace, &ds.name).is_some()
+                        || sc.plan.explicit_claims(host, workspace, &ds.name)
+                    {
+                        return false;
+                    }
+                    if !feed_selected && !targets.hit(&[ds.name.as_str()]) {
+                        return false;
+                    }
+                    sweep.mention(&sc.label, &ds.name);
+                    !sweep.claimed(&sc.label, &ds.skill_id)
                 })
                 .collect();
             let total = batch.len();
             for (position, ds) in batch.into_iter().enumerate() {
-                if !feed_selected && !targets.hit(&[ds.name.as_str()]) {
-                    continue;
-                }
-                sweep.mention(&sc.label, &ds.name);
-                if sweep.claimed(&sc.label, &ds.skill_id) {
-                    continue;
-                }
                 let st = SyncTarget {
                     target: CatalogTarget {
                         skill_id: ds.skill_id.clone(),

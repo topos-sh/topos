@@ -265,6 +265,13 @@ impl PlaneSource for UreqPlane {
         // Both ids are spliced into the URL path — refuse anything outside the validated id charset
         // (defense in depth; the enrollment loaders already validated what they persisted).
         ensure_url_safe_ids(skill_id, &workspace_id)?;
+        // ONE fallback phase held across the WHOLE fetch (the metadata frame + every blob). With
+        // no verb-level label in flight (`diff`, `log`), each inner request would otherwise open
+        // and close its own — and a plain stderr would say "contacting <host>" once per file.
+        let _phase = progress::phase_if_idle(
+            &*self.progress,
+            &format!("contacting {}", host_label(&self.base_url)),
+        );
         let vid_hex = to_hex(&version_id);
         let meta_url = format!(
             "{}/v1/workspaces/{}/skills/{}/versions/{}",
