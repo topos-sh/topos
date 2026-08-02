@@ -93,7 +93,7 @@ topos fmt [OPTIONS]
 
 ### `topos add`
 
-Get skills and keep them updated. The source can be a skill or channel from your workspace (`code-review`, `@acme/code-review`, `@acme/channels/backend`), a whole workspace's feed (`@acme`, with `-g`), a local folder (`./tools/my-skill`), or a public GitHub repo (`owner/repo` for every skill in it, `owner/repo/name` for one). Records one line in this folder's `topos.toml` — or in your machine's own file with `-g` — and installs right away. A GitHub source you have never used before shows what it found and waits for `--yes`. `add topos` restores the built-in topos skill
+Get skills and keep them updated. The source can be a skill or channel from your workspace (`code-review`, `@acme/code-review`, `@acme/channels/backend`), a whole workspace's feed (`@acme`, with `-g`), a local folder (`./tools/my-skill`), or a public GitHub repo (`owner/repo` for every skill in it, `owner/repo/name` for one). Records one line in this folder's `topos.toml` — or in your machine's own file with `-g` — and installs right away. A plain name is looked for both in the skills already sitting in your agents' folders and in the catalogs of the workspaces you are connected to — when only a workspace has it, that is what you get. A GitHub source you have never used before shows what it found and waits for `--yes`. `add topos` restores the built-in topos skill
 
 ```
 topos add [OPTIONS] <SOURCE>

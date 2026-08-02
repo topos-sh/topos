@@ -31,7 +31,10 @@ generated `docs/cli.md` (`cargo xtask gen-cli-ref`).
   report per session. `update --quiet` is the harness-hook sweep: self-throttled,
   schema-conservative stdout (`--hook claude-code` opts that harness into `reloadSkills`).
 - **`add`/`remove` are exact file inverses** (property-tested). `add` is source-polymorphic
-  (workspace refs, a path adopted in place, a forge import, `add topos` for the built-in);
+  (workspace refs, a path adopted in place, a forge import, `add topos` for the built-in); a BARE
+  NAME resolves against both the untracked local inventory and the connected workspaces' catalogs
+  — one local dir adopts in place, a name only a workspace publishes subscribes to its canonical
+  reference, and either side ambiguous refuses naming every way out;
   `remove` drops the row / writes `"off"` / rewrites a set line minus its members. Two-phase
   (describe → `--yes`) only for loss, a set split, or first trust; everything else applies
   immediately with an undo-led receipt.

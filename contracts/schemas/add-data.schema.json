@@ -76,6 +76,17 @@
         }
       ]
     },
+    "published_match": {
+      "description": "The connected workspace that publishes the same NAME an `add <name>` just adopted from a\nlocal directory — the team-managed spelling, disclosed beside the local copy that landed.\nNever blocking (the adopt happened as asked); absent when no workspace, or more than one,\ncarries the name. **Additive.**",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/PublishedMatch"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "reference": {
       "description": "The reference the manifest line stores (canonical where resolvable). **Additive.**",
       "type": [
@@ -210,6 +221,34 @@
         "claude-code",
         "openclaw",
         "hermes"
+      ]
+    },
+    "PublishedMatch": {
+      "description": "The workspace spelling an [`AddData`] carries when the bare NAME a local adopt resolved is also\npublished in exactly one connected workspace. Distinct from [`GovernedCopy`], which matches an\nimport's UPSTREAM source; this one matches nothing but the name the user typed.\n**INFERRED** (additive-only).",
+      "type": "object",
+      "properties": {
+        "identical": {
+          "description": "Whether the adopted bytes are IDENTICAL to the version that workspace currently serves —\n`false` also covers \"not knowable here\" (an offline cache match carries no digest).",
+          "type": "boolean"
+        },
+        "name": {
+          "description": "The bundle's catalog name there (the name that matched).",
+          "type": "string"
+        },
+        "reference": {
+          "description": "The paste-ready reference, in the canonical host-qualified form\n(`<host>/<workspace>/<name>` — unambiguous however many servers this installation is\nlogged into).",
+          "type": "string"
+        },
+        "workspace": {
+          "description": "The workspace's address name.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "workspace",
+        "name",
+        "reference",
+        "identical"
       ]
     },
     "SkillOrigin": {
