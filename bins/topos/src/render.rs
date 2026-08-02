@@ -75,9 +75,10 @@ pub(crate) fn err_envelope(command: &str, err: &ClientError) -> JsonEnvelope {
 
 fn next_actions(err: &ClientError) -> Vec<NextAction> {
     match err {
-        // A LOCAL ambiguity whose name a connected workspace ALSO publishes has two real ways
-        // out, so it carries both: the inventory read that resolves the local pick, and the
-        // subscribe (the first canonical reference, as ONE argv token straight from the hint).
+        // A LOCAL ambiguity whose name a connected workspace ALSO publishes has more than one
+        // real way out, so it carries them all: the inventory read that resolves the local pick,
+        // and one runnable subscribe PER hinted reference — advertising only the first would hand
+        // an agent an arbitrary workspace as if the ambiguity had been settled.
         ClientError::AmbiguousHarness {
             workspace: Some(hint),
             ..
@@ -87,7 +88,7 @@ fn next_actions(err: &ClientError) -> Vec<NextAction> {
             ..
         } => {
             let mut out = vec![disambiguate_with_list()];
-            out.extend(hint.references.first().map(|reference| {
+            out.extend(hint.references.iter().map(|reference| {
                 crate::actions::next_action(
                     ActionCode::from("RUN_COMMAND".to_owned()),
                     vec![

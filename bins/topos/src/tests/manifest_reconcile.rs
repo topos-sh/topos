@@ -5794,10 +5794,40 @@ fn a_name_only_a_workspace_publishes_resolves_to_its_reference() {
     assert_eq!(err.code(), "NO_UNTRACKED_SKILL");
 }
 
+/// Record [`BARE`] as delivered by the rig's workspace — the machine's own delivery history, which
+/// is the ONLY thing that nominates a workspace for a clean local resolve's receipt disclosure (a
+/// local adopt never fans out across every session's catalog just for a courtesy line).
+fn seed_delivered_bare(rig: &Rig) {
+    sync_status::record(
+        &rig.fs,
+        &rig.layout(),
+        &[(
+            WS.to_owned(),
+            sync_status::WorkspaceSync {
+                host: Some(HOST.to_owned()),
+                workspace_name: Some(WS_NAME.to_owned()),
+                delivered: [(
+                    "s_bare".to_owned(),
+                    sync_status::DeliveredSkill {
+                        name: BARE.to_owned(),
+                        ..Default::default()
+                    },
+                )]
+                .into_iter()
+                .collect(),
+                ..Default::default()
+            },
+        )],
+    )
+    .unwrap();
+}
+
 #[test]
 fn a_local_directory_wins_and_the_receipt_names_the_workspace_spelling() {
     let (rig, plane, dir, _v) = bare_rig("bare-both");
-    // The SAME bytes the workspace serves, sitting untracked in the home agent dir.
+    // The SAME bytes the workspace serves, sitting untracked in the home agent dir — and the
+    // delivery history that nominates the workspace for the receipt's disclosure.
+    seed_delivered_bare(&rig);
     let path = untracked_skill(&rig.home.0, BARE, b"# deploy\n");
     let ctx = rig.ctx_at(Some(&rig.work.0));
 
@@ -5813,7 +5843,8 @@ fn a_local_directory_wins_and_the_receipt_names_the_workspace_spelling() {
         }
         other => panic!("a local copy adopts in place: {other:?}"),
     };
-    // The receipt judges the workspace's current version against the bytes that just landed.
+    // The receipt judges the workspace's current version against the bytes that just landed —
+    // the ONE confirming catalog read carried the digest.
     let data = ops::add_with_name(&ctx, &path, Some(BARE)).unwrap();
     let same = published.suggestion(&data.bundle_digest);
     assert_eq!(same.reference, format!("{HOST}/{WS_NAME}/{BARE}"));
@@ -5824,6 +5855,7 @@ fn a_local_directory_wins_and_the_receipt_names_the_workspace_spelling() {
     // identical claim goes away.
     let rig2 = Rig::new("bare-both-drift");
     rig2.seed_session();
+    seed_delivered_bare(&rig2);
     let drifted = untracked_skill(&rig2.home.0, BARE, b"# deploy (mine)\n");
     let ctx2 = rig2.ctx_at(Some(&rig2.work.0));
     let published2 = match bare_plan(&rig2, &plane, &dir, BARE, true).unwrap() {
@@ -5832,6 +5864,16 @@ fn a_local_directory_wins_and_the_receipt_names_the_workspace_spelling() {
     };
     let data2 = ops::add_with_name(&ctx2, &drifted, Some(BARE)).unwrap();
     assert!(!published2.suggestion(&data2.bundle_digest).identical);
+
+    // A name the workspace publishes but never delivered HERE adopts with no disclosure at all —
+    // the local act does not go asking every catalog for one.
+    let rig3 = Rig::new("bare-both-undelivered");
+    rig3.seed_session();
+    untracked_skill(&rig3.home.0, BARE, b"# deploy\n");
+    match bare_plan(&rig3, &plane, &dir, BARE, true).unwrap() {
+        ops::BareAddPlan::Adopt { published, .. } => assert!(published.is_none()),
+        other => panic!("a local copy adopts in place: {other:?}"),
+    }
 }
 
 #[test]
@@ -5872,6 +5914,28 @@ fn a_name_several_workspaces_publish_refuses_naming_every_spelling() {
         ops::BareAddPlan::Adopt { published, .. } => assert!(published.is_none()),
         other => panic!("a local copy adopts in place: {other:?}"),
     }
+
+    // A LOCAL ambiguity on top of the two workspaces: the hint's runnable subscribes cover EVERY
+    // spelling — advertising only one would settle an ambiguity nobody resolved.
+    untracked_skill(&rig.work.0, BARE, b"# deploy\n");
+    let err = bare_plan(&rig, &plane, &dir, BARE, true).unwrap_err();
+    assert_eq!(err.code(), "AMBIGUOUS_SCOPE");
+    let envelope = crate::render::err_envelope("add", &err);
+    let subscribes: Vec<_> = envelope
+        .next_actions
+        .iter()
+        .filter(|a| a.argv.len() == 4 && a.argv[1] == "add")
+        .map(|a| a.argv[2].clone())
+        .collect();
+    assert_eq!(
+        subscribes,
+        vec![
+            format!("{HOST}/{WS_NAME}/{BARE}"),
+            format!("beta.test/ops/{BARE}")
+        ],
+        "{:?}",
+        envelope.next_actions
+    );
 }
 
 #[test]
@@ -6136,4 +6200,12 @@ fn a_read_catalog_clears_the_cache_row_it_no_longer_carries() {
             .code(),
         "NO_UNTRACKED_SKILL"
     );
+
+    // The clean-resolve receipt obeys the same authority: its ONE confirming read finds the name
+    // gone, so the stale row's disclosure is withdrawn — never printed beside an adopt.
+    untracked_skill(&rig.home.0, BARE, b"# deploy\n");
+    match bare_plan(&rig, &plane, &empty, BARE, true).unwrap() {
+        ops::BareAddPlan::Adopt { published, .. } => assert!(published.is_none()),
+        other => panic!("a local copy adopts in place: {other:?}"),
+    }
 }
