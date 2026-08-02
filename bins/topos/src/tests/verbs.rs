@@ -1148,6 +1148,12 @@ fn an_empty_inventory_names_the_covering_manifest_instead_of_claiming_nothing() 
     };
     let in_project = h.ctx_rooted(&user_home.0, &project.0);
 
+    // The disclosure LINE is what this test owns. Never the whole render: a harness env override
+    // (`CLAUDE_CONFIG_DIR`, `CODEX_HOME`, …) can point discovery at a real skills dir on the
+    // machine running the suite, appending untracked rows that have nothing to do with the claim.
+    let disclosure = "No tracked skills outside this folder's topos.toml — it tracks 2 bundles \
+                      (run `topos status` to see them).";
+
     let covered = ops::list(&in_project, None, false, Some(discovery), None).unwrap();
     assert!(covered.data.tracked.is_empty(), "nothing is tracked here");
     assert_eq!(
@@ -1155,19 +1161,14 @@ fn an_empty_inventory_names_the_covering_manifest_instead_of_claiming_nothing() 
         "a folder row and a channel line both count as demand"
     );
     let text = render::list_tty(&covered);
-    assert!(
-        text.starts_with(
-            "No tracked skills outside this folder's topos.toml — it tracks 2 bundles (run `topos \
-             status` to see them)."
-        ),
-        "{text}"
-    );
+    assert!(text.starts_with(disclosure), "{text}");
 
     // `--tracked` (no discovery) narrows what is SWEPT, not what this folder asks for — the
     // disclosure must not vanish with the flag, or the flag becomes a way to be lied to.
     let tracked_only = ops::list(&in_project, None, false, None, None).unwrap();
     assert_eq!(tracked_only.project_bundles, 2);
-    assert_eq!(render::list_tty(&tracked_only), text);
+    let tracked_text = render::list_tty(&tracked_only);
+    assert!(tracked_text.starts_with(disclosure), "{tracked_text}");
 
     // No covering file (the walk stops at the passed home): the line is byte-identical to the one
     // it has always been — no new noise where there is nothing to disclose.

@@ -44,7 +44,7 @@ use std::path::{Path, PathBuf};
 use topos_types::results::{AddData, RemoveData, RemoveItem, RemoveKind};
 
 use crate::ctx::Ctx;
-use crate::error::ClientError;
+use crate::error::{ClientError, TargetCandidate};
 use crate::manifest::MANIFEST_FILE;
 use crate::manifest::document::{
     EntryValue, ManifestEditor, ManifestError, ManifestScope, materialized_global, project_template,
@@ -930,7 +930,11 @@ pub(crate) fn off_row_for(ctx: &Ctx<'_>, token: &str) -> Result<Option<String>, 
         1 => Ok(Some(refs.remove(0))),
         // A switch lives in the machine-wide file only, and this lookup reads exactly that file —
         // so every re-spelling it offers is a `-g` one, whatever else the invocation carried.
-        _ => Err(ambiguous(token, refs, true)),
+        _ => Err(ambiguous(
+            token,
+            refs.into_iter().map(TargetCandidate::plain),
+            true,
+        )),
     }
 }
 
@@ -1093,7 +1097,7 @@ fn resolve_one(
             .map(|i| i.name.clone())
             .collect();
         found.push(Candidate {
-            spelling: c.to_owned(),
+            candidate: TargetCandidate::plain(c),
             exact: true,
             arm: Arm::FeedDrop {
                 reference: c.to_owned(),
@@ -1118,7 +1122,7 @@ fn resolve_one(
         }
         let name = row.display_name();
         found.push(Candidate {
-            spelling: row.reference.clone(),
+            candidate: TargetCandidate::plain(row.reference.clone()),
             exact: is_exact(&row.reference),
             arm: Arm::RowDrop { row, name },
         });
@@ -1133,7 +1137,7 @@ fn resolve_one(
         }) {
             let reference = format!("{}/{}/{}", item.host, item.workspace, item.name);
             found.push(Candidate {
-                spelling: reference.clone(),
+                candidate: TargetCandidate::plain(reference.clone()),
                 exact: is_exact(&reference),
                 arm: Arm::OffWrite {
                     reference,
@@ -1169,9 +1173,10 @@ fn resolve_one(
         let member_ref =
             member_reference(row, member).unwrap_or_else(|| format!("{}/{member}", row.reference));
         found.push(Candidate {
-            // The EXACT invocation that selects this line's rewrite — what the ambiguity
-            // refusal lists, paste-ready (`--via` names the set line the split targets).
-            spelling: format!("{member_ref} --via {}", row.reference),
+            // The EXACT invocation that selects this line's rewrite — what the ambiguity refusal
+            // offers, STRUCTURED (`--via` names the set line the split targets). The member
+            // reference stays its own field, so a path-shaped one is never re-tokenized.
+            candidate: TargetCandidate::via(member_ref, row.reference.clone()),
             // A set member is never spelled in the file — the token cannot BE it.
             exact: false,
             arm: Arm::SetSplit {
@@ -1188,11 +1193,13 @@ fn resolve_one(
     if found.iter().any(|c| c.exact) {
         found.retain(|c| c.exact);
     }
-    let mut seen: Vec<String> = Vec::new();
+    // Dedup on the RENDERED spelling: two candidates that would print (and run) identically are
+    // one way out, however they were reached.
+    let mut seen: Vec<TargetCandidate> = Vec::new();
     found.retain(|c| {
-        let first = !seen.contains(&c.spelling);
+        let first = !seen.iter().any(|s| s.spelling() == c.candidate.spelling());
         if first {
-            seen.push(c.spelling.clone());
+            seen.push(c.candidate.clone());
         }
         first
     });
@@ -1210,10 +1217,10 @@ fn resolve_one(
     }
 }
 
-/// One thing a `remove` token could name, with the QUALIFIED SPELLING the refusal would print and
+/// One thing a `remove` token could name, with the QUALIFIED CANDIDATE the refusal would offer and
 /// whether the token spelled it exactly (see [`resolve_one`]).
 struct Candidate {
-    spelling: String,
+    candidate: TargetCandidate,
     exact: bool,
     arm: Arm,
 }
@@ -1281,12 +1288,14 @@ fn resolve_via(
 /// would be resolved against the other one.
 fn ambiguous(
     token: &str,
-    candidates: impl IntoIterator<Item = String>,
+    candidates: impl IntoIterator<Item = TargetCandidate>,
     global: bool,
 ) -> ClientError {
-    let mut candidates: Vec<String> = candidates.into_iter().collect();
+    let mut candidates: Vec<TargetCandidate> = candidates.into_iter().collect();
+    // Ordered structurally (which is spelling order) and deduped on what the surfaces show: two
+    // candidates that would print and run identically are ONE way out.
     candidates.sort();
-    candidates.dedup();
+    candidates.dedup_by(|a, b| a.spelling() == b.spelling());
     ClientError::AmbiguousTarget {
         name: token.to_owned(),
         candidates,

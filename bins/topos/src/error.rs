@@ -30,6 +30,67 @@ fn add_spelling(global: bool) -> &'static str {
     if global { "topos add -g" } else { "topos add" }
 }
 
+/// ONE thing an ambiguous target could have meant, kept as STRUCTURE rather than as a sentence:
+/// the reference itself, plus — for a member a set line delivers — the set that member removal
+/// must name to select it.
+///
+/// The structure is the point. A reference is not always a tidy token: a local folder reference is
+/// a PATH, and a path may contain whitespace. Rebuilding a command by splitting a rendered
+/// spelling would let the bytes of a directory name become argv tokens of their own — a folder
+/// called `my skill --yes` would smuggle a consent flag into an offered command. So the two
+/// renderings are derived here, from the parts, and never re-parsed out of each other:
+/// [`spelling`](Self::spelling) is the human/wire text, [`argv_tokens`](Self::argv_tokens) the
+/// executable form in which the reference is ALWAYS exactly one token.
+///
+/// Ordering is derived over `(reference, via)` — which is the spelling order too, since a
+/// reference holds no byte below `-`/space that could reorder the pair — so a sorted candidate
+/// list reads the same on both surfaces.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct TargetCandidate {
+    /// The candidate's own reference — one argv token, whatever it contains.
+    pub reference: String,
+    /// The SET line whose member rewrite this candidate selects (`--via <set-reference>`), for a
+    /// bundle no row of its own spells. `None` for a candidate that is a row (or a resource).
+    pub via: Option<String>,
+}
+
+impl TargetCandidate {
+    /// A candidate that stands on its own reference — no set line to name.
+    pub(crate) fn plain(reference: impl Into<String>) -> Self {
+        Self {
+            reference: reference.into(),
+            via: None,
+        }
+    }
+
+    /// A candidate reached only THROUGH a set line: removing it rewrites that one line.
+    pub(crate) fn via(reference: impl Into<String>, set: impl Into<String>) -> Self {
+        Self {
+            reference: reference.into(),
+            via: Some(set.into()),
+        }
+    }
+
+    /// The rendered spelling — what the envelope's `data.candidates` carries. Exactly the text
+    /// the two parts read as on a command line, so a consumer that has always read these strings
+    /// sees no change.
+    pub(crate) fn spelling(&self) -> String {
+        match &self.via {
+            Some(set) => format!("{} --via {set}", self.reference),
+            None => self.reference.clone(),
+        }
+    }
+
+    /// The EXECUTABLE form: the reference as ONE token, then the selector as its own two. This is
+    /// what a rebuilt next action extends its argv with — never a split of the spelling.
+    pub(crate) fn argv_tokens(&self) -> Vec<String> {
+        match &self.via {
+            Some(set) => vec![self.reference.clone(), "--via".to_owned(), set.clone()],
+            None => vec![self.reference.clone()],
+        }
+    }
+}
+
 /// The clause an ambiguity refusal appends when a connected workspace publishes the same name —
 /// empty when none does, so the two messages stay byte-identical to their pre-disclosure form.
 /// Proven-identical bytes get the stronger reading (there is nothing to keep locally); otherwise
@@ -456,9 +517,9 @@ pub(crate) enum ClientError {
     NotAvailable(String),
     /// A name resolved to MORE than one thing the invocation could have meant — several workspace
     /// resources (across workspaces, or across the channel/skill kinds), or several lines of one
-    /// manifest. Carries the paste-ready qualified spellings
+    /// manifest. Each way out rides as a STRUCTURED [`TargetCandidate`]
     /// (`<workspace>/channels/<name>` / `<workspace>/skills/<name>`, a manifest reference, or a
-    /// `<reference> --via <set-reference>` selection — several argv TOKENS, not one).
+    /// reference plus the set line that delivers it), never as text a surface has to re-parse.
     ///
     /// The MESSAGE states the refusal only. The candidates are argv, so they ride the surfaces AS
     /// argv: the envelope's `data.candidates` (machine-readably, unchanged) and one runnable
@@ -474,7 +535,7 @@ pub(crate) enum ClientError {
     #[error("'{name}' is ambiguous here — more than one reference answers to it")]
     AmbiguousTarget {
         name: String,
-        candidates: Vec<String>,
+        candidates: Vec<TargetCandidate>,
         global: bool,
     },
 }

@@ -26,7 +26,7 @@
 
 use topos_types::requests::{WireChannelIndex, WireSkillIndex};
 
-use crate::error::ClientError;
+use crate::error::{ClientError, TargetCandidate};
 
 /// The kind-scoped resource segment — the literal middle of a qualified path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -418,7 +418,11 @@ pub(crate) fn resolve_one(
                     })),
                     _ => Err(ClientError::AmbiguousTarget {
                         name: "this origin".to_owned(),
-                        candidates: universe.iter().map(|w| w.name.clone()).collect(),
+                        // A workspace name stands on its own — no set line delivers it.
+                        candidates: universe
+                            .iter()
+                            .map(|w| TargetCandidate::plain(w.name.clone()))
+                            .collect(),
                         // This resolver serves the verbs that target a WORKSPACE RESOURCE, none of
                         // which reaches it under `-g` (the machine-wide manifest edit is
                         // `manifest_edit`'s own resolution, and it raises its own refusal) — so the
@@ -553,7 +557,11 @@ fn resolve_bare(
         1 => Ok(Some(matches.remove(0).0)),
         _ => Err(ClientError::AmbiguousTarget {
             name: name.to_owned(),
-            candidates: matches.into_iter().map(|(_, path)| path).collect(),
+            // Each qualified path is a reference of its own (there is no set line to name here).
+            candidates: matches
+                .into_iter()
+                .map(|(_, path)| TargetCandidate::plain(path))
+                .collect(),
             // Same reason as the origin arm above: no `-g` invocation reaches this resolver.
             global: false,
         }),
@@ -864,12 +872,17 @@ mod tests {
         assert_eq!(name, "deploy");
         // No `-g` invocation reaches this resolver — the offered re-spellings stay the bare form.
         assert!(!global);
+        // The candidates are STRUCTURED; what a surface shows is their spelling.
         assert_eq!(
-            candidates,
+            candidates.iter().map(|c| c.spelling()).collect::<Vec<_>>(),
             vec![
                 "acme/skills/deploy".to_owned(),
                 "beta/skills/deploy".to_owned()
             ]
+        );
+        assert!(
+            candidates.iter().all(|c| c.via.is_none()),
+            "a workspace resource stands on its own reference"
         );
         // The wire code is the shared AMBIGUOUS_NAME.
         assert_eq!(
@@ -893,7 +906,7 @@ mod tests {
             panic!("expected AmbiguousTarget");
         };
         assert_eq!(
-            candidates,
+            candidates.iter().map(|c| c.spelling()).collect::<Vec<_>>(),
             vec![
                 "acme/channels/release".to_owned(),
                 "acme/skills/release".to_owned()

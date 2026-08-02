@@ -42,7 +42,10 @@ pub(crate) fn err_envelope(command: &str, err: &ClientError) -> JsonEnvelope {
         TerminalOutcome::RetryableFailure | TerminalOutcome::Unavailable
     );
     let data = match err {
+        // The RENDERED spelling of each candidate — the string this field has always carried;
+        // the structure behind it is the client's, and the wire shape does not move for it.
         ClientError::AmbiguousTarget { candidates, .. } => {
+            let candidates: Vec<String> = candidates.iter().map(|c| c.spelling()).collect();
             serde_json::json!({ "candidates": candidates })
         }
         ClientError::AmbiguousWorkspace { references, .. } => {
@@ -250,32 +253,39 @@ fn next_actions(command: &str, err: &ClientError) -> Vec<NextAction> {
             vec!["topos".into(), "add".into(), path.clone(), "--json".into()],
         )],
         // An ambiguous name: ONE runnable way out per candidate, each the FAILING invocation
-        // re-spelled — same verb, this candidate's spelling. The verb is read from `command`, never
-        // assumed: the same refusal is raised by `remove`'s manifest resolution, by `add`'s lift of
-        // a switched-off row, and by the workspace-resource resolver every targeting verb shares.
+        // re-spelled — same verb, this candidate's tokens, and the refused invocation's `-g` (the
+        // same preservation `subscribe_action` makes: the machine-wide file and this folder's are
+        // two different documents, so a rebuilt command that dropped the flag would edit the one
+        // nobody asked about).
         //
-        // A candidate is ARGV, not a value: a set-member spelling carries its own selector
-        // (`<reference> --via <set-reference>`), so it splits on whitespace into the tokens it
-        // already is. Quoting it into one argument would hand the caller a command that cannot run
-        // — and the tokens are references (a path-safe grammar), never free text.
-        //
-        // The refused invocation's `-g` rides along (the same preservation `subscribe_action`
-        // makes): the machine-wide file and this folder's are two different documents, so a
-        // rebuilt command that dropped the flag would edit the one nobody asked about.
+        // THE FAITHFULNESS RULE, and why this is a closed match on the verb: a command may be
+        // offered only where the WHOLE invocation is determined by the verb, one candidate, and
+        // the scope flag. `remove` and `add` are — their argv is the target and nothing else.
+        // `protect` is NOT: its optional LEVEL positional decides which act it is, so rebuilding
+        // `topos protect <name> open` as `topos protect <candidate>` offers the opposite act
+        // (a tighten where a loosen was asked). A wrong offered command is worse than none, so
+        // everything else answers with the refusal alone — the agent still gets `data.candidates`.
+        // A verb added later lands in `_` and stays silent until someone proves its argv
+        // reconstructible.
         ClientError::AmbiguousTarget {
             candidates, global, ..
-        } => candidates
-            .iter()
-            .map(|candidate| {
-                let mut argv = vec!["topos".to_owned(), command.to_owned()];
-                if *global {
-                    argv.push("-g".to_owned());
-                }
-                argv.extend(candidate.split_whitespace().map(str::to_owned));
-                argv.push("--json".to_owned());
-                crate::actions::next_action(ActionCode::from("RUN_COMMAND".to_owned()), argv)
-            })
-            .collect(),
+        } => match command {
+            "remove" | "add" => candidates
+                .iter()
+                .map(|candidate| {
+                    let mut argv = vec!["topos".to_owned(), command.to_owned()];
+                    if *global {
+                        argv.push("-g".to_owned());
+                    }
+                    // The candidate's OWN tokens — the reference always exactly one of them, so a
+                    // path holding whitespace (or a `--yes`) can never become argv of its own.
+                    argv.extend(candidate.argv_tokens());
+                    argv.push("--json".to_owned());
+                    crate::actions::next_action(ActionCode::from("RUN_COMMAND".to_owned()), argv)
+                })
+                .collect(),
+            _ => Vec::new(),
+        },
         // Everything else: a refusal whose PROSE names one of the STATIC command spellings
         // mirrors it structurally. Prose text is never tokenized into argv — see the allowlist.
         other => mirror_prose_commands(&safe_message(other)),
@@ -3648,17 +3658,19 @@ mod tests {
 
     #[test]
     fn an_ambiguous_name_offers_one_runnable_command_per_candidate() {
-        use crate::error::ClientError;
+        use crate::error::{ClientError, TargetCandidate};
 
         // The candidates ARE the ways out, so each becomes the FAILING invocation re-spelled: the
         // verb that refused (read from the command, never assumed) plus that candidate's tokens.
         let err = ClientError::AmbiguousTarget {
             name: "rust-skills".to_owned(),
             candidates: vec![
-                "github.com/leonardomso/rust-skills".to_owned(),
-                "github.com/leonardomso/rust-skills/rust-skills --via \
-                 github.com/leonardomso/rust-skills"
-                    .to_owned(),
+                TargetCandidate::plain("github.com/leonardomso/rust-skills"),
+                // The set member: its reference and the line that delivers it, kept apart.
+                TargetCandidate::via(
+                    "github.com/leonardomso/rust-skills/rust-skills",
+                    "github.com/leonardomso/rust-skills",
+                ),
             ],
             // This folder's file — the refused `topos remove rust-skills` carried no `-g`.
             global: false,
@@ -3720,8 +3732,8 @@ mod tests {
         let lift = ClientError::AmbiguousTarget {
             name: "deploy".to_owned(),
             candidates: vec![
-                "topos.sh/acme/deploy".to_owned(),
-                "topos.sh/beta/deploy".to_owned(),
+                TargetCandidate::plain("topos.sh/acme/deploy"),
+                TargetCandidate::plain("topos.sh/beta/deploy"),
             ],
             // The switch it lifts lives in the machine-wide file, and the invocation said so.
             global: true,
@@ -3746,7 +3758,7 @@ mod tests {
         // The scope rides the ERROR, not the verb: the same shape without `-g` stays bare.
         let local = ClientError::AmbiguousTarget {
             name: "deploy".to_owned(),
-            candidates: vec!["topos.sh/acme/deploy".to_owned()],
+            candidates: vec![TargetCandidate::plain("topos.sh/acme/deploy")],
             global: false,
         };
         assert_eq!(
@@ -3768,6 +3780,82 @@ mod tests {
         let wire = envelope.error.expect("a refusal carries its error");
         assert_eq!(wire.code, "AMBIGUOUS_NAME");
         assert_eq!(wire.next_actions.len(), 2);
+    }
+
+    #[test]
+    fn an_ambiguity_offers_a_command_only_where_the_argv_is_fully_determined() {
+        use crate::error::{ClientError, TargetCandidate};
+
+        // `protect <target> [<level>]` is NOT reconstructible from verb + candidate: the optional
+        // level positional decides WHICH ACT it is, so re-spelling `topos protect deploy open` as
+        // `topos protect <candidate>` would offer the opposite (a tighten for a loosen). Nothing
+        // is offered — the short refusal and `data.candidates` stand alone, exactly the surface
+        // this verb had before commands were ever rebuilt.
+        let err = ClientError::AmbiguousTarget {
+            name: "deploy".to_owned(),
+            candidates: vec![
+                TargetCandidate::plain("acme/skills/deploy"),
+                TargetCandidate::plain("beta/skills/deploy"),
+            ],
+            global: false,
+        };
+        assert!(super::next_actions("protect", &err).is_empty());
+        assert_eq!(super::err_hint_tty("protect", &err), None);
+        // The machine half is untouched by the silence: the candidates still ride the envelope.
+        let envelope = super::err_envelope("protect", &err);
+        assert_eq!(
+            envelope.data["candidates"],
+            serde_json::json!(["acme/skills/deploy", "beta/skills/deploy"])
+        );
+        assert!(envelope.next_actions.is_empty());
+        // The two verbs whose whole invocation IS the target keep their offers.
+        for verb in ["remove", "add"] {
+            assert_eq!(super::next_actions(verb, &err).len(), 2, "{verb}");
+        }
+        // A verb nobody has vetted stays silent rather than guessing at its argv.
+        assert!(super::next_actions("publish", &err).is_empty());
+    }
+
+    #[test]
+    fn a_candidate_reference_stays_one_token_however_it_is_spelled() {
+        use crate::error::{ClientError, TargetCandidate};
+
+        // A local reference is a PATH, and a path may hold whitespace — including bytes that read
+        // as flags. The reference is carried as its own field and pushed as ONE argv element, so
+        // no directory name can grow into argv of its own (least of all a consent flag).
+        let hostile = TargetCandidate::via("./my skill --yes", "github.com/o/r");
+        assert_eq!(
+            hostile.argv_tokens(),
+            vec!["./my skill --yes", "--via", "github.com/o/r"]
+        );
+        let err = ClientError::AmbiguousTarget {
+            name: "my skill".to_owned(),
+            candidates: vec![hostile.clone()],
+            global: false,
+        };
+        let actions = super::next_actions("remove", &err);
+        assert_eq!(
+            actions[0].argv,
+            vec![
+                "topos",
+                "remove",
+                "./my skill --yes",
+                "--via",
+                "github.com/o/r",
+                "--json"
+            ]
+        );
+        assert!(
+            !actions[0].argv.iter().any(|t| t == "--yes"),
+            "the hostile path is one inert token: {actions:?}"
+        );
+        // The human line quotes it back into one argument, so the offered command still runs.
+        assert_eq!(
+            super::err_hint_tty("remove", &err),
+            Some("try:\n  topos remove './my skill --yes' --via github.com/o/r".to_owned())
+        );
+        // And the wire spelling is the two parts as a command line reads them — unchanged shape.
+        assert_eq!(hostile.spelling(), "./my skill --yes --via github.com/o/r");
     }
 
     #[test]
