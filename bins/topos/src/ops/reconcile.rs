@@ -1103,6 +1103,14 @@ fn reconcile_set<'a>(
                     if sweep.claimed(&sc.label, &entry.skill_id) {
                         return None;
                     }
+                    // An unparseable id can never open a phase (the sync guard refuses it first),
+                    // so it must not count either — same warning, raised where it is excluded.
+                    if SkillId::parse(&entry.skill_id).is_err() {
+                        sweep
+                            .warnings
+                            .push(format!("BAD_ID {}: served an invalid skill id", entry.name));
+                        return None;
+                    }
                     picked.insert(entry.skill_id.as_str()).then_some(entry)
                 })
                 .collect();
@@ -1200,6 +1208,14 @@ fn reconcile_feed<'a>(
                     }
                     sweep.mention(&sc.label, &ds.name);
                     if sweep.claimed(&sc.label, &ds.skill_id) {
+                        return false;
+                    }
+                    // Same as the channel batch: an unparseable id cannot open a phase, so it is
+                    // warned about here and never counted.
+                    if SkillId::parse(&ds.skill_id).is_err() {
+                        sweep
+                            .warnings
+                            .push(format!("BAD_ID {}: served an invalid skill id", ds.name));
                         return false;
                     }
                     picked.insert(ds.skill_id.as_str())
