@@ -1249,6 +1249,35 @@ pub(crate) struct PublishedName {
 }
 
 impl PublishedName {
+    /// Build a match ONLY when its canonical spelling reads back through the manifest grammar as
+    /// exactly this bundle. The grammar reserves spellings — `channels` in the bundle position is
+    /// an incomplete channel reference, and a host shape it cannot read has no key at all — and a
+    /// match that cannot be SPELLED cannot be subscribed, hinted, or acted on: offering it would
+    /// hand the user a command that refuses. Unspellable stays unlisted, which is exactly the
+    /// answer the ladder gave before the workspace half of the namespace existed.
+    fn spelled(
+        host: &str,
+        workspace: &str,
+        name: &str,
+        bundle_digest: Option<String>,
+    ) -> Option<Self> {
+        let reference = format!("{host}/{workspace}/{name}");
+        match crate::manifest::keys::classify_key(&reference) {
+            Ok(crate::manifest::keys::KeyShape::WorkspaceBundle { bundle, .. })
+                if bundle == name =>
+            {
+                Some(PublishedName {
+                    host: host.to_owned(),
+                    workspace: workspace.to_owned(),
+                    name: name.to_owned(),
+                    reference,
+                    bundle_digest,
+                })
+            }
+            _ => None,
+        }
+    }
+
     /// The receipt disclosure for an adopt that landed `adopted_digest` bytes: the same workspace
     /// spelling, plus whether those bytes are provably what the workspace serves today (an
     /// unknown digest reads `false` — the disclosure never claims agreement it did not check).
@@ -1304,16 +1333,14 @@ pub(crate) fn published_matches(
             if e.name != name || e.status != "active" {
                 continue;
             }
-            found.insert(
-                (s.host.clone(), s.workspace_name.clone()),
-                PublishedName {
-                    host: s.host.clone(),
-                    workspace: s.workspace_name.clone(),
-                    name: e.name.clone(),
-                    reference: format!("{}/{}/{}", s.host, s.workspace_name, e.name),
-                    bundle_digest: Some(e.bundle_digest.clone()),
-                },
-            );
+            if let Some(published) = PublishedName::spelled(
+                &s.host,
+                &s.workspace_name,
+                &e.name,
+                Some(e.bundle_digest.clone()),
+            ) {
+                found.insert((s.host.clone(), s.workspace_name.clone()), published);
+            }
         }
     }
     let mut out: Vec<PublishedName> = found.into_values().collect();
@@ -1367,16 +1394,9 @@ fn cached_matches(
         {
             continue;
         }
-        found.insert(
-            (host.to_owned(), workspace.to_owned()),
-            PublishedName {
-                host: host.to_owned(),
-                workspace: workspace.to_owned(),
-                name: name.to_owned(),
-                reference: format!("{host}/{workspace}/{name}"),
-                bundle_digest: None,
-            },
-        );
+        if let Some(published) = PublishedName::spelled(host, workspace, name, None) {
+            found.insert((host.to_owned(), workspace.to_owned()), published);
+        }
     }
     found
 }
@@ -2041,6 +2061,19 @@ mod tests {
                 .expect("disclosed")
                 .identical
         );
+    }
+
+    #[test]
+    fn a_match_exists_only_where_its_spelling_reads_back_as_the_bundle() {
+        // A port-bearing self-hosted session spells fine — the grammar reads it back.
+        let ported = PublishedName::spelled("localhost:3000", "acme", "deploy", None)
+            .expect("a ported host is a legal reference");
+        assert_eq!(ported.reference, "localhost:3000/acme/deploy");
+        // `channels` is RESERVED in the bundle position (an incomplete channel reference) — a
+        // bundle so named cannot be spelled, so it is never offered.
+        assert!(PublishedName::spelled("topos.sh", "acme", "channels", None).is_none());
+        // A host the grammar cannot read has no key at all.
+        assert!(PublishedName::spelled("not a host", "acme", "deploy", None).is_none());
     }
 
     #[test]

@@ -6165,6 +6165,27 @@ fn a_cache_row_of_an_ended_session_or_a_withdrawal_resolves_nothing() {
 }
 
 #[test]
+fn an_unspellable_catalog_name_stays_the_plain_not_found() {
+    // A workspace CAN publish a bundle named `channels` (nothing upstream reserves it yet), but
+    // the manifest grammar reserves that spelling as an incomplete channel reference — so the
+    // ladder must answer exactly as before the workspace half existed, never hand the reference
+    // arm a key it will refuse.
+    let rig = Rig::new("bare-unspellable");
+    rig.seed_session();
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let v = one_file(b"# channels\n");
+    let plane = FakePlane::new(log).with_version("s_ch", &v);
+    plane.serves(Vec::new());
+    let dir = FakeDirectory::new(vec![catalog_entry("s_ch", "channels", &v)], Vec::new());
+    assert_eq!(
+        bare_plan(&rig, &plane, &dir, "channels", true)
+            .unwrap_err()
+            .code(),
+        "NO_UNTRACKED_SKILL"
+    );
+}
+
+#[test]
 fn a_read_catalog_clears_the_cache_row_it_no_longer_carries() {
     let (rig, plane, _dir, _v) = bare_rig("bare-cache-invalidate");
     // The last delivery still remembers the name…
