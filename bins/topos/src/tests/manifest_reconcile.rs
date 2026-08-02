@@ -5708,6 +5708,23 @@ fn an_adopted_project_placement_hands_over_and_parks_the_home_store() {
 // The BARE-NAME ladder: one namespace, made of the local inventory AND the connected catalogs.
 // =================================================================================================
 
+/// The probe name the bare-name ladder resolves — deliberately IMPROBABLE. Discovery also walks
+/// agent roots ambient env configures (a developer's real machine), and a genuine skill named
+/// like `deploy` there would flip a Subscribe into an Adopt under `cargo test`.
+const BARE: &str = "zx-bare-probe";
+
+/// [`add_rig`]'s twin for the bare-name ladder: the one catalog skill is named [`BARE`].
+fn bare_rig(tag: &str) -> (Rig, FakePlane, FakeDirectory, Version) {
+    let rig = Rig::new(tag);
+    rig.seed_session();
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let v = one_file(b"# deploy\n");
+    let plane = FakePlane::new(log).with_version("s_bare", &v);
+    plane.serves(Vec::new());
+    let dir = FakeDirectory::new(vec![catalog_entry("s_bare", BARE, &v)], Vec::new());
+    (rig, plane, dir, v)
+}
+
 /// An untracked skill a discovery walk will find: `<root>/.claude/skills/<name>/SKILL.md` (the
 /// rig's home already carries `.claude/`, so claude-code reads as present at both scopes).
 fn untracked_skill(root: &std::path::Path, name: &str, body: &[u8]) -> PathBuf {
@@ -5757,47 +5774,47 @@ fn seed_second_session(rig: &Rig) {
 
 #[test]
 fn a_name_only_a_workspace_publishes_resolves_to_its_reference() {
-    let (rig, plane, dir, _v) = add_rig("bare-ws-only");
-    match bare_plan(&rig, &plane, &dir, "deploy", true).unwrap() {
+    let (rig, plane, dir, _v) = bare_rig("bare-ws-only");
+    match bare_plan(&rig, &plane, &dir, BARE, true).unwrap() {
         ops::BareAddPlan::Subscribe {
             reference,
             workspace,
         } => {
             // The CANONICAL host-qualified spelling — unambiguous however many servers this
             // machine is logged into.
-            assert_eq!(reference, format!("{HOST}/{WS_NAME}/deploy"));
+            assert_eq!(reference, format!("{HOST}/{WS_NAME}/{BARE}"));
             assert_eq!(workspace, WS_NAME);
         }
         other => panic!("the workspace's copy is the only thing that name can mean: {other:?}"),
     }
     // A name NOBODY has stays the plain not-found — the workspace half never invents a match.
-    let err = bare_plan(&rig, &plane, &dir, "ghost", true).unwrap_err();
+    let err = bare_plan(&rig, &plane, &dir, "zx-bare-ghost", true).unwrap_err();
     assert_eq!(err.code(), "NO_UNTRACKED_SKILL");
 }
 
 #[test]
 fn a_local_directory_wins_and_the_receipt_names_the_workspace_spelling() {
-    let (rig, plane, dir, _v) = add_rig("bare-both");
+    let (rig, plane, dir, _v) = bare_rig("bare-both");
     // The SAME bytes the workspace serves, sitting untracked in the home agent dir.
-    let path = untracked_skill(&rig.home.0, "deploy", b"# deploy\n");
+    let path = untracked_skill(&rig.home.0, BARE, b"# deploy\n");
     let ctx = rig.ctx_at(Some(&rig.work.0));
 
-    let published = match bare_plan(&rig, &plane, &dir, "deploy", true).unwrap() {
+    let published = match bare_plan(&rig, &plane, &dir, BARE, true).unwrap() {
         ops::BareAddPlan::Adopt {
             path: p,
             name,
             published,
         } => {
             assert_eq!(p, path, "the bytes in front of you are what you asked for");
-            assert_eq!(name, "deploy");
+            assert_eq!(name, BARE);
             published.expect("the one workspace publishing the name is disclosed")
         }
         other => panic!("a local copy adopts in place: {other:?}"),
     };
     // The receipt judges the workspace's current version against the bytes that just landed.
-    let data = ops::add_with_name(&ctx, &path, Some("deploy")).unwrap();
+    let data = ops::add_with_name(&ctx, &path, Some(BARE)).unwrap();
     let same = published.suggestion(&data.bundle_digest);
-    assert_eq!(same.reference, format!("{HOST}/{WS_NAME}/deploy"));
+    assert_eq!(same.reference, format!("{HOST}/{WS_NAME}/{BARE}"));
     assert_eq!(same.workspace, WS_NAME);
     assert!(same.identical, "byte-identical to what the catalog serves");
 
@@ -5805,27 +5822,27 @@ fn a_local_directory_wins_and_the_receipt_names_the_workspace_spelling() {
     // identical claim goes away.
     let rig2 = Rig::new("bare-both-drift");
     rig2.seed_session();
-    let drifted = untracked_skill(&rig2.home.0, "deploy", b"# deploy (mine)\n");
+    let drifted = untracked_skill(&rig2.home.0, BARE, b"# deploy (mine)\n");
     let ctx2 = rig2.ctx_at(Some(&rig2.work.0));
-    let published2 = match bare_plan(&rig2, &plane, &dir, "deploy", true).unwrap() {
+    let published2 = match bare_plan(&rig2, &plane, &dir, BARE, true).unwrap() {
         ops::BareAddPlan::Adopt { published, .. } => published.expect("still disclosed"),
         other => panic!("a local copy adopts in place: {other:?}"),
     };
-    let data2 = ops::add_with_name(&ctx2, &drifted, Some("deploy")).unwrap();
+    let data2 = ops::add_with_name(&ctx2, &drifted, Some(BARE)).unwrap();
     assert!(!published2.suggestion(&data2.bundle_digest).identical);
 }
 
 #[test]
 fn a_name_several_workspaces_publish_refuses_naming_every_spelling() {
-    let (rig, plane, dir, _v) = add_rig("bare-two-ws");
+    let (rig, plane, dir, _v) = bare_rig("bare-two-ws");
     seed_second_session(&rig);
 
-    let err = bare_plan(&rig, &plane, &dir, "deploy", true).unwrap_err();
+    let err = bare_plan(&rig, &plane, &dir, BARE, true).unwrap_err();
     assert_eq!(err.code(), "AMBIGUOUS_WORKSPACE");
     let message = err.to_string();
     for reference in [
-        format!("{HOST}/{WS_NAME}/deploy"),
-        "beta.test/ops/deploy".to_owned(),
+        format!("{HOST}/{WS_NAME}/{BARE}"),
+        format!("beta.test/ops/{BARE}"),
     ] {
         assert!(message.contains(&reference), "{message}");
     }
@@ -5839,14 +5856,17 @@ fn a_name_several_workspaces_publish_refuses_naming_every_spelling() {
     );
     assert_eq!(
         envelope.data["references"],
-        serde_json::json!([format!("{HOST}/{WS_NAME}/deploy"), "beta.test/ops/deploy"]),
+        serde_json::json!([
+            format!("{HOST}/{WS_NAME}/{BARE}"),
+            format!("beta.test/ops/{BARE}")
+        ]),
         "sorted by the spelling the message prints"
     );
 
     // With a LOCAL copy in hand the adopt still wins — and carries no suggestion, because naming
     // one of two teams' copies beside an adopt that already landed would be a guess.
-    untracked_skill(&rig.home.0, "deploy", b"# deploy\n");
-    match bare_plan(&rig, &plane, &dir, "deploy", true).unwrap() {
+    untracked_skill(&rig.home.0, BARE, b"# deploy\n");
+    match bare_plan(&rig, &plane, &dir, BARE, true).unwrap() {
         ops::BareAddPlan::Adopt { published, .. } => assert!(published.is_none()),
         other => panic!("a local copy adopts in place: {other:?}"),
     }
@@ -5854,16 +5874,16 @@ fn a_name_several_workspaces_publish_refuses_naming_every_spelling() {
 
 #[test]
 fn a_local_ambiguity_discloses_the_team_copy_and_judges_the_bytes() {
-    let (rig, plane, dir, _v) = add_rig("bare-scope");
+    let (rig, plane, dir, _v) = bare_rig("bare-scope");
     // The same name in the home AND project dirs of ONE harness — `@harness` cannot split them.
-    untracked_skill(&rig.home.0, "deploy", b"# deploy\n");
-    untracked_skill(&rig.work.0, "deploy", b"# deploy\n");
+    untracked_skill(&rig.home.0, BARE, b"# deploy\n");
+    untracked_skill(&rig.work.0, BARE, b"# deploy\n");
 
-    let err = bare_plan(&rig, &plane, &dir, "deploy", true).unwrap_err();
+    let err = bare_plan(&rig, &plane, &dir, BARE, true).unwrap_err();
     assert_eq!(err.code(), "AMBIGUOUS_SCOPE");
     let message = err.to_string();
     assert!(
-        message.contains("byte-identical") && message.contains(&format!("{HOST}/{WS_NAME}/deploy")),
+        message.contains("byte-identical") && message.contains(&format!("{HOST}/{WS_NAME}/{BARE}")),
         "every copy matches the served version, so the message collapses toward the subscribe: \
          {message}"
     );
@@ -5874,7 +5894,7 @@ fn a_local_ambiguity_discloses_the_team_copy_and_judges_the_bytes() {
         Some(vec![
             "topos".to_owned(),
             "add".to_owned(),
-            format!("{HOST}/{WS_NAME}/deploy"),
+            format!("{HOST}/{WS_NAME}/{BARE}"),
             "--json".to_owned(),
         ]),
         "{:?}",
@@ -5882,8 +5902,8 @@ fn a_local_ambiguity_discloses_the_team_copy_and_judges_the_bytes() {
     );
 
     // One copy DRIFTS: the disclosure stands, the identical claim does not.
-    untracked_skill(&rig.work.0, "deploy", b"# deploy (mine)\n");
-    let message = bare_plan(&rig, &plane, &dir, "deploy", true)
+    untracked_skill(&rig.work.0, BARE, b"# deploy (mine)\n");
+    let message = bare_plan(&rig, &plane, &dir, BARE, true)
         .unwrap_err()
         .to_string();
     assert!(!message.contains("byte-identical"), "{message}");
@@ -5892,30 +5912,30 @@ fn a_local_ambiguity_discloses_the_team_copy_and_judges_the_bytes() {
 
 #[test]
 fn a_selector_or_harness_form_never_subscribes() {
-    let (rig, plane, dir, _v) = add_rig("bare-gated");
+    let (rig, plane, dir, _v) = bare_rig("bare-gated");
     // `-s`/`-a` narrow a LOCAL adopt, so the fully-bare gate is closed: today's answer, exactly.
-    let err = bare_plan(&rig, &plane, &dir, "deploy", false).unwrap_err();
+    let err = bare_plan(&rig, &plane, &dir, BARE, false).unwrap_err();
     assert_eq!(err.code(), "NO_UNTRACKED_SKILL");
     // Same for a second workspace publishing it — the gate is about the FORM, not the count.
     seed_second_session(&rig);
     assert_eq!(
-        bare_plan(&rig, &plane, &dir, "deploy", false)
+        bare_plan(&rig, &plane, &dir, BARE, false)
             .unwrap_err()
             .code(),
         "NO_UNTRACKED_SKILL"
     );
     // A `@harness` suffix names a local harness's dir — it cannot reach the subscribe arm at all.
-    let err = bare_plan(&rig, &plane, &dir, "deploy@claude-code", true).unwrap_err();
+    let err = bare_plan(&rig, &plane, &dir, &format!("{BARE}@claude-code"), true).unwrap_err();
     assert_eq!(err.code(), "HARNESS_NOT_FOUND");
 }
 
 #[test]
 fn a_cache_only_match_subscribes_and_an_unanswering_session_is_skipped() {
-    let (rig, plane, dir, _v) = add_rig("bare-offline");
+    let (rig, plane, dir, _v) = bare_rig("bare-offline");
     // The catalog cannot be read at all — a transport fault, never an existence claim.
     dir.set_unavailable(true);
     assert_eq!(
-        bare_plan(&rig, &plane, &dir, "deploy", true)
+        bare_plan(&rig, &plane, &dir, BARE, true)
             .unwrap_err()
             .code(),
         "NO_UNTRACKED_SKILL",
@@ -5933,9 +5953,9 @@ fn a_cache_only_match_subscribes_and_an_unanswering_session_is_skipped() {
                 host: Some(HOST.to_owned()),
                 workspace_name: Some(WS_NAME.to_owned()),
                 delivered: [(
-                    "s_deploy".to_owned(),
+                    "s_bare".to_owned(),
                     sync_status::DeliveredSkill {
-                        name: "deploy".to_owned(),
+                        name: BARE.to_owned(),
                         ..Default::default()
                     },
                 )]
@@ -5946,32 +5966,32 @@ fn a_cache_only_match_subscribes_and_an_unanswering_session_is_skipped() {
         )],
     )
     .unwrap();
-    match bare_plan(&rig, &plane, &dir, "deploy", true).unwrap() {
+    match bare_plan(&rig, &plane, &dir, BARE, true).unwrap() {
         ops::BareAddPlan::Subscribe { reference, .. } => {
-            assert_eq!(reference, format!("{HOST}/{WS_NAME}/deploy"));
+            assert_eq!(reference, format!("{HOST}/{WS_NAME}/{BARE}"));
         }
         other => panic!("the cache alone is enough to spell the reference: {other:?}"),
     }
     // And with a local copy beside it, the disclosure carries no identical claim: a cached row
     // holds a served VERSION id, which is a different hash from a bundle digest.
-    let path = untracked_skill(&rig.home.0, "deploy", b"# deploy\n");
+    let path = untracked_skill(&rig.home.0, BARE, b"# deploy\n");
     let ctx = rig.ctx_at(Some(&rig.work.0));
-    let published = match bare_plan(&rig, &plane, &dir, "deploy", true).unwrap() {
+    let published = match bare_plan(&rig, &plane, &dir, BARE, true).unwrap() {
         ops::BareAddPlan::Adopt { published, .. } => published.expect("disclosed"),
         other => panic!("a local copy adopts in place: {other:?}"),
     };
-    let data = ops::add_with_name(&ctx, &path, Some("deploy")).unwrap();
+    let data = ops::add_with_name(&ctx, &path, Some(BARE)).unwrap();
     assert!(!published.suggestion(&data.bundle_digest).identical);
 }
 
 #[test]
 fn a_bare_name_subscribe_records_the_canonical_row_and_its_inverse() {
-    let (rig, plane, dir, _v) = add_rig("bare-e2e");
+    let (rig, plane, dir, _v) = bare_rig("bare-e2e");
     let ctx = rig.ctx_at(Some(&rig.work.0));
     let ops::BareAddPlan::Subscribe {
         reference,
         workspace,
-    } = bare_plan(&rig, &plane, &dir, "deploy", true).unwrap()
+    } = bare_plan(&rig, &plane, &dir, BARE, true).unwrap()
     else {
         panic!("nothing local carries the name");
     };
@@ -5989,7 +6009,7 @@ fn a_bare_name_subscribe_records_the_canonical_row_and_its_inverse() {
         };
     ops::push_note(
         &mut data,
-        format!("resolved 'deploy' to {reference} — {workspace} publishes it"),
+        format!("resolved '{BARE}' to {reference} — {workspace} publishes it"),
     );
 
     let manifest = rig.work.0.join(crate::manifest::MANIFEST_FILE);
@@ -6003,8 +6023,77 @@ fn a_bare_name_subscribe_records_the_canonical_row_and_its_inverse() {
         "the inverse is the project-scope remove of the same key"
     );
     let note = data.note.expect("the resolution is disclosed");
-    assert!(
-        note.contains("deploy") && note.contains(&reference),
-        "{note}"
+    assert!(note.contains(BARE) && note.contains(&reference), "{note}");
+}
+
+#[test]
+fn a_cache_row_of_an_ended_session_or_a_withdrawal_resolves_nothing() {
+    let (rig, plane, dir, _v) = bare_rig("bare-stale-cache");
+    // The catalog is unreachable, so ONLY the cache could answer — exactly the offline posture.
+    dir.set_unavailable(true);
+
+    // A leftover row from a workspace whose session has ENDED (`logout` removes the session but
+    // leaves `sync_status.json` behind): resolving it would aim the subscribe at a workspace this
+    // machine can no longer reach — an honest not-found is the only right answer.
+    sync_status::record(
+        &rig.fs,
+        &rig.layout(),
+        &[(
+            "w_gone".to_owned(),
+            sync_status::WorkspaceSync {
+                host: Some("gone.test".to_owned()),
+                workspace_name: Some("gone".to_owned()),
+                delivered: [(
+                    "s_bare".to_owned(),
+                    sync_status::DeliveredSkill {
+                        name: BARE.to_owned(),
+                        ..Default::default()
+                    },
+                )]
+                .into_iter()
+                .collect(),
+                ..Default::default()
+            },
+        )],
+    )
+    .unwrap();
+    assert_eq!(
+        bare_plan(&rig, &plane, &dir, BARE, true)
+            .unwrap_err()
+            .code(),
+        "NO_UNTRACKED_SKILL",
+        "an ended session's cache row keeps no say in the namespace"
+    );
+
+    // A row the workspace since WITHDREW — the live session stands, but withdrawn is not
+    // published, whatever the cache still holds.
+    sync_status::record(
+        &rig.fs,
+        &rig.layout(),
+        &[(
+            WS.to_owned(),
+            sync_status::WorkspaceSync {
+                host: Some(HOST.to_owned()),
+                workspace_name: Some(WS_NAME.to_owned()),
+                delivered: [(
+                    "s_bare".to_owned(),
+                    sync_status::DeliveredSkill {
+                        name: BARE.to_owned(),
+                        withdrawn: true,
+                        ..Default::default()
+                    },
+                )]
+                .into_iter()
+                .collect(),
+                ..Default::default()
+            },
+        )],
+    )
+    .unwrap();
+    assert_eq!(
+        bare_plan(&rig, &plane, &dir, BARE, true)
+            .unwrap_err()
+            .code(),
+        "NO_UNTRACKED_SKILL"
     );
 }
