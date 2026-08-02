@@ -200,7 +200,11 @@ fn assert_golden(name: &str, command: &str, value: Value) {
 /// [`render::err_envelope`] emits for that error — code, message, `data`, and the runnable
 /// next actions alike.
 fn assert_golden_err(name: &str, command: &str, err: &crate::error::ClientError) {
-    let got = serde_json::to_string_pretty(&render::err_envelope(command, err)).unwrap() + "\n";
+    // The golden refusals are all single-target invocations — the shape a rebuilt command may
+    // restate (see `render::err_hint_tty`); a richer one would legitimately offer fewer actions.
+    let argv = vec![command.to_owned()];
+    let got =
+        serde_json::to_string_pretty(&render::err_envelope(command, &argv, err)).unwrap() + "\n";
     let path = workspace_root().join(format!("contracts/fixtures/json/{name}.json"));
     let want = std::fs::read_to_string(&path).unwrap_or_default();
     assert_eq!(got, want, "golden {name} mismatch.\nACTUAL:\n{got}");
@@ -996,7 +1000,7 @@ fn a_global_add_refusal_keeps_g_in_every_spelled_follow_up() {
         err.to_string().contains("`topos add -g <reference>`"),
         "{err}"
     );
-    let envelope = crate::render::err_envelope("add", &err);
+    let envelope = crate::render::err_envelope("add", &["add".to_owned()], &err);
     for action in &envelope.next_actions {
         assert_eq!(action.argv[2], "-g", "{:?}", action.argv);
     }
@@ -1017,7 +1021,7 @@ fn a_global_add_refusal_keeps_g_in_every_spelled_follow_up() {
             .contains("`topos add -g topos.sh/acme/code-review`"),
         "{hinted}"
     );
-    let envelope = crate::render::err_envelope("add", &hinted);
+    let envelope = crate::render::err_envelope("add", &["add".to_owned()], &hinted);
     let subscribe = envelope.next_actions.last().expect("the subscribe rides");
     assert_eq!(
         subscribe.argv,
@@ -1321,7 +1325,7 @@ fn error_envelope_is_coded_retryability_aware_and_leak_free() {
         name: "x".into(),
         count: 2,
     };
-    let env = render::err_envelope("list", &amb);
+    let env = render::err_envelope("list", &["list".to_owned()], &amb);
     assert!(!env.ok);
     let err = env.error.as_ref().unwrap();
     assert_eq!(err.code, "AMBIGUOUS_NAME");
@@ -1335,7 +1339,7 @@ fn error_envelope_is_coded_retryability_aware_and_leak_free() {
 
     // Corrupt must not leak the inner serde detail to --json or TTY.
     let corrupt = ClientError::Corrupt("secret-serde-detail-xyzzy".into());
-    let env = render::err_envelope("list", &corrupt);
+    let env = render::err_envelope("list", &["list".to_owned()], &corrupt);
     let msg = env.error.unwrap().context["message"]
         .as_str()
         .unwrap()
@@ -1345,7 +1349,12 @@ fn error_envelope_is_coded_retryability_aware_and_leak_free() {
 
     // A store-side IO failure is retryable, like a client-side one.
     let io = ClientError::Gitstore(topos_gitstore::GitstoreError::Io("disk full".into()));
-    assert!(render::err_envelope("add", &io).error.unwrap().retryable);
+    assert!(
+        render::err_envelope("add", &["add".to_owned()], &io)
+            .error
+            .unwrap()
+            .retryable
+    );
 }
 
 #[test]

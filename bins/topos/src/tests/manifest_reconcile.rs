@@ -4058,7 +4058,10 @@ fn removing_two_members_of_one_set_leaves_neither() {
 /// sentence — so this, not `err.to_string()`, is where "every way out is named, paste-ready" is
 /// proven.
 fn ways_out(err: &ClientError) -> String {
-    crate::render::err_hint_tty("remove", err).unwrap_or_default()
+    // The invocation these suites make: `topos remove <token>` — one verb, one target, so the
+    // reconstruction is faithful and the ways out are offered.
+    let argv = vec!["remove".to_owned(), "deploy".to_owned()];
+    crate::render::err_hint_tty("remove", &argv, err).unwrap_or_default()
 }
 
 #[test]
@@ -5933,7 +5936,7 @@ fn a_name_several_workspaces_publish_refuses_naming_every_spelling() {
         assert!(message.contains(&reference), "{message}");
     }
     // The machine-readable half: one runnable subscribe per spelling, and the references in `data`.
-    let envelope = crate::render::err_envelope("add", &err);
+    let envelope = crate::render::err_envelope("add", &["add".to_owned()], &err);
     assert_eq!(
         envelope.next_actions.len(),
         2,
@@ -5975,7 +5978,7 @@ fn a_name_several_workspaces_publish_refuses_naming_every_spelling() {
     untracked_skill(&rig.work.0, BARE, b"# deploy\n");
     let err = bare_plan(&rig, &plane, &dir, BARE, true).unwrap_err();
     assert_eq!(err.code(), "AMBIGUOUS_SCOPE");
-    let envelope = crate::render::err_envelope("add", &err);
+    let envelope = crate::render::err_envelope("add", &["add".to_owned()], &err);
     let subscribes: Vec<_> = envelope
         .next_actions
         .iter()
@@ -6009,7 +6012,7 @@ fn a_local_ambiguity_discloses_the_team_copy_and_judges_the_bytes() {
          {message}"
     );
     // The subscribe rides beside the inventory read as a runnable action.
-    let envelope = crate::render::err_envelope("add", &err);
+    let envelope = crate::render::err_envelope("add", &["add".to_owned()], &err);
     assert_eq!(
         envelope.next_actions.last().map(|a| a.argv.clone()),
         Some(vec![

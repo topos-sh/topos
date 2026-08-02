@@ -34,9 +34,9 @@ pub(crate) fn ok_envelope(command: &str, data: serde_json::Value) -> JsonEnvelop
 /// [`ClientError::AmbiguousTarget`] additionally surfaces its paste-ready qualified spellings as
 /// `data.candidates` — the machine-readable half of the ambiguity refusal — and an
 /// [`ClientError::AmbiguousWorkspace`] its canonical references the same way, as `data.references`.
-pub(crate) fn err_envelope(command: &str, err: &ClientError) -> JsonEnvelope {
+pub(crate) fn err_envelope(command: &str, argv: &[String], err: &ClientError) -> JsonEnvelope {
     let outcome = err.outcome();
-    let next_actions = next_actions(command, err);
+    let next_actions = next_actions(command, argv, err);
     let retryable = matches!(
         outcome,
         TerminalOutcome::RetryableFailure | TerminalOutcome::Unavailable
@@ -75,10 +75,11 @@ pub(crate) fn err_envelope(command: &str, err: &ClientError) -> JsonEnvelope {
     }
 }
 
-/// The machine-actionable ways out of one failure. `command` is the VERB that refused (the same
-/// name the envelope carries) — the one input no error variant holds, and the one an ambiguity
-/// needs to rebuild the invocation the caller just made.
-fn next_actions(command: &str, err: &ClientError) -> Vec<NextAction> {
+/// The machine-actionable ways out of one failure. Two inputs no error variant holds ride
+/// alongside it: `command`, the canonical VERB that refused (the same name the envelope carries),
+/// and `argv`, the user's own invocation past the binary name. An ambiguity needs both — the verb
+/// to rebuild with, and the whole invocation to judge whether rebuilding can be FAITHFUL at all.
+fn next_actions(command: &str, argv: &[String], err: &ClientError) -> Vec<NextAction> {
     match err {
         // A LOCAL ambiguity whose name a connected workspace ALSO publishes has more than one
         // real way out, so it carries them all: the inventory read that resolves the local pick,
@@ -258,30 +259,36 @@ fn next_actions(command: &str, err: &ClientError) -> Vec<NextAction> {
         // two different documents, so a rebuilt command that dropped the flag would edit the one
         // nobody asked about).
         //
-        // THE FAITHFULNESS RULE, and why this is a closed match on the verb: a command may be
-        // offered only where the WHOLE invocation is determined by the verb, one candidate, and
-        // the scope flag. `remove` and `add` are — their argv is the target and nothing else.
-        // `protect` is NOT: its optional LEVEL positional decides which act it is, so rebuilding
-        // `topos protect <name> open` as `topos protect <candidate>` offers the opposite act
-        // (a tighten where a loosen was asked). A wrong offered command is worse than none, so
-        // everything else answers with the refusal alone — the agent still gets `data.candidates`.
-        // A verb added later lands in `_` and stays silent until someone proves its argv
-        // reconstructible.
+        // THE FAITHFULNESS RULE, in two halves that must BOTH pass — a rebuilt command is offered
+        // only where it is the whole of what was asked, with one name swapped for one candidate.
+        //
+        // The VERB half (a closed match): `remove` and `add` take a target and act on it.
+        // `protect` does not qualify — its optional LEVEL positional decides which act it is, so
+        // rebuilding `topos protect <name> open` as `topos protect <candidate>` offers the
+        // opposite (a tighten where a loosen was asked). A verb added later lands in `_` and stays
+        // silent until someone proves its argv reconstructible.
+        //
+        // The INVOCATION half: even `remove` is only reconstructible when the ambiguous token was
+        // the whole request. `topos remove foo bar --yes` rebuilt as `topos remove <candidate>`
+        // succeeds while silently abandoning `bar` — the caller would believe their batch ran.
+        //
+        // Either half failing means NO offer: the short refusal stands, and the agent still gets
+        // every way out in `data.candidates`. A wrong offered command is worse than none.
         ClientError::AmbiguousTarget {
             candidates, global, ..
-        } => match command {
-            "remove" | "add" => candidates
+        } => match (command, is_lone_target_invocation(argv)) {
+            ("remove" | "add", true) => candidates
                 .iter()
                 .map(|candidate| {
-                    let mut argv = vec!["topos".to_owned(), command.to_owned()];
+                    let mut rebuilt = vec!["topos".to_owned(), command.to_owned()];
                     if *global {
-                        argv.push("-g".to_owned());
+                        rebuilt.push("-g".to_owned());
                     }
                     // The candidate's OWN tokens — the reference always exactly one of them, so a
                     // path holding whitespace (or a `--yes`) can never become argv of its own.
-                    argv.extend(candidate.argv_tokens());
-                    argv.push("--json".to_owned());
-                    crate::actions::next_action(ActionCode::from("RUN_COMMAND".to_owned()), argv)
+                    rebuilt.extend(candidate.argv_tokens());
+                    rebuilt.push("--json".to_owned());
+                    crate::actions::next_action(ActionCode::from("RUN_COMMAND".to_owned()), rebuilt)
                 })
                 .collect(),
             _ => Vec::new(),
@@ -290,6 +297,41 @@ fn next_actions(command: &str, err: &ClientError) -> Vec<NextAction> {
         // mirrors it structurally. Prose text is never tokenized into argv — see the allowlist.
         other => mirror_prose_commands(&safe_message(other)),
     }
+}
+
+/// Whether the refused invocation was EXACTLY its verb plus the ONE ambiguous token — the only
+/// shape a per-candidate rebuild can honor, since the rebuild says nothing but "this verb, this
+/// candidate". Read from the user's own argv (past the binary name), because only the argv knows:
+/// the typed error carries the name that failed, never the request it was part of.
+///
+/// Three tokens are looked past. The VERB — the first non-flag token, however the user spelled it
+/// (`pull` for `update`) — is what the rebuild re-states. `--json` is the agent half of the same
+/// action, and the rebuild appends its own. `-g`/`--global` is preserved structurally by the
+/// error's own `global` field, so seeing it here changes nothing.
+///
+/// EVERY other flag disqualifies, `--yes` most of all — and deliberately, even though it could be
+/// carried over. Re-offering it would apply an act against a target the caller has never seen
+/// described: they consented to losing `foo`, and the rebuild is about a candidate they are only
+/// now choosing between. They can re-run with `--yes` themselves, having read the describe.
+///
+/// A second positional disqualifies too: a rebuilt single-target command would drop the rest of
+/// the batch and still exit 0. And an EMPTY argv (no invocation in hand) fails toward silence.
+fn is_lone_target_invocation(argv: &[String]) -> bool {
+    let mut verb_seen = false;
+    let mut positionals = 0_usize;
+    for token in argv {
+        match token.as_str() {
+            // Carried by the rebuild itself, or by the error's own scope field.
+            "--json" | "-g" | "--global" => {}
+            // Anything else flag-shaped is part of the request the rebuild cannot restate —
+            // including a value-taking selector, whose VALUE then reads as a positional and
+            // disqualifies the shape a second time. Both directions fail closed.
+            t if t.starts_with('-') => return false,
+            _ if !verb_seen => verb_seen = true,
+            _ => positionals += 1,
+        }
+    }
+    verb_seen && positionals == 1
 }
 
 /// The inventory read every name-resolution refusal offers: what is adoptable here, machine-readable.
@@ -2508,9 +2550,10 @@ pub(crate) fn err_tty(err: &ClientError) -> String {
 /// in the first place), and printing it twice, two lines apart, reads as two different steps. The
 /// block is still built from `next_actions` alone; this only drops what the reader just read.
 ///
-/// `command` is the verb that refused, passed straight through to [`next_actions`] — the surfaces
-/// stay one computation, so a human and an agent are offered the same commands.
-pub(crate) fn err_hint_tty(command: &str, err: &ClientError) -> Option<String> {
+/// `command` and `argv` describe the invocation that refused; both pass straight through to
+/// [`next_actions`] — the surfaces stay one computation, so a human and an agent are offered the
+/// same commands, and withheld the same ones.
+pub(crate) fn err_hint_tty(command: &str, argv: &[String], err: &ClientError) -> Option<String> {
     let retryable = matches!(
         err.outcome(),
         TerminalOutcome::RetryableFailure | TerminalOutcome::Unavailable
@@ -2518,7 +2561,7 @@ pub(crate) fn err_hint_tty(command: &str, err: &ClientError) -> Option<String> {
     let message = safe_message(err);
     let already_said = backtick_spans(&message);
     let mut lines: Vec<String> = Vec::new();
-    for action in next_actions(command, err) {
+    for action in next_actions(command, argv, err) {
         let line = hint_line(&action.argv);
         if line.is_empty() || lines.contains(&line) || already_said.iter().any(|s| *s == line) {
             continue;
@@ -2602,6 +2645,11 @@ mod tests {
         auth_status_next_actions, auth_status_tty, list_tty, log_tty, publish_tty, pull_tty,
         safe_message, status_tty, welcome_tty,
     };
+
+    /// A synthetic invocation for the render tests: what a user typed past the binary name.
+    fn typed(tokens: &[&str]) -> Vec<String> {
+        tokens.iter().map(|t| (*t).to_owned()).collect()
+    }
 
     fn row(name: &str, action: PullAction) -> PullSkill {
         PullSkill {
@@ -3445,7 +3493,11 @@ mod tests {
 
     #[test]
     fn not_enrolled_carries_the_join_template_with_its_needs() {
-        let actions = super::next_actions("update", &crate::error::ClientError::NotEnrolled);
+        let actions = super::next_actions(
+            "update",
+            &typed(&["update"]),
+            &crate::error::ClientError::NotEnrolled,
+        );
         assert_eq!(actions.len(), 1, "{actions:?}");
         assert_eq!(actions[0].code.as_str(), "LOGIN_WORKSPACE");
         assert_eq!(
@@ -3463,6 +3515,7 @@ mod tests {
         // PATH_NOT_NAME's fix is TYPED — the envelope carries the concrete `topos add ./<arg>`.
         let actions = super::next_actions(
             "add",
+            &typed(&["add"]),
             &crate::error::ClientError::PathNotName {
                 arg: "deploy".to_owned(),
             },
@@ -3475,6 +3528,7 @@ mod tests {
         // A SESSION-REQUIRED refusal carries its address as an EXECUTABLE argv, typed.
         let actions = super::next_actions(
             "publish",
+            &typed(&["publish"]),
             &crate::error::ClientError::SessionRequired {
                 address: "acme.test/eng".to_owned(),
                 message: "not logged into acme.test/eng — run `topos login acme.test/eng` first"
@@ -3492,6 +3546,7 @@ mod tests {
         // An expired flow mirrors the join template, needs and all.
         let actions = super::next_actions(
             "login",
+            &typed(&["login"]),
             &crate::error::ClientError::Enrollment(
                 "this login attempt expired — start over with `topos login <workspace-address>`"
                     .to_owned(),
@@ -3503,6 +3558,7 @@ mod tests {
         // "upgrade topos" is `topos self-update`, structurally.
         let actions = super::next_actions(
             "list",
+            &typed(&["list"]),
             &crate::error::ClientError::UnknownSchemaVersion { found: 9, max: 1 },
         );
         assert_eq!(actions.len(), 1, "{actions:?}");
@@ -3511,6 +3567,7 @@ mod tests {
         // Divergent placements name the loss-led reset (a describe — nothing dropped yet).
         let actions = super::next_actions(
             "update",
+            &typed(&["update"]),
             &crate::error::ClientError::PlacementsDiverged {
                 skill: "deploy".to_owned(),
                 paths: vec!["/a".into(), "/b".into()],
@@ -3521,7 +3578,14 @@ mod tests {
         assert!(actions[0].argv.iter().any(|t| t == "--reset"));
 
         // A message without a backticked `topos …` command mirrors nothing.
-        assert!(super::next_actions("add", &crate::error::ClientError::EmptyBundle).is_empty());
+        assert!(
+            super::next_actions(
+                "add",
+                &typed(&["add"]),
+                &crate::error::ClientError::EmptyBundle
+            )
+            .is_empty()
+        );
     }
 
     #[test]
@@ -3531,6 +3595,7 @@ mod tests {
         // consent flag cannot be smuggled into an executable next action.
         let actions = super::next_actions(
             "add",
+            &typed(&["add"]),
             &crate::error::ClientError::PathNotName {
                 arg: "skill --yes".to_owned(),
             },
@@ -3545,6 +3610,7 @@ mod tests {
         // Same discipline on the other typed value arms.
         let actions = super::next_actions(
             "publish",
+            &typed(&["publish"]),
             &crate::error::ClientError::HarnessMismatch {
                 name: "pwn --yes".to_owned(),
                 requested: "cursor".to_owned(),
@@ -3557,6 +3623,7 @@ mod tests {
         );
         let actions = super::next_actions(
             "add",
+            &typed(&["add"]),
             &crate::error::ClientError::PlacementOccupied {
                 path: "/tmp/x --yes".to_owned(),
             },
@@ -3634,6 +3701,7 @@ mod tests {
         // actually clear the block: the `--onto-current` escape and the `--reset` discard.
         let actions = super::next_actions(
             "publish",
+            &typed(&["publish"]),
             &crate::error::ClientError::PublishBlocked {
                 skill: "deploy-checklist".to_owned(),
             },
@@ -3675,7 +3743,7 @@ mod tests {
             // This folder's file — the refused `topos remove rust-skills` carried no `-g`.
             global: false,
         };
-        let actions = super::next_actions("remove", &err);
+        let actions = super::next_actions("remove", &typed(&["remove", "rust-skills"]), &err);
         assert_eq!(actions.len(), 2, "{actions:?}");
         assert_eq!(
             actions[0].argv,
@@ -3709,7 +3777,8 @@ mod tests {
 
         // The TTY prints those same commands under the one lead-in — and the message above them no
         // longer inlines the list, so nothing is said twice.
-        let hint = super::err_hint_tty("remove", &err).expect("an ambiguity always has a way out");
+        let hint = super::err_hint_tty("remove", &typed(&["remove", "rust-skills"]), &err)
+            .expect("an ambiguity always has a way out");
         assert_eq!(
             hint,
             "try:\n  topos remove github.com/leonardomso/rust-skills\n  topos remove \
@@ -3738,7 +3807,8 @@ mod tests {
             // The switch it lifts lives in the machine-wide file, and the invocation said so.
             global: true,
         };
-        let actions = super::next_actions("add", &lift);
+        let lift_argv = typed(&["add", "-g", "deploy"]);
+        let actions = super::next_actions("add", &lift_argv, &lift);
         assert_eq!(
             actions[0].argv,
             vec!["topos", "add", "-g", "topos.sh/acme/deploy", "--json"]
@@ -3749,7 +3819,7 @@ mod tests {
         );
         // The flag reaches the human line too — one surface never offers what the other withholds.
         assert_eq!(
-            super::err_hint_tty("add", &lift),
+            super::err_hint_tty("add", &lift_argv, &lift),
             Some(
                 "try:\n  topos add -g topos.sh/acme/deploy\n  topos add -g topos.sh/beta/deploy"
                     .to_owned()
@@ -3762,13 +3832,13 @@ mod tests {
             global: false,
         };
         assert_eq!(
-            super::next_actions("add", &local)[0].argv,
+            super::next_actions("add", &typed(&["add", "deploy"]), &local)[0].argv,
             vec!["topos", "add", "topos.sh/acme/deploy", "--json"]
         );
 
         // The envelope keeps the machine-readable half unchanged (a consumer reading
         // `data.candidates` is untouched by the message losing the list), and mirrors the actions.
-        let envelope = super::err_envelope("remove", &err);
+        let envelope = super::err_envelope("remove", &typed(&["remove", "rust-skills"]), &err);
         assert_eq!(
             envelope.data["candidates"],
             serde_json::json!([
@@ -3799,10 +3869,11 @@ mod tests {
             ],
             global: false,
         };
-        assert!(super::next_actions("protect", &err).is_empty());
-        assert_eq!(super::err_hint_tty("protect", &err), None);
+        let one_target = typed(&["protect", "deploy"]);
+        assert!(super::next_actions("protect", &one_target, &err).is_empty());
+        assert_eq!(super::err_hint_tty("protect", &one_target, &err), None);
         // The machine half is untouched by the silence: the candidates still ride the envelope.
-        let envelope = super::err_envelope("protect", &err);
+        let envelope = super::err_envelope("protect", &one_target, &err);
         assert_eq!(
             envelope.data["candidates"],
             serde_json::json!(["acme/skills/deploy", "beta/skills/deploy"])
@@ -3810,10 +3881,64 @@ mod tests {
         assert!(envelope.next_actions.is_empty());
         // The two verbs whose whole invocation IS the target keep their offers.
         for verb in ["remove", "add"] {
-            assert_eq!(super::next_actions(verb, &err).len(), 2, "{verb}");
+            assert_eq!(
+                super::next_actions(verb, &typed(&[verb, "deploy"]), &err).len(),
+                2,
+                "{verb}"
+            );
         }
         // A verb nobody has vetted stays silent rather than guessing at its argv.
-        assert!(super::next_actions("publish", &err).is_empty());
+        assert!(super::next_actions("publish", &typed(&["publish", "deploy"]), &err).is_empty());
+    }
+
+    #[test]
+    fn an_ambiguity_offers_nothing_when_the_rebuild_would_not_be_the_whole_request() {
+        use crate::error::{ClientError, TargetCandidate};
+
+        // The verb gate is not enough: `remove` takes SEVERAL targets and flags, and a rebuild
+        // says only "this verb, this candidate". Where the ambiguous token was not the whole
+        // request, the rebuilt command would succeed while quietly doing less than was asked.
+        let err = ClientError::AmbiguousTarget {
+            name: "foo".to_owned(),
+            candidates: vec![
+                TargetCandidate::plain("github.com/o/r/foo"),
+                TargetCandidate::plain("github.com/p/q/foo"),
+            ],
+            global: false,
+        };
+        let offered = |tokens: &[&str]| super::next_actions("remove", &typed(tokens), &err).len();
+
+        // A BATCH: `topos remove foo <candidate>` abandons `bar` and still exits 0.
+        assert_eq!(offered(&["remove", "foo", "bar"]), 0);
+        // `--yes`: carrying it over would APPLY the removal of a candidate the caller has never
+        // seen described — they consented to losing `foo`, not to losing whichever of these two
+        // they are only now choosing between. Dropping it silently would be no better: the
+        // rebuilt command would then describe where they asked to apply. Neither is offered.
+        assert_eq!(offered(&["remove", "foo", "--yes"]), 0);
+        // Any other flag is part of a request the rebuild cannot restate — including a
+        // value-taking one, whose value would read as a second target.
+        assert_eq!(offered(&["remove", "foo", "--via", "github.com/o/r"]), 0);
+        assert_eq!(offered(&["remove", "--workspace", "acme", "foo"]), 0);
+        // And with no invocation in hand at all, the gate fails toward silence.
+        assert_eq!(offered(&[]), 0);
+
+        // The shapes that ARE the whole request keep their offers — including the scope flag and
+        // the machine half, which the rebuild restates itself.
+        assert_eq!(offered(&["remove", "foo"]), 2);
+        assert_eq!(offered(&["remove", "-g", "foo"]), 2);
+        assert_eq!(offered(&["remove", "--global", "foo"]), 2);
+        assert_eq!(offered(&["--json", "remove", "foo"]), 2);
+
+        // Withheld does NOT mean uninformative: every way out still rides the envelope, and the
+        // TTY still prints the refusal — just no command it cannot honestly promise.
+        let batch = typed(&["remove", "foo", "bar", "--yes"]);
+        let envelope = super::err_envelope("remove", &batch, &err);
+        assert_eq!(
+            envelope.data["candidates"],
+            serde_json::json!(["github.com/o/r/foo", "github.com/p/q/foo"])
+        );
+        assert!(envelope.next_actions.is_empty());
+        assert_eq!(super::err_hint_tty("remove", &batch, &err), None);
     }
 
     #[test]
@@ -3833,7 +3958,8 @@ mod tests {
             candidates: vec![hostile.clone()],
             global: false,
         };
-        let actions = super::next_actions("remove", &err);
+        let argv = typed(&["remove", "my skill --yes"]);
+        let actions = super::next_actions("remove", &argv, &err);
         assert_eq!(
             actions[0].argv,
             vec![
@@ -3851,7 +3977,7 @@ mod tests {
         );
         // The human line quotes it back into one argument, so the offered command still runs.
         assert_eq!(
-            super::err_hint_tty("remove", &err),
+            super::err_hint_tty("remove", &argv, &err),
             Some("try:\n  topos remove './my skill --yes' --via github.com/o/r".to_owned())
         );
         // And the wire spelling is the two parts as a command line reads them — unchanged shape.
@@ -3968,7 +4094,7 @@ mod tests {
         let blocked = ClientError::PublishBlocked {
             skill: "deploy".to_owned(),
         };
-        let hint = super::err_hint_tty("publish", &blocked)
+        let hint = super::err_hint_tty("publish", &typed(&["publish"]), &blocked)
             .expect("a blocked publish offers its two exits");
         assert_eq!(
             hint, "try:\n  topos update deploy --onto-current\n  topos update deploy --reset",
@@ -3977,11 +4103,15 @@ mod tests {
 
         // A refusal that already taught its fix in backticks adds nothing underneath it.
         assert_eq!(
-            super::err_hint_tty("upgrade", &ClientError::UpgradeAmbiguous),
+            super::err_hint_tty(
+                "upgrade",
+                &typed(&["upgrade"]),
+                &ClientError::UpgradeAmbiguous
+            ),
             None
         );
         assert_eq!(
-            super::err_hint_tty("update", &ClientError::NotEnrolled),
+            super::err_hint_tty("update", &typed(&["update"]), &ClientError::NotEnrolled),
             None
         );
 
@@ -3989,6 +4119,7 @@ mod tests {
         assert_eq!(
             super::err_hint_tty(
                 "add",
+                &typed(&["add"]),
                 &ClientError::RemoteFetch {
                     msg: "acme/skills".to_owned(),
                     permanent: false
@@ -4002,6 +4133,7 @@ mod tests {
         assert_eq!(
             super::err_hint_tty(
                 "add",
+                &typed(&["add"]),
                 &ClientError::RemoteFetch {
                     msg: "acme/skills".to_owned(),
                     permanent: true
@@ -4017,13 +4149,13 @@ mod tests {
             message: "not logged in".to_owned(),
         };
         assert_eq!(
-            super::err_hint_tty("publish", &session),
+            super::err_hint_tty("publish", &typed(&["publish"]), &session),
             Some("try:\n  topos login 'acme test/eng'".to_owned())
         );
 
         // A permanent failure with nothing runnable adds no line at all.
         assert_eq!(
-            super::err_hint_tty("add", &ClientError::EmptyBundle),
+            super::err_hint_tty("add", &typed(&["add"]), &ClientError::EmptyBundle),
             None,
             "no invented hint where there is no way out"
         );

@@ -31,14 +31,20 @@ use crate::{identity, logfile, ops, render};
 /// state dir the command just deleted), or on a failed command.
 pub fn run() -> ExitCode {
     let cli = Cli::parse();
+    // The invocation AS TYPED, past the binary name. The composition root is the only place that
+    // legitimately holds it, and the error surfaces need it: a refusal that offers a rebuilt
+    // command must first know whether the rebuild would be the whole of what was asked (see
+    // `render::err_hint_tty`). Non-UTF-8 arguments are dropped — a lossy token must never become
+    // part of an offered command, and their absence only makes the surfaces more conservative.
+    let argv: Vec<String> = std::env::args().skip(1).collect();
     // No subcommand: on a TTY, orient (the status snapshot / the unenrolled welcome, exit 0);
     // piped or under `--json`, keep the classic usage error (stderr, exit 2) so scripts fail
     // loudly. The version nag never rides the bare invocation — orientation stays offline.
     let Some(command) = cli.command else {
-        return run_bare(cli.json, cli.workspace);
+        return run_bare(cli.json, cli.workspace, &argv);
     };
     let check = version_check_applies(&command) && ops::version_check_env_allows();
-    let code = run_command(cli.json, cli.workspace, command, false);
+    let code = run_command(cli.json, cli.workspace, command, false, &argv);
     if check && code == ExitCode::SUCCESS {
         let fs = RealFs;
         let clock = RealClock;
@@ -73,7 +79,7 @@ fn version_check_applies(command: &Command) -> bool {
 /// snapshot `topos status` computes, with the unenrolled welcome as its short form — and exit 0.
 /// Anything scripted (piped stdout, or `--json`) keeps the classic clap usage error on stderr with
 /// exit 2, so automation that forgot a verb still fails loudly.
-fn run_bare(json: bool, workspace: Option<String>) -> ExitCode {
+fn run_bare(json: bool, workspace: Option<String>, argv: &[String]) -> ExitCode {
     use std::io::IsTerminal;
     if json || !std::io::stdout().is_terminal() {
         let mut cmd = crate::cli::cli_command();
@@ -84,13 +90,25 @@ fn run_bare(json: bool, workspace: Option<String>) -> ExitCode {
         let _ = err.print();
         return ExitCode::from(2);
     }
-    run_command(false, workspace, Command::Status { bundle: None }, true)
+    run_command(
+        false,
+        workspace,
+        Command::Status { bundle: None },
+        true,
+        argv,
+    )
 }
 
 /// Parse-free dispatch: wire the real seams, run recovery, dispatch the verb, emit the outcome.
 /// `bare` marks the no-subcommand TTY orientation (it only softens `status`'s render on a fresh
 /// machine — the welcome instead of the full snapshot).
-fn run_command(json: bool, workspace: Option<String>, command: Command, bare: bool) -> ExitCode {
+fn run_command(
+    json: bool,
+    workspace: Option<String>,
+    command: Command,
+    bare: bool,
+    argv: &[String],
+) -> ExitCode {
     // The global `--workspace` — which workspace the ambient write verbs act in (and the filter that
     // disambiguates a skill name shared across workspaces). Optional; inferred with a single workspace.
     // Canonicalized below (name → id) once the layout exists, so every consumer keeps id semantics.
@@ -109,6 +127,7 @@ fn run_command(json: bool, workspace: Option<String>, command: Command, bare: bo
         fs: &fs,
         clock: &clock,
         log_path: layout.log_path(),
+        argv,
     };
     // The harness adapter, selected through the one dispatch seam. v0 wires Claude Code only; the
     // adapter touches its config home only when adopting a recognized skill, arming auto-updates, or on
@@ -198,7 +217,7 @@ fn run_command(json: bool, workspace: Option<String>, command: Command, bare: bo
             }
             data
         });
-        return finish_status(json, cmd_name, result, bare);
+        return finish_status(json, cmd_name, result, bare, argv);
     }
 
     // Recovery runs at the start of every command (it also abandons an expired, never-redeemed
@@ -1491,6 +1510,7 @@ fn finish_status(
     command: &str,
     result: Result<topos_types::results::StatusData, ClientError>,
     bare: bool,
+    argv: &[String],
 ) -> ExitCode {
     match result {
         Ok(data) => {
@@ -1523,10 +1543,13 @@ fn finish_status(
         // the diagnostics log and no `details:` pointer is printed (there is no written detail).
         Err(e) => {
             if json {
-                println!("{}", render::to_json(&render::err_envelope(command, &e)));
+                println!(
+                    "{}",
+                    render::to_json(&render::err_envelope(command, argv, &e))
+                );
             } else {
                 eprintln!("{}", render::err_tty(&e));
-                if let Some(hint) = render::err_hint_tty(command, &e) {
+                if let Some(hint) = render::err_hint_tty(command, argv, &e) {
                     eprintln!("{hint}");
                 }
             }
@@ -2597,6 +2620,11 @@ struct Diag<'a> {
     fs: &'a dyn FsOps,
     clock: &'a dyn Clock,
     log_path: PathBuf,
+    /// The invocation as typed (past the binary name). It rides HERE because this struct is
+    /// already threaded to every place a failure reaches a surface — and the error surfaces need
+    /// it for one judgement: whether a rebuilt command would restate the whole request or quietly
+    /// drop half of it. Read-only, never logged (the log records the verb + the typed detail).
+    argv: &'a [String],
 }
 
 impl Diag<'_> {
@@ -2624,14 +2652,17 @@ impl Diag<'_> {
 fn emit_err(json: bool, command: &str, err: &ClientError, diag: &Diag<'_>) -> ExitCode {
     let logged = diag.note(command, err);
     if json {
-        println!("{}", render::to_json(&render::err_envelope(command, err)));
+        println!(
+            "{}",
+            render::to_json(&render::err_envelope(command, diag.argv, err))
+        );
     } else {
         eprintln!("{}", render::err_tty(err));
         // The way out, between the refusal and the pointer: the SAME next actions the `--json`
         // envelope computes, as runnable lines (and the transience clause where the typed outcome
         // says the failure is retryable). One source of truth — never a second hint table. The
         // verb rides along: an ambiguity's ways out ARE this invocation, re-spelled per candidate.
-        if let Some(hint) = render::err_hint_tty(command, err) {
+        if let Some(hint) = render::err_hint_tty(command, diag.argv, err) {
             eprintln!("{hint}");
         }
         // Point a human at the detail the fixed message withheld — only when it actually landed.
