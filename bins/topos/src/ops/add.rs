@@ -1449,7 +1449,8 @@ pub(crate) enum BareAddPlan {
 ///
 /// `subscribe` is the fully-bare gate: an `-s`/`-a` selector narrows a local adopt, so a form
 /// carrying one keeps today's answers exactly. (A `<name>@<harness>` suffix cannot reach the
-/// subscribe arm at all — the harness filter resolves to its own typed refusals.)
+/// subscribe arm at all — the harness filter resolves to its own typed refusals.) `global` is the
+/// invocation's `-g`, carried into every refusal so the spelled follow-ups keep its scope.
 ///
 /// # Errors
 /// The name-resolution family of [`resolve_add_target`], the two ambiguity shapes ENRICHED with
@@ -1461,6 +1462,7 @@ pub(crate) fn plan_bare_add(
     roots: &super::DiscoveryRoots,
     target: &str,
     subscribe: bool,
+    global: bool,
 ) -> Result<BareAddPlan, ClientError> {
     let (name, harness) = split_target(target);
     // The same residual guard [`resolve_add_target`] carries: a `~`-prefixed bare token is never a
@@ -1490,10 +1492,11 @@ pub(crate) fn plan_bare_add(
             workspace: workspace_hint(
                 &published_matches(ctx, connect, name),
                 &paths_named(name, &untracked),
+                global,
             ),
         }),
         NameResolution::AmbiguousScope { harness, paths } => {
-            let workspace = workspace_hint(&published_matches(ctx, connect, name), &paths);
+            let workspace = workspace_hint(&published_matches(ctx, connect, name), &paths, global);
             Err(ClientError::AmbiguousScope {
                 name: name.to_owned(),
                 harness,
@@ -1535,6 +1538,7 @@ pub(crate) fn plan_bare_add(
                 [_, _, ..] if subscribe => Err(ClientError::AmbiguousWorkspace {
                     name: name.to_owned(),
                     references: published.iter().map(|p| p.reference.clone()).collect(),
+                    global,
                 }),
                 _ => Err(ClientError::NoUntrackedSkill {
                     name: name.to_owned(),
@@ -1548,7 +1552,11 @@ pub(crate) fn plan_bare_add(
 /// the name. `identical` is claimed only on proof: exactly one reference, its live catalog digest
 /// in hand, and every local candidate scanning to that digest — an unreadable directory or a
 /// cache-only match leaves the weaker (still useful) disclosure standing.
-fn workspace_hint(published: &[PublishedName], candidates: &[String]) -> Option<WorkspaceHint> {
+fn workspace_hint(
+    published: &[PublishedName],
+    candidates: &[String],
+    global: bool,
+) -> Option<WorkspaceHint> {
     if published.is_empty() {
         return None;
     }
@@ -1565,6 +1573,7 @@ fn workspace_hint(published: &[PublishedName], candidates: &[String]) -> Option<
     Some(WorkspaceHint {
         references: published.iter().map(|p| p.reference.clone()).collect(),
         identical,
+        global,
     })
 }
 
@@ -1995,12 +2004,13 @@ mod tests {
     #[test]
     fn the_workspace_hint_claims_identical_bytes_only_on_proof() {
         // No workspace publishes the name: the two ambiguity refusals stay exactly as they were.
-        assert!(workspace_hint(&[], &["/h/.claude/skills/deploy".to_owned()]).is_none());
+        assert!(workspace_hint(&[], &["/h/.claude/skills/deploy".to_owned()], false).is_none());
         // A CACHE-ONLY match carries no digest — the spelling is disclosed, the bytes are not
         // claimed (the served version id it does hold is a different hash entirely).
         let cached = workspace_hint(
             &[pn("acme.test", "eng", "deploy", None)],
             &["/h/.claude/skills/deploy".to_owned()],
+            false,
         )
         .expect("a match is disclosed");
         assert_eq!(cached.references, vec!["acme.test/eng/deploy".to_owned()]);
@@ -2012,6 +2022,7 @@ mod tests {
                 pn("acme.test", "ops", "deploy", Some("aa")),
             ],
             &["/h/.claude/skills/deploy".to_owned()],
+            false,
         )
         .expect("both spellings are disclosed");
         assert_eq!(several.references.len(), 2);
@@ -2020,12 +2031,13 @@ mod tests {
         let unreadable = workspace_hint(
             &[pn("acme.test", "eng", "deploy", Some("aa"))],
             &["/nonexistent/deploy".to_owned()],
+            false,
         )
         .expect("the spelling is still disclosed");
         assert!(!unreadable.identical);
         // No candidates at all is not "every candidate agrees" — it is nothing to compare.
         assert!(
-            !workspace_hint(&[pn("acme.test", "eng", "deploy", Some("aa"))], &[])
+            !workspace_hint(&[pn("acme.test", "eng", "deploy", Some("aa"))], &[], false)
                 .expect("disclosed")
                 .identical
         );

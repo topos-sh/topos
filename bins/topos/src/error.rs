@@ -20,6 +20,14 @@ pub(crate) struct WorkspaceHint {
     pub references: Vec<String>,
     /// Every local candidate is byte-identical to the ONE reference's current version.
     pub identical: bool,
+    /// The refused invocation carried `-g` — every subscribe this hint spells must carry it too,
+    /// or following the guidance would silently move the row to the other manifest scope.
+    pub global: bool,
+}
+
+/// The `topos add` spelling that preserves the refused invocation's scope.
+fn add_spelling(global: bool) -> &'static str {
+    if global { "topos add -g" } else { "topos add" }
 }
 
 /// The clause an ambiguity refusal appends when a connected workspace publishes the same name —
@@ -33,15 +41,16 @@ fn workspace_sentence(name: &str, hint: Option<&WorkspaceHint>) -> String {
     let Some(first) = hint.references.first() else {
         return String::new();
     };
+    let add = add_spelling(hint.global);
     if hint.identical {
         return format!(
             "; every local copy above is byte-identical to what `{first}` serves today — \
-             `topos add {first}` subscribes to the team's copy, while adopting a path forks it \
+             `{add} {first}` subscribes to the team's copy, while adopting a path forks it \
              into a new, unmanaged skill"
         );
     }
     format!(
-        "; '{name}' is also published in {} — `topos add {first}` subscribes to the team's copy \
+        "; '{name}' is also published in {} — `{add} {first}` subscribes to the team's copy \
          (delivered and kept current by topos), while the paths above adopt a local copy as a \
          new, unmanaged skill",
         hint.references.join(", ")
@@ -186,15 +195,17 @@ pub(crate) enum ClientError {
     /// publishes it — the machine cannot pick between two teams' copies, so it names both spellings and
     /// refuses. The `references` are the canonical host-qualified forms, shown VERBATIM (a workspace
     /// address is a path-safe identifier, never a secret); they also ride the envelope's
-    /// `data.references` and one `next_actions` entry each.
+    /// `data.references` and one `next_actions` entry each. `global` preserves the refused
+    /// invocation's `-g` in every spelled follow-up, so the row lands in the scope that was asked.
     #[error(
         "'{name}' is published in {} of the workspaces this machine is connected to ({}) — name the one \
-         you mean (`topos add <reference>`)",
-        references.len(), references.join(", ")
+         you mean (`{} <reference>`)",
+        references.len(), references.join(", "), add_spelling(*global)
     )]
     AmbiguousWorkspace {
         name: String,
         references: Vec<String>,
+        global: bool,
     },
     /// `add <skill>@<harness>` named a harness that holds no untracked skill of that name. The message
     /// names where the skill IS found (if anywhere), all shown VERBATIM (slugs + the user's own tokens).
