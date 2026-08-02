@@ -662,15 +662,76 @@ fn run_command(json: bool, workspace: Option<String>, command: Command, bare: bo
                     ops::note_added_path(&ctx, &mut d, &p, global)?;
                     Ok(d)
                 }),
+                // A bare NAME resolves against BOTH namespaces — the untracked local inventory and
+                // the connected workspaces' catalogs — so a name only the team publishes is not a
+                // dead end, and a name both carry says so on the receipt.
                 crate::source::SourceSpec::LocalName(name) => match list_discovery(false) {
-                    // Adopt the resolved dir UNDER its resolved name — so `list`/`add`/`publish`/`diff`
-                    // agree on the name even for a harness the active adapter does not recognize.
                     Some(roots) => {
-                        ops::resolve_add_target(&ctx, &roots, &name).and_then(|(p, n)| {
-                            let mut d = ops::add_with_name(&ctx, &p, Some(&n))?;
-                            ops::note_added_path(&ctx, &mut d, &p, global)?;
-                            Ok(d)
-                        })
+                        match ops::plan_bare_add(
+                            &ctx,
+                            &connect_session_transports,
+                            &roots,
+                            &name,
+                            no_selectors,
+                        ) {
+                            // Nothing local carries the name and exactly ONE workspace publishes
+                            // it: record the canonical reference through the ordinary reference
+                            // arm — same row, same delivery, same receipt shape — and teach the
+                            // grammar in a note, so the next add can be spelled directly.
+                            Ok(ops::BareAddPlan::Subscribe {
+                                reference,
+                                workspace,
+                            }) => {
+                                let result = ops::add_reference(
+                                    &ctx,
+                                    &connect_session_transports,
+                                    None,
+                                    &reference,
+                                    global,
+                                    yes,
+                                );
+                                let result = result.map(|outcome| match outcome {
+                                    ops::AddRefOutcome::Applied(mut data) => {
+                                        ops::push_note(
+                                            &mut data,
+                                            format!(
+                                                "resolved '{name}' to {reference} — no untracked \
+                                                 skill of that name is on this machine, and \
+                                                 {workspace} publishes it"
+                                            ),
+                                        );
+                                        // The arming sweep + the built-in ride an APPLIED add,
+                                        // exactly as on the spelled-out reference arm above.
+                                        if data.currency.is_some() {
+                                            data.triggers =
+                                                breadth_arm(&ctx.roots, harness.as_ref(), &fs);
+                                            if let Err(e) = ops::ensure_builtin(&ctx) {
+                                                let _ = diag.note(cmd_name, &e);
+                                            }
+                                        }
+                                        ops::AddRefOutcome::Applied(data)
+                                    }
+                                    described => described,
+                                });
+                                return finish_add_reference(json, cmd_name, result, &diag);
+                            }
+                            // Adopt the resolved dir UNDER its resolved name — so
+                            // `list`/`add`/`publish`/`diff` agree on the name even for a harness
+                            // the active adapter does not recognize.
+                            Ok(ops::BareAddPlan::Adopt {
+                                path,
+                                name,
+                                published,
+                            }) => ops::add_with_name(&ctx, &path, Some(&name)).and_then(|mut d| {
+                                ops::note_added_path(&ctx, &mut d, &path, global)?;
+                                // The bytes that just landed are what the disclosure judges
+                                // against the team's current version.
+                                d.published_match =
+                                    published.map(|p| p.suggestion(&d.bundle_digest));
+                                Ok(d)
+                            }),
+                            Err(e) => Err(e),
+                        }
                     }
                     None => Err(ClientError::InvalidArgument(
                         "cannot resolve a skill name without $HOME set — adopt a directory by \

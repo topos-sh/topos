@@ -519,6 +519,12 @@ pub struct AddData {
     /// **Additive.**
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub governed_copy: Option<GovernedCopy>,
+    /// The connected workspace that publishes the same NAME an `add <name>` just adopted from a
+    /// local directory — the team-managed spelling, disclosed beside the local copy that landed.
+    /// Never blocking (the adopt happened as asked); absent when no workspace, or more than one,
+    /// carries the name. **Additive.**
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub published_match: Option<PublishedMatch>,
     /// A disclosure the receipt leads with when the edit was not the plain row write: a
     /// redundant row NOT written (the feed already delivers it), an `"off"` switch deleted
     /// instead of a row added, or a standing web decline this machine's row now overrides.
@@ -578,6 +584,26 @@ pub struct GovernedCopy {
     /// Whether the governed copy was imported from the exact same subdirectory (`false` = same
     /// repository, different path).
     pub same_path: bool,
+}
+
+/// The workspace spelling an [`AddData`] carries when the bare NAME a local adopt resolved is also
+/// published in exactly one connected workspace. Distinct from [`GovernedCopy`], which matches an
+/// import's UPSTREAM source; this one matches nothing but the name the user typed.
+/// **INFERRED** (additive-only).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
+pub struct PublishedMatch {
+    /// The workspace's address name.
+    pub workspace: String,
+    /// The bundle's catalog name there (the name that matched).
+    pub name: String,
+    /// The paste-ready reference, in the canonical host-qualified form
+    /// (`<host>/<workspace>/<name>` — unambiguous however many servers this installation is
+    /// logged into).
+    pub reference: String,
+    /// Whether the adopted bytes are IDENTICAL to the version that workspace currently serves —
+    /// `false` also covers "not knowable here" (an offline cache match carries no digest).
+    pub identical: bool,
 }
 
 /// `init` — create this folder's `topos.toml` (the project manifest `add`/`remove` edit and

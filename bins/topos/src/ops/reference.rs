@@ -421,6 +421,7 @@ fn set_data(name: &str) -> AddData {
         reference: None,
         undo: Vec::new(),
         governed_copy: None,
+        published_match: None,
         note: None,
     }
 }

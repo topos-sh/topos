@@ -48,8 +48,9 @@ mod uninstall;
 mod version_check;
 
 pub(crate) use add::{
-    AddRemoteOpts, KeepAsYoursOutcome, add, add_remote, add_remote_fetched, add_with_name,
-    governed_copy_suggestion, keep_as_yours, resolve_add_target, split_target, tracked_skill_at,
+    AddRemoteOpts, BareAddPlan, KeepAsYoursOutcome, add, add_remote, add_remote_fetched,
+    add_with_name, governed_copy_suggestion, keep_as_yours, plan_bare_add, resolve_add_target,
+    split_target, tracked_skill_at,
 };
 pub(crate) use arm::{arm_detected, probe_detected, scrub_all};
 pub(crate) use builtin::{ensure_builtin, is_builtin, restore_builtin};
@@ -72,7 +73,7 @@ pub(crate) use list::list;
 pub(crate) use list::{DiscoveryRoots, ListFilter, ListOutcome, RemoteScope, list_with};
 pub(crate) use login::{LoginConnectors, login as session_login, logout as session_logout};
 pub(crate) use manifest_edit::{
-    manifest_host, note_added_path, note_added_remote, off_row_for, reference_shaped,
+    manifest_host, note_added_path, note_added_remote, off_row_for, push_note, reference_shaped,
     remove_global, remove_project,
 };
 // The TTY-only enrollment row types are constructed in `list` and rendered by field access; the named
