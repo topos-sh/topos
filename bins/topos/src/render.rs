@@ -2568,6 +2568,17 @@ pub(crate) fn err_hint_tty(command: &str, argv: &[String], err: &ClientError) ->
         }
         lines.push(line);
     }
+    // An ambiguity whose rebuilt commands were withheld (an unfaithful verb, a multi-target
+    // invocation) still SHOWS its ways out — as spellings, never offers: the person re-spells
+    // their own invocation around one. "More than one answers" with no list would be a refusal
+    // to say which. The spellings are byte-identical to the envelope's `data.candidates`.
+    if lines.is_empty()
+        && let ClientError::AmbiguousTarget { candidates, .. } = err
+        && !candidates.is_empty()
+    {
+        let list: Vec<String> = candidates.iter().map(|c| c.spelling()).collect();
+        return Some(format!("it matches:\n  {}", list.join("\n  ")));
+    }
     match (retryable, lines.is_empty()) {
         (true, true) => Some("this is often transient — running it again is safe".to_owned()),
         (false, true) => None,
@@ -3871,7 +3882,13 @@ mod tests {
         };
         let one_target = typed(&["protect", "deploy"]);
         assert!(super::next_actions("protect", &one_target, &err).is_empty());
-        assert_eq!(super::err_hint_tty("protect", &one_target, &err), None);
+        // No RUNNABLE offer — but the ways out are still SHOWN, as spellings (a rebuilt protect
+        // could reverse the requested level, so a command is never promised; a bare "more than
+        // one answers" that refused to say which would be worse than the old inline list).
+        assert_eq!(
+            super::err_hint_tty("protect", &one_target, &err),
+            Some("it matches:\n  acme/skills/deploy\n  beta/skills/deploy".to_owned())
+        );
         // The machine half is untouched by the silence: the candidates still ride the envelope.
         let envelope = super::err_envelope("protect", &one_target, &err);
         assert_eq!(
@@ -3930,7 +3947,8 @@ mod tests {
         assert_eq!(offered(&["--json", "remove", "foo"]), 2);
 
         // Withheld does NOT mean uninformative: every way out still rides the envelope, and the
-        // TTY still prints the refusal — just no command it cannot honestly promise.
+        // TTY lists the candidate SPELLINGS — as facts, never as commands it cannot honestly
+        // promise (byte-identical to `data.candidates`, so both surfaces name the same ways out).
         let batch = typed(&["remove", "foo", "bar", "--yes"]);
         let envelope = super::err_envelope("remove", &batch, &err);
         assert_eq!(
@@ -3938,7 +3956,10 @@ mod tests {
             serde_json::json!(["github.com/o/r/foo", "github.com/p/q/foo"])
         );
         assert!(envelope.next_actions.is_empty());
-        assert_eq!(super::err_hint_tty("remove", &batch, &err), None);
+        assert_eq!(
+            super::err_hint_tty("remove", &batch, &err),
+            Some("it matches:\n  github.com/o/r/foo\n  github.com/p/q/foo".to_owned())
+        );
     }
 
     #[test]
