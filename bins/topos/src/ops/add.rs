@@ -1265,7 +1265,9 @@ impl PublishedName {
 /// Every connected workspace that publishes `name`, offline-first and best-effort — the workspace
 /// half of the namespace a bare `add <name>` resolves against.
 ///
-/// Two sources, unioned by `(host, workspace)` with the LIVE read winning. The offline delivery
+/// Two sources, unioned by `(host, workspace)` — and a live catalog that ANSWERS replaces its
+/// workspace's cache candidate wholesale, so a name the workspace no longer serves (deleted or
+/// archived since the last delivery) stops matching the moment the index is read. The offline delivery
 /// cache costs nothing and keeps the answer useful on a plane nobody can reach right now, but it
 /// only knows what was delivered to THIS machine — and it carries no bundle digest, so a
 /// cache-only match can never support an identical-bytes claim. Each ACTIVE session's catalog is
@@ -1335,6 +1337,11 @@ pub(crate) fn published_matches(
         let Ok(index) = transports.directory.skills_index(&s.workspace_id) else {
             continue;
         };
+        // A catalog that ANSWERED is authoritative for its workspace: a cache candidate the index
+        // no longer carries (deleted or archived since the last delivery) is cleared here, never
+        // left to fabricate a match. A failed read above keeps the cache's answer — offline
+        // degradation, not truth decay.
+        found.remove(&(s.host.clone(), s.workspace_name.clone()));
         for e in index.skills {
             if e.name != name || e.status != "active" {
                 continue;
