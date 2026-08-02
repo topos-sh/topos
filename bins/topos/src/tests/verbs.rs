@@ -158,6 +158,7 @@ impl Harness {
     /// A context over an explicit harness adapter (for the Claude Code recognition / hook tests).
     fn ctx_with<'a>(&'a self, harness: &'a dyn HarnessAdapter) -> Ctx<'a> {
         Ctx {
+            progress: crate::progress::silent(),
             fs: &self.fs,
             ids: &self.ids,
             clock: &self.clock,
@@ -1378,6 +1379,7 @@ fn add_under_fault_preserves_draft_and_is_all_or_nothing() {
     let probe_ids = SeqIds::new("t");
     let probe_clock = FixedClock(FIXED_MILLIS);
     let probe_ctx = Ctx {
+        progress: crate::progress::silent(),
         fs: &probe_fs,
         ids: &probe_ids,
         clock: &probe_clock,
@@ -1398,6 +1400,7 @@ fn add_under_fault_preserves_draft_and_is_all_or_nothing() {
         let clock = FixedClock(FIXED_MILLIS);
         let layout = Layout::new(&home.0);
         let ctx = Ctx {
+            progress: crate::progress::silent(),
             fs: &fs,
             ids: &ids,
             clock: &clock,
@@ -1422,6 +1425,7 @@ fn add_under_fault_preserves_draft_and_is_all_or_nothing() {
         crate::sidecar::recover(&real, &layout, 0, &mut Vec::new()).unwrap();
         let clean_ids = SeqIds::new("t");
         let clean_ctx = Ctx {
+            progress: crate::progress::silent(),
             fs: &real,
             ids: &clean_ids,
             clock: &clock,

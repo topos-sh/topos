@@ -73,6 +73,7 @@ axum = "0.8"                  # topos-plane HTTP
 utoipa = "5"                  # OpenAPI generation for the Rust plane (topos-plane's document assembly + topos-types' contract-derives impls)
 clap = { version = "4", features = ["derive"] }       # topos client bin
 ureq = "3"                    # topos client transport — default, blocking, rustls+ring
+indicatif = "0.18"            # topos client: the terminal activity line (spinner + human bytes) while a fetch is in flight
 rustix = { version = "1", features = ["fs"] } # topos client: safe fsync / F_FULLFSYNC / flock (no unsafe)
 hex = "0.4"                   # one shared hex codec for the std crates (the client decodes 64-char sidecar id fields); the no_std kernel keeps its own tiny impl
 tracing = "0.1"              # observability spine

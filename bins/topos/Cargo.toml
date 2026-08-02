@@ -53,6 +53,13 @@ flate2 = "1"
 # signing side lives in CI (the minisign CLI) and, for tests, in the dev-dependency below. Stays clear
 # of check-arch's ban list and adds no transitive edge at all.
 minisign-verify = "0.2"
+# The ACTIVITY line (`src/progress.rs`): the one animated stderr surface — a steady-ticked spinner carrying
+# the phase label and human byte counts while a fetch is in flight. Chosen for the mainstream precedent
+# (cargo's own progress line is indicatif's sibling; every Rust CLI that shows a download uses it) over
+# hand-rolled ANSI. Its tree is `console` + three tiny leaves: no async runtime, no HTTP, no C edge — it
+# stays clear of check-arch's ban list. The ticker is a thread, which is fine: the client is blocking, and
+# nothing here touches the outcome types or stdout.
+indicatif.workspace = true
 
 [dev-dependencies]
 # Test-only SIGNING capability: mint a throwaway keypair + sign fixture tarballs in the self-update

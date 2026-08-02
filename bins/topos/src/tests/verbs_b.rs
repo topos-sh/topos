@@ -93,6 +93,7 @@ impl Rig {
     }
     fn ctx<'a>(&'a self, plane: &'a dyn PlaneSource, follow: &'a dyn FollowSource) -> Ctx<'a> {
         Ctx {
+            progress: crate::progress::silent(),
             fs: &self.fs,
             ids: &self.ids,
             clock: &self.clock,

@@ -289,12 +289,18 @@ pub(crate) fn sync_one_planned(
     let target_commit = super::parse_hex32(&sync.observed_version_id)?;
     let store = Store::open(&sp.store)?;
     let mut written = WriteBatch::default();
+    // The ONE place a sync reaches the network for BYTES — every state above returned without
+    // fetching, so the label is honest wherever it prints. `_if_idle` because the reconcile that
+    // usually drives this already named the item (`updating <name> (2 of 3)`), which says more.
+    let fetching = crate::progress::phase_if_idle(ctx.progress, &format!("downloading {name}"));
     let target_digest = ensure_local(ctx, &store, skill_id, target_commit, 0, &mut written)?
         .unwrap_or_else(|| unreachable!("depth-0 ensure_local errors instead of shallow-stopping"));
     // Once, after the whole backfill — exactly the versions THIS op wrote (plus the target's own set when
     // already local), durable before any JSON records the target. Never the whole store: the per-pull
     // fsync cost is bounded by the fetched bytes, not lifetime history.
     fsync_batch(ctx, &written)?;
+    // The bytes are local and durable — the rest of this sync is disk work.
+    drop(fetching);
     // A digest mismatch on the rendered bytes is a loud integrity ERROR (content addressing is the integrity
     // story) — corruption evidence, never a transient skip.
     let bundle = store.render_verified(target_commit, target_digest)?;

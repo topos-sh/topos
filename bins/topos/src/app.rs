@@ -3,6 +3,7 @@
 
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::rc::Rc;
 use std::time::Duration;
 
 use clap::Parser;
@@ -113,6 +114,13 @@ fn run_command(json: bool, workspace: Option<String>, command: Command, bare: bo
     // adapter touches its config home only when adopting a recognized skill, arming auto-updates, or on
     // uninstall.
     let harness = adapter_for(HarnessId::ClaudeCode, &fs, &fs);
+    // The ACTIVITY channel (stderr only — stdout stays the one document). Animated on a terminal,
+    // one plain line per phase when piped, and byte-silent for the harness hook sweep, which fires
+    // on every session-start-shaped event and must cost nothing on either stream. Held as an `Rc`
+    // because the transports built below are boxed `'static` trait objects: they cannot borrow the
+    // binding, so each one clones a handle to the same sink.
+    let quiet_sweep = matches!(&command, Command::Update { quiet: true, .. });
+    let progress = crate::progress::select(quiet_sweep);
 
     // `uninstall` dispatches BEFORE state recovery and enrollment loading: its whole point is to
     // remove `~/.topos/` even when that state is corrupt — an unreadable/newer credentials doc or a
@@ -132,6 +140,9 @@ fn run_command(json: bool, workspace: Option<String>, command: Command, bare: bo
             plane: &inert_plane,
             follow: &inert_follow,
             roots: None,
+            // The teardown is entirely local (delete `~/.topos/`, scrub the triggers) — nothing to
+            // report activity about.
+            progress: crate::progress::silent(),
         };
         let binary = std::env::current_exe().ok();
         // The breadth scrub rides the applied receipt: after the active adapter's hook scrub,
@@ -172,6 +183,10 @@ fn run_command(json: bool, workspace: Option<String>, command: Command, bare: bo
                 home: PathBuf::from(h),
                 cwd: std::env::current_dir().ok(),
             }),
+            // `status` (and the bare-`topos` orientation over it) promises OFFLINE: it dials
+            // nothing, so it has no activity to report. The silent sink makes that structural
+            // rather than a thing every code path must remember not to do.
+            progress: crate::progress::silent(),
         };
         // The snapshot from local state; the trigger rows from the read-only probe at this root
         // (the one layer holding the real config port + $HOME) — the same layering the arming
@@ -211,20 +226,21 @@ fn run_command(json: bool, workspace: Option<String>, command: Command, bare: bo
                     Some(s.credential.clone()),
                     Default::default(),
                 )
-                .with_workspaces(vec![s.workspace_id.clone()]),
+                .with_workspaces(vec![s.workspace_id.clone()])
+                .with_progress(Rc::clone(&progress)),
             ),
-            directory: Box::new(UreqDeviceClient::new(
-                s.base_url.clone(),
-                Some(s.credential.clone()),
-            )),
-            contribute: Box::new(UreqDeviceClient::new(
-                s.base_url.clone(),
-                Some(s.credential.clone()),
-            )),
-            governance: Box::new(UreqDeviceClient::new(
-                s.base_url.clone(),
-                Some(s.credential.clone()),
-            )),
+            directory: Box::new(
+                UreqDeviceClient::new(s.base_url.clone(), Some(s.credential.clone()))
+                    .with_progress(Rc::clone(&progress)),
+            ),
+            contribute: Box::new(
+                UreqDeviceClient::new(s.base_url.clone(), Some(s.credential.clone()))
+                    .with_progress(Rc::clone(&progress)),
+            ),
+            governance: Box::new(
+                UreqDeviceClient::new(s.base_url.clone(), Some(s.credential.clone()))
+                    .with_progress(Rc::clone(&progress)),
+            ),
         }
     };
     let routed_plane = ops::SessionRoutedPlane::load(&fs, &layout, &connect_for_wiring);
@@ -266,6 +282,7 @@ fn run_command(json: bool, workspace: Option<String>, command: Command, bare: bo
             home: PathBuf::from(h),
             cwd: std::env::current_dir().ok(),
         }),
+        progress: &*progress,
     };
 
     // The credentialed device connectors — every credentialed route presents the device's ONE Bearer
@@ -273,35 +290,40 @@ fn run_command(json: bool, workspace: Option<String>, command: Command, bare: bo
     // <address>` mints it mid-invocation (at the granted poll), and the continued describe/apply must
     // see the freshly-minted credential.
     let connect_governance = |base_url: &str| -> Box<dyn GovernanceSource> {
-        Box::new(UreqDeviceClient::new(
-            base_url.to_owned(),
-            load_device_credential(ctx.fs, &ctx.layout),
-        ))
+        Box::new(
+            UreqDeviceClient::new(
+                base_url.to_owned(),
+                load_device_credential(ctx.fs, &ctx.layout),
+            )
+            .with_progress(Rc::clone(&progress)),
+        )
     };
     let connect_contribute =
         |base_url: &str, credential: Option<&str>| -> Box<dyn ContributeSource> {
-            Box::new(UreqDeviceClient::new(
-                base_url.to_owned(),
-                credential.map(str::to_owned),
-            ))
+            Box::new(
+                UreqDeviceClient::new(base_url.to_owned(), credential.map(str::to_owned))
+                    .with_progress(Rc::clone(&progress)),
+            )
         };
     // The DIRECTORY connector (describe reads + subscription/curation/notice row ops) and the
     // RECONCILE connector (delivery + fleet report + the per-skill read lane on one object) — both
     // re-read the on-disk credential fresh per build, for the same mid-invocation reason as above.
     let connect_directory = |base_url: &str| -> Box<dyn DirectorySource> {
-        Box::new(UreqDeviceClient::new(
-            base_url.to_owned(),
-            load_device_credential(ctx.fs, &ctx.layout),
-        ))
+        Box::new(
+            UreqDeviceClient::new(
+                base_url.to_owned(),
+                load_device_credential(ctx.fs, &ctx.layout),
+            )
+            .with_progress(Rc::clone(&progress)),
+        )
     };
     // LEGACY connector shape kept for the mid-migration op signatures — creds-less (the session
     // lanes carry the real credentials).
     let connect_delivery = |base_url: &str| -> Box<dyn ReconcileTransport> {
-        Box::new(UreqPlane::new(
-            base_url.to_owned(),
-            None,
-            Default::default(),
-        ))
+        Box::new(
+            UreqPlane::new(base_url.to_owned(), None, Default::default())
+                .with_progress(Rc::clone(&progress)),
+        )
     };
     // The per-SESSION transports (the manifest model): one byte/delivery lane + one directory
     // lane per logged-in workspace, each under that session's OWN workspace-scoped credential.
@@ -313,21 +335,30 @@ fn run_command(json: bool, workspace: Option<String>, command: Command, bare: bo
                     Some(s.credential.clone()),
                     Default::default(),
                 )
-                .with_workspaces(vec![s.workspace_id.clone()]),
+                .with_workspaces(vec![s.workspace_id.clone()])
+                .with_progress(Rc::clone(&progress)),
             ),
-            directory: Box::new(UreqDeviceClient::new(
-                s.base_url.clone(),
-                Some(s.credential.clone()),
-            )),
-            contribute: Box::new(UreqDeviceClient::new(
-                s.base_url.clone(),
-                Some(s.credential.clone()),
-            )),
-            governance: Box::new(UreqDeviceClient::new(
-                s.base_url.clone(),
-                Some(s.credential.clone()),
-            )),
+            directory: Box::new(
+                UreqDeviceClient::new(s.base_url.clone(), Some(s.credential.clone()))
+                    .with_progress(Rc::clone(&progress)),
+            ),
+            contribute: Box::new(
+                UreqDeviceClient::new(s.base_url.clone(), Some(s.credential.clone()))
+                    .with_progress(Rc::clone(&progress)),
+            ),
+            governance: Box::new(
+                UreqDeviceClient::new(s.base_url.clone(), Some(s.credential.clone()))
+                    .with_progress(Rc::clone(&progress)),
+            ),
         }
+    };
+    // The ENROLLMENT connector: `UreqDeviceClient` with NO credential — the device-flow routes are
+    // unauthenticated (they mint the credential the other connectors then present). A closure like
+    // its siblings, so it carries this invocation's activity sink.
+    let connect_enroll = |base_url: &str| -> Box<dyn EnrollSource> {
+        Box::new(
+            UreqDeviceClient::new(base_url.to_owned(), None).with_progress(Rc::clone(&progress)),
+        )
     };
     // The default WEB origin the enrollment doors dial on a fresh install (`follow <bare-ws>`,
     // `auth login`): the env override, else the hosted web origin (the card re-roots onto the API).
@@ -363,14 +394,15 @@ fn run_command(json: bool, workspace: Option<String>, command: Command, bare: bo
                 |base: &str, cred: &str, ws: &str| -> Box<dyn crate::plane::DeliverySource> {
                     Box::new(
                         UreqPlane::new(base.to_owned(), Some(cred.to_owned()), Default::default())
-                            .with_workspaces(vec![ws.to_owned()]),
+                            .with_workspaces(vec![ws.to_owned()])
+                            .with_progress(Rc::clone(&progress)),
                     )
                 };
             let connect_session_lane = |base: &str, cred: &str| -> Box<dyn GovernanceSource> {
-                Box::new(UreqDeviceClient::new(
-                    base.to_owned(),
-                    Some(cred.to_owned()),
-                ))
+                Box::new(
+                    UreqDeviceClient::new(base.to_owned(), Some(cred.to_owned()))
+                        .with_progress(Rc::clone(&progress)),
+                )
             };
             let connectors = ops::LoginConnectors {
                 enroll: &connect_enroll,
@@ -439,6 +471,7 @@ fn run_command(json: bool, workspace: Option<String>, command: Command, bare: bo
             });
             let result = block_on_pending(
                 &clock,
+                &*progress,
                 &policy,
                 first,
                 session_login_pending_disclosure,
@@ -462,10 +495,10 @@ fn run_command(json: bool, workspace: Option<String>, command: Command, bare: bo
         // back, and the receipt reports the server-side outcome honestly).
         Command::Logout { workspace: ws, all } => {
             let connect_session_revoke = |base: &str, cred: &str| -> Box<dyn GovernanceSource> {
-                Box::new(UreqDeviceClient::new(
-                    base.to_owned(),
-                    Some(cred.to_owned()),
-                ))
+                Box::new(
+                    UreqDeviceClient::new(base.to_owned(), Some(cred.to_owned()))
+                        .with_progress(Rc::clone(&progress)),
+                )
             };
             finish_session_logout(
                 json,
@@ -492,7 +525,8 @@ fn run_command(json: bool, workspace: Option<String>, command: Command, bare: bo
                 crate::source::SourceSpec::Remote(_)
             );
             if !no_selectors && looks_remote {
-                let git = crate::plane_http::UreqGitSource::new();
+                let git =
+                    crate::plane_http::UreqGitSource::new().with_progress(Rc::clone(&progress));
                 let result = ops::add_forge_selected(
                     &ctx,
                     &connect_session_transports,
@@ -579,7 +613,8 @@ fn run_command(json: bool, workspace: Option<String>, command: Command, bare: bo
                             crate::manifest::keys::KeyShape::LocalPath { .. }
                         ) =>
                 {
-                    let git = crate::plane_http::UreqGitSource::new();
+                    let git =
+                        crate::plane_http::UreqGitSource::new().with_progress(Rc::clone(&progress));
                     let result = ops::add_reference(
                         &ctx,
                         &connect_session_transports,
@@ -743,7 +778,8 @@ fn run_command(json: bool, workspace: Option<String>, command: Command, bare: bo
                 },
                 crate::source::SourceSpec::Remote(spec) => match list_discovery(false) {
                     Some(roots) => {
-                        let git = crate::plane_http::UreqGitSource::new();
+                        let git = crate::plane_http::UreqGitSource::new()
+                            .with_progress(Rc::clone(&progress));
                         // The `-a` selection is a standing fact, not a one-run choice: it rides
                         // the row so the next update keeps the copy where it was asked for.
                         let chosen: Vec<String> = single_agent.iter().cloned().collect();
@@ -883,7 +919,7 @@ fn run_command(json: bool, workspace: Option<String>, command: Command, bare: bo
                     .iter()
                     .map(|s| (s.workspace_id.clone(), s.display_name.clone()))
                     .collect();
-                catalog_client = SessionCatalog::new(&live);
+                catalog_client = SessionCatalog::new(&live, &progress);
                 Some(ops::RemoteScope {
                     catalog: &catalog_client,
                     memberships,
@@ -1160,7 +1196,9 @@ fn run_command(json: bool, workspace: Option<String>, command: Command, bare: bo
                 // The background sweep NEVER contacts a forge: `--quiet` passes no git source
                 // (git rows move only on an explicit update), and the reconcile's forge arms
                 // degrade honestly without one.
-                let git = (!quiet).then(crate::plane_http::UreqGitSource::new);
+                let git = (!quiet).then(|| {
+                    crate::plane_http::UreqGitSource::new().with_progress(Rc::clone(&progress))
+                });
                 ops::manifest_update(
                     &ctx,
                     &connect_session_transports,
@@ -1325,7 +1363,7 @@ fn run_command(json: bool, workspace: Option<String>, command: Command, bare: bo
         Command::SelfUpdate { check, version } => {
             // A MAINTENANCE command: it replaces the binary itself. It mints no device identity (kept out
             // of the device-id match above) and never touches a skill / the plane / the account.
-            let releases = connect_releases();
+            let releases = connect_releases(Rc::clone(&progress));
             let base_url = std::env::var("TOPOS_INSTALL_BASE_URL").ok();
             let result = std::env::current_exe()
                 .map_err(ClientError::from)
@@ -1363,15 +1401,6 @@ fn run_command(json: bool, workspace: Option<String>, command: Command, bare: bo
     }
 }
 
-/// Map a NON-`add`/`remove` `topos channel …` invocation to its typed refusal: a bare `channel` (or an
-/// The ENROLLMENT connector: `UreqDeviceClient` with NO credential — the device-flow routes are
-/// unauthenticated (they mint the credential the other connectors then present). The credentialed
-/// connectors are closures in [`run`] (they must re-read `credentials.json` fresh so an enrollment
-/// that just persisted mid-invocation is seen).
-fn connect_enroll(base_url: &str) -> Box<dyn EnrollSource> {
-    Box::new(UreqDeviceClient::new(base_url.to_owned(), None))
-}
-
 /// Load the device's ONE Bearer credential from `credentials.json`. Best-effort (absent / corrupt ⇒
 /// `None`): a corrupt doc already failed the startup [`load_enrollment`] closed, and a missing
 /// credential surfaces downstream as a clear "not enrolled" at request time.
@@ -1381,9 +1410,12 @@ fn load_device_credential(fs: &dyn FsOps, layout: &Layout) -> Option<String> {
 }
 
 /// The real release source for `topos upgrade` — the `ureq` GitHub transport. No base URL / creds: the
-/// updater's default download base is compiled in (overridable via `TOPOS_INSTALL_BASE_URL`).
-fn connect_releases() -> Box<dyn crate::release::ReleaseSource> {
-    Box::new(crate::plane_http::UreqReleases::new())
+/// updater's default download base is compiled in (overridable via `TOPOS_INSTALL_BASE_URL`). It
+/// carries the activity sink because the asset download is the one fetch here worth watching.
+fn connect_releases(
+    progress: Rc<dyn crate::progress::ProgressSink>,
+) -> Box<dyn crate::release::ReleaseSource> {
+    Box::new(crate::plane_http::UreqReleases::new().with_progress(progress))
 }
 
 /// The hosted WEB origin every token-less door defaults to (`follow <bare-workspace>`, `auth login`,
@@ -2341,6 +2373,10 @@ struct LoopbackPlan<'a> {
 /// on-disk WAL. A `policy.block == false` (headless `--json` without `--wait`) returns the first result
 /// untouched — a headless agent must not hang.
 ///
+/// The wait is the one place the CLI blocks on a HUMAN rather than a socket, so an animated sink
+/// spins under the static disclosure for as long as it lasts. A line-per-phase sink opens nothing:
+/// the `waiting_line` below already said it, once, in better words.
+///
 /// With a `loopback` plan, the wait ALSO binds an ephemeral 127.0.0.1 listener and auto-opens the
 /// approval page carrying the state-bound return coordinates — the browser's redirect wakes the
 /// next poll immediately (zero typing). The redirect is only an ACCELERATOR: it carries no
@@ -2348,6 +2384,7 @@ struct LoopbackPlan<'a> {
 /// (the human approved on their phone, or the auto-open failed and they pasted the URL elsewhere).
 fn block_on_pending<T>(
     clock: &dyn Clock,
+    progress: &dyn crate::progress::ProgressSink,
     policy: &WaitPolicy,
     first: Result<T, ClientError>,
     pending_of: impl Fn(&T) -> Option<PendingDisclosure>,
@@ -2418,6 +2455,14 @@ fn block_on_pending<T>(
     // The waiting line: ONE static print (no per-second rewrite, no countdown — the device-flow
     // precedent waits quietly), carrying the glance code.
     eprintln!("{}", waiting_line(&disc.user_code));
+    // …and, on a repainting sink only, a live spinner beneath it for the length of the wait. On a
+    // piped stderr the line above already carries the whole message; repeating it as a phase would
+    // only say the same thing twice.
+    let _phase = if progress.animated() {
+        crate::progress::phase(progress, "waiting for approval in your browser")
+    } else {
+        crate::progress::no_phase()
+    };
 
     // `last` is the most recent pending result, handed back verbatim if a numeric `--wait` deadline passes
     // (starts as `first`, so `--wait 0` returns immediately without polling again).
@@ -2703,14 +2748,18 @@ struct SessionCatalog {
 }
 
 impl SessionCatalog {
-    fn new(sessions: &[crate::sessions::Session]) -> Self {
+    fn new(
+        sessions: &[crate::sessions::Session],
+        progress: &Rc<dyn crate::progress::ProgressSink>,
+    ) -> Self {
         Self {
             lanes: sessions
                 .iter()
                 .map(|s| {
                     (
                         s.workspace_id.clone(),
-                        UreqDeviceClient::new(s.base_url.clone(), Some(s.credential.clone())),
+                        UreqDeviceClient::new(s.base_url.clone(), Some(s.credential.clone()))
+                            .with_progress(Rc::clone(progress)),
                     )
                 })
                 .collect(),
@@ -2831,6 +2880,7 @@ mod tests {
         let pending = Ok::<_, crate::error::ClientError>("pending-marker");
         let out = block_on_pending(
             &clock,
+            crate::progress::silent(),
             &policy,
             pending,
             |_| {
@@ -2857,6 +2907,7 @@ mod tests {
         let pending = Ok::<_, crate::error::ClientError>("still-pending");
         let out = block_on_pending(
             &clock,
+            crate::progress::silent(),
             &policy,
             pending,
             |_| {

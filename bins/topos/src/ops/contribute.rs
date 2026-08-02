@@ -188,6 +188,11 @@ pub(crate) fn run_write(
     review: Option<&ReviewSend>,
 ) -> Result<WriteReceipt, ClientError> {
     op_wal::write(ctx.fs, &ctx.layout, rec)?;
+    // The activity line for the round-trip. A publish/propose is ONE JSON POST carrying the whole
+    // candidate, so there is no byte progress to show — only which bundle is in flight, which is
+    // still the difference between a silent terminal and a legible one. The verdict/revert writes
+    // fall through to the transport's own "contacting <host>", which is all they can honestly say.
+    let _phase = write_phase(ctx, rec);
     match send_op(transport, ctx, sp, rec, review) {
         Ok(receipt) => {
             // A terminal protocol outcome (any 200): the op is settled — drop the WAL. A subsequent retry
@@ -204,6 +209,24 @@ pub(crate) fn run_write(
         // Uncertain (5xx / 429 / timeout / malformed — the op MAY have landed): keep the WAL so the next
         // attempt replays the SAME op_id and the plane replays the byte-identical receipt.
         Err(e) => Err(e),
+    }
+}
+
+/// The activity phase one contribute write runs under. Named only for the two verbs that ship a
+/// BUNDLE — and only when the record carries the advisory display name, since a phase reading
+/// "publishing s_1f3c…" would name an id nobody asked about. Everything else opens nothing and lets
+/// the transport name the server.
+fn write_phase<'a>(ctx: &'a Ctx<'_>, rec: &OpRecord) -> crate::progress::Phase<'a> {
+    let verb = match rec.op {
+        OpKind::PublishDirect => "publishing",
+        OpKind::PublishPropose => "proposing",
+        OpKind::Revert | OpKind::ReviewApprove | OpKind::ReviewReject | OpKind::ReviewWithdraw => {
+            return crate::progress::no_phase();
+        }
+    };
+    match &rec.display_name {
+        Some(name) => crate::progress::phase(ctx.progress, &format!("{verb} {name}")),
+        None => crate::progress::no_phase(),
     }
 }
 
@@ -656,6 +679,7 @@ mod tests {
         let inert_f = InertFollow;
         let layout = crate::sidecar::Layout::new(&scratch.0);
         let ctx = Ctx {
+            progress: crate::progress::silent(),
             fs: &fs,
             ids: &ids,
             clock: &clock,
@@ -755,6 +779,7 @@ mod tests {
         let inert_f = InertFollow;
         let layout = crate::sidecar::Layout::new(&scratch.0);
         let ctx = Ctx {
+            progress: crate::progress::silent(),
             fs: &fs,
             ids: &ids,
             clock: &clock,

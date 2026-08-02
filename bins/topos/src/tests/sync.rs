@@ -250,6 +250,7 @@ impl Rig {
         follow: &'a dyn FollowSource,
     ) -> Ctx<'a> {
         Ctx {
+            progress: crate::progress::silent(),
             fs,
             ids: &self.ids,
             clock: &self.clock,

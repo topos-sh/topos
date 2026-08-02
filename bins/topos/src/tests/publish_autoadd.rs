@@ -104,6 +104,7 @@ impl Rig {
     }
     fn ctx(&self) -> Ctx<'_> {
         Ctx {
+            progress: crate::progress::silent(),
             fs: &self.fs,
             ids: &self.ids,
             clock: &self.clock,

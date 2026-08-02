@@ -260,6 +260,7 @@ mod tests {
         home: &Path,
     ) -> Ctx<'a> {
         Ctx {
+            progress: crate::progress::silent(),
             fs,
             ids,
             clock,

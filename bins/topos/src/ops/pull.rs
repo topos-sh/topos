@@ -604,6 +604,7 @@ pub(super) fn ctx_with_plane<'a>(ctx: &'a Ctx<'a>, plane: &'a dyn PlaneSource) -
         plane,
         follow: ctx.follow,
         roots: ctx.roots.clone(),
+        progress: ctx.progress,
     }
 }
 
@@ -626,6 +627,7 @@ pub(super) fn ctx_with_plane_and_follow<'a>(
         plane,
         follow,
         roots: ctx.roots.clone(),
+        progress: ctx.progress,
     }
 }
 
@@ -643,6 +645,7 @@ pub(super) fn ctx_with_layout<'a>(ctx: &'a Ctx<'a>, layout: &crate::sidecar::Lay
         plane: ctx.plane,
         follow: ctx.follow,
         roots: ctx.roots.clone(),
+        progress: ctx.progress,
     }
 }
 
@@ -664,6 +667,7 @@ pub(super) fn ctx_with_store<'a>(
         plane,
         follow,
         roots: ctx.roots.clone(),
+        progress: ctx.progress,
     }
 }
 

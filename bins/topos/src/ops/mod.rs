@@ -735,6 +735,7 @@ mod tests {
             let plane = InertPlane;
             let harness = ClaudeCode::new(scratch("adapter"), &fs);
             let ctx = Ctx {
+                progress: crate::progress::silent(),
                 fs: &fs,
                 ids: &ids,
                 clock: &clock,

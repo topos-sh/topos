@@ -1000,6 +1000,7 @@ fn reconcile_thing<'a>(
                 pin: row.pin(),
                 display: display.clone(),
                 override_dir,
+                step: None,
             };
             sync_workspace_skill(env, sc, run, &st, sweep);
         }
@@ -1075,15 +1076,20 @@ fn reconcile_set<'a>(
                 return;
             };
             let members: Vec<String> = ch.skills.iter().map(|s| s.skill_id.clone()).collect();
-            for member in &members {
-                let Some(entry) = catalog.skills.iter().find(|e| &e.skill_id == member) else {
-                    continue; // archived / no current — nothing to deliver
-                };
-                // An explicit row of the SAME scope owns the identity: its version and fields win,
-                // and the set adds nothing.
-                if sc.plan.explicit_claims(host, workspace, &entry.name) {
-                    continue;
-                }
+            // The batch this channel converges — its members the catalog still serves, minus the
+            // ones an explicit row of the SAME scope owns (its version and fields win, and the set
+            // adds nothing). Resolved up front so the activity line can count them.
+            let batch: Vec<&WireSkillIndexEntry> = members
+                .iter()
+                .filter_map(|member| {
+                    let entry = catalog.skills.iter().find(|e| &e.skill_id == member)?;
+                    // Archived / no current members simply are not in the catalog — nothing to
+                    // deliver, and nothing to count.
+                    (!sc.plan.explicit_claims(host, workspace, &entry.name)).then_some(entry)
+                })
+                .collect();
+            let total = batch.len();
+            for (position, entry) in batch.into_iter().enumerate() {
                 if !set_selected && !targets.hit(&[entry.name.as_str()]) {
                     continue;
                 }
@@ -1115,6 +1121,10 @@ fn reconcile_set<'a>(
                     pin: None,
                     display,
                     override_dir,
+                    step: Some(Step {
+                        index: position + 1,
+                        total,
+                    }),
                 };
                 sync_workspace_skill(env, sc, run, &st, sweep);
             }
@@ -1158,12 +1168,18 @@ fn reconcile_feed<'a>(
             if served.is_empty() && sweep.empty_feeds.insert(address.clone()) {
                 sweep.disclosures.push(nothing_assigned_line(&address));
             }
-            for ds in &served {
-                if sc.plan.off_for(host, workspace, &ds.name).is_some()
-                    || sc.plan.explicit_claims(host, workspace, &ds.name)
-                {
-                    continue;
-                }
+            // The batch this feed converges — everything served, minus what this machine's own
+            // file withholds (an `"off"` switch) and what an explicit row already claims. Narrowed
+            // up front so the activity line counts what it will actually visit.
+            let batch: Vec<&DeliverySkill> = served
+                .iter()
+                .filter(|ds| {
+                    sc.plan.off_for(host, workspace, &ds.name).is_none()
+                        && !sc.plan.explicit_claims(host, workspace, &ds.name)
+                })
+                .collect();
+            let total = batch.len();
+            for (position, ds) in batch.into_iter().enumerate() {
                 if !feed_selected && !targets.hit(&[ds.name.as_str()]) {
                     continue;
                 }
@@ -1183,6 +1199,10 @@ fn reconcile_feed<'a>(
                     pin: None,
                     display: ds.name.clone(),
                     override_dir: None,
+                    step: Some(Step {
+                        index: position + 1,
+                        total,
+                    }),
                 };
                 sync_workspace_skill(env, sc, run, &st, sweep);
             }
@@ -1285,6 +1305,32 @@ struct SyncTarget {
     display: String,
     /// The project-relative placement override the row (or its kind default) resolved to.
     override_dir: Option<String>,
+    /// Where this bundle sits in the BATCH its source is converging — what turns the activity line
+    /// into "updating docs (2 of 7)". `None` for a lone explicit row, which is a batch of one and
+    /// says so by not counting.
+    step: Option<Step>,
+}
+
+/// One bundle's position in the batch a channel or a feed is converging. Counted over the set the
+/// source actually hands this scope, AFTER the purely-local withholdings (an `"off"` switch, a row
+/// that claims the name) — a denominator that includes rows nothing will ever visit is a wrong
+/// denominator.
+#[derive(Debug, Clone, Copy)]
+struct Step {
+    /// 1-based, so the first item reads "1 of 7" rather than "0 of 7".
+    index: usize,
+    total: usize,
+}
+
+impl Step {
+    /// The activity label for `display` at this position — or the uncounted form when the item came
+    /// from a lone row.
+    fn label(step: Option<Self>, display: &str) -> String {
+        match step {
+            Some(Self { index, total }) => format!("updating {display} ({index} of {total})"),
+            None => format!("updating {display}"),
+        }
+    }
 }
 
 /// Sync ONE workspace bundle toward its served (or pinned) version, at the resolved scope.
@@ -1307,6 +1353,10 @@ fn sync_workspace_skill<'a>(
     if !sweep.claim(&sc.label, &target.skill_id) {
         return; // already reconciled in this scope under another row
     }
+    // The activity line for this item — opened AFTER the dedupe claim, so a bundle two rows both
+    // name is announced once, and held for the whole converge (the engine's own `downloading …`
+    // fallback stays quiet underneath it: naming the item beats naming the step).
+    let _phase = crate::progress::phase(ctx.progress, &Step::label(st.step, &st.display));
     // The row's pin overrides the served version (the engine fetches by version id, so an older pin
     // resolves as long as the plane still serves its bytes).
     let version_id = st
@@ -3404,4 +3454,30 @@ pub(crate) fn lay_baseline_with_plan(
     }
     ctx.fs.fsync_dir(&ctx.layout.skills_dir())?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Step;
+
+    #[test]
+    fn the_activity_label_counts_a_batch_and_stays_quiet_about_a_lone_row() {
+        // A channel or a feed hands the sweep a batch, so the line says where in it we are —
+        // 1-based, because "0 of 7" reads as nothing having started.
+        assert_eq!(
+            Step::label(Some(Step { index: 1, total: 7 }), "docs"),
+            "updating docs (1 of 7)"
+        );
+        assert_eq!(
+            Step::label(Some(Step { index: 7, total: 7 }), "docs"),
+            "updating docs (7 of 7)"
+        );
+        // A lone explicit row is a batch of one and says so by not counting.
+        assert_eq!(Step::label(None, "docs"), "updating docs");
+        // The label carries the DISPLAY name (the folder the person sees), never an opaque id.
+        assert_eq!(
+            Step::label(None, "deploy-runbook"),
+            "updating deploy-runbook"
+        );
+    }
 }

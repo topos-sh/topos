@@ -203,6 +203,7 @@ impl SessionInstall {
         let routed = ops::SessionRoutedPlane::load(&fs, &layout, &connect);
         let cache = ops::CacheFollow::load(&fs, &layout);
         let ctx = Ctx {
+            progress: crate::progress::silent(),
             fs: &fs,
             ids: &ids,
             clock: &clock,

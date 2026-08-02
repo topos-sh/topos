@@ -170,6 +170,12 @@ fn self_update_with_key(
     }
 
     // 4. download the asset + SHA256SUMS.
+    // The op names the phase because only the op knows WHICH version is landing; the transport
+    // streams the bytes into it (a release asset declares its length, so this one shows a real
+    // percentage). The phase covers the signature + checksum fetches below too — they are part of
+    // the same "install this release" wait, and each is a few hundred bytes.
+    let phase =
+        crate::progress::phase(ctx.progress, &format!("downloading topos {latest_version}"));
     let asset = format!("topos-{TARGET_TRIPLE}.tar.gz");
     let asset_url = format!("{base_url}/download/{tag}/{asset}");
     let sums_url = format!("{base_url}/download/{tag}/SHA256SUMS");
@@ -220,6 +226,9 @@ fn self_update_with_key(
             actual,
         });
     }
+
+    // Nothing is fetched past this point — the rest is local work, and the receipt is next.
+    drop(phase);
 
     // 7. extract the `topos` binary from the tarball (in memory — never unpack attacker paths to disk).
     let bin_bytes = extract_topos(&tarball)?;
@@ -484,6 +493,7 @@ mod tests {
         let follow = InertFollow;
         let harness = ClaudeCode::new(scratch("adapter"), &fs);
         let ctx = Ctx {
+            progress: crate::progress::silent(),
             fs: &fs,
             ids: &ids,
             clock: &clock,

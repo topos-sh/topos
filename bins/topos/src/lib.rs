@@ -42,6 +42,7 @@ pub(crate) mod ops;
 pub(crate) mod placement;
 pub(crate) mod plane;
 pub(crate) mod plane_http;
+pub(crate) mod progress;
 pub(crate) mod release;
 pub(crate) mod render;
 pub(crate) mod resolve;

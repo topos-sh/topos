@@ -1148,6 +1148,7 @@ mod tests {
         let fs = RealFs;
         let harness = topos_harness::ClaudeCode::new(home.0.join(".claude"), &fs);
         let ctx = Ctx {
+            progress: crate::progress::silent(),
             fs: &fs,
             ids: &RealIds,
             clock: &RealClock,
@@ -1834,6 +1835,7 @@ mod tests {
         // The exact pair the composition root's pre-recovery fast path runs.
         let harness = topos_harness::ClaudeCode::new(home.0.join(".claude"), &fs);
         let ctx = Ctx {
+            progress: crate::progress::silent(),
             fs: &fs,
             ids: &RealIds,
             clock: &RealClock,

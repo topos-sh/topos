@@ -894,6 +894,7 @@ mod tests {
         let follow = InertFollow;
         let harness = ClaudeCode::new(scratch("adapter2"), &fs);
         let ctx = Ctx {
+            progress: crate::progress::silent(),
             fs: &fs,
             ids: &ids,
             clock: &clock,
@@ -950,6 +951,7 @@ mod tests {
         let follow = InertFollow;
         let harness = ClaudeCode::new(scratch("adapter3"), &fs);
         let ctx = Ctx {
+            progress: crate::progress::silent(),
             fs: &fs,
             ids: &ids,
             clock: &clock,

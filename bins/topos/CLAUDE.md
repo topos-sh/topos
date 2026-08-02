@@ -73,6 +73,13 @@ generated `docs/cli.md` (`cargo xtask gen-cli-ref`).
   `resolve_session_lane` picks a write verb's lane. `scan` — the bundle scanner (rejects
   fs-level hazards before the kernel digest). `config_io` + `ctx` — the injected
   `HarnessAdapter`/`ConfigStore` seams. `actions` — the one `NextAction` construction fn.
+- `progress` — the ACTIVITY seam: a stderr-only transient line naming what is in flight while a
+  fetch runs. One phase at a time, opened through an RAII guard; a verb's label (`updating docs
+  (2 of 3)`) wins over a transport's (`contacting topos.sh`), which opens only when idle; byte
+  progress attaches to whichever phase is live, so the transports stream bytes into a label the
+  op chose. Three sinks — animated (`indicatif`, terminal), one plain line per phase (piped), and
+  silent (`update --quiet`, the offline verbs, every test). **Never stdout**: the `--json`
+  envelope and the golden fixtures are untouched by it.
 
 Golden `--json` fixtures are asserted byte-equal in tests; the composed-e2e fixture rig is
 `test_support::SessionInstall` (feature `test-fixtures`).
@@ -85,4 +92,4 @@ only key in the binary is the PUBLIC release key (`RELEASE_PUBKEY`, which makes 
 signatures mandatory). Kernel identity (`version_id`/`bundle_digest`) depends only on bytes +
 device id, so injectable id/time sources keep `add` deterministic. Notable deps: `rustix` (safe
 syscalls: fsync/flock/atomic dir-swap), `ureq` (rustls), `toml_edit`, `tar`+`flate2` (self-update
-+ forge import, in-memory), `minisign-verify`.
++ forge import, in-memory), `minisign-verify`, `indicatif` (the stderr activity line).

@@ -8,6 +8,7 @@ use topos_harness::HarnessAdapter;
 use crate::fs_seam::FsOps;
 use crate::ids::{Clock, IdSource};
 use crate::plane::{FollowSource, PlaneSource};
+use crate::progress::ProgressSink;
 use crate::sidecar::Layout;
 
 /// The machine roots agent DETECTION and shared-dir placement resolve against — the user's home dir
@@ -42,4 +43,10 @@ pub(crate) struct Ctx<'a> {
     /// classic active-adapter placement — production with no `$HOME`, and every test that does not
     /// exercise the engine).
     pub roots: Option<AgentRoots>,
+    /// The ACTIVITY channel — where a verb says "still working" while a fetch is in flight. Real on
+    /// stderr in production (animated on a terminal, one plain line per phase when piped), the no-op
+    /// [`silent`](crate::progress::silent) sink under `update --quiet`, for the verbs that promise
+    /// to dial nothing, and in every test. It never touches stdout, so no outcome, envelope, or
+    /// golden fixture depends on it.
+    pub progress: &'a dyn ProgressSink,
 }

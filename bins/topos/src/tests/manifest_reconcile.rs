@@ -144,6 +144,7 @@ impl Rig {
     }
     fn ctx_at<'a>(&'a self, cwd: Option<&std::path::Path>) -> Ctx<'a> {
         Ctx {
+            progress: crate::progress::silent(),
             fs: &self.fs,
             ids: &self.ids,
             clock: &self.clock,
@@ -3893,6 +3894,7 @@ fn a_project_scope_selector_import_converges_on_a_later_update() {
 /// The store-routing helper the reconcile uses, reachable from the suite.
 fn ops_ctx_with_layout<'a>(ctx: &'a Ctx<'a>, layout: &Layout) -> Ctx<'a> {
     Ctx {
+        progress: crate::progress::silent(),
         layout: layout.clone(),
         fs: ctx.fs,
         ids: ctx.ids,

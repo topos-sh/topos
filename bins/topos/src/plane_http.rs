@@ -17,8 +17,9 @@
 //! The client stays **sync + tokio-free**: `ureq` brings its own blocking TLS stack, so this adds no
 //! `plane-store`/`sqlx`/`tokio` edge (`check-arch` holds the line).
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
+use std::rc::Rc;
 use std::time::Duration;
 
 use topos_core::digest::{self, FileMode, to_hex};
@@ -39,6 +40,7 @@ use crate::plane::{
     GovernanceSource, KnownCurrent, LinkStatus, PlaneError, PlaneSource, PointerFetch,
     WriteReceipt,
 };
+use crate::progress::{self, ProgressSink};
 
 /// Fail fast establishing a connection (a dead plane must not hang the session-start sweep).
 const CONNECT_TIMEOUT_SECS: u64 = 10;
@@ -68,6 +70,11 @@ pub(crate) struct UreqPlane {
     /// The enrolled workspace ids (from `user.json`) — the delivery/report lane's fan-out set.
     workspaces: Vec<String>,
     agent: ureq::Agent,
+    /// The ACTIVITY sink (see the module header): byte progress for the bundle blobs, plus the
+    /// fallback "contacting <host>" phase when the verb above named nothing better. An `Rc` because
+    /// this transport is boxed as a `'static` trait object and cannot borrow the composition root's
+    /// binding. Silent by default — [`Self::with_progress`] is what wires the real one.
+    progress: Rc<dyn ProgressSink>,
 }
 
 impl std::fmt::Debug for UreqPlane {
@@ -97,7 +104,15 @@ impl UreqPlane {
             skill_workspaces: RefCell::new(skill_workspaces),
             workspaces: Vec::new(),
             agent: ureq::Agent::new_with_config(agent_config()),
+            progress: Rc::new(progress::Silent),
         }
+    }
+
+    /// Attach the invocation's activity sink (the composition root's). Without it the transport is
+    /// silent, which is exactly what the unit tests and fixtures want.
+    pub(crate) fn with_progress(mut self, progress: Rc<dyn ProgressSink>) -> Self {
+        self.progress = progress;
+        self
     }
 
     /// The `(workspace_id, credential)` a skill's reads use, if this transport knows the skill AND a
@@ -133,6 +148,36 @@ impl UreqPlane {
     /// fault, and [`PlaneError::Unavailable`] on any other status. `url` never contains the secret (the
     /// credential is in the header), so it is safe in the error text.
     fn bearer_get(&self, url: &str, credential: &str) -> Result<Vec<u8>, PlaneError> {
+        self.bearer_get_inner(url, credential, None)
+    }
+
+    /// [`Self::bearer_get`] for ONE BLOB of a version being assembled: the body is streamed and its
+    /// bytes reported into the phase in flight, on top of the `carried` total the version's earlier
+    /// blobs already contributed — so a multi-file bundle shows one climbing figure, not a counter
+    /// that restarts at every file.
+    fn bearer_get_part(
+        &self,
+        url: &str,
+        credential: &str,
+        carried: u64,
+    ) -> Result<Vec<u8>, PlaneError> {
+        self.bearer_get_inner(url, credential, Some(carried))
+    }
+
+    /// The shared body of the two above. `part` selects the read: `None` = a small metadata body
+    /// read whole; `Some(carried)` = a watched blob streamed on top of that running total.
+    fn bearer_get_inner(
+        &self,
+        url: &str,
+        credential: &str,
+        part: Option<u64>,
+    ) -> Result<Vec<u8>, PlaneError> {
+        // Only when the verb above named nothing better — a `downloading <skill>` phase says more
+        // than the server's hostname does.
+        let _phase = progress::phase_if_idle(
+            &*self.progress,
+            &format!("contacting {}", host_label(&self.base_url)),
+        );
         let resp = self
             .agent
             .get(url)
@@ -143,7 +188,10 @@ impl UreqPlane {
             .map_err(|e| PlaneError::Unreachable(format!("GET {url}: {e}")))?;
         let status = resp.status().as_u16();
         match classify(status) {
-            HttpClass::Ok => read_body(resp),
+            HttpClass::Ok => match part {
+                Some(carried) => read_body_reported(resp, &*self.progress, carried, false),
+                None => read_body(resp),
+            },
             HttpClass::NotFound => Err(PlaneError::NotFound),
             // No conditional headers are sent here, so 304 cannot occur; fold it in with other statuses.
             HttpClass::NotModified | HttpClass::Other => {
@@ -166,6 +214,10 @@ impl PlaneSource for UreqPlane {
         let url = format!(
             "{}/v1/workspaces/{}/skills/{}/current",
             self.base_url, workspace_id, skill_id
+        );
+        let _phase = progress::phase_if_idle(
+            &*self.progress,
+            &format!("contacting {}", host_label(&self.base_url)),
         );
         let mut req = self
             .agent
@@ -216,12 +268,22 @@ impl PlaneSource for UreqPlane {
         let meta_bytes = self.bearer_get(&meta_url, &credential)?;
         let meta: WireVersionMeta = serde_json::from_slice(&meta_bytes)
             .map_err(|e| PlaneError::Malformed(format!("version metadata for {skill_id}: {e}")))?;
+        // The bundle's blobs are the bytes worth watching — one running total across all of them
+        // (the metadata frame carries no sizes, so the total stays unknown and the line shows the
+        // figure climbing rather than a fabricated percentage).
+        let carried = Cell::new(0u64);
         build_fetched_version(&meta, |object_id_hex| {
             let url = format!(
                 "{}/v1/workspaces/{}/skills/{}/bundles/{}",
                 self.base_url, workspace_id, skill_id, object_id_hex
             );
-            self.bearer_get(&url, &credential)
+            let bytes = self.bearer_get_part(&url, &credential, carried.get())?;
+            carried.set(
+                carried
+                    .get()
+                    .saturating_add(u64::try_from(bytes.len()).unwrap_or(u64::MAX)),
+            );
+            Ok(bytes)
         })
     }
 
@@ -316,6 +378,10 @@ impl crate::plane::DeliverySource for UreqPlane {
         let body =
             serde_json::to_vec(&topos_types::requests::NoticeAckRequest { ids: ids.to_vec() })
                 .map_err(|e| PlaneError::Malformed(format!("ack body: {e}")))?;
+        let _phase = progress::phase_if_idle(
+            &*self.progress,
+            &format!("contacting {}", host_label(&self.base_url)),
+        );
         let resp = self
             .agent
             .post(&url)
@@ -355,6 +421,10 @@ impl crate::plane::DeliverySource for UreqPlane {
         };
         let body = serde_json::to_vec(&report)
             .map_err(|e| PlaneError::Malformed(format!("report body: {e}")))?;
+        let _phase = progress::phase_if_idle(
+            &*self.progress,
+            &format!("contacting {}", host_label(&self.base_url)),
+        );
         let resp = self
             .agent
             .put(&url)
@@ -464,6 +534,82 @@ fn read_body(resp: ureq::http::Response<ureq::Body>) -> Result<Vec<u8>, PlaneErr
         .map_err(|e| PlaneError::Unavailable(format!("read body: {e}")))
 }
 
+/// The buffer one streamed read pulls at a time — large enough that the per-chunk progress report
+/// disappears next to the socket read, small enough that a slow link still moves the line.
+const STREAM_CHUNK_BYTES: usize = 64 * 1024;
+
+/// [`read_body`] for a body worth WATCHING — a repo tarball, a release asset, a bundle blob — read in
+/// chunks so the activity line advances while the bytes arrive instead of after they all have.
+///
+/// Byte-for-byte the same read as [`read_body`]: the same [`MAX_FETCH_BYTES`] limiter (`read_to_vec`
+/// is exactly this loop over the same limited reader), so an over-limit body still fails, and every
+/// fault still maps to the same transient [`PlaneError::Unavailable`] with the same `read body:`
+/// prefix. Only the reporting is new.
+///
+/// `carried` is what EARLIER bodies of the same phase already contributed — a version's per-file
+/// blob fetches report ONE running total for the whole bundle rather than a counter that restarts
+/// at every file. `declare_total` says whether this body's own `Content-Length` may stand as the
+/// phase's total: true when this body IS the whole download (so a percentage is honest), false for
+/// one part of many (where the phase's real total is unknown).
+fn read_body_reported(
+    resp: ureq::http::Response<ureq::Body>,
+    progress: &dyn ProgressSink,
+    carried: u64,
+    declare_total: bool,
+) -> Result<Vec<u8>, PlaneError> {
+    read_body_reported_limited(resp, progress, carried, declare_total, MAX_FETCH_BYTES)
+}
+
+/// [`read_body_reported`] with the cap injected — the production callers all take
+/// [`MAX_FETCH_BYTES`] through the wrapper above (ONE place decides the real ceiling); the tests
+/// pass a tiny one to prove an over-limit body still fails rather than streaming forever.
+fn read_body_reported_limited(
+    resp: ureq::http::Response<ureq::Body>,
+    progress: &dyn ProgressSink,
+    carried: u64,
+    declare_total: bool,
+    limit: u64,
+) -> Result<Vec<u8>, PlaneError> {
+    use std::io::Read;
+
+    let body = resp.into_body();
+    let total = if declare_total {
+        body.content_length()
+    } else {
+        None
+    };
+    let mut reader = body.into_with_config().limit(limit).reader();
+    let mut out: Vec<u8> = Vec::new();
+    let mut buf = vec![0u8; STREAM_CHUNK_BYTES];
+    loop {
+        match reader.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => {
+                out.extend_from_slice(&buf[..n]);
+                let done = carried.saturating_add(u64::try_from(out.len()).unwrap_or(u64::MAX));
+                progress.bytes(done, total);
+            }
+            // `read_to_vec`'s `read_to_end` retries an interrupted read; so does this loop, or a
+            // signal during a long download would surface as a spurious transport fault.
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(PlaneError::Unavailable(format!("read body: {e}"))),
+        }
+    }
+    Ok(out)
+}
+
+/// The HOST a base URL names — the transports' fallback phase label ("contacting topos.sh"), which
+/// is all a generic plane call can honestly say about itself. An unparseable base falls back to the
+/// base verbatim: a progress label is never worth an error, and the base is already safe to print
+/// (every secret rides a header, never the URL).
+fn host_label(base_url: &str) -> String {
+    base_url
+        .parse::<ureq::http::Uri>()
+        .ok()
+        .and_then(|u| u.host().map(str::to_owned))
+        .unwrap_or_else(|| base_url.to_owned())
+}
+
 /// Assemble a [`FetchedVersion`] from a version's metadata + a blob-fetching closure, re-verifying every
 /// blob's `sha256 == object_id`. **Pure** (the closure abstracts the transport), so the happy path, the
 /// sha256-mismatch → `Malformed`, and the bad-hex → `Malformed` are all unit-testable with canned bytes.
@@ -543,6 +689,10 @@ pub(crate) struct UreqDeviceClient {
     /// login-only).
     credential: Option<String>,
     agent: ureq::Agent,
+    /// The ACTIVITY sink — this lane carries short metadata calls and small JSON writes, so all it
+    /// has to say is which server it is waiting on, and only when the verb named nothing better.
+    /// Silent by default; [`Self::with_progress`] wires the real one.
+    progress: Rc<dyn ProgressSink>,
 }
 
 impl std::fmt::Debug for UreqDeviceClient {
@@ -564,7 +714,25 @@ impl UreqDeviceClient {
             base_url: base_url.trim_end_matches('/').to_owned(),
             credential,
             agent: ureq::Agent::new_with_config(agent_config()),
+            progress: Rc::new(progress::Silent),
         }
+    }
+
+    /// Attach the invocation's activity sink (the composition root's). Without it the transport is
+    /// silent, which is exactly what the unit tests and fixtures want.
+    pub(crate) fn with_progress(mut self, progress: Rc<dyn ProgressSink>) -> Self {
+        self.progress = progress;
+        self
+    }
+
+    /// The fallback phase this lane opens around one request — all a generic directory/governance
+    /// call can honestly say about itself. Opened only when nothing more specific is in flight, so
+    /// a verb-level label (`publishing docs`) always wins.
+    fn dialing(&self) -> progress::Phase<'_> {
+        progress::phase_if_idle(
+            &*self.progress,
+            &format!("contacting {}", host_label(&self.base_url)),
+        )
     }
 
     /// The device's Bearer credential, or a typed "not enrolled" error (mirroring the un-enrolled
@@ -617,6 +785,7 @@ impl UreqDeviceClient {
         let payload = serde_json::to_vec(body).map_err(|_| {
             ClientError::Corrupt(format!("{what}: could not serialize the request"))
         })?;
+        let _phase = self.dialing();
         let mut req = self
             .agent
             .post(url)
@@ -656,6 +825,7 @@ impl EnrollSource for UreqDeviceClient {
     fn fetch_card(&self, url: &str) -> Result<WireProtocolCard, ClientError> {
         // Ask for the machine contract EXPLICITLY: the route content-negotiates, and anything not
         // asking for JSON is served the human page instead (ureq's default Accept is `*/*`).
+        let _phase = self.dialing();
         let resp = self
             .agent
             .get(url)
@@ -954,6 +1124,7 @@ impl CatalogSource for UreqDeviceClient {
         let url = format!("{}/v1/workspaces/{}/skills", self.base_url, workspace_id);
         // The read is authorized by the workspace Bearer credential (resolved to a confirmed-member row);
         // the credential rides the header, so the URL carries no secret — safe in an error message.
+        let _phase = self.dialing();
         let resp = self
             .agent
             .get(&url)
@@ -1008,6 +1179,7 @@ impl UreqDeviceClient {
     ) -> Result<T, ClientError> {
         let credential = self.credential_for(workspace_id)?;
         let url = format!("{}{path}", self.base_url);
+        let _phase = self.dialing();
         let resp = self
             .agent
             .get(&url)
@@ -1061,6 +1233,7 @@ impl UreqDeviceClient {
                 .send_empty()
                 .map_err(|e| ClientError::Plane(format!("{what}: {e}"))),
         };
+        let _phase = self.dialing();
         let resp = match method {
             RowMethod::Put => send(self.agent.put(&url).header("authorization", &auth))?,
             RowMethod::Post => send(self.agent.post(&url).header("authorization", &auth))?,
@@ -1389,19 +1562,39 @@ const RELEASE_USER_AGENT: &str = concat!("topos/", env!("CARGO_PKG_VERSION"));
 /// The blocking `ureq` release source: the GitHub API for latest-tag resolution + raw asset GETs.
 pub(crate) struct UreqReleases {
     agent: ureq::Agent,
+    /// The ACTIVITY sink. The asset is the one download here with a server-declared length, so this
+    /// is where a real percentage comes from; `self-update` names the phase (it knows the version),
+    /// this transport supplies the bytes.
+    progress: Rc<dyn ProgressSink>,
+}
+
+impl std::fmt::Debug for UreqReleases {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // The agent is not Debug; there is nothing else worth printing.
+        f.debug_struct("UreqReleases").finish_non_exhaustive()
+    }
 }
 
 impl UreqReleases {
     pub(crate) fn new() -> Self {
         Self {
             agent: ureq::Agent::new_with_config(agent_config()),
+            progress: Rc::new(progress::Silent),
         }
+    }
+
+    /// Attach the invocation's activity sink (the composition root's). Without it the transport is
+    /// silent, which is exactly what the unit tests and fixtures want.
+    pub(crate) fn with_progress(mut self, progress: Rc<dyn ProgressSink>) -> Self {
+        self.progress = progress;
+        self
     }
 }
 
 impl crate::release::ReleaseSource for UreqReleases {
     fn latest_tag(&self) -> Result<String, ClientError> {
         let url = "https://api.github.com/repos/topos-sh/topos/releases/latest";
+        let _phase = progress::phase_if_idle(&*self.progress, "checking for a newer topos");
         let resp = self
             .agent
             .get(url)
@@ -1426,6 +1619,9 @@ impl crate::release::ReleaseSource for UreqReleases {
     }
 
     fn download(&self, url: &str) -> Result<Vec<u8>, ClientError> {
+        // `self-update` opens the `downloading topos <version>` phase around the whole install, so
+        // this fallback only ever fires for a caller that named nothing.
+        let _phase = progress::phase_if_idle(&*self.progress, "downloading topos");
         let resp = self
             .agent
             .get(url)
@@ -1436,7 +1632,8 @@ impl crate::release::ReleaseSource for UreqReleases {
         if !(200..=299).contains(&status) {
             return Err(ClientError::Plane(format!("download {url}: HTTP {status}")));
         }
-        read_body(resp).map_err(plane_err)
+        // A release asset declares its `Content-Length`, so this one shows a real percentage.
+        read_body_reported(resp, &*self.progress, 0, true).map_err(plane_err)
     }
 }
 
@@ -1503,13 +1700,32 @@ impl crate::release::ReleaseProbe for UreqVersionProbe {
 /// The blocking `ureq` remote-source: a public repo tarball over the GitHub API.
 pub(crate) struct UreqGitSource {
     agent: ureq::Agent,
+    /// The ACTIVITY sink. A forge import is the longest silent wait the CLI has (a whole repo over
+    /// one connection), so this transport names the repo itself rather than leaving the fallback to
+    /// say "contacting github.com".
+    progress: Rc<dyn ProgressSink>,
+}
+
+impl std::fmt::Debug for UreqGitSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // The agent is not Debug; there is nothing else worth printing.
+        f.debug_struct("UreqGitSource").finish_non_exhaustive()
+    }
 }
 
 impl UreqGitSource {
     pub(crate) fn new() -> Self {
         Self {
             agent: ureq::Agent::new_with_config(agent_config()),
+            progress: Rc::new(progress::Silent),
         }
+    }
+
+    /// Attach the invocation's activity sink (the composition root's). Without it the transport is
+    /// silent, which is exactly what the unit tests and fixtures want.
+    pub(crate) fn with_progress(mut self, progress: Rc<dyn ProgressSink>) -> Self {
+        self.progress = progress;
+        self
     }
 }
 
@@ -1540,6 +1756,9 @@ impl crate::git_source::GitTarballSource for UreqGitSource {
                 spec.owner, spec.repo
             ),
         };
+        // Named by what the user asked for — the repo, not the API path the tarball happens to
+        // live behind.
+        let _phase = progress::phase(&*self.progress, &format!("fetching {}", spec.origin()));
         let resp = self
             .agent
             .get(&url)
@@ -1548,7 +1767,9 @@ impl crate::git_source::GitTarballSource for UreqGitSource {
             .call()
             .map_err(|e| ClientError::RemoteFetch(format!("{}: {e}", spec.label())))?;
         match resp.status().as_u16() {
-            200..=299 => read_body(resp).map_err(|_| {
+            // Streamed: GitHub's tarball redirect answers chunked (no `Content-Length`), so the
+            // line shows the figure climbing rather than a percentage it cannot know.
+            200..=299 => read_body_reported(resp, &*self.progress, 0, true).map_err(|_| {
                 ClientError::RemoteFetch(format!(
                     "{}: response body could not be read",
                     spec.label()
@@ -1598,8 +1819,119 @@ fn plane_err(e: PlaneError) -> ClientError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::RefCell;
     use topos_types::requests::WireVersionFile;
     use topos_types::{TerminalOutcome, WireError};
+
+    /// A sink that records every byte report, so the streamed read's reporting is asserted without
+    /// a terminal.
+    #[derive(Debug, Default)]
+    struct Recorder {
+        phases: RefCell<Vec<String>>,
+        reports: RefCell<Vec<(u64, Option<u64>)>>,
+    }
+
+    impl ProgressSink for Recorder {
+        fn begin(&self, label: &str) {
+            self.phases.borrow_mut().push(label.to_owned());
+        }
+        fn begin_if_idle(&self, label: &str) -> bool {
+            self.begin(label);
+            true
+        }
+        fn bytes(&self, done: u64, total: Option<u64>) {
+            self.reports.borrow_mut().push((done, total));
+        }
+        fn end(&self) {}
+        fn animated(&self) -> bool {
+            false
+        }
+    }
+
+    /// A 200 response over `bytes`, length-delimited (what a release asset looks like).
+    fn measured_response(bytes: Vec<u8>) -> ureq::http::Response<ureq::Body> {
+        ureq::http::Response::builder()
+            .status(200)
+            .body(ureq::Body::builder().data(bytes))
+            .expect("a canned response builds")
+    }
+
+    #[test]
+    fn a_streamed_body_reads_the_same_bytes_and_reports_them_as_they_arrive() {
+        // Bigger than one read chunk, so the report is genuinely incremental rather than one
+        // after-the-fact number.
+        let payload: Vec<u8> = (0..STREAM_CHUNK_BYTES * 2 + 7)
+            .map(|i| (i % 251) as u8)
+            .collect();
+        let total = payload.len() as u64;
+        let rec = Recorder::default();
+
+        let got = read_body_reported(measured_response(payload.clone()), &rec, 0, true)
+            .expect("a canned body reads");
+        assert_eq!(got, payload, "streaming must not alter a single byte");
+
+        let reports = rec.reports.borrow().clone();
+        assert!(
+            reports.len() > 1,
+            "incremental, not one final number: {reports:?}"
+        );
+        // A length-delimited body declares its total, so the line can show a real percentage.
+        assert!(
+            reports.iter().all(|(_, t)| *t == Some(total)),
+            "{reports:?}"
+        );
+        // Monotonic, ending exactly at the body's size.
+        assert!(reports.windows(2).all(|w| w[0].0 < w[1].0), "{reports:?}");
+        assert_eq!(reports.last().copied(), Some((total, Some(total))));
+
+        // The SAME body read as one PART of a larger phase: the running total starts from what the
+        // earlier parts contributed, and no total is claimed (the phase's real size is unknown).
+        let rec = Recorder::default();
+        read_body_reported(measured_response(payload.clone()), &rec, 1_000, false)
+            .expect("a canned body reads");
+        let reports = rec.reports.borrow().clone();
+        assert_eq!(reports.last().copied(), Some((1_000 + total, None)));
+        assert!(reports.iter().all(|(_, t)| t.is_none()), "{reports:?}");
+    }
+
+    #[test]
+    fn a_streamed_body_still_fails_at_the_byte_cap() {
+        // The cap is the same limiter `read_body` applies (`read_to_vec` IS this loop over the same
+        // limited reader) — injected here only because the production ceiling is 128 MiB.
+        let rec = Recorder::default();
+        let err =
+            read_body_reported_limited(measured_response(vec![7u8; 4096]), &rec, 0, true, 512)
+                .expect_err("an over-limit body is refused, not truncated silently");
+        // The same transient class the whole-body read maps an over-limit read to.
+        assert!(
+            matches!(&err, PlaneError::Unavailable(m) if m.starts_with("read body: ")),
+            "{err:?}"
+        );
+        // `ureq`'s limiter refuses a body that REACHES the cap too (the last read finds no budget
+        // left, whether or not more bytes exist) — inherited verbatim from `read_to_vec`, which
+        // drives the same limited reader. Asserted so the shared boundary is on record rather than
+        // rediscovered.
+        let rec = Recorder::default();
+        assert!(
+            read_body_reported_limited(measured_response(vec![7u8; 512]), &rec, 0, true, 512)
+                .is_err()
+        );
+        // Anything under it reads clean.
+        let rec = Recorder::default();
+        let ok = read_body_reported_limited(measured_response(vec![7u8; 511]), &rec, 0, true, 512)
+            .expect("a body under the cap reads");
+        assert_eq!(ok.len(), 511);
+    }
+
+    #[test]
+    fn the_fallback_phase_names_the_host_not_the_url() {
+        // A generic plane call can only honestly say which server it is waiting on.
+        assert_eq!(host_label("https://topos.sh"), "topos.sh");
+        assert_eq!(host_label("https://api.topos.sh/v1/skills"), "api.topos.sh");
+        assert_eq!(host_label("http://127.0.0.1:8787"), "127.0.0.1");
+        // An unparseable base falls back to itself — a progress label is never worth an error.
+        assert_eq!(host_label("not a url"), "not a url");
+    }
 
     #[test]
     fn classify_maps_the_wire_status_set() {
