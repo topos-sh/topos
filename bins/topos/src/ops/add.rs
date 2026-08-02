@@ -1271,6 +1271,12 @@ impl PublishedName {
 /// cache-only match can never support an identical-bytes claim. Each ACTIVE session's catalog is
 /// the authority on what its workspace actually publishes, and carries the digest.
 ///
+/// The ACTIVE session roster gates BOTH halves: `logout` ends the session but leaves
+/// `sync_status.json` behind, so a leftover cache row must not resolve a name toward a workspace
+/// this machine can no longer subscribe to (a dead `SESSION_REQUIRED` instead of an honest
+/// not-found, or a false two-workspace ambiguity). A cache entry the workspace since WITHDREW is
+/// skipped the same way — withdrawn is not published, whatever the cache still holds.
+///
 /// A session that does not answer is SKIPPED, silently: this is a hint source, and folding a
 /// transport fault into "no workspace has it" would turn an unreachable server into a
 /// not-found. The authoritative read on the subscribe path happens inside `add_reference`, which
@@ -1280,6 +1286,18 @@ pub(crate) fn published_matches(
     connect: &super::reconcile::SessionConnect<'_>,
     name: &str,
 ) -> Vec<PublishedName> {
+    let Ok(sessions) = crate::sessions::read_sessions(ctx.fs, &ctx.layout) else {
+        return Vec::new(); // no readable roster, nothing subscribable — local-only resolution
+    };
+    // Only an ACTIVE session's catalog is this person's universe (pending delivers nothing).
+    let active: Vec<_> = sessions
+        .sessions
+        .iter()
+        .filter(|s| s.status == crate::sessions::SESSION_ACTIVE)
+        .collect();
+    if active.is_empty() {
+        return Vec::new();
+    }
     let mut found: BTreeMap<(String, String), PublishedName> = BTreeMap::new();
     let cache = crate::sync_status::read(ctx.fs, &ctx.layout).unwrap_or_default();
     for entry in cache.workspaces.values() {
@@ -1288,7 +1306,17 @@ pub(crate) fn published_matches(
         else {
             continue; // a pre-session record cannot be spelled as a reference
         };
-        if !entry.delivered.values().any(|d| d.name == name) {
+        if !active
+            .iter()
+            .any(|s| s.host == host && s.workspace_name == workspace)
+        {
+            continue; // a session that ended keeps no say in the namespace
+        }
+        if !entry
+            .delivered
+            .values()
+            .any(|d| d.name == name && !d.withdrawn)
+        {
             continue;
         }
         found.insert(
@@ -1302,31 +1330,25 @@ pub(crate) fn published_matches(
             },
         );
     }
-    if let Ok(sessions) = crate::sessions::read_sessions(ctx.fs, &ctx.layout) {
-        for s in &sessions.sessions {
-            // Only an ACTIVE session's catalog is this person's universe (pending delivers nothing).
-            if s.status != crate::sessions::SESSION_ACTIVE {
+    for s in &active {
+        let transports = connect(s);
+        let Ok(index) = transports.directory.skills_index(&s.workspace_id) else {
+            continue;
+        };
+        for e in index.skills {
+            if e.name != name || e.status != "active" {
                 continue;
             }
-            let transports = connect(s);
-            let Ok(index) = transports.directory.skills_index(&s.workspace_id) else {
-                continue;
-            };
-            for e in index.skills {
-                if e.name != name || e.status != "active" {
-                    continue;
-                }
-                found.insert(
-                    (s.host.clone(), s.workspace_name.clone()),
-                    PublishedName {
-                        host: s.host.clone(),
-                        workspace: s.workspace_name.clone(),
-                        name: e.name.clone(),
-                        reference: format!("{}/{}/{}", s.host, s.workspace_name, e.name),
-                        bundle_digest: Some(e.bundle_digest.clone()),
-                    },
-                );
-            }
+            found.insert(
+                (s.host.clone(), s.workspace_name.clone()),
+                PublishedName {
+                    host: s.host.clone(),
+                    workspace: s.workspace_name.clone(),
+                    name: e.name.clone(),
+                    reference: format!("{}/{}/{}", s.host, s.workspace_name, e.name),
+                    bundle_digest: Some(e.bundle_digest.clone()),
+                },
+            );
         }
     }
     let mut out: Vec<PublishedName> = found.into_values().collect();
