@@ -5703,3 +5703,308 @@ fn an_adopted_project_placement_hands_over_and_parks_the_home_store() {
     // The bytes in the checkout were never the subject — they stay exactly where they are.
     assert!(placed.join("SKILL.md").exists());
 }
+
+// =================================================================================================
+// The BARE-NAME ladder: one namespace, made of the local inventory AND the connected catalogs.
+// =================================================================================================
+
+/// An untracked skill a discovery walk will find: `<root>/.claude/skills/<name>/SKILL.md` (the
+/// rig's home already carries `.claude/`, so claude-code reads as present at both scopes).
+fn untracked_skill(root: &std::path::Path, name: &str, body: &[u8]) -> PathBuf {
+    let dir = root.join(".claude/skills").join(name);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("SKILL.md"), body).unwrap();
+    dir
+}
+
+/// Plan a bare `add <target>` exactly as the composition root does: the machine's discovery roots
+/// (home + the working directory) against every connected session's catalog.
+fn bare_plan(
+    rig: &Rig,
+    plane: &FakePlane,
+    dir: &FakeDirectory,
+    target: &str,
+    subscribe: bool,
+) -> Result<ops::BareAddPlan, ClientError> {
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    let roots = ops::DiscoveryRoots {
+        home: rig.home.0.clone(),
+        cwd: Some(rig.work.0.clone()),
+    };
+    ops::plan_bare_add(&ctx, &connect(plane, dir), &roots, target, subscribe)
+}
+
+/// A SECOND connected workspace, on its own server — what makes a bare name ambiguous across
+/// teams rather than across harnesses.
+fn seed_second_session(rig: &Rig) {
+    sessions::upsert_session(
+        &rig.fs,
+        &rig.layout(),
+        Session {
+            host: "beta.test".into(),
+            base_url: "https://beta.test/api".into(),
+            workspace_id: "w_ops".into(),
+            workspace_name: "ops".into(),
+            display_name: "Operations".into(),
+            session_id: "sn_2".into(),
+            credential: "cred-2".into(),
+            status: SESSION_ACTIVE.into(),
+            logged_in_at: 1,
+        },
+    )
+    .unwrap();
+}
+
+#[test]
+fn a_name_only_a_workspace_publishes_resolves_to_its_reference() {
+    let (rig, plane, dir, _v) = add_rig("bare-ws-only");
+    match bare_plan(&rig, &plane, &dir, "deploy", true).unwrap() {
+        ops::BareAddPlan::Subscribe {
+            reference,
+            workspace,
+        } => {
+            // The CANONICAL host-qualified spelling — unambiguous however many servers this
+            // machine is logged into.
+            assert_eq!(reference, format!("{HOST}/{WS_NAME}/deploy"));
+            assert_eq!(workspace, WS_NAME);
+        }
+        other => panic!("the workspace's copy is the only thing that name can mean: {other:?}"),
+    }
+    // A name NOBODY has stays the plain not-found — the workspace half never invents a match.
+    let err = bare_plan(&rig, &plane, &dir, "ghost", true).unwrap_err();
+    assert_eq!(err.code(), "NO_UNTRACKED_SKILL");
+}
+
+#[test]
+fn a_local_directory_wins_and_the_receipt_names_the_workspace_spelling() {
+    let (rig, plane, dir, _v) = add_rig("bare-both");
+    // The SAME bytes the workspace serves, sitting untracked in the home agent dir.
+    let path = untracked_skill(&rig.home.0, "deploy", b"# deploy\n");
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+
+    let published = match bare_plan(&rig, &plane, &dir, "deploy", true).unwrap() {
+        ops::BareAddPlan::Adopt {
+            path: p,
+            name,
+            published,
+        } => {
+            assert_eq!(p, path, "the bytes in front of you are what you asked for");
+            assert_eq!(name, "deploy");
+            published.expect("the one workspace publishing the name is disclosed")
+        }
+        other => panic!("a local copy adopts in place: {other:?}"),
+    };
+    // The receipt judges the workspace's current version against the bytes that just landed.
+    let data = ops::add_with_name(&ctx, &path, Some("deploy")).unwrap();
+    let same = published.suggestion(&data.bundle_digest);
+    assert_eq!(same.reference, format!("{HOST}/{WS_NAME}/deploy"));
+    assert_eq!(same.workspace, WS_NAME);
+    assert!(same.identical, "byte-identical to what the catalog serves");
+
+    // A local copy that has DRIFTED from the team's version is disclosed just the same — only the
+    // identical claim goes away.
+    let rig2 = Rig::new("bare-both-drift");
+    rig2.seed_session();
+    let drifted = untracked_skill(&rig2.home.0, "deploy", b"# deploy (mine)\n");
+    let ctx2 = rig2.ctx_at(Some(&rig2.work.0));
+    let published2 = match bare_plan(&rig2, &plane, &dir, "deploy", true).unwrap() {
+        ops::BareAddPlan::Adopt { published, .. } => published.expect("still disclosed"),
+        other => panic!("a local copy adopts in place: {other:?}"),
+    };
+    let data2 = ops::add_with_name(&ctx2, &drifted, Some("deploy")).unwrap();
+    assert!(!published2.suggestion(&data2.bundle_digest).identical);
+}
+
+#[test]
+fn a_name_several_workspaces_publish_refuses_naming_every_spelling() {
+    let (rig, plane, dir, _v) = add_rig("bare-two-ws");
+    seed_second_session(&rig);
+
+    let err = bare_plan(&rig, &plane, &dir, "deploy", true).unwrap_err();
+    assert_eq!(err.code(), "AMBIGUOUS_WORKSPACE");
+    let message = err.to_string();
+    for reference in [
+        format!("{HOST}/{WS_NAME}/deploy"),
+        "beta.test/ops/deploy".to_owned(),
+    ] {
+        assert!(message.contains(&reference), "{message}");
+    }
+    // The machine-readable half: one runnable subscribe per spelling, and the references in `data`.
+    let envelope = crate::render::err_envelope("add", &err);
+    assert_eq!(
+        envelope.next_actions.len(),
+        2,
+        "{:?}",
+        envelope.next_actions
+    );
+    assert_eq!(
+        envelope.data["references"],
+        serde_json::json!([format!("{HOST}/{WS_NAME}/deploy"), "beta.test/ops/deploy"]),
+        "sorted by the spelling the message prints"
+    );
+
+    // With a LOCAL copy in hand the adopt still wins — and carries no suggestion, because naming
+    // one of two teams' copies beside an adopt that already landed would be a guess.
+    untracked_skill(&rig.home.0, "deploy", b"# deploy\n");
+    match bare_plan(&rig, &plane, &dir, "deploy", true).unwrap() {
+        ops::BareAddPlan::Adopt { published, .. } => assert!(published.is_none()),
+        other => panic!("a local copy adopts in place: {other:?}"),
+    }
+}
+
+#[test]
+fn a_local_ambiguity_discloses_the_team_copy_and_judges_the_bytes() {
+    let (rig, plane, dir, _v) = add_rig("bare-scope");
+    // The same name in the home AND project dirs of ONE harness — `@harness` cannot split them.
+    untracked_skill(&rig.home.0, "deploy", b"# deploy\n");
+    untracked_skill(&rig.work.0, "deploy", b"# deploy\n");
+
+    let err = bare_plan(&rig, &plane, &dir, "deploy", true).unwrap_err();
+    assert_eq!(err.code(), "AMBIGUOUS_SCOPE");
+    let message = err.to_string();
+    assert!(
+        message.contains("byte-identical") && message.contains(&format!("{HOST}/{WS_NAME}/deploy")),
+        "every copy matches the served version, so the message collapses toward the subscribe: \
+         {message}"
+    );
+    // The subscribe rides beside the inventory read as a runnable action.
+    let envelope = crate::render::err_envelope("add", &err);
+    assert_eq!(
+        envelope.next_actions.last().map(|a| a.argv.clone()),
+        Some(vec![
+            "topos".to_owned(),
+            "add".to_owned(),
+            format!("{HOST}/{WS_NAME}/deploy"),
+            "--json".to_owned(),
+        ]),
+        "{:?}",
+        envelope.next_actions
+    );
+
+    // One copy DRIFTS: the disclosure stands, the identical claim does not.
+    untracked_skill(&rig.work.0, "deploy", b"# deploy (mine)\n");
+    let message = bare_plan(&rig, &plane, &dir, "deploy", true)
+        .unwrap_err()
+        .to_string();
+    assert!(!message.contains("byte-identical"), "{message}");
+    assert!(message.contains("is also published in"), "{message}");
+}
+
+#[test]
+fn a_selector_or_harness_form_never_subscribes() {
+    let (rig, plane, dir, _v) = add_rig("bare-gated");
+    // `-s`/`-a` narrow a LOCAL adopt, so the fully-bare gate is closed: today's answer, exactly.
+    let err = bare_plan(&rig, &plane, &dir, "deploy", false).unwrap_err();
+    assert_eq!(err.code(), "NO_UNTRACKED_SKILL");
+    // Same for a second workspace publishing it — the gate is about the FORM, not the count.
+    seed_second_session(&rig);
+    assert_eq!(
+        bare_plan(&rig, &plane, &dir, "deploy", false)
+            .unwrap_err()
+            .code(),
+        "NO_UNTRACKED_SKILL"
+    );
+    // A `@harness` suffix names a local harness's dir — it cannot reach the subscribe arm at all.
+    let err = bare_plan(&rig, &plane, &dir, "deploy@claude-code", true).unwrap_err();
+    assert_eq!(err.code(), "HARNESS_NOT_FOUND");
+}
+
+#[test]
+fn a_cache_only_match_subscribes_and_an_unanswering_session_is_skipped() {
+    let (rig, plane, dir, _v) = add_rig("bare-offline");
+    // The catalog cannot be read at all — a transport fault, never an existence claim.
+    dir.set_unavailable(true);
+    assert_eq!(
+        bare_plan(&rig, &plane, &dir, "deploy", true)
+            .unwrap_err()
+            .code(),
+        "NO_UNTRACKED_SKILL",
+        "an unreachable directory answers nothing; it never fabricates a match"
+    );
+
+    // The offline delivery cache remembers what this workspace last delivered here — enough to
+    // spell the reference, never enough to claim the bytes agree.
+    sync_status::record(
+        &rig.fs,
+        &rig.layout(),
+        &[(
+            WS.to_owned(),
+            sync_status::WorkspaceSync {
+                host: Some(HOST.to_owned()),
+                workspace_name: Some(WS_NAME.to_owned()),
+                delivered: [(
+                    "s_deploy".to_owned(),
+                    sync_status::DeliveredSkill {
+                        name: "deploy".to_owned(),
+                        ..Default::default()
+                    },
+                )]
+                .into_iter()
+                .collect(),
+                ..Default::default()
+            },
+        )],
+    )
+    .unwrap();
+    match bare_plan(&rig, &plane, &dir, "deploy", true).unwrap() {
+        ops::BareAddPlan::Subscribe { reference, .. } => {
+            assert_eq!(reference, format!("{HOST}/{WS_NAME}/deploy"));
+        }
+        other => panic!("the cache alone is enough to spell the reference: {other:?}"),
+    }
+    // And with a local copy beside it, the disclosure carries no identical claim: a cached row
+    // holds a served VERSION id, which is a different hash from a bundle digest.
+    let path = untracked_skill(&rig.home.0, "deploy", b"# deploy\n");
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    let published = match bare_plan(&rig, &plane, &dir, "deploy", true).unwrap() {
+        ops::BareAddPlan::Adopt { published, .. } => published.expect("disclosed"),
+        other => panic!("a local copy adopts in place: {other:?}"),
+    };
+    let data = ops::add_with_name(&ctx, &path, Some("deploy")).unwrap();
+    assert!(!published.suggestion(&data.bundle_digest).identical);
+}
+
+#[test]
+fn a_bare_name_subscribe_records_the_canonical_row_and_its_inverse() {
+    let (rig, plane, dir, _v) = add_rig("bare-e2e");
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    let ops::BareAddPlan::Subscribe {
+        reference,
+        workspace,
+    } = bare_plan(&rig, &plane, &dir, "deploy", true).unwrap()
+    else {
+        panic!("nothing local carries the name");
+    };
+
+    // The composition root's own hand-off: the resolved reference goes through the ORDINARY
+    // reference arm, so the row, the delivery, and the receipt shape are the spelled-out ones.
+    let mut data =
+        match ops::add_reference(&ctx, &connect(&plane, &dir), None, &reference, false, false)
+            .unwrap()
+        {
+            ops::AddRefOutcome::Applied(d) => *d,
+            ops::AddRefOutcome::Described { .. } => {
+                panic!("a workspace reference applies immediately")
+            }
+        };
+    ops::push_note(
+        &mut data,
+        format!("resolved 'deploy' to {reference} — {workspace} publishes it"),
+    );
+
+    let manifest = rig.work.0.join(crate::manifest::MANIFEST_FILE);
+    assert_eq!(data.manifest.as_deref(), Some(manifest.to_str().unwrap()));
+    assert_eq!(data.reference.as_deref(), Some(reference.as_str()));
+    let text = std::fs::read_to_string(&manifest).unwrap();
+    assert!(text.contains(&format!("\"{reference}\"")), "{text}");
+    assert_eq!(
+        data.undo,
+        vec!["topos".to_owned(), "remove".to_owned(), reference.clone()],
+        "the inverse is the project-scope remove of the same key"
+    );
+    let note = data.note.expect("the resolution is disclosed");
+    assert!(
+        note.contains("deploy") && note.contains(&reference),
+        "{note}"
+    );
+}

@@ -183,6 +183,16 @@ fn assert_golden(name: &str, command: &str, value: Value) {
     assert_eq!(got, want, "golden {name} mismatch.\nACTUAL:\n{got}");
 }
 
+/// The same byte-equality over a REFUSAL: the committed example must be exactly what
+/// [`render::err_envelope`] emits for that error — code, message, `data`, and the runnable
+/// next actions alike.
+fn assert_golden_err(name: &str, command: &str, err: &crate::error::ClientError) {
+    let got = serde_json::to_string_pretty(&render::err_envelope(command, err)).unwrap() + "\n";
+    let path = workspace_root().join(format!("contracts/fixtures/json/{name}.json"));
+    let want = std::fs::read_to_string(&path).unwrap_or_default();
+    assert_eq!(got, want, "golden {name} mismatch.\nACTUAL:\n{got}");
+}
+
 /// A fake remote source: hands back a fixed `.tar.gz` regardless of the spec (the fetch transport is
 /// proven separately over loopback; here we exercise the op's extract→place→adopt→origin flow).
 struct FakeGit(Vec<u8>);
@@ -918,6 +928,41 @@ fn add_minting_is_deterministic_and_names_from_frontmatter() {
 
     // The committed add golden equals the real output.
     assert_golden("add.ok", "add", serde_json::to_value(&a1).unwrap());
+}
+
+#[test]
+fn the_bare_name_refusals_match_their_committed_envelopes() {
+    // Several connected workspaces publish the name: the spellings ride `data.references` AND one
+    // runnable subscribe each, so an agent picks a reference instead of re-reading the sentence.
+    assert_golden_err(
+        "add.ambiguous-workspace",
+        "add",
+        &crate::error::ClientError::AmbiguousWorkspace {
+            name: "code-review".to_owned(),
+            references: vec![
+                "topos.sh/acme/code-review".to_owned(),
+                "topos.sh/beta/code-review".to_owned(),
+            ],
+        },
+    );
+    // The LOCAL ambiguity with the same-name disclosure: the inventory read still resolves the
+    // local pick, and the subscribe rides beside it as the other real way out.
+    assert_golden_err(
+        "add.ambiguous-scope",
+        "add",
+        &crate::error::ClientError::AmbiguousScope {
+            name: "code-review".to_owned(),
+            harness: "claude-code".to_owned(),
+            paths: vec![
+                "/home/ada/.claude/skills/code-review".to_owned(),
+                "/work/acme-api/.claude/skills/code-review".to_owned(),
+            ],
+            workspace: Some(crate::error::WorkspaceHint {
+                references: vec!["topos.sh/acme/code-review".to_owned()],
+                identical: true,
+            }),
+        },
+    );
 }
 
 #[test]

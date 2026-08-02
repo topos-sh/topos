@@ -1879,6 +1879,90 @@ mod tests {
         assert!(!is_path_shaped("deploy"));
     }
 
+    /// One probed workspace match; `digest` `None` is the cache-only shape (no live catalog read).
+    fn pn(host: &str, workspace: &str, name: &str, digest: Option<&str>) -> PublishedName {
+        PublishedName {
+            host: host.to_owned(),
+            workspace: workspace.to_owned(),
+            name: name.to_owned(),
+            reference: format!("{host}/{workspace}/{name}"),
+            bundle_digest: digest.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn paths_named_collects_every_local_candidate_of_one_name() {
+        let inv = vec![
+            ue("deploy", "claude-code", "/h/.claude/skills/deploy"),
+            ue("deploy", "cursor", "/h/.cursor/skills/deploy"),
+            ue("lint", "claude-code", "/h/.claude/skills/lint"),
+        ];
+        assert_eq!(
+            paths_named("deploy", &inv),
+            vec![
+                "/h/.claude/skills/deploy".to_owned(),
+                "/h/.cursor/skills/deploy".to_owned()
+            ]
+        );
+        assert!(paths_named("ghost", &inv).is_empty());
+    }
+
+    #[test]
+    fn the_workspace_hint_claims_identical_bytes_only_on_proof() {
+        // No workspace publishes the name: the two ambiguity refusals stay exactly as they were.
+        assert!(workspace_hint(&[], &["/h/.claude/skills/deploy".to_owned()]).is_none());
+        // A CACHE-ONLY match carries no digest — the spelling is disclosed, the bytes are not
+        // claimed (the served version id it does hold is a different hash entirely).
+        let cached = workspace_hint(
+            &[pn("acme.test", "eng", "deploy", None)],
+            &["/h/.claude/skills/deploy".to_owned()],
+        )
+        .expect("a match is disclosed");
+        assert_eq!(cached.references, vec!["acme.test/eng/deploy".to_owned()]);
+        assert!(!cached.identical);
+        // SEVERAL workspaces: no single version to be identical TO, whatever digests are in hand.
+        let several = workspace_hint(
+            &[
+                pn("acme.test", "eng", "deploy", Some("aa")),
+                pn("acme.test", "ops", "deploy", Some("aa")),
+            ],
+            &["/h/.claude/skills/deploy".to_owned()],
+        )
+        .expect("both spellings are disclosed");
+        assert_eq!(several.references.len(), 2);
+        assert!(!several.identical);
+        // A candidate directory that cannot be scanned (it does not exist) proves nothing.
+        let unreadable = workspace_hint(
+            &[pn("acme.test", "eng", "deploy", Some("aa"))],
+            &["/nonexistent/deploy".to_owned()],
+        )
+        .expect("the spelling is still disclosed");
+        assert!(!unreadable.identical);
+        // No candidates at all is not "every candidate agrees" — it is nothing to compare.
+        assert!(
+            !workspace_hint(&[pn("acme.test", "eng", "deploy", Some("aa"))], &[])
+                .expect("disclosed")
+                .identical
+        );
+    }
+
+    #[test]
+    fn a_receipt_suggestion_calls_the_bytes_identical_only_when_they_are() {
+        let live = pn("acme.test", "eng", "deploy", Some("beef"));
+        let same = live.suggestion("beef");
+        assert_eq!(same.workspace, "eng");
+        assert_eq!(same.name, "deploy");
+        assert_eq!(same.reference, "acme.test/eng/deploy");
+        assert!(same.identical);
+        assert!(!live.suggestion("cafe").identical);
+        // An unknown digest reads `false` — never a claim of agreement nobody checked.
+        assert!(
+            !pn("acme.test", "eng", "deploy", None)
+                .suggestion("beef")
+                .identical
+        );
+    }
+
     #[test]
     fn harness_not_found_message_names_alternatives_when_they_exist() {
         let none = harness_not_found_message("deploy", "cursor", &[]);
