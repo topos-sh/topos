@@ -5725,10 +5725,12 @@ fn bare_rig(tag: &str) -> (Rig, FakePlane, FakeDirectory, Version) {
     (rig, plane, dir, v)
 }
 
-/// An untracked skill a discovery walk will find: `<root>/.claude/skills/<name>/SKILL.md` (the
-/// rig's home already carries `.claude/`, so claude-code reads as present at both scopes).
+/// An untracked skill a discovery walk will find: `<root>/.aider-desk/skills/<name>/SKILL.md`.
+/// The harness is chosen for DETERMINISM, not realism: its user dir hangs off the passed home with
+/// no env override, where a `.claude/skills` fixture vanishes the moment a developer's real
+/// `CLAUDE_CONFIG_DIR` redirects claude-code's root away from the rig's home.
 fn untracked_skill(root: &std::path::Path, name: &str, body: &[u8]) -> PathBuf {
-    let dir = root.join(".claude/skills").join(name);
+    let dir = root.join(".aider-desk/skills").join(name);
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join("SKILL.md"), body).unwrap();
     dir
@@ -5925,7 +5927,7 @@ fn a_selector_or_harness_form_never_subscribes() {
         "NO_UNTRACKED_SKILL"
     );
     // A `@harness` suffix names a local harness's dir — it cannot reach the subscribe arm at all.
-    let err = bare_plan(&rig, &plane, &dir, &format!("{BARE}@claude-code"), true).unwrap_err();
+    let err = bare_plan(&rig, &plane, &dir, &format!("{BARE}@aider-desk"), true).unwrap_err();
     assert_eq!(err.code(), "HARNESS_NOT_FOUND");
 }
 
@@ -6092,6 +6094,44 @@ fn a_cache_row_of_an_ended_session_or_a_withdrawal_resolves_nothing() {
     .unwrap();
     assert_eq!(
         bare_plan(&rig, &plane, &dir, BARE, true)
+            .unwrap_err()
+            .code(),
+        "NO_UNTRACKED_SKILL"
+    );
+}
+
+#[test]
+fn a_read_catalog_clears_the_cache_row_it_no_longer_carries() {
+    let (rig, plane, _dir, _v) = bare_rig("bare-cache-invalidate");
+    // The last delivery still remembers the name…
+    sync_status::record(
+        &rig.fs,
+        &rig.layout(),
+        &[(
+            WS.to_owned(),
+            sync_status::WorkspaceSync {
+                host: Some(HOST.to_owned()),
+                workspace_name: Some(WS_NAME.to_owned()),
+                delivered: [(
+                    "s_bare".to_owned(),
+                    sync_status::DeliveredSkill {
+                        name: BARE.to_owned(),
+                        ..Default::default()
+                    },
+                )]
+                .into_iter()
+                .collect(),
+                ..Default::default()
+            },
+        )],
+    )
+    .unwrap();
+    // …but the workspace's catalog ANSWERS and no longer carries it (deleted or archived since).
+    // The answered read is authoritative: the stale row must not fabricate a subscribe that
+    // `add_reference` would then refuse as not-available.
+    let empty = FakeDirectory::new(Vec::new(), Vec::new());
+    assert_eq!(
+        bare_plan(&rig, &plane, &empty, BARE, true)
             .unwrap_err()
             .code(),
         "NO_UNTRACKED_SKILL"
