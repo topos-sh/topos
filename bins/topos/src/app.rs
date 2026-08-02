@@ -34,9 +34,14 @@ pub fn run() -> ExitCode {
     // The invocation AS TYPED, past the binary name. The composition root is the only place that
     // legitimately holds it, and the error surfaces need it: a refusal that offers a rebuilt
     // command must first know whether the rebuild would be the whole of what was asked (see
-    // `render::err_hint_tty`). Non-UTF-8 arguments are dropped — a lossy token must never become
-    // part of an offered command, and their absence only makes the surfaces more conservative.
-    let argv: Vec<String> = std::env::args().skip(1).collect();
+    // `render::err_hint_tty`). Read through `args_os` — `std::env::args()` PANICS on any
+    // non-UTF-8 element (even a launcher's argv[0], which `skip` still has to step over). A
+    // non-UTF-8 argument is dropped instead — a lossy token must never become part of an offered
+    // command, and its absence only makes the surfaces more conservative.
+    let argv: Vec<String> = std::env::args_os()
+        .skip(1)
+        .filter_map(|a| a.into_string().ok())
+        .collect();
     // No subcommand: on a TTY, orient (the status snapshot / the unenrolled welcome, exit 0);
     // piped or under `--json`, keep the classic usage error (stderr, exit 2) so scripts fail
     // loudly. The version nag never rides the bare invocation — orientation stays offline.
