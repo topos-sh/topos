@@ -65,13 +65,6 @@ pub(crate) trait ProgressSink {
 
     /// End the phase in flight and clear its line. Idempotent — ending nothing is a no-op.
     fn end(&self);
-
-    /// Whether this sink REPAINTS a live line (a spinner) rather than printing one line per phase.
-    ///
-    /// The one caller is the login wait, which already prints a static "Waiting for approval…"
-    /// disclosure of its own: on a repainting sink a spinner beneath it adds liveness, on a
-    /// line-per-phase sink it would only say the same thing twice.
-    fn animated(&self) -> bool;
 }
 
 /// The phase guard [`phase`] hands back — ends the phase it opened when it drops, so an early
@@ -178,10 +171,6 @@ impl ProgressSink for Silent {
     fn bytes(&self, _done: u64, _total: Option<u64>) {}
 
     fn end(&self) {}
-
-    fn animated(&self) -> bool {
-        false
-    }
 }
 
 // =================================================================================================
@@ -231,10 +220,6 @@ impl<W: Write> ProgressSink for Plain<W> {
 
     fn end(&self) {
         self.active.set(false);
-    }
-
-    fn animated(&self) -> bool {
-        false
     }
 }
 
@@ -315,10 +300,6 @@ impl ProgressSink for Tty {
             bar.finish_and_clear();
         }
         self.label.borrow_mut().clear();
-    }
-
-    fn animated(&self) -> bool {
-        true
     }
 }
 
@@ -420,7 +401,6 @@ mod tests {
         // apart.
         assert!(!s.begin_if_idle("contacting topos.sh"));
         assert!(!silent().begin_if_idle("contacting topos.sh"));
-        assert!(!silent().animated());
         // A guard over a sink that claimed nothing is inert.
         let _phase = phase_if_idle(silent(), "downloading docs");
     }

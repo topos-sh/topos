@@ -2458,14 +2458,11 @@ fn block_on_pending<T>(
     // The waiting line: ONE static print (no per-second rewrite, no countdown — the device-flow
     // precedent waits quietly), carrying the glance code.
     eprintln!("{}", waiting_line(&disc.user_code));
-    // …and, on a repainting sink only, a live spinner beneath it for the length of the wait. On a
-    // piped stderr the line above already carries the whole message; repeating it as a phase would
-    // only say the same thing twice.
-    let _phase = if progress.animated() {
-        crate::progress::phase(progress, "waiting for approval in your browser")
-    } else {
-        crate::progress::no_phase()
-    };
+    // …and a phase HELD OPEN for the length of the wait: a repainting sink shows a live spinner
+    // beneath it, a plain sink says it once — and on either, the held phase keeps every poll's
+    // transport fallback ("contacting …") from re-announcing itself each interval, so a piped
+    // `--wait` log stays two lines instead of one per poll.
+    let _phase = crate::progress::phase(progress, "waiting for approval in your browser");
 
     // `last` is the most recent pending result, handed back verbatim if a numeric `--wait` deadline passes
     // (starts as `first`, so `--wait 0` returns immediately without polling again).

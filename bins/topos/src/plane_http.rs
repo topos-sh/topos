@@ -1142,6 +1142,7 @@ impl GovernanceSource for UreqDeviceClient {
         // deletes the row (reported state cascading) and a retry answers the uniform 404.
         let credential = self.credential_for("")?;
         let url = format!("{}/v1/session", self.base_url);
+        let _phase = self.dialing();
         let resp = self
             .agent
             .delete(&url)
@@ -1995,9 +1996,6 @@ mod tests {
             self.reports.borrow_mut().push((done, total));
         }
         fn end(&self) {}
-        fn animated(&self) -> bool {
-            false
-        }
     }
 
     /// A 200 response over `bytes`, length-delimited (what a release asset looks like).
