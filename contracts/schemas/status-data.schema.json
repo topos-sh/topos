@@ -262,6 +262,11 @@
           "const": "pending-session"
         },
         {
+          "description": "An adopted feed this installation has never had a delivery from: the next `update` performs\nthe first exchange. What that exchange brings — including nothing — is not knowable here,\nso the line promises an exchange, never an apply.",
+          "type": "string",
+          "const": "no-delivery-yet"
+        },
+        {
           "description": "Not applied here yet — `topos update` applies it (or the state is not determinable\noffline).",
           "type": "string",
           "const": "unknown"

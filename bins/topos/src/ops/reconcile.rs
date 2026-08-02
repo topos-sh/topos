@@ -332,6 +332,9 @@ struct Sweep {
     /// `(workspace id, channel)` expansions that FAILED this run — their members freeze, and their
     /// cache rows must survive the sweep that could not see the member list.
     failed_channels: HashSet<(String, String)>,
+    /// Feed ADDRESSES whose empty serve is already disclosed. A feed may be adopted by more than
+    /// one recipe; the fact is the workspace's, not a scope's, so it is said once per run.
+    empty_feeds: HashSet<String>,
     /// Project dirs owning a failed expansion — the cleaner freezes everything under them.
     unexpanded: Vec<PathBuf>,
     /// Per scope label, every NAME its rows MENTION — delivered or not. A name a row still names is
@@ -1146,6 +1149,15 @@ fn reconcile_feed<'a>(
     match &run.snapshot {
         Some(snap) => {
             let served: Vec<DeliverySkill> = snap.skills.clone();
+            // The exchange SUCCEEDED and the workspace served nothing. Without this line the
+            // receipt names only the rows that moved, so a person who has just been told the feed
+            // would be applied reads the silence as the apply having failed. It is a DISCLOSURE —
+            // the exchange worked — so it never joins the count the summary calls failed. Only an
+            // empty SERVE says it: bundles that arrived and were skipped here (an `"off"` row, an
+            // explicit claim, a target filter) are a local choice, not an empty workspace.
+            if served.is_empty() && sweep.empty_feeds.insert(address.clone()) {
+                sweep.disclosures.push(nothing_assigned_line(&address));
+            }
             for ds in &served {
                 if sc.plan.off_for(host, workspace, &ds.name).is_some()
                     || sc.plan.explicit_claims(host, workspace, &ds.name)
@@ -1601,6 +1613,13 @@ fn draft_synced_line(name: &str, synced: Option<u32>) -> String {
         format!("{n} other agent folders")
     };
     format!("DRAFT_SYNCED {name}: synced your edits of {name} to {folders}")
+}
+
+/// The one receipt line an adopted feed earns when its exchange lands empty — the workspace was
+/// reached, and it has nothing for this person yet. Says what happened, never what to do about it:
+/// there is no command that makes a teammate share something.
+fn nothing_assigned_line(address: &str) -> String {
+    format!("NOTHING_ASSIGNED {address}: exchanged — nothing assigned to you yet")
 }
 
 /// Warn ONCE per bundle when a PROJECT placement is visible to git: the bundle ships its OWN

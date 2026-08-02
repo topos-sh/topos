@@ -1440,6 +1440,9 @@ fn status_line(item: &topos_types::results::StatusItem) -> String {
         StatusItemState::Off => "off — withheld here by your global manifest".to_owned(),
         StatusItemState::NotAvailable => "not available with your current access".to_owned(),
         StatusItemState::PendingSession => "awaiting session approval".to_owned(),
+        StatusItemState::NoDeliveryYet => {
+            "no delivery yet (`topos update` performs the first exchange)".to_owned()
+        }
         StatusItemState::Unknown => "not applied here yet (`topos update` applies it)".to_owned(),
     };
     let version = item
@@ -1500,6 +1503,9 @@ fn status_detail_tty(detail: &topos_types::results::StatusDetail) -> String {
         StatusItemState::Off => "off — withheld here by your global manifest",
         StatusItemState::NotAvailable => "not available with your current access",
         StatusItemState::PendingSession => "awaiting session approval",
+        StatusItemState::NoDeliveryYet => {
+            "no delivery yet (`topos update` performs the first exchange)"
+        }
         StatusItemState::Unknown => "not applied here yet (`topos update` applies it)",
     };
     s.push_str(&format!("\n  {state}"));
@@ -2667,6 +2673,20 @@ mod tests {
             out.contains("Checked 3 managed skill(s): 2 up to date, 1 failed."),
             "{out}"
         );
+        // A DISCLOSURE prints beside them and is counted by neither half of the summary — an
+        // exchange that served nothing is a fact about a clean run, not a fault in it.
+        let disclosures = vec![
+            "NOTHING_ASSIGNED topos.sh/acme: exchanged — nothing assigned to you yet".to_owned(),
+        ];
+        let out = pull_tty(&empty, &[], &disclosures);
+        assert!(
+            out.contains(
+                "note: NOTHING_ASSIGNED topos.sh/acme: exchanged — nothing assigned to you yet"
+            ),
+            "{out}"
+        );
+        assert!(!out.contains("failed"), "{out}");
+        assert!(!out.contains("warning:"), "{out}");
     }
 
     #[test]
@@ -3039,6 +3059,18 @@ mod tests {
                     state: StatusItemState::Off,
                     shadows: Vec::new(),
                 },
+                StatusItem {
+                    name: "fresh".to_owned(),
+                    reference: "topos.sh/fresh".to_owned(),
+                    source: "the topos.sh/fresh feed".to_owned(),
+                    scope: "person".to_owned(),
+                    via: None,
+                    attribution: None,
+                    version: None,
+                    applied_as_of: None,
+                    state: StatusItemState::NoDeliveryYet,
+                    shadows: Vec::new(),
+                },
             ],
             regimes: vec![StatusRegime {
                 host: "topos.sh".to_owned(),
@@ -3080,6 +3112,12 @@ mod tests {
         assert!(text.contains("via channel 'everyone'"), "{text}");
         assert!(text.contains("assigned by Dana"), "{text}");
         assert!(text.contains("noisy — off — withheld here"), "{text}");
+        // A feed nothing has ever delivered from promises the EXCHANGE, not an apply — nothing
+        // here knows the workspace assigns anything at all.
+        assert!(
+            text.contains("fresh — no delivery yet (`topos update` performs the first exchange)"),
+            "{text}"
+        );
         // The regime line and the notes ride verbatim.
         assert!(
             text.contains("topos.sh/demo — adopting all assigned, 1 off"),
