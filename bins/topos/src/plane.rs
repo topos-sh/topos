@@ -616,7 +616,7 @@ pub(crate) trait GovernanceSource {
     /// on the uniform 404 (already ended); [`ClientError::Plane`] on a transport fault.
     fn revoke_session(&self) -> Result<(), ClientError> {
         Err(ClientError::Plane(
-            "this transport serves no session revoke".into(),
+            "this build cannot end a session against that server".into(),
         ))
     }
 
@@ -636,7 +636,7 @@ pub(crate) trait GovernanceSource {
         _requested_name: &str,
     ) -> Result<ConnectedSession, ClientError> {
         Err(ClientError::Plane(
-            "this transport serves no login connect".into(),
+            "this build cannot open a session against that server".into(),
         ))
     }
 }

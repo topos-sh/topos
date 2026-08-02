@@ -200,7 +200,7 @@ fn self_update_with_key(
             let sig_text =
                 std::str::from_utf8(&sig_bytes).map_err(|_| ClientError::SignatureInvalid {
                     asset: asset.clone(),
-                    reason: "file is not valid UTF-8".into(),
+                    reason: "is not valid UTF-8".into(),
                 })?;
             verify_release_signature(key, sig_text, &tarball, &tag, &asset)?;
             true

@@ -2069,7 +2069,7 @@ fn reconcile_repo_skill(
             // The single-skill row's twin of the set arm's motion line — a disclosure, not a
             // failure (see the set arm above).
             sweep.disclosures.push(format!(
-                "GIT_UPDATED {origin}: {} -> {}; skills: ~{}",
+                "GIT_UPDATED {origin}: {} → {}; skills: ~{}",
                 short_commit(&recorded),
                 short_commit(&resolved),
                 import.lock.name
@@ -2471,7 +2471,7 @@ fn git_updated_line(
         }
     }
     let mut line = format!(
-        "GIT_UPDATED {origin}: {} -> {}",
+        "GIT_UPDATED {origin}: {} → {}",
         short_commit(old),
         short_commit(new)
     );

@@ -224,8 +224,8 @@ pub(crate) fn login(
             }
             enroll::EnrollIntentDoc::Retired => {
                 return Err(ClientError::Enrollment(
-                    "a retired enrollment flow is on disk — it will be swept when it expires; \
-                     start fresh with `topos login <address>`"
+                    "a retired login flow is still on disk — it is swept when it expires; start \
+                     fresh with `topos login <workspace-address>`"
                         .into(),
                 ));
             }
@@ -433,7 +433,7 @@ fn resume(
         DeviceAuthPoll::Expired => {
             enroll::delete_wal(ctx.fs, &ctx.layout)?;
             Err(ClientError::Enrollment(
-                "the login flow expired; start over with `topos login`".into(),
+                "this login attempt expired — start over with `topos login`".into(),
             ))
         }
         DeviceAuthPoll::Granted(grant) => {
@@ -663,7 +663,7 @@ pub(crate) fn logout(
     if all_sessions.sessions.is_empty() {
         return Err(ClientError::SessionRequired {
             address: "<workspace-address>".to_owned(),
-            message: "not logged into any workspace; nothing to log out of".into(),
+            message: "this machine is not logged in anywhere — nothing to log out of".into(),
         });
     }
     let names: Vec<String> = all_sessions
@@ -679,7 +679,8 @@ pub(crate) fn logout(
                 .find(ws)?
                 .ok_or_else(|| {
                     ClientError::WorkspaceSelection(format!(
-                        "not logged into workspace '{ws}'; logged-in workspaces: {}",
+                        "this machine is not logged into workspace '{ws}' — it is logged into: \
+                         {}",
                         names.join(", ")
                     ))
                 })?

@@ -664,7 +664,8 @@ fn run_command(json: bool, workspace: Option<String>, command: Command, bare: bo
                         ClientError::SessionRequired {
                             address: ws.to_owned(),
                             message: format!(
-                                "`{source}` names a workspace this machine is not connected to —                                  run `topos login {ws}` first"
+                                "`{source}` names a workspace this machine is not logged into — \
+                                 run `topos login {ws}` first"
                             ),
                         }
                     } else {
@@ -1525,6 +1526,9 @@ fn finish_status(
                 println!("{}", render::to_json(&render::err_envelope(command, &e)));
             } else {
                 eprintln!("{}", render::err_tty(&e));
+                if let Some(hint) = render::err_hint_tty(&e) {
+                    eprintln!("{hint}");
+                }
             }
             ExitCode::FAILURE
         }
@@ -2418,8 +2422,7 @@ fn block_on_pending<T>(
         );
     }
     eprintln!(
-        "Ctrl-C is safe — the same command resumes this enrollment; `--wait <seconds>` caps the \
-         wait."
+        "Ctrl-C is safe — the same command resumes this login; `--wait <seconds>` caps the wait."
     );
     // The loopback arm: auto-open, and let the redirect wake the poll. Every fault here is
     // silent — the poll behind it settles the login either way.
@@ -2627,6 +2630,12 @@ fn emit_err(json: bool, command: &str, err: &ClientError, diag: &Diag<'_>) -> Ex
         println!("{}", render::to_json(&render::err_envelope(command, err)));
     } else {
         eprintln!("{}", render::err_tty(err));
+        // The way out, between the refusal and the pointer: the SAME next actions the `--json`
+        // envelope computes, as runnable lines (and the transience clause where the typed outcome
+        // says the failure is retryable). One source of truth — never a second hint table.
+        if let Some(hint) = render::err_hint_tty(err) {
+            eprintln!("{hint}");
+        }
         // Point a human at the detail the fixed message withheld — only when it actually landed.
         if logged {
             eprintln!("details: {}", diag.log_path.display());

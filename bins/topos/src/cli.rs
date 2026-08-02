@@ -123,7 +123,7 @@ pub(crate) enum Command {
         wait: Option<Option<u64>>,
     },
     /// Disconnect this machine from a workspace. Installed skills, your edits, and manifests
-    /// stay — they just stop updating. `topos login <address>` reconnects.
+    /// stay — they just stop updating. `topos login <workspace-address>` reconnects.
     Logout {
         /// The workspace to log out of (name or id). With one login it is inferred; with
         /// several, name one or pass `--all`.

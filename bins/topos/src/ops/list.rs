@@ -546,8 +546,8 @@ fn merge_follow_state(
 fn catalog_err_label(e: &PlaneError) -> &'static str {
     match e {
         // The real transport maps 404 to an empty index, so `NotFound` here is only a defensive fallback.
-        PlaneError::NotFound => "not authorized",
-        PlaneError::Unreachable(_) => "plane unreachable",
+        PlaneError::NotFound => "not visible to you",
+        PlaneError::Unreachable(_) => "the server did not answer",
         PlaneError::Unavailable(_) => "temporarily unavailable",
         PlaneError::Malformed(_) => "malformed response",
     }

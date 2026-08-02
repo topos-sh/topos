@@ -54,7 +54,7 @@ topos login [OPTIONS] [ADDRESS]
 
 ### `topos logout`
 
-Disconnect this machine from a workspace. Installed skills, your edits, and manifests stay — they just stop updating. `topos login <address>` reconnects
+Disconnect this machine from a workspace. Installed skills, your edits, and manifests stay — they just stop updating. `topos login <workspace-address>` reconnects
 
 ```
 topos logout [OPTIONS]

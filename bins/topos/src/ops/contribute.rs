@@ -79,7 +79,9 @@ fn content_b64(bytes: &[u8]) -> String {
 /// Map a transport-level [`PlaneError`] into the client error family.
 fn plane_err(e: PlaneError) -> ClientError {
     match e {
-        PlaneError::NotFound => ClientError::Plane("not served here".to_owned()),
+        PlaneError::NotFound => {
+            ClientError::Plane("the server does not serve this, or not to you".to_owned())
+        }
         PlaneError::Unavailable(m) | PlaneError::Unreachable(m) | PlaneError::Malformed(m) => {
             ClientError::Plane(m)
         }

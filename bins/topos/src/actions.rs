@@ -170,7 +170,7 @@ fn resolve_diverged_draft(argv: &[String]) -> Safety {
             Some(false),
             Some(
                 "describes the discard; applying it drops your local draft so the team's version \
-                 wins (a snapshot is kept in the sidecar store)",
+                 wins (a snapshot is kept on this machine)",
             ),
         );
     }
@@ -270,7 +270,7 @@ fn apply_described(argv: &[String]) -> Safety {
         // `update --reset --yes` is the loss-led local discard; a plain `update … --yes` syncs.
         Some("update") if has_flag(argv, "--reset") => (
             Some(false),
-            Some("discards your local edits (a snapshot is kept in the sidecar store)"),
+            Some("discards your local edits (a snapshot is kept on this machine)"),
         ),
         Some("update") => (Some(true), None),
         // `remove --yes`: dropping a manifest row is offline, while an `off` row's resolution may
@@ -302,7 +302,7 @@ fn apply_described(argv: &[String]) -> Safety {
         },
         Some("uninstall") => (
             Some(false),
-            Some("deletes the ~/.topos sidecar tree (the stored sessions go with it)"),
+            Some("deletes everything topos keeps under ~/.topos (the stored sessions go with it)"),
         ),
         // `auth status` is the one remaining auth subcommand — a read-only probe.
         Some("auth") => (Some(false), None),

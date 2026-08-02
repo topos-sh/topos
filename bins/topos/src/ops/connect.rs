@@ -121,13 +121,15 @@ pub(crate) fn resolve_api_base(link_base: &str, declared: &str) -> Result<String
     let declared = declared.trim().trim_end_matches('/');
     if declared.is_empty() {
         return Err(ClientError::Enrollment(
-            "the protocol card declared no API base URL; upgrade the server".into(),
+            "that address answered without naming its API — the server is older than this topos, \
+             or it is not a topos server"
+                .into(),
         ));
     }
     validate_base_url(declared)?;
     if link_base.starts_with("https://") && !declared.starts_with("https://") {
         return Err(ClientError::Enrollment(
-            "refusing to connect: the address is https but the card declares a plain-http API base"
+            "refusing to connect — the address is https but the server names a plain-http API"
                 .into(),
         ));
     }

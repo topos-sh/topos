@@ -90,7 +90,7 @@ fn init_global(ctx: &Ctx<'_>) -> Result<InitData, ClientError> {
     let note = if connected.is_empty() {
         Some(
             "no workspace is connected yet, so the file starts with just its header — \
-             `topos login <address>` connects one, and its feed row lands here"
+             `topos login <workspace-address>` connects one, and its feed row lands here"
                 .to_owned(),
         )
     } else {

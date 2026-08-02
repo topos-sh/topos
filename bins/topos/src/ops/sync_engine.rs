@@ -1171,7 +1171,7 @@ fn ensure_local(
             // The TARGET must be served — a miss here is the ordinary not-served error, never a
             // silent shallow stop.
             return Err(ClientError::Plane(format!(
-                "version {} not served",
+                "the server does not serve version {}, or not to you",
                 to_hex(&version_id)
             )));
         }

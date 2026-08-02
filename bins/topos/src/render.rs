@@ -342,10 +342,10 @@ pub(crate) fn safe_message(err: &ClientError) -> String {
         ClientError::Io(_) | ClientError::IoKind { .. } => {
             "a filesystem operation failed".to_owned()
         }
-        ClientError::Gitstore(_) => "the embedded git store reported an error".to_owned(),
+        ClientError::Gitstore(_) => "the local skill store reported an error".to_owned(),
         ClientError::Verify(_) => "an integrity check failed".to_owned(),
-        ClientError::Corrupt(_) => "a sidecar document is corrupt".to_owned(),
-        ClientError::WireInvalid(_) => "the plane's response failed validation".to_owned(),
+        ClientError::Corrupt(_) => "topos's own state on this machine is unreadable".to_owned(),
+        ClientError::WireInvalid(_) => "the server sent a response topos could not read".to_owned(),
         ClientError::Scan(_) => "the skill directory was rejected".to_owned(),
         // The remaining Display strings are fixed text, a user-supplied name, or (InvalidArgument)
         // usage guidance written by this code — safe to show verbatim.
@@ -478,7 +478,9 @@ pub(crate) fn session_logout_tty(data: &topos_types::results::LogoutData) -> Str
              what the server still holds.",
         );
     }
-    s.push_str("\nSkills, drafts, and manifests stay; `topos login <address>` signs back in.");
+    s.push_str(
+        "\nSkills, drafts, and manifests stay — `topos login <workspace-address>` signs back in.",
+    );
     s
 }
 
@@ -726,7 +728,10 @@ pub(crate) fn keep_as_yours_describe_tty(
         s.push_str(" — your local draft rides along");
     }
     s.push_str(".\n");
-    s.push_str(&format!("  {}", argv_line(yes_argv)));
+    s.push_str(&format!(
+        "Nothing has changed yet — apply with:\n  {}",
+        argv_line(yes_argv)
+    ));
     s
 }
 
@@ -1034,7 +1039,7 @@ pub(crate) fn reset_applied_tty(items: &[topos_types::results::ResetData]) -> St
     let mut s = String::new();
     for item in items {
         s.push_str(&format!(
-            "Reset '{}' to {} — local edits discarded (a snapshot was kept in the sidecar store).\n",
+            "Reset '{}' to {} — local edits discarded (a snapshot was kept under ~/.topos).\n",
             item.skill,
             short(&item.to_version)
         ));
@@ -1194,13 +1199,13 @@ pub(crate) fn self_update_tty(o: &crate::ops::SelfUpdateOutcome) -> String {
     use crate::ops::SelfUpdateAction::*;
     let mut s = match o.action {
         Checked if o.update_available => format!(
-            "A newer topos is available: {} -> {}.\nRun `topos self-update` to install it.",
+            "A newer topos is available: {} → {}.\nRun `topos self-update` to install it.",
             o.current_version,
             o.latest_version.as_deref().unwrap_or("?")
         ),
         Checked | AlreadyCurrent => format!("topos is up to date ({}).", o.current_version),
         Upgraded => format!(
-            "Updated topos {} -> {}.",
+            "Updated topos {} → {}.",
             o.current_version,
             o.latest_version.as_deref().unwrap_or("?")
         ),
@@ -1290,12 +1295,12 @@ pub(crate) fn uninstall_describe_tty(
     }
     if d.sidecar_present {
         s.push_str(&format!(
-            "\n  · delete the sidecar tree {} (the signed-in credential lives there and goes with it)",
+            "\n  · delete topos's own files at {} (the signed-in credential lives there and goes with it)",
             d.sidecar_path
         ));
     } else {
         s.push_str(&format!(
-            "\n  · nothing to delete at {} (no sidecar tree here)",
+            "\n  · nothing to delete at {} (topos keeps no files here)",
             d.sidecar_path
         ));
     }
@@ -1355,9 +1360,9 @@ pub(crate) fn uninstall_applied_tty(d: &crate::ops::UninstallApplied) -> String 
         s.push_str(&format!("\n  · {}: {}", t.agent, phrase));
     }
     if d.sidecar_removed {
-        s.push_str("\n  · deleted the ~/.topos sidecar tree (credential included)");
+        s.push_str("\n  · deleted topos's own files at ~/.topos (credential included)");
     } else {
-        s.push_str("\n  · no sidecar tree to delete");
+        s.push_str("\n  · topos kept no files here to delete");
     }
     if let Some(bin) = &d.binary_path {
         s.push_str(&format!(
@@ -1906,7 +1911,7 @@ pub(crate) fn publish_describe_tty(
         ));
     }
     s.push_str(&format!(
-        "\nNothing has landed yet — apply with:\n  {}",
+        "\nNothing has changed yet — apply with:\n  {}",
         argv_line(yes_argv)
     ));
     s
@@ -2413,12 +2418,12 @@ fn merge_preview_line(p: &topos_types::results::MergePreview) -> String {
 fn conflict_kind_label(kind: ConflictPathKind) -> &'static str {
     match kind {
         ConflictPathKind::Content => "content — diff3 markers at the path",
-        ConflictPathKind::BinaryContent => "binary content — yours kept in the .topos-mine sidecar",
+        ConflictPathKind::BinaryContent => "binary content — yours kept alongside as .topos-mine",
         ConflictPathKind::ModifyDelete => "you modified, current deleted — yours kept",
         ConflictPathKind::DeleteModify => "you deleted, current modified — theirs kept",
-        ConflictPathKind::AddAdd => "both added — yours kept in the .topos-mine sidecar",
+        ConflictPathKind::AddAdd => "both added — yours kept alongside as .topos-mine",
         ConflictPathKind::ModeMode => "mode disagreement — theirs kept",
-        ConflictPathKind::Oversize => "too large to merge — yours kept in the .topos-mine sidecar",
+        ConflictPathKind::Oversize => "too large to merge — yours kept alongside as .topos-mine",
     }
 }
 
@@ -2435,6 +2440,97 @@ fn append_proposals_trailer(mut out: String, awaiting: u32) -> String {
 
 pub(crate) fn err_tty(err: &ClientError) -> String {
     format!("error: {}", safe_message(err))
+}
+
+/// The WAY OUT on the TTY — the same [`next_actions`] the `--json` envelope carries, spelled as
+/// runnable command lines under one lead-in. There is no second, hand-written hint table: an
+/// action the agent surface offers is exactly the command a human is shown, so the two can never
+/// drift apart.
+///
+/// The lead-in is `try:` everywhere, prefixed with the transience clause when — and only when —
+/// the typed [`ClientError::outcome`] says the failure is retryable. The retryable bit is READ,
+/// never re-derived here: one classification serves the agent's `retryable` field and this line,
+/// so a human and an agent are never told opposite things about the same failure. Actions with an
+/// EMPTY argv (`REQUEST_ACCESS`, `CONTACT_ADMIN`, the bare `RETRY`) carry no command to print; a
+/// retryable error with nothing runnable still says so, because re-running IS the way out.
+/// `None` = there is genuinely nothing to add under the error line.
+///
+/// A command the error line ALREADY spells in backticks is not repeated underneath it — many
+/// refusals teach their own fix in prose (that is how [`mirror_prose_commands`] derives the action
+/// in the first place), and printing it twice, two lines apart, reads as two different steps. The
+/// block is still built from `next_actions` alone; this only drops what the reader just read.
+pub(crate) fn err_hint_tty(err: &ClientError) -> Option<String> {
+    let retryable = matches!(
+        err.outcome(),
+        TerminalOutcome::RetryableFailure | TerminalOutcome::Unavailable
+    );
+    let message = safe_message(err);
+    let already_said = backtick_spans(&message);
+    let mut lines: Vec<String> = Vec::new();
+    for action in next_actions(err) {
+        let line = hint_line(&action.argv);
+        if line.is_empty() || lines.contains(&line) || already_said.iter().any(|s| *s == line) {
+            continue;
+        }
+        lines.push(line);
+    }
+    match (retryable, lines.is_empty()) {
+        (true, true) => Some("this is often transient — running it again is safe".to_owned()),
+        (false, true) => None,
+        (transient, false) => {
+            let lead = if transient {
+                "this is often transient — try:"
+            } else {
+                "try:"
+            };
+            Some(format!("{lead}\n  {}", lines.join("\n  ")))
+        }
+    }
+}
+
+/// One next-action argv as the human line the hint block prints: the machine surface's `--json`
+/// tail is dropped (a person running this wants the readable output, and the flag is the agent
+/// half of the same action), and each remaining token is [`shell_quote`]d so a value carrying
+/// whitespace copy-pastes back as ONE argument. A `<placeholder>` token — which only ever comes
+/// from the compile-time template table, never a runtime value — stays bare, so the line reads as
+/// the fill-in-the-blank it is. Empty argv (an action with no command) yields an empty line.
+/// Every backtick-quoted span in a message — the commands a refusal's prose already taught, so the
+/// hint block below it can stay silent about them.
+fn backtick_spans(message: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let mut rest = message;
+    while let Some(start) = rest.find('`') {
+        let after = &rest[start + 1..];
+        let Some(end) = after.find('`') else { break };
+        out.push(&after[..end]);
+        rest = &after[end + 1..];
+    }
+    out
+}
+
+fn hint_line(argv: &[String]) -> String {
+    let tokens: Vec<String> = argv
+        .iter()
+        .filter(|t| t.as_str() != "--json")
+        .map(|t| {
+            if is_placeholder(t) {
+                t.clone()
+            } else {
+                shell_quote(t)
+            }
+        })
+        .collect();
+    tokens.join(" ")
+}
+
+/// A bare `<name>` template hole — the one token shape the hint line leaves unquoted.
+fn is_placeholder(token: &str) -> bool {
+    token.starts_with('<')
+        && token.ends_with('>')
+        && token.len() > 2
+        && token[1..token.len() - 1]
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
 fn short(hex: &str) -> &str {
@@ -2917,7 +3013,7 @@ mod tests {
                 notes: Vec::new(),
             }),
             warnings: vec![
-                "could not read the catalog for workspace Beta (plane unreachable) — skipped"
+                "could not read the catalog for workspace Beta (the server did not answer) — skipped"
                     .to_owned(),
             ],
         };
@@ -3307,7 +3403,7 @@ mod tests {
 
         // An expired flow mirrors the join template, needs and all.
         let actions = super::next_actions(&crate::error::ClientError::Enrollment(
-            "the enrollment flow expired; start over with `topos login <workspace-address>`"
+            "this login attempt expired — start over with `topos login <workspace-address>`"
                 .to_owned(),
         ));
         assert_eq!(actions[0].code.as_str(), "LOGIN_WORKSPACE");
@@ -3552,6 +3648,63 @@ mod tests {
         assert!(
             named.starts_with("Logging in to topos.example.com/eng."),
             "{named}"
+        );
+    }
+
+    #[test]
+    fn the_tty_error_hint_renders_the_json_next_actions_and_never_repeats_the_prose() {
+        use crate::error::ClientError;
+
+        // A refusal whose JSON carries a way out the PROSE never spells: both commands render,
+        // indented, under the one lead-in — this is the gap the block exists to close.
+        let blocked = ClientError::PublishBlocked {
+            skill: "deploy".to_owned(),
+        };
+        let hint = super::err_hint_tty(&blocked).expect("a blocked publish offers its two exits");
+        assert_eq!(
+            hint, "try:\n  topos update deploy --onto-current\n  topos update deploy --reset",
+            "the machine surface's argv, minus its `--json` tail"
+        );
+
+        // A refusal that already taught its fix in backticks adds nothing underneath it.
+        assert_eq!(super::err_hint_tty(&ClientError::UpgradeAmbiguous), None);
+        assert_eq!(super::err_hint_tty(&ClientError::NotEnrolled), None);
+
+        // A transient failure says so, driven by the TYPED outcome — never re-classified here.
+        assert_eq!(
+            super::err_hint_tty(&ClientError::RemoteFetch {
+                msg: "acme/skills".to_owned(),
+                permanent: false
+            }),
+            Some("this is often transient — running it again is safe".to_owned())
+        );
+
+        // A PERMANENT fetch failure (a 404, a malformed reference) must NOT invite a retry — the
+        // hint is driven by the same typed outcome, so it stays silent here.
+        assert_eq!(
+            super::err_hint_tty(&ClientError::RemoteFetch {
+                msg: "acme/skills".to_owned(),
+                permanent: true
+            }),
+            None
+        );
+
+        // A template hole stays bare (it comes from the compile-time table, never a runtime value),
+        // while a runtime value carrying whitespace is quoted back into ONE argument.
+        let session = ClientError::SessionRequired {
+            address: "acme test/eng".to_owned(),
+            message: "not logged in".to_owned(),
+        };
+        assert_eq!(
+            super::err_hint_tty(&session),
+            Some("try:\n  topos login 'acme test/eng'".to_owned())
+        );
+
+        // A permanent failure with nothing runnable adds no line at all.
+        assert_eq!(
+            super::err_hint_tty(&ClientError::EmptyBundle),
+            None,
+            "no invented hint where there is no way out"
         );
     }
 }

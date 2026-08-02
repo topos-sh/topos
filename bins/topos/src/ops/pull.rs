@@ -695,7 +695,9 @@ impl<'a> BreakerPlane<'a> {
 
     fn short_circuit(&self) -> PlaneError {
         PlaneError::Unreachable(
-            "the plane was unreachable earlier in this pull; skipping the remaining calls".into(),
+            "the server was already unreachable earlier in this run — the remaining calls were \
+             skipped"
+                .into(),
         )
     }
 

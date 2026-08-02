@@ -185,7 +185,9 @@ impl UreqPlane {
             .call()
             // A `.call()` Err is connect-level (dial/TLS/timeout before any status): the plane itself is
             // unreachable, so the sweep's circuit breaker may trip on it.
-            .map_err(|e| PlaneError::Unreachable(format!("GET {url}: {e}")))?;
+            .map_err(|e| {
+                PlaneError::Unreachable(transport_reason(&host_label(&self.base_url), &e))
+            })?;
         let status = resp.status().as_u16();
         match classify(status) {
             HttpClass::Ok => match part {
@@ -194,9 +196,9 @@ impl UreqPlane {
             },
             HttpClass::NotFound => Err(PlaneError::NotFound),
             // No conditional headers are sent here, so 304 cannot occur; fold it in with other statuses.
-            HttpClass::NotModified | HttpClass::Other => {
-                Err(PlaneError::Unavailable(format!("GET {url}: HTTP {status}")))
-            }
+            HttpClass::NotModified | HttpClass::Other => Err(PlaneError::Unavailable(
+                status_reason(&host_label(&self.base_url), status),
+            )),
         }
     }
 }
@@ -232,13 +234,16 @@ impl PlaneSource for UreqPlane {
         let resp = req
             .call()
             // Connect-level (see `bearer_get`) — distinguishable so the sweep breaker can trip.
-            .map_err(|e| PlaneError::Unreachable(format!("get_current {skill_id}: {e}")))?;
+            .map_err(|e| {
+                PlaneError::Unreachable(transport_reason(&host_label(&self.base_url), &e))
+            })?;
         let status = resp.status().as_u16();
         match classify(status) {
             HttpClass::NotModified => Ok(PointerFetch::NotModified),
             HttpClass::NotFound => Err(PlaneError::NotFound),
-            HttpClass::Other => Err(PlaneError::Unavailable(format!(
-                "get_current {skill_id}: HTTP {status}"
+            HttpClass::Other => Err(PlaneError::Unavailable(status_reason(
+                &host_label(&self.base_url),
+                status,
             ))),
             HttpClass::Ok => {
                 let bytes = read_body(resp)?;
@@ -388,14 +393,16 @@ impl crate::plane::DeliverySource for UreqPlane {
             .header("authorization", format!("Bearer {cred}"))
             .header("content-type", "application/json")
             .send(&body[..])
-            .map_err(|e| PlaneError::Unreachable(format!("POST {url}: {e}")))?;
+            .map_err(|e| {
+                PlaneError::Unreachable(transport_reason(&host_label(&self.base_url), &e))
+            })?;
         let status = resp.status().as_u16();
         match classify(status) {
             HttpClass::Ok => Ok(()),
             HttpClass::NotFound => Err(PlaneError::NotFound),
-            HttpClass::NotModified | HttpClass::Other => Err(PlaneError::Unavailable(format!(
-                "POST {url}: HTTP {status}"
-            ))),
+            HttpClass::NotModified | HttpClass::Other => Err(PlaneError::Unavailable(
+                status_reason(&host_label(&self.base_url), status),
+            )),
         }
     }
 
@@ -431,14 +438,16 @@ impl crate::plane::DeliverySource for UreqPlane {
             .header("authorization", format!("Bearer {cred}"))
             .header("content-type", "application/json")
             .send(&body[..])
-            .map_err(|e| PlaneError::Unreachable(format!("PUT {url}: {e}")))?;
+            .map_err(|e| {
+                PlaneError::Unreachable(transport_reason(&host_label(&self.base_url), &e))
+            })?;
         let status = resp.status().as_u16();
         match classify(status) {
             HttpClass::Ok => Ok(()),
             HttpClass::NotFound => Err(PlaneError::NotFound),
-            HttpClass::NotModified | HttpClass::Other => {
-                Err(PlaneError::Unavailable(format!("PUT {url}: HTTP {status}")))
-            }
+            HttpClass::NotModified | HttpClass::Other => Err(PlaneError::Unavailable(
+                status_reason(&host_label(&self.base_url), status),
+            )),
         }
     }
 }
@@ -531,7 +540,7 @@ fn read_body(resp: ureq::http::Response<ureq::Body>) -> Result<Vec<u8>, PlaneErr
         .into_with_config()
         .limit(MAX_FETCH_BYTES)
         .read_to_vec()
-        .map_err(|e| PlaneError::Unavailable(format!("read body: {e}")))
+        .map_err(|_| PlaneError::Unavailable("the response was cut short".to_owned()))
 }
 
 /// The buffer one streamed read pulls at a time — large enough that the per-chunk progress report
@@ -592,7 +601,11 @@ fn read_body_reported_limited(
             // `read_to_vec`'s `read_to_end` retries an interrupted read; so does this loop, or a
             // signal during a long download would surface as a spurious transport fault.
             Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
-            Err(e) => return Err(PlaneError::Unavailable(format!("read body: {e}"))),
+            Err(_) => {
+                return Err(PlaneError::Unavailable(
+                    "the response was cut short".to_owned(),
+                ));
+            }
         }
     }
     Ok(out)
@@ -608,6 +621,116 @@ fn host_label(base_url: &str) -> String {
         .ok()
         .and_then(|u| u.host().map(str::to_owned))
         .unwrap_or_else(|| base_url.to_owned())
+}
+
+/// The ONE place a `ureq` fault becomes words. Every transport in this module routes its
+/// `.call()`/`.send()` error through here, so a raw library tail (`timeout: connect`,
+/// `io: Custom { kind: …`) can never reach a user surface — what lands instead is one plain,
+/// lowercase phrase that names the HOST and says what actually went wrong, with the relevant
+/// [`agent_config`] deadline spelled out (a person who waited ten seconds should be told it was
+/// ten seconds).
+///
+/// `host` is the bare hostname ([`host_label`]); a URL is never echoed (paths carry ids nobody
+/// needs to read, and the phrase is about the endpoint, not the route).
+pub(crate) fn transport_reason(host: &str, e: &ureq::Error) -> String {
+    use ureq::Error as E;
+    match e {
+        // DNS: nothing was dialed at all.
+        E::HostNotFound => format!("could not resolve host {host} — check your network"),
+        E::Timeout(t) => timeout_reason(host, *t),
+        // TLS, from either the generic seam or rustls itself.
+        E::Tls(_) => format!("the secure connection to {host} could not be established"),
+        E::Rustls(_) | E::Pem(_) => {
+            format!("the secure connection to {host} could not be established")
+        }
+        E::ConnectionFailed => format!("could not connect to {host}"),
+        E::Io(io) => io_reason(host, io),
+        // The peer spoke something that is not HTTP/1.1, or framed it wrong.
+        E::Protocol(_) | E::LargeResponseHeader(..) => {
+            format!("{host} sent a response topos could not read")
+        }
+        E::TooManyRedirects | E::RedirectFailed => {
+            format!("{host} redirected the request too many times")
+        }
+        E::RequireHttpsOnly(_) => {
+            format!("{host} was asked for over plain http — topos speaks https only")
+        }
+        E::BadUri(_) | E::Http(_) => format!("the address for {host} is not a valid URL"),
+        // `ureq::Error` is `#[non_exhaustive]`; an unmapped fault still says something true.
+        _ => format!("could not reach {host}"),
+    }
+}
+
+/// The timeout half of [`transport_reason`], split out so each deadline names the constant that
+/// produced it.
+fn timeout_reason(host: &str, t: ureq::Timeout) -> String {
+    use ureq::Timeout as T;
+    match t {
+        T::Resolve | T::Connect => {
+            format!("{host} did not respond (connection timed out after {CONNECT_TIMEOUT_SECS}s)")
+        }
+        T::SendRequest | T::SendBody | T::RecvResponse => format!(
+            "{host} accepted the connection but sent no answer (timed out after \
+             {RECV_RESPONSE_TIMEOUT_SECS}s)"
+        ),
+        T::RecvBody => {
+            format!("the transfer from {host} stalled (timed out after {RECV_BODY_TIMEOUT_SECS}s)")
+        }
+        // `Global`/`PerCall` are only set by the version probe, which never errors to a user.
+        _ => format!("{host} did not respond in time"),
+    }
+}
+
+/// The socket half of [`transport_reason`] — the `io::ErrorKind`s a real dial produces.
+///
+/// The kind is the signal wherever the platform sets one. A failed name lookup is the exception:
+/// on macOS (and glibc under some resolvers) `getaddrinfo` comes back as an UNCATEGORIZED custom
+/// error, and `io::ErrorKind::Uncategorized` is unnameable in stable Rust — so the fallback arm
+/// sniffs the resolver's own signature to tell "the name does not exist" from "the socket
+/// misbehaved". The sniffed text is never printed; only which of two fixed phrases is chosen.
+fn io_reason(host: &str, e: &std::io::Error) -> String {
+    use std::io::ErrorKind as K;
+    match e.kind() {
+        K::ConnectionRefused => format!("{host} refused the connection"),
+        K::ConnectionReset | K::ConnectionAborted | K::BrokenPipe | K::UnexpectedEof => {
+            format!("{host} closed the connection")
+        }
+        K::TimedOut => format!("{host} did not respond (the connection timed out)"),
+        K::NotFound | K::AddrNotAvailable => {
+            format!("could not resolve host {host} — check your network")
+        }
+        K::NetworkUnreachable | K::HostUnreachable => {
+            format!("{host} is unreachable from this machine — check your network")
+        }
+        K::PermissionDenied => format!("this machine refused to open a connection to {host}"),
+        _ if looks_like_a_name_lookup_failure(e) => {
+            format!("could not resolve host {host} — check your network")
+        }
+        _ => format!("could not reach {host}"),
+    }
+}
+
+/// Whether an uncategorized io error is the platform resolver saying the name does not exist.
+/// Matched on the two stable substrings every libc spells it with — the text itself never leaves
+/// this function.
+fn looks_like_a_name_lookup_failure(e: &std::io::Error) -> bool {
+    let text = e.to_string().to_ascii_lowercase();
+    text.contains("lookup address information")
+        || text.contains("name or service not known")
+        || text.contains("nodename nor servname")
+        || text.contains("temporary failure in name resolution")
+}
+
+/// The unexpected-status half of the same discipline: one plain phrase naming the host and the
+/// status, with the two statuses a person can act on called out by name. Used wherever a transport
+/// turns a non-2xx into an error the user may see.
+fn status_reason(host: &str, status: u16) -> String {
+    match status {
+        401 | 403 => format!("{host} refused this request (not authorized — HTTP {status})"),
+        429 => format!("{host} is rate-limiting this machine (HTTP 429)"),
+        500..=599 => format!("{host} had an internal error (HTTP {status})"),
+        _ => format!("{host} answered HTTP {status}"),
+    }
 }
 
 /// Assemble a [`FetchedVersion`] from a version's metadata + a blob-fetching closure, re-verifying every
@@ -729,10 +852,13 @@ impl UreqDeviceClient {
     /// call can honestly say about itself. Opened only when nothing more specific is in flight, so
     /// a verb-level label (`publishing docs`) always wins.
     fn dialing(&self) -> progress::Phase<'_> {
-        progress::phase_if_idle(
-            &*self.progress,
-            &format!("contacting {}", host_label(&self.base_url)),
-        )
+        progress::phase_if_idle(&*self.progress, &format!("contacting {}", self.host()))
+    }
+
+    /// The bare hostname this lane talks to — the name every message about it uses, so a person
+    /// reads "topos.sh did not respond", never an internal noun or a spliced URL.
+    fn host(&self) -> String {
+        host_label(&self.base_url)
     }
 
     /// The device's Bearer credential, or a typed "not enrolled" error (mirroring the un-enrolled
@@ -744,7 +870,7 @@ impl UreqDeviceClient {
             .as_deref()
             .ok_or_else(|| ClientError::SessionRequired {
                 address: "<workspace-address>".to_owned(),
-                message: "not logged in; run `topos login <workspace-address>` first".into(),
+                message: "not logged in — run `topos login <workspace-address>` first".into(),
             })
     }
 
@@ -795,7 +921,7 @@ impl UreqDeviceClient {
         }
         let resp = req
             .send(payload.as_slice())
-            .map_err(|e| ClientError::Plane(format!("{what}: {e}")))?;
+            .map_err(|e| ClientError::Plane(transport_reason(&self.host(), &e)))?;
         let status = resp.status().as_u16();
         let bytes = read_body(resp).map_err(plane_err)?;
         Ok((status, bytes))
@@ -817,7 +943,7 @@ impl UreqDeviceClient {
         let credential = self.credential_for(workspace_id)?;
         let url = format!("{}{path}", self.base_url);
         let (status, bytes) = self.post_json_auth(&url, credential, &value, what)?;
-        map_write_envelope(status, &bytes)
+        map_write_envelope(&self.host(), status, &bytes)
     }
 }
 
@@ -831,12 +957,12 @@ impl EnrollSource for UreqDeviceClient {
             .get(url)
             .header("Accept", "application/json")
             .call()
-            .map_err(|e| ClientError::Plane(format!("fetch protocol card: {e}")))?;
+            .map_err(|e| ClientError::Plane(transport_reason(&self.host(), &e)))?;
         let status = resp.status().as_u16();
         if classify(status) != HttpClass::Ok {
             return Err(ClientError::Plane(format!(
-                "fetch protocol card: HTTP {status} — the address did not answer the topos \
-                 protocol card"
+                "{} — it answered HTTP {status} instead of the topos protocol card",
+                self.host()
             )));
         }
         let bytes = read_body(resp).map_err(plane_err)?;
@@ -860,9 +986,7 @@ impl EnrollSource for UreqDeviceClient {
         let url = format!("{}/v1/login/authorize", self.base_url);
         let (status, bytes) = self.post_json(&url, &body, "device authorize")?;
         if classify(status) != HttpClass::Ok {
-            return Err(ClientError::Plane(format!(
-                "device authorize: HTTP {status}"
-            )));
+            return Err(ClientError::Plane(status_reason(&self.host(), status)));
         }
         let resp: DeviceAuthStartResponse = serde_json::from_slice(&bytes).map_err(|e| {
             ClientError::WireInvalid(format!("authorize response is malformed: {e}"))
@@ -885,7 +1009,7 @@ impl EnrollSource for UreqDeviceClient {
         .map_err(|_| ClientError::Corrupt("poll body: could not serialize".to_owned()))?;
         let url = format!("{}/v1/login/token", self.base_url);
         let (status, bytes) = self.post_json(&url, &body, "device token poll")?;
-        map_poll_response(status, &bytes)
+        map_poll_response(&self.host(), status, &bytes)
     }
 }
 
@@ -894,11 +1018,9 @@ impl EnrollSource for UreqDeviceClient {
 /// is no second mint round-trip); the workspace id is validated at this wire boundary (it later
 /// keys URL splices + the session row). **Pure** (status + bytes in), so every arm is unit-tested
 /// without a socket.
-fn map_poll_response(status: u16, bytes: &[u8]) -> Result<DeviceAuthPoll, ClientError> {
+fn map_poll_response(host: &str, status: u16, bytes: &[u8]) -> Result<DeviceAuthPoll, ClientError> {
     if classify(status) != HttpClass::Ok {
-        return Err(ClientError::Plane(format!(
-            "device token poll: HTTP {status}"
-        )));
+        return Err(ClientError::Plane(status_reason(host, status)));
     }
     let resp: DeviceAuthPollResponse = serde_json::from_slice(bytes)
         .map_err(|e| ClientError::WireInvalid(format!("poll response is malformed: {e}")))?;
@@ -945,7 +1067,11 @@ fn wire_workspace(wire: DeviceAuthWorkspace) -> Result<EnrolledWorkspace, Client
 /// Map a `POST /v1/login/connect` response to the typed [`ConnectedSession`]. The uniform 404 is
 /// the ONE non-fault miss (no seat there, or the acting session is itself gone) — the caller falls
 /// back to the browser on it. **Pure** (status + bytes in), like [`map_poll_response`].
-fn map_login_connect(status: u16, bytes: &[u8]) -> Result<ConnectedSession, ClientError> {
+fn map_login_connect(
+    host: &str,
+    status: u16,
+    bytes: &[u8],
+) -> Result<ConnectedSession, ClientError> {
     match classify(status) {
         HttpClass::Ok => {}
         HttpClass::NotFound => {
@@ -954,7 +1080,7 @@ fn map_login_connect(status: u16, bytes: &[u8]) -> Result<ConnectedSession, Clie
             });
         }
         HttpClass::NotModified | HttpClass::Other => {
-            return Err(ClientError::Plane(format!("login connect: HTTP {status}")));
+            return Err(ClientError::Plane(status_reason(host, status)));
         }
     }
     let resp: LoginConnectResponse = serde_json::from_slice(bytes)
@@ -989,7 +1115,7 @@ impl GovernanceSource for UreqDeviceClient {
             self.base_url, workspace_id
         );
         let (status, bytes) = self.post_json_auth(&url, credential, &value, "create invitation")?;
-        map_invite_envelope(status, &bytes)
+        map_invite_envelope(&self.host(), status, &bytes)
     }
 
     fn login_connect(
@@ -1008,7 +1134,7 @@ impl GovernanceSource for UreqDeviceClient {
         let credential = self.credential_for(workspace)?;
         let url = format!("{}/v1/login/connect", self.base_url);
         let (status, bytes) = self.post_json_auth(&url, credential, &body, "login connect")?;
-        map_login_connect(status, &bytes)
+        map_login_connect(&self.host(), status, &bytes)
     }
 
     fn revoke_session(&self) -> Result<(), ClientError> {
@@ -1021,7 +1147,7 @@ impl GovernanceSource for UreqDeviceClient {
             .delete(&url)
             .header("authorization", format!("Bearer {credential}"))
             .call()
-            .map_err(|e| ClientError::Plane(format!("session revoke: {e}")))?;
+            .map_err(|e| ClientError::Plane(transport_reason(&self.host(), &e)))?;
         let status = resp.status().as_u16();
         match classify(status) {
             HttpClass::Ok => {
@@ -1034,7 +1160,7 @@ impl GovernanceSource for UreqDeviceClient {
                 target: "session".to_owned(),
             }),
             HttpClass::NotModified | HttpClass::Other => {
-                Err(ClientError::Plane(format!("session revoke: HTTP {status}")))
+                Err(ClientError::Plane(status_reason(&self.host(), status)))
             }
         }
     }
@@ -1044,11 +1170,13 @@ impl GovernanceSource for UreqDeviceClient {
 /// transport/auth/integrity fault; `ok` carries the [`InvitationData`]; `!ok` is a typed DENIED error
 /// carrying the wire error's code (never a secret). **Pure** (status + bytes in), so the ok / denied /
 /// non-200 / malformed arms are all unit-tested without a socket (mirrors [`build_fetched_version`]).
-fn map_invite_envelope(status: u16, bytes: &[u8]) -> Result<InvitationData, ClientError> {
+fn map_invite_envelope(
+    host: &str,
+    status: u16,
+    bytes: &[u8],
+) -> Result<InvitationData, ClientError> {
     if classify(status) != HttpClass::Ok {
-        return Err(ClientError::Plane(format!(
-            "create invitation: HTTP {status}"
-        )));
+        return Err(ClientError::Plane(status_reason(host, status)));
     }
     let env: JsonEnvelope = serde_json::from_slice(bytes)
         .map_err(|e| ClientError::WireInvalid(format!("invitation envelope is malformed: {e}")))?;
@@ -1068,7 +1196,9 @@ fn map_invite_envelope(status: u16, bytes: &[u8]) -> Result<InvitationData, Clie
                     .to_owned(),
             ));
         }
-        return Err(ClientError::Plane(format!("invite refused ({code})")));
+        return Err(ClientError::Plane(format!(
+            "the server refused this invitation ({code})"
+        )));
     }
     serde_json::from_value(env.data)
         .map_err(|e| ClientError::WireInvalid(format!("invitation data is malformed: {e}")))
@@ -1117,9 +1247,10 @@ impl CatalogSource for UreqDeviceClient {
         // No stored device credential ⇒ Unavailable (the caller degrades it to a warning), never a
         // request without a credential.
         let Some(credential) = self.credential.as_deref() else {
-            return Err(PlaneError::Unavailable(format!(
-                "not enrolled; no credential to read workspace {workspace_id}"
-            )));
+            return Err(PlaneError::Unavailable(
+                "this machine is not logged in, so it holds no credential for this workspace"
+                    .to_owned(),
+            ));
         };
         let url = format!("{}/v1/workspaces/{}/skills", self.base_url, workspace_id);
         // The read is authorized by the workspace Bearer credential (resolved to a confirmed-member row);
@@ -1132,7 +1263,7 @@ impl CatalogSource for UreqDeviceClient {
             .call()
             // A `.call()` Err is connect-level (dial/TLS/timeout before any status): the plane itself is
             // unreachable — surfaced distinctly (the caller degrades it to a per-workspace warning).
-            .map_err(|e| PlaneError::Unreachable(format!("fetch catalog {workspace_id}: {e}")))?;
+            .map_err(|e| PlaneError::Unreachable(transport_reason(&self.host(), &e)))?;
         let status = resp.status().as_u16();
         match classify(status) {
             HttpClass::Ok => {
@@ -1143,9 +1274,9 @@ impl CatalogSource for UreqDeviceClient {
             // 404 = not a member / no such workspace (the indistinguishable "no catalog") ⇒ an empty index.
             HttpClass::NotFound => Ok(WireSkillIndex { skills: Vec::new() }),
             // No conditional headers are sent, so 304 cannot occur; fold it in with the other statuses.
-            HttpClass::NotModified | HttpClass::Other => Err(PlaneError::Unavailable(format!(
-                "fetch catalog {workspace_id}: HTTP {status}"
-            ))),
+            HttpClass::NotModified | HttpClass::Other => {
+                Err(PlaneError::Unavailable(status_reason(&self.host(), status)))
+            }
         }
     }
 }
@@ -1185,7 +1316,7 @@ impl UreqDeviceClient {
             .get(&url)
             .header("authorization", format!("Bearer {credential}"))
             .call()
-            .map_err(|e| ClientError::Plane(format!("{what}: {e}")))?;
+            .map_err(|e| ClientError::Plane(transport_reason(&self.host(), &e)))?;
         let status = resp.status().as_u16();
         match classify(status) {
             HttpClass::Ok => {
@@ -1193,12 +1324,12 @@ impl UreqDeviceClient {
                 serde_json::from_slice(&bytes)
                     .map_err(|e| ClientError::WireInvalid(format!("{what} body is malformed: {e}")))
             }
-            // The plane's pre-gate miss is deliberately uniform (no existence signal); mirror it.
+            // The server's pre-gate miss is deliberately uniform (no existence signal); mirror it.
             HttpClass::NotFound => Err(ClientError::TargetNotFound {
                 target: target.to_owned(),
             }),
             HttpClass::NotModified | HttpClass::Other => {
-                Err(ClientError::Plane(format!("{what}: HTTP {status}")))
+                Err(ClientError::Plane(status_reason(&self.host(), status)))
             }
         }
     }
@@ -1227,11 +1358,11 @@ impl UreqDeviceClient {
                 })?;
                 req.header("content-type", "application/json")
                     .send(payload.as_slice())
-                    .map_err(|e| ClientError::Plane(format!("{what}: {e}")))
+                    .map_err(|e| ClientError::Plane(transport_reason(&self.host(), &e)))
             }
             None => req
                 .send_empty()
-                .map_err(|e| ClientError::Plane(format!("{what}: {e}"))),
+                .map_err(|e| ClientError::Plane(transport_reason(&self.host(), &e))),
         };
         let _phase = self.dialing();
         let resp = match method {
@@ -1243,7 +1374,7 @@ impl UreqDeviceClient {
                 .delete(&url)
                 .header("authorization", &auth)
                 .call()
-                .map_err(|e| ClientError::Plane(format!("{what}: {e}")))?,
+                .map_err(|e| ClientError::Plane(transport_reason(&self.host(), &e)))?,
         };
         let status = resp.status().as_u16();
         match classify(status) {
@@ -1259,7 +1390,7 @@ impl UreqDeviceClient {
                 Err(if (400..500).contains(&status) && status != 429 {
                     ClientError::PlaneRejected(status)
                 } else {
-                    ClientError::Plane(format!("{what}: HTTP {status}"))
+                    ClientError::Plane(status_reason(&self.host(), status))
                 })
             }
         }
@@ -1499,7 +1630,7 @@ fn parse_card(bytes: &[u8]) -> Result<WireProtocolCard, ClientError> {
 /// moved — NEEDS_REVIEW, an OK `review --reject`, and every failure carry `{}`, so it is parsed leniently
 /// (`.ok()`), never assuming `outcome == Ok ⟹ data is a record`. **Pure** (status + bytes), so every arm is
 /// unit-tested without a socket (mirrors [`map_invite_envelope`]).
-fn map_write_envelope(status: u16, bytes: &[u8]) -> Result<WriteReceipt, ClientError> {
+fn map_write_envelope(host: &str, status: u16, bytes: &[u8]) -> Result<WriteReceipt, ClientError> {
     if classify(status) != HttpClass::Ok {
         // A 4xx other than 429 is a DEFINITIVE rejection — the op provably did NOT land (a bad request /
         // payload-too-large), so the caller drops the op-WAL instead of replaying it forever. A 5xx / 429 /
@@ -1507,7 +1638,7 @@ fn map_write_envelope(status: u16, bytes: &[u8]) -> Result<WriteReceipt, ClientE
         return Err(if (400..500).contains(&status) && status != 429 {
             ClientError::PlaneRejected(status)
         } else {
-            ClientError::Plane(format!("contribute write: HTTP {status}"))
+            ClientError::Plane(status_reason(host, status))
         });
     }
     let JsonEnvelope {
@@ -1559,6 +1690,10 @@ fn map_write_envelope(status: u16, bytes: &[u8]) -> Result<WriteReceipt, ClientE
 /// The user-agent GitHub requires (it 403s a request without one). Carries this build's version.
 const RELEASE_USER_AGENT: &str = concat!("topos/", env!("CARGO_PKG_VERSION"));
 
+/// The host the release + forge lanes talk to — named in every message about them, so a person
+/// reads which of the two servers in play was the one that went quiet.
+const GITHUB_API_HOST: &str = "api.github.com";
+
 /// The blocking `ureq` release source: the GitHub API for latest-tag resolution + raw asset GETs.
 pub(crate) struct UreqReleases {
     agent: ureq::Agent,
@@ -1601,20 +1736,21 @@ impl crate::release::ReleaseSource for UreqReleases {
             .header("User-Agent", RELEASE_USER_AGENT)
             .header("Accept", "application/vnd.github+json")
             .call()
-            .map_err(|e| ClientError::Plane(format!("release check: {e}")))?;
+            .map_err(|e| ClientError::Plane(transport_reason(GITHUB_API_HOST, &e)))?;
         let status = resp.status().as_u16();
         if status != 200 {
-            return Err(ClientError::Plane(format!(
-                "release check: HTTP {status} from {url}"
-            )));
+            return Err(ClientError::Plane(status_reason(GITHUB_API_HOST, status)));
         }
         let body = read_body(resp).map_err(plane_err)?;
         #[derive(serde::Deserialize)]
         struct Rel {
             tag_name: String,
         }
-        let rel: Rel = serde_json::from_slice(&body)
-            .map_err(|e| ClientError::Plane(format!("release check: malformed response: {e}")))?;
+        let rel: Rel = serde_json::from_slice(&body).map_err(|_| {
+            ClientError::Plane(format!(
+                "{GITHUB_API_HOST} sent a release listing topos could not read"
+            ))
+        })?;
         Ok(rel.tag_name)
     }
 
@@ -1627,10 +1763,10 @@ impl crate::release::ReleaseSource for UreqReleases {
             .get(url)
             .header("User-Agent", RELEASE_USER_AGENT)
             .call()
-            .map_err(|e| ClientError::Plane(format!("download {url}: {e}")))?;
+            .map_err(|e| ClientError::Plane(transport_reason(&host_label(url), &e)))?;
         let status = resp.status().as_u16();
         if !(200..=299).contains(&status) {
-            return Err(ClientError::Plane(format!("download {url}: HTTP {status}")));
+            return Err(ClientError::Plane(status_reason(&host_label(url), status)));
         }
         // A release asset declares its `Content-Length`, so this one shows a real percentage.
         read_body_reported(resp, &*self.progress, 0, true).map_err(plane_err)
@@ -1735,16 +1871,17 @@ impl crate::git_source::GitTarballSource for UreqGitSource {
         // enum makes a non-GitHub host unrepresentable — so no host branch is needed.
         let _ = spec.host.domain();
         if !is_repo_seg(&spec.owner) || !is_repo_seg(&spec.repo) {
-            return Err(ClientError::RemoteFetch(format!(
-                "{}: invalid owner/repo",
-                spec.label()
-            )));
+            return Err(ClientError::RemoteFetch {
+                msg: format!("{} — that is not a valid owner/repo", spec.label()),
+                permanent: true,
+            });
         }
         // GitHub's `/tarball/{ref}` (ref optional → the default branch) redirects to codeload.
         let url = match &spec.git_ref {
             Some(r) => {
-                let r = sanitize_ref(r).ok_or_else(|| {
-                    ClientError::RemoteFetch(format!("{}: invalid ref", spec.label()))
+                let r = sanitize_ref(r).ok_or_else(|| ClientError::RemoteFetch {
+                    msg: format!("{} — that is not a valid ref", spec.label()),
+                    permanent: true,
                 })?;
                 format!(
                     "https://api.github.com/repos/{}/{}/tarball/{r}",
@@ -1765,24 +1902,37 @@ impl crate::git_source::GitTarballSource for UreqGitSource {
             .header("User-Agent", RELEASE_USER_AGENT)
             .header("Accept", "application/vnd.github+json")
             .call()
-            .map_err(|e| ClientError::RemoteFetch(format!("{}: {e}", spec.label())))?;
+            .map_err(|e| ClientError::RemoteFetch {
+                msg: format!(
+                    "{} — {}",
+                    spec.label(),
+                    transport_reason(GITHUB_API_HOST, &e)
+                ),
+                permanent: false,
+            })?;
         match resp.status().as_u16() {
             // Streamed: GitHub's tarball redirect answers chunked (no `Content-Length`), so the
             // line shows the figure climbing rather than a percentage it cannot know.
             200..=299 => read_body_reported(resp, &*self.progress, 0, true).map_err(|_| {
-                ClientError::RemoteFetch(format!(
-                    "{}: response body could not be read",
-                    spec.label()
-                ))
+                ClientError::RemoteFetch {
+                    msg: format!(
+                        "{} — the download from {GITHUB_API_HOST} was cut short",
+                        spec.label()
+                    ),
+                    permanent: false,
+                }
             }),
-            404 => Err(ClientError::RemoteFetch(format!(
-                "{} — repo or ref not found (only public repos are supported today)",
-                spec.label()
-            ))),
-            s => Err(ClientError::RemoteFetch(format!(
-                "{}: HTTP {s}",
-                spec.label()
-            ))),
+            404 => Err(ClientError::RemoteFetch {
+                msg: format!(
+                    "{} — repo or ref not found (only public repos are supported today)",
+                    spec.label()
+                ),
+                permanent: true,
+            }),
+            s => Err(ClientError::RemoteFetch {
+                msg: format!("{} — {}", spec.label(), status_reason(GITHUB_API_HOST, s)),
+                permanent: false,
+            }),
         }
     }
 }
@@ -1809,7 +1959,9 @@ fn sanitize_ref(r: &str) -> Option<String> {
 /// Map a transport-level [`PlaneError`] from a shared body read into the client error family.
 fn plane_err(e: PlaneError) -> ClientError {
     match e {
-        PlaneError::NotFound => ClientError::Plane("not found".into()),
+        PlaneError::NotFound => {
+            ClientError::Plane("the server does not serve this, or not to you".into())
+        }
         PlaneError::Unavailable(m) | PlaneError::Unreachable(m) | PlaneError::Malformed(m) => {
             ClientError::Plane(m)
         }
@@ -1904,7 +2056,7 @@ mod tests {
                 .expect_err("an over-limit body is refused, not truncated silently");
         // The same transient class the whole-body read maps an over-limit read to.
         assert!(
-            matches!(&err, PlaneError::Unavailable(m) if m.starts_with("read body: ")),
+            matches!(&err, PlaneError::Unavailable(m) if m == "the response was cut short"),
             "{err:?}"
         );
         // `ureq`'s limiter refuses a body that REACHES the cap too (the last read finds no budget
@@ -2049,8 +2201,8 @@ mod tests {
             receipt: None,
             error: None,
         };
-        let data =
-            map_invite_envelope(200, &envelope_bytes(&env)).expect("ok maps to InvitationData");
+        let data = map_invite_envelope("topos.test", 200, &envelope_bytes(&env))
+            .expect("ok maps to InvitationData");
         assert_eq!(data.address, "https://acme.topos.test/acme");
         assert_eq!(data.invited, vec!["alice@acme.com".to_owned()]);
         assert!(!data.mailed);
@@ -2078,7 +2230,7 @@ mod tests {
                 next_actions: Vec::new(),
             }),
         };
-        let err = map_invite_envelope(200, &envelope_bytes(&env)).unwrap_err();
+        let err = map_invite_envelope("topos.test", 200, &envelope_bytes(&env)).unwrap_err();
         match err {
             ClientError::Plane(m) => assert!(m.contains("NOT_AUTHORIZED"), "got {m}"),
             other => panic!("expected a typed Plane error, got {other:?}"),
@@ -2088,7 +2240,7 @@ mod tests {
     #[test]
     fn map_invite_envelope_non_200_is_a_typed_error() {
         // A non-200 (transport/auth/integrity) never reaches the envelope decode.
-        let err = map_invite_envelope(500, b"{}").unwrap_err();
+        let err = map_invite_envelope("topos.test", 500, b"{}").unwrap_err();
         assert!(matches!(err, ClientError::Plane(_)), "got {err:?}");
     }
 
@@ -2152,7 +2304,7 @@ mod tests {
             receipt(TerminalOutcome::Ok),
             None,
         );
-        let wr = map_write_envelope(200, &bytes).expect("ok maps to a receipt");
+        let wr = map_write_envelope("topos.test", 200, &bytes).expect("ok maps to a receipt");
         assert_eq!(wr.outcome(), TerminalOutcome::Ok);
         assert!(
             wr.wire_record.is_some(),
@@ -2195,8 +2347,8 @@ mod tests {
             receipt: None,
             error: Some(err),
         });
-        let wr =
-            map_write_envelope(200, &bytes).expect("a receipt-less DENIED is a terminal receipt");
+        let wr = map_write_envelope("topos.test", 200, &bytes)
+            .expect("a receipt-less DENIED is a terminal receipt");
         assert!(wr.receipt.is_none(), "no receipt was attached");
         assert_eq!(
             wr.outcome(),
@@ -2240,7 +2392,7 @@ mod tests {
                 receipt: None,
                 error: Some(err),
             });
-            let e = map_write_envelope(200, &bytes)
+            let e = map_write_envelope("topos.test", 200, &bytes)
                 .expect_err("a receipt-less non-DENIED outcome is not a settled answer");
             assert_eq!(e.code(), "CORRUPT_STATE", "{outcome:?}");
         }
@@ -2255,7 +2407,8 @@ mod tests {
             receipt(TerminalOutcome::NeedsReview),
             None,
         );
-        let wr = map_write_envelope(200, &bytes).expect("needs_review is a 200 receipt");
+        let wr =
+            map_write_envelope("topos.test", 200, &bytes).expect("needs_review is a 200 receipt");
         assert_eq!(wr.outcome(), TerminalOutcome::NeedsReview);
         assert!(wr.wire_record.is_none());
         assert!(wr.error.is_none());
@@ -2271,7 +2424,8 @@ mod tests {
             receipt(TerminalOutcome::Ok),
             None,
         );
-        let wr = map_write_envelope(200, &bytes).expect("an OK reject is not Corrupt");
+        let wr =
+            map_write_envelope("topos.test", 200, &bytes).expect("an OK reject is not Corrupt");
         assert_eq!(wr.outcome(), TerminalOutcome::Ok);
         assert!(wr.wire_record.is_none(), "no pointer moved on a reject");
     }
@@ -2296,7 +2450,8 @@ mod tests {
             receipt(TerminalOutcome::Conflict),
             Some(err),
         );
-        let wr = map_write_envelope(200, &bytes).expect("conflict is a 200 receipt, not an Err");
+        let wr = map_write_envelope("topos.test", 200, &bytes)
+            .expect("conflict is a 200 receipt, not an Err");
         assert_eq!(wr.outcome(), TerminalOutcome::Conflict);
         assert_eq!(
             wr.error.and_then(|e| e.current_generation),
@@ -2307,7 +2462,7 @@ mod tests {
 
     #[test]
     fn map_write_envelope_non_200_is_a_plane_error() {
-        let err = map_write_envelope(500, b"{}").unwrap_err();
+        let err = map_write_envelope("topos.test", 500, b"{}").unwrap_err();
         assert!(matches!(err, ClientError::Plane(_)), "got {err:?}");
     }
 
@@ -2323,12 +2478,12 @@ mod tests {
             receipt: None,
             error: None,
         });
-        let err = map_write_envelope(200, &bytes).unwrap_err();
+        let err = map_write_envelope("topos.test", 200, &bytes).unwrap_err();
         assert!(matches!(err, ClientError::WireInvalid(_)), "got {err:?}");
         assert_eq!(
             crate::render::safe_message(&err),
-            "the plane's response failed validation",
-            "a wire fault never blames a local sidecar"
+            "the server sent a response topos could not read",
+            "a wire fault never blames this machine's own state"
         );
     }
 
@@ -2351,18 +2506,19 @@ mod tests {
     #[test]
     fn map_poll_response_maps_every_arm() {
         assert!(matches!(
-            map_poll_response(200, &poll_json("pending", None)).unwrap(),
+            map_poll_response("topos.test", 200, &poll_json("pending", None)).unwrap(),
             DeviceAuthPoll::Pending
         ));
         assert!(matches!(
-            map_poll_response(200, &poll_json("denied", None)).unwrap(),
+            map_poll_response("topos.test", 200, &poll_json("denied", None)).unwrap(),
             DeviceAuthPoll::Denied
         ));
         assert!(matches!(
-            map_poll_response(200, &poll_json("expired", None)).unwrap(),
+            map_poll_response("topos.test", 200, &poll_json("expired", None)).unwrap(),
             DeviceAuthPoll::Expired
         ));
-        let granted = map_poll_response(200, &poll_json("granted", Some("w_acme"))).unwrap();
+        let granted =
+            map_poll_response("topos.test", 200, &poll_json("granted", Some("w_acme"))).unwrap();
         let DeviceAuthPoll::Granted(grant) = granted else {
             panic!("expected a granted poll");
         };
@@ -2375,7 +2531,7 @@ mod tests {
         assert!(!format!("{grant:?}").contains("devc_secret"));
         // A non-200 is a transport-shaped error, never a silent pending.
         assert!(matches!(
-            map_poll_response(500, b"{}").unwrap_err(),
+            map_poll_response("topos.test", 500, b"{}").unwrap_err(),
             ClientError::Plane(_)
         ));
     }
@@ -2383,13 +2539,14 @@ mod tests {
     #[test]
     fn map_poll_response_refuses_a_bare_or_hostile_grant() {
         // `granted` without its credential/session/workspace halves is malformed, not a re-poll.
-        let err = map_poll_response(200, &poll_json("granted", None)).unwrap_err();
+        let err = map_poll_response("topos.test", 200, &poll_json("granted", None)).unwrap_err();
         assert!(matches!(err, ClientError::WireInvalid(_)), "got {err:?}");
         // A hostile workspace id (it later keys URL splices + the session doc) fails the WHOLE poll,
         // as the WIRE flavor of the corrupt family (same CORRUPT_STATE code; the safe message names
         // the plane).
         for bad in ["../../x", "a/b", "A", "", ".", ".."] {
-            let err = map_poll_response(200, &poll_json("granted", Some(bad))).unwrap_err();
+            let err =
+                map_poll_response("topos.test", 200, &poll_json("granted", Some(bad))).unwrap_err();
             assert!(
                 matches!(err, ClientError::WireInvalid(_)),
                 "workspace id {bad:?} must be refused as WireInvalid, got {err:?}"
@@ -2397,7 +2554,7 @@ mod tests {
             assert_eq!(err.code(), "CORRUPT_STATE", "no new wire code");
             assert_eq!(
                 crate::render::safe_message(&err),
-                "the plane's response failed validation"
+                "the server sent a response topos could not read"
             );
         }
     }
@@ -2411,7 +2568,7 @@ mod tests {
             "workspace": { "workspace_id": "w_eng", "name": "eng", "display_name": "Engineering" },
         }))
         .expect("serialize connect body");
-        let minted = map_login_connect(200, &body).unwrap();
+        let minted = map_login_connect("topos.test", 200, &body).unwrap();
         assert_eq!(minted.credential, "sess_secret");
         assert_eq!(minted.session_id, "sn_2");
         assert_eq!(minted.workspace.workspace_id, "w_eng");
@@ -2420,11 +2577,11 @@ mod tests {
         // The uniform 404 is the ONE non-fault miss — the caller falls back to the browser on it,
         // and it must never read as a transport fault.
         assert!(matches!(
-            map_login_connect(404, b"").unwrap_err(),
+            map_login_connect("topos.test", 404, b"").unwrap_err(),
             ClientError::TargetNotFound { .. }
         ));
         assert!(matches!(
-            map_login_connect(500, b"{}").unwrap_err(),
+            map_login_connect("topos.test", 500, b"{}").unwrap_err(),
             ClientError::Plane(_)
         ));
         // The same id boundary as the granted poll.
@@ -2436,7 +2593,7 @@ mod tests {
         }))
         .expect("serialize connect body");
         assert!(matches!(
-            map_login_connect(200, &hostile).unwrap_err(),
+            map_login_connect("topos.test", 200, &hostile).unwrap_err(),
             ClientError::WireInvalid(_)
         ));
     }

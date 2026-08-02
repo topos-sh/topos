@@ -128,7 +128,7 @@ impl Sessions {
         if let Some(ws) = explicit {
             let found = self.find(ws)?.ok_or_else(|| {
                 ClientError::WorkspaceSelection(format!(
-                    "not logged into workspace '{ws}'; logged-in workspaces: {}",
+                    "this machine is not logged into workspace '{ws}' — it is logged into: {}",
                     self.names().join(", ")
                 ))
             })?;
@@ -156,7 +156,8 @@ impl Sessions {
             }),
             [only] => Ok(only),
             _ => Err(ClientError::WorkspaceSelection(format!(
-                "logged into multiple workspaces ({}); pass `--workspace <name>` to choose one",
+                "this machine is logged into more than one workspace ({}) — pass `--workspace \
+                 <name>` to choose one",
                 self.names().join(", ")
             ))),
         }

@@ -391,7 +391,7 @@ pub(crate) fn followed_workspace(ctx: &Ctx<'_>, skill_id: &str) -> Option<String
 pub(crate) fn workspace_of(ctx: &Ctx<'_>, skill_id: &str) -> Result<String, ClientError> {
     followed_workspace(ctx, skill_id).ok_or_else(|| {
         ClientError::Plane(format!(
-            "'{skill_id}' is not a followed skill; a plane op needs its workspace"
+            "'{skill_id}' is not delivered to this machine, so there is no workspace to act in"
         ))
     })
 }

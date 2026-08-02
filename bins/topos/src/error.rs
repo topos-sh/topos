@@ -64,13 +64,13 @@ pub(crate) enum ClientError {
     /// A filesystem operation failed, wrapped with call-site context only (the OS `ErrorKind` was not
     /// retained, so it classifies retryable). Where the `io::Error` is in hand, prefer the `?`-ridden
     /// [`ClientError::IoKind`] path so permanence can be told apart.
-    #[error("filesystem error: {0}")]
+    #[error("a filesystem operation failed — {0}")]
     Io(String),
     /// A filesystem operation failed, carrying the OS [`std::io::ErrorKind`] — so `outcome()` can tell a
     /// permanent local failure (permission denied / read-only filesystem / disk full) from a transient
     /// one instead of inviting the agent to retry-loop forever. Every `std::io::Error` that rides `?`
     /// lands here via `From`; the wire code stays `IO_ERROR` (the kind refines only the outcome).
-    #[error("filesystem error: {context}")]
+    #[error("a filesystem operation failed — {context}")]
     IoKind {
         kind: std::io::ErrorKind,
         context: String,
@@ -87,33 +87,36 @@ pub(crate) enum ClientError {
     #[error("'{skill}' has no changes to publish — the draft matches current")]
     NoChanges { skill: String },
     /// A write-side git store failure.
-    #[error("git store error: {0}")]
+    #[error("the local skill store reported an error — {0}")]
     Gitstore(#[from] GitstoreError),
     /// A read-side integrity failure (verify-on-read).
-    #[error("integrity error: {0}")]
+    #[error("an integrity check failed — {0}")]
     Verify(#[from] VerifyError),
     /// A persisted document carries an unknown/newer `schema_version` — fail closed; the doc is **never**
     /// handed to serde and **never** deleted (an upgrade is required, not a corruption).
     #[error(
-        "document schema_version {found} is newer than this build supports (max {max}); upgrade topos"
+        "this machine's topos state was written by a newer topos (format {found}; this build \
+         reads up to {max}) — update this install with `topos self-update`"
     )]
     UnknownSchemaVersion { found: u32, max: u32 },
     /// A persisted document carries a `schema_version` below the supported floor.
-    #[error("document schema_version {found} is no longer supported")]
+    #[error(
+        "this machine's topos state is in a format this topos no longer reads (format {found})"
+    )]
     UnsupportedLegacy { found: u32 },
     /// A persisted document could not be parsed or is internally inconsistent (genuine corruption — not a
     /// mere version mismatch). Recovery reports it; it never fabricates the missing state.
-    #[error("corrupt sidecar state: {0}")]
+    #[error("topos's own state on this machine is unreadable — {0}")]
     Corrupt(String),
     /// A PLANE RESPONSE failed client-side validation (a wire-boundary id/shape check) — the remote
     /// counterpart of [`ClientError::Corrupt`]. Same `CORRUPT_STATE` wire code (the vocabulary stays
-    /// closed), but the safe surface says the plane's response failed validation instead of falsely
-    /// blaming a local sidecar document. Persisted-doc failures (a `follows.json` load) stay `Corrupt`.
-    #[error("plane response failed validation: {0}")]
+    /// closed), but the safe surface blames the server's answer instead of falsely blaming this
+    /// machine's own state. Persisted-doc failures (a `follows.json` load) stay `Corrupt`.
+    #[error("the server sent a response topos could not read — {0}")]
     WireInvalid(String),
     /// The scan of a real skill dir hit a filesystem-level reject (symlink / device / non-regular file /
     /// non-UTF-8 name) or a kernel path reject (absolute / `..` / NUL / collision).
-    #[error("skill directory rejected: {0}")]
+    #[error("the skill directory was rejected — {0}")]
     Scan(String),
     /// The bundle has no files (after excluding `.git/` + `.DS_Store`) — not a skill.
     #[error("the skill directory has no files to adopt")]
@@ -219,7 +222,7 @@ pub(crate) enum ClientError {
     /// The placement cannot be materialized safely (a non-directory sits where a skill dir belongs, a
     /// symlink cannot be resolved to a directory, or the filesystem supports no safe swap) — refused
     /// rather than risk clobbering or a torn write.
-    #[error("the skill placement cannot be materialized safely: {reason}")]
+    #[error("the skill's files cannot be written safely — {reason}")]
     PlacementUnsupported { reason: String },
     /// MORE than one of a skill's placements holds a DIFFERENT local edit — there is no single draft
     /// to sync, diff, or publish, and nothing is overwritten (the typed freeze). The paths name every
@@ -232,13 +235,17 @@ pub(crate) enum ClientError {
         paths.join(", ")
     )]
     PlacementsDiverged { skill: String, paths: Vec<String> },
-    /// The plane could not be read for an explicitly-targeted skill (unreachable, not served, or a
+    /// The server could not be read for an explicitly-targeted skill (unreachable, not served, or a
     /// malformed response). A bare update sweep isolates such failures per skill instead of erroring.
-    #[error("plane read failed: {0}")]
+    ///
+    /// The message is SELF-AUTHORED and shown verbatim: every construction site writes one complete
+    /// lowercase phrase naming the server (or the thing that could not be read) — a transport fault
+    /// goes through [`crate::plane_http::transport_reason`] first, so no `ureq` tail ever lands here.
+    #[error("{0}")]
     Plane(String),
     /// A go-back (`pull <skill>@<hash>`) named a version this client cannot anchor — it is absent from
     /// the local store, so its bytes are unavailable and it cannot be installed. Refused.
-    #[error("cannot go back to version '{version}': not in this skill's local history")]
+    #[error("cannot go back to version '{version}' — it is not in this skill's local history")]
     UnknownGoBackVersion { version: String },
     /// A LOGIN-FLOW step could not complete (an expired/denied browser approval, a malformed
     /// invitation link, a conflicting pending flow). The message is self-contained guidance —
@@ -265,7 +272,8 @@ pub(crate) enum ClientError {
     /// shipped — refused BEFORE signing or sending (the disclosure/integrity gate; never a silent
     /// mode-flip). The agent re-discloses (via `diff`) and re-pins the exact digest.
     #[error(
-        "the pinned @<digest> does not match the bytes: pinned {got}, bytes hash to {expected}"
+        "the pinned @<digest> does not match the bytes — you pinned {got}, these bytes hash to \
+         {expected}"
     )]
     ApprovalMismatch {
         skill: String,
@@ -274,11 +282,11 @@ pub(crate) enum ClientError {
     },
     /// The compare-and-set saw a base the team has moved past (`CONFLICT`) — the local view is stale. The
     /// agent pulls (rebases) and re-shows the diff before retrying; never a silent retry.
-    #[error("the team moved past your base; pull to rebase, then retry")]
+    #[error("the team moved past the version you started from — update to rebase, then retry")]
     Conflict { skill: String, current: Option<u64> },
     /// The plane denied the op (`DENIED`) — not rostered, four-eyes self-approve, or an already-resolved
     /// proposal. Carries the wire code for the agent to branch on; never a secret.
-    #[error("the plane denied this operation ({0})")]
+    #[error("the server refused this operation ({0})")]
     Denied(String),
     /// A `review` verdict (`--approve`/`--reject`/`--withdraw`) targeted a proposal that is no longer OPEN
     /// at the live `current`: an already-resolved proposal moved `current` past its base, so the
@@ -290,12 +298,12 @@ pub(crate) enum ClientError {
     ReviewNotOpen(String),
     /// A `publish` is blocked because an unresolved author-merge conflict (`conflict.json`) is present —
     /// the draft must be resolved first. Refused before any build / WAL / send (the publish guard).
-    #[error("publish is blocked: resolve the merge conflict in this skill first")]
+    #[error("publish is blocked — resolve the merge conflict in this skill first")]
     PublishBlocked { skill: String },
     /// A crashed prior write for this skill is still in-flight and DIFFERS from the command just issued
     /// (a different digest / mode / target). Settle it first (re-run the original command, which replays
     /// its `op_id`), then re-issue this change — never silently replay a different intent.
-    #[error("an in-flight write for '{skill}' must settle first: {detail}")]
+    #[error("an earlier write for '{skill}' is still in flight and must settle first — {detail}")]
     PendingOp { skill: String, detail: String },
     /// A verb that must act in ONE workspace could not choose one: this install has joined multiple
     /// workspaces and none was named (pass `--workspace <name>`), or a named `--workspace` (address
@@ -306,13 +314,14 @@ pub(crate) enum ClientError {
     WorkspaceSelection(String),
     /// A definitive, NON-retryable rejection from the plane on a non-2xx status (a 4xx other than 429 — the
     /// op provably did NOT land), so its op-WAL is dropped rather than replayed forever.
-    #[error("the plane rejected the request (HTTP {0})")]
+    #[error("the server rejected this request (HTTP {0})")]
     PlaneRejected(u16),
     /// A self-update download (`topos upgrade`) did not match the sha256 the release `SHA256SUMS` lists —
     /// refused BEFORE the binary is touched (the mandatory, never-skippable integrity gate). The message is
     /// all-public (the asset name + the two hashes), so it is safe to show verbatim.
     #[error(
-        "downloaded {asset}: sha256 mismatch (expected {expected}, got {actual}) — refusing to install"
+        "{asset} does not match its published checksum (expected {expected}, got {actual}) — \
+         refusing to install"
     )]
     ChecksumMismatch {
         asset: String,
@@ -329,13 +338,16 @@ pub(crate) enum ClientError {
     /// bytes. With a key compiled in, signature verification is mandatory and fail-closed: refused
     /// BEFORE the checksum step and BEFORE the binary is touched. The message is all-public (the
     /// asset name + a non-secret reason), so it is safe to show verbatim.
-    #[error("downloaded {asset}: release signature {reason} — refusing to install")]
+    #[error("the release signature for {asset} {reason} — refusing to install")]
     SignatureInvalid { asset: String, reason: String },
-    /// `add <owner/repo>` (a remote import) could not fetch the source over the network (unreachable
-    /// host, an HTTP error, a not-found repo/ref). Transient by default — the agent may retry. The
-    /// message is all-public (the source + a transport reason), so it is shown VERBATIM.
-    #[error("could not fetch {0}")]
-    RemoteFetch(String),
+    /// `add <owner/repo>` (a remote import) could not fetch the source. `permanent` separates the
+    /// causes retrying can never fix (a not-found repo/ref, a malformed reference) from the
+    /// transport faults a retry may clear (unreachable host, a cut-short download, a server
+    /// error) — the outcome and the envelope's `retryable` both derive from it, so a 404 never
+    /// invites a retry loop. The message is all-public (the source + a humanized reason), so it is
+    /// shown VERBATIM.
+    #[error("could not fetch {msg}")]
+    RemoteFetch { msg: String, permanent: bool },
     /// A fetched remote source (a repo, or the `#<ref>`/`/tree/` subtree named) contained no `SKILL.md` —
     /// there is no skill to adopt. Usage guidance shown VERBATIM (the source is the user's own token).
     /// (`src`, not `source` — `thiserror` reserves a field named `source` for an error cause.)
@@ -404,10 +416,14 @@ pub(crate) enum ClientError {
          to act on the file as it is now"
     )]
     ManifestExists { path: String },
-    /// A terminal protocol outcome the verb does not special-case (e.g. the plane's `RetryableFailure` /
+    /// A terminal protocol outcome the verb does not special-case (e.g. the server's `RetryableFailure` /
     /// `Unavailable` / `PermanentFailure`), carried verbatim so the agent branches on the TRUE outcome
     /// (not a generic transport error). `retryable` selects a Retry next-action + the outcome class.
-    #[error("the plane returned {code} ({outcome:?})")]
+    ///
+    /// The MESSAGE carries only the server's fine code: `outcome` already rides the envelope
+    /// structurally (and drives the TTY's transient/permanent phrasing), so repeating its Rust
+    /// spelling in prose only leaked an internal name into a human line.
+    #[error("the server could not complete this operation ({code})")]
     PlaneTerminal {
         outcome: TerminalOutcome,
         code: String,
@@ -512,7 +528,7 @@ impl ClientError {
             ClientError::UpgradeUnwritable(_) => "IO_ERROR",
             // The remote-import family (each machine-branchable; a fetch fault is retryable, the rest are
             // permanent selection/placement errors the agent resolves by changing its argv).
-            ClientError::RemoteFetch(_) => "REMOTE_FETCH",
+            ClientError::RemoteFetch { .. } => "REMOTE_FETCH",
             ClientError::NoSkillInSource { .. } => "NO_SKILL_IN_SOURCE",
             ClientError::SkillNotInRepo { .. } => "SKILL_NOT_IN_REPO",
             ClientError::AmbiguousSkillInRepo { .. } => "AMBIGUOUS_SKILL",
@@ -550,7 +566,13 @@ impl ClientError {
             | ClientError::DuplicateSkillName { .. }
             | ClientError::AmbiguousTarget { .. } => TerminalOutcome::AmbiguousName,
             // A network fetch fault is transient — the agent may retry the same import.
-            ClientError::RemoteFetch(_) => TerminalOutcome::RetryableFailure,
+            ClientError::RemoteFetch { permanent, .. } => {
+                if *permanent {
+                    TerminalOutcome::PermanentFailure
+                } else {
+                    TerminalOutcome::RetryableFailure
+                }
+            }
             // A transient filesystem or plane-read failure is retryable — whether it surfaced
             // client-side, in the store, or reading the plane.
             ClientError::Io(_)

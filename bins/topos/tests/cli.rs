@@ -416,7 +416,7 @@ fn a_corrupt_sidecar_doc_still_reports_corrupt_state() {
     assert_eq!(v["error"]["code"], "CORRUPT_STATE");
     assert_eq!(
         v["error"]["context"]["message"],
-        "a sidecar document is corrupt"
+        "topos's own state on this machine is unreadable"
     );
 
     let _ = std::fs::remove_dir_all(&home);
