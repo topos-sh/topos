@@ -5750,7 +5750,7 @@ fn bare_plan(
         home: rig.home.0.clone(),
         cwd: Some(rig.work.0.clone()),
     };
-    ops::plan_bare_add(&ctx, &connect(plane, dir), &roots, target, subscribe)
+    ops::plan_bare_add(&ctx, &connect(plane, dir), &roots, target, subscribe, false)
 }
 
 /// A SECOND connected workspace, on its own server — what makes a bare name ambiguous across

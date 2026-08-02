@@ -673,6 +673,7 @@ fn run_command(json: bool, workspace: Option<String>, command: Command, bare: bo
                             &roots,
                             &name,
                             no_selectors,
+                            global,
                         ) {
                             // Nothing local carries the name and exactly ONE workspace publishes
                             // it: record the canonical reference through the ordinary reference

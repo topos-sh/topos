@@ -88,34 +88,20 @@ fn next_actions(err: &ClientError) -> Vec<NextAction> {
             ..
         } => {
             let mut out = vec![disambiguate_with_list()];
-            out.extend(hint.references.iter().map(|reference| {
-                crate::actions::next_action(
-                    ActionCode::from("RUN_COMMAND".to_owned()),
-                    vec![
-                        "topos".into(),
-                        "add".into(),
-                        reference.clone(),
-                        "--json".into(),
-                    ],
-                )
-            }));
+            out.extend(
+                hint.references
+                    .iter()
+                    .map(|reference| subscribe_action(reference, hint.global)),
+            );
             out
         }
         // Several workspaces publish the name: one executable subscribe per spelling, so the
         // agent picks a reference instead of re-parsing the sentence that listed them.
-        ClientError::AmbiguousWorkspace { references, .. } => references
+        ClientError::AmbiguousWorkspace {
+            references, global, ..
+        } => references
             .iter()
-            .map(|reference| {
-                crate::actions::next_action(
-                    ActionCode::from("RUN_COMMAND".to_owned()),
-                    vec![
-                        "topos".into(),
-                        "add".into(),
-                        reference.clone(),
-                        "--json".into(),
-                    ],
-                )
-            })
+            .map(|reference| subscribe_action(reference, *global))
             .collect(),
         // Every "look at the discovered inventory to resolve this" error points the agent at `list` — the
         // ambiguity shapes plus the not-found cases from `add <skill>` name resolution.
@@ -273,6 +259,19 @@ fn disambiguate_with_list() -> NextAction {
         ActionCode::DisambiguateName,
         vec!["topos".into(), "list".into(), "--json".into()],
     )
+}
+
+/// One runnable subscribe for a workspace-disambiguation refusal — carrying the refused
+/// invocation's `-g`, so following the action lands the row in the scope that was asked, never
+/// silently the other one.
+fn subscribe_action(reference: &str, global: bool) -> NextAction {
+    let mut argv = vec!["topos".to_owned(), "add".to_owned()];
+    if global {
+        argv.push("-g".to_owned());
+    }
+    argv.push(reference.to_owned());
+    argv.push("--json".to_owned());
+    crate::actions::next_action(ActionCode::from("RUN_COMMAND".to_owned()), argv)
 }
 
 /// The STATIC command spellings a refusal's prose may name, each with its READY argv — the whole

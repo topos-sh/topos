@@ -943,6 +943,7 @@ fn the_bare_name_refusals_match_their_committed_envelopes() {
                 "topos.sh/acme/code-review".to_owned(),
                 "topos.sh/beta/code-review".to_owned(),
             ],
+            global: false,
         },
     );
     // The LOCAL ambiguity with the same-name disclosure: the inventory read still resolves the
@@ -960,8 +961,60 @@ fn the_bare_name_refusals_match_their_committed_envelopes() {
             workspace: Some(crate::error::WorkspaceHint {
                 references: vec!["topos.sh/acme/code-review".to_owned()],
                 identical: true,
+                global: false,
             }),
         },
+    );
+}
+
+#[test]
+fn a_global_add_refusal_keeps_g_in_every_spelled_follow_up() {
+    // `add -g <name>` refused: following a spelled subscribe must land the row machine-wide, not
+    // silently in this folder's manifest — both the prose and every runnable argv carry `-g`.
+    let err = crate::error::ClientError::AmbiguousWorkspace {
+        name: "code-review".to_owned(),
+        references: vec![
+            "topos.sh/acme/code-review".to_owned(),
+            "topos.sh/beta/code-review".to_owned(),
+        ],
+        global: true,
+    };
+    assert!(
+        err.to_string().contains("`topos add -g <reference>`"),
+        "{err}"
+    );
+    let envelope = crate::render::err_envelope("add", &err);
+    for action in &envelope.next_actions {
+        assert_eq!(action.argv[2], "-g", "{:?}", action.argv);
+    }
+
+    let hinted = crate::error::ClientError::AmbiguousScope {
+        name: "code-review".to_owned(),
+        harness: "claude-code".to_owned(),
+        paths: vec!["/home/ada/.claude/skills/code-review".to_owned()],
+        workspace: Some(crate::error::WorkspaceHint {
+            references: vec!["topos.sh/acme/code-review".to_owned()],
+            identical: false,
+            global: true,
+        }),
+    };
+    assert!(
+        hinted
+            .to_string()
+            .contains("`topos add -g topos.sh/acme/code-review`"),
+        "{hinted}"
+    );
+    let envelope = crate::render::err_envelope("add", &hinted);
+    let subscribe = envelope.next_actions.last().expect("the subscribe rides");
+    assert_eq!(
+        subscribe.argv,
+        vec![
+            "topos".to_owned(),
+            "add".to_owned(),
+            "-g".to_owned(),
+            "topos.sh/acme/code-review".to_owned(),
+            "--json".to_owned(),
+        ]
     );
 }
 
