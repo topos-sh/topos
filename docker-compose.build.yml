@@ -1,0 +1,29 @@
+# Build BOTH application images from this checkout instead of pulling the released ones — for
+# contributors, for a patched tree, and for the compose smoke test that proves the real deploy
+# artifacts still build and boot.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
+#
+# An override, not a second stack: `docker-compose.yml` stays the ONE deployment file, and everything
+# about the topology — the internal-only plane, the env contract, the volumes — is defined there and
+# inherited here. This file adds exactly the `build:` blocks it drops.
+#
+# The built images take the SAME names and tag as the pinned ones (compose tags a build with the
+# service's `image:`), so a later plain `docker compose up` reuses what you built here rather than
+# pulling. That is the intent while you work on a branch; run `docker compose pull` to get back to the
+# released bytes.
+#
+# Both builds take the REPO ROOT as their context — the web image reads files that live outside `web/`
+# (the vault OpenAPI contract, the installer, the built-in skill), so a `web/`-scoped context cannot
+# build it.
+
+services:
+  plane:
+    build:
+      context: .
+      dockerfile: Dockerfile
+
+  web:
+    build:
+      context: .
+      dockerfile: web/Dockerfile

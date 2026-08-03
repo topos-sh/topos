@@ -24,7 +24,9 @@ export TOPOS_WORKSPACE_NAME="smoke-team"
 # production path, so it overrides them exactly as the compose header tells an operator to.
 export TOPOS_WEB_AUTH_SECRET="smoke-auth-secret-$$-0123456789abcdef0123456789abcdef"
 export TOPOS_INTERNAL_TOKEN="smoke-internal-token-$$-0123456789abcdef"
-compose() { docker compose -p "$PROJECT" "$@"; }
+# The BUILD override: the smoke's whole point is proving that THIS tree's images build and boot, so it
+# never pulls the released ones the plain compose file pins.
+compose() { docker compose -p "$PROJECT" -f docker-compose.yml -f docker-compose.build.yml "$@"; }
 cleanup() { compose down -v --remove-orphans >/dev/null 2>&1 || true; rm -f "$COOKIES"; }
 COOKIES="$(mktemp)"
 trap cleanup EXIT

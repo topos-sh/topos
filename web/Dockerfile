@@ -26,11 +26,14 @@ RUN bun install --frozen-lockfile
 #     (scripts/gen-plane-types.mjs resolves it as <web>/../contracts/openapi/openapi.json).
 #   ../scripts/install.sh — the bytes `GET /install` serves (env.server.ts INSTALL_SH_PATH default
 #     `../scripts/install.sh`, resolved against the process cwd = this WORKDIR).
+#   ../docker-compose.yml — the bytes `GET /compose.yml` serves, so a server hands out the very
+#     deployment file that stands up its own release (COMPOSE_YML_PATH, same resolution rule).
 #   ../skills/topos — the built-in skill's three files, which the `.well-known/agent-skills`
 #     discovery lane reads at request time (env.server.ts BUILTIN_SKILL_DIR default
 #     `../skills/topos`). Without it that lane throws on every unauthenticated request.
 COPY contracts/openapi/openapi.json /app/contracts/openapi/openapi.json
 COPY scripts/install.sh /app/scripts/install.sh
+COPY docker-compose.yml /app/docker-compose.yml
 COPY skills/ /app/skills/
 
 # The app source (web/node_modules + web/build are excluded by .dockerignore, so the host tree never
@@ -59,7 +62,8 @@ ENV NODE_ENV=production \
     APP_ENV=production \
     PORT=3000 \
     HOST=0.0.0.0 \
-    INSTALL_SH_PATH=/app/scripts/install.sh
+    INSTALL_SH_PATH=/app/scripts/install.sh \
+    COMPOSE_YML_PATH=/app/docker-compose.yml
 
 # Unprivileged user (uid 10001, matching the plane image). react-router-serve reads the build + deps, and
 # the app writes nothing to disk (its state is Postgres + the vault), so a read-only-friendly non-root
@@ -70,13 +74,14 @@ RUN useradd --system --uid 10001 --create-home --home-dir /home/topos topos
 # package.json (`"type": "module"` + the `start` script), and the DRIZZLE MIGRATIONS — the boot
 # migrator (app/lib/db/migrate.server.ts) runs at process start, resolves `<cwd>/drizzle`, and
 # fails LOUDLY when it is absent, so an image without that folder never comes up (the compose
-# smoke renders a document to pin this). The installer bytes ride along at the mirrored sibling
-# path the ENV points at. No app source, no config file is needed at runtime.
+# smoke renders a document to pin this). The installer and compose bytes ride along at the mirrored
+# sibling paths the ENVs point at. No app source, no config file is needed at runtime.
 COPY --from=builder --chown=10001:10001 /app/web/build ./build
 COPY --from=builder --chown=10001:10001 /app/web/node_modules ./node_modules
 COPY --from=builder --chown=10001:10001 /app/web/package.json ./package.json
 COPY --from=builder --chown=10001:10001 /app/web/drizzle ./drizzle
 COPY --from=builder --chown=10001:10001 /app/scripts/install.sh /app/scripts/install.sh
+COPY --from=builder --chown=10001:10001 /app/docker-compose.yml /app/docker-compose.yml
 COPY --from=builder --chown=10001:10001 /app/skills /app/skills
 
 USER topos

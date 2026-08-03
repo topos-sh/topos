@@ -5,16 +5,17 @@ sidebar_label: Self-host
 ---
 
 ```bash title="Try it on a laptop"
-git clone https://github.com/topos-sh/topos && cd topos
+curl -fsSL https://topos.sh/compose.yml -o docker-compose.yml
 printf 'TOPOS_WEB_AUTH_SECRET=%s\nTOPOS_INTERNAL_TOKEN=%s\n' \
   "$(openssl rand -hex 32)" "$(openssl rand -hex 32)" > .env
-docker compose up --build
+docker compose up -d
 ```
 
-Then open `http://localhost:3000` **in a browser** — the first browser request is what mints the
-workspace and prints the setup link to the logs. Open that link, create the first account, and
-connect a machine with `topos login http://localhost:3000`: the CLI accepts an explicit `http://`
-address for localhost.
+That is the whole install: one file, two prebuilt images, no clone and no build. Then open
+`http://localhost:3000` **in a browser** — the first browser request is what mints the workspace and
+prints the setup link to the logs. Open that link, create the first account, and connect a machine
+with `topos login http://localhost:3000`: the CLI accepts an explicit `http://` address for
+localhost.
 
 <Note>
   The two secrets are required even for a laptop try-out — the app refuses to start on the
@@ -41,6 +42,35 @@ Three services, **one published port**:
   **`plane` must never be externally reachable.** It publishes no port by design. Do not add
   one, and do not proxy it. The database likewise publishes no port.
 </Warning>
+
+### The images
+
+Both application images are published to GHCR, multi-arch (`linux/amd64` and `linux/arm64`), built
+by the public repository's release workflow:
+
+| Image | What it is |
+|---|---|
+| `ghcr.io/topos-sh/topos-web` | The product app — the surface you reach |
+| `ghcr.io/topos-sh/topos-plane` | Byte custody, internal-only |
+
+One `TOPOS_VERSION` pins both, and the compose file ships pinned to a release rather than tracking
+`latest`. That is deliberate: your server and your team's CLIs speak one wire, so a server that
+jumped forward on its own would break machines you cannot see. Upgrading is a decision you make —
+see [Upgrades](#upgrades).
+
+Every release publishes an immutable digest and an SBOM per image, and the manifests carry build
+provenance you can check against the workflow that produced them:
+
+```bash
+gh attestation verify oci://ghcr.io/topos-sh/topos-web:v0.1.20 --repo topos-sh/topos
+```
+
+To run a patched tree instead, clone the repository and add the build override — same file, same
+topology, images built from your checkout:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
+```
 
 ## A real deployment
 
@@ -72,11 +102,11 @@ Three services, **one published port**:
   </Step>
   <Step title="Bring it up">
     ```bash
-    docker compose up -d --build
+    docker compose up -d
     ```
 
-    Both images build from source, the database provisions its roles and grants on first boot of a
-    fresh volume, and each application migrates its own schema at startup, before serving anything.
+    Both images are pulled, the database provisions its roles and grants on first boot of a fresh
+    volume, and each application migrates its own schema at startup, before serving anything.
   </Step>
   <Step title="Terminate TLS at your proxy">
     Forward to `http://web:3000`. Caddy, for example:
@@ -121,12 +151,13 @@ Three services, **one published port**:
 ```bash
 curl -fsS https://topos.example.com/healthz
 curl -fsS -H 'Accept: application/json' https://topos.example.com
-bash scripts/compose-smoke.sh
 ```
 
-Liveness answers `{"ok":true}`; the protocol card answers
-`{"schema_version":1,"card":"topos-protocol-card","api_base_url":"https://topos.example.com/api"}`;
-and the last is the same end-to-end smoke the repo's CI runs.
+Liveness answers `{"ok":true}`, and the protocol card answers
+`{"schema_version":1,"card":"topos-protocol-card","api_base_url":"https://topos.example.com/api"}`.
+From a clone, `bash scripts/compose-smoke.sh` runs the same end-to-end smoke the repo's CI does —
+it builds the images from that tree and boots a throwaway stack, so it proves a source tree rather
+than your running deployment.
 
 <Warning>
   If `api_base_url` comes back as `http://…` or `localhost`, `TOPOS_PUBLIC_URL` is unset or wrong,
@@ -139,8 +170,8 @@ and the last is the same end-to-end smoke the repo's CI runs.
   **Probing gotcha:** a non-browser fetch of any *page* gets the constant protocol card, not HTML —
   that is how clients discover the API base. Uptime checks and scrapers that expect a page must
   send `Accept: text/html`. The resource routes are the exceptions, answering any client with their
-  own payload: `/healthz`, `/install`, `/llms.txt`, and the documentation's machine surfaces
-  (`/docs.md`, `/docs/<page>.md`, `/docs/llms.txt`).
+  own payload: `/healthz`, `/install`, `/compose.yml`, `/llms.txt`, and the documentation's machine
+  surfaces (`/docs.md`, `/docs/<page>.md`, `/docs/llms.txt`).
 </Note>
 
 ## Mail
@@ -186,21 +217,22 @@ whole-catalog export are all on **Settings → General**, owner-only — see
 
 ## Upgrades
 
+An upgrade is a version and two commands. Set `TOPOS_VERSION` in your `.env` to the
+[release](https://github.com/topos-sh/topos/releases) you want, then:
+
 ```bash
-git pull
-docker compose up -d --build
+docker compose pull
+docker compose up -d
 docker compose logs -f web
 ```
 
-Or `git checkout v0.1.9` for a specific tag; the last command confirms the boot migration ran.
-Both applications migrate their own schema at boot, before binding a port — no migration command
-to run by hand, and a broken migration crashes loudly rather than serving an unmigrated database.
-Only `plane` has a published image (`ghcr.io/topos-sh/topos-plane`); the web app builds from
-source, the slow part of an upgrade on a small box.
+The last command confirms the boot migration ran. Both applications migrate their own schema at
+boot, before binding a port — no migration command to run by hand, and a broken migration crashes
+loudly rather than serving an unmigrated database.
 
 **Back up first** — migrations apply automatically and there is no automated downgrade. Rolling
-back is: stop the stack, restore the pre-upgrade backup, check out the previous tag, rebuild, and
-pin clients to match (`topos self-update --version <tag>`).
+back is: stop the stack, restore the pre-upgrade backup, set `TOPOS_VERSION` back to the previous
+release, `pull` and `up -d`, and pin clients to match (`topos self-update --version <tag>`).
 
 There is no negotiated client-server compatibility mechanism — keep the CLI and the server on the
 same `0.x` line, and after a server upgrade tell people to run `topos self-update`.
@@ -243,7 +275,8 @@ again), or your `.env` (rotating `TOPOS_WEB_AUTH_SECRET` signs every browser out
 ## Bring your own Postgres
 
 To use a managed database instead of the bundled `db`, run the same provisioning script that
-database runs at first boot (idempotent, needs a superuser once):
+database runs at first boot (idempotent, needs a superuser once — fetch it with
+`curl -fsSLO https://raw.githubusercontent.com/topos-sh/topos/main/scripts/compose-init-db.sh`):
 
 ```bash
 POSTGRES_USER=<superuser> POSTGRES_DB=topos \
@@ -284,9 +317,6 @@ documented in the compose file and `topos-plane --help`.
 
 ## Known rough edges
 
-- **No published web image.** Only `plane` ships as `ghcr.io/topos-sh/topos-plane` (and the bundled
-  compose file builds even that from source); the app builds from source on every upgrade. Building
-  and pushing your own image in CI is a reasonable optimization.
 - **No health checks for `web` or `plane` in the compose file** — only the database has one, so on
   a very first boot the app can render before `plane` finishes migrating. It settles on its own.
 - **No metrics endpoint, no `/readyz`,** and no structured JSON logging on the web tier.
