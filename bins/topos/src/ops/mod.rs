@@ -65,7 +65,7 @@ pub(crate) use auth::{AuthConnectors, AuthStatusData, status};
 pub(crate) use builtin::{
     ensure_with as builtin_ensure_with, marker_in_frontmatter as builtin_marker_in_frontmatter,
 };
-pub(crate) use diff::{DiffBudget, diff};
+pub(crate) use diff::{DiffBudget, diff, diff_resolved};
 pub(crate) use fmt::fmt_manifest;
 pub(crate) use init::init;
 pub(crate) use inventory::ScopeView;
@@ -265,6 +265,74 @@ fn resolve_skill_stored(
     project_fallback.ok_or(ClientError::NoSuchSkill {
         name: name.to_owned(),
     })
+}
+
+/// Which store(s) a TARGETED verb resolves a name in — the scope flag as the resolver sees it.
+/// The listing verbs read the same two answers off their `--all`/`-g` view; the targeted ones
+/// (`update <name>`, a go-back, `update --reset`) need it because the store they resolve in is the
+/// store they then WRITE.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum StoreScope {
+    /// Bare: act where you stand — [`resolve_skill_here`].
+    #[default]
+    Here,
+    /// `-g`: the MACHINE store alone, even from inside a project. A name only a project store
+    /// holds is then an honest miss — never silently answered by, or applied to, a project copy
+    /// the flag deliberately excluded.
+    Machine,
+}
+
+/// Resolve a NAME in the scope the invocation SELECTED (see [`StoreScope`]), returning the OWNING
+/// store's layout beside the hit — the layout every per-skill read and write then rides.
+fn resolve_skill_in_scope(
+    ctx: &Ctx<'_>,
+    name: &str,
+    workspace: Option<&str>,
+    scope: StoreScope,
+) -> Result<(crate::sidecar::Layout, SkillId, Lock), ClientError> {
+    match scope {
+        StoreScope::Here => resolve_skill_here(ctx, name, workspace),
+        StoreScope::Machine => {
+            let (id, lock) = resolve_skill_in_workspace(ctx, name, workspace)?;
+            Ok((ctx.layout.clone(), id, lock))
+        }
+    }
+}
+
+/// Resolve a NAME the way the invocation STANDS — the read/act-here rule: the cwd chain's project
+/// stores NEAREST FIRST, then the machine's home store. A checkout that holds the name answers for
+/// it, drafted or not: from inside a project, `log`/`diff`/a bare targeted `update` are about the
+/// copy you are standing in, and a same-named machine twin is a different bundle's history.
+///
+/// The DRAFT preference [`resolve_skill_stored`] carries is deliberately absent here. That rule
+/// exists for one verb — publish must ship the EDITED copy of a bundle held cleanly at both scopes
+/// — and applying it to reads would make a stray machine-side edit silently re-point `log`, `diff`,
+/// and a targeted update at the other scope's copy. Nearness is the whole rule; nothing else is
+/// consulted.
+fn resolve_skill_here(
+    ctx: &Ctx<'_>,
+    name: &str,
+    workspace: Option<&str>,
+) -> Result<(crate::sidecar::Layout, SkillId, Lock), ClientError> {
+    if let Some(roots) = &ctx.roots
+        && let Some(cwd) = roots.cwd.as_deref()
+    {
+        for dir in crate::manifest::scopes::manifest_dirs_up(ctx.fs, cwd, Some(&roots.home)) {
+            let Some(playout) = crate::sidecar::existing_project_store(ctx.fs, &dir) else {
+                continue;
+            };
+            let pctx = pull::ctx_with_layout(ctx, &playout);
+            match resolve_skill_in_workspace(&pctx, name, workspace) {
+                Ok((id, lock)) => return Ok((playout, id, lock)),
+                // Not in THIS store — keep walking out. Anything else (an ambiguity in the store
+                // you stand in, an unreadable store) is this scope's answer and is reported.
+                Err(ClientError::NoSuchSkill { .. }) => {}
+                Err(e) => return Err(e),
+            }
+        }
+    }
+    let (id, lock) = resolve_skill_in_workspace(ctx, name, workspace)?;
+    Ok((ctx.layout.clone(), id, lock))
 }
 
 /// Whether a store's copy of `sid` carries LOCAL EDITS (any scanned placement modified against

@@ -72,16 +72,31 @@ pub(crate) fn diff(
     r#ref: Option<&str>,
     budget: DiffBudget,
 ) -> Result<DiffData, ClientError> {
-    // Resolve across BOTH stores: a bundle a project `topos.toml` delivers keeps its custody in the
-    // checkout's own store, and a `diff` run from inside that checkout must read THAT copy — not a
-    // same-named machine twin, and not a not-found. Every store/doc/scan read below rides `sctx`
-    // (the owning store's layout); the plane and follow seams are machine-level and stay as they are.
-    let (layout, id, lock) = super::resolve_skill_stored(ctx, skill, None)?;
-    let sctx = super::pull::ctx_with_layout(ctx, &layout);
-    let sp = layout.published(&id);
+    // Resolve WHERE YOU STAND: a bundle a project `topos.toml` delivers keeps its custody in the
+    // checkout's own store, and a `diff` run from inside that checkout is about THAT copy — not a
+    // same-named machine twin, and not a not-found.
+    let (layout, id, lock) = super::resolve_skill_here(ctx, skill, None)?;
+    diff_resolved(ctx, &layout, &id, &lock, r#ref, budget)
+}
+
+/// [`diff`] over an ALREADY-RESOLVED copy — the entry the reset describe uses, so the loss it
+/// discloses is measured against exactly the store the discard will act on (a second, independent
+/// resolution could land on the other scope's copy and describe bytes nobody is about to lose).
+/// Every store/doc/scan read rides the OWNING layout; the plane and follow seams are machine-level
+/// and stay as they are.
+pub(crate) fn diff_resolved(
+    ctx: &Ctx<'_>,
+    layout: &sidecar::Layout,
+    id: &crate::id::SkillId,
+    lock: &Lock,
+    r#ref: Option<&str>,
+    budget: DiffBudget,
+) -> Result<DiffData, ClientError> {
+    let sctx = super::pull::ctx_with_layout(ctx, layout);
+    let sp = layout.published(id);
 
     let Some(reference) = r#ref else {
-        return diff_draft_vs_current(&sctx, &sp, &lock, budget);
+        return diff_draft_vs_current(&sctx, &sp, lock, budget);
     };
 
     // Parse the ref: `<a>..<b>` is a range; otherwise a single endpoint compared against `current` (so a
@@ -91,8 +106,8 @@ pub(crate) fn diff(
         None => ("current".to_owned(), reference.to_owned()),
     };
 
-    let base = resolve_endpoint(&sctx, &id, &from)?;
-    let target = resolve_endpoint(&sctx, &id, &to)?;
+    let base = resolve_endpoint(&sctx, id, &from)?;
+    let target = resolve_endpoint(&sctx, id, &to)?;
 
     let sections = unified_diff_sections(&diff_files(&base.files), &diff_files(&target.files));
     let (diff, truncated, files) = apply_budget(sections, budget);

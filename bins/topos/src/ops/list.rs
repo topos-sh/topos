@@ -92,7 +92,9 @@ pub(crate) type SessionDirectory<'a> = &'a dyn Fn(&Session) -> Box<dyn Directory
 
 /// Inventory the machine under a full [`ListRequest`], row-capped by `page` (applied PER BUCKET
 /// with a [`BucketTruncation`] marker per capped bucket; the buckets are the scope names plus
-/// `untracked` and `remote`).
+/// `untracked`, `remote` and `agent`). A bucket that NESTS rows is paged at its unbounded axis —
+/// `--remote` at each workspace's skills, `-a` at each dir's entries — with one summed marker, so
+/// no view can answer with an unbounded row count.
 ///
 /// # Errors
 /// [`ClientError::TargetNotFound`] when a deep-dive name resolves nowhere;
@@ -141,7 +143,22 @@ pub(crate) fn list_with(
 
     // The agent-eye view — deliberately spans both scopes.
     if let Some(slug) = &req.agent {
-        data.agent_view = Some(agent_view(&resolved, discover.as_ref(), slug)?);
+        let mut view = agent_view(&resolved, discover.as_ref(), slug)?;
+        // The page applies to each DIR's entries (the unbounded axis — a skills dir holds however
+        // many folders the person put there); the dirs themselves are a handful and ride whole. One
+        // `agent` marker sums the drop across them, so a paged view never silently shortens a dir.
+        if page.is_active() {
+            let mut shown = 0;
+            let mut total = 0;
+            for dir in &mut view.dirs {
+                let (s, t) = page.apply(&mut dir.entries);
+                shown += s;
+                total += t;
+            }
+            mark("agent", (shown, total), &mut truncated);
+        }
+        data.agent_view = Some(view);
+        data.truncated = truncated;
         return Ok(ListOutcome {
             data,
             warnings,
@@ -159,8 +176,20 @@ pub(crate) fn list_with(
             connect,
             &mut warnings,
         )?;
+        // The page applies to each workspace's SKILLS — the unbounded axis. Paging the workspace
+        // WRAPPERS instead left every nested catalog whole, so a `--limit 5` over one workspace
+        // holding 400 skills emitted all 400. The channels ride whole: a workspace has a handful,
+        // and they are the index a person pages the skills WITH. One `remote` marker sums the drop
+        // across workspaces.
         if page.is_active() {
-            mark("remote", page.apply(&mut data.remote), &mut truncated);
+            let mut shown = 0;
+            let mut total = 0;
+            for ws in &mut data.remote {
+                let (s, t) = page.apply(&mut ws.skills);
+                shown += s;
+                total += t;
+            }
+            mark("remote", (shown, total), &mut truncated);
         }
         data.truncated = truncated;
         return Ok(ListOutcome {
@@ -1908,6 +1937,189 @@ mod tests {
             out.warnings[0].contains("workspace acme") && out.warnings[0].contains("skipped"),
             "{}",
             out.warnings[0]
+        );
+    }
+
+    /// The page reaches the rows a nested view actually holds. `--remote` used to page the
+    /// per-workspace WRAPPERS — one row per workspace, so a `--limit` over a single workspace
+    /// capped nothing and the nested catalog came back whole. The cap now lands on each
+    /// workspace's skills, with ONE summed marker; the channels (a handful, and the index the
+    /// skills are read WITH) stay whole.
+    #[test]
+    fn remote_pages_catalog_rows_not_workspace_wrappers() {
+        let home = TempHome::new();
+        let repo = lay_project(&home);
+        home.session(
+            "topos.sh",
+            "w_acme",
+            "acme",
+            crate::sessions::SESSION_ACTIVE,
+        );
+        home.cache("w_acme", "topos.sh", "acme", Vec::new(), Vec::new());
+        let mut channels = HashMap::new();
+        channels.insert(
+            "w_acme".to_owned(),
+            WireChannelIndex {
+                channels: vec![
+                    WireChannelEntry {
+                        name: "backend".to_owned(),
+                        mode: "open".to_owned(),
+                        builtin: false,
+                        included: true,
+                        skills: vec![],
+                    },
+                    WireChannelEntry {
+                        name: "everyone".to_owned(),
+                        mode: "open".to_owned(),
+                        builtin: true,
+                        included: true,
+                        skills: vec![],
+                    },
+                ],
+            },
+        );
+        let mut skills = HashMap::new();
+        skills.insert(
+            "w_acme".to_owned(),
+            WireSkillIndex {
+                skills: vec![
+                    catalog_entry("deploy", &"d".repeat(64)),
+                    catalog_entry("notes", &"d".repeat(64)),
+                    catalog_entry("triage", &"d".repeat(64)),
+                ],
+            },
+        );
+        let fake = FakeDirectory {
+            channels,
+            skills,
+            fail: false,
+        };
+        let out = with_ctx(&home, Some(&repo), |ctx| {
+            list_with(
+                ctx,
+                &ListRequest {
+                    remote: true,
+                    ..request()
+                },
+                None,
+                Some(&|_s: &Session| -> Box<dyn DirectorySource> { Box::new(fake.clone()) }),
+                super::super::RowPage {
+                    offset: 0,
+                    limit: Some(2),
+                },
+            )
+        })
+        .unwrap();
+        let ws = &out.data.remote[0];
+        assert_eq!(ws.skills.len(), 2, "the catalog rows are capped");
+        assert_eq!(ws.channels.len(), 2, "the channels ride whole");
+        assert_eq!(out.data.truncated.len(), 1);
+        let t = &out.data.truncated[0];
+        assert_eq!((t.bucket.as_str(), t.shown, t.total), ("remote", 2, 3));
+    }
+
+    /// The agent view is paged at each DIR's entries, with one summed `agent` marker — the same
+    /// promise every other bucket makes. (Its row SELECTORS are refused at the argv boundary; see
+    /// the cli suite.)
+    #[test]
+    fn the_agent_view_pages_dir_entries() {
+        let home = TempHome::new();
+        let cwd = home.0.join("repo");
+        std::fs::create_dir_all(&cwd).unwrap();
+        std::fs::write(cwd.join(crate::manifest::MANIFEST_FILE), "[bundles]\n").unwrap();
+        // Three folders in the agent's own skills dir — more than the page allows.
+        let probe_home = TempHome::new();
+        for name in ["alpha", "beta", "gamma"] {
+            let dir = probe_home.0.join(".claude/skills").join(name);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("SKILL.md"), b"# s\n").unwrap();
+        }
+        let out = with_ctx(&home, Some(&cwd), |ctx| {
+            list_with(
+                ctx,
+                &ListRequest {
+                    agent: Some("claude-code".to_owned()),
+                    ..request()
+                },
+                Some(DiscoveryRoots {
+                    home: probe_home.0.clone(),
+                    cwd: Some(cwd.clone()),
+                }),
+                None,
+                super::super::RowPage {
+                    offset: 0,
+                    limit: Some(2),
+                },
+            )
+        })
+        .unwrap();
+        let view = out.data.agent_view.expect("an agent view");
+        let user_dir = view
+            .dirs
+            .iter()
+            .find(|d| d.scope == "user" && d.path.ends_with(".claude/skills"))
+            .expect("the claude-code user dir");
+        assert_eq!(user_dir.entries.len(), 2, "the dir's entries are capped");
+        assert_eq!(out.data.truncated.len(), 1);
+        let t = &out.data.truncated[0];
+        assert_eq!((t.bucket.as_str(), t.shown, t.total), ("agent", 2, 3));
+    }
+
+    /// A FOCUSED view still honors `--footprint` on the TTY. Both focused arms used to return
+    /// before the shared tail, so `list <name> --footprint` printed no footprint at all while the
+    /// `--json` payload carried it — a flag whose answer depended on which view asked.
+    #[test]
+    fn the_focused_tty_views_still_print_the_footprint() {
+        use topos_types::results::{AgentView, AgentViewDir, ListDetail};
+
+        let footprint = Some(vec!["/home/me/.topos/state".to_owned()]);
+        let dive = ListOutcome {
+            data: ListData {
+                detail: Some(ListDetail {
+                    name: "deploy".to_owned(),
+                    source_file: None,
+                    source_key: None,
+                    feed: None,
+                    attribution: None,
+                    version: None,
+                    pin: None,
+                    placements: Vec::new(),
+                    state: StatusItemState::Applied,
+                }),
+                footprint: footprint.clone(),
+                ..ListData::default()
+            },
+            warnings: Vec::new(),
+            untracked_view: false,
+        };
+        let rendered = crate::render::list_tty(&dive);
+        assert!(rendered.contains("deploy"), "{rendered}");
+        assert!(
+            rendered.contains("Footprint: 1 paths") && rendered.contains("/home/me/.topos/state"),
+            "the deep dive prints the footprint: {rendered}"
+        );
+
+        let agent = ListOutcome {
+            data: ListData {
+                agent_view: Some(AgentView {
+                    agent: "claude-code".to_owned(),
+                    agent_name: "Claude Code".to_owned(),
+                    dirs: vec![AgentViewDir {
+                        path: "/home/me/.claude/skills".to_owned(),
+                        scope: "user".to_owned(),
+                        entries: Vec::new(),
+                    }],
+                }),
+                footprint,
+                ..ListData::default()
+            },
+            warnings: Vec::new(),
+            untracked_view: false,
+        };
+        let rendered = crate::render::list_tty(&agent);
+        assert!(
+            rendered.contains("Footprint: 1 paths") && rendered.contains("/home/me/.topos/state"),
+            "the agent view prints the footprint: {rendered}"
         );
     }
 }

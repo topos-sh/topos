@@ -124,12 +124,7 @@ fn next_actions(command: &str, argv: &[String], err: &ClientError) -> Vec<NextAc
         // A stale base — update to rebase, then re-show the diff and retry. Never a silent retry.
         ClientError::Conflict { skill, .. } => vec![crate::actions::next_action(
             ActionCode::RebaseAndRetry,
-            vec![
-                "topos".into(),
-                "update".into(),
-                skill.clone(),
-                "--json".into(),
-            ],
+            update_rebuild(command, argv, skill, &[]),
         )],
         // An unresolved author merge blocks publish. The block only ever exists with a RECORDED
         // conflict, and a plain `update <skill>` merely RE-DISCLOSES a recorded conflict (it never
@@ -140,23 +135,11 @@ fn next_actions(command: &str, argv: &[String], err: &ClientError) -> Vec<NextAc
         ClientError::PublishBlocked { skill } => vec![
             crate::actions::next_action(
                 ActionCode::ResolveDivergedDraft,
-                vec![
-                    "topos".into(),
-                    "update".into(),
-                    skill.clone(),
-                    "--onto-current".into(),
-                    "--json".into(),
-                ],
+                update_rebuild(command, argv, skill, &["--onto-current"]),
             ),
             crate::actions::next_action(
                 ActionCode::ResolveDivergedDraft,
-                vec![
-                    "topos".into(),
-                    "update".into(),
-                    skill.clone(),
-                    "--reset".into(),
-                    "--json".into(),
-                ],
+                update_rebuild(command, argv, skill, &["--reset"]),
             ),
         ],
         // A denial is not self-service (ask an owner to invite/roster you, or contact an admin) — the
@@ -230,13 +213,7 @@ fn next_actions(command: &str, argv: &[String], err: &ClientError) -> Vec<NextAc
         // bare `--reset` DESCRIBES — nothing is dropped without its own `--yes`).
         ClientError::PlacementsDiverged { skill, .. } => vec![crate::actions::next_action(
             ActionCode::ResolveDivergedDraft,
-            vec![
-                "topos".into(),
-                "update".into(),
-                skill.clone(),
-                "--reset".into(),
-                "--json".into(),
-            ],
+            update_rebuild(command, argv, skill, &["--reset"]),
         )],
         // The value-carrying fixes, TYPED: the runtime value rides as exactly ONE argv element,
         // straight from the error variant's own field — never re-tokenized out of prose, so a
@@ -346,6 +323,22 @@ fn is_lone_target_invocation(argv: &[String]) -> bool {
         }
     }
     verb_seen && positionals == 1
+}
+
+/// A rebuilt `topos update <skill> …` way-out that PRESERVES the refused invocation's scope: an
+/// `update -g` that refused must be offered a `-g` resolution, or the offered command would act on
+/// the OTHER scope's copy (the project's, from inside a checkout). The flag carries over only when
+/// the refused verb was `update` itself and spelled it — a publish-origin refusal has no scope
+/// flag to preserve, and inventing one would change what the user asked.
+fn update_rebuild(command: &str, argv: &[String], skill: &str, extras: &[&str]) -> Vec<String> {
+    let mut out = vec!["topos".to_owned(), "update".to_owned()];
+    if command == "update" && argv.iter().any(|t| t == "-g" || t == "--global") {
+        out.push("-g".to_owned());
+    }
+    out.push(skill.to_owned());
+    out.extend(extras.iter().map(|s| (*s).to_owned()));
+    out.push("--json".to_owned());
+    out
 }
 
 /// The refused invocation re-spelled at the MACHINE scope — the user's OWN argv with `-g` inserted
@@ -898,13 +891,20 @@ pub(crate) fn list_tty(out: &ListOutcome) -> String {
     let data = &out.data;
     let mut s = String::new();
 
-    // The one-skill deep dive is the whole answer.
+    // The one-skill deep dive is the whole answer — plus the tail every list shares (a focused
+    // view still honors `--footprint`, and still says when a page dropped rows).
     if let Some(detail) = &data.detail {
-        return list_detail_tty(detail);
+        let mut s = list_detail_tty(detail);
+        s.push('\n');
+        push_list_tail(&mut s, out);
+        return s.trim_end().to_owned();
     }
     // So is the agent-eye view.
     if let Some(view) = &data.agent_view {
-        return agent_view_tty(view);
+        let mut s = agent_view_tty(view);
+        s.push('\n');
+        push_list_tail(&mut s, out);
+        return s.trim_end().to_owned();
     }
 
     if out.untracked_view {
@@ -1013,6 +1013,16 @@ pub(crate) fn list_tty(out: &ListOutcome) -> String {
         s.push_str("See what your workspaces offer: `topos list --remote`\n");
     }
 
+    push_list_tail(&mut s, out);
+    s.trim_end().to_owned()
+}
+
+/// The tail EVERY `list` shape ends with, focused views included: the paging markers, the isolated
+/// warnings, and the footprint. It is shared because a flag's answer must not depend on which view
+/// it was asked with — `list <name> --footprint` and `list -a <slug> --footprint` carry the
+/// footprint in `--json`, so they print it here too.
+fn push_list_tail(s: &mut String, out: &ListOutcome) {
+    let data = &out.data;
     // An explicit `--limit`/`--offset` page on the TTY: one line per capped bucket.
     for t in &data.truncated {
         s.push_str(&format!(
@@ -1035,7 +1045,6 @@ pub(crate) fn list_tty(out: &ListOutcome) -> String {
             s.push_str(&format!("  {p}\n"));
         }
     }
-    s.trim_end().to_owned()
 }
 
 /// One `--remote` catalog row: `<name>  <name>@<short>  <kind>  <adoption note>` (+ any
@@ -4314,6 +4323,39 @@ mod tests {
         assert!(
             named.starts_with("Logging in to topos.example.com/eng."),
             "{named}"
+        );
+    }
+
+    #[test]
+    fn a_rebuilt_update_way_out_preserves_the_refused_invocations_scope() {
+        use crate::error::ClientError;
+        let err = ClientError::PlacementsDiverged {
+            skill: "docs".into(),
+            paths: vec!["/x/a".into(), "/x/b".into()],
+        };
+        // An `update -g` that refused is offered a `-g` resolution — the bare spelling would act
+        // on the OTHER scope's copy from inside a checkout.
+        let argv: Vec<String> = ["update", "-g", "docs", "--reset"]
+            .iter()
+            .map(|s| (*s).to_owned())
+            .collect();
+        let actions = super::next_actions("update", &argv, &err);
+        assert_eq!(
+            actions[0].argv,
+            vec!["topos", "update", "-g", "docs", "--reset", "--json"]
+        );
+        // A publish-origin refusal has no scope flag to preserve.
+        let publish_argv: Vec<String> = ["publish", "docs"]
+            .iter()
+            .map(|s| (*s).to_owned())
+            .collect();
+        let blocked = ClientError::PublishBlocked {
+            skill: "docs".into(),
+        };
+        let actions = super::next_actions("publish", &publish_argv, &blocked);
+        assert_eq!(
+            actions[1].argv,
+            vec!["topos", "update", "docs", "--reset", "--json"]
         );
     }
 

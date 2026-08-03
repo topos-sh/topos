@@ -1143,10 +1143,24 @@ fn run_command(
             hook,
             rebuild,
         } => {
+            // The scope flag decides which STORE every targeted arm below resolves in — and, since
+            // the store it resolves in is the store it writes, which copy it acts on. It is
+            // computed here, ahead of the special modes: `-g` inside a project must mean the
+            // machine's copy for a reset and a go-back exactly as it does for the reconcile.
+            let store_scope = if global {
+                ops::StoreScope::Machine
+            } else {
+                ops::StoreScope::Here
+            };
             // `--reset` is its own two-phase discard verb (loss-led describe / `--yes` apply); it
             // does not flow through the reconcile and is never a `--quiet` hook shape.
             if reset {
-                return finish_reset(json, cmd_name, ops::reset(&ctx, &targets, yes), &diag);
+                return finish_reset(
+                    json,
+                    cmd_name,
+                    ops::reset(&ctx, &targets, yes, store_scope),
+                    &diag,
+                );
             }
             // The BARE sweep is the hook shape (the auto-update triggers all run `update --quiet`).
             // Hooks fire on every session-start-shaped event, so the quiet path passes a
@@ -1215,6 +1229,7 @@ fn run_command(
                         &ctx,
                         targets.into_iter().next(),
                         onto_current,
+                        store_scope,
                         None,
                         &ops::ReconcileOpts::default(),
                     )
@@ -2723,9 +2738,13 @@ fn emit_err(json: bool, command: &str, err: &ClientError, diag: &Diag<'_>) -> Ex
 /// after parsing). A skill LITERALLY named like `docs@abcdef12` is not lost to the go-back parse:
 /// [`pull_with_name_fallback`] retries the whole argument as the name when the pre-@ part resolves to
 /// no tracked skill.
+///
+/// `store` is the invocation's scope flag ([`ops::StoreScope`]) — carried onto the targeted scope so
+/// the mode resolves (and acts) in the store the flag named.
 fn build_pull_scope(
     skill: Option<String>,
     onto_current: bool,
+    store: ops::StoreScope,
 ) -> Result<ops::PullScope, ClientError> {
     let Some(arg) = skill else {
         if onto_current {
@@ -2749,6 +2768,7 @@ fn build_pull_scope(
             name: name.to_owned(),
             workspace: None,
             mode: ops::TargetMode::GoBack(vref),
+            store,
         });
     }
     Ok(ops::PullScope::One {
@@ -2759,6 +2779,7 @@ fn build_pull_scope(
         } else {
             ops::TargetMode::AcceptPending
         },
+        store,
     })
 }
 
@@ -2772,12 +2793,14 @@ pub(crate) fn pull_with_name_fallback(
     ctx: &Ctx<'_>,
     skill: Option<String>,
     onto_current: bool,
+    store: ops::StoreScope,
     delivery: Option<&dyn crate::plane::DeliverySource>,
     reconcile: &ops::ReconcileOpts,
 ) -> Result<ops::PullOutcome, ClientError> {
     let arg = skill.clone();
     let _ = (delivery, reconcile);
-    let first = build_pull_scope(skill, onto_current).and_then(|scope| ops::pull(ctx, scope));
+    let first =
+        build_pull_scope(skill, onto_current, store).and_then(|scope| ops::pull(ctx, scope));
     match first {
         Err(ClientError::NoSuchSkill { .. })
             if arg.as_ref().is_some_and(|a| {
@@ -2793,6 +2816,7 @@ pub(crate) fn pull_with_name_fallback(
                     name: arg.expect("guard checked Some"),
                     workspace: None,
                     mode: ops::TargetMode::AcceptPending,
+                    store,
                 },
             )
         }
@@ -2867,7 +2891,7 @@ mod tests {
         waiting_line,
     };
     use crate::ids::Clock;
-    use crate::ops::{PullScope, RowPage, TargetMode, VersionRef};
+    use crate::ops::{PullScope, RowPage, StoreScope, TargetMode, VersionRef};
 
     struct TestClock(u64);
     impl Clock for TestClock {
@@ -3093,12 +3117,12 @@ mod tests {
         // The full 64-hex suffix goes back (the long-standing shape).
         let full = format!("docs@{}", "ab".repeat(32));
         assert!(matches!(
-            build_pull_scope(Some(full), false).unwrap(),
+            build_pull_scope(Some(full), false, StoreScope::Here).unwrap(),
             PullScope::One { name, mode: TargetMode::GoBack(VersionRef::Full(_)), .. } if name == "docs"
         ));
         // A pasted 12-char short form is a go-back too — no more silent NO_SUCH_SKILL degradation.
         assert!(matches!(
-            build_pull_scope(Some("docs@ab12cd34ef56".to_owned()), false).unwrap(),
+            build_pull_scope(Some("docs@ab12cd34ef56".to_owned()), false, StoreScope::Here).unwrap(),
             PullScope::One { name, mode: TargetMode::GoBack(VersionRef::Prefix(p)), .. }
                 if name == "docs" && p == "ab12cd34ef56"
         ));
@@ -3106,12 +3130,13 @@ mod tests {
         // as does any non-hex suffix.
         for name in ["docs@ab12", "team@cli"] {
             assert!(matches!(
-                build_pull_scope(Some(name.to_owned()), false).unwrap(),
+                build_pull_scope(Some(name.to_owned()), false, StoreScope::Here).unwrap(),
                 PullScope::One { name: n, mode: TargetMode::AcceptPending, .. } if n == name
             ));
         }
         // The escape never combines with a go-back ref.
-        let err = build_pull_scope(Some("docs@ab12cd34ef56".to_owned()), true).unwrap_err();
+        let err = build_pull_scope(Some("docs@ab12cd34ef56".to_owned()), true, StoreScope::Here)
+            .unwrap_err();
         assert_eq!(err.code(), "INVALID_ARGUMENT");
     }
 }

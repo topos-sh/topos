@@ -448,7 +448,8 @@ pub struct ListDetail {
 #[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
 pub struct BucketTruncation {
     /// The capped bucket's name (a scope name — `project` / `machine` — or `untracked` /
-    /// `remote`).
+    /// `remote` / `agent`). `remote` sums the drop across every workspace's skills, `agent`
+    /// across every dir's entries: one bucket per view, whatever it nests.
     pub bucket: String,
     /// Rows emitted on this page.
     pub shown: u64,

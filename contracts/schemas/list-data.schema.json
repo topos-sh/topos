@@ -173,7 +173,7 @@
       "type": "object",
       "properties": {
         "bucket": {
-          "description": "The capped bucket's name (a scope name — `project` / `machine` — or `untracked` /\n`remote`).",
+          "description": "The capped bucket's name (a scope name — `project` / `machine` — or `untracked` /\n`remote` / `agent`). `remote` sums the drop across every workspace's skills, `agent`\nacross every dir's entries: one bucket per view, whatever it nests.",
           "type": "string"
         },
         "shown": {

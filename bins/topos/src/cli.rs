@@ -236,11 +236,14 @@ pub(crate) enum Command {
         #[arg(long)]
         untracked: bool,
         /// Show one agent's skill folders as that agent reads them (a slug like `cursor`).
+        // `--skill`/`--channel` conflict on purpose: this view is a DIRECTORY LISTING of what sits
+        // in the agent's folders, not a filtered inventory — the selectors have nothing to narrow
+        // there, and refusing says so instead of silently ignoring them.
         #[arg(
             long,
             short = 'a',
             value_name = "SLUG",
-            conflicts_with_all = ["global", "all", "remote", "untracked"]
+            conflicts_with_all = ["global", "all", "remote", "untracked", "skill", "channel"]
         )]
         agent: Option<String>,
         /// Also list what your workspace(s) offer, with each skill's state on this machine.
@@ -536,9 +539,16 @@ mod tests {
             &["topos", "list", "-a", "cursor", "--remote"][..],
             &["topos", "list", "--remote", "--untracked"][..],
             &["topos", "list", "-g", "--all"][..],
+            // The agent view is a DIRECTORY listing, not a filtered inventory: the row selectors
+            // have nothing to narrow there, so they refuse instead of being silently dropped.
+            &["topos", "list", "-a", "cursor", "--skill", "docs"][..],
+            &["topos", "list", "-a", "cursor", "--channel", "backend"][..],
         ] {
             assert!(Cli::try_parse_from(bad.iter().copied()).is_err(), "{bad:?}");
         }
+        // The selectors still combine with every OTHER view.
+        assert!(Cli::try_parse_from(["topos", "list", "--skill", "docs"]).is_ok());
+        assert!(Cli::try_parse_from(["topos", "list", "--remote", "--channel", "backend"]).is_ok());
     }
 
     #[test]
