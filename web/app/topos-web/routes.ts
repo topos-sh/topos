@@ -90,6 +90,8 @@ export function ossRoutes(options: OssRoutesOptions = {}): RouteConfigEntry[] {
     // The OTHER install path: the self-host deployment file, so standing up a server is a curl
     // and a `docker compose up` rather than a clone and a build.
     route("compose.yml", file("compose-yml.ts")),
+    // Its companion: the database provisioning script that compose file mounts.
+    route("compose-init-db.sh", file("compose-init-db.ts")),
     // The agent-onboarding document: what an agent told "set up Topos for us" fetches and follows.
     route("agent", file("agent.ts")),
     // THE DOCUMENTATION, rendered by this app from the repo's own MDX (compiled into

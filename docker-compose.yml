@@ -4,6 +4,19 @@
 #   docker compose up -d           # the app on http://localhost:3000; the plane + Postgres beside it,
 #                                  # reachable only on the compose network (no published ports)
 #
+# ── TWO files, not one ─────────────────────────────────────────────────────────────────────────────────
+# This file mounts `./scripts/compose-init-db.sh` into the database's first-boot hook — the script that
+# creates the two application roles and their schemas. It is a SEPARATE file on purpose (it is also the
+# recipe for a managed/external Postgres), so a deployment fetches both:
+#
+#   mkdir -p scripts
+#   curl -fsSL https://topos.sh/compose.yml         -o docker-compose.yml
+#   curl -fsSL https://topos.sh/compose-init-db.sh  -o scripts/compose-init-db.sh
+#
+# Miss the second one and Docker would helpfully create a DIRECTORY at that path; the database's
+# healthcheck below proves a real role exists precisely so that mistake stops the stack instead of
+# quietly producing a database with no application roles in it.
+#
 # ── prebuilt images, not a build ───────────────────────────────────────────────────────────────────────
 # Both application images are PULLED from GHCR, so this file is the only thing you need — no clone, no
 # Rust toolchain, no Node. They are multi-arch (linux/amd64 + linux/arm64), built by the release
@@ -45,6 +58,12 @@
 # topos_web) to point there and start with `--no-deps` so the bundled `db` stays down. A networked
 # Postgres should append `?sslmode=require`.
 
+# The project name, pinned rather than derived from whatever the directory happens to be called. It is
+# what prefixes the two volumes (`topos_pg-data`, `topos_plane-data`), so the backup and restore commands
+# in the docs name real volumes no matter where this file was downloaded to. `docker compose -p <other>`
+# still overrides it.
+name: topos
+
 services:
   db:
     # Pinned by the multi-arch index digest for reproducibility. To track Postgres patch releases on
@@ -73,7 +92,18 @@ services:
       # boots. Each app then runs its own migration lineage as its own role.
       - ./scripts/compose-init-db.sh:/docker-entrypoint-initdb.d/10-topos-init.sh:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-topos} -d ${POSTGRES_DB:-topos}"]
+      # Accepting connections is NOT enough to be healthy: the two application roles must exist.
+      # initdb runs the provisioning script ONCE, on a fresh volume — so if that script never
+      # arrived (see the header: it is a second file, fetched beside this one), postgres still
+      # comes up perfectly serviceable with only the superuser, and the apps then fail to
+      # authenticate forever against a database that reports itself fine. Proving a role here turns
+      # that silent half-install into a db that never goes healthy, which is what `depends_on`
+      # already knows how to wait on and what `docker compose ps` shows you at a glance.
+      test:
+        [
+          "CMD-SHELL",
+          "pg_isready -U ${POSTGRES_USER:-topos} -d ${POSTGRES_DB:-topos} && psql -U ${POSTGRES_USER:-topos} -d ${POSTGRES_DB:-topos} -tAc \"SELECT 1 FROM pg_roles WHERE rolname = 'topos_web'\" | grep -q 1",
+        ]
       interval: 5s
       timeout: 5s
       retries: 12

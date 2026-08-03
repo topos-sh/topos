@@ -27,6 +27,11 @@ const serverSchema = z.object({
    */
   COMPOSE_YML_PATH: z.string().default("../docker-compose.yml"),
   /**
+   * Path the /compose-init-db.sh route serves — the database's first-boot provisioning script,
+   * the second file a self-host install fetches; defaults to the repo's own copy.
+   */
+  COMPOSE_INIT_DB_PATH: z.string().default("../scripts/compose-init-db.sh"),
+  /**
    * Directory the /.well-known/agent-skills routes serve the built-in `topos` skill from;
    * defaults to the repo's own source (resolved, like INSTALL_SH_PATH, against the process
    * working directory — an absolute path wins).

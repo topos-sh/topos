@@ -5,13 +5,18 @@ sidebar_label: Self-host
 ---
 
 ```bash title="Try it on a laptop"
-curl -fsSL https://topos.sh/compose.yml -o docker-compose.yml
+mkdir -p scripts
+curl -fsSL https://topos.sh/compose.yml        -o docker-compose.yml
+curl -fsSL https://topos.sh/compose-init-db.sh -o scripts/compose-init-db.sh
 printf 'TOPOS_WEB_AUTH_SECRET=%s\nTOPOS_INTERNAL_TOKEN=%s\n' \
   "$(openssl rand -hex 32)" "$(openssl rand -hex 32)" > .env
 docker compose up -d
 ```
 
-That is the whole install: one file, two prebuilt images, no clone and no build. Then open
+That is the whole install: two files, two prebuilt images, no clone and no build. The second file
+is the database's first-boot provisioning script — the compose file mounts it to create the two
+application roles. Skip it and the database never reports healthy, on purpose: it is better to stop
+than to run a database with no application roles in it. Then open
 `http://localhost:3000` **in a browser** — the first browser request is what mints the workspace and
 prints the setup link to the logs. Open that link, create the first account, and connect a machine
 with `topos login http://localhost:3000`: the CLI accepts an explicit `http://` address for
@@ -62,7 +67,7 @@ Every release publishes an immutable digest and an SBOM per image, and the manif
 provenance you can check against the workflow that produced them:
 
 ```bash
-gh attestation verify oci://ghcr.io/topos-sh/topos-web:v0.1.20 --repo topos-sh/topos
+gh attestation verify oci://ghcr.io/topos-sh/topos-web:$TOPOS_VERSION --repo topos-sh/topos
 ```
 
 To run a patched tree instead, clone the repository and add the build override — same file, same
@@ -170,8 +175,8 @@ than your running deployment.
   **Probing gotcha:** a non-browser fetch of any *page* gets the constant protocol card, not HTML —
   that is how clients discover the API base. Uptime checks and scrapers that expect a page must
   send `Accept: text/html`. The resource routes are the exceptions, answering any client with their
-  own payload: `/healthz`, `/install`, `/compose.yml`, `/llms.txt`, and the documentation's machine
-  surfaces (`/docs.md`, `/docs/<page>.md`, `/docs/llms.txt`).
+  own payload: `/healthz`, `/install`, `/compose.yml`, `/compose-init-db.sh`, `/llms.txt`, and the
+  documentation's machine surfaces (`/docs.md`, `/docs/<page>.md`, `/docs/llms.txt`).
 </Note>
 
 ## Mail
@@ -274,15 +279,19 @@ again), or your `.env` (rotating `TOPOS_WEB_AUTH_SECRET` signs every browser out
 
 ## Bring your own Postgres
 
-To use a managed database instead of the bundled `db`, run the same provisioning script that
-database runs at first boot (idempotent, needs a superuser once — fetch it with
-`curl -fsSLO https://raw.githubusercontent.com/topos-sh/topos/main/scripts/compose-init-db.sh`):
+To use a managed database instead of the bundled `db`, run the same provisioning script your
+deployment already fetched — the one the bundled database runs at first boot (idempotent, needs a
+superuser once). Point `PGHOST`/`PGPORT` at your server:
 
 ```bash
 POSTGRES_USER=<superuser> POSTGRES_DB=topos \
 TOPOS_PLANE_DB_PASSWORD=<secret> TOPOS_WEB_DB_PASSWORD=<secret> \
   sh scripts/compose-init-db.sh
 ```
+
+Take it from the deployment you are running rather than from `main`
+(`curl -fsSL https://topos.sh/compose-init-db.sh -o scripts/compose-init-db.sh`), so the roles it
+creates match the images you pinned.
 
 Then override each service's `DATABASE_URL` (append `?sslmode=require` for a networked database)
 and start with `docker compose up -d --no-deps plane web`, keeping the bundled `db` down. Match

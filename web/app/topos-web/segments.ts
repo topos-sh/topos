@@ -23,6 +23,7 @@ export const OSS_TOP_LEVEL_SEGMENTS: readonly string[] = [
   "app",
   "claim",
   // The self-host deployment file (`curl …/compose.yml -o docker-compose.yml`).
+  "compose-init-db.sh",
   "compose.yml",
   // The documentation and the docs root's markdown twin (`/docs.md`), both origin-rooted.
   "docs",

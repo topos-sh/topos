@@ -34,6 +34,7 @@ RUN bun install --frozen-lockfile
 COPY contracts/openapi/openapi.json /app/contracts/openapi/openapi.json
 COPY scripts/install.sh /app/scripts/install.sh
 COPY docker-compose.yml /app/docker-compose.yml
+COPY scripts/compose-init-db.sh /app/scripts/compose-init-db.sh
 COPY skills/ /app/skills/
 
 # The app source (web/node_modules + web/build are excluded by .dockerignore, so the host tree never
@@ -63,7 +64,8 @@ ENV NODE_ENV=production \
     PORT=3000 \
     HOST=0.0.0.0 \
     INSTALL_SH_PATH=/app/scripts/install.sh \
-    COMPOSE_YML_PATH=/app/docker-compose.yml
+    COMPOSE_YML_PATH=/app/docker-compose.yml \
+    COMPOSE_INIT_DB_PATH=/app/scripts/compose-init-db.sh
 
 # Unprivileged user (uid 10001, matching the plane image). react-router-serve reads the build + deps, and
 # the app writes nothing to disk (its state is Postgres + the vault), so a read-only-friendly non-root
@@ -82,6 +84,7 @@ COPY --from=builder --chown=10001:10001 /app/web/package.json ./package.json
 COPY --from=builder --chown=10001:10001 /app/web/drizzle ./drizzle
 COPY --from=builder --chown=10001:10001 /app/scripts/install.sh /app/scripts/install.sh
 COPY --from=builder --chown=10001:10001 /app/docker-compose.yml /app/docker-compose.yml
+COPY --from=builder --chown=10001:10001 /app/scripts/compose-init-db.sh /app/scripts/compose-init-db.sh
 COPY --from=builder --chown=10001:10001 /app/skills /app/skills
 
 USER topos
