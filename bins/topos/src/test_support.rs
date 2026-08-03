@@ -272,7 +272,9 @@ impl SessionInstall {
 
     /// `topos add <reference> --yes` (a workspace/catalog/channel/feed reference; `global` =
     /// `-g`). The suites drive the APPLIED arm; a first-trust describe surfacing here is a
-    /// failure (workspace references never gate).
+    /// failure (workspace references never gate). A project-scoped add records into a file that
+    /// already exists (none in reach refuses), so the rig runs the idempotent `topos init` first,
+    /// exactly as a person would.
     pub fn add_reference(
         &self,
         reference: &str,
@@ -280,6 +282,9 @@ impl SessionInstall {
         cwd: Option<&Path>,
     ) -> Result<AddData, String> {
         self.with_ctx(cwd, |ctx| {
+            if !global {
+                ops::init(ctx, false).map_err(err_str)?;
+            }
             let connect = connect_session();
             match ops::add_reference(ctx, &connect, None, reference, global, true)
                 .map_err(err_str)?
