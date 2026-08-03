@@ -28,6 +28,57 @@ jobs:
   gate:
     uses: ./.github/workflows/ci.yml
 
+  # The version pins that must agree with the tag being released, asserted BEFORE anything is
+  # pushed (seconds, no build) so a mismatch fails loud and early instead of publishing a
+  # half-consistent release:
+  #
+  #   * the crate version — `topos self-update` compares a resolved tag against the binary's
+  #     compiled-in CARGO_PKG_VERSION, so a stale crate version ships binaries that report the
+  #     wrong number (RELEASING.md says it MUST match; this is what makes that true).
+  #   * the compose pin — `docker-compose.yml` names the image tags a self-hoster pulls. It is
+  #     the published deployment artifact, so it must name THIS release, not the last one.
+  #
+  # Runs on the dry-run path too (the assert step is what's tag-guarded, not the job — a job
+  # skipped by `if:` would skip everything that `needs` it).
+  pins:
+    name: pins (crate + compose ↔ tag)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - name: assert the crate version and the compose pin name this tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          # The tag's X.Y.Z core, with any -rc.N suffix kept: the crate version carries it too.
+          want="${tag#v}"
+
+          crate="$(sed -n 's/^version = "\([^"]*\)".*/\1/p' Cargo.toml | head -n 1)"
+          if [ "$crate" != "$want" ]; then
+            echo "::error file=Cargo.toml::[workspace.package] version is '${crate}', but the tag is '${tag}'."
+            echo "::error::Bump the version to ${want} and re-tag (see RELEASING.md)."
+            exit 1
+          fi
+
+          # A pre-release (vX.Y.Z-rc.N) publishes images but is NOT what a self-hoster should land
+          # on, so the compose pin deliberately stays on the last stable release.
+          case "$want" in
+            *-*)
+              echo "pre-release ${tag}: the compose pin stays on the last stable release."
+              exit 0
+              ;;
+          esac
+
+          # The pin is the compose default: `${TOPOS_VERSION:-vX.Y.Z}`, identical on both services.
+          pins="$(grep -oE '\$\{TOPOS_VERSION:-[^}]+\}' docker-compose.yml | sed 's/.*:-//;s/}//' | sort -u)"
+          if [ "$(printf '%s\n' "$pins" | wc -l)" -ne 1 ] || [ "$pins" != "$tag" ]; then
+            echo "::error file=docker-compose.yml::the compose image pin is '${pins//$'\n'/, }', but the tag is '${tag}'."
+            echo "::error::Set both services to \${TOPOS_VERSION:-${tag}} and re-tag (see RELEASING.md)."
+            exit 1
+          fi
+
+          echo "crate ${crate} and compose pin ${pins} both match ${tag}."
+
   build-cli:
     name: cli (${{ matrix.target }})
     needs: gate
@@ -85,28 +136,35 @@ jobs:
           path: dist/*.tar.gz
           if-no-files-found: error
 
-  # Per-arch image builds on NATIVE runners (no QEMU), pushed by digest; the merge job below
-  # assembles the one multi-arch manifest list.
+  # Per-arch builds of BOTH self-host images on NATIVE runners (no QEMU), pushed by digest; the
+  # merge job below assembles one multi-arch manifest list per image. The two images are the whole
+  # deployment: the web app is the surface a self-hoster reaches, the plane is the byte custody
+  # behind it — publishing only one of them still leaves `docker compose up` compiling from source.
   image:
-    name: image (${{ matrix.platform }})
-    needs: gate
-    runs-on: ${{ matrix.runner }}
+    name: image (${{ matrix.image.name }}, ${{ matrix.platform.id }})
+    needs: [gate, pins]
+    runs-on: ${{ matrix.platform.runner }}
     permissions:
       contents: read
       packages: write
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - platform: linux/amd64
+        image:
+          - name: topos-plane
+            dockerfile: Dockerfile
+          - name: topos-web
+            dockerfile: web/Dockerfile
+        platform:
+          - id: linux/amd64
             runner: ubuntu-24.04
-          - platform: linux/arm64
+          - id: linux/arm64
             runner: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
       - name: sanitize the platform for the artifact name
         env:
-          PLATFORM: ${{ matrix.platform }}
+          PLATFORM: ${{ matrix.platform.id }}
         run: echo "PLATFORM_SLUG=${PLATFORM//\//-}" >> "$GITHUB_ENV"
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
       - name: log in to GHCR
@@ -122,17 +180,19 @@ jobs:
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
         with:
           context: .
-          platforms: ${{ matrix.platform }}
+          file: ${{ matrix.image.dockerfile }}
+          platforms: ${{ matrix.platform.id }}
           # Keep the per-arch push a plain manifest; provenance for the merged list is
           # attested explicitly in the merge job.
           provenance: false
-          outputs: type=image,name=ghcr.io/topos-sh/topos-plane,push-by-digest=true,name-canonical=true,push=true
+          outputs: type=image,name=ghcr.io/topos-sh/${{ matrix.image.name }},push-by-digest=true,name-canonical=true,push=true
       - name: build only (dry run, no push)
         if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
         with:
           context: .
-          platforms: ${{ matrix.platform }}
+          file: ${{ matrix.image.dockerfile }}
+          platforms: ${{ matrix.platform.id }}
           provenance: false
           push: false
       - name: export the per-arch digest
@@ -145,13 +205,15 @@ jobs:
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: startsWith(github.ref, 'refs/tags/v')
         with:
-          name: digest-${{ env.PLATFORM_SLUG }}
+          # Namespaced by image: the merge job below collects one image's arches at a time.
+          name: digest-${{ matrix.image.name }}-${{ env.PLATFORM_SLUG }}
           path: digests/*.txt
           if-no-files-found: error
 
-  # Merge the per-arch digests into ONE multi-arch manifest list, tag it, attest it, SBOM it.
+  # Merge each image's per-arch digests into ONE multi-arch manifest list, tag it, attest it, SBOM
+  # it. One job per image, so a `topos-web` failure cannot publish a half-merged `topos-plane`.
   image-merge:
-    name: image (merge + attest)
+    name: image (${{ matrix.image }} merge + attest)
     needs: image
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-24.04
@@ -160,6 +222,12 @@ jobs:
       packages: write
       id-token: write
       attestations: write
+    strategy:
+      fail-fast: false
+      matrix:
+        image: [topos-plane, topos-web]
+    env:
+      IMAGE: ghcr.io/topos-sh/${{ matrix.image }}
     steps:
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
       - name: log in to GHCR
@@ -170,55 +238,58 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          pattern: digest-*
+          # This image's arches only — the other image's digests are a different manifest list.
+          pattern: digest-${{ matrix.image }}-*
           path: digests
           merge-multiple: true
       - name: create the multi-arch manifest list
         run: |
           refs=()
           for f in digests/*.txt; do
-            refs+=("ghcr.io/topos-sh/topos-plane@$(cat "$f")")
+            refs+=("${IMAGE}@$(cat "$f")")
           done
           docker buildx imagetools create \
-            -t "ghcr.io/topos-sh/topos-plane:${GITHUB_REF_NAME}" \
-            -t ghcr.io/topos-sh/topos-plane:latest \
+            -t "${IMAGE}:${GITHUB_REF_NAME}" \
+            -t "${IMAGE}:latest" \
             "${refs[@]}"
       - name: capture the immutable manifest-list digest
         id: digest
+        env:
+          NAME: ${{ matrix.image }}
         run: |
           digest="$(docker buildx imagetools inspect \
-            "ghcr.io/topos-sh/topos-plane:${GITHUB_REF_NAME}" \
+            "${IMAGE}:${GITHUB_REF_NAME}" \
             --format '{{.Manifest.Digest}}')"
           echo "digest=${digest}" >> "$GITHUB_OUTPUT"
           {
-            echo "ghcr.io/topos-sh/topos-plane@${digest}"
+            echo "${IMAGE}@${digest}"
             echo "# = tag ${GITHUB_REF_NAME}"
-          } > topos-plane-image-digest.txt
+          } > "${NAME}-image-digest.txt"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: topos-plane-image-digest
-          path: topos-plane-image-digest.txt
+          name: ${{ matrix.image }}-image-digest
+          path: ${{ matrix.image }}-image-digest.txt
           if-no-files-found: error
       - name: attest the image provenance
         uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
         with:
-          subject-name: ghcr.io/topos-sh/topos-plane
+          subject-name: ghcr.io/topos-sh/${{ matrix.image }}
           subject-digest: ${{ steps.digest.outputs.digest }}
           push-to-registry: true
       - name: image SBOM (spdx-json)
         uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
         with:
-          image: ghcr.io/topos-sh/topos-plane@${{ steps.digest.outputs.digest }}
+          image: ghcr.io/topos-sh/${{ matrix.image }}@${{ steps.digest.outputs.digest }}
           registry-username: ${{ github.actor }}
           registry-password: ${{ secrets.GITHUB_TOKEN }}
           format: spdx-json
-          output-file: topos-plane-image.spdx.json
+          output-file: ${{ matrix.image }}-image.spdx.json
           upload-artifact: false
           upload-release-assets: false
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: topos-plane-image-sbom
-          path: topos-plane-image.spdx.json
+          name: ${{ matrix.image }}-image-sbom
+          path: ${{ matrix.image }}-image.spdx.json
           if-no-files-found: error
 
   # Assemble every asset, checksum + sign + attest them, and publish the release.
@@ -254,9 +325,12 @@ jobs:
           pattern: dist-*
           path: dist
           merge-multiple: true
+      # Both images' digest files + SBOMs (`<image>-image-digest`, `<image>-image-sbom`). The
+      # per-arch `digest-<image>-<platform>` artifacts are merge-job inputs, not release assets,
+      # and this pattern does not match them.
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          pattern: topos-plane-image-*
+          pattern: "*-image-*"
           path: dist
           merge-multiple: true
       - name: assert the blocking targets; warn on missing best-effort ones
@@ -339,7 +413,8 @@ jobs:
             dist/SHA256SUMS
       - name: generate the release notes
         run: |
-          image_ref="$(head -n 1 dist/topos-plane-image-digest.txt)"
+          plane_ref="$(head -n 1 dist/topos-plane-image-digest.txt)"
+          web_ref="$(head -n 1 dist/topos-web-image-digest.txt)"
           {
             cat <<'EOF'
           ## Assets
@@ -358,17 +433,34 @@ jobs:
             cat <<'EOF'
           | `install.sh` | the checksummed installer (`curl -fsSL …/latest/download/install.sh \| sh`) |
           | `SHA256SUMS` | checksums over every asset |
-          | `topos-plane-image-digest.txt` | the immutable multi-arch server-image digest |
-          | `topos-plane-image.spdx.json` | SBOM of the server image |
+          | `topos-web-image-digest.txt` | the immutable multi-arch digest of the web-app image |
+          | `topos-plane-image-digest.txt` | the immutable multi-arch digest of the plane image |
+          | `topos-web-image.spdx.json` | SBOM of the web-app image |
+          | `topos-plane-image.spdx.json` | SBOM of the plane image |
           | `topos-source.spdx.json` | SBOM of the source tree (the `--locked` Cargo.lock is the dependency set of every binary) |
 
-          ## Server image
+          ## Self-host
+
+          Two files, no clone and no build — the compose file below pins both images to this release:
+
+          ```
+          EOF
+            echo "curl -fsSL https://topos.sh/compose.yml -o docker-compose.yml"
+            cat <<'EOF'
+          printf 'TOPOS_WEB_AUTH_SECRET=%s\nTOPOS_INTERNAL_TOKEN=%s\n' \
+            "$(openssl rand -hex 32)" "$(openssl rand -hex 32)" > .env
+          docker compose up -d
+          ```
+
+          ## Images
 
           Pull by immutable digest (recommended) or by tag:
 
           ```
           EOF
-            echo "docker pull ${image_ref}"
+            echo "docker pull ${web_ref}"
+            echo "docker pull ${plane_ref}"
+            echo "docker pull ghcr.io/topos-sh/topos-web:${GITHUB_REF_NAME}"
             echo "docker pull ghcr.io/topos-sh/topos-plane:${GITHUB_REF_NAME}"
             cat <<'EOF'
           ```

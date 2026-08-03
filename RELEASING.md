@@ -27,12 +27,20 @@ Preconditions:
 
 1. `main` is green. `release.yml` reuses the full CI gate (`gate: uses: ./.github/workflows/ci.yml`),
    so a red tree fails the release too.
-2. Bump the version. Edit `[workspace.package] version` in the root `Cargo.toml` to `X.Y.Z` (or
-   `X.Y.Z-rc.N`), then run `cargo build` so `Cargo.lock` picks up the new member versions. The
-   release builds with `--locked`, so a stale `Cargo.lock` fails it. Commit both files.
+2. Bump the version — in **two** places, both asserted against the tag by the release's `pins` job
+   before anything is built or pushed:
+   - `[workspace.package] version` in the root `Cargo.toml` → `X.Y.Z` (or `X.Y.Z-rc.N`), then run
+     `cargo build` so `Cargo.lock` picks up the new member versions. The release builds with
+     `--locked`, so a stale `Cargo.lock` fails it.
+   - The image pin in `docker-compose.yml` → `${TOPOS_VERSION:-vX.Y.Z}` on **both** services. That
+     file is the published deployment artifact (served at `/compose.yml`), so it must name the
+     release it ships with. A `-rc.N` tag is exempt — the pin stays on the last stable release,
+     because a candidate is not what a self-hoster should land on.
+
+   Commit them together.
 3. No changelog to maintain: `release.yml` generates the GitHub release notes (an asset table, the
-   server-image pull lines, the verify commands, and a minisign note). A behavior change's doc
-   updates land in the same change that introduced it, per `CONTRIBUTING.md`.
+   self-host quickstart, the image pull lines, the verify commands, and a minisign note). A
+   behavior change's doc updates land in the same change that introduced it, per `CONTRIBUTING.md`.
 
 Cut it — from the pushed `main` commit that bumped the version:
 
@@ -53,7 +61,12 @@ as the latest release (the workflow passes no prerelease flag), so a candidate t
 
 - The GitHub release for `vX.Y.Z` lists, for every built target, `topos-<triple>.tar.gz` +
   `SHA256SUMS` + a matching `<asset>.minisig` (plus `install.sh`, `install.sh.minisig`,
-  `SHA256SUMS.minisig`, `topos-plane-image-digest.txt`, and the two SBOMs).
+  `SHA256SUMS.minisig`, both `<image>-image-digest.txt` files, and the three SBOMs).
+- Both images are pullable ANONYMOUSLY — the release publishes them, but a package's registry
+  visibility is a repository setting, and a newly created package is born **private**:
+  `docker logout ghcr.io && docker pull ghcr.io/topos-sh/topos-web:vX.Y.Z`. A `denied` here means
+  the package needs Package settings → Change visibility → Public (there is no API for it). The
+  self-host quickstart is broken for everyone until this passes.
 - Each signature verifies against the release public key:
   `minisign -Vm topos-<triple>.tar.gz -P <the RELEASE_PUBKEY / MINISIGN_PUBKEY value>`.
 - From a clean environment, `curl -fsSL https://topos.sh/install | sh` installs and runs
