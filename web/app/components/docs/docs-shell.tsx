@@ -1,5 +1,7 @@
-import type { MouseEvent } from "react";
+import { CheckIcon, CopyIcon, FileTextIcon } from "lucide-react";
+import { type MouseEvent, useRef, useState } from "react";
 import { Link, NavLink } from "react-router";
+import { useCopied } from "@/components/use-copied";
 import type { DocsPageView } from "@/lib/docs/model";
 
 /**
@@ -47,6 +49,67 @@ function copyFromCodeBlock(event: MouseEvent<HTMLElement>) {
   });
 }
 
+/**
+ * Both page actions are SECONDARY — nobody arrives at a docs page to press them — so they wear no
+ * border and no field: faint mono text that inks on hover, the annotation voice the rest of the
+ * system uses for an aside. One shape for the two, so they read as a pair rather than a control
+ * and a link that happen to sit together.
+ */
+const ACTION =
+  "inline-flex shrink-0 items-center gap-1.5 rounded-sm font-mono text-[11px] text-faint transition-colors hover:text-ink focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-2";
+
+/**
+ * The machine-readable exits, at the top of every page: COPY the markdown this page was written
+ * in, or OPEN it. Both name the same twin (`<this path>.md`), and the copy FETCHES it rather than
+ * the page shipping a second copy of its own prose — the same rule the code-block copy follows.
+ *
+ * A failed fetch or a denied clipboard leaves the button untouched rather than inventing an error
+ * surface: the link sitting beside it is the honest fallback, and it needs no script to work.
+ */
+function PageActions({ markdownPath }: { markdownPath: string }) {
+  const { copied, copy } = useCopied();
+  const [busy, setBusy] = useState(false);
+  // One flight at a time — a second click while the twin is still in the air is a no-op, not a
+  // second request.
+  const inFlight = useRef(false);
+
+  async function copyPage() {
+    if (inFlight.current) {
+      return;
+    }
+    inFlight.current = true;
+    setBusy(true);
+    try {
+      const response = await fetch(markdownPath, { headers: { accept: "text/markdown" } });
+      if (response.ok) {
+        copy(await response.text());
+      }
+    } catch {
+      // Offline or blocked: the "View as markdown" link beside this button still resolves.
+    } finally {
+      inFlight.current = false;
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="mt-1.5 flex flex-wrap items-center gap-x-4 gap-y-1">
+      <button type="button" onClick={copyPage} className={ACTION}>
+        {copied ? (
+          <CheckIcon aria-hidden className="h-3 w-3" />
+        ) : (
+          <CopyIcon aria-hidden className="h-3 w-3" />
+        )}
+        {copied ? "copied" : busy ? "copying…" : "copy page as markdown"}
+      </button>
+      <a href={markdownPath} className={ACTION}>
+        <FileTextIcon aria-hidden className="h-3 w-3" />
+        view page as markdown
+      </a>
+    </div>
+  );
+}
+
 function DocsNav() {
   return (
     <nav className="sticky top-0 z-20 border-line-soft border-b bg-ground/95 backdrop-blur">
@@ -87,16 +150,12 @@ function DocsNav() {
   );
 }
 
-function DocsFooter({ markdownPath }: { markdownPath: string }) {
+function DocsFooter() {
   return (
     <footer className="mt-20 border-line-soft border-t py-10">
       <div className={`${WRAP} flex flex-wrap items-center justify-between gap-4 text-[13px]`}>
         <p className="text-faint">Apache-2.0 {"·"} © 2026 Topos</p>
         <div className="flex flex-wrap gap-6 text-faint">
-          {/* The same page an agent should fetch — stated on the page, not hidden in a header. */}
-          <a href={markdownPath} className="transition-colors hover:text-ink">
-            This page as markdown
-          </a>
           <a href="/docs/llms.txt" className="transition-colors hover:text-ink">
             llms.txt
           </a>
@@ -229,6 +288,9 @@ export function DocsShell({ page }: { page: DocsPageView }) {
             <h1 className="font-display font-semibold text-[clamp(19px,2.4vw,25px)] text-ink leading-[1.45] tracking-[-0.03em]">
               {page.title}
             </h1>
+            {/* Between the title and its description, on the reading column's own left edge —
+                the pair is quiet enough to sit in the text's line without competing with it. */}
+            <PageActions markdownPath={page.markdownPath} />
             <p className="mt-2 text-[15px] text-dim">{page.description}</p>
           </header>
           {/* biome-ignore lint/a11y/useKeyWithClickEvents: pure event delegation — the real controls are the generated <button data-copy> elements, and their keyboard activation dispatches a native click this same handler receives. */}
@@ -242,7 +304,7 @@ export function DocsShell({ page }: { page: DocsPageView }) {
         </main>
         <TableOfContents headings={page.headings} />
       </div>
-      <DocsFooter markdownPath={page.markdownPath} />
+      <DocsFooter />
     </div>
   );
 }
