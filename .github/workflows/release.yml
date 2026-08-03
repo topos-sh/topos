@@ -454,10 +454,19 @@ jobs:
           mkdir -p scripts
           curl -fsSL https://topos.sh/compose.yml        -o docker-compose.yml
           curl -fsSL https://topos.sh/compose-init-db.sh -o scripts/compose-init-db.sh
+          EOF
+            # The pin is written into .env rather than left to the fetched file's default: those URLs
+            # always serve the CURRENT deployment recipe, so following an older release's page would
+            # otherwise stand up whatever is newest — and silently contradict the line above.
+            echo "echo 'TOPOS_VERSION=${GITHUB_REF_NAME}' > .env"
+            cat <<'EOF'
           printf 'TOPOS_WEB_AUTH_SECRET=%s\nTOPOS_INTERNAL_TOKEN=%s\n' \
-            "$(openssl rand -hex 32)" "$(openssl rand -hex 32)" > .env
+            "$(openssl rand -hex 32)" "$(openssl rand -hex 32)" >> .env
           docker compose up -d
           ```
+
+          The `TOPOS_VERSION` line is what pins this release: those URLs always serve the current
+          recipe, so it is what keeps an older release page reproducible.
 
           ## Images
 
