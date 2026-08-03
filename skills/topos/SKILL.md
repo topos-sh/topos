@@ -19,8 +19,10 @@ version automatically. Two independent questions decide what lands, and they nev
   working there gets the same set.
 
 A skill named by both is delivered twice — one copy per scope, with independent baselines and
-drafts. Skills next to this file may be topos-managed copies: they update on their own, and your
-edits to them are drafts you can share back.
+drafts. Every verb acts on the scope you STAND in — the nearest `topos.toml` when one covers the
+folder, the machine otherwise — and `-g` makes any verb mean the machine; no verb crosses that line
+on its own. Skills next to this file may be topos-managed copies: they update on their own, and
+your edits to them are drafts you can share back.
 
 Run `topos --version` first. If it is missing, this is a downloaded copy on a machine not yet
 set up: read `INSTALL.md` next to this file, OFFER the install (show the command; run nothing
@@ -55,7 +57,7 @@ gives a person is changed in the web app, not here:
 
 | The user wants | The answer |
 |---|---|
-| this skill in this repo | `topos add <name>` (a row in the repo's `topos.toml`) |
+| this skill in this repo | `topos add <name>` (a row in the repo's `topos.toml` — `topos init` first when none covers the folder) |
 | it on this machine wherever they work | `topos add <name> -g` (a row in `~/.topos/topos.toml`) |
 | it off on THIS machine | `topos remove <name> -g` (writes an `off` row here only) |
 | it off on ALL their machines | Not a CLI act — the off switch on the workspace's "Your skills" page. Hand them the link |
@@ -64,29 +66,38 @@ gives a person is changed in the web app, not here:
 ## What is managed here
 
 ```
-topos status                      # sessions, this folder's manifest, triggers — offline
-topos status <name>               # ONE skill in depth: the exact row (or workspace set) behind it
-topos list --json                 # every tracked skill, with source and status columns
+topos status                      # health: sessions, triggers, what needs attention — offline
+topos list --json                 # the inventory where you stand (`-g` machine-wide, `--all` both)
+topos list <name> --json          # ONE skill in depth: the exact row (or feed) behind it
 ```
 
-Rows carry source (workspace address = team-managed, `built-in`, an origin host, `local`) and
-status (`current` / `behind` / `draft`, plus a cause where one applies). Check before treating
-a skill dir as hand-authored — editing a team-managed skill creates a draft, not a private
-fork. `topos list --remote` adds the connected catalogs this folder does not use yet.
+Rows arrive per scope (`scopes[]`, the one you stand in first) and carry source (workspace
+address = team-managed, `built-in`, an origin host, `local`) and status (`current` / `behind` /
+`draft`, plus a cause where one applies). Check before treating a skill dir as hand-authored —
+editing a team-managed skill creates a draft, not a private fork. What a view does not show is
+never invisible and never dumped: it rides as ONE summary carrying the exact command that
+expands it (`machine_summary` → `topos list -g`, `untracked_summary` → `topos list --untracked`,
+the skills in the agents' dirs topos does not manage yet). `topos list --remote` adds the
+connected catalogs this folder does not use yet; `topos list -a <agent>` shows one harness's
+skills dirs as that agent reads them.
 
 ## Staying current
 
-A session-start trigger runs `topos update --quiet`; `topos update` is the same sweep on
-demand, `topos update <name>` targets one, `topos update --rebuild` re-creates a folder someone
-broke by hand (edits saved first). Updates never destroy drafts — they merge around them; a
-conflict freezes the copy with a marked way out, and a settled draft is copied onto the skill's
-other copies in the same scope. Two things never move on their own: a pin, and a git source —
+`topos update` converges the scope you STAND in — this folder's `topos.toml` when one covers it,
+the machine-wide set otherwise; `-g` converges the machine from anywhere, `topos update <name>`
+narrows within that scope, `topos update --rebuild` re-creates a folder someone broke by hand
+(edits saved first). Every receipt names the scope it acted on. The session-start trigger runs
+`topos update --quiet`, which always covers BOTH scopes, so nothing goes stale while the session
+works in one folder. Updates never destroy drafts — they merge around them; a conflict freezes the
+copy with a marked way out, and a settled draft is copied onto the skill's other copies in the
+same scope. Two things never move on their own: a pin, and a git source —
 the quiet sweep never dials a forge, so a repo row advances only on an explicit `topos update`,
 receipted with the commit it moved to.
 
 ## Adding skills (a manifest row is the demand)
 
 ```
+topos init                        # create THIS folder's topos.toml (the one way one is born)
 topos add <name>                  # a connected catalog's skill, by bare name when unique
 topos add @<workspace>/<name>     # the same, workspace-qualified; pins with @<64-hex digest>
 topos add @<workspace>/channels/<name>   # a whole channel
@@ -97,14 +108,20 @@ topos remove <name>               # the inverse — drops the same row
 topos fmt                         # tidy the file (grouped, sorted, comments kept)
 ```
 
-`add`/`remove` edit the NEAREST `topos.toml` (created at the enclosing git root when none is in
-reach) and deliver immediately. `-g` edits `~/.topos/topos.toml` instead: `add -g @<workspace>`
-adopts that whole feed, `remove -g <name>` writes the machine-local `off` row (and `add -g <name>`
-deletes it again). Most people have no global file at all — while it is absent the machine behaves
+`add`/`remove` edit the NEAREST `topos.toml` at or above the working dir and deliver immediately.
+`add` never creates a manifest: with none covering the folder it REFUSES ("no topos.toml covers
+this folder") and hands back both ways out as next actions — `topos init` here, or the same
+invocation with `-g`. It never crosses that line by itself either: removing a machine-delivered
+skill from a project refuses toward `-g`. `-g` edits `~/.topos/topos.toml` instead:
+`add -g @<workspace>` adopts that whole feed, `remove -g <name>` writes the machine-local `off`
+row (and `add -g <name>` deletes it again). Most people have no global file at all — while it is absent the machine behaves
 exactly as if it listed every connected workspace, and the first `-g` edit writes that out in full
 before applying the change. A bare `add -g` of something already given writes nothing and says so.
 In a checkout, managed copies land in the project's own agent dirs and keep themselves out of
-commits (each placed dir carries its own ignore file; state lives in the checkout's `.topos/`).
+commits (each placed dir carries its own ignore file; the version history of a project row lives in
+that checkout's own `.topos/`, so the machine store and home agent dirs never mention it). COMMIT
+`topos.toml`, leave `.topos/` and the placed dirs per-user: a row naming a folder in the repo
+vendors that skill — a teammate clones, runs `topos update`, and has it with no workspace involved.
 
 ## The manifest format
 
@@ -159,7 +176,8 @@ Offer to share something reusable THIS session produced. The bar — all must ho
 
 At most ONE offer per session, at a natural pause — never interrupting active work.
 
-Survey before minting (`topos list --json`, `topos list --remote --json`); PREFER deepening an
+Survey before minting (`topos list --all --json` — both scopes, so a machine-wide skill is not
+missed from inside a checkout — and `topos list --remote --json`); PREFER deepening an
 existing skill with the minimal edit — never rewrite whole files. A fact-shaped learning goes in
 an existing skill's Pitfalls (or stays local), never its own skill. Mint NEW only when nothing
 fits, sectioned "When to Use / Procedure / Pitfalls / Verification"; the frontmatter

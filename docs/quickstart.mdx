@@ -74,12 +74,14 @@ themselves current — no one runs anything to receive updates.
 
 - **Edit freely.** Updates never overwrite your local edits. Share an improvement back with
   `topos publish pr-describe -m "Cover stacked PRs" --yes`.
-- **Pin skills to a repo.** `topos add pr-describe` inside a checkout writes
-  [`topos.toml`](/docs/topos-toml); commit it and everyone working in that repo gets the same set.
+- **Pin skills to a repo.** `topos init` writes the repo's [`topos.toml`](/docs/topos-toml), then
+  `topos add pr-describe` records a line in it; commit the file and everyone working in that repo
+  gets the same set.
 - **Take one you weren't given.** **Your skills → Library** browses the whole catalog; **Add to
   mine** puts a skill in your own set on every machine you log in.
-- **Check any time.** `topos status` — offline — lists every skill on this machine, its version,
-  and where it comes from.
+- **Check any time.** Both offline: `topos list` shows what is installed where you stand, with
+  versions and sources (`-g` for your whole machine), and `topos status` is the health check —
+  logins, auto-update triggers, and anything waiting on you.
 
 <CardGrid>
   <Card title="Get skills" href="/docs/add">

@@ -25,10 +25,12 @@ Your workspace's **Your skills** page shows exactly these four groups, each row 
 is. Nothing to run, nothing to configure. On the machine:
 
 ```bash
-topos status
+topos list
+topos list -g
 ```
 
-Offline, and it changes nothing: every skill here, its version, and what asked for it.
+Offline, and neither changes anything: what is installed where you stand, and — with `-g` — the
+machine-wide set connecting gave you, each skill with its version and what asked for it.
 
 ## Turning one off
 
@@ -62,19 +64,21 @@ Two switches, with deliberately different reach.
 ## Add a set to a project
 
 ```bash
+topos init
 topos add code-review
 topos add @acme/channels/backend
 topos add ./tools/my-skill
 topos add vercel-labs/skills/find-skills --yes
 ```
 
-In order: a skill from your workspace by name, a whole channel's set, a folder in this repo
+`topos init` writes the file, once, in the folder it should govern — the repo root, usually. Then,
+in order: a skill from your workspace by name, a whole channel's set, a folder in this repo
 (offline), and one skill from a public GitHub repo. The shape of what you type is the source — `@`
 introduces a workspace, a slash without `@` is GitHub, a path is a folder. A pasted skill-page URL
 works too, and `@acme/db-migrations@<version>` pins exact bytes.
 
-Each of those records **one line** in the nearest [`topos.toml`](/docs/topos-toml) — this folder's,
-or a fresh one at the repo root when there isn't one yet — and delivers in the same command:
+Each `add` records **one line** in the nearest [`topos.toml`](/docs/topos-toml) at or above this
+folder, and delivers in the same command:
 
 ```toml title="topos.toml — committed to the repo"
 [bundles]
@@ -85,9 +89,14 @@ or a fresh one at the repo root when there isn't one yet — and delivers in the
 ```
 
 **Commit that file**: everyone who works in the repo then gets the same skills, delivered to their
-agents automatically. Every receipt names the file it edited and the exact undo. The rest of the
-grammar — exact pins, placement, the `off` value, grouped keys, `topos fmt` — is on
-[topos.toml](/docs/topos-toml).
+agents automatically. A line pointing at a folder in the repo vendors that skill outright — a
+teammate clones, runs `topos update`, and has it, with no workspace involved. Every receipt names
+the file it edited and the exact undo. The rest of the grammar — exact pins, placement, the `off`
+value, grouped keys, `topos fmt` — is on [topos.toml](/docs/topos-toml).
+
+With no `topos.toml` covering the folder you are standing in, `add` stops and says so, pointing at
+`topos init` here or `-g` for your machine. It never creates a file behind your back, and never
+quietly writes to the other one.
 
 ## Add something just for this machine
 
@@ -114,8 +123,15 @@ The nearest `topos.toml` above your working directory governs that checkout **wh
 file governs this machine — no merging, and no arithmetic between them. They answer two different
 questions: "what should anyone working here have?" and "what should follow me around?" So a skill
 named by both is delivered twice, once into the project's agent directories and once into your home
-ones; they update independently, and `topos status <skill>` names which file and line — or which
-workspace's set — is behind each copy. More: [topos.toml](/docs/topos-toml).
+ones; they update independently, and `topos list <skill>` names which file and line — or which
+workspace's set — is behind each copy. Their bookkeeping is separate too: a skill added inside a
+checkout keeps its version history in that checkout's own `.topos/`, so your machine's store and
+home agent directories never mention it. More: [topos.toml](/docs/topos-toml).
+
+No command crosses that line on its own. Every verb acts on where you stand — the nearest
+`topos.toml` when one covers the folder, your machine otherwise — and `-g` on any verb means the
+machine. What a verb doesn't act on is never hidden either: it comes back as one summary line
+ending in the exact command that expands it.
 
 ## Where the files land
 
@@ -131,17 +147,21 @@ ignores itself.
 ## Updates apply themselves
 
 Logging in arms a session-start trigger, so each time an agent starts the machine quietly catches
-up. By hand, any time:
+up — that sweep always covers both sets, this folder's and your machine's, so nothing goes stale
+while you work in one place. By hand, any time:
 
 ```bash
 topos update
+topos update -g
 topos update code-review
 topos update code-review@<version>
 topos update --rebuild
 ```
 
-Everything; one skill; that version's bytes put back on this machine only; or every managed folder
-re-created from topos's own store.
+Everything the scope you are standing in asks for — this folder's `topos.toml` when one covers it,
+your machine-wide set otherwise; then the machine-wide set explicitly; one skill inside that scope;
+that version's bytes put back on this machine only; or every managed folder re-created from topos's
+own store. Each receipt names the scope it acted on.
 
 New files are verified against the workspace's records before anything lands, and **your local
 edits are never overwritten** — updates merge around them, and a genuine conflict is frozen with a
@@ -186,7 +206,8 @@ topos remove code-review -g
 ```
 
 From this project, or from your own machine-wide list. `remove` edits the same file `add` did and
-prints the undo — they are exact inverses. Two cases describe first instead of applying:
+prints the undo — they are exact inverses, and neither reaches across: a skill your machine-wide
+file delivers is refused here, pointing at `-g`. Two cases describe first instead of applying:
 
 - **Local work would be lost.** A skill you've edited but not shared is described first, so you can
   see the draft before the copy leaves your agent directories. (Your edits are snapshotted, never
@@ -203,12 +224,18 @@ are always retained.
 ## Check any time
 
 ```bash
-topos status
-topos status db-migrations
 topos list
+topos list db-migrations
+topos list --untracked
 topos list --remote
+topos status
 ```
 
-Every skill here with its version and source; one skill in depth — the exact line behind it and
-where its files are; the inventory plus untracked skills you could add; and what your workspaces
-offer.
+The inventory where you stand, each skill with its version and source; one skill in depth — the
+exact file and line behind it, or the workspace feed, and where its files sit; the skills already in
+your agents' folders that topos doesn't manage yet; what your workspaces offer, the one command here
+that needs the network; and the health panel — logins, sessions, whether the auto-update triggers
+are armed, and what needs attention, each with the command that resolves it.
+
+Nothing a view leaves out is hidden: a bare `topos list` inside a project ends with one line for the
+machine-wide set and one for the untracked skills, each naming the command that opens it in full.
