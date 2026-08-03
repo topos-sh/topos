@@ -2943,13 +2943,21 @@ fn clean_undemanded(
             .placements
             .iter()
             .enumerate()
-            .filter(|(_, p)| {
+            .filter(|(i, p)| {
                 // A failed set expansion freezes everything under its project dir — a member's dir
                 // must survive the sweep that could not see the member list.
                 if sweep
                     .unexpanded
                     .iter()
                     .any(|sd| Path::new(p).starts_with(sd))
+                {
+                    return false;
+                }
+                // The user's own adopted-in-place source dir is never the sweep's to retire.
+                if map
+                    .placement_state
+                    .get(*i)
+                    .is_some_and(|s| s.adopted_source)
                 {
                     return false;
                 }
@@ -2969,12 +2977,12 @@ fn clean_undemanded(
 }
 
 /// A row-dropped bundle's by-choice clean over ONE store: exactly the placements topos itself
-/// WROTE (`materialized_sha` present — an adopted-in-place source dir, which topos never wrote,
-/// is never deleted), snapshot-first; the sync doc is NOT reset. With `exclude_project` (the
-/// HOME store's posture) placements inside some project checkout are left alone — a project
-/// manifest may still demand the bundle there, and that checkout reconciles lazily when visited;
-/// a PROJECT store passes `false` (its placements are its own). `Ok(Some(name))` when something
-/// was actually cleaned.
+/// WROTE (`materialized_sha` present and NOT the `adopted_source` marker — the user's own
+/// adopted-in-place dir carries a baseline sha for drift detection but is never deleted),
+/// snapshot-first; the sync doc is NOT reset. With `exclude_project` (the HOME store's posture)
+/// placements inside some project checkout are left alone — a project manifest may still demand
+/// the bundle there, and that checkout reconciles lazily when visited; a PROJECT store passes
+/// `false` (its placements are its own). `Ok(Some(name))` when something was actually cleaned.
 fn clean_written_placements(
     ctx: &Ctx<'_>,
     sid: &SkillId,
@@ -2994,6 +3002,7 @@ fn clean_written_placements(
         .enumerate()
         .filter(|(_, (p, st))| {
             st.materialized_sha.is_some()
+                && !st.adopted_source
                 && (!exclude_project || !is_project_placement(ctx, Path::new(p)))
         })
         .map(|(i, _)| i)
@@ -3105,6 +3114,16 @@ fn clean_placements(
     map: &PlacementMap,
     indices: &[usize],
 ) -> Result<(), ClientError> {
+    // The adopted-in-place SOURCE dir is the user's own — topos never created it, and no sweep
+    // may delete or empty it, whatever else retires. Filtered HERE, at the one choke point every
+    // undemanded/withdraw clean rides, so the guarantee is structural (callers pre-filter too,
+    // for honest receipts).
+    let indices: Vec<usize> = indices
+        .iter()
+        .copied()
+        .filter(|&i| !map.placement_state.get(i).is_some_and(|s| s.adopted_source))
+        .collect();
+    let indices = indices.as_slice();
     if indices.is_empty() {
         return Ok(());
     }

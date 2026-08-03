@@ -1364,6 +1364,7 @@ mod tests {
                     materialized_sha: Some(materialized.to_owned()),
                     pre_existing_sha: None,
                     swap_capability: cap,
+                    adopted_source: false,
                 })
                 .collect(),
             harness: None,

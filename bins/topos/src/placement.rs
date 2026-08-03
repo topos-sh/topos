@@ -882,6 +882,7 @@ pub(crate) fn reconcile_map(prior: &PlacementMap, plan: &PlacementPlan) -> Place
                 materialized_sha: None,
                 pre_existing_sha: None,
                 swap_capability: SwapCapability::Unsupported,
+                adopted_source: false,
             };
             continue;
         }
@@ -892,6 +893,7 @@ pub(crate) fn reconcile_map(prior: &PlacementMap, plan: &PlacementPlan) -> Place
             materialized_sha: None,
             pre_existing_sha: None,
             swap_capability: SwapCapability::Unsupported,
+            adopted_source: false,
         });
     }
     next
@@ -1347,6 +1349,7 @@ mod tests {
                 materialized_sha: None,
                 pre_existing_sha: pre_existing.map(str::to_owned),
                 swap_capability: SwapCapability::AtomicExchange,
+                adopted_source: false,
             }],
             harness: None,
             harness_layer: None,

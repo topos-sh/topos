@@ -76,6 +76,7 @@ fn sample_map(tag: u8) -> PlacementMap {
             materialized_sha: Some(hex(tag)),
             pre_existing_sha: None,
             swap_capability: SwapCapability::Unsupported,
+            adopted_source: false,
         }],
         harness: None,
         harness_layer: None,
