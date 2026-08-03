@@ -153,7 +153,7 @@
       "type": "object",
       "properties": {
         "managed": {
-          "description": "What manages it: `\"<file>:<row-key>\"` for a manifest row, `\"feed <host>/<ws>\"` for a\nworkspace feed; `None` = untracked.",
+          "description": "What manages it: `\"<file>:<row-key>\"` for a manifest row, `\"feed <host>/<ws>\"` for a\nworkspace feed, `\"built-in\"` for the CLI's own placed meta-skill; `None` = untracked.",
           "type": [
             "string",
             "null"
@@ -199,7 +199,7 @@
       "description": "Why a tracked skill is `detached` in [`SkillEntry`]. **INFERRED** (additive value set).",
       "oneOf": [
         {
-          "description": "The person unfollowed the skill (delivery stopped on every device).",
+          "description": "The skill left this scope's skill list (its manifest or feed row is gone — removed here,\nor the feed no longer carries it); the retained record is a deliberate leftover.",
           "type": "string",
           "const": "unfollowed"
         },
@@ -255,6 +255,13 @@
           "items": {
             "type": "string"
           }
+        },
+        "scope": {
+          "description": "The scope section that answered (`\"project\"` / `\"machine\"`) — the spelling every suggested\ncommand must honor: a machine-scope answer spells `topos update -g`. **INFERRED**\n(additive).",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "source_file": {
           "description": "The manifest FILE whose row delivers it, when a row does (a path).",

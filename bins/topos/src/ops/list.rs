@@ -143,7 +143,7 @@ pub(crate) fn list_with(
 
     // The agent-eye view — deliberately spans both scopes.
     if let Some(slug) = &req.agent {
-        let mut view = agent_view(&resolved, discover.as_ref(), slug)?;
+        let mut view = agent_view(ctx, &resolved, discover.as_ref(), slug)?;
         // The page applies to each DIR's entries (the unbounded axis — a skills dir holds however
         // many folders the person put there); the dirs themselves are a handful and ride whole. One
         // `agent` marker sums the drop across them, so a paged view never silently shortens a dir.
@@ -228,7 +228,7 @@ pub(crate) fn list_with(
                     .iter()
                     .map(|section| store_ghosts(ctx, section, &cache, &all, signed_in))
                     .collect();
-                ghost_detail(&dive_ghosts, name).ok_or(miss)?
+                ghost_detail(&dive, &dive_ghosts, name).ok_or(miss)?
             }
         });
         return Ok(ListOutcome {
@@ -414,14 +414,24 @@ fn dive_sections(resolved: &Resolved, view: ScopeView) -> Vec<&ScopeResolution> 
 /// The deep answer for a name only a GHOST record carries (the built-in, a detached/frozen copy) —
 /// the store record IS the answer: no manifest row names it, so `source_file`/`source_key`/`feed`
 /// and the attribution are honestly absent, and the version, placements and state come from the
-/// scope store the ghost was read out of. `ghosts` is per shown section in precedence order, so
-/// the first hit follows the same order the resolved rows do. `None` when no shown section holds
-/// such a record (the caller keeps its uniform not-found).
-fn ghost_detail(ghosts: &[Vec<Ghost>], token: &str) -> Option<topos_types::results::ListDetail> {
-    let ghost = ghosts.iter().flatten().find(|g| g.entry.skill == token)?;
+/// scope store the ghost was read out of. `ghosts` is per `sections` entry in precedence order, so
+/// the first hit follows the same order the resolved rows do — and the section it came from is the
+/// answer's scope. `None` when no shown section holds such a record (the caller keeps its uniform
+/// not-found).
+fn ghost_detail(
+    sections: &[&ScopeResolution],
+    ghosts: &[Vec<Ghost>],
+    token: &str,
+) -> Option<topos_types::results::ListDetail> {
+    let (scope, ghost) = sections.iter().zip(ghosts).find_map(|(section, gs)| {
+        gs.iter()
+            .find(|g| g.entry.skill == token)
+            .map(|g| (section.scope, g))
+    })?;
     let version = ghost.entry.version_id.clone();
     Some(topos_types::results::ListDetail {
         name: ghost.entry.skill.clone(),
+        scope: Some(scope.to_owned()),
         source_file: None,
         source_key: None,
         feed: None,
@@ -453,9 +463,10 @@ fn ghost_state(entry: &SkillEntry) -> StatusItemState {
 /// shows what is INSTALLED, and these are installed: the manifest resolution just does not claim
 /// them, and hiding them would make `remove topos`'s own target invisible. Read from THIS scope's
 /// own store only (never cross-scope), with the classic column semantics: `built-in` for the
-/// meta-skill; otherwise the detach cause from the delivery cache (withdrawn upstream / signed
-/// out), the source from the recorded origin or the workspace label, and draft/behind/current
-/// from the lock + placements.
+/// meta-skill; otherwise DETACHED (no row demands an unclaimed record, so the bytes are a kept
+/// leftover), with the cause from the delivery cache (withdrawn upstream / signed out / the row
+/// left this scope's list), the source from the recorded origin or the workspace label, and the
+/// draft flag from the lock + placements.
 fn store_ghosts(
     ctx: &Ctx<'_>,
     section: &ScopeResolution,
@@ -518,10 +529,12 @@ fn store_ghosts(
                 .ok()
                 .flatten()
                 .and_then(|o| origin_host(&o.origin.source));
-            let (source, status, cause) = if delivered.is_none() && origin.is_none() {
-                // A purely local record: its absent workspace already says "local", and no
-                // update status is honestly claimable without an upstream to measure against.
-                (None, None, None)
+            // An unclaimed record is never live: no row demands it, so the bytes are a kept
+            // leftover whatever their drift, and the cause names which act ended the demand —
+            // withdrawn upstream, signed out, or (otherwise) the row left this scope's list.
+            let (source, cause) = if delivered.is_none() && origin.is_none() {
+                // A purely local record: its absent workspace already says "local".
+                (None, DetachCause::Unfollowed)
             } else {
                 let label = delivered.and_then(|(ws, _)| {
                     all.sessions
@@ -531,26 +544,13 @@ fn store_ghosts(
                 });
                 let source = origin.or(label).unwrap_or_else(|| "local".to_owned());
                 let cause = match delivered {
-                    Some((_, d)) if d.withdrawn => Some(DetachCause::RemovedUpstream),
-                    Some(_) if !signed_in => Some(DetachCause::SignedOut),
-                    _ => None,
+                    Some((_, d)) if d.withdrawn => DetachCause::RemovedUpstream,
+                    Some(_) if !signed_in => DetachCause::SignedOut,
+                    _ => DetachCause::Unfollowed,
                 };
-                let behind = delivered.is_some_and(|(_, d)| {
-                    !d.served_version.is_empty()
-                        && !lock.base_commit.bytes().all(|b| b == b'0')
-                        && d.served_version != lock.base_commit
-                });
-                let status = if cause.is_some() {
-                    SkillStatus::Detached
-                } else if draft {
-                    SkillStatus::Draft
-                } else if behind {
-                    SkillStatus::Behind
-                } else {
-                    SkillStatus::Current
-                };
-                (Some(source), Some(status), cause)
+                (Some(source), cause)
             };
+            let (status, cause) = (Some(SkillStatus::Detached), Some(cause));
             SkillEntry {
                 skill: lock.name.clone(),
                 workspace_id: delivered.map(|(ws, _)| ws.clone()),
@@ -743,8 +743,10 @@ fn adoption(
 
 /// The agent-eye view for one harness: each skills dir it reads from this folder — its canonical
 /// home dir, the shared `.agents/skills` dirs when the harness is covered by them, and its
-/// project dir — with every entry marked managed (by which manifest row or feed) or untracked.
+/// project dir — with every entry marked managed (by which manifest row or feed, or `built-in`
+/// for the CLI's own placed meta-skill) or untracked.
 fn agent_view(
+    ctx: &Ctx<'_>,
     resolved: &Resolved,
     roots: Option<&DiscoveryRoots>,
     slug: &str,
@@ -793,6 +795,14 @@ fn agent_view(
                     managed.push((canon, label.clone()));
                 }
             }
+        }
+    }
+    // The placed BUILT-IN meta-skill is topos-managed with no manifest row (force-synced
+    // custody), so its recorded dirs are seeded by hand — labeled the way the inventory's ghost
+    // row names it. An unreadable record marks nothing (the view stays a best-effort read).
+    for dir in super::builtin::placement_dirs(ctx).unwrap_or_default() {
+        if let Ok(canon) = Path::new(&dir).canonicalize() {
+            managed.push((canon, "built-in".to_owned()));
         }
     }
 
@@ -1358,6 +1368,17 @@ mod tests {
             &"d".repeat(64),
             &[managed_dir.to_string_lossy().as_ref()],
         );
+        // The placed BUILT-IN meta-skill: a store record with no manifest row anywhere — the view
+        // must mark it managed (`built-in`), never untracked.
+        let builtin_dir = probe_home.0.join(".claude/skills/topos");
+        std::fs::create_dir_all(&builtin_dir).unwrap();
+        std::fs::write(builtin_dir.join("SKILL.md"), b"# topos\n").unwrap();
+        home.store_applied(
+            "topos",
+            "topos",
+            &"a".repeat(64),
+            &[builtin_dir.to_string_lossy().as_ref()],
+        );
 
         let out = run_discovering(
             &home,
@@ -1393,6 +1414,8 @@ mod tests {
             "{managed}"
         );
         assert_eq!(entry("stray-helper").managed, None);
+        // The built-in carries its own honest marker — the inventory's ghost-row label.
+        assert_eq!(entry("topos").managed.as_deref(), Some("built-in"));
         // The view spans both scopes: a project dir rides along.
         assert!(
             view.dirs.iter().any(|d| d.scope == "project"),
@@ -1467,8 +1490,10 @@ mod tests {
         assert_eq!(row("ghosty").status, Some(SkillStatus::Detached));
         assert_eq!(row("ghosty").cause, Some(DetachCause::RemovedUpstream));
         assert_eq!(row("ghosty").workspace_id.as_deref(), Some("w_acme"));
-        // The frozen local copy shows plainly — its absent workspace already says "local".
-        assert_eq!(row("frozen").status, None);
+        // The frozen local copy is a leftover like any other ghost: detached, its row gone — its
+        // absent workspace already says "local".
+        assert_eq!(row("frozen").status, Some(SkillStatus::Detached));
+        assert_eq!(row("frozen").cause, Some(DetachCause::Unfollowed));
         assert_eq!(row("frozen").version_id, "b".repeat(64));
 
         // A name only a ghost carries still answers — the deep dive falls back to the same store
@@ -1486,6 +1511,46 @@ mod tests {
             matches!(miss, ClientError::TargetNotFound { .. }),
             "{miss:?}"
         );
+    }
+
+    /// A REMOVED row's retained record (the delivery cache still lists it, nothing withdrew it)
+    /// reads detached with the removed-from-the-list cause — never like a live row. This is the
+    /// remove-then-clean leftover: the bytes deliberately stay, and the row must say so.
+    #[test]
+    fn a_removed_rows_retained_record_reads_detached_not_current() {
+        let home = TempHome::new();
+        let cwd = home.0.join("plain");
+        std::fs::create_dir_all(&cwd).unwrap();
+        home.session(
+            "topos.sh",
+            "w_acme",
+            "acme",
+            crate::sessions::SESSION_ACTIVE,
+        );
+        // The machine manifest exists but no longer carries the row (the remove dropped it); the
+        // cache still lists the delivery un-withdrawn, and the store record stands.
+        home.global("[bundles]\n");
+        let id = skill_id_of("lingery");
+        home.store_applied(&id, "lingery", &"c".repeat(64), &[]);
+        home.cache(
+            "w_acme",
+            "topos.sh",
+            "acme",
+            vec![assigned("lingery", None)],
+            Vec::new(),
+        );
+
+        let out = run(&home, &cwd, &request()).unwrap();
+        let machine = scope(&out, "machine");
+        let row = machine
+            .rows
+            .iter()
+            .find(|r| r.skill == "lingery")
+            .unwrap_or_else(|| panic!("no lingery in {:?}", machine.rows));
+        assert_eq!(row.status, Some(SkillStatus::Detached));
+        assert_eq!(row.cause, Some(DetachCause::Unfollowed));
+        // The source is the session's DISPLAY name (the testkit keeps it unequal to the slug).
+        assert_eq!(row.source.as_deref(), Some("ACME"));
     }
 
     /// `list <name>` answers for a GHOST too: the built-in (no manifest row anywhere) reports its
@@ -1538,6 +1603,11 @@ mod tests {
 
         let detail = deep("topos").unwrap().data.detail.expect("a detail");
         assert_eq!(detail.name, "topos");
+        assert_eq!(
+            detail.scope.as_deref(),
+            Some("machine"),
+            "a ghost answer carries the scope of the store it was read out of"
+        );
         assert_eq!(detail.version.as_deref(), Some(&*"a".repeat(64)));
         assert_eq!(
             detail.placements,
@@ -1593,9 +1663,20 @@ mod tests {
             )
         };
 
-        // The default view still reads project-then-machine: both names answer.
-        assert!(deep("repo-helper", ScopeView::Here).is_ok());
-        assert!(deep("notes", ScopeView::Here).is_ok());
+        // The default view still reads project-then-machine: both names answer, each carrying
+        // the scope it was answered from (the spelling every suggested command rides on).
+        let detail = deep("repo-helper", ScopeView::Here)
+            .unwrap()
+            .data
+            .detail
+            .expect("a detail");
+        assert_eq!(detail.scope.as_deref(), Some("project"));
+        let detail = deep("notes", ScopeView::Here)
+            .unwrap()
+            .data
+            .detail
+            .expect("a detail");
+        assert_eq!(detail.scope.as_deref(), Some("machine"));
 
         // `-g`: the machine's own row answers, the project-only one does not.
         let detail = deep("notes", ScopeView::Machine)
@@ -1604,6 +1685,7 @@ mod tests {
             .detail
             .expect("a detail");
         assert_eq!(detail.name, "notes");
+        assert_eq!(detail.scope.as_deref(), Some("machine"));
         let miss = deep("repo-helper", ScopeView::Machine).unwrap_err();
         assert!(
             matches!(miss, ClientError::TargetNotFound { .. }),
@@ -2077,6 +2159,7 @@ mod tests {
             data: ListData {
                 detail: Some(ListDetail {
                     name: "deploy".to_owned(),
+                    scope: None,
                     source_file: None,
                     source_key: None,
                     feed: None,

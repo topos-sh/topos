@@ -405,7 +405,7 @@ pub struct AgentViewEntry {
     /// The skill dir's name.
     pub name: String,
     /// What manages it: `"<file>:<row-key>"` for a manifest row, `"feed <host>/<ws>"` for a
-    /// workspace feed; `None` = untracked.
+    /// workspace feed, `"built-in"` for the CLI's own placed meta-skill; `None` = untracked.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub managed: Option<String>,
 }
@@ -417,6 +417,11 @@ pub struct AgentViewEntry {
 pub struct ListDetail {
     /// The bundle's name.
     pub name: String,
+    /// The scope section that answered (`"project"` / `"machine"`) — the spelling every suggested
+    /// command must honor: a machine-scope answer spells `topos update -g`. **INFERRED**
+    /// (additive).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
     /// The manifest FILE whose row delivers it, when a row does (a path).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_file: Option<String>,
@@ -532,7 +537,8 @@ pub enum SkillStatus {
 #[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
 #[serde(rename_all = "kebab-case")]
 pub enum DetachCause {
-    /// The person unfollowed the skill (delivery stopped on every device).
+    /// The skill left this scope's skill list (its manifest or feed row is gone — removed here,
+    /// or the feed no longer carries it); the retained record is a deliberate leftover.
     Unfollowed,
     /// `topos remove` excluded the skill on THIS device (other devices still receive it).
     ExcludedHere,
