@@ -183,6 +183,17 @@ fn the_session_manifest_hero_loop() {
 
     // ── v2 fast-forwards silently (login was the acceptance — no offer step) ────────────────────
     write_skill(&src, "# deploy v2\nDeploy the service, faster.\n");
+    // The PUBLISH describe's audience line is REAL end-to-end: the reach body the web app serves
+    // deserializes through the Rust wire type, warning-free — and a read that failed would WARN
+    // now, never silently omit the line.
+    let (reach, reach_warnings) = author
+        .publish_describe_reach("deploy", Some(&cwd))
+        .expect("the publish describe");
+    assert!(reach_warnings.is_empty(), "{reach_warnings:?}");
+    assert!(
+        reach.is_some_and(|n| n >= 1),
+        "the publish describe carries the web-served reach: {reach:?}"
+    );
     author
         .publish("deploy", false, None, Some("v2"), Some(&cwd))
         .expect("publish v2");

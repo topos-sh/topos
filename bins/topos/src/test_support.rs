@@ -421,6 +421,41 @@ impl SessionInstall {
         })
     }
 
+    /// The bare enrolled `publish` DESCRIBE's audience (the `reaches N people` number) and its
+    /// warnings — the composed e2e proves the REAL served reach body deserializes through the
+    /// wire type and that a failed read warns instead of silently omitting the line.
+    pub fn publish_describe_reach(
+        &self,
+        target: &str,
+        cwd: Option<&Path>,
+    ) -> Result<(Option<u64>, Vec<String>), String> {
+        self.with_ctx(cwd, |ctx| {
+            let connect = connect_session();
+            let dir_legacy = |_b: &str| -> Box<dyn crate::plane::DirectorySource> {
+                unreachable!("the session lane carries every describe read")
+            };
+            let del_legacy = |_b: &str| -> Box<dyn crate::plane::ReconcileTransport> {
+                unreachable!("the session lane carries every describe read")
+            };
+            let connectors = ops::PublishDescribeConnectors {
+                directory: &dir_legacy,
+                delivery: &del_legacy,
+            };
+            let (data, warnings) = ops::publish_describe(
+                ctx,
+                &connectors,
+                Some(&connect),
+                None,
+                target,
+                false,
+                None,
+                None,
+            )
+            .map_err(err_str)?;
+            Ok((data.reach, warnings))
+        })
+    }
+
     /// `topos review <skill>@<hash> --approve|--reject|--withdraw` — a Debug view of the outcome.
     pub fn review(
         &self,

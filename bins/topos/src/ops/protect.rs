@@ -26,12 +26,14 @@ pub(crate) struct ProtectConnectors<'a> {
     pub session: &'a SessionConnect<'a>,
 }
 
-/// The verb's outcome — the two-phase pair.
+/// The verb's outcome — the two-phase pair. The describe carries WARNINGS (stable-shape envelope
+/// lines): a best-effort read that failed must say so visibly, never leave its line missing.
 #[derive(Debug)]
 pub(crate) enum ProtectOutcome {
     Described {
         data: ProtectData,
         yes_argv: Vec<String>,
+        warnings: Vec<String>,
     },
     Applied(ProtectData),
 }
@@ -94,8 +96,10 @@ pub(crate) fn protect(
                     "no session for this workspace — run `topos login <workspace-address>` first"
                         .into(),
             })?;
-    // The audience the protection governs (best-effort — a read fault degrades the describe, never the op).
-    let audience = read_audience(directory, &workspace_id, kind, &name, skill_id.as_deref());
+    // The audience the protection governs (best-effort — a read fault degrades the describe, never
+    // the op) — but never SILENTLY: the failure is a visible warning, not a missing line.
+    let (audience, warnings) =
+        read_audience(directory, &workspace_id, kind, &name, skill_id.as_deref());
 
     let note = match (kind, loosening) {
         (ResourceKind::Skill, true) => {
@@ -121,7 +125,11 @@ pub(crate) fn protect(
             yes_argv.push(l);
         }
         yes_argv.push("--yes".to_owned());
-        return Ok(ProtectOutcome::Described { data, yes_argv });
+        return Ok(ProtectOutcome::Described {
+            data,
+            yes_argv,
+            warnings,
+        });
     }
 
     // ---- APPLY (`--yes`) ----
@@ -181,20 +189,34 @@ fn level_argv(kind: ResourceKind, level: &str) -> Option<String> {
 
 /// The audience the protection governs — the reach (people) for a skill. A channel's audience is
 /// not on the session wire (delivery is profile math, not membership rows) — the describe simply
-/// omits it. Best-effort: a read fault answers `None` (the describe degrades, the op does not).
+/// omits it, silently and deliberately. A SKILL's failed read is different: best-effort still (the
+/// describe degrades, the op does not), but the fault comes back as a visible warning — a
+/// wordlessly missing audience line is how a wire mismatch once hid for a week.
 fn read_audience(
     directory: &dyn crate::plane::DirectorySource,
     workspace_id: &str,
     kind: ResourceKind,
-    _name: &str,
+    name: &str,
     skill_id: Option<&str>,
-) -> Option<u64> {
+) -> (Option<u64>, Vec<String>) {
     match kind {
         ResourceKind::Skill => {
-            let id = skill_id?;
-            directory.reach(workspace_id, id).ok().map(|r| r.persons)
+            let Some(id) = skill_id else {
+                return (None, Vec::new());
+            };
+            match directory.reach(workspace_id, id) {
+                Ok(r) => (Some(r.persons), Vec::new()),
+                Err(e) => (
+                    None,
+                    vec![format!(
+                        "REACH_UNAVAILABLE {name}: {} — how many people this reaches could not \
+                         be read; the audience line is omitted",
+                        crate::render::safe_message(&e)
+                    )],
+                ),
+            }
         }
-        ResourceKind::Channel => None,
+        ResourceKind::Channel => (None, Vec::new()),
     }
 }
 
