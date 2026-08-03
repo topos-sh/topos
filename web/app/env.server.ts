@@ -21,6 +21,12 @@ const serverSchema = z.object({
   /** Path the /install route serves; defaults to the repo's own installer. */
   INSTALL_SH_PATH: z.string().default("../scripts/install.sh"),
   /**
+   * Path the /compose.yml route serves — the self-host deployment file; defaults to the repo's
+   * own `docker-compose.yml` (resolved, like INSTALL_SH_PATH, against the process working
+   * directory — an absolute path wins).
+   */
+  COMPOSE_YML_PATH: z.string().default("../docker-compose.yml"),
+  /**
    * Directory the /.well-known/agent-skills routes serve the built-in `topos` skill from;
    * defaults to the repo's own source (resolved, like INSTALL_SH_PATH, against the process
    * working directory — an absolute path wins).

@@ -217,13 +217,14 @@ Team skills here are managed by topos - read the `topos` skill before working wi
 ## Self-hosting
 
 The whole product runs from one compose file, and your workspace address is simply your
-origin.
+origin. Both images are prebuilt and multi-arch, so there is nothing to clone and nothing to
+compile.
 
 ```sh
-git clone https://github.com/topos-sh/topos && cd topos
+curl -fsSL https://topos.sh/compose.yml -o docker-compose.yml
 printf 'TOPOS_WEB_AUTH_SECRET=%s\nTOPOS_INTERNAL_TOKEN=%s\n' \
   "$(openssl rand -hex 32)" "$(openssl rand -hex 32)" > .env
-docker compose up -d --build
+docker compose up -d
 ```
 
 The two secrets are required even for a laptop try-out. Open `http://localhost:3000` in a

@@ -1,8 +1,27 @@
 # Self-host Topos in one command: the web app (the ONE public surface), the stateless plane behind it,
 # and a pinned Postgres, on one internal network.
 #
-#   docker compose up --build      # the app on http://localhost:3000; the plane + Postgres beside it,
+#   docker compose up -d           # the app on http://localhost:3000; the plane + Postgres beside it,
 #                                  # reachable only on the compose network (no published ports)
+#
+# ── prebuilt images, not a build ───────────────────────────────────────────────────────────────────────
+# Both application images are PULLED from GHCR, so this file is the only thing you need — no clone, no
+# Rust toolchain, no Node. They are multi-arch (linux/amd64 + linux/arm64), built by the release
+# workflow of the public repository, provenance-attested and SBOM'd (`gh attestation verify`).
+#
+# TOPOS_VERSION pins BOTH images to one release, deliberately: the server and the `topos` CLIs your team
+# runs speak one wire, so an unattended jump to a newer server is a way to break machines you cannot see.
+# Upgrading is explicit and takes two commands:
+#
+#   TOPOS_VERSION=vX.Y.Z docker compose pull      # or edit the default below
+#   TOPOS_VERSION=vX.Y.Z docker compose up -d
+#
+# A `:latest` tag is published too, if you would rather track it — set TOPOS_VERSION=latest and take the
+# upgrade discipline on yourself. Release notes: https://github.com/topos-sh/topos/releases
+#
+# To BUILD from source instead (contributing, or a patched tree), add the override beside this file:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
 #
 # The TOPOLOGY after the door cutover: the WEB APP is the only thing the world reaches. It fronts `/api`,
 # serves the resource addresses + the constant protocol card, and drives the plane over an internal
@@ -60,9 +79,9 @@ services:
       retries: 12
 
   plane:
-    build:
-      context: .
-      dockerfile: Dockerfile
+    # Pinned to one release (see the header). Override with TOPOS_VERSION, or build from source with
+    # the docker-compose.build.yml override.
+    image: ghcr.io/topos-sh/topos-plane:${TOPOS_VERSION:-v0.1.20}
     restart: unless-stopped
     # NO `ports:` — the plane is internal-only. The web app reaches it at http://plane:8787 over the
     # compose network; nothing outside the network can. (The image already binds 0.0.0.0:8787.)
@@ -84,9 +103,9 @@ services:
       - plane-data:/data
 
   web:
-    build:
-      context: .
-      dockerfile: web/Dockerfile
+    # The same release as the plane — one TOPOS_VERSION moves both, and they are only ever tested
+    # together.
+    image: ghcr.io/topos-sh/topos-web:${TOPOS_VERSION:-v0.1.20}
     restart: unless-stopped
     depends_on:
       db:

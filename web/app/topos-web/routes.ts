@@ -87,6 +87,9 @@ export function ossRoutes(options: OssRoutesOptions = {}): RouteConfigEntry[] {
     // The `.sh`-suffixed alias shells expect — same loader, byte-identical bytes and headers;
     // `/install` stays the canonical name.
     route("install.sh", file("install-sh.ts")),
+    // The OTHER install path: the self-host deployment file, so standing up a server is a curl
+    // and a `docker compose up` rather than a clone and a build.
+    route("compose.yml", file("compose-yml.ts")),
     // The agent-onboarding document: what an agent told "set up Topos for us" fetches and follows.
     route("agent", file("agent.ts")),
     // THE DOCUMENTATION, rendered by this app from the repo's own MDX (compiled into

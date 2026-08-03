@@ -263,6 +263,8 @@ const SESSIONLESS_ROUTES = new Set([
   // The `.sh` alias (same loader as /install) + the public agent-onboarding document: both
   // constant public bytes, sessionless by design.
   "install-sh",
+  // The self-host deployment file — constant public bytes, sessionless by design.
+  "compose-yml",
   "agent",
   // The documentation: public bytes compiled into the build, sessionless by design — the page,
   // its plain-markdown twin, and the docs index.
