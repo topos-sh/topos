@@ -454,6 +454,7 @@ jobs:
           mkdir -p scripts
           curl -fsSL https://topos.sh/compose.yml        -o docker-compose.yml
           curl -fsSL https://topos.sh/compose-init-db.sh -o scripts/compose-init-db.sh
+          chmod +x scripts/compose-init-db.sh
           EOF
             # The pin is written into .env rather than left to the fetched file's default: those URLs
             # always serve the CURRENT deployment recipe, so following an older release's page would

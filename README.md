@@ -224,6 +224,7 @@ compile.
 mkdir -p scripts
 curl -fsSL https://topos.sh/compose.yml        -o docker-compose.yml
 curl -fsSL https://topos.sh/compose-init-db.sh -o scripts/compose-init-db.sh
+chmod +x scripts/compose-init-db.sh
 printf 'TOPOS_WEB_AUTH_SECRET=%s\nTOPOS_INTERNAL_TOKEN=%s\n' \
   "$(openssl rand -hex 32)" "$(openssl rand -hex 32)" > .env
 docker compose up -d

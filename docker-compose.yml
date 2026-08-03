@@ -12,6 +12,7 @@
 #   mkdir -p scripts
 #   curl -fsSL https://topos.sh/compose.yml         -o docker-compose.yml
 #   curl -fsSL https://topos.sh/compose-init-db.sh  -o scripts/compose-init-db.sh
+#   chmod +x scripts/compose-init-db.sh
 #
 # Miss the second one and Docker would helpfully create a DIRECTORY at that path; the database's
 # healthcheck below proves a real role exists precisely so that mistake stops the stack instead of
