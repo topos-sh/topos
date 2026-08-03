@@ -27,15 +27,16 @@ These act on this machine only.
 
 ### `topos status`
 
-See what topos manages on this machine: each skill with its version and where it comes from — per scope (this folder's `topos.toml`, and your own machine-wide set) — plus your workspace logins and whether auto-update is armed. `topos status <skill>` answers one skill in depth: which file and line (or which workspace's feed) delivers it, and where its files are. Works offline and changes nothing. A bare `topos` on a terminal shows the same thing
+Check topos's health: your workspace logins and sessions, whether the auto-update triggers are armed, which `topos.toml` governs where you stand, and what needs attention — updates pending, deliveries not applied yet, edits of your own — each with the command that resolves it. `-g` reports your machine-wide set instead; `--all` both. For the skill inventory use `topos list`, and `topos list <skill>` for one skill in depth. Works offline and changes nothing. A bare `topos` on a terminal shows the same thing
 
 ```
-topos status [BUNDLE]
+topos status [OPTIONS]
 ```
 
 | Argument / flag | What it does |
 |---|---|
-| `[BUNDLE]` | One skill to answer in depth. Omitted, the full table |
+| `-g, --global` | Report your machine-wide set, even when run inside a project |
+| `--all` | Report both this folder's scope and your machine-wide set in full |
 
 
 ### `topos login`
@@ -146,17 +147,20 @@ topos update [OPTIONS] [TARGETS]...
 
 ### `topos list`
 
-List the skills on this machine — the ones topos manages, plus untracked skills found in your agents' skill folders that you could `add`
+See what's installed where you stand, per scope: each skill with its version, where it comes from, and its state. Inside a project the rows are that folder's `topos.toml`'s; `-g` lists your machine-wide set, `--all` both. `topos list <skill>` answers one skill in depth — which file and line (or which workspace's feed) delivers it, and where its files are. `--untracked` lists skills found in your agents' folders that topos does not manage yet; `-a <agent>` shows one agent's skill folders exactly as that agent reads them; `--remote` lists what your workspaces offer (needs a login). Works offline except `--remote`
 
 ```
-topos list [OPTIONS] [NAME]...
+topos list [OPTIONS] [NAME]
 ```
 
 | Argument / flag | What it does |
 |---|---|
-| `[NAME]...` | Show only these skills |
+| `[NAME]` | One skill to answer in depth. Omitted, the full inventory |
+| `-g, --global` | List your machine-wide set, even when run inside a project |
+| `--all` | List both this folder's scope and your machine-wide set in full |
+| `--untracked` | List the skills in your agents' folders that topos does not manage yet |
+| `-a, --agent <SLUG>` | Show one agent's skill folders as that agent reads them (a slug like `cursor`) |
 | `--remote` | Also list what your workspace(s) offer, with each skill's state on this machine. Needs a login |
-| `--tracked` | Only skills topos manages — skip discovery of untracked ones |
 | `--footprint` | Also list the files topos owns outside skill folders |
 | `--channel <NAME>` | Only skills in this channel (repeatable) |
 | `--skill <NAME>` | Only this skill (repeatable) |

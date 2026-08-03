@@ -1272,8 +1272,8 @@ fn resolve_via(
     let expansions = sets.get_or_insert_with(|| expand_sets(ctx, connect, target, plan));
     let Some((row, members)) = expansions.iter().find(|(row, _)| row.reference == via_ref) else {
         return Err(ClientError::InvalidArgument(format!(
-            "--via {via_ref} names no channel/repo line in this file — `topos status` lists what \
-             each file asks for"
+            "--via {via_ref} names no channel/repo line in this file — `topos list` shows what \
+             each scope delivers"
         )));
     };
     let want = member_of(row, canonical);
@@ -1472,7 +1472,7 @@ fn miss(ctx: &Ctx<'_>, token: &str, global: bool) -> Result<ClientError, ClientE
         return Ok(ClientError::InvalidArgument(hint));
     }
     Ok(ClientError::InvalidArgument(format!(
-        "'{token}' is not in {} — `topos status` lists what each file asks for",
+        "'{token}' is not in {} — `topos list` shows what each scope delivers",
         if global {
             "your machine-wide manifest, and no connected workspace's feed delivers it".to_owned()
         } else {

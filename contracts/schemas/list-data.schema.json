@@ -1,17 +1,33 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "ListData",
-  "description": "`list` result — the four inventory buckets. **PINNED** (bucket set + per-entry identity).",
+  "description": "`list` result — the inventory, per scope. The scopes shown in full ride `scopes`; whatever the\ninvocation does not show rides ONE summary (`machine_summary` / `untracked_summary`) so nothing\nis invisible. The optional views (`untracked` / `remote` / `detail` / `agent_view`) fill only\nunder their flag. **PINNED.**",
   "type": "object",
   "properties": {
-    "followed": {
-      "type": "array",
-      "items": {
-        "$ref": "#/$defs/SkillEntry"
-      }
+    "agent_view": {
+      "description": "The agent-eye view (`list -a <slug>`).",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/AgentView"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "detail": {
+      "description": "The one-skill deep dive (`list <name>`).",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ListDetail"
+        },
+        {
+          "type": "null"
+        }
+      ]
     },
     "footprint": {
-      "description": "Only present under `--footprint`: topos-owned paths outside skill dirs. **INFERRED shape.**",
+      "description": "Only present under `--footprint`: topos-owned paths outside skill dirs.",
       "type": [
         "array",
         "null"
@@ -20,53 +36,144 @@
         "type": "string"
       }
     },
-    "published_by_you": {
+    "machine_summary": {
+      "description": "The machine scope's one-line summary, present only when the machine scope is NOT shown in\nfull (the default view inside a project).",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ListScopeSummary"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "remote": {
+      "description": "Per-workspace catalog view (only under `--remote`).",
       "type": "array",
       "items": {
-        "$ref": "#/$defs/SkillEntry"
+        "$ref": "#/$defs/RemoteWorkspace"
       }
     },
-    "remote_available": {
-      "description": "Only present under `--remote`: skills available in the followed workspaces' catalogs, annotated with\nthis install's local follow-state — the \"what could I follow next\" surface. **INFERRED** (additive;\nempty/omitted unless `--remote`).",
+    "scopes": {
+      "description": "The scope sections shown in full, render order (here-scope first).",
       "type": "array",
       "items": {
-        "$ref": "#/$defs/RemoteSkillEntry"
+        "$ref": "#/$defs/ListScope"
       }
     },
-    "tracked": {
-      "type": "array",
-      "items": {
-        "$ref": "#/$defs/SkillEntry"
-      }
+    "signed_in": {
+      "description": "Signed-in state — the TTY renders the static remote pointer from it.",
+      "type": "boolean"
     },
     "truncated": {
-      "description": "The buckets that were row-capped (`--limit`/`--offset`, or the `--json` default page), one\nmarker per capped bucket. The page applies PER BUCKET (each bucket skips `offset` rows and\nshows up to `limit`); the `NEXT_PAGE` next action's argv fetches the next page. Empty (and\nomitted) on an uncapped list — the pinned shape is byte-identical there. **INFERRED**\n(additive).",
+      "description": "The buckets that were row-capped (`--limit`/`--offset`, or the `--json` default page), one\nmarker per capped bucket. The page applies PER BUCKET; the `NEXT_PAGE` next action's argv\nfetches the next page. Empty (and omitted) on an uncapped list.",
       "type": "array",
       "items": {
         "$ref": "#/$defs/BucketTruncation"
       }
     },
     "untracked": {
-      "description": "A real skill in a harness dir that topos doesn't manage yet (discovered, not adopted) — it has\nno topos `version_id`/`bundle_digest` yet, so it carries only what is knowable on disk.",
+      "description": "Full untracked discoveries (only under `--untracked`).",
       "type": "array",
       "items": {
         "$ref": "#/$defs/UntrackedEntry"
       }
+    },
+    "untracked_summary": {
+      "description": "The untracked discoveries' one-line summary (absent when nothing untracked was found, or\nwhen the untracked listing itself is shown).",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/UntrackedSummary"
+        },
+        {
+          "type": "null"
+        }
+      ]
     }
   },
   "required": [
-    "followed",
-    "published_by_you",
-    "tracked",
-    "untracked"
+    "scopes",
+    "signed_in"
   ],
   "$defs": {
+    "AgentView": {
+      "description": "The agent-eye view (`list -a <slug>`): for one harness from this folder, each skills dir it\nreads and what sits in it. Deliberately spans both scopes. **PINNED.**",
+      "type": "object",
+      "properties": {
+        "agent": {
+          "description": "The harness's registry slug.",
+          "type": "string"
+        },
+        "agent_name": {
+          "description": "The harness's human-readable name.",
+          "type": "string"
+        },
+        "dirs": {
+          "description": "The skills dirs the harness reads from this folder, each with its entries.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/AgentViewDir"
+          }
+        }
+      },
+      "required": [
+        "agent",
+        "agent_name",
+        "dirs"
+      ]
+    },
+    "AgentViewDir": {
+      "description": "One skills dir in an [`AgentView`]. **PINNED.**",
+      "type": "object",
+      "properties": {
+        "entries": {
+          "description": "The skill dirs sitting in it.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/AgentViewEntry"
+          }
+        },
+        "path": {
+          "description": "The dir's path.",
+          "type": "string"
+        },
+        "scope": {
+          "description": "`\"user\"` (a home dir) or `\"project\"` (under this folder).",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "scope",
+        "entries"
+      ]
+    },
+    "AgentViewEntry": {
+      "description": "One entry of an [`AgentViewDir`]. **PINNED.**",
+      "type": "object",
+      "properties": {
+        "managed": {
+          "description": "What manages it: `\"<file>:<row-key>\"` for a manifest row, `\"feed <host>/<ws>\"` for a\nworkspace feed; `None` = untracked.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "description": "The skill dir's name.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name"
+      ]
+    },
     "BucketTruncation": {
       "description": "One row-capped bucket in a paged [`ListData`]. **INFERRED** (additive).",
       "type": "object",
       "properties": {
         "bucket": {
-          "description": "The capped bucket's field name (`followed` / `published_by_you` / `tracked` / `untracked` /\n`remote_available`).",
+          "description": "The capped bucket's name (a scope name — `project` / `machine` — or `untracked` /\n`remote`).",
           "type": "string"
         },
         "shown": {
@@ -113,46 +220,191 @@
         }
       ]
     },
-    "RemoteFollowState": {
-      "description": "The local follow-state annotation on a `--remote` catalog entry.",
-      "oneOf": [
-        {
-          "description": "In the workspace catalog, not followed by this install — `follow` to adopt.",
-          "type": "string",
-          "const": "available"
-        },
-        {
-          "description": "Followed, and the local version matches the catalog `current`.",
-          "type": "string",
-          "const": "following"
-        },
-        {
-          "description": "Followed, but the catalog `current` is newer than the local version — `pull` to advance.",
-          "type": "string",
-          "const": "following-behind"
-        }
-      ]
-    },
-    "RemoteSkillEntry": {
-      "description": "A skill available in a followed workspace's catalog (`list --remote`), annotated with this install's\nfollow-state so the agent can see what to `follow` (or `pull`) next. Metadata only — the catalog grants\nno bytes. **INFERRED** (additive).",
+    "ListDetail": {
+      "description": "The deep answer for ONE skill (`topos list <name>`): which file and line-key (or which feed)\ndelivers it, the version and any pin, where its bytes are, and its state. **PINNED.**",
       "type": "object",
       "properties": {
-        "bundle_digest": {
-          "description": "The catalog `current` consent hash (64-char lowercase hex).",
-          "type": "string",
-          "pattern": "^[0-9a-f]{64}$"
-        },
-        "display_name": {
-          "description": "The advisory display name, when the plane discloses one.",
+        "attribution": {
+          "description": "The delivery attribution (`assigned by <name>` / `picked by you`), when known.",
           "type": [
             "string",
             "null"
           ]
         },
-        "kind": {
-          "description": "The catalog's bundle kind (`\"skill\"` for everything today) — display metadata, never branched\non. Additive: an older plane omits it.",
+        "feed": {
+          "description": "The feed origin, when no row names it (`<host>/<workspace>` — the workspace whose feed\ndelivers it).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "description": "The bundle's name.",
+          "type": "string"
+        },
+        "pin": {
+          "description": "A row's version pin, when one is spelled.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "placements": {
+          "description": "The placement directories this machine holds for it.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "source_file": {
+          "description": "The manifest FILE whose row delivers it, when a row does (a path).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "source_key": {
+          "description": "The row's spelled KEY in that file (the joined reference).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "state": {
+          "description": "The line's state (the resolution's own vocabulary).",
+          "$ref": "#/$defs/StatusItemState"
+        },
+        "version": {
+          "description": "The applied version (64-hex), when applied locally.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "name",
+        "state"
+      ]
+    },
+    "ListScope": {
+      "description": "One scope section of a [`ListData`] — the rows one manifest (or the implicit feed recipe)\ndelivers. **PINNED.**",
+      "type": "object",
+      "properties": {
+        "manifest": {
+          "description": "The governing manifest file; `None` = the implicit feed recipe (no machine-wide file — one\nfeed row per connected workspace).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "rows": {
+          "description": "The scope's inventory rows.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SkillEntry"
+          }
+        },
+        "scope": {
+          "description": "`\"project\"` (the nearest `topos.toml` covering the working directory) or `\"machine\"`.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "scope",
+        "rows"
+      ]
+    },
+    "ListScopeSummary": {
+      "description": "The one-line summary of a scope the invocation does not show in full. **PINNED.**",
+      "type": "object",
+      "properties": {
+        "command": {
+          "description": "The exact command that expands the summary into the full section.",
+          "type": "string"
+        },
+        "skills": {
+          "description": "Skills the scope delivers.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "updates_pending": {
+          "description": "How many of them sit behind their last-known served target.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "skills",
+        "updates_pending",
+        "command"
+      ]
+    },
+    "RemoteAdoption": {
+      "description": "This machine's adoption state for a `--remote` catalog skill. **PINNED value set.**",
+      "oneOf": [
+        {
+          "description": "A row in the here-scope delivers it.",
           "type": "string",
-          "default": "skill"
+          "const": "adopted-here"
+        },
+        {
+          "description": "Only the machine scope delivers it (seen from inside a project).",
+          "type": "string",
+          "const": "adopted-on-machine"
+        },
+        {
+          "description": "No scope covering the working directory delivers it — `topos add` records the demand.",
+          "type": "string",
+          "const": "not-adopted"
+        },
+        {
+          "description": "Adopted, but the catalog `current` is newer than what is applied here — `topos update`\nadvances it.",
+          "type": "string",
+          "const": "update-available"
+        }
+      ]
+    },
+    "RemoteChannel": {
+      "description": "One channel in a [`RemoteWorkspace`]. **PINNED.**",
+      "type": "object",
+      "properties": {
+        "adopted_in": {
+          "description": "The manifest file whose row adopts this channel here, when one does.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "description": "The channel's name.",
+          "type": "string"
+        },
+        "skills": {
+          "description": "How many skills it references.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "name",
+        "skills"
+      ]
+    },
+    "RemoteSkill": {
+      "description": "One catalog skill in a [`RemoteWorkspace`]. **PINNED.**",
+      "type": "object",
+      "properties": {
+        "kind": {
+          "description": "The catalog's bundle kind (`\"skill\"` for everything today) — display metadata, never\nbranched on.",
+          "type": "string"
+        },
+        "name": {
+          "description": "The skill's catalog name (the reference leaf).",
+          "type": "string"
         },
         "open_proposals": {
           "description": "Open, non-stale proposal count on the skill.",
@@ -160,31 +412,61 @@
           "format": "uint64",
           "minimum": 0
         },
-        "skill_id": {
-          "description": "The skill id — the workspace-scoped handle a `follow` targets.",
-          "type": "string"
-        },
         "state": {
-          "description": "This install's follow-state for the skill.",
-          "$ref": "#/$defs/RemoteFollowState"
+          "description": "This machine's adoption state for the skill.",
+          "$ref": "#/$defs/RemoteAdoption"
         },
         "version_id": {
           "description": "The catalog `current` version id (64-char lowercase hex).",
           "type": "string",
           "pattern": "^[0-9a-f]{64}$"
+        }
+      },
+      "required": [
+        "name",
+        "kind",
+        "version_id",
+        "open_proposals",
+        "state"
+      ]
+    },
+    "RemoteWorkspace": {
+      "description": "One workspace's catalog view under `list --remote` — its channels and skills, each annotated\nwith this machine's adoption state. Metadata only — the catalog grants no bytes. **PINNED.**",
+      "type": "object",
+      "properties": {
+        "channels": {
+          "description": "The workspace's channels.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/RemoteChannel"
+          }
+        },
+        "host": {
+          "description": "The server host the workspace lives on.",
+          "type": "string"
+        },
+        "skills": {
+          "description": "The workspace's catalog skills.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/RemoteSkill"
+          }
+        },
+        "workspace": {
+          "description": "The workspace's address name.",
+          "type": "string"
         },
         "workspace_id": {
-          "description": "The workspace the skill lives in (its catalog scope).",
+          "description": "The workspace's opaque id.",
           "type": "string"
         }
       },
       "required": [
-        "skill_id",
+        "host",
+        "workspace",
         "workspace_id",
-        "version_id",
-        "bundle_digest",
-        "open_proposals",
-        "state"
+        "channels",
+        "skills"
       ]
     },
     "SkillEntry": {
@@ -284,6 +566,56 @@
         }
       ]
     },
+    "StatusItemState": {
+      "description": "A resolved line's state — the offline resolution's shared vocabulary ([`ListDetail::state`]\nand the internal per-scope rows). **INFERRED value set** (additive).",
+      "oneOf": [
+        {
+          "description": "The bytes are applied and current against the last-known delivered target (see\n`applied_as_of` — the offline cache's stamp, not a live confirmation).",
+          "type": "string",
+          "const": "applied"
+        },
+        {
+          "description": "A newer target is known than what is applied — the next `update` lands it.",
+          "type": "string",
+          "const": "behind"
+        },
+        {
+          "description": "Local edits sit ahead of the applied version (a draft).",
+          "type": "string",
+          "const": "local-edits"
+        },
+        {
+          "description": "An exclude line withholds this name here (the row's `source` recorded it).",
+          "type": "string",
+          "const": "excluded"
+        },
+        {
+          "description": "A machine-local `\"off\"` row in the global manifest withholds this bundle from the feed\nhere (the everywhere-path is the web decline).",
+          "type": "string",
+          "const": "off"
+        },
+        {
+          "description": "Referenced here but NOT deliverable with your current access — phrased from LOCAL\nknowledge only (no live session for its workspace); never from server confirmation.",
+          "type": "string",
+          "const": "not-available"
+        },
+        {
+          "description": "The session that would deliver it is pending an owner's approval.",
+          "type": "string",
+          "const": "pending-session"
+        },
+        {
+          "description": "An adopted feed this installation has never had a delivery from: the next `update` performs\nthe first exchange. What that exchange brings — including nothing — is not knowable here,\nso the line promises an exchange, never an apply.",
+          "type": "string",
+          "const": "no-delivery-yet"
+        },
+        {
+          "description": "Not applied here yet — `topos update` applies it (or the state is not determinable\noffline).",
+          "type": "string",
+          "const": "unknown"
+        }
+      ]
+    },
     "UntrackedEntry": {
       "description": "A discovered-but-unadopted skill — known only by where it lives, not by any topos version yet.\nDiscovery spans every harness in the baked registry, so `harness` is an open **slug** string (not the\nclosed [`crate::HarnessId`] — topos discovers far more harnesses than it has full adapters for).",
       "type": "object",
@@ -319,6 +651,33 @@
         "harness_name",
         "adapter_supported",
         "scope"
+      ]
+    },
+    "UntrackedSummary": {
+      "description": "The one-line summary of the untracked discoveries a bare `list` does not itemize. **PINNED.**",
+      "type": "object",
+      "properties": {
+        "command": {
+          "description": "The exact command that shows the full listing.",
+          "type": "string"
+        },
+        "folders": {
+          "description": "The distinct folders holding them.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "skills": {
+          "description": "Untracked skills discovered in the known agents' skill folders.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "skills",
+        "folders",
+        "command"
       ]
     }
   }

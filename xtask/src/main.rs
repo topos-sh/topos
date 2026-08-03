@@ -425,9 +425,10 @@ fn fixtures() -> Vec<(&'static str, String)> {
         EnrollmentPending, InviteReadData, ListData, LogData, LoginData, LogoutData, MergePreview,
         MergePreviewVerdict, MergeReport, ProtectData, PublishData, PublishDescribeData,
         PublishGate, PublishedMatch, PullAction, PullData, PullSkill, RemoveData, RemoveItem,
-        RemoveKind, ReviewIndexData, ReviewIndexEntry, SkillEntry, StatusData, StatusTrigger,
-        WorkspaceSyncReport,
+        RemoveKind, ReviewIndexData, ReviewIndexEntry, SkillEntry, SkillStatus, StatusData,
+        StatusScope, StatusScopeSummary, StatusTrigger, WorkspaceSyncReport,
     };
+    use topos_types::results::{AttentionCount, ListScope};
     use topos_types::{ActionCode, Affected, JsonEnvelope, Receipt, TerminalOutcome, WireError};
 
     let argv = |parts: &[&str]| parts.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
@@ -745,27 +746,31 @@ fn fixtures() -> Vec<(&'static str, String)> {
         error: None,
     };
 
-    // `list` after adopting the fixture skill — one tracked skill, no draft. It was `add`'d locally (never
-    // followed), so it has NO workspace: `workspace_id` is `None` and omits from the envelope. The populated
-    // provenance rides the `pull` fixtures above (a followed skill) + the schema's new optional field.
+    // `list` over one workspace session with one assigned-and-applied skill: the machine scope is
+    // the here-scope (no covering project file), governed by the implicit feed recipe (`manifest`
+    // omits). Byte-equal to the real op's output in the `list_golden_matches...` test — path-free
+    // by construction, so the bytes are stable across machines.
     let list_ok = JsonEnvelope {
         schema_version: 1,
         command: "list".to_owned(),
         ok: true,
         data: serde_json::to_value(ListData {
-            tracked: vec![SkillEntry {
-                skill: "pr-describe".to_owned(),
-                workspace_id: None,
-                version_id: fx_version.to_owned(),
-                bundle_digest: fx_digest.to_owned(),
-                draft: false,
-                pending_proposals: vec![],
-                // A purely-local, never-followed `add` carries no provenance columns — the pinned shape
-                // stays byte-identical to what the real CLI emits here (all three omit when `None`).
-                source: None,
-                status: None,
-                cause: None,
+            scopes: vec![ListScope {
+                scope: "machine".to_owned(),
+                manifest: None,
+                rows: vec![SkillEntry {
+                    skill: "pr-describe".to_owned(),
+                    workspace_id: Some("w_acme".to_owned()),
+                    version_id: "d".repeat(64),
+                    bundle_digest: "e".repeat(64),
+                    draft: false,
+                    pending_proposals: vec![],
+                    source: Some("the topos.sh/acme feed".to_owned()),
+                    status: Some(SkillStatus::Current),
+                    cause: None,
+                }],
             }],
+            signed_in: true,
             ..Default::default()
         })
         .expect("ListData serializes"),
@@ -1397,9 +1402,10 @@ fn fixtures() -> Vec<(&'static str, String)> {
         error: None,
     };
 
-    // `status` — the offline orientation snapshot: an enrolled, signed-in install with one
-    // first-receive offer still awaiting consent and the read-only trigger rows (OpenClaw's
-    // presence needs a live scheduler query, so its row is an honest unknown).
+    // `status` — the offline health panel: an enrolled, signed-in install inside a project (the
+    // here-scope body carries its attention counts; the machine scope rides the one summary line
+    // with ITS counts) and the read-only trigger rows (OpenClaw's presence needs a live scheduler
+    // query, so its row is an honest unknown).
     let status_ok = JsonEnvelope {
         schema_version: 1,
         command: "status".to_owned(),
@@ -1408,8 +1414,6 @@ fn fixtures() -> Vec<(&'static str, String)> {
             version: "0.1.0".to_owned(),
             server: Some("https://topos.sh/api".to_owned()),
             signed_in: true,
-            profile_skills: 2,
-            awaiting_first_sync: Some(1),
             sessions: vec![topos_types::results::StatusSession {
                 workspace_id: "w_demo".to_owned(),
                 name: "demo".to_owned(),
@@ -1419,10 +1423,6 @@ fn fixtures() -> Vec<(&'static str, String)> {
                 // would read "pending" — awaiting owner approval.
                 session_status: None,
             }],
-            items: Vec::new(),
-            regimes: Vec::new(),
-            notes: Vec::new(),
-            detail: None,
             triggers: vec![
                 StatusTrigger {
                     agent: "claude-code".to_owned(),
@@ -1437,6 +1437,25 @@ fn fixtures() -> Vec<(&'static str, String)> {
                     ),
                 },
             ],
+            scopes: vec![StatusScope {
+                scope: "project".to_owned(),
+                manifest: Some("/repo/topos.toml".to_owned()),
+                regimes: Vec::new(),
+                notes: Vec::new(),
+                attention: vec![AttentionCount {
+                    kind: "updates-pending".to_owned(),
+                    count: 2,
+                    command: "topos update".to_owned(),
+                }],
+            }],
+            machine_summary: Some(StatusScopeSummary {
+                attention: vec![AttentionCount {
+                    kind: "assignments-not-applied".to_owned(),
+                    count: 1,
+                    command: "topos update -g".to_owned(),
+                }],
+                command: "topos status -g".to_owned(),
+            }),
         })
         .expect("StatusData serializes"),
         warnings: vec![],

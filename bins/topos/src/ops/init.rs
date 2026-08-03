@@ -103,7 +103,7 @@ fn init_global(ctx: &Ctx<'_>) -> Result<InitData, ClientError> {
             created: false,
             note: Some(
                 "it already exists and was left untouched — `topos fmt -g` tidies it, and \
-                 `topos status` says what it currently asks for"
+                 `topos list -g` shows what it currently delivers"
                     .to_owned(),
             ),
         });
@@ -144,7 +144,7 @@ fn init_global(ctx: &Ctx<'_>) -> Result<InitData, ClientError> {
             created: false,
             note: Some(
                 "it already exists and was left untouched — `topos fmt -g` tidies it, and \
-                 `topos status` says what it currently asks for"
+                 `topos list -g` shows what it currently delivers"
                     .to_owned(),
             ),
         }),

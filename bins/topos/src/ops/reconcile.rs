@@ -791,7 +791,7 @@ pub(crate) fn manifest_update(
         return Err(ClientError::InvalidArgument(
             match (driven.project, driven.person, &project_dir) {
                 (true, false, Some(dir)) => format!(
-                    "'{t}' is not demanded by {}/{} — `topos status` shows what this folder \
+                    "'{t}' is not demanded by {}/{} — `topos list` shows what this folder \
                      resolves to; `topos add {t}` records it here, and `topos update -g {t}` \
                      updates your machine-wide set instead",
                     dir.display(),
@@ -799,13 +799,13 @@ pub(crate) fn manifest_update(
                 ),
                 (false, true, _) => format!(
                     "'{t}' is not in your machine-wide set — neither your own {} nor a connected \
-                     feed demands it; `topos status` shows the resolved set; `topos add -g {t}` \
+                     feed demands it; `topos list` shows the resolved set; `topos add -g {t}` \
                      records new demand",
                     crate::manifest::MANIFEST_FILE
                 ),
                 _ => format!(
                     "'{t}' is not in any manifest covering this directory or your connected \
-                     feeds — `topos status` shows the resolved set; `topos add` records new demand"
+                     feeds — `topos list` shows the resolved set; `topos add` records new demand"
                 ),
             },
         ));

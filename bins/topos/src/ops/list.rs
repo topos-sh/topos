@@ -1,398 +1,131 @@
-//! `list [<skill>] [--footprint]` — inventory this machine. Populates the **tracked** bucket (every
-//! skill with a local sidecar record) and, once enrolled, the **followed** bucket (the tracked subset
-//! `follows.json` says is following its workspace `current`) plus a TTY enrollment header (workspace,
-//! plane, auto-update-hook state) — the one-command answer to "am I enrolled, what am I following, is the
-//! hook armed". `published_by_you` stays empty: the client keeps no durable record of its own settled
-//! publishes (the op-WAL is deleted once an op settles; `lock.json` records no author), so that bucket
-//! honestly waits for the plane-side `log --team` read. `untracked` needs harness discovery wiring and
-//! renders empty. `--footprint` reports every topos-owned path outside skill dirs: the `~/.topos/` tree
-//! plus any harness config the auto-update hook lives in (disclosed, never deleted).
+//! `list` — the INVENTORY, offline by default: what is installed where you stand, per scope. The
+//! default body is the here-scope's rows in full (the nearest `topos.toml` covering the cwd, else
+//! the machine); `-g` is the machine scope alone, `--all` both. Whatever the invocation does not
+//! show is never invisible and never dumped — the machine scope and the untracked discoveries
+//! each ride ONE summary line ending in the exact command that expands them, and a signed-in TTY
+//! points at `list --remote` for what the workspaces offer.
+//!
+//! The optional views: `list <name>` is the one-skill deep dive (which file and line-key — or
+//! which feed — delivers it); `-a <slug>` is the agent-eye view (each skills dir that harness
+//! reads from this folder, entries marked managed or untracked — deliberately spanning both
+//! scopes); `--untracked` is the full discovery listing; `--remote` (the one networked arm) reads
+//! each live session's channel index + catalog and annotates every skill with this machine's
+//! adoption state. `--footprint` reports every topos-owned path outside skill dirs.
+//!
+//! Rows come from the SAME per-scope resolution `status` reads ([`super::inventory`]): project
+//! rows from the checkout's own store, machine rows from `~/.topos/` — one resolution, two views.
+//! The offline states are cache facts ("as of last sync"), never live claims.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-use topos_core::digest::to_hex;
+use topos_harness::coverage;
 use topos_harness::registry::{self, SkillScope};
 use topos_types::persisted::{Lock, PlacementMap};
-use topos_types::requests::WireSkillIndexEntry;
 use topos_types::results::{
-    BucketTruncation, DetachCause, ListData, RemoteFollowState, RemoteSkillEntry, SkillEntry,
-    SkillStatus, UntrackedEntry,
+    AgentView, AgentViewDir, AgentViewEntry, BucketTruncation, DetachCause, ListData, ListScope,
+    ListScopeSummary, RemoteAdoption, RemoteChannel, RemoteSkill, RemoteWorkspace, SkillEntry,
+    SkillStatus, StatusItemState, UntrackedEntry, UntrackedSummary,
 };
 
 use crate::ctx::Ctx;
+use crate::doc;
 use crate::error::ClientError;
-use crate::plane::{CatalogSource, PlaneError};
-use crate::scan;
+use crate::plane::DirectorySource;
+use crate::sessions::{Session, Sessions};
 use crate::sidecar;
-use crate::sync_status::{self, DeliveredSkill};
-use crate::{doc, scan::ScannedBundle};
+use crate::sync_status::{DeliveredSkill, SyncStatus};
 
-/// The filesystem roots `list` probes for **untracked** skills: the user home (every harness's global
-/// skill dir resolves under it) and, optionally, the current project dir (for repo-scoped skills). Passing
-/// `None` to [`list`] is `--tracked` — discovery is skipped entirely.
+use super::inventory::{self, Resolved, Row, ScopeResolution, ScopeView, ZERO_HEX};
+
+/// The filesystem roots `list` probes for **untracked** skills: the user home (every harness's
+/// global skill dir resolves under it) and, optionally, the current project dir (for repo-scoped
+/// skills). `None` (no `$HOME`) degrades to no discovery — the untracked summary honestly
+/// disappears rather than lying a zero.
 #[derive(Debug, Clone)]
 pub(crate) struct DiscoveryRoots {
     pub home: PathBuf,
     pub cwd: Option<PathBuf>,
 }
 
-/// A `list` run's typed result: the schema-pinned envelope payload plus the TTY-only enrollment
-/// disclosure. `ListData` is PINNED (its buckets carry `SkillEntry` rows only), so the enrollment header
-/// and the per-row follow annotations ride alongside for the TTY renderer — mirroring how `pull`'s
-/// warnings ride outside `PullData`.
+/// One `list` invocation, parsed: which scope(s) show in full, which optional view (at most one —
+/// clap's conflicts enforce it), and the row filters.
+#[derive(Debug, Default)]
+pub(crate) struct ListRequest {
+    /// The scope selection (`-g` / `--all`; default = where you stand).
+    pub view: ScopeView,
+    /// `--untracked` — the full discovery listing plus one summary per tracked scope.
+    pub untracked: bool,
+    /// `list <name>` — the one-skill deep dive.
+    pub name: Option<String>,
+    /// `-a <slug>` — the agent-eye view.
+    pub agent: Option<String>,
+    /// `--remote` — the live per-workspace catalog view.
+    pub remote: bool,
+    /// `--footprint` — topos-owned paths outside skill dirs.
+    pub footprint: bool,
+    /// `--channel` selectors (rows delivered via that channel), ALL-OR-NONE.
+    pub channels: Vec<String>,
+    /// `--skill` selectors (rows by name), ALL-OR-NONE.
+    pub skills: Vec<String>,
+    /// The global `--workspace` filter, canonicalized to an id — narrows the `--remote` reads.
+    pub workspace: Option<String>,
+}
+
+/// A `list` run's typed result: the schema-pinned envelope payload plus the isolated per-workspace
+/// `--remote` read failures (one stable-shape line each — a transport fault reading one
+/// workspace's catalog skips it with a warning rather than failing the whole `list`).
 #[derive(Debug)]
 pub(crate) struct ListOutcome {
     pub data: ListData,
-    /// `Some` iff enrolled (`instance.json` present — the same presence rule `load_enrollment` uses).
-    pub enrollment: Option<ListEnrollment>,
-    /// Per-workspace `--remote` catalog-read failures (one stable-shape line each) — the SAME degradation
-    /// shape `pull` uses: a transport fault reading one workspace's catalog skips it with a warning rather
-    /// than failing the whole `list`. Empty on the local-only path. Rides the `--json` envelope's
-    /// `warnings` + the TTY, outside the pinned `ListData`.
     pub warnings: Vec<String>,
-    /// How many bundles the covering `topos.toml` asks for — the TTY-only honesty belt under an
-    /// EMPTY tracked bucket. `list` inventories this machine's own records; a folder whose manifest
-    /// governs its own set delivers into that project's store, so "nothing tracked" alone reads as
-    /// "nothing here" in exactly the directory where the opposite is true.
-    ///
-    /// ZERO says "nothing to add" and covers all three quiet cases identically — no covering file,
-    /// a covering file with no bundle rows, no working directory to walk up from — because each
-    /// leaves the empty state byte-identical to what it has always been. TTY-only by construction:
-    /// it rides beside the pinned [`ListData`], never inside it.
-    pub project_bundles: usize,
+    /// TTY-only: this run was `--untracked`, so the tracked scopes render as one summary line
+    /// each (the wire carries them in full either way).
+    pub untracked_view: bool,
 }
 
-/// The `--remote` scope: what `list` needs to read the followed workspaces' catalogs and annotate each
-/// entry with local follow-state. `pub(crate)` — built by the composition root (real `ureq` transport
-/// holding the per-workspace credential map + the memberships from `user.json`) and by the test (a fake
-/// transport). Present only under `--remote`; `None` is the local-only path.
-pub(crate) struct RemoteScope<'a> {
-    /// The catalog transport (`GET /v1/workspaces/{ws}/skills`, presenting the workspace's Bearer credential
-    /// looked up in its own credential map).
-    pub catalog: &'a dyn CatalogSource,
-    /// Every workspace this install has joined, as `(workspace_id, display_label)` (from `user.json`) — the
-    /// catalog targets.
-    pub memberships: Vec<(String, String)>,
-    /// The global `--workspace` filter, pre-canonicalized to an id (narrows to one joined workspace);
-    /// `None` = every joined one.
-    pub only: Option<String>,
-}
+/// The per-session directory connector `--remote` dials (one credentialed client per live
+/// session) — a seam so the tests inject a fake.
+pub(crate) type SessionDirectory<'a> = &'a dyn Fn(&Session) -> Box<dyn DirectorySource>;
 
-impl RemoteScope<'_> {
-    /// The workspaces to read the catalog from: the memberships, narrowed by the `--workspace` filter.
-    fn target_workspaces(&self) -> Vec<(&str, &str)> {
-        self.memberships
-            .iter()
-            .filter(|(id, _)| self.only.as_deref().is_none_or(|w| w == id))
-            .map(|(id, label)| (id.as_str(), label.as_str()))
-            .collect()
-    }
-}
-
-/// The enrolled-state disclosure for the TTY header + row annotations.
-#[derive(Debug)]
-pub(crate) struct ListEnrollment {
-    /// The joined workspaces as `(workspace_id, display_label)` in membership order — the TTY groups the
-    /// tracked rows by their `workspace_id` and names each group by its label (falling back to the raw id).
-    pub workspace_labels: Vec<(String, String)>,
-    /// The enrolled plane's base URL.
-    pub base_url: String,
-    /// Whether the harness session-start auto-update hook is currently installed (read from the adapter's
-    /// managed-entry disclosure — it names its config path only while the managed entry is present).
-    pub hook_active: bool,
-    /// One entry per `data.tracked` row, same order: the follow-state note, or `None` for a purely
-    /// local (never-followed) skill.
-    pub notes: Vec<Option<FollowNote>>,
-}
-
-/// One tracked row's follow state, from `follows.json`.
-#[derive(Debug)]
-pub(crate) struct FollowNote {
-    /// `"auto"` / `"confirm-each"`.
-    pub mode: &'static str,
-    /// `false` = the entry is retained but paused (`topos add <skill>` resumes it).
-    pub following: bool,
-}
-
-/// A `list` invocation's row filter: positional NAMES, `--skill` selectors (both matched by skill
-/// name), and `--channel` selectors (matched offline against each skill's cached `via` channels). A
-/// single positional name keeps the classic narrowing (proposals annotation + the exactly-one gate);
-/// any richer form resolves ALL-OR-NONE (an unmatched name refuses the whole invocation) and filters
-/// the tracked rows to the union of what matched.
-#[derive(Debug, Default, Clone)]
-pub(crate) struct ListFilter {
-    pub names: Vec<String>,
-    pub channels: Vec<String>,
-    pub skills: Vec<String>,
-}
-
-impl ListFilter {
-    /// A single positional name with no selectors — the classic `list <skill>` narrowing.
-    fn single_name(&self) -> Option<&str> {
-        if self.channels.is_empty() && self.skills.is_empty() && self.names.len() == 1 {
-            Some(self.names[0].as_str())
-        } else {
-            None
-        }
-    }
-
-    /// Any filter at all — narrows the view (suppresses untracked discovery + the remote catalog, the
-    /// same way the classic single name does).
-    fn narrows(&self) -> bool {
-        !(self.names.is_empty() && self.channels.is_empty() && self.skills.is_empty())
-    }
-}
-
-/// The test-only single-name shim over [`list_with`] (the inline suites + the e2e rig).
+/// Inventory the machine under a full [`ListRequest`], row-capped by `page` (applied PER BUCKET
+/// with a [`BucketTruncation`] marker per capped bucket; the buckets are the scope names plus
+/// `untracked` and `remote`).
 ///
 /// # Errors
-/// [`ClientError::NoSuchSkill`] / [`ClientError::AmbiguousName`] when a name filter does not resolve to
-/// exactly one skill; otherwise a read failure.
-#[cfg(test)]
-pub(crate) fn list(
-    ctx: &Ctx<'_>,
-    skill: Option<&str>,
-    want_footprint: bool,
-    discover: Option<DiscoveryRoots>,
-    remote: Option<RemoteScope<'_>>,
-) -> Result<ListOutcome, ClientError> {
-    let filter = ListFilter {
-        names: skill.map(|s| vec![s.to_owned()]).unwrap_or_default(),
-        ..ListFilter::default()
-    };
-    list_with(
-        ctx,
-        &filter,
-        want_footprint,
-        discover,
-        remote,
-        crate::ops::RowPage::unlimited(),
-    )
-}
-
-/// Inventory the tracked skills under a full [`ListFilter`] (positional names + `--channel`/`--skill`
-/// selectors), the footprint, and the optional `--remote` catalog — row-capped by `page` (the
-/// `--json` default page / the `--limit`/`--offset` flags), applied PER BUCKET with a
-/// [`BucketTruncation`] marker per capped bucket.
-///
-/// # Errors
-/// [`ClientError::NoSuchSkill`] when a name selector matches no tracked skill; the uniform not-found when
-/// a `--channel` selector matches no delivered skill; [`ClientError::AmbiguousName`] for the classic
-/// single-name over-match; otherwise a read failure.
+/// [`ClientError::TargetNotFound`] when a deep-dive name resolves nowhere;
+/// [`ClientError::InvalidArgument`] for an unknown `-a` slug; [`ClientError::SessionRequired`]
+/// for `--remote` with no live session; [`ClientError::NoSuchSkill`] / the uniform not-found for
+/// a filter selector matching nothing; otherwise a read failure.
 pub(crate) fn list_with(
     ctx: &Ctx<'_>,
-    filter: &ListFilter,
-    want_footprint: bool,
+    req: &ListRequest,
     discover: Option<DiscoveryRoots>,
-    remote: Option<RemoteScope<'_>>,
+    remote: Option<SessionDirectory<'_>>,
     page: super::RowPage,
 ) -> Result<ListOutcome, ClientError> {
-    // The follow-state is the ONE source for the per-skill workspace provenance, the followed bucket, and
-    // the TTY notes — read it once here (absent ⇒ empty, e.g. unenrolled or a membership-only door). We
-    // deliberately do NOT consult `ctx.follow`: `list` already keys its followed bucket + notes off this
-    // file read, so the per-entry `workspace_id` shares that single authority (they can only agree).
-    // The SESSION-model sources: the delivered cache (per-skill workspace provenance + the
-    // followed bucket) and the sessions file (labels + the signed-in state). Both best-effort —
-    // absence just narrows what a column can say.
-    let cache = crate::sync_status::read(ctx.fs, &ctx.layout).unwrap_or_default();
-    let follows: Vec<(String, String, bool)> = cache
-        .workspaces
-        .iter()
-        .flat_map(|(ws, e)| {
-            e.delivered
-                .iter()
-                .map(|(id, d)| (id.clone(), ws.clone(), d.withdrawn))
-        })
-        .collect();
-    let all_sessions = crate::sessions::read_sessions(ctx.fs, &ctx.layout)?;
-    let signed_in = all_sessions.live().count() > 0;
-    let labels: HashMap<String, String> = Some(())
-        .map(|()| {
-            all_sessions
-                .sessions
-                .iter()
-                .map(|s| (s.workspace_id.clone(), s.display_name.clone()))
-                .collect()
-        })
-        .unwrap_or_default();
-    // The last reconcile's per-skill delivery cache — the offline source of the `behind` status and the
-    // `removed-upstream` cause, plus each skill's `via` channels for a `--channel` filter. Best-effort
-    // (absent ⇒ no cache signal; `list` never wedges on the advisory doc).
-    let sync = sync_status::read(ctx.fs, &ctx.layout).unwrap_or_default();
-
-    // Carry the stable skill id alongside each entry — the proposals read route and the follow-state
-    // are keyed by id, not name.
-    let mut tracked: Vec<(String, SkillEntry)> = Vec::new();
-    for entry in ctx.fs.read_dir(&ctx.layout.skills_dir())? {
-        let Some(id) = entry.file_name().and_then(|n| n.to_str()) else {
-            continue;
-        };
-        // Skip the transient staging dirs (and anything else hidden); a skill id never starts with '.'.
-        if id.starts_with('.') || !entry.is_dir() {
-            continue;
+    let (all, cache) = inventory::read_sources(ctx)?;
+    let signed_in = all.live().count() > 0;
+    let resolved = inventory::resolve(ctx, &all, &cache)?;
+    let mut warnings: Vec<String> = Vec::new();
+    let mut data = ListData {
+        signed_in,
+        ..ListData::default()
+    };
+    let mut truncated: Vec<BucketTruncation> = Vec::new();
+    fn mark(bucket: &str, (shown, total): (usize, usize), out: &mut Vec<BucketTruncation>) {
+        if shown < total {
+            out.push(BucketTruncation {
+                bucket: bucket.to_owned(),
+                shown: shown as u64,
+                total: total as u64,
+            });
         }
-        // A dir name outside the validated id charset was never minted by topos — not a tracked skill.
-        let Ok(id) = crate::id::SkillId::parse(id) else {
-            continue;
-        };
-        let paths = ctx.layout.published(&id);
-        let Some(lock): Option<Lock> = doc::read_doc(ctx.fs, &paths.lock)? else {
-            continue;
-        };
-        let draft = is_draft(ctx, &paths.map, &lock)?;
-        let id_str = id.into_string();
-        // The skill's follow entry (a retained-but-paused entry still carries its workspace); `None`
-        // for a purely local, never-followed `add`'d skill.
-        let follow_entry = follows.iter().find(|(fid, _, _)| *fid == id_str);
-        let workspace_id = follow_entry.map(|(_, ws, _)| ws.clone());
-        // The recorded remote import origin (best-effort — absence means no upstream).
-        let origin_host = doc::read_doc::<crate::ops::add::OriginDoc>(ctx.fs, &paths.origin)
-            .ok()
-            .flatten()
-            .and_then(|o| origin_host(&o.origin.source));
-        // The skill's last-delivery cache entry (served version + withdrawn flag) — offline `behind` +
-        // `removed-upstream`.
-        let delivered = workspace_id
-            .as_deref()
-            .and_then(|w| sync.workspaces.get(w))
-            .and_then(|ws| ws.delivered.get(&id_str));
-        let (source, status, cause) = if crate::ops::builtin::is_builtin(&id_str) {
-            // The built-in skill: shipped by the CLI, force-synced to the binary. A hand edit shows
-            // `draft` honestly until the next sweep overwrites it (snapshot-first).
-            (
-                Some("built-in".to_owned()),
-                Some(if draft {
-                    SkillStatus::Draft
-                } else {
-                    SkillStatus::Current
-                }),
-                None,
-            )
-        } else {
-            derive_columns(
-                follow_entry,
-                draft,
-                origin_host,
-                workspace_id.as_deref().and_then(|w| labels.get(w)),
-                workspace_id.is_none() || signed_in,
-                delivered,
-                &lock.base_commit,
-            )
-        };
-        tracked.push((
-            id_str,
-            SkillEntry {
-                skill: lock.name,
-                workspace_id,
-                version_id: lock.base_commit,
-                bundle_digest: lock.bundle_digest,
-                draft,
-                pending_proposals: Vec::new(),
-                source,
-                status,
-                cause,
-            },
-        ));
-    }
-    // Deterministic order (name, then version).
-    tracked.sort_by(|a, b| {
-        a.1.skill
-            .cmp(&b.1.skill)
-            .then_with(|| a.1.version_id.cmp(&b.1.version_id))
-    });
-
-    let narrowed = filter.narrows();
-    if let Some(want) = filter.single_name() {
-        // The classic `list <skill>` narrowing: exactly-one gate + the OPEN-proposals annotation.
-        let count = tracked.iter().filter(|(_, e)| e.skill == want).count();
-        match count {
-            0 => {
-                return Err(ClientError::NoSuchSkill {
-                    name: want.to_owned(),
-                });
-            }
-            1 => {
-                tracked.retain(|(_, e)| e.skill == want);
-                // For the narrowed skill, annotate its OPEN proposals as `<skill>@<hash>` (best-effort —
-                // a plane-read failure / a local-only skill leaves it empty; the bare `list` skips this to
-                // avoid a network GET per skill).
-                if let Some((id, entry)) = tracked.first_mut()
-                    && let Ok(handles) = ctx.plane.list_open_proposals(id)
-                {
-                    entry.pending_proposals = handles
-                        .iter()
-                        .map(|h| format!("{}@{}", entry.skill, to_hex(h)))
-                        .collect();
-                }
-            }
-            count => {
-                return Err(ClientError::AmbiguousName {
-                    name: want.to_owned(),
-                    count,
-                });
-            }
-        }
-    } else if narrowed {
-        // The multi-name / `--skill` / `--channel` filter: resolve ALL-OR-NONE, keep the union.
-        tracked = apply_filter(tracked, filter, &sync)?;
     }
 
-    // The connected-state disclosure + the delivered bucket, from the SESSION-model sources: the
-    // sessions file supplies the header (labels + base), the offline delivery cache the per-row
-    // notes (every delivered bundle syncs auto — the consent layer is retired; login accepted).
-    let mut enrollment = if all_sessions.sessions.is_empty() {
-        None
-    } else {
-        let notes: Vec<Option<FollowNote>> = tracked
-            .iter()
-            .map(|(id, _)| {
-                follows
-                    .iter()
-                    .find(|(fid, _, _)| fid == id)
-                    .map(|(_, _, withdrawn)| FollowNote {
-                        mode: "auto",
-                        following: !withdrawn,
-                    })
-            })
-            .collect();
-        let workspace_labels: Vec<(String, String)> = all_sessions
-            .sessions
-            .iter()
-            .map(|s| (s.workspace_id.clone(), s.display_name.clone()))
-            .collect();
-        Some(ListEnrollment {
-            workspace_labels,
-            base_url: all_sessions
-                .sessions
-                .first()
-                .map(|s| s.base_url.clone())
-                .unwrap_or_default(),
-            hook_active: ctx.harness.trigger_present(),
-            notes,
-        })
-    };
-    let followed: Vec<SkillEntry> = match &enrollment {
-        Some(e) => tracked
-            .iter()
-            .zip(&e.notes)
-            .filter(|(_, n)| n.as_ref().is_some_and(|n| n.following))
-            .map(|((_, entry), _)| entry.clone())
-            .collect(),
-        None => Vec::new(),
-    };
-    // The local applied version per tracked skill, keyed by id — the cheap `Following`/`FollowingBehind`
-    // discriminant for the `--remote` merge below (the sidecar `lock`'s `base_commit` is the version this
-    // install is on). Captured before `tracked` is flattened to `SkillEntry` rows (which drop the id key).
-    let local_versions: HashMap<String, String> = tracked
-        .iter()
-        .map(|(id, e)| (id.clone(), e.version_id.clone()))
-        .collect();
-    let tracked: Vec<SkillEntry> = tracked.into_iter().map(|(_, e)| e).collect();
-
-    let footprint = if want_footprint {
-        // The `~/.topos/` walk PLUS any harness config path topos holds a managed entry in (disclosed,
-        // never deleted) — every topos-owned path outside skill dirs.
+    if req.footprint {
+        // The `~/.topos/` walk PLUS any harness config path topos holds a managed entry in
+        // (disclosed, never deleted) — every topos-owned path outside skill dirs.
         let mut paths = sidecar::footprint(ctx.fs, &ctx.layout)?;
         paths.extend(
             ctx.harness
@@ -401,199 +134,613 @@ pub(crate) fn list_with(
                 .map(|p| p.to_string_lossy().into_owned()),
         );
         paths.sort();
-        Some(paths)
-    } else {
-        None
-    };
-
-    // Discover untracked skills across the baked harness registry — only on a bare sweep (any filter
-    // narrows to tracked rows) and only when not `--tracked`. Dedups against every tracked placement so an
-    // adopted/followed skill never shows up as "untracked".
-    let untracked = if let (Some(roots), false) = (&discover, narrowed) {
-        discover_untracked(ctx, roots)?
-    } else {
-        Vec::new()
-    };
-
-    // The `--remote` catalog: for each followed workspace, a catalog read merged with the
-    // local follow-state. A per-workspace transport fault degrades to a warning (never fails the `list`).
-    let mut warnings: Vec<String> = Vec::new();
-    let remote_available = match (remote, narrowed) {
-        // Bare-sweep only, mirroring untracked discovery above: the catalog is a browse of the WHOLE
-        // workspace, so any filter skips it. This also keeps `local_versions` complete (captured after the
-        // no-op narrowing), so the follow-state merge can never mislabel a followed skill the narrowing
-        // dropped as `Following` when it is really `FollowingBehind`.
-        (Some(scope), false) => build_remote(&scope, &follows, &local_versions, &mut warnings),
-        (Some(_), true) => {
-            warnings.push(
-                "the remote catalog is listed only on a bare `topos list --remote`, not with a name/channel/skill filter — skipped".to_owned(),
-            );
-            Vec::new()
-        }
-        (None, _) => Vec::new(),
-    };
-
-    // The row page, applied LAST and PER BUCKET (after the remote merge, whose follow-state
-    // discriminant needs the complete tracked set): each bucket independently skips `offset` rows
-    // and emits up to `limit`, with one truncation marker per bucket that lost rows. The TTY's
-    // per-row follow notes are index-aligned with `tracked`, so they slice under the SAME page —
-    // alignment is preserved by construction. An inactive page keeps the exact prior shape.
-    let mut followed = followed;
-    let mut published_by_you: Vec<SkillEntry> = Vec::new();
-    let mut tracked = tracked;
-    let mut untracked = untracked;
-    let mut remote_available = remote_available;
-    let mut truncated: Vec<BucketTruncation> = Vec::new();
-    if page.is_active() {
-        let mut mark = |bucket: &str, (shown, total): (usize, usize)| {
-            if shown < total {
-                truncated.push(BucketTruncation {
-                    bucket: bucket.to_owned(),
-                    shown: shown as u64,
-                    total: total as u64,
-                });
-            }
-        };
-        mark("followed", page.apply(&mut followed));
-        mark("published_by_you", page.apply(&mut published_by_you));
-        mark("tracked", page.apply(&mut tracked));
-        if let Some(e) = &mut enrollment {
-            page.apply(&mut e.notes);
-        }
-        mark("untracked", page.apply(&mut untracked));
-        mark("remote_available", page.apply(&mut remote_available));
+        data.footprint = Some(paths);
     }
 
+    // The one-skill deep dive: project rows first, then machine — the miss is the uniform
+    // not-found. Nothing else rides the answer.
+    if let Some(name) = &req.name {
+        data.detail = Some(inventory::detail_for(&resolved, &all, name)?);
+        return Ok(ListOutcome {
+            data,
+            warnings,
+            untracked_view: req.untracked,
+        });
+    }
+
+    // The agent-eye view — deliberately spans both scopes.
+    if let Some(slug) = &req.agent {
+        data.agent_view = Some(agent_view(&resolved, discover.as_ref(), slug)?);
+        return Ok(ListOutcome {
+            data,
+            warnings,
+            untracked_view: req.untracked,
+        });
+    }
+
+    // The live per-workspace catalog view — the one networked arm.
+    if req.remote {
+        let connect = remote.expect("the composition root passes the --remote connector");
+        data.remote = remote_view(
+            &resolved,
+            &all,
+            req.workspace.as_deref(),
+            connect,
+            &mut warnings,
+        )?;
+        if page.is_active() {
+            mark("remote", page.apply(&mut data.remote), &mut truncated);
+        }
+        data.truncated = truncated;
+        return Ok(ListOutcome {
+            data,
+            warnings,
+            untracked_view: req.untracked,
+        });
+    }
+
+    // The scope sections shown in full. Under `--untracked` every tracked scope covering the cwd
+    // rides along (the TTY renders each as one summary line), so nothing is invisible beside the
+    // discovery listing.
+    let in_project = resolved.project().is_some();
+    let sections: Vec<&ScopeResolution> = if req.untracked {
+        resolved.scopes.iter().collect()
+    } else {
+        match req.view {
+            ScopeView::Here => vec![resolved.project().unwrap_or_else(|| resolved.machine())],
+            ScopeView::Machine => vec![resolved.machine()],
+            ScopeView::All => resolved.scopes.iter().collect(),
+        }
+    };
+
+    // Each shown section's GHOST rows first (store records no resolved row claims — the built-in
+    // meta-skill, detached/frozen copies): installed is installed, so they are never invisible.
+    let ghosts: Vec<Vec<Ghost>> = sections
+        .iter()
+        .map(|section| store_ghosts(ctx, section, &cache, &all, signed_in))
+        .collect();
+
+    // The `--channel`/`--skill` filters, ALL-OR-NONE across the SHOWN sections (ghosts count as
+    // matchable rows — a detached copy is still findable by its name or its cached channel).
+    let narrowed = !(req.channels.is_empty() && req.skills.is_empty());
+    if narrowed {
+        validate_filters(&sections, &ghosts, &req.skills, &req.channels)?;
+    }
+    let keeps = |name: &str, via: &[String]| -> bool {
+        if !narrowed {
+            return true;
+        }
+        req.skills.iter().any(|s| s == name)
+            || req.channels.iter().any(|c| via.iter().any(|v| v == c))
+    };
+    for (section, section_ghosts) in sections.iter().zip(&ghosts) {
+        let mut rows: Vec<SkillEntry> = section
+            .inventory_rows()
+            .filter(|r| keeps(&r.name, &r.via_channels))
+            .map(skill_entry)
+            .collect();
+        rows.extend(
+            section_ghosts
+                .iter()
+                .filter(|g| keeps(&g.entry.skill, &g.via_channels))
+                .map(|g| g.entry.clone()),
+        );
+        if page.is_active() {
+            mark(section.scope, page.apply(&mut rows), &mut truncated);
+        }
+        data.scopes.push(ListScope {
+            scope: section.scope.to_owned(),
+            manifest: section.manifest.clone(),
+            rows,
+        });
+    }
+
+    if req.untracked {
+        // The FULL discovery listing (grouped by folder on the TTY).
+        if let Some(roots) = &discover {
+            data.untracked = discover_untracked(ctx, roots)?;
+            if page.is_active() {
+                mark("untracked", page.apply(&mut data.untracked), &mut truncated);
+            }
+        }
+    } else if !narrowed {
+        // The quiet rule's summaries: the machine scope when the body shows only the project, and
+        // the untracked discoveries (absent when nothing was found — nothing is being withheld).
+        if in_project && matches!(req.view, ScopeView::Here) {
+            let machine = resolved.machine();
+            // The ghost rows count into the summary's `skills` too — a summary that undercounts
+            // what `-g` would show breaks the summary's promise. Their pending state does NOT
+            // ride `updates_pending`: no manifest row means `topos update -g` has nothing to act
+            // on there, and the count's command must stay true.
+            let machine_ghosts = store_ghosts(ctx, machine, &cache, &all, signed_in);
+            data.machine_summary = Some(ListScopeSummary {
+                skills: machine.skills() + machine_ghosts.len() as u64,
+                updates_pending: machine.updates_pending(),
+                command: "topos list -g".to_owned(),
+            });
+        }
+        if let Some(roots) = &discover {
+            let found = discover_untracked(ctx, roots)?;
+            if !found.is_empty() {
+                let folders: HashSet<&str> = found
+                    .iter()
+                    .filter_map(|u| Path::new(&u.path).parent().and_then(Path::to_str))
+                    .collect();
+                data.untracked_summary = Some(UntrackedSummary {
+                    skills: found.len() as u64,
+                    folders: folders.len() as u64,
+                    command: "topos list --untracked".to_owned(),
+                });
+            }
+        }
+    }
+
+    data.truncated = truncated;
     Ok(ListOutcome {
-        data: ListData {
-            followed,
-            published_by_you,
-            tracked,
-            untracked,
-            remote_available,
-            footprint,
-            truncated,
-        },
-        enrollment,
+        data,
         warnings,
-        project_bundles: covering_manifest_bundles(ctx),
+        untracked_view: req.untracked,
     })
 }
 
-/// How many bundles the NEAREST `topos.toml` covering the working directory asks for — its THING
-/// rows plus its SET lines (a project manifest can hold neither a feed row nor an `"off"` switch;
-/// the grammar refuses both there).
-///
-/// Read from [`Ctx::roots`], the SAME source `status` walks from — so the two verbs can only name
-/// the same file, and the disclosure does not vanish under `--tracked` (which narrows DISCOVERY;
-/// what a folder asks for is not discovery, and the empty state is exactly as misleading there).
-///
-/// Purely offline (one walk up, one read, one parse) and FAIL-QUIET: a manifest the grammar
-/// refuses counts ZERO rather than failing the inventory. `status` is the verb that reports a bad
-/// file; `list` would be answering a question nobody asked, and refusing to inventory a machine
-/// because a neighbouring folder holds a broken file is the wrong trade.
-fn covering_manifest_bundles(ctx: &Ctx<'_>) -> usize {
-    let Some(roots) = &ctx.roots else {
-        return 0;
+/// One resolved row as the inventory prints it. A row never applied here carries the all-zero
+/// baseline as its identity (the system's own "never applied" sentinel — the honest reading of a
+/// required field with nothing to put in it); an `"off"` switch reads detached/excluded-here.
+fn skill_entry(row: &Row) -> SkillEntry {
+    let (status, cause) = match row.state {
+        StatusItemState::Applied => (Some(SkillStatus::Current), None),
+        StatusItemState::Behind => (Some(SkillStatus::Behind), None),
+        StatusItemState::LocalEdits => (Some(SkillStatus::Draft), None),
+        StatusItemState::Off => (Some(SkillStatus::Detached), Some(DetachCause::ExcludedHere)),
+        StatusItemState::NotAvailable => {
+            (Some(SkillStatus::Detached), Some(DetachCause::SignedOut))
+        }
+        // Never applied / pending / no delivery yet: no update status is honestly claimable.
+        _ => (None, None),
     };
-    let Some(cwd) = roots.cwd.as_deref() else {
-        return 0;
-    };
-    crate::manifest::scopes::nearest_project_plan(ctx.fs, cwd, Some(&roots.home))
-        .ok()
-        .flatten()
-        .map_or(0, |(_, plan)| plan.things.len() + plan.sets.len())
+    SkillEntry {
+        skill: row.name.clone(),
+        workspace_id: row.workspace_id.clone(),
+        version_id: row.version.clone().unwrap_or_else(|| ZERO_HEX.to_owned()),
+        bundle_digest: row.digest.clone().unwrap_or_else(|| ZERO_HEX.to_owned()),
+        draft: matches!(row.state, StatusItemState::LocalEdits),
+        pending_proposals: Vec::new(),
+        source: (!row.source.is_empty()).then(|| row.source.clone()),
+        status,
+        cause,
+    }
 }
 
-/// Read each target workspace's catalog and merge every entry with the local follow-state.
-/// A per-workspace signing or transport fault DEGRADES: the workspace is skipped with a stable-shape
-/// warning line (the same isolation `pull`'s sweep uses), and the successfully-read workspaces still land.
-/// The result is sorted deterministically by `(workspace_id, skill_id)`.
-fn build_remote(
-    scope: &RemoteScope<'_>,
-    follows: &[(String, String, bool)],
-    local_versions: &HashMap<String, String>,
-    warnings: &mut Vec<String>,
-) -> Vec<RemoteSkillEntry> {
-    let mut out: Vec<RemoteSkillEntry> = Vec::new();
-    for (ws_id, ws_label) in scope.target_workspaces() {
-        // Read THIS workspace's catalog — authorized by the workspace's Bearer credential (catalog
-        // visibility == workspace membership, resolved from the registry row). A workspace with no stored
-        // credential degrades to the warning below like any other per-workspace fault.
-        let index = match scope.catalog.fetch_catalog(ws_id) {
-            Ok(index) => index,
-            Err(e) => {
-                warnings.push(format!(
-                    "could not read the catalog for workspace {ws_label} ({}) — skipped",
-                    catalog_err_label(&e)
-                ));
-                continue;
-            }
-        };
-        for entry in &index.skills {
-            out.push(RemoteSkillEntry {
-                skill_id: entry.skill_id.clone(),
-                workspace_id: ws_id.to_owned(),
-                kind: entry.kind.clone(),
-                display_name: entry.display_name.clone(),
-                version_id: entry.version_id.clone(),
-                bundle_digest: entry.bundle_digest.clone(),
-                open_proposals: entry.open_proposals,
-                state: merge_follow_state(entry, ws_id, follows, local_versions),
-            });
+/// The ALL-OR-NONE filter gate: every `--skill` selector must match at least one shown row's name
+/// (else the typed no-such-skill), every `--channel` selector at least one row's cached delivery
+/// channel (else the uniform not-found). Ghost rows count — a detached copy is still findable.
+fn validate_filters(
+    sections: &[&ScopeResolution],
+    ghosts: &[Vec<Ghost>],
+    skills: &[String],
+    channels: &[String],
+) -> Result<(), ClientError> {
+    for s in skills {
+        let hit = sections
+            .iter()
+            .any(|sec| sec.rows.iter().any(|r| r.name == *s))
+            || ghosts.iter().flatten().any(|g| g.entry.skill == *s);
+        if !hit {
+            return Err(ClientError::NoSuchSkill { name: s.clone() });
         }
     }
-    // Deterministic: workspace_id, then skill_id.
-    out.sort_by(|a, b| {
-        a.workspace_id
-            .cmp(&b.workspace_id)
-            .then_with(|| a.skill_id.cmp(&b.skill_id))
-    });
+    for c in channels {
+        let hit = sections.iter().any(|sec| {
+            sec.rows
+                .iter()
+                .any(|r| r.via_channels.iter().any(|v| v == c))
+        }) || ghosts
+            .iter()
+            .flatten()
+            .any(|g| g.via_channels.iter().any(|v| v == c));
+        if !hit {
+            return Err(crate::resolve::not_found(c));
+        }
+    }
+    Ok(())
+}
+
+/// One store record no resolved row claims, with the cached channels the `--channel` filter
+/// matches against.
+struct Ghost {
+    entry: SkillEntry,
+    via_channels: Vec<String>,
+}
+
+/// The scope's unclaimed STORE records — the built-in `topos` meta-skill and detached/frozen
+/// copies (an unfollowed skill's retained bytes, a removed row's kept custody). The inventory
+/// shows what is INSTALLED, and these are installed: the manifest resolution just does not claim
+/// them, and hiding them would make `remove topos`'s own target invisible. Read from THIS scope's
+/// own store only (never cross-scope), with the classic column semantics: `built-in` for the
+/// meta-skill; otherwise the detach cause from the delivery cache (withdrawn upstream / signed
+/// out), the source from the recorded origin or the workspace label, and draft/behind/current
+/// from the lock + placements.
+fn store_ghosts(
+    ctx: &Ctx<'_>,
+    section: &ScopeResolution,
+    cache: &SyncStatus,
+    all: &Sessions,
+    signed_in: bool,
+) -> Vec<Ghost> {
+    let Some(layout) = &section.store else {
+        return Vec::new();
+    };
+    let claimed: HashSet<&str> = section.rows.iter().map(|r| r.name.as_str()).collect();
+    let Ok(entries) = ctx.fs.read_dir(&layout.skills_dir()) else {
+        return Vec::new();
+    };
+    let mut out: Vec<Ghost> = Vec::new();
+    for dir in entries {
+        let Some(id) = dir.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        let Ok(sid) = crate::id::SkillId::parse(id) else {
+            continue;
+        };
+        let sp = layout.published(&sid);
+        let Ok(Some(lock)) = doc::read_doc::<Lock>(ctx.fs, &sp.lock) else {
+            continue;
+        };
+        if claimed.contains(lock.name.as_str()) {
+            continue;
+        }
+        let draft = ghost_draft(ctx, &sp.map, &lock);
+        // The cached delivery for this id, across workspaces — withdrawn entries included (the
+        // withdrawal IS the cause).
+        let delivered: Option<(&String, &DeliveredSkill)> = cache
+            .workspaces
+            .iter()
+            .find_map(|(ws, e)| e.delivered.get(id).map(|d| (ws, d)));
+        let via_channels = delivered
+            .map(|(_, d)| d.via_channels.clone())
+            .unwrap_or_default();
+        let entry = if super::builtin::is_builtin(id) {
+            // The built-in: shipped by the CLI, force-synced to the binary. A hand edit shows
+            // `draft` honestly until the next sweep overwrites it (snapshot-first).
+            SkillEntry {
+                skill: lock.name.clone(),
+                workspace_id: None,
+                version_id: lock.base_commit.clone(),
+                bundle_digest: lock.bundle_digest.clone(),
+                draft,
+                pending_proposals: Vec::new(),
+                source: Some("built-in".to_owned()),
+                status: Some(if draft {
+                    SkillStatus::Draft
+                } else {
+                    SkillStatus::Current
+                }),
+                cause: None,
+            }
+        } else {
+            let origin = doc::read_doc::<super::add::OriginDoc>(ctx.fs, &sp.origin)
+                .ok()
+                .flatten()
+                .and_then(|o| origin_host(&o.origin.source));
+            let (source, status, cause) = if delivered.is_none() && origin.is_none() {
+                // A purely local record: its absent workspace already says "local", and no
+                // update status is honestly claimable without an upstream to measure against.
+                (None, None, None)
+            } else {
+                let label = delivered.and_then(|(ws, _)| {
+                    all.sessions
+                        .iter()
+                        .find(|s| s.workspace_id == *ws)
+                        .map(|s| s.display_name.clone())
+                });
+                let source = origin.or(label).unwrap_or_else(|| "local".to_owned());
+                let cause = match delivered {
+                    Some((_, d)) if d.withdrawn => Some(DetachCause::RemovedUpstream),
+                    Some(_) if !signed_in => Some(DetachCause::SignedOut),
+                    _ => None,
+                };
+                let behind = delivered.is_some_and(|(_, d)| {
+                    !d.served_version.is_empty()
+                        && !lock.base_commit.bytes().all(|b| b == b'0')
+                        && d.served_version != lock.base_commit
+                });
+                let status = if cause.is_some() {
+                    SkillStatus::Detached
+                } else if draft {
+                    SkillStatus::Draft
+                } else if behind {
+                    SkillStatus::Behind
+                } else {
+                    SkillStatus::Current
+                };
+                (Some(source), Some(status), cause)
+            };
+            SkillEntry {
+                skill: lock.name.clone(),
+                workspace_id: delivered.map(|(ws, _)| ws.clone()),
+                version_id: lock.base_commit.clone(),
+                bundle_digest: lock.bundle_digest.clone(),
+                draft,
+                pending_proposals: Vec::new(),
+                source,
+                status,
+                cause,
+            }
+        };
+        out.push(Ghost {
+            entry,
+            via_channels,
+        });
+    }
+    // Deterministic order: name (ids are opaque; names are the scope identity).
+    out.sort_by(|a, b| a.entry.skill.cmp(&b.entry.skill));
     out
 }
 
-/// The local follow-state annotation for one catalog entry:
-/// - **`Available`** — no `following == true` [`FollowEntry`] matches `(workspace_id, skill_id)`;
-/// - **`Following`** — followed, and the local applied version matches the catalog `current` (OR the local
-///   version can't be cheaply determined — we default a followed skill to `Following`, never wrongly
-///   claiming it is behind);
-/// - **`FollowingBehind`** — followed, but the local applied version differs from the catalog `current`
-///   (the catalog has moved on — `pull` to advance).
-fn merge_follow_state(
-    entry: &WireSkillIndexEntry,
-    workspace_id: &str,
-    follows: &[(String, String, bool)],
-    local_versions: &HashMap<String, String>,
-) -> RemoteFollowState {
-    let followed = follows
+/// A ghost carries a draft iff ANY of its placements holds bytes hashing to a different digest
+/// than the lock pins. A missing/unscannable source is no-draft (nothing to compare), never an
+/// error.
+fn ghost_draft(ctx: &Ctx<'_>, map_path: &Path, lock: &Lock) -> bool {
+    let Ok(Some(map)) = doc::read_map(ctx.fs, map_path) else {
+        return false;
+    };
+    for placement in &map.placements {
+        let source = Path::new(placement);
+        if !source.exists() {
+            continue;
+        }
+        if let Ok(scanned) = crate::scan::scan(source)
+            && topos_core::digest::to_hex(&scanned.bundle_digest) != lock.bundle_digest
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/// The host of a recorded import source (`github.com/owner/repo` → `github.com`), or `None` for
+/// an empty source.
+fn origin_host(source: &str) -> Option<String> {
+    source
+        .trim_start_matches("https://")
+        .trim_start_matches("http://")
+        .split('/')
+        .next()
+        .filter(|h| !h.is_empty())
+        .map(str::to_owned)
+}
+
+/// The `--remote` view: one channel-index + catalog read per live session (narrowed by the
+/// `--workspace` filter), each skill annotated with this machine's adoption state from the SAME
+/// resolution the local sections print. A per-workspace transport fault DEGRADES to a warning —
+/// the successfully-read workspaces still land.
+fn remote_view(
+    resolved: &Resolved,
+    all: &crate::sessions::Sessions,
+    only: Option<&str>,
+    connect: SessionDirectory<'_>,
+    warnings: &mut Vec<String>,
+) -> Result<Vec<RemoteWorkspace>, ClientError> {
+    let live: Vec<&Session> = all.live().collect();
+    if live.is_empty() {
+        return Err(ClientError::SessionRequired {
+            address: "<workspace-address>".to_owned(),
+            message: "not connected to a workspace — run `topos login <workspace-address>` first"
+                .into(),
+        });
+    }
+    let mut out = Vec::new();
+    for s in live {
+        if only.is_some_and(|w| w != s.workspace_id) {
+            continue;
+        }
+        let dir = connect(s);
+        let channels = match dir.channels_index(&s.workspace_id) {
+            Ok(c) => c,
+            Err(e) => {
+                warnings.push(remote_skip_line(s, &e));
+                continue;
+            }
+        };
+        let skills = match dir.skills_index(&s.workspace_id) {
+            Ok(k) => k,
+            Err(e) => {
+                warnings.push(remote_skip_line(s, &e));
+                continue;
+            }
+        };
+        out.push(RemoteWorkspace {
+            host: s.host.clone(),
+            workspace: s.workspace_name.clone(),
+            workspace_id: s.workspace_id.clone(),
+            channels: channels
+                .channels
+                .iter()
+                .map(|c| RemoteChannel {
+                    name: c.name.clone(),
+                    skills: c.skills.len() as u64,
+                    adopted_in: channel_adopted_in(resolved, &s.host, &s.workspace_name, &c.name),
+                })
+                .collect(),
+            skills: skills
+                .skills
+                .iter()
+                .map(|e| RemoteSkill {
+                    name: e.name.clone(),
+                    kind: e.kind.clone(),
+                    version_id: e.version_id.clone(),
+                    open_proposals: e.open_proposals,
+                    state: adoption(resolved, &s.host, &s.workspace_name, &e.name, &e.version_id),
+                })
+                .collect(),
+        });
+    }
+    // Deterministic order however the sessions file lists them.
+    out.sort_by(|a, b| {
+        a.host
+            .cmp(&b.host)
+            .then_with(|| a.workspace.cmp(&b.workspace))
+    });
+    Ok(out)
+}
+
+/// A short, leak-free line for one skipped `--remote` workspace.
+fn remote_skip_line(s: &Session, e: &ClientError) -> String {
+    let label = match e {
+        ClientError::TargetNotFound { .. } => "not visible to you",
+        _ => "the server did not answer",
+    };
+    format!(
+        "could not read the catalog for workspace {} ({label}) — skipped",
+        s.workspace_name
+    )
+}
+
+/// The manifest file whose channel row adopts `<host>/<ws>/channels/<name>` here, when one does.
+fn channel_adopted_in(
+    resolved: &Resolved,
+    host: &str,
+    workspace: &str,
+    channel: &str,
+) -> Option<String> {
+    let canonical = format!("{host}/{workspace}/channels/{channel}");
+    resolved
+        .scopes
         .iter()
-        .any(|(id, ws, withdrawn)| id == &entry.skill_id && ws == workspace_id && !withdrawn);
-    if !followed {
-        return RemoteFollowState::Available;
+        .find(|s| s.sets.contains(&canonical))
+        .and_then(|s| s.manifest.clone())
+}
+
+/// One catalog skill's adoption marker: adopted by the here-scope, only by the machine (seen from
+/// inside a project), not at all — or adopted with the catalog `current` past the UNPINNED
+/// applied version (a pinned row sits where it was asked to sit, never "update available").
+fn adoption(
+    resolved: &Resolved,
+    host: &str,
+    workspace: &str,
+    name: &str,
+    catalog_version: &str,
+) -> RemoteAdoption {
+    let reference = format!("{host}/{workspace}/{name}");
+    fn find<'a>(s: &'a ScopeResolution, reference: &str) -> Option<&'a Row> {
+        s.rows.iter().find(|r| r.bundle && r.reference == reference)
     }
-    match local_versions.get(&entry.skill_id) {
-        Some(local) if *local != entry.version_id => RemoteFollowState::FollowingBehind,
-        // Matches, or no cheap local version to compare — default to Following (never falsely "behind").
-        _ => RemoteFollowState::Following,
+    let here = &resolved.scopes[0];
+    let (row, adopted) = if let Some(r) = find(here, &reference) {
+        (r, RemoteAdoption::AdoptedHere)
+    } else if here.scope != "machine"
+        && let Some(r) = find(resolved.machine(), &reference)
+    {
+        (r, RemoteAdoption::AdoptedOnMachine)
+    } else {
+        return RemoteAdoption::NotAdopted;
+    };
+    match &row.version {
+        Some(v) if row.pin.is_none() && v != catalog_version => RemoteAdoption::UpdateAvailable,
+        _ => adopted,
     }
 }
 
-/// A short, leak-free label for a per-workspace catalog-read failure (rides a warning line).
-fn catalog_err_label(e: &PlaneError) -> &'static str {
-    match e {
-        // The real transport maps 404 to an empty index, so `NotFound` here is only a defensive fallback.
-        PlaneError::NotFound => "not visible to you",
-        PlaneError::Unreachable(_) => "the server did not answer",
-        PlaneError::Unavailable(_) => "temporarily unavailable",
-        PlaneError::Malformed(_) => "malformed response",
+/// The agent-eye view for one harness: each skills dir it reads from this folder — its canonical
+/// home dir, the shared `.agents/skills` dirs when the harness is covered by them, and its
+/// project dir — with every entry marked managed (by which manifest row or feed) or untracked.
+fn agent_view(
+    resolved: &Resolved,
+    roots: Option<&DiscoveryRoots>,
+    slug: &str,
+) -> Result<AgentView, ClientError> {
+    let known = registry::known_harnesses();
+    let Some(harness) = known.iter().find(|h| h.slug == slug) else {
+        let slugs: Vec<&str> = known.iter().map(|h| h.slug).collect();
+        return Err(ClientError::InvalidArgument(format!(
+            "'{slug}' is not a known agent — known agents: {}",
+            slugs.join(", ")
+        )));
+    };
+
+    // The dirs, home scope first, deduped (a harness whose native dir IS the shared dir).
+    let mut dirs: Vec<(PathBuf, &'static str)> = Vec::new();
+    if let Some(r) = roots {
+        let cwd = r.cwd.as_deref();
+        if let Some(d) = registry::skills_root(slug, SkillScope::User, &r.home, cwd) {
+            dirs.push((d, "user"));
+        }
+        let covered = coverage::shared_dir_support(slug).covered();
+        if covered {
+            dirs.push((coverage::shared_skills_dir(&r.home), "user"));
+        }
+        if let Some(d) = registry::skills_root(slug, SkillScope::Project, &r.home, cwd) {
+            dirs.push((d, "project"));
+        }
+        if covered && let Some(c) = cwd {
+            dirs.push((c.join(".agents/skills"), "project"));
+        }
     }
+    let mut seen: HashSet<PathBuf> = HashSet::new();
+    dirs.retain(|(d, _)| seen.insert(d.clone()));
+
+    // Every managed placement across BOTH scopes, canonicalized → its managing label.
+    let mut managed: Vec<(PathBuf, String)> = Vec::new();
+    for scope in &resolved.scopes {
+        for row in &scope.rows {
+            let label = match (&row.source_file, &row.source_key, &row.feed) {
+                (Some(file), Some(key), _) => format!("{file}:{key}"),
+                (_, _, Some(feed)) => format!("feed {feed}"),
+                _ => continue,
+            };
+            for p in &row.placements {
+                if let Ok(canon) = Path::new(p).canonicalize() {
+                    managed.push((canon, label.clone()));
+                }
+            }
+        }
+    }
+
+    let mut out = Vec::new();
+    for (dir, scope) in dirs {
+        let mut entries: Vec<AgentViewEntry> = Vec::new();
+        if let Ok(read) = std::fs::read_dir(&dir) {
+            for entry in read.flatten() {
+                let path = entry.path();
+                let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+                    continue;
+                };
+                if name.starts_with('.') || !path.is_dir() {
+                    continue;
+                }
+                if !path.join("SKILL.md").is_file() {
+                    continue;
+                }
+                let canon = path.canonicalize().unwrap_or_else(|_| path.clone());
+                entries.push(AgentViewEntry {
+                    name: name.to_owned(),
+                    managed: managed
+                        .iter()
+                        .find(|(p, _)| *p == canon)
+                        .map(|(_, label)| label.clone()),
+                });
+            }
+        }
+        entries.sort_by(|a, b| a.name.cmp(&b.name));
+        out.push(AgentViewDir {
+            path: dir.to_string_lossy().into_owned(),
+            scope: scope.to_owned(),
+            entries,
+        });
+    }
+    Ok(AgentView {
+        agent: harness.slug.to_owned(),
+        agent_name: harness.display_name.to_owned(),
+        dirs: out,
+    })
 }
 
-/// Discover skills sitting in a known harness's skill dir (across the baked registry) that no tracked skill
-/// already records — the `add`-able inventory. Dedups a physically-shared dir (e.g. `.agents/skills`) to
-/// one row by canonical path. Real-fs (like the adapters' own `discover`), so a per-dir scan failure is
-/// silently skipped, never an error. `pub(crate)` so `add <skill>` name resolution shares the SAME
-/// discovered inventory `list` prints (one source of truth for what a name can resolve to).
+/// Discover skills sitting in a known harness's skill dir (across the baked registry) that no
+/// tracked skill already records — the `add`-able inventory. Dedups a physically-shared dir (e.g.
+/// `.agents/skills`) to one row by canonical path. Real-fs (like the adapters' own `discover`),
+/// so a per-dir scan failure is silently skipped, never an error. `pub(crate)` so `add <skill>`
+/// name resolution shares the SAME discovered inventory `list` prints (one source of truth for
+/// what a name can resolve to).
 pub(crate) fn discover_untracked(
     ctx: &Ctx<'_>,
     roots: &DiscoveryRoots,
@@ -604,7 +751,7 @@ pub(crate) fn discover_untracked(
     for d in registry::discover_all(&roots.home, roots.cwd.as_deref()) {
         let canon = d.path.canonicalize().unwrap_or_else(|_| d.path.clone());
         if tracked.contains(&canon) {
-            continue; // already adopted or followed — not "untracked"
+            continue; // already adopted or delivered — not "untracked"
         }
         if !seen.insert(canon) {
             continue; // one physical dir once (a dir shared across harnesses, e.g. .agents/skills)
@@ -632,8 +779,9 @@ pub(crate) fn discover_untracked(
     Ok(out)
 }
 
-/// Every tracked skill's placement paths, canonicalized (a placement that no longer resolves on disk is
-/// dropped — it can't shadow a real discovery). The same dedup key `add`'s `reject_already_tracked` uses.
+/// Every tracked skill's placement paths in the MACHINE store, canonicalized (a placement that no
+/// longer resolves on disk is dropped — it can't shadow a real discovery). The same dedup key
+/// `add`'s `reject_already_tracked` uses.
 fn tracked_placement_paths(ctx: &Ctx<'_>) -> Result<Vec<PathBuf>, ClientError> {
     let mut paths = Vec::new();
     for entry in ctx.fs.read_dir(&ctx.layout.skills_dir())? {
@@ -660,361 +808,912 @@ fn tracked_placement_paths(ctx: &Ctx<'_>) -> Result<Vec<PathBuf>, ClientError> {
     Ok(paths)
 }
 
-/// A skill carries a draft iff ANY of its placements holds bytes hashing to a different
-/// `bundle_digest` than the lock pins (draft-anywhere: the edit may live in the shared dir or any
-/// native copy). A missing/unscannable source is reported as no-draft (nothing to compare), never an
-/// error.
-fn is_draft(ctx: &Ctx<'_>, map_path: &Path, lock: &Lock) -> Result<bool, ClientError> {
-    let Some(map): Option<PlacementMap> = doc::read_map(ctx.fs, map_path)? else {
-        return Ok(false);
-    };
-    for placement in &map.placements {
-        let source = Path::new(placement);
-        if !source.exists() {
-            continue;
-        }
-        if let Ok(ScannedBundle { bundle_digest, .. }) = scan::scan(source)
-            && to_hex(&bundle_digest) != lock.bundle_digest
-        {
-            return Ok(true);
-        }
-    }
-    Ok(false)
-}
-
-/// The SOURCE / STATUS / CAUSE columns for one tracked row, from the offline signals: the follow entry
-/// (following flag + the per-device exclusion marker), the draft flag, an import origin host, the
-/// workspace's friendly label, whether a workspace credential is held (signed-out detection), and the
-/// last-delivery cache entry + the locally-applied version (offline `behind` + `removed-upstream`).
-///
-/// `behind` reads the last reconcile's served version (the cache) against the local applied version — an
-/// auto follower whose reconcile already applied the update stays `current`; a confirm-each follower with
-/// a pending offer, or any device that has not re-synced since the plane moved, reads `behind`.
-fn derive_columns(
-    follow: Option<&(String, String, bool)>,
-    draft: bool,
-    origin_host: Option<String>,
-    ws_label: Option<&String>,
-    has_credential: bool,
-    delivered: Option<&DeliveredSkill>,
-    local_version: &str,
-) -> (Option<String>, Option<SkillStatus>, Option<DetachCause>) {
-    // A purely local, never-followed, non-imported skill carries no columns (its absent workspace already
-    // says "local") — leaving the pinned `list` shape byte-identical for that common case.
-    if follow.is_none() && origin_host.is_none() {
-        return (None, None, None);
-    }
-    // SOURCE: an imported skill names its origin host; a followed one its workspace label; else local.
-    let source = origin_host
-        .or_else(|| ws_label.cloned())
-        .unwrap_or_else(|| "local".to_owned());
-
-    // CAUSE (only when detached): an UPSTREAM withdrawal (the skill is still followed, so it outranks the
-    // person/device causes), the per-device exclusion, a person-scoped unfollow, or signed-out — checked
-    // most-specific first.
-    let cause = if delivered.is_some_and(|d| d.withdrawn) {
-        Some(DetachCause::RemovedUpstream)
-    } else {
-        match follow {
-            Some((_, _, true)) => Some(DetachCause::RemovedUpstream),
-            Some(_) if !has_credential => Some(DetachCause::SignedOut),
-            _ => None,
-        }
-    };
-    let status = if cause.is_some() {
-        SkillStatus::Detached
-    } else if draft {
-        SkillStatus::Draft
-    } else if is_behind(delivered, local_version) {
-        SkillStatus::Behind
-    } else {
-        SkillStatus::Current
-    };
-    (Some(source), Some(status), cause)
-}
-
-/// Whether the last reconcile served a version this copy has not applied — the offline `behind` signal.
-/// Guards the never-received baseline (an all-zero local version is an unaccepted first receive, not
-/// "behind") and an empty served version (a withdrawn / uncached skill).
-fn is_behind(delivered: Option<&DeliveredSkill>, local_version: &str) -> bool {
-    let Some(d) = delivered else { return false };
-    !d.served_version.is_empty()
-        && !local_version.bytes().all(|b| b == b'0')
-        && d.served_version != local_version
-}
-
-/// Filter the tracked rows to the union of what the [`ListFilter`] names, ALL-OR-NONE: every positional
-/// name and `--skill` selector must match at least one tracked skill (else [`ClientError::NoSuchSkill`]),
-/// and every `--channel` selector must match at least one skill the last delivery cached as delivered via
-/// that channel (else the uniform not-found). The rows are kept in their existing order.
-fn apply_filter(
-    tracked: Vec<(String, SkillEntry)>,
-    filter: &ListFilter,
-    sync: &sync_status::SyncStatus,
-) -> Result<Vec<(String, SkillEntry)>, ClientError> {
-    let mut keep: HashSet<String> = HashSet::new();
-    // Names + `--skill` selectors: matched by skill name.
-    for name in filter.names.iter().chain(filter.skills.iter()) {
-        let matched: Vec<&String> = tracked
-            .iter()
-            .filter(|(_, e)| &e.skill == name)
-            .map(|(id, _)| id)
-            .collect();
-        if matched.is_empty() {
-            return Err(ClientError::NoSuchSkill { name: name.clone() });
-        }
-        keep.extend(matched.into_iter().cloned());
-    }
-    // `--channel` selectors: matched by the last delivery's cached `via` channels.
-    for ch in &filter.channels {
-        let mut matched = false;
-        for (id, e) in &tracked {
-            let via = e
-                .workspace_id
-                .as_deref()
-                .and_then(|w| sync.workspaces.get(w))
-                .and_then(|ws| ws.delivered.get(id))
-                .map(|d| d.via_channels.as_slice())
-                .unwrap_or(&[]);
-            if via.iter().any(|c| c == ch) {
-                keep.insert(id.clone());
-                matched = true;
-            }
-        }
-        if !matched {
-            return Err(crate::resolve::not_found(ch));
-        }
-    }
-    Ok(tracked
-        .into_iter()
-        .filter(|(id, _)| keep.contains(id))
-        .collect())
-}
-
-/// The host of an import source (`github.com/owner/repo` → `github.com`), or `None` for an empty source.
-fn origin_host(source: &str) -> Option<String> {
-    source
-        .trim_start_matches("https://")
-        .trim_start_matches("http://")
-        .split('/')
-        .next()
-        .filter(|h| !h.is_empty())
-        .map(str::to_owned)
-}
-
 #[cfg(test)]
 mod tests {
-    use std::cell::RefCell;
-    use std::path::PathBuf;
-    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::collections::HashMap;
 
-    use topos_harness::ClaudeCode;
-    use topos_types::PERSISTED_SCHEMA_VERSION;
-    use topos_types::persisted::Lock;
-    use topos_types::requests::{WireSkillIndex, WireSkillIndexEntry};
+    use topos_types::requests::{
+        WireChannelEntry, WireChannelIndex, WireMe, WireProposalIndex, WireReach, WireSkillIndex,
+        WireSkillIndexEntry, WireSkillLog,
+    };
 
     use super::*;
-    use crate::ctx::Ctx;
-    use crate::fs_seam::{FsOps, RealFs};
-    use crate::ids::{RealClock, RealIds};
-    use crate::plane::{InertFollow, InertPlane};
-    use crate::sidecar::Layout;
+    use crate::ops::inventory::testkit::{TempHome, assigned, skill_id_of, with_ctx};
 
-    // 64-char lowercase-hex version ids (the schema-pinned shape).
-    const VER_A: &str = "aa"; // repeated ×32 below
-    const VER_X: &str = "dd";
-    const DIGEST: &str = "ee";
-
-    fn hex(byte: &str) -> String {
-        byte.repeat(32)
+    fn request() -> ListRequest {
+        ListRequest::default()
     }
 
-    fn scratch(tag: &str) -> PathBuf {
-        static N: AtomicU32 = AtomicU32::new(0);
-        let n = N.fetch_add(1, Ordering::Relaxed);
-        let dir =
-            std::env::temp_dir().join(format!("topos-listrem-{tag}-{}-{n}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
+    fn run(home: &TempHome, cwd: &Path, req: &ListRequest) -> Result<ListOutcome, ClientError> {
+        run_discovering(home, cwd, req, None)
     }
 
-    /// A fake catalog transport: canned per-workspace responses (`Ok` index or a transport fault),
-    /// capturing every `workspace_id` the caller reads (the real transport presents the workspace's Bearer
-    /// credential; the merge logic under test only needs to know which workspaces were read).
-    struct FakeCatalog {
-        ok: HashMap<String, WireSkillIndex>,
-        fail: HashSet<String>,
-        calls: RefCell<Vec<String>>,
+    fn run_discovering(
+        home: &TempHome,
+        cwd: &Path,
+        req: &ListRequest,
+        discover: Option<DiscoveryRoots>,
+    ) -> Result<ListOutcome, ClientError> {
+        with_ctx(home, Some(cwd), |ctx| {
+            list_with(ctx, req, discover, None, super::super::RowPage::unlimited())
+        })
     }
-    impl CatalogSource for FakeCatalog {
-        fn fetch_catalog(&self, workspace_id: &str) -> Result<WireSkillIndex, PlaneError> {
-            self.calls.borrow_mut().push(workspace_id.to_owned());
-            if self.fail.contains(workspace_id) {
-                return Err(PlaneError::Unavailable("boom".into()));
+
+    fn scope<'a>(out: &'a ListOutcome, name: &str) -> &'a ListScope {
+        out.data
+            .scopes
+            .iter()
+            .find(|s| s.scope == name)
+            .unwrap_or_else(|| panic!("no {name} scope in {:?}", out.data.scopes))
+    }
+
+    /// A project layout: a checkout with its own `topos.toml` demanding one workspace bundle and
+    /// one adopted-in-place local folder recorded in the PROJECT's own store.
+    fn lay_project(home: &TempHome) -> PathBuf {
+        let repo = home.0.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        std::fs::write(
+            repo.join(crate::manifest::MANIFEST_FILE),
+            "[bundles]\n\
+             \"topos.sh/acme/deploy\" = \"*\"\n\
+             \"./tools/repo-helper\" = \"*\"\n",
+        )
+        .unwrap();
+        let tool = repo.join("tools/repo-helper");
+        std::fs::create_dir_all(&tool).unwrap();
+        std::fs::write(tool.join("SKILL.md"), b"# helper\n").unwrap();
+        // The PROJECT store holds the adopted skill — the custody the machine store never sees.
+        let layout = crate::sidecar::project_store_layout(&repo);
+        std::fs::create_dir_all(layout.home()).unwrap();
+        let id = skill_id_of("repo-helper");
+        let sid = crate::id::SkillId::parse(&id).unwrap();
+        std::fs::create_dir_all(layout.skill_dir(&sid)).unwrap();
+        let sp = layout.published(&sid);
+        crate::doc::write_doc(
+            &crate::fs_seam::RealFs,
+            &sp.sync,
+            &topos_types::persisted::SyncState {
+                schema_version: topos_types::PERSISTED_SCHEMA_VERSION,
+                observed: 1,
+                observed_version_id: "b".repeat(64),
+                applied: 1,
+                base_commit: "b".repeat(64),
+                work_hash: "e".repeat(64),
+                held: false,
+                draft_observed: None,
+            },
+        )
+        .unwrap();
+        crate::doc::write_doc(
+            &crate::fs_seam::RealFs,
+            &sp.lock,
+            &topos_types::persisted::Lock {
+                schema_version: topos_types::PERSISTED_SCHEMA_VERSION,
+                skill_id: id,
+                name: "repo-helper".to_owned(),
+                base_commit: "b".repeat(64),
+                bundle_digest: "f".repeat(64),
+                files: Vec::new(),
+            },
+        )
+        .unwrap();
+        repo
+    }
+
+    /// The default view in a project: the PROJECT rows in full — including the skill adopted
+    /// into the PROJECT's own store (invisible to a home-store-only read) — plus the machine
+    /// summary with its counts and exact command, and the signed-in flag the remote pointer
+    /// renders from.
+    #[test]
+    fn default_in_a_project_shows_project_rows_and_summarizes_the_machine() {
+        let home = TempHome::new();
+        let repo = lay_project(&home);
+        home.session(
+            "topos.sh",
+            "w_acme",
+            "acme",
+            crate::sessions::SESSION_ACTIVE,
+        );
+        home.cache(
+            "w_acme",
+            "topos.sh",
+            "acme",
+            vec![assigned("notes", None), assigned("triage", None)],
+            Vec::new(),
+        );
+        // One machine row BEHIND: applied at an older version than served.
+        home.store_applied(&skill_id_of("notes"), "notes", &"c".repeat(64), &[]);
+
+        let out = run(&home, &repo, &request()).unwrap();
+        assert_eq!(out.data.scopes.len(), 1, "{:?}", out.data.scopes);
+        let project = scope(&out, "project");
+        assert!(
+            project
+                .manifest
+                .as_deref()
+                .is_some_and(|m| m.ends_with("topos.toml"))
+        );
+        let names: Vec<&str> = project.rows.iter().map(|r| r.skill.as_str()).collect();
+        assert!(names.contains(&"deploy"), "{names:?}");
+        // The PROJECT-STORE adopted skill shows with its stored identity — the custody leg made
+        // these invisible to the old home-store-only list.
+        let helper = project
+            .rows
+            .iter()
+            .find(|r| r.skill == "repo-helper")
+            .expect("the project-store skill rides the project section");
+        assert_eq!(helper.version_id, "b".repeat(64));
+        assert_eq!(helper.status, Some(SkillStatus::Current));
+
+        // The machine summary: 2 skills, 1 update pending, the exact expanding command.
+        let summary = out.data.machine_summary.expect("a machine summary");
+        assert_eq!(summary.skills, 2);
+        assert_eq!(summary.updates_pending, 1);
+        assert_eq!(summary.command, "topos list -g");
+        assert!(out.data.signed_in, "the remote pointer renders from this");
+    }
+
+    /// Outside a project: machine rows in full, NO machine summary (machine IS the shown scope).
+    #[test]
+    fn outside_a_project_the_machine_rows_show_in_full() {
+        let home = TempHome::new();
+        let cwd = home.0.join("plain");
+        std::fs::create_dir_all(&cwd).unwrap();
+        home.session(
+            "topos.sh",
+            "w_acme",
+            "acme",
+            crate::sessions::SESSION_ACTIVE,
+        );
+        home.cache(
+            "w_acme",
+            "topos.sh",
+            "acme",
+            vec![assigned("notes", None)],
+            Vec::new(),
+        );
+
+        let out = run(&home, &cwd, &request()).unwrap();
+        assert_eq!(out.data.scopes.len(), 1);
+        let machine = scope(&out, "machine");
+        assert!(machine.manifest.is_none(), "the implicit feed recipe");
+        assert_eq!(machine.rows.len(), 1);
+        assert_eq!(machine.rows[0].skill, "notes");
+        // Never applied: the all-zero baseline, no false version claim, no status claim.
+        assert_eq!(machine.rows[0].version_id, super::ZERO_HEX);
+        assert_eq!(machine.rows[0].status, None);
+        assert!(out.data.machine_summary.is_none());
+    }
+
+    /// `-g` inside a project: machine rows only — scope-blind like `update -g`.
+    #[test]
+    fn dash_g_shows_machine_rows_even_inside_a_project() {
+        let home = TempHome::new();
+        let repo = lay_project(&home);
+        home.session(
+            "topos.sh",
+            "w_acme",
+            "acme",
+            crate::sessions::SESSION_ACTIVE,
+        );
+        home.cache(
+            "w_acme",
+            "topos.sh",
+            "acme",
+            vec![assigned("notes", None)],
+            Vec::new(),
+        );
+
+        let out = run(
+            &home,
+            &repo,
+            &ListRequest {
+                view: ScopeView::Machine,
+                ..request()
+            },
+        )
+        .unwrap();
+        assert_eq!(out.data.scopes.len(), 1);
+        let machine = scope(&out, "machine");
+        assert!(machine.rows.iter().any(|r| r.skill == "notes"));
+        assert!(
+            !machine.rows.iter().any(|r| r.skill == "deploy"),
+            "no project rows under -g"
+        );
+        assert!(out.data.machine_summary.is_none());
+    }
+
+    /// `--all`: both scope sections in full.
+    #[test]
+    fn all_shows_both_scope_sections() {
+        let home = TempHome::new();
+        let repo = lay_project(&home);
+        home.session(
+            "topos.sh",
+            "w_acme",
+            "acme",
+            crate::sessions::SESSION_ACTIVE,
+        );
+        home.cache(
+            "w_acme",
+            "topos.sh",
+            "acme",
+            vec![assigned("notes", None)],
+            Vec::new(),
+        );
+
+        let out = run(
+            &home,
+            &repo,
+            &ListRequest {
+                view: ScopeView::All,
+                ..request()
+            },
+        )
+        .unwrap();
+        let names: Vec<&str> = out.data.scopes.iter().map(|s| s.scope.as_str()).collect();
+        assert_eq!(names, vec!["project", "machine"]);
+        assert!(out.data.machine_summary.is_none());
+    }
+
+    /// `--untracked`: the full discovery listing PLUS every tracked covering scope (the TTY
+    /// renders each as one summary line, so nothing is invisible).
+    #[test]
+    fn untracked_lists_discoveries_and_keeps_the_tracked_scopes_visible() {
+        let home = TempHome::new();
+        let repo = lay_project(&home);
+        home.session(
+            "topos.sh",
+            "w_acme",
+            "acme",
+            crate::sessions::SESSION_ACTIVE,
+        );
+        // A discoverable untracked skill in a harness dir under an ISOLATED probe home.
+        let probe_home = TempHome::new();
+        let skill_dir = probe_home.0.join(".cursor/skills/improbable-zebra");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            b"---\nname: improbable-zebra\n---\n# z\n",
+        )
+        .unwrap();
+        let discover = DiscoveryRoots {
+            home: probe_home.0.clone(),
+            cwd: None,
+        };
+
+        let out = run_discovering(
+            &home,
+            &repo,
+            &ListRequest {
+                untracked: true,
+                ..request()
+            },
+            Some(discover),
+        )
+        .unwrap();
+        assert!(
+            out.data
+                .untracked
+                .iter()
+                .any(|u| u.name == "improbable-zebra" && u.harness == "cursor"),
+            "{:?}",
+            out.data.untracked
+        );
+        let names: Vec<&str> = out.data.scopes.iter().map(|s| s.scope.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["project", "machine"],
+            "tracked scopes ride along"
+        );
+        assert!(out.data.untracked_summary.is_none(), "the listing IS shown");
+    }
+
+    /// The untracked SUMMARY on a bare list: counts + the exact expanding command; absent when
+    /// nothing untracked exists (nothing is being withheld).
+    #[test]
+    fn the_untracked_summary_counts_skills_and_folders() {
+        let home = TempHome::new();
+        let cwd = home.0.join("plain");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let probe_home = TempHome::new();
+        for name in ["improbable-zebra", "unlikely-yak"] {
+            let dir = probe_home.0.join(".cursor/skills").join(name);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("SKILL.md"), b"# s\n").unwrap();
+        }
+        let discover = DiscoveryRoots {
+            home: probe_home.0.clone(),
+            cwd: None,
+        };
+
+        let out = run_discovering(&home, &cwd, &request(), Some(discover)).unwrap();
+        let summary = out.data.untracked_summary.expect("a summary");
+        assert_eq!(summary.skills, 2);
+        assert_eq!(summary.folders, 1, "both live in one folder");
+        assert_eq!(summary.command, "topos list --untracked");
+        assert!(
+            out.data.untracked.is_empty(),
+            "the full listing waits for the flag"
+        );
+
+        // Nothing discovered → no summary at all.
+        let empty_home = TempHome::new();
+        let out = run_discovering(
+            &home,
+            &cwd,
+            &request(),
+            Some(DiscoveryRoots {
+                home: empty_home.0.clone(),
+                cwd: None,
+            }),
+        )
+        .unwrap();
+        assert!(out.data.untracked_summary.is_none());
+    }
+
+    /// `list <name>`: the deep dive — file + row-key for a manifest-delivered skill, the feed
+    /// spelling for a feed-delivered one, and the uniform not-found on a miss.
+    #[test]
+    fn the_deep_dive_names_the_file_or_the_feed() {
+        let home = TempHome::new();
+        let cwd = home.0.join("plain");
+        std::fs::create_dir_all(&cwd).unwrap();
+        home.session(
+            "topos.sh",
+            "w_acme",
+            "acme",
+            crate::sessions::SESSION_ACTIVE,
+        );
+        home.cache(
+            "w_acme",
+            "topos.sh",
+            "acme",
+            vec![assigned("deploy", Some("Dana")), assigned("notes", None)],
+            Vec::new(),
+        );
+        home.global("[bundles]\n\"topos.sh/acme\" = \"*\"\n\"topos.sh/acme/deploy\" = \"*\"\n");
+        // deploy applied with a placement — the detail names where the bytes are.
+        let placed = home.0.join("placed-deploy");
+        home.store_applied(
+            &skill_id_of("deploy"),
+            "deploy",
+            &"d".repeat(64),
+            &[placed.to_string_lossy().as_ref()],
+        );
+
+        let deep = |name: &str| {
+            run(
+                &home,
+                &cwd,
+                &ListRequest {
+                    name: Some(name.to_owned()),
+                    ..request()
+                },
+            )
+        };
+        let detail = deep("deploy").unwrap().data.detail.expect("a detail");
+        assert!(
+            detail
+                .source_file
+                .as_deref()
+                .is_some_and(|f| f.ends_with("topos.toml"))
+        );
+        assert_eq!(detail.source_key.as_deref(), Some("topos.sh/acme/deploy"));
+        assert_eq!(detail.feed, None);
+        assert_eq!(
+            detail.placements,
+            vec![placed.to_string_lossy().into_owned()]
+        );
+        assert!(matches!(detail.state, StatusItemState::Applied));
+
+        let detail = deep("notes").unwrap().data.detail.expect("a detail");
+        assert_eq!(detail.source_file, None);
+        assert_eq!(detail.feed.as_deref(), Some("topos.sh/acme"));
+
+        let err = deep("nowhere").unwrap_err();
+        assert!(matches!(err, ClientError::TargetNotFound { .. }), "{err:?}");
+    }
+
+    /// `list -a <slug>`: the agent-eye view — the harness's dirs across home and project, each
+    /// entry marked managed (`<file>:<row-key>`) or untracked; an unknown slug refuses typed,
+    /// naming the known slugs.
+    #[test]
+    fn the_agent_view_marks_managed_and_untracked_entries() {
+        let home = TempHome::new();
+        let cwd = home.0.join("repo");
+        std::fs::create_dir_all(&cwd).unwrap();
+        std::fs::write(
+            cwd.join(crate::manifest::MANIFEST_FILE),
+            "[bundles]\n\"topos.sh/acme/deploy\" = \"*\"\n",
+        )
+        .unwrap();
+        home.session(
+            "topos.sh",
+            "w_acme",
+            "acme",
+            crate::sessions::SESSION_ACTIVE,
+        );
+        home.cache(
+            "w_acme",
+            "topos.sh",
+            "acme",
+            vec![assigned("deploy", None)],
+            Vec::new(),
+        );
+        // The managed placement: the machine store records deploy placed into the probe home's
+        // claude-code skills dir.
+        let probe_home = TempHome::new();
+        let managed_dir = probe_home.0.join(".claude/skills/deploy");
+        std::fs::create_dir_all(&managed_dir).unwrap();
+        std::fs::write(managed_dir.join("SKILL.md"), b"# deploy\n").unwrap();
+        // An untracked neighbour in the same dir.
+        let stray = probe_home.0.join(".claude/skills/stray-helper");
+        std::fs::create_dir_all(&stray).unwrap();
+        std::fs::write(stray.join("SKILL.md"), b"# stray\n").unwrap();
+        home.global("[bundles]\n\"topos.sh/acme/deploy\" = \"*\"\n");
+        home.store_applied(
+            &skill_id_of("deploy"),
+            "deploy",
+            &"d".repeat(64),
+            &[managed_dir.to_string_lossy().as_ref()],
+        );
+
+        let out = run_discovering(
+            &home,
+            &cwd,
+            &ListRequest {
+                agent: Some("claude-code".to_owned()),
+                ..request()
+            },
+            Some(DiscoveryRoots {
+                home: probe_home.0.clone(),
+                cwd: Some(cwd.clone()),
+            }),
+        )
+        .unwrap();
+        let view = out.data.agent_view.expect("an agent view");
+        assert_eq!(view.agent, "claude-code");
+        assert_eq!(view.agent_name, "Claude Code");
+        let user_dir = view
+            .dirs
+            .iter()
+            .find(|d| d.scope == "user" && d.path.ends_with(".claude/skills"))
+            .expect("the claude-code user dir");
+        let entry = |n: &str| {
+            user_dir
+                .entries
+                .iter()
+                .find(|e| e.name == n)
+                .unwrap_or_else(|| panic!("no entry {n} in {:?}", user_dir.entries))
+        };
+        let managed = entry("deploy").managed.as_deref().expect("managed");
+        assert!(
+            managed.ends_with("topos.toml:topos.sh/acme/deploy"),
+            "{managed}"
+        );
+        assert_eq!(entry("stray-helper").managed, None);
+        // The view spans both scopes: a project dir rides along.
+        assert!(
+            view.dirs.iter().any(|d| d.scope == "project"),
+            "{:?}",
+            view.dirs
+        );
+
+        // The unknown slug refusal names the known ones.
+        let err = run_discovering(
+            &home,
+            &cwd,
+            &ListRequest {
+                agent: Some("not-a-harness".to_owned()),
+                ..request()
+            },
+            None,
+        )
+        .unwrap_err();
+        match err {
+            ClientError::InvalidArgument(msg) => {
+                assert!(msg.contains("claude-code"), "{msg}");
             }
+            other => panic!("expected InvalidArgument, got {other:?}"),
+        }
+    }
+
+    /// Store records no resolved row claims stay IN the inventory: the built-in meta-skill
+    /// (source `built-in`) and detached/frozen copies ride their scope's section with the classic
+    /// column semantics — installed is installed, and `remove topos`'s own target must be
+    /// findable. The deep dive stays resolution-only (the old `status <bundle>` missed
+    /// store-only records the same way).
+    #[test]
+    fn unclaimed_store_records_ride_their_scope_as_ghost_rows() {
+        let home = TempHome::new();
+        let cwd = home.0.join("plain");
+        std::fs::create_dir_all(&cwd).unwrap();
+        home.session(
+            "topos.sh",
+            "w_acme",
+            "acme",
+            crate::sessions::SESSION_ACTIVE,
+        );
+        // A withdrawn delivery whose bytes are retained: the cache says withdrawn, so the feed
+        // itemizes nothing and no row claims the record.
+        let ghost_id = skill_id_of("ghosty");
+        home.store_applied(&ghost_id, "ghosty", &"c".repeat(64), &[]);
+        let mut withdrawn = assigned("ghosty", None).1;
+        withdrawn.withdrawn = true;
+        home.cache(
+            "w_acme",
+            "topos.sh",
+            "acme",
+            vec![(ghost_id, withdrawn)],
+            Vec::new(),
+        );
+        // The built-in meta-skill's record (force-synced custody, never a manifest row).
+        home.store_applied("topos", "topos", &"a".repeat(64), &[]);
+        // A purely local frozen copy (row removed, bytes kept): no cache entry, no origin.
+        home.store_applied(&skill_id_of("frozen"), "frozen", &"b".repeat(64), &[]);
+
+        let out = run(&home, &cwd, &request()).unwrap();
+        let machine = scope(&out, "machine");
+        let row = |n: &str| {
+            machine
+                .rows
+                .iter()
+                .find(|r| r.skill == n)
+                .unwrap_or_else(|| panic!("no {n} in {:?}", machine.rows))
+        };
+        assert_eq!(row("topos").source.as_deref(), Some("built-in"));
+        assert_eq!(row("topos").status, Some(SkillStatus::Current));
+        assert_eq!(row("ghosty").status, Some(SkillStatus::Detached));
+        assert_eq!(row("ghosty").cause, Some(DetachCause::RemovedUpstream));
+        assert_eq!(row("ghosty").workspace_id.as_deref(), Some("w_acme"));
+        // The frozen local copy shows plainly — its absent workspace already says "local".
+        assert_eq!(row("frozen").status, None);
+        assert_eq!(row("frozen").version_id, "b".repeat(64));
+
+        // The deep dive still answers only what the scopes deliver — the ghost's home is the
+        // inventory rows, and the miss stays the uniform not-found.
+        let miss = run(
+            &home,
+            &cwd,
+            &ListRequest {
+                name: Some("topos".to_owned()),
+                ..request()
+            },
+        )
+        .unwrap_err();
+        assert!(
+            matches!(miss, ClientError::TargetNotFound { .. }),
+            "{miss:?}"
+        );
+    }
+
+    /// The machine summary's `skills` count includes the ghost rows — a summary that undercounts
+    /// what `-g` would show breaks the summary's promise. Their pending state deliberately stays
+    /// out of `updates pending`: no manifest row means `topos update -g` has nothing to act on.
+    #[test]
+    fn the_machine_summary_counts_ghost_rows() {
+        let home = TempHome::new();
+        let repo = lay_project(&home);
+        home.session(
+            "topos.sh",
+            "w_acme",
+            "acme",
+            crate::sessions::SESSION_ACTIVE,
+        );
+        home.cache(
+            "w_acme",
+            "topos.sh",
+            "acme",
+            vec![assigned("notes", None)],
+            Vec::new(),
+        );
+        // One CLAIMED machine record (the feed delivers notes) + the built-in ghost.
+        home.store_applied(&skill_id_of("notes"), "notes", &"d".repeat(64), &[]);
+        home.store_applied("topos", "topos", &"a".repeat(64), &[]);
+
+        let out = run(&home, &repo, &request()).unwrap();
+        let summary = out.data.machine_summary.expect("a machine summary");
+        assert_eq!(summary.skills, 2, "the delivered row + the built-in ghost");
+        assert_eq!(
+            summary.updates_pending, 0,
+            "a ghost never claims `topos update -g`"
+        );
+
+        // `-g` shows exactly what the summary counted.
+        let out = run(
+            &home,
+            &repo,
+            &ListRequest {
+                view: ScopeView::Machine,
+                ..request()
+            },
+        )
+        .unwrap();
+        assert_eq!(scope(&out, "machine").rows.len(), 2);
+    }
+
+    /// A fake per-session directory: canned channel + skill indexes, or a fault. `Clone` so the
+    /// connector closure can mint an owned (`'static`) copy per session.
+    #[derive(Clone)]
+    struct FakeDirectory {
+        channels: HashMap<String, WireChannelIndex>,
+        skills: HashMap<String, WireSkillIndex>,
+        fail: bool,
+    }
+    impl DirectorySource for FakeDirectory {
+        fn me(&self, _w: &str) -> Result<WireMe, ClientError> {
+            unreachable!("list --remote reads channels + skills only")
+        }
+        fn channels_index(&self, w: &str) -> Result<WireChannelIndex, ClientError> {
+            if self.fail {
+                return Err(ClientError::TargetNotFound { target: w.into() });
+            }
+            Ok(self.channels.get(w).cloned().unwrap_or(WireChannelIndex {
+                channels: Vec::new(),
+            }))
+        }
+        fn skills_index(&self, w: &str) -> Result<WireSkillIndex, ClientError> {
             Ok(self
-                .ok
-                .get(workspace_id)
+                .skills
+                .get(w)
                 .cloned()
                 .unwrap_or(WireSkillIndex { skills: Vec::new() }))
         }
+        fn proposals_index(&self, _w: &str) -> Result<WireProposalIndex, ClientError> {
+            unreachable!()
+        }
+        fn skill_log(&self, _w: &str, _s: &str) -> Result<WireSkillLog, ClientError> {
+            unreachable!()
+        }
+        fn reach(&self, _w: &str, _s: &str) -> Result<WireReach, ClientError> {
+            unreachable!()
+        }
+        fn channel_place(&self, _w: &str, _c: &str, _s: &str) -> Result<(), ClientError> {
+            unreachable!()
+        }
+        fn channel_unplace(&self, _w: &str, _c: &str, _s: &str) -> Result<(), ClientError> {
+            unreachable!()
+        }
+        fn protect_skill(&self, _w: &str, _s: &str, _l: &str) -> Result<(), ClientError> {
+            unreachable!()
+        }
+        fn protect_channel(&self, _w: &str, _c: &str, _l: &str) -> Result<(), ClientError> {
+            unreachable!()
+        }
+        fn ack_notices(&self, _w: &str, _ids: &[String]) -> Result<(), ClientError> {
+            unreachable!()
+        }
     }
 
-    fn catalog_entry(skill_id: &str, version: &str) -> WireSkillIndexEntry {
+    fn catalog_entry(name: &str, version: &str) -> WireSkillIndexEntry {
         WireSkillIndexEntry {
-            skill_id: skill_id.to_owned(),
-            name: skill_id.to_owned(),
+            skill_id: format!("s_{name}"),
+            name: name.to_owned(),
             kind: "skill".to_owned(),
             status: "active".to_owned(),
-            version_id: hex(version),
-            bundle_digest: hex(DIGEST),
+            version_id: version.to_owned(),
+            bundle_digest: "e".repeat(64),
             generation: 1,
-            display_name: Some(skill_id.to_owned()),
+            display_name: None,
             updated_at: 1,
-            open_proposals: 0,
+            open_proposals: 2,
             upstream_host: None,
             upstream_repo: None,
             upstream_path: None,
         }
     }
 
-    /// Lay a tracked skill dir (`skills/<id>/lock.json` on `version`) so the tracked walk finds it and the
-    /// local-version map records it.
-    fn lay_skill(fs: &RealFs, layout: &Layout, id: &str, name: &str, version: &str) {
-        let sid = crate::id::SkillId::parse(id).unwrap();
-        fs.create_dir_all(&layout.skill_dir(&sid)).unwrap();
-        doc::write_doc(
-            fs,
-            &layout.published(&sid).lock,
-            &Lock {
-                schema_version: PERSISTED_SCHEMA_VERSION,
-                skill_id: id.to_owned(),
-                name: name.to_owned(),
-                base_commit: hex(version),
-                bundle_digest: hex(DIGEST),
-                files: Vec::new(),
+    /// `--remote` with no live session refuses typed; with sessions it reads each workspace's
+    /// channels (adopted_in naming the adopting manifest) and skills (the four adoption markers).
+    #[test]
+    fn remote_reads_channels_and_skills_with_adoption_markers() {
+        let home = TempHome::new();
+        let repo = lay_project(&home);
+
+        // No session → the typed refusal, before anything could dial.
+        let refused = with_ctx(&home, Some(&repo), |ctx| {
+            list_with(
+                ctx,
+                &ListRequest {
+                    remote: true,
+                    ..request()
+                },
+                None,
+                Some(&|_s: &Session| -> Box<dyn DirectorySource> {
+                    unreachable!("no session → no dial")
+                }),
+                super::super::RowPage::unlimited(),
+            )
+        })
+        .unwrap_err();
+        assert_eq!(refused.code(), "SESSION_REQUIRED");
+
+        home.session(
+            "topos.sh",
+            "w_acme",
+            "acme",
+            crate::sessions::SESSION_ACTIVE,
+        );
+        home.cache(
+            "w_acme",
+            "topos.sh",
+            "acme",
+            vec![assigned("deploy", None), assigned("notes", None)],
+            Vec::new(),
+        );
+        // machine adopts `notes` explicitly and is BEHIND the catalog current; the project (the
+        // here-scope) adopts `deploy` (never applied → adopted-here, no update claim).
+        home.global(
+            "[bundles]\n\
+             \"topos.sh/acme/notes\" = \"*\"\n\
+             \"topos.sh/acme/channels/backend\" = \"*\"\n",
+        );
+        home.store_applied(&skill_id_of("notes"), "notes", &"c".repeat(64), &[]);
+
+        let mut channels = HashMap::new();
+        channels.insert(
+            "w_acme".to_owned(),
+            WireChannelIndex {
+                channels: vec![
+                    WireChannelEntry {
+                        name: "backend".to_owned(),
+                        mode: "open".to_owned(),
+                        builtin: false,
+                        included: true,
+                        skills: vec![],
+                    },
+                    WireChannelEntry {
+                        name: "everyone".to_owned(),
+                        mode: "open".to_owned(),
+                        builtin: true,
+                        included: true,
+                        skills: vec![],
+                    },
+                ],
             },
-        )
+        );
+        let mut skills = HashMap::new();
+        skills.insert(
+            "w_acme".to_owned(),
+            WireSkillIndex {
+                skills: vec![
+                    catalog_entry("deploy", &"d".repeat(64)),
+                    catalog_entry("notes", &"d".repeat(64)),
+                    catalog_entry("triage", &"d".repeat(64)),
+                ],
+            },
+        );
+        let fake = FakeDirectory {
+            channels,
+            skills,
+            fail: false,
+        };
+
+        let out = with_ctx(&home, Some(&repo), |ctx| {
+            list_with(
+                ctx,
+                &ListRequest {
+                    remote: true,
+                    ..request()
+                },
+                None,
+                Some(&|_s: &Session| -> Box<dyn DirectorySource> { Box::new(fake.clone()) }),
+                super::super::RowPage::unlimited(),
+            )
+        })
         .unwrap();
-    }
-
-    #[test]
-    fn remote_workspace_filter_narrows_to_one() {
-        let home = scratch("filter");
-        let layout = Layout::new(&home);
-        let fs = RealFs;
-
-        let mut ok = HashMap::new();
-        ok.insert(
-            "w_acme".to_owned(),
-            WireSkillIndex {
-                skills: vec![catalog_entry("s_docs", VER_X)],
-            },
+        assert_eq!(out.data.remote.len(), 1);
+        let ws = &out.data.remote[0];
+        assert_eq!(
+            (ws.host.as_str(), ws.workspace.as_str()),
+            ("topos.sh", "acme")
         );
-        ok.insert(
-            "w_beta".to_owned(),
-            WireSkillIndex {
-                skills: vec![catalog_entry("s_other", VER_A)],
-            },
-        );
-        let fake = FakeCatalog {
-            ok,
-            fail: HashSet::new(),
-            calls: RefCell::new(Vec::new()),
-        };
-
-        let ids = RealIds;
-        let clock = RealClock;
-        let plane = InertPlane;
-        let follow = InertFollow;
-        let harness = ClaudeCode::new(scratch("adapter2"), &fs);
-        let ctx = Ctx {
-            progress: crate::progress::silent(),
-            fs: &fs,
-            ids: &ids,
-            clock: &clock,
-            device_id: String::new(),
-            layout: layout.clone(),
-            harness: &harness,
-            plane: &plane,
-            follow: &follow,
-            roots: None,
-        };
-
-        // `--workspace w_beta` → only w_beta's catalog is read.
-        let scope = RemoteScope {
-            catalog: &fake,
-            memberships: vec![
-                ("w_acme".to_owned(), "Acme".to_owned()),
-                ("w_beta".to_owned(), "Beta".to_owned()),
-            ],
-            only: Some("w_beta".to_owned()),
-        };
-        let out = list(&ctx, None, false, None, Some(scope)).unwrap();
-        assert_eq!(out.data.remote_available.len(), 1);
-        assert_eq!(out.data.remote_available[0].skill_id, "s_other");
-        assert_eq!(out.data.remote_available[0].workspace_id, "w_beta");
-        // Only the filtered workspace was contacted.
-        assert_eq!(fake.calls.borrow().len(), 1);
-        assert_eq!(fake.calls.borrow()[0], "w_beta");
-    }
-
-    #[test]
-    fn remote_is_skipped_and_warns_when_narrowed_to_a_skill() {
-        let home = scratch("narrowed");
-        let layout = Layout::new(&home);
-        let fs = RealFs;
-        // A tracked skill so the name narrows cleanly (list <skill> requires exactly one match).
-        lay_skill(&fs, &layout, "s_docs", "docs", VER_X);
-
-        let mut ok = HashMap::new();
-        ok.insert(
-            "w_acme".to_owned(),
-            WireSkillIndex {
-                skills: vec![catalog_entry("s_docs", VER_X)],
-            },
-        );
-        let fake = FakeCatalog {
-            ok,
-            fail: HashSet::new(),
-            calls: RefCell::new(Vec::new()),
-        };
-
-        let ids = RealIds;
-        let clock = RealClock;
-        let plane = InertPlane;
-        let follow = InertFollow;
-        let harness = ClaudeCode::new(scratch("adapter3"), &fs);
-        let ctx = Ctx {
-            progress: crate::progress::silent(),
-            fs: &fs,
-            ids: &ids,
-            clock: &clock,
-            device_id: String::new(),
-            layout: layout.clone(),
-            harness: &harness,
-            plane: &plane,
-            follow: &follow,
-            roots: None,
-        };
-        let scope = RemoteScope {
-            catalog: &fake,
-            memberships: vec![("w_acme".to_owned(), "Acme".to_owned())],
-            only: None,
-        };
-        // `list docs --remote`: the catalog is a bare-sweep browse, so a name-narrowed list SKIPS it with a
-        // warning and attempts NO catalog read — the narrowing can never mislabel a followed skill.
-        let out = list(&ctx, Some("docs"), false, None, Some(scope)).unwrap();
-        assert!(out.data.remote_available.is_empty());
+        let backend = ws.channels.iter().find(|c| c.name == "backend").unwrap();
         assert!(
-            out.warnings
+            backend
+                .adopted_in
+                .as_deref()
+                .is_some_and(|f| f.ends_with("topos.toml")),
+            "{:?}",
+            backend.adopted_in
+        );
+        let everyone = ws.channels.iter().find(|c| c.name == "everyone").unwrap();
+        assert_eq!(everyone.adopted_in, None);
+        let state = |n: &str| ws.skills.iter().find(|s| s.name == n).unwrap().state;
+        // `deploy` is adopted by the PROJECT manifest — the here-scope.
+        assert_eq!(state("deploy"), RemoteAdoption::AdoptedHere);
+        // `notes` is adopted machine-side only, and its applied version is behind the catalog.
+        assert_eq!(state("notes"), RemoteAdoption::UpdateAvailable);
+        assert_eq!(state("triage"), RemoteAdoption::NotAdopted);
+        assert_eq!(
+            ws.skills
                 .iter()
-                .any(|w| w.contains("bare `topos list --remote`"))
+                .find(|s| s.name == "deploy")
+                .unwrap()
+                .open_proposals,
+            2
         );
+    }
+
+    /// A machine-only adoption seen from inside a project reads adopted-on-machine (when not
+    /// behind), and a per-workspace fault degrades to a warning, never failing the list.
+    #[test]
+    fn remote_marks_machine_adoption_and_degrades_per_workspace_faults() {
+        let home = TempHome::new();
+        let repo = lay_project(&home);
+        home.session(
+            "topos.sh",
+            "w_acme",
+            "acme",
+            crate::sessions::SESSION_ACTIVE,
+        );
+        home.cache(
+            "w_acme",
+            "topos.sh",
+            "acme",
+            vec![assigned("notes", None)],
+            Vec::new(),
+        );
+        home.global("[bundles]\n\"topos.sh/acme/notes\" = \"*\"\n");
+        // Applied AT the catalog current — adopted-on-machine, not update-available.
+        home.store_applied(&skill_id_of("notes"), "notes", &"d".repeat(64), &[]);
+
+        let mut skills = HashMap::new();
+        skills.insert(
+            "w_acme".to_owned(),
+            WireSkillIndex {
+                skills: vec![catalog_entry("notes", &"d".repeat(64))],
+            },
+        );
+        let fake = FakeDirectory {
+            channels: HashMap::new(),
+            skills,
+            fail: false,
+        };
+        let out = with_ctx(&home, Some(&repo), |ctx| {
+            list_with(
+                ctx,
+                &ListRequest {
+                    remote: true,
+                    ..request()
+                },
+                None,
+                Some(&|_s: &Session| -> Box<dyn DirectorySource> { Box::new(fake.clone()) }),
+                super::super::RowPage::unlimited(),
+            )
+        })
+        .unwrap();
+        assert_eq!(
+            out.data.remote[0].skills[0].state,
+            RemoteAdoption::AdoptedOnMachine
+        );
+
+        // The degrade: a faulting workspace is skipped with a stable warning line.
+        let failing = FakeDirectory {
+            channels: HashMap::new(),
+            skills: HashMap::new(),
+            fail: true,
+        };
+        let out = with_ctx(&home, Some(&repo), |ctx| {
+            list_with(
+                ctx,
+                &ListRequest {
+                    remote: true,
+                    ..request()
+                },
+                None,
+                Some(&|_s: &Session| -> Box<dyn DirectorySource> { Box::new(failing.clone()) }),
+                super::super::RowPage::unlimited(),
+            )
+        })
+        .unwrap();
+        assert!(out.data.remote.is_empty());
+        assert_eq!(out.warnings.len(), 1);
         assert!(
-            fake.calls.borrow().is_empty(),
-            "no catalog read is attempted when narrowed to a skill"
+            out.warnings[0].contains("workspace acme") && out.warnings[0].contains("skipped"),
+            "{}",
+            out.warnings[0]
         );
     }
 }

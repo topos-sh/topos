@@ -208,16 +208,25 @@ fn ensure_places_the_bundle_and_lists_it_as_built_in() {
     let sync = ops::ensure_builtin(&ctx).unwrap();
     assert!(!sync.changed, "an in-sync sweep changes nothing");
 
-    // `list` carries the row with the built-in source (never the bare-local no-columns shape).
-    let out = ops::list(&ctx, None, false, None, None).unwrap();
-    let row = out
-        .data
-        .tracked
-        .iter()
-        .find(|s| s.skill == "topos")
-        .expect("the built-in rows in list");
-    assert_eq!(row.source.as_deref(), Some("built-in"));
-    assert!(!row.draft);
+    // The store carries the built-in's record (the manifest-resolved inventory shows only what
+    // the scopes deliver — the built-in is force-synced custody, not a manifest row).
+    let held = ctx
+        .fs
+        .read_dir(&ctx.layout.skills_dir())
+        .unwrap()
+        .into_iter()
+        .filter_map(|e| e.file_name().and_then(|n| n.to_str().map(str::to_owned)))
+        .filter_map(|id| crate::id::SkillId::parse(&id).ok())
+        .filter_map(|sid| {
+            crate::doc::read_doc::<topos_types::persisted::Lock>(
+                ctx.fs,
+                &ctx.layout.published(&sid).lock,
+            )
+            .ok()
+            .flatten()
+        })
+        .any(|lock| lock.name == "topos" && crate::ops::is_builtin(&lock.skill_id));
+    assert!(held, "the built-in's store record stands");
 }
 
 #[test]

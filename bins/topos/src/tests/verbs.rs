@@ -155,18 +155,6 @@ impl Harness {
     fn ctx(&self) -> Ctx<'_> {
         self.ctx_with(&self.harness)
     }
-    /// A context that KNOWS where it stands — the machine roots (user home + working directory)
-    /// the manifest walk resolves against. `Ctx::roots = None` (the default above) is the honest
-    /// no-`$HOME` degradation, so anything reading a covering `topos.toml` needs this instead.
-    fn ctx_rooted(&self, home: &Path, cwd: &Path) -> Ctx<'_> {
-        Ctx {
-            roots: Some(crate::ctx::AgentRoots {
-                home: home.to_path_buf(),
-                cwd: Some(cwd.to_path_buf()),
-            }),
-            ..self.ctx_with(&self.harness)
-        }
-    }
     /// A context over an explicit harness adapter (for the Claude Code recognition / hook tests).
     fn ctx_with<'a>(&'a self, harness: &'a dyn HarnessAdapter) -> Ctx<'a> {
         Ctx {
@@ -187,6 +175,29 @@ impl Harness {
 fn envelope_string(command: &str, value: Value) -> String {
     let env = render::ok_envelope(command, value);
     serde_json::to_string_pretty(&env).unwrap() + "\n"
+}
+
+/// The machine store's tracked skills as `(name, base_commit)` — the CUSTODY oracle the
+/// crash-safety and dedup assertions read (the `list` inventory itself is manifest-resolved now,
+/// so a store record without a manifest row deliberately does not appear there).
+fn store_records(ctx: &Ctx<'_>) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    if let Ok(entries) = ctx.fs.read_dir(&ctx.layout.skills_dir()) {
+        for entry in entries {
+            let Some(id) = entry.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+            let Ok(sid) = crate::id::SkillId::parse(id) else {
+                continue;
+            };
+            if let Ok(Some(lock)) = doc::read_doc::<Lock>(ctx.fs, &ctx.layout.published(&sid).lock)
+            {
+                out.push((lock.name, lock.base_commit));
+            }
+        }
+    }
+    out.sort();
+    out
 }
 
 fn assert_golden(name: &str, command: &str, value: Value) {
@@ -1036,26 +1047,11 @@ fn a_global_add_refusal_keeps_g_in_every_spelled_follow_up() {
 }
 
 #[test]
-fn add_then_list_finds_tracked_and_pins_lock_shape() {
+fn add_pins_the_lock_shape() {
     let src = editable_source();
     let root = src.0.join("pr-describe");
     let h = Harness::new("addlist");
     let add = ops::add(&h.ctx(), &root).unwrap();
-
-    let list = ops::list(&h.ctx(), None, false, None, None).unwrap().data;
-    assert_eq!(list.tracked.len(), 1);
-    let entry = &list.tracked[0];
-    assert_eq!(entry.skill, "pr-describe");
-    assert_eq!(entry.version_id, add.version_id);
-    assert_eq!(entry.bundle_digest, add.bundle_digest);
-    assert!(!entry.draft, "freshly added skill has no draft");
-    assert!(
-        entry.workspace_id.is_none(),
-        "a locally-adopted skill has no workspace"
-    );
-    assert!(
-        list.followed.is_empty() && list.published_by_you.is_empty() && list.untracked.is_empty()
-    );
 
     // The lock.json on-disk instance shape (sorted files: path, mode, sha256, size + base_commit).
     let lock: Lock = doc::read_doc(
@@ -1079,8 +1075,47 @@ fn add_then_list_finds_tracked_and_pins_lock_shape() {
             .iter()
             .all(|f| f.mode == "100644" && f.sha256.len() == 64)
     );
+}
 
-    assert_golden("list.ok", "list", serde_json::to_value(&list).unwrap());
+/// The committed `list.ok` golden equals the REAL op's output over a deterministic machine
+/// scope: one workspace session, one assigned-and-applied skill (fixed version + digest), the
+/// implicit feed recipe. Path-free by construction, so the bytes are stable across machines.
+#[test]
+fn list_golden_matches_the_real_machine_scope_output() {
+    use crate::ops::inventory::testkit::{TempHome, assigned, skill_id_of, with_ctx};
+    let home = TempHome::new();
+    let cwd = home.0.join("plain");
+    std::fs::create_dir_all(&cwd).unwrap();
+    home.session(
+        "topos.sh",
+        "w_acme",
+        "acme",
+        crate::sessions::SESSION_ACTIVE,
+    );
+    home.cache(
+        "w_acme",
+        "topos.sh",
+        "acme",
+        vec![assigned("pr-describe", Some("Dana"))],
+        Vec::new(),
+    );
+    home.store_applied(
+        &skill_id_of("pr-describe"),
+        "pr-describe",
+        &"d".repeat(64),
+        &[],
+    );
+    let out = with_ctx(&home, Some(&cwd), |ctx| {
+        ops::list_with(
+            ctx,
+            &ops::ListRequest::default(),
+            None,
+            None,
+            ops::RowPage::unlimited(),
+        )
+    })
+    .unwrap();
+    assert_golden("list.ok", "list", serde_json::to_value(&out.data).unwrap());
 }
 
 #[test]
@@ -1102,9 +1137,19 @@ fn list_discovers_untracked_registry_skills_then_dedups_an_adopted_one() {
         home: user_home.0.clone(),
         cwd: None,
     };
-    let data = ops::list(&h.ctx(), None, false, Some(roots()), None)
-        .unwrap()
-        .data;
+    let untracked_req = || ops::ListRequest {
+        untracked: true,
+        ..ops::ListRequest::default()
+    };
+    let data = ops::list_with(
+        &h.ctx(),
+        &untracked_req(),
+        Some(roots()),
+        None,
+        ops::RowPage::unlimited(),
+    )
+    .unwrap()
+    .data;
     let found = data
         .untracked
         .iter()
@@ -1114,15 +1159,34 @@ fn list_discovers_untracked_registry_skills_then_dedups_an_adopted_one() {
     assert_eq!(found.scope, "user");
     assert!(found.path.contains("my-skill"));
 
-    // `--tracked` (None discovery) suppresses discovery entirely.
-    let tracked_only = ops::list(&h.ctx(), None, false, None, None).unwrap().data;
-    assert!(tracked_only.untracked.is_empty());
+    // The bare list itemizes no discoveries — they ride the ONE summary line instead.
+    let bare = ops::list_with(
+        &h.ctx(),
+        &ops::ListRequest::default(),
+        Some(roots()),
+        None,
+        ops::RowPage::unlimited(),
+    )
+    .unwrap()
+    .data;
+    assert!(bare.untracked.is_empty());
+    assert!(
+        bare.untracked_summary
+            .is_some_and(|s| s.skills >= 1 && s.command == "topos list --untracked"),
+        "the summary points at the expanding command"
+    );
 
     // Adopt it → it drops out of the untracked set (dedup by canonical placement path).
     ops::add(&h.ctx(), &skill_dir).unwrap();
-    let after = ops::list(&h.ctx(), None, false, Some(roots()), None)
-        .unwrap()
-        .data;
+    let after = ops::list_with(
+        &h.ctx(),
+        &untracked_req(),
+        Some(roots()),
+        None,
+        ops::RowPage::unlimited(),
+    )
+    .unwrap()
+    .data;
     assert!(
         !after
             .untracked
@@ -1130,64 +1194,6 @@ fn list_discovers_untracked_registry_skills_then_dedups_an_adopted_one() {
             .any(|u| u.name == "my-skill" && u.path.contains("my-skill")),
         "an adopted skill is no longer reported as untracked"
     );
-}
-
-#[test]
-fn an_empty_inventory_names_the_covering_manifest_instead_of_claiming_nothing() {
-    // `list` inventories THIS MACHINE's own records; a folder governed by a `topos.toml` keeps its
-    // bundles in that project's own store. Standing in such a folder with nothing tracked here, the
-    // bare "No tracked skills." is true and misleading in one breath — so the covering file's demand
-    // rides the TTY-only channel (never the pinned `ListData`) and the empty state names it.
-    let h = Harness::new("list-covering");
-    let user_home = Scratch::new("list-covering-home");
-    let project = Scratch::new("list-covering-proj");
-    std::fs::write(
-        project.0.join("topos.toml"),
-        "[bundles]\n\"./tools/demo-skill\" = \"*\"\n\"topos.sh/acme/channels/backend\" = \"*\"\n",
-    )
-    .unwrap();
-    let discovery = ops::DiscoveryRoots {
-        home: user_home.0.clone(),
-        cwd: Some(project.0.clone()),
-    };
-    let in_project = h.ctx_rooted(&user_home.0, &project.0);
-
-    // The disclosure LINE is what this test owns. Never the whole render: a harness env override
-    // (`CLAUDE_CONFIG_DIR`, `CODEX_HOME`, …) can point discovery at a real skills dir on the
-    // machine running the suite, appending untracked rows that have nothing to do with the claim.
-    let disclosure = "No tracked skills outside this folder's topos.toml — it tracks 2 bundles \
-                      (run `topos status` to see them).";
-
-    let covered = ops::list(&in_project, None, false, Some(discovery), None).unwrap();
-    assert!(covered.data.tracked.is_empty(), "nothing is tracked here");
-    assert_eq!(
-        covered.project_bundles, 2,
-        "a folder row and a channel line both count as demand"
-    );
-    let text = render::list_tty(&covered);
-    assert!(text.starts_with(disclosure), "{text}");
-
-    // `--tracked` (no discovery) narrows what is SWEPT, not what this folder asks for — the
-    // disclosure must not vanish with the flag, or the flag becomes a way to be lied to.
-    let tracked_only = ops::list(&in_project, None, false, None, None).unwrap();
-    assert_eq!(tracked_only.project_bundles, 2);
-    let tracked_text = render::list_tty(&tracked_only);
-    assert!(tracked_text.starts_with(disclosure), "{tracked_text}");
-
-    // No covering file (the walk stops at the passed home): the line is byte-identical to the one
-    // it has always been — no new noise where there is nothing to disclose.
-    let plain_cwd = user_home.0.join("nested");
-    std::fs::create_dir_all(&plain_cwd).unwrap();
-    let bare = ops::list(
-        &h.ctx_rooted(&user_home.0, &plain_cwd),
-        None,
-        false,
-        None,
-        None,
-    )
-    .unwrap();
-    assert_eq!(bare.project_bundles, 0);
-    assert_eq!(render::list_tty(&bare), "No tracked skills.");
 }
 
 #[test]
@@ -1201,11 +1207,20 @@ fn footprint_oracle_equals_the_created_set_and_catches_a_stray_write() {
 
     // Ground truth: every path under the home (topos never writes the user source dir).
     let mut ground = fs_tree(&h.home.0);
-    let mut reported = ops::list(&h.ctx(), None, true, None, None)
-        .unwrap()
-        .data
-        .footprint
-        .unwrap();
+    let mut reported = ops::list_with(
+        &h.ctx(),
+        &ops::ListRequest {
+            footprint: true,
+            ..ops::ListRequest::default()
+        },
+        None,
+        None,
+        ops::RowPage::unlimited(),
+    )
+    .unwrap()
+    .data
+    .footprint
+    .unwrap();
     ground.sort();
     reported.sort();
     assert_eq!(
@@ -1216,11 +1231,20 @@ fn footprint_oracle_equals_the_created_set_and_catches_a_stray_write() {
     // Adversarial: a stray file under the home must appear in the footprint walk.
     let stray = layout.home().join("stray-unregistered");
     std::fs::write(&stray, b"x").unwrap();
-    let reported = ops::list(&h.ctx(), None, true, None, None)
-        .unwrap()
-        .data
-        .footprint
-        .unwrap();
+    let reported = ops::list_with(
+        &h.ctx(),
+        &ops::ListRequest {
+            footprint: true,
+            ..ops::ListRequest::default()
+        },
+        None,
+        None,
+        ops::RowPage::unlimited(),
+    )
+    .unwrap()
+    .data
+    .footprint
+    .unwrap();
     assert!(
         reported.iter().any(|p| p == &stray.to_string_lossy()),
         "the footprint walk must reflect a stray write"
@@ -1242,13 +1266,7 @@ fn add_rejects_a_symlink_and_writes_nothing() {
         "got {err:?}"
     );
     // Nothing tracked.
-    assert!(
-        ops::list(&h.ctx(), None, false, None, None)
-            .unwrap()
-            .data
-            .tracked
-            .is_empty()
-    );
+    assert!(store_records(&h.ctx()).is_empty());
 }
 
 #[test]
@@ -1292,13 +1310,7 @@ fn add_rejects_a_fifo_and_handles_a_casefold_collision() {
             ops::add(&h.ctx(), &root).unwrap_err(),
             crate::error::ClientError::Scan(_)
         ));
-        assert!(
-            ops::list(&h.ctx(), None, false, None, None)
-                .unwrap()
-                .data
-                .tracked
-                .is_empty()
-        );
+        assert!(store_records(&h.ctx()).is_empty());
     }
 
     // A case-fold collision (`Readme.md` vs `readme.md`): a case-insensitive FS collapses them (add
@@ -1358,25 +1370,28 @@ fn error_envelope_is_coded_retryability_aware_and_leak_free() {
 }
 
 #[test]
-fn list_by_ambiguous_name_is_typed() {
+fn list_deep_dive_miss_is_the_uniform_not_found() {
     let h = Harness::new("ambig");
-    // Two DISTINCT directories that share a name -> two distinct tracked skills (legitimate), so a name
-    // lookup is ambiguous. (Re-adding the SAME dir is refused as ALREADY_TRACKED — a different case,
-    // covered separately.)
+    // A store record with NO manifest row resolves nowhere — the deep dive answers only what the
+    // scopes deliver, and a token nothing delivers is the uniform not-found.
     let src_a = editable_source();
-    let src_b = editable_source();
     ops::add(&h.ctx(), &src_a.0.join("pr-describe")).unwrap();
-    ops::add(&h.ctx(), &src_b.0.join("pr-describe")).unwrap();
 
-    let err = ops::list(&h.ctx(), Some("pr-describe"), false, None, None).unwrap_err();
+    let deep = |name: &str| {
+        ops::list_with(
+            &h.ctx(),
+            &ops::ListRequest {
+                name: Some(name.to_owned()),
+                ..ops::ListRequest::default()
+            },
+            None,
+            None,
+            ops::RowPage::unlimited(),
+        )
+    };
     assert!(matches!(
-        err,
-        crate::error::ClientError::AmbiguousName { count: 2, .. }
-    ));
-    // No such name -> typed.
-    assert!(matches!(
-        ops::list(&h.ctx(), Some("nope"), false, None, None).unwrap_err(),
-        crate::error::ClientError::NoSuchSkill { .. }
+        deep("nope").unwrap_err(),
+        crate::error::ClientError::TargetNotFound { .. }
     ));
 }
 
@@ -1515,10 +1530,7 @@ fn add_under_fault_preserves_draft_and_is_all_or_nothing() {
             follow: &no_follow,
             roots: None,
         };
-        let tracked = ops::list(&clean_ctx, None, false, None, None)
-            .unwrap()
-            .data
-            .tracked;
+        let tracked = store_records(&clean_ctx);
 
         // All-or-nothing: the staging-rename is the commit point, so the skill is either absent (fault
         // before the publish) or COMPLETE (fault at/after it) — never a half/corrupt state. A faulted
@@ -1527,9 +1539,9 @@ fn add_under_fault_preserves_draft_and_is_all_or_nothing() {
             tracked.len() <= 1,
             "fail_at={fail_at}: at most one skill, found {tracked:?}"
         );
-        if let Some(entry) = tracked.first() {
+        if let Some((_, version)) = tracked.first() {
             assert_eq!(
-                entry.version_id,
+                version,
                 "d77b648d8149d63189864c6b6d06da4f7919935c4242cc197e708b1dafe941d5"
             );
             // Complete + usable: it renders + diffs without an integrity error.
@@ -1614,13 +1626,10 @@ fn add_recognizes_a_claude_code_skill_tags_it_installs_the_hook_and_writes_nothi
     );
     assert!(settings.contains("# topos:currency"), "sentinel present");
 
-    // The placement was recorded with the harness tag; a list shows it tracked.
-    let tracked = ops::list(&ctx, None, false, None, None)
-        .unwrap()
-        .data
-        .tracked;
+    // The placement was recorded with the harness tag; the store carries the one record.
+    let tracked = store_records(&ctx);
     assert_eq!(tracked.len(), 1);
-    assert_eq!(tracked[0].skill, "pr-describe");
+    assert_eq!(tracked[0].0, "pr-describe");
 }
 
 #[test]
@@ -1657,11 +1666,7 @@ fn re_adding_the_same_dir_is_refused_as_already_tracked() {
         "re-adding the same dir must be refused, got {err:?}"
     );
     assert_eq!(
-        ops::list(&h.ctx(), None, false, None, None)
-            .unwrap()
-            .data
-            .tracked
-            .len(),
+        store_records(&h.ctx()).len(),
         1,
         "no second record was minted"
     );

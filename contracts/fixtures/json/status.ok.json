@@ -3,8 +3,29 @@
   "command": "status",
   "ok": true,
   "data": {
-    "awaiting_first_sync": 1,
-    "profile_skills": 2,
+    "machine_summary": {
+      "attention": [
+        {
+          "command": "topos update -g",
+          "count": 1,
+          "kind": "assignments-not-applied"
+        }
+      ],
+      "command": "topos status -g"
+    },
+    "scopes": [
+      {
+        "attention": [
+          {
+            "command": "topos update",
+            "count": 2,
+            "kind": "updates-pending"
+          }
+        ],
+        "manifest": "/repo/topos.toml",
+        "scope": "project"
+      }
+    ],
     "server": "https://topos.sh/api",
     "sessions": [
       {

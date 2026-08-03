@@ -4,9 +4,9 @@
 use topos_types::persisted::ConflictPathKind;
 use topos_types::requests::InvitationData;
 use topos_types::results::{
-    AddData, AddedNote, DiffData, LogData, ProposeData, PublishData, PullData, PullSkill,
-    RemoteFollowState, RemoteSkillEntry, RemoveData, RemoveItem, RemoveKind, RevertData,
-    ReviewData, ReviewDecision, SkillEntry, UntrackedEntry,
+    AddData, AddedNote, AgentView, DiffData, LogData, ProposeData, PublishData, PullData,
+    PullSkill, RemoteSkill, RemoveData, RemoveItem, RemoveKind, RevertData, ReviewData,
+    ReviewDecision, SkillEntry, UntrackedEntry,
 };
 use topos_types::{
     ActionCode, Affected, CurrencyKind, JsonEnvelope, NextAction, TerminalOutcome, TriggerState,
@@ -870,116 +870,149 @@ pub(crate) fn withdrawn_next_actions(data: &PullData) -> Vec<NextAction> {
         .collect()
 }
 
-/// The empty tracked bucket, said honestly. With nothing covering the working directory the line
-/// is the plain one it has always been. With a `topos.toml` that asks for bundles of its own, the
-/// bare version is true and misleading in the same breath — this machine's own records are empty
-/// WHILE the folder tracks its own set — so the line names the file, counts what it asks for, and
-/// points at the verb that shows it. It never claims those bundles are installed: `status` is
-/// where a demand is read against what actually landed.
-fn empty_tracked_line(project_bundles: usize) -> String {
-    match project_bundles {
-        0 => "No tracked skills.\n".to_owned(),
-        1 => "No tracked skills outside this folder's topos.toml — it tracks 1 bundle (run \
-              `topos status` to see it).\n"
-            .to_owned(),
-        n => format!(
-            "No tracked skills outside this folder's topos.toml — it tracks {n} bundles (run \
-             `topos status` to see them).\n"
-        ),
+/// A count with its correctly-pluralized noun (`1 skill`, `2 skills`).
+fn counted(n: u64, noun: &str) -> String {
+    if n == 1 {
+        format!("{n} {noun}")
+    } else {
+        format!("{n} {noun}s")
     }
 }
 
+/// The scope section header — it leads with the governing FILE, so "why is this here" starts at
+/// the line that asked for it. The machine scope with no file names the implicit recipe honestly.
+fn scope_header(scope: &str, manifest: Option<&str>) -> String {
+    match (scope, manifest) {
+        ("project", Some(f)) => format!("This folder — {f}"),
+        ("project", None) => "This folder".to_owned(),
+        (_, Some(f)) => format!("Machine-wide — {f}"),
+        (_, None) => "Machine-wide — your connected workspaces' feeds".to_owned(),
+    }
+}
+
+/// The `list` TTY — the inventory: the scope sections in full (or, under `--untracked`, one
+/// summary line each), then whatever the optional views carry, then the quiet-rule summary lines
+/// (each EXACTLY one line ending in the command that expands it), the paging markers, the
+/// isolated warnings, and the footprint.
 pub(crate) fn list_tty(out: &ListOutcome) -> String {
     let data = &out.data;
     let mut s = String::new();
-    // The enrollment header — the "am I enrolled, is the hook armed" disclosure. The workspace names move
-    // to the per-group headers below (one install can follow skills across several workspaces). Rendered
-    // only when enrolled; the unenrolled output is byte-identical to the accountless local list.
-    if let Some(e) = &out.enrollment {
-        s.push_str(&format!(
-            "Connected to {} — auto-update hook: {}\n",
-            e.base_url,
-            if e.hook_active {
-                "active"
-            } else {
-                "not installed"
-            }
-        ));
+
+    // The one-skill deep dive is the whole answer.
+    if let Some(detail) = &data.detail {
+        return list_detail_tty(detail);
     }
-    // The follow-state note `(mode, following)` for tracked row `i` (aligned by construction), present only
-    // when enrolled+followed — extracted as plain fields so the row builder stays type-agnostic.
-    let note_of = |i: usize| {
-        out.enrollment
-            .as_ref()
-            .and_then(|en| en.notes.get(i))
-            .and_then(Option::as_ref)
-            .map(|n| (n.mode, n.following))
-    };
-    // Tracked skills. An empty inventory still falls through to the untracked discovery below — a fresh
-    // user's whole value is "here's what you could adopt", so we never early-return on no-tracked.
-    if data.tracked.is_empty() {
-        s.push_str(&empty_tracked_line(out.project_bundles));
+    // So is the agent-eye view.
+    if let Some(view) = &data.agent_view {
+        return agent_view_tty(view);
+    }
+
+    if out.untracked_view {
+        // `--untracked`: each tracked scope is ONE summary line (never invisible, never dumped).
+        let machine_alone = data.scopes.len() == 1;
+        for scope in &data.scopes {
+            let skills = scope.rows.len() as u64;
+            let line = if scope.scope == "project" {
+                format!(
+                    "{} tracked in this folder — `topos list`",
+                    counted(skills, "skill")
+                )
+            } else if machine_alone {
+                format!("{} machine-wide — `topos list`", counted(skills, "skill"))
+            } else {
+                format!(
+                    "{} machine-wide — `topos list -g`",
+                    counted(skills, "skill")
+                )
+            };
+            s.push_str(&line);
+            s.push('\n');
+        }
+        if data.untracked.is_empty() {
+            s.push_str("No untracked skills found in your agents' folders.\n");
+        }
     } else {
-        match &out.enrollment {
-            // Enrolled: group the tracked rows by workspace (named by the membership display label), with
-            // the purely-local skills under their own clearly-labelled group. `--json` stays a flat list —
-            // grouping is TTY-only.
-            Some(e) => {
-                for (ws_id, label) in ordered_workspace_groups(&data.tracked, &e.workspace_labels) {
-                    s.push_str(&format!("{label}:\n"));
-                    for (i, entry) in data.tracked.iter().enumerate() {
-                        if entry.workspace_id.as_deref() == Some(ws_id) {
-                            s.push_str(&list_row(entry, note_of(i)));
-                        }
-                    }
-                }
-                if data.tracked.iter().any(|e| e.workspace_id.is_none()) {
-                    s.push_str("local (not shared):\n");
-                    for (i, entry) in data.tracked.iter().enumerate() {
-                        if entry.workspace_id.is_none() {
-                            s.push_str(&list_row(entry, note_of(i)));
-                        }
-                    }
-                }
+        for scope in &data.scopes {
+            s.push_str(&scope_header(&scope.scope, scope.manifest.as_deref()));
+            s.push('\n');
+            if scope.rows.is_empty() {
+                s.push_str("  (nothing installed in this scope)\n");
             }
-            // Unenrolled: the flat accountless list (there are no workspaces to group by).
-            None => {
-                s.push_str("Tracked skills:\n");
-                for (i, entry) in data.tracked.iter().enumerate() {
-                    s.push_str(&list_row(entry, note_of(i)));
-                }
+            for entry in &scope.rows {
+                s.push_str(&list_row(entry));
             }
         }
     }
-    // Untracked skills discovered in any known harness's skill dir — the `add`-able inventory.
+
+    // The untracked LISTING (under `--untracked`), grouped by folder.
     if !data.untracked.is_empty() {
-        s.push_str("\nUntracked skills — run `topos add <skill>` to adopt:\n");
+        s.push_str("Untracked skills — `topos add <name>` manages one:\n");
+        let mut last_folder: Option<String> = None;
         for u in &data.untracked {
+            let folder = std::path::Path::new(&u.path)
+                .parent()
+                .map(|p| p.display().to_string())
+                .unwrap_or_default();
+            if last_folder.as_deref() != Some(folder.as_str()) {
+                s.push_str(&format!("  {folder}:\n"));
+                last_folder = Some(folder);
+            }
             s.push_str(&untracked_row(u));
         }
     }
-    // The `--remote` catalog — what this install could add next, grouped by workspace and annotated
-    // with the local delivery state. An `Available` row names where it lives; `topos add <name>`
-    // records the demand.
-    if !data.remote_available.is_empty() {
-        s.push_str("\nRemote catalog:\n");
-        let label_of = |ws_id: &str| -> String {
-            out.enrollment
-                .as_ref()
-                .and_then(|e| e.workspace_labels.iter().find(|(id, _)| id == ws_id))
-                .map(|(_, label)| label.clone())
-                .unwrap_or_else(|| ws_id.to_owned())
-        };
-        // `remote_available` is sorted by (workspace_id, skill_id), so group by consecutive workspace.
-        let mut last_ws: Option<&str> = None;
-        for r in &data.remote_available {
-            if last_ws != Some(r.workspace_id.as_str()) {
-                s.push_str(&format!("  {}:\n", label_of(&r.workspace_id)));
-                last_ws = Some(r.workspace_id.as_str());
+
+    // The `--remote` catalog — per workspace: the channels (with the adopting file, when one
+    // adopts), then the skills with this machine's adoption markers.
+    for ws in &data.remote {
+        s.push_str(&format!("{}/{}:\n", ws.host, ws.workspace));
+        if !ws.channels.is_empty() {
+            s.push_str("  channels:\n");
+            for c in &ws.channels {
+                let adopted = match &c.adopted_in {
+                    Some(f) => format!("  (adopted in {f})"),
+                    None => String::new(),
+                };
+                s.push_str(&format!(
+                    "    {} — {}{adopted}\n",
+                    c.name,
+                    counted(c.skills, "skill")
+                ));
             }
-            s.push_str(&remote_row(r));
+        }
+        if !ws.skills.is_empty() {
+            s.push_str("  skills:\n");
+            for r in &ws.skills {
+                s.push_str(&remote_row(r));
+            }
         }
     }
+
+    // The quiet-rule summaries: what this view did not show, ONE line each.
+    if let Some(m) = &data.machine_summary {
+        let updates = if m.updates_pending > 0 {
+            format!(", {} pending", counted(m.updates_pending, "update"))
+        } else {
+            String::new()
+        };
+        s.push_str(&format!(
+            "{} machine-wide{updates} — `{}`\n",
+            counted(m.skills, "skill"),
+            m.command
+        ));
+    }
+    if let Some(u) = &data.untracked_summary {
+        s.push_str(&format!(
+            "{} in {} — `{}` shows them; `topos add <name>` manages one\n",
+            counted(u.skills, "untracked skill"),
+            counted(u.folders, "folder"),
+            u.command
+        ));
+    }
+    // The static pointer at what the workspaces offer — no network, no cached counts.
+    if data.signed_in && data.remote.is_empty() && !out.untracked_view {
+        s.push_str("See what your workspaces offer: `topos list --remote`\n");
+    }
+
     // An explicit `--limit`/`--offset` page on the TTY: one line per capped bucket.
     for t in &data.truncated {
         s.push_str(&format!(
@@ -1005,16 +1038,16 @@ pub(crate) fn list_tty(out: &ListOutcome) -> String {
     s.trim_end().to_owned()
 }
 
-/// One `--remote` catalog row: `<name>  <name>@<short>  <kind>  <state note>` (+ any open-proposal
-/// count). The name falls back to the skill id when the plane discloses no display name; the kind is
-/// the catalog's bundle kind, displayed verbatim (never branched on).
-fn remote_row(r: &RemoteSkillEntry) -> String {
-    let name = r.display_name.as_deref().unwrap_or(&r.skill_id);
+/// One `--remote` catalog row: `<name>  <name>@<short>  <kind>  <adoption note>` (+ any
+/// open-proposal count). The kind is displayed verbatim (never branched on).
+fn remote_row(r: &RemoteSkill) -> String {
+    use topos_types::results::RemoteAdoption;
     let note = match r.state {
-        RemoteFollowState::Available => "(available)".to_owned(),
-        RemoteFollowState::Following => "(following)".to_owned(),
-        RemoteFollowState::FollowingBehind => {
-            format!("(update available — run `topos update {name}`)")
+        RemoteAdoption::AdoptedHere => "(adopted here)".to_owned(),
+        RemoteAdoption::AdoptedOnMachine => "(adopted machine-wide)".to_owned(),
+        RemoteAdoption::NotAdopted => format!("(not adopted — `topos add {}`)", r.name),
+        RemoteAdoption::UpdateAvailable => {
+            format!("(update available — `topos update {}`)", r.name)
         }
     };
     let proposals = if r.open_proposals > 0 {
@@ -1024,8 +1057,8 @@ fn remote_row(r: &RemoteSkillEntry) -> String {
     };
     format!(
         "    {}  {}@{}  {}  {}{}\n",
-        name,
-        name,
+        r.name,
+        r.name,
         short(&r.version_id),
         r.kind,
         note,
@@ -1033,10 +1066,11 @@ fn remote_row(r: &RemoteSkillEntry) -> String {
     )
 }
 
-/// One untracked-discovery row: `<name>  [<harness-name> · <slug>]  <path>`, plus an adopt-only note for a
-/// harness topos has no full adapter for — it can still be `add`ed (the bytes track + share), but live
-/// auto-updates for that harness land later. The **slug** is shown because it is the `<skill>@<harness>` token
-/// `add` takes to disambiguate a name found in more than one harness.
+/// One untracked-discovery row (already grouped by folder): `<name>  [<harness-name> · <slug>]`,
+/// plus an adopt-only note for a harness topos has no full adapter for — it can still be `add`ed
+/// (the bytes track + share), but live auto-updates for that harness land later. The **slug** is
+/// shown because it is the `<skill>@<harness>` token `add` takes to disambiguate a name found in
+/// more than one harness.
 fn untracked_row(u: &UntrackedEntry) -> String {
     let support = if u.adapter_supported {
         ""
@@ -1044,43 +1078,36 @@ fn untracked_row(u: &UntrackedEntry) -> String {
         "  (adopt-only — live auto-updates land later)"
     };
     format!(
-        "  {}  [{} · {}]  {}{}\n",
-        u.name, u.harness_name, u.harness, u.path, support
+        "    {}  [{} · {}]{}\n",
+        u.name, u.harness_name, u.harness, support
     )
 }
 
-/// One tracked row's text: the padded skill line (`<skill>  <skill>@<short>` + follow note + draft flag)
-/// plus any open-proposal lines beneath it. `note` is the follow-state `(mode, following)` where the skill
-/// is enrolled+followed, else `None` (a purely local skill).
-fn list_row(entry: &SkillEntry, note: Option<(&str, bool)>) -> String {
-    let follow_note = match note {
-        Some((mode, true)) => format!("  (delivered, {mode})"),
-        Some((_, false)) => format!("  (paused — `topos add {}` resumes)", entry.skill),
-        None => String::new(),
-    };
-    // The SOURCE / STATUS / CAUSE columns (present once `list` populated them): `[status]` + the source,
-    // and the detach cause on a detached row.
+/// One inventory row: `<skill>  <skill>@<short>` + the draft flag + the STATUS / SOURCE / CAUSE
+/// columns. A row never applied here carries the all-zero identity — rendered as the honest
+/// not-applied note instead of a meaningless `@000000000000`.
+fn list_row(entry: &SkillEntry) -> String {
     let columns = list_columns(entry);
-    let mut s = format!(
-        "  {}  {}@{}{}{}{}\n",
+    if entry.version_id.bytes().all(|b| b == b'0') {
+        let mut note = String::new();
+        if entry.status.is_none() {
+            note.push_str("  (not applied here yet — `topos update` applies it)");
+        }
+        note.push_str(&columns);
+        return format!("  {}{note}\n", entry.skill);
+    }
+    format!(
+        "  {}  {}@{}{}{}\n",
         entry.skill,
         entry.skill,
         short(&entry.version_id),
-        follow_note,
         if entry.draft { "  (draft)" } else { "" },
         columns,
-    );
-    // Open proposals print IN FULL — this is the surface a reviewer copies the hash from.
-    for p in &entry.pending_proposals {
-        s.push_str(&format!(
-            "    open proposal {p} — run `topos review {p} --approve` (or `--reject`)\n"
-        ));
-    }
-    s
+    )
 }
 
-/// The SOURCE / STATUS / CAUSE suffix for a tracked row (`  [behind]  from acme  (excluded here)`) —
-/// rendered only for the fields `list` populated (an older/local producer leaves them `None`).
+/// The STATUS / SOURCE / CAUSE suffix for an inventory row (`  [behind]  from acme  (excluded
+/// here)`) — rendered only for the fields the resolution populated.
 fn list_columns(entry: &SkillEntry) -> String {
     use topos_types::results::{DetachCause, SkillStatus};
     let mut s = String::new();
@@ -1104,7 +1131,7 @@ fn list_columns(entry: &SkillEntry) -> String {
     if let Some(cause) = entry.cause {
         let label = match cause {
             DetachCause::Unfollowed => "unfollowed",
-            DetachCause::ExcludedHere => "excluded here",
+            DetachCause::ExcludedHere => "switched off here",
             DetachCause::RemovedUpstream => "removed upstream",
             DetachCause::SignedOut => "signed out",
         };
@@ -1113,32 +1140,29 @@ fn list_columns(entry: &SkillEntry) -> String {
     s
 }
 
-/// The workspace groups present among `tracked`, ordered `(workspace_id, display_label)`: membership order
-/// first (from `workspace_labels`), then any workspace that appears on a row but has no membership label
-/// (defensive — named by its raw id). The purely-local (no-workspace) group is rendered by the caller.
-fn ordered_workspace_groups<'a>(
-    tracked: &'a [SkillEntry],
-    workspace_labels: &'a [(String, String)],
-) -> Vec<(&'a str, &'a str)> {
-    let mut present: Vec<&str> = tracked
-        .iter()
-        .filter_map(|e| e.workspace_id.as_deref())
-        .collect();
-    present.sort_unstable();
-    present.dedup();
-
-    let mut ordered: Vec<(&'a str, &'a str)> = Vec::new();
-    for (id, label) in workspace_labels {
-        if present.contains(&id.as_str()) {
-            ordered.push((id.as_str(), label.as_str()));
+/// The agent-eye view (`list -a <slug>`): each skills dir the harness reads from this folder,
+/// every entry marked managed (`topos: <file>:<row-key>` / `feed <host>/<ws>`) or untracked.
+fn agent_view_tty(view: &AgentView) -> String {
+    let mut s = format!("{} — what it reads from this folder:", view.agent_name);
+    for dir in &view.dirs {
+        s.push_str(&format!("\n  {} ({}):", dir.path, dir.scope));
+        if dir.entries.is_empty() {
+            s.push_str("\n    (empty)");
+        }
+        for e in &dir.entries {
+            match &e.managed {
+                Some(m) if m.starts_with("feed ") => {
+                    s.push_str(&format!("\n    {}  {m}", e.name));
+                }
+                Some(m) => s.push_str(&format!("\n    {}  topos: {m}", e.name)),
+                None => s.push_str(&format!(
+                    "\n    {}  untracked (`topos add {}` manages it)",
+                    e.name, e.name
+                )),
+            }
         }
     }
-    for ws in present {
-        if !ordered.iter().any(|(id, _)| *id == ws) {
-            ordered.push((ws, ws));
-        }
-    }
-    ordered
+    s
 }
 
 /// The `update --reset` DESCRIBE's TTY — LOSS-led: it shows exactly the draft delta being discarded.
@@ -1506,13 +1530,11 @@ pub(crate) fn uninstall_applied_tty(d: &crate::ops::UninstallApplied) -> String 
     s
 }
 
-/// The applied logout's TTY.
-/// `auth status`'s TTY — whoami, per-workspace health, hook health, reporting posture.
-/// The `status` snapshot's TTY — the one orientation read: version, sign-in, the sessions, the
-/// resolved table SECTIONED PER SCOPE (scopes are unblended, so each gets its own heading and its
-/// own source line), each connected workspace's regime, the disclosure notes verbatim, the
-/// per-agent trigger rows, and — for `topos status <bundle>` — the deep answer's short paragraph.
-/// Entirely from the offline snapshot.
+/// The `status` panel's TTY — HEALTH, no inventory: version, sign-in, the sessions, then per
+/// shown SCOPE its governing file, the regimes, the notes verbatim, and the attention counts —
+/// each ONE line ending in the exact command that resolves it — then the machine summary (when
+/// the machine body is not shown) and the per-agent trigger rows. Entirely from the offline
+/// snapshot.
 pub(crate) fn status_tty(d: &topos_types::results::StatusData) -> String {
     let mut s = format!("topos {}", d.version);
     match &d.server {
@@ -1549,58 +1571,38 @@ pub(crate) fn status_tty(d: &topos_types::results::StatusData) -> String {
             }
         }
     }
-    // THE TABLE, one section per SCOPE — this folder's manifest first, then the person's own
-    // recipe. Per line: the one source that asked, the applied version with its as-of stamp, the
-    // attribution, and an honest state (phrased from local knowledge only).
-    let project: Vec<&topos_types::results::StatusItem> =
-        d.items.iter().filter(|i| i.scope == "project").collect();
-    let person: Vec<&topos_types::results::StatusItem> =
-        d.items.iter().filter(|i| i.scope != "project").collect();
-    if !project.is_empty() {
+    // The scope bodies: the governing file leads, then the regimes (machine scope), the notes
+    // verbatim, and the attention counts — nothing pending is said out loud.
+    for scope in &d.scopes {
         s.push_str(&format!(
-            "\nThis folder — {}",
-            status_manifest_of(&project).unwrap_or_else(|| "topos.toml".to_owned())
+            "\n{}",
+            scope_header(&scope.scope, scope.manifest.as_deref())
         ));
-        for item in &project {
-            s.push_str(&status_line(item));
-        }
-    }
-    if !person.is_empty() || !d.regimes.is_empty() {
-        match status_manifest_of(&person) {
-            Some(file) => s.push_str(&format!("\nYou — {file}")),
-            None => s.push_str("\nYou — your connected workspaces' feeds"),
-        }
-        for item in &person {
-            s.push_str(&status_line(item));
-        }
-        // One regime line per connected workspace: what this machine takes from it.
-        for r in &d.regimes {
+        for r in &scope.regimes {
             s.push_str(&format!("\n  {}/{} — {}", r.host, r.workspace, r.regime));
         }
-    }
-    // The disclosure sentences the table cannot carry per row — rendered VERBATIM.
-    if !d.notes.is_empty() {
-        s.push_str("\nnotes:");
-        for note in &d.notes {
+        for note in &scope.notes {
             s.push_str(&format!("\n  {note}"));
         }
-    }
-    s.push_str(&format!(
-        "\nassigned to you: {} {}",
-        d.profile_skills,
-        if d.profile_skills == 1 {
-            "bundle"
-        } else {
-            "bundles"
+        if scope.attention.is_empty() {
+            s.push_str("\n  nothing pending");
         }
-    ));
-    if let Some(p) = d.awaiting_first_sync
-        && p > 0
-    {
-        s.push_str(&format!(
-            " — {p} not applied here yet (`topos update` applies {})",
-            if p == 1 { "it" } else { "them" },
-        ));
+        for a in &scope.attention {
+            s.push_str(&format!("\n  {} — `{}`", attention_phrase(a), a.command));
+        }
+    }
+    // The machine scope not shown in full: ONE summary line with ITS counts.
+    if let Some(m) = &d.machine_summary {
+        let counts = if m.attention.is_empty() {
+            "nothing pending".to_owned()
+        } else {
+            m.attention
+                .iter()
+                .map(attention_phrase)
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        s.push_str(&format!("\nmachine-wide: {counts} — `{}`", m.command));
     }
     if !d.triggers.is_empty() {
         s.push_str("\nauto-update triggers:");
@@ -1616,72 +1618,25 @@ pub(crate) fn status_tty(d: &topos_types::results::StatusData) -> String {
             }
         }
     }
-    // `topos status <bundle>` — the deep answer, as a short paragraph under the table.
-    if let Some(detail) = &d.detail {
-        s.push_str(&status_detail_tty(detail));
-    }
     s
 }
 
-/// The manifest FILE a scope's lines name, when one does — the section heading's second half (a
-/// scope with only feed-delivered lines has no file, and says so instead).
-fn status_manifest_of(items: &[&topos_types::results::StatusItem]) -> Option<String> {
-    items
-        .iter()
-        .find(|i| i.source.ends_with("topos.toml"))
-        .map(|i| i.source.clone())
-}
-
-/// One table line: the bundle, its applied version, the honest state, the one source that asked,
-/// and — when the delivery knows them — the channel and who aimed it here.
-fn status_line(item: &topos_types::results::StatusItem) -> String {
-    use topos_types::results::StatusItemState;
-    let state = match item.state {
-        StatusItemState::Applied => match &item.applied_as_of {
-            Some(ts) => format!("applied as of {ts}"),
-            None => "applied".to_owned(),
-        },
-        StatusItemState::Behind => "behind (`topos update` lands the newer version)".to_owned(),
-        StatusItemState::LocalEdits => "local edits ahead of the applied version".to_owned(),
-        StatusItemState::Excluded => format!("excluded by {}", item.source),
-        StatusItemState::Off => "off — withheld here by your global manifest".to_owned(),
-        StatusItemState::NotAvailable => "not available with your current access".to_owned(),
-        StatusItemState::PendingSession => "awaiting session approval".to_owned(),
-        StatusItemState::NoDeliveryYet => {
-            "no delivery yet (`topos update` performs the first exchange)".to_owned()
-        }
-        StatusItemState::Unknown => "not applied here yet (`topos update` applies it)".to_owned(),
-    };
-    let version = item
-        .version
-        .as_deref()
-        .map(|v| format!(" @ {}", short(v)))
-        .unwrap_or_default();
-    let via = item
-        .via
-        .as_deref()
-        .map(|c| format!(" · via channel '{c}'"))
-        .unwrap_or_default();
-    let attribution = item
-        .attribution
-        .as_deref()
-        .map(|a| format!(" · {a}"))
-        .unwrap_or_default();
-    let mut line = format!(
-        "\n  {}{version} — {state} · {}{via}{attribution}",
-        item.name, item.source
-    );
-    for shadow in &item.shadows {
-        line.push_str(&format!("\n    shadows {shadow}"));
+/// One attention count, phrased (`2 updates pending` / `1 assignment not applied` / `1 draft
+/// ahead`) — the command is appended by the caller (body line vs summary).
+fn attention_phrase(a: &topos_types::results::AttentionCount) -> String {
+    match a.kind.as_str() {
+        "updates-pending" => format!("{} pending", counted(a.count, "update")),
+        "assignments-not-applied" => format!("{} not applied", counted(a.count, "assignment")),
+        "drafts-ahead" => format!("{} ahead", counted(a.count, "draft")),
+        kind => format!("{} {kind}", a.count),
     }
-    line
 }
 
-/// `topos status <bundle>` — where this one bundle comes from, spelled out: the row (file + key)
-/// or the feed (+ who aimed it), the version and any pin, where its bytes are, and its state.
-fn status_detail_tty(detail: &topos_types::results::StatusDetail) -> String {
+/// `topos list <name>` — where this one skill comes from, spelled out: the row (file + key) or
+/// the feed (+ who aimed it), the version and any pin, where its bytes are, and its state.
+fn list_detail_tty(detail: &topos_types::results::ListDetail) -> String {
     use topos_types::results::StatusItemState;
-    let mut s = format!("\n\n{}", detail.name);
+    let mut s = detail.name.clone();
     match (&detail.source_file, &detail.source_key, &detail.feed) {
         (Some(file), Some(key), _) => s.push_str(&format!("\n  from {file}, line key {key}")),
         (Some(file), None, _) => s.push_str(&format!("\n  from {file}")),
@@ -2729,11 +2684,11 @@ fn short(hex: &str) -> &str {
 mod tests {
     use topos_types::persisted::ConflictPathKind;
     use topos_types::results::{
-        Conflict, ConflictPathReport, ListData, LogData, MergeReport, Offer, PublishData,
-        PullAction, PullData, PullSkill, SkillEntry,
+        AgentView, Conflict, ConflictPathReport, ListData, LogData, MergeReport, Offer,
+        PublishData, PullAction, PullData, PullSkill, RemoteSkill, SkillEntry, UntrackedEntry,
     };
 
-    use crate::ops::{FollowNote, ListEnrollment, ListOutcome};
+    use crate::ops::ListOutcome;
 
     use super::{
         auth_status_next_actions, auth_status_tty, list_tty, log_tty, publish_tty, pull_tty,
@@ -3089,187 +3044,339 @@ mod tests {
     }
 
     #[test]
-    fn list_tty_groups_by_workspace_and_shows_follow_state() {
-        let entry = |name: &str, draft: bool, ws: Option<&str>| SkillEntry {
+    fn list_tty_sections_scopes_and_summarizes_what_it_does_not_show() {
+        use topos_types::results::{ListScope, ListScopeSummary, SkillStatus, UntrackedSummary};
+        let entry = |name: &str, version: &str, status| SkillEntry {
             skill: name.to_owned(),
-            workspace_id: ws.map(str::to_owned),
-            version_id: "ab".repeat(32),
+            workspace_id: Some("w_acme".to_owned()),
+            version_id: version.to_owned(),
             bundle_digest: "cd".repeat(32),
-            draft,
+            draft: false,
             pending_proposals: Vec::new(),
-            source: None,
-            status: None,
+            source: Some("the topos.sh/acme feed".to_owned()),
+            status,
             cause: None,
         };
-        let mut docs = entry("docs", false, Some("w_acme"));
-        docs.pending_proposals = vec![format!("docs@{}", "ef".repeat(32))];
         let out = ListOutcome {
             data: ListData {
-                followed: vec![docs.clone()],
-                published_by_you: Vec::new(),
-                // Two workspace skills (one paused) + one purely-local skill.
-                tracked: vec![
-                    docs,
-                    entry("paused", false, Some("w_acme")),
-                    entry("local", true, None),
-                ],
-                untracked: Vec::new(),
-                remote_available: Vec::new(),
-                footprint: None,
-                truncated: Vec::new(),
+                scopes: vec![ListScope {
+                    scope: "project".to_owned(),
+                    manifest: Some("/repo/topos.toml".to_owned()),
+                    rows: vec![
+                        entry("deploy", &"ab".repeat(32), Some(SkillStatus::Current)),
+                        // Never applied here: the all-zero identity renders as the honest note.
+                        entry("fresh", &"0".repeat(64), None),
+                    ],
+                }],
+                machine_summary: Some(ListScopeSummary {
+                    skills: 2,
+                    updates_pending: 1,
+                    command: "topos list -g".to_owned(),
+                }),
+                untracked_summary: Some(UntrackedSummary {
+                    skills: 3,
+                    folders: 2,
+                    command: "topos list --untracked".to_owned(),
+                }),
+                signed_in: true,
+                ..ListData::default()
             },
             warnings: Vec::new(),
-            project_bundles: 0,
-            enrollment: Some(ListEnrollment {
-                workspace_labels: vec![("w_acme".to_owned(), "Acme".to_owned())],
-                base_url: "https://topos.example".to_owned(),
-                hook_active: true,
-                notes: vec![
-                    Some(FollowNote {
-                        mode: "auto",
-                        following: true,
-                    }),
-                    Some(FollowNote {
-                        mode: "confirm-each",
-                        following: false,
-                    }),
-                    None,
-                ],
-            }),
+            untracked_view: false,
         };
         let text = list_tty(&out);
-        // The header names the plane + hook; the workspace names move to the group headers.
+        // The section leads with the governing file.
         assert!(
-            text.starts_with("Connected to https://topos.example — auto-update hook: active"),
+            text.starts_with("This folder — /repo/topos.toml\n"),
             "{text}"
         );
-        // The workspace group is named by its membership display label; the local skills group separately.
-        assert!(text.contains("\nAcme:\n"), "{text}");
-        assert!(text.contains("\nlocal (not shared):\n"), "{text}");
-        // The Acme group holds the followed + the paused rows (before the local group's line).
-        let acme_at = text.find("Acme:").unwrap();
-        let local_at = text.find("local (not shared):").unwrap();
         assert!(
-            acme_at < local_at,
-            "workspace group precedes local:\n{text}"
-        );
-        assert!(text.contains("docs@ababababab"), "{text}");
-        assert!(text.contains("(delivered, auto)"), "{text}");
-        assert!(
-            text.contains("paused@") && text.contains("(paused — `topos add paused` resumes)"),
+            text.contains("deploy  deploy@abababababab  [current]  from the topos.sh/acme feed"),
             "{text}"
         );
-        // A purely local skill sits under the local group with no follow note; its draft flag still shows.
         assert!(
-            text[local_at..].contains("local@") && text.contains("(draft)"),
+            text.contains("fresh  (not applied here yet — `topos update` applies it)"),
             "{text}"
         );
-        // The open proposal prints IN FULL — the copy-paste surface for `review`.
+        assert!(!text.contains("fresh@000000"), "{text}");
+        // EXACTLY one summary line each, ending in the backticked command.
         assert!(
-            text.contains(&format!("docs@{}", "ef".repeat(32))),
+            text.contains("2 skills machine-wide, 1 update pending — `topos list -g`"),
             "{text}"
         );
-        assert!(text.contains("`topos review docs@"), "{text}");
+        assert!(
+            text.contains(
+                "3 untracked skills in 2 folders — `topos list --untracked` shows them; \
+                 `topos add <name>` manages one"
+            ),
+            "{text}"
+        );
+        // Signed in: the STATIC remote pointer (no network, no cached counts).
+        assert!(
+            text.contains("See what your workspaces offer: `topos list --remote`"),
+            "{text}"
+        );
 
-        // Unenrolled: the header disappears and the output matches the accountless view.
-        let unenrolled = ListOutcome {
-            data: ListData::default(),
-            enrollment: None,
+        // Signed out: the pointer disappears; an empty scope says so instead of vanishing.
+        let out = ListOutcome {
+            data: ListData {
+                scopes: vec![ListScope {
+                    scope: "machine".to_owned(),
+                    manifest: None,
+                    rows: Vec::new(),
+                }],
+                signed_in: false,
+                ..ListData::default()
+            },
             warnings: Vec::new(),
-            project_bundles: 0,
+            untracked_view: false,
         };
-        assert_eq!(list_tty(&unenrolled), "No tracked skills.");
+        let text = list_tty(&out);
+        assert!(
+            text.starts_with("Machine-wide — your connected workspaces' feeds"),
+            "{text}"
+        );
+        assert!(text.contains("(nothing installed in this scope)"), "{text}");
+        assert!(!text.contains("workspaces offer"), "{text}");
     }
 
     #[test]
-    fn the_empty_inventory_names_a_covering_manifest_and_stays_plain_without_one() {
-        // Nothing tracked and nothing covering the folder: the line says exactly what it always
-        // said — a disclosure is added only where there is something to disclose.
-        let empty = |project_bundles| ListOutcome {
-            data: ListData::default(),
-            enrollment: None,
+    fn list_tty_renders_the_untracked_view_with_scope_summaries() {
+        use topos_types::results::ListScope;
+        let out = ListOutcome {
+            data: ListData {
+                scopes: vec![
+                    ListScope {
+                        scope: "project".to_owned(),
+                        manifest: Some("/repo/topos.toml".to_owned()),
+                        rows: Vec::new(),
+                    },
+                    ListScope {
+                        scope: "machine".to_owned(),
+                        manifest: None,
+                        rows: Vec::new(),
+                    },
+                ],
+                untracked: vec![
+                    UntrackedEntry {
+                        name: "zebra".to_owned(),
+                        path: "/home/u/.cursor/skills/zebra".to_owned(),
+                        harness: "cursor".to_owned(),
+                        harness_name: "Cursor".to_owned(),
+                        adapter_supported: false,
+                        scope: "user".to_owned(),
+                    },
+                    UntrackedEntry {
+                        name: "yak".to_owned(),
+                        path: "/home/u/.claude/skills/yak".to_owned(),
+                        harness: "claude-code".to_owned(),
+                        harness_name: "Claude Code".to_owned(),
+                        adapter_supported: true,
+                        scope: "user".to_owned(),
+                    },
+                ],
+                signed_in: false,
+                ..ListData::default()
+            },
             warnings: Vec::new(),
-            project_bundles,
+            untracked_view: true,
         };
-        assert_eq!(list_tty(&empty(0)), "No tracked skills.");
-
-        // A covering `topos.toml` with demand of its own: the empty state names the file, counts
-        // what it asks for, and hands over to the verb that shows it. It never claims those bundles
-        // are installed — `status` is where demand meets what actually landed.
-        assert_eq!(
-            list_tty(&empty(3)),
-            "No tracked skills outside this folder's topos.toml — it tracks 3 bundles (run `topos \
-             status` to see them)."
+        let text = list_tty(&out);
+        // One summary line per tracked scope — nothing invisible beside the listing.
+        assert!(
+            text.contains("0 skills tracked in this folder — `topos list`"),
+            "{text}"
         );
-        // One row reads as one row (the count is the file's, so it must agree with the file).
-        assert_eq!(
-            list_tty(&empty(1)),
-            "No tracked skills outside this folder's topos.toml — it tracks 1 bundle (run `topos \
-             status` to see it)."
+        assert!(
+            text.contains("0 skills machine-wide — `topos list -g`"),
+            "{text}"
         );
+        // The full listing, grouped by folder.
+        assert!(text.contains("/home/u/.cursor/skills:"), "{text}");
+        assert!(
+            text.contains("zebra  [Cursor · cursor]  (adopt-only — live auto-updates land later)"),
+            "{text}"
+        );
+        assert!(text.contains("/home/u/.claude/skills:"), "{text}");
+        assert!(text.contains("yak  [Claude Code · claude-code]"), "{text}");
     }
 
     #[test]
-    fn list_tty_renders_the_remote_catalog_grouped_and_honest() {
-        use topos_types::results::{RemoteFollowState, RemoteSkillEntry};
-
-        let remote = |skill: &str, ws: &str, state| RemoteSkillEntry {
-            skill_id: skill.to_owned(),
-            workspace_id: ws.to_owned(),
+    fn list_tty_renders_the_remote_catalog_with_adoption_markers() {
+        use topos_types::results::{RemoteAdoption, RemoteChannel, RemoteWorkspace};
+        let skill = |name: &str, state| RemoteSkill {
+            name: name.to_owned(),
             kind: "skill".to_owned(),
-            display_name: Some(skill.to_owned()),
             version_id: "ab".repeat(32),
-            bundle_digest: "cd".repeat(32),
-            open_proposals: 0,
+            open_proposals: if name == "deploy" { 2 } else { 0 },
             state,
         };
         let out = ListOutcome {
             data: ListData {
-                remote_available: vec![
-                    remote("deploy", "w_acme", RemoteFollowState::Available),
-                    remote("runbook", "w_acme", RemoteFollowState::Following),
-                    remote("audit", "w_acme", RemoteFollowState::FollowingBehind),
-                ],
+                remote: vec![RemoteWorkspace {
+                    host: "topos.sh".to_owned(),
+                    workspace: "acme".to_owned(),
+                    workspace_id: "w_acme".to_owned(),
+                    channels: vec![
+                        RemoteChannel {
+                            name: "backend".to_owned(),
+                            skills: 3,
+                            adopted_in: Some("~/.topos/topos.toml".to_owned()),
+                        },
+                        RemoteChannel {
+                            name: "everyone".to_owned(),
+                            skills: 5,
+                            adopted_in: None,
+                        },
+                    ],
+                    skills: vec![
+                        skill("deploy", RemoteAdoption::AdoptedHere),
+                        skill("notes", RemoteAdoption::AdoptedOnMachine),
+                        skill("audit", RemoteAdoption::UpdateAvailable),
+                        skill("triage", RemoteAdoption::NotAdopted),
+                    ],
+                }],
+                signed_in: true,
                 ..ListData::default()
             },
-            enrollment: Some(ListEnrollment {
-                workspace_labels: vec![("w_acme".to_owned(), "Acme".to_owned())],
-                base_url: "https://topos.example".to_owned(),
-                hook_active: true,
-                notes: Vec::new(),
-            }),
             warnings: vec![
-                "could not read the catalog for workspace Beta (the server did not answer) — skipped"
+                "could not read the catalog for workspace beta (the server did not answer) — \
+                 skipped"
                     .to_owned(),
             ],
-            project_bundles: 0,
+            untracked_view: false,
         };
         let text = list_tty(&out);
-        assert!(text.contains("Remote catalog:"), "{text}");
-        // Grouped under the workspace's membership label.
-        assert!(text.contains("  Acme:\n"), "{text}");
-        // Available is honest — it does NOT promise a grant.
+        assert!(text.contains("topos.sh/acme:"), "{text}");
+        // Channels: the count + the adopting file when a manifest row adopts one.
         assert!(
-            text.contains("deploy@abababababab  skill  (available)"),
+            text.contains("backend — 3 skills  (adopted in ~/.topos/topos.toml)"),
             "{text}"
         );
-        assert!(!text.contains("topos follow deploy"), "{text}"); // the dead verb never returns
+        assert!(text.contains("everyone — 5 skills"), "{text}");
+        // The four adoption markers, each honest about the way forward.
         assert!(
-            text.contains("runbook@abababababab  skill  (following)"),
+            text.contains("deploy@abababababab  skill  (adopted here)  2 open proposal(s)"),
             "{text}"
         );
-        // Behind points at `topos update` (the real advance path).
         assert!(
-            text.contains(
-                "audit@abababababab  skill  (update available — run `topos update audit`)"
-            ),
+            text.contains("notes@abababababab  skill  (adopted machine-wide)"),
             "{text}"
         );
+        assert!(
+            text.contains("audit@abababababab  skill  (update available — `topos update audit`)"),
+            "{text}"
+        );
+        assert!(
+            text.contains("triage@abababababab  skill  (not adopted — `topos add triage`)"),
+            "{text}"
+        );
+        // The dead verb never returns; the remote view carries no pointer at itself.
+        assert!(!text.contains("topos follow"), "{text}");
+        assert!(!text.contains("workspaces offer"), "{text}");
         // The per-workspace degradation warning surfaces.
         assert!(
-            text.contains("warning: could not read the catalog for workspace Beta"),
+            text.contains("warning: could not read the catalog for workspace beta"),
             "{text}"
         );
+    }
+
+    #[test]
+    fn list_tty_renders_the_deep_dive_and_the_agent_view() {
+        use topos_types::results::{
+            AgentViewDir, AgentViewEntry, ListDetail, StatusItemState as S,
+        };
+        // The deep dive is the whole answer: file + line key, version, placements, state.
+        let out = ListOutcome {
+            data: ListData {
+                detail: Some(ListDetail {
+                    name: "deploy".to_owned(),
+                    source_file: Some("~/.topos/topos.toml".to_owned()),
+                    source_key: Some("topos.sh/acme/deploy".to_owned()),
+                    feed: None,
+                    attribution: Some("assigned by Dana".to_owned()),
+                    version: Some("a".repeat(64)),
+                    pin: None,
+                    placements: vec!["/home/dev/.claude/skills/deploy".to_owned()],
+                    state: S::Applied,
+                }),
+                signed_in: true,
+                ..ListData::default()
+            },
+            warnings: Vec::new(),
+            untracked_view: false,
+        };
+        let text = list_tty(&out);
+        assert!(text.starts_with("deploy\n"), "{text}");
+        assert!(
+            text.contains("from ~/.topos/topos.toml, line key topos.sh/acme/deploy"),
+            "{text}"
+        );
+        assert!(text.contains("— assigned by Dana"), "{text}");
+        assert!(text.contains("version aaaaaaaaaaaa"), "{text}");
+        assert!(
+            text.contains("placed in /home/dev/.claude/skills/deploy"),
+            "{text}"
+        );
+        assert!(text.ends_with("applied"), "{text}");
+
+        // The agent-eye view: per-dir entries marked managed or untracked.
+        let out = ListOutcome {
+            data: ListData {
+                agent_view: Some(AgentView {
+                    agent: "cursor".to_owned(),
+                    agent_name: "Cursor".to_owned(),
+                    dirs: vec![
+                        AgentViewDir {
+                            path: "/home/u/.cursor/skills".to_owned(),
+                            scope: "user".to_owned(),
+                            entries: vec![
+                                AgentViewEntry {
+                                    name: "deploy".to_owned(),
+                                    managed: Some(
+                                        "~/.topos/topos.toml:topos.sh/acme/deploy".to_owned(),
+                                    ),
+                                },
+                                AgentViewEntry {
+                                    name: "notes".to_owned(),
+                                    managed: Some("feed topos.sh/acme".to_owned()),
+                                },
+                                AgentViewEntry {
+                                    name: "stray".to_owned(),
+                                    managed: None,
+                                },
+                            ],
+                        },
+                        AgentViewDir {
+                            path: "/repo/.cursor/skills".to_owned(),
+                            scope: "project".to_owned(),
+                            entries: Vec::new(),
+                        },
+                    ],
+                }),
+                signed_in: true,
+                ..ListData::default()
+            },
+            warnings: Vec::new(),
+            untracked_view: false,
+        };
+        let text = list_tty(&out);
+        assert!(
+            text.starts_with("Cursor — what it reads from this folder:"),
+            "{text}"
+        );
+        assert!(text.contains("/home/u/.cursor/skills (user):"), "{text}");
+        assert!(
+            text.contains("deploy  topos: ~/.topos/topos.toml:topos.sh/acme/deploy"),
+            "{text}"
+        );
+        assert!(text.contains("notes  feed topos.sh/acme"), "{text}");
+        assert!(
+            text.contains("stray  untracked (`topos add stray` manages it)"),
+            "{text}"
+        );
+        assert!(text.contains("/repo/.cursor/skills (project):"), "{text}");
+        assert!(text.contains("(empty)"), "{text}");
     }
 
     #[test]
@@ -3283,9 +3390,8 @@ mod tests {
                 ]),
                 ..ListData::default()
             },
-            enrollment: None,
             warnings: Vec::new(),
-            project_bundles: 0,
+            untracked_view: false,
         };
         let text = list_tty(&out);
         assert!(
@@ -3398,15 +3504,13 @@ mod tests {
     #[test]
     fn status_tty_renders_both_connection_faces() {
         use topos_types::results::{
-            StatusData, StatusDetail, StatusItem, StatusItemState, StatusRegime, StatusSession,
-            StatusTrigger,
+            AttentionCount, StatusData, StatusRegime, StatusScope, StatusScopeSummary,
+            StatusSession, StatusTrigger,
         };
         let connected = StatusData {
             version: "0.1.0".to_owned(),
             server: Some("https://topos.sh/api".to_owned()),
             signed_in: true,
-            profile_skills: 2,
-            awaiting_first_sync: Some(1),
             sessions: vec![StatusSession {
                 workspace_id: "w_demo".to_owned(),
                 name: "demo".to_owned(),
@@ -3414,63 +3518,39 @@ mod tests {
                 host: "topos.sh".to_owned(),
                 session_status: None,
             }],
-            items: vec![
-                StatusItem {
-                    name: "api-only".to_owned(),
-                    reference: "topos.sh/demo/api-only".to_owned(),
-                    source: "/repo/topos.toml".to_owned(),
-                    scope: "project".to_owned(),
-                    via: None,
-                    attribution: None,
-                    version: None,
-                    applied_as_of: None,
-                    state: StatusItemState::Unknown,
-                    shadows: Vec::new(),
-                },
-                StatusItem {
-                    name: "deploy".to_owned(),
-                    reference: "topos.sh/demo/deploy".to_owned(),
-                    source: "the topos.sh/demo feed".to_owned(),
-                    scope: "person".to_owned(),
-                    via: Some("everyone".to_owned()),
-                    attribution: Some("assigned by Dana".to_owned()),
-                    version: Some("a".repeat(64)),
-                    applied_as_of: Some("2026-07-24T00:00:00Z".to_owned()),
-                    state: StatusItemState::Applied,
-                    shadows: Vec::new(),
-                },
-                StatusItem {
-                    name: "noisy".to_owned(),
-                    reference: "topos.sh/demo/noisy".to_owned(),
-                    source: "~/.topos/topos.toml".to_owned(),
-                    scope: "person".to_owned(),
-                    via: None,
-                    attribution: None,
-                    version: None,
-                    applied_as_of: None,
-                    state: StatusItemState::Off,
-                    shadows: Vec::new(),
-                },
-                StatusItem {
-                    name: "fresh".to_owned(),
-                    reference: "topos.sh/fresh".to_owned(),
-                    source: "the topos.sh/fresh feed".to_owned(),
-                    scope: "person".to_owned(),
-                    via: None,
-                    attribution: None,
-                    version: None,
-                    applied_as_of: None,
-                    state: StatusItemState::NoDeliveryYet,
-                    shadows: Vec::new(),
-                },
-            ],
-            regimes: vec![StatusRegime {
-                host: "topos.sh".to_owned(),
-                workspace: "demo".to_owned(),
-                regime: "adopting all assigned, 1 off".to_owned(),
+            scopes: vec![StatusScope {
+                scope: "project".to_owned(),
+                manifest: Some("/repo/topos.toml".to_owned()),
+                regimes: Vec::new(),
+                notes: vec!["off — not currently assigned: topos.sh/demo/gone".to_owned()],
+                attention: vec![
+                    AttentionCount {
+                        kind: "updates-pending".to_owned(),
+                        count: 2,
+                        command: "topos update".to_owned(),
+                    },
+                    AttentionCount {
+                        kind: "drafts-ahead".to_owned(),
+                        count: 1,
+                        command: "topos list".to_owned(),
+                    },
+                ],
             }],
-            notes: vec!["off — not currently assigned: topos.sh/demo/gone".to_owned()],
-            detail: None,
+            machine_summary: Some(StatusScopeSummary {
+                attention: vec![
+                    AttentionCount {
+                        kind: "updates-pending".to_owned(),
+                        count: 1,
+                        command: "topos update -g".to_owned(),
+                    },
+                    AttentionCount {
+                        kind: "assignments-not-applied".to_owned(),
+                        count: 3,
+                        command: "topos update -g".to_owned(),
+                    },
+                ],
+                command: "topos status -g".to_owned(),
+            }),
             triggers: vec![
                 StatusTrigger {
                     agent: "claude-code".to_owned(),
@@ -3491,85 +3571,71 @@ mod tests {
             "{text}"
         );
         assert!(text.contains("topos.sh/demo (Demo)"), "{text}");
-        // The table is SECTIONED per scope — each heading names the recipe that scope reads.
+        // The body is the here-scope, led by its governing file.
         assert!(text.contains("This folder — /repo/topos.toml"), "{text}");
-        assert!(text.contains("You — ~/.topos/topos.toml"), "{text}");
-        // The applied row carries its version, the as-of stamp, the ONE source, the channel, and
-        // who aimed it here; an `off` switch reads as its own row.
+        // The attention counts: one line each, ending in the exact command.
         assert!(
-            text.contains("applied as of 2026-07-24T00:00:00Z"),
+            text.contains("2 updates pending — `topos update`"),
             "{text}"
         );
-        assert!(text.contains("the topos.sh/demo feed"), "{text}");
-        assert!(text.contains("via channel 'everyone'"), "{text}");
-        assert!(text.contains("assigned by Dana"), "{text}");
-        assert!(text.contains("noisy — off — withheld here"), "{text}");
-        // A feed nothing has ever delivered from promises the EXCHANGE, not an apply — nothing
-        // here knows the workspace assigns anything at all.
-        assert!(
-            text.contains("fresh — no delivery yet (`topos update` performs the first exchange)"),
-            "{text}"
-        );
-        // The regime line and the notes ride verbatim.
-        assert!(
-            text.contains("topos.sh/demo — adopting all assigned, 1 off"),
-            "{text}"
-        );
+        assert!(text.contains("1 draft ahead — `topos list`"), "{text}");
+        // The notes ride verbatim.
         assert!(
             text.contains("off — not currently assigned: topos.sh/demo/gone"),
             "{text}"
         );
-        assert!(text.contains("assigned to you: 2 bundles"), "{text}");
-        assert!(text.contains("1 not applied here yet"), "{text}");
+        // The machine summary: ITS counts on one line, ending in the expanding command.
+        assert!(
+            text.contains(
+                "machine-wide: 1 update pending, 3 assignments not applied — `topos status -g`"
+            ),
+            "{text}"
+        );
         assert!(text.contains("claude-code: armed"), "{text}");
         assert!(
             text.contains("openclaw: unknown — presence needs"),
             "{text}"
         );
-        // The dead vocabulary stays dead on this surface.
+        // NO inventory here — health only; the dead vocabulary stays dead on this surface.
+        assert!(!text.contains("assigned to you:"), "{text}");
         assert!(!text.contains("following:"), "{text}");
         assert!(!text.contains("your profile"), "{text}");
         assert!(!text.contains("auth login"), "{text}");
-        assert!(!text.contains("not yet reconciled"), "{text}");
 
-        // `status <bundle>`: the deep answer spells the file, the key, and the state.
-        let deep = StatusData {
-            detail: Some(StatusDetail {
-                name: "deploy".to_owned(),
-                source_file: Some("~/.topos/topos.toml".to_owned()),
-                source_key: Some("topos.sh/demo/deploy".to_owned()),
-                feed: None,
-                attribution: Some("assigned by Dana".to_owned()),
-                version: Some("a".repeat(64)),
-                pin: None,
-                placements: vec!["/home/dev/.claude/skills/deploy".to_owned()],
-                state: StatusItemState::Applied,
-            }),
+        // A machine body with nothing pending says so — and a regime line rides it.
+        let quiet = StatusData {
+            scopes: vec![StatusScope {
+                scope: "machine".to_owned(),
+                manifest: None,
+                regimes: vec![StatusRegime {
+                    host: "topos.sh".to_owned(),
+                    workspace: "demo".to_owned(),
+                    regime: "adopting all assigned, 1 off".to_owned(),
+                }],
+                notes: Vec::new(),
+                attention: Vec::new(),
+            }],
+            machine_summary: None,
             ..connected.clone()
         };
-        let text = status_tty(&deep);
+        let text = status_tty(&quiet);
         assert!(
-            text.contains("from ~/.topos/topos.toml, line key topos.sh/demo/deploy"),
+            text.contains("Machine-wide — your connected workspaces' feeds"),
             "{text}"
         );
-        assert!(text.contains("— assigned by Dana"), "{text}");
-        assert!(text.contains("version aaaaaaaaaaaa"), "{text}");
         assert!(
-            text.contains("placed in /home/dev/.claude/skills/deploy"),
+            text.contains("topos.sh/demo — adopting all assigned, 1 off"),
             "{text}"
         );
+        assert!(text.contains("nothing pending"), "{text}");
 
         // The unconnected face states the fix in prose (join by address, or create a workspace).
         let fresh = StatusData {
             server: None,
             signed_in: false,
-            profile_skills: 0,
-            awaiting_first_sync: Some(0),
             sessions: Vec::new(),
-            items: Vec::new(),
-            regimes: Vec::new(),
-            notes: Vec::new(),
-            detail: None,
+            scopes: Vec::new(),
+            machine_summary: None,
             triggers: Vec::new(),
             ..connected
         };
@@ -3577,7 +3643,6 @@ mod tests {
         assert!(text.contains("not connected"), "{text}");
         assert!(text.contains("`topos login <workspace-address>`"), "{text}");
         assert!(text.contains("https://topos.sh"), "{text}");
-        assert!(text.contains("assigned to you: 0 bundles"), "{text}");
 
         // The bare-`topos` welcome stays three lines: what topos is + the two ways in.
         let welcome = welcome_tty(&fresh);

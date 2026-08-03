@@ -25,6 +25,7 @@ mod contribute;
 mod diff;
 mod fmt;
 mod init;
+pub(crate) mod inventory;
 mod invite;
 mod list;
 mod log;
@@ -67,10 +68,9 @@ pub(crate) use builtin::{
 pub(crate) use diff::{DiffBudget, diff};
 pub(crate) use fmt::fmt_manifest;
 pub(crate) use init::init;
+pub(crate) use inventory::ScopeView;
 pub(crate) use invite::{InviteConnectors, InviteOutcome, invite};
-#[cfg(test)]
-pub(crate) use list::list;
-pub(crate) use list::{DiscoveryRoots, ListFilter, ListOutcome, RemoteScope, list_with};
+pub(crate) use list::{DiscoveryRoots, ListOutcome, ListRequest, list_with};
 pub(crate) use login::{LoginConnectors, login as session_login, logout as session_logout};
 pub(crate) use manifest_edit::{
     add_scope, manifest_host, note_added_path_in, note_added_remote, off_row_for, push_note,
@@ -78,13 +78,9 @@ pub(crate) use manifest_edit::{
 };
 // The scope-flag form of the path row-write: the composition root always resolves the target
 // itself (see `add_scope`), so this backstop exists for the fixture rig and its own tests.
+pub(crate) use log::{LogConnectors, log};
 #[cfg(any(test, feature = "test-fixtures"))]
 pub(crate) use manifest_edit::note_added_path;
-// The TTY-only enrollment row types are constructed in `list` and rendered by field access; the named
-// re-export exists for the renderer's tests, which build them by hand.
-#[cfg(test)]
-pub(crate) use list::{FollowNote, ListEnrollment};
-pub(crate) use log::{LogConnectors, log};
 pub(crate) use publish::{PublishDescribeConnectors, PublishOutcome, publish, publish_describe};
 // The auto-add pre-step is driven internally by `publish`; the re-export exists only for its unit tests.
 pub(crate) use protect::{ProtectConnectors, ProtectOutcome, protect};
