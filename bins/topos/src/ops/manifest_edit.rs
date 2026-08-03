@@ -649,6 +649,43 @@ pub(crate) fn path_reference(manifest_dir: &Path, source_abs: &Path) -> String {
     }
 }
 
+/// Whether `target`'s file already carries a local-path row pointing at `source_abs` — the
+/// question that separates "this folder is recorded here" from "a record outliving the row that
+/// asked for it". Keys resolve the way delivery resolves them (`~/` against the machine home, an
+/// absolute key verbatim, anything else against the folder the manifest governs) and are compared
+/// canonically, so `./tools/x` and the same folder spelled in full are one row, not two.
+///
+/// # Errors
+/// A read failure, or a manifest the grammar refuses (typed, naming the file).
+pub(crate) fn path_row_claims(
+    ctx: &Ctx<'_>,
+    target: &EditTarget,
+    source_abs: &Path,
+) -> Result<bool, ClientError> {
+    let Some(text) = read_text(ctx, &target.path)? else {
+        return Ok(false);
+    };
+    let doc = crate::manifest::document::parse_manifest(&text, target.scope)
+        .map_err(|e| corrupt(&target.path, &e))?;
+    Ok(doc.rows.iter().any(|row| match &row.shape {
+        KeyShape::LocalPath { raw } => canonical_or(&row_dir(ctx, target, raw)) == *source_abs,
+        _ => false,
+    }))
+}
+
+/// The folder a local-path row's key names, before canonicalization.
+fn row_dir(ctx: &Ctx<'_>, target: &EditTarget, raw: &str) -> PathBuf {
+    if let Some(rest) = raw.strip_prefix("~/")
+        && let Some(roots) = &ctx.roots
+    {
+        return roots.home.join(rest);
+    }
+    if Path::new(raw).is_absolute() {
+        return PathBuf::from(raw);
+    }
+    target.dir.join(raw.trim_start_matches("./"))
+}
+
 /// Whether a string is commit-shaped (7–40 hex) — the only pin a forge row takes.
 pub(super) fn is_commit(s: &str) -> bool {
     (7..=40).contains(&s.len()) && s.bytes().all(|b| b.is_ascii_hexdigit())

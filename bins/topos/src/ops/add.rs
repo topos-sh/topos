@@ -1,6 +1,7 @@
 //! `add <source>` — adopt a skill. The positional is source-polymorphic (classified in
-//! [`crate::source`]): a local PATH (`./ ../ ~/ /…`) adopts a directory in place; a bare skill NAME
-//! resolves against the untracked inventory `list` discovers (see [`resolve_add_target`]); a remote source
+//! [`crate::source`]): a local PATH (`./ ../ ~/ /…`) adopts a directory in place (see
+//! [`adopt_path`]); a bare skill NAME resolves against the untracked inventory `list` discovers
+//! (see [`resolve_add_target`]); a remote source
 //! (`owner/repo`, a github.com URL) fetches + imports it (see [`add_remote`]). Adoption itself
 //! ([`add_with_name`]) mints an id + name, scans + imports to the embedded-git store, snapshots the genesis
 //! version, and writes the sidecar docs — all staged and published with one directory rename, so it is
@@ -26,6 +27,8 @@ use crate::scan::{self, ScannedBundle};
 use crate::source::RemoteSpec;
 use crate::{doc, logfile, sidecar};
 
+use super::manifest_edit::EditTarget;
+
 /// The fixed, controlled-ASCII commit message for a genesis adopt — folded into the `version_id`
 /// preimage, so it must stay constant for a deterministic id.
 const ADD_MESSAGE: &str = "topos: add";
@@ -39,6 +42,100 @@ const ADD_MESSAGE: &str = "topos: add";
 /// store/io failure.
 pub(crate) fn add(ctx: &Ctx<'_>, source: &Path) -> Result<AddData, ClientError> {
     add_with_name(ctx, source, None)
+}
+
+/// The PATH arm of `add`, against the scope whose file will hold the row: adopt the directory at
+/// `source`, or RE-LINK the record a dropped row left behind.
+///
+/// `remove <path>` edits the manifest and KEEPS the bytes, so a record outlives the row that asked
+/// for it — and [`add`]'s already-tracked refusal then fired on a record nothing demanded any more,
+/// which made the undo that removal prints (`topos add [-g] <path>`) a command that could not run.
+/// So when a record for this folder exists and NO row in `target` claims it, the add re-links to
+/// that record: the row is written exactly as a fresh adopt writes it, over the id, lock, history,
+/// and draft snapshots already on disk — nothing is minted and no byte moves, so the state after
+/// the undo is the state before the remove. A folder `target` STILL spells is refused exactly as
+/// before: that add really is a second adoption of one mutable directory.
+///
+/// # Errors
+/// As [`add`], plus a `target` manifest that cannot be read or parsed.
+pub(crate) fn adopt_path(
+    ctx: &Ctx<'_>,
+    target: &EditTarget,
+    source: &Path,
+) -> Result<AddData, ClientError> {
+    match unclaimed_record(ctx, target, source)? {
+        Some(data) => Ok(data),
+        None => add(ctx, source),
+    }
+}
+
+/// The add receipt for a retained record no row in `target` claims — `None` when there is nothing
+/// to re-link (no record for this folder, a record with no lock, or a row still claiming it),
+/// which leaves every refusal and every fresh adopt exactly where [`add`] puts it.
+fn unclaimed_record(
+    ctx: &Ctx<'_>,
+    target: &EditTarget,
+    source: &Path,
+) -> Result<Option<AddData>, ClientError> {
+    // A source that does not resolve is the adopt's error to raise — one refusal, in one place.
+    let Ok(source_abs) = source.canonicalize() else {
+        return Ok(None);
+    };
+    let Some(id) = tracked_skill_at(ctx, &source_abs)? else {
+        return Ok(None);
+    };
+    if super::manifest_edit::path_row_claims(ctx, target, &source_abs)? {
+        return Ok(None);
+    }
+    let skill_id = crate::id::SkillId::parse(&id)?;
+    let sp = ctx.layout.published(&skill_id);
+    // The lock is the record's commit marker AND everything the receipt reports: without it there
+    // is nothing to re-link to, and the ordinary adopt owns the answer.
+    let Some(lock) = doc::read_doc::<Lock>(ctx.fs, &sp.lock)? else {
+        return Ok(None);
+    };
+    let map = doc::read_map(ctx.fs, &sp.map)?;
+
+    logfile::append_event(
+        ctx.fs,
+        &ctx.layout.log_path(),
+        &serde_json::json!({
+            "action": "add",
+            "skill_id": skill_id.as_str(),
+            "name": lock.name,
+            "version_id": lock.base_commit,
+            "at": ctx.clock.now_unix_millis(),
+        }),
+    )?;
+
+    Ok(Some(AddData {
+        skill_id: skill_id.into_string(),
+        name: lock.name.clone(),
+        version_id: lock.base_commit,
+        bundle_digest: lock.bundle_digest,
+        tracked: true,
+        harness: map.as_ref().and_then(|m| m.harness),
+        harness_slug: map.as_ref().and_then(|m| m.harness_slug.clone()),
+        // Re-armed exactly as an adopt arms it: the folder is demanded again, and the harness
+        // config may have been rewritten while it was not. Idempotent, and the signal the
+        // composition root's breadth sweep + built-in placement ride.
+        currency: recognize(ctx, &source_abs).map(|_| ctx.harness.install_currency_trigger()),
+        triggers: Vec::new(),
+        origin: None,
+        // Set by the manifest-edit step at the composition root, exactly as on a fresh adopt.
+        manifest: None,
+        reference: None,
+        undo: Vec::new(),
+        governed_copy: None,
+        published_match: None,
+        // The receipt would otherwise read as a fresh adopt while carrying a version older than
+        // this run: say what actually happened.
+        note: Some(format!(
+            "'{}' still had a record here from an earlier add — the row points back at it, at the \
+             version it left, with its history and any local edits intact",
+            lock.name
+        )),
+    }))
 }
 
 /// Adopt the skill rooted at `source`. `name_override` (set by a name-resolved `add <skill>`) forces the
