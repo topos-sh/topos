@@ -1,11 +1,14 @@
 //! `init [-g]` — write a `topos.toml` you can then edit by hand.
 //!
 //! Without `-g` it creates THIS folder's project manifest from the commented template (the folder
-//! IS the scope — `init` never walks up; it is `add` with nothing in reach that prefers the git
-//! root). With `-g` it MATERIALIZES the machine-wide file: the header plus one feed row per
-//! connected workspace, spelling out what an absent file already means, so the next edit is a
-//! line-by-line one. Idempotent either way — an existing file is a clean no-op receipt
-//! (`created: false`), never an overwrite.
+//! IS the scope — `init` never walks up). It is the ONE way a project manifest is born: `add`
+//! records rows in a file that already exists and refuses when none covers the folder, so the
+//! file always lands where a person put it. With `-g` it MATERIALIZES the machine-wide file: the
+//! header plus one feed row per connected workspace, spelling out what an absent file already
+//! means, so the next edit is a line-by-line one. Idempotent either way — an existing file is a
+//! clean no-op receipt (`created: false`), never an overwrite.
+
+use std::path::Path;
 
 use topos_types::results::InitData;
 
@@ -15,6 +18,19 @@ use crate::manifest::MANIFEST_FILE;
 use crate::manifest::document::{materialized_global, project_template};
 
 use super::manifest_edit as medit;
+
+/// Whether any directory from `cwd` upward holds a `.git` — the one thing the travel note needs to
+/// know. A manifest inside a repo travels with it; one outside stays local to the folder.
+fn inside_a_git_repo(fs: &dyn crate::fs_seam::FsOps, cwd: &Path) -> bool {
+    let mut dir = Some(cwd.to_path_buf());
+    while let Some(d) = dir {
+        if fs.exists(&d.join(".git")) {
+            return true;
+        }
+        dir = d.parent().map(Path::to_path_buf);
+    }
+    false
+}
 
 /// Create the folder's `topos.toml`, or (with `global`) materialize `~/.topos/topos.toml`.
 ///
@@ -36,23 +52,19 @@ pub(crate) fn init(ctx: &Ctx<'_>, global: bool) -> Result<InitData, ClientError>
             )
         })?;
     let path = cwd.join(MANIFEST_FILE);
-    let note = if medit::init_dir(ctx.fs, &cwd) == cwd && !ctx.fs.exists(&cwd.join(".git")) {
-        Some(
-            "outside a git repository — this manifest stays local to this folder (it won't \
-             travel with a repo)"
-                .to_owned(),
-        )
-    } else {
-        None
-    };
+    let travel = (!inside_a_git_repo(ctx.fs, &cwd)).then(|| {
+        "outside a git repository — this manifest stays local to this folder (it won't travel \
+         with a repo)"
+            .to_owned()
+    });
     // The same writer lock every manifest mutation takes — `init` is check-then-write, so a
-    // concurrent `add` that births the file must not have its row overwritten by the template.
+    // concurrent `add`'s row must not be overwritten by the template.
     let _guard = medit::lock_manifest(ctx, &path)?;
     if ctx.fs.exists(&path) {
         return Ok(InitData {
             manifest: path.display().to_string(),
             created: false,
-            note,
+            note: travel,
         });
     }
     // The lock fences topos's own writers; an OUTSIDE editor can still land the file between the
@@ -63,6 +75,16 @@ pub(crate) fn init(ctx: &Ctx<'_>, global: bool) -> Result<InitData, ClientError>
             crate::atomic::NewOutcome::Written => true,
             crate::atomic::NewOutcome::Exists => false,
         };
+    // A FRESH file says what having one MEANS, which the lead's "record skills with `topos add`"
+    // does not: this is now the file every project add here writes to, and the only one — an
+    // `add` records rows, it never creates a manifest of its own.
+    let created_note = "this is the file every `topos add` in this folder records into — `add` \
+                        writes rows, never a new manifest";
+    let note = match (created, travel) {
+        (true, Some(t)) => Some(format!("{created_note} · {t}")),
+        (true, None) => Some(created_note.to_owned()),
+        (false, t) => t,
+    };
     Ok(InitData {
         manifest: path.display().to_string(),
         created,
@@ -183,7 +205,16 @@ mod tests {
         with_ctx(&home, Some(&repo), |ctx| {
             let first = init(ctx, false).unwrap();
             assert!(first.created);
-            assert!(first.note.is_none(), "inside a repo — no travel note");
+            // A fresh file says what it is for — and, inside a repo, nothing about travel.
+            let note = first
+                .note
+                .clone()
+                .expect("a created file says what it is for");
+            assert!(note.contains("every `topos add`"), "{note}");
+            assert!(
+                !note.contains("git"),
+                "inside a repo — no travel note: {note}"
+            );
             assert!(std::path::Path::new(&first.manifest).exists());
             // The created file parses as an EMPTY project manifest (the template is comments only).
             let text = std::fs::read_to_string(&first.manifest).unwrap();
@@ -214,10 +245,16 @@ mod tests {
         with_ctx(&home, Some(&stray), |ctx| {
             let out = init(ctx, false).unwrap();
             assert!(out.created);
-            assert!(
-                out.note.as_deref().is_some_and(|n| n.contains("git")),
-                "{out:?}"
-            );
+            // Both disclosures ride one note: what the file is for, and that it won't travel.
+            let note = out.note.clone().expect("a created file carries its note");
+            assert!(note.contains("every `topos add`"), "{note}");
+            assert!(note.contains("git"), "{note}");
+            // The idempotent no-op keeps ONLY the travel note (nothing was created to explain).
+            let again = init(ctx, false).unwrap();
+            assert!(!again.created);
+            let again_note = again.note.clone().expect("the travel note stands");
+            assert!(again_note.contains("git"), "{again_note}");
+            assert!(!again_note.contains("every `topos add`"), "{again_note}");
         });
     }
 

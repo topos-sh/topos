@@ -36,6 +36,18 @@ fn copy_tree(src: &Path, dst: &Path) {
     }
 }
 
+/// The WORKING DIRECTORY every run stands in — a dedicated empty dir beside the sidecar, created
+/// on demand. The scope rules read the cwd (the nearest `topos.toml` at or above it), so a test
+/// must never inherit the crate's own folder: what a project `add` writes would depend on the
+/// checkout it ran in. A test that means to act on a project scope mints the file here with
+/// `topos init`, exactly as a person would.
+fn work_dir(home: &Path) -> PathBuf {
+    let name = home.file_name().and_then(|n| n.to_str()).unwrap_or("run");
+    let dir = home.with_file_name(format!("{name}-cwd"));
+    std::fs::create_dir_all(&dir).expect("the run's working directory");
+    dir
+}
+
 fn run(home: &Path, args: &[&str]) -> (bool, serde_json::Value) {
     // Hermetic: point the Claude config home at an isolated (empty) dir so a test never reads or writes
     // the real `~/.claude`.
@@ -46,6 +58,7 @@ fn run_in(home: &Path, claude: &Path, args: &[&str]) -> (bool, serde_json::Value
     let out = Command::new(bin())
         .env("TOPOS_HOME", home)
         .env("CLAUDE_CONFIG_DIR", claude)
+        .current_dir(work_dir(home))
         .args(args)
         .output()
         .expect("spawn topos");
@@ -60,6 +73,7 @@ fn run_raw(home: &Path, args: &[&str], debug: bool) -> std::process::Output {
     let mut cmd = Command::new(bin());
     cmd.env("TOPOS_HOME", home)
         .env("CLAUDE_CONFIG_DIR", home.join(".claude-isolated"))
+        .current_dir(work_dir(home))
         .args(args);
     if debug {
         cmd.env("TOPOS_DEBUG", "1");
@@ -77,7 +91,9 @@ fn end_to_end_add_then_list_over_json() {
     copy_tree(&fixture(), &skill);
 
     // add — drives clap, TOPOS_HOME, the recover+identity startup, and the success envelope.
-    let (ok, v) = run(&home, &["--json", "add", skill.to_str().unwrap()]);
+    // MACHINE-WIDE (`-g`): the source sits outside any checkout, and `list` inventories this
+    // machine's own store, so the scope the assertions below are about is the machine's.
+    let (ok, v) = run(&home, &["--json", "add", "-g", skill.to_str().unwrap()]);
     assert!(ok, "add should exit 0");
     assert_eq!(v["command"], "add");
     assert_eq!(v["ok"], true);
@@ -120,10 +136,10 @@ fn json_envelope_apply_receipt_on_ungated_arms_describe_on_gated() {
     let src = scratch("yes-scope-src");
     let skill = src.join("pr-describe");
     copy_tree(&fixture(), &skill);
-    let (ok, v) = run(&home, &["--json", "add", skill.to_str().unwrap()]);
+    let (ok, v) = run(&home, &["--json", "add", "-g", skill.to_str().unwrap()]);
     assert!(ok, "add should exit 0");
-    // The add recorded a manifest line (an out-of-tree path ref lands in the personal manifest)
-    // and disclosed its inverse — `remove <path>` — in the receipt.
+    // The add recorded a manifest line (an out-of-tree path ref, asked for machine-wide, lands in
+    // the personal manifest) and disclosed its inverse — `remove -g <path>` — in the receipt.
     let undo: Vec<String> = v["data"]["undo"]
         .as_array()
         .expect("the add receipt carries its undo argv")
@@ -139,8 +155,8 @@ fn json_envelope_apply_receipt_on_ungated_arms_describe_on_gated() {
     // UNGATED (the manifest-line remove): dropping the line is immediate and reversible — the
     // bare run APPLIES with the receipt document (not a `describe` wrapper), `bytes_kept` (the
     // tracked bytes stay in the sidecar), and the undo-led next action (`add` the row back).
-    // The receipt's own undo argv IS the invocation (an out-of-tree path records in the
-    // machine-wide file, so the inverse carries `-g`).
+    // The receipt's own undo argv IS the invocation (an out-of-tree path asked for machine-wide
+    // records in that file, so the inverse carries `-g`).
     let mut remove_argv: Vec<&str> = vec!["--json"];
     remove_argv.extend(undo.iter().skip(1).map(String::as_str));
     let (ok, v) = run(&home, &remove_argv);
@@ -206,7 +222,12 @@ fn end_to_end_claude_code_adopt_arms_currency_and_pull_is_silent() {
     let before = std::fs::read(&skill_md).unwrap();
 
     // add → recognized as Claude Code, auto-update armed, hook written to settings.json.
-    let (ok, v) = run_in(&home, &claude, &["--json", "add", skill.to_str().unwrap()]);
+    // MACHINE-WIDE: the skill lives in the agent's own config home, not in a checkout.
+    let (ok, v) = run_in(
+        &home,
+        &claude,
+        &["--json", "add", "-g", skill.to_str().unwrap()],
+    );
     assert!(ok, "add should exit 0");
     assert_eq!(v["data"]["name"], "pr-describe");
     assert_eq!(v["data"]["harness"], "claude-code");
@@ -252,7 +273,11 @@ fn end_to_end_claude_code_adopt_arms_currency_and_pull_is_silent() {
     );
 
     // A second add of the same dir is refused (already tracked), not silently duplicated.
-    let (ok, v) = run_in(&home, &claude, &["--json", "add", skill.to_str().unwrap()]);
+    let (ok, v) = run_in(
+        &home,
+        &claude,
+        &["--json", "add", "-g", skill.to_str().unwrap()],
+    );
     assert!(!ok, "re-adding the same dir exits nonzero");
     assert_eq!(v["error"]["code"], "ALREADY_TRACKED");
 
@@ -305,9 +330,38 @@ fn end_to_end_add_by_name_resolves_a_discovered_skill() {
     assert_eq!(untracked[0]["name"], "deploy");
     assert_eq!(untracked[0]["harness"], "claude-code");
 
-    // `topos add deploy` — resolves the NAME against that inventory and adopts it (Claude Code recognized,
-    // auto-update armed), with no path typed.
+    // The runs below all stand IN `$HOME`, where the project walk stops by rule — no `topos.toml`
+    // can cover this folder, so the project-scoped add refuses and names the two ways out. The
+    // machine-wide file is the one that applies here, and `-g` is how you say so.
     let v = run_disc(&home, &disc, &claude, &["--json", "add", "deploy"]);
+    assert_eq!(v["ok"], false, "{v}");
+    assert_eq!(v["error"]["code"], "NO_MANIFEST");
+    let codes: Vec<&str> = v["next_actions"]
+        .as_array()
+        .expect("the two ways out")
+        .iter()
+        .map(|a| a["code"].as_str().unwrap_or_default())
+        .collect();
+    assert_eq!(
+        codes,
+        ["INIT_PROJECT_MANIFEST", "RETRY_MACHINE_WIDE"],
+        "{v}"
+    );
+    let retry: Vec<&str> = v["next_actions"][1]["argv"]
+        .as_array()
+        .expect("the retry argv")
+        .iter()
+        .map(|t| t.as_str().unwrap_or_default())
+        .collect();
+    assert_eq!(
+        retry,
+        ["topos", "add", "-g", "deploy"],
+        "the retry is this very invocation, machine-wide: {v}"
+    );
+
+    // `topos add -g deploy` — resolves the NAME against that inventory and adopts it (Claude Code
+    // recognized, auto-update armed), with no path typed.
+    let v = run_disc(&home, &disc, &claude, &["--json", "add", "-g", "deploy"]);
     assert_eq!(v["command"], "add");
     assert_eq!(v["ok"], true, "{v}");
     assert_eq!(v["data"]["name"], "deploy");
@@ -318,7 +372,7 @@ fn end_to_end_add_by_name_resolves_a_discovered_skill() {
     let v = run_disc(&home, &disc, &claude, &["--json", "list"]);
     assert_eq!(v["data"]["tracked"][0]["skill"], "deploy");
     assert!(v["data"]["untracked"].as_array().unwrap().is_empty());
-    let v = run_disc(&home, &disc, &claude, &["--json", "add", "deploy"]);
+    let v = run_disc(&home, &disc, &claude, &["--json", "add", "-g", "deploy"]);
     assert_eq!(v["ok"], false);
     assert_eq!(v["error"]["code"], "ALREADY_TRACKED");
     // The DISAMBIGUATED re-add reports the SAME code (an agent branches identically whether or not it
@@ -327,21 +381,21 @@ fn end_to_end_add_by_name_resolves_a_discovered_skill() {
         &home,
         &disc,
         &claude,
-        &["--json", "add", "deploy@claude-code"],
+        &["--json", "add", "-g", "deploy@claude-code"],
     );
     assert_eq!(v["ok"], false);
     assert_eq!(v["error"]["code"], "ALREADY_TRACKED");
 
     // A name nowhere in the inventory fails closed with the discovery-specific code (not NO_SUCH_SKILL,
     // which is about tracked skills).
-    let v = run_disc(&home, &disc, &claude, &["--json", "add", "ghost"]);
+    let v = run_disc(&home, &disc, &claude, &["--json", "add", "-g", "ghost"]);
     assert_eq!(v["ok"], false);
     assert_eq!(v["error"]["code"], "NO_UNTRACKED_SKILL");
 
     // A path-shaped positional is treated as a PATH (adopt in place), NEVER resolved as the same-named
     // discovered skill: a `./`-prefixed token pointing at nothing here fails as a path adopt (an fs
     // error), so it can't sneak in as the discovered "deploy".
-    let v = run_disc(&home, &disc, &claude, &["--json", "add", "./deploy"]);
+    let v = run_disc(&home, &disc, &claude, &["--json", "add", "-g", "./deploy"]);
     assert_eq!(v["ok"], false, "{v}");
     assert_ne!(
         v["error"]["code"], "ALREADY_TRACKED",
@@ -426,6 +480,10 @@ fn a_corrupt_sidecar_doc_still_reports_corrupt_state() {
 fn an_io_error_is_redacted_on_the_surface_and_detailed_in_the_log() {
     let home = scratch("iodiag");
     let missing = format!("/definitely-missing-topos-{}", std::process::id());
+    // A folder's manifest first: the scope resolves BEFORE the source is read, so without one the
+    // add would refuse on the scope rather than reaching the io fault this test is about.
+    let out = run_raw(&home, &["init", "--json"], false);
+    assert!(out.status.success(), "init should exit 0");
 
     // --json: the fixed message on stdout; the full context (path + cause) in the diagnostics log.
     let out = run_raw(&home, &["add", &missing, "--json"], false);

@@ -93,7 +93,7 @@ topos fmt [OPTIONS]
 
 ### `topos add`
 
-Get skills and keep them updated. The source can be a skill or channel from your workspace (`code-review`, `@acme/code-review`, `@acme/channels/backend`), a whole workspace's feed (`@acme`, with `-g`), a local folder (`./tools/my-skill`), or a public GitHub repo (`owner/repo` for every skill in it, `owner/repo/name` for one). Records one line in this folder's `topos.toml` — or in your machine's own file with `-g` — and installs right away. A plain name is looked for both in the skills already sitting in your agents' folders and in the catalogs of the workspaces you are connected to — when only a workspace has it, that is what you get. A GitHub source you have never used before shows what it found and waits for `--yes`. `add topos` restores the built-in topos skill
+Get skills and keep them updated. The source can be a skill or channel from your workspace (`code-review`, `@acme/code-review`, `@acme/channels/backend`), a whole workspace's feed (`@acme`, with `-g`), a local folder (`./tools/my-skill`), or a public GitHub repo (`owner/repo` for every skill in it, `owner/repo/name` for one). Records one line in the nearest `topos.toml` at or above this folder — or in your machine-wide file (`~/.topos/topos.toml`) with `-g` — and installs right away. With no `topos.toml` covering this folder it stops and says so: `topos init` creates one here, or add `-g`. A plain name is looked for both in the skills already sitting in your agents' folders and in the catalogs of the workspaces you are connected to — when only a workspace has it, that is what you get. A GitHub source you have never used before shows what it found and waits for `--yes`. `add topos` restores the built-in topos skill
 
 ```
 topos add [OPTIONS] <SOURCE>
@@ -110,7 +110,7 @@ topos add [OPTIONS] <SOURCE>
 
 ### `topos remove`
 
-Stop getting skills here — the inverse of `add`. Edits the same `topos.toml` (or your machine-wide file with `-g`: dropping a line, or switching one feed-delivered skill "off" on this machine) and prints exactly what changed and how to undo it. Asks first only when removing would lose local work or rewrite a whole channel/repo line
+Stop getting skills here — the inverse of `add`. Edits the same file `add` would: the nearest `topos.toml` at or above this folder, or your machine-wide file with `-g` (dropping a line, or switching one feed-delivered skill "off" on this machine). It never reaches across that line — a skill your machine-wide file delivers is refused here, pointing at `-g`. Prints exactly what changed and how to undo it; asks first only when removing would lose local work or rewrite a whole channel/repo line
 
 ```
 topos remove [OPTIONS] [SKILL]...

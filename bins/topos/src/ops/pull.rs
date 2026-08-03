@@ -634,7 +634,7 @@ pub(super) fn ctx_with_plane_and_follow<'a>(
 /// A shallow copy of `ctx` running against a different STORE layout (a project's own store) —
 /// every other seam shared. The layout IS the scope: the whole engine (locks, recovery, doc IO,
 /// the sync machine) runs unchanged against whichever store the ctx carries.
-pub(super) fn ctx_with_layout<'a>(ctx: &'a Ctx<'a>, layout: &crate::sidecar::Layout) -> Ctx<'a> {
+pub(crate) fn ctx_with_layout<'a>(ctx: &'a Ctx<'a>, layout: &crate::sidecar::Layout) -> Ctx<'a> {
     Ctx {
         fs: ctx.fs,
         ids: ctx.ids,

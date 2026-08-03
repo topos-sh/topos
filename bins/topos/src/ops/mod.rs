@@ -73,9 +73,13 @@ pub(crate) use list::list;
 pub(crate) use list::{DiscoveryRoots, ListFilter, ListOutcome, RemoteScope, list_with};
 pub(crate) use login::{LoginConnectors, login as session_login, logout as session_logout};
 pub(crate) use manifest_edit::{
-    manifest_host, note_added_path, note_added_remote, off_row_for, push_note, reference_shaped,
-    remove_global, remove_project,
+    add_scope, manifest_host, note_added_path_in, note_added_remote, off_row_for, push_note,
+    reference_shaped, remove_global, remove_project,
 };
+// The scope-flag form of the path row-write: the composition root always resolves the target
+// itself (see `add_scope`), so this backstop exists for the fixture rig and its own tests.
+#[cfg(any(test, feature = "test-fixtures"))]
+pub(crate) use manifest_edit::note_added_path;
 // The TTY-only enrollment row types are constructed in `list` and rendered by field access; the named
 // re-export exists for the renderer's tests, which build them by hand.
 #[cfg(test)]
@@ -87,8 +91,8 @@ pub(crate) use protect::{ProtectConnectors, ProtectOutcome, protect};
 #[cfg(test)]
 pub(crate) use publish::ensure_tracked;
 pub(crate) use pull::{
-    PullOutcome, PullScope, ReconcileOpts, ResetOutcome, TargetMode, pull, quiet_hook_lines,
-    quiet_soft_failure, reset,
+    PullOutcome, PullScope, ReconcileOpts, ResetOutcome, TargetMode, ctx_with_layout, pull,
+    quiet_hook_lines, quiet_soft_failure, reset,
 };
 pub(crate) use reconcile::{
     CacheFollow, ManifestUpdateOpts, SessionRoutedPlane, SessionTransports, forge_imports,

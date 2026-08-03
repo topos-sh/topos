@@ -292,9 +292,13 @@ impl SessionInstall {
         })
     }
 
-    /// `topos add ./dir` — adopt a local folder (the manifest line rides the receipt).
+    /// `topos init` then `topos add ./dir` — adopt a local folder into THIS folder's manifest (the
+    /// line rides the receipt). The `init` is not incidental: `add` records rows in a file that
+    /// already exists and refuses when none covers the folder, so the rig mints the project
+    /// manifest first, exactly as a person would.
     pub fn adopt_dir(&self, dir: &Path, cwd: Option<&Path>) -> Result<AddData, String> {
         self.with_ctx(cwd, |ctx| {
+            ops::init(ctx, false).map_err(err_str)?;
             let mut data = ops::add(ctx, dir).map_err(err_str)?;
             ops::note_added_path(ctx, &mut data, dir, false).map_err(err_str)?;
             Ok(data)
