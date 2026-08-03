@@ -63,10 +63,13 @@ as the latest release (the workflow passes no prerelease flag), so a candidate t
   `SHA256SUMS` + a matching `<asset>.minisig` (plus `install.sh`, `install.sh.minisig`,
   `SHA256SUMS.minisig`, both `<image>-image-digest.txt` files, and the three SBOMs).
 - Both images are pullable ANONYMOUSLY — the release publishes them, but a package's registry
-  visibility is a repository setting, and a newly created package is born **private**:
+  visibility is a settings toggle, and a newly created package is born **private**:
   `docker logout ghcr.io && docker pull ghcr.io/topos-sh/topos-web:vX.Y.Z`. A `denied` here means
-  the package needs Package settings → Change visibility → Public (there is no API for it). The
-  self-host quickstart is broken for everyone until this passes.
+  the package needs Package settings → Change visibility → Public, by hand — there is no REST API
+  for package visibility. If that dialog shows Public greyed out as *disabled by organization
+  administrators*, the block is one level up: Organization settings → Packages → Package creation
+  must have **Public** ticked before any package in the org can be made public. The self-host
+  quickstart is broken for everyone until the anonymous pull passes.
 - Each signature verifies against the release public key:
   `minisign -Vm topos-<triple>.tar.gz -P <the RELEASE_PUBKEY / MINISIGN_PUBKEY value>`.
 - From a clean environment, `curl -fsSL https://topos.sh/install | sh` installs and runs
