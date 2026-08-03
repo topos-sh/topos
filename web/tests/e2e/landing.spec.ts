@@ -101,7 +101,7 @@ test.describe("the public landing page", () => {
     );
 
     // 7 — the founder band, the pricing band's "Talk to us" destination. It sits directly under
-    // pricing and ahead of the FAQ, and opens on its heading: no micro-label above it.
+    // pricing and opens on its heading: no micro-label above it.
     const contact = page.locator("#contact");
     await expect(contact).toHaveCount(1);
     await expect(
@@ -109,22 +109,16 @@ test.describe("the public landing page", () => {
     ).toBeVisible();
     await expect(contact.getByText("Design partners")).toHaveCount(0);
     // The order is the contract, not an accident of authoring: the band that answers the pricing
-    // CTA has to come before the FAQ, or the button jumps the reader past it.
-    const contactPrecedesFaq = await page.evaluate(() => {
+    // CTA is the page's last word, so the button never jumps the reader past anything.
+    const contactIsLastBand = await page.evaluate(() => {
       const c = document.querySelector("#contact");
-      const f = document.querySelector("#faq");
+      const f = document.querySelector("footer");
       if (!c || !f) return false;
       return Boolean(c.compareDocumentPosition(f) & Node.DOCUMENT_POSITION_FOLLOWING);
     });
-    expect(contactPrecedesFaq).toBe(true);
+    expect(contactIsLastBand).toBe(true);
 
-    // 8 — the FAQ, fully visible text (no accordion): six questions, six answers on the page.
-    const faq = page.locator("#faq");
-    await expect(faq.locator("dt")).toHaveCount(6);
-    await expect(faq.locator("dd")).toHaveCount(6);
-    await expect(faq.locator("dd").first()).toBeVisible();
-
-    // 9 — the footer: the browser-path button leads its link row; no security link, no address.
+    // 8 — the footer: the browser-path button leads its link row; no security link, no address.
     const footer = page.locator("footer");
     // Two matches are legitimate in single tenancy: the primary button (/login) plus the plain
     // "Sign in" link (/app). The button is the first — assert it specifically.
@@ -144,12 +138,15 @@ test.describe("the public landing page", () => {
 
   test("the retired bands are gone", async ({ page }) => {
     await page.goto("/");
-    // The git-comparison band and the verb-card band both left; the nav points at the FAQ now.
+    // The git-comparison band, the verb-card band, and the FAQ all left; what the nav still points
+    // at has to resolve to a band that is actually on the page.
     await expect(page.locator("#vs")).toHaveCount(0);
     await expect(page.locator("#agent")).toHaveCount(0);
+    await expect(page.locator("#faq")).toHaveCount(0);
     await expect(page.getByRole("link", { name: "Why Topos" })).toHaveCount(0);
-    await expect(page.getByRole("link", { name: "FAQ" })).toHaveAttribute("href", "#faq");
+    await expect(page.getByRole("link", { name: "FAQ" })).toHaveCount(0);
     await expect(page.getByRole("link", { name: "Pricing" })).toHaveAttribute("href", "#pricing");
+    await expect(page.getByRole("link", { name: "How it works" })).toHaveAttribute("href", "#demo");
   });
 
   test("the founder's address is never in the served bytes, and never a mailto", async ({

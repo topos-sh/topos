@@ -36,7 +36,6 @@ const FLEET_RAIL = false;
 const INSTALL = "curl -fsSL https://topos.sh/install | sh";
 const AGENT_SETUP_PROMPT = "Set up Topos for us: fetch https://topos.sh/agent and follow it.";
 const GITHUB = "https://github.com/topos-sh/topos";
-const SECURITY = `${GITHUB}/blob/main/SECURITY.md`;
 /** The documentation site — a subpath of this origin, so it rides the deployment's own domain. */
 const DOCS = "/docs";
 
@@ -245,70 +244,6 @@ const TEAMS: {
   },
 ];
 
-/** Six answers in full view — no accordion, because a hidden answer is an unanswered question. */
-const FAQ: { q: string; a: ReactNode }[] = [
-  {
-    q: "What does my team actually install?",
-    a: (
-      <>
-        Plain files, in your agent’s own folders: the same skill bundles and reference docs someone
-        would write by hand. The open-source <code className="font-mono text-[13px]">topos</code>{" "}
-        command keeps them current in the background; nothing about how your agent works changes.
-      </>
-    ),
-  },
-  {
-    q: "Which agents does it work with?",
-    a: (
-      <>
-        Topos delivers to Claude Code, OpenClaw, and Hermes today. What it writes is the ordinary
-        skill format, so Codex, Cursor, and the wider skills ecosystem read the same files.
-      </>
-    ),
-  },
-  {
-    q: "What happens to someone’s local edits?",
-    a: (
-      <>
-        They are never overwritten. A local change is kept as a draft beside the team’s version, and
-        your agent offers it back as a proposal when it is worth sharing.
-      </>
-    ),
-  },
-  {
-    q: "Where do our skills live, and is there lock-in?",
-    a: (
-      <>
-        In a plain git repo. Self-host the whole thing or use our cloud, and take it with you if you
-        ever leave.{" "}
-        <a
-          href={SECURITY}
-          target="_blank"
-          rel="noreferrer"
-          className="border-hairline border-b transition-colors hover:border-ink"
-        >
-          The security model
-          <span className="sr-only"> (opens in a new tab)</span>
-        </a>{" "}
-        spells out exactly what the server holds.
-      </>
-    ),
-  },
-  {
-    q: "What does it cost?",
-    a: (
-      <>
-        Nothing while we are in closed beta, and self-hosting is free forever. We will publish
-        pricing before that changes.
-      </>
-    ),
-  },
-  {
-    q: "We’re early. Will you set it up with us?",
-    a: <>Yes. Email me below and I’ll get your team’s first shared skills flowing with you.</>,
-  },
-];
-
 /**
  * The unclaimed-install band: shown ONLY while a single-tenant install still awaits its first
  * owner. The claim rides the one-time link the server printed at boot — machine control is the
@@ -367,9 +302,6 @@ export function LandingPage({
             </a>
             <a href="#pricing" className="transition-colors hover:text-ink max-sm:hidden">
               Pricing
-            </a>
-            <a href="#faq" className="transition-colors hover:text-ink max-sm:hidden">
-              FAQ
             </a>
             <a href={DOCS} className="transition-colors hover:text-ink max-sm:hidden">
               Docs
@@ -497,9 +429,9 @@ export function LandingPage({
 
       <PricingBand ctaTo={ctaTo} ctaLabel={ctaLabel} docsHref={DOCS} />
 
-      {/* Directly under pricing, so the Enterprise arm's "Talk to us" lands on the next screen
-          rather than past the FAQ. It opens on its heading — no micro-label — which is what marks
-          it as the page's one personal address rather than another catalogued band. */}
+      {/* Directly under pricing, so the Enterprise arm's "Talk to us" lands on the next screen.
+          It opens on its heading — no micro-label — which is what marks it as the page's one
+          personal address rather than another catalogued band, and it is the page's last word. */}
       <section id="contact" className="pt-[84px] lg:pt-[116px]">
         <div className={WRAP}>
           <SectionHeading>Setting this up for a team? Email me.</SectionHeading>
@@ -512,23 +444,6 @@ export function LandingPage({
           <div className="mt-5">
             <FounderAddressBlock />
           </div>
-        </div>
-      </section>
-
-      <section id="faq" className="pt-[84px] lg:pt-[116px]">
-        <div className={WRAP}>
-          <MicroLabel>FAQ</MicroLabel>
-          <SectionHeading>Questions people ask first.</SectionHeading>
-          <dl className="mt-6 grid gap-x-12 gap-y-7 lg:grid-cols-2">
-            {FAQ.map((item) => (
-              <div key={item.q}>
-                <dt className="font-display font-semibold text-[13.5px] text-ink tracking-[-0.01em]">
-                  {item.q}
-                </dt>
-                <dd className="mt-2 max-w-[54ch] text-[14px] text-dim leading-[1.6]">{item.a}</dd>
-              </div>
-            ))}
-          </dl>
         </div>
       </section>
 
