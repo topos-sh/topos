@@ -736,7 +736,7 @@ fn run_command(
                 crate::source::SourceSpec::LocalPath(p) => {
                     ops::add_scope(&ctx, global).and_then(|scope| {
                         let sctx = ops::ctx_with_layout(&ctx, &scope.layout);
-                        let mut d = ops::add(&sctx, &p)?;
+                        let mut d = ops::adopt_path(&sctx, &scope.target, &p)?;
                         ops::note_added_path_in(&ctx, &mut d, &scope.target, &p)?;
                         Ok(d)
                     })

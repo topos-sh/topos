@@ -6595,7 +6595,7 @@ fn scoped_path_add(
 ) -> Result<topos_types::results::AddData, ClientError> {
     let scope = ops::add_scope(ctx, global)?;
     let sctx = ops::ctx_with_layout(ctx, &scope.layout);
-    let mut data = ops::add(&sctx, source)?;
+    let mut data = ops::adopt_path(&sctx, &scope.target, source)?;
     ops::note_added_path_in(ctx, &mut data, &scope.target, source)?;
     Ok(data)
 }
@@ -6962,6 +6962,69 @@ fn an_out_of_tree_source_records_absolutely_in_the_folders_own_file() {
             .join(crate::manifest::MANIFEST_FILE)
             .exists(),
         "no machine-wide file was written"
+    );
+}
+
+#[test]
+fn a_dropped_rows_record_is_re_linked_while_a_standing_row_still_refuses() {
+    // `remove <path>` edits the file and KEEPS the bytes, so the record outlives the row that
+    // asked for it. Re-adding that folder has nothing to refuse — it re-links to the record:
+    // the same id, the same lock, no second store dir, nothing minted.
+    let rig = Rig::new("zq-relink");
+    let proj = project("zq-relink-proj", "[bundles]\n");
+    let ctx = rig.ctx_at(Some(&proj.0));
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let plane = FakePlane::new(log);
+    let dir = FakeDirectory::new(Vec::new(), Vec::new());
+    let session_connect = connect(&plane, &dir);
+
+    let src = proj.0.join("zq-relink-src");
+    skill_source(&src, b"# zq-relink\n");
+    let added = scoped_path_add(&ctx, &src, false).unwrap();
+    let sid = crate::id::SkillId::parse(&added.skill_id).unwrap();
+    let store = crate::sidecar::project_store_layout(&proj.0);
+    let lock_before = std::fs::read(store.skill_dir(&sid).join("lock.json")).unwrap();
+
+    ops::remove_project(
+        &ctx,
+        &session_connect,
+        &["./zq-relink-src".to_owned()],
+        None,
+        true,
+    )
+    .unwrap()
+    .expect("the path row is a manifest arm");
+    assert!(
+        store.skill_dir(&sid).join("lock.json").exists(),
+        "the record outlives the row"
+    );
+
+    let back = scoped_path_add(&ctx, &src, false).unwrap();
+    assert_eq!(back.skill_id, added.skill_id, "the same record answers");
+    assert_eq!(back.version_id, added.version_id, "at the version it left");
+    assert_eq!(back.name, added.name);
+    assert_eq!(back.reference.as_deref(), Some("./zq-relink-src"));
+    assert!(
+        back.note.is_some_and(|n| n.contains("earlier add")),
+        "the receipt says the record was re-linked, not freshly adopted"
+    );
+    assert_eq!(
+        std::fs::read(store.skill_dir(&sid).join("lock.json")).unwrap(),
+        lock_before,
+        "the lock is untouched — no version, no history, no draft snapshot moved"
+    );
+    assert_eq!(
+        std::fs::read_dir(store.skills_dir())
+            .map(|d| d.count())
+            .unwrap_or(0),
+        1,
+        "no second record was minted"
+    );
+
+    // A folder the file STILL spells is a second adoption of one mutable dir — refused as before.
+    assert_eq!(
+        scoped_path_add(&ctx, &src, false).unwrap_err().code(),
+        "ALREADY_TRACKED"
     );
 }
 

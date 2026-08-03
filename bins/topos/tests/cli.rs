@@ -216,6 +216,93 @@ fn json_envelope_apply_receipt_on_ungated_arms_describe_on_gated() {
 }
 
 #[test]
+fn the_undo_a_row_removal_prints_runs_and_re_links_the_record_it_kept() {
+    // The receipt above stops at the argv; this runs it. `remove <path>` keeps the bytes, so the
+    // store record outlives the row that asked for it — and the undo the receipt prints has to be
+    // a command that WORKS against exactly that state, not one the already-tracked refusal meets.
+    let home = scratch("relink");
+    let src = scratch("relink-src");
+    let skill = src.join("pr-describe");
+    copy_tree(&fixture(), &skill);
+
+    let (ok, v) = run(&home, &["--json", "add", "-g", skill.to_str().unwrap()]);
+    assert!(ok, "add should exit 0: {v}");
+    let skill_id = v["data"]["skill_id"].as_str().expect("skill id").to_owned();
+    let version = v["data"]["version_id"]
+        .as_str()
+        .expect("version")
+        .to_owned();
+    let manifest = PathBuf::from(v["data"]["manifest"].as_str().expect("the manifest file"));
+    let manifest_before = std::fs::read_to_string(&manifest).expect("the manifest text");
+    let records = |home: &Path| {
+        std::fs::read_dir(home.join("skills"))
+            .map(|d| d.count())
+            .unwrap_or(0)
+    };
+    let records_before = records(&home);
+    // The add's own inverse, taken verbatim from its receipt (the row key is the canonical path,
+    // which is not always the path that was typed).
+    let remove_argv: Vec<String> = v["data"]["undo"]
+        .as_array()
+        .expect("the add receipt carries its undo argv")
+        .iter()
+        .map(|t| t.as_str().expect("argv token").to_owned())
+        .collect();
+
+    // Drop the row; take the undo argv IT prints, verbatim.
+    let mut argv: Vec<&str> = vec!["--json"];
+    argv.extend(remove_argv.iter().skip(1).map(String::as_str));
+    let (ok, v) = run(&home, &argv);
+    assert!(ok, "the row removal applies: {v}");
+    assert_eq!(v["data"]["items"][0]["bytes_kept"], true);
+    assert_eq!(v["next_actions"][0]["code"], "UNDO");
+    let undo: Vec<String> = v["next_actions"][0]["argv"]
+        .as_array()
+        .expect("the undo argv")
+        .iter()
+        .map(|t| t.as_str().expect("argv token").to_owned())
+        .collect();
+
+    // Run it exactly as printed (the binary name off the front, `--json` on for the assertions).
+    let mut argv: Vec<&str> = vec!["--json"];
+    argv.extend(undo.iter().skip(1).map(String::as_str));
+    let (ok, v) = run(&home, &argv);
+    assert!(ok, "the printed undo must run: {v}");
+    assert_eq!(v["command"], "add");
+    assert_eq!(v["data"]["skill_id"], skill_id, "the same record answers");
+    assert_eq!(v["data"]["version_id"], version, "at the version it left");
+    assert_eq!(v["data"]["tracked"], true);
+
+    // The row is back exactly as it was, and nothing was minted to put it there.
+    assert_eq!(
+        std::fs::read_to_string(&manifest).unwrap(),
+        manifest_before,
+        "the manifest is byte-identical to its pre-remove state"
+    );
+    assert_eq!(
+        records(&home),
+        records_before,
+        "no second record was minted"
+    );
+
+    // …and the removal works again — the pair is still an exact inverse.
+    let mut argv: Vec<&str> = vec!["--json"];
+    argv.extend(remove_argv.iter().skip(1).map(String::as_str));
+    let (ok, v) = run(&home, &argv);
+    assert!(ok, "the row removal applies again: {v}");
+    assert_eq!(v["data"]["applied"], true);
+    assert!(
+        !std::fs::read_to_string(&manifest)
+            .unwrap()
+            .contains("pr-describe"),
+        "the row is gone again"
+    );
+
+    let _ = std::fs::remove_dir_all(&src);
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+#[test]
 fn end_to_end_claude_code_adopt_arms_currency_and_pull_is_silent() {
     let home = scratch("cc-home");
     let claude = scratch("cc-claude");
