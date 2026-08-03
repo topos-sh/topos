@@ -155,6 +155,53 @@ test.describe("the documentation", () => {
     }
   });
 
+  test("every page opens on the two markdown actions, each naming that page's own twin", async ({
+    page,
+  }) => {
+    await page.goto("/docs");
+    for (const path of await sidebarPaths(page)) {
+      await page.goto(path);
+      const twin = path === "/docs" ? "/docs.md" : `${path}.md`;
+      // The exits sit in the header — above the article, not buried under it.
+      const header = page.locator("main header");
+      await expect(header.getByRole("button"), path).toHaveText(/copy page as markdown/i);
+      await expect(
+        header.getByRole("link", { name: /view page as markdown/i }),
+        path,
+      ).toHaveAttribute("href", twin);
+      // The footer's old duplicate of the same link is gone — one address, stated once.
+      await expect(
+        page.locator("footer").getByRole("link", { name: /markdown/i }),
+        path,
+      ).toHaveCount(0);
+    }
+  });
+
+  test("copy page puts the twin's own bytes on the clipboard", async ({
+    page,
+    request,
+    context,
+  }) => {
+    await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+    await page.goto("/docs/install");
+
+    // Located by POSITION, not by name: the label is the button's own accessible name, and it
+    // changes to "copied" on success — a name-based locator would stop matching the thing it
+    // just clicked.
+    const copyPage = page.locator("main header button");
+    await expect(copyPage).toHaveText(/copy page as markdown/i);
+    await copyPage.click();
+    // The button reports the write rather than staying silent about it.
+    await expect(copyPage).toHaveText(/copied/i);
+
+    // What landed is EXACTLY what the twin serves — the page copies the markdown, it does not
+    // re-derive a second rendering of its own prose.
+    const clipboard = await page.evaluate(() => navigator.clipboard.readText());
+    const twin = await (await request.get("/docs/install.md", { maxRedirects: 0 })).text();
+    expect(clipboard).toBe(twin);
+    expect(clipboard.startsWith("# ")).toBe(true);
+  });
+
   test("/docs/llms.txt indexes every page by its markdown twin, and every link resolves", async ({
     page,
     request,
