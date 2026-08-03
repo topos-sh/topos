@@ -1146,12 +1146,20 @@ fn list_columns(entry: &SkillEntry) -> String {
     {
         s.push_str(&format!("  from {source}"));
     }
+    // The cause clause carries the quiet rule for a leftover row: why it is still shown (the
+    // bytes are deliberately kept) and what retires it — the exact command where one is always
+    // true, the resolving event otherwise.
     if let Some(cause) = entry.cause {
         let label = match cause {
-            DetachCause::Unfollowed => "unfollowed",
-            DetachCause::ExcludedHere => "switched off here",
-            DetachCause::RemovedUpstream => "removed upstream",
-            DetachCause::SignedOut => "signed out",
+            DetachCause::Unfollowed => {
+                "removed from the skill list — bytes kept until you re-add it".to_owned()
+            }
+            DetachCause::ExcludedHere => "switched off here".to_owned(),
+            DetachCause::RemovedUpstream => format!(
+                "removed upstream — bytes kept; `topos add {} --yes` keeps it as yours",
+                entry.skill
+            ),
+            DetachCause::SignedOut => "signed out — `topos login` reconnects".to_owned(),
         };
         s.push_str(&format!("  ({label})"));
     }
@@ -1159,7 +1167,8 @@ fn list_columns(entry: &SkillEntry) -> String {
 }
 
 /// The agent-eye view (`list -a <slug>`): each skills dir the harness reads from this folder,
-/// every entry marked managed (`topos: <file>:<row-key>` / `feed <host>/<ws>`) or untracked.
+/// every entry marked managed (`topos: <file>:<row-key>` / `feed <host>/<ws>` / `topos:
+/// built-in`) or untracked.
 fn agent_view_tty(view: &AgentView) -> String {
     let mut s = format!("{} — what it reads from this folder:", view.agent_name);
     for dir in &view.dirs {
@@ -1651,9 +1660,16 @@ fn attention_phrase(a: &topos_types::results::AttentionCount) -> String {
 }
 
 /// `topos list <name>` — where this one skill comes from, spelled out: the row (file + key) or
-/// the feed (+ who aimed it), the version and any pin, where its bytes are, and its state.
+/// the feed (+ who aimed it), the version and any pin, where its bytes are, and its state. Every
+/// suggested command is SCOPE-EXACT (the same rule as [`list_row`]): an answer from the machine
+/// scope spells `topos update -g`, a project answer the bare form.
 fn list_detail_tty(detail: &topos_types::results::ListDetail) -> String {
     use topos_types::results::StatusItemState;
+    let flag = if detail.scope.as_deref() == Some("machine") {
+        " -g"
+    } else {
+        ""
+    };
     let mut s = detail.name.clone();
     match (&detail.source_file, &detail.source_key, &detail.feed) {
         (Some(file), Some(key), _) => s.push_str(&format!("\n  from {file}, line key {key}")),
@@ -1676,18 +1692,24 @@ fn list_detail_tty(detail: &topos_types::results::ListDetail) -> String {
         s.push_str(&format!("\n  placed in {}", detail.placements.join(", ")));
     }
     let state = match detail.state {
-        StatusItemState::Applied => "applied",
-        StatusItemState::Behind => "behind — `topos update` lands the newer version",
-        StatusItemState::LocalEdits => "local edits ahead of the applied version",
-        StatusItemState::Excluded => "excluded here",
-        StatusItemState::Off => "off — withheld here by your global manifest",
-        StatusItemState::NotAvailable => "not available with your current access",
-        StatusItemState::PendingSession => "awaiting session approval",
-        StatusItemState::NoDeliveryYet => {
-            "no delivery yet (`topos update` performs the first exchange)"
+        StatusItemState::Applied => "applied".to_owned(),
+        StatusItemState::Behind => {
+            format!("behind — `topos update{flag}` lands the newer version")
         }
-        StatusItemState::Detached => "detached (the bytes stay; delivery ended)",
-        StatusItemState::Unknown => "not applied here yet (`topos update` applies it)",
+        StatusItemState::LocalEdits => "local edits ahead of the applied version".to_owned(),
+        StatusItemState::Excluded => "excluded here".to_owned(),
+        StatusItemState::Off => "off — withheld here by your global manifest".to_owned(),
+        StatusItemState::NotAvailable => "not available with your current access".to_owned(),
+        StatusItemState::PendingSession => "awaiting session approval".to_owned(),
+        StatusItemState::NoDeliveryYet => {
+            format!("no delivery yet (`topos update{flag}` performs the first exchange)")
+        }
+        StatusItemState::Detached => {
+            "detached — delivery ended; the bytes stay until the skill is added back".to_owned()
+        }
+        StatusItemState::Unknown => {
+            format!("not applied here yet (`topos update{flag}` applies it)")
+        }
     };
     s.push_str(&format!("\n  {state}"));
     s
@@ -3208,6 +3230,119 @@ mod tests {
         );
     }
 
+    /// The deep dive's suggested command is scope-exact like the rows: a machine-scope answer
+    /// spells `topos update -g` in every state that suggests an update, a project answer keeps
+    /// the bare form; the detached copy names the retiring event instead of a command.
+    #[test]
+    fn the_deep_dive_spells_its_own_scopes_update_command() {
+        use topos_types::results::{ListDetail, StatusItemState as S};
+        let detail = |scope: &str, state| ListDetail {
+            name: "deploy".to_owned(),
+            scope: Some(scope.to_owned()),
+            source_file: None,
+            source_key: None,
+            feed: Some("topos.sh/acme".to_owned()),
+            attribution: None,
+            version: None,
+            pin: None,
+            placements: Vec::new(),
+            state,
+        };
+        let render = |d| {
+            list_tty(&ListOutcome {
+                data: ListData {
+                    detail: Some(d),
+                    signed_in: false,
+                    ..ListData::default()
+                },
+                warnings: Vec::new(),
+                untracked_view: false,
+            })
+        };
+        let text = render(detail("machine", S::Behind));
+        assert!(
+            text.contains("behind — `topos update -g` lands the newer version"),
+            "{text}"
+        );
+        let text = render(detail("project", S::Behind));
+        assert!(
+            text.contains("behind — `topos update` lands the newer version"),
+            "{text}"
+        );
+        let text = render(detail("machine", S::NoDeliveryYet));
+        assert!(
+            text.contains("no delivery yet (`topos update -g` performs the first exchange)"),
+            "{text}"
+        );
+        let text = render(detail("machine", S::Unknown));
+        assert!(
+            text.contains("not applied here yet (`topos update -g` applies it)"),
+            "{text}"
+        );
+        let text = render(detail("machine", S::Detached));
+        assert!(
+            text.contains(
+                "detached — delivery ended; the bytes stay until the skill is added back"
+            ),
+            "{text}"
+        );
+    }
+
+    /// A lingering ghost row explains itself in ONE clause: why it is still shown (the bytes are
+    /// deliberately kept) and what retires it — the exact command where one is always true
+    /// (withdrawn: the keep-as-yours fork; signed out: `topos login`), the resolving event
+    /// otherwise (a removed row: re-adding it).
+    #[test]
+    fn ghost_rows_explain_why_they_linger_and_what_retires_them() {
+        use topos_types::results::{DetachCause, ListScope, SkillStatus};
+        let ghost = |name: &str, cause| SkillEntry {
+            skill: name.to_owned(),
+            workspace_id: Some("w_acme".to_owned()),
+            version_id: "ab".repeat(32),
+            bundle_digest: "cd".repeat(32),
+            draft: false,
+            pending_proposals: Vec::new(),
+            source: Some("acme".to_owned()),
+            status: Some(SkillStatus::Detached),
+            cause: Some(cause),
+        };
+        let out = ListOutcome {
+            data: ListData {
+                scopes: vec![ListScope {
+                    scope: "machine".to_owned(),
+                    manifest: None,
+                    rows: vec![
+                        ghost("dropped", DetachCause::Unfollowed),
+                        ghost("gone-up", DetachCause::RemovedUpstream),
+                        ghost("outed", DetachCause::SignedOut),
+                    ],
+                }],
+                signed_in: false,
+                ..ListData::default()
+            },
+            warnings: Vec::new(),
+            untracked_view: false,
+        };
+        let text = list_tty(&out);
+        assert!(
+            text.contains(
+                "dropped  dropped@abababababab  [detached]  from acme  (removed from the skill \
+                 list — bytes kept until you re-add it)"
+            ),
+            "{text}"
+        );
+        assert!(
+            text.contains(
+                "(removed upstream — bytes kept; `topos add gone-up --yes` keeps it as yours)"
+            ),
+            "{text}"
+        );
+        assert!(
+            text.contains("(signed out — `topos login` reconnects)"),
+            "{text}"
+        );
+    }
+
     #[test]
     fn list_tty_renders_the_untracked_view_with_scope_summaries() {
         use topos_types::results::ListScope;
@@ -3359,6 +3494,7 @@ mod tests {
             data: ListData {
                 detail: Some(ListDetail {
                     name: "deploy".to_owned(),
+                    scope: Some("machine".to_owned()),
                     source_file: Some("~/.topos/topos.toml".to_owned()),
                     source_key: Some("topos.sh/acme/deploy".to_owned()),
                     feed: None,
@@ -3413,6 +3549,10 @@ mod tests {
                                     name: "stray".to_owned(),
                                     managed: None,
                                 },
+                                AgentViewEntry {
+                                    name: "topos".to_owned(),
+                                    managed: Some("built-in".to_owned()),
+                                },
                             ],
                         },
                         AgentViewDir {
@@ -3443,6 +3583,9 @@ mod tests {
             text.contains("stray  untracked (`topos add stray` manages it)"),
             "{text}"
         );
+        // The placed built-in is topos-managed — never "untracked", never told to add itself.
+        assert!(text.contains("topos  topos: built-in"), "{text}");
+        assert!(!text.contains("`topos add topos`"), "{text}");
         assert!(text.contains("/repo/.cursor/skills (project):"), "{text}");
         assert!(text.contains("(empty)"), "{text}");
     }

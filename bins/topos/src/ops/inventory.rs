@@ -681,14 +681,16 @@ pub(crate) fn detail_for(
         s.rows
             .iter()
             .find(|r| canonical.as_deref() == Some(r.reference.as_str()) || r.name == token)
+            .map(|r| (s.scope, r))
     });
-    let Some(row) = hit else {
+    let Some((scope, row)) = hit else {
         return Err(ClientError::TargetNotFound {
             target: token.to_owned(),
         });
     };
     Ok(ListDetail {
         name: row.name.clone(),
+        scope: Some(scope.to_owned()),
         source_file: row.source_file.clone(),
         source_key: row.source_key.clone(),
         feed: row.feed.clone(),
