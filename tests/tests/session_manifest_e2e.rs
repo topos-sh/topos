@@ -240,8 +240,9 @@ fn the_session_manifest_hero_loop() {
     );
 
     // ── the `-g` lane: the FEED delivers person-scope by itself; the global file takes control ──
-    // No file, no `-g` act: the feed already landed the person-scope copy on the sweeps above
-    // (login was the acceptance — delivery is automatic).
+    // No file, no `-g` act: standing OUTSIDE any checkout, the bare update converges the machine
+    // and the feed lands the person-scope copy by itself (login was the acceptance — delivery is
+    // automatic). The project sweeps above converged the checkout alone, as the scope rule says.
     let (feed_pull, feed_warnings) = dev.update(&[], None).expect("the person-scope sweep");
     let person_dir = person_scope_dir(&dev).unwrap_or_else(|| {
         panic!(

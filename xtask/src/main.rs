@@ -638,6 +638,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
         command: "pull".to_owned(),
         ok: true,
         data: serde_json::to_value(PullData {
+            scope: None,
             notices: Vec::new(),
             sync: Vec::new(),
             skills: vec![PullSkill {
@@ -669,6 +670,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
         command: "pull".to_owned(),
         ok: true,
         data: serde_json::to_value(PullData {
+            scope: None,
             notices: Vec::new(),
             sync: Vec::new(),
             skills: vec![PullSkill {
@@ -707,6 +709,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
         command: "pull".to_owned(),
         ok: true,
         data: serde_json::to_value(PullData {
+            scope: None,
             notices: Vec::new(),
             sync: Vec::new(),
             skills: vec![PullSkill {
@@ -1231,6 +1234,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
         command: "update".to_owned(),
         ok: true,
         data: serde_json::to_value(PullData {
+            scope: None,
             skills: vec![PullSkill {
                 skill: "deploy".to_owned(),
                 workspace_id: Some("w_acme".to_owned()),
@@ -1279,6 +1283,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
         command: "update".to_owned(),
         ok: true,
         data: serde_json::to_value(PullData {
+            scope: None,
             skills: vec![PullSkill {
                 skill: "deploy".to_owned(),
                 workspace_id: Some("w_acme".to_owned()),
@@ -1536,6 +1541,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
         command: "update".to_owned(),
         ok: true,
         data: serde_json::to_value(PullData {
+            scope: None,
             skills: vec![],
             proposals_awaiting: 0,
             notices: vec![],

@@ -1142,6 +1142,7 @@ fn run_command(
         }
         Command::Update {
             targets,
+            global,
             reset,
             yes,
             onto_current,
@@ -1239,6 +1240,17 @@ fn run_command(
                 let git = (!quiet).then(|| {
                     crate::plane_http::UreqGitSource::new().with_progress(Rc::clone(&progress))
                 });
+                // The scope rule: a hand-run update converges where the invocation stands (or the
+                // machine, with `-g`), and the hook sweep covers BOTH — silent delivery is the
+                // promise, so `--quiet` wins over `-g` rather than narrowing what auto-update
+                // reaches.
+                let scope = if quiet {
+                    ops::UpdateScope::Both
+                } else if global {
+                    ops::UpdateScope::Machine
+                } else {
+                    ops::UpdateScope::Here
+                };
                 ops::manifest_update(
                     &ctx,
                     &connect_session_transports,
@@ -1248,6 +1260,7 @@ fn run_command(
                         targets,
                         ack_notices: !quiet,
                         rebuild,
+                        scope,
                     },
                 )
             };

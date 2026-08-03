@@ -350,6 +350,9 @@ impl SessionInstall {
                     targets: targets.iter().map(|t| (*t).to_owned()).collect(),
                     ack_notices: true,
                     rebuild: false,
+                    // A hand-run `topos update`: the scope rule applies, so `cwd` inside a
+                    // checkout converges that project and a `cwd`-less call converges the machine.
+                    scope: ops::UpdateScope::Here,
                 },
             )
             // The lines a sweep emits, merged exactly as the `--json` envelope merges them:

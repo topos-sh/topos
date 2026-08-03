@@ -86,6 +86,11 @@ fn a_pinned_reference_delivers_its_version_and_publish_to_never_mints_a_channel(
     let bytes = std::fs::read_to_string(&placed).expect("the pinned version landed in-checkout");
     assert_eq!(bytes, "# pinme v1\n", "the PIN wins over current");
 
+    // The person scope's own copy arrives on a MACHINE-scoped run — an `update` converges where it
+    // stands, so the in-checkout add above was the project's business alone — and holding it is
+    // what makes the split below real.
+    dev.update(&[], None).expect("the machine-scoped sweep");
+
     // A fresh sweep keeps the pin (never silently fast-forwarded to v2). The ONE line it earns is
     // the cross-store disclosure: this installation now holds `pinme` at two versions — the
     // person scope's current and this checkout's pin — and the applied report carries only one row

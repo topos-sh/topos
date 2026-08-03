@@ -542,7 +542,8 @@ fn connect<'a>(
     }
 }
 
-/// The bare sweep (no forge lane — the background posture).
+/// A bare hand-run `topos update` (no forge lane — the background posture): the scope rule applies,
+/// so it converges the PROJECT when a manifest covers the cwd and the MACHINE otherwise.
 fn sweep(ctx: &Ctx<'_>, plane: &FakePlane, dir: &FakeDirectory) -> ops::PullOutcome {
     ops::manifest_update(
         ctx,
@@ -551,6 +552,31 @@ fn sweep(ctx: &Ctx<'_>, plane: &FakePlane, dir: &FakeDirectory) -> ops::PullOutc
         &ops::ManifestUpdateOpts::default(),
     )
     .unwrap()
+}
+
+/// The reconcile under an explicit scope selector — `-g` (machine), or the hook sweep's BOTH.
+fn sweep_scoped(
+    ctx: &Ctx<'_>,
+    plane: &FakePlane,
+    dir: &FakeDirectory,
+    scope: ops::UpdateScope,
+) -> ops::PullOutcome {
+    ops::manifest_update(
+        ctx,
+        &connect(plane, dir),
+        None,
+        &ops::ManifestUpdateOpts {
+            scope,
+            ..ops::ManifestUpdateOpts::default()
+        },
+    )
+    .unwrap()
+}
+
+/// The BACKGROUND sweep (`update --quiet`, the auto-update trigger): both scopes, always — silent
+/// delivery is the promise, so it may never narrow to the folder the session happened to start in.
+fn sweep_both(ctx: &Ctx<'_>, plane: &FakePlane, dir: &FakeDirectory) -> ops::PullOutcome {
+    sweep_scoped(ctx, plane, dir, ops::UpdateScope::Both)
 }
 
 // =================================================================================================
@@ -978,6 +1004,8 @@ fn the_nearest_project_file_governs_whole() {
     );
 }
 
+/// Both scopes at once is the BACKGROUND sweep's shape (a hand-run update converges only where it
+/// stands), so the unblended property is proven through it.
 #[test]
 fn the_same_bundle_at_both_scopes_lands_twice() {
     let rig = Rig::new("unblended");
@@ -993,7 +1021,7 @@ fn the_same_bundle_at_both_scopes_lands_twice() {
     plane.serves(vec![delivered("s_deploy", "deploy", &v)]);
     let dir = FakeDirectory::new(vec![catalog_entry("s_deploy", "deploy", &v)], Vec::new());
     let ctx = rig.ctx_at(Some(&proj.0));
-    let out = sweep(&ctx, &plane, &dir);
+    let out = sweep_both(&ctx, &plane, &dir);
     assert!(out.warnings.is_empty(), "{:?}", out.warnings);
 
     let person_copy = rig.work.0.join("skills/deploy");
@@ -1043,7 +1071,7 @@ fn the_same_bundle_at_both_scopes_lands_twice() {
 
     // A draft in the PROJECT copy stays that scope's business.
     std::fs::write(project_copy.join("SKILL.md"), b"# project edit\n").unwrap();
-    let out = sweep(&ctx, &plane, &dir);
+    let out = sweep_both(&ctx, &plane, &dir);
     assert!(out.warnings.is_empty(), "{:?}", out.warnings);
     assert_eq!(
         std::fs::read(project_copy.join("SKILL.md")).unwrap(),
@@ -1165,6 +1193,247 @@ fn an_unparsable_manifest_freezes_its_scope() {
         out.warnings
     );
     assert!(placed.exists(), "a frozen scope never cleans");
+}
+
+// =================================================================================================
+// The scope rule: an `update` converges where the invocation STANDS (`-g` = the machine); only the
+// background hook sweep covers both, because silent delivery may never narrow to one folder.
+// =================================================================================================
+
+/// Two populated scopes on one machine: the project file demands `api`, and the connected feed
+/// delivers `deploy`. Every test below asserts WHICH of the two a given invocation converged.
+struct TwoScopes {
+    proj: Scratch,
+    plane: FakePlane,
+    dir: FakeDirectory,
+}
+
+fn two_scopes(tag: &str) -> TwoScopes {
+    let api = one_file(b"# api\n");
+    let deploy = one_file(b"# deploy\n");
+    let proj = project(
+        tag,
+        &format!("[bundles]\n\"{HOST}/{WS_NAME}/api\" = \"*\"\n"),
+    );
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let plane = FakePlane::new(log)
+        .with_version("s_api", &api)
+        .with_version("s_deploy", &deploy);
+    // The FEED carries `deploy` alone — `api` is the project row's demand and nothing else's.
+    plane.serves(vec![delivered("s_deploy", "deploy", &deploy)]);
+    let dir = FakeDirectory::new(
+        vec![
+            catalog_entry("s_api", "api", &api),
+            catalog_entry("s_deploy", "deploy", &deploy),
+        ],
+        Vec::new(),
+    );
+    TwoScopes { proj, plane, dir }
+}
+
+#[test]
+fn a_bare_update_inside_a_project_converges_only_that_project() {
+    let rig = Rig::new("scope-here-proj");
+    rig.seed_session();
+    let t = two_scopes("scope-here-proj");
+    let ctx = rig.ctx_at(Some(&t.proj.0));
+    let out = sweep(&ctx, &t.plane, &t.dir);
+    assert!(out.warnings.is_empty(), "{:?}", out.warnings);
+
+    // The folder's own demand landed, inside the checkout, and the receipt names the scope.
+    assert!(t.proj.0.join(".claude/skills/api/SKILL.md").exists());
+    assert_eq!(
+        out.data.scope,
+        Some(format!("project {}", t.proj.0.display()))
+    );
+    // The machine scope was never DRIVEN: no bytes in the home agent dirs, no home store entry.
+    assert!(
+        !rig.work.0.join("skills").exists(),
+        "the feed's copy stayed away from the machine's agent dirs"
+    );
+    let deploy_id = crate::id::SkillId::parse("s_deploy").unwrap();
+    assert!(
+        !rig.layout().skill_dir(&deploy_id).exists(),
+        "the home store gained no entry"
+    );
+    assert!(
+        !out.data.skills.iter().any(|s| s.skill == "deploy"),
+        "{:?}",
+        out.data.skills
+    );
+    // The machine's demand is PENDING, not dropped — the machine-scoped run still delivers it.
+    let out = sweep_scoped(&ctx, &t.plane, &t.dir, ops::UpdateScope::Machine);
+    assert!(
+        rig.work.0.join("skills/deploy/SKILL.md").exists(),
+        "{:?}",
+        out.warnings
+    );
+}
+
+#[test]
+fn a_bare_update_outside_a_project_converges_the_machine() {
+    let rig = Rig::new("scope-here-machine");
+    rig.seed_session();
+    let t = two_scopes("scope-here-machine");
+    // Standing in the plain work dir — no `topos.toml` covers it, so the machine is where you are.
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    let out = sweep(&ctx, &t.plane, &t.dir);
+    assert!(out.warnings.is_empty(), "{:?}", out.warnings);
+
+    assert_eq!(out.data.scope.as_deref(), Some("machine"));
+    assert!(rig.work.0.join("skills/deploy/SKILL.md").exists());
+    // A project the invocation never stood in is not reconciled from outside it.
+    assert!(!t.proj.0.join(".claude/skills/api").exists());
+    assert!(crate::sidecar::existing_project_store(&rig.fs, &t.proj.0).is_none());
+}
+
+#[test]
+fn update_g_inside_a_project_converges_only_the_machine() {
+    let rig = Rig::new("scope-global");
+    rig.seed_session();
+    let t = two_scopes("scope-global");
+    let ctx = rig.ctx_at(Some(&t.proj.0));
+    let out = sweep_scoped(&ctx, &t.plane, &t.dir, ops::UpdateScope::Machine);
+    assert!(out.warnings.is_empty(), "{:?}", out.warnings);
+
+    assert_eq!(out.data.scope.as_deref(), Some("machine"));
+    assert!(rig.work.0.join("skills/deploy/SKILL.md").exists());
+    // The checkout the invocation was standing in is untouched: no bytes, and no store minted.
+    assert!(
+        !t.proj.0.join(".claude/skills/api").exists(),
+        "{:?}",
+        out.data.skills
+    );
+    assert!(crate::sidecar::existing_project_store(&rig.fs, &t.proj.0).is_none());
+    assert!(
+        !out.data.skills.iter().any(|s| s.skill == "api"),
+        "{:?}",
+        out.data.skills
+    );
+}
+
+/// The property the hook sweep exists for: `update --quiet` fires on a session start in SOME
+/// folder, and everything the machine holds must still converge — silent delivery is the promise,
+/// so the folder the agent happened to open may never narrow what auto-update reaches.
+#[test]
+fn the_hook_sweep_converges_both_scopes_from_inside_a_project() {
+    let rig = Rig::new("scope-both");
+    rig.seed_session();
+    let t = two_scopes("scope-both");
+    let ctx = rig.ctx_at(Some(&t.proj.0));
+    let out = sweep_both(&ctx, &t.plane, &t.dir);
+    assert!(out.warnings.is_empty(), "{:?}", out.warnings);
+
+    assert_eq!(out.data.scope.as_deref(), Some("both"));
+    assert!(
+        t.proj.0.join(".claude/skills/api/SKILL.md").exists(),
+        "the project scope converged"
+    );
+    assert!(
+        rig.work.0.join("skills/deploy/SKILL.md").exists(),
+        "the machine scope converged in the same run"
+    );
+}
+
+/// A project file the grammar REFUSES still covers the folder. Falling back to the machine would
+/// answer a typo by converging a tree nobody asked about — and would land bytes the person is at
+/// that moment being told their manifest is broken.
+#[test]
+fn a_frozen_project_manifest_never_falls_back_to_the_machine() {
+    let rig = Rig::new("scope-frozen");
+    rig.seed_session();
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let deploy = one_file(b"# deploy\n");
+    let plane = FakePlane::new(log).with_version("s_deploy", &deploy);
+    plane.serves(vec![delivered("s_deploy", "deploy", &deploy)]);
+    let dir = FakeDirectory::new(
+        vec![catalog_entry("s_deploy", "deploy", &deploy)],
+        Vec::new(),
+    );
+    let proj = project(
+        "scope-frozen-proj",
+        "[bundles]\n\"not a reference\" = \"*\"\n",
+    );
+    let ctx = rig.ctx_at(Some(&proj.0));
+    let out = sweep(&ctx, &plane, &dir);
+
+    assert!(
+        out.warnings
+            .iter()
+            .any(|w| w.starts_with("MANIFEST_INVALID")),
+        "{:?}",
+        out.warnings
+    );
+    assert_eq!(
+        out.data.scope,
+        Some(format!("project {}", proj.0.display())),
+        "the frozen file still names the scope this run stood in"
+    );
+    assert!(
+        !rig.work.0.join("skills").exists(),
+        "a broken project file never hands the run to the machine: {:?}",
+        out.data.skills
+    );
+}
+
+/// A named target narrows WITHIN the driven scope — so a name that is perfectly real one scope
+/// over is a miss, and the refusal has to say which scope it searched rather than claim the name
+/// is nowhere (which would send someone to re-add what they already have).
+#[test]
+fn a_target_from_the_other_scope_refuses_naming_the_scope_it_searched() {
+    let rig = Rig::new("scope-target");
+    rig.seed_session();
+    let t = two_scopes("scope-target");
+
+    // Standing in the project: `deploy` is the FEED's, and the feed is not this folder's scope.
+    let ctx = rig.ctx_at(Some(&t.proj.0));
+    let refused = ops::manifest_update(
+        &ctx,
+        &connect(&t.plane, &t.dir),
+        None,
+        &ops::ManifestUpdateOpts {
+            targets: vec!["deploy".to_owned()],
+            ..ops::ManifestUpdateOpts::default()
+        },
+    );
+    let Err(err) = refused else {
+        panic!("a target from the other scope must refuse");
+    };
+    assert_eq!(err.code(), "INVALID_ARGUMENT", "{err}");
+    let msg = err.to_string();
+    assert!(
+        msg.contains(&format!(
+            "'deploy' is not demanded by {}/topos.toml",
+            t.proj.0.display()
+        )),
+        "{msg}"
+    );
+    assert!(msg.contains("`topos update -g deploy`"), "{msg}");
+    assert!(
+        !rig.work.0.join("skills").exists(),
+        "the refusal moved no bytes: {msg}"
+    );
+
+    // The mirror image, standing outside the project: `api` is the project file's demand.
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    let refused = ops::manifest_update(
+        &ctx,
+        &connect(&t.plane, &t.dir),
+        None,
+        &ops::ManifestUpdateOpts {
+            targets: vec!["api".to_owned()],
+            ..ops::ManifestUpdateOpts::default()
+        },
+    );
+    let Err(err) = refused else {
+        panic!("a target from the other scope must refuse");
+    };
+    let msg = err.to_string();
+    assert!(
+        msg.contains("'api' is not in your machine-wide set"),
+        "{msg}"
+    );
+    assert!(msg.contains("`topos add -g api`"), "{msg}");
 }
 
 // =================================================================================================
@@ -2025,7 +2294,12 @@ fn a_targeted_update_narrows_the_sweep_and_names_a_miss() {
         panic!("an unmatched target must refuse");
     };
     assert_eq!(err.code(), "INVALID_ARGUMENT", "{err}");
-    assert!(err.to_string().contains("connected feeds"), "{err}");
+    // Standing outside any project, the searched scope was the machine — and the line says so.
+    assert!(
+        err.to_string()
+            .contains("'nonesuch' is not in your machine-wide set"),
+        "{err}"
+    );
 }
 
 // =================================================================================================
@@ -2296,6 +2570,8 @@ fn a_dropped_repo_row_cleans_its_members_like_any_undemanded_item() {
 // Per-scope mentions (the person clean is never shielded by a project mention).
 // =================================================================================================
 
+/// Driven through the BACKGROUND sweep: only a both-scope run converges the person scope from
+/// inside a project, and the cross-scope shielding question only arises when it does.
 #[test]
 fn a_project_mention_never_shields_a_person_scope_clean() {
     let rig = Rig::new("scope-mention");
@@ -2312,14 +2588,14 @@ fn a_project_mention_never_shields_a_person_scope_clean() {
     std::fs::create_dir_all(proj.0.join("deploy")).unwrap();
     std::fs::write(proj.0.join("deploy/SKILL.md"), b"# local deploy\n").unwrap();
     let ctx = rig.ctx_at(Some(&proj.0));
-    sweep(&ctx, &plane, &dir);
+    sweep_both(&ctx, &plane, &dir);
     let placed = rig.work.0.join("skills/deploy");
     assert!(placed.exists(), "the person feed installed its copy");
 
     // The feed withdraws the bundle. The person-scope copy must retire — the PROJECT's mention
     // of the same name is a different scope's business and shields nothing.
     plane.serves(Vec::new());
-    let out = sweep(&ctx, &plane, &dir);
+    let out = sweep_both(&ctx, &plane, &dir);
     assert!(
         !placed.exists(),
         "the person copy retired despite the project mention: {:?}",
@@ -4212,6 +4488,7 @@ fn a_bundle_held_at_two_versions_reports_the_person_copy_and_discloses_the_split
     // The wire carries ONE row per (session, bundle). Which store answers must not depend on which
     // checkout the update happened to run from — the PERSON store answers whenever it holds the
     // bundle — and the version the OTHER store holds must not simply vanish from the person's view.
+    // The split only EXISTS once both scopes have converged, so this rides the background sweep.
     let rig = Rig::new("split-report");
     rig.seed_session();
     let v1 = one_file(b"# deploy v1\n");
@@ -4229,7 +4506,7 @@ fn a_bundle_held_at_two_versions_reports_the_person_copy_and_discloses_the_split
     plane.serves(vec![delivered("s_deploy", "deploy", &v2)]);
     let dir = FakeDirectory::new(vec![catalog_entry("s_deploy", "deploy", &v2)], Vec::new());
     let ctx = rig.ctx_at(Some(&proj.0));
-    let out = sweep(&ctx, &plane, &dir);
+    let out = sweep_both(&ctx, &plane, &dir);
 
     assert_eq!(
         std::fs::read(rig.work.0.join("skills/deploy/SKILL.md")).unwrap(),

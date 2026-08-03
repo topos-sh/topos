@@ -126,7 +126,7 @@ topos remove [OPTIONS] [SKILL]...
 
 ### `topos update`
 
-Fetch and apply the latest version of everything this folder's `topos.toml` asks for and everything your workspaces give you. Runs by itself at the start of each agent session; safe to run by hand any time. `topos update <skill>` updates one skill; `topos update <skill>@<version>` puts that version's bytes back on this machine only
+Fetch and apply the latest version of what you asked for, where you are standing: this folder's `topos.toml` when one covers it, and otherwise your machine-wide set (your own `topos.toml` and the skills your workspaces give you). `-g` updates the machine-wide set even from inside a project. The background auto-update that runs at the start of each agent session always covers both, so nothing goes stale while you work in one folder. Safe to run by hand any time. `topos update <skill>` updates one skill; `topos update <skill>@<version>` puts that version's bytes back on this machine only
 
 ```
 topos update [OPTIONS] [TARGETS]...
@@ -134,11 +134,12 @@ topos update [OPTIONS] [TARGETS]...
 
 | Argument / flag | What it does |
 |---|---|
-| `[TARGETS]...` | The skill(s) to update; `<skill>@<version>` restores that version's bytes locally. Omitted, everything is updated |
+| `[TARGETS]...` | The skill(s) to update; `<skill>@<version>` restores that version's bytes locally. Omitted, everything in this scope is updated |
+| `-g, --global` | Update only your machine-wide skills (`~/.topos/topos.toml` and your workspace feeds), even when run inside a project |
 | `--reset` | Discard your local edits to a skill and take the team version. Shows what would be lost first; `--yes` applies |
 | `--yes` | Confirm an action that shows a preview first (like `--reset`) |
 | `--onto-current` | Resolve a conflicted skill by keeping your bytes exactly as they are, skipping the merge with the team's changes (what the merge would have brought is shown first). Takes exactly one skill |
-| `--quiet` | Print nothing on stdout — the mode the session-start hook uses. Errors still go to stderr with a non-zero exit |
+| `--quiet` | Print nothing on stdout — the mode the session-start hook uses. The hook sweep always covers both scopes (this folder's and your machine-wide set), so `-g` has no effect here. Errors still go to stderr with a non-zero exit |
 | `--ttl <SECONDS>` | With `--quiet`: skip the run entirely when one already completed within this many seconds, so hooks can fire often at no cost. `0` disables the throttle. Default 300; `TOPOS_UPDATE_TTL` changes the default |
 | `--rebuild` | Rebuild every managed skill folder from topos's own store: your unshared edits are saved first, then each folder is re-created fresh. Fixes a folder someone deleted or broke by hand |
 

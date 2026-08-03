@@ -222,7 +222,7 @@ fn add_workspace(
                 ),
             );
             drop(off_guard);
-            return Ok(finish_workspace(ctx, connect, data, &resolved));
+            return Ok(finish_workspace(ctx, connect, data, &resolved, true));
         }
         // Released before `write_row`, which takes it again for its own read→edit→write (the
         // `flock` is per open file description, so re-taking it in the same process is fine, but
@@ -276,24 +276,27 @@ fn add_workspace(
                 "the feed already delivers it — this row pins what this machine takes".to_owned(),
             );
         }
-        return Ok(finish_workspace(ctx, connect, data, &resolved));
+        return Ok(finish_workspace(ctx, connect, data, &resolved, true));
     }
 
     let Some(target) = medit::project_target(ctx)? else {
         return Err(ClientError::NoManifest);
     };
     medit::write_row(ctx, &mut data, &target, &resolved.canonical, &value)?;
-    Ok(finish_workspace(ctx, connect, data, &resolved))
+    Ok(finish_workspace(ctx, connect, data, &resolved, false))
 }
 
 /// Deliver what the new row asks for, in the same invocation — the SAME reconcile the sweep runs,
-/// narrowed to this name. Best-effort by contract: the demand is durably recorded, so a transport
-/// hiccup just moves the byte landing to the next sweep.
+/// narrowed to this name AND to the scope the row was just written in (`-g` delivers the machine
+/// set even from inside a project; a project row delivers the project). Best-effort by contract:
+/// the demand is durably recorded, so a transport hiccup just moves the byte landing to the next
+/// sweep.
 fn finish_workspace(
     ctx: &Ctx<'_>,
     connect: &SessionConnect<'_>,
     data: AddData,
     resolved: &Resolved,
+    global: bool,
 ) -> AddRefOutcome {
     let targets = match resolved.entry {
         // A channel expands server-side into member names a targeted filter could not match.
@@ -307,6 +310,11 @@ fn finish_workspace(
         &super::reconcile::ManifestUpdateOpts {
             targets,
             ack_notices: false,
+            scope: if global {
+                super::reconcile::UpdateScope::Machine
+            } else {
+                super::reconcile::UpdateScope::Here
+            },
             ..Default::default()
         },
     );

@@ -95,8 +95,8 @@ pub(crate) use pull::{
     quiet_hook_lines, quiet_soft_failure, reset,
 };
 pub(crate) use reconcile::{
-    CacheFollow, ManifestUpdateOpts, SessionRoutedPlane, SessionTransports, forge_imports,
-    manifest_update,
+    CacheFollow, ManifestUpdateOpts, SessionRoutedPlane, SessionTransports, UpdateScope,
+    forge_imports, manifest_update,
 };
 // The handover is driven by the reconcile; the direct re-export serves the custody-first
 // regression tests (retire only after verifiable project adoption; park, never delete).

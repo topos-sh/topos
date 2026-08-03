@@ -2295,6 +2295,39 @@ pub(crate) fn review_tty(data: &ReviewData) -> String {
     }
 }
 
+/// Which set an `update` receipt is reporting on, read back from [`PullData::scope`]. `update` acts
+/// where you stand, so a receipt that does not name its scope leaves the OTHER set's silence
+/// ambiguous. The background sweep reconciles `"both"` and prints nothing anyway, so it reads as
+/// unstated — as does a producer predating the scoped update, and the single-skill go-back, which
+/// acts on local bytes rather than on a scope.
+enum PullReceiptScope {
+    Project(String),
+    Machine,
+    Unstated,
+}
+
+impl PullReceiptScope {
+    fn read(scope: Option<&str>) -> Self {
+        match scope {
+            Some("machine") => PullReceiptScope::Machine,
+            Some(s) => match s.strip_prefix("project ") {
+                Some(dir) => PullReceiptScope::Project(dir.to_owned()),
+                None => PullReceiptScope::Unstated,
+            },
+            None => PullReceiptScope::Unstated,
+        }
+    }
+
+    /// The receipt's opening line, when there is one to say.
+    fn lead(&self) -> Option<String> {
+        match self {
+            PullReceiptScope::Project(dir) => Some(format!("updated this folder ({dir})")),
+            PullReceiptScope::Machine => Some("updated machine-wide".to_owned()),
+            PullReceiptScope::Unstated => None,
+        }
+    }
+}
+
 /// The human `update` view — one line per skill that needs attention (gh-status style: name, what
 /// happened, and the concrete next command where one exists), up-to-date rows summarized compactly,
 /// isolated per-skill failures (`warnings` — the same stable lines the `--json` envelope carries)
@@ -2306,12 +2339,25 @@ pub(crate) fn review_tty(data: &ReviewData) -> String {
 /// every other receipt in this CLI uses for a disclosure — and they are counted separately,
 /// because the summary below says "failed" and a successful run must never claim one.
 pub(crate) fn pull_tty(data: &PullData, warnings: &[String], disclosures: &[String]) -> String {
+    let scope = PullReceiptScope::read(data.scope.as_deref());
     if data.skills.is_empty() && warnings.is_empty() && disclosures.is_empty() {
-        return append_proposals_trailer(
-            "Nothing to update here — no manifest or profile demands anything in this directory."
-                .to_owned(),
-            data.proposals_awaiting,
-        );
+        // The line most easily MISREAD: someone standing in a project must not take an untouched
+        // machine-wide set for an emptied one, so the empty receipt names the scope it emptied.
+        let line = match &scope {
+            PullReceiptScope::Project(dir) => format!(
+                "Nothing to update in {dir} — its topos.toml demands nothing. Your machine-wide \
+                 skills are untouched; `topos update -g` updates those."
+            ),
+            PullReceiptScope::Machine => {
+                "Nothing to update machine-wide — no manifest or workspace feed demands anything."
+                    .to_owned()
+            }
+            PullReceiptScope::Unstated => {
+                "Nothing to update here — no manifest or profile demands anything in this directory."
+                    .to_owned()
+            }
+        };
+        return append_proposals_trailer(line, data.proposals_awaiting);
     }
     let mut up_to_date = 0usize;
     let rows: Vec<(&str, String, Vec<String>)> = data
@@ -2328,6 +2374,9 @@ pub(crate) fn pull_tty(data: &PullData, warnings: &[String], disclosures: &[Stri
         .collect();
 
     let mut out = String::new();
+    if let Some(lead) = scope.lead() {
+        out.push_str(&format!("{lead}\n"));
+    }
     let pad = rows.iter().map(|(n, ..)| n.len()).max().unwrap_or(0);
     for (name, line, extra) in &rows {
         out.push_str(&format!("{name:<pad$}  {line}\n"));
@@ -2893,6 +2942,7 @@ mod tests {
             proposals_awaiting: 2,
             notices: Vec::new(),
             sync: Vec::new(),
+            scope: None,
         };
         let out = pull_tty(&data, &[], &[]);
 
@@ -2953,6 +3003,7 @@ mod tests {
             proposals_awaiting: 0,
             notices: Vec::new(),
             sync: Vec::new(),
+            scope: None,
         };
         assert_eq!(
             pull_tty(&clean, &[], &[]),
@@ -2964,6 +3015,7 @@ mod tests {
             proposals_awaiting: 0,
             notices: Vec::new(),
             sync: Vec::new(),
+            scope: None,
         };
         assert_eq!(
             pull_tty(&empty, &[], &[]),
@@ -3022,6 +3074,7 @@ mod tests {
                 notice("verdict", Some("reject"), Some("needs a test")),
             ],
             sync: Vec::new(),
+            scope: None,
         };
         let out = pull_tty(&data, &[], &[]);
         // The verdict shows its outcome + reason, and sorts before the closure.
