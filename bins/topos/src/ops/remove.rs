@@ -8,11 +8,14 @@
 //!   that directory (topos never adopted it — deleting it is the only removal there is).
 //! - the built-in `topos` skill → the durable device opt-out (`topos add topos` brings it back).
 //!
-//! A skill a workspace delivers is refused toward the DEMAND: what a folder takes is its
-//! `topos.toml` row, what this machine takes is the global file's, and what a workspace gives you
-//! is managed on the web. Multi-skill positional; resolve ALL-OR-NONE (a batch either resolves
-//! every target or applies nothing).
+//! A skill a workspace delivers is refused toward the DEMAND — but only while a row actually
+//! claims the name: what a folder takes is its `topos.toml` row, what this machine takes is the
+//! global file's, and what a workspace gives you is managed on the web. A retained copy whose
+//! demand already ended (a GHOST awaiting the next sweep's retire) is nobody's demand, so it
+//! falls through to the describe-first permanent delete with an honest note. Multi-skill
+//! positional; resolve ALL-OR-NONE (a batch either resolves every target or applies nothing).
 
+use std::collections::HashSet;
 use std::path::PathBuf;
 
 use topos_types::results::{RemoveData, RemoveItem, RemoveKind};
@@ -47,11 +50,14 @@ pub(crate) enum RemoveOutcome {
 
 /// One resolved removal, pre-apply.
 enum Removal {
-    /// A tracked, never-published local skill → a permanent delete (sidecar entry included).
+    /// A tracked local skill no row demands → a permanent delete (sidecar entry included). For a
+    /// GHOST — a retained workspace-delivered copy whose demand already ended — the notes carry
+    /// the honest disclosure (describe-tense and applied-tense; receipts must stay true in both).
     TrackedLocal {
         skill_id: String,
         name: String,
         dirs: Vec<PathBuf>,
+        note: Option<GhostNote>,
     },
     /// An untracked copy in an agent dir → a permanent delete of that directory.
     Untracked { name: String, dir: PathBuf },
@@ -88,14 +94,22 @@ pub(crate) fn remove(
     };
 
     let universe = super::connect::build_universe_sessions(ctx, connectors.session)?;
+    let demanded = machine_demand(ctx)?;
 
     // Resolve ALL-OR-NONE.
     let mut removals = Vec::with_capacity(targets.len());
     for token in targets {
-        removals.push(classify(ctx, &universe, roots, agent_filter, token)?);
+        removals.push(classify(
+            ctx,
+            &universe,
+            &demanded,
+            roots,
+            agent_filter,
+            token,
+        )?);
     }
 
-    let mut items: Vec<RemoveItem> = removals.iter().map(describe_item).collect();
+    let mut items: Vec<RemoveItem> = removals.iter().map(|r| describe_item(r, false)).collect();
 
     // The gate: a followed CLEAN skill is a reversible per-device act — it applies immediately
     // (`--yes` an accepted no-op). Everything else keeps the two-phase describe: a permanent
@@ -155,6 +169,9 @@ pub(crate) fn remove(
     // received here) is likewise ineligible: after this exclusion the delivery reports it
     // excluded, not detached, so the advertised `follow` would answer a first-trust DESCRIBE
     // instead of the immediate re-attach only a local marker routes to.
+    // The APPLIED items re-derive so a ghost's note speaks in the right tense (the describe's
+    // "doing nothing also resolves this" would be false on a receipt for an act just performed).
+    let items: Vec<RemoveItem> = removals.iter().map(|r| describe_item(r, true)).collect();
     for removal in &removals {
         match removal {
             Removal::TrackedLocal { skill_id, dirs, .. } => {
@@ -200,11 +217,39 @@ pub(crate) fn remove(
     }))
 }
 
+/// The verbatim demand-refusal: a workspace-delivered skill whose demand still STANDS is removed
+/// by editing the demand, never by deleting the copy.
+fn delivered_refusal(name: &str) -> ClientError {
+    ClientError::InvalidArgument(format!(
+        "'{name}' is delivered from a workspace — remove the DEMAND, not the copy: `topos \
+         remove {name}` drops this folder's line for it; `topos remove -g {name}` edits your \
+         machine-wide file (switching it off here). What the workspace assigns you is managed \
+         on the web."
+    ))
+}
+
+/// Every name (and reference) the MACHINE scope still demands — the rows (bundle or `"off"`) of
+/// the same offline resolution `list` and `status` render. This is the demand-guard's key: the
+/// classic ladder only ever deletes HOME-store records, and a workspace-provenance record whose
+/// name none of these rows claim is a GHOST — its demand already ended, so refusing toward a row
+/// that does not exist would be false. Offline by construction (no dial).
+fn machine_demand(ctx: &Ctx<'_>) -> Result<HashSet<String>, ClientError> {
+    let (all, cache) = super::inventory::read_sources(ctx)?;
+    let resolved = super::inventory::resolve(ctx, &all, &cache)?;
+    let mut out = HashSet::new();
+    for row in &resolved.machine().rows {
+        out.insert(row.name.clone());
+        out.insert(row.reference.clone());
+    }
+    Ok(out)
+}
+
 /// Classify ONE target: a followed catalog skill (exclusion), a tracked-local (permanent), or an
 /// untracked agent-dir copy (permanent). A workspace / channel target is refused toward the right verb.
 fn classify(
     ctx: &Ctx<'_>,
     universe: &[resolve::WorkspaceNames],
+    demanded: &HashSet<String>,
     roots: Option<&DiscoveryRoots>,
     agent_filter: Option<&str>,
     token: &str,
@@ -223,17 +268,26 @@ fn classify(
     // An explicit `<name>@<agent>` names an untracked agent-dir copy — resolve it through discovery
     // (never a plane resource).
     if let ParsedTarget::LocalAt { name, agent } = &parsed {
-        return untracked(ctx, roots, Some(agent.as_str()), name);
+        return untracked(ctx, demanded, roots, Some(agent.as_str()), name);
     }
     // Resolve against the plane universe (SKILLS scope). A channel / workspace match is refused toward
     // the verb that acts on it.
     match resolve::resolve_one(universe, &parsed, resolve::KindScope::SKILLS)? {
-        Some(Resolution::Resource { name, .. }) => Err(ClientError::InvalidArgument(format!(
-            "'{name}' is delivered from a workspace — remove the DEMAND, not the copy: `topos \
-             remove {name}` drops this folder's line for it; `topos remove -g {name}` edits your \
-             machine-wide file (switching it off here). What the workspace assigns you is managed \
-             on the web."
-        ))),
+        Some(Resolution::Resource { name, .. }) => {
+            // The DEMAND-GUARD: the refusal fires only when a row (bundle or `"off"`) still
+            // claims the name here. A catalog knowing the name is not a demand — with no
+            // claiming row, whatever this machine retains is the classic ladder's business.
+            if demanded.contains(&name) || demanded.contains(token) {
+                return Err(delivered_refusal(&name));
+            }
+            match super::resolve_skill(ctx, &name) {
+                Ok((sid, lock)) => tracked_or_followed(ctx, demanded, sid, lock.name),
+                Err(ClientError::NoSuchSkill { .. }) => {
+                    untracked(ctx, demanded, roots, agent_filter, &name)
+                }
+                Err(e) => Err(e),
+            }
+        }
         Some(Resolution::Workspace { workspace_name, .. }) => {
             Err(ClientError::InvalidArgument(format!(
                 "'{workspace_name}' is a workspace, not a skill — `remove` takes skills off this \
@@ -243,35 +297,79 @@ fn classify(
         // Not a plane resource: the local paths — a tracked skill you `add`ed, or an untracked agent-dir
         // copy discovery knows.
         None => match super::resolve_skill(ctx, token) {
-            Ok((sid, lock)) => tracked_or_followed(ctx, sid, lock.name),
-            Err(ClientError::NoSuchSkill { .. }) => untracked(ctx, roots, agent_filter, token),
+            Ok((sid, lock)) => tracked_or_followed(ctx, demanded, sid, lock.name),
+            Err(ClientError::NoSuchSkill { .. }) => {
+                untracked(ctx, demanded, roots, agent_filter, token)
+            }
             Err(e) => Err(e),
         },
     }
 }
 
-/// A locally-tracked skill resolved by name: a followed one (with a workspace row) becomes an exclusion
-/// even when the universe read did not surface it (offline / a since-removed catalog row); a
-/// never-followed one is a permanent local delete.
-fn tracked_or_followed(ctx: &Ctx<'_>, sid: SkillId, name: String) -> Result<Removal, ClientError> {
+/// The tense-matched disclosure a GHOST removal carries (describe vs receipt — both must be true
+/// when printed).
+struct GhostNote {
+    describe: String,
+    applied: String,
+}
+
+/// A locally-tracked skill resolved by name. With workspace provenance (the delivery cache still
+/// names a workspace) the DEMAND decides: a row still claiming the name keeps the refusal toward
+/// the demand; no claiming row means the demand already ended — a GHOST — and the token falls
+/// through to the same describe-first permanent delete untracked copies ride, disclosed honestly.
+/// A never-followed one is a plain permanent local delete.
+fn tracked_or_followed(
+    ctx: &Ctx<'_>,
+    demanded: &HashSet<String>,
+    sid: SkillId,
+    name: String,
+) -> Result<Removal, ClientError> {
     let skill_id = sid.as_str().to_owned();
-    if super::followed_workspace(ctx, &skill_id).is_some() {
-        return Err(ClientError::InvalidArgument(format!(
-            "'{name}' is delivered from a workspace — remove the DEMAND, not the copy: `topos \
-             remove {name}` drops this folder's line for it; `topos remove -g {name}` edits your \
-             machine-wide file (switching it off here). What the workspace assigns you is managed \
-             on the web."
-        )));
+    let followed = super::followed_workspace(ctx, &skill_id).is_some();
+    if followed && demanded.contains(&name) {
+        return Err(delivered_refusal(&name));
     }
-    // A purely-local skill — the placement dirs to delete come from its map.
+    // The placement dirs to delete come from the record's map.
     let sp = ctx.layout.published(&sid);
-    let dirs = doc::read_map(ctx.fs, &sp.map)?
+    let map = doc::read_map(ctx.fs, &sp.map)?;
+    let dirs: Vec<PathBuf> = map
+        .as_ref()
         .map(|m| m.placements.iter().map(PathBuf::from).collect())
         .unwrap_or_default();
+    // The ghost's honest note. When the sweep would retire the copy anyway, the describe says so
+    // (doing nothing also resolves it); an adopted-in-place source dir is exactly what no sweep
+    // deletes, so that claim is withheld and the explicit-remove boundary named instead.
+    let note = followed.then(|| {
+        let adopted = map
+            .as_ref()
+            .is_some_and(|m| m.placement_state.iter().any(|s| s.adopted_source));
+        if adopted {
+            GhostNote {
+                describe: "a retained copy of an ended workspace delivery; its dir was adopted \
+                           in place, so no sweep deletes it — only an explicit remove does \
+                           (record included)"
+                    .to_owned(),
+                applied: "a retained copy of an ended workspace delivery — deleted with its \
+                          record"
+                    .to_owned(),
+            }
+        } else {
+            GhostNote {
+                describe: "a retained copy of an ended workspace delivery; the next `topos \
+                           update` retires it anyway, so doing nothing also resolves this — \
+                           applying deletes it now (record included)"
+                    .to_owned(),
+                applied: "a retained copy of an ended workspace delivery — deleted with its \
+                          record"
+                    .to_owned(),
+            }
+        }
+    });
     Ok(Removal::TrackedLocal {
         skill_id,
         name,
         dirs,
+        note,
     })
 }
 
@@ -279,6 +377,7 @@ fn tracked_or_followed(ctx: &Ctx<'_>, sid: SkillId, name: String) -> Result<Remo
 /// discovery `add` uses. A missing `$HOME` (no discovery) or a genuine miss is the uniform not-found.
 fn untracked(
     ctx: &Ctx<'_>,
+    demanded: &HashSet<String>,
     roots: Option<&DiscoveryRoots>,
     agent: Option<&str>,
     name: &str,
@@ -299,7 +398,7 @@ fn untracked(
         // The resolver's "already tracked" answer means the name IS a tracked skill — reclassify it as a
         // local delete (a bare `remove <name>` of an adopted-but-never-followed skill lands here).
         Err(ClientError::AlreadyTrackedName { .. }) => match super::resolve_skill(ctx, name) {
-            Ok((sid, lock)) => tracked_or_followed(ctx, sid, lock.name),
+            Ok((sid, lock)) => tracked_or_followed(ctx, demanded, sid, lock.name),
             Err(_) => Err(resolve::not_found(name)),
         },
         Err(ClientError::NoUntrackedSkill { .. }) | Err(ClientError::HarnessNotFound(_)) => {
@@ -309,17 +408,26 @@ fn untracked(
     }
 }
 
-/// The describe/apply row for one removal (the boundary a followed removal keeps vs a permanent delete).
-fn describe_item(removal: &Removal) -> RemoveItem {
+/// The describe/apply row for one removal (the boundary a followed removal keeps vs a permanent
+/// delete). `applied` picks the tense a ghost's note speaks in — each printed only when true.
+fn describe_item(removal: &Removal, applied: bool) -> RemoveItem {
     match removal {
-        Removal::TrackedLocal { name, dirs, .. } => RemoveItem {
+        Removal::TrackedLocal {
+            name, dirs, note, ..
+        } => RemoveItem {
             name: name.clone(),
             kind: RemoveKind::TrackedLocalPermanent,
             manifest: None,
             workspace_id: None,
             agent_dirs: dirs.iter().map(|d| d.display().to_string()).collect(),
             bytes_kept: false,
-            note: None,
+            note: note.as_ref().map(|n| {
+                if applied {
+                    n.applied.clone()
+                } else {
+                    n.describe.clone()
+                }
+            }),
         },
         Removal::Untracked { name, dir } => RemoveItem {
             name: name.clone(),
