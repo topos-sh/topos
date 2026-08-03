@@ -477,6 +477,14 @@ pub(crate) enum ClientError {
          to act on the file as it is now"
     )]
     ManifestExists { path: String },
+    /// A project-scoped `add`/`remove` found NO `topos.toml` covering the working directory.
+    /// Creation is `init`'s job (the cargo/pnpm/git precedent) — the edit is refused, never
+    /// rerouted to another scope, and the two ways out ride as executable next actions.
+    #[error(
+        "no topos.toml covers this folder — `topos init` creates one here, or add `-g` to act on \
+         your machine-wide file (~/.topos/topos.toml)"
+    )]
+    NoManifest,
     /// A terminal protocol outcome the verb does not special-case (e.g. the server's `RetryableFailure` /
     /// `Unavailable` / `PermanentFailure`), carried verbatim so the agent branches on the TRUE outcome
     /// (not a generic transport error). `retryable` selects a Retry next-action + the outcome class.
@@ -610,6 +618,8 @@ impl ClientError {
             ClientError::ManifestChanged { .. } => "MANIFEST_CHANGED",
             // A concurrent BIRTH of the same document (the file appeared after the absence check).
             ClientError::ManifestExists { .. } => "MANIFEST_EXISTS",
+            // No file to edit at the scope the invocation asked for — never a reroute to the other.
+            ClientError::NoManifest => "NO_MANIFEST",
             // The plane's fine code rides the Display message + context; the agent branches on `outcome`.
             ClientError::PlaneTerminal { .. } => "PLANE_TERMINAL",
             ClientError::UpgradeAmbiguous => "UPGRADE_AMBIGUOUS",

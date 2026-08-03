@@ -717,11 +717,23 @@ fn run_command(
             // user/agent's to verify).
             // Every adopt also records its MANIFEST line (the demand side: what this folder — or,
             // under `-g`, the person — uses); the receipt names the manifest first with the inverse.
+            //
+            // The SCOPE is resolved FIRST, before a byte moves (`ops::add_scope`): it decides both
+            // the file the row lands in and the STORE the version history belongs to — a project
+            // add's history lives in the checkout's own `.topos/`, which is the store that scope's
+            // `update` converges. With no `topos.toml` covering this folder the add refuses there
+            // and then, never adopting into a store no manifest will ask for. The row is written
+            // against that SAME resolved target — nothing is re-resolved between the custody
+            // decision and the write.
             let result = match crate::source::classify(&source) {
-                crate::source::SourceSpec::LocalPath(p) => ops::add(&ctx, &p).and_then(|mut d| {
-                    ops::note_added_path(&ctx, &mut d, &p, global)?;
-                    Ok(d)
-                }),
+                crate::source::SourceSpec::LocalPath(p) => {
+                    ops::add_scope(&ctx, global).and_then(|scope| {
+                        let sctx = ops::ctx_with_layout(&ctx, &scope.layout);
+                        let mut d = ops::add(&sctx, &p)?;
+                        ops::note_added_path_in(&ctx, &mut d, &scope.target, &p)?;
+                        Ok(d)
+                    })
+                }
                 // A bare NAME resolves against BOTH namespaces — the untracked local inventory and
                 // the connected workspaces' catalogs — so a name only the team publishes is not a
                 // dead end, and a name both carry says so on the receipt.
@@ -784,8 +796,10 @@ fn run_command(
                                 path,
                                 name,
                                 published,
-                            }) => ops::add_with_name(&ctx, &path, Some(&name)).and_then(|mut d| {
-                                ops::note_added_path(&ctx, &mut d, &path, global)?;
+                            }) => ops::add_scope(&ctx, global).and_then(|scope| {
+                                let sctx = ops::ctx_with_layout(&ctx, &scope.layout);
+                                let mut d = ops::add_with_name(&sctx, &path, Some(&name))?;
+                                ops::note_added_path_in(&ctx, &mut d, &scope.target, &path)?;
                                 // The bytes that just landed are what the disclosure judges
                                 // against the team's current version.
                                 d.published_match =
@@ -808,19 +822,20 @@ fn run_command(
                         // The `-a` selection is a standing fact, not a one-run choice: it rides
                         // the row so the next update keeps the copy where it was asked for.
                         let chosen: Vec<String> = single_agent.iter().cloned().collect();
-                        ops::add_remote(
-                            &ctx,
-                            &git,
-                            &spec,
-                            &roots,
-                            &ops::AddRemoteOpts {
-                                skill: single_skill,
-                                harness: single_agent.clone(),
-                                global,
-                            },
-                        )
-                        .and_then(|mut d| {
-                            ops::note_added_remote(&ctx, &mut d, global, &chosen)?;
+                        ops::add_scope(&ctx, global).and_then(|scope| {
+                            let sctx = ops::ctx_with_layout(&ctx, &scope.layout);
+                            let mut d = ops::add_remote(
+                                &sctx,
+                                &git,
+                                &spec,
+                                &roots,
+                                &ops::AddRemoteOpts {
+                                    skill: single_skill,
+                                    harness: single_agent.clone(),
+                                    global,
+                                },
+                            )?;
+                            ops::note_added_remote(&ctx, &mut d, &scope.target, &chosen)?;
                             // The DEDUP courtesy: when a connected workspace already governs this
                             // source (its catalog's upstream provenance matches), the receipt
                             // SUGGESTS the governed reference — visible, never blocking (the

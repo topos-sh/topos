@@ -1,18 +1,22 @@
 //! The MANIFEST half of `add` / `remove` — which `topos.toml` a verb edits, how that file is
 //! BORN, and the row-level recording every receipt names.
 //!
-//! Two scopes, unblended. The GLOBAL file (`~/.topos/topos.toml`, the `-g` arm) is this machine's
-//! personal recipe: absent, it behaves exactly as if it held one feed row per connected
+//! Two scopes, unblended, and no verb crosses the line on its own: an edit acts on WHERE YOU
+//! STAND, `-g` means the machine. The GLOBAL file (`~/.topos/topos.toml`, the `-g` arm) is this
+//! machine's personal recipe: absent, it behaves exactly as if it held one feed row per connected
 //! workspace; present, it is the COMPLETE recipe. A PROJECT file is a repo fact — the NEAREST
-//! `topos.toml` covering the working directory, else a fresh one at the enclosing git root (the
-//! npm-init precedent: the file should travel with the repo).
+//! `topos.toml` covering the working directory, and nothing else. With none in reach a
+//! project-scoped edit REFUSES ([`ClientError::NoManifest`]): creating the file is `topos init`'s
+//! job (the cargo/pnpm/git precedent), and rerouting the edit to the other scope would write in a
+//! file nobody named.
 //!
 //! FILE BIRTH is one rule, everywhere: any path topos brings into existence is written
 //! MATERIALIZED first — the global file gets the header plus one feed row per connected
 //! workspace (spelling out what an absent file already means), a project file the commented
 //! template — and only THEN does the requested edit run. A file a person wrote by hand is never
 //! materialized. A born file STAYS even when a consent gate refuses the act that birthed it, and
-//! the receipt says so.
+//! the receipt says so. Only `-g` births a file this way now: the project scope has nothing to
+//! birth, because it refuses when there is nothing to edit.
 //!
 //! `remove` is the strict inverse: it edits FILES ONLY (machine facts). What a workspace GIVES a
 //! person is a server fact, managed on the web — the CLI's one machine-local negative is the
@@ -152,6 +156,19 @@ pub(crate) fn reference_shaped(token: &str) -> bool {
     token.contains('/')
 }
 
+/// Whether a token can ONLY be a manifest row's spelling: a reference (see [`reference_shaped`])
+/// or a PATH (`./x`, `../x`, `~/x`, `/abs`, the adopt-in-place spelling a row records). Such a
+/// token names nothing the classic tracked/untracked ladder knows, so with no manifest in reach it
+/// refuses toward the scopes instead of falling through to a "no such skill".
+fn row_spelled(token: &str) -> bool {
+    let t = token.trim();
+    reference_shaped(t)
+        || t.starts_with("./")
+        || t.starts_with("../")
+        || t.starts_with("~/")
+        || t.starts_with('/')
+}
+
 /// The typed refusal for an `@ws` sugar with more than one connected host — the sugar cannot
 /// pick, so the message names every host and the full spelling.
 pub(super) fn several_hosts(ctx: &Ctx<'_>, token: &str) -> Option<ClientError> {
@@ -194,9 +211,10 @@ pub(crate) fn global_target(ctx: &Ctx<'_>) -> EditTarget {
     }
 }
 
-/// The PROJECT target: the NEAREST `topos.toml` covering the working directory, else a fresh one
-/// at the enclosing git root (else the working directory itself). `None` when no working
-/// directory is known — the caller skips the edit honestly rather than guessing a folder.
+/// The PROJECT target: the NEAREST `topos.toml` covering the working directory — nothing else.
+/// `None` when no manifest covers the cwd (or no working directory is known); every verb acts on
+/// where it stands, and a file that does not exist is `topos init`'s to create (the cargo/pnpm/git
+/// precedent), never an `add`'s to invent somewhere the person did not name.
 ///
 /// # Errors
 /// An [`crate::fs_seam::FsOps`] read failure while walking.
@@ -207,31 +225,9 @@ pub(crate) fn project_target(ctx: &Ctx<'_>) -> Result<Option<EditTarget>, Client
     let Some(cwd) = roots.cwd.as_deref() else {
         return Ok(None);
     };
-    if let Some(dir) = scopes::nearest_manifest_dir(ctx.fs, cwd, Some(&roots.home)) {
-        return Ok(Some(EditTarget {
-            path: dir.join(MANIFEST_FILE),
-            dir,
-            scope: ManifestScope::Project,
-        }));
-    }
-    let dir = init_dir(ctx.fs, cwd);
-    // The project walk STOPS below `$HOME` (a manifest there would shadow the personal scope
-    // confusingly), so a project edit must never land AT or above the home directory — the file
-    // would be dead on arrival, read by nothing. Route it to the global file instead (the receipt
-    // names that path, so the routing is disclosed).
-    //
-    // Both sides are canonicalized the SAME way before comparing (canonicalizing only one makes a
-    // symlinked prefix — macOS `/var` → `/private/var` — a spurious match), AND the route fires
-    // only when the walk from cwd would actually stop at $HOME (cwd at/under home): with cwd
-    // ABOVE home, the file at `dir` is on the live upward path, never dead.
-    let dir_c = canonical_or(&dir);
-    let home_c = canonical_or(&roots.home);
-    let cwd_c = canonical_or(cwd);
-    let cwd_at_or_under_home = cwd_c == home_c || cwd_c.starts_with(&home_c);
-    let edit_at_or_above_home = dir_c == home_c || home_c.starts_with(&dir_c);
-    if cwd_at_or_under_home && edit_at_or_above_home {
-        return Ok(Some(global_target(ctx)));
-    }
+    let Some(dir) = scopes::nearest_manifest_dir(ctx.fs, cwd, Some(&roots.home)) else {
+        return Ok(None);
+    };
     Ok(Some(EditTarget {
         path: dir.join(MANIFEST_FILE),
         dir,
@@ -239,7 +235,7 @@ pub(crate) fn project_target(ctx: &Ctx<'_>) -> Result<Option<EditTarget>, Client
     }))
 }
 
-/// The target a scope flag selects (`-g` = the global file).
+/// The target a scope flag selects (`-g` = the global file, always resolvable).
 ///
 /// # Errors
 /// As [`project_target`].
@@ -250,18 +246,34 @@ pub(crate) fn edit_target(ctx: &Ctx<'_>, global: bool) -> Result<Option<EditTarg
     project_target(ctx)
 }
 
-/// The folder a fresh project manifest is created in when none is in reach: the enclosing git
-/// repository's root (npm-init precedent — the file travels with the repo), else the working
-/// directory itself.
-pub(crate) fn init_dir(fs: &dyn crate::fs_seam::FsOps, cwd: &Path) -> PathBuf {
-    let mut dir = Some(cwd.to_path_buf());
-    while let Some(d) = dir {
-        if fs.exists(&d.join(".git")) {
-            return d;
-        }
-        dir = d.parent().map(Path::to_path_buf);
+/// The SCOPE an `add` acts in, decided BEFORE any byte moves: the manifest file the row lands in,
+/// and the STORE that scope's version history belongs to.
+///
+/// Custody follows the scope, not the machine: a project add's history belongs to the checkout's
+/// own `.topos/state/<user>/` — the store that scope's `update` converges — so the decision has to
+/// be made before the adopt, never after history has already landed in the home store. `-g` keeps
+/// the home store and the machine-wide file.
+///
+/// # Errors
+/// [`ClientError::NoManifest`] when no `topos.toml` covers the working directory and `-g` was not
+/// asked for — refused before anything lands, never rerouted to the other scope; a filesystem
+/// failure minting the project store.
+pub(crate) fn add_scope(ctx: &Ctx<'_>, global: bool) -> Result<AddScope, ClientError> {
+    if global {
+        return Ok(AddScope {
+            target: global_target(ctx),
+            layout: ctx.layout.clone(),
+        });
     }
-    cwd.to_path_buf()
+    let target = project_target(ctx)?.ok_or(ClientError::NoManifest)?;
+    let layout = crate::sidecar::ensure_project_store(ctx.fs, &target.dir)?;
+    Ok(AddScope { target, layout })
+}
+
+/// Where an `add` records its row and where it keeps the bytes' history — see [`add_scope`].
+pub(crate) struct AddScope {
+    pub target: EditTarget,
+    pub layout: crate::sidecar::Layout,
 }
 
 /// A path's canonical form, best-effort: symlinks resolved when the path exists, else the path
@@ -550,41 +562,41 @@ fn restore_add(reference: &str, pin: Option<&str>, global: bool) -> Vec<String> 
     argv
 }
 
-/// Record a workspace/forge/local reference in the manifest a scope flag selects. `pin` writes
-/// the explicit version row; `None` tracks what the reference currently serves.
+/// Record a workspace/forge/local reference in `target`. `pin` writes the explicit version row;
+/// `None` tracks what the reference currently serves.
 ///
 /// # Errors
-/// As [`write_row`]; `Ok(())` with no target (no working directory) — the caller's adopt already
-/// landed, and guessing a folder would be worse than recording nothing.
-pub(crate) fn note_added(
+/// As [`write_row`].
+pub(crate) fn note_added_in(
     ctx: &Ctx<'_>,
     data: &mut AddData,
+    target: &EditTarget,
     reference: &str,
     pin: Option<&str>,
-    global: bool,
 ) -> Result<(), ClientError> {
-    let Some(target) = edit_target(ctx, global)? else {
-        return Ok(());
-    };
     let value = match pin {
         Some(p) => EntryValue::Pin(p.to_owned()),
         None => EntryValue::Star,
     };
-    write_row(ctx, data, &target, reference, &value)
+    write_row(ctx, data, target, reference, &value)
 }
 
-/// Record a PATH-adopted bundle: the project manifest with the dir-relative spelling when the
-/// source sits under its folder (the committed, travels-with-the-repo form); else — an
-/// out-of-tree source, or an explicit `-g` — the GLOBAL file with the absolute path (machine-local
-/// by nature).
+/// Record a PATH-adopted bundle in `target`: the dir-relative `./` spelling when the source sits
+/// under the manifest's own folder (the committed, travels-with-the-repo form), else the ABSOLUTE
+/// path — written into that same file either way.
+///
+/// The scope is the CALLER's (the folder it stands in, or `-g`) and is never rerouted here: an
+/// out-of-tree source under a project manifest is a machine-local fact spelled absolutely, in the
+/// file the person asked for. Sending it to the global file instead used to edit a document
+/// nobody had named.
 ///
 /// # Errors
 /// As [`write_row`].
-pub(crate) fn note_added_path(
+pub(crate) fn note_added_path_in(
     ctx: &Ctx<'_>,
     data: &mut AddData,
+    target: &EditTarget,
     source: &Path,
-    global: bool,
 ) -> Result<(), ClientError> {
     // Canonicalize best-effort (symlinks resolve; a vanished dir keeps the typed spelling).
     let source_abs = source.canonicalize().unwrap_or_else(|_| {
@@ -598,19 +610,34 @@ pub(crate) fn note_added_path(
                 .unwrap_or_else(|| source.to_path_buf())
         }
     });
-    if !global && let Some(target) = project_target(ctx)? {
-        // Compare BOTH paths canonically: a source under the manifest's folder ALWAYS records the
-        // dir-relative `./path`, never an absolute one (the file itself still lands at
-        // `target.path` — the dir is canonicalized only to compute the spelling).
-        let dir_c = canonical_or(&target.dir);
-        if source_abs.starts_with(&dir_c) && target.scope == ManifestScope::Project {
-            let reference = path_reference(&dir_c, &source_abs);
-            return write_row(ctx, data, &target, &reference, &EntryValue::Star);
-        }
-    }
-    let reference = source_abs.display().to_string();
-    let target = global_target(ctx);
-    write_row(ctx, data, &target, &reference, &EntryValue::Star)
+    // Compare BOTH paths canonically: a source under the manifest's folder ALWAYS records the
+    // dir-relative `./path`, never an absolute one (the file itself still lands at `target.path` —
+    // the dir is canonicalized only to compute the spelling).
+    let dir_c = canonical_or(&target.dir);
+    let reference = if target.scope == ManifestScope::Project && source_abs.starts_with(&dir_c) {
+        path_reference(&dir_c, &source_abs)
+    } else {
+        source_abs.display().to_string()
+    };
+    write_row(ctx, data, target, &reference, &EntryValue::Star)
+}
+
+/// [`note_added_path_in`] resolving the target from the scope flag — the BACKSTOP for a caller
+/// that has not already resolved it. The composition root always has (`add_scope`, which refuses
+/// before a byte moves), so this exists for the fixture rig and its own tests.
+///
+/// # Errors
+/// [`ClientError::NoManifest`] when no `topos.toml` covers the working directory and `-g` was not
+/// asked for; otherwise as [`write_row`].
+#[cfg(any(test, feature = "test-fixtures"))]
+pub(crate) fn note_added_path(
+    ctx: &Ctx<'_>,
+    data: &mut AddData,
+    source: &Path,
+    global: bool,
+) -> Result<(), ClientError> {
+    let target = edit_target(ctx, global)?.ok_or(ClientError::NoManifest)?;
+    note_added_path_in(ctx, data, &target, source)
 }
 
 /// The manifest spelling of an adopted local path: relative to the manifest's folder when the
@@ -644,7 +671,7 @@ pub(super) fn is_commit(s: &str) -> bool {
 pub(crate) fn note_added_remote(
     ctx: &Ctx<'_>,
     data: &mut AddData,
-    global: bool,
+    target: &EditTarget,
     harness: &[String],
 ) -> Result<(), ClientError> {
     let Some(origin) = data.origin.clone() else {
@@ -666,11 +693,8 @@ pub(crate) fn note_added_remote(
         _ => None,
     };
     if harness.is_empty() {
-        return note_added(ctx, data, &reference, pin, global);
+        return note_added_in(ctx, data, target, &reference, pin);
     }
-    let Some(target) = edit_target(ctx, global)? else {
-        return Ok(());
-    };
     // The fields must be LEGAL for the reference's own shape — a whole-repo row takes `harness`
     // and nothing else, so a pinned repo-root import has no spelling that carries both. The PIN
     // wins there (it decides which bytes; the selection only decides where they sit) and the
@@ -680,7 +704,7 @@ pub(crate) fn note_added_remote(
         .map_err(|e| ClientError::InvalidArgument(e.message))?;
     let version_legal = crate::manifest::document::legal_fields(&shape).contains(&"version");
     if pin.is_some() && !version_legal {
-        note_added(ctx, data, &reference, pin, global)?;
+        note_added_in(ctx, data, target, &reference, pin)?;
         push_note(
             data,
             format!(
@@ -696,7 +720,7 @@ pub(crate) fn note_added_remote(
         harness: Some(harness.to_vec()),
         ..Default::default()
     });
-    write_row(ctx, data, &target, &reference, &value)
+    write_row(ctx, data, target, &reference, &value)
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -942,8 +966,11 @@ pub(crate) fn off_row_for(ctx: &Ctx<'_>, token: &str) -> Result<Option<String>, 
 /// manifest row (the caller falls through to the classic tracked/untracked removal).
 ///
 /// # Errors
-/// [`ClientError::InvalidArgument`] on a mixed batch (some tokens are manifest rows, some are
-/// not), or when a token is a GLOBAL row spelled without `-g`; a filesystem failure.
+/// [`ClientError::NoManifest`] when no manifest covers this folder and a token is spelled as a
+/// manifest ROW (a reference, or a path) — such a token names nothing else, so the classic ladder's
+/// answers would name the wrong fix; [`ClientError::InvalidArgument`] on a mixed batch (some tokens
+/// are manifest rows, some are not), or when a token is a GLOBAL row spelled without `-g`; a
+/// filesystem failure.
 pub(crate) fn remove_project(
     ctx: &Ctx<'_>,
     connect: &SessionConnect<'_>,
@@ -952,16 +979,18 @@ pub(crate) fn remove_project(
     yes: bool,
 ) -> Result<Option<RemoveOutcome>, ClientError> {
     let Some(target) = project_target(ctx)? else {
+        // No file here to edit. A ROW-SPELLED token (a reference, or a path) only ever means a
+        // manifest line, so it refuses toward the two scopes rather than falling through to the
+        // classic ladder, whose "no such skill" would name the wrong fix. A BARE NAME still falls
+        // through — an untracked copy, the built-in, or the machine-delivered refusal.
+        if tokens.iter().any(|t| row_spelled(t)) {
+            return Err(ClientError::NoManifest);
+        }
         return Ok(None);
     };
     // Held across the resolve AND the apply — see [`remove_global`].
     let _guard = lock_manifest(ctx, &target.path)?;
     let arms = resolve_arms(ctx, connect, &target, tokens, via)?;
-    if target.scope == ManifestScope::Global && arms.iter().all(Option::is_none) {
-        // The home-routing guard sent this edit to the global file — a bare `remove` there is
-        // still a file edit, but it must not silently claim a token the classic removal owns.
-        return Ok(None);
-    }
     if arms.iter().all(Option::is_none) {
         // Nothing here claims any token — but a GLOBAL row of that name is a near-miss worth
         // naming rather than answering "no such skill" through the classic path.
@@ -1207,8 +1236,8 @@ fn resolve_one(
         0 => Ok(None),
         1 => Ok(Some(found.remove(0).arm)),
         // The candidates are lines of THIS target's file, so the offered re-spellings must resolve
-        // against the same one: `-g` where this edit is the machine-wide file (including the
-        // home-routed project edit, which lands there too), bare where it is this folder's.
+        // against the same one: `-g` where this edit is the machine-wide file, bare where it is
+        // this folder's.
         _ => Err(ambiguous(
             token,
             seen,

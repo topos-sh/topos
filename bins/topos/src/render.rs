@@ -207,6 +207,20 @@ fn next_actions(command: &str, argv: &[String], err: &ClientError) -> Vec<NextAc
                 "--json".into(),
             ],
         )],
+        // No `topos.toml` covers this folder: the two ways out are the two SCOPES, and neither is
+        // guessed at. Creating the file here is `init`'s job (the cargo/pnpm/git precedent); the
+        // other is this very invocation aimed at the machine-wide file — rebuilt from the argv, so
+        // nothing about the request is lost but the scope it could not resolve.
+        ClientError::NoManifest => vec![
+            crate::actions::next_action(
+                ActionCode::from("INIT_PROJECT_MANIFEST".to_owned()),
+                vec!["topos".into(), "init".into()],
+            ),
+            crate::actions::next_action(
+                ActionCode::from("RETRY_MACHINE_WIDE".to_owned()),
+                retry_machine_wide(command, argv),
+            ),
+        ],
         // "upgrade topos" in prose is `topos self-update` structurally.
         ClientError::UnknownSchemaVersion { .. } => vec![crate::actions::next_action(
             ActionCode::from("UPDATE_CLI".to_owned()),
@@ -332,6 +346,26 @@ fn is_lone_target_invocation(argv: &[String]) -> bool {
         }
     }
     verb_seen && positionals == 1
+}
+
+/// The refused invocation re-spelled at the MACHINE scope — the user's OWN argv with `-g` inserted
+/// right after the verb, so the retry is the whole of what was asked with only the scope changed.
+/// The verb is the first non-flag token, however it was spelled; `--json` is filtered out (the
+/// agent surface appends its own, and the TTY hint drops it anyway). An argv with no verb in it
+/// (or none at all) falls back to the bare `topos <command> -g`.
+fn retry_machine_wide(command: &str, argv: &[String]) -> Vec<String> {
+    let mut rest: Vec<String> = argv
+        .iter()
+        .filter(|t| t.as_str() != "--json")
+        .cloned()
+        .collect();
+    let Some(verb_at) = rest.iter().position(|t| !t.starts_with('-')) else {
+        return vec!["topos".to_owned(), command.to_owned(), "-g".to_owned()];
+    };
+    rest.insert(verb_at + 1, "-g".to_owned());
+    let mut out = vec!["topos".to_owned()];
+    out.extend(rest);
+    out
 }
 
 /// The inventory read every name-resolution refusal offers: what is adoptable here, machine-readable.

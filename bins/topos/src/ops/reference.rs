@@ -8,10 +8,12 @@
 //! resolves through exactly that session, and a workspace this machine is not logged into refuses
 //! toward `topos login`.
 //!
-//! The two SCOPES are unblended: without `-g` the row lands in the nearest project `topos.toml`
-//! (created at the enclosing git root when none is in reach); with `-g` it lands in this machine's
-//! global file, whose absence means "one feed row per connected workspace" — so a bare `add -g X`
-//! of something the feed already delivers writes NOTHING and says so.
+//! The two SCOPES are unblended: without `-g` the row lands in the NEAREST project `topos.toml`
+//! covering the working directory — and with none in reach the add REFUSES
+//! ([`ClientError::NoManifest`]: `topos init` creates one here, `-g` acts on the machine), never
+//! creating a file somewhere nobody named. With `-g` it lands in this machine's global file, whose
+//! absence means "one feed row per connected workspace" — so a bare `add -g X` of something the
+//! feed already delivers writes NOTHING and says so.
 //!
 //! One CONSENT gate lives here: a git origin this MACHINE's trust registry (`crate::forge_trust`,
 //! the home sidecar) has not granted is fetched read-only, described (what it holds, what would be
@@ -278,11 +280,7 @@ fn add_workspace(
     }
 
     let Some(target) = medit::project_target(ctx)? else {
-        return Err(ClientError::InvalidArgument(
-            "cannot resolve the current directory — run `topos add` inside the folder the \
-             manifest should govern, or use `-g` for your machine-wide file"
-                .into(),
-        ));
+        return Err(ClientError::NoManifest);
     };
     medit::write_row(ctx, &mut data, &target, &resolved.canonical, &value)?;
     Ok(finish_workspace(ctx, connect, data, &resolved))
@@ -460,12 +458,10 @@ fn add_forge(
             "`{host}` sources are not fetchable yet — github.com is"
         )));
     }
+    // The `-g` target always resolves; a project one refuses when no `topos.toml` covers this
+    // folder — BEFORE the fetch, so an import never lands bytes no file will ask for.
     let Some(target) = medit::edit_target(ctx, global)? else {
-        return Err(ClientError::InvalidArgument(
-            "cannot resolve the current directory — run `topos add` inside the folder the \
-             manifest should govern, or use `-g` for your machine-wide file"
-                .into(),
-        ));
+        return Err(ClientError::NoManifest);
     };
     let Some(git) = git else {
         return Err(ClientError::InvalidArgument(
@@ -741,12 +737,10 @@ pub(crate) fn add_forge_selected(
                 .into(),
         ));
     };
+    // Same scope rule as every other arm: `-g` always resolves, a project one refuses when no
+    // `topos.toml` covers this folder — before the fetch, before any member lands.
     let Some(target) = medit::edit_target(ctx, global)? else {
-        return Err(ClientError::InvalidArgument(
-            "cannot resolve the current directory — run `topos add` inside the folder the \
-             manifest should govern, or use `-g` for your machine-wide file"
-                .into(),
-        ));
+        return Err(ClientError::NoManifest);
     };
     let Some(roots) = discovery_roots(ctx, &target) else {
         return Err(ClientError::InvalidArgument(
@@ -863,7 +857,7 @@ pub(crate) fn add_forge_selected(
             // path — carrying the WHOLE harness selection (so the second combination of one
             // skill rewrites the identical row rather than narrowing it) and the same dedup
             // courtesy, judged against ITS resolved subdir.
-            medit::note_added_remote(ctx, &mut data, global, &chosen)?;
+            medit::note_added_remote(ctx, &mut data, &target, &chosen)?;
             let imported_subdir = data.origin.as_ref().and_then(|o| o.subdir.clone());
             data.governed_copy = super::add::governed_copy_suggestion(
                 ctx,

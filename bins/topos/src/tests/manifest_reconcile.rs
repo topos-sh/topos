@@ -6120,6 +6120,14 @@ fn a_bare_name_subscribe_records_the_canonical_row_and_its_inverse() {
         panic!("nothing local carries the name");
     };
 
+    // With NO manifest covering this folder the subscribe refuses toward the two scopes — it
+    // never invents a file. `topos init` is what creates one.
+    match ops::add_reference(&ctx, &connect(&plane, &dir), None, &reference, false, false) {
+        Err(e) => assert_eq!(e.code(), "NO_MANIFEST"),
+        Ok(_) => panic!("no topos.toml covers this folder — the subscribe must refuse"),
+    }
+    ops::init(&ctx, false).expect("the folder's manifest");
+
     // The composition root's own hand-off: the resolved reference goes through the ORDINARY
     // reference arm, so the row, the delivery, and the receipt shape are the spelled-out ones.
     let mut data =
@@ -6287,4 +6295,471 @@ fn a_read_catalog_clears_the_cache_row_it_no_longer_carries() {
         ops::BareAddPlan::Adopt { published, .. } => assert!(published.is_none()),
         other => panic!("a local copy adopts in place: {other:?}"),
     }
+}
+
+// =================================================================================================
+// The SCOPE line: every verb acts on WHERE YOU STAND, `-g` means the machine, and no verb crosses
+// that line on its own.
+// =================================================================================================
+
+/// A one-file skill source at `dir` — the adopt-in-place fixture.
+fn skill_source(dir: &std::path::Path, body: &[u8]) {
+    std::fs::create_dir_all(dir).unwrap();
+    std::fs::write(dir.join("SKILL.md"), body).unwrap();
+}
+
+/// The composition root's OWN path-adopt sequence, in one call (mirrors `app.rs`): the scope is
+/// resolved BEFORE any byte moves, the adopt runs against that scope's store, and the row is
+/// written into the SAME resolved target — never re-resolved in between.
+fn scoped_path_add(
+    ctx: &Ctx<'_>,
+    source: &std::path::Path,
+    global: bool,
+) -> Result<topos_types::results::AddData, ClientError> {
+    let scope = ops::add_scope(ctx, global)?;
+    let sctx = ops::ctx_with_layout(ctx, &scope.layout);
+    let mut data = ops::add(&sctx, source)?;
+    ops::note_added_path_in(ctx, &mut data, &scope.target, source)?;
+    Ok(data)
+}
+
+/// [`FakeDirectory`] that also ANSWERS `me` — the one read the resolver universe needs before a
+/// workspace's names exist at all. (The bare fake leaves `me` absent on purpose: a publish's
+/// post-landing read is best-effort there.)
+#[derive(Clone)]
+struct NamedDirectory(FakeDirectory);
+impl DirectorySource for NamedDirectory {
+    fn me(&self, ws: &str) -> Result<WireMe, ClientError> {
+        Ok(WireMe {
+            workspace_id: ws.to_owned(),
+            name: WS_NAME.to_owned(),
+            display_name: "Engineering".to_owned(),
+            address: format!("{HOST}/{WS_NAME}"),
+            principal: "u_test".to_owned(),
+            role: "member".to_owned(),
+            invited_by: None,
+            session_status: Some(SESSION_ACTIVE.to_owned()),
+            link_status: SESSION_ACTIVE.to_owned(),
+        })
+    }
+    fn channels_index(&self, ws: &str) -> Result<WireChannelIndex, ClientError> {
+        self.0.channels_index(ws)
+    }
+    fn skills_index(&self, ws: &str) -> Result<WireSkillIndex, ClientError> {
+        self.0.skills_index(ws)
+    }
+    fn proposals_index(&self, ws: &str) -> Result<WireProposalIndex, ClientError> {
+        self.0.proposals_index(ws)
+    }
+    fn skill_log(&self, ws: &str, s: &str) -> Result<WireSkillLog, ClientError> {
+        self.0.skill_log(ws, s)
+    }
+    fn reach(&self, ws: &str, s: &str) -> Result<WireReach, ClientError> {
+        self.0.reach(ws, s)
+    }
+    fn channel_place(&self, ws: &str, c: &str, s: &str) -> Result<(), ClientError> {
+        self.0.channel_place(ws, c, s)
+    }
+    fn channel_unplace(&self, ws: &str, c: &str, s: &str) -> Result<(), ClientError> {
+        self.0.channel_unplace(ws, c, s)
+    }
+    fn protect_skill(&self, ws: &str, s: &str, l: &str) -> Result<(), ClientError> {
+        self.0.protect_skill(ws, s, l)
+    }
+    fn protect_channel(&self, ws: &str, c: &str, l: &str) -> Result<(), ClientError> {
+        self.0.protect_channel(ws, c, l)
+    }
+    fn ack_notices(&self, ws: &str, ids: &[String]) -> Result<(), ClientError> {
+        self.0.ack_notices(ws, ids)
+    }
+}
+
+/// One error's next actions as `(code, argv)` pairs — the machine surface of a refusal.
+fn scope_ways_out(command: &str, argv: &[&str], err: &ClientError) -> Vec<(String, Vec<String>)> {
+    let argv: Vec<String> = argv.iter().map(|t| (*t).to_owned()).collect();
+    crate::render::err_envelope(command, &argv, err)
+        .next_actions
+        .into_iter()
+        .map(|a| (a.code.as_str().to_owned(), a.argv))
+        .collect()
+}
+
+#[test]
+fn a_bare_edit_never_writes_the_machine_file_and_a_g_edit_never_a_project_one() {
+    let rig = Rig::new("zq-scope-property");
+    let proj = project("zq-scope-property-proj", "[bundles]\n");
+    let ctx = rig.ctx_at(Some(&proj.0));
+    let global_path = rig.layout().home().join(crate::manifest::MANIFEST_FILE);
+    let project_path = proj.0.join(crate::manifest::MANIFEST_FILE);
+
+    // BARE: the row lands in THIS folder's file, and the machine-wide file is never even born.
+    let inside = proj.0.join("zq-inside-src");
+    skill_source(&inside, b"# zq-inside\n");
+    let added = scoped_path_add(&ctx, &inside, false).unwrap();
+    assert_eq!(
+        added.manifest.as_deref(),
+        Some(project_path.to_str().unwrap())
+    );
+    assert_eq!(added.reference.as_deref(), Some("./zq-inside-src"));
+    assert!(
+        !global_path.exists(),
+        "a bare add never touches the machine-wide file"
+    );
+
+    // `-g`: the row lands in the machine-wide file, and THIS folder's is byte-identical after.
+    let outside = rig.work.0.join("zq-outside-src");
+    skill_source(&outside, b"# zq-outside\n");
+    let before = std::fs::read_to_string(&project_path).unwrap();
+    let g_added = scoped_path_add(&ctx, &outside, true).unwrap();
+    assert_eq!(
+        g_added.manifest.as_deref(),
+        Some(global_path.to_str().unwrap())
+    );
+    assert_eq!(
+        std::fs::read_to_string(&project_path).unwrap(),
+        before,
+        "a `-g` add never touches a project file"
+    );
+    let global_text = std::fs::read_to_string(&global_path).unwrap();
+    assert!(
+        global_text.contains(outside.to_str().unwrap()),
+        "{global_text}"
+    );
+
+    // The INVERSES obey the same line: each removal edits only the file its scope names.
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let plane = FakePlane::new(log);
+    let dir = FakeDirectory::new(Vec::new(), Vec::new());
+    let session_connect = connect(&plane, &dir);
+    let global_before = std::fs::read_to_string(&global_path).unwrap();
+    ops::remove_project(
+        &ctx,
+        &session_connect,
+        &["./zq-inside-src".to_owned()],
+        None,
+        true,
+    )
+    .unwrap()
+    .expect("the project row is a manifest arm");
+    assert!(
+        !std::fs::read_to_string(&project_path)
+            .unwrap()
+            .contains("zq-inside-src"),
+        "the project row is gone"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&global_path).unwrap(),
+        global_before,
+        "the project remove never touched the machine-wide file"
+    );
+
+    let project_before = std::fs::read_to_string(&project_path).unwrap();
+    ops::remove_global(
+        &ctx,
+        &session_connect,
+        &[outside.to_str().unwrap().to_owned()],
+        None,
+        true,
+    )
+    .unwrap();
+    assert!(
+        !std::fs::read_to_string(&global_path)
+            .unwrap()
+            .contains("zq-outside-src"),
+        "the machine-wide row is gone"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&project_path).unwrap(),
+        project_before,
+        "the `-g` remove never touched a project file"
+    );
+}
+
+#[test]
+fn a_project_add_with_no_manifest_refuses_and_lands_nothing() {
+    let rig = Rig::new("zq-nomanifest-add");
+    // A folder no `topos.toml` covers — and no `.git` either, so nothing invents a repo root.
+    let bare = Scratch::new("zq-nomanifest-cwd");
+    let ctx = rig.ctx_at(Some(&bare.0));
+    let src = bare.0.join("zq-nomanifest-src");
+    skill_source(&src, b"# zq-nomanifest\n");
+
+    let err = scoped_path_add(&ctx, &src, false).unwrap_err();
+    assert_eq!(err.code(), "NO_MANIFEST");
+    // Nothing landed: no manifest at either scope, no project store, no store entry.
+    assert!(!bare.0.join(crate::manifest::MANIFEST_FILE).exists());
+    assert!(
+        !rig.layout()
+            .home()
+            .join(crate::manifest::MANIFEST_FILE)
+            .exists()
+    );
+    assert!(
+        !bare.0.join(".topos").exists(),
+        "the project store is never minted by a refused add"
+    );
+    assert!(
+        std::fs::read_dir(rig.layout().skills_dir())
+            .map(|d| d.count())
+            .unwrap_or(0)
+            == 0,
+        "the home store holds nothing"
+    );
+
+    // The two ways out ride as executable actions, and the retry is the caller's OWN invocation
+    // with `-g` inserted after the verb (`--json` filtered out — the surfaces append their own).
+    assert_eq!(
+        scope_ways_out("add", &["add", "./zq-nomanifest-src", "--json"], &err),
+        vec![
+            (
+                "INIT_PROJECT_MANIFEST".to_owned(),
+                vec!["topos".to_owned(), "init".to_owned()]
+            ),
+            (
+                "RETRY_MACHINE_WIDE".to_owned(),
+                vec![
+                    "topos".to_owned(),
+                    "add".to_owned(),
+                    "-g".to_owned(),
+                    "./zq-nomanifest-src".to_owned()
+                ]
+            ),
+        ]
+    );
+
+    // `-g` is not refused — the machine-wide file is always resolvable, and is BORN by the add.
+    let mut added = scoped_path_add(&ctx, &src, true).unwrap();
+    assert_eq!(
+        added.manifest.as_deref(),
+        Some(
+            rig.layout()
+                .home()
+                .join(crate::manifest::MANIFEST_FILE)
+                .to_str()
+                .unwrap()
+        )
+    );
+
+    // The row-write BACKSTOP refuses identically for a caller that skipped the scope resolve —
+    // the rule lives in one place, not only at the composition root.
+    match ops::note_added_path(&ctx, &mut added, &src, false) {
+        Err(e) => assert_eq!(e.code(), "NO_MANIFEST"),
+        Ok(()) => panic!("the project scope has no file to record into"),
+    }
+}
+
+#[test]
+fn a_reference_verb_with_no_manifest_refuses_while_a_bare_name_falls_through() {
+    let (rig, plane, dir, _v) = bare_rig("zq-nomanifest-ref");
+    let bare = Scratch::new("zq-nomanifest-ref-cwd");
+    let ctx = rig.ctx_at(Some(&bare.0));
+    let session_connect = connect(&plane, &dir);
+
+    // A workspace reference is a manifest ROW — with no file to hold it, the add refuses.
+    match ops::add_reference(
+        &ctx,
+        &session_connect,
+        None,
+        &format!("@{WS_NAME}/{BARE}"),
+        false,
+        false,
+    ) {
+        Err(e) => assert_eq!(e.code(), "NO_MANIFEST"),
+        Ok(_) => panic!("no topos.toml covers this folder"),
+    }
+    // …and with `-g` the same reference applies against the machine-wide file.
+    match ops::add_reference(
+        &ctx,
+        &session_connect,
+        None,
+        &format!("@{WS_NAME}/{BARE}"),
+        true,
+        false,
+    ) {
+        Ok(ops::AddRefOutcome::Applied(d)) => {
+            assert_eq!(
+                d.reference.as_deref(),
+                Some(&format!("{HOST}/{WS_NAME}/{BARE}")[..])
+            );
+        }
+        Ok(ops::AddRefOutcome::Described { .. }) => {
+            panic!("a workspace reference never gates")
+        }
+        Err(e) => panic!("the machine-wide add applies: {}", e.code()),
+    }
+
+    // `remove` is the same line from the other side: a ROW-SPELLED token (a reference, or a path)
+    // refuses toward the two scopes rather than falling through to a "no such skill".
+    for token in [
+        format!("@{WS_NAME}/{BARE}"),
+        "./zq-nomanifest-ref".to_owned(),
+    ] {
+        let err = ops::remove_project(
+            &ctx,
+            &session_connect,
+            std::slice::from_ref(&token),
+            None,
+            true,
+        )
+        .expect_err("a row spelling with no file to hold it");
+        assert_eq!(err.code(), "NO_MANIFEST", "token={token}");
+        assert_eq!(
+            scope_ways_out("remove", &["remove", &token], &err)[1].1,
+            vec![
+                "topos".to_owned(),
+                "remove".to_owned(),
+                "-g".to_owned(),
+                token.clone()
+            ]
+        );
+    }
+    // A BARE NAME still falls through — the classic ladder owns untracked copies and the built-in.
+    assert!(
+        ops::remove_project(
+            &ctx,
+            &session_connect,
+            &["zq-plain-name".to_owned()],
+            None,
+            true
+        )
+        .unwrap()
+        .is_none(),
+        "a bare name is not a manifest row spelling"
+    );
+}
+
+#[test]
+fn a_project_add_keeps_its_history_in_the_checkouts_own_store() {
+    let rig = Rig::new("zq-custody");
+    let proj = project("zq-custody-proj", "[bundles]\n");
+    let ctx = rig.ctx_at(Some(&proj.0));
+
+    let src = proj.0.join("zq-custody-src");
+    skill_source(&src, b"# zq-custody\n");
+    let added = scoped_path_add(&ctx, &src, false).unwrap();
+    let sid = crate::id::SkillId::parse(&added.skill_id).unwrap();
+
+    // Custody follows the SCOPE: the checkout's own store holds the history, the home store none.
+    let project_store = crate::sidecar::project_store_layout(&proj.0);
+    assert!(
+        project_store.skill_dir(&sid).join("lock.json").exists(),
+        "the checkout's own store holds the version history"
+    );
+    assert!(
+        !rig.layout().skill_dir(&sid).exists(),
+        "the home store holds no entry for a project-scoped adopt"
+    );
+    assert_eq!(
+        std::fs::read_dir(rig.layout().skills_dir())
+            .map(|d| d.count())
+            .unwrap_or(0),
+        0,
+        "the home store's skills/ is empty"
+    );
+    // The row is the committed, travels-with-the-repo spelling, in the folder's own file.
+    assert_eq!(added.reference.as_deref(), Some("./zq-custody-src"));
+    let text = std::fs::read_to_string(proj.0.join(crate::manifest::MANIFEST_FILE)).unwrap();
+    assert!(text.contains("\"./zq-custody-src\""), "{text}");
+}
+
+#[test]
+fn an_out_of_tree_source_records_absolutely_in_the_folders_own_file() {
+    let rig = Rig::new("zq-outoftree");
+    let proj = project("zq-outoftree-proj", "[bundles]\n");
+    let ctx = rig.ctx_at(Some(&proj.0));
+
+    // The source sits OUTSIDE the checkout: the reference cannot travel with the repo, so it is
+    // spelled absolutely — and still recorded in THIS folder's file. The scope was the person's
+    // (they omitted `-g`); it is never rerouted to the machine-wide file.
+    let src = rig.work.0.join("zq-outoftree-src");
+    skill_source(&src, b"# zq-outoftree\n");
+    let added = scoped_path_add(&ctx, &src, false).unwrap();
+    assert_eq!(added.reference.as_deref(), src.to_str());
+    assert_eq!(
+        added.manifest.as_deref(),
+        proj.0.join(crate::manifest::MANIFEST_FILE).to_str()
+    );
+    assert!(
+        !rig.layout()
+            .home()
+            .join(crate::manifest::MANIFEST_FILE)
+            .exists(),
+        "no machine-wide file was written"
+    );
+}
+
+#[test]
+fn a_project_remove_of_a_machine_delivered_skill_refuses_toward_g() {
+    // (a) The machine-wide FILE spells the row: the near-miss is named, with the `-g` spelling.
+    let rig = Rig::new("zq-crossscope");
+    rig.seed_session();
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let v = one_file(b"# deploy\n");
+    let plane = FakePlane::new(log).with_version("s_deploy", &v);
+    plane.serves(vec![delivered("s_deploy", "deploy", &v)]);
+    let dir = FakeDirectory::new(vec![catalog_entry("s_deploy", "deploy", &v)], Vec::new());
+    rig.write_global(&format!("[bundles]\n\"{HOST}/{WS_NAME}/deploy\" = \"*\"\n"));
+    let proj = project("zq-crossscope-proj", "[bundles]\n");
+    let ctx = rig.ctx_at(Some(&proj.0));
+    let session_connect = connect(&plane, &dir);
+
+    let err = ops::remove_project(&ctx, &session_connect, &["deploy".to_owned()], None, true)
+        .expect_err("this folder's file does not carry it");
+    let message = crate::render::safe_message(&err);
+    assert!(
+        message.contains("topos remove -g deploy"),
+        "the other scope's row is named as the fix: {message}"
+    );
+    assert!(
+        std::fs::read_to_string(proj.0.join(crate::manifest::MANIFEST_FILE))
+            .unwrap()
+            .trim()
+            .ends_with("[bundles]"),
+        "the refusal wrote nothing"
+    );
+
+    // (b) NO machine-wide file at all (the implicit feed delivers it): the manifest arm claims
+    // nothing, and the CLASSIC removal refuses toward the same `-g` spelling.
+    let rig = Rig::new("zq-crossscope-feed");
+    rig.seed_session();
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let plane = FakePlane::new(log).with_version("s_deploy", &v);
+    plane.serves(vec![delivered("s_deploy", "deploy", &v)]);
+    let dir = FakeDirectory::new(vec![catalog_entry("s_deploy", "deploy", &v)], Vec::new());
+    let proj = project("zq-crossscope-feed-proj", "[bundles]\n");
+    let ctx = rig.ctx_at(Some(&proj.0));
+    let session_connect = connect(&plane, &dir);
+    assert!(
+        !rig.layout()
+            .home()
+            .join(crate::manifest::MANIFEST_FILE)
+            .exists(),
+        "the implicit recipe: no machine-wide file"
+    );
+    assert!(
+        ops::remove_project(&ctx, &session_connect, &["deploy".to_owned()], None, true)
+            .unwrap()
+            .is_none(),
+        "no manifest arm claims a feed-delivered name"
+    );
+    // The classic path resolves against the workspace's own names, so this fake answers `me`.
+    let named = NamedDirectory(dir.clone());
+    let named_connect = |_s: &Session| ops::SessionTransports {
+        plane: Box::new(plane.clone()),
+        directory: Box::new(named.clone()),
+        contribute: Box::new(NoContribute),
+        governance: Box::new(NoGovernance),
+    };
+    let dir_connect = |_: &str| -> Box<dyn DirectorySource> { Box::new(dir.clone()) };
+    let connectors = ops::RemoveConnectors {
+        session: &named_connect,
+        directory: &dir_connect,
+    };
+    let err = ops::remove(&ctx, &connectors, &["deploy".to_owned()], &[], None, true)
+        .expect_err("what a workspace gives you is not this folder's to delete");
+    let message = crate::render::safe_message(&err);
+    assert!(
+        message.contains("topos remove -g deploy"),
+        "the classic path names the machine-wide switch: {message}"
+    );
 }
