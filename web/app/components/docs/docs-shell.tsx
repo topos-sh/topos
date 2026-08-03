@@ -18,7 +18,12 @@ import type { DocsPageView } from "@/lib/docs/model";
  * every code block, so the browser downloads no highlighter.
  */
 
-const WRAP = "mx-auto max-w-[1180px] px-6";
+/**
+ * The same measure the landing and every other public page uses (DESIGN.md's layout rule): the
+ * wordmark has to sit on one vertical line as a reader crosses from the landing into the docs,
+ * so this wrap is not the docs' own decision to make.
+ */
+const WRAP = "mx-auto max-w-[1080px] px-6";
 const GITHUB = "https://github.com/topos-sh/topos";
 
 /**
