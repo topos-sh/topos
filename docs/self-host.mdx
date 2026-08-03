@@ -235,6 +235,15 @@ The last command confirms the boot migration ran. Both applications migrate thei
 boot, before binding a port — no migration command to run by hand, and a broken migration crashes
 loudly rather than serving an unmigrated database.
 
+<Note>
+  **Upgrading an install you originally cloned?** Two things changed with prebuilt images. The
+  compose file no longer builds, so `--build` does nothing and `docker compose pull` is what moves
+  you; and the project name is now pinned to `topos` rather than taken from the directory. If your
+  checkout lives in a directory named something else, compose will look for `topos_*` volumes and
+  find none — it starts as an empty install rather than touching your data. Either rename the
+  directory to `topos`, or keep your old name explicitly with `docker compose -p <your-old-name>`.
+</Note>
+
 **Back up first** — migrations apply automatically and there is no automated downgrade. Rolling
 back is: stop the stack, restore the pre-upgrade backup, set `TOPOS_VERSION` back to the previous
 release, `pull` and `up -d`, and pin clients to match (`topos self-update --version <tag>`).
