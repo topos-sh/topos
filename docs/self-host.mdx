@@ -64,10 +64,11 @@ jumped forward on its own would break machines you cannot see. Upgrading is a de
 see [Upgrades](#upgrades).
 
 Every release publishes an immutable digest and an SBOM per image, and the manifests carry build
-provenance you can check against the workflow that produced them:
+provenance you can check against the workflow that produced them (substitute the release you pinned
+— `TOPOS_VERSION` lives in `.env`, which your shell does not read):
 
 ```bash
-gh attestation verify oci://ghcr.io/topos-sh/topos-web:$TOPOS_VERSION --repo topos-sh/topos
+gh attestation verify oci://ghcr.io/topos-sh/topos-web:vX.Y.Z --repo topos-sh/topos
 ```
 
 To run a patched tree instead, clone the repository and add the build override — same file, same
@@ -240,8 +241,13 @@ loudly rather than serving an unmigrated database.
   compose file no longer builds, so `--build` does nothing and `docker compose pull` is what moves
   you; and the project name is now pinned to `topos` rather than taken from the directory. If your
   checkout lives in a directory named something else, compose will look for `topos_*` volumes and
-  find none — it starts as an empty install rather than touching your data. Either rename the
-  directory to `topos`, or keep your old name explicitly with `docker compose -p <your-old-name>`.
+  find none — it starts as an empty install rather than touching your data.
+
+  Keep your existing volumes by keeping your existing project name — `docker compose -p <your-old-name>`
+  on every command, or `COMPOSE_PROJECT_NAME=<your-old-name>` in your `.env`. **Renaming the directory
+  will not do it:** the `name:` field in the compose file overrides the directory, so the old
+  `<your-old-name>_*` volumes stay orphaned either way. To actually adopt the new name, move the data
+  across deliberately — restore a backup into the `topos_*` volumes (see [Backups](#backups)).
 </Note>
 
 **Back up first** — migrations apply automatically and there is no automated downgrade. Rolling
