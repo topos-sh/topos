@@ -49,11 +49,13 @@ pub(crate) enum PullScope {
     /// One skill, by name, in a targeted mode. `workspace` pins the resolution to a specific
     /// workspace when a qualified path (`<ws>/skills/<name>`) selected one — so a name shared across
     /// workspaces resolves to exactly the one the user addressed, never a different one or an
-    /// over-strict ambiguity refusal.
+    /// over-strict ambiguity refusal. `store` is the SCOPE flag: which store the name resolves in,
+    /// and therefore which copy this run acts on.
     One {
         name: String,
         workspace: Option<String>,
         mode: TargetMode,
+        store: super::StoreScope,
     },
 }
 
@@ -245,16 +247,19 @@ pub(crate) fn pull(ctx: &Ctx<'_>, scope: PullScope) -> Result<PullOutcome, Clien
             name,
             workspace,
             mode,
+            store,
         } => {
-            // Resolve across BOTH stores: a bundle a project `topos.toml` delivers keeps its
-            // custody in the checkout's own store, so a targeted update run from inside that
-            // checkout must drive THAT copy's engine state. Everything the engine reads or writes
-            // per skill (locks, docs, the store, the drift scan) rides `sctx` — the owning store's
-            // layout. The FOLLOW seam stays the original `ctx`'s: it is machine-level (built from
-            // `state/sync_status.json` under `~/.topos/`), and re-rooting it on a project store
-            // would read a document that does not exist there.
+            // Resolve in the SCOPE this invocation named: bare acts where you stand (the nearest
+            // project store holding the name, else the machine's), `-g` on the machine store alone.
+            // A bundle a project `topos.toml` delivers keeps its custody in the checkout's own
+            // store, so a targeted update run from inside that checkout drives THAT copy's engine
+            // state. Everything the engine reads or writes per skill (locks, docs, the store, the
+            // drift scan) rides `sctx` — the owning store's layout. The FOLLOW seam stays the
+            // original `ctx`'s: it is machine-level (built from `state/sync_status.json` under
+            // `~/.topos/`), and re-rooting it on a project store would read a document that does
+            // not exist there.
             let (layout, skill_id, _lock) =
-                super::resolve_skill_stored(ctx, &name, workspace.as_deref())?;
+                super::resolve_skill_in_scope(ctx, &name, workspace.as_deref(), store)?;
             let sctx = ctx_with_layout(ctx, &layout);
             // The go-back and the `--onto-current` escape are documented plane-independent (the escape is
             // the offline no-deadlock guarantee) — neither spends a network call on the proposals count.
@@ -305,7 +310,8 @@ pub(crate) fn pull(ctx: &Ctx<'_>, scope: PullScope) -> Result<PullOutcome, Clien
 /// `update --reset <skill>...` — the loss-led two-phase discard. Refuses without a named skill (a reset
 /// throws away local edits; it must never be a blanket "reset everything"). The describe LEADS with the
 /// exact draft delta being discarded (the local `diff` — draft vs current); `--yes` discards it, restoring
-/// the followed `current` (an imported skill's adopted origin). Resolves ALL-OR-NONE.
+/// the followed `current` (an imported skill's adopted origin). Resolves ALL-OR-NONE, in the SCOPE the
+/// invocation named (`store`) — the copy the describe measures is the copy `--yes` discards.
 ///
 /// # Errors
 /// [`ClientError::InvalidArgument`] with no named skill; name-resolution errors; a store / io failure.
@@ -313,6 +319,7 @@ pub(crate) fn reset(
     ctx: &Ctx<'_>,
     targets: &[String],
     yes: bool,
+    store: super::StoreScope,
 ) -> Result<ResetOutcome, ClientError> {
     if targets.is_empty() {
         return Err(ClientError::InvalidArgument(
@@ -321,26 +328,31 @@ pub(crate) fn reset(
                 .into(),
         ));
     }
-    // Resolve ALL-OR-NONE, keeping each hit's OWNING store beside it: a project-delivered bundle's
-    // draft lives in the checkout's own store, and both halves of the reset — the loss disclosure
-    // and the discard — must act on that copy, never on a same-named machine twin.
+    // Resolve ALL-OR-NONE in the named scope, keeping each hit's OWNING store beside it: a
+    // project-delivered bundle's draft lives in the checkout's own store, and both halves of the
+    // reset — the loss disclosure and the discard — must act on that copy, never on a same-named
+    // twin in the other scope.
     let mut resolved = Vec::with_capacity(targets.len());
     for token in targets {
-        resolved.push(super::resolve_skill_stored(ctx, token, None)?);
+        resolved.push(super::resolve_skill_in_scope(ctx, token, None, store)?);
     }
     let mut items = Vec::with_capacity(resolved.len());
-    for (_layout, id, lock) in &resolved {
-        // The draft delta vs current — the exact bytes a reset drops. DIVERGENT copies cannot render
-        // one diff (that freeze is exactly what `--reset` is the named way out of), so the loss is
-        // disclosed as the frozen set instead of failing the reset. UNCAPPED deliberately: a loss
-        // disclosure must never truncate what would be discarded.
-        let drop_diff = match super::diff(ctx, &lock.name, None, super::DiffBudget::unlimited()) {
-            Ok(d) => d.diff,
-            Err(e @ ClientError::PlacementsDiverged { .. }) => {
-                format!("{e}\n(each copy is snapshotted into the local store before the reset)")
-            }
-            Err(e) => return Err(e),
-        };
+    for (layout, id, lock) in &resolved {
+        // The draft delta vs current — the exact bytes a reset drops, read from the copy resolved
+        // above (never re-resolved: a second pass could answer with the other scope's copy and
+        // describe a loss nobody is about to take). DIVERGENT copies cannot render one diff (that
+        // freeze is exactly what `--reset` is the named way out of), so the loss is disclosed as
+        // the frozen set instead of failing the reset. UNCAPPED deliberately: a loss disclosure
+        // must never truncate what would be discarded.
+        let drop_diff =
+            match super::diff_resolved(ctx, layout, id, lock, None, super::DiffBudget::unlimited())
+            {
+                Ok(d) => d.diff,
+                Err(e @ ClientError::PlacementsDiverged { .. }) => {
+                    format!("{e}\n(each copy is snapshotted into the local store before the reset)")
+                }
+                Err(e) => return Err(e),
+            };
         items.push(ResetData {
             skill: lock.name.clone(),
             workspace_id: super::followed_workspace(ctx, id.as_str()),
@@ -351,7 +363,12 @@ pub(crate) fn reset(
     }
 
     if !yes {
+        // The apply command is THIS invocation re-spelled: the scope flag rides along, or `--yes`
+        // would discard a different copy than the one just described.
         let mut yes_argv = vec!["topos".to_owned(), "update".to_owned()];
+        if store == super::StoreScope::Machine {
+            yes_argv.push("-g".to_owned());
+        }
         yes_argv.extend(targets.iter().cloned());
         yes_argv.push("--reset".to_owned());
         yes_argv.push("--yes".to_owned());

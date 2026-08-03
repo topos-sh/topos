@@ -7160,6 +7160,7 @@ fn a_targeted_go_back_runs_against_the_project_store() {
     let out = ops::pull(
         &ctx,
         ops::PullScope::One {
+            store: ops::StoreScope::Here,
             name: "deploy".to_owned(),
             workspace: None,
             mode: ops::TargetMode::GoBack(ops::VersionRef::Full(v1.id)),
@@ -7191,5 +7192,291 @@ fn a_targeted_go_back_runs_against_the_project_store() {
     assert!(
         !rig.layout().skill_dir(&sid("s_deploy")).exists(),
         "the machine store never gained a copy"
+    );
+}
+
+// =================================================================================================
+// The SCOPE FLAG on the targeted verbs: a bare run reads and acts WHERE YOU STAND, `-g` on the
+// machine — including for the modes that never touch the reconcile (a go-back, `--reset`).
+// =================================================================================================
+
+/// Both scopes holding the SAME bundle: the machine (through the feed) and the checkout (through
+/// its own file). Sweeps both, returns the checkout — the two-copy fixture the scope flag is about.
+fn both_scopes_hold_deploy(
+    tag: &str,
+    rig: &Rig,
+    plane: &FakePlane,
+    dir: &FakeDirectory,
+) -> Scratch {
+    let proj = project(
+        tag,
+        &format!("[bundles]\n\"{HOST}/{WS_NAME}/deploy\" = \"*\"\n"),
+    );
+    let out = sweep_both(&rig.ctx_at(Some(&proj.0)), plane, dir);
+    assert!(out.warnings.is_empty(), "{:?}", out.warnings);
+    assert!(
+        rig.layout().skill_dir(&sid("s_deploy")).exists()
+            && crate::sidecar::existing_project_store(&rig.fs, &proj.0)
+                .is_some_and(|l| l.skill_dir(&sid("s_deploy")).exists()),
+        "the fixture needs BOTH stores holding the name"
+    );
+    proj
+}
+
+/// With the name in BOTH stores, the reads answer with the copy you are STANDING IN. The machine
+/// copy's own draft does not pull them back to the machine: the draft preference exists for
+/// publish (ship the edited copy), and letting it steer a read would make `diff` from inside a
+/// checkout describe another scope's edit.
+#[test]
+fn reads_from_inside_a_project_answer_the_project_copy() {
+    let rig = Rig::new("scope-reads");
+    rig.seed_session();
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let v1 = one_file(b"# deploy v1\n");
+    let v2 = one_file(b"# deploy v2\n");
+    let plane = FakePlane::new(log)
+        .with_version("s_deploy", &v1)
+        .with_version("s_deploy", &v2);
+    plane.serves(vec![delivered("s_deploy", "deploy", &v1)]);
+    let dir = FakeDirectory::new(vec![catalog_entry("s_deploy", "deploy", &v1)], Vec::new());
+    let proj = both_scopes_hold_deploy("scope-reads-repo", &rig, &plane, &dir);
+    let ctx = rig.ctx_at(Some(&proj.0));
+    let machine_copy = rig.work.0.join("skills/deploy");
+    let project_copy = proj.0.join(".claude/skills/deploy");
+
+    // The team moves to v2 and only the MACHINE converges (`-g`), so the two stores' histories
+    // genuinely differ — a log that answered from the wrong store would show a version this
+    // checkout has never held.
+    let mut moved = delivered("s_deploy", "deploy", &v2);
+    moved.generation = 2;
+    plane.serves(vec![moved]);
+    let mut moved_cat = catalog_entry("s_deploy", "deploy", &v2);
+    moved_cat.generation = 2;
+    let dir2 = FakeDirectory::new(vec![moved_cat], Vec::new());
+    let out = sweep_scoped(&ctx, &plane, &dir2, ops::UpdateScope::Machine);
+    assert!(out.warnings.is_empty(), "{:?}", out.warnings);
+    assert_eq!(
+        std::fs::read(machine_copy.join("SKILL.md")).unwrap(),
+        b"# deploy v2\n"
+    );
+    assert_eq!(
+        std::fs::read(project_copy.join("SKILL.md")).unwrap(),
+        b"# deploy v1\n",
+        "the checkout stayed where its own file put it"
+    );
+
+    // Each copy carries a DIFFERENT edit; the machine's is the one the old home-first rule would
+    // have shown (a drafted home copy outranked everything).
+    std::fs::write(machine_copy.join("SKILL.md"), b"# machine edit\n").unwrap();
+    std::fs::write(project_copy.join("SKILL.md"), b"# project edit\n").unwrap();
+
+    let d = ops::diff(&ctx, "deploy", None, ops::DiffBudget::unlimited()).unwrap();
+    assert!(
+        d.diff.contains("project edit") && !d.diff.contains("machine edit"),
+        "the diff is the copy you stand in: {}",
+        d.diff
+    );
+
+    let dirs = |_: &str| -> Box<dyn DirectorySource> { Box::new(dir2.clone()) };
+    let sessions = connect(&plane, &dir2);
+    let connectors = ops::LogConnectors {
+        directory: &dirs,
+        session: &sessions,
+    };
+    let out = ops::log(&ctx, &connectors, "deploy", ops::RowPage::unlimited()).unwrap();
+    let versions: Vec<String> = out
+        .events
+        .iter()
+        .filter(|e| e.get("action").and_then(|x| x.as_str()) == Some("version"))
+        .filter_map(|e| e.get("version_id").and_then(|x| x.as_str()))
+        .map(str::to_owned)
+        .collect();
+    assert!(
+        versions.contains(&topos_core::digest::to_hex(&v1.id)),
+        "the checkout's own version is in its log: {versions:?}"
+    );
+    assert!(
+        !versions.contains(&topos_core::digest::to_hex(&v2.id)),
+        "the machine's newer version is NOT this copy's history: {versions:?}"
+    );
+}
+
+/// `-g` pins the MACHINE store for the targeted modes too, INCLUDING when only the checkout's copy
+/// carries a draft — the case the home-first-unless-drafted resolution got backwards, so a `-g
+/// --reset` described and then discarded the project copy's edit. Its describe also re-spells the
+/// flag in the apply command: a `--yes` without `-g` would act on the other copy.
+#[test]
+fn a_g_reset_inside_a_project_never_reaches_the_checkouts_copy() {
+    let rig = Rig::new("scope-greset");
+    rig.seed_session();
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let v = one_file(b"# deploy\n");
+    let plane = FakePlane::new(log).with_version("s_deploy", &v);
+    plane.serves(vec![delivered("s_deploy", "deploy", &v)]);
+    let dir = FakeDirectory::new(vec![catalog_entry("s_deploy", "deploy", &v)], Vec::new());
+    let proj = both_scopes_hold_deploy("scope-greset-repo", &rig, &plane, &dir);
+    let ctx = rig.ctx_at(Some(&proj.0));
+    let machine_copy = rig.work.0.join("skills/deploy");
+    let project_copy = proj.0.join(".claude/skills/deploy");
+    // ONLY the checkout's copy is edited. The machine's is clean — so `-g` has nothing to discard,
+    // and anything it DOES discard came from the scope the flag excluded.
+    std::fs::write(project_copy.join("SKILL.md"), b"# project edit\n").unwrap();
+
+    let described = ops::reset(
+        &ctx,
+        &["deploy".to_owned()],
+        false,
+        ops::StoreScope::Machine,
+    )
+    .expect("the machine store holds it");
+    let (items, yes_argv) = match described {
+        ops::ResetOutcome::Described { items, yes_argv } => (items, yes_argv),
+        other => panic!("a bare reset describes: {other:?}"),
+    };
+    assert!(
+        !items[0].drop_diff.contains("project edit"),
+        "the machine copy is clean — nothing of the checkout's is disclosed as lost: {}",
+        items[0].drop_diff
+    );
+    assert_eq!(
+        yes_argv,
+        vec!["topos", "update", "-g", "deploy", "--reset", "--yes"],
+        "the apply command re-spells the scope flag"
+    );
+
+    ops::reset(&ctx, &["deploy".to_owned()], true, ops::StoreScope::Machine).unwrap();
+    assert_eq!(
+        std::fs::read(project_copy.join("SKILL.md")).unwrap(),
+        b"# project edit\n",
+        "`-g` never reaches into the checkout"
+    );
+    assert_eq!(
+        std::fs::read(machine_copy.join("SKILL.md")).unwrap(),
+        b"# deploy\n",
+        "the machine copy is where the reset ran — at the team's bytes, as it already was"
+    );
+
+    // The BARE run is the other half of the line: it acts where you stand, so it is the
+    // checkout's edit that is disclosed and discarded.
+    let bare = ops::reset(&ctx, &["deploy".to_owned()], false, ops::StoreScope::Here).unwrap();
+    match &bare {
+        ops::ResetOutcome::Described { items, yes_argv } => {
+            assert!(
+                items[0].drop_diff.contains("project edit"),
+                "{}",
+                items[0].drop_diff
+            );
+            assert!(!yes_argv.contains(&"-g".to_owned()), "{yes_argv:?}");
+        }
+        other => panic!("a bare reset describes: {other:?}"),
+    }
+    ops::reset(&ctx, &["deploy".to_owned()], true, ops::StoreScope::Here).unwrap();
+    assert_eq!(
+        std::fs::read(project_copy.join("SKILL.md")).unwrap(),
+        b"# deploy\n",
+        "the bare run discarded the copy you stand in"
+    );
+}
+
+/// A name only a PROJECT store holds is an honest miss under `-g` — never quietly answered by (or
+/// applied to) the copy the flag excluded. The same name resolves fine without the flag.
+#[test]
+fn a_g_targeted_run_misses_a_project_only_name() {
+    let rig = Rig::new("scope-gmiss");
+    rig.seed_session();
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let v = one_file(b"# deploy\n");
+    let plane = FakePlane::new(log).with_version("s_deploy", &v);
+    let dir = FakeDirectory::new(vec![catalog_entry("s_deploy", "deploy", &v)], Vec::new());
+    let proj = project_custody("scope-gmiss-repo", &rig, &plane, &dir);
+    let ctx = rig.ctx_at(Some(&proj.0));
+
+    for (scope, want) in [
+        (ops::StoreScope::Machine, false),
+        (ops::StoreScope::Here, true),
+    ] {
+        let r = ops::reset(&ctx, &["deploy".to_owned()], false, scope);
+        assert_eq!(
+            r.is_ok(),
+            want,
+            "scope {scope:?} resolved {:?}",
+            r.as_ref().err()
+        );
+        if !want {
+            let err = r.unwrap_err();
+            assert!(
+                matches!(&err, ClientError::NoSuchSkill { name } if name == "deploy"),
+                "got {err:?}"
+            );
+        }
+    }
+    // The go-back obeys the same line — `-g` looks only where the flag says.
+    let err = ops::pull(
+        &ctx,
+        ops::PullScope::One {
+            store: ops::StoreScope::Machine,
+            name: "deploy".to_owned(),
+            workspace: None,
+            mode: ops::TargetMode::GoBack(ops::VersionRef::Full(v.id)),
+        },
+    );
+    let err = match err {
+        Ok(_) => panic!("`-g` must not reach the checkout's copy"),
+        Err(e) => e,
+    };
+    assert!(
+        matches!(&err, ClientError::NoSuchSkill { name } if name == "deploy"),
+        "got {err:?}"
+    );
+}
+
+/// A path adopted IN PLACE under a project file keeps its recorded placement through a reset: the
+/// planner's project dispatch is for bundles whose dirs the ENGINE owns, and this dir is the
+/// person's own. Re-planning it into `.claude/skills/<name>` would materialize a second copy and
+/// leave the edited source exactly as it was — while the receipt claimed the edits were discarded.
+#[test]
+fn a_reset_of_an_adopted_path_restores_the_source_dir() {
+    let rig = Rig::new("zq-adopt-reset");
+    let proj = project("zq-adopt-reset-proj", "[bundles]\n");
+    let ctx = rig.ctx_at(Some(&proj.0));
+
+    let src = proj.0.join("tools/zq-adopted");
+    skill_source(&src, b"# adopted\n");
+    let added = scoped_path_add(&ctx, &src, false).unwrap();
+    assert_eq!(added.name, "zq-adopted");
+
+    // The edit lands where the person works — the adopted source itself.
+    std::fs::write(src.join("SKILL.md"), b"# adopted\nlocal edit\n").unwrap();
+    let described = ops::reset(
+        &ctx,
+        &["zq-adopted".to_owned()],
+        false,
+        ops::StoreScope::Here,
+    )
+    .unwrap();
+    match &described {
+        ops::ResetOutcome::Described { items, .. } => assert!(
+            items[0].drop_diff.contains("local edit"),
+            "the loss is the source dir's edit: {}",
+            items[0].drop_diff
+        ),
+        other => panic!("a bare reset describes: {other:?}"),
+    }
+
+    ops::reset(
+        &ctx,
+        &["zq-adopted".to_owned()],
+        true,
+        ops::StoreScope::Here,
+    )
+    .unwrap();
+    assert_eq!(
+        std::fs::read(src.join("SKILL.md")).unwrap(),
+        b"# adopted\n",
+        "the SOURCE dir is what the reset restored"
+    );
+    assert!(
+        !proj.0.join(".claude/skills/zq-adopted").exists(),
+        "no second copy was planted in the checkout's harness dirs"
     );
 }

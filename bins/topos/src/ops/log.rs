@@ -60,10 +60,10 @@ pub(crate) fn log(
         )));
     }
 
-    // Resolve across BOTH stores: a bundle a project `topos.toml` delivers keeps its custody (and
-    // its action log) in the checkout's own store, so a `log` run from inside that checkout reads
-    // THAT store — not a same-named machine twin, and not a not-found.
-    let (layout, id, lock) = super::resolve_skill_stored(ctx, skill, None)?;
+    // Resolve WHERE YOU STAND: a bundle a project `topos.toml` delivers keeps its custody (and its
+    // action log) in the checkout's own store, so a `log` run from inside that checkout reads THAT
+    // store — not a same-named machine twin, and not a not-found.
+    let (layout, id, lock) = super::resolve_skill_here(ctx, skill, None)?;
 
     // ---- the local action log (`log.jsonl`) — non-version events (add / error / …) ----
     // Each store keeps its OWN `log.jsonl` (the layout resolves it under that store's root), and an
