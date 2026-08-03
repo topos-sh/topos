@@ -35,10 +35,9 @@ use topos_types::{JsonEnvelope, TerminalOutcome, WireCurrentRecord};
 
 use crate::error::ClientError;
 use crate::plane::{
-    CatalogSource, ConnectedSession, ContributeSource, DeviceAuthPoll, DeviceAuthStart,
-    DirectorySource, EnrollSource, EnrolledGrant, EnrolledWorkspace, FetchedFile, FetchedVersion,
-    GovernanceSource, KnownCurrent, LinkStatus, PlaneError, PlaneSource, PointerFetch,
-    WriteReceipt,
+    ConnectedSession, ContributeSource, DeviceAuthPoll, DeviceAuthStart, DirectorySource,
+    EnrollSource, EnrolledGrant, EnrolledWorkspace, FetchedFile, FetchedVersion, GovernanceSource,
+    KnownCurrent, LinkStatus, PlaneError, PlaneSource, PointerFetch, WriteReceipt,
 };
 use crate::progress::{self, ProgressSink};
 
@@ -1231,61 +1230,6 @@ impl ContributeSource for UreqDeviceClient {
     }
     fn review(&self, body: ReviewRequest) -> Result<WriteReceipt, ClientError> {
         self.post_write("/v1/reviews", &body.workspace_id, &body, "review")
-    }
-}
-
-// =================================================================================================
-// The catalog-read side of `UreqDeviceClient` — the workspace-catalog GET (`list --remote`). Authorized by
-// the workspace's Bearer credential (catalog visibility == workspace membership); metadata only, no bytes.
-// A workspace with no stored credential ⇒ Unavailable (degraded to a per-workspace warning); a 404 (not a
-// member / no such workspace) is the indistinguishable "no catalog" ⇒ mapped to an EMPTY index, so a caller
-// sweeping several workspaces degrades cleanly rather than erroring.
-// =================================================================================================
-
-impl CatalogSource for UreqDeviceClient {
-    fn fetch_catalog(&self, workspace_id: &str) -> Result<WireSkillIndex, PlaneError> {
-        // The workspace id is spliced into the URL path — refuse anything outside the validated charset
-        // (defense in depth; the enrollment loaders already validated what they persisted). The fixed
-        // message never echoes the hostile bytes.
-        if !crate::id::is_valid_id(workspace_id) {
-            return Err(PlaneError::Malformed(
-                "a workspace id is not a safe path segment".into(),
-            ));
-        }
-        // No stored device credential ⇒ Unavailable (the caller degrades it to a warning), never a
-        // request without a credential.
-        let Some(credential) = self.credential.as_deref() else {
-            return Err(PlaneError::Unavailable(
-                "this machine is not logged in, so it holds no credential for this workspace"
-                    .to_owned(),
-            ));
-        };
-        let url = format!("{}/v1/workspaces/{}/skills", self.base_url, workspace_id);
-        // The read is authorized by the workspace Bearer credential (resolved to a confirmed-member row);
-        // the credential rides the header, so the URL carries no secret — safe in an error message.
-        let _phase = self.dialing();
-        let resp = self
-            .agent
-            .get(&url)
-            .header("authorization", format!("Bearer {credential}"))
-            .call()
-            // A `.call()` Err is connect-level (dial/TLS/timeout before any status): the plane itself is
-            // unreachable — surfaced distinctly (the caller degrades it to a per-workspace warning).
-            .map_err(|e| PlaneError::Unreachable(transport_reason(&self.host(), &e)))?;
-        let status = resp.status().as_u16();
-        match classify(status) {
-            HttpClass::Ok => {
-                let bytes = read_body(resp)?;
-                serde_json::from_slice::<WireSkillIndex>(&bytes)
-                    .map_err(|e| PlaneError::Malformed(format!("catalog for {workspace_id}: {e}")))
-            }
-            // 404 = not a member / no such workspace (the indistinguishable "no catalog") ⇒ an empty index.
-            HttpClass::NotFound => Ok(WireSkillIndex { skills: Vec::new() }),
-            // No conditional headers are sent, so 304 cannot occur; fold it in with the other statuses.
-            HttpClass::NotModified | HttpClass::Other => {
-                Err(PlaneError::Unavailable(status_reason(&self.host(), status)))
-            }
-        }
     }
 }
 

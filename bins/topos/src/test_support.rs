@@ -366,9 +366,11 @@ impl SessionInstall {
         })
     }
 
-    /// `topos status` — the offline trust rail, from `cwd`.
+    /// `topos status` — the offline health panel, from `cwd` (the here-scope view).
     pub fn status(&self, cwd: Option<&Path>) -> Result<StatusData, String> {
-        self.with_ctx(cwd, |ctx| ops::status_snapshot(ctx, None).map_err(err_str))
+        self.with_ctx(cwd, |ctx| {
+            ops::status_snapshot(ctx, ops::ScopeView::Here).map_err(err_str)
+        })
     }
 
     // ---- governance ---------------------------------------------------------------------------

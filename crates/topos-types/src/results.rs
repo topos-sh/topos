@@ -220,94 +220,234 @@ pub struct ConflictPathReport {
 }
 
 // =================================================================================================
-// PINNED — `list` (the four buckets + per-skill identity).
+// PINNED — `list` (the per-scope inventory + the deep dive + the agent-eye and remote views).
 // =================================================================================================
 
-/// `list` result — the four inventory buckets. **PINNED** (bucket set + per-entry identity).
+/// `list` result — the inventory, per scope. The scopes shown in full ride `scopes`; whatever the
+/// invocation does not show rides ONE summary (`machine_summary` / `untracked_summary`) so nothing
+/// is invisible. The optional views (`untracked` / `remote` / `detail` / `agent_view`) fill only
+/// under their flag. **PINNED.**
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
 pub struct ListData {
-    pub followed: Vec<SkillEntry>,
-    pub published_by_you: Vec<SkillEntry>,
-    pub tracked: Vec<SkillEntry>,
-    /// A real skill in a harness dir that topos doesn't manage yet (discovered, not adopted) — it has
-    /// no topos `version_id`/`bundle_digest` yet, so it carries only what is knowable on disk.
-    pub untracked: Vec<UntrackedEntry>,
-    /// Only present under `--remote`: skills available in the followed workspaces' catalogs, annotated with
-    /// this install's local follow-state — the "what could I follow next" surface. **INFERRED** (additive;
-    /// empty/omitted unless `--remote`).
+    /// The scope sections shown in full, render order (here-scope first).
+    pub scopes: Vec<ListScope>,
+    /// The machine scope's one-line summary, present only when the machine scope is NOT shown in
+    /// full (the default view inside a project).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub machine_summary: Option<ListScopeSummary>,
+    /// The untracked discoveries' one-line summary (absent when nothing untracked was found, or
+    /// when the untracked listing itself is shown).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub untracked_summary: Option<UntrackedSummary>,
+    /// Signed-in state — the TTY renders the static remote pointer from it.
+    pub signed_in: bool,
+    /// Full untracked discoveries (only under `--untracked`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub remote_available: Vec<RemoteSkillEntry>,
-    /// Only present under `--footprint`: topos-owned paths outside skill dirs. **INFERRED shape.**
+    pub untracked: Vec<UntrackedEntry>,
+    /// Per-workspace catalog view (only under `--remote`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub remote: Vec<RemoteWorkspace>,
+    /// The one-skill deep dive (`list <name>`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<ListDetail>,
+    /// The agent-eye view (`list -a <slug>`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_view: Option<AgentView>,
+    /// Only present under `--footprint`: topos-owned paths outside skill dirs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub footprint: Option<Vec<String>>,
     /// The buckets that were row-capped (`--limit`/`--offset`, or the `--json` default page), one
-    /// marker per capped bucket. The page applies PER BUCKET (each bucket skips `offset` rows and
-    /// shows up to `limit`); the `NEXT_PAGE` next action's argv fetches the next page. Empty (and
-    /// omitted) on an uncapped list — the pinned shape is byte-identical there. **INFERRED**
-    /// (additive).
+    /// marker per capped bucket. The page applies PER BUCKET; the `NEXT_PAGE` next action's argv
+    /// fetches the next page. Empty (and omitted) on an uncapped list.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub truncated: Vec<BucketTruncation>,
+}
+
+/// One scope section of a [`ListData`] — the rows one manifest (or the implicit feed recipe)
+/// delivers. **PINNED.**
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
+pub struct ListScope {
+    /// `"project"` (the nearest `topos.toml` covering the working directory) or `"machine"`.
+    pub scope: String,
+    /// The governing manifest file; `None` = the implicit feed recipe (no machine-wide file — one
+    /// feed row per connected workspace).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manifest: Option<String>,
+    /// The scope's inventory rows.
+    pub rows: Vec<SkillEntry>,
+}
+
+/// The one-line summary of a scope the invocation does not show in full. **PINNED.**
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
+pub struct ListScopeSummary {
+    /// Skills the scope delivers.
+    pub skills: u64,
+    /// How many of them sit behind their last-known served target.
+    pub updates_pending: u64,
+    /// The exact command that expands the summary into the full section.
+    pub command: String,
+}
+
+/// The one-line summary of the untracked discoveries a bare `list` does not itemize. **PINNED.**
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
+pub struct UntrackedSummary {
+    /// Untracked skills discovered in the known agents' skill folders.
+    pub skills: u64,
+    /// The distinct folders holding them.
+    pub folders: u64,
+    /// The exact command that shows the full listing.
+    pub command: String,
+}
+
+/// One workspace's catalog view under `list --remote` — its channels and skills, each annotated
+/// with this machine's adoption state. Metadata only — the catalog grants no bytes. **PINNED.**
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
+pub struct RemoteWorkspace {
+    /// The server host the workspace lives on.
+    pub host: String,
+    /// The workspace's address name.
+    pub workspace: String,
+    /// The workspace's opaque id.
+    pub workspace_id: String,
+    /// The workspace's channels.
+    pub channels: Vec<RemoteChannel>,
+    /// The workspace's catalog skills.
+    pub skills: Vec<RemoteSkill>,
+}
+
+/// One channel in a [`RemoteWorkspace`]. **PINNED.**
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
+pub struct RemoteChannel {
+    /// The channel's name.
+    pub name: String,
+    /// How many skills it references.
+    pub skills: u64,
+    /// The manifest file whose row adopts this channel here, when one does.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub adopted_in: Option<String>,
+}
+
+/// One catalog skill in a [`RemoteWorkspace`]. **PINNED.**
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
+pub struct RemoteSkill {
+    /// The skill's catalog name (the reference leaf).
+    pub name: String,
+    /// The catalog's bundle kind (`"skill"` for everything today) — display metadata, never
+    /// branched on.
+    pub kind: String,
+    /// The catalog `current` version id (64-char lowercase hex).
+    #[cfg_attr(feature = "contract-derives", schemars(extend("pattern" = "^[0-9a-f]{64}$")))]
+    pub version_id: String,
+    /// Open, non-stale proposal count on the skill.
+    pub open_proposals: u64,
+    /// This machine's adoption state for the skill.
+    pub state: RemoteAdoption,
+}
+
+/// This machine's adoption state for a `--remote` catalog skill. **PINNED value set.**
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
+#[serde(rename_all = "kebab-case")]
+pub enum RemoteAdoption {
+    /// A row in the here-scope delivers it.
+    AdoptedHere,
+    /// Only the machine scope delivers it (seen from inside a project).
+    AdoptedOnMachine,
+    /// No scope covering the working directory delivers it — `topos add` records the demand.
+    NotAdopted,
+    /// Adopted, but the catalog `current` is newer than what is applied here — `topos update`
+    /// advances it.
+    UpdateAvailable,
+}
+
+/// The agent-eye view (`list -a <slug>`): for one harness from this folder, each skills dir it
+/// reads and what sits in it. Deliberately spans both scopes. **PINNED.**
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
+pub struct AgentView {
+    /// The harness's registry slug.
+    pub agent: String,
+    /// The harness's human-readable name.
+    pub agent_name: String,
+    /// The skills dirs the harness reads from this folder, each with its entries.
+    pub dirs: Vec<AgentViewDir>,
+}
+
+/// One skills dir in an [`AgentView`]. **PINNED.**
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
+pub struct AgentViewDir {
+    /// The dir's path.
+    pub path: String,
+    /// `"user"` (a home dir) or `"project"` (under this folder).
+    pub scope: String,
+    /// The skill dirs sitting in it.
+    pub entries: Vec<AgentViewEntry>,
+}
+
+/// One entry of an [`AgentViewDir`]. **PINNED.**
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
+pub struct AgentViewEntry {
+    /// The skill dir's name.
+    pub name: String,
+    /// What manages it: `"<file>:<row-key>"` for a manifest row, `"feed <host>/<ws>"` for a
+    /// workspace feed; `None` = untracked.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub managed: Option<String>,
+}
+
+/// The deep answer for ONE skill (`topos list <name>`): which file and line-key (or which feed)
+/// delivers it, the version and any pin, where its bytes are, and its state. **PINNED.**
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
+pub struct ListDetail {
+    /// The bundle's name.
+    pub name: String,
+    /// The manifest FILE whose row delivers it, when a row does (a path).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_file: Option<String>,
+    /// The row's spelled KEY in that file (the joined reference).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_key: Option<String>,
+    /// The feed origin, when no row names it (`<host>/<workspace>` — the workspace whose feed
+    /// delivers it).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub feed: Option<String>,
+    /// The delivery attribution (`assigned by <name>` / `picked by you`), when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attribution: Option<String>,
+    /// The applied version (64-hex), when applied locally.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    /// A row's version pin, when one is spelled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pin: Option<String>,
+    /// The placement directories this machine holds for it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub placements: Vec<String>,
+    /// The line's state (the resolution's own vocabulary).
+    pub state: StatusItemState,
 }
 
 /// One row-capped bucket in a paged [`ListData`]. **INFERRED** (additive).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
 pub struct BucketTruncation {
-    /// The capped bucket's field name (`followed` / `published_by_you` / `tracked` / `untracked` /
-    /// `remote_available`).
+    /// The capped bucket's name (a scope name — `project` / `machine` — or `untracked` /
+    /// `remote`).
     pub bucket: String,
     /// Rows emitted on this page.
     pub shown: u64,
     /// Total rows in the bucket before paging.
     pub total: u64,
-}
-
-/// A skill available in a followed workspace's catalog (`list --remote`), annotated with this install's
-/// follow-state so the agent can see what to `follow` (or `pull`) next. Metadata only — the catalog grants
-/// no bytes. **INFERRED** (additive).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
-pub struct RemoteSkillEntry {
-    /// The skill id — the workspace-scoped handle a `follow` targets.
-    pub skill_id: String,
-    /// The workspace the skill lives in (its catalog scope).
-    pub workspace_id: String,
-    /// The catalog's bundle kind (`"skill"` for everything today) — display metadata, never branched
-    /// on. Additive: an older plane omits it.
-    #[serde(default = "default_bundle_kind")]
-    pub kind: String,
-    /// The advisory display name, when the plane discloses one.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub display_name: Option<String>,
-    /// The catalog `current` version id (64-char lowercase hex).
-    #[cfg_attr(feature = "contract-derives", schemars(extend("pattern" = "^[0-9a-f]{64}$")))]
-    pub version_id: String,
-    /// The catalog `current` consent hash (64-char lowercase hex).
-    #[cfg_attr(feature = "contract-derives", schemars(extend("pattern" = "^[0-9a-f]{64}$")))]
-    pub bundle_digest: String,
-    /// Open, non-stale proposal count on the skill.
-    pub open_proposals: u64,
-    /// This install's follow-state for the skill.
-    pub state: RemoteFollowState,
-}
-
-/// The wire fallback for a plane predating the catalog `kind` (everything it serves is a skill).
-fn default_bundle_kind() -> String {
-    "skill".to_owned()
-}
-
-/// The local follow-state annotation on a `--remote` catalog entry.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
-#[serde(rename_all = "kebab-case")]
-pub enum RemoteFollowState {
-    /// In the workspace catalog, not followed by this install — `follow` to adopt.
-    Available,
-    /// Followed, and the local version matches the catalog `current`.
-    Following,
-    /// Followed, but the catalog `current` is newer than the local version — `pull` to advance.
-    FollowingBehind,
 }
 
 /// A discovered-but-unadopted skill — known only by where it lives, not by any topos version yet.
@@ -1281,10 +1421,10 @@ pub enum PublishGate {
 // INFERRED — `status` (the offline orientation snapshot).
 // =================================================================================================
 
-/// `status` result — the one orientation read: the sessions, the resolved trust-rail table for
-/// the current directory (the person's profile layers itemized beside the manifests'), per-agent
-/// trigger arm state, and the binary version. Computed ENTIRELY from local state (no network).
-/// **INFERRED** (additive-only).
+/// `status` result — the health panel: the binary version, the server + signed-in state, the
+/// sessions, the auto-update trigger states, and per shown SCOPE what governs it and what needs
+/// attention. NO skill inventory — that is `list`'s. Computed ENTIRELY from local state (no
+/// network). **INFERRED** (additive-only).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
 pub struct StatusData {
@@ -1295,42 +1435,76 @@ pub struct StatusData {
     pub server: Option<String>,
     /// Whether a LIVE (non-ended) session's credential is stored — the signed-in state.
     pub signed_in: bool,
-    /// Skills the person's server-stored PROFILES deliver to this installation, counted from the
-    /// offline delivery cache (withdrawn and manifest-channel rows excluded).
-    pub profile_skills: u64,
-    /// Profile deliveries not yet applied on this machine (never reconciled here — the next
-    /// `topos update` applies them). Absent = not cheaply knowable from local state.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub awaiting_first_sync: Option<u64>,
-    /// Per-agent auto-update trigger state, probed READ-ONLY over the detected agents (nothing is
-    /// armed or repaired by `status`).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub triggers: Vec<StatusTrigger>,
     /// This installation's SESSIONS — one per logged-into workspace (the session model; empty =
     /// logged into nothing).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sessions: Vec<StatusSession>,
-    /// The resolved table for the CURRENT directory: every bundle the scopes covering it — the
-    /// nearest project manifest and the person scope (the global manifest, or each connected
-    /// workspace's feed) — resolve to, deduped per scope, each with its one source line and an
-    /// honest state; recorded `"off"` switches appear as their own rows.
+    /// Per-agent auto-update trigger state, probed READ-ONLY over the detected agents (nothing is
+    /// armed or repaired by `status`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub items: Vec<StatusItem>,
-    /// Each connected workspace's REGIME on this machine: adopting its whole feed, explicit
-    /// line-by-line control, or feed rows withheld by a hand-written global manifest.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub regimes: Vec<StatusRegime>,
-    /// The disclosure lines — plain sentences the table cannot carry per row: the loud
-    /// no-feed-row note, redundant rows, inert `"off"` switches, set-collision winners,
-    /// declined-but-delivered notes, cross-scope version splits. Rendered verbatim.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub notes: Vec<String>,
-    /// The deep single-bundle answer (`topos status <bundle>`): where it comes from, spelled.
+    pub triggers: Vec<StatusTrigger>,
+    /// The scope bodies shown in full (here-scope; both under `--all`; machine under `-g` and
+    /// outside a project).
+    pub scopes: Vec<StatusScope>,
+    /// The machine scope's one-line summary with ITS pending counts, present only when the
+    /// machine body is NOT shown in full (the default view inside a project).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub detail: Option<StatusDetail>,
+    pub machine_summary: Option<StatusScopeSummary>,
 }
 
-/// One workspace's regime line in a [`StatusData`]. **INFERRED** (additive-only).
+/// One scope body of a [`StatusData`]: what governs it, the per-workspace regimes (machine
+/// scope), the disclosure notes, and the attention counts. **INFERRED** (additive-only).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
+pub struct StatusScope {
+    /// `"project"` or `"machine"`.
+    pub scope: String,
+    /// The governing manifest file; `None` = the implicit feed recipe (no machine-wide file).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manifest: Option<String>,
+    /// Each connected workspace's REGIME on this machine (machine scope only): adopting its whole
+    /// feed, explicit line-by-line control, or feed rows withheld by a hand-written file.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub regimes: Vec<StatusRegime>,
+    /// The disclosure lines — plain sentences no count can carry: the loud no-feed-row note,
+    /// redundant rows, inert `"off"` switches, set-collision winners, declined-but-delivered
+    /// notes, feeds that have not delivered yet, cross-scope version splits. Rendered verbatim.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub notes: Vec<String>,
+    /// What needs attention in this scope, one count per kind — each with the exact command that
+    /// resolves it. Only non-zero counts appear; empty = nothing pending.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attention: Vec<AttentionCount>,
+}
+
+/// One attention count in a [`StatusScope`] / [`StatusScopeSummary`]. **INFERRED**
+/// (additive-only).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
+pub struct AttentionCount {
+    /// `"updates-pending"` (applied version behind the last-known served target),
+    /// `"assignments-not-applied"` (delivered but never applied here), or `"drafts-ahead"`
+    /// (local edits ahead of the applied version).
+    pub kind: String,
+    /// How many rows the kind counts.
+    pub count: u64,
+    /// The exact command that resolves it.
+    pub command: String,
+}
+
+/// The machine scope's one-line summary in a [`StatusData`] whose body shows only the project
+/// scope. **INFERRED** (additive-only).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
+pub struct StatusScopeSummary {
+    /// The machine scope's attention counts (empty = nothing pending).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attention: Vec<AttentionCount>,
+    /// The exact command that expands the summary into the full body.
+    pub command: String,
+}
+
+/// One workspace's regime line in a [`StatusScope`]. **INFERRED** (additive-only).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
 pub struct StatusRegime {
@@ -1341,38 +1515,6 @@ pub struct StatusRegime {
     /// The regime sentence (e.g. "adopting all assigned, 2 off" or "explicit: 3 bundles; 1
     /// assigned not adopted here").
     pub regime: String,
-}
-
-/// The deep answer for ONE bundle (`topos status <bundle>`). **INFERRED** (additive-only).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
-pub struct StatusDetail {
-    /// The bundle's name.
-    pub name: String,
-    /// The manifest FILE whose row delivers it, when a row does (a path).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub source_file: Option<String>,
-    /// The row's spelled KEY in that file (the joined reference).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub source_key: Option<String>,
-    /// The feed origin, when no row names it (`<host>/<workspace>` — the workspace whose feed
-    /// delivers it).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub feed: Option<String>,
-    /// The delivery attribution (`assigned by <name>` / `picked by you`), when known.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub attribution: Option<String>,
-    /// The applied version (64-hex), when applied locally.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub version: Option<String>,
-    /// A row's version pin, when one is spelled.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pin: Option<String>,
-    /// The placement directories this machine holds for it.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub placements: Vec<String>,
-    /// The line's state (the same vocabulary as the table).
-    pub state: StatusItemState,
 }
 
 /// One session in a [`StatusData`] — this installation logged into one workspace. **INFERRED**
@@ -1393,47 +1535,8 @@ pub struct StatusSession {
     pub session_status: Option<String>,
 }
 
-/// One resolved line of the trust rail. Every "why does this agent have X?" is answered by
-/// `source` (which manifest line — or profile — asked for it); every "why doesn't it?" by
-/// `state` (an exclude renders as its own row). **INFERRED** (additive-only).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
-pub struct StatusItem {
-    /// The bundle's name (the dedupe key).
-    pub name: String,
-    /// The winning reference (canonical where known).
-    pub reference: String,
-    /// ONE source line: the manifest that asked for it (`<dir>/topos.toml`,
-    /// `~/.topos/topos.toml`), or the profile layer (`your profile @ <host>/<ws>`). On an
-    /// `excluded` row, the layer that RECORDED the exclude.
-    pub source: String,
-    /// Where the bytes belong: `"project"` (this project's harness dirs) or `"person"` (the home
-    /// dirs).
-    pub scope: String,
-    /// The channel that delivers it, when the line rides one (`everyone` = the workspace
-    /// baseline).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub via: Option<String>,
-    /// The delivery attribution, when known (`assigned by <name>` / `picked by you`).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub attribution: Option<String>,
-    /// The applied version (64-hex), when one is applied locally.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(feature = "contract-derives", schemars(extend("pattern" = "^[0-9a-f]{64}$")))]
-    pub version: Option<String>,
-    /// When the applied state was last confirmed against a delivery (RFC-3339 UTC) — the offline
-    /// cache's honesty stamp: "applied as of this sync", never a live claim.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub applied_as_of: Option<String>,
-    /// The line's state.
-    pub state: StatusItemState,
-    /// Broader mentions this line shadows (their labels) — on an `excluded` row, the layers
-    /// whose provision the exclude withholds. Rendered, never acted on.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub shadows: Vec<String>,
-}
-
-/// A trust-rail line's state. **INFERRED value set** (additive).
+/// A resolved line's state — the offline resolution's shared vocabulary ([`ListDetail::state`]
+/// and the internal per-scope rows). **INFERRED value set** (additive).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
 #[serde(rename_all = "kebab-case")]

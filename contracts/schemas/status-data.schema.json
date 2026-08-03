@@ -1,54 +1,25 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "StatusData",
-  "description": "`status` result — the one orientation read: the sessions, the resolved trust-rail table for\nthe current directory (the person's profile layers itemized beside the manifests'), per-agent\ntrigger arm state, and the binary version. Computed ENTIRELY from local state (no network).\n**INFERRED** (additive-only).",
+  "description": "`status` result — the health panel: the binary version, the server + signed-in state, the\nsessions, the auto-update trigger states, and per shown SCOPE what governs it and what needs\nattention. NO skill inventory — that is `list`'s. Computed ENTIRELY from local state (no\nnetwork). **INFERRED** (additive-only).",
   "type": "object",
   "properties": {
-    "awaiting_first_sync": {
-      "description": "Profile deliveries not yet applied on this machine (never reconciled here — the next\n`topos update` applies them). Absent = not cheaply knowable from local state.",
-      "type": [
-        "integer",
-        "null"
-      ],
-      "format": "uint64",
-      "minimum": 0
-    },
-    "detail": {
-      "description": "The deep single-bundle answer (`topos status <bundle>`): where it comes from, spelled.",
+    "machine_summary": {
+      "description": "The machine scope's one-line summary with ITS pending counts, present only when the\nmachine body is NOT shown in full (the default view inside a project).",
       "anyOf": [
         {
-          "$ref": "#/$defs/StatusDetail"
+          "$ref": "#/$defs/StatusScopeSummary"
         },
         {
           "type": "null"
         }
       ]
     },
-    "items": {
-      "description": "The resolved table for the CURRENT directory: every bundle the scopes covering it — the\nnearest project manifest and the person scope (the global manifest, or each connected\nworkspace's feed) — resolve to, deduped per scope, each with its one source line and an\nhonest state; recorded `\"off\"` switches appear as their own rows.",
+    "scopes": {
+      "description": "The scope bodies shown in full (here-scope; both under `--all`; machine under `-g` and\noutside a project).",
       "type": "array",
       "items": {
-        "$ref": "#/$defs/StatusItem"
-      }
-    },
-    "notes": {
-      "description": "The disclosure lines — plain sentences the table cannot carry per row: the loud\nno-feed-row note, redundant rows, inert `\"off\"` switches, set-collision winners,\ndeclined-but-delivered notes, cross-scope version splits. Rendered verbatim.",
-      "type": "array",
-      "items": {
-        "type": "string"
-      }
-    },
-    "profile_skills": {
-      "description": "Skills the person's server-stored PROFILES deliver to this installation, counted from the\noffline delivery cache (withdrawn and manifest-channel rows excluded).",
-      "type": "integer",
-      "format": "uint64",
-      "minimum": 0
-    },
-    "regimes": {
-      "description": "Each connected workspace's REGIME on this machine: adopting its whole feed, explicit\nline-by-line control, or feed rows withheld by a hand-written global manifest.",
-      "type": "array",
-      "items": {
-        "$ref": "#/$defs/StatusRegime"
+        "$ref": "#/$defs/StatusScope"
       }
     },
     "server": {
@@ -84,197 +55,36 @@
   "required": [
     "version",
     "signed_in",
-    "profile_skills"
+    "scopes"
   ],
   "$defs": {
-    "StatusDetail": {
-      "description": "The deep answer for ONE bundle (`topos status <bundle>`). **INFERRED** (additive-only).",
+    "AttentionCount": {
+      "description": "One attention count in a [`StatusScope`] / [`StatusScopeSummary`]. **INFERRED**\n(additive-only).",
       "type": "object",
       "properties": {
-        "attribution": {
-          "description": "The delivery attribution (`assigned by <name>` / `picked by you`), when known.",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "feed": {
-          "description": "The feed origin, when no row names it (`<host>/<workspace>` — the workspace whose feed\ndelivers it).",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "name": {
-          "description": "The bundle's name.",
+        "command": {
+          "description": "The exact command that resolves it.",
           "type": "string"
         },
-        "pin": {
-          "description": "A row's version pin, when one is spelled.",
-          "type": [
-            "string",
-            "null"
-          ]
+        "count": {
+          "description": "How many rows the kind counts.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
         },
-        "placements": {
-          "description": "The placement directories this machine holds for it.",
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        },
-        "source_file": {
-          "description": "The manifest FILE whose row delivers it, when a row does (a path).",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "source_key": {
-          "description": "The row's spelled KEY in that file (the joined reference).",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "state": {
-          "description": "The line's state (the same vocabulary as the table).",
-          "$ref": "#/$defs/StatusItemState"
-        },
-        "version": {
-          "description": "The applied version (64-hex), when applied locally.",
-          "type": [
-            "string",
-            "null"
-          ]
+        "kind": {
+          "description": "`\"updates-pending\"` (applied version behind the last-known served target),\n`\"assignments-not-applied\"` (delivered but never applied here), or `\"drafts-ahead\"`\n(local edits ahead of the applied version).",
+          "type": "string"
         }
       },
       "required": [
-        "name",
-        "state"
-      ]
-    },
-    "StatusItem": {
-      "description": "One resolved line of the trust rail. Every \"why does this agent have X?\" is answered by\n`source` (which manifest line — or profile — asked for it); every \"why doesn't it?\" by\n`state` (an exclude renders as its own row). **INFERRED** (additive-only).",
-      "type": "object",
-      "properties": {
-        "applied_as_of": {
-          "description": "When the applied state was last confirmed against a delivery (RFC-3339 UTC) — the offline\ncache's honesty stamp: \"applied as of this sync\", never a live claim.",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "attribution": {
-          "description": "The delivery attribution, when known (`assigned by <name>` / `picked by you`).",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "name": {
-          "description": "The bundle's name (the dedupe key).",
-          "type": "string"
-        },
-        "reference": {
-          "description": "The winning reference (canonical where known).",
-          "type": "string"
-        },
-        "scope": {
-          "description": "Where the bytes belong: `\"project\"` (this project's harness dirs) or `\"person\"` (the home\ndirs).",
-          "type": "string"
-        },
-        "shadows": {
-          "description": "Broader mentions this line shadows (their labels) — on an `excluded` row, the layers\nwhose provision the exclude withholds. Rendered, never acted on.",
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        },
-        "source": {
-          "description": "ONE source line: the manifest that asked for it (`<dir>/topos.toml`,\n`~/.topos/topos.toml`), or the profile layer (`your profile @ <host>/<ws>`). On an\n`excluded` row, the layer that RECORDED the exclude.",
-          "type": "string"
-        },
-        "state": {
-          "description": "The line's state.",
-          "$ref": "#/$defs/StatusItemState"
-        },
-        "version": {
-          "description": "The applied version (64-hex), when one is applied locally.",
-          "type": [
-            "string",
-            "null"
-          ],
-          "pattern": "^[0-9a-f]{64}$"
-        },
-        "via": {
-          "description": "The channel that delivers it, when the line rides one (`everyone` = the workspace\nbaseline).",
-          "type": [
-            "string",
-            "null"
-          ]
-        }
-      },
-      "required": [
-        "name",
-        "reference",
-        "source",
-        "scope",
-        "state"
-      ]
-    },
-    "StatusItemState": {
-      "description": "A trust-rail line's state. **INFERRED value set** (additive).",
-      "oneOf": [
-        {
-          "description": "The bytes are applied and current against the last-known delivered target (see\n`applied_as_of` — the offline cache's stamp, not a live confirmation).",
-          "type": "string",
-          "const": "applied"
-        },
-        {
-          "description": "A newer target is known than what is applied — the next `update` lands it.",
-          "type": "string",
-          "const": "behind"
-        },
-        {
-          "description": "Local edits sit ahead of the applied version (a draft).",
-          "type": "string",
-          "const": "local-edits"
-        },
-        {
-          "description": "An exclude line withholds this name here (the row's `source` recorded it).",
-          "type": "string",
-          "const": "excluded"
-        },
-        {
-          "description": "A machine-local `\"off\"` row in the global manifest withholds this bundle from the feed\nhere (the everywhere-path is the web decline).",
-          "type": "string",
-          "const": "off"
-        },
-        {
-          "description": "Referenced here but NOT deliverable with your current access — phrased from LOCAL\nknowledge only (no live session for its workspace); never from server confirmation.",
-          "type": "string",
-          "const": "not-available"
-        },
-        {
-          "description": "The session that would deliver it is pending an owner's approval.",
-          "type": "string",
-          "const": "pending-session"
-        },
-        {
-          "description": "An adopted feed this installation has never had a delivery from: the next `update` performs\nthe first exchange. What that exchange brings — including nothing — is not knowable here,\nso the line promises an exchange, never an apply.",
-          "type": "string",
-          "const": "no-delivery-yet"
-        },
-        {
-          "description": "Not applied here yet — `topos update` applies it (or the state is not determinable\noffline).",
-          "type": "string",
-          "const": "unknown"
-        }
+        "kind",
+        "count",
+        "command"
       ]
     },
     "StatusRegime": {
-      "description": "One workspace's regime line in a [`StatusData`]. **INFERRED** (additive-only).",
+      "description": "One workspace's regime line in a [`StatusScope`]. **INFERRED** (additive-only).",
       "type": "object",
       "properties": {
         "host": {
@@ -294,6 +104,67 @@
         "host",
         "workspace",
         "regime"
+      ]
+    },
+    "StatusScope": {
+      "description": "One scope body of a [`StatusData`]: what governs it, the per-workspace regimes (machine\nscope), the disclosure notes, and the attention counts. **INFERRED** (additive-only).",
+      "type": "object",
+      "properties": {
+        "attention": {
+          "description": "What needs attention in this scope, one count per kind — each with the exact command that\nresolves it. Only non-zero counts appear; empty = nothing pending.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/AttentionCount"
+          }
+        },
+        "manifest": {
+          "description": "The governing manifest file; `None` = the implicit feed recipe (no machine-wide file).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "notes": {
+          "description": "The disclosure lines — plain sentences no count can carry: the loud no-feed-row note,\nredundant rows, inert `\"off\"` switches, set-collision winners, declined-but-delivered\nnotes, feeds that have not delivered yet, cross-scope version splits. Rendered verbatim.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "regimes": {
+          "description": "Each connected workspace's REGIME on this machine (machine scope only): adopting its whole\nfeed, explicit line-by-line control, or feed rows withheld by a hand-written file.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/StatusRegime"
+          }
+        },
+        "scope": {
+          "description": "`\"project\"` or `\"machine\"`.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "scope"
+      ]
+    },
+    "StatusScopeSummary": {
+      "description": "The machine scope's one-line summary in a [`StatusData`] whose body shows only the project\nscope. **INFERRED** (additive-only).",
+      "type": "object",
+      "properties": {
+        "attention": {
+          "description": "The machine scope's attention counts (empty = nothing pending).",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/AttentionCount"
+          }
+        },
+        "command": {
+          "description": "The exact command that expands the summary into the full body.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "command"
       ]
     },
     "StatusSession": {

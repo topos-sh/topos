@@ -109,19 +109,25 @@ fn end_to_end_add_then_list_over_json() {
         "first use minted the device identity"
     );
 
-    // list — finds the tracked skill via the same wiring.
+    // list — the machine scope (the here-scope out here) carries the adopted row via the same
+    // wiring: the manifest line `add -g` recorded resolves against the machine store.
     let (ok, v) = run(&home, &["--json", "list"]);
     assert!(ok);
-    let tracked = v["data"]["tracked"].as_array().expect("tracked array");
-    assert_eq!(tracked.len(), 1);
-    assert_eq!(tracked[0]["skill"], "pr-describe");
-    assert_eq!(tracked[0]["version_id"], version);
+    let scopes = v["data"]["scopes"].as_array().expect("scopes array");
+    let machine = scopes
+        .iter()
+        .find(|s| s["scope"] == "machine")
+        .expect("the machine scope");
+    let rows = machine["rows"].as_array().expect("rows");
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(rows[0]["skill"], "pr-describe");
+    assert_eq!(rows[0]["version_id"], version);
 
-    // An unknown skill name fails closed with a coded error envelope (still exit-nonzero, valid JSON).
+    // An unknown deep-dive name fails closed with the uniform not-found (exit-nonzero, valid JSON).
     let (ok, v) = run(&home, &["--json", "list", "nope"]);
     assert!(!ok, "an unknown name should exit nonzero");
     assert_eq!(v["ok"], false);
-    assert_eq!(v["error"]["code"], "NO_SUCH_SKILL");
+    assert_eq!(v["error"]["code"], "NOT_FOUND");
 
     let _ = std::fs::remove_dir_all(&src);
     let _ = std::fs::remove_dir_all(&home);
@@ -197,10 +203,13 @@ fn json_envelope_apply_receipt_on_ungated_arms_describe_on_gated() {
     assert_eq!(v["next_actions"][0]["code"], "APPLY_DESCRIBED");
     let argv = v["next_actions"][0]["argv"].as_array().expect("argv");
     assert_eq!(argv.last().and_then(|t| t.as_str()), Some("--yes"));
-    // The describe deleted nothing: the skill still lists as tracked.
-    let (ok, v) = run(&home, &["--json", "list", "--tracked"]);
-    assert!(ok);
-    assert_eq!(v["data"]["tracked"][0]["skill"], "pr-describe");
+    // The describe deleted nothing: the sidecar custody still holds the skill's record (the
+    // earlier row-remove kept the bytes, so no manifest row lists it any more — the store is the
+    // honest oracle here).
+    let kept = std::fs::read_dir(home.join("skills"))
+        .map(|d| d.count())
+        .unwrap_or(0);
+    assert!(kept >= 1, "the sidecar custody must still hold the skill");
 
     let _ = std::fs::remove_dir_all(&src);
     let _ = std::fs::remove_dir_all(&home);
@@ -251,10 +260,14 @@ fn end_to_end_claude_code_adopt_arms_currency_and_pull_is_silent() {
         "the skill file is byte-identical"
     );
 
-    // list shows it tracked.
+    // list shows it in the machine scope.
     let (ok, v) = run_in(&home, &claude, &["--json", "list"]);
     assert!(ok);
-    assert_eq!(v["data"]["tracked"][0]["skill"], "pr-describe");
+    let machine_rows = v["data"]["scopes"]
+        .as_array()
+        .and_then(|s| s.iter().find(|x| x["scope"] == "machine").cloned())
+        .expect("the machine scope");
+    assert_eq!(machine_rows["rows"][0]["skill"], "pr-describe");
 
     // The installed hook runs `topos update --quiet --hook claude-code`; the field's already-armed
     // hooks run the retained `topos pull --quiet` alias. BOTH must exit 0 and emit NOTHING on stdout
@@ -323,12 +336,15 @@ fn end_to_end_add_by_name_resolves_a_discovered_skill() {
     std::fs::create_dir_all(&skill).unwrap();
     std::fs::write(skill.join("SKILL.md"), "# deploy\n\nShip it.\n").unwrap();
 
-    // `topos list` discovers it as untracked, tagged with the registry slug (the `@harness` token).
-    let v = run_disc(&home, &disc, &claude, &["--json", "list"]);
+    // `topos list --untracked` discovers it, tagged with the registry slug (the `@harness`
+    // token); the bare list carries only the one summary line.
+    let v = run_disc(&home, &disc, &claude, &["--json", "list", "--untracked"]);
     let untracked = v["data"]["untracked"].as_array().expect("untracked array");
     assert_eq!(untracked.len(), 1, "{untracked:?}");
     assert_eq!(untracked[0]["name"], "deploy");
     assert_eq!(untracked[0]["harness"], "claude-code");
+    let v = run_disc(&home, &disc, &claude, &["--json", "list"]);
+    assert_eq!(v["data"]["untracked_summary"]["skills"], 1, "{v}");
 
     // The runs below all stand IN `$HOME`, where the project walk stops by rule — no `topos.toml`
     // can cover this folder, so the project-scoped add refuses and names the two ways out. The
@@ -368,10 +384,20 @@ fn end_to_end_add_by_name_resolves_a_discovered_skill() {
     assert_eq!(v["data"]["harness"], "claude-code");
     assert_eq!(v["data"]["tracked"], true);
 
-    // Now tracked → discovery no longer lists it as untracked, and re-adopting by name reports it tracked.
+    // Now tracked → discovery no longer lists it as untracked, and the machine scope carries it.
+    let v = run_disc(&home, &disc, &claude, &["--json", "list", "--untracked"]);
+    assert!(
+        v["data"]["untracked"]
+            .as_array()
+            .is_none_or(|u| u.is_empty()),
+        "{v}"
+    );
     let v = run_disc(&home, &disc, &claude, &["--json", "list"]);
-    assert_eq!(v["data"]["tracked"][0]["skill"], "deploy");
-    assert!(v["data"]["untracked"].as_array().unwrap().is_empty());
+    let machine_rows = v["data"]["scopes"]
+        .as_array()
+        .and_then(|s| s.iter().find(|x| x["scope"] == "machine").cloned())
+        .expect("the machine scope");
+    assert_eq!(machine_rows["rows"][0]["skill"], "deploy");
     let v = run_disc(&home, &disc, &claude, &["--json", "add", "-g", "deploy"]);
     assert_eq!(v["ok"], false);
     assert_eq!(v["error"]["code"], "ALREADY_TRACKED");

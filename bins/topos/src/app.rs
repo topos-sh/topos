@@ -98,7 +98,10 @@ fn run_bare(json: bool, workspace: Option<String>, argv: &[String]) -> ExitCode 
     run_command(
         false,
         workspace,
-        Command::Status { bundle: None },
+        Command::Status {
+            global: false,
+            all: false,
+        },
         true,
         argv,
     )
@@ -190,8 +193,12 @@ fn run_command(
     // expired enrollment WAL, removes torn staging, repairs logs). Its finisher likewise never
     // appends to the diagnostics log — a status run leaves the sidecar byte-identical, proven by
     // `ops::status`'s pending-recovery-fixture test.
-    if let Command::Status { bundle } = &command {
-        let bundle = bundle.clone();
+    if let Command::Status { global, all } = &command {
+        let view = match (global, all) {
+            (true, _) => ops::ScopeView::Machine,
+            (_, true) => ops::ScopeView::All,
+            _ => ops::ScopeView::Here,
+        };
         let inert_plane = crate::plane::InertPlane;
         let inert_follow = crate::plane::InertFollow;
         let ctx = Ctx {
@@ -215,7 +222,7 @@ fn run_command(
         // The snapshot from local state; the trigger rows from the read-only probe at this root
         // (the one layer holding the real config port + $HOME) — the same layering the arming
         // receipts use, minus every write.
-        let result = ops::status_snapshot(&ctx, bundle.as_deref()).map(|mut data| {
+        let result = ops::status_snapshot(&ctx, view).map(|mut data| {
             if let Some(r) = &ctx.roots {
                 data.triggers =
                     ops::probe_detected(&r.home, r.cwd.as_deref(), harness.as_ref(), &fs);
@@ -737,7 +744,7 @@ fn run_command(
                 // A bare NAME resolves against BOTH namespaces — the untracked local inventory and
                 // the connected workspaces' catalogs — so a name only the team publishes is not a
                 // dead end, and a name both carry says so on the receipt.
-                crate::source::SourceSpec::LocalName(name) => match list_discovery(false) {
+                crate::source::SourceSpec::LocalName(name) => match list_discovery() {
                     Some(roots) => {
                         match ops::plan_bare_add(
                             &ctx,
@@ -815,7 +822,7 @@ fn run_command(
                             .into(),
                     )),
                 },
-                crate::source::SourceSpec::Remote(spec) => match list_discovery(false) {
+                crate::source::SourceSpec::Remote(spec) => match list_discovery() {
                     Some(roots) => {
                         let git = crate::plane_http::UreqGitSource::new()
                             .with_progress(Rc::clone(&progress));
@@ -902,8 +909,11 @@ fn run_command(
         }
         Command::List {
             name,
+            global,
+            all,
+            untracked,
+            agent,
             remote,
-            tracked,
             footprint,
             channel,
             skill,
@@ -915,68 +925,50 @@ fn run_command(
             // selector (incl. the global `--workspace`, which narrows the `--remote` catalog); the
             // page flags are appended by the finisher once the effective page is known.
             let page_argv = list_page_argv(
-                &name,
+                name.as_deref(),
+                global,
+                all,
+                untracked,
+                agent.as_deref(),
                 remote,
-                tracked,
                 footprint,
                 &channel,
                 &skill,
                 workspace.as_deref(),
             );
-            // The full row filter: positional names + the `--channel`/`--skill` selectors. A single bare
-            // name keeps the classic exactly-one narrowing; richer forms resolve ALL-OR-NONE (an unmatched
-            // name refuses the whole invocation) and filter the tracked rows.
-            let filter = ops::ListFilter {
-                names: name,
+            let req = ops::ListRequest {
+                view: match (global, all) {
+                    (true, _) => ops::ScopeView::Machine,
+                    (_, true) => ops::ScopeView::All,
+                    _ => ops::ScopeView::Here,
+                },
+                untracked,
+                name,
+                agent,
+                remote,
+                footprint,
                 channels: channel,
                 skills: skill,
+                workspace: workspace.clone(),
             };
-            // Under `--remote`, the catalog targets are the LIVE SESSIONS — one credentialed
-            // read per session (a typed "run login first" when there is none). The routing
-            // catalog holds one client per session, keyed by workspace id.
-            let catalog_client;
-            let scope = if remote {
-                let live: Vec<crate::sessions::Session> =
-                    match crate::sessions::read_sessions(&fs, &ctx.layout) {
-                        Ok(all) => all
-                            .sessions
-                            .into_iter()
-                            .filter(|s| s.status != "ended")
-                            .collect(),
-                        Err(e) => return emit_err(json, cmd_name, &e, &diag),
-                    };
-                if live.is_empty() {
-                    let e = ClientError::SessionRequired {
-                        address: "<workspace-address>".to_owned(),
-                        message:
-                            "not connected to a workspace — run `topos login <workspace-address>` \
-                          first"
-                                .into(),
-                    };
-                    return emit_err(json, cmd_name, &e, &diag);
-                }
-                let memberships: Vec<(String, String)> = live
-                    .iter()
-                    .map(|s| (s.workspace_id.clone(), s.display_name.clone()))
-                    .collect();
-                catalog_client = SessionCatalog::new(&live, &progress);
-                Some(ops::RemoteScope {
-                    catalog: &catalog_client,
-                    memberships,
-                    only: workspace.clone(),
-                })
-            } else {
-                None
-            };
+            // Under `--remote` (the one networked arm) the op reads each LIVE session's channel
+            // index + catalog through its own credentialed directory lane (the typed "run login
+            // first" refusal lives in the op). Everything else stays offline.
+            let connect_list_directory =
+                |s: &crate::sessions::Session| -> Box<dyn DirectorySource> {
+                    Box::new(
+                        UreqDeviceClient::new(s.base_url.clone(), Some(s.credential.clone()))
+                            .with_progress(Rc::clone(&progress)),
+                    )
+                };
             finish_list(
                 json,
                 cmd_name,
                 ops::list_with(
                     &ctx,
-                    &filter,
-                    footprint,
-                    list_discovery(tracked),
-                    scope,
+                    &req,
+                    list_discovery(),
+                    Some(&connect_list_directory),
                     page,
                 ),
                 page,
@@ -1017,7 +1009,7 @@ fn run_command(
         } => {
             // Discovery roots for the auto-add pre-step (a `publish` of an untracked local source adopts it
             // first) — the SAME roots `add`/`list` use; `None` degrades name/dir resolution the same way.
-            let roots = list_discovery(false);
+            let roots = list_discovery();
             // A bare ENROLLED publish DESCRIBES what shipping would do (nothing lands on the plane); `--yes`
             // applies. An un-enrolled publish refuses typed inside the op (enroll with `follow` first).
             let publish_sessions = crate::sessions::read_sessions(&fs, &ctx.layout)
@@ -1382,8 +1374,8 @@ fn run_command(
                     cmd_name,
                     &ClientError::InvalidArgument(format!(
                         "--via {via} selects a channel/repo line in a manifest, and no manifest \
-                         line here carries the named target — `topos status` lists what each \
-                         file asks for"
+                         line here carries the named target — `topos list` shows what each \
+                         scope delivers"
                     )),
                     &diag,
                 );
@@ -1392,7 +1384,7 @@ fn run_command(
                 directory: &connect_directory,
                 session: &connect_session_transports,
             };
-            let roots = list_discovery(false);
+            let roots = list_discovery();
             let result = ops::remove(&ctx, &connectors, &skill, &[], roots.as_ref(), yes);
             finish_remove(json, cmd_name, result, &diag)
         }
@@ -1702,28 +1694,39 @@ fn finish_list(
 }
 
 /// The complete `topos list` argv this invocation re-spells for its NEXT_PAGE continuation — every
-/// selector preserved: the positional names, the mode flags, the repeatable `--channel`/`--skill`
-/// selectors, AND the global `--workspace` (already canonicalized to an id; the flag accepts it) —
-/// so the next page enumerates exactly the same view, never a widened one.
+/// selector preserved: the deep-dive name, the scope flags, the view flags, the repeatable
+/// `--channel`/`--skill` selectors, AND the global `--workspace` (already canonicalized to an id;
+/// the flag accepts it) — so the next page enumerates exactly the same view, never a widened one.
+#[allow(clippy::too_many_arguments)]
 fn list_page_argv(
-    names: &[String],
+    name: Option<&str>,
+    global: bool,
+    all: bool,
+    untracked: bool,
+    agent: Option<&str>,
     remote: bool,
-    tracked: bool,
     footprint: bool,
     channels: &[String],
     skills: &[String],
     workspace: Option<&str>,
 ) -> Vec<String> {
     let mut argv = vec!["topos".to_owned(), "list".to_owned()];
-    argv.extend(names.iter().cloned());
+    if let Some(n) = name {
+        argv.push(n.to_owned());
+    }
     for (flag, on) in [
+        ("-g", global),
+        ("--all", all),
+        ("--untracked", untracked),
         ("--remote", remote),
-        ("--tracked", tracked),
         ("--footprint", footprint),
     ] {
         if on {
             argv.push(flag.to_owned());
         }
+    }
+    if let Some(a) = agent {
+        argv.extend(["--agent".to_owned(), a.to_owned()]);
     }
     for c in channels {
         argv.extend(["--channel".to_owned(), c.clone()]);
@@ -2812,46 +2815,6 @@ fn breadth_arm(
     }
 }
 
-/// The session-routed CATALOG reader (`list --remote`): one credentialed client per live
-/// session, routed by workspace id.
-struct SessionCatalog {
-    lanes: Vec<(String, UreqDeviceClient)>,
-}
-
-impl SessionCatalog {
-    fn new(
-        sessions: &[crate::sessions::Session],
-        progress: &Rc<dyn crate::progress::ProgressSink>,
-    ) -> Self {
-        Self {
-            lanes: sessions
-                .iter()
-                .map(|s| {
-                    (
-                        s.workspace_id.clone(),
-                        UreqDeviceClient::new(s.base_url.clone(), Some(s.credential.clone()))
-                            .with_progress(Rc::clone(progress)),
-                    )
-                })
-                .collect(),
-        }
-    }
-}
-
-impl crate::plane::CatalogSource for SessionCatalog {
-    fn fetch_catalog(
-        &self,
-        workspace_id: &str,
-    ) -> Result<topos_types::requests::WireSkillIndex, crate::plane::PlaneError> {
-        match self.lanes.iter().find(|(w, _)| w == workspace_id) {
-            Some((_, client)) => client.fetch_catalog(workspace_id),
-            None => Err(crate::plane::PlaneError::Unavailable(
-                "no session for this workspace".into(),
-            )),
-        }
-    }
-}
-
 /// Build the harness adapter for `id`, borrowing the shared config-store seam plus the subprocess
 /// runner (OpenClaw's trigger drives its own `openclaw` CLI). Adding a harness is ONE new match arm
 /// — no caller change. v0 only ever selects Claude Code (the CLI's one selection site above passes
@@ -2885,13 +2848,10 @@ fn resolve_home() -> PathBuf {
         .join(".topos")
 }
 
-/// The discovery roots for `list`: `None` under `--tracked` (skip discovery), else the user home (every
-/// harness's global skill dir resolves under it) + the current project dir (repo-scoped skills). A missing
-/// `$HOME` degrades to no discovery rather than an error.
-fn list_discovery(tracked: bool) -> Option<ops::DiscoveryRoots> {
-    if tracked {
-        return None;
-    }
+/// The discovery roots for `list`/`add`: the user home (every harness's global skill dir resolves
+/// under it) + the current project dir (repo-scoped skills). A missing `$HOME` degrades to no
+/// discovery rather than an error.
+fn list_discovery() -> Option<ops::DiscoveryRoots> {
     let home = std::env::var_os("HOME").map(PathBuf::from)?;
     Some(ops::DiscoveryRoots {
         home,
@@ -3031,9 +2991,12 @@ mod tests {
         // The NEXT_PAGE continuation must re-spell the WHOLE view — dropping `--workspace` would
         // widen a narrowed `--remote` catalog to every joined workspace on the next page.
         let argv = list_page_argv(
-            &["docs".to_owned()],
-            true,
+            None,
             false,
+            false,
+            false,
+            None,
+            true,
             false,
             &["eng".to_owned()],
             &["deploy".to_owned()],
@@ -3044,7 +3007,6 @@ mod tests {
             vec![
                 "topos",
                 "list",
-                "docs",
                 "--remote",
                 "--channel",
                 "eng",
@@ -3054,9 +3016,37 @@ mod tests {
                 "w_acme",
             ]
         );
+        // The scope + view flags re-spell too.
+        let argv = list_page_argv(
+            None,
+            true,
+            false,
+            true,
+            Some("cursor"),
+            false,
+            false,
+            &[],
+            &[],
+            None,
+        );
+        assert_eq!(
+            argv,
+            vec!["topos", "list", "-g", "--untracked", "--agent", "cursor"]
+        );
         // The bare local list re-spells bare.
         assert_eq!(
-            list_page_argv(&[], false, false, false, &[], &[], None),
+            list_page_argv(
+                None,
+                false,
+                false,
+                false,
+                None,
+                false,
+                false,
+                &[],
+                &[],
+                None
+            ),
             vec!["topos", "list"]
         );
     }

@@ -313,8 +313,8 @@ pub(crate) trait DirectorySource {
     fn channels_index(&self, workspace_id: &str) -> Result<WireChannelIndex, ClientError>;
 
     /// `GET /v1/workspaces/{ws}/skills` — the workspace catalog (name → skill id + digests), the
-    /// resolver's and the describe's name source. The same route `list --remote` reads through
-    /// [`CatalogSource`]; this typed twin keeps the verb paths on ONE connector.
+    /// resolver's and the describe's name source, and the route `list --remote` reads per live
+    /// session.
     ///
     /// # Errors
     /// As [`me`](Self::me).
@@ -720,31 +720,6 @@ pub(crate) trait ContributeSource {
     /// # Errors
     /// As [`publish`](Self::publish).
     fn review(&self, body: ReviewRequest) -> Result<WriteReceipt, ClientError>;
-}
-
-// ---------------------------------------------------------------------------------------------
-// The catalog-read seam — the WORKSPACE-CATALOG read side (`list --remote`), behind a port so the list
-// tests run against a fake WITHOUT HTTP. The read is authenticated by the workspace's Bearer credential
-// (catalog visibility == workspace membership, resolved from the registry row), not a per-skill token.
-// Metadata only (no bytes). The real impl is `crate::plane_http::UreqDeviceClient` (the same client that
-// speaks enrollment / governance / contribute, holding the per-workspace credential map); the fake lives
-// in the `list` tests.
-// ---------------------------------------------------------------------------------------------
-
-/// The catalog-read transport: `GET /v1/workspaces/{ws}/skills` returns the workspace's discovery metadata
-/// (every skill holding a `current`), so a member can see what to follow next. The transport presents the
-/// workspace's Bearer credential (looked up by `workspace_id` in its own credential map).
-pub(crate) trait CatalogSource {
-    /// Read a workspace's skill catalog (metadata only). The real impl maps a **404** (not a member / no
-    /// such workspace — the indistinguishable "no catalog") to an EMPTY index rather than an error, so a
-    /// caller merging several workspaces degrades cleanly; a workspace with no stored credential and any
-    /// other non-200 are [`PlaneError::Unavailable`] (or [`PlaneError::Unreachable`] on a connect-level
-    /// fault) — each degraded to a per-workspace warning by the `list --remote` merge.
-    ///
-    /// # Errors
-    /// [`PlaneError::Unreachable`] / [`PlaneError::Unavailable`] on a transport / non-200 / missing-credential
-    /// fault; [`PlaneError::Malformed`] on a corrupt body or an unsafe workspace-id path segment.
-    fn fetch_catalog(&self, workspace_id: &str) -> Result<WireSkillIndex, PlaneError>;
 }
 
 // ---------------------------------------------------------------------------------------------

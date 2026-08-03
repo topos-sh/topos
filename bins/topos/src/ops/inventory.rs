@@ -1,0 +1,1961 @@
+//! The shared per-scope RESOLUTION machinery `list` and `status` both read — one resolution, two
+//! views. Computed ENTIRELY from local state: the parsed manifests (`manifest::scopes`), the
+//! sessions file, the offline delivery cache (`sync_status`), and the per-scope sidecar stores.
+//! No network, no writes.
+//!
+//! SCOPES ARE UNBLENDED, so the resolution is SECTIONED, never merged: the NEAREST project
+//! manifest (taken whole) when one covers the working directory, then the MACHINE scope — the
+//! global manifest when it exists (a COMPLETE recipe: only its rows deliver, and a workspace's
+//! feed flows iff a feed row says so), else the implicit recipe of one feed row per connected
+//! workspace. Within a scope the delivered set is the union of the rows (or the implicit feeds)
+//! minus the `"off"` switches, deduped by bundle identity — an explicit row beats any set's or
+//! any feed's delivery of the same bundle.
+//!
+//! Per line: the winning reference, ONE source (which manifest row — or which workspace's feed —
+//! asked), the delivery attribution (`assigned by <name>` / `picked by you`), and an honest state
+//! (applied-as-of-the-last-sync / local edits / behind / off / not available / never delivered /
+//! unknown). What a row cannot carry rides each scope's `notes`: the loud "the global manifest
+//! does not adopt these assignments" line, feeds and channel lines whose exchange has brought
+//! nothing yet, rows that add nothing, `"off"` switches for bundles nobody assigns any more, set
+//! collisions, declined-but-delivered bundles, and cross-scope version splits.
+
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::{Path, PathBuf};
+
+use topos_types::persisted::{Lock, SyncState};
+use topos_types::results::{ListDetail, StatusItemState, StatusRegime};
+
+use crate::ctx::Ctx;
+use crate::error::ClientError;
+use crate::manifest::document::EntryValue;
+use crate::manifest::keys::{self, KeyShape};
+use crate::manifest::scopes::{self, ScopePlan};
+use crate::sessions::Sessions;
+use crate::sidecar::Layout;
+use crate::sync_status::{DeliveredSkill, SyncStatus, WorkspaceSync};
+use crate::{doc, placement, sessions, sync_status};
+
+/// The all-zero sentinel a first-receive baseline carries — a delivered bundle whose sync doc
+/// still holds it has never been applied here (the next `update` applies it).
+pub(crate) const ZERO_HEX: &str =
+    "0000000000000000000000000000000000000000000000000000000000000000";
+
+/// Which scope(s) a read verb shows in full — the same three-way split `update` acts on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum ScopeView {
+    /// Where you stand: the nearest project manifest when one covers the cwd, else the machine.
+    #[default]
+    Here,
+    /// The machine scope alone (`-g`), even from inside a project.
+    Machine,
+    /// Both scopes in full (`--all`).
+    All,
+}
+
+/// One resolved line plus the provenance the deep answer spells out.
+pub(crate) struct Row {
+    /// The bundle's name (the dedupe key within a scope).
+    pub name: String,
+    /// The winning reference (canonical where known).
+    pub reference: String,
+    /// ONE source line: the manifest that asked for it, or `the <host>/<ws> feed`.
+    pub source: String,
+    /// EVERY channel the last delivery cached for it — the `--channel` filter's key (its first
+    /// entry is the delivering channel, when the line rides one).
+    pub via_channels: Vec<String>,
+    /// The delivery attribution (`assigned by <name>` / `picked by you`), when known.
+    pub attribution: Option<String>,
+    /// The applied version (the scope store's lock base), when the store holds one.
+    pub version: Option<String>,
+    /// The applied bytes' consent hash (the lock's), when the store holds one.
+    pub digest: Option<String>,
+    /// The line's honest state, phrased from local knowledge only.
+    pub state: StatusItemState,
+    /// The workspace's opaque id, when the delivery cache names one.
+    pub workspace_id: Option<String>,
+    /// The manifest FILE whose row delivers it (absent on a feed-delivered line).
+    pub source_file: Option<String>,
+    /// That row's spelled key (the joined reference).
+    pub source_key: Option<String>,
+    /// `<host>/<workspace>` when a feed delivers it.
+    pub feed: Option<String>,
+    /// The row's version pin, when one is spelled.
+    pub pin: Option<String>,
+    /// The placement dirs this machine holds for it.
+    pub placements: Vec<String>,
+    /// A BUNDLE line (not an `"off"` switch) — what the inventory counts as a delivered skill.
+    pub bundle: bool,
+}
+
+/// One scope's whole resolution: its label, its governing file, its lines, and the disclosure
+/// notes only this scope can say.
+pub(crate) struct ScopeResolution {
+    /// `"project"` or `"machine"`.
+    pub scope: &'static str,
+    /// The governing manifest file (pretty-printed); `None` = the implicit feed recipe.
+    pub manifest: Option<String>,
+    pub rows: Vec<Row>,
+    pub notes: Vec<String>,
+    /// The SET rows the file adopts, canonical (`<host>/<ws>/channels/<name>`, repo sets) — the
+    /// `--remote` view's "adopted in which file" lookup.
+    pub sets: Vec<String>,
+    /// This scope's OWN store (the machine sidecar / the checkout's `.topos/state/<user>/`),
+    /// when one exists — the inventory's ghost walk reads it for records no row claims (the
+    /// built-in meta-skill, detached/frozen copies). Never cross-scope.
+    pub store: Option<Layout>,
+}
+
+impl ScopeResolution {
+    /// The rows the INVENTORY shows: the bundle lines plus the `"off"` switches (an off row is a
+    /// standing statement, never invisible).
+    pub(crate) fn inventory_rows(&self) -> impl Iterator<Item = &Row> {
+        self.rows
+            .iter()
+            .filter(|r| r.bundle || matches!(r.state, StatusItemState::Off))
+    }
+
+    /// Delivered skills in this scope (the summary's `skills` count).
+    pub(crate) fn skills(&self) -> u64 {
+        self.rows.iter().filter(|r| r.bundle).count() as u64
+    }
+
+    /// Rows sitting behind their last-known served target (`updates pending`).
+    pub(crate) fn updates_pending(&self) -> u64 {
+        self.rows
+            .iter()
+            .filter(|r| r.bundle && matches!(r.state, StatusItemState::Behind))
+            .count() as u64
+    }
+
+    /// Rows whose placements scan Modified (`drafts ahead`).
+    pub(crate) fn drafts_ahead(&self) -> u64 {
+        self.rows
+            .iter()
+            .filter(|r| r.bundle && matches!(r.state, StatusItemState::LocalEdits))
+            .count() as u64
+    }
+}
+
+/// The whole resolution: the scopes in render order (project first when one covers the cwd, the
+/// machine scope always last) and the per-workspace regimes (a machine-scope fact).
+pub(crate) struct Resolved {
+    pub scopes: Vec<ScopeResolution>,
+    pub regimes: Vec<StatusRegime>,
+}
+
+impl Resolved {
+    /// The project scope, when one covers the working directory.
+    pub(crate) fn project(&self) -> Option<&ScopeResolution> {
+        self.scopes.iter().find(|s| s.scope == "project")
+    }
+
+    /// The machine scope (always resolved).
+    pub(crate) fn machine(&self) -> &ScopeResolution {
+        self.scopes
+            .iter()
+            .find(|s| s.scope == "machine")
+            .expect("the machine scope is always resolved")
+    }
+}
+
+/// One scope's pass — its lines plus the notes only that pass can see.
+#[derive(Default)]
+struct ScopeOut {
+    rows: Vec<Row>,
+    /// Two SETS delivering one name at different versions — the winner named.
+    collisions: Vec<String>,
+    /// `"off"` switches whose bundle is not in the cached feed any more.
+    stale_offs: Vec<String>,
+    /// Feeds/channel lines that have delivered nothing yet, or whose completed exchange assigned
+    /// this person nothing — said as sentences, since no row can carry them.
+    quiet_lines: Vec<String>,
+    /// Feed ADDRESSES whose last exchange completed and assigned this person nothing. The fact is
+    /// the WORKSPACE's, not a scope's, so `resolve` says it once however many recipes adopt it.
+    empty_feeds: Vec<String>,
+}
+
+/// Resolve both scopes, the regimes, and the per-scope notes — the whole offline answer.
+///
+/// # Errors
+/// A read failure or a manifest the grammar refuses (typed, naming the fix).
+pub(crate) fn resolve(
+    ctx: &Ctx<'_>,
+    all: &Sessions,
+    cache: &SyncStatus,
+) -> Result<Resolved, ClientError> {
+    let connected: Vec<(String, String)> = all
+        .live()
+        .map(|s| (s.host.clone(), s.workspace_name.clone()))
+        .collect();
+    let person_plan = scopes::person_plan(ctx.fs, &ctx.layout, &connected)?;
+    let project = match ctx.roots.as_ref().and_then(|r| {
+        r.cwd
+            .as_deref()
+            .map(|cwd| (cwd.to_path_buf(), r.home.clone()))
+    }) {
+        Some((cwd, home)) => scopes::nearest_project_plan(ctx.fs, &cwd, Some(&home))?,
+        None => None,
+    };
+
+    // The NEAREST project manifest, whole — over the project's OWN store (never minted here).
+    let mut project_out = ScopeOut::default();
+    let mut project_store = None;
+    if let Some((dir, plan)) = &project {
+        project_store = crate::sidecar::existing_project_store(ctx.fs, dir);
+        project_out = scope_rows(ctx, plan, project_store.as_ref(), cache, all);
+    }
+    let mut person_out = scope_rows(ctx, &person_plan, Some(&ctx.layout), cache, all);
+
+    // The REGIMES — one sentence per connected workspace, over the person plan.
+    let mut regimes = Vec::new();
+    for (host, ws) in &connected {
+        let unadopted = assigned_not_adopted(&person_plan, cache, host, ws);
+        if let Some(regime) = person_plan.regime(host, ws, unadopted) {
+            regimes.push(StatusRegime {
+                host: host.clone(),
+                workspace: ws.clone(),
+                regime,
+            });
+        }
+    }
+
+    // The MACHINE scope's notes, in reading order: the loud one first, then the quiet feeds,
+    // then the inert rows, then the frictions.
+    let mut machine_notes = Vec::new();
+    if person_plan.file_backed() {
+        let adopts = person_out.rows.iter().filter(|r| r.bundle).count();
+        for (host, ws) in &connected {
+            if person_plan.has_feed(host, ws) {
+                continue;
+            }
+            let unadopted = assigned_not_adopted(&person_plan, cache, host, ws);
+            if unadopted == 0 {
+                continue;
+            }
+            machine_notes.push(format!(
+                "global manifest adopts {adopts} bundles; {unadopted} assigned bundles are not \
+                 adopted here (no feed row) — `topos add -g @{ws}` restores them"
+            ));
+        }
+    }
+    // A feed that HAS exchanged and brought nothing: the rows can only fall silent, so the fact
+    // gets words. Said once per address — it is the workspace's answer, not each scope's.
+    let mut said: BTreeSet<&str> = BTreeSet::new();
+    let mut project_notes = Vec::new();
+    for feed in &person_out.empty_feeds {
+        if said.insert(feed.as_str()) {
+            machine_notes.push(format!("{feed}: exchanged — nothing assigned to you yet"));
+        }
+    }
+    for feed in &project_out.empty_feeds {
+        if said.insert(feed.as_str()) {
+            project_notes.push(format!("{feed}: exchanged — nothing assigned to you yet"));
+        }
+    }
+    machine_notes.append(&mut person_out.quiet_lines);
+    project_notes.append(&mut project_out.quiet_lines);
+    // A bare `"*"` row for a bundle the flowing feed already delivers states nothing new.
+    for row in &person_plan.things {
+        let KeyShape::WorkspaceBundle {
+            host,
+            workspace,
+            bundle,
+        } = &row.shape
+        else {
+            continue;
+        };
+        if matches!(row.value, EntryValue::Star)
+            && person_plan.has_feed(host, workspace)
+            && feed_delivers(cache, host, workspace, bundle)
+        {
+            machine_notes.push(format!(
+                "{} adds nothing — the feed already delivers it",
+                row.reference
+            ));
+        }
+    }
+    machine_notes.extend(person_out.stale_offs.iter().cloned());
+    project_notes.extend(project_out.stale_offs.iter().cloned());
+    machine_notes.extend(person_out.collisions.iter().cloned());
+    project_notes.extend(project_out.collisions.iter().cloned());
+    // Declined on the web, delivered here anyway: the file outranks the person's own web choice.
+    for entry in cache.workspaces.values() {
+        let (Some(host), Some(ws)) = (&entry.host, &entry.workspace_name) else {
+            continue;
+        };
+        for name in entry.declined.values() {
+            if person_plan.explicit_claims(host, ws, name) {
+                machine_notes.push(format!(
+                    "{name}: declined on the web, delivered here by your global manifest"
+                ));
+            }
+        }
+    }
+    // The same bundle at BOTH scopes on different versions — nothing blends, so both copies land.
+    // Disclosed on the PROJECT side: it is the project copy that is projected in-repo.
+    let claude = claude_code_detected(ctx);
+    for prow in project_out.rows.iter().filter(|r| r.bundle) {
+        let Some(person) = person_out
+            .rows
+            .iter()
+            .find(|r| r.bundle && r.name == prow.name)
+        else {
+            continue;
+        };
+        let here = prow.pin.clone().or_else(|| prow.version.clone());
+        let there = person.pin.clone().or_else(|| person.version.clone());
+        if let (Some(a), Some(b)) = (here, there)
+            && a != b
+        {
+            let mut note = format!(
+                "{}: project pins {}, machine delivers {} — the project copy is projected in-repo",
+                prow.name,
+                short(&a),
+                short(&b)
+            );
+            if claude {
+                note.push_str(
+                    "; Claude Code resolves personal skills ahead of project ones, so the \
+                     personal copy may win anyway",
+                );
+            }
+            project_notes.push(note);
+        }
+    }
+
+    let mut out = Vec::new();
+    if let Some((_, plan)) = &project {
+        out.push(ScopeResolution {
+            scope: "project",
+            manifest: plan.file.as_deref().map(|p| pretty(ctx, p)),
+            rows: project_out.rows,
+            notes: project_notes,
+            sets: plan.sets.iter().map(|r| r.shape.canonical()).collect(),
+            store: project_store,
+        });
+    }
+    out.push(ScopeResolution {
+        scope: "machine",
+        manifest: person_plan.file.as_deref().map(|p| pretty(ctx, p)),
+        rows: person_out.rows,
+        notes: machine_notes,
+        sets: person_plan
+            .sets
+            .iter()
+            .map(|r| r.shape.canonical())
+            .collect(),
+        store: Some(ctx.layout.clone()),
+    });
+    Ok(Resolved {
+        scopes: out,
+        regimes,
+    })
+}
+
+/// One scope's lines, in reading order: the explicit THING rows, each SET row's cached members
+/// itemized, the flowing FEEDS, then the `"off"` switches. Deduped by bundle identity as it goes —
+/// the first statement to claim an identity wins, and things are read before sets and feeds,
+/// which IS the "an explicit row beats a set" rule. A set or feed that itemizes NOTHING becomes a
+/// sentence (a quiet line), never a silent absence.
+fn scope_rows(
+    ctx: &Ctx<'_>,
+    plan: &ScopePlan,
+    layout: Option<&Layout>,
+    cache: &SyncStatus,
+    all: &Sessions,
+) -> ScopeOut {
+    let file = plan.file.as_deref().map(|p| pretty(ctx, p));
+    let base = plan
+        .file
+        .as_deref()
+        .and_then(Path::parent)
+        .map(Path::to_path_buf);
+    let mut out = ScopeOut::default();
+    let mut claimed: BTreeSet<String> = BTreeSet::new();
+    let mut by_name: BTreeMap<String, (String, String)> = BTreeMap::new();
+    let mut index: Option<BTreeMap<String, String>> = None;
+
+    // 1. The explicit THING rows — one bundle each, the row's own fields winning.
+    for row in &plan.things {
+        let identity = row.shape.canonical();
+        if !claimed.insert(identity.clone()) {
+            continue;
+        }
+        let name = row.display_name();
+        let mut via_channels = Vec::new();
+        let mut attribution = None;
+        let mut workspace_id = None;
+        let applied = match &row.shape {
+            KeyShape::WorkspaceBundle {
+                host,
+                workspace,
+                bundle,
+            } => match cache_lookup(cache, host, workspace, bundle) {
+                Some(hit) => {
+                    via_channels = hit.ds.via_channels.clone();
+                    attribution = attribution_of(hit.ds);
+                    workspace_id = Some(hit.workspace_id.to_owned());
+                    // A PINNED row's target is its pin, never the served current: the pin is what
+                    // `update` delivers here, so measuring against `current` would report a row
+                    // sitting exactly where it was asked to sit as "behind — `topos update` lands
+                    // the newer version", advice the next `update` correctly refuses to take.
+                    let target = row.pin().unwrap_or_else(|| hit.ds.served_version.clone());
+                    applied_for_id(ctx, layout, hit.skill_id, &target)
+                }
+                None => stored_by_name(ctx, layout, &mut index, &name)
+                    .unwrap_or_else(|| Applied::plain(session_state(all, host, workspace))),
+            },
+            // A local folder: its presence IS the delivery (adopted in place — there is no
+            // upstream to be behind or ahead of).
+            KeyShape::LocalPath { raw } => {
+                if ctx.fs.exists(&local_dir(ctx, base.as_deref(), raw)) {
+                    stored_by_name(ctx, layout, &mut index, &name)
+                        .unwrap_or_else(|| Applied::plain(StatusItemState::Applied))
+                } else {
+                    Applied::plain(StatusItemState::Unknown)
+                }
+            }
+            // A repo skill: only this scope's store can answer it offline.
+            _ => stored_by_name(ctx, layout, &mut index, &name).unwrap_or_else(Applied::unknown),
+        };
+        out.rows.push(Row {
+            name,
+            reference: identity,
+            source: file.clone().unwrap_or_default(),
+            via_channels,
+            attribution,
+            version: applied.version,
+            digest: applied.digest,
+            state: applied.state,
+            workspace_id,
+            source_file: file.clone(),
+            source_key: Some(row.reference.clone()),
+            feed: None,
+            pin: row.pin(),
+            placements: applied.placements,
+            bundle: true,
+        });
+    }
+
+    // 2. The SET rows — the members the last delivery cached under each. A set that itemizes
+    // nothing is a sentence, not a silent absence: it promises the exchange, or names the access
+    // fact standing in the way.
+    for row in &plan.sets {
+        let identity = row.shape.canonical();
+        let KeyShape::Channel {
+            host,
+            workspace,
+            channel,
+        } = &row.shape
+        else {
+            // A repo set expands only at reconcile time; offline, its members answer through the
+            // scope store's explicit rows when adopted. Nothing cheap to itemize here.
+            continue;
+        };
+        let entry = ws_entry(cache, host, workspace);
+        let mut itemized = 0usize;
+        for (ws_id, skill_id, ds) in entry
+            .into_iter()
+            .flat_map(|(id, e)| e.delivered.iter().map(move |(sid, d)| (id, sid, d)))
+        {
+            if ds.withdrawn
+                || ds.name.is_empty()
+                || !ds.via_channels.iter().any(|c| c == channel)
+                || plan.off_for(host, workspace, &ds.name).is_some()
+                || plan.explicit_claims(host, workspace, &ds.name)
+            {
+                continue;
+            }
+            let member = format!("{host}/{workspace}/{}", ds.name);
+            if !claimed.insert(member.clone()) {
+                continue;
+            }
+            collide(
+                &mut by_name,
+                &mut out.collisions,
+                &ds.name,
+                &identity,
+                &ds.served_version,
+            );
+            let applied = applied_for_id(ctx, layout, skill_id, &ds.served_version);
+            out.rows.push(Row {
+                name: ds.name.clone(),
+                reference: member,
+                source: file.clone().unwrap_or_default(),
+                via_channels: ds.via_channels.clone(),
+                attribution: attribution_of(ds),
+                version: applied.version,
+                digest: applied.digest,
+                state: applied.state,
+                workspace_id: Some(ws_id.to_owned()),
+                source_file: file.clone(),
+                source_key: Some(row.reference.clone()),
+                feed: None,
+                pin: None,
+                placements: applied.placements,
+                bundle: true,
+            });
+            itemized += 1;
+        }
+        if itemized == 0 {
+            out.quiet_lines.push(quiet_set_line(
+                &row.reference,
+                session_state(all, host, workspace),
+            ));
+        }
+    }
+
+    // 3. The FEEDS that flow here (the global file's feed rows, or the implicit recipe's).
+    for (host, workspace) in &plan.feeds {
+        let feed = format!("{host}/{workspace}");
+        let entry = ws_entry(cache, host, workspace);
+        let mut itemized = 0usize;
+        for (ws_id, skill_id, ds) in entry
+            .into_iter()
+            .flat_map(|(id, e)| e.delivered.iter().map(move |(sid, d)| (id, sid, d)))
+        {
+            if ds.withdrawn
+                || ds.via_manifest
+                || ds.name.is_empty()
+                || plan.off_for(host, workspace, &ds.name).is_some()
+                || plan.explicit_claims(host, workspace, &ds.name)
+            {
+                continue;
+            }
+            let identity = format!("{feed}/{}", ds.name);
+            if !claimed.insert(identity.clone()) {
+                continue;
+            }
+            collide(
+                &mut by_name,
+                &mut out.collisions,
+                &ds.name,
+                &feed,
+                &ds.served_version,
+            );
+            let applied = applied_for_id(ctx, layout, skill_id, &ds.served_version);
+            out.rows.push(Row {
+                name: ds.name.clone(),
+                reference: identity,
+                source: format!("the {feed} feed"),
+                via_channels: ds.via_channels.clone(),
+                attribution: attribution_of(ds),
+                version: applied.version,
+                digest: applied.digest,
+                state: applied.state,
+                workspace_id: Some(ws_id.to_owned()),
+                source_file: None,
+                source_key: None,
+                feed: Some(feed.clone()),
+                pin: None,
+                placements: applied.placements,
+                bundle: true,
+            });
+            itemized += 1;
+        }
+        // A feed that has itemized NOTHING and has no completed exchange behind it: ONE honest
+        // sentence for the workspace itself. The test is delivery PROVENANCE, never the existence
+        // of a cache entry — a landed publish SEEDS its workspace's entry (host, address, its own
+        // manifest-driven row) without any delivery having answered, and only the sweep ever
+        // stamps `last_delivery_at`. Reading the seed as an exchange would delete this line and
+        // drop the adopted feed out of the answer entirely, since a `via_manifest` row itemizes
+        // nothing here.
+        //
+        // A live session that has never delivered here is missing the EXCHANGE, not an apply —
+        // the ordinary unknown state would promise `update` lands something, and this line cannot
+        // know that the workspace assigns anything at all. Every other verdict (`session_state`'s
+        // no-session and pending answers) is about access and stands.
+        let exchanged = entry.is_some_and(|(_, e)| e.last_delivery_at.is_some());
+        if !exchanged && itemized == 0 {
+            let state = match session_state(all, host, workspace) {
+                StatusItemState::Unknown => StatusItemState::NoDeliveryYet,
+                settled => settled,
+            };
+            out.quiet_lines.push(quiet_feed_line(&feed, state));
+        } else if exchanged && !entry.is_some_and(|(_, e)| assigns_anything(e)) {
+            // The other side of the same fact: the exchange DID complete and the workspace has
+            // nothing for this person. Said in words, the same words the sweep's receipt uses.
+            out.empty_feeds.push(feed.clone());
+        }
+    }
+
+    // 4. The `"off"` switches — their own rows (the file says them), and a note when the bundle
+    // one withholds is not assigned to this person any more.
+    for row in &plan.offs {
+        let KeyShape::WorkspaceBundle {
+            host,
+            workspace,
+            bundle,
+        } = &row.shape
+        else {
+            continue;
+        };
+        if !feed_delivers(cache, host, workspace, bundle) {
+            out.stale_offs
+                .push(format!("off — not currently assigned: {}", row.reference));
+        }
+        let identity = row.shape.canonical();
+        if !claimed.insert(identity.clone()) {
+            continue;
+        }
+        out.rows.push(Row {
+            name: row.display_name(),
+            reference: identity,
+            source: file.clone().unwrap_or_default(),
+            via_channels: Vec::new(),
+            attribution: None,
+            version: None,
+            digest: None,
+            state: StatusItemState::Off,
+            workspace_id: None,
+            source_file: file.clone(),
+            source_key: Some(row.reference.clone()),
+            feed: None,
+            pin: None,
+            placements: Vec::new(),
+            bundle: false,
+        });
+    }
+    out
+}
+
+/// The sentence for an adopted feed that has itemized nothing (no rows can say it).
+fn quiet_feed_line(feed: &str, state: StatusItemState) -> String {
+    match state {
+        StatusItemState::PendingSession => {
+            format!("{feed}: awaiting session approval — delivery starts once approved")
+        }
+        StatusItemState::NotAvailable => {
+            format!("{feed}: not available with your current access")
+        }
+        _ => format!("{feed}: no delivery yet — `topos update` performs the first exchange"),
+    }
+}
+
+/// The sentence for a channel line that has itemized nothing.
+fn quiet_set_line(reference: &str, state: StatusItemState) -> String {
+    match state {
+        StatusItemState::PendingSession => {
+            format!("{reference}: awaiting session approval — delivery starts once approved")
+        }
+        StatusItemState::NotAvailable => {
+            format!("{reference}: not available with your current access")
+        }
+        _ => format!(
+            "{reference}: nothing delivered from this line yet — `topos update` performs the \
+             exchange"
+        ),
+    }
+}
+
+/// The deep single-skill answer (`topos list <name>`): the token resolved against the SAME lines
+/// the inventory renders (a row reference, a leaf name, or a cached feed name; `@ws/…` and the
+/// canonical spellings ride [`keys::parse_input`] with the one connected host as the default).
+/// Scope order IS precedence: project rows first, then machine.
+///
+/// # Errors
+/// A token no scope delivers is the uniform [`ClientError::TargetNotFound`].
+pub(crate) fn detail_for(
+    resolved: &Resolved,
+    all: &Sessions,
+    token: &str,
+) -> Result<ListDetail, ClientError> {
+    let hosts: BTreeSet<&str> = all.live().map(|s| s.host.as_str()).collect();
+    let default_host = if hosts.len() == 1 {
+        hosts.iter().copied().next()
+    } else {
+        None
+    };
+    let canonical = keys::parse_input(token, default_host)
+        .ok()
+        .map(|r| r.shape.canonical());
+    let hit = resolved.scopes.iter().find_map(|s| {
+        s.rows
+            .iter()
+            .find(|r| canonical.as_deref() == Some(r.reference.as_str()) || r.name == token)
+    });
+    let Some(row) = hit else {
+        return Err(ClientError::TargetNotFound {
+            target: token.to_owned(),
+        });
+    };
+    Ok(ListDetail {
+        name: row.name.clone(),
+        source_file: row.source_file.clone(),
+        source_key: row.source_key.clone(),
+        feed: row.feed.clone(),
+        attribution: row.attribution.clone(),
+        version: row.version.clone(),
+        pin: row.pin.clone(),
+        placements: row.placements.clone(),
+        state: row.state,
+    })
+}
+
+/// How much of what the workspaces ASSIGN this person has never been applied here — the machine
+/// scope's `assignments not applied` count (the delivery cache's feed rows; a manifest-driven row
+/// is demand, not an assignment). A delivery whose sidecar sync doc still holds the all-zero
+/// baseline has never been applied; any unreadable doc makes the count honestly absent, never a
+/// partial number.
+///
+/// Only a workspace this installation still holds a LIVE session for can assign anything here:
+/// the cache OUTLIVES a logout, so counting every cached entry would keep crediting a workspace
+/// nothing dials any more. A PENDING session counts (the workspace assigns; only an owner's
+/// approval gates the bytes); an ENDED one does not. The key is `(host, workspace id)`, never the
+/// id alone: ids are opaque strings each SERVER mints on its own, and an entry with NO recorded
+/// host is not placeable on any server, so it counts for nobody.
+pub(crate) fn awaiting_first_sync(
+    ctx: &Ctx<'_>,
+    all: &Sessions,
+    cache: &SyncStatus,
+) -> Option<u64> {
+    let live: BTreeSet<(&str, &str)> = all
+        .live()
+        .map(|s| (s.host.as_str(), s.workspace_id.as_str()))
+        .collect();
+    let mut awaiting = Some(0u64);
+    for (workspace_id, entry) in &cache.workspaces {
+        let Some(host) = entry.host.as_deref() else {
+            continue;
+        };
+        if !live.contains(&(host, workspace_id.as_str())) {
+            continue;
+        }
+        for (skill_id, d) in &entry.delivered {
+            if d.withdrawn || d.via_manifest {
+                continue;
+            }
+            let Ok(sid) = crate::id::SkillId::parse(skill_id) else {
+                awaiting = None;
+                continue;
+            };
+            match doc::read_doc::<SyncState>(ctx.fs, &ctx.layout.published(&sid).sync) {
+                Ok(Some(sync)) if sync.base_commit == ZERO_HEX => {
+                    awaiting = awaiting.map(|n| n + 1);
+                }
+                Ok(None) => awaiting = awaiting.map(|n| n + 1),
+                Ok(Some(_)) => {}
+                Err(_) => awaiting = None,
+            }
+        }
+    }
+    awaiting
+}
+
+// =================================================================================================
+// The offline readers — the delivery cache, the per-scope stores, the sessions file.
+// =================================================================================================
+
+/// The honest local state of one bundle, read from one scope's store alone.
+struct Applied {
+    state: StatusItemState,
+    version: Option<String>,
+    digest: Option<String>,
+    placements: Vec<String>,
+}
+
+impl Applied {
+    fn plain(state: StatusItemState) -> Self {
+        Applied {
+            state,
+            version: None,
+            digest: None,
+            placements: Vec::new(),
+        }
+    }
+
+    fn unknown() -> Self {
+        Applied::plain(StatusItemState::Unknown)
+    }
+}
+
+/// The APPLIED state for one bundle in one scope's store: never applied → `Unknown` ("not applied
+/// here yet"); a scanned draft → `LocalEdits`; a served version past the applied one → `Behind`;
+/// else `Applied` — an offline cache fact ("as of the last sync"), never a live claim. Any
+/// unreadable doc degrades to `Unknown`.
+fn applied_for_id(
+    ctx: &Ctx<'_>,
+    layout: Option<&Layout>,
+    skill_id: &str,
+    served_version: &str,
+) -> Applied {
+    let Some(layout) = layout else {
+        return Applied::unknown();
+    };
+    let Ok(sid) = crate::id::SkillId::parse(skill_id) else {
+        return Applied::unknown();
+    };
+    if !ctx.fs.exists(&layout.skill_dir(&sid)) {
+        return Applied::unknown();
+    }
+    let sp = layout.published(&sid);
+    let Ok(Some(sync)) = doc::read_doc::<SyncState>(ctx.fs, &sp.sync) else {
+        return Applied::unknown();
+    };
+    if sync.base_commit == ZERO_HEX {
+        return Applied::unknown();
+    }
+    let Ok(Some(lock)) = doc::read_doc::<Lock>(ctx.fs, &sp.lock) else {
+        return Applied::unknown();
+    };
+    let version = Some(lock.base_commit.clone());
+    let digest = Some(lock.bundle_digest.clone());
+    let mut placements = Vec::new();
+    let mut edited = false;
+    if let Ok(Some(map)) = doc::read_map(ctx.fs, &sp.map) {
+        placements.clone_from(&map.placements);
+        let scoped = super::pull::ctx_with_layout(ctx, layout);
+        if let Ok(scans) = placement::scan_placements(&scoped, &map) {
+            edited = scans
+                .iter()
+                .any(|s| matches!(s.status, placement::ScanStatus::Modified { .. }));
+        }
+    }
+    if edited {
+        return Applied {
+            state: StatusItemState::LocalEdits,
+            version,
+            digest,
+            placements,
+        };
+    }
+    if !served_version.is_empty() && served_version != lock.base_commit {
+        return Applied {
+            state: StatusItemState::Behind,
+            version,
+            digest,
+            placements,
+        };
+    }
+    Applied {
+        state: StatusItemState::Applied,
+        version,
+        digest,
+        placements,
+    }
+}
+
+/// The scope store's `name → skill id` index, built once per scope on first need — the offline
+/// answer for a row the delivery cache does not name (a repo skill, a local folder, a bundle
+/// applied before the cache was written).
+fn store_index(ctx: &Ctx<'_>, layout: &Layout) -> BTreeMap<String, String> {
+    let mut out = BTreeMap::new();
+    let Ok(entries) = ctx.fs.read_dir(&layout.skills_dir()) else {
+        return out;
+    };
+    for entry in entries {
+        let Some(id) = entry.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        let Ok(sid) = crate::id::SkillId::parse(id) else {
+            continue;
+        };
+        let Ok(Some(lock)) = doc::read_doc::<Lock>(ctx.fs, &layout.published(&sid).lock) else {
+            continue;
+        };
+        out.insert(lock.name, id.to_owned());
+    }
+    out
+}
+
+/// The stored state for a NAME in this scope, when the store holds one (the index is built at most
+/// once per scope). No served version is known this way, so a stored copy never reads `behind` —
+/// only applied, edited, or unknown.
+fn stored_by_name(
+    ctx: &Ctx<'_>,
+    layout: Option<&Layout>,
+    index: &mut Option<BTreeMap<String, String>>,
+    name: &str,
+) -> Option<Applied> {
+    let layout = layout?;
+    let id = index
+        .get_or_insert_with(|| store_index(ctx, layout))
+        .get(name)?
+        .clone();
+    Some(applied_for_id(ctx, Some(layout), &id, ""))
+}
+
+/// One cached delivery a line resolves against.
+struct CacheHit<'a> {
+    workspace_id: &'a str,
+    skill_id: &'a str,
+    ds: &'a DeliveredSkill,
+}
+
+/// The cache entry of one workspace, by its manifest-grammar address — keyed, so a row can carry
+/// the workspace's opaque id alongside.
+fn ws_entry<'a>(
+    cache: &'a SyncStatus,
+    host: &str,
+    workspace: &str,
+) -> Option<(&'a str, &'a WorkspaceSync)> {
+    cache
+        .workspaces
+        .iter()
+        .find(|(_, e)| {
+            e.host.as_deref() == Some(host) && e.workspace_name.as_deref() == Some(workspace)
+        })
+        .map(|(id, e)| (id.as_str(), e))
+}
+
+/// The cached delivery of `<host>/<workspace>/<name>`, whatever asked for it.
+fn cache_lookup<'a>(
+    cache: &'a SyncStatus,
+    host: &str,
+    workspace: &str,
+    name: &str,
+) -> Option<CacheHit<'a>> {
+    let (workspace_id, entry) = ws_entry(cache, host, workspace)?;
+    let (skill_id, ds) = entry
+        .delivered
+        .iter()
+        .find(|(_, d)| !d.withdrawn && d.name == name)?;
+    Some(CacheHit {
+        workspace_id,
+        skill_id,
+        ds,
+    })
+}
+
+/// Whether the workspace's last delivery ASSIGNED this bundle to the person (a feed row — a
+/// manifest-driven delivery is demand, not an assignment).
+pub(crate) fn feed_delivers(cache: &SyncStatus, host: &str, workspace: &str, bundle: &str) -> bool {
+    ws_entry(cache, host, workspace).is_some_and(|(_, e)| {
+        e.delivered
+            .values()
+            .any(|d| !d.withdrawn && !d.via_manifest && d.name == bundle)
+    })
+}
+
+/// Whether the workspace's last delivery assigned this person ANYTHING at all — the same feed-row
+/// test [`feed_delivers`] applies, over every name. What a local `"off"` row then withholds is a
+/// separate, local fact: the workspace still assigned it.
+fn assigns_anything(entry: &WorkspaceSync) -> bool {
+    entry
+        .delivered
+        .values()
+        .any(|d| !d.withdrawn && !d.via_manifest && !d.name.is_empty())
+}
+
+/// The assigned bundles of one workspace a FILE-backed person plan does not adopt: its feed does
+/// not flow here, and no explicit row claims them.
+fn assigned_not_adopted(
+    plan: &ScopePlan,
+    cache: &SyncStatus,
+    host: &str,
+    workspace: &str,
+) -> usize {
+    if plan.has_feed(host, workspace) {
+        return 0;
+    }
+    let Some((_, entry)) = ws_entry(cache, host, workspace) else {
+        return 0;
+    };
+    entry
+        .delivered
+        .values()
+        .filter(|d| {
+            !d.withdrawn
+                && !d.via_manifest
+                && !d.name.is_empty()
+                && !plan.explicit_claims(host, workspace, &d.name)
+        })
+        .count()
+}
+
+/// The delivery attribution, when the cache carries one.
+fn attribution_of(ds: &DeliveredSkill) -> Option<String> {
+    if let Some(who) = &ds.assigned_by {
+        return Some(format!("assigned by {who}"));
+    }
+    ds.picked.then(|| "picked by you".to_owned())
+}
+
+/// The honest line for a workspace reference with NO cached delivery — phrased from the LOCAL
+/// sessions file, never a server answer.
+fn session_state(all: &Sessions, host: &str, workspace: &str) -> StatusItemState {
+    match all.find_on_host(host, workspace) {
+        None => StatusItemState::NotAvailable,
+        Some(s) if s.status == sessions::SESSION_PENDING => StatusItemState::PendingSession,
+        Some(s) if s.status == sessions::SESSION_ENDED => StatusItemState::NotAvailable,
+        // Connected but never delivered here — the next `update` answers.
+        Some(_) => StatusItemState::Unknown,
+    }
+}
+
+/// Record one SET/feed delivery of `name`; a second set delivering the same name at a DIFFERENT
+/// version is a real collision on disk — name the winner rather than let one copy vanish quietly.
+fn collide(
+    by_name: &mut BTreeMap<String, (String, String)>,
+    notes: &mut Vec<String>,
+    name: &str,
+    reference: &str,
+    version: &str,
+) {
+    match by_name.get(name) {
+        Some((winner, won_at)) => {
+            if !version.is_empty() && !won_at.is_empty() && won_at != version {
+                notes.push(format!(
+                    "{name}: `{winner}` and `{reference}` both deliver it — `{winner}` wins here"
+                ));
+            }
+        }
+        None => {
+            by_name.insert(name.to_owned(), (reference.to_owned(), version.to_owned()));
+        }
+    }
+}
+
+/// A local-folder row's directory: absolute as spelled, `~/…` against the machine home, else
+/// relative to the manifest's own folder.
+fn local_dir(ctx: &Ctx<'_>, base: Option<&Path>, raw: &str) -> PathBuf {
+    if let Some(rest) = raw.strip_prefix("~/")
+        && let Some(roots) = &ctx.roots
+    {
+        return roots.home.join(rest);
+    }
+    if Path::new(raw).is_absolute() {
+        return PathBuf::from(raw);
+    }
+    match base {
+        Some(b) => b.join(raw.trim_start_matches("./")),
+        None => PathBuf::from(raw),
+    }
+}
+
+/// A path as a person reads it — the machine home abbreviated to `~`.
+pub(crate) fn pretty(ctx: &Ctx<'_>, path: &Path) -> String {
+    if let Some(roots) = &ctx.roots
+        && let Ok(rest) = path.strip_prefix(&roots.home)
+    {
+        return format!("~/{}", rest.display());
+    }
+    path.display().to_string()
+}
+
+/// Whether Claude Code is detected on this machine — its own precedence resolves personal skills
+/// over project ones, which a cross-scope version split must disclose. A read-only probe.
+fn claude_code_detected(ctx: &Ctx<'_>) -> bool {
+    ctx.roots.as_ref().is_some_and(|r| {
+        topos_harness::registry::detected_harnesses(&r.home, r.cwd.as_deref())
+            .iter()
+            .any(|h| h.slug == "claude-code")
+    })
+}
+
+/// A version/commit as a note spells it.
+pub(crate) fn short(hex: &str) -> &str {
+    hex.get(..12).unwrap_or(hex)
+}
+
+/// The reader both verbs open with: the sessions file and the offline delivery cache.
+pub(crate) fn read_sources(ctx: &Ctx<'_>) -> Result<(Sessions, SyncStatus), ClientError> {
+    let all = sessions::read_sessions(ctx.fs, &ctx.layout)?;
+    let cache = sync_status::read(ctx.fs, &ctx.layout).unwrap_or_default();
+    Ok((all, cache))
+}
+
+/// The shared fixture kit for the resolution's three consumers (`inventory`/`status`/`list`
+/// tests): a self-cleaning temp MACHINE home with writers for the global manifest, sessions, the
+/// delivery cache, and a scope store — plus the one Ctx builder every suite runs through.
+#[cfg(test)]
+pub(crate) mod testkit {
+    use std::collections::BTreeMap;
+    use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    use topos_types::PERSISTED_SCHEMA_VERSION;
+    use topos_types::persisted::{
+        Lock, PlacementKind, PlacementMap, PlacementState, SwapCapability, SyncState,
+    };
+
+    use crate::ctx::Ctx;
+    use crate::fs_seam::RealFs;
+    use crate::ids::{RealClock, RealIds};
+    use crate::manifest::MANIFEST_FILE;
+    use crate::plane::{InertFollow, InertPlane};
+    use crate::sidecar::Layout;
+    use crate::sync_status::{DeliveredSkill, WorkspaceSync};
+    use crate::{doc, sync_status};
+
+    /// A self-cleaning temp MACHINE home (RAII): `<home>/.topos` is the sidecar, `<home>` the
+    /// root the manifest walk and the placement probes resolve against.
+    pub(crate) struct TempHome(pub PathBuf);
+
+    impl TempHome {
+        pub(crate) fn new() -> Self {
+            static N: AtomicU32 = AtomicU32::new(0);
+            let n = N.fetch_add(1, Ordering::Relaxed);
+            let dir = std::env::temp_dir().join(format!("topos-inv-{}-{n}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            Self(dir)
+        }
+
+        pub(crate) fn layout(&self) -> Layout {
+            Layout::new(&self.0.join(".topos"))
+        }
+
+        /// Write the GLOBAL manifest (`~/.topos/topos.toml`).
+        pub(crate) fn global(&self, text: &str) {
+            let dir = self.0.join(".topos");
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join(MANIFEST_FILE), text).unwrap();
+        }
+
+        /// A session for `<host>/<ws>`.
+        pub(crate) fn session(&self, host: &str, ws_id: &str, ws: &str, status: &str) {
+            crate::sessions::upsert_session(
+                &RealFs,
+                &self.layout(),
+                crate::sessions::Session {
+                    host: host.to_owned(),
+                    base_url: format!("https://{host}/api"),
+                    workspace_id: ws_id.to_owned(),
+                    workspace_name: ws.to_owned(),
+                    display_name: ws.to_uppercase(),
+                    session_id: format!("sn_{ws}"),
+                    credential: "c".to_owned(),
+                    status: status.to_owned(),
+                    logged_in_at: 1,
+                },
+            )
+            .unwrap();
+        }
+
+        /// Record one workspace's last delivery in the offline cache.
+        pub(crate) fn cache(
+            &self,
+            ws_id: &str,
+            host: &str,
+            ws: &str,
+            delivered: Vec<(String, DeliveredSkill)>,
+            declined: Vec<(String, String)>,
+        ) {
+            sync_status::record(
+                &RealFs,
+                &self.layout(),
+                &[(
+                    ws_id.to_owned(),
+                    WorkspaceSync {
+                        host: Some(host.to_owned()),
+                        workspace_name: Some(ws.to_owned()),
+                        last_delivery_at: Some(1_700_000_000_000),
+                        last_report_at: None,
+                        staleness_window_ms: 0,
+                        delivered: delivered.into_iter().collect(),
+                        declined: declined.into_iter().collect(),
+                    },
+                )],
+            )
+            .unwrap();
+        }
+
+        /// A PRE-SESSION-MODEL cache entry: one the document still tolerates, with no host and no
+        /// address recorded.
+        pub(crate) fn hostless_cache(&self, ws_id: &str, delivered: Vec<(String, DeliveredSkill)>) {
+            sync_status::record(
+                &RealFs,
+                &self.layout(),
+                &[(
+                    ws_id.to_owned(),
+                    WorkspaceSync {
+                        host: None,
+                        workspace_name: None,
+                        last_delivery_at: Some(1_700_000_000_000),
+                        last_report_at: None,
+                        staleness_window_ms: 0,
+                        delivered: delivered.into_iter().collect(),
+                        declined: BTreeMap::new(),
+                    },
+                )],
+            )
+            .unwrap();
+        }
+
+        /// Lay an APPLIED store entry (dir + sync + lock + optional placements) for one skill in
+        /// the MACHINE scope store. A placement dir's drift against the recorded sha is what a
+        /// draft scan reads, and a lock `version` behind the cached served one is what `behind`
+        /// reads.
+        pub(crate) fn store_applied(
+            &self,
+            id: &str,
+            name: &str,
+            version: &str,
+            placements: &[&str],
+        ) {
+            let fs = RealFs;
+            let layout = self.layout();
+            let sid = crate::id::SkillId::parse(id).unwrap();
+            std::fs::create_dir_all(layout.skill_dir(&sid)).unwrap();
+            let sp = layout.published(&sid);
+            doc::write_doc(
+                &fs,
+                &sp.sync,
+                &SyncState {
+                    schema_version: PERSISTED_SCHEMA_VERSION,
+                    observed: 1,
+                    observed_version_id: version.to_owned(),
+                    applied: 1,
+                    base_commit: version.to_owned(),
+                    work_hash: "e".repeat(64),
+                    held: false,
+                    draft_observed: None,
+                },
+            )
+            .unwrap();
+            doc::write_doc(
+                &fs,
+                &sp.lock,
+                &Lock {
+                    schema_version: PERSISTED_SCHEMA_VERSION,
+                    skill_id: id.to_owned(),
+                    name: name.to_owned(),
+                    base_commit: version.to_owned(),
+                    bundle_digest: "e".repeat(64),
+                    files: Vec::new(),
+                },
+            )
+            .unwrap();
+            if !placements.is_empty() {
+                doc::write_map(
+                    &fs,
+                    &sp.map,
+                    &PlacementMap {
+                        schema_version: 2,
+                        placements: placements.iter().map(|p| (*p).to_owned()).collect(),
+                        applied_commit: version.to_owned(),
+                        materialized_sha: "e".repeat(64),
+                        pre_existing_sha: None,
+                        swap_capability: SwapCapability::Unsupported,
+                        harness: None,
+                        harness_layer: None,
+                        harness_slug: None,
+                        placement_state: placements
+                            .iter()
+                            .map(|_| PlacementState {
+                                kind: PlacementKind::Native,
+                                agent: None,
+                                // The recorded sha deliberately never matches real dir bytes, so
+                                // an EXISTING placement dir scans Modified (a draft) and an
+                                // absent one scans Absent (clean).
+                                materialized_sha: Some("e".repeat(64)),
+                                pre_existing_sha: None,
+                                swap_capability: SwapCapability::Unsupported,
+                            })
+                            .collect(),
+                    },
+                )
+                .unwrap();
+            }
+        }
+    }
+
+    impl Drop for TempHome {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// The skill id [`assigned`] derives for `name` — for laying a matching store entry.
+    pub(crate) fn skill_id_of(name: &str) -> String {
+        let tag = name.chars().next().unwrap_or('x');
+        format!("topos_{}", std::iter::repeat_n(tag, 32).collect::<String>())
+    }
+
+    /// A cached FEED row (assigned to the person; never manifest-driven). `by = None` reads as
+    /// the person's own pick.
+    pub(crate) fn assigned(name: &str, by: Option<&str>) -> (String, DeliveredSkill) {
+        (
+            skill_id_of(name),
+            DeliveredSkill {
+                name: name.to_owned(),
+                review_required: false,
+                served_version: "d".repeat(64),
+                withdrawn: false,
+                via_channels: vec!["everyone".to_owned()],
+                via_manifest: false,
+                assigned_by: by.map(str::to_owned),
+                picked: by.is_none(),
+            },
+        )
+    }
+
+    /// Run `f` over a real-seam Ctx rooted at `home` (cwd optional) — the one builder every
+    /// inventory-reading suite shares.
+    pub(crate) fn with_ctx<R>(
+        home: &TempHome,
+        cwd: Option<&Path>,
+        f: impl FnOnce(&Ctx<'_>) -> R,
+    ) -> R {
+        let fs = RealFs;
+        let harness = topos_harness::ClaudeCode::new(home.0.join(".claude"), &fs);
+        let ctx = Ctx {
+            progress: crate::progress::silent(),
+            fs: &fs,
+            ids: &RealIds,
+            clock: &RealClock,
+            device_id: String::new(),
+            layout: home.layout(),
+            harness: &harness,
+            plane: &InertPlane,
+            follow: &InertFollow,
+            roots: Some(crate::ctx::AgentRoots {
+                home: home.0.clone(),
+                cwd: cwd.map(Path::to_path_buf),
+            }),
+        };
+        f(&ctx)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::testkit::{TempHome, assigned, with_ctx};
+    use super::*;
+    use crate::fs_seam::RealFs;
+    use crate::manifest::MANIFEST_FILE;
+
+    fn resolve_at(home: &TempHome, cwd: &Path) -> Resolved {
+        with_ctx(home, Some(cwd), |ctx| {
+            let (all, cache) = read_sources(ctx).unwrap();
+            resolve(ctx, &all, &cache).unwrap()
+        })
+    }
+
+    fn awaiting_at(home: &TempHome, cwd: &Path) -> Option<u64> {
+        with_ctx(home, Some(cwd), |ctx| {
+            let (all, cache) = read_sources(ctx).unwrap();
+            awaiting_first_sync(ctx, &all, &cache)
+        })
+    }
+
+    /// NO global file: the machine behaves exactly as if one feed row per connected workspace
+    /// were written — the cached assignments itemize, attributed, sourced to the feed itself.
+    #[test]
+    fn the_implicit_recipe_itemizes_each_workspace_feed() {
+        let home = TempHome::new();
+        let cwd = home.0.join("plain");
+        std::fs::create_dir_all(&cwd).unwrap();
+        home.session(
+            "topos.sh",
+            "w_acme",
+            "acme",
+            crate::sessions::SESSION_ACTIVE,
+        );
+        home.cache(
+            "w_acme",
+            "topos.sh",
+            "acme",
+            vec![assigned("deploy", Some("Dana")), assigned("notes", None)],
+            Vec::new(),
+        );
+
+        let r = resolve_at(&home, &cwd);
+        let m = r.machine();
+        assert!(m.manifest.is_none(), "the implicit recipe has no file");
+        let row = |n: &str| m.rows.iter().find(|i| i.name == n).expect("a row");
+        assert_eq!(row("deploy").source, "the topos.sh/acme feed");
+        assert_eq!(row("deploy").reference, "topos.sh/acme/deploy");
+        assert_eq!(
+            row("deploy").attribution.as_deref(),
+            Some("assigned by Dana")
+        );
+        assert_eq!(row("notes").attribution.as_deref(), Some("picked by you"));
+        assert_eq!(
+            row("deploy").via_channels.first().map(String::as_str),
+            Some("everyone")
+        );
+        assert_eq!(row("deploy").workspace_id.as_deref(), Some("w_acme"));
+        // Never applied here (no store): the honest not-applied-yet state, no false claim.
+        assert!(matches!(row("deploy").state, StatusItemState::Unknown));
+        assert_eq!(awaiting_at(&home, &cwd), Some(2));
+        // The implicit recipe adopts everything the workspace assigns; nothing to disclose.
+        assert_eq!(r.regimes.len(), 1);
+        assert_eq!(r.regimes[0].regime, "adopting all assigned");
+        assert!(m.notes.is_empty(), "{:?}", m.notes);
+    }
+
+    /// The delivery cache OUTLIVES a logout, so the count must be session-scoped or a workspace
+    /// nobody dials any more keeps claiming to assign bundles.
+    #[test]
+    fn a_cached_workspace_without_a_session_assigns_nothing_here() {
+        let home = TempHome::new();
+        let cwd = home.0.join("plain");
+        std::fs::create_dir_all(&cwd).unwrap();
+        home.session(
+            "topos.sh",
+            "w_acme",
+            "acme",
+            crate::sessions::SESSION_ACTIVE,
+        );
+        // acme is logged in and assigns nothing; the logged-OUT workspace's cache entry survives.
+        home.cache("w_acme", "topos.sh", "acme", Vec::new(), Vec::new());
+        home.cache(
+            "w_gone",
+            "topos.sh",
+            "gone",
+            vec![assigned("ghost", Some("Dana"))],
+            Vec::new(),
+        );
+
+        let r = resolve_at(&home, &cwd);
+        assert_eq!(awaiting_at(&home, &cwd), Some(0));
+        assert!(
+            !r.machine().rows.iter().any(|i| i.name == "ghost"),
+            "a workspace with no session itemizes nothing"
+        );
+
+        // A session for it — however it is minted — makes the same rows count again.
+        home.session(
+            "topos.sh",
+            "w_gone",
+            "gone",
+            crate::sessions::SESSION_ACTIVE,
+        );
+        let r = resolve_at(&home, &cwd);
+        assert_eq!(awaiting_at(&home, &cwd), Some(1));
+        assert!(r.machine().rows.iter().any(|i| i.name == "ghost"));
+    }
+
+    /// PENDING counts, ENDED does not: a pending session's workspace still assigns (only an
+    /// owner's approval gates the bytes), while an ended one has taken its access away.
+    #[test]
+    fn a_pending_session_counts_and_an_ended_one_does_not() {
+        for (status, expected) in [
+            (crate::sessions::SESSION_PENDING, Some(1)),
+            (crate::sessions::SESSION_ENDED, Some(0)),
+        ] {
+            let home = TempHome::new();
+            let cwd = home.0.join("plain");
+            std::fs::create_dir_all(&cwd).unwrap();
+            home.session("topos.sh", "w_acme", "acme", status);
+            home.cache(
+                "w_acme",
+                "topos.sh",
+                "acme",
+                vec![assigned("deploy", None)],
+                Vec::new(),
+            );
+            assert_eq!(awaiting_at(&home, &cwd), expected, "status {status}");
+        }
+    }
+
+    /// A workspace id is an OPAQUE string each server mints on its own, so it is not an address.
+    /// Matching the live set on the id alone would let a session on one host resurrect another
+    /// host's stale cache entry.
+    #[test]
+    fn the_live_test_is_keyed_by_host_and_id_not_the_id_alone() {
+        let home = TempHome::new();
+        let cwd = home.0.join("plain");
+        std::fs::create_dir_all(&cwd).unwrap();
+        // Logged into `topos.sh`; the SAME id is cached from a different server.
+        home.session(
+            "topos.sh",
+            "w_shared",
+            "acme",
+            crate::sessions::SESSION_ACTIVE,
+        );
+        home.cache(
+            "w_shared",
+            "other.test",
+            "acme",
+            vec![assigned("ghost", Some("Dana"))],
+            Vec::new(),
+        );
+
+        let r = resolve_at(&home, &cwd);
+        assert_eq!(awaiting_at(&home, &cwd), Some(0));
+        assert!(!r.machine().rows.iter().any(|i| i.name == "ghost"));
+
+        // The HOST is what decides: a session on the server that cached it counts the same rows.
+        home.session(
+            "other.test",
+            "w_shared",
+            "acme",
+            crate::sessions::SESSION_ACTIVE,
+        );
+        let r = resolve_at(&home, &cwd);
+        assert_eq!(awaiting_at(&home, &cwd), Some(1));
+        assert!(r.machine().rows.iter().any(|i| i.name == "ghost"));
+    }
+
+    /// A cache entry with no recorded host cannot be placed on any server — it counts for nobody.
+    #[test]
+    fn a_cache_entry_with_no_recorded_host_counts_for_nobody() {
+        let home = TempHome::new();
+        let cwd = home.0.join("plain");
+        std::fs::create_dir_all(&cwd).unwrap();
+        home.session(
+            "topos.sh",
+            "w_acme",
+            "acme",
+            crate::sessions::SESSION_ACTIVE,
+        );
+        home.hostless_cache("w_acme", vec![assigned("ghost", Some("Dana"))]);
+
+        let r = resolve_at(&home, &cwd);
+        assert_eq!(awaiting_at(&home, &cwd), Some(0));
+        assert!(!r.machine().rows.iter().any(|i| i.name == "ghost"));
+    }
+
+    /// A feed that has never delivered here is missing the EXCHANGE, not an apply — its note
+    /// must not promise `update` lands something it cannot know exists. The access verdicts
+    /// (pending approval) are a different fact and still word the note.
+    #[test]
+    fn a_feed_with_no_delivery_yet_promises_only_the_exchange() {
+        let home = TempHome::new();
+        let cwd = home.0.join("plain");
+        std::fs::create_dir_all(&cwd).unwrap();
+        home.session(
+            "topos.sh",
+            "w_acme",
+            "acme",
+            crate::sessions::SESSION_ACTIVE,
+        );
+
+        let r = resolve_at(&home, &cwd);
+        assert!(
+            r.machine().notes.iter().any(|n| n
+                == "topos.sh/acme: no delivery yet — `topos update` performs the first exchange"),
+            "{:?}",
+            r.machine().notes
+        );
+
+        home.session(
+            "topos.sh",
+            "w_acme",
+            "acme",
+            crate::sessions::SESSION_PENDING,
+        );
+        let r = resolve_at(&home, &cwd);
+        assert!(
+            r.machine()
+                .notes
+                .iter()
+                .any(|n| n.contains("awaiting session approval")),
+            "{:?}",
+            r.machine().notes
+        );
+    }
+
+    /// A cache ENTRY is not an exchange. A landed publish seeds its workspace's entry — host,
+    /// address, and its own manifest-driven row — with no delivery having answered; only the
+    /// sweep stamps `last_delivery_at`. Reading the seed as an exchange would delete the
+    /// no-delivery note and drop the adopted feed out of the answer with nothing said.
+    #[test]
+    fn a_publish_seeded_entry_keeps_the_never_delivered_note() {
+        let home = TempHome::new();
+        let cwd = home.0.join("plain");
+        std::fs::create_dir_all(&cwd).unwrap();
+        home.session(
+            "topos.sh",
+            "w_acme",
+            "acme",
+            crate::sessions::SESSION_ACTIVE,
+        );
+        crate::sync_status::merge_delivered(
+            &RealFs,
+            &home.layout(),
+            "w_acme",
+            "topos.sh",
+            "acme",
+            "topos_pppppppppppppppppppppppppppppppp",
+            DeliveredSkill {
+                name: "deploy".to_owned(),
+                served_version: "d".repeat(64),
+                via_manifest: true,
+                ..DeliveredSkill::default()
+            },
+        )
+        .unwrap();
+        // The seed's shape is the whole point: an entry exists, no exchange is recorded.
+        let cache = crate::sync_status::read(&RealFs, &home.layout()).unwrap();
+        assert_eq!(cache.workspaces["w_acme"].last_delivery_at, None);
+
+        let r = resolve_at(&home, &cwd);
+        assert!(
+            r.machine()
+                .notes
+                .iter()
+                .any(|n| n.starts_with("topos.sh/acme: no delivery yet")),
+            "{:?}",
+            r.machine().notes
+        );
+        // A manifest-driven row is demand, not an assignment — it counts for nothing here, and
+        // nothing claims an exchange that never happened.
+        assert_eq!(awaiting_at(&home, &cwd), Some(0));
+        assert!(
+            !r.machine().notes.iter().any(|n| n.contains("exchanged")),
+            "{:?}",
+            r.machine().notes
+        );
+    }
+
+    /// The exchange COMPLETED and the workspace had nothing for this person: said in words, once,
+    /// in the sweep receipt's own vocabulary.
+    #[test]
+    fn a_completed_exchange_that_brought_nothing_says_so() {
+        let home = TempHome::new();
+        let cwd = home.0.join("plain");
+        std::fs::create_dir_all(&cwd).unwrap();
+        home.session(
+            "topos.sh",
+            "w_acme",
+            "acme",
+            crate::sessions::SESSION_ACTIVE,
+        );
+        home.cache("w_acme", "topos.sh", "acme", Vec::new(), Vec::new());
+
+        let r = resolve_at(&home, &cwd);
+        assert_eq!(
+            r.machine().notes,
+            vec!["topos.sh/acme: exchanged — nothing assigned to you yet"]
+        );
+        assert!(r.machine().rows.is_empty());
+
+        // A workspace that DID assign something says nothing of the sort.
+        home.cache(
+            "w_acme",
+            "topos.sh",
+            "acme",
+            vec![assigned("deploy", None)],
+            Vec::new(),
+        );
+        let r = resolve_at(&home, &cwd);
+        assert!(
+            !r.machine().notes.iter().any(|n| n.contains("exchanged")),
+            "{:?}",
+            r.machine().notes
+        );
+    }
+
+    /// A global file is COMPLETE: with no feed row the assignments do NOT flow — only the file's
+    /// own rows deliver, and the withheld ones are disclosed loudly, with the way back.
+    #[test]
+    fn a_file_backed_plan_withholds_the_feed_and_says_so() {
+        let home = TempHome::new();
+        let cwd = home.0.join("plain");
+        std::fs::create_dir_all(&cwd).unwrap();
+        home.session(
+            "topos.sh",
+            "w_acme",
+            "acme",
+            crate::sessions::SESSION_ACTIVE,
+        );
+        home.cache(
+            "w_acme",
+            "topos.sh",
+            "acme",
+            vec![
+                assigned("deploy", Some("Dana")),
+                assigned("notes", None),
+                assigned("triage", None),
+            ],
+            Vec::new(),
+        );
+        home.global("[bundles]\n\"topos.sh/acme/deploy\" = \"*\"\n");
+
+        let r = resolve_at(&home, &cwd);
+        let m = r.machine();
+        assert!(
+            m.manifest
+                .as_deref()
+                .is_some_and(|f| f.ends_with("topos.toml")),
+            "{:?}",
+            m.manifest
+        );
+        // The file's own row delivers, sourced to the file — the other assignments do not flow.
+        let deploy = m.rows.iter().find(|i| i.name == "deploy").expect("a row");
+        assert!(deploy.source.ends_with("topos.toml"), "{}", deploy.source);
+        assert_eq!(deploy.attribution.as_deref(), Some("assigned by Dana"));
+        assert!(!m.rows.iter().any(|i| i.name == "notes"));
+        assert!(!m.rows.iter().any(|i| i.name == "triage"));
+        // The LOUD line names both counts and the exact way back.
+        let loud = m
+            .notes
+            .iter()
+            .find(|n| n.contains("not adopted here"))
+            .expect("the loud note");
+        assert!(loud.contains("global manifest adopts 1 bundles"), "{loud}");
+        assert!(loud.contains("2 assigned bundles"), "{loud}");
+        assert!(loud.contains("`topos add -g @acme`"), "{loud}");
+        // The regime says the same thing in one phrase.
+        assert_eq!(
+            r.regimes[0].regime,
+            "explicit: 1 bundles; 2 assigned not adopted here"
+        );
+    }
+
+    /// `"off"` is a statement like any other: it stays a row. An off switch for a bundle nobody
+    /// assigns any more is inert — that gets a note, never a silent line.
+    #[test]
+    fn off_rows_stand_and_a_stale_one_is_disclosed() {
+        let home = TempHome::new();
+        let cwd = home.0.join("plain");
+        std::fs::create_dir_all(&cwd).unwrap();
+        home.session(
+            "topos.sh",
+            "w_acme",
+            "acme",
+            crate::sessions::SESSION_ACTIVE,
+        );
+        home.cache(
+            "w_acme",
+            "topos.sh",
+            "acme",
+            vec![assigned("noisy", None), assigned("deploy", None)],
+            Vec::new(),
+        );
+        home.global(
+            "[bundles]\n\
+             \"topos.sh/acme\" = \"*\"\n\
+             \"topos.sh/acme/noisy\" = \"off\"\n\
+             \"topos.sh/acme/gone\" = \"off\"\n",
+        );
+
+        let r = resolve_at(&home, &cwd);
+        let m = r.machine();
+        let noisy = m
+            .rows
+            .iter()
+            .find(|i| i.name == "noisy")
+            .expect("the off row");
+        assert!(matches!(noisy.state, StatusItemState::Off));
+        assert!(!noisy.bundle, "an off switch is not a delivered bundle");
+        // The off bundle is withheld from the feed's itemization (one row, not two).
+        assert_eq!(m.rows.iter().filter(|i| i.name == "noisy").count(), 1);
+        // The still-assigned bundle keeps flowing.
+        assert!(m.rows.iter().any(|i| i.name == "deploy"));
+        // The stale switch is called out by reference; the live one needs no note.
+        assert!(
+            m.notes
+                .iter()
+                .any(|n| n == "off — not currently assigned: topos.sh/acme/gone"),
+            "{:?}",
+            m.notes
+        );
+        assert!(!m.notes.iter().any(|n| n.contains("acme/noisy")));
+        assert_eq!(r.regimes[0].regime, "adopting all assigned, 2 off");
+    }
+
+    /// A bare `"*"` row for a bundle the flowing feed already delivers is harmless — and inert.
+    #[test]
+    fn a_redundant_row_is_named_as_adding_nothing() {
+        let home = TempHome::new();
+        let cwd = home.0.join("plain");
+        std::fs::create_dir_all(&cwd).unwrap();
+        home.session(
+            "topos.sh",
+            "w_acme",
+            "acme",
+            crate::sessions::SESSION_ACTIVE,
+        );
+        home.cache(
+            "w_acme",
+            "topos.sh",
+            "acme",
+            vec![assigned("deploy", None)],
+            Vec::new(),
+        );
+        home.global("[bundles]\n\"topos.sh/acme\" = \"*\"\n\"topos.sh/acme/deploy\" = \"*\"\n");
+
+        let r = resolve_at(&home, &cwd);
+        assert!(
+            r.machine()
+                .notes
+                .iter()
+                .any(|n| n == "topos.sh/acme/deploy adds nothing — the feed already delivers it"),
+            "{:?}",
+            r.machine().notes
+        );
+        // Deduped by identity: the explicit row wins, the feed does not repeat it.
+        assert_eq!(
+            r.machine()
+                .rows
+                .iter()
+                .filter(|i| i.name == "deploy")
+                .count(),
+            1
+        );
+    }
+
+    /// Declined on the web, delivered here anyway: the file outranks the person's own web choice,
+    /// so the disagreement is stated rather than left a mystery.
+    #[test]
+    fn a_declined_bundle_a_row_still_delivers_is_disclosed() {
+        let home = TempHome::new();
+        let cwd = home.0.join("plain");
+        std::fs::create_dir_all(&cwd).unwrap();
+        home.session(
+            "topos.sh",
+            "w_acme",
+            "acme",
+            crate::sessions::SESSION_ACTIVE,
+        );
+        home.cache(
+            "w_acme",
+            "topos.sh",
+            "acme",
+            vec![assigned("deploy", None)],
+            vec![(
+                "topos_zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz".to_owned(),
+                "legacy".to_owned(),
+            )],
+        );
+        home.global("[bundles]\n\"topos.sh/acme\" = \"*\"\n\"topos.sh/acme/legacy\" = \"*\"\n");
+
+        let r = resolve_at(&home, &cwd);
+        assert!(
+            r.machine()
+                .notes
+                .iter()
+                .any(|n| n == "legacy: declined on the web, delivered here by your global manifest"),
+            "{:?}",
+            r.machine().notes
+        );
+    }
+
+    /// The regime sentence per workspace phrases BOTH shapes from the same plan.
+    #[test]
+    fn regimes_phrase_the_adopting_and_the_explicit_shapes() {
+        let home = TempHome::new();
+        let cwd = home.0.join("plain");
+        std::fs::create_dir_all(&cwd).unwrap();
+        home.session(
+            "topos.sh",
+            "w_acme",
+            "acme",
+            crate::sessions::SESSION_ACTIVE,
+        );
+        home.session(
+            "topos.sh",
+            "w_beta",
+            "beta",
+            crate::sessions::SESSION_ACTIVE,
+        );
+        home.cache(
+            "w_acme",
+            "topos.sh",
+            "acme",
+            vec![assigned("deploy", None)],
+            Vec::new(),
+        );
+        home.cache(
+            "w_beta",
+            "topos.sh",
+            "beta",
+            vec![assigned("triage", None), assigned("notes", None)],
+            Vec::new(),
+        );
+        home.global("[bundles]\n\"topos.sh/acme\" = \"*\"\n\"topos.sh/beta/triage\" = \"*\"\n");
+
+        let r = resolve_at(&home, &cwd);
+        let regime = |ws: &str| {
+            r.regimes
+                .iter()
+                .find(|x| x.workspace == ws)
+                .map(|x| x.regime.clone())
+                .unwrap_or_default()
+        };
+        assert_eq!(regime("acme"), "adopting all assigned");
+        assert_eq!(
+            regime("beta"),
+            "explicit: 1 bundles; 1 assigned not adopted here"
+        );
+    }
+
+    /// The NEAREST project manifest governs its subtree WHOLE — an ancestor's rows never blend in.
+    #[test]
+    fn only_the_nearest_project_manifest_governs_the_project_scope() {
+        let home = TempHome::new();
+        let repo = home.0.join("repo");
+        let nested = repo.join("services/api");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(
+            repo.join(MANIFEST_FILE),
+            "[bundles]\n\"topos.sh/acme/repo-wide\" = \"*\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            nested.join(MANIFEST_FILE),
+            "[bundles]\n\"topos.sh/acme/api-only\" = \"*\"\n",
+        )
+        .unwrap();
+        home.session(
+            "topos.sh",
+            "w_acme",
+            "acme",
+            crate::sessions::SESSION_ACTIVE,
+        );
+
+        let r = resolve_at(&home, &nested);
+        let p = r.project().expect("a project scope");
+        assert_eq!(p.rows.len(), 1, "{:?}", p.rows.len());
+        assert_eq!(p.rows[0].name, "api-only");
+        assert!(
+            p.manifest
+                .as_deref()
+                .is_some_and(|m| m.ends_with("services/api/topos.toml")),
+            "{:?}",
+            p.manifest
+        );
+        // Connected but never delivered here — the honest local answer, nothing dialed.
+        assert!(matches!(p.rows[0].state, StatusItemState::Unknown));
+    }
+
+    /// `detail_for` names WHERE one skill comes from: a row spells its file and its key; a feed
+    /// delivery spells the feed and who aimed it. A token nothing delivers refuses uniformly.
+    #[test]
+    fn the_deep_answer_names_the_row_or_the_feed() {
+        let home = TempHome::new();
+        let cwd = home.0.join("plain");
+        std::fs::create_dir_all(&cwd).unwrap();
+        home.session(
+            "topos.sh",
+            "w_acme",
+            "acme",
+            crate::sessions::SESSION_ACTIVE,
+        );
+        home.cache(
+            "w_acme",
+            "topos.sh",
+            "acme",
+            vec![assigned("deploy", Some("Dana")), assigned("notes", None)],
+            Vec::new(),
+        );
+        home.global("[bundles]\n\"topos.sh/acme\" = \"*\"\n\"topos.sh/acme/deploy\" = \"*\"\n");
+
+        with_ctx(&home, Some(&cwd), |ctx| {
+            let (all, cache) = read_sources(ctx).unwrap();
+            let r = resolve(ctx, &all, &cache).unwrap();
+
+            // The row-delivered bundle: the file + the spelled key.
+            let detail = detail_for(&r, &all, "deploy").expect("the deep answer");
+            assert_eq!(detail.name, "deploy");
+            assert!(
+                detail
+                    .source_file
+                    .as_deref()
+                    .is_some_and(|f| f.ends_with("topos.toml")),
+                "{:?}",
+                detail.source_file
+            );
+            assert_eq!(detail.source_key.as_deref(), Some("topos.sh/acme/deploy"));
+            assert_eq!(detail.feed, None);
+            assert_eq!(detail.attribution.as_deref(), Some("assigned by Dana"));
+
+            // The feed-delivered one: the feed, not a file. The `@ws/name` spelling resolves too.
+            let detail = detail_for(&r, &all, "@acme/notes").expect("the deep answer");
+            assert_eq!(detail.name, "notes");
+            assert_eq!(detail.source_file, None);
+            assert_eq!(detail.source_key, None);
+            assert_eq!(detail.feed.as_deref(), Some("topos.sh/acme"));
+            assert_eq!(detail.attribution.as_deref(), Some("picked by you"));
+
+            // A token no scope delivers is the uniform not-found.
+            let err = detail_for(&r, &all, "nowhere").expect_err("an unknown token");
+            assert!(matches!(err, ClientError::TargetNotFound { .. }), "{err:?}");
+        });
+    }
+}

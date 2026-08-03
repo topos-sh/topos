@@ -3,9 +3,10 @@
 //! The MANIFEST-MODEL verb surface: `login`/`logout` manage this installation's workspace
 //! sessions; `init` creates a folder's `topos.toml` and `fmt` tidies one; `add`/`remove` edit the
 //! nearest manifest (`-g` = this machine's own `~/.topos/topos.toml`); `update` is the
-//! reconcile (targeted forms + the `--quiet` sweep); `status` is the offline trust rail;
+//! reconcile (targeted forms + the `--quiet` sweep); `status` is the offline health panel and
+//! `list` the offline inventory (both scoped: here-scope by default, `-g` machine, `--all` both);
 //! `publish`/`review`/`revert`/`protect`/`invite` are the workspace governance verbs; the utility
-//! verbs (`list`, `diff`, `log`, `self-update`, `uninstall`, `auth status`) persist. Two-phase
+//! verbs (`diff`, `log`, `self-update`, `uninstall`, `auth status`) persist. Two-phase
 //! describe/`--yes` gates the acts with REACH, LOSS, or FIRST TRUST (`publish`'s describe,
 //! `review`'s verdicts, `revert`, `protect`, `invite`, `update --reset`, `uninstall`; a `remove`
 //! over local edits, a permanent delete, or a set-splitting row rewrite; a bare `add` of an
@@ -54,15 +55,20 @@ pub(crate) struct Cli {
 #[derive(Debug, Subcommand)]
 pub(crate) enum Command {
     // ---- Self-scoped (affect only you) ----
-    /// See what topos manages on this machine: each skill with its version and where it comes
-    /// from — per scope (this folder's `topos.toml`, and your own machine-wide set) — plus your
-    /// workspace logins and whether auto-update is armed. `topos status <skill>` answers one
-    /// skill in depth: which file and line (or which workspace's feed) delivers it, and where
-    /// its files are. Works offline and changes nothing. A bare `topos` on a terminal shows the
-    /// same thing.
+    /// Check topos's health: your workspace logins and sessions, whether the auto-update
+    /// triggers are armed, which `topos.toml` governs where you stand, and what needs
+    /// attention — updates pending, deliveries not applied yet, edits of your own — each with
+    /// the command that resolves it. `-g` reports your machine-wide set instead; `--all` both.
+    /// For the skill inventory use `topos list`, and `topos list <skill>` for one skill in
+    /// depth. Works offline and changes nothing. A bare `topos` on a terminal shows the same
+    /// thing.
     Status {
-        /// One skill to answer in depth. Omitted, the full table.
-        bundle: Option<String>,
+        /// Report your machine-wide set, even when run inside a project.
+        #[arg(long, short = 'g')]
+        global: bool,
+        /// Report both this folder's scope and your machine-wide set in full.
+        #[arg(long, conflicts_with = "global")]
+        all: bool,
     },
     /// Fetch and apply the latest version of what you asked for, where you are standing: this
     /// folder's `topos.toml` when one covers it, and otherwise your machine-wide set (your own
@@ -208,18 +214,39 @@ pub(crate) enum Command {
         #[arg(long)]
         yes: bool,
     },
-    /// List the skills on this machine — the ones topos manages, plus untracked skills found in
-    /// your agents' skill folders that you could `add`.
+    /// See what's installed where you stand, per scope: each skill with its version, where it
+    /// comes from, and its state. Inside a project the rows are that folder's `topos.toml`'s;
+    /// `-g` lists your machine-wide set, `--all` both. `topos list <skill>` answers one skill
+    /// in depth — which file and line (or which workspace's feed) delivers it, and where its
+    /// files are. `--untracked` lists skills found in your agents' folders that topos does not
+    /// manage yet; `-a <agent>` shows one agent's skill folders exactly as that agent reads
+    /// them; `--remote` lists what your workspaces offer (needs a login). Works offline except
+    /// `--remote`.
     List {
-        /// Show only these skills.
-        name: Vec<String>,
+        /// One skill to answer in depth. Omitted, the full inventory.
+        #[arg(conflicts_with_all = ["remote", "untracked", "agent"])]
+        name: Option<String>,
+        /// List your machine-wide set, even when run inside a project.
+        #[arg(long, short = 'g')]
+        global: bool,
+        /// List both this folder's scope and your machine-wide set in full.
+        #[arg(long, conflicts_with = "global")]
+        all: bool,
+        /// List the skills in your agents' folders that topos does not manage yet.
+        #[arg(long)]
+        untracked: bool,
+        /// Show one agent's skill folders as that agent reads them (a slug like `cursor`).
+        #[arg(
+            long,
+            short = 'a',
+            value_name = "SLUG",
+            conflicts_with_all = ["global", "all", "remote", "untracked"]
+        )]
+        agent: Option<String>,
         /// Also list what your workspace(s) offer, with each skill's state on this machine.
         /// Needs a login.
-        #[arg(long)]
+        #[arg(long, conflicts_with = "untracked")]
         remote: bool,
-        /// Only skills topos manages — skip discovery of untracked ones.
-        #[arg(long)]
-        tracked: bool,
         /// Also list the files topos owns outside skill folders.
         #[arg(long)]
         footprint: bool,
@@ -447,16 +474,71 @@ mod tests {
 
     #[test]
     fn status_parses_and_the_subcommand_is_optional() {
-        // `topos status` is the explicit orientation verb.
+        // `topos status` is the explicit health verb.
         let out = Cli::try_parse_from(["topos", "status"]).unwrap();
-        assert!(matches!(out.command, Some(Command::Status { .. })));
+        assert!(matches!(
+            out.command,
+            Some(Command::Status {
+                global: false,
+                all: false
+            })
+        ));
         assert_eq!(out.command.unwrap().name(), "status");
+        // The scope flags parse; `-g` and `--all` refuse each other.
+        assert!(matches!(
+            Cli::try_parse_from(["topos", "status", "-g"])
+                .unwrap()
+                .command,
+            Some(Command::Status { global: true, .. })
+        ));
+        assert!(matches!(
+            Cli::try_parse_from(["topos", "status", "--all"])
+                .unwrap()
+                .command,
+            Some(Command::Status { all: true, .. })
+        ));
+        assert!(Cli::try_parse_from(["topos", "status", "-g", "--all"]).is_err());
+        // The deep dive moved to `list <skill>`: `status` takes no positional any more.
+        let moved = Cli::try_parse_from(["topos", "status", "docs"]).unwrap_err();
+        assert_eq!(moved.kind(), ErrorKind::UnknownArgument);
         // A bare `topos` parses (no subcommand) — the composition root decides between the TTY
         // orientation render and the scripted usage error.
         let bare = Cli::try_parse_from(["topos"]).unwrap();
         assert!(bare.command.is_none());
         let bare_json = Cli::try_parse_from(["topos", "--json"]).unwrap();
         assert!(bare_json.command.is_none() && bare_json.json);
+    }
+
+    #[test]
+    fn list_takes_the_new_scope_and_view_flags() {
+        // The deep dive is the one positional.
+        let out = Cli::try_parse_from(["topos", "list", "docs"]).unwrap();
+        assert!(matches!(
+            out.command,
+            Some(Command::List { name: Some(n), .. }) if n == "docs"
+        ));
+        // The scope flags and the views parse.
+        assert!(Cli::try_parse_from(["topos", "list", "-g"]).is_ok());
+        assert!(Cli::try_parse_from(["topos", "list", "--all"]).is_ok());
+        assert!(Cli::try_parse_from(["topos", "list", "--untracked"]).is_ok());
+        assert!(Cli::try_parse_from(["topos", "list", "-a", "cursor"]).is_ok());
+        assert!(Cli::try_parse_from(["topos", "list", "--remote"]).is_ok());
+        // `--tracked` is DELETED — the tracked rows are the default body now.
+        let removed = Cli::try_parse_from(["topos", "list", "--tracked"]).unwrap_err();
+        assert_eq!(removed.kind(), ErrorKind::UnknownArgument);
+        // The views refuse to combine where the answer would be ambiguous.
+        for bad in [
+            &["topos", "list", "docs", "--remote"][..],
+            &["topos", "list", "docs", "--untracked"][..],
+            &["topos", "list", "docs", "-a", "cursor"][..],
+            &["topos", "list", "-a", "cursor", "-g"][..],
+            &["topos", "list", "-a", "cursor", "--all"][..],
+            &["topos", "list", "-a", "cursor", "--remote"][..],
+            &["topos", "list", "--remote", "--untracked"][..],
+            &["topos", "list", "-g", "--all"][..],
+        ] {
+            assert!(Cli::try_parse_from(bad.iter().copied()).is_err(), "{bad:?}");
+        }
     }
 
     #[test]
