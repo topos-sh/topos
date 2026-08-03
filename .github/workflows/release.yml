@@ -69,15 +69,20 @@ jobs:
               ;;
           esac
 
-          # The pin is the compose default: `${TOPOS_VERSION:-vX.Y.Z}`, identical on both services.
-          pins="$(grep -oE '\$\{TOPOS_VERSION:-[^}]+\}' docker-compose.yml | sed 's/.*:-//;s/}//' | sort -u)"
-          if [ "$(printf '%s\n' "$pins" | wc -l)" -ne 1 ] || [ "$pins" != "$tag" ]; then
-            echo "::error file=docker-compose.yml::the compose image pin is '${pins//$'\n'/, }', but the tag is '${tag}'."
-            echo "::error::Set both services to \${TOPOS_VERSION:-${tag}} and re-tag (see RELEASING.md)."
+          # The pin is the compose default: `${TOPOS_VERSION:-vX.Y.Z}`. BOTH application services must
+          # carry it, so count the matches rather than just deduplicating them — a service whose tag
+          # got hardcoded would otherwise leave one correct pin behind and pass. `|| true` keeps a
+          # zero-match grep from killing the script under `set -e` before it can say why.
+          pins="$(grep -oE '\$\{TOPOS_VERSION:-[^}]+\}' docker-compose.yml | sed 's/.*:-//;s/}//' || true)"
+          count="$(printf '%s' "$pins" | grep -c . || true)"
+          distinct="$(printf '%s\n' "$pins" | sort -u | tr '\n' ' ' | sed 's/ *$//')"
+          if [ "$count" -ne 2 ] || [ "$distinct" != "$tag" ]; then
+            echo "::error file=docker-compose.yml::expected BOTH services pinned to ${tag} through \${TOPOS_VERSION:-…}; found ${count} such pin(s): ${distinct:-none}."
+            echo "::error::Set plane and web to \${TOPOS_VERSION:-${tag}} and re-tag (see RELEASING.md)."
             exit 1
           fi
 
-          echo "crate ${crate} and compose pin ${pins} both match ${tag}."
+          echo "crate ${crate} and both compose pins (${distinct}) match ${tag}."
 
   build-cli:
     name: cli (${{ matrix.target }})
@@ -441,12 +446,14 @@ jobs:
 
           ## Self-host
 
-          Two files, no clone and no build — the compose file below pins both images to this release:
+          No clone and no build — the compose file pins both images to this release:
 
           ```
           EOF
-            echo "curl -fsSL https://topos.sh/compose.yml -o docker-compose.yml"
             cat <<'EOF'
+          mkdir -p scripts
+          curl -fsSL https://topos.sh/compose.yml        -o docker-compose.yml
+          curl -fsSL https://topos.sh/compose-init-db.sh -o scripts/compose-init-db.sh
           printf 'TOPOS_WEB_AUTH_SECRET=%s\nTOPOS_INTERNAL_TOKEN=%s\n' \
             "$(openssl rand -hex 32)" "$(openssl rand -hex 32)" > .env
           docker compose up -d

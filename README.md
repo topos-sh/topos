@@ -221,11 +221,15 @@ origin. Both images are prebuilt and multi-arch, so there is nothing to clone an
 compile.
 
 ```sh
-curl -fsSL https://topos.sh/compose.yml -o docker-compose.yml
+mkdir -p scripts
+curl -fsSL https://topos.sh/compose.yml        -o docker-compose.yml
+curl -fsSL https://topos.sh/compose-init-db.sh -o scripts/compose-init-db.sh
 printf 'TOPOS_WEB_AUTH_SECRET=%s\nTOPOS_INTERNAL_TOKEN=%s\n' \
   "$(openssl rand -hex 32)" "$(openssl rand -hex 32)" > .env
 docker compose up -d
 ```
+
+Two files: the deployment itself, and the script that creates the database's roles on first boot.
 
 The two secrets are required even for a laptop try-out. Open `http://localhost:3000` in a
 browser - the first browser visit creates the workspace and prints a one-time setup link to the

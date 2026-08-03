@@ -14,12 +14,16 @@ import { installTestEnv } from "./helpers/test-env";
  */
 
 let composeLoader: () => Promise<Response>;
+let initDbLoader: () => Promise<Response>;
 let onDisk: string;
+let initDbOnDisk: string;
 
 beforeAll(async () => {
   installTestEnv();
   ({ loader: composeLoader } = await import("@/routes/compose-yml"));
+  ({ loader: initDbLoader } = await import("@/routes/compose-init-db"));
   onDisk = await readFile("../docker-compose.yml", "utf8");
+  initDbOnDisk = await readFile("../scripts/compose-init-db.sh", "utf8");
 });
 
 describe("the self-host compose file", () => {
@@ -52,5 +56,25 @@ describe("the self-host compose file", () => {
 
     // Nothing in the PUBLISHED file builds — that lives in docker-compose.build.yml.
     expect(served).not.toMatch(/^\s*build:/m);
+  });
+
+  it("serves every host path it mounts, so a fetched deployment is complete", async () => {
+    const served = await (await composeLoader()).text();
+
+    // Any `./…` bind mount is a file the operator must ALSO have. Each one must therefore be
+    // fetchable from this server — otherwise the quickstart hands out a compose file that cannot
+    // stand up, and Docker turns the missing path into a directory rather than an error.
+    const hostMounts = [...served.matchAll(/^\s*-\s+\.\/(\S+?):/gm)].map(([, p]) => p);
+    expect(hostMounts).toEqual(["scripts/compose-init-db.sh"]);
+
+    const res = await initDbLoader();
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe(initDbOnDisk);
+  });
+
+  it("pins the project name, so the documented volume names are the real ones", async () => {
+    // Without this, the volumes are prefixed with whatever directory the file was downloaded to,
+    // and the backup commands in the docs would silently create-and-tar empty volumes.
+    expect(await (await composeLoader()).text()).toMatch(/^name:\s*topos\s*$/m);
   });
 });

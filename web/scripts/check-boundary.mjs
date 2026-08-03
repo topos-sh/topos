@@ -265,6 +265,7 @@ const SESSIONLESS_ROUTES = new Set([
   "install-sh",
   // The self-host deployment file — constant public bytes, sessionless by design.
   "compose-yml",
+  "compose-init-db",
   "agent",
   // The documentation: public bytes compiled into the build, sessionless by design — the page,
   // its plain-markdown twin, and the docs index.
