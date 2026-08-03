@@ -11,7 +11,7 @@ use topos_types::persisted::{Lock, PlacementMap};
 use topos_types::results::{DiffData, DiffPatchInfo, DiffSource};
 
 use super::contribute;
-use super::{VersionRef, parse_hex32, resolve_skill, resolve_version_ref};
+use super::{VersionRef, parse_hex32, resolve_version_ref};
 use crate::ctx::Ctx;
 use crate::error::ClientError;
 use crate::scan::{self, ScannedBundle};
@@ -72,11 +72,16 @@ pub(crate) fn diff(
     r#ref: Option<&str>,
     budget: DiffBudget,
 ) -> Result<DiffData, ClientError> {
-    let (id, lock) = resolve_skill(ctx, skill)?;
-    let sp = ctx.layout.published(&id);
+    // Resolve across BOTH stores: a bundle a project `topos.toml` delivers keeps its custody in the
+    // checkout's own store, and a `diff` run from inside that checkout must read THAT copy — not a
+    // same-named machine twin, and not a not-found. Every store/doc/scan read below rides `sctx`
+    // (the owning store's layout); the plane and follow seams are machine-level and stay as they are.
+    let (layout, id, lock) = super::resolve_skill_stored(ctx, skill, None)?;
+    let sctx = super::pull::ctx_with_layout(ctx, &layout);
+    let sp = layout.published(&id);
 
     let Some(reference) = r#ref else {
-        return diff_draft_vs_current(ctx, &sp, &lock, budget);
+        return diff_draft_vs_current(&sctx, &sp, &lock, budget);
     };
 
     // Parse the ref: `<a>..<b>` is a range; otherwise a single endpoint compared against `current` (so a
@@ -86,8 +91,8 @@ pub(crate) fn diff(
         None => ("current".to_owned(), reference.to_owned()),
     };
 
-    let base = resolve_endpoint(ctx, &id, &from)?;
-    let target = resolve_endpoint(ctx, &id, &to)?;
+    let base = resolve_endpoint(&sctx, &id, &from)?;
+    let target = resolve_endpoint(&sctx, &id, &to)?;
 
     let sections = unified_diff_sections(&diff_files(&base.files), &diff_files(&target.files));
     let (diff, truncated, files) = apply_budget(sections, budget);
@@ -142,7 +147,9 @@ fn apply_budget(
     }
 }
 
-/// The bare draft ↔ current diff (current = the on-machine base commit).
+/// The bare draft ↔ current diff (current = the on-machine base commit). `ctx` is the OWNING
+/// store's (see [`diff`]): the store, the placement map, and the drift scan all belong to whichever
+/// scope holds this bundle's custody.
 fn diff_draft_vs_current(
     ctx: &Ctx<'_>,
     sp: &sidecar::SkillPaths,
@@ -207,6 +214,9 @@ fn diff_draft_vs_current(
 /// way the bytes are fetched ONCE and re-verified to reproduce the version id — the SAME bytes are
 /// returned for display, never a second, unverified fetch (so a tampered plane cannot show benign bytes
 /// while the id commits to other bytes).
+///
+/// `ctx` is the OWNING store's (see [`diff`]) — the recorded pointer history a short prefix resolves
+/// against is that store's; the plane and follow seams it carries are the machine's, unchanged.
 fn resolve_endpoint(
     ctx: &Ctx<'_>,
     id: &crate::id::SkillId,

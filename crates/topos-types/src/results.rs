@@ -220,13 +220,19 @@ pub struct ConflictPathReport {
 }
 
 // =================================================================================================
-// PINNED — `list` (the per-scope inventory + the deep dive + the agent-eye and remote views).
+// `list` (the per-scope inventory + the deep dive + the agent-eye and remote views).
+//
+// The payload was REDESIGNED WHOLESALE pre-1.0 when `list` became the scoped inventory (and
+// `status` the health panel): the old follow-shaped buckets are gone, not deprecated — a reader
+// written against them does not degrade, it breaks. THIS shape is the stable one from here: the
+// per-scope sections plus the summaries and the optional views, additive-only from now on.
 // =================================================================================================
 
 /// `list` result — the inventory, per scope. The scopes shown in full ride `scopes`; whatever the
 /// invocation does not show rides ONE summary (`machine_summary` / `untracked_summary`) so nothing
 /// is invisible. The optional views (`untracked` / `remote` / `detail` / `agent_view`) fill only
-/// under their flag. **PINNED.**
+/// under their flag. **The stable shape** (see the section note: it replaced the pre-1.0 bucket
+/// payload outright); additive-only from here.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
 pub struct ListData {
@@ -1418,13 +1424,19 @@ pub enum PublishGate {
 }
 
 // =================================================================================================
-// INFERRED — `status` (the offline orientation snapshot).
+// `status` (the offline health panel).
+//
+// Like `list`'s, this payload was REDESIGNED WHOLESALE pre-1.0 in the split that made `status` the
+// health panel: the resolved-item table, the profile counts, and the flat regime list are gone,
+// replaced by per-scope bodies carrying attention counts. THIS shape is the stable one from here,
+// additive-only.
 // =================================================================================================
 
 /// `status` result — the health panel: the binary version, the server + signed-in state, the
 /// sessions, the auto-update trigger states, and per shown SCOPE what governs it and what needs
 /// attention. NO skill inventory — that is `list`'s. Computed ENTIRELY from local state (no
-/// network). **INFERRED** (additive-only).
+/// network). **The stable shape** (see the section note: it replaced the pre-1.0 item table
+/// outright); additive-only from here.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
 pub struct StatusData {
@@ -1562,6 +1574,9 @@ pub enum StatusItemState {
     /// the first exchange. What that exchange brings — including nothing — is not knowable here,
     /// so the line promises an exchange, never an apply.
     NoDeliveryYet,
+    /// A retained store copy delivery no longer claims here (the built-in aside: unfollowed,
+    /// excluded, or withdrawn upstream) — the bytes are a frozen local copy.
+    Detached,
     /// Not applied here yet — `topos update` applies it (or the state is not determinable
     /// offline).
     Unknown,

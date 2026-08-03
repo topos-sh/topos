@@ -1261,6 +1261,12 @@ pub(crate) fn workspace_slug(ctx: &Ctx<'_>, workspace_id: Option<&str>) -> Optio
 /// target set is computed identically everywhere. The engine plans breadth for FOLLOWED skills only
 /// — a purely-local skill (adopted in place, never followed) keeps its recorded placement as-is: its
 /// dir is the user's own working location, and nothing distributes it.
+///
+/// **The layout IS the scope.** A ctx running against a PROJECT's own store plans PROJECT-scoped —
+/// the same planner the reconcile hands its project rows. Without that, a targeted verb run on a
+/// project-held bundle (a go-back, a reset, an accept from inside the checkout) would re-plan it
+/// onto the machine's harness dirs — which the project store's containment rail then refuses
+/// outright, so the verb would not merely misplace the bytes, it would fail.
 pub(crate) fn plan_for_skill(
     ctx: &Ctx<'_>,
     skill_id: &str,
@@ -1268,6 +1274,20 @@ pub(crate) fn plan_for_skill(
     prior: &PlacementMap,
 ) -> PlacementPlan {
     let ws = crate::ops::followed_workspace(ctx, skill_id);
+    if let Some(root) = ctx.layout.project_root() {
+        return project_plan(
+            ctx,
+            root,
+            skill_id,
+            PlacementNaming {
+                name: Some(&lock.name),
+                workspace_slug: workspace_slug(ctx, ws.as_deref()).as_deref(),
+            },
+            None,
+            Some(prior),
+            None,
+        );
+    }
     if ws.is_none() {
         return classic_plan(
             ctx,
