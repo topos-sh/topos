@@ -17,6 +17,13 @@
       "format": "uint32",
       "minimum": 0
     },
+    "scope": {
+      "description": "The scope(s) this update reconciled: `\"project <dir>\"`, `\"machine\"`, or `\"both\"` (the\nbackground sweep). Absent from producers predating the scoped update, and from the\nsingle-skill go-back, which acts on local bytes rather than a scope. **INFERRED**\n(additive).",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "skills": {
       "type": "array",
       "items": {

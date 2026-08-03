@@ -67,18 +67,81 @@ pub(crate) struct SessionTransports {
 /// Builds the transports for ONE session (per-workspace credentials — the session model).
 pub(crate) type SessionConnect<'a> = dyn Fn(&Session) -> SessionTransports + 'a;
 
+/// Which scope(s) ONE `update` reconciles — the scope rule made explicit. Every verb acts on where
+/// you stand, so a hand-run update converges the scope the invocation is standing in and leaves the
+/// other one's stores, placements and agent dirs alone; only the background sweep covers both,
+/// because silent delivery has to reach everything the machine holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum UpdateScope {
+    /// Where the invocation stands: the project scope when a manifest covers the cwd, else the
+    /// machine.
+    #[default]
+    Here,
+    /// The machine scope only (`-g`), even from inside a project.
+    Machine,
+    /// Both scopes — the hook sweep's mode (`--quiet`): silent delivery covers everything, always.
+    Both,
+}
+
 /// How a reconcile behaves.
 #[derive(Default)]
 pub(crate) struct ManifestUpdateOpts {
-    /// Targeted names/references (`topos update <name>…`); empty = the full sweep.
+    /// Targeted names/references (`topos update <name>…`); empty = the full sweep. A target
+    /// narrows WITHIN the driven scope(s) — a name only the other scope demands is unmatched.
     pub targets: Vec<String>,
     /// Ack the delivered notices (the interactive / `--json` update); the quiet hook fetches
     /// WITHOUT acking, so nothing is marked read that no one narrated.
     pub ack_notices: bool,
     /// `--rebuild`: absorb every edited copy into its store, drop the recorded placement dirs, and
     /// let the ordinary sweep re-project them from the store. The absorb-then-drop ORDER is the
-    /// whole guarantee — a rebuild must never be a way to lose an edit.
+    /// whole guarantee — a rebuild must never be a way to lose an edit. Gated per scope, like
+    /// everything else this run drives.
     pub rebuild: bool,
+    /// Which scope(s) to DRIVE (see [`UpdateScope`]). Both plans are still read either way — the
+    /// selector decides which ones converge, clean, and disclose.
+    pub scope: UpdateScope,
+}
+
+/// The scope(s) this run resolved to drive, and how the receipt names them. Two booleans rather
+/// than the request enum: the arms below gate on what is actually being converged, so a
+/// "not driven" scope can never be read as "nothing demanded" by a cleaner.
+struct Driven {
+    project: bool,
+    person: bool,
+}
+
+impl Driven {
+    /// Resolve the request against what covers the cwd. A project manifest the grammar REFUSED
+    /// still counts as covering it: the parse failure freezes that scope loudly, and silently
+    /// updating the machine instead would answer a typo by converging the wrong tree.
+    fn resolve(scope: UpdateScope, project_here: bool) -> Self {
+        match scope {
+            UpdateScope::Here => Driven {
+                project: project_here,
+                person: !project_here,
+            },
+            UpdateScope::Machine => Driven {
+                project: false,
+                person: true,
+            },
+            UpdateScope::Both => Driven {
+                project: true,
+                person: true,
+            },
+        }
+    }
+
+    /// The receipt's scope name: `"project <dir>"`, `"machine"`, or `"both"`.
+    fn label(&self, project_dir: Option<&Path>) -> String {
+        match (self.project, self.person) {
+            (true, true) => "both".to_owned(),
+            (true, false) => project_dir.map_or_else(
+                || "project".to_owned(),
+                |d| format!("project {}", d.display()),
+            ),
+            _ => "machine".to_owned(),
+        }
+    }
 }
 
 /// One session's runtime state for this sweep.
@@ -605,6 +668,21 @@ pub(crate) fn manifest_update(
             }
         }
     }
+    // Which scope(s) this run DRIVES. Both plans above are read either way — the read is what
+    // makes the freeze warnings and the cross-scope bookkeeping honest; the selector below decides
+    // only which of them converges, cleans, and discloses. A frozen project file still COVERS the
+    // cwd, so `Here` stays on it (its dir comes from the walk, since the failed parse produced no
+    // plan to carry one).
+    let project_dir: Option<PathBuf> = match (&project, project_frozen) {
+        (Some((dir, _)), _) => Some(dir.clone()),
+        (None, true) => cwd
+            .as_deref()
+            .and_then(|c| scopes::nearest_manifest_dir(ctx.fs, c, home.as_deref())),
+        (None, false) => None,
+    };
+    let driven = Driven::resolve(opts.scope, project_dir.is_some());
+    let scope_label = driven.label(project_dir.as_deref());
+
     // Every manifest dir up the chain — NOT a resolution input (nearest wins whole); the store
     // surfaces (lazy recovery, the pre-1.0 handover) still visit each one.
     let manifest_dirs: Vec<PathBuf> = match &cwd {
@@ -667,10 +745,15 @@ pub(crate) fn manifest_update(
         repos: std::cell::RefCell::new(Vec::new()),
     };
 
-    // ---- 3. `--rebuild`, BEFORE the fan-out: absorb, then drop, then let the sweep re-project. ----
+    // ---- 3. `--rebuild`, BEFORE the fan-out: absorb, then drop, then let the sweep re-project.
+    // A rebuild rebuilds exactly what this run converges: re-projecting a store no scope drives
+    // would drop placement dirs nothing is about to write back.
     if opts.rebuild {
-        rebuild_store(ctx, &ctx.layout, &mut sweep.warnings);
-        if let Some((dir, _)) = &project
+        if driven.person {
+            rebuild_store(ctx, &ctx.layout, &mut sweep.warnings);
+        }
+        if driven.project
+            && let Some((dir, _)) = &project
             && let Some(playout) = sidecar::existing_project_store(ctx.fs, dir)
         {
             let pctx = super::pull::ctx_with_layout(ctx, &playout);
@@ -678,9 +761,11 @@ pub(crate) fn manifest_update(
         }
     }
 
-    // ---- 4. Reconcile each scope, unblended. ----
+    // ---- 4. Reconcile the driven scope(s), unblended. ----
     let mut targets = Targets::new(&opts.targets);
-    if let Some((dir, plan)) = &project {
+    if driven.project
+        && let Some((dir, plan)) = &project
+    {
         let sc = ScopeCtx {
             scope: ResolvedScope::Project { dir: dir.clone() },
             label: ResolvedScope::Project { dir: dir.clone() }.label(),
@@ -688,7 +773,9 @@ pub(crate) fn manifest_update(
         };
         reconcile_scope(&env, &sc, &mut targets, &mut sweep);
     }
-    if let Some(plan) = &person {
+    if driven.person
+        && let Some(plan) = &person
+    {
         let sc = ScopeCtx {
             scope: ResolvedScope::Person,
             label: ResolvedScope::Person.label(),
@@ -697,19 +784,43 @@ pub(crate) fn manifest_update(
         reconcile_scope(&env, &sc, &mut targets, &mut sweep);
     }
     if let Some(t) = targets.unmatched() {
-        return Err(ClientError::InvalidArgument(format!(
-            "'{t}' is not in any manifest covering this directory or your connected feeds — \
-             `topos status` shows the resolved set; `topos add` records new demand"
-        )));
+        // The refusal names the scope actually SEARCHED. Under the scope rule a name can be
+        // perfectly real one scope over, and "not in any manifest" would send someone to re-add
+        // what they already have — so each arm says where it looked and offers the other scope's
+        // spelling as a way out rather than a claim about where the name lives.
+        return Err(ClientError::InvalidArgument(
+            match (driven.project, driven.person, &project_dir) {
+                (true, false, Some(dir)) => format!(
+                    "'{t}' is not demanded by {}/{} — `topos status` shows what this folder \
+                     resolves to; `topos add {t}` records it here, and `topos update -g {t}` \
+                     updates your machine-wide set instead",
+                    dir.display(),
+                    crate::manifest::MANIFEST_FILE
+                ),
+                (false, true, _) => format!(
+                    "'{t}' is not in your machine-wide set — neither your own {} nor a connected \
+                     feed demands it; `topos status` shows the resolved set; `topos add -g {t}` \
+                     records new demand",
+                    crate::manifest::MANIFEST_FILE
+                ),
+                _ => format!(
+                    "'{t}' is not in any manifest covering this directory or your connected \
+                     feeds — `topos status` shows the resolved set; `topos add` records new demand"
+                ),
+            },
+        ));
     }
 
-    // ---- 5. Disclosures the table cannot carry per row. ----
-    disclose(&env, person.as_ref(), &mut sweep);
+    // ---- 5. Disclosures the table cannot carry per row. The person plan's own note (a global
+    // file withholding a feed) belongs to a run that drove that scope; a project-scoped run has
+    // no business narrating what the machine set is or is not adopting. ----
+    disclose(&env, person.as_ref().filter(|_| driven.person), &mut sweep);
 
     // ---- 6. Clean what nothing demands any more (the targeted form never cleans). ----
     if opts.targets.is_empty() {
         clean_undemanded(
             &env,
+            &driven,
             person.as_ref(),
             project.as_ref(),
             project_frozen,
@@ -907,6 +1018,7 @@ pub(crate) fn manifest_update(
             proposals_awaiting,
             notices,
             sync,
+            scope: Some(scope_label),
         },
         warnings: sweep.warnings,
         disclosures: sweep.disclosures,
@@ -2673,10 +2785,13 @@ fn disclose(env: &Env<'_>, person: Option<&ScopePlan>, sweep: &mut Sweep) {
 /// - PROJECT scope: ONLY the NEAREST project's own store is cleaned, against ITS plan — an
 ///   ancestor's store is never cleaned from below, because that file governs its own subtree.
 ///
-/// Frozen throughout: a scope whose manifest failed to parse, a workspace with no fresh delivery, the
-/// members of a set that failed to expand, and every name a row still mentions.
+/// Frozen throughout: a scope this run did not DRIVE, a scope whose manifest failed to parse, a
+/// workspace with no fresh delivery, the members of a set that failed to expand, and every name a
+/// row still mentions. The driven gate comes first on purpose — an undriven scope resolved no rows
+/// this run, so its whole recorded set would read as undemanded and retire.
 fn clean_undemanded(
     env: &Env<'_>,
+    driven: &Driven,
     person: Option<&ScopePlan>,
     project: Option<&(PathBuf, ScopePlan)>,
     project_frozen: bool,
@@ -2685,7 +2800,7 @@ fn clean_undemanded(
     let ctx = env.ctx;
 
     // ---- Person scope. ----
-    if let Some(plan) = person {
+    if let Some(plan) = person.filter(|_| driven.person) {
         let label = ResolvedScope::Person.label();
         // The PERSON scope's own mentions decide the person clean — scopes are unblended, so a
         // project manifest naming the same NAME must not shield an unrelated person-scope
@@ -2771,7 +2886,7 @@ fn clean_undemanded(
     }
 
     // ---- Project scope: the NEAREST file's own store, against its own plan. ----
-    if project_frozen {
+    if !driven.project || project_frozen {
         return;
     }
     let Some((pd, _plan)) = project else { return };

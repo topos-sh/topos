@@ -64,16 +64,22 @@ pub(crate) enum Command {
         /// One skill to answer in depth. Omitted, the full table.
         bundle: Option<String>,
     },
-    /// Fetch and apply the latest version of everything this folder's `topos.toml` asks for and
-    /// everything your workspaces give you.
-    /// Runs by itself at the start of each agent session; safe to run by hand any time.
-    /// `topos update <skill>` updates one skill; `topos update <skill>@<version>` puts that
-    /// version's bytes back on this machine only.
+    /// Fetch and apply the latest version of what you asked for, where you are standing: this
+    /// folder's `topos.toml` when one covers it, and otherwise your machine-wide set (your own
+    /// `topos.toml` and the skills your workspaces give you). `-g` updates the machine-wide set
+    /// even from inside a project. The background auto-update that runs at the start of each
+    /// agent session always covers both, so nothing goes stale while you work in one folder.
+    /// Safe to run by hand any time. `topos update <skill>` updates one skill;
+    /// `topos update <skill>@<version>` puts that version's bytes back on this machine only.
     #[command(alias = "pull")]
     Update {
         /// The skill(s) to update; `<skill>@<version>` restores that version's bytes locally.
-        /// Omitted, everything is updated.
+        /// Omitted, everything in this scope is updated.
         targets: Vec<String>,
+        /// Update only your machine-wide skills (`~/.topos/topos.toml` and your workspace feeds),
+        /// even when run inside a project.
+        #[arg(long, short = 'g')]
+        global: bool,
         /// Discard your local edits to a skill and take the team version. Shows what would be
         /// lost first; `--yes` applies.
         #[arg(long)]
@@ -86,8 +92,9 @@ pub(crate) enum Command {
         /// Takes exactly one skill.
         #[arg(long = "onto-current")]
         onto_current: bool,
-        /// Print nothing on stdout — the mode the session-start hook uses. Errors still go to
-        /// stderr with a non-zero exit.
+        /// Print nothing on stdout — the mode the session-start hook uses. The hook sweep always
+        /// covers both scopes (this folder's and your machine-wide set), so `-g` has no effect
+        /// here. Errors still go to stderr with a non-zero exit.
         #[arg(long)]
         quiet: bool,
         /// With `--quiet`: skip the run entirely when one already completed within this many

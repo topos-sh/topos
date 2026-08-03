@@ -34,6 +34,12 @@ pub struct PullData {
     /// warning and `auth status` read. **INFERRED** (additive).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sync: Vec<WorkspaceSyncReport>,
+    /// The scope(s) this update reconciled: `"project <dir>"`, `"machine"`, or `"both"` (the
+    /// background sweep). Absent from producers predating the scoped update, and from the
+    /// single-skill go-back, which acts on local bytes rather than a scope. **INFERRED**
+    /// (additive).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
 }
 
 /// One workspace's sync freshness in a [`PullData`]. **INFERRED** (additive-only).
@@ -1497,6 +1503,7 @@ mod tests {
             proposals_awaiting: 0,
             notices: Vec::new(),
             sync: Vec::new(),
+            scope: None,
         };
         let v = serde_json::to_value(&data).unwrap();
         assert_eq!(v["skills"][0]["action"], "up_to_date");

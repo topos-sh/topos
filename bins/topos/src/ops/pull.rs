@@ -234,6 +234,7 @@ pub(crate) fn pull(ctx: &Ctx<'_>, scope: PullScope) -> Result<PullOutcome, Clien
                     proposals_awaiting,
                     notices: Vec::new(),
                     sync: Vec::new(),
+                    scope: None,
                 },
                 warnings,
             );
@@ -285,6 +286,7 @@ pub(crate) fn pull(ctx: &Ctx<'_>, scope: PullScope) -> Result<PullOutcome, Clien
                     proposals_awaiting,
                     notices: Vec::new(),
                     sync: Vec::new(),
+                    scope: None,
                 },
                 Vec::new(),
             ))
