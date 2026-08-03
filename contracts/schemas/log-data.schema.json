@@ -16,6 +16,17 @@
       "type": "array",
       "items": true
     },
+    "sync_fault": {
+      "description": "The delivering workspace's LAST exchange with this machine, when it did not land — this\nhistory was read from state nothing has refreshed since. Absent when that exchange landed,\nand for a copy no workspace delivers. **INFERRED** (additive).",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/SyncFault"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "team": {
       "description": "Plane-side records under `--team` (op-receipts ⋈ approvals ⋈ lineage) — honestly partial.",
       "type": [
@@ -40,5 +51,45 @@
   },
   "required": [
     "events"
-  ]
+  ],
+  "$defs": {
+    "ExchangeFault": {
+      "description": "Why an exchange with a workspace did not land. All three keep local state and retry later, but\nthey are DIFFERENT things to the person reading them, and only the first is a failure to reach\nthe server at all. **INFERRED value set.**",
+      "oneOf": [
+        {
+          "description": "Connect-level: the server could not be dialed at all (dial / TLS / timeout).",
+          "type": "string",
+          "const": "unreachable"
+        },
+        {
+          "description": "The server was reachable but the exchange did not land — a failure status, or an answer\nthat never fully arrived.",
+          "type": "string",
+          "const": "unavailable"
+        },
+        {
+          "description": "A COMPLETE answer arrived and its structure was wrong.",
+          "type": "string",
+          "const": "malformed"
+        }
+      ]
+    },
+    "SyncFault": {
+      "description": "A workspace's last exchange with this machine, recorded because it did not land. **INFERRED**\n(additive).",
+      "type": "object",
+      "properties": {
+        "kind": {
+          "description": "What went wrong.",
+          "$ref": "#/$defs/ExchangeFault"
+        },
+        "workspace": {
+          "description": "The workspace as a person addresses it — never the opaque id.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "workspace",
+        "kind"
+      ]
+    }
+  }
 }

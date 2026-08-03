@@ -938,6 +938,38 @@ pub struct LogData {
     /// (additive).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub total: Option<u64>,
+    /// The delivering workspace's LAST exchange with this machine, when it did not land — this
+    /// history was read from state nothing has refreshed since. Absent when that exchange landed,
+    /// and for a copy no workspace delivers. **INFERRED** (additive).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sync_fault: Option<SyncFault>,
+}
+
+/// A workspace's last exchange with this machine, recorded because it did not land. **INFERRED**
+/// (additive).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
+pub struct SyncFault {
+    /// The workspace as a person addresses it — never the opaque id.
+    pub workspace: String,
+    /// What went wrong.
+    pub kind: ExchangeFault,
+}
+
+/// Why an exchange with a workspace did not land. All three keep local state and retry later, but
+/// they are DIFFERENT things to the person reading them, and only the first is a failure to reach
+/// the server at all. **INFERRED value set.**
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
+#[serde(rename_all = "kebab-case")]
+pub enum ExchangeFault {
+    /// Connect-level: the server could not be dialed at all (dial / TLS / timeout).
+    Unreachable,
+    /// The server was reachable but the exchange did not land — a failure status, or an answer
+    /// that never fully arrived.
+    Unavailable,
+    /// A COMPLETE answer arrived and its structure was wrong.
+    Malformed,
 }
 
 /// `publish` (a direct publish that moves `current`). Under a `reviewed` bundle a direct publish is

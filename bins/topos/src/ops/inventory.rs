@@ -1180,6 +1180,7 @@ pub(crate) mod testkit {
                         staleness_window_ms: 0,
                         delivered: delivered.into_iter().collect(),
                         declined: declined.into_iter().collect(),
+                        last_exchange_fault: None,
                     },
                 )],
             )
@@ -1202,6 +1203,7 @@ pub(crate) mod testkit {
                         staleness_window_ms: 0,
                         delivered: delivered.into_iter().collect(),
                         declined: BTreeMap::new(),
+                        last_exchange_fault: None,
                     },
                 )],
             )

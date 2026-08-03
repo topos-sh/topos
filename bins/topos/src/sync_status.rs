@@ -9,6 +9,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 use topos_types::PERSISTED_SCHEMA_VERSION;
+use topos_types::results::ExchangeFault;
 
 use crate::doc;
 use crate::error::ClientError;
@@ -59,6 +60,12 @@ pub(crate) struct WorkspaceSync {
     /// Replaced wholesale by each successful delivery.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub declined: BTreeMap<String, String>,
+    /// The LAST exchange's fault, when it did not land — the durable half of the quiet hook's
+    /// transient warning, so a later read (`log`) can still say the workspace this copy comes from
+    /// did not answer. A successful delivery REPLACES the whole entry, so a landed exchange clears
+    /// it by construction; absent therefore means "the last exchange landed".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_exchange_fault: Option<ExchangeFault>,
 }
 
 /// One skill's last-delivery cache entry (see [`WorkspaceSync::delivered`]). Written by the reconcile,
@@ -127,6 +134,35 @@ pub(crate) fn record(
     for (ws, entry) in updates {
         status.workspaces.insert(ws.clone(), entry.clone());
     }
+    fs.create_dir_all(&layout.state_dir())?;
+    doc::write_doc(fs, &layout.sync_status_path(), &status)
+}
+
+/// Record each workspace's LAST exchange fault against its EXISTING entry, leaving every other
+/// field alone (the successful path replaces an entry wholesale, so a landed exchange clears the
+/// fault by construction). Existing entries ONLY: a workspace that never delivered here has nothing
+/// to be stale from and nothing to fault — the same philosophy [`is_stale`] keeps — so no entry is
+/// born and, when none matched, no write happens at all.
+pub(crate) fn record_faults(
+    fs: &dyn FsOps,
+    layout: &Layout,
+    faults: &[(String, ExchangeFault)],
+) -> Result<(), ClientError> {
+    if faults.is_empty() {
+        return Ok(());
+    }
+    let mut status = read(fs, layout)?;
+    let mut touched = false;
+    for (ws, fault) in faults {
+        if let Some(entry) = status.workspaces.get_mut(ws) {
+            entry.last_exchange_fault = Some(*fault);
+            touched = true;
+        }
+    }
+    if !touched {
+        return Ok(());
+    }
+    status.schema_version = PERSISTED_SCHEMA_VERSION;
     fs.create_dir_all(&layout.state_dir())?;
     doc::write_doc(fs, &layout.sync_status_path(), &status)
 }
@@ -248,6 +284,68 @@ mod tests {
         assert_eq!(status.workspaces["w_b"].staleness_window_ms, 1_000);
         // An empty update writes nothing (and needs no state dir).
         record(&fs, &Layout::new(&scratch("noop")), &[]).unwrap();
+    }
+
+    #[test]
+    fn a_fault_lands_on_an_existing_entry_and_a_delivery_clears_it() {
+        let fs = RealFs;
+        let layout = Layout::new(&scratch("fault"));
+        record(
+            &fs,
+            &layout,
+            &[(
+                "w_a".into(),
+                WorkspaceSync {
+                    last_delivery_at: Some(1_000),
+                    staleness_window_ms: 10,
+                    ..WorkspaceSync::default()
+                },
+            )],
+        )
+        .unwrap();
+        // The fault lands beside the freshness facts — nothing else in the entry moves.
+        record_faults(&fs, &layout, &[("w_a".into(), ExchangeFault::Malformed)]).unwrap();
+        let entry = read(&fs, &layout).unwrap().workspaces["w_a"].clone();
+        assert_eq!(entry.last_exchange_fault, Some(ExchangeFault::Malformed));
+        assert_eq!(entry.last_delivery_at, Some(1_000));
+        assert_eq!(entry.staleness_window_ms, 10);
+
+        // The next successful delivery replaces the entry wholesale — the fault goes with it.
+        record(
+            &fs,
+            &layout,
+            &[(
+                "w_a".into(),
+                WorkspaceSync {
+                    last_delivery_at: Some(2_000),
+                    ..WorkspaceSync::default()
+                },
+            )],
+        )
+        .unwrap();
+        assert_eq!(
+            read(&fs, &layout).unwrap().workspaces["w_a"].last_exchange_fault,
+            None
+        );
+    }
+
+    #[test]
+    fn a_never_delivered_workspace_gains_no_entry_from_a_fault() {
+        let fs = RealFs;
+        let layout = Layout::new(&scratch("faultnew"));
+        // No entry to modify: nothing is born, and the document is never even written (a first-run
+        // failure must not manufacture a freshness row there is nothing to be fresh about).
+        record_faults(
+            &fs,
+            &layout,
+            &[("w_ghost".into(), ExchangeFault::Unreachable)],
+        )
+        .unwrap();
+        assert!(!layout.sync_status_path().exists());
+        assert!(read(&fs, &layout).unwrap().workspaces.is_empty());
+        // An empty update writes nothing either.
+        record_faults(&fs, &layout, &[]).unwrap();
+        assert!(!layout.sync_status_path().exists());
     }
 
     #[test]
