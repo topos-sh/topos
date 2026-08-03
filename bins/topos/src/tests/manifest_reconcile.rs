@@ -7942,3 +7942,199 @@ fn a_ghost_remove_falls_through_and_a_still_claimed_name_keeps_the_refusal() {
         "the record is gone with the copy"
     );
 }
+
+/// [`FakeDirectory`] that answers `me` (the resolver universe's read) AND `reach` — the audience
+/// read the publish/protect describes make. `Ok(persons)` is a live-shaped payload; `Err` is the
+/// typed transport failure (a body that fails to parse surfaces exactly this way).
+#[derive(Clone)]
+struct ReachDirectory {
+    inner: NamedDirectory,
+    reach: Result<u64, String>,
+}
+impl DirectorySource for ReachDirectory {
+    fn me(&self, ws: &str) -> Result<WireMe, ClientError> {
+        self.inner.me(ws)
+    }
+    fn channels_index(&self, ws: &str) -> Result<WireChannelIndex, ClientError> {
+        self.inner.channels_index(ws)
+    }
+    fn skills_index(&self, ws: &str) -> Result<WireSkillIndex, ClientError> {
+        self.inner.skills_index(ws)
+    }
+    fn proposals_index(&self, ws: &str) -> Result<WireProposalIndex, ClientError> {
+        self.inner.proposals_index(ws)
+    }
+    fn skill_log(&self, ws: &str, s: &str) -> Result<WireSkillLog, ClientError> {
+        self.inner.skill_log(ws, s)
+    }
+    fn reach(&self, _ws: &str, _s: &str) -> Result<WireReach, ClientError> {
+        match &self.reach {
+            Ok(p) => Ok(WireReach {
+                persons: *p,
+                sessions: p + 1,
+            }),
+            Err(m) => Err(ClientError::WireInvalid(m.clone())),
+        }
+    }
+    fn channel_place(&self, ws: &str, c: &str, s: &str) -> Result<(), ClientError> {
+        self.inner.channel_place(ws, c, s)
+    }
+    fn channel_unplace(&self, ws: &str, c: &str, s: &str) -> Result<(), ClientError> {
+        self.inner.channel_unplace(ws, c, s)
+    }
+    fn protect_skill(&self, ws: &str, s: &str, l: &str) -> Result<(), ClientError> {
+        self.inner.protect_skill(ws, s, l)
+    }
+    fn protect_channel(&self, ws: &str, c: &str, l: &str) -> Result<(), ClientError> {
+        self.inner.protect_channel(ws, c, l)
+    }
+    fn ack_notices(&self, ws: &str, ids: &[String]) -> Result<(), ClientError> {
+        self.inner.ack_notices(ws, ids)
+    }
+}
+
+/// The audience line prints against a live-shaped reach payload — and a reach that FAILS surfaces
+/// as a visible warning, never as a wordlessly missing line (the swallow that hid the wire
+/// mismatch for a week is gone).
+#[test]
+fn the_publish_describe_audience_line_prints_and_a_failed_reach_warns() {
+    let rig = Rig::new("zq-reach");
+    rig.seed_session();
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let plane = FakePlane::new(log);
+    plane.serves(Vec::new());
+    let src = rig.work.0.join("deploy");
+    skill_source(&src, b"# deploy\n");
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    ops::add(&ctx, &src).unwrap();
+
+    let fake = FakeDirectory::new(Vec::new(), Vec::new());
+    let dc = |_: &str| -> Box<dyn DirectorySource> {
+        Box::new(FakeDirectory::new(Vec::new(), Vec::new()))
+    };
+    let del = |_: &str| -> Box<dyn crate::plane::ReconcileTransport> {
+        let p = FakePlane::new(Arc::new(Mutex::new(Vec::new())));
+        p.serves(Vec::new());
+        Box::new(p)
+    };
+    let connectors = ops::PublishDescribeConnectors {
+        directory: &dc,
+        delivery: &del,
+    };
+
+    // A LIVE-shaped payload: the line prints.
+    let good = ReachDirectory {
+        inner: NamedDirectory(fake.clone()),
+        reach: Ok(4),
+    };
+    let session_connect = |_s: &Session| ops::SessionTransports {
+        plane: Box::new(plane.clone()),
+        directory: Box::new(good.clone()),
+        contribute: Box::new(NoContribute),
+        governance: Box::new(NoGovernance),
+    };
+    let (data, warnings) = ops::publish_describe(
+        &ctx,
+        &connectors,
+        Some(&session_connect),
+        None,
+        "deploy",
+        false,
+        None,
+        None,
+    )
+    .unwrap();
+    assert_eq!(data.reach, Some(4));
+    assert!(warnings.is_empty(), "{warnings:?}");
+    let argv = vec!["topos".to_owned(), "publish".to_owned(), "--yes".to_owned()];
+    let tty = crate::render::publish_describe_tty(&data, &argv);
+    assert!(tty.contains("reaches 4 people"), "{tty}");
+
+    // A reach that fails to parse: the line is absent AND a warning says why.
+    let bad = ReachDirectory {
+        inner: NamedDirectory(fake.clone()),
+        reach: Err("missing field `sessions`".to_owned()),
+    };
+    let session_connect = |_s: &Session| ops::SessionTransports {
+        plane: Box::new(plane.clone()),
+        directory: Box::new(bad.clone()),
+        contribute: Box::new(NoContribute),
+        governance: Box::new(NoGovernance),
+    };
+    let (data, warnings) = ops::publish_describe(
+        &ctx,
+        &connectors,
+        Some(&session_connect),
+        None,
+        "deploy",
+        false,
+        None,
+        None,
+    )
+    .unwrap();
+    assert_eq!(data.reach, None);
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert!(
+        warnings[0].starts_with("REACH_UNAVAILABLE deploy:"),
+        "{warnings:?}"
+    );
+    assert!(
+        warnings[0].contains("audience line is omitted"),
+        "{warnings:?}"
+    );
+    let tty = crate::render::publish_describe_tty(&data, &argv);
+    assert!(!tty.contains("reaches"), "{tty}");
+}
+
+/// The `protect` describe holds the same rule: a failed reach is a visible warning on the
+/// described outcome, never a silently absent audience.
+#[test]
+fn a_protect_describe_reach_failure_warns_instead_of_vanishing() {
+    let rig = Rig::new("zq-preach");
+    rig.seed_session();
+    let v = one_file(b"# deploy\n");
+    let fake = FakeDirectory::new(vec![catalog_entry("s_deploy", "deploy", &v)], Vec::new());
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+
+    let run = |reach: Result<u64, String>| {
+        let rd = ReachDirectory {
+            inner: NamedDirectory(fake.clone()),
+            reach,
+        };
+        let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+        let plane = FakePlane::new(log);
+        let session_connect = move |_s: &Session| ops::SessionTransports {
+            plane: Box::new(plane.clone()),
+            directory: Box::new(rd.clone()),
+            contribute: Box::new(NoContribute),
+            governance: Box::new(NoGovernance),
+        };
+        let dir_connect = |_: &str| -> Box<dyn DirectorySource> {
+            Box::new(FakeDirectory::new(Vec::new(), Vec::new()))
+        };
+        let connectors = ops::ProtectConnectors {
+            directory: &dir_connect,
+            session: &session_connect,
+        };
+        ops::protect(&ctx, &connectors, "deploy", None, None, false).unwrap()
+    };
+
+    match run(Ok(9)) {
+        ops::ProtectOutcome::Described { data, warnings, .. } => {
+            assert_eq!(data.audience, Some(9));
+            assert!(warnings.is_empty(), "{warnings:?}");
+        }
+        other => panic!("a bare protect describes: {other:?}"),
+    }
+    match run(Err("missing field `sessions`".to_owned())) {
+        ops::ProtectOutcome::Described { data, warnings, .. } => {
+            assert_eq!(data.audience, None);
+            assert_eq!(warnings.len(), 1, "{warnings:?}");
+            assert!(
+                warnings[0].starts_with("REACH_UNAVAILABLE deploy:"),
+                "{warnings:?}"
+            );
+        }
+        other => panic!("a bare protect describes: {other:?}"),
+    }
+}

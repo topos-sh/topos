@@ -226,6 +226,9 @@ pub(crate) struct PublishDescribeConnectors<'a> {
 /// WAL apply paths are untouched (this runs only for an enrolled `!yes` invocation, dispatched in the
 /// composition root).
 ///
+/// Returns the describe plus its WARNINGS (stable-shape envelope lines) — a best-effort read that
+/// failed must say so visibly, never leave its line wordlessly missing.
+///
 /// # Errors
 /// [`ClientError::Enrollment`] if not enrolled; [`ClientError::NoChanges`] when the draft equals current;
 /// [`ClientError::ApprovalMismatch`] on a failed `@<digest>` pin; [`ClientError::PublishBlocked`] on an
@@ -240,7 +243,7 @@ pub(crate) fn publish_describe(
     propose: bool,
     channel: Option<&str>,
     workspace: Option<&str>,
-) -> Result<PublishDescribeData, ClientError> {
+) -> Result<(PublishDescribeData, Vec<String>), ClientError> {
     let (source_str, pin) = parse_target(target);
     let _ = roots;
     // A describe MUTATES NOTHING (the consent contract). An already-tracked target is scanned in place;
@@ -374,10 +377,21 @@ pub(crate) fn publish_describe(
     if let Some(l) = &lane {
         check_channel_exists(directory, l, channel)?;
     }
-    let reach = directory
-        .reach(&workspace_id, id.as_str())
-        .ok()
-        .map(|r| r.persons);
+    // The audience read is best-effort, but NEVER a silent one: a reach that fails to arrive (or
+    // to parse) surfaces as a visible warning — a wordlessly missing line is how a wire mismatch
+    // once hid for a week.
+    let mut warnings: Vec<String> = Vec::new();
+    let reach = match directory.reach(&workspace_id, id.as_str()) {
+        Ok(r) => Some(r.persons),
+        Err(e) => {
+            warnings.push(format!(
+                "REACH_UNAVAILABLE {skill_name}: {} — how many people this reaches could not be \
+                 read; the audience line is omitted",
+                crate::render::safe_message(&e)
+            ));
+            None
+        }
+    };
     let me = directory.me(&workspace_id).ok();
 
     // GENESIS = no published `current` exists — the same signal the NO_CHANGES guard above keys
@@ -480,28 +494,32 @@ pub(crate) fn publish_describe(
         None => (None, None, None),
     };
 
-    Ok(PublishDescribeData {
-        skill: skill_name,
-        skill_id: id.into_string(),
-        workspace_id,
-        workspace_display_name: me.map(|m| m.display_name),
-        bundle_digest: digest_hex,
-        placements,
-        gate,
-        // The full ancestor-bytes revert detection is the apply path's (the server treats a revert-shaped
-        // publish as a forward move); the describe reports the gate + placements without pre-judging it.
-        is_revert: false,
-        reach,
-        share_line,
-        invite_line,
-        undo,
-        origin_note,
-        placement_note,
-        merge_preview,
-        manifest: transfer_manifest,
-        reference: transfer_reference,
-        converted_from: transfer_from,
-    })
+    Ok((
+        PublishDescribeData {
+            skill: skill_name,
+            skill_id: id.into_string(),
+            workspace_id,
+            workspace_display_name: me.map(|m| m.display_name),
+            bundle_digest: digest_hex,
+            placements,
+            gate,
+            // The full ancestor-bytes revert detection is the apply path's (the server treats a
+            // revert-shaped publish as a forward move); the describe reports the gate + placements
+            // without pre-judging it.
+            is_revert: false,
+            reach,
+            share_line,
+            invite_line,
+            undo,
+            origin_note,
+            placement_note,
+            merge_preview,
+            manifest: transfer_manifest,
+            reference: transfer_reference,
+            converted_from: transfer_from,
+        },
+        warnings,
+    ))
 }
 
 /// The server's FRESH per-skill protection for the describe's gate — the delivery read carries it (each
