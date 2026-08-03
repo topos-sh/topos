@@ -19,7 +19,7 @@ use topos_types::requests::{
     WireChannelEntry, WireChannelIndex, WireChannelSkill, WireMe, WireProposalIndex, WireReach,
     WireSkillIndex, WireSkillIndexEntry, WireSkillLog,
 };
-use topos_types::results::PullAction;
+use topos_types::results::{ExchangeFault, PullAction};
 use topos_types::{CurrencyKind, HarnessId, TriggerReport, TriggerState};
 
 use crate::ctx::Ctx;
@@ -2078,6 +2078,16 @@ fn rig_now(rig: &Rig) -> i64 {
     i64::try_from(rig.clock.0).expect("the rig clock fits an i64")
 }
 
+/// The fault the freshness cache recorded for a workspace's LAST exchange — by ID, the way the
+/// cache is keyed.
+fn recorded_fault(rig: &Rig, workspace_id: &str) -> Option<ExchangeFault> {
+    sync_status::read(&rig.fs, &rig.layout())
+        .unwrap()
+        .workspaces
+        .get(workspace_id)
+        .and_then(|e| e.last_exchange_fault)
+}
+
 const DAY_MS: i64 = 86_400_000;
 
 #[test]
@@ -2099,12 +2109,29 @@ fn an_unreachable_and_stale_workspace_warns_by_name() {
         "the freshness cache is keyed by id, never by name — the warning must look it up that way"
     );
 
+    assert_eq!(
+        recorded_fault(&rig, WS),
+        None,
+        "a landed exchange records no fault"
+    );
+
     // Now the server is gone.
     plane.serve_unreachable();
     let out = sweep(&ctx, &plane, &dir);
     assert_eq!(out.unreachable.len(), 1);
     assert_eq!(out.unreachable[0].workspace_id, WS);
     assert_eq!(out.unreachable[0].workspace_name, WS_NAME);
+    // The transient warning below is only half of it: the fault OUTLIVES this run, under the same
+    // id the freshness facts sit under, so a later read can still say the exchange did not land.
+    assert_eq!(recorded_fault(&rig, WS), Some(ExchangeFault::Unreachable));
+    assert_eq!(
+        sync_status::read(&rig.fs, &rig.layout())
+            .unwrap()
+            .workspaces[WS]
+            .last_delivery_at,
+        Some(rig_now(&rig)),
+        "the fault lands BESIDE the freshness facts — it never overwrites the entry"
+    );
 
     // Past the recorded 7-day window: the ONE line, naming the workspace a person knows.
     let stale_now = rig_now(&rig) + 8 * DAY_MS;
@@ -2153,6 +2180,7 @@ fn an_answering_server_never_gets_blamed_on_the_network() {
         ops::quiet_hook_lines(&rig.fs, &rig.layout(), stale_now, &out),
         vec![unavailable_line.clone()]
     );
+    assert_eq!(recorded_fault(&rig, WS), Some(ExchangeFault::Unavailable));
 
     // The OTHER half of the same variant: the answer got cut off part-way.
     plane.serve_truncated();
@@ -2162,6 +2190,7 @@ fn an_answering_server_never_gets_blamed_on_the_network() {
         vec![unavailable_line],
         "a truncated body is the same variant and reads the same"
     );
+    assert_eq!(recorded_fault(&rig, WS), Some(ExchangeFault::Unavailable));
 
     // The plane ANSWERED unreadably. Pointing a person at their network here sends them the wrong
     // way entirely — the signal is about the bytes.
@@ -2178,6 +2207,7 @@ fn an_answering_server_never_gets_blamed_on_the_network() {
             "topos: {WS_NAME} last synced 8d ago — the server's answer could not be read"
         )]
     );
+    assert_eq!(recorded_fault(&rig, WS), Some(ExchangeFault::Malformed));
 
     // All three still stay quiet inside the window — the reason never overrides the threshold.
     let fresh_now = rig_now(&rig) + 3_600_000;
@@ -2205,6 +2235,38 @@ fn a_never_delivered_workspace_stays_silent_while_unreachable() {
         ops::quiet_hook_lines(&rig.fs, &rig.layout(), i64::MAX, &out).is_empty(),
         "no record, no warning"
     );
+    // And no row is BORN to carry the fault either — the same philosophy: there is nothing here a
+    // later read could be answering staler than.
+    assert!(
+        !sync_status::read(&rig.fs, &rig.layout())
+            .unwrap()
+            .workspaces
+            .contains_key(WS),
+        "a never-delivered workspace gains no freshness row from a failure"
+    );
+}
+
+/// A landed exchange CLEARS a recorded fault: the successful write replaces a workspace's whole
+/// entry, so the fault cannot outlive the run that fixed it (a stale one would have `log` warning
+/// forever about a server that came back).
+#[test]
+fn a_landed_exchange_clears_the_recorded_fault() {
+    let rig = Rig::new("faultclear");
+    rig.seed_session();
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let plane = FakePlane::new(log);
+    let dir = FakeDirectory::new(Vec::new(), Vec::new());
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+
+    sweep(&ctx, &plane, &dir);
+    plane.serve_malformed();
+    sweep(&ctx, &plane, &dir);
+    assert_eq!(recorded_fault(&rig, WS), Some(ExchangeFault::Malformed));
+
+    // The server comes back.
+    plane.serve(empty_snapshot());
+    sweep(&ctx, &plane, &dir);
+    assert_eq!(recorded_fault(&rig, WS), None);
 }
 
 #[test]
@@ -7361,6 +7423,86 @@ fn reads_from_inside_a_project_answer_the_project_copy() {
     assert!(
         !versions.contains(&topos_core::digest::to_hex(&v2.id)),
         "the machine's newer version is NOT this copy's history: {versions:?}"
+    );
+}
+
+/// A history read must not present itself as fresh when the workspace behind it did not answer. The
+/// sweep's own warning is transient (and silent inside the staleness window), so `log` reads the
+/// RECORDED fault — machine-scoped, like the device id, even for a copy the checkout's own file
+/// delivers — and says it once, naming the workspace the way a person addresses it and ending in
+/// the same clause the sweep would have used.
+#[test]
+fn a_project_copys_log_names_the_workspace_whose_last_exchange_failed() {
+    let rig = Rig::new("logfault");
+    rig.seed_session();
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let v = one_file(b"# deploy\n");
+    let plane = FakePlane::new(log).with_version("s_deploy", &v);
+    plane.serves(vec![delivered("s_deploy", "deploy", &v)]);
+    let dir = FakeDirectory::new(vec![catalog_entry("s_deploy", "deploy", &v)], Vec::new());
+    // Delivered by the CHECKOUT's own file: the custody (and the action log) live in the project
+    // store, while the freshness cache the fault rides is the machine's.
+    let proj = project(
+        "logfault-repo",
+        &format!("[bundles]\n\"{HOST}/{WS_NAME}/deploy\" = \"*\"\n"),
+    );
+    let out = sweep(&rig.ctx_at(Some(&proj.0)), &plane, &dir);
+    assert!(out.warnings.is_empty(), "{:?}", out.warnings);
+    assert!(
+        crate::sidecar::existing_project_store(&rig.fs, &proj.0)
+            .is_some_and(|l| l.skill_dir(&sid("s_deploy")).exists()),
+        "the fixture needs the CHECKOUT holding the copy"
+    );
+
+    // The server answers with a failure. Nothing about the copy changes — only the record of the
+    // exchange does.
+    plane.serve_unavailable();
+    sweep(&rig.ctx_at(Some(&proj.0)), &plane, &dir);
+    assert_eq!(recorded_fault(&rig, WS), Some(ExchangeFault::Unavailable));
+
+    // The production follow seam (built from the delivery cache the sweep wrote) is what maps this
+    // copy back to its workspace.
+    let cache_follow = ops::CacheFollow::load(&rig.fs, &rig.layout());
+    let ctx = Ctx {
+        follow: &cache_follow,
+        ..rig.ctx_at(Some(&proj.0))
+    };
+    let dirs = |_: &str| -> Box<dyn DirectorySource> { Box::new(dir.clone()) };
+    let sessions = connect(&plane, &dir);
+    let connectors = ops::LogConnectors {
+        directory: &dirs,
+        session: &sessions,
+    };
+    let data = ops::log(&ctx, &connectors, "deploy", ops::RowPage::unlimited()).unwrap();
+    let fault = data.sync_fault.clone().expect("the fault reaches `log`");
+    assert_eq!(
+        fault.workspace, WS_NAME,
+        "named the way a person addresses it"
+    );
+    assert_eq!(fault.kind, ExchangeFault::Unavailable);
+
+    // ONE line, the cause named exactly as the sweep would have named it — and never the id.
+    let rendered = crate::render::log_tty(&data);
+    assert!(
+        rendered.contains(&format!(
+            "note: {WS_NAME}'s last exchange with this machine did not succeed — the server did \
+             not answer successfully; retry with `topos update`"
+        )),
+        "{rendered}"
+    );
+    assert!(
+        !rendered.contains(WS),
+        "the cache's key is never what a person is shown: {rendered}"
+    );
+
+    // The server comes back: the note goes with the fault.
+    plane.serves(vec![delivered("s_deploy", "deploy", &v)]);
+    sweep(&rig.ctx_at(Some(&proj.0)), &plane, &dir);
+    let data = ops::log(&ctx, &connectors, "deploy", ops::RowPage::unlimited()).unwrap();
+    assert!(data.sync_fault.is_none());
+    assert!(
+        !crate::render::log_tty(&data).contains("did not succeed"),
+        "a landed exchange prints no such line"
     );
 }
 

@@ -34,7 +34,7 @@ use topos_gitstore::Store;
 use topos_types::PERSISTED_SCHEMA_VERSION;
 use topos_types::persisted::{Lock, PlacementMap, SwapCapability, SyncState};
 use topos_types::requests::{WireChannelIndex, WireSkillIndex, WireSkillIndexEntry};
-use topos_types::results::{PullAction, PullData, PullSkill, WorkspaceSyncReport};
+use topos_types::results::{ExchangeFault, PullAction, PullData, PullSkill, WorkspaceSyncReport};
 use topos_types::{CurrentRecord, PointerScope, WIRE_SCHEMA_VERSION, WireCurrentRecord};
 
 use crate::ctx::Ctx;
@@ -639,6 +639,20 @@ pub(crate) fn manifest_update(
         }
     }
 
+    // Record every fault above against its workspace's freshness row. The quiet hook's warning is
+    // transient (and silent inside the staleness window), so without this a later read would show
+    // plain history with no hint that nothing has refreshed it. Best-effort, exactly like the
+    // successful write below: a freshness-cache failure must not turn a degraded run into a hard one.
+    let faults: Vec<(String, ExchangeFault)> = unreachable
+        .iter()
+        .map(|u| (u.workspace_id.clone(), u.reason.fault()))
+        .collect();
+    if let Err(e) = sync_status::record_faults(ctx.fs, &ctx.layout, &faults) {
+        sweep
+            .warnings
+            .push(format!("SYNC_STATUS_WRITE_FAILED: {}", e.detail()));
+    }
+
     // ---- 2. Build the two scope plans. A file the grammar refuses freezes its scope WHOLE. ----
     let connected: Vec<(String, String)> = runs
         .iter()
@@ -972,6 +986,9 @@ pub(crate) fn manifest_update(
                 staleness_window_ms: snap.staleness_window_ms,
                 delivered: delivered_cache,
                 declined,
+                // This exchange LANDED — the entry is replaced wholesale, so any fault a previous
+                // run recorded for this workspace goes with it.
+                last_exchange_fault: None,
             },
         ));
         // Notices, LAST per workspace (the ack marks read-state only after the reconcile ran).

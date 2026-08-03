@@ -23,7 +23,7 @@ use std::path::Path;
 
 use topos_core::digest::to_hex;
 use topos_types::persisted::SyncState;
-use topos_types::results::{PullData, ResetData};
+use topos_types::results::{ExchangeFault, PullData, ResetData};
 
 use crate::ctx::Ctx;
 use crate::error::ClientError;
@@ -133,7 +133,10 @@ pub(crate) enum StaleReason {
 impl StaleReason {
     /// The warning line's reason clause — true of what actually happened, in a person's terms.
     /// Pointing someone at their network when the bytes were the problem sends them the wrong way.
-    fn clause(self) -> &'static str {
+    /// THE one place these three sentences are written: every later surface that names a fault
+    /// (the freshness cache's recorded one, read back by `log`) converts into this enum and asks
+    /// here, so no reason can drift into another's clause.
+    pub(crate) fn clause(self) -> &'static str {
         match self {
             Self::Unreachable => "the server could not be reached",
             // True of the WHOLE variant: a failure status, an unexpected one, and an answer that
@@ -141,6 +144,26 @@ impl StaleReason {
             // answer whose contents are wrong — a different thing to go look at.
             Self::Unavailable => "the server did not answer successfully",
             Self::Malformed => "the server's answer could not be read",
+        }
+    }
+
+    /// The DURABLE spelling of this reason — what the freshness cache records for the last exchange.
+    pub(crate) fn fault(self) -> ExchangeFault {
+        match self {
+            Self::Unreachable => ExchangeFault::Unreachable,
+            Self::Unavailable => ExchangeFault::Unavailable,
+            Self::Malformed => ExchangeFault::Malformed,
+        }
+    }
+}
+
+impl From<ExchangeFault> for StaleReason {
+    /// The way back from a recorded fault, so a read of the cache reaches the same [`Self::clause`].
+    fn from(fault: ExchangeFault) -> Self {
+        match fault {
+            ExchangeFault::Unreachable => Self::Unreachable,
+            ExchangeFault::Unavailable => Self::Unavailable,
+            ExchangeFault::Malformed => Self::Malformed,
         }
     }
 }

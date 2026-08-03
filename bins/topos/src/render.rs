@@ -1259,6 +1259,17 @@ pub(crate) fn log_tty(data: &LogData) -> String {
     if let Some(hint) = &data.archived_successor {
         out.push_str(&format!("note: {hint}\n"));
     }
+    // The workspace this copy comes from did not land its last exchange with this machine: say so
+    // ONCE, with the true cause (the shared clause — a failed exchange must never read as a dead
+    // network), so history is not taken for freshly synced.
+    if let Some(f) = &data.sync_fault {
+        out.push_str(&format!(
+            "note: {}'s last exchange with this machine did not succeed — {}; retry with `topos \
+             update`\n",
+            f.workspace,
+            crate::ops::StaleReason::from(f.kind).clause()
+        ));
+    }
     if data.events.is_empty() {
         return if out.is_empty() {
             "No history.".to_owned()
@@ -3651,6 +3662,7 @@ mod tests {
             archived_successor: None,
             truncated: false,
             total: None,
+            sync_fault: None,
         };
         let out = log_tty(&data);
         // Columns: human timestamp, action, name, short id.

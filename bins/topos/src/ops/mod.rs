@@ -87,8 +87,8 @@ pub(crate) use protect::{ProtectConnectors, ProtectOutcome, protect};
 #[cfg(test)]
 pub(crate) use publish::ensure_tracked;
 pub(crate) use pull::{
-    PullOutcome, PullScope, ReconcileOpts, ResetOutcome, TargetMode, ctx_with_layout, pull,
-    quiet_hook_lines, quiet_soft_failure, reset,
+    PullOutcome, PullScope, ReconcileOpts, ResetOutcome, StaleReason, TargetMode, ctx_with_layout,
+    pull, quiet_hook_lines, quiet_soft_failure, reset,
 };
 pub(crate) use reconcile::{
     CacheFollow, ManifestUpdateOpts, SessionRoutedPlane, SessionTransports, UpdateScope,

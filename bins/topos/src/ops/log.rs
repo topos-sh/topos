@@ -18,10 +18,10 @@ use super::reconcile::SessionConnect;
 use crate::ctx::Ctx;
 use crate::error::ClientError;
 use crate::resolve::{self, Resolution, ResourceKind};
-use crate::{identity, logfile, sidecar::Layout};
+use crate::{identity, logfile, sessions, sidecar::Layout, sync_status};
 use topos_core::digest::to_hex;
 use topos_types::requests::{WireLogProposal, WireLogVersion};
-use topos_types::results::LogData;
+use topos_types::results::{LogData, SyncFault};
 
 /// The seam `log` needs — the directory connector reads the plane-side history.
 pub(crate) struct LogConnectors<'a> {
@@ -146,12 +146,42 @@ pub(crate) fn log(
         (false, false, events.len())
     };
 
+    // Whether the workspace this copy is delivered from landed its LAST exchange with this machine.
+    // The freshness cache is a MACHINE fact, like the device id above — one per install, whatever
+    // scope holds the copy — so a project copy reads it from `ctx.layout` too.
+    let sync_fault = super::followed_workspace(ctx, id.as_str())
+        .and_then(|workspace_id| recorded_fault(ctx, &workspace_id));
+
     Ok(LogData {
         events,
         team: None,
         archived_successor,
         truncated,
         total: page_applied.then_some(total as u64),
+        sync_fault,
+    })
+}
+
+/// The fault recorded for `workspace_id`'s last exchange, named the way a person addresses the
+/// workspace. Best-effort: an unreadable freshness cache says nothing rather than failing a history
+/// read. The cache is KEYED by the opaque id and the id is never what a person is shown — the cache
+/// row and the session record both spell the address name, so the fallback cannot switch vocabulary
+/// mid-line; the id is the last resort, for a row written before either carried a name.
+fn recorded_fault(ctx: &Ctx<'_>, workspace_id: &str) -> Option<SyncFault> {
+    let status = sync_status::read(ctx.fs, &ctx.layout).ok()?;
+    let entry = status.workspaces.get(workspace_id)?;
+    let kind = entry.last_exchange_fault?;
+    let named = entry.workspace_name.clone().or_else(|| {
+        sessions::read_sessions(ctx.fs, &ctx.layout)
+            .ok()?
+            .sessions
+            .iter()
+            .find(|s| s.workspace_id == workspace_id)
+            .map(|s| s.workspace_name.clone())
+    });
+    Some(SyncFault {
+        workspace: named.unwrap_or_else(|| workspace_id.to_owned()),
+        kind,
     })
 }
 

@@ -827,6 +827,8 @@ fn fixtures() -> Vec<(&'static str, String)> {
             archived_successor: None,
             truncated: false,
             total: None,
+            // The delivering workspace's last exchange landed (a local-only skill has none at all).
+            sync_fault: None,
         })
         .expect("LogData serializes"),
         warnings: vec![],
@@ -1382,6 +1384,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
             archived_successor: None,
             truncated: true,
             total: Some(3),
+            sync_fault: None,
         })
         .expect("LogData serializes"),
         warnings: vec![],
