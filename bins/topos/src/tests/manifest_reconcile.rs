@@ -5594,6 +5594,7 @@ fn a_prior_placement_that_no_longer_resolves_inside_the_checkout_is_refused() {
             materialized_sha: Some("a".repeat(64)),
             pre_existing_sha: None,
             swap_capability: topos_types::persisted::SwapCapability::AtomicExchange,
+            adopted_source: false,
         }],
         materialized_sha: "a".repeat(64),
         pre_existing_sha: None,
@@ -5983,6 +5984,7 @@ fn seed_store_row(layout: &Layout, id: &str, placement: &std::path::Path) {
                 materialized_sha: None,
                 pre_existing_sha: None,
                 swap_capability: SwapCapability::RenameDance,
+                adopted_source: false,
             }],
             harness: None,
             harness_layer: None,
@@ -6229,7 +6231,7 @@ fn a_local_directory_wins_and_the_receipt_names_the_workspace_spelling() {
     };
     // The receipt judges the workspace's current version against the bytes that just landed —
     // the ONE confirming catalog read carried the digest.
-    let data = ops::add_with_name(&ctx, &path, Some(BARE)).unwrap();
+    let data = ops::add_with_name(&ctx, &path, Some(BARE), true).unwrap();
     let same = published.suggestion(&data.bundle_digest);
     assert_eq!(same.reference, format!("{HOST}/{WS_NAME}/{BARE}"));
     assert_eq!(same.workspace, WS_NAME);
@@ -6246,7 +6248,7 @@ fn a_local_directory_wins_and_the_receipt_names_the_workspace_spelling() {
         ops::BareAddPlan::Adopt { published, .. } => published.expect("still disclosed"),
         other => panic!("a local copy adopts in place: {other:?}"),
     };
-    let data2 = ops::add_with_name(&ctx2, &drifted, Some(BARE)).unwrap();
+    let data2 = ops::add_with_name(&ctx2, &drifted, Some(BARE), true).unwrap();
     assert!(!published2.suggestion(&data2.bundle_digest).identical);
 
     // A name the workspace publishes but never delivered HERE adopts with no disclosure at all —
@@ -6443,7 +6445,7 @@ fn a_cache_only_match_subscribes_and_an_unanswering_session_is_skipped() {
         ops::BareAddPlan::Adopt { published, .. } => published.expect("disclosed"),
         other => panic!("a local copy adopts in place: {other:?}"),
     };
-    let data = ops::add_with_name(&ctx, &path, Some(BARE)).unwrap();
+    let data = ops::add_with_name(&ctx, &path, Some(BARE), true).unwrap();
     assert!(!published.suggestion(&data.bundle_digest).identical);
 }
 
@@ -7684,4 +7686,158 @@ fn a_reset_of_an_adopted_path_restores_the_source_dir() {
         !proj.0.join(".claude/skills/zq-adopted").exists(),
         "no second copy was planted in the checkout's harness dirs"
     );
+}
+
+// =================================================================================================
+// Adopted-in-place custody is NEVER the sweep's to destroy: the user's source dir survives every
+// clean path byte-identical, in both scopes — and a retained ghost's `remove` speaks honestly.
+// =================================================================================================
+
+/// Every file under `dir` with its exact bytes — the byte-identical assertion's witness.
+fn dir_bytes(dir: &std::path::Path) -> Vec<(String, Vec<u8>)> {
+    let mut out = Vec::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        for e in std::fs::read_dir(&d).unwrap() {
+            let p = e.unwrap().path();
+            if p.is_dir() {
+                stack.push(p);
+            } else {
+                out.push((
+                    p.strip_prefix(dir).unwrap().to_string_lossy().into_owned(),
+                    std::fs::read(&p).unwrap(),
+                ));
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+/// The PROJECT-scope clean paths: a plain update leaves the adopted source alone; a hand-edited
+/// manifest that orphans the record (the exact file state a `remove` row-drop leaves too) retires
+/// NOTHING of the source dir — it survives byte-identical, record retained, idempotent across
+/// sweeps. This was live data loss: the pre-fix cleaner marked every under-project placement of an
+/// undemanded record stale, the adopted source included.
+#[test]
+fn an_adopted_in_place_source_dir_survives_the_project_retire() {
+    let rig = Rig::new("zq-adoptkeep");
+    rig.seed_session();
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let plane = FakePlane::new(log);
+    plane.serves(Vec::new());
+    let dir = FakeDirectory::new(Vec::new(), Vec::new());
+    let proj = project("zq-adoptkeep-proj", "[bundles]\n");
+    let src = proj.0.join("skills/quaggamap");
+    skill_source(&src, b"# quaggamap\n");
+    std::fs::write(src.join("notes.txt"), b"the user's own extra file\n").unwrap();
+    let ctx = rig.ctx_at(Some(&proj.0));
+    scoped_path_add(&ctx, &src, false).unwrap();
+    let baseline = dir_bytes(&src);
+
+    // A plain update (the row present) writes nothing into the source dir.
+    sweep(&ctx, &plane, &dir);
+    assert_eq!(
+        dir_bytes(&src),
+        baseline,
+        "a plain update left the source alone"
+    );
+
+    // The row is orphaned by hand (the same file state a row-drop `remove` leaves): the sweep
+    // retires nothing of the adopted source.
+    std::fs::write(proj.0.join(crate::manifest::MANIFEST_FILE), "[bundles]\n").unwrap();
+    sweep(&ctx, &plane, &dir);
+    assert!(src.is_dir(), "the adopted source dir survives the retire");
+    assert_eq!(dir_bytes(&src), baseline, "…byte-identical");
+    // Idempotent: the sweep after changes nothing either.
+    sweep(&ctx, &plane, &dir);
+    assert_eq!(dir_bytes(&src), baseline);
+    // The record is retained (bytes-stay honesty; the ghost row explains itself elsewhere).
+    let playout = crate::sidecar::existing_project_store(&rig.fs, &proj.0).unwrap();
+    assert!(
+        std::fs::read_dir(playout.skills_dir()).unwrap().count() > 0,
+        "the record is retained"
+    );
+}
+
+/// The same retire driven through the REAL row-drop (`remove` → the manifest arm), project scope:
+/// the row leaves, the sweep retires nothing of the source dir.
+#[test]
+fn remove_then_update_never_touches_an_adopted_source_dir() {
+    let rig = Rig::new("zq-adoptrm");
+    rig.seed_session();
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let plane = FakePlane::new(log);
+    plane.serves(Vec::new());
+    let dir = FakeDirectory::new(Vec::new(), Vec::new());
+    let proj = project("zq-adoptrm-proj", "[bundles]\n");
+    let src = proj.0.join("skills/quaggamap");
+    skill_source(&src, b"# quaggamap\n");
+    let ctx = rig.ctx_at(Some(&proj.0));
+    scoped_path_add(&ctx, &src, false).unwrap();
+    let baseline = dir_bytes(&src);
+
+    let session_connect = connect(&plane, &dir);
+    let outcome = ops::remove_project(
+        &ctx,
+        &session_connect,
+        &["quaggamap".to_owned()],
+        None,
+        true,
+    )
+    .unwrap()
+    .expect("the row-drop arm claims the adopted name");
+    match outcome {
+        ops::RemoveOutcome::Applied(_) => {}
+        other => panic!("a row drop applies immediately: {other:?}"),
+    }
+    assert_eq!(dir_bytes(&src), baseline, "the remove itself moved no byte");
+
+    sweep(&ctx, &plane, &dir);
+    assert!(src.is_dir(), "the retire sweep spared the adopted source");
+    assert_eq!(dir_bytes(&src), baseline, "…byte-identical");
+}
+
+/// The MACHINE scope holds the same promise: a `-g` adopted source survives the row-drop sweep AND
+/// the `--rebuild` repair (which parks + re-projects every placement topos wrote — the user's own
+/// dir is not one of them).
+#[test]
+fn an_adopted_source_dir_survives_the_machine_sweeps_and_rebuild() {
+    let rig = Rig::new("zq-adoptg");
+    rig.seed_session();
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let plane = FakePlane::new(log);
+    plane.serves(Vec::new());
+    let dir = FakeDirectory::new(Vec::new(), Vec::new());
+    rig.write_global("[bundles]\n");
+    let src = rig.home.0.join("tools/quaggamap");
+    skill_source(&src, b"# quaggamap\n");
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    scoped_path_add(&ctx, &src, true).unwrap();
+    let baseline = dir_bytes(&src);
+
+    // `update --rebuild` with the row present: every topos-written placement re-projects; the
+    // adopted source is left exactly as it stands.
+    ops::manifest_update(
+        &ctx,
+        &connect(&plane, &dir),
+        None,
+        &ops::ManifestUpdateOpts {
+            rebuild: true,
+            scope: ops::UpdateScope::Machine,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        dir_bytes(&src),
+        baseline,
+        "a rebuild never touches the source"
+    );
+
+    // The row dropped, then the machine sweep: the source survives byte-identical.
+    rig.write_global("[bundles]\n");
+    sweep_scoped(&ctx, &plane, &dir, ops::UpdateScope::Machine);
+    assert!(src.is_dir(), "the machine retire spared the adopted source");
+    assert_eq!(dir_bytes(&src), baseline, "…byte-identical");
 }

@@ -162,6 +162,12 @@ pub struct PlacementState {
     pub pre_existing_sha: Option<String>,
     /// The swap capability probed for THIS dir's filesystem.
     pub swap_capability: SwapCapability,
+    /// THIS dir is the user's own adopted-in-place SOURCE (`add <path>` recorded it where it
+    /// stood; topos never created it). The cleaners treat it as never-deletable: when demand for
+    /// the bundle ends, every placement topos wrote retires, but the adopted source dir survives
+    /// byte-identical. Sticky for the life of the record. **Additive.**
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub adopted_source: bool,
 }
 
 /// What a placement dir IS — the shared cross-agent convention dir, or one harness's native skills

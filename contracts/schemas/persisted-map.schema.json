@@ -107,6 +107,10 @@
       "description": "One placement's durable state (`map.json` v2), 1:1 with [`PlacementMap::placements`]. **Field-set\npinned**; the `kind` value set is INFERRED.",
       "type": "object",
       "properties": {
+        "adopted_source": {
+          "description": "THIS dir is the user's own adopted-in-place SOURCE (`add <path>` recorded it where it\nstood; topos never created it). The cleaners treat it as never-deletable: when demand for\nthe bundle ends, every placement topos wrote retires, but the adopted source dir survives\nbyte-identical. Sticky for the life of the record. **Additive.**",
+          "type": "boolean"
+        },
         "agent": {
           "description": "The registry slug of the harness a `native` placement serves; `None` for `shared` (and for a\nplain adopted dir under no known harness).",
           "type": [

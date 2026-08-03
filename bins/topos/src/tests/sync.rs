@@ -2704,6 +2704,7 @@ fn add_replica(rig: &Rig, id: &str, dir: &Path, files: &[(&str, FileMode, &[u8])
         materialized_sha: Some(lock.bundle_digest),
         pre_existing_sha: None,
         swap_capability: SwapCapability::Unsupported,
+        adopted_source: false,
     });
     doc::write_map(&rig.fs, &sp.map, &map).unwrap();
 }
@@ -2837,6 +2838,7 @@ fn a_converge_landing_survives_the_same_runs_settled_fanout() {
         materialized_sha: None,
         pre_existing_sha: None,
         swap_capability: SwapCapability::Unsupported,
+        adopted_source: false,
     });
     doc::write_map(&rig.fs, &sp.map, &map).unwrap();
 

@@ -41,7 +41,7 @@ const ADD_MESSAGE: &str = "topos: add";
 /// [`ClientError::Scan`] from the scan; [`ClientError::SkillExists`] on an id collision; otherwise a
 /// store/io failure.
 pub(crate) fn add(ctx: &Ctx<'_>, source: &Path) -> Result<AddData, ClientError> {
-    add_with_name(ctx, source, None)
+    add_with_name(ctx, source, None, true)
 }
 
 /// The PATH arm of `add`, against the scope whose file will hold the row: adopt the directory at
@@ -94,7 +94,26 @@ fn unclaimed_record(
     let Some(lock) = doc::read_doc::<Lock>(ctx.fs, &sp.lock)? else {
         return Ok(None);
     };
-    let map = doc::read_map(ctx.fs, &sp.map)?;
+    // Re-stamp the never-deletable source marker on the dir's slot. A record written before the
+    // marker existed lacks it, and this is the one moment the dir is PROVEN to be the user's own
+    // adopted source — they just named it to `add`. Under the skill lock, read-modify-write.
+    let map = {
+        let _guard = crate::sidecar::lock_skill(ctx.fs, &ctx.layout, &skill_id)?;
+        let mut map = doc::read_map(ctx.fs, &sp.map)?;
+        if let Some(m) = map.as_mut() {
+            let mut stamped = false;
+            for (dir, st) in m.placements.iter().zip(m.placement_state.iter_mut()) {
+                if Path::new(dir) == source_abs && !st.adopted_source {
+                    st.adopted_source = true;
+                    stamped = true;
+                }
+            }
+            if stamped {
+                doc::write_map(ctx.fs, &sp.map, m)?;
+            }
+        }
+        map
+    };
 
     logfile::append_event(
         ctx.fs,
@@ -151,6 +170,7 @@ pub(crate) fn add_with_name(
     ctx: &Ctx<'_>,
     source: &Path,
     name_override: Option<&str>,
+    adopted_in_place: bool,
 ) -> Result<AddData, ClientError> {
     // Establish the home, then refuse a source that overlaps it (canonicalized — catches symlinks), so
     // uninstall can never delete user bytes and the footprint oracle never collapses.
@@ -294,13 +314,18 @@ pub(crate) fn add_with_name(
             pre_existing_sha: None,
             swap_capability: SwapCapability::Unsupported,
             // The adopted source dir is the ONE native placement (the adopted bytes ARE what topos
-            // recorded, so the per-placement sha starts at the adopted digest).
+            // recorded, so the per-placement sha starts at the adopted digest — that baseline is
+            // for DRIFT detection only). `adopted_source` marks a dir the USER owns — an
+            // in-place adopt of a directory topos never created; the undemanded cleans retire
+            // every placement topos wrote, but never that one. A REMOTE import materializes its
+            // dir itself and passes `false`: those bytes are topos's to retire like any other.
             placement_state: vec![topos_types::persisted::PlacementState {
                 kind: topos_types::persisted::PlacementKind::Native,
                 agent: harness_slug.clone(),
                 materialized_sha: Some(digest_hex.clone()),
                 pre_existing_sha: None,
                 swap_capability: SwapCapability::Unsupported,
+                adopted_source: adopted_in_place,
             }],
             harness,
             harness_layer,
@@ -625,7 +650,7 @@ pub(crate) fn add_remote_fetched(
             dest_dir.display()
         )));
     }
-    let mut data = match add_with_name(ctx, &dest_dir, Some(&selected.name)) {
+    let mut data = match add_with_name(ctx, &dest_dir, Some(&selected.name), false) {
         Ok(d) => d,
         Err(e) => {
             // The staged tree is LIVE at `dest_dir` now, and an edit can land there the instant
@@ -787,7 +812,7 @@ pub(crate) fn keep_as_yours(
     //    already-tracked guard would refuse the still-tracked path.
     retire_tracked(ctx, &sid)?;
     // 3. Adopt `dest` fresh: a new local skill id, named `<name>`, with NO upstream.
-    let data = add_with_name(ctx, &dest, Some(name))?;
+    let data = add_with_name(ctx, &dest, Some(name), false)?;
     Ok(Some(KeepAsYoursOutcome::Forked(Box::new(data))))
 }
 

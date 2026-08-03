@@ -633,7 +633,7 @@ fn ensure_name(
                 )
             })?;
             let (path, name) = resolve_add_target(ctx, roots, raw)?;
-            let data = add_with_name(ctx, &path, Some(&name))?;
+            let data = add_with_name(ctx, &path, Some(&name), true)?;
             Ok((
                 data.name.clone(),
                 Some(AddedNote {

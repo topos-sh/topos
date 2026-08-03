@@ -805,7 +805,7 @@ fn run_command(
                                 published,
                             }) => ops::add_scope(&ctx, global).and_then(|scope| {
                                 let sctx = ops::ctx_with_layout(&ctx, &scope.layout);
-                                let mut d = ops::add_with_name(&sctx, &path, Some(&name))?;
+                                let mut d = ops::add_with_name(&sctx, &path, Some(&name), true)?;
                                 ops::note_added_path_in(&ctx, &mut d, &scope.target, &path)?;
                                 // The bytes that just landed are what the disclosure judges
                                 // against the team's current version.

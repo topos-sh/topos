@@ -1279,6 +1279,7 @@ pub(crate) mod testkit {
                                 materialized_sha: Some("e".repeat(64)),
                                 pre_existing_sha: None,
                                 swap_capability: SwapCapability::Unsupported,
+                                adopted_source: false,
                             })
                             .collect(),
                     },
