@@ -46,7 +46,10 @@ Claude Code's line adds a short flag naming itself, which is how that agent opts
 answer below; every other trigger runs the sweep unadorned.
 
 The sweep self-throttles (default 300 seconds), so a trigger can fire on every session event
-cheaply. It also stays off the network it doesn't need: it talks to your workspaces and to nothing
+cheaply. It always covers **both** sets — your machine-wide one and any `topos.toml` covering the
+folder the session starts in — so nothing goes stale while you spend the day in one checkout. That
+is the one way it differs from a `topos update` you type, which converges the scope you are standing
+in. The sweep also stays off the network it doesn't need: it talks to your workspaces and to nothing
 else, so a skill imported from a git repo moves only when you run `topos update` yourself, never
 because a session started.
 
@@ -210,8 +213,9 @@ and `$XDG_CONFIG_HOME` for the `~/.config`-based agents.
 
 <Note>
   Don't see yours? Skills are plain directories, so any agent that reads a skills folder
-  picks up delivered bundles whether or not it's listed. `topos list` also discovers
-  untracked skills already sitting in any of these directories, ready to `topos add`.
+  picks up delivered bundles whether or not it's listed. `topos list` also finds the skills
+  already sitting in these directories that it doesn't manage — a bare run counts them in one
+  line, `topos list --untracked` names them, and `topos add <name>` takes one over.
 </Note>
 
 ## The shared directory

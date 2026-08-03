@@ -16,7 +16,7 @@ their agents already read.
 "./tools/release-checklist" = "*"                        # a folder in this repo
 ```
 
-The CLI writes it. The first three lines above came from:
+`topos init` creates it; the CLI writes its lines. The first three above came from:
 
 ```bash
 topos add @acme/channels/backend
@@ -126,21 +126,24 @@ drop a skill you thought you had.
 
 | Command | What it does to the file |
 |---|---|
-| `topos add <ref>` | adds one line to the nearest project file |
+| `topos add <ref>` | adds one line to the nearest `topos.toml` at or above this folder — with none covering it, refuses |
 | `topos add <ref> -g` | adds one line to `~/.topos/topos.toml` |
-| `topos add ./folder` | adds `"./folder" = "*"`; a folder outside the checkout goes to the global file, absolute |
+| `topos add ./folder` | adds `"./folder" = "*"` — relative when the folder sits under the file's own folder, absolute when it doesn't |
 | `topos add -g @acme` | adds `"topos.sh/acme" = "*"` |
 | `topos add -g <skill>` when an `"off"` line stands | deletes the `"off"` line |
 | `topos remove <skill>` | drops that line — or splits the channel/repo line carrying it |
 | `topos remove -g <skill>` | drops the line, or writes `"off"` when the workspace delivers it |
 | `topos remove -g @acme` | drops the whole-workspace line |
 | `topos publish ./folder --yes` | rewrites the `./folder` line to the workspace reference |
-| `topos init` | creates the file in this folder, from a comment-only template |
+| `topos init` | creates the file in this folder, from a comment-only template — the one way a project file is born |
+| `topos init -g` | writes `~/.topos/topos.toml` out in full: one feed line per workspace you are connected to |
 | `topos fmt` | rewrites the layout; never the meaning |
 | `topos update` | nothing — except finishing a landed publish's rewrite, below |
 
 `add` and `remove` are exact inverses, and every receipt names the file it edited plus the command
-that undoes it. A `-g` add of a skill the workspace already delivers writes nothing and says so —
+that undoes it. Neither creates a file and neither crosses scopes: run in a folder no `topos.toml`
+covers, a project `add` refuses and hands you both ways out — `topos init` here, or the same command
+with `-g`. A `-g` add of a skill the workspace already delivers writes nothing and says so —
 there is no point stacking a line on a line that already delivers. Adding it *with* a pin does
 write: that is a real conversion to machine-local control.
 
@@ -186,17 +189,26 @@ and it leaves an already-normal file untouched.
 
 The project file is the **nearest** `topos.toml` walking up from your working directory, and it
 governs that checkout whole — no merging with an ancestor's file, and no arithmetic against what
-you get personally. `topos add` with none in reach creates one at the enclosing git root, so the
-file travels with the repo; `topos init` creates one in the folder you run it in.
+you get personally. `topos init` creates one in the folder you run it in, and that is the only way
+one is born: `add` records lines in a file someone put there, and refuses when none covers the
+folder rather than picking a location for you.
+
+Every other verb reads the same line. `update`, `list`, and `status` answer for the scope you are
+standing in, and `-g` on any of them means your machine instead. A skill added inside a checkout
+therefore keeps its version history in that checkout's own `.topos/` — commit the `topos.toml` and
+leave `.topos/` and the delivered folders to each person, which they arrange themselves. A line
+naming a folder in the repo vendors that skill outright: clone, `topos update`, and it is there,
+with no workspace in the picture.
 
 The two lists never blend. They answer different questions — "what should anyone working here
 have?" and "what should follow me around?" — so a skill named by both is delivered twice, once
 into the project's agent folders and once into your home ones. They update independently.
 
 ```bash
-topos status
-topos status code-review
+topos list
+topos list code-review
 ```
 
-Everything here with its version and what asked for it; then one skill, down to the exact file and
-line behind each copy. Both work offline and change nothing.
+Everything the scope you stand in holds, with versions and what asked for them — plus one line for
+the machine-wide set and the command that opens it; then one skill, down to the exact file and line
+behind each copy. Both work offline and change nothing.

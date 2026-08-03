@@ -5,13 +5,18 @@ sidebar_label: For agents
 ---
 
 Every command is non-interactive, `--json` prints exactly one machine-readable object and never
-prompts, and every refusal names its own fix. Four rules cover almost everything:
+prompts, and every refusal names its own fix. Five rules cover almost everything:
 
 1. **Use `--json` on every command** and read the envelope rather than parsing prose.
 2. **Follow `next_actions`** — each carries a complete `argv`.
 3. **Preview once, then act.** When a preview matches what the user already asked for, apply
    with `--yes` immediately — repeating a preview is never progress.
-4. **Never route around a refusal** by hand-editing files or `~/.topos/` internals. Read the
+4. **Know which scope you are in.** Every verb acts on where you stand — the nearest `topos.toml`
+   walking up when one covers the working directory, your machine (`~/.topos/topos.toml`)
+   otherwise — and `-g` makes any verb mean the machine. Nothing crosses that line on its own, and
+   whatever a command doesn't act on comes back as one summary line carrying the command that
+   expands it.
+5. **Never route around a refusal** by hand-editing files or `~/.topos/` internals. Read the
    error, run the named fix, retry once.
 
 ## Entry points
@@ -136,7 +141,7 @@ divides the requests you can act on from the ones you hand back to the human.
 
 | The human asks | Do this |
 |---|---|
-| "get us the team's code-review skill here" | `topos add code-review` — a line in this repo's `topos.toml` |
+| "get us the team's code-review skill here" | `topos add code-review` — a line in this repo's `topos.toml`. With no such file covering the folder the add refuses; `topos init` creates one here (ask first — it is a file the repo will commit) |
 | "keep that on my laptop wherever I work" | `topos add code-review -g` — a line in `~/.topos/topos.toml` |
 | "stop that one on this box" | `topos remove code-review -g` — writes an `off` line here only |
 | "turn that off for me everywhere" | Not a CLI act. Point them at **Your skills** in the browser, where the off switch covers every machine they log in |
@@ -153,25 +158,37 @@ divides the requests you can act on from the ones you hand back to the human.
 `0` means no cap. Diffs truncate at file boundaries with `patch_omitted` marks and a
 `FETCH_FULL_DIFF` next action; row caps emit a truncation marker and `NEXT_PAGE`.
 
-Also worth knowing: `topos status` is offline and read-only; `update --quiet` overrides `--json`
-and exits `0` on a network blip (it is what the session-start hook runs); redacted errors carry the
-safe message in `error.context.message`, and the full source chain always lands in
+Also worth knowing: `topos status` is offline and read-only — the health panel (binary version,
+`sessions`, `triggers`, and per-scope `attention` counts, each carrying the `command` that resolves
+it), with no inventory in it, which is `list`'s job; `update --quiet` overrides `--json`, sweeps
+both scopes, and exits `0` on a network blip (it is what the session-start hook runs); redacted
+errors carry the safe message in `error.context.message`, and the full source chain always lands in
 `~/.topos/log.jsonl` (`TOPOS_DEBUG=1` prints it to stderr).
 
 ## Before you touch a skill directory
 
 ```bash
 topos list --json
-topos status <skill> --json
+topos list <skill> --json
 ```
 
-`list` rows carry a **source** (a workspace address means team-managed; `built-in`; an origin
-host; `local`) and a **status** (`current` / `behind` / `draft`) — check before treating a skill
-directory as hand-authored. Editing a team-managed skill creates a draft, not a private fork, and
-drafts are safe: updates merge around them and never overwrite them.
+`list` returns its rows per scope in `scopes[]` — the scope you are standing in first, each with the
+`manifest` that governs it — and every row carries a **source** (a workspace address means
+team-managed; `built-in`; an origin host; `local`) and a **status** (`current` / `behind` / `draft` /
+`detached`). Check before treating a skill directory as hand-authored. Editing a team-managed skill
+creates a draft, not a private fork, and drafts are safe: updates merge around them and never
+overwrite them.
 
-`status <skill>` answers *why* a copy is there: which file and line asked for it — or which
-workspace's set — and where its files sit. A skill can legitimately have two independent copies,
+What a run does not show in full comes back as one summary object rather than nothing:
+`machine_summary` (skills, updates pending) and `untracked_summary` (skills, folders) each carry the
+exact `command` that expands them — run that command instead of guessing.
+
+`list <skill>` fills `detail` and answers *why* a copy is there: `source_file` and `source_key` are
+the file and the line that asked for it, `feed` names the workspace whose set delivers it when no
+line does, plus the applied `version`, any `pin`, and the `placements` on disk. `-a <agent>` fills
+`agent_view` instead — one harness's skills directories exactly as that agent reads them, spanning
+both scopes — and `--remote` fills `remote` with each connected workspace's channels and skills,
+annotated with this machine's adoption state. A skill can legitimately have two independent copies,
 one for the project and one for the person, with separate drafts; publish from inside the checkout
 you edited.
 
@@ -188,8 +205,9 @@ it must hold:
 
 Offer **at most once per session**, at a natural pause, never interrupting active work. Then:
 
-1. **Survey first**: `topos list --json` and `topos list --remote --json`. Prefer deepening an
-   existing skill with a minimal edit over minting a new one.
+1. **Survey first**: `topos list --all --json` (both scopes, so a skill on the machine isn't missed
+   from inside a checkout) and `topos list --remote --json`. Prefer deepening an existing skill with
+   a minimal edit over minting a new one.
 2. **Draft freely** — editing is local, reversible, and needs no permission.
 3. **Scan for secrets** before anything org-bound: tokens, credentials, internal hostnames. Strip
    them or stop.
