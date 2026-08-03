@@ -939,7 +939,7 @@ pub(crate) fn list_tty(out: &ListOutcome) -> String {
                 s.push_str("  (nothing installed in this scope)\n");
             }
             for entry in &scope.rows {
-                s.push_str(&list_row(entry));
+                s.push_str(&list_row(entry, &scope.scope));
             }
         }
     }
@@ -1086,12 +1086,21 @@ fn untracked_row(u: &UntrackedEntry) -> String {
 /// One inventory row: `<skill>  <skill>@<short>` + the draft flag + the STATUS / SOURCE / CAUSE
 /// columns. A row never applied here carries the all-zero identity — rendered as the honest
 /// not-applied note instead of a meaningless `@000000000000`.
-fn list_row(entry: &SkillEntry) -> String {
+///
+/// `scope` is the section the row rides, and every command the row suggests is SCOPE-EXACT: a
+/// machine row spells `topos update -g`, because a bare `update` read from inside a project drives
+/// the PROJECT and would never touch the row the reader is looking at. The `-g` spelling is
+/// correct outside a project too (it is what the bare form resolves to there), so the row needs no
+/// knowledge of where the reader stands — only of which section it is in.
+fn list_row(entry: &SkillEntry, scope: &str) -> String {
+    let flag = if scope == "machine" { " -g" } else { "" };
     let columns = list_columns(entry);
     if entry.version_id.bytes().all(|b| b == b'0') {
         let mut note = String::new();
         if entry.status.is_none() {
-            note.push_str("  (not applied here yet — `topos update` applies it)");
+            note.push_str(&format!(
+                "  (not applied here yet — `topos update{flag}` applies it)"
+            ));
         }
         note.push_str(&columns);
         return format!("  {}{note}\n", entry.skill);
@@ -1668,6 +1677,7 @@ fn list_detail_tty(detail: &topos_types::results::ListDetail) -> String {
         StatusItemState::NoDeliveryYet => {
             "no delivery yet (`topos update` performs the first exchange)"
         }
+        StatusItemState::Detached => "detached (the bytes stay; delivery ended)",
         StatusItemState::Unknown => "not applied here yet (`topos update` applies it)",
     };
     s.push_str(&format!("\n  {state}"));
@@ -3138,6 +3148,55 @@ mod tests {
         );
         assert!(text.contains("(nothing installed in this scope)"), "{text}");
         assert!(!text.contains("workspaces offer"), "{text}");
+    }
+
+    /// Every command a ROW suggests is scope-exact: a machine-section row spells `topos update -g`
+    /// (a bare `update` read from inside a project drives the PROJECT and would never touch it),
+    /// while a project row keeps the bare spelling. `--all` renders both sections in one output,
+    /// so the two spellings must appear side by side.
+    #[test]
+    fn list_tty_rows_spell_their_own_scopes_update_command() {
+        use topos_types::results::ListScope;
+        let never_applied = |name: &str| SkillEntry {
+            skill: name.to_owned(),
+            workspace_id: Some("w_acme".to_owned()),
+            version_id: "0".repeat(64),
+            bundle_digest: "0".repeat(64),
+            draft: false,
+            pending_proposals: Vec::new(),
+            source: None,
+            status: None,
+            cause: None,
+        };
+        let out = ListOutcome {
+            data: ListData {
+                scopes: vec![
+                    ListScope {
+                        scope: "project".to_owned(),
+                        manifest: Some("/repo/topos.toml".to_owned()),
+                        rows: vec![never_applied("in-repo")],
+                    },
+                    ListScope {
+                        scope: "machine".to_owned(),
+                        manifest: None,
+                        rows: vec![never_applied("machine-wide")],
+                    },
+                ],
+                signed_in: false,
+                ..ListData::default()
+            },
+            warnings: Vec::new(),
+            untracked_view: false,
+        };
+        let text = list_tty(&out);
+        assert!(
+            text.contains("in-repo  (not applied here yet — `topos update` applies it)"),
+            "{text}"
+        );
+        assert!(
+            text.contains("machine-wide  (not applied here yet — `topos update -g` applies it)"),
+            "{text}"
+        );
     }
 
     #[test]

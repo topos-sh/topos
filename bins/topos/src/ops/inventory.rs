@@ -137,10 +137,14 @@ impl ScopeResolution {
 }
 
 /// The whole resolution: the scopes in render order (project first when one covers the cwd, the
-/// machine scope always last) and the per-workspace regimes (a machine-scope fact).
+/// machine scope always last), the per-workspace regimes (a machine-scope fact), and the PERSON
+/// plan the machine scope was resolved from — the counts that speak for the machine scope
+/// (`awaiting_first_sync`) need the same recipe the rows came from, and re-parsing the global
+/// manifest to get it would risk two different answers from one command.
 pub(crate) struct Resolved {
     pub scopes: Vec<ScopeResolution>,
     pub regimes: Vec<StatusRegime>,
+    pub person_plan: ScopePlan,
 }
 
 impl Resolved {
@@ -349,6 +353,7 @@ pub(crate) fn resolve(
     Ok(Resolved {
         scopes: out,
         regimes,
+        person_plan,
     })
 }
 
@@ -651,12 +656,15 @@ fn quiet_set_line(reference: &str, state: StatusItemState) -> String {
 /// The deep single-skill answer (`topos list <name>`): the token resolved against the SAME lines
 /// the inventory renders (a row reference, a leaf name, or a cached feed name; `@ws/…` and the
 /// canonical spellings ride [`keys::parse_input`] with the one connected host as the default).
-/// Scope order IS precedence: project rows first, then machine.
+/// `sections` is what THIS invocation shows — the scope flags mean the same thing on the deep dive
+/// as on the listing, so `-g` answers from the machine scope alone even inside a project — and its
+/// order IS precedence.
 ///
 /// # Errors
-/// A token no scope delivers is the uniform [`ClientError::TargetNotFound`].
+/// A token no shown scope delivers is the uniform [`ClientError::TargetNotFound`]; `list`'s caller
+/// then retries the same token against those scopes' store GHOSTS before surfacing it.
 pub(crate) fn detail_for(
-    resolved: &Resolved,
+    sections: &[&ScopeResolution],
     all: &Sessions,
     token: &str,
 ) -> Result<ListDetail, ClientError> {
@@ -669,7 +677,7 @@ pub(crate) fn detail_for(
     let canonical = keys::parse_input(token, default_host)
         .ok()
         .map(|r| r.shape.canonical());
-    let hit = resolved.scopes.iter().find_map(|s| {
+    let hit = sections.iter().find_map(|s| {
         s.rows
             .iter()
             .find(|r| canonical.as_deref() == Some(r.reference.as_str()) || r.name == token)
@@ -704,25 +712,50 @@ pub(crate) fn detail_for(
 /// approval gates the bytes); an ENDED one does not. The key is `(host, workspace id)`, never the
 /// id alone: ids are opaque strings each SERVER mints on its own, and an entry with NO recorded
 /// host is not placeable on any server, so it counts for nobody.
+///
+/// And only what the MACHINE RESOLUTION DEMANDS counts. The count's whole promise is that
+/// `topos update -g` applies it, so an assignment the person plan WITHHOLDS — a file-backed global
+/// manifest with no feed row for that workspace, or an `"off"` row over the bundle — must not
+/// appear: `update` deliberately will not land it, and the line would send the reader to a command
+/// that cannot move the number. Those withheld rows are disclosed elsewhere (the loud no-feed-row
+/// note; the `"off"` row shows as its own inventory line), so nothing goes silent.
 pub(crate) fn awaiting_first_sync(
     ctx: &Ctx<'_>,
     all: &Sessions,
     cache: &SyncStatus,
+    plan: &ScopePlan,
 ) -> Option<u64> {
-    let live: BTreeSet<(&str, &str)> = all
+    // Keyed by `(host, workspace id)` — the live check; valued by the workspace's ADDRESS name,
+    // which is what the plan's rows are spelled with (`<host>/<workspace>/<bundle>`).
+    let live: BTreeMap<(&str, &str), &str> = all
         .live()
-        .map(|s| (s.host.as_str(), s.workspace_id.as_str()))
+        .map(|s| {
+            (
+                (s.host.as_str(), s.workspace_id.as_str()),
+                s.workspace_name.as_str(),
+            )
+        })
         .collect();
     let mut awaiting = Some(0u64);
     for (workspace_id, entry) in &cache.workspaces {
         let Some(host) = entry.host.as_deref() else {
             continue;
         };
-        if !live.contains(&(host, workspace_id.as_str())) {
+        let Some(workspace) = live.get(&(host, workspace_id.as_str())).copied() else {
             continue;
-        }
+        };
         for (skill_id, d) in &entry.delivered {
             if d.withdrawn || d.via_manifest {
+                continue;
+            }
+            // The demand test: the workspace's feed flows here (the implicit recipe feeds every
+            // connected workspace, so it passes this too) and no `"off"` row covers the bundle —
+            // or an explicit row claims the bundle outright, which delivers it whatever the feed
+            // does.
+            let demanded = plan.explicit_claims(host, workspace, &d.name)
+                || (plan.has_feed(host, workspace)
+                    && plan.off_for(host, workspace, &d.name).is_none());
+            if !demanded {
                 continue;
             }
             let Ok(sid) = crate::id::SkillId::parse(skill_id) else {
@@ -1326,7 +1359,8 @@ mod tests {
     fn awaiting_at(home: &TempHome, cwd: &Path) -> Option<u64> {
         with_ctx(home, Some(cwd), |ctx| {
             let (all, cache) = read_sources(ctx).unwrap();
-            awaiting_first_sync(ctx, &all, &cache)
+            let resolved = resolve(ctx, &all, &cache).unwrap();
+            awaiting_first_sync(ctx, &all, &cache, &resolved.person_plan)
         })
     }
 
@@ -1439,6 +1473,62 @@ mod tests {
             );
             assert_eq!(awaiting_at(&home, &cwd), expected, "status {status}");
         }
+    }
+
+    /// Only what the machine resolution DEMANDS counts. A file-backed global manifest that omits a
+    /// workspace's feed row withholds every assignment from it, and an `"off"` row withholds its
+    /// bundle — `topos update -g` deliberately applies neither, so counting them would put a
+    /// number next to a command that cannot move it. The withheld rows are still disclosed: the
+    /// loud no-feed-row note names them, and an `"off"` row is its own inventory line.
+    #[test]
+    fn a_withheld_assignment_is_not_counted_as_not_applied() {
+        let home = TempHome::new();
+        let cwd = home.0.join("plain");
+        std::fs::create_dir_all(&cwd).unwrap();
+        home.session(
+            "topos.sh",
+            "w_acme",
+            "acme",
+            crate::sessions::SESSION_ACTIVE,
+        );
+        home.cache(
+            "w_acme",
+            "topos.sh",
+            "acme",
+            vec![assigned("deploy", None), assigned("notes", None)],
+            Vec::new(),
+        );
+
+        // No global file at all — the implicit recipe feeds every connected workspace, so both
+        // assignments are demanded and both count.
+        assert_eq!(awaiting_at(&home, &cwd), Some(2));
+
+        // A global file with NO feed row for acme: the whole feed is withheld.
+        home.global("[bundles]\n\"github.com/acme/tools\" = \"*\"\n");
+        assert_eq!(
+            awaiting_at(&home, &cwd),
+            Some(0),
+            "a feed the global manifest never adopts assigns nothing `update -g` can apply"
+        );
+        // …and it is not silent: the loud no-feed-row note names the count.
+        let r = resolve_at(&home, &cwd);
+        assert!(
+            r.machine()
+                .notes
+                .iter()
+                .any(|n| n.contains("2 assigned bundles are not adopted here (no feed row)")),
+            "{:?}",
+            r.machine().notes
+        );
+
+        // The feed row back, with ONE bundle switched off: the off bundle drops out of the count.
+        home.global("[bundles]\n\"topos.sh/acme\" = \"*\"\n\"topos.sh/acme/notes\" = \"off\"\n");
+        assert_eq!(awaiting_at(&home, &cwd), Some(1));
+
+        // An EXPLICIT row claims a bundle whatever the feed does — a feed-less file still demands
+        // the row it spells.
+        home.global("[bundles]\n\"topos.sh/acme/deploy\" = \"*\"\n");
+        assert_eq!(awaiting_at(&home, &cwd), Some(1));
     }
 
     /// A workspace id is an OPAQUE string each server mints on its own, so it is not an address.
@@ -1929,9 +2019,11 @@ mod tests {
         with_ctx(&home, Some(&cwd), |ctx| {
             let (all, cache) = read_sources(ctx).unwrap();
             let r = resolve(ctx, &all, &cache).unwrap();
+            // The default view's sections: project-then-machine, precedence order.
+            let sections: Vec<&ScopeResolution> = r.scopes.iter().collect();
 
             // The row-delivered bundle: the file + the spelled key.
-            let detail = detail_for(&r, &all, "deploy").expect("the deep answer");
+            let detail = detail_for(&sections, &all, "deploy").expect("the deep answer");
             assert_eq!(detail.name, "deploy");
             assert!(
                 detail
@@ -1946,7 +2038,7 @@ mod tests {
             assert_eq!(detail.attribution.as_deref(), Some("assigned by Dana"));
 
             // The feed-delivered one: the feed, not a file. The `@ws/name` spelling resolves too.
-            let detail = detail_for(&r, &all, "@acme/notes").expect("the deep answer");
+            let detail = detail_for(&sections, &all, "@acme/notes").expect("the deep answer");
             assert_eq!(detail.name, "notes");
             assert_eq!(detail.source_file, None);
             assert_eq!(detail.source_key, None);
@@ -1954,7 +2046,7 @@ mod tests {
             assert_eq!(detail.attribution.as_deref(), Some("picked by you"));
 
             // A token no scope delivers is the uniform not-found.
-            let err = detail_for(&r, &all, "nowhere").expect_err("an unknown token");
+            let err = detail_for(&sections, &all, "nowhere").expect_err("an unknown token");
             assert!(matches!(err, ClientError::TargetNotFound { .. }), "{err:?}");
         });
     }

@@ -6,7 +6,9 @@
 //! points at `list --remote` for what the workspaces offer.
 //!
 //! The optional views: `list <name>` is the one-skill deep dive (which file and line-key — or
-//! which feed — delivers it); `-a <slug>` is the agent-eye view (each skills dir that harness
+//! which feed — delivers it) over the SAME scopes the invocation selects, falling back to the
+//! store records no row claims, so it answers for exactly what the listing shows and no more;
+//! `-a <slug>` is the agent-eye view (each skills dir that harness
 //! reads from this folder, entries marked managed or untracked — deliberately spanning both
 //! scopes); `--untracked` is the full discovery listing; `--remote` (the one networked arm) reads
 //! each live session's channel index + catalog and annotates every skill with this machine's
@@ -137,17 +139,6 @@ pub(crate) fn list_with(
         data.footprint = Some(paths);
     }
 
-    // The one-skill deep dive: project rows first, then machine — the miss is the uniform
-    // not-found. Nothing else rides the answer.
-    if let Some(name) = &req.name {
-        data.detail = Some(inventory::detail_for(&resolved, &all, name)?);
-        return Ok(ListOutcome {
-            data,
-            warnings,
-            untracked_view: req.untracked,
-        });
-    }
-
     // The agent-eye view — deliberately spans both scopes.
     if let Some(slug) = &req.agent {
         data.agent_view = Some(agent_view(&resolved, discover.as_ref(), slug)?);
@@ -193,7 +184,32 @@ pub(crate) fn list_with(
         }
     };
 
-    // Each shown section's GHOST rows first (store records no resolved row claims — the built-in
+    // The one-skill deep dive, over the sections THIS INVOCATION SELECTS — the scope flags mean
+    // the same thing here as on the listing, so `-g` answers from the machine scope alone even
+    // inside a project (the default and `--all` read project-then-machine, precedence order).
+    // A name no resolved row claims falls back to those sections' GHOSTS: the built-in and every
+    // detached copy are shown by a plain `list`, so `list <name>` must answer for them too — a
+    // deep dive that says "not found" about a row the listing prints is just wrong.
+    if let Some(name) = &req.name {
+        let dive = dive_sections(&resolved, req.view);
+        data.detail = Some(match inventory::detail_for(&dive, &all, name) {
+            Ok(detail) => detail,
+            Err(miss) => {
+                let dive_ghosts: Vec<Vec<Ghost>> = dive
+                    .iter()
+                    .map(|section| store_ghosts(ctx, section, &cache, &all, signed_in))
+                    .collect();
+                ghost_detail(&dive_ghosts, name).ok_or(miss)?
+            }
+        });
+        return Ok(ListOutcome {
+            data,
+            warnings,
+            untracked_view: req.untracked,
+        });
+    }
+
+    // Each shown section's GHOST rows (store records no resolved row claims — the built-in
     // meta-skill, detached/frozen copies): installed is installed, so they are never invisible.
     let ghosts: Vec<Vec<Ghost>> = sections
         .iter()
@@ -346,10 +362,61 @@ fn validate_filters(
 }
 
 /// One store record no resolved row claims, with the cached channels the `--channel` filter
-/// matches against.
+/// matches against and the placement dirs its store map records (what the deep dive answers with —
+/// read from the same map the draft scan already opened, so it costs nothing extra).
 struct Ghost {
     entry: SkillEntry,
     via_channels: Vec<String>,
+    placements: Vec<String>,
+}
+
+/// Which scope sections the DEEP DIVE (`list <name>`) resolves against, in precedence order: the
+/// machine scope alone under `-g` (the flag means the same thing here as on the listing — from
+/// inside a project it must not answer with the project copy), project-then-machine otherwise.
+/// The here-view deliberately keeps BOTH: a bare `list <name>` is a lookup, not a section, and a
+/// machine-wide skill is a true answer to "where does this come from".
+fn dive_sections(resolved: &Resolved, view: ScopeView) -> Vec<&ScopeResolution> {
+    match view {
+        ScopeView::Machine => vec![resolved.machine()],
+        ScopeView::Here | ScopeView::All => resolved.scopes.iter().collect(),
+    }
+}
+
+/// The deep answer for a name only a GHOST record carries (the built-in, a detached/frozen copy) —
+/// the store record IS the answer: no manifest row names it, so `source_file`/`source_key`/`feed`
+/// and the attribution are honestly absent, and the version, placements and state come from the
+/// scope store the ghost was read out of. `ghosts` is per shown section in precedence order, so
+/// the first hit follows the same order the resolved rows do. `None` when no shown section holds
+/// such a record (the caller keeps its uniform not-found).
+fn ghost_detail(ghosts: &[Vec<Ghost>], token: &str) -> Option<topos_types::results::ListDetail> {
+    let ghost = ghosts.iter().flatten().find(|g| g.entry.skill == token)?;
+    let version = ghost.entry.version_id.clone();
+    Some(topos_types::results::ListDetail {
+        name: ghost.entry.skill.clone(),
+        source_file: None,
+        source_key: None,
+        feed: None,
+        attribution: None,
+        version: (!version.bytes().all(|b| b == b'0')).then_some(version),
+        pin: None,
+        placements: ghost.placements.clone(),
+        state: ghost_state(&ghost.entry),
+    })
+}
+
+/// A ghost's row status as the deep dive's state vocabulary: a copy delivery no longer claims is
+/// `detached` (the new state — the bytes stay, the delivery ended); everything else keeps what the
+/// row column says, so the built-in reads `applied` (or `local-edits` under a hand edit) exactly
+/// as its row does. A purely local record claims no status at all, and reads by its draft alone.
+fn ghost_state(entry: &SkillEntry) -> StatusItemState {
+    match entry.status {
+        Some(SkillStatus::Detached) => StatusItemState::Detached,
+        Some(SkillStatus::Draft) => StatusItemState::LocalEdits,
+        Some(SkillStatus::Behind) => StatusItemState::Behind,
+        Some(SkillStatus::Current) => StatusItemState::Applied,
+        None if entry.draft => StatusItemState::LocalEdits,
+        None => StatusItemState::Applied,
+    }
 }
 
 /// The scope's unclaimed STORE records — the built-in `topos` meta-skill and detached/frozen
@@ -389,7 +456,7 @@ fn store_ghosts(
         if claimed.contains(lock.name.as_str()) {
             continue;
         }
-        let draft = ghost_draft(ctx, &sp.map, &lock);
+        let (draft, placements) = ghost_scan(ctx, &sp.map, &lock);
         // The cached delivery for this id, across workspaces — withdrawn entries included (the
         // withdrawal IS the cause).
         let delivered: Option<(&String, &DeliveredSkill)> = cache
@@ -470,6 +537,7 @@ fn store_ghosts(
         out.push(Ghost {
             entry,
             via_channels,
+            placements,
         });
     }
     // Deterministic order: name (ids are opaque; names are the scope identity).
@@ -477,13 +545,15 @@ fn store_ghosts(
     out
 }
 
-/// A ghost carries a draft iff ANY of its placements holds bytes hashing to a different digest
-/// than the lock pins. A missing/unscannable source is no-draft (nothing to compare), never an
-/// error.
-fn ghost_draft(ctx: &Ctx<'_>, map_path: &Path, lock: &Lock) -> bool {
+/// One ghost's `(draft, placements)` from its store map: a draft iff ANY placement holds bytes
+/// hashing to a different digest than the lock pins, and the recorded placement dirs (what the
+/// deep dive prints — the same set a resolved row reports). Both come off ONE map read. A
+/// missing/unscannable source is no-draft (nothing to compare) and no placements, never an error.
+fn ghost_scan(ctx: &Ctx<'_>, map_path: &Path, lock: &Lock) -> (bool, Vec<String>) {
     let Ok(Some(map)) = doc::read_map(ctx.fs, map_path) else {
-        return false;
+        return (false, Vec::new());
     };
+    let mut draft = false;
     for placement in &map.placements {
         let source = Path::new(placement);
         if !source.exists() {
@@ -492,10 +562,11 @@ fn ghost_draft(ctx: &Ctx<'_>, map_path: &Path, lock: &Lock) -> bool {
         if let Ok(scanned) = crate::scan::scan(source)
             && topos_core::digest::to_hex(&scanned.bundle_digest) != lock.bundle_digest
         {
-            return true;
+            draft = true;
+            break;
         }
     }
-    false
+    (draft, map.placements)
 }
 
 /// The host of a recorded import source (`github.com/owner/repo` → `github.com`), or `None` for
@@ -1371,13 +1442,13 @@ mod tests {
         assert_eq!(row("frozen").status, None);
         assert_eq!(row("frozen").version_id, "b".repeat(64));
 
-        // The deep dive still answers only what the scopes deliver — the ghost's home is the
-        // inventory rows, and the miss stays the uniform not-found.
+        // A name only a ghost carries still answers — the deep dive falls back to the same store
+        // records the listing prints, so `list <name>` never denies a row `list` just showed.
         let miss = run(
             &home,
             &cwd,
             &ListRequest {
-                name: Some("topos".to_owned()),
+                name: Some("nowhere".to_owned()),
                 ..request()
             },
         )
@@ -1385,6 +1456,129 @@ mod tests {
         assert!(
             matches!(miss, ClientError::TargetNotFound { .. }),
             "{miss:?}"
+        );
+    }
+
+    /// `list <name>` answers for a GHOST too: the built-in (no manifest row anywhere) reports its
+    /// placements and reads `applied`, and a detached copy reads the `detached` state. Before
+    /// this, both answered NOT_FOUND while a plain `list` printed them — a deep dive that denies a
+    /// row the listing shows is simply wrong.
+    #[test]
+    fn the_deep_dive_answers_from_the_ghost_records_too() {
+        let home = TempHome::new();
+        let cwd = home.0.join("plain");
+        std::fs::create_dir_all(&cwd).unwrap();
+        home.session(
+            "topos.sh",
+            "w_acme",
+            "acme",
+            crate::sessions::SESSION_ACTIVE,
+        );
+        // The built-in, placed: a clean placement (its recorded sha never matches real bytes, so
+        // an EXISTING dir would scan as a draft — leave it absent for the clean reading).
+        let placed = home.0.join("placed-topos");
+        home.store_applied(
+            "topos",
+            "topos",
+            &"a".repeat(64),
+            &[placed.to_string_lossy().as_ref()],
+        );
+        // A withdrawn delivery whose bytes are retained — the detached ghost.
+        let ghost_id = skill_id_of("ghosty");
+        home.store_applied(&ghost_id, "ghosty", &"c".repeat(64), &[]);
+        let mut withdrawn = assigned("ghosty", None).1;
+        withdrawn.withdrawn = true;
+        home.cache(
+            "w_acme",
+            "topos.sh",
+            "acme",
+            vec![(ghost_id, withdrawn)],
+            Vec::new(),
+        );
+
+        let deep = |name: &str| {
+            run(
+                &home,
+                &cwd,
+                &ListRequest {
+                    name: Some(name.to_owned()),
+                    ..request()
+                },
+            )
+        };
+
+        let detail = deep("topos").unwrap().data.detail.expect("a detail");
+        assert_eq!(detail.name, "topos");
+        assert_eq!(detail.version.as_deref(), Some(&*"a".repeat(64)));
+        assert_eq!(
+            detail.placements,
+            vec![placed.to_string_lossy().into_owned()],
+            "the ghost answers with the placements its store map records"
+        );
+        // No row names it, so no file, no key, no feed — the record IS the answer.
+        assert_eq!(detail.source_file, None);
+        assert_eq!(detail.source_key, None);
+        assert_eq!(detail.feed, None);
+        assert!(
+            matches!(detail.state, StatusItemState::Applied),
+            "{detail:?}"
+        );
+
+        let detail = deep("ghosty").unwrap().data.detail.expect("a detail");
+        assert!(
+            matches!(detail.state, StatusItemState::Detached),
+            "{detail:?}"
+        );
+    }
+
+    /// `list <name> -g` inside a project answers from the MACHINE scope alone — the flag means the
+    /// same thing on the deep dive as on the listing. A name only the project delivers is a miss
+    /// under `-g` (it would otherwise silently answer with the project copy).
+    #[test]
+    fn the_deep_dive_honors_the_scope_view() {
+        let home = TempHome::new();
+        let repo = lay_project(&home);
+        home.session(
+            "topos.sh",
+            "w_acme",
+            "acme",
+            crate::sessions::SESSION_ACTIVE,
+        );
+        home.cache(
+            "w_acme",
+            "topos.sh",
+            "acme",
+            vec![assigned("notes", None)],
+            Vec::new(),
+        );
+
+        let deep = |name: &str, view: ScopeView| {
+            run(
+                &home,
+                &repo,
+                &ListRequest {
+                    name: Some(name.to_owned()),
+                    view,
+                    ..request()
+                },
+            )
+        };
+
+        // The default view still reads project-then-machine: both names answer.
+        assert!(deep("repo-helper", ScopeView::Here).is_ok());
+        assert!(deep("notes", ScopeView::Here).is_ok());
+
+        // `-g`: the machine's own row answers, the project-only one does not.
+        let detail = deep("notes", ScopeView::Machine)
+            .unwrap()
+            .data
+            .detail
+            .expect("a detail");
+        assert_eq!(detail.name, "notes");
+        let miss = deep("repo-helper", ScopeView::Machine).unwrap_err();
+        assert!(
+            matches!(miss, ClientError::TargetNotFound { .. }),
+            "the machine holds nothing of that name — {miss:?}"
         );
     }
 

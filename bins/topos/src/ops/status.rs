@@ -46,7 +46,9 @@ pub(crate) fn status_snapshot(ctx: &Ctx<'_>, view: ScopeView) -> Result<StatusDa
         .collect();
 
     let resolved = inventory::resolve(ctx, &all, &cache)?;
-    let awaiting = inventory::awaiting_first_sync(ctx, &all, &cache);
+    // Counted against the SAME person plan the machine rows resolved from — the count's command
+    // (`topos update [-g]`) has to be true of the recipe that is actually governing.
+    let awaiting = inventory::awaiting_first_sync(ctx, &all, &cache, &resolved.person_plan);
     let in_project = resolved.project().is_some();
 
     // Which bodies show in full: the here-scope by default; the machine alone under `-g`; both

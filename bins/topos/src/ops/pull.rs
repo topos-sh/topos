@@ -246,13 +246,21 @@ pub(crate) fn pull(ctx: &Ctx<'_>, scope: PullScope) -> Result<PullOutcome, Clien
             workspace,
             mode,
         } => {
-            let (skill_id, _lock) =
-                super::resolve_skill_in_workspace(ctx, &name, workspace.as_deref())?;
+            // Resolve across BOTH stores: a bundle a project `topos.toml` delivers keeps its
+            // custody in the checkout's own store, so a targeted update run from inside that
+            // checkout must drive THAT copy's engine state. Everything the engine reads or writes
+            // per skill (locks, docs, the store, the drift scan) rides `sctx` — the owning store's
+            // layout. The FOLLOW seam stays the original `ctx`'s: it is machine-level (built from
+            // `state/sync_status.json` under `~/.topos/`), and re-rooting it on a project store
+            // would read a document that does not exist there.
+            let (layout, skill_id, _lock) =
+                super::resolve_skill_stored(ctx, &name, workspace.as_deref())?;
+            let sctx = ctx_with_layout(ctx, &layout);
             // The go-back and the `--onto-current` escape are documented plane-independent (the escape is
             // the offline no-deadlock guarantee) — neither spends a network call on the proposals count.
             let plane_independent = matches!(mode, TargetMode::GoBack(_) | TargetMode::OntoCurrent);
             let mut row = match mode {
-                TargetMode::GoBack(vref) => sync_engine::go_back(ctx, &skill_id, &vref)?,
+                TargetMode::GoBack(vref) => sync_engine::go_back(&sctx, &skill_id, &vref)?,
                 TargetMode::AcceptPending | TargetMode::OntoCurrent => {
                     let inv = match mode {
                         TargetMode::OntoCurrent => sync_engine::Invocation::Escape,
@@ -265,10 +273,10 @@ pub(crate) fn pull(ctx: &Ctx<'_>, scope: PullScope) -> Result<PullOutcome, Clien
                         .find(|(id, _)| *id == *skill_id.as_str())
                     {
                         Some((_, follow)) if follow.following => {
-                            sync_engine::sync_one(ctx, &skill_id, &follow, inv)?
+                            sync_engine::sync_one(&sctx, &skill_id, &follow, inv)?
                         }
                         // Tracked but not followed → there is no `current` to pull; report the local state.
-                        _ => sync_engine::current_state(ctx, &skill_id)?,
+                        _ => sync_engine::current_state(&sctx, &skill_id)?,
                     }
                 }
             };
@@ -313,13 +321,15 @@ pub(crate) fn reset(
                 .into(),
         ));
     }
-    // Resolve ALL-OR-NONE, then compute each draft delta (the loss the describe leads with).
+    // Resolve ALL-OR-NONE, keeping each hit's OWNING store beside it: a project-delivered bundle's
+    // draft lives in the checkout's own store, and both halves of the reset — the loss disclosure
+    // and the discard — must act on that copy, never on a same-named machine twin.
     let mut resolved = Vec::with_capacity(targets.len());
     for token in targets {
-        resolved.push(super::resolve_skill(ctx, token)?);
+        resolved.push(super::resolve_skill_stored(ctx, token, None)?);
     }
     let mut items = Vec::with_capacity(resolved.len());
-    for (id, lock) in &resolved {
+    for (_layout, id, lock) in &resolved {
         // The draft delta vs current — the exact bytes a reset drops. DIVERGENT copies cannot render
         // one diff (that freeze is exactly what `--reset` is the named way out of), so the loss is
         // disclosed as the frozen set instead of failing the reset. UNCAPPED deliberately: a loss
@@ -348,9 +358,10 @@ pub(crate) fn reset(
         return Ok(ResetOutcome::Described { items, yes_argv });
     }
 
-    // ---- APPLY (`--yes`) ---- discard each draft back to its base (the draft is snapshotted first).
-    for (id, _lock) in &resolved {
-        sync_engine::reset_to_base(ctx, id)?;
+    // ---- APPLY (`--yes`) ---- discard each draft back to its base (the draft is snapshotted first),
+    // each through ITS owning store — the same copy the describe above measured the loss against.
+    for (layout, id, _lock) in &resolved {
+        sync_engine::reset_to_base(&ctx_with_layout(ctx, layout), id)?;
     }
     for item in &mut items {
         item.applied = true;

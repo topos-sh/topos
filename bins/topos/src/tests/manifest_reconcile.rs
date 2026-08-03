@@ -7040,3 +7040,156 @@ fn a_project_remove_of_a_machine_delivered_skill_refuses_toward_g() {
         "the classic path names the machine-wide switch: {message}"
     );
 }
+
+// =================================================================================================
+// The TARGETED verbs over PROJECT custody: a bundle a project file delivers keeps its engine state
+// in the checkout's own store, so every verb that names it by name has to look there — a home-store
+// -only resolution answers NO_SUCH_SKILL, or (worse) with a same-named machine copy.
+// =================================================================================================
+
+/// A checkout whose `topos.toml` delivers `deploy`, swept to `v` — custody in the PROJECT's store,
+/// nothing in the machine's. Returns the checkout and the placed dir.
+fn project_custody(tag: &str, rig: &Rig, plane: &FakePlane, dir: &FakeDirectory) -> Scratch {
+    let proj = project(
+        tag,
+        &format!("[bundles]\n\"{HOST}/{WS_NAME}/deploy\" = \"*\"\n"),
+    );
+    let ctx = rig.ctx_at(Some(&proj.0));
+    let out = sweep(&ctx, plane, dir);
+    assert!(out.warnings.is_empty(), "{:?}", out.warnings);
+    assert!(
+        !rig.layout().skill_dir(&sid("s_deploy")).exists(),
+        "the machine store must hold nothing — the point of the fixture"
+    );
+    proj
+}
+
+fn sid(id: &str) -> crate::id::SkillId {
+    crate::id::SkillId::parse(id).unwrap()
+}
+
+/// `diff` and `log`, run from inside the checkout, read the PROJECT store's copy: the diff shows
+/// the edit made to the in-repo placement, and the log walks that store's version history. Both
+/// used to resolve the home store alone — a project-delivered bundle was simply not found.
+#[test]
+fn diff_and_log_resolve_a_project_stores_copy() {
+    let rig = Rig::new("proj-targeted");
+    rig.seed_session();
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let v = one_file(b"# deploy\n");
+    let plane = FakePlane::new(log).with_version("s_deploy", &v);
+    let dir = FakeDirectory::new(vec![catalog_entry("s_deploy", "deploy", &v)], Vec::new());
+    let proj = project_custody("proj-targeted-repo", &rig, &plane, &dir);
+    let ctx = rig.ctx_at(Some(&proj.0));
+
+    // An edit in the IN-REPO placement — the draft `diff` must show.
+    let placed = proj.0.join(".claude/skills/deploy");
+    std::fs::write(placed.join("SKILL.md"), b"# deploy\nrun the canary first\n").unwrap();
+
+    let d = ops::diff(&ctx, "deploy", None, ops::DiffBudget::unlimited()).unwrap();
+    assert!(
+        d.diff.contains("run the canary first"),
+        "the project copy's draft is the diff: {}",
+        d.diff
+    );
+
+    // `log` walks the PROJECT store's git history (the version the sweep applied there).
+    let dirs = |_: &str| -> Box<dyn DirectorySource> { Box::new(dir.clone()) };
+    let sessions = connect(&plane, &dir);
+    let connectors = ops::LogConnectors {
+        directory: &dirs,
+        session: &sessions,
+    };
+    let out = ops::log(&ctx, &connectors, "deploy", ops::RowPage::unlimited()).unwrap();
+    let versions: Vec<&str> = out
+        .events
+        .iter()
+        .filter(|e| e.get("action").and_then(|x| x.as_str()) == Some("version"))
+        .filter_map(|e| e.get("version_id").and_then(|x| x.as_str()))
+        .collect();
+    assert!(
+        versions.contains(&&*topos_core::digest::to_hex(&v.id)),
+        "the applied version is in the project store's log: {:?}",
+        out.events
+    );
+}
+
+/// A targeted `update <name>@<version>` goes back inside the PROJECT store: the checkout's copy
+/// returns to the older bytes, that store's lock records it, and the machine store — which never
+/// held this bundle — stays empty.
+#[test]
+fn a_targeted_go_back_runs_against_the_project_store() {
+    let rig = Rig::new("proj-goback");
+    rig.seed_session();
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let v1 = one_file(b"# deploy v1\n");
+    let v2 = one_file(b"# deploy v2\n");
+    let plane = FakePlane::new(log)
+        .with_version("s_deploy", &v1)
+        .with_version("s_deploy", &v2);
+    let dir = FakeDirectory::new(vec![catalog_entry("s_deploy", "deploy", &v1)], Vec::new());
+    let proj = project_custody("proj-goback-repo", &rig, &plane, &dir);
+    let ctx = rig.ctx_at(Some(&proj.0));
+    let placed = proj.0.join(".claude/skills/deploy");
+    assert_eq!(
+        std::fs::read(placed.join("SKILL.md")).unwrap(),
+        b"# deploy v1\n"
+    );
+
+    // The team moves to v2 (a real pointer move — the next generation); the project store then
+    // holds both versions, which is what a go-back needs.
+    let mut moved = catalog_entry("s_deploy", "deploy", &v2);
+    moved.generation = 2;
+    let dir2 = FakeDirectory::new(vec![moved], Vec::new());
+    let out = sweep(&ctx, &plane, &dir2);
+    assert!(out.warnings.is_empty(), "{:?}", out.warnings);
+    assert_eq!(
+        std::fs::read(placed.join("SKILL.md")).unwrap(),
+        b"# deploy v2\n"
+    );
+
+    // Back to v1, by name — resolved in the project store, applied there. The follow seam is the
+    // PRODUCTION one (built from the delivery cache the sweep just wrote): it is what makes the
+    // re-plan reach for a workspace-scoped placement, so an inert seam would not exercise the
+    // path at all.
+    let cache_follow = ops::CacheFollow::load(&rig.fs, &rig.layout());
+    let ctx = Ctx {
+        follow: &cache_follow,
+        ..rig.ctx_at(Some(&proj.0))
+    };
+    let out = ops::pull(
+        &ctx,
+        ops::PullScope::One {
+            name: "deploy".to_owned(),
+            workspace: None,
+            mode: ops::TargetMode::GoBack(ops::VersionRef::Full(v1.id)),
+        },
+    )
+    .unwrap();
+    assert_eq!(out.data.skills.len(), 1);
+    assert_eq!(out.data.skills[0].action, PullAction::Held);
+    assert_eq!(
+        std::fs::read(placed.join("SKILL.md")).unwrap(),
+        b"# deploy v1\n",
+        "the IN-REPO copy went back"
+    );
+    let playout = crate::sidecar::existing_project_store(&rig.fs, &proj.0).unwrap();
+    let sp = playout.published(&sid("s_deploy"));
+    let lock: topos_types::persisted::Lock =
+        crate::doc::read_doc(&rig.fs, &sp.lock).unwrap().unwrap();
+    assert_eq!(lock.base_commit, topos_core::digest::to_hex(&v1.id));
+    // The bytes stayed IN the checkout: the re-plan is the project's, so nothing was aimed at the
+    // machine's harness dirs (which the project store's containment rail would refuse outright).
+    let map = crate::doc::read_map(&rig.fs, &sp.map).unwrap().unwrap();
+    assert!(
+        map.placements
+            .iter()
+            .all(|p| std::path::Path::new(p).starts_with(&proj.0)),
+        "{:?}",
+        map.placements
+    );
+    assert!(
+        !rig.layout().skill_dir(&sid("s_deploy")).exists(),
+        "the machine store never gained a copy"
+    );
+}

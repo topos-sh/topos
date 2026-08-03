@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "StatusData",
-  "description": "`status` result — the health panel: the binary version, the server + signed-in state, the\nsessions, the auto-update trigger states, and per shown SCOPE what governs it and what needs\nattention. NO skill inventory — that is `list`'s. Computed ENTIRELY from local state (no\nnetwork). **INFERRED** (additive-only).",
+  "description": "`status` result — the health panel: the binary version, the server + signed-in state, the\nsessions, the auto-update trigger states, and per shown SCOPE what governs it and what needs\nattention. NO skill inventory — that is `list`'s. Computed ENTIRELY from local state (no\nnetwork). **The stable shape** (see the section note: it replaced the pre-1.0 item table\noutright); additive-only from here.",
   "type": "object",
   "properties": {
     "machine_summary": {

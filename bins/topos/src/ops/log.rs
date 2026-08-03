@@ -13,8 +13,8 @@ use serde_json::{Value, json};
 use topos_gitstore::Store;
 
 use super::connect::DirectoryConnect;
+use super::parse_hex32;
 use super::reconcile::SessionConnect;
-use super::{parse_hex32, resolve_skill};
 use crate::ctx::Ctx;
 use crate::error::ClientError;
 use crate::resolve::{self, Resolution, ResourceKind};
@@ -60,10 +60,19 @@ pub(crate) fn log(
         )));
     }
 
-    let (id, lock) = resolve_skill(ctx, skill)?;
+    // Resolve across BOTH stores: a bundle a project `topos.toml` delivers keeps its custody (and
+    // its action log) in the checkout's own store, so a `log` run from inside that checkout reads
+    // THAT store — not a same-named machine twin, and not a not-found.
+    let (layout, id, lock) = super::resolve_skill_stored(ctx, skill, None)?;
 
     // ---- the local action log (`log.jsonl`) — non-version events (add / error / …) ----
-    let local_actions: Vec<Value> = logfile::read_events(ctx.fs, &Layout::log_path(&ctx.layout))?
+    // Each store keeps its OWN `log.jsonl` (the layout resolves it under that store's root), and an
+    // apply event is written by the operation running against the store it applied into — so the
+    // OWNING store's log is this copy's history. Deliberately not merged with the machine log: the
+    // same bundle can be held at both scopes under one skill id, and merging would attribute the
+    // other copy's applies to this one. A machine-scope skill resolves to the machine layout here,
+    // so nothing about the machine case changes.
+    let local_actions: Vec<Value> = logfile::read_events(ctx.fs, &Layout::log_path(&layout))?
         .into_iter()
         .filter(|e| e.get("skill_id").and_then(|v| v.as_str()) == Some(id.as_str()))
         .collect();
@@ -72,8 +81,10 @@ pub(crate) fn log(
     // The git commit author is the raw device id (`d_<hex>`); THIS install's own id renders as "you", so a
     // local-only skill never prints a bare `d_…`. A `None` device id (no host identity yet) leaves the raw
     // author — the fallback for a display-less local version.
+    // The device id is a MACHINE fact (one host identity per install), so it is read from the
+    // machine layout however the skill's custody is scoped; the version walk is the owning store's.
     let me_device = identity::read_device_id(ctx.fs, &ctx.layout)?;
-    let store = Store::open(&ctx.layout.published(&id).store)?;
+    let store = Store::open(&layout.published(&id).store)?;
     let local_versions: Vec<(String, Value)> = store
         .log(parse_hex32(&lock.base_commit)?)?
         .into_iter()
