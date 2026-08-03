@@ -7131,6 +7131,10 @@ fn a_project_remove_of_a_machine_delivered_skill_refuses_toward_g() {
     plane.serves(vec![delivered("s_deploy", "deploy", &v)]);
     let dir = FakeDirectory::new(vec![catalog_entry("s_deploy", "deploy", &v)], Vec::new());
     let proj = project("zq-crossscope-feed-proj", "[bundles]\n");
+    // The feed has actually DELIVERED here (the machine sweep records it) — the delivered set is
+    // what makes the name the implicit recipe's claim; a workspace merely publishing a name is
+    // not a demand, and would fall through to the classic not-found instead.
+    sweep(&rig.ctx_at(Some(&rig.work.0)), &plane, &dir);
     let ctx = rig.ctx_at(Some(&proj.0));
     let session_connect = connect(&plane, &dir);
     assert!(
@@ -7840,4 +7844,101 @@ fn an_adopted_source_dir_survives_the_machine_sweeps_and_rebuild() {
     sweep_scoped(&ctx, &plane, &dir, ops::UpdateScope::Machine);
     assert!(src.is_dir(), "the machine retire spared the adopted source");
     assert_eq!(dir_bytes(&src), baseline, "…byte-identical");
+}
+
+/// Item: the demand-guard keys on a ROW claiming the name, not on store/cache provenance. With the
+/// row present the refusal stands VERBATIM; with the row gone the same token is a GHOST and falls
+/// through to the describe-first permanent delete, whose describe says the sweep would retire it
+/// anyway — and whose receipt speaks in the applied tense.
+#[test]
+fn a_ghost_remove_falls_through_and_a_still_claimed_name_keeps_the_refusal() {
+    let rig = Rig::new("zq-ghost");
+    rig.seed_session();
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let v = one_file(b"# deploy\n");
+    let plane = FakePlane::new(log).with_version("s_deploy", &v);
+    plane.serves(vec![delivered("s_deploy", "deploy", &v)]);
+    let dir = FakeDirectory::new(vec![catalog_entry("s_deploy", "deploy", &v)], Vec::new());
+    rig.write_global(&format!("[bundles]\n\"{HOST}/{WS_NAME}/deploy\" = \"*\"\n"));
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    sweep_scoped(&ctx, &plane, &dir, ops::UpdateScope::Machine);
+    let sid = crate::id::SkillId::parse("s_deploy").unwrap();
+    assert!(
+        rig.layout().skill_dir(&sid).exists(),
+        "delivered + recorded"
+    );
+    // The app wires the CACHE-BACKED follow seam (the workspace provenance the guard reads);
+    // the rig's default is inert, which would hide the ghost's provenance entirely.
+    let cf = ops::CacheFollow::load(&rig.fs, &rig.layout());
+    let mut ctx = rig.ctx_at(Some(&rig.work.0));
+    ctx.follow = &cf;
+
+    let named = NamedDirectory(dir.clone());
+    let named_connect = |_s: &Session| ops::SessionTransports {
+        plane: Box::new(plane.clone()),
+        directory: Box::new(named.clone()),
+        contribute: Box::new(NoContribute),
+        governance: Box::new(NoGovernance),
+    };
+    let dir_connect = |_: &str| -> Box<dyn DirectorySource> { Box::new(dir.clone()) };
+    let connectors = ops::RemoveConnectors {
+        session: &named_connect,
+        directory: &dir_connect,
+    };
+
+    // (a) STILL CLAIMED (the row is in the machine file): today's refusal, verbatim.
+    let err = ops::remove(&ctx, &connectors, &["deploy".to_owned()], &[], None, false)
+        .expect_err("a claimed name refuses toward the demand");
+    assert_eq!(
+        crate::render::safe_message(&err),
+        "'deploy' is delivered from a workspace — remove the DEMAND, not the copy: `topos \
+         remove deploy` drops this folder's line for it; `topos remove -g deploy` edits your \
+         machine-wide file (switching it off here). What the workspace assigns you is managed \
+         on the web."
+    );
+
+    // (b) The row leaves (the ghost window: record + cache provenance remain, demand gone): the
+    // false refusal is GONE — the bare run DESCRIBES the permanent delete, note honest.
+    rig.write_global("[bundles]\n");
+    let outcome = ops::remove(&ctx, &connectors, &["deploy".to_owned()], &[], None, false)
+        .expect("the ghost falls through to the classic ladder");
+    let items = match outcome {
+        ops::RemoveOutcome::Described { data, yes_argv } => {
+            assert!(yes_argv.contains(&"--yes".to_owned()));
+            assert!(!data.applied);
+            data.items
+        }
+        other => panic!("a permanent delete describes first: {other:?}"),
+    };
+    assert_eq!(items.len(), 1);
+    assert!(matches!(
+        items[0].kind,
+        topos_types::results::RemoveKind::TrackedLocalPermanent
+    ));
+    let note = items[0].note.as_deref().expect("the ghost explains itself");
+    assert!(
+        note.contains("`topos update` retires it anyway"),
+        "the describe says doing nothing also resolves it: {note}"
+    );
+
+    // (c) `--yes` applies: dirs + record go, and the receipt's note speaks in the applied tense.
+    let outcome = ops::remove(&ctx, &connectors, &["deploy".to_owned()], &[], None, true)
+        .expect("the consented apply");
+    let data = match outcome {
+        ops::RemoveOutcome::Applied(d) => d,
+        other => panic!("--yes applies: {other:?}"),
+    };
+    assert!(data.applied);
+    let note = data.items[0]
+        .note
+        .as_deref()
+        .expect("the receipt discloses");
+    assert!(
+        !note.contains("doing nothing"),
+        "an applied receipt never claims a choice that is already spent: {note}"
+    );
+    assert!(
+        !rig.layout().skill_dir(&sid).exists(),
+        "the record is gone with the copy"
+    );
 }
