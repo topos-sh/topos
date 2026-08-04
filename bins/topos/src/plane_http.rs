@@ -2255,17 +2255,75 @@ impl crate::ops::McpDocSource for UreqMcpSource {
             }
         }
         // The document cap is the SAME one the web tier enforces — a server.json is a page of
-        // text, never a payload, and the stream is cut the moment it goes over.
+        // text, never a payload, and the stream is cut the moment it goes over. The two ways that
+        // read can end badly are OPPOSITE answers: an oversized document is a permanent fact about
+        // this address (retrying fetches the same bytes), while a stream that dies mid-body is the
+        // transport's transient fault, and only the second is worth trying again.
         let limit = u64::try_from(crate::mcp_validate::MAX_SERVER_JSON_BYTES).unwrap_or(u64::MAX);
-        read_body_reported_limited(resp, &*self.progress, 0, true, limit).map_err(|_| {
-            ClientError::RemoteFetch {
+        read_server_json(resp, &*self.progress, limit).map_err(|fault| match fault {
+            ServerJsonFault::TooLarge => ClientError::RemoteFetch {
                 msg: format!(
-                    "{url} — the document was cut short, or is too large to be a server.json"
+                    "{url} — too large to be a server.json (the cap is {} KB)",
+                    limit / 1024
                 ),
+                fault: FetchFault::Gone,
+            },
+            ServerJsonFault::CutShort => ClientError::RemoteFetch {
+                msg: format!("{url} — the download was cut short"),
                 fault: FetchFault::unavailable(),
-            }
+            },
         })
     }
+}
+
+/// The two ways reading a fetched server document ends badly — kept apart because they are
+/// opposite answers (see the caller).
+#[derive(Debug, PartialEq, Eq)]
+enum ServerJsonFault {
+    /// The body went past the document cap.
+    TooLarge,
+    /// The stream died mid-body.
+    CutShort,
+}
+
+/// Read a fetched server document under the gate's own byte cap, reporting bytes as they arrive
+/// like every other body read.
+///
+/// The cap is enforced HERE, in the loop, rather than by the transport's limiter: that limiter
+/// answers ONE error for an over-cap body and a broken stream alike, and it refuses a body that
+/// merely REACHES the cap — a document of exactly [`crate::mcp_validate::MAX_SERVER_JSON_BYTES`]
+/// bytes, which the gate itself accepts. Nothing past the cap is ever buffered: the read returns
+/// at the first byte over.
+fn read_server_json(
+    resp: ureq::http::Response<ureq::Body>,
+    progress: &dyn ProgressSink,
+    limit: u64,
+) -> Result<Vec<u8>, ServerJsonFault> {
+    use std::io::Read;
+
+    let body = resp.into_body();
+    let total = body.content_length();
+    let mut reader = body.into_with_config().limit(u64::MAX).reader();
+    let mut out: Vec<u8> = Vec::new();
+    let mut buf = vec![0u8; STREAM_CHUNK_BYTES];
+    loop {
+        match reader.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => {
+                out.extend_from_slice(&buf[..n]);
+                let done = u64::try_from(out.len()).unwrap_or(u64::MAX);
+                if done > limit {
+                    return Err(ServerJsonFault::TooLarge);
+                }
+                progress.bytes(done, total);
+            }
+            // An interrupted read is retried, exactly as the shared body reader does — a signal
+            // during a download is not a transport fault.
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(_) => return Err(ServerJsonFault::CutShort),
+        }
+    }
+    Ok(out)
 }
 
 /// The host part of an `https://…` URL, for the transport messages.
@@ -2461,6 +2519,35 @@ mod tests {
         let ok = read_body_reported_limited(measured_response(vec![7u8; 511]), &rec, 0, true, 512)
             .expect("a body under the cap reads");
         assert_eq!(ok.len(), 511);
+    }
+
+    /// A server document that goes over the cap is a PERMANENT answer about that address, said in
+    /// its own words — never folded in with a stream that died, which is worth retrying. And a
+    /// document sitting exactly ON the cap is one the gate accepts, so the fetch must hand it over.
+    #[test]
+    fn an_oversized_server_document_is_its_own_answer() {
+        let rec = Recorder::default();
+        assert_eq!(
+            read_server_json(measured_response(vec![b'x'; 4096]), &rec, 512),
+            Err(ServerJsonFault::TooLarge)
+        );
+        // Nothing past the cap is buffered: the read returns at the first byte over.
+        assert!(
+            rec.reports.borrow().iter().all(|(done, _)| *done <= 512),
+            "{:?}",
+            rec.reports.borrow()
+        );
+        let rec = Recorder::default();
+        let ok = read_server_json(measured_response(vec![b'x'; 512]), &rec, 512)
+            .expect("a document exactly at the cap is the one the gate accepts");
+        assert_eq!(ok.len(), 512);
+        let rec = Recorder::default();
+        assert_eq!(
+            read_server_json(measured_response(vec![b'x'; 511]), &rec, 512)
+                .expect("under the cap reads")
+                .len(),
+            511
+        );
     }
 
     #[test]
