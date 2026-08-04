@@ -17,7 +17,7 @@ import { cn } from "@/lib/utils";
  * read as a failed image. It sits a step quieter (`faint` against the marks' `dim`) so the eye
  * skips it on the way to a brand it recognizes — which is exactly the behaviour a picker wants.
  *
- * ONE SIZE by default (`size-5`) for both arms: the grid's rhythm comes from every row starting at
+ * ONE SIZE by default (`size-4`) for both arms: the grid's rhythm comes from every row starting at
  * the same x, and a fallback that measured differently would break the column before it said
  * anything useful.
  */

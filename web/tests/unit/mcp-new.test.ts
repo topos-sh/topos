@@ -311,6 +311,45 @@ describe("the publish", () => {
     expect(vault.published).toEqual([]);
   });
 
+  it("hands the staged document back with the refusal, so a retry keeps the bytes", async () => {
+    const versionId = versionIdFor("s_shoals");
+    await seedBundle(db, wsId, "s_shoals", "shoals", { kind: "mcp", versionId });
+    vault.seed(wsId, "s_shoals", versionId, [
+      {
+        path: "server.json",
+        content: JSON.stringify({ ...WEATHER, name: "io.github.acme/shoals" }, null, 2),
+      },
+    ]);
+    const document = `${JSON.stringify({ ...WEATHER, name: "io.github.acme/shoals" }, null, 2)}\n`;
+    const { status, body } = await post({
+      intent: "publish",
+      document,
+      origin: "https://example.test/server.json",
+      name: "shoals-again",
+      channel: "",
+    });
+    expect(status).toBe(400);
+    expect(body.code).toBe("MCP_NAME_TAKEN");
+    // The card can render again from this alone — same bytes, same provenance line, and the
+    // name the person had typed over the suggestion.
+    const echoed = body.preview as { document: string; origin: string; suggestedName: string };
+    expect(echoed.document).toBe(document);
+    expect(echoed.origin).toBe("https://example.test/server.json");
+    expect(echoed.suggestedName).toBe("shoals-again");
+  });
+
+  it("hands nothing back when the posted bytes no longer preview at all", async () => {
+    const { status, body } = await post({
+      intent: "publish",
+      document: JSON.stringify({ ...WEATHER, remotes: [{ type: "sse", url: "https://a.test/s" }] }),
+      name: "unpreviewable",
+      channel: "",
+    });
+    expect(status).toBe(400);
+    expect(body.code).toBe("MCP_NO_STREAMABLE_REMOTE");
+    expect(body.preview).toBeUndefined();
+  });
+
   it("refuses an empty payload rather than publishing nothing", async () => {
     const { status } = await post({ intent: "publish", document: "", name: "x", channel: "" });
     expect(status).toBe(400);

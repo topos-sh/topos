@@ -17,8 +17,10 @@ type ActiveTab = "skills" | "history" | "settings";
 export function ChannelTabs({ basePath, active }: { basePath: string; active: ActiveTab }) {
   return (
     <nav aria-label="Channel sections" className="flex border-line-soft border-b">
+      {/* The tab says what the tab HOLDS: a channel curates both kinds, and its own heading has
+          said "Skills and MCP servers" since the MCP kind landed. */}
       <Tab to={basePath} isActive={active === "skills"}>
-        Skills
+        Skills and MCP servers
       </Tab>
       <Tab to={`${basePath}/history`} isActive={active === "history"}>
         History

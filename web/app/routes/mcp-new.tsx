@@ -118,6 +118,13 @@ interface Refusal {
   code?: string;
   /** The picked row a `pick` refusal answers about. */
   server?: string;
+  /**
+   * THE STAGED DOCUMENT, HANDED BACK. A refused publish on the custom arm must not cost the
+   * person the bytes they staged: the preview card renders from this echo, so the retry is one
+   * click and not a re-paste. Absent when the posted bytes no longer preview at all (a doctored
+   * form), where there is nothing honest to render.
+   */
+  preview?: PreviewData;
 }
 
 function refusal(form: Refusal["form"], error: string, code?: string, status = 400) {
@@ -203,11 +210,23 @@ export async function action({ request, params }: ActionFunctionArgs) {
     const picked = String(formData.get("server") ?? "").trim();
     const name = String(formData.get("name") ?? "").trim();
     const channel = String(formData.get("channel") ?? "").trim();
+    // The custom arm's staged bytes, echoed back with whatever this arm refuses so the card
+    // stays on the page and the retry costs nothing. It is filled the moment the document is in
+    // hand — a refusal before that has no bytes to hand back, which is honest.
+    let staged: PreviewData | undefined;
     // A refusal from this arm goes back where the act was: into the dialog for a picked row,
     // onto the page for the custom arm's preview card.
     const refuseHere = (message: string, code?: string, status = 400) =>
       picked.length === 0
-        ? refusal("publish", message, code, status)
+        ? data<Refusal>(
+            {
+              form: "publish",
+              error: message,
+              ...(code === undefined ? {} : { code }),
+              ...(staged === undefined ? {} : { preview: staged }),
+            },
+            { status },
+          )
         : data<Refusal>(
             {
               form: "pick",
@@ -236,6 +255,18 @@ export async function action({ request, params }: ActionFunctionArgs) {
       // multipart encoding, which normalizes line endings, so trusting the bytes back would make
       // the published version id depend on the browser rather than on the document.
       document = canonicalize(posted);
+      const restaged = validateServerJson(document);
+      if (restaged.ok) {
+        staged = {
+          form: "preview",
+          // The provenance line the card already showed, carried back with the bytes; a client
+          // may say anything here, so it is bounded and only ever rendered to its own author.
+          origin: String(formData.get("origin") ?? "").slice(0, 300),
+          summary: restaged.summary,
+          suggestedName: name.length > 0 ? name : suggestedNameFor(restaged.summary.name),
+          document,
+        };
+      }
     }
     const files = [
       {
@@ -335,11 +366,13 @@ export default function McpNew() {
   // The row whose dialog is open — plain local state, set by a click and cleared by Cancel or
   // Escape. It is the only thing choosing a server changes until the publish button is pressed.
   const [picked, setPicked] = useState<CuratedMcpRow | null>(null);
+  const error = actionData !== undefined && "error" in actionData ? actionData : undefined;
+  // The card renders from a fresh preview OR from the one a refused publish handed back — the
+  // staged bytes survive the refusal, so a retry is a click rather than a re-paste.
   const preview =
     actionData !== undefined && actionData.form === "preview" && !("error" in actionData)
       ? actionData
-      : undefined;
-  const error = actionData !== undefined && "error" in actionData ? actionData : undefined;
+      : error?.preview;
   // A `pick` refusal is the dialog's to show; everything else belongs to the page.
   const pageError = error !== undefined && error.form !== "pick" ? error : undefined;
   return (
@@ -519,7 +552,10 @@ function AddServerDialog({
                 the first thing on the block rather than a name to re-read. */}
             <McpMark logo={server.logo} className="size-4" />
             <span className="font-mono text-[13px] text-ink">{server.name}</span>
-            <span className="text-faint text-xs">{server.version}</span>
+            {/* LABELLED, because the number is this document's and not the vendor's release: the
+                built-in list holds a minimal document naming one endpoint, and a bare "1.0.0"
+                beside a product name reads as a claim about the product. */}
+            <span className="text-faint text-xs">document version {server.version}</span>
             <Chip tone="neutral">{server.transport}</Chip>
             <AuthChip auth={server.auth} />
           </div>
@@ -658,7 +694,16 @@ function CustomSource({ busy, flying }: { busy: boolean; flying: string | null }
   );
 }
 
+/**
+ * ONE SOURCE, ONE FIELD. The select decides which field the action reads, so showing all three
+ * at once invites filling the wrong one and getting "Pick a source and fill in the matching
+ * field." back for a form that looked filled in. The chosen source is the only field on screen,
+ * which makes the select's job visible instead of implied.
+ */
 function SourceForm({ busy, flying }: { busy: boolean; flying: string | null }) {
+  const [source, setSource] = useState<McpSourceKind>("registry");
+  const fieldClasses =
+    "block h-11 w-full rounded-md border border-line px-3 font-mono text-[13px] text-ink placeholder:text-faint focus:border-accent focus:outline-none";
   return (
     <Form method="post" className="mt-4 max-w-2xl space-y-4">
       <input type="hidden" name="intent" value="preview" />
@@ -667,7 +712,8 @@ function SourceForm({ busy, flying }: { busy: boolean; flying: string | null }) 
           <span className="mb-1 block font-medium text-dim text-sm">Where it comes from</span>
           <select
             name="source"
-            defaultValue="registry"
+            value={source}
+            onChange={(event) => setSource(event.target.value as McpSourceKind)}
             className="block h-11 w-full rounded-md border border-line bg-panel px-3 text-ink text-sm focus:border-accent focus:outline-none"
           >
             <option value="registry">The MCP registry, by name</option>
@@ -675,38 +721,44 @@ function SourceForm({ busy, flying }: { busy: boolean; flying: string | null }) 
             <option value="paste">Paste the server.json</option>
           </select>
         </label>
-        <label className="block">
-          <span className="mb-1 block font-medium text-dim text-sm">Registry name</span>
-          <input
-            type="text"
-            name="registry_name"
-            placeholder="io.github.owner/server"
-            className="block h-11 w-full rounded-md border border-line px-3 font-mono text-[13px] text-ink placeholder:text-faint focus:border-accent focus:outline-none"
-          />
-        </label>
-        <label className="block">
-          <span className="mb-1 block font-medium text-dim text-sm">URL</span>
-          <input
-            type="text"
-            name="url"
-            placeholder="https://example.com/.well-known/mcp/server.json"
-            className="block h-11 w-full rounded-md border border-line px-3 font-mono text-[13px] text-ink placeholder:text-faint focus:border-accent focus:outline-none"
-          />
-        </label>
-        <label className="block">
-          <span className="mb-1 block font-medium text-dim text-sm">server.json</span>
-          <textarea
-            name="document"
-            rows={8}
-            data-testid="mcp-paste"
-            placeholder={'{\n  "name": "io.github.owner/server",\n  …\n}'}
-            className="block w-full rounded-md border border-line px-3 py-2 font-mono text-[12px] text-ink placeholder:text-faint focus:border-accent focus:outline-none"
-          />
-          <span className="mt-1 block text-faint text-xs">
-            The one path that makes no outbound request — use it for a server inside your own
-            network.
-          </span>
-        </label>
+        {source === "registry" && (
+          <label className="block">
+            <span className="mb-1 block font-medium text-dim text-sm">Registry name</span>
+            <input
+              type="text"
+              name="registry_name"
+              placeholder="io.github.owner/server"
+              className={fieldClasses}
+            />
+          </label>
+        )}
+        {source === "url" && (
+          <label className="block">
+            <span className="mb-1 block font-medium text-dim text-sm">URL</span>
+            <input
+              type="text"
+              name="url"
+              placeholder="https://example.com/.well-known/mcp/server.json"
+              className={fieldClasses}
+            />
+          </label>
+        )}
+        {source === "paste" && (
+          <label className="block">
+            <span className="mb-1 block font-medium text-dim text-sm">server.json</span>
+            <textarea
+              name="document"
+              rows={8}
+              data-testid="mcp-paste"
+              placeholder={'{\n  "name": "io.github.owner/server",\n  …\n}'}
+              className="block w-full rounded-md border border-line px-3 py-2 font-mono text-[12px] text-ink placeholder:text-faint focus:border-accent focus:outline-none"
+            />
+            <span className="mt-1 block text-faint text-xs">
+              The one path that makes no outbound request — use it for a server inside your own
+              network.
+            </span>
+          </label>
+        )}
         <button type="submit" className={`${buttonClasses("primary")} min-h-11`}>
           {flying === "preview" ? "Reading…" : "Preview"}
         </button>
@@ -784,6 +836,9 @@ function PreviewCard({ preview }: { preview: PreviewData }) {
         <Form method="post" className="space-y-3">
           <input type="hidden" name="intent" value="publish" />
           <input type="hidden" name="document" value={preview.document} />
+          {/* Carried so a refused publish can hand this card back whole, provenance line and
+              all, instead of costing the person the bytes they staged. */}
+          <input type="hidden" name="origin" value={preview.origin} />
           <BusyFields busy={busy} className="space-y-3">
             <div className="flex flex-wrap items-end gap-2">
               <label className="block min-w-48 flex-1">

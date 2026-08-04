@@ -182,7 +182,7 @@ function DashboardPage({
               Add from GitHub
             </Link>
             <Link to={wsPath("mcp/new")} className={buttonClasses("quiet")}>
-              Add MCP server
+              Add an MCP server
             </Link>
             <Link to={wsPath("settings")} className={buttonClasses("quiet")}>
               Settings
@@ -224,7 +224,9 @@ function DashboardPage({
             <SectionHeading>
               <span id="mcp-index-heading">MCP servers</span>
             </SectionHeading>
-            <span className="text-faint text-xs">Every agent on the team is pointed at these.</span>
+            <span className="text-faint text-xs">
+              Delivered as a tool endpoint in each member&apos;s agent configs.
+            </span>
           </div>
           <Card className="overflow-hidden">
             <ul>

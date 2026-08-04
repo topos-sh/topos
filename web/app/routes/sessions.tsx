@@ -553,8 +553,8 @@ function SkillStates({ skills, declined }: { skills: SessionSkillState[]; declin
  * The state word is the CLIENT'S, an open vocabulary kept verbatim: the four this tier knows
  * get a tone, and anything else renders as the plain neutral chip rather than being dropped —
  * a newer client must be able to say something this build has not heard of yet. The `note` is
- * the client's own sentence, carried as a native tooltip: it is untrusted text about one
- * machine, not page copy.
+ * the client's own sentence about one machine — untrusted text, never page copy — and it is
+ * reachable the way every other explainer here is: a focusable chip, hover or keyboard.
  */
 function HarnessChips({ harnesses }: { harnesses: SessionSkillState["harnesses"] }) {
   if (harnesses === null || harnesses.length === 0) {
@@ -562,13 +562,31 @@ function HarnessChips({ harnesses }: { harnesses: SessionSkillState["harnesses"]
   }
   return (
     <span data-testid="sessions-harness-chips" className="flex flex-wrap items-center gap-1.5">
-      {harnesses.map((harness) => (
-        <span key={harness.slug} title={harness.note}>
-          <Chip tone={harnessTone(harness.state)}>
-            {harness.slug} {harness.state}
-          </Chip>
-        </span>
-      ))}
+      {harnesses.map((harness) =>
+        harness.note === undefined || harness.note === "" ? (
+          <span key={harness.slug}>
+            <Chip tone={harnessTone(harness.state)}>
+              {harness.slug} {harness.state}
+            </Chip>
+          </span>
+        ) : (
+          // A note rides the same affordance every explainer on this page rides: a real
+          // focusable trigger, opening on hover OR focus. A bare `title` is mouse-only — a
+          // keyboard reader never reaches it and a screen reader is not obliged to announce it.
+          <Tooltip key={harness.slug}>
+            <TooltipTrigger
+              type="button"
+              aria-label={`${harness.slug} ${harness.state} — ${harness.note}`}
+              className="cursor-help rounded-full focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-2"
+            >
+              <Chip tone={harnessTone(harness.state)}>
+                {harness.slug} {harness.state}
+              </Chip>
+            </TooltipTrigger>
+            <TooltipContent>{harness.note}</TooltipContent>
+          </Tooltip>
+        ),
+      )}
     </span>
   );
 }

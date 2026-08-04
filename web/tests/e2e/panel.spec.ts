@@ -23,7 +23,14 @@ test("the panel carries Skills + MCP servers + Channels; the publish dialog hand
   // is the SKILLS way in and offers nothing else; adding a server is its own page.
   const publishNew = page.getByRole("button", { name: "Publish a skill from your agent" });
   await expect(publishNew).toBeVisible();
-  await expect(page.getByRole("link", { name: "Add an MCP server" })).toBeVisible();
+  // Scoped to the rail's own MCP group: the dashboard offers the same act under the same name,
+  // which is deliberate — one act, one name.
+  await expect(
+    page
+      .locator('[data-sidebar="group"]', { hasText: "MCP servers" })
+      .first()
+      .getByRole("link", { name: "Add an MCP server" }),
+  ).toBeVisible();
   await expect(page.getByRole("link", { name: "New channel" })).toBeVisible();
 
   // The Channels list surfaces the implicit `everyone` channel (only the panel lists channels on `/`).

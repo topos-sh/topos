@@ -67,7 +67,9 @@ test("choosing a server opens its dialog with no request, and adding it publishe
   page,
 }) => {
   await gotoSettled(page, "/");
-  await page.getByRole("link", { name: "Add MCP server" }).click();
+  // Scoped to the content pane: the rail's `+` carries the same name, which is the point —
+  // one act, one name, wherever it is offered.
+  await page.getByRole("main").getByRole("link", { name: "Add an MCP server" }).click();
   await expect(page.getByRole("heading", { name: "Add an MCP server" })).toBeVisible();
 
   // The page RESTS on the list: no typing needed to see what is on offer.
@@ -158,7 +160,9 @@ test("paste a server.json, preview what it promises, publish it into the catalog
 }) => {
   // The dashboard is where the affordance lives — reached by clicking, not by typing a URL.
   await gotoSettled(page, "/");
-  await page.getByRole("link", { name: "Add MCP server" }).click();
+  // Scoped to the content pane: the rail's `+` carries the same name, which is the point —
+  // one act, one name, wherever it is offered.
+  await page.getByRole("main").getByRole("link", { name: "Add an MCP server" }).click();
   await expect(page.getByRole("heading", { name: "Add an MCP server" })).toBeVisible();
 
   // The typed sources sit behind the disclosure; the picker is what the page opens on.
@@ -219,7 +223,7 @@ test("an MCP server has its own section, its own + , and its own address", async
   // The Skills `+` opens the publish dialog (skills only); the MCP `+` is a link to the
   // add-a-server page, at its own Rails-shaped address.
   await expect(page.getByRole("button", { name: "Publish a skill from your agent" })).toBeVisible();
-  await page.getByRole("link", { name: "Add an MCP server" }).click();
+  await servers.getByRole("link", { name: "Add an MCP server" }).click();
   await page.waitForURL("**/mcp/new");
   await expect(page.getByRole("heading", { name: "Add an MCP server" })).toBeVisible();
 
@@ -249,17 +253,18 @@ test("a member publishing into a curated channel is told the placement was withh
   try {
     await signIn(page, MEMBER);
     await gotoSettled(page, "/mcp/new");
-
-    // On the way IN: the destination says what it will do with a member's placement.
-    await expect(page.getByLabel("Into")).toContainText(
-      "Everyone (the default channel) — curated; placement needs a reviewer",
-    );
-
     await page.getByText("Custom server", { exact: true }).click();
     await page.getByLabel("Where it comes from").selectOption("paste");
     await page.getByTestId("mcp-paste").fill(DOCUMENT);
     await page.getByRole("button", { name: "Preview" }).click();
     await expect(page.getByTestId("mcp-preview")).toBeVisible();
+
+    // On the way IN: the destination says what it will do with a member's placement, beside the
+    // button that would do it.
+    await expect(page.getByLabel("Into")).toContainText(
+      "Everyone (the default channel) — curated; placement needs a reviewer",
+    );
+
     await page.getByTestId("mcp-publish").click();
 
     // On the way OUT: the server's own page carries the one line that says what did not happen.
