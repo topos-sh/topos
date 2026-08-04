@@ -183,8 +183,8 @@ describe("the report door shape-checks the block — before the credential resol
       "malformed report entry: harness state",
     ],
     [
-      "an over-long note",
-      [{ slug: "claude-code", state: "drifted", note: "x".repeat(201) }],
+      "a note that is not text at all",
+      [{ slug: "claude-code", state: "drifted", note: 12 }],
       "malformed report entry: harness note",
     ],
   ])("%s is a 400 naming the field", async (_label, harnesses, message) => {
@@ -196,6 +196,63 @@ describe("the report door shape-checks the block — before the credential resol
     // gets its uniform miss: proof the parse let the block through.
     const { status } = await put([{ slug: "claude-code", state: "current" }]);
     expect(status).not.toBe(400);
+  });
+
+  /**
+   * A NOTE IS DISPLAY TEXT, not evidence — so its LENGTH is the one thing the door trims rather
+   * than refuses. A report is the session's COMPLETE per-workspace snapshot, and a note is
+   * whatever the harness had to say: one deep path plus an OS error clears 200 characters, the
+   * client cannot know it did, and the condition persists — so refusing the PUT would keep the
+   * machine out of the fleet picture for exactly as long as something is wrong with it. The
+   * snapshot lands; the note says as much of its story as it fits.
+   */
+  it("an over-long note is stored trimmed — and the snapshot LANDS", async () => {
+    const route = await import("@/routes/api.v1.report");
+    const note = `${"x".repeat(260)}…`;
+    const request = new Request(`http://x/api/v1/workspaces/${wsId}/report`, {
+      method: "PUT",
+      // The seeded session's credential — this one goes all the way to the row.
+      headers: { "content-type": "application/json", authorization: "Bearer cs_box" },
+      body: JSON.stringify({
+        schema_version: 1,
+        applied: [
+          {
+            skill_id: "s_srv",
+            version_id: VERSION,
+            harnesses: [{ slug: "cursor", state: "drifted", note }],
+          },
+        ],
+      }),
+    });
+    const res = await route.action({ request, params: { ws: wsId } } as never);
+    expect(res.status).toBe(204);
+    expect(await storedHarnessState("s_srv")).toEqual([
+      { slug: "cursor", state: "drifted", note: "x".repeat(200) },
+    ]);
+  });
+
+  it("trims on a code-point boundary — a lone surrogate would not survive the column", async () => {
+    // The cap counts UTF-16 code units, so a cut can land inside a surrogate pair; storing half
+    // of one is not representable in jsonb, which would turn a long note into a 500.
+    const note = `${"y".repeat(199)}😀 tail`;
+    const route = await import("@/routes/api.v1.report");
+    const request = new Request(`http://x/api/v1/workspaces/${wsId}/report`, {
+      method: "PUT",
+      headers: { "content-type": "application/json", authorization: "Bearer cs_box" },
+      body: JSON.stringify({
+        schema_version: 1,
+        applied: [
+          {
+            skill_id: "s_srv",
+            version_id: VERSION,
+            harnesses: [{ slug: "cursor", state: "drifted", note }],
+          },
+        ],
+      }),
+    });
+    expect((await route.action({ request, params: { ws: wsId } } as never)).status).toBe(204);
+    const stored = (await storedHarnessState("s_srv")) as { note: string }[];
+    expect(stored[0]?.note).toBe("y".repeat(199));
   });
 
   it("the field is OPTIONAL — a bare row still passes the door", async () => {

@@ -24,10 +24,30 @@ const MAX_HARNESSES = 12;
 const MAX_NOTE = 200;
 
 /**
+ * A note is DISPLAY TEXT, so an over-long one is trimmed rather than refused. The cut is taken on
+ * a code-point boundary: slicing between a surrogate pair would leave a lone code unit, which is
+ * not representable in jsonb and would turn a long note into a 500 further down.
+ */
+function cappedNote(note: string): string {
+  if (note.length <= MAX_NOTE) {
+    return note;
+  }
+  const cut = note.slice(0, MAX_NOTE);
+  const last = cut.charCodeAt(MAX_NOTE - 1);
+  return last >= 0xd800 && last <= 0xdbff ? cut.slice(0, -1) : cut;
+}
+
+/**
  * The optional per-harness block a config-placed ('mcp') bundle's row carries. Absent or empty
  * ⇒ null (a file bundle's one applied version says everything). This route refuses a malformed
- * body rather than trimming it: the report is the fleet's evidence, so a garbled row must be
+ * SHAPE rather than trimming it: the report is the fleet's evidence, so a garbled row must be
  * fixed at the client, not silently half-stored.
+ *
+ * A note's LENGTH is the one exception, and deliberately so. A report is the session's whole
+ * per-workspace snapshot, so refusing the PUT over one long note — a deep path plus an OS error
+ * is all it takes, and the client cannot know it was too long — would knock the machine out of
+ * the fleet picture entirely, for as long as the condition it is reporting persists. The note is
+ * capped instead: the snapshot lands, and the note says as much of its story as it fits.
  */
 function parseHarnesses(raw: unknown): ReportedHarnessState[] | null | string {
   if (raw === undefined || raw === null) {
@@ -48,15 +68,13 @@ function parseHarnesses(raw: unknown): ReportedHarnessState[] | null | string {
     if (typeof h.state !== "string" || !HARNESS_STATE.test(h.state)) {
       return "malformed report entry: harness state";
     }
-    if (h.note !== undefined && h.note !== null) {
-      if (typeof h.note !== "string" || h.note.length > MAX_NOTE) {
-        return "malformed report entry: harness note";
-      }
+    if (h.note !== undefined && h.note !== null && typeof h.note !== "string") {
+      return "malformed report entry: harness note";
     }
     states.push({
       slug: h.slug,
       state: h.state,
-      ...(typeof h.note === "string" ? { note: h.note } : {}),
+      ...(typeof h.note === "string" ? { note: cappedNote(h.note) } : {}),
     });
   }
   return states.length === 0 ? null : states;
