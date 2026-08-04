@@ -895,9 +895,9 @@ pub struct WireProtocolCard {
     pub card: String,
     /// The API base URL the client re-roots onto (the origin serving `/v1`).
     pub api_base_url: String,
-    /// The serving build's release version (the bare semver core, no leading `v`). Absent from a
-    /// producer that predates the field — a client reads such a card as "nothing declared" and
-    /// proceeds.
+    /// The serving build's release version (no leading `v`; a candidate build's `-rc.N` suffix
+    /// rides along — a consumer orders on the semver core). Absent from a producer that predates
+    /// the field — a client reads such a card as "nothing declared" and proceeds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub server_version: Option<String>,
     /// The oldest CLI release this server still speaks to — the last wire-breaking release. Absent

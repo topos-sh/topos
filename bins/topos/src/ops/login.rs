@@ -390,6 +390,14 @@ fn connect_over_lane(
     else {
         return Ok(None);
     };
+    // The lane-side connect COMMITS to this server exactly as a fresh flow does, so the same
+    // floor holds at the same moment: the card is read first, and a server below the oldest wire
+    // this build speaks refuses BEFORE a session is minted. (Today a below-floor server predates
+    // this route and would answer the uniform 404 — but the floor moves, and the day it rises
+    // past a server that DOES serve the route, this check is what keeps connect from slipping a
+    // newer wire past it.)
+    let card = (connectors.enroll)(&target.origin).fetch_card(&target.origin)?;
+    crate::compat::ensure_server_supported(&card)?;
     let minted = match (connectors.lane)(&actor.base_url, &actor.credential)
         .login_connect(&target.preselect, &machine_name())
     {
@@ -1456,6 +1464,48 @@ mod tests {
             let ops = all.find_on_host("topos.example.com", "ops").unwrap();
             assert_eq!(ops.credential, "sess-ops");
             assert_eq!(ops.session_id, "sn_ops");
+        });
+    }
+
+    #[test]
+    fn the_lane_side_connect_holds_the_same_floor_as_a_fresh_flow() {
+        let home = scratch("lane-floor");
+        with_ctx(&home, |ctx| {
+            seed_session(ctx, "w_eng", "eng");
+            // A live session on the host would let connect mint browser-free — but the card now
+            // declares a release below this build's floor, and connect commits to the server
+            // exactly as a fresh flow does, so it refuses at the same moment: before dialing.
+            let rig = Rig::new(Vec::new()).declaring("0.1.9");
+            *rig.lane_answer.borrow_mut() = Some(Ok(ConnectedSession {
+                credential: "sess-ops".to_owned(),
+                session_id: "sn_ops".to_owned(),
+                workspace: EnrolledWorkspace {
+                    workspace_id: "w_ops".to_owned(),
+                    name: "ops".to_owned(),
+                    display_name: "Operations".to_owned(),
+                },
+                link_status: LinkStatus::Active,
+            }));
+            rig.with(|connectors| {
+                let err = login(ctx, connectors, Some("topos.example.com/ops"), false).unwrap_err();
+                assert!(
+                    matches!(&err, ClientError::ServerTooOld { server_version } if server_version == "0.1.9"),
+                    "expected ServerTooOld, got {err:?}"
+                );
+                assert!(
+                    rig.lane_calls.borrow().is_empty(),
+                    "the lane never dialed an unspeakable server"
+                );
+                assert!(rig.enroll.starts.borrow().is_empty(), "no flow was started");
+            });
+            assert_eq!(
+                sessions::read_sessions(ctx.fs, &ctx.layout)
+                    .unwrap()
+                    .sessions
+                    .len(),
+                1,
+                "the floor mints nothing"
+            );
         });
     }
 

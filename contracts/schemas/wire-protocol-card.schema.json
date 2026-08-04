@@ -27,7 +27,7 @@
       "minimum": 0
     },
     "server_version": {
-      "description": "The serving build's release version (the bare semver core, no leading `v`). Absent from a\nproducer that predates the field — a client reads such a card as \"nothing declared\" and\nproceeds.",
+      "description": "The serving build's release version (no leading `v`; a candidate build's `-rc.N` suffix\nrides along — a consumer orders on the semver core). Absent from a producer that predates\nthe field — a client reads such a card as \"nothing declared\" and proceeds.",
       "type": [
         "string",
         "null"

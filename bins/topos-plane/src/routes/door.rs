@@ -35,6 +35,7 @@ use topos_types::{JsonEnvelope, WireCurrentRecord};
     responses(
         (status = 200, description = "The caller's own membership (identity + address + role + inviter).", body = WireMe),
         (status = 404, description = "Missing/blank credential, unknown/revoked one, or non-member (indistinguishable).", body = JsonEnvelope),
+        (status = 426, description = "The caller's topos release is below this server's floor — the envelope names the floor and carries the `self-update` next action.", body = JsonEnvelope),
         (status = 429, description = "Rate limited (Retry-After header).", body = JsonEnvelope),
         (status = 500, description = "Integrity / internal store fault.", body = JsonEnvelope),
     ),
@@ -52,6 +53,7 @@ pub(crate) fn get_me() {}
     responses(
         (status = 200, description = "The workspace channels (the structural `everyone` included), with the caller's membership marked.", body = WireChannelIndex),
         (status = 404, description = "Missing/blank credential, unknown/revoked one, or non-member (indistinguishable).", body = JsonEnvelope),
+        (status = 426, description = "The caller's topos release is below this server's floor — the envelope names the floor and carries the `self-update` next action.", body = JsonEnvelope),
         (status = 429, description = "Rate limited (Retry-After header).", body = JsonEnvelope),
         (status = 500, description = "Integrity / internal store fault.", body = JsonEnvelope),
     ),
@@ -70,6 +72,7 @@ pub(crate) fn get_channels() {}
     responses(
         (status = 200, description = "The skill's audience (entitled members + their live sessions).", body = WireReach),
         (status = 404, description = "Missing/blank credential, non-member, or unknown skill (indistinguishable).", body = JsonEnvelope),
+        (status = 426, description = "The caller's topos release is below this server's floor — the envelope names the floor and carries the `self-update` next action.", body = JsonEnvelope),
         (status = 429, description = "Rate limited (Retry-After header).", body = JsonEnvelope),
         (status = 500, description = "Integrity / internal store fault.", body = JsonEnvelope),
     ),
@@ -89,6 +92,7 @@ pub(crate) fn get_reach() {}
     responses(
         (status = 200, description = "The curation outcome (placed / created, or a 200 DENIED CURATED_ROLE_REQUIRED / BAD_NAME / SKILL_NOT_ACTIVE).", body = JsonEnvelope),
         (status = 404, description = "Missing/blank credential, unknown/revoked one, or non-member (indistinguishable).", body = JsonEnvelope),
+        (status = 426, description = "The caller's topos release is below this server's floor — the envelope names the floor and carries the `self-update` next action.", body = JsonEnvelope),
         (status = 429, description = "Rate limited (Retry-After header).", body = JsonEnvelope),
         (status = 500, description = "Integrity / internal store fault.", body = JsonEnvelope),
     ),
@@ -108,6 +112,7 @@ pub(crate) fn channel_place() {}
     responses(
         (status = 200, description = "The curation outcome (removed / not_placed, or a 200 DENIED CURATED_ROLE_REQUIRED).", body = JsonEnvelope),
         (status = 404, description = "Missing/blank credential, unknown/revoked one, or non-member (indistinguishable).", body = JsonEnvelope),
+        (status = 426, description = "The caller's topos release is below this server's floor — the envelope names the floor and carries the `self-update` next action.", body = JsonEnvelope),
         (status = 429, description = "Rate limited (Retry-After header).", body = JsonEnvelope),
         (status = 500, description = "Integrity / internal store fault.", body = JsonEnvelope),
     ),
@@ -128,6 +133,7 @@ pub(crate) fn channel_unplace() {}
         (status = 200, description = "The protect outcome (set, or a 200 DENIED REVIEWER_ROLE_REQUIRED / OWNER_ROLE_REQUIRED).", body = JsonEnvelope),
         (status = 400, description = "A level not valid for a skill (must be `reviewed` or `open`).", body = JsonEnvelope),
         (status = 404, description = "Missing/blank credential, unknown/revoked one, or non-member (indistinguishable).", body = JsonEnvelope),
+        (status = 426, description = "The caller's topos release is below this server's floor — the envelope names the floor and carries the `self-update` next action.", body = JsonEnvelope),
         (status = 429, description = "Rate limited (Retry-After header).", body = JsonEnvelope),
         (status = 500, description = "Integrity / internal store fault.", body = JsonEnvelope),
     ),
@@ -148,6 +154,7 @@ pub(crate) fn set_skill_protection() {}
         (status = 200, description = "The protect outcome (set, or a 200 DENIED REVIEWER_ROLE_REQUIRED / OWNER_ROLE_REQUIRED).", body = JsonEnvelope),
         (status = 400, description = "A level not valid for a channel (must be `curated` or `open`).", body = JsonEnvelope),
         (status = 404, description = "Missing/blank credential, unknown/revoked one, or non-member (indistinguishable).", body = JsonEnvelope),
+        (status = 426, description = "The caller's topos release is below this server's floor — the envelope names the floor and carries the `self-update` next action.", body = JsonEnvelope),
         (status = 429, description = "Rate limited (Retry-After header).", body = JsonEnvelope),
         (status = 500, description = "Integrity / internal store fault.", body = JsonEnvelope),
     ),
@@ -167,6 +174,7 @@ pub(crate) fn set_channel_protection() {}
         (status = 200, description = "The notices were acked (idempotent — only the caller's own unacked rows move).", body = JsonEnvelope),
         (status = 400, description = "Malformed body.", body = JsonEnvelope),
         (status = 404, description = "Missing/blank credential, unknown/revoked one, or non-member (indistinguishable).", body = JsonEnvelope),
+        (status = 426, description = "The caller's topos release is below this server's floor — the envelope names the floor and carries the `self-update` next action.", body = JsonEnvelope),
         (status = 429, description = "Rate limited (Retry-After header).", body = JsonEnvelope),
         (status = 500, description = "Integrity / internal store fault.", body = JsonEnvelope),
     ),
@@ -186,6 +194,7 @@ pub(crate) fn ack_notices() {}
         (status = 200, description = "The invitation receipt — OK carries the InvitationData (address + invited + the honest mailed flag; the tokened invite link travels ONLY in the mail); a policy refusal is a 200 DENIED OWNER_ROLE_REQUIRED, an unresolvable hint a 200 DENIED UNKNOWN_SKILL / UNKNOWN_CHANNEL, an unarmed mail transport a 200 DENIED MAIL_NOT_CONFIGURED.", body = JsonEnvelope),
         (status = 400, description = "Malformed body or a malformed invitee email.", body = JsonEnvelope),
         (status = 404, description = "Missing/blank credential, unknown/revoked one, or non-member (indistinguishable).", body = JsonEnvelope),
+        (status = 426, description = "The caller's topos release is below this server's floor — the envelope names the floor and carries the `self-update` next action.", body = JsonEnvelope),
         (status = 429, description = "Rate limited (Retry-After header).", body = JsonEnvelope),
         (status = 500, description = "Integrity / internal store fault.", body = JsonEnvelope),
     ),
@@ -203,6 +212,7 @@ pub(crate) fn invite() {}
     responses(
         (status = 200, description = "This device's delivery answer (entitled skills, detached, notices, open-proposal count).", body = WireDelivery),
         (status = 404, description = "Missing/blank credential, unknown/revoked one, or non-member (indistinguishable).", body = JsonEnvelope),
+        (status = 426, description = "The caller's topos release is below this server's floor — the envelope names the floor and carries the `self-update` next action.", body = JsonEnvelope),
         (status = 429, description = "Rate limited (Retry-After header).", body = JsonEnvelope),
         (status = 500, description = "Integrity / internal store fault.", body = JsonEnvelope),
     ),
@@ -222,6 +232,7 @@ pub(crate) fn get_delivery() {}
         (status = 204, description = "The applied-state report was recorded (no body)."),
         (status = 400, description = "Malformed body or a bad skill / version id.", body = JsonEnvelope),
         (status = 404, description = "Missing/blank credential, unknown/revoked one, or non-member (indistinguishable).", body = JsonEnvelope),
+        (status = 426, description = "The caller's topos release is below this server's floor — the envelope names the floor and carries the `self-update` next action.", body = JsonEnvelope),
         (status = 429, description = "Rate limited (Retry-After header).", body = JsonEnvelope),
         (status = 500, description = "Integrity / internal store fault.", body = JsonEnvelope),
     ),
@@ -238,6 +249,7 @@ pub(crate) fn put_report() {}
     responses(
         (status = 200, description = "The login-flow grant (RFC-8628-shaped): the secret device_code to poll with (promoted to the SESSION's workspace-scoped bearer credential at the exchange), the human-facing user_code, and the BARE approval URL (the code never rides a URL). The flow names NO workspace — the signed-in approver chooses (or creates) it in the browser; a `preselect` slug is recorded shape-checked and unresolved, and an invite_token is recorded unvalidated — this start is never an existence or token oracle.", body = DeviceAuthStartResponse),
         (status = 400, description = "Malformed body.", body = JsonEnvelope),
+        (status = 426, description = "The caller's topos release is below this server's floor — the envelope names the floor and carries the `self-update` next action.", body = JsonEnvelope),
         (status = 429, description = "Rate limited (Retry-After header).", body = JsonEnvelope),
         (status = 500, description = "Internal fault.", body = JsonEnvelope),
     ),
@@ -252,6 +264,7 @@ pub(crate) fn login_authorize() {}
     responses(
         (status = 200, description = "The poll status. The poll IS the exchange: the first poll that finds the flow approved MINTS the session (re-validating the approver's seat under the same fence), and `granted` carries the SESSION's credential (the promoted flow code), the session id + status, the CHOSEN workspace, and — when the flow carried an invitation naming one — the first-destination hint. A re-poll answers the same grant.", body = DeviceAuthPollResponse),
         (status = 400, description = "Malformed body.", body = JsonEnvelope),
+        (status = 426, description = "The caller's topos release is below this server's floor — the envelope names the floor and carries the `self-update` next action.", body = JsonEnvelope),
         (status = 429, description = "Rate limited (Retry-After header).", body = JsonEnvelope),
         (status = 500, description = "Internal fault.", body = JsonEnvelope),
     ),
@@ -268,6 +281,7 @@ pub(crate) fn login_token() {}
         (status = 200, description = "The lane-side second connect: a further workspace's freshly minted session, browser-free. Seat standing is the trust basis — the acting user must already hold a seat in the named workspace; the plaintext credential is returned exactly once.", body = LoginConnectResponse),
         (status = 400, description = "Malformed body.", body = JsonEnvelope),
         (status = 404, description = "Missing/blank credential, unknown/revoked one, unknown workspace, or no seat there (indistinguishable).", body = JsonEnvelope),
+        (status = 426, description = "The caller's topos release is below this server's floor — the envelope names the floor and carries the `self-update` next action.", body = JsonEnvelope),
         (status = 429, description = "Rate limited (Retry-After header).", body = JsonEnvelope),
         (status = 500, description = "Internal fault.", body = JsonEnvelope),
     ),
@@ -286,6 +300,7 @@ pub(crate) fn login_connect() {}
         (status = 200, description = "The all-outcome envelope + receipt (OK / NEEDS_REVIEW / CONFLICT / DENIED …). An op_id retry replays byte-identically.", body = JsonEnvelope),
         (status = 400, description = "Malformed body / id / candidate.", body = JsonEnvelope),
         (status = 404, description = "Missing/blank credential, unknown/revoked one, or non-member (indistinguishable).", body = JsonEnvelope),
+        (status = 426, description = "The caller's topos release is below this server's floor — the envelope names the floor and carries the `self-update` next action.", body = JsonEnvelope),
         (status = 429, description = "Rate limited (Retry-After header).", body = JsonEnvelope),
         (status = 500, description = "Integrity / internal store fault.", body = JsonEnvelope),
     ),
@@ -302,6 +317,7 @@ pub(crate) fn publish() {}
         (status = 200, description = "The all-outcome envelope + receipt (NEEDS_REVIEW on success — the candidate is committed without moving `current`).", body = JsonEnvelope),
         (status = 400, description = "Malformed body / id / candidate.", body = JsonEnvelope),
         (status = 404, description = "Missing/blank credential, unknown/revoked one, or non-member (indistinguishable).", body = JsonEnvelope),
+        (status = 426, description = "The caller's topos release is below this server's floor — the envelope names the floor and carries the `self-update` next action.", body = JsonEnvelope),
         (status = 429, description = "Rate limited (Retry-After header).", body = JsonEnvelope),
         (status = 500, description = "Integrity / internal store fault.", body = JsonEnvelope),
     ),
@@ -318,6 +334,7 @@ pub(crate) fn propose() {}
         (status = 200, description = "The all-outcome envelope + receipt — a revert is a FORWARD commit restoring the good version's bytes (the pointer never moves backward).", body = JsonEnvelope),
         (status = 400, description = "Malformed body / id.", body = JsonEnvelope),
         (status = 404, description = "Missing/blank credential, unknown/revoked one, or non-member (indistinguishable).", body = JsonEnvelope),
+        (status = 426, description = "The caller's topos release is below this server's floor — the envelope names the floor and carries the `self-update` next action.", body = JsonEnvelope),
         (status = 429, description = "Rate limited (Retry-After header).", body = JsonEnvelope),
         (status = 500, description = "Integrity / internal store fault.", body = JsonEnvelope),
     ),
@@ -334,6 +351,7 @@ pub(crate) fn revert() {}
         (status = 200, description = "The all-outcome envelope + receipt (approve promotes; reject requires its reason; withdraw is author-only).", body = JsonEnvelope),
         (status = 400, description = "Malformed body / id.", body = JsonEnvelope),
         (status = 404, description = "Missing/blank credential, unknown/revoked one, or non-member (indistinguishable).", body = JsonEnvelope),
+        (status = 426, description = "The caller's topos release is below this server's floor — the envelope names the floor and carries the `self-update` next action.", body = JsonEnvelope),
         (status = 429, description = "Rate limited (Retry-After header).", body = JsonEnvelope),
         (status = 500, description = "Integrity / internal store fault.", body = JsonEnvelope),
     ),
@@ -354,6 +372,7 @@ pub(crate) fn review() {}
     responses(
         (status = 200, description = "The `current` pointer record (`ETag = \"<generation>\"`; a conditional GET answers 304).", body = WireCurrentRecord),
         (status = 404, description = "Missing/blank credential, unknown/revoked one, non-member, or no pointer (indistinguishable).", body = JsonEnvelope),
+        (status = 426, description = "The caller's topos release is below this server's floor — the envelope names the floor and carries the `self-update` next action.", body = JsonEnvelope),
         (status = 429, description = "Rate limited (Retry-After header).", body = JsonEnvelope),
         (status = 500, description = "Integrity / internal store fault.", body = JsonEnvelope),
     ),
@@ -371,6 +390,7 @@ pub(crate) fn get_current() {}
     responses(
         (status = 200, description = "The workspace catalog (metadata only, no bytes; catalog visibility == membership).", body = WireSkillIndex),
         (status = 404, description = "Missing/blank credential, unknown/revoked one, or non-member (indistinguishable).", body = JsonEnvelope),
+        (status = 426, description = "The caller's topos release is below this server's floor — the envelope names the floor and carries the `self-update` next action.", body = JsonEnvelope),
         (status = 429, description = "Rate limited (Retry-After header).", body = JsonEnvelope),
         (status = 500, description = "Integrity / internal store fault.", body = JsonEnvelope),
     ),
@@ -390,6 +410,7 @@ pub(crate) fn list_skills() {}
     responses(
         (status = 200, description = "The object's verified bytes (application/octet-stream). Served only through a skill that reaches it — never by bare hash."),
         (status = 404, description = "Missing/blank credential, non-member, unreachable/unknown object, or a malformed id (indistinguishable).", body = JsonEnvelope),
+        (status = 426, description = "The caller's topos release is below this server's floor — the envelope names the floor and carries the `self-update` next action.", body = JsonEnvelope),
         (status = 429, description = "Rate limited (Retry-After header).", body = JsonEnvelope),
         (status = 500, description = "Integrity / internal store fault.", body = JsonEnvelope),
     ),
@@ -409,6 +430,7 @@ pub(crate) fn get_object() {}
     responses(
         (status = 200, description = "The version's metadata + file listing (no blob bytes; the per-object read serves those).", body = WireVersionMeta),
         (status = 404, description = "Missing/blank credential, non-member, or an unknown/purged version (indistinguishable).", body = JsonEnvelope),
+        (status = 426, description = "The caller's topos release is below this server's floor — the envelope names the floor and carries the `self-update` next action.", body = JsonEnvelope),
         (status = 429, description = "Rate limited (Retry-After header).", body = JsonEnvelope),
         (status = 500, description = "Integrity / internal store fault.", body = JsonEnvelope),
     ),
@@ -427,6 +449,7 @@ pub(crate) fn get_version() {}
     responses(
         (status = 200, description = "The skill's OPEN proposals — handles only (version id, base generation, opened-at); no bytes, no proposer.", body = WireProposalList),
         (status = 404, description = "Missing/blank credential, unknown/revoked one, or non-member (indistinguishable).", body = JsonEnvelope),
+        (status = 426, description = "The caller's topos release is below this server's floor — the envelope names the floor and carries the `self-update` next action.", body = JsonEnvelope),
         (status = 429, description = "Rate limited (Retry-After header).", body = JsonEnvelope),
         (status = 500, description = "Integrity / internal store fault.", body = JsonEnvelope),
     ),
@@ -444,6 +467,7 @@ pub(crate) fn list_proposals() {}
     responses(
         (status = 200, description = "The review inbox: every OPEN proposal in the workspace, author message first.", body = WireProposalIndex),
         (status = 404, description = "Missing/blank credential, unknown/revoked one, or non-member (indistinguishable).", body = JsonEnvelope),
+        (status = 426, description = "The caller's topos release is below this server's floor — the envelope names the floor and carries the `self-update` next action.", body = JsonEnvelope),
         (status = 429, description = "Rate limited (Retry-After header).", body = JsonEnvelope),
         (status = 500, description = "Integrity / internal store fault.", body = JsonEnvelope),
     ),
@@ -462,6 +486,7 @@ pub(crate) fn get_proposals() {}
     responses(
         (status = 200, description = "The skill's version history (purge tombstones included) + its proposal events.", body = WireSkillLog),
         (status = 404, description = "Missing/blank credential, unknown/revoked one, or non-member (indistinguishable).", body = JsonEnvelope),
+        (status = 426, description = "The caller's topos release is below this server's floor — the envelope names the floor and carries the `self-update` next action.", body = JsonEnvelope),
         (status = 429, description = "Rate limited (Retry-After header).", body = JsonEnvelope),
         (status = 500, description = "Integrity / internal store fault.", body = JsonEnvelope),
     ),
@@ -480,6 +505,7 @@ pub(crate) fn get_log() {}
     responses(
         (status = 200, description = "The self-end landed (no body sent): THIS credential's session is ended server-side and its reported state deleted with it. A retry answers the uniform 404 (already ended).", body = JsonEnvelope),
         (status = 404, description = "Missing/blank credential or an already-ended session (indistinguishable) — the caller treats this as already-signed-out.", body = JsonEnvelope),
+        (status = 426, description = "The caller's topos release is below this server's floor — the envelope names the floor and carries the `self-update` next action.", body = JsonEnvelope),
         (status = 429, description = "Rate limited (Retry-After header).", body = JsonEnvelope),
         (status = 500, description = "Integrity / internal store fault.", body = JsonEnvelope),
     ),

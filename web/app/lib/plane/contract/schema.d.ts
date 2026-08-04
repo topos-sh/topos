@@ -1467,9 +1467,9 @@ export interface components {
              */
             schema_version: number;
             /**
-             * @description The serving build's release version (the bare semver core, no leading `v`). Absent from a
-             *     producer that predates the field — a client reads such a card as "nothing declared" and
-             *     proceeds.
+             * @description The serving build's release version (no leading `v`; a candidate build's `-rc.N` suffix
+             *     rides along — a consumer orders on the semver core). Absent from a producer that predates
+             *     the field — a client reads such a card as "nothing declared" and proceeds.
              */
             server_version?: string | null;
         };
@@ -1696,6 +1696,15 @@ export interface operations {
                     "application/json": components["schemas"]["JsonEnvelope"];
                 };
             };
+            /** @description The caller's topos release is below this server's floor — the envelope names the floor and carries the `self-update` next action. */
+            426: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
             /** @description Rate limited (Retry-After header). */
             429: {
                 headers: {
@@ -1759,6 +1768,15 @@ export interface operations {
                     "application/json": components["schemas"]["JsonEnvelope"];
                 };
             };
+            /** @description The caller's topos release is below this server's floor — the envelope names the floor and carries the `self-update` next action. */
+            426: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
             /** @description Rate limited (Retry-After header). */
             429: {
                 headers: {
@@ -1810,6 +1828,15 @@ export interface operations {
                     "application/json": components["schemas"]["JsonEnvelope"];
                 };
             };
+            /** @description The caller's topos release is below this server's floor — the envelope names the floor and carries the `self-update` next action. */
+            426: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
             /** @description Rate limited (Retry-After header). */
             429: {
                 headers: {
@@ -1853,6 +1880,15 @@ export interface operations {
             };
             /** @description Missing/blank credential or an already-ended session (indistinguishable) — the caller treats this as already-signed-out. */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
+            /** @description The caller's topos release is below this server's floor — the envelope names the floor and carries the `self-update` next action. */
+            426: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -1923,6 +1959,15 @@ export interface operations {
                     "application/json": components["schemas"]["JsonEnvelope"];
                 };
             };
+            /** @description The caller's topos release is below this server's floor — the envelope names the floor and carries the `self-update` next action. */
+            426: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
             /** @description Rate limited (Retry-After header). */
             429: {
                 headers: {
@@ -1979,6 +2024,15 @@ export interface operations {
             };
             /** @description Missing/blank credential, unknown/revoked one, or non-member (indistinguishable). */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
+            /** @description The caller's topos release is below this server's floor — the envelope names the floor and carries the `self-update` next action. */
+            426: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -2049,6 +2103,15 @@ export interface operations {
                     "application/json": components["schemas"]["JsonEnvelope"];
                 };
             };
+            /** @description The caller's topos release is below this server's floor — the envelope names the floor and carries the `self-update` next action. */
+            426: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
             /** @description Rate limited (Retry-After header). */
             429: {
                 headers: {
@@ -2112,6 +2175,15 @@ export interface operations {
                     "application/json": components["schemas"]["JsonEnvelope"];
                 };
             };
+            /** @description The caller's topos release is below this server's floor — the envelope names the floor and carries the `self-update` next action. */
+            426: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
             /** @description Rate limited (Retry-After header). */
             429: {
                 headers: {
@@ -2158,6 +2230,15 @@ export interface operations {
             };
             /** @description Missing/blank credential, unknown/revoked one, or non-member (indistinguishable). */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
+            /** @description The caller's topos release is below this server's floor — the envelope names the floor and carries the `self-update` next action. */
+            426: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -2233,6 +2314,15 @@ export interface operations {
                     "application/json": components["schemas"]["JsonEnvelope"];
                 };
             };
+            /** @description The caller's topos release is below this server's floor — the envelope names the floor and carries the `self-update` next action. */
+            426: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
             /** @description Rate limited (Retry-After header). */
             429: {
                 headers: {
@@ -2283,6 +2373,15 @@ export interface operations {
             };
             /** @description Missing/blank credential, unknown/revoked one, or non-member (indistinguishable). */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
+            /** @description The caller's topos release is below this server's floor — the envelope names the floor and carries the `self-update` next action. */
+            426: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -2347,6 +2446,15 @@ export interface operations {
                     "application/json": components["schemas"]["JsonEnvelope"];
                 };
             };
+            /** @description The caller's topos release is below this server's floor — the envelope names the floor and carries the `self-update` next action. */
+            426: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
             /** @description Rate limited (Retry-After header). */
             429: {
                 headers: {
@@ -2393,6 +2501,15 @@ export interface operations {
             };
             /** @description Missing/blank credential, unknown/revoked one, or non-member (indistinguishable). */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
+            /** @description The caller's topos release is below this server's floor — the envelope names the floor and carries the `self-update` next action. */
+            426: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -2466,6 +2583,15 @@ export interface operations {
                     "application/json": components["schemas"]["JsonEnvelope"];
                 };
             };
+            /** @description The caller's topos release is below this server's floor — the envelope names the floor and carries the `self-update` next action. */
+            426: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
             /** @description Rate limited (Retry-After header). */
             429: {
                 headers: {
@@ -2512,6 +2638,15 @@ export interface operations {
             };
             /** @description Missing/blank credential, unknown/revoked one, or non-member (indistinguishable). */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
+            /** @description The caller's topos release is below this server's floor — the envelope names the floor and carries the `self-update` next action. */
+            426: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -2585,6 +2720,15 @@ export interface operations {
                     "application/json": components["schemas"]["JsonEnvelope"];
                 };
             };
+            /** @description The caller's topos release is below this server's floor — the envelope names the floor and carries the `self-update` next action. */
+            426: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
             /** @description Rate limited (Retry-After header). */
             429: {
                 headers: {
@@ -2631,6 +2775,15 @@ export interface operations {
             };
             /** @description Missing/blank credential, unknown/revoked one, or non-member (indistinguishable). */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
+            /** @description The caller's topos release is below this server's floor — the envelope names the floor and carries the `self-update` next action. */
+            426: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -2702,6 +2855,15 @@ export interface operations {
                     "application/json": components["schemas"]["JsonEnvelope"];
                 };
             };
+            /** @description The caller's topos release is below this server's floor — the envelope names the floor and carries the `self-update` next action. */
+            426: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
             /** @description Rate limited (Retry-After header). */
             429: {
                 headers: {
@@ -2748,6 +2910,15 @@ export interface operations {
             };
             /** @description Missing/blank credential, unknown/revoked one, or non-member (indistinguishable). */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
+            /** @description The caller's topos release is below this server's floor — the envelope names the floor and carries the `self-update` next action. */
+            426: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -2810,6 +2981,15 @@ export interface operations {
                     "application/json": components["schemas"]["JsonEnvelope"];
                 };
             };
+            /** @description The caller's topos release is below this server's floor — the envelope names the floor and carries the `self-update` next action. */
+            426: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
             /** @description Rate limited (Retry-After header). */
             429: {
                 headers: {
@@ -2858,6 +3038,15 @@ export interface operations {
             };
             /** @description Missing/blank credential, unknown/revoked one, non-member, or no pointer (indistinguishable). */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
+            /** @description The caller's topos release is below this server's floor — the envelope names the floor and carries the `self-update` next action. */
+            426: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -2920,6 +3109,15 @@ export interface operations {
                     "application/json": components["schemas"]["JsonEnvelope"];
                 };
             };
+            /** @description The caller's topos release is below this server's floor — the envelope names the floor and carries the `self-update` next action. */
+            426: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
             /** @description Rate limited (Retry-After header). */
             429: {
                 headers: {
@@ -2968,6 +3166,15 @@ export interface operations {
             };
             /** @description Missing/blank credential, unknown/revoked one, or non-member (indistinguishable). */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
+            /** @description The caller's topos release is below this server's floor — the envelope names the floor and carries the `self-update` next action. */
+            426: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -3043,6 +3250,15 @@ export interface operations {
                     "application/json": components["schemas"]["JsonEnvelope"];
                 };
             };
+            /** @description The caller's topos release is below this server's floor — the envelope names the floor and carries the `self-update` next action. */
+            426: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
             /** @description Rate limited (Retry-After header). */
             429: {
                 headers: {
@@ -3091,6 +3307,15 @@ export interface operations {
             };
             /** @description Missing/blank credential, non-member, or unknown skill (indistinguishable). */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
+            /** @description The caller's topos release is below this server's floor — the envelope names the floor and carries the `self-update` next action. */
+            426: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -3148,6 +3373,15 @@ export interface operations {
             };
             /** @description Missing/blank credential, non-member, or an unknown/purged version (indistinguishable). */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
+            /** @description The caller's topos release is below this server's floor — the envelope names the floor and carries the `self-update` next action. */
+            426: {
                 headers: {
                     [name: string]: unknown;
                 };

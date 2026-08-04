@@ -46,6 +46,16 @@
               }
             }
           },
+          "426": {
+            "description": "The caller's topos release is below this server's floor — the envelope names the floor and carries the `self-update` next action.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonEnvelope"
+                }
+              }
+            }
+          },
           "429": {
             "description": "Rate limited (Retry-After header).",
             "content": {
@@ -127,6 +137,16 @@
               }
             }
           },
+          "426": {
+            "description": "The caller's topos release is below this server's floor — the envelope names the floor and carries the `self-update` next action.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonEnvelope"
+                }
+              }
+            }
+          },
           "429": {
             "description": "Rate limited (Retry-After header).",
             "content": {
@@ -179,6 +199,16 @@
           },
           "400": {
             "description": "Malformed body.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonEnvelope"
+                }
+              }
+            }
+          },
+          "426": {
+            "description": "The caller's topos release is below this server's floor — the envelope names the floor and carries the `self-update` next action.",
             "content": {
               "application/json": {
                 "schema": {
@@ -268,6 +298,16 @@
               }
             }
           },
+          "426": {
+            "description": "The caller's topos release is below this server's floor — the envelope names the floor and carries the `self-update` next action.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonEnvelope"
+                }
+              }
+            }
+          },
           "429": {
             "description": "Rate limited (Retry-After header).",
             "content": {
@@ -341,6 +381,16 @@
           },
           "404": {
             "description": "Missing/blank credential, unknown/revoked one, or non-member (indistinguishable).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonEnvelope"
+                }
+              }
+            }
+          },
+          "426": {
+            "description": "The caller's topos release is below this server's floor — the envelope names the floor and carries the `self-update` next action.",
             "content": {
               "application/json": {
                 "schema": {
@@ -430,6 +480,16 @@
               }
             }
           },
+          "426": {
+            "description": "The caller's topos release is below this server's floor — the envelope names the floor and carries the `self-update` next action.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonEnvelope"
+                }
+              }
+            }
+          },
           "429": {
             "description": "Rate limited (Retry-After header).",
             "content": {
@@ -511,6 +571,16 @@
               }
             }
           },
+          "426": {
+            "description": "The caller's topos release is below this server's floor — the envelope names the floor and carries the `self-update` next action.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonEnvelope"
+                }
+              }
+            }
+          },
           "429": {
             "description": "Rate limited (Retry-After header).",
             "content": {
@@ -564,6 +634,16 @@
           },
           "404": {
             "description": "Missing/blank credential or an already-ended session (indistinguishable) — the caller treats this as already-signed-out.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonEnvelope"
+                }
+              }
+            }
+          },
+          "426": {
+            "description": "The caller's topos release is below this server's floor — the envelope names the floor and carries the `self-update` next action.",
             "content": {
               "application/json": {
                 "schema": {
@@ -634,6 +714,16 @@
           },
           "404": {
             "description": "Missing/blank credential, unknown/revoked one, or non-member (indistinguishable).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonEnvelope"
+                }
+              }
+            }
+          },
+          "426": {
+            "description": "The caller's topos release is below this server's floor — the envelope names the floor and carries the `self-update` next action.",
             "content": {
               "application/json": {
                 "schema": {
@@ -741,6 +831,16 @@
               }
             }
           },
+          "426": {
+            "description": "The caller's topos release is below this server's floor — the envelope names the floor and carries the `self-update` next action.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonEnvelope"
+                }
+              }
+            }
+          },
           "429": {
             "description": "Rate limited (Retry-After header).",
             "content": {
@@ -821,6 +921,16 @@
           },
           "404": {
             "description": "Missing/blank credential, unknown/revoked one, or non-member (indistinguishable).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonEnvelope"
+                }
+              }
+            }
+          },
+          "426": {
+            "description": "The caller's topos release is below this server's floor — the envelope names the floor and carries the `self-update` next action.",
             "content": {
               "application/json": {
                 "schema": {
@@ -915,6 +1025,16 @@
               }
             }
           },
+          "426": {
+            "description": "The caller's topos release is below this server's floor — the envelope names the floor and carries the `self-update` next action.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonEnvelope"
+                }
+              }
+            }
+          },
           "429": {
             "description": "Rate limited (Retry-After header).",
             "content": {
@@ -977,6 +1097,16 @@
           },
           "404": {
             "description": "Missing/blank credential, unknown/revoked one, or non-member (indistinguishable).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonEnvelope"
+                }
+              }
+            }
+          },
+          "426": {
+            "description": "The caller's topos release is below this server's floor — the envelope names the floor and carries the `self-update` next action.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1075,6 +1205,16 @@
               }
             }
           },
+          "426": {
+            "description": "The caller's topos release is below this server's floor — the envelope names the floor and carries the `self-update` next action.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonEnvelope"
+                }
+              }
+            }
+          },
           "429": {
             "description": "Rate limited (Retry-After header).",
             "content": {
@@ -1137,6 +1277,16 @@
           },
           "404": {
             "description": "Missing/blank credential, unknown/revoked one, or non-member (indistinguishable).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonEnvelope"
+                }
+              }
+            }
+          },
+          "426": {
+            "description": "The caller's topos release is below this server's floor — the envelope names the floor and carries the `self-update` next action.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1235,6 +1385,16 @@
               }
             }
           },
+          "426": {
+            "description": "The caller's topos release is below this server's floor — the envelope names the floor and carries the `self-update` next action.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonEnvelope"
+                }
+              }
+            }
+          },
           "429": {
             "description": "Rate limited (Retry-After header).",
             "content": {
@@ -1297,6 +1457,16 @@
           },
           "404": {
             "description": "Missing/blank credential, unknown/revoked one, or non-member (indistinguishable).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonEnvelope"
+                }
+              }
+            }
+          },
+          "426": {
+            "description": "The caller's topos release is below this server's floor — the envelope names the floor and carries the `self-update` next action.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1388,6 +1558,16 @@
               }
             }
           },
+          "426": {
+            "description": "The caller's topos release is below this server's floor — the envelope names the floor and carries the `self-update` next action.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonEnvelope"
+                }
+              }
+            }
+          },
           "429": {
             "description": "Rate limited (Retry-After header).",
             "content": {
@@ -1450,6 +1630,16 @@
           },
           "404": {
             "description": "Missing/blank credential, unknown/revoked one, or non-member (indistinguishable).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonEnvelope"
+                }
+              }
+            }
+          },
+          "426": {
+            "description": "The caller's topos release is below this server's floor — the envelope names the floor and carries the `self-update` next action.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1539,6 +1729,16 @@
               }
             }
           },
+          "426": {
+            "description": "The caller's topos release is below this server's floor — the envelope names the floor and carries the `self-update` next action.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonEnvelope"
+                }
+              }
+            }
+          },
           "429": {
             "description": "Rate limited (Retry-After header).",
             "content": {
@@ -1610,6 +1810,16 @@
           },
           "404": {
             "description": "Missing/blank credential, unknown/revoked one, non-member, or no pointer (indistinguishable).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonEnvelope"
+                }
+              }
+            }
+          },
+          "426": {
+            "description": "The caller's topos release is below this server's floor — the envelope names the floor and carries the `self-update` next action.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1697,6 +1907,16 @@
               }
             }
           },
+          "426": {
+            "description": "The caller's topos release is below this server's floor — the envelope names the floor and carries the `self-update` next action.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonEnvelope"
+                }
+              }
+            }
+          },
           "429": {
             "description": "Rate limited (Retry-After header).",
             "content": {
@@ -1768,6 +1988,16 @@
           },
           "404": {
             "description": "Missing/blank credential, unknown/revoked one, or non-member (indistinguishable).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonEnvelope"
+                }
+              }
+            }
+          },
+          "426": {
+            "description": "The caller's topos release is below this server's floor — the envelope names the floor and carries the `self-update` next action.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1875,6 +2105,16 @@
               }
             }
           },
+          "426": {
+            "description": "The caller's topos release is below this server's floor — the envelope names the floor and carries the `self-update` next action.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonEnvelope"
+                }
+              }
+            }
+          },
           "429": {
             "description": "Rate limited (Retry-After header).",
             "content": {
@@ -1946,6 +2186,16 @@
           },
           "404": {
             "description": "Missing/blank credential, non-member, or unknown skill (indistinguishable).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonEnvelope"
+                }
+              }
+            }
+          },
+          "426": {
+            "description": "The caller's topos release is below this server's floor — the envelope names the floor and carries the `self-update` next action.",
             "content": {
               "application/json": {
                 "schema": {
@@ -2034,6 +2284,16 @@
           },
           "404": {
             "description": "Missing/blank credential, non-member, or an unknown/purged version (indistinguishable).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonEnvelope"
+                }
+              }
+            }
+          },
+          "426": {
+            "description": "The caller's topos release is below this server's floor — the envelope names the floor and carries the `self-update` next action.",
             "content": {
               "application/json": {
                 "schema": {
@@ -3919,7 +4179,7 @@
               "string",
               "null"
             ],
-            "description": "The serving build's release version (the bare semver core, no leading `v`). Absent from a\nproducer that predates the field — a client reads such a card as \"nothing declared\" and\nproceeds."
+            "description": "The serving build's release version (no leading `v`; a candidate build's `-rc.N` suffix\nrides along — a consumer orders on the semver core). Absent from a producer that predates\nthe field — a client reads such a card as \"nothing declared\" and proceeds."
           }
         }
       },
