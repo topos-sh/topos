@@ -437,6 +437,7 @@ impl crate::plane::DeliverySource for UreqPlane {
                     |(skill_id, commit)| topos_types::requests::WireAppliedSkill {
                         skill_id: skill_id.clone(),
                         version_id: topos_core::digest::to_hex(commit),
+                        harnesses: Vec::new(),
                     },
                 )
                 .collect(),

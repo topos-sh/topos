@@ -552,6 +552,13 @@
           "description": "Local edits ahead of the version this entry is on.",
           "type": "boolean"
         },
+        "kind": {
+          "description": "The catalog bundle kind (`\"mcp\"` for a config-placed MCP-server bundle). Absent ⇒\n`\"skill\"`. **Additive.**",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "pending_proposals": {
           "description": "Open proposals, each as `<skill>@<version_id>`.",
           "type": "array",

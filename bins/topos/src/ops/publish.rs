@@ -1259,6 +1259,7 @@ fn build_publish_op(
         // entry after it (a revert/review carries no name and preserves the stored one).
         display_name: Some(lock.name.clone()),
         channel: channel.map(str::to_owned),
+        bundle_kind: None,
         last_receipt: None,
     })
 }

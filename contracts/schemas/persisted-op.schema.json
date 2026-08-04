@@ -9,6 +9,13 @@
       "type": "string",
       "pattern": "^[0-9a-f]{64}$"
     },
+    "bundle_kind": {
+      "description": "The catalog `kind` a genesis publish/propose declares (`\"mcp\"`), replayed byte-identical on\na crash retry. `None` for skills, reverts/reviews, and pre-existing WALs. (Distinct from\n[`OpRecord::op`], the operation kind.)",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "candidate_commit": {
       "description": "The built commit (`version_id`) this op publishes / reverts / reviews — part of the op's bound identity.",
       "type": "string",

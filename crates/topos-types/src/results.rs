@@ -544,6 +544,10 @@ pub struct SkillEntry {
     /// `signed-out`. Absent when the row is live. **INFERRED** (additive).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cause: Option<DetachCause>,
+    /// The catalog bundle kind (`"mcp"` for a config-placed MCP-server bundle). Absent ⇒
+    /// `"skill"`. **Additive.**
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
 }
 
 /// A tracked skill's update status in [`SkillEntry`]. **INFERRED** (additive value set).

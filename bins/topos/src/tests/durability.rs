@@ -320,6 +320,7 @@ fn migration_dispatch_is_fail_closed() {
             display_name: Some("deploy-helper".to_owned()),
             channel: Some("ops".to_owned()),
             last_receipt: None,
+            bundle_kind: None,
         },
         PERSISTED_SCHEMA_VERSION,
     );

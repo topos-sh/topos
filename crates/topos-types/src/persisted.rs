@@ -348,6 +348,11 @@ pub struct OpRecord {
     /// origin) — replayed byte-identical on a crash retry. `None` for local authorship.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub upstream: Option<crate::requests::WireUpstream>,
+    /// The catalog `kind` a genesis publish/propose declares (`"mcp"`), replayed byte-identical on
+    /// a crash retry. `None` for skills, reverts/reviews, and pre-existing WALs. (Distinct from
+    /// [`OpRecord::op`], the operation kind.)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bundle_kind: Option<String>,
     /// The stored terminal receipt, once one is known (the source of idempotent-retry truth).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_receipt: Option<Receipt>,

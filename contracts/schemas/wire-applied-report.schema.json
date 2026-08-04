@@ -28,6 +28,13 @@
       "description": "One applied-state row a device reports: the skill and the version it currently holds after its\nreconcile.",
       "type": "object",
       "properties": {
+        "harnesses": {
+          "description": "Per-harness applied states for a config-placed (`mcp`) bundle: which detected agents hold\nthe entry and how (`state` is an OPEN vocabulary — `current` / `drifted` / `not-supported` /\n`unprovable`; a reader ignores a state it does not recognize). Empty for file-bundle\nskills. **Additive.**",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/WireHarnessState"
+          }
+        },
         "skill_id": {
           "description": "The skill id (the `<skill>` path segment).",
           "type": "string"
@@ -41,6 +48,31 @@
       "required": [
         "skill_id",
         "version_id"
+      ]
+    },
+    "WireHarnessState": {
+      "description": "One harness's applied state for a config-placed (`mcp`) bundle on this installation.",
+      "type": "object",
+      "properties": {
+        "note": {
+          "description": "A short human-readable qualifier (why not-supported / what drifted), when one exists.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "slug": {
+          "description": "The harness registry slug (e.g. `claude-code`, `cursor`).",
+          "type": "string"
+        },
+        "state": {
+          "description": "The state — an OPEN vocabulary (`current` / `drifted` / `not-supported` / `unprovable`).",
+          "type": "string"
+        }
+      },
+      "required": [
+        "slug",
+        "state"
       ]
     }
   }

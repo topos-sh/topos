@@ -3168,6 +3168,7 @@ mod tests {
             source: Some("the topos.sh/acme feed".to_owned()),
             status,
             cause: None,
+            kind: None,
         };
         let out = ListOutcome {
             data: ListData {
@@ -3269,6 +3270,7 @@ mod tests {
             source: None,
             status: None,
             cause: None,
+            kind: None,
         };
         let out = ListOutcome {
             data: ListData {
@@ -3376,6 +3378,7 @@ mod tests {
             source: Some("acme".to_owned()),
             status: Some(SkillStatus::Detached),
             cause: Some(cause),
+            kind: None,
         };
         let out = ListOutcome {
             data: ListData {

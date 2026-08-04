@@ -283,6 +283,7 @@ fn send_op(
                     candidate,
                     // Advisory folder name (the author's folder) — replayed verbatim from the WAL.
                     display_name: rec.display_name.clone(),
+                    kind: rec.bundle_kind.clone(),
                 })
             } else {
                 transport.propose(ProposeRequest {
@@ -294,6 +295,7 @@ fn send_op(
                     candidate,
                     // Advisory folder name (the author's folder) — replayed verbatim from the WAL.
                     display_name: rec.display_name.clone(),
+                    kind: rec.bundle_kind.clone(),
                 })
             }
         }
@@ -711,6 +713,7 @@ mod tests {
             display_name: None,
             channel: None,
             last_receipt: None,
+            bundle_kind: None,
         };
 
         let fake = FakeContribute {
@@ -810,6 +813,7 @@ mod tests {
             display_name: None,
             channel: None,
             last_receipt: None,
+            bundle_kind: None,
         };
 
         let receipt =

@@ -123,6 +123,11 @@ pub struct PublishRequest {
     /// authorship. **Additive.**
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub upstream: Option<WireUpstream>,
+    /// The catalog `kind` this publish declares for a BRAND-NEW bundle (`"mcp"` for an MCP-server
+    /// bundle; absent ⇒ `"skill"`). Genesis-only: an existing bundle's kind is fixed at birth, and
+    /// a publish naming a different kind is refused before any custody write. **Additive.**
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
 }
 
 /// The upstream-provenance block a publish may carry: where the bundle's bytes originally came
@@ -180,6 +185,10 @@ pub struct ProposeRequest {
     /// independent of the version's review.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub channel: Option<String>,
+    /// The catalog `kind` this proposal declares for a BRAND-NEW bundle (same semantics as
+    /// [`PublishRequest::kind`] — a reroute-to-proposal genesis still carries it). **Additive.**
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
 }
 
 /// `POST /v1/reverts` body — a **forward** revert: the server constructs a new 1-parent commit carrying the
@@ -581,6 +590,28 @@ pub struct WireAppliedSkill {
     /// The version this device holds (64-char lowercase hex).
     #[cfg_attr(feature = "contract-derives", schemars(extend("pattern" = "^[0-9a-f]{64}$")))]
     pub version_id: String,
+    /// Per-harness applied states for a config-placed (`mcp`) bundle: which detected agents hold
+    /// the entry and how (`state` is an OPEN vocabulary — `current` / `drifted` / `not-supported` /
+    /// `unprovable`; a reader ignores a state it does not recognize). Empty for file-bundle
+    /// skills. **Additive.**
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub harnesses: Vec<WireHarnessState>,
+}
+
+/// One harness's applied state for a config-placed (`mcp`) bundle on this installation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(
+    feature = "contract-derives",
+    derive(schemars::JsonSchema, utoipa::ToSchema)
+)]
+pub struct WireHarnessState {
+    /// The harness registry slug (e.g. `claude-code`, `cursor`).
+    pub slug: String,
+    /// The state — an OPEN vocabulary (`current` / `drifted` / `not-supported` / `unprovable`).
+    pub state: String,
+    /// A short human-readable qualifier (why not-supported / what drifted), when one exists.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
 }
 
 /// `PUT /v1/workspaces/{ws}/report` body — the fleet's applied-state report: this device's
@@ -1179,6 +1210,7 @@ mod tests {
                 message: "topos: publish".to_owned(),
             },
             display_name: Some("Deploy".to_owned()),
+            kind: None,
         };
         let v = serde_json::to_value(&req).unwrap();
         // snake_case field names, candidate nested, the server-stamped time absent — and NO credential
@@ -1466,6 +1498,7 @@ mod tests {
             applied: vec![WireAppliedSkill {
                 skill_id: "s_prdescribe".to_owned(),
                 version_id: "c".repeat(64),
+                harnesses: Vec::new(),
             }],
         };
         let v = serde_json::to_value(&report).unwrap();

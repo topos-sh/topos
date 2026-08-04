@@ -360,6 +360,8 @@ fn skill_entry(row: &Row) -> SkillEntry {
         source: (!row.source.is_empty()).then(|| row.source.clone()),
         status,
         cause,
+        // Threaded from the delivery cache once the mcp engine records kinds (this increment).
+        kind: None,
     }
 }
 
@@ -530,6 +532,7 @@ fn store_ghosts(
                     SkillStatus::Current
                 }),
                 cause: None,
+                kind: None,
             }
         } else {
             let origin = doc::read_doc::<super::add::OriginDoc>(ctx.fs, &sp.origin)
@@ -568,6 +571,7 @@ fn store_ghosts(
                 source,
                 status,
                 cause,
+                kind: None,
             }
         };
         out.push(Ghost {

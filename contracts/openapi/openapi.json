@@ -2971,6 +2971,13 @@
             "description": "The generation the proposal is born against (its base); a stale base later makes it non-current.",
             "minimum": 0
           },
+          "kind": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The catalog `kind` this proposal declares for a BRAND-NEW bundle (same semantics as\n[`PublishRequest::kind`] — a reroute-to-proposal genesis still carries it). **Additive.**"
+          },
           "op_id": {
             "type": "string",
             "description": "The client-minted UUIDv4 idempotency key (replays the stored receipt on retry)."
@@ -3140,6 +3147,13 @@
             "format": "int64",
             "description": "The generation this publish's compare-and-set targets; a stale value yields `CONFLICT`.",
             "minimum": 0
+          },
+          "kind": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The catalog `kind` this publish declares for a BRAND-NEW bundle (`\"mcp\"` for an MCP-server\nbundle; absent ⇒ `\"skill\"`). Genesis-only: an existing bundle's kind is fixed at birth, and\na publish naming a different kind is refused before any custody write. **Additive.**"
           },
           "op_id": {
             "type": "string",
@@ -3448,6 +3462,13 @@
           "version_id"
         ],
         "properties": {
+          "harnesses": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/WireHarnessState"
+            },
+            "description": "Per-harness applied states for a config-placed (`mcp`) bundle: which detected agents hold\nthe entry and how (`state` is an OPEN vocabulary — `current` / `drifted` / `not-supported` /\n`unprovable`; a reader ignores a state it does not recognize). Empty for file-bundle\nskills. **Additive.**"
+          },
           "skill_id": {
             "type": "string",
             "description": "The skill id (the `<skill>` path segment)."
@@ -3807,6 +3828,31 @@
           "100644",
           "100755"
         ]
+      },
+      "WireHarnessState": {
+        "type": "object",
+        "description": "One harness's applied state for a config-placed (`mcp`) bundle on this installation.",
+        "required": [
+          "slug",
+          "state"
+        ],
+        "properties": {
+          "note": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A short human-readable qualifier (why not-supported / what drifted), when one exists."
+          },
+          "slug": {
+            "type": "string",
+            "description": "The harness registry slug (e.g. `claude-code`, `cursor`)."
+          },
+          "state": {
+            "type": "string",
+            "description": "The state — an OPEN vocabulary (`current` / `drifted` / `not-supported` / `unprovable`)."
+          }
+        }
       },
       "WireLogProposal": {
         "type": "object",

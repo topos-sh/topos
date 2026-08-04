@@ -151,6 +151,7 @@ mod tests {
             display_name: None,
             channel: None,
             last_receipt: None,
+            bundle_kind: None,
         }
     }
 

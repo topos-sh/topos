@@ -768,6 +768,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
                     source: Some("the topos.sh/acme feed".to_owned()),
                     status: Some(SkillStatus::Current),
                     cause: None,
+                    kind: None,
                 }],
             }],
             signed_in: true,
