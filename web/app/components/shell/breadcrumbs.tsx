@@ -178,7 +178,7 @@ const REGISTRY: Record<string, CrumbBuilder> = {
   "mcp-file-view": bundleFile,
 
   // The MCP section's way in (the Skills one, add-from-GitHub, carries no trail today).
-  "routes/mcp-import": () => [{ label: "MCP servers" }, { label: "Add a server" }],
+  "routes/mcp-new": () => [{ label: "MCP servers" }, { label: "Add a server" }],
 
   // Workspace nav.
   "routes/profile": () => [{ label: "Your skills" }],

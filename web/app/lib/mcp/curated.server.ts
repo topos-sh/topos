@@ -1,15 +1,15 @@
+import { canonicalServerJson } from "@/lib/mcp/fetch.server";
 import { STREAMABLE_HTTP } from "@/lib/mcp/validate.server";
 
 /**
- * THE BUILT-IN LIST — the popular remote MCP servers the import page offers as a picker, so the
- * common case is choosing a name off a list instead of knowing an address by heart.
+ * THE BUILT-IN LIST — the popular remote MCP servers the add-a-server page offers as a picker, so
+ * the common case is choosing a name off a list instead of knowing an address by heart.
  *
  * Plain committed data. Nothing here is fetched at build time and no entry carries code: the
- * picker reads it, and choosing one hands the SAME preview → publish flow the same kind of bytes
- * a paste would have. Every entry goes through the ordinary gate
- * (app/lib/mcp/validate.server.ts) on the way in and again on the way out — there is no arm here
- * that skips it, and the unit suite drives every entry through that gate so a bad row fails CI
- * rather than a member's publish.
+ * picker reads it, and choosing one publishes the SAME kind of bytes a paste would have. Every
+ * entry goes through the ordinary gate (app/lib/mcp/validate.server.ts) on the way out — there is
+ * no arm here that skips it, and the unit suite drives every entry through that gate so a bad row
+ * fails CI rather than a member's publish.
  *
  * TWO RULES decide membership, and they are the same two the gate enforces:
  *
@@ -287,22 +287,50 @@ export function curatedServerDocument(entry: CuratedMcpServer): Record<string, u
   };
 }
 
-/** One row as the picker renders it — the host is shown so the address is visible before a click. */
+/**
+ * One row as the picker renders it — the host is shown so the address is visible before a click,
+ * and the row carries its own canonical `server.json` bytes. The bytes ride along deliberately:
+ * choosing a row asks "add this?" and answers "here is exactly what would land" in the same
+ * instant, and a round trip to fetch a document this process has had committed since build time
+ * is a round trip in front of a question the page can already answer. Nothing here is secret —
+ * this file is source — and the publish arm re-derives the bytes from the list rather than
+ * trusting the ones that come back.
+ */
 export interface CuratedMcpRow {
   name: string;
+  slug: string;
   title: string;
   description: string;
   auth: "oauth" | "none";
   host: string;
+  url: string;
+  version: string;
+  transport: typeof STREAMABLE_HTTP;
+  document: string;
 }
 
-/** What the loader hands the page: display fields only, in the list's own order. */
+/** What the loader hands the page: every row, in the list's own order. */
 export function curatedServerRows(): CuratedMcpRow[] {
   return CURATED_MCP_SERVERS.map((entry) => ({
     name: entry.name,
+    slug: entry.slug,
     title: entry.title,
     description: entry.description,
     auth: entry.auth,
     host: new URL(entry.url).host,
+    url: entry.url,
+    version: CURATED_VERSION,
+    transport: STREAMABLE_HTTP,
+    document: canonicalServerJson(curatedServerDocument(entry)),
   }));
+}
+
+/**
+ * The exact bytes a picked row publishes, or `null` when this list holds no such row. The publish
+ * arm reads this instead of the form's document field: a pick posts an id, and an id this list
+ * does not hold is refused here rather than turned into a document.
+ */
+export function curatedDocumentFor(name: string): string | null {
+  const entry = curatedServerByName(name);
+  return entry === undefined ? null : canonicalServerJson(curatedServerDocument(entry));
 }

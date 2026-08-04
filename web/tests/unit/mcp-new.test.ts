@@ -11,14 +11,19 @@ import {
 import { type StubVault, startStubVault } from "./helpers/stub-vault";
 
 /**
- * THE MCP IMPORT PAGE — its two phases against a real scratch Postgres, the app's one custody
- * transport re-pointed at an in-process stub vault, and the fetch seam replaced so no test
- * touches the network.
+ * THE ADD-AN-MCP-SERVER PAGE — its two phases against a real scratch Postgres, the app's one
+ * custody transport re-pointed at an in-process stub vault, and the fetch seam replaced so no
+ * test touches the network.
  *
- * The four sources are one code path by design: whatever the bytes came from — a picked row off
- * the built-in list included — the preview canonicalizes them and runs the same gate the session
- * lane runs, and the publish arm runs it AGAIN on the bytes the form posted back — the form is a
- * client, and a client's word is not the gate. That second run is what these tests lean on hardest.
+ * The three CUSTOM sources are one code path by design: whatever the bytes came from, the preview
+ * canonicalizes them and runs the same gate the session lane runs, and the publish arm runs it
+ * AGAIN on the bytes the form posted back — the form is a client, and a client's word is not the
+ * gate. That second run is what these tests lean on hardest.
+ *
+ * The PICKER never previews at all — its documents are committed data the loader ships, so the
+ * dialog answers on the click. What it posts is an ID, and the publish arm looks the bytes up on
+ * this side: the tests below assert exactly that, including that a document smuggled alongside
+ * the id is ignored.
  *
  * The SSRF guard is exercised directly, with the resolver mocked: what matters is which
  * ADDRESSES it refuses, and a test that needed real DNS to say so would be testing DNS.
@@ -43,12 +48,9 @@ vi.mock("@/lib/mcp/fetch.server", async (importOriginal) => {
     ...actual,
     loadServerDocument: async (source: { kind: string; value: string }) => {
       fetched.calls.push(source);
-      // The two arms that never reach the network run for real — the point of a curated pick is
-      // that it produces the SAME bytes the gate would judge in production.
-      if (source.kind === "paste" || source.kind === "curated") {
-        return await actual.loadServerDocument(
-          source as { kind: "paste" | "curated"; value: string },
-        );
+      // The arm that never reaches the network runs for real.
+      if (source.kind === "paste") {
+        return await actual.loadServerDocument(source as { kind: "paste"; value: string });
       }
       if (fetched.fail !== null) {
         throw new actual.McpFetchError(fetched.fail);
@@ -83,7 +85,7 @@ interface ActionResult {
 }
 
 async function post(fields: Record<string, string>): Promise<ActionResult> {
-  const { action } = await import("@/routes/mcp-import");
+  const { action } = await import("@/routes/mcp-new");
   const form = new FormData();
   for (const [key, value] of Object.entries(fields)) {
     form.set(key, value);
@@ -91,7 +93,7 @@ async function post(fields: Record<string, string>): Promise<ActionResult> {
   let result: unknown;
   try {
     result = await action({
-      request: new Request(`${ORIGIN}/mcp/import`, {
+      request: new Request(`${ORIGIN}/mcp/new`, {
         method: "POST",
         headers: { origin: ORIGIN },
         body: form,
@@ -211,37 +213,20 @@ describe("the preview", () => {
     expect(fetched.calls).toEqual([]);
   });
 
-  it("reads a CURATED pick out of the committed list, with its own catalog name", async () => {
+  it("has no arm for a picked row at all — the picker never previews", async () => {
     const { CURATED_MCP_SERVERS } = await import("@/lib/mcp/curated.server");
     const entry = CURATED_MCP_SERVERS[0];
     expect(entry).toBeDefined();
-    const { body } = await post({
+    // `curated` was a source once. It is gone: the built-in list's documents ship with the page,
+    // so there is nothing here to ask, and this arm must not quietly come back.
+    const { status } = await post({
       intent: "preview",
       source: "curated",
       server: entry?.name ?? "",
     });
-    expect(body.summary).toMatchObject({
-      name: entry?.name,
-      url: entry?.url,
-      transport: "streamable-http",
-      authHint: entry?.auth,
-    });
-    // The row's own slug, not the registry name's tail — which for most of the list is "mcp".
-    expect(body.suggestedName).toBe(entry?.slug);
-    expect(body.origin).toBe("the built-in list");
-    // A pick is not a fetch: nothing was written and no network arm was spent.
-    expect(vault.calls).toEqual([]);
-  });
-
-  it("refuses a pick this list does not hold, rather than inventing a document", async () => {
-    const { status, body } = await post({
-      intent: "preview",
-      source: "curated",
-      server: "io.github.nobody/not-on-the-list",
-    });
     expect(status).toBe(400);
-    expect(String(body.error)).toContain("not one of the servers on this list");
-    expect(vault.published).toEqual([]);
+    expect(fetched.calls).toEqual([]);
+    expect(vault.calls).toEqual([]);
   });
 });
 
@@ -329,6 +314,84 @@ describe("the publish", () => {
   it("refuses an empty payload rather than publishing nothing", async () => {
     const { status } = await post({ intent: "publish", document: "", name: "x", channel: "" });
     expect(status).toBe(400);
+    expect(vault.published).toEqual([]);
+  });
+});
+
+describe("publishing a picked row", () => {
+  it("derives the bytes from the built-in list, not from the form", async () => {
+    const { CURATED_MCP_SERVERS, curatedDocumentFor } = await import("@/lib/mcp/curated.server");
+    const entry = CURATED_MCP_SERVERS[0];
+    expect(entry).toBeDefined();
+    const name = entry?.name ?? "";
+    const { status, location } = await post({
+      intent: "publish",
+      server: name,
+      name: entry?.slug ?? "",
+      channel: "",
+      // A document field alongside the id is IGNORED — the pick names a row, it does not carry
+      // one, so a doctored form cannot publish bytes this list never held.
+      document: JSON.stringify({ ...WEATHER, name: "io.github.acme/smuggled" }),
+    });
+    expect(status).toBe(302);
+    expect(location).toBe(`/mcp/${entry?.slug}`);
+    expect(vault.published).toHaveLength(1);
+    expect(vault.published[0]?.files).toEqual([
+      { path: "server.json", content: curatedDocumentFor(name) },
+    ]);
+    // No fetch was spent on it either: a pick reaches nothing outside this process.
+    expect(fetched.calls).toEqual([]);
+
+    const rows = await db.q<{ kind: string; name: string }>(
+      `SELECT kind, name FROM web.bundle WHERE name = $1`,
+      [entry?.slug],
+    );
+    expect(rows[0]?.kind).toBe("mcp");
+    // The document's own embedded name is what the audit records, not the catalog slug.
+    const audit = await db.q<{ details: Record<string, unknown> }>(
+      `SELECT details FROM web.audit_event WHERE kind = 'mcp_imported' AND details->>'server' = $1`,
+      [name],
+    );
+    expect(audit).toHaveLength(1);
+  });
+
+  it("refuses an id this list does not hold, rather than inventing a document", async () => {
+    const { status, body } = await post({
+      intent: "publish",
+      server: "io.github.nobody/not-on-the-list",
+      name: "nobody",
+      channel: "",
+    });
+    expect(status).toBe(400);
+    expect(String(body.error)).toContain("not one of the servers on this list");
+    // The refusal is addressed to the dialog, and names the row it answers about — a page-level
+    // answer would leave the open dialog silent.
+    expect(body.form).toBe("pick");
+    expect(body.server).toBe("io.github.nobody/not-on-the-list");
+    expect(vault.published).toEqual([]);
+  });
+
+  it("sends a gate refusal back to the dialog that asked", async () => {
+    const { CURATED_MCP_SERVERS } = await import("@/lib/mcp/curated.server");
+    const entry = CURATED_MCP_SERVERS[1];
+    expect(entry).toBeDefined();
+    const name = entry?.name ?? "";
+    const versionId = versionIdFor("s_picked_taken");
+    // Another bundle already claims this server's embedded name — the live collision.
+    await seedBundle(db, wsId, "s_picked_taken", "already-here", { kind: "mcp", versionId });
+    vault.seed(wsId, "s_picked_taken", versionId, [
+      { path: "server.json", content: JSON.stringify({ ...WEATHER, name }, null, 2) },
+    ]);
+    const { status, body } = await post({
+      intent: "publish",
+      server: name,
+      name: entry?.slug ?? "",
+      channel: "",
+    });
+    expect(status).toBe(400);
+    expect(body.code).toBe("MCP_NAME_TAKEN");
+    expect(body.form).toBe("pick");
+    expect(body.server).toBe(name);
     expect(vault.published).toEqual([]);
   });
 });

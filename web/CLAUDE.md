@@ -110,8 +110,11 @@ caller.
   credential (the shapes live in the repo-root `tests/fixtures/mcp/`, compiled into
   `secret-patterns.generated.ts`), and an embedded registry name no other bundle here claims.
   Both publish doors run the same gate before any custody call: the session lane's
-  publish/propose and the `mcp/import` page — the MCP section's own way in (built-in list ·
-  registry name · SSRF-guarded URL · paste).
+  publish/propose and the `mcp/new` page — the MCP section's own way in (built-in list ·
+  registry name · SSRF-guarded URL · paste). The built-in list is committed data the loader
+  ships whole, documents included, so picking one opens its confirm dialog with no round trip;
+  the publish re-derives those bytes from the list. The three typed sources keep their
+  server-side preview.
   `…/registry/v0.1/servers[/{name}/versions[/latest]]` serves the workspace's catalog in the
   official read-API shape, member-gated by cookie OR bearer, uniform-404 otherwise.
 - **Signed-in:** dashboard (skills and MCP servers as separate sections) · bundle browser +

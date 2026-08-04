@@ -1,10 +1,9 @@
 import { lookup } from "node:dns/promises";
 import { isIPv4 } from "node:net";
-import { curatedServerByName, curatedServerDocument } from "@/lib/mcp/curated.server";
 import { MAX_SERVER_JSON_BYTES, nestsTooDeep } from "@/lib/mcp/validate.server";
 
 /**
- * THE TWO SERVER-SIDE FETCHES the MCP import page can make, and the guard that makes the
+ * THE TWO SERVER-SIDE FETCHES the add-an-MCP-server page can make, and the guard that makes the
  * second one safe.
  *
  * A pasted document needs no fetch at all — that is the path an internal server takes. The
@@ -340,10 +339,11 @@ export async function fetchRegistryServer(
 }
 
 /**
- * Where the page's four arms get their bytes. Only two of them reach the network: a paste never
- * leaves the process, and a `curated` pick reads a row out of the committed list.
+ * Where the page's three CUSTOM arms get their bytes. Only two of them reach the network — a
+ * paste never leaves the process. (The picker is not here at all: a built-in row's document is
+ * committed data the page already holds, so choosing one asks this tier nothing.)
  */
-export type McpSourceKind = "registry" | "url" | "paste" | "curated";
+export type McpSourceKind = "registry" | "url" | "paste";
 
 /** The two arms that make an outbound request — the belt and the SSRF guard are theirs alone. */
 export function fetchesUpstream(kind: McpSourceKind): boolean {
@@ -356,9 +356,9 @@ export interface McpSource {
 }
 
 /**
- * The ONE door the import page uses, so the four arms differ in exactly one place. The
- * fetcher is a parameter (the upstream importer's pattern) — production dials the network,
- * tests hand back bytes, and the two local arms call it not at all.
+ * The ONE door the custom arms use, so the three differ in exactly one place. The fetcher is a
+ * parameter (the upstream importer's pattern) — production dials the network, tests hand back
+ * bytes, and the paste arm calls it not at all.
  */
 export async function loadServerDocument(
   source: McpSource,
@@ -366,15 +366,6 @@ export async function loadServerDocument(
 ): Promise<FetchedDocument> {
   if (source.kind === "paste") {
     return { text: source.value, url: "" };
-  }
-  if (source.kind === "curated") {
-    // A picked row is looked up, never trusted as bytes: the form posts an id, and an id this
-    // list does not hold is refused here rather than turned into a document.
-    const entry = curatedServerByName(source.value);
-    if (entry === undefined) {
-      throw new McpFetchError("that is not one of the servers on this list");
-    }
-    return { text: JSON.stringify(curatedServerDocument(entry)), url: "" };
   }
   if (source.kind === "registry") {
     return await fetchRegistryServer(source.value, fetcher);

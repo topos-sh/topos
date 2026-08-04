@@ -376,7 +376,7 @@ function McpSection({
     <SidebarGroup>
       <SidebarGroupLabel>MCP servers</SidebarGroupLabel>
       <SidebarGroupAction asChild aria-label="Add an MCP server">
-        <Link to={wsHref(wsSegment, "mcp/import")}>
+        <Link to={wsHref(wsSegment, "mcp/new")}>
           <Plus />
         </Link>
       </SidebarGroupAction>

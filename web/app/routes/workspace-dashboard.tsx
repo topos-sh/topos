@@ -181,7 +181,7 @@ function DashboardPage({
             <Link to={wsPath("skills/import")} className={buttonClasses("quiet")}>
               Add from GitHub
             </Link>
-            <Link to={wsPath("mcp/import")} className={buttonClasses("quiet")}>
+            <Link to={wsPath("mcp/new")} className={buttonClasses("quiet")}>
               Add MCP server
             </Link>
             <Link to={wsPath("settings")} className={buttonClasses("quiet")}>

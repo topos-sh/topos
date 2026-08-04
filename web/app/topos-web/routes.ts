@@ -200,10 +200,11 @@ function memberWorkspaceChildren(
     route("visibility", file("visibility.tsx")),
     // Add-from-GitHub: server-side fetch → preview → publish WITH upstream provenance.
     route("skills/import", file("skill-import.tsx")),
-    // Add-an-MCP-server — the MCP section's own way in (its `+ new`): pick / registry name /
-    // URL / paste → preview → publish as a `kind: 'mcp'` bundle whose one file is the server
-    // document. Nothing here offers a skill, and the Skills `+` offers no server.
-    route("mcp/import", file("mcp-import.tsx")),
+    // Add-an-MCP-server — the MCP section's own way in (its `+ new`): pick from the built-in
+    // list, or name / fetch / paste a document → publish as a `kind: 'mcp'` bundle whose one
+    // file is the server document. Nothing here offers a skill, and the Skills `+` offers no
+    // server.
+    route("mcp/new", file("mcp-new.tsx")),
     route("members", file("workspace-members.tsx")),
     route("settings/archive", file("workspace-archive.tsx")),
     route("settings", file("workspace-settings.tsx")),
@@ -227,7 +228,7 @@ function memberWorkspaceChildren(
     route("skills/:skill/versions/:versionId/files/*", file("file-view.tsx")),
     // The SAME subpages under the MCP base — one module each, kind-fenced, so a server's tabs
     // stay inside the MCP section instead of walking the reader back into Skills. The static
-    // `mcp/import` above outranks `mcp/:server`, exactly as `skills/import` does.
+    // `mcp/new` above outranks `mcp/:server`, exactly as `skills/import` does.
     route("mcp/:server/history", file("skill-history.tsx"), { id: "mcp-history" }),
     route("mcp/:server/proposals", file("skill-proposals.tsx"), { id: "mcp-proposals" }),
     route("mcp/:server/proposals/:versionId", file("proposal-review.tsx"), {

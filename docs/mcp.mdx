@@ -51,15 +51,18 @@ reads silence as one.
 <Tabs>
   <Tab title="The browser">
     The left panel carries an **MCP servers** section of its own, next to Skills; its `+` (and
-    **Add MCP server** on the dashboard) opens `<origin>/<workspace>/mcp/import`. The page opens
-    on a searchable list of popular servers — Linear, Notion, GitHub, Sentry, Figma and the rest
-    — each showing what it connects to and whether a sign-in is coming. Choose one, preview what
-    it promises, then publish it under a name and into a channel.
+    **Add MCP server** on the dashboard) opens `<origin>/<workspace>/mcp/new`. The page opens on
+    a searchable grid of popular servers — Linear, Notion, GitHub, Sentry, Figma and the rest —
+    each showing what it connects to and whether a sign-in is coming. Click one and it asks,
+    there and then, whether to add it: the endpoint, the auth, the exact `server.json` bytes,
+    the name it will take and the channel it goes into. Cancel or press Escape and nothing has
+    happened; confirm and it publishes.
 
     Anything not on that list goes in under **Custom server**, which is the same three typed
     sources as ever: the MCP registry by name, a URL to a `server.json`, or the document pasted
-    in. Every one of them — a pick included — lands in the same preview and passes the same
-    gate; the list only saves the typing.
+    in. Those three are read by the server first and shown as a preview, because nobody here has
+    seen those bytes yet. Every one of them — a pick included — passes the same gate; the list
+    only saves the typing.
 
     <Note>
       A URL is fetched by the server your workspace runs on: `https` only, redirects refused, and

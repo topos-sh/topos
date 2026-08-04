@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   CURATED_MCP_SERVERS,
   CURATED_VERSION,
+  curatedDocumentFor,
   curatedServerByName,
   curatedServerDocument,
   curatedServerRows,
@@ -105,15 +106,40 @@ describe("the lookups the page uses", () => {
     expect(curatedServerByName("")).toBeUndefined();
   });
 
-  it("projects display rows without leaking the document", () => {
+  it("projects a row per entry, carrying the exact bytes a publish would store", () => {
     const rows = curatedServerRows();
     expect(rows).toHaveLength(CURATED_MCP_SERVERS.length);
-    for (const [index, row] of rows.entries()) {
-      const entry = CURATED_MCP_SERVERS[index];
-      expect(row.name).toBe(entry?.name);
-      expect(row.host).toBe(new URL(entry?.url ?? "").host);
-      // Display fields only — nothing on the wire to the browser is the document itself.
-      expect(Object.keys(row).sort()).toEqual(["auth", "description", "host", "name", "title"]);
+    for (const [index, entry] of CURATED_MCP_SERVERS.entries()) {
+      const row = rows[index];
+      expect(row).toBeDefined();
+      if (row === undefined) {
+        continue;
+      }
+      expect(row.name).toBe(entry.name);
+      expect(row.slug).toBe(entry.slug);
+      expect(row.host).toBe(new URL(entry.url).host);
+      expect(row.url).toBe(entry.url);
+      expect(row.version).toBe(CURATED_VERSION);
+      expect(row.transport).toBe(STREAMABLE_HTTP);
+      // The dialog shows what would land WITHOUT asking the server for it, so the row has to be
+      // the same bytes the publish arm derives — byte for byte, or the page would be showing a
+      // document that is not the one it publishes.
+      expect(row.document).toBe(canonicalServerJson(curatedServerDocument(entry)));
+      expect(row.document).toBe(curatedDocumentFor(row.name));
     }
+  });
+
+  it("hands back bytes only for a name this list holds", () => {
+    const first = CURATED_MCP_SERVERS[0];
+    expect(first).toBeDefined();
+    if (first !== undefined) {
+      expect(curatedDocumentFor(first.name)).toBe(
+        canonicalServerJson(curatedServerDocument(first)),
+      );
+    }
+    // The publish arm's whole defence against a doctored form field: an unknown id is refused,
+    // never turned into a document.
+    expect(curatedDocumentFor("io.github.nobody/not-on-the-list")).toBeNull();
+    expect(curatedDocumentFor("")).toBeNull();
   });
 });
