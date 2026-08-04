@@ -225,7 +225,8 @@ pub(crate) fn add_mcp(
         McpSourceShape::Unreadable => Err(ClientError::InvalidArgument(format!(
             "`{source}` is not something `--mcp` can read — name an official-registry server \
              (`io.github.acme/weather`), an https link to its server.json, or a local folder \
-             holding one"
+             holding one; if a workspace you are connected to already publishes it, plain `topos \
+             add {source}` gets it with its kind intact"
         ))),
     }
 }
@@ -244,8 +245,8 @@ fn adopt_local(ctx: &Ctx<'_>, dir: &Path, global: bool) -> Result<AddMcpOutcome,
     let server = dir.join("server.json");
     if ctx.fs.read_opt(&server)?.is_none() {
         return Err(ClientError::InvalidArgument(format!(
-            "{} holds no server.json at its root — an MCP bundle IS its folder, and the document \
-             is what topos places",
+            "{} holds no server.json at its root — an MCP bundle is a folder whose root holds \
+             server.json",
             dir.display()
         )));
     };
