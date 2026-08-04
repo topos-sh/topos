@@ -606,7 +606,11 @@ fn add_forge(
     }
 
     // ---- APPLY ----
-    // The DEMAND lands FIRST: with the row durably recorded, a member-install failure part-way
+    // The fetch above SUCCEEDED, which is newer evidence than any refusal on file: a source the
+    // automatic update had written off as gone has just handed over its bytes. Forget the verdict,
+    // or the row this add is about to write would never be checked again.
+    crate::forge_check::forget(ctx.fs, &ctx.layout, &source_label);
+    // The DEMAND lands next: with the row durably recorded, a member-install failure part-way
     // leaves a CONVERGENT state — the manifest asks for exactly what was accepted, and the next
     // update (or a re-run of this add) finishes the landing — instead of installed members no
     // manifest row asks for.
@@ -827,8 +831,10 @@ pub(crate) fn add_forge_selected(
         });
     }
 
-    // ---- APPLY ---- the rows land first, then the bytes (a partial landing therefore leaves
-    // demand the next update converges).
+    // ---- APPLY ---- the fetch above succeeded, so any standing refusal against this source is
+    // out of date (see the bare reference arm); then the rows, then the bytes (a partial landing
+    // therefore leaves demand the next update converges).
+    crate::forge_check::forget(ctx.fs, &ctx.layout, &origin_label);
     if target.scope == ManifestScope::Project {
         crate::sidecar::ensure_project_store(ctx.fs, &target.dir)?;
     }

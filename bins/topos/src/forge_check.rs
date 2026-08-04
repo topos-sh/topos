@@ -58,12 +58,26 @@ pub(crate) struct ForgeCheck {
     /// round that dialed, whatever its outcome.
     #[serde(default)]
     pub next_check_at_ms: i64,
-    /// Per source (`<host>/<owner>/<repo>`), how its last check went.
+    /// Per QUESTION — `<host>/<owner>/<repo>#<ref>`, the ref empty for a floating row — how its
+    /// last check went. Keyed by the question rather than the source because one repository can be
+    /// named at two refs, and those are two different facts: a floating row that works says nothing
+    /// about a pinned row whose commit is gone, and a per-source key would let the first quietly
+    /// erase the second's final verdict.
     #[serde(default)]
     pub sources: BTreeMap<String, SourceCheck>,
 }
 
-/// One source's last check.
+/// The key one row's check is filed under: which source, at which ref.
+pub(crate) fn question(source: &str, git_ref: &str) -> String {
+    format!("{source}#{git_ref}")
+}
+
+/// The source half of a [`question`] key. Origins carry no `#`, so the split is unambiguous.
+pub(crate) fn source_of(key: &str) -> &str {
+    key.split('#').next().unwrap_or(key)
+}
+
+/// One question's last check.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct SourceCheck {
     /// Epoch millis of the last check ATTEMPT, whatever came of it.
@@ -103,14 +117,37 @@ pub(crate) struct CheckFailure {
 }
 
 impl SourceCheck {
-    /// Whether asking again can still change the answer. A settled `gone` verdict about the SAME
-    /// ref is the one thing that stops the lane from dialing.
-    pub(crate) fn worth_dialing(&self, git_ref: &str) -> bool {
+    /// Whether asking this question again can still change the answer. A settled `gone` verdict is
+    /// the one thing that stops the lane from dialing — and it is filed under the exact question it
+    /// was about, so a row edited to ask something different is asking something different.
+    pub(crate) fn worth_dialing(&self) -> bool {
         match &self.failure {
-            Some(f) => !f.gone || f.git_ref != git_ref,
+            Some(f) => !f.gone,
             None => true,
         }
     }
+}
+
+/// Forget every verdict standing against a SOURCE, at any ref.
+///
+/// A verdict is a record of what a forge said, and a forge that has just handed over the bytes has
+/// said something newer. Without this a repository that was deleted and later restored would stay
+/// permanently un-updated: `topos add … --yes` would fetch it, install it, and write the row, while
+/// the automatic update went on refusing to dial the source the person just proved is alive.
+///
+/// Best-effort: a machine that cannot record the forgetting simply asks again later, which is the
+/// safe direction.
+pub(crate) fn forget(fs: &dyn FsOps, layout: &Layout, source: &str) {
+    let mut doc = read(fs, layout);
+    let before = doc.sources.len();
+    doc.sources
+        .retain(|key, check| source_of(key) != source || check.failure.is_none());
+    if doc.sources.len() == before {
+        return;
+    }
+    doc.schema_version = PERSISTED_SCHEMA_VERSION;
+    let _ = fs.create_dir_all(&layout.state_dir());
+    let _ = crate::doc::write_doc(fs, &layout.forge_check_path(), &doc);
 }
 
 /// Read the document. FAILS OPEN: absent, unreadable, or written by a build this one does not
@@ -301,27 +338,25 @@ mod tests {
         assert!(due(&doc, 0));
     }
 
-    #[test]
-    fn a_gone_verdict_stops_the_dialing_until_the_row_changes() {
-        let settled = SourceCheck {
+    fn gone(git_ref: &str) -> SourceCheck {
+        SourceCheck {
             failure: Some(CheckFailure {
                 reason: "gone".into(),
                 gone: true,
                 reached: true,
-                git_ref: String::new(),
+                git_ref: git_ref.to_owned(),
                 reported: true,
             }),
             ..SourceCheck::default()
-        };
-        assert!(
-            !settled.worth_dialing(""),
-            "the same floating row is not asked again"
-        );
-        assert!(
-            settled.worth_dialing("abc1234"),
-            "a row edited to a pin re-opens the question"
-        );
+        }
+    }
 
+    #[test]
+    fn a_gone_verdict_stops_the_dialing_for_the_question_it_was_about() {
+        assert!(
+            !gone("").worth_dialing(),
+            "the same question is not re-asked"
+        );
         let transient = SourceCheck {
             failure: Some(CheckFailure {
                 reason: "could not connect".into(),
@@ -333,10 +368,66 @@ mod tests {
             ..SourceCheck::default()
         };
         assert!(
-            transient.worth_dialing(""),
+            transient.worth_dialing(),
             "a network fault is always retried"
         );
-        assert!(SourceCheck::default().worth_dialing(""));
+        assert!(SourceCheck::default().worth_dialing());
+
+        // A row edited to ask something else is asking something else — a different key entirely,
+        // which nothing has been recorded against.
+        assert_eq!(question("github.com/o/r", ""), "github.com/o/r#");
+        assert_eq!(
+            question("github.com/o/r", "abc1234"),
+            "github.com/o/r#abc1234"
+        );
+        assert_eq!(source_of("github.com/o/r#abc1234"), "github.com/o/r");
+        assert_eq!(source_of("github.com/o/r"), "github.com/o/r");
+    }
+
+    #[test]
+    fn a_source_that_answers_again_is_forgiven_every_verdict_against_it() {
+        // A repository deleted and later restored: `add … --yes` fetches it, which is newer
+        // evidence than any refusal on file. Without the forgetting, automatic updates would stay
+        // switched off for that source forever.
+        let home = TempHome::new();
+        let (fs, layout) = (RealFs, home.layout());
+        let now = 1_700_000_000_000;
+        record_round(
+            &fs,
+            &layout,
+            next_due(now, 0, None),
+            &[
+                (question("github.com/o/r", ""), gone("")),
+                (question("github.com/o/r", "abc1234"), gone("abc1234")),
+                (question("github.com/o/other", ""), gone("")),
+            ],
+        )
+        .unwrap();
+
+        forget(&fs, &layout, "github.com/o/r");
+        let doc = read(&fs, &layout);
+        assert!(
+            !doc.sources.contains_key(&question("github.com/o/r", "")),
+            "{:?}",
+            doc.sources
+        );
+        assert!(
+            !doc.sources
+                .contains_key(&question("github.com/o/r", "abc1234")),
+            "every ref of that source is forgiven: {:?}",
+            doc.sources
+        );
+        assert!(
+            doc.sources
+                .contains_key(&question("github.com/o/other", "")),
+            "and nobody else's verdict is touched: {:?}",
+            doc.sources
+        );
+        assert_eq!(
+            doc.next_check_at_ms,
+            now + CHECK_INTERVAL_MS,
+            "forgetting is not a round; the clock is untouched"
+        );
     }
 
     #[test]

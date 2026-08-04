@@ -511,7 +511,9 @@ struct ForgeLane<'a> {
     /// What was recorded BEFORE this round — the settled refusals, and how long each source has
     /// gone without an answer.
     prior: forge_check::ForgeCheck,
-    /// This round's outcome per source.
+    /// This round's outcome per QUESTION (`<source>#<ref>`). Per question, not per source: one
+    /// repository named at two refs produces two independent facts, and filing them together would
+    /// let a floating row that works erase a pinned row's final verdict.
     seen: std::cell::RefCell<BTreeMap<String, SourceCheck>>,
     /// The furthest-out instant any host asked to be left alone until this round.
     backoff: std::cell::Cell<Option<i64>>,
@@ -526,13 +528,6 @@ struct ForgeLane<'a> {
     /// why this is tracked apart from the outcome map.
     dialed: std::cell::RefCell<BTreeSet<String>>,
     now_ms: i64,
-}
-
-/// The QUESTION a row puts to a forge: which source, at which ref. Everything the lane counts
-/// once per round is counted per question, because that is the granularity at which an answer is
-/// actually the same answer.
-fn question(origin: &str, git_ref: &str) -> String {
-    format!("{origin}#{git_ref}")
 }
 
 /// Why the lane will not dial for a source right now — each with what, if anything, to say.
@@ -574,16 +569,16 @@ impl<'a> ForgeLane<'a> {
     /// one: two manifest rows can name a single repository (a set line and a member line of it),
     /// and they must not cost two requests and two identical sentences about the same repo.
     fn hold(&self, origin: &str, git_ref: &str) -> Option<ForgeHold> {
-        // ONE TURN PER SOURCE PER ROUND. Two manifest rows can name a single repository (a set
-        // line and a member line of it), and a question already asked has already been answered —
+        // ONE TURN PER QUESTION PER ROUND. A question already asked has already been answered —
         // whatever the answer was. Without this a failing repo named twice costs two requests and
         // says the same sentence twice in one breath, because only the never-reached fault opens
         // the breaker and every other fault would fall straight through to a second dial.
-        if self.dialed.borrow().contains(&question(origin, git_ref))
+        let key = forge_check::question(origin, git_ref);
+        if self.dialed.borrow().contains(&key)
             && self
                 .seen
                 .borrow()
-                .get(origin)
+                .get(&key)
                 .is_some_and(|c| c.failure.is_some())
         {
             return Some(ForgeHold::Attempted);
@@ -591,8 +586,8 @@ impl<'a> ForgeLane<'a> {
         if let Some(settled) = self
             .prior
             .sources
-            .get(origin)
-            .filter(|c| !c.worth_dialing(git_ref))
+            .get(&key)
+            .filter(|c| !c.worth_dialing())
             .cloned()
             && let Some(f) = settled.failure.clone()
         {
@@ -602,7 +597,7 @@ impl<'a> ForgeLane<'a> {
             // one thing worth persisting is having finally said it out loud.
             if !f.reported {
                 let mut seen = self.seen.borrow_mut();
-                let entry = seen.entry(origin.to_owned()).or_insert(settled);
+                let entry = seen.entry(key).or_insert(settled);
                 if let Some(e) = &mut entry.failure {
                     e.reported = true;
                 }
@@ -616,7 +611,7 @@ impl<'a> ForgeLane<'a> {
         // checked-and-unanswered — otherwise the clock would treat it as never tried and the whole
         // round would come back at the next session start.
         if self.down.get() {
-            self.note_short_circuit(origin);
+            self.note_short_circuit(origin, git_ref);
             return Some(ForgeHold::Down);
         }
         None
@@ -629,7 +624,7 @@ impl<'a> ForgeLane<'a> {
         git_ref: &str,
         spec: &crate::source::RemoteSpec,
     ) -> Result<RepoHead, ClientError> {
-        let key = question(origin, git_ref);
+        let key = forge_check::question(origin, git_ref);
         if let Some((_, head)) = self.heads.borrow().iter().find(|(k, _)| *k == key) {
             return Ok(head.clone());
         }
@@ -643,7 +638,7 @@ impl<'a> ForgeLane<'a> {
                     let held = self.backoff.get().unwrap_or(i64::MIN);
                     self.backoff.set(Some(held.max(at)));
                 }
-                self.note_answer(origin, &head.commit);
+                self.note_answer(origin, git_ref, &head.commit);
                 Ok(head)
             }
             Err(e) => {
@@ -660,7 +655,7 @@ impl<'a> ForgeLane<'a> {
         git_ref: &str,
         spec: &crate::source::RemoteSpec,
     ) -> Result<Rc<Vec<u8>>, ClientError> {
-        let key = question(origin, git_ref);
+        let key = forge_check::question(origin, git_ref);
         if let Some((_, bytes)) = self.repos.borrow().iter().find(|(k, _)| *k == key) {
             return Ok(Rc::clone(bytes));
         }
@@ -682,34 +677,27 @@ impl<'a> ForgeLane<'a> {
     /// answering, recorded here rather than at the fetch because an HTTP 200 is not yet a landing:
     /// a body that turns out to be unreadable must not be filed as a successful check, and the
     /// commit worth recording is the one the bytes actually carry.
-    fn note_landed(&self, origin: &str, commit: &str) {
+    fn note_landed(&self, origin: &str, git_ref: &str, commit: &str) {
         // The archive names its commit in the SHORT form; a probe earlier this round may have
         // named the same commit in full. Same commit, better spelling — keep the better one rather
         // than writing the fuller answer back down to its own prefix. (The borrow is released
         // before `note_answer` takes its own.)
-        let already = self
-            .seen
-            .borrow()
-            .get(origin)
-            .and_then(|c| c.commit.clone());
+        let key = forge_check::question(origin, git_ref);
+        let already = self.seen.borrow().get(&key).and_then(|c| c.commit.clone());
         if !commit.is_empty()
             && let Some(seen) = already
             && commit_matches(&seen, commit)
             && seen.len() >= commit.len()
         {
-            self.note_answer(origin, &seen);
+            self.note_answer(origin, git_ref, &seen);
             return;
         }
         if commit.is_empty() {
             // No commit could be read from the archive. The check still happened, so record it as
             // answered; claiming a commit nobody found would be worse than admitting none.
-            let prior = self
-                .prior
-                .sources
-                .get(origin)
-                .and_then(|p| p.commit.clone());
+            let prior = self.prior.sources.get(&key).and_then(|p| p.commit.clone());
             self.seen.borrow_mut().insert(
-                origin.to_owned(),
+                key,
                 SourceCheck {
                     checked_at_ms: self.now_ms,
                     answered_at_ms: Some(self.now_ms),
@@ -719,14 +707,14 @@ impl<'a> ForgeLane<'a> {
             );
             return;
         }
-        self.note_answer(origin, commit);
+        self.note_answer(origin, git_ref, commit);
     }
 
     /// Record a source that answered. Clears any standing failure — including a settled one, so a
     /// repo that comes back is simply back.
-    fn note_answer(&self, origin: &str, commit: &str) {
+    fn note_answer(&self, origin: &str, git_ref: &str, commit: &str) {
         self.seen.borrow_mut().insert(
-            origin.to_owned(),
+            forge_check::question(origin, git_ref),
             SourceCheck {
                 checked_at_ms: self.now_ms,
                 answered_at_ms: Some(self.now_ms),
@@ -752,34 +740,34 @@ impl<'a> ForgeLane<'a> {
             let held = self.backoff.get().unwrap_or(i64::MIN);
             self.backoff.set(Some(held.max(at)));
         }
-        let prior = self.prior.sources.get(origin);
-        self.seen.borrow_mut().insert(
-            origin.to_owned(),
-            SourceCheck {
-                checked_at_ms: self.now_ms,
-                answered_at_ms: prior.and_then(|p| p.answered_at_ms),
-                commit: prior.and_then(|p| p.commit.clone()),
-                failure: Some(CheckFailure {
-                    reason: crate::render::safe_message(e),
-                    gone: fault.permanent(),
-                    reached: fault.reached(),
-                    git_ref: git_ref.to_owned(),
-                    // A final answer is SAID by the arm that received it, in this same round, so
-                    // it is recorded as already said. Recording it unsaid would make the round
-                    // that discovered the deletion and the round after it both announce it.
-                    reported: fault.permanent(),
-                }),
-            },
-        );
+        let key = forge_check::question(origin, git_ref);
+        let prior = self.prior.sources.get(&key);
+        let record = SourceCheck {
+            checked_at_ms: self.now_ms,
+            answered_at_ms: prior.and_then(|p| p.answered_at_ms),
+            commit: prior.and_then(|p| p.commit.clone()),
+            failure: Some(CheckFailure {
+                reason: crate::render::safe_message(e),
+                gone: fault.permanent(),
+                reached: fault.reached(),
+                git_ref: git_ref.to_owned(),
+                // A final answer is SAID by the arm that received it, in this same round, so it is
+                // recorded as already said. Recording it unsaid would make the round that
+                // discovered the deletion and the round after it both announce it.
+                reported: fault.permanent(),
+            }),
+        };
+        self.seen.borrow_mut().insert(key, record);
     }
 
     /// Record the round's short-circuit for a source the breaker skipped — it had its turn, and
     /// the clock must treat it as checked.
-    fn note_short_circuit(&self, origin: &str) {
-        let prior = self.prior.sources.get(origin);
+    fn note_short_circuit(&self, origin: &str, git_ref: &str) {
+        let key = forge_check::question(origin, git_ref);
+        let prior = self.prior.sources.get(&key);
         self.seen
             .borrow_mut()
-            .entry(origin.to_owned())
+            .entry(key.clone())
             .or_insert_with(|| SourceCheck {
                 checked_at_ms: self.now_ms,
                 answered_at_ms: prior.and_then(|p| p.answered_at_ms),
@@ -790,7 +778,7 @@ impl<'a> ForgeLane<'a> {
                         .to_owned(),
                     gone: false,
                     reached: false,
-                    git_ref: String::new(),
+                    git_ref: git_ref.to_owned(),
                     reported: false,
                 }),
             });
@@ -2496,7 +2484,7 @@ fn reconcile_repo_set(
         }
     };
     let resolved = tree.commit.clone().unwrap_or_default();
-    lane.note_landed(&origin, &resolved);
+    lane.note_landed(&origin, &git_ref, &resolved);
     let recorded = tracked
         .first()
         .and_then(|i| i.origin.commit.clone())
@@ -2712,7 +2700,7 @@ fn reconcile_repo_skill(
             return;
         }
     };
-    lane.note_landed(&origin, &tree.commit.clone().unwrap_or_default());
+    lane.note_landed(&origin, &git_ref, &tree.commit.clone().unwrap_or_default());
     // Every slot's copy at the same commit is settled: nothing moves without a real change.
     if let Some(import) = &tracked {
         let resolved = tree.commit.clone().unwrap_or_default();

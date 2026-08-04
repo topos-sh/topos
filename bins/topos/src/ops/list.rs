@@ -213,6 +213,11 @@ pub(crate) fn list_with(
         }
     };
 
+    // The external sources' health, over the sections THIS INVOCATION SHOWS — assigned BEFORE the
+    // deep dive, which returns early: a repo-backed `list <name>` needs the same answer to "is this
+    // still being kept current?" as the listing does, and more so.
+    data.forge = inventory::forge_sources(ctx, &sections);
+
     // The one-skill deep dive, over the sections THIS INVOCATION SELECTS — the scope flags mean
     // the same thing here as on the listing, so `-g` answers from the machine scope alone even
     // inside a project (the default and `--all` read project-then-machine, precedence order).
@@ -258,8 +263,6 @@ pub(crate) fn list_with(
         req.skills.iter().any(|s| s == name)
             || req.channels.iter().any(|c| via.iter().any(|v| v == c))
     };
-    // The external sources' health, over the sections THIS INVOCATION SHOWS.
-    data.forge = inventory::forge_sources(ctx, &sections);
     for (section, section_ghosts) in sections.iter().zip(&ghosts) {
         let mut rows: Vec<SkillEntry> = section
             .inventory_rows()
