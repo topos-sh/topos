@@ -499,6 +499,9 @@ fn scope_rows(
                     pin: row.pin(),
                     placements: member.applied.placements,
                     bundle: true,
+                    // A repo-set member is always a skill: `kind = "mcp"` on GitHub rows refuses.
+                    kind: None,
+                    harness_states: Vec::new(),
                 });
             }
             continue;

@@ -2216,7 +2216,7 @@ impl crate::ops::McpDocSource for UreqMcpSource {
         if !url.starts_with("https://") {
             return Err(ClientError::RemoteFetch {
                 msg: format!("{url} — a server.json is fetched over https only"),
-                permanent: true,
+                fault: FetchFault::Gone,
             });
         }
         let resp = self
@@ -2227,8 +2227,9 @@ impl crate::ops::McpDocSource for UreqMcpSource {
             .call()
             .map_err(|e| ClientError::RemoteFetch {
                 msg: format!("{url} — {}", transport_reason(&host, &e)),
-                permanent: false,
+                fault: transport_fault(&e),
             })?;
+        let retry_after_ms = retry_after_ms(&resp);
         let status = resp.status().as_u16();
         match status {
             200..=299 => {}
@@ -2237,19 +2238,19 @@ impl crate::ops::McpDocSource for UreqMcpSource {
                     msg: format!(
                         "{url} — that address redirects; give the address it redirects to"
                     ),
-                    permanent: true,
+                    fault: FetchFault::Gone,
                 });
             }
             404 => {
                 return Err(ClientError::RemoteFetch {
                     msg: format!("{url} — no server document there (HTTP 404)"),
-                    permanent: true,
+                    fault: FetchFault::Gone,
                 });
             }
             s => {
                 return Err(ClientError::RemoteFetch {
                     msg: format!("{url} — {}", status_reason(&host, s)),
-                    permanent: !matches!(s, 429 | 500..=599),
+                    fault: FetchFault::Unavailable { retry_after_ms },
                 });
             }
         }
@@ -2261,7 +2262,7 @@ impl crate::ops::McpDocSource for UreqMcpSource {
                 msg: format!(
                     "{url} — the document was cut short, or is too large to be a server.json"
                 ),
-                permanent: false,
+                fault: FetchFault::unavailable(),
             }
         })
     }
