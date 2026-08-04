@@ -397,8 +397,8 @@ pub(super) fn plan_for(ctx: &Ctx<'_>, target: &EditTarget) -> Result<ScopePlan, 
 }
 
 /// Every manifest that governs anything here — the cwd chain's files (nearest first) plus the
-/// global file — as `(path, scope, rows)`. The read-only view the cross-scope hints, the
-/// first-trust check, and the governance rewrite share.
+/// global file — as `(path, scope, rows)`. The read-only view the cross-scope hints and the
+/// governance rewrite share.
 ///
 /// # Errors
 /// A read failure, or a manifest the grammar refuses (typed, naming the file).

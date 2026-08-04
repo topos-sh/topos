@@ -15,15 +15,13 @@
 //! absence means "one feed row per connected workspace" — so a bare `add -g X` of something the
 //! feed already delivers writes NOTHING and says so.
 //!
-//! One CONSENT gate lives here: a git origin this MACHINE's trust registry (`crate::forge_trust`,
-//! the home sidecar) has not granted is fetched read-only, described (what it holds, what would be
-//! written where), and applied only under `--yes`. Trust is a machine fact — never a file fact and
-//! never a store fact: a manifest row is demand anyone could have committed, and a project
-//! `.topos/` store travels with the checkout, so neither ever skips the member-listing describe
-//! (the describe names a standing row instead). The `-s`/`-a` SELECTOR arm goes through the same
-//! gate and the same per-scope store — a selector narrows which members land and where, never whose
-//! bytes they are. Every other arm is a self-scoped file edit that applies immediately with an
-//! undo-led receipt.
+//! A git source is always DESCRIBED FIRST here: the repo is fetched read-only, what it holds and
+//! what would be written where is spelled out, and it lands only under `--yes`. That is a property
+//! of this verb, not of the origin — an interactive `add` is where a person is present to read the
+//! answer, so every one of them gets the same two-phase shape however many times the source has
+//! been added before. The `-s`/`-a` SELECTOR arm behaves identically: a selector narrows which
+//! members land and where, never whose bytes they are. Every other arm is a self-scoped file edit
+//! that applies immediately with an undo-led receipt.
 
 use topos_types::results::{AddData, AddDescribeData};
 
@@ -38,7 +36,7 @@ use crate::source::{GitHost, RemoteSpec};
 use super::manifest_edit::{self as medit, EditTarget};
 use super::reconcile::{SessionConnect, SessionTransports};
 
-/// What `add <reference>` did — or, for a first-trust git source, what it WOULD do.
+/// What `add <reference>` did — or, for a git source, what it WOULD do.
 pub(crate) enum AddRefOutcome {
     /// The row is written (and, where it delivers bytes, they landed). Boxed: `AddData` dwarfs
     /// the describe variant.
@@ -503,13 +501,6 @@ fn add_forge(
         ManifestScope::Global => ctx.layout.clone(),
     };
     let sctx = super::pull::ctx_with_layout(ctx, &store_layout);
-    // FIRST TRUST is a MACHINE fact: the origin counts as known ONLY when this machine's own
-    // trust registry (the HOME sidecar — `crate::forge_trust`) granted it at a prior add's
-    // consent moment. Never a store fact — a project `.topos/` store travels with the checkout,
-    // so committed store contents could otherwise smuggle trust in — and never a manifest ROW
-    // (demand anyone could have committed). The predicate is evaluated HERE, before any write,
-    // so this add's own row can never satisfy the gate it is behind.
-    let trusted = crate::forge_trust::is_trusted(ctx, &source_label);
 
     // ONE fetch serves both the describe and the apply (read-only either way).
     let targz = git.fetch(&spec)?;
@@ -569,15 +560,16 @@ fn add_forge(
         (Some(p), None) => EntryValue::Pin(p.clone()),
         (None, None) => EntryValue::Star,
     };
-    // PROVE THE ROW BEFORE THE CONSENT. The apply below grants the origin durably and only then
-    // writes; a value the file would refuse must therefore be caught here, while nothing has
-    // happened yet — a machine must never be left trusting a source whose row never landed.
+    // PROVE THE ROW BEFORE ANYTHING LANDS: a value the file would refuse is caught here, while
+    // nothing has happened yet.
     crate::manifest::document::check_row(&reference, target.scope, &value)
         .map_err(|e| ClientError::InvalidArgument(e.message))?;
 
-    // FIRST TRUST: an origin the scope's store does not track is described, never installed,
-    // until `--yes` — however many manifests spell its row.
-    if !trusted && !yes {
+    // DESCRIBE FIRST, unconditionally: an interactive add of a git source says what the source
+    // holds and where it would land, and installs only under `--yes`. Re-adding a source already
+    // tracked here describes again rather than skipping ahead — the answer is what the person
+    // came for, and this verb is the one place a person is present to read it.
+    if !yes {
         let mut yes_argv = vec!["topos".to_owned(), "add".to_owned(), raw.to_owned()];
         if global {
             yes_argv.push("-g".to_owned());
@@ -614,15 +606,10 @@ fn add_forge(
     }
 
     // ---- APPLY ----
-    // The CONSENT lands FIRST: reaching here IS the consent moment (a granted registry, or the
-    // accepted describe's `--yes`), and the machine registry records it durably before any other
-    // write — so a partial landing retries as a trusted origin, and the reconcile's forge arms
-    // may converge it.
-    crate::forge_trust::grant(ctx, &source_label)?;
-    // Then the DEMAND: with the row durably recorded, a member-install failure part-way leaves a
-    // CONVERGENT state — the manifest asks for exactly what the consent covered, and the next
-    // explicit update (or a re-run of this add) finishes the landing — instead of installed
-    // members no manifest row asks for.
+    // The DEMAND lands FIRST: with the row durably recorded, a member-install failure part-way
+    // leaves a CONVERGENT state — the manifest asks for exactly what was accepted, and the next
+    // update (or a re-run of this add) finishes the landing — instead of installed members no
+    // manifest row asks for.
     let mut row_receipt = set_data(members.first().map_or(&repo, |m| m));
     medit::write_row(ctx, &mut row_receipt, &target, &reference, &value)?;
     // A project install writes through the project's own self-ignoring `.topos/` store; mint its
@@ -702,7 +689,7 @@ fn add_forge(
 // The SELECTOR import — `add owner/repo -s <skill>… -a <agent>…` (and their `*` fan-outs)
 // ---------------------------------------------------------------------------------------------
 
-/// What a selector-driven import did — or, for a first-trust git source, what it WOULD do. Same
+/// What a selector-driven import did — or, for a git source, what it WOULD do. Same
 /// two-phase shape as [`AddRefOutcome`]; the applied arm is a LIST because the selectors fan out
 /// over (skill × harness).
 pub(crate) enum AddManyOutcome {
@@ -715,10 +702,9 @@ pub(crate) enum AddManyOutcome {
 
 /// `topos add <owner/repo> [-s <skill>…] [-a <agent>…] [-g] [--yes]` — the SELECTOR arm.
 ///
-/// The selectors change WHICH members land and WHERE; they change nothing about whose bytes these
-/// are. So this arm runs the SAME first-trust ceremony as the bare reference arm: an origin this
-/// MACHINE's registry has not granted is described (source, members, what lands where) and applied
-/// only under `--yes`, which grants the origin BEFORE the first member installs. And it runs under
+/// The selectors change WHICH members land and WHERE; they change nothing about what a person gets
+/// to read first. So this arm runs the SAME describe as the bare reference arm — source, members,
+/// what lands where — and applies only under `--yes`. And it runs under
 /// the SCOPE's own store — a project-destined import lands in the checkout's `.topos/`, which is
 /// the store the project reconcile converges, so a selector import is no longer a set of bytes no
 /// scope's `update` can ever see again.
@@ -765,9 +751,7 @@ pub(crate) fn add_forge_selected(
         ManifestScope::Global => ctx.layout.clone(),
     };
     let sctx = super::pull::ctx_with_layout(ctx, &store_layout);
-    // Evaluated BEFORE any write, so this add's own row can never satisfy the gate it is behind.
     let origin_label = spec.origin();
-    let trusted = crate::forge_trust::is_trusted(ctx, &origin_label);
 
     // ONE fetch serves the describe and the apply alike (read-only either way) — and serves every
     // (skill × harness) combination, where the old per-combination `add_remote` re-fetched.
@@ -803,9 +787,9 @@ pub(crate) fn add_forge_selected(
         agents.iter().cloned().map(Some).collect()
     };
 
-    // FIRST TRUST — identical to the bare reference arm's, selectors and all: what the source
+    // DESCRIBE FIRST — identical to the bare reference arm's, selectors and all: what the source
     // holds, and the exact file the rows land in.
-    if !trusted && !yes {
+    if !yes {
         let members: Vec<String> = skill_opts
             .iter()
             .map(|s| s.clone().unwrap_or_else(|| discovered.join(", ")))
@@ -843,9 +827,8 @@ pub(crate) fn add_forge_selected(
         });
     }
 
-    // ---- APPLY ---- the CONSENT lands first, then the bytes (a partial landing therefore retries
-    // as a trusted origin, and the reconcile's forge arms may converge it).
-    crate::forge_trust::grant(ctx, &origin_label)?;
+    // ---- APPLY ---- the rows land first, then the bytes (a partial landing therefore leaves
+    // demand the next update converges).
     if target.scope == ManifestScope::Project {
         crate::sidecar::ensure_project_store(ctx.fs, &target.dir)?;
     }

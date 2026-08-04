@@ -7,11 +7,11 @@
 //! `list` the offline inventory (both scoped: here-scope by default, `-g` machine, `--all` both);
 //! `publish`/`review`/`revert`/`protect`/`invite` are the workspace governance verbs; the utility
 //! verbs (`diff`, `log`, `self-update`, `uninstall`, `auth status`) persist. Two-phase
-//! describe/`--yes` gates the acts with REACH, LOSS, or FIRST TRUST (`publish`'s describe,
-//! `review`'s verdicts, `revert`, `protect`, `invite`, `update --reset`, `uninstall`; a `remove`
-//! over local edits, a permanent delete, or a set-splitting row rewrite; a bare `add` of an
-//! untrusted git source); every other manifest edit applies immediately with an undo-led receipt
-//! (`--yes` an accepted no-op).
+//! describe/`--yes` gates the acts with REACH or LOSS (`publish`'s describe, `review`'s verdicts,
+//! `revert`, `protect`, `invite`, `update --reset`, `uninstall`; a `remove` over local edits, a
+//! permanent delete, or a set-splitting row rewrite) — plus a bare `add` of a git source, where
+//! the two phases are what let a person read what a repo holds before it lands; every other
+//! manifest edit applies immediately with an undo-led receipt (`--yes` an accepted no-op).
 //!
 //! The doc comments on the verbs below are USER-FACING twice over: they are `--help`, and
 //! `cli_ref.rs` renders them into `docs/cli.md` + the built-in skill's `reference.md`. Write them
@@ -75,8 +75,10 @@ pub(crate) enum Command {
     /// `topos.toml` and the skills your workspaces give you). `-g` updates the machine-wide set
     /// even from inside a project. The background auto-update that runs at the start of each
     /// agent session always covers both, so nothing goes stale while you work in one folder.
-    /// Safe to run by hand any time. `topos update <skill>` updates one skill;
-    /// `topos update <skill>@<version>` puts that version's bytes back on this machine only.
+    /// Running it by hand checks everything now, including your GitHub lines — the background
+    /// sweep checks those a few times a day rather than every session. Safe to run any time.
+    /// `topos update <skill>` updates one skill; `topos update <skill>@<version>` puts that
+    /// version's bytes back on this machine only.
     #[command(alias = "pull")]
     Update {
         /// The skill(s) to update; `<skill>@<version>` restores that version's bytes locally.
@@ -172,8 +174,9 @@ pub(crate) enum Command {
     /// this folder it stops and says so: `topos init` creates one here, or add `-g`. A plain name
     /// is looked for both in the skills already sitting in your agents' folders and in the
     /// catalogs of the workspaces you are connected to — when only a workspace has it, that is
-    /// what you get. A GitHub source you have never used before shows what it found and waits for
-    /// `--yes`. `add topos` restores the built-in topos skill.
+    /// what you get. A GitHub source shows what it found and waits for `--yes`, every time — a
+    /// skill is instructions your agent will follow, and that listing is there to be read.
+    /// `add topos` restores the built-in topos skill.
     Add {
         /// What to add: a workspace skill, channel, or feed; a local folder; or a GitHub repo.
         source: String,
@@ -187,8 +190,8 @@ pub(crate) enum Command {
         /// Add it machine-wide (your `~/.topos/topos.toml`) instead of to this folder's file.
         #[arg(long, short = 'g')]
         global: bool,
-        /// Confirm adding from a GitHub source this machine has never used before (everything
-        /// else applies immediately, and `--yes` changes nothing there).
+        /// Confirm adding from a GitHub source, after reading what it found (everything else
+        /// applies immediately, and `--yes` changes nothing there).
         #[arg(long)]
         yes: bool,
     },

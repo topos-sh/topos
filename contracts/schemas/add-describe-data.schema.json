@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "AddDescribeData",
-  "description": "The FIRST-TRUST describe a bare `add` of a NEW git source returns: the source, what was\ndiscovered in it, and exactly what would be written where — nothing has landed. `--yes`\napplies. **INFERRED** (additive-only).",
+  "description": "The describe a bare `add` of a git source returns: the source, what was discovered in it, and\nexactly what would be written where — nothing has landed. `--yes` applies. **INFERRED**\n(additive-only).",
   "type": "object",
   "properties": {
     "manifest": {
@@ -27,7 +27,7 @@
       "type": "string"
     },
     "source": {
-      "description": "The source being trusted for the first time (e.g. `github.com/<owner>/<repo>`).",
+      "description": "The source the add would take bytes from (e.g. `github.com/<owner>/<repo>`).",
       "type": "string"
     },
     "value": {

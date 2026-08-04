@@ -95,6 +95,27 @@ pub(crate) struct PullOutcome {
     /// a failure, or answered unreadably) — state kept, retry next session; the quiet hook warns
     /// only once the staleness window is blown.
     pub unreachable: Vec<UnreachableWorkspace>,
+    /// Forges that answered nothing about one or more rows THIS run — the git lane's twin of
+    /// `unreachable`, and gated the same way. One entry per HOST, never per row.
+    pub stale_forge: Vec<StaleForge>,
+}
+
+/// One forge host that went quiet this run, and how long its rows have gone unanswered.
+///
+/// Aggregated by host on purpose. The silent sweep's only channel is text injected into an agent's
+/// context window, so its budget is a person's attention: five rows behind one dead network is ONE
+/// thing that happened, and it gets one sentence.
+#[derive(Debug, Clone)]
+pub(crate) struct StaleForge {
+    /// The forge (`github.com`) — what the line names, because that is the thing that went quiet.
+    pub host: String,
+    /// How many of this run's sources sit behind it.
+    pub sources: usize,
+    /// The OLDEST last-answered time across those sources; `None` = one of them has never
+    /// answered at all (and so is not stale — there is nothing to be stale from).
+    pub answered_at: Option<i64>,
+    /// What went wrong, in a person's terms.
+    pub reason: String,
 }
 
 /// One workspace left without a fresh delivery this run. It carries BOTH halves of the workspace's
@@ -177,6 +198,7 @@ impl PullOutcome {
             disclosures: Vec::new(),
             access_gone: Vec::new(),
             unreachable: Vec::new(),
+            stale_forge: Vec::new(),
         }
     }
 }
@@ -601,6 +623,30 @@ pub(crate) fn quiet_hook_lines(
         lines.push(format!(
             "topos: {ws} — this device no longer has access (unlinked, removed, or gone); its \
              skills are frozen in place"
+        ));
+    }
+    // A forge that went quiet gets the SAME posture as a workspace that did: recorded always,
+    // shown on demand by `status`/`list`, and said here only once the silence has run long enough
+    // to mean something. One line names the host, how many skills sit behind it, and — because
+    // "unreachable" on its own reads as breakage — that they still work.
+    for forge in &out.stale_forge {
+        if !crate::forge_check::is_stale(forge.answered_at, now_millis) {
+            continue;
+        }
+        let ago = forge
+            .answered_at
+            .map(|at| sync_status::human_duration(now_millis.saturating_sub(at)));
+        lines.push(format!(
+            "topos: {} unreachable — {} {} not checked{} ({}); they still work",
+            forge.host,
+            forge.sources,
+            if forge.sources == 1 {
+                "skill"
+            } else {
+                "skills"
+            },
+            ago.map(|a| format!(" for {a}")).unwrap_or_default(),
+            forge.reason
         ));
     }
     if out.unreachable.is_empty() {

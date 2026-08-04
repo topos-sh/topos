@@ -3,6 +3,14 @@
   "command": "status",
   "ok": true,
   "data": {
+    "forge": [
+      {
+        "answered_at": 1750000000000,
+        "checked_at": 1750000000000,
+        "commit": "1164afa5f0e21ebd01e6fc11249759353f494ad1",
+        "source": "github.com/vercel-labs/skills"
+      }
+    ],
     "machine_summary": {
       "attention": [
         {

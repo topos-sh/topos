@@ -32,12 +32,12 @@ reference is `reference.md` next to this file; `topos <verb> --help` matches it.
 ## Driving the CLI
 
 - Add `--json` to any verb for exactly one machine-readable envelope — never a prompt.
-- topos asks first only when an act REACHES other people, LOSES local work, or TRUSTS something
-  new. Those runs DESCRIBE (nothing written) and return the paste-ready `--yes` argv:
-  `publish`, `review`'s verdict flags, `revert`, `protect`, `invite`, `update --reset`,
-  `uninstall`; a `remove` whose skill carries unshared edits, or whose row is a channel/repo line
-  that would be rewritten into its members; and a bare `add` of a git source this machine has
-  never used (it lists what the repo holds first). Everything else — every other file edit,
+- topos asks first only when an act REACHES other people or LOSES local work. Those runs
+  DESCRIBE (nothing written) and return the paste-ready `--yes` argv: `publish`, `review`'s
+  verdict flags, `revert`, `protect`, `invite`, `update --reset`, `uninstall`; and a `remove`
+  whose skill carries unshared edits, or whose row is a channel/repo line that would be rewritten
+  into its members. A bare `add` of a git source describes too — every time, tracked or not:
+  listing what the repo holds is what the command is for. Everything else — every other file edit,
   `login`, `fmt` — applies immediately and prints its undo. Read the receipt's `undo`/next action
   to reverse it, and tell the person what changed.
 - Describe once, then act: when a describe matches what the user already asked for, apply
@@ -90,9 +90,10 @@ narrows within that scope, `topos update --rebuild` re-creates a folder someone 
 `topos update --quiet`, which always covers BOTH scopes, so nothing goes stale while the session
 works in one folder. Updates never destroy drafts — they merge around them; a conflict freezes the
 copy with a marked way out, and a settled draft is copied onto the skill's other copies in the
-same scope. Two things never move on their own: a pin, and a git source —
-the quiet sweep never dials a forge, so a repo row advances only on an explicit `topos update`,
-receipted with the commit it moved to.
+same scope. One thing never moves on its own: a pin. A git row IS kept current by the quiet sweep, on its own
+much slower rhythm (a few times a day, not every session) — it asks what commit the repo is on and
+downloads only on a real change, receipted with the commit it moved to. `topos update` by hand
+checks every source immediately; `topos status` and `topos list` show when each was last checked.
 
 ## Adding skills (a manifest row is the demand)
 

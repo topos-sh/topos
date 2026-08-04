@@ -13,14 +13,40 @@ use std::io::Read;
 use crate::error::ClientError;
 use crate::source::RemoteSpec;
 
-/// The upstream repo source — GitHub in production, a fake in tests. Returns a gzip'd tar of the repo at
-/// the requested ref.
+/// What a cheap [`GitTarballSource::probe`] learned about a repo — everything needed to decide
+/// whether the tarball is worth downloading at all.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RepoHead {
+    /// The full commit the repo's default branch points at right now.
+    pub commit: String,
+    /// The `<owner>/<repo>` the request actually landed on, when the forge redirected the one
+    /// asked for to a new name. `None` = the reference is still canonical.
+    pub renamed_to: Option<(String, String)>,
+    /// The earliest instant (epoch millis) the host asked to be called back at — a rate-limit or
+    /// backoff signal. Only ever DELAYS the next check; it can never pull one earlier.
+    pub retry_after_ms: Option<i64>,
+}
+
+/// The upstream repo source — GitHub in production, a fake in tests.
 pub(crate) trait GitTarballSource {
     /// Fetch `spec.owner/spec.repo` at `spec.git_ref` (or the default branch) as a `.tar.gz`.
     ///
     /// # Errors
-    /// [`ClientError::RemoteFetch`] on any transport / not-found / HTTP failure (transient by default).
+    /// [`ClientError::RemoteFetch`], classified by [`crate::error::FetchFault`].
     fn fetch(&self, spec: &RemoteSpec) -> Result<Vec<u8>, ClientError>;
+
+    /// Ask what commit `spec`'s default branch points at, WITHOUT downloading the repo.
+    ///
+    /// This is what makes an automatic cadence affordable: a repo that has not moved costs one
+    /// small request instead of a whole archive, so a machine tracking several sources can check
+    /// them on a clock rather than only when a person asks. Only FLOATING rows are probed — a
+    /// pinned row either already satisfies its pin (and never dials) or must fetch the pinned
+    /// bytes anyway, so the probe deliberately answers for the default branch alone.
+    ///
+    /// # Errors
+    /// [`ClientError::RemoteFetch`], classified by [`crate::error::FetchFault`] — the caller's
+    /// breaker trips only on the never-reached one.
+    fn probe(&self, spec: &RemoteSpec) -> Result<RepoHead, ClientError>;
 }
 
 /// A generous ceiling on a fetched repo (defense against a decompression bomb; skill repos are small).
@@ -404,6 +430,54 @@ fn trim_slashes(s: &str) -> &str {
     s.trim_matches('/')
 }
 
+/// The commit `HEAD` points at in a git smart-HTTP ref advertisement, or `None` when the bytes are
+/// not one (or the HEAD line is not inside them).
+///
+/// The advertisement is pkt-line framed: each record is a 4-hex-digit length COVERING those four
+/// digits, `0000` is a flush, and the payload of a ref record is `<sha> <name>` optionally followed
+/// by `\0<capabilities>`. HEAD is advertised FIRST whenever it exists, which is what lets the
+/// caller stop reading after a few hundred bytes — a busy repo's full advertisement runs to
+/// megabytes of refs nobody here needs, so `input` is expected to be a bounded PREFIX and a record
+/// running past its end simply ends the walk.
+pub(crate) fn parse_head_advertisement(input: &[u8]) -> Option<String> {
+    let mut rest = input;
+    loop {
+        if rest.len() < 4 {
+            return None;
+        }
+        let (len_hex, tail) = rest.split_at(4);
+        let len = usize::from_str_radix(std::str::from_utf8(len_hex).ok()?, 16).ok()?;
+        // `0000` (flush) and `0001` (delimiter) carry no payload; anything under the 4-byte header
+        // is malformed. Both just advance the walk.
+        if len == 0 || len == 1 {
+            rest = tail;
+            continue;
+        }
+        let payload_len = len.checked_sub(4)?;
+        if payload_len > tail.len() {
+            return None; // the record runs past the prefix we read — stop, do not guess
+        }
+        let (payload, tail) = tail.split_at(payload_len);
+        if let Some(sha) = head_ref_sha(payload) {
+            return Some(sha);
+        }
+        rest = tail;
+    }
+}
+
+/// The sha of a ref-advertisement record IF it advertises `HEAD` — `<sha> HEAD` with the optional
+/// NUL-separated capability list after it. Anything else (the `# service=` banner, another ref)
+/// answers `None`.
+fn head_ref_sha(payload: &[u8]) -> Option<String> {
+    let text = std::str::from_utf8(payload).ok()?;
+    let (sha, rest) = text.trim_end_matches('\n').split_once(' ')?;
+    if sha.len() < 7 || !sha.chars().all(|c| c.is_ascii_hexdigit()) {
+        return None;
+    }
+    let name = rest.split(['\0', '\n']).next().unwrap_or(rest);
+    (name == "HEAD").then(|| sha.to_ascii_lowercase())
+}
+
 /// Parse a commit-ish suffix out of GitHub's archive top dir (`<owner>-<repo>-<sha>`): the trailing
 /// hex-looking segment after the last `-`. `None` if it does not look like a sha (then the origin records
 /// no commit — honest rather than wrong).
@@ -666,6 +740,87 @@ mod tests {
         let repo = extract_tree(&targz).unwrap();
         assert!(repo.files.contains_key("SKILL.md"));
         assert!(!repo.files.contains_key("evil-link"));
+    }
+
+    /// Frame payloads as pkt-lines the way a git server does (4 hex digits COVERING themselves).
+    fn pkt(payloads: &[&[u8]]) -> Vec<u8> {
+        let mut out = Vec::new();
+        for p in payloads {
+            if p.is_empty() {
+                out.extend_from_slice(b"0000"); // flush
+                continue;
+            }
+            out.extend_from_slice(format!("{:04x}", p.len() + 4).as_bytes());
+            out.extend_from_slice(p);
+        }
+        out
+    }
+
+    #[test]
+    fn the_head_advertisement_yields_the_commit_the_default_branch_points_at() {
+        // The real shape, verbatim: the service banner, a flush, then HEAD first with its
+        // NUL-separated capability list.
+        let adv = pkt(&[
+            b"# service=git-upload-pack\n",
+            b"",
+            b"fd2a861ab0406a4ac536a55274d14ea6fd1ca9c9 HEAD\0multi_ack thin-pack side-band               symref=HEAD:refs/heads/master object-format=sha1\n",
+            b"fd2a861ab0406a4ac536a55274d14ea6fd1ca9c9 refs/heads/master\n",
+            b"",
+        ]);
+        assert_eq!(
+            parse_head_advertisement(&adv).as_deref(),
+            Some("fd2a861ab0406a4ac536a55274d14ea6fd1ca9c9")
+        );
+    }
+
+    #[test]
+    fn a_truncated_advertisement_answers_nothing_rather_than_guessing() {
+        // The caller reads a bounded PREFIX (a busy repo advertises megabytes of refs), so a
+        // record running past the end is the ordinary case at the cut — and must never be read as
+        // a partial commit. HEAD is advertised first, so a prefix that cut before it means the
+        // answer genuinely is not there.
+        let adv = pkt(&[
+            b"# service=git-upload-pack\n",
+            b"",
+            b"fd2a861ab0406a4ac536a55274d14ea6fd1ca9c9 HEAD\n",
+        ]);
+        let cut = &adv[..adv.len() - 10];
+        assert_eq!(parse_head_advertisement(cut), None);
+        assert_eq!(parse_head_advertisement(b""), None);
+        assert_eq!(parse_head_advertisement(b"not pkt-line at all"), None);
+    }
+
+    #[test]
+    fn only_the_head_record_answers_and_the_banner_never_does() {
+        // A repo whose advertisement carries no HEAD (an empty repo) has no answer to give — and
+        // neither the `# service=` banner nor another ref may be mistaken for one.
+        let no_head = pkt(&[
+            b"# service=git-upload-pack\n",
+            b"",
+            b"1111111111111111111111111111111111111111 refs/heads/main\n",
+            b"",
+        ]);
+        assert_eq!(parse_head_advertisement(&no_head), None);
+
+        // A ref whose NAME merely starts with HEAD is a different ref.
+        let lookalike = pkt(&[
+            b"2222222222222222222222222222222222222222 HEADSTONE\n",
+            b"3333333333333333333333333333333333333333 HEAD\n",
+        ]);
+        assert_eq!(
+            parse_head_advertisement(&lookalike).as_deref(),
+            Some("3333333333333333333333333333333333333333")
+        );
+
+        // A capability line without a sha is not a commit.
+        let junk = pkt(&[
+            b"zzzz HEAD\n",
+            b"4444444444444444444444444444444444444444 HEAD\n",
+        ]);
+        assert_eq!(
+            parse_head_advertisement(&junk).as_deref(),
+            Some("4444444444444444444444444444444444444444")
+        );
     }
 
     #[test]

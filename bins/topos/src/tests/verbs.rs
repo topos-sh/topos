@@ -231,6 +231,19 @@ impl crate::git_source::GitTarballSource for FakeGit {
     ) -> Result<Vec<u8>, crate::error::ClientError> {
         Ok(self.0.clone())
     }
+    fn probe(
+        &self,
+        _spec: &crate::source::RemoteSpec,
+    ) -> Result<crate::git_source::RepoHead, crate::error::ClientError> {
+        Ok(crate::git_source::RepoHead {
+            commit: crate::git_source::extract_tree(&self.0)
+                .ok()
+                .and_then(|t| t.commit)
+                .unwrap_or_default(),
+            renamed_to: None,
+            retry_after_ms: None,
+        })
+    }
 }
 
 /// Build a `.tar.gz` with a `TOP/` prefix over `(repo-relative path, bytes, mode)` entries.

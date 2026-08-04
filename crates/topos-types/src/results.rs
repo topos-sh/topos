@@ -268,6 +268,9 @@ pub struct ListData {
     /// fetches the next page. Empty (and omitted) on an uncapped list.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub truncated: Vec<BucketTruncation>,
+    /// The last auto-update check of every external source the shown scopes name.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub forge: Vec<ForgeSource>,
 }
 
 /// One scope section of a [`ListData`] — the rows one manifest (or the implicit feed recipe)
@@ -446,6 +449,32 @@ pub struct ListDetail {
     pub placements: Vec<String>,
     /// The line's state (the resolution's own vocabulary).
     pub state: StatusItemState,
+}
+
+/// One external source's last auto-update check — the answer to "is this even working?", computed
+/// entirely from local state. Every check is recorded whatever its outcome, so a source that has
+/// gone quiet is visible here long before the silent sweep is willing to interrupt a session over
+/// it. **INFERRED** (additive).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
+pub struct ForgeSource {
+    /// The source a manifest row names (`<host>/<owner>/<repo>`).
+    pub source: String,
+    /// When it was last checked (epoch millis), whatever came of that check.
+    pub checked_at: i64,
+    /// When it last ANSWERED (epoch millis). Absent = it never has.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub answered_at: Option<i64>,
+    /// The commit the last answering check saw.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commit: Option<String>,
+    /// Why the last check failed. Absent = it succeeded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    /// The failure is FINAL — the forge says this source is gone, so it is not retried until the
+    /// row that names it changes.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub gone: bool,
 }
 
 /// One row-capped bucket in a paged [`ListData`]. **INFERRED** (additive).
@@ -692,13 +721,13 @@ pub struct AddData {
     pub note: Option<String>,
 }
 
-/// The FIRST-TRUST describe a bare `add` of a NEW git source returns: the source, what was
-/// discovered in it, and exactly what would be written where — nothing has landed. `--yes`
-/// applies. **INFERRED** (additive-only).
+/// The describe a bare `add` of a git source returns: the source, what was discovered in it, and
+/// exactly what would be written where — nothing has landed. `--yes` applies. **INFERRED**
+/// (additive-only).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
 pub struct AddDescribeData {
-    /// The source being trusted for the first time (e.g. `github.com/<owner>/<repo>`).
+    /// The source the add would take bytes from (e.g. `github.com/<owner>/<repo>`).
     pub source: String,
     /// The skills discovered in it (leaf directory names).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -1501,6 +1530,9 @@ pub struct StatusData {
     /// machine body is NOT shown in full (the default view inside a project).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub machine_summary: Option<StatusScopeSummary>,
+    /// The last auto-update check of every external source the shown scopes name.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub forge: Vec<ForgeSource>,
 }
 
 /// One scope body of a [`StatusData`]: what governs it, the per-workspace regimes (machine
