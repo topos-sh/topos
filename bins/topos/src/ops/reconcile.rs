@@ -548,28 +548,34 @@ impl<'a> ForgeLane<'a> {
     }
 
     /// Whether this source may be dialed, and why not when it may not.
+    ///
+    /// A verdict reached EARLIER IN THIS ROUND counts as much as one carried in from a previous
+    /// one: two manifest rows can name a single repository (a set line and a member line of it),
+    /// and they must not cost two requests and two identical sentences about the same repo.
     fn hold(&self, origin: &str, git_ref: &str) -> Option<ForgeHold> {
-        if let Some(prior) = self.prior.sources.get(origin)
-            && !prior.worth_dialing(git_ref)
-            && let Some(f) = &prior.failure
+        let settled = self
+            .seen
+            .borrow()
+            .get(origin)
+            .or_else(|| self.prior.sources.get(origin))
+            .filter(|c| !c.worth_dialing(git_ref))
+            .cloned();
+        if let Some(source) = settled
+            && let Some(f) = source.failure.clone()
         {
-            // Carry the settled verdict into this round's record so it survives, and mark it said.
+            // Carry the verdict into this round's record so it survives, and mark it said.
             let mut seen = self.seen.borrow_mut();
-            let entry = seen
-                .entry(origin.to_owned())
-                .or_insert_with(|| SourceCheck {
-                    failure: Some(CheckFailure {
-                        reported: true,
-                        ..f.clone()
-                    }),
-                    ..prior.clone()
-                });
-            let first_time = !f.reported;
+            let said = seen
+                .get(origin)
+                .and_then(|c| c.failure.as_ref())
+                .is_some_and(|f| f.reported);
+            let entry = seen.entry(origin.to_owned()).or_insert(source);
+            let first_time = !f.reported && !said;
             if let Some(e) = &mut entry.failure {
                 e.reported = true;
             }
             return Some(ForgeHold::Gone {
-                reason: f.reason.clone(),
+                reason: f.reason,
                 first_time,
             });
         }
@@ -628,6 +634,26 @@ impl<'a> ForgeLane<'a> {
             Ok(bytes) => {
                 let bytes = Rc::new(bytes);
                 self.repos.borrow_mut().push((key, Rc::clone(&bytes)));
+                // A pinned row never probes — it is settled and silent, or it fetches. So the
+                // fetch is where ITS check gets recorded; a floating row's probe has already
+                // recorded a better answer (with the head it saw), and that is left alone.
+                let answered = self
+                    .seen
+                    .borrow()
+                    .get(origin)
+                    .is_some_and(|c| c.failure.is_none());
+                if !answered {
+                    let prior = self.prior.sources.get(origin);
+                    self.seen.borrow_mut().insert(
+                        origin.to_owned(),
+                        SourceCheck {
+                            checked_at_ms: self.now_ms,
+                            answered_at_ms: Some(self.now_ms),
+                            commit: prior.and_then(|p| p.commit.clone()),
+                            failure: None,
+                        },
+                    );
+                }
                 Ok(bytes)
             }
             Err(e) => {
@@ -1333,6 +1359,11 @@ fn close_forge_round(
     warnings: &mut Vec<String>,
 ) -> Vec<StaleForge> {
     let outcomes: Vec<(String, SourceCheck)> = lane.seen.borrow().clone().into_iter().collect();
+    if outcomes.is_empty() {
+        // Nothing was checked — every row settled on its pin, or this machine tracks no external
+        // source at all. There is no turn to have taken, so there is no next turn to schedule.
+        return Vec::new();
+    }
     let next = forge_check::next_due(
         now_ms,
         i64::try_from(
@@ -2544,7 +2575,11 @@ fn reconcile_repo_skill(
             Ok(h) => h,
             Err(e) => {
                 note_item_failure(env.ctx, &mut sweep.warnings, &row.reference, &e);
-                converge_in_place(sweep);
+                // Only a TRACKED copy has something to converge; the not-installed-yet line would
+                // be a second, weaker sentence about the failure just reported.
+                if tracked.is_some() {
+                    converge_in_place(sweep);
+                }
                 return;
             }
         };
@@ -2569,7 +2604,9 @@ fn reconcile_repo_skill(
         Ok(t) => t,
         Err(e) => {
             note_item_failure(env.ctx, &mut sweep.warnings, &row.reference, &e);
-            converge_in_place(sweep);
+            if tracked.is_some() {
+                converge_in_place(sweep);
+            }
             return;
         }
     };
