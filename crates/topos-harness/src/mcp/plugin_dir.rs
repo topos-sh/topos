@@ -1,21 +1,23 @@
-//! The Claude Code plugin-dir renderer — [`McpDialect::ClaudePluginDir`]. Unlike every other
-//! dialect this surface is a topos-OWNED directory (`<claude home>/skills/topos-mcp/`), so there
-//! is no foreign content to preserve: the two files are rendered WHOLE, deterministically, and
-//! the CLI owns all directory I/O (placement, swap, delete). Drift checking still runs — the
-//! caller compares [`parse_plugin_mcp`]'s fingerprints against its ledger before overwriting, so
-//! a hand-edited copy is detected exactly like any other dialect's drift.
+//! The Claude Code plugin-dir renderer — the [`McpDialect::ClaudePluginDir`] surface's constant
+//! parts. The surface is a topos-OWNED directory (`<claude home>/skills/topos-mcp/`) holding two
+//! files; its `.mcp.json` is an ordinary strict-JSON driver surface (`jsonc_edit`, top-level
+//! `mcpServers` — route through [`apply`](super::apply)/[`observe`](super::observe) like any
+//! dialect), while THIS module renders what the driver cannot know: the constant
+//! `.claude-plugin/plugin.json` manifest, and the whole-dir shape a fresh placement creates. The
+//! CLI owns all directory I/O (write, manifest upkeep, prune on the last entry's removal).
 //!
 //! Rendered files:
 //! - `.claude-plugin/plugin.json` — the constant plugin manifest.
 //! - `.mcp.json` — `{"mcpServers": {…}}`, entries in the Claude entry shape
 //!   (`{"type": "http", "url": …, "headers": …}`), keys sorted, 2-space indent, trailing
-//!   newline.
+//!   newline — byte-identical to what the JSON driver's fresh-file synthesis writes (asserted
+//!   in the dispatcher tests).
 
 use std::collections::BTreeMap;
 
 use serde_json::{Map, Value};
 
-use super::{McpDialect, McpEntry, Observed, entry_value, fingerprint_value};
+use super::{McpDialect, McpEntry, entry_value};
 
 /// The manifest file's dir-relative path.
 pub const PLUGIN_MANIFEST_PATH: &str = ".claude-plugin/plugin.json";
@@ -33,58 +35,10 @@ pub fn render_plugin_dir(entries: &[McpEntry]) -> Vec<(String, Vec<u8>)> {
     ]
 }
 
-/// The `key → fingerprint` view of a plugin `.mcp.json` for drift checking. `None` when the
-/// bytes are not strict JSON with an object `mcpServers` (the dir is wholly ours, so any other
-/// shape IS drift). Every key is reported — a topos-owned file holds nothing foreign.
+/// The constant `.claude-plugin/plugin.json` bytes — what the caller writes (and re-heals)
+/// beside every `.mcp.json` it places.
 #[must_use]
-pub fn parse_plugin_mcp(bytes: &[u8]) -> Option<BTreeMap<String, String>> {
-    let root: Value = serde_json::from_slice(bytes).ok()?;
-    let servers = root.as_object()?.get("mcpServers")?.as_object()?;
-    Some(
-        servers
-            .iter()
-            .map(|(key, value)| (key.clone(), fingerprint_value(value)))
-            .collect(),
-    )
-}
-
-/// What the ledger records after placing `entries` — `(key, fingerprint)` in the callers'
-/// order, matching what [`parse_plugin_mcp`] reads back from the rendered bytes.
-#[must_use]
-pub fn plugin_dir_fingerprints(entries: &[McpEntry]) -> Vec<(String, String)> {
-    entries
-        .iter()
-        .map(|e| {
-            (
-                e.key.clone(),
-                fingerprint_value(&entry_value(McpDialect::ClaudePluginDir, e)),
-            )
-        })
-        .collect()
-}
-
-/// Observe a plugin `.mcp.json` (the dialect's status read).
-#[must_use]
-pub fn observe(current: Option<&[u8]>) -> Observed {
-    match current {
-        None => Observed {
-            entries: BTreeMap::new(),
-            parseable: true,
-        },
-        Some(bytes) => match parse_plugin_mcp(bytes) {
-            Some(entries) => Observed {
-                entries,
-                parseable: true,
-            },
-            None => Observed {
-                entries: BTreeMap::new(),
-                parseable: false,
-            },
-        },
-    }
-}
-
-fn manifest_bytes() -> Vec<u8> {
+pub fn manifest_bytes() -> Vec<u8> {
     // Inserted alphabetically so serialization is deterministic under either map backend.
     let mut m = Map::new();
     m.insert(
@@ -144,36 +98,6 @@ mod tests {
             String::from_utf8(files[1].1.clone()).unwrap(),
             "{\n  \"mcpServers\": {\n    \"topos-a\": {\n      \"type\": \"http\",\n      \"url\": \"https://a.example\"\n    },\n    \"topos-b\": {\n      \"headers\": {\n        \"X-T\": \"v\"\n      },\n      \"type\": \"http\",\n      \"url\": \"https://b.example\"\n    }\n  }\n}\n"
         );
-    }
-
-    #[test]
-    fn fingerprints_round_trip_through_the_rendered_bytes() {
-        let entries = [
-            entry("topos-a", "https://a.example"),
-            entry_with_headers("topos-b", "https://b.example", &[("X-T", "v")]),
-        ];
-        let want: BTreeMap<String, String> =
-            plugin_dir_fingerprints(&entries).into_iter().collect();
-        let files = render_plugin_dir(&entries);
-        let got = parse_plugin_mcp(&files[1].1).expect("rendered bytes parse");
-        assert_eq!(got, want, "what we render is what the ledger records");
-    }
-
-    #[test]
-    fn parse_and_observe_fail_closed_on_foreign_shapes() {
-        assert!(parse_plugin_mcp(b"not json").is_none());
-        assert!(parse_plugin_mcp(b"{\"mcpServers\": 3}").is_none());
-        assert!(parse_plugin_mcp(b"{}").is_none(), "no mcpServers key");
-        let o = observe(Some(b"not json"));
-        assert!(!o.parseable && o.entries.is_empty());
-        let o = observe(None);
-        assert!(o.parseable && o.entries.is_empty());
-        // A hand-edited entry shows up as a fingerprint mismatch against the ledger.
-        let placed = [entry("topos-a", "https://a")];
-        let ledger = plugin_dir_fingerprints(&placed);
-        let edited = "{\n  \"mcpServers\": {\n    \"topos-a\": {\n      \"type\": \"http\",\n      \"url\": \"https://hand-edited\"\n    }\n  }\n}\n";
-        let got = parse_plugin_mcp(edited.as_bytes()).unwrap();
-        assert_ne!(got.get("topos-a"), Some(&ledger[0].1), "drift is visible");
     }
 
     #[test]

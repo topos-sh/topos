@@ -136,9 +136,10 @@ pub struct Observed {
     pub parseable: bool,
 }
 
-/// Compute MCP placements for one FILE dialect (routes to the driver). The
-/// [`McpDialect::ClaudePluginDir`] surface is a whole rendered directory, not a patched file —
-/// use [`plugin_dir::render_plugin_dir`]; asking this dispatcher yields an honest `Unprovable`.
+/// Compute MCP placements for one config surface (routes to the driver). For
+/// [`McpDialect::ClaudePluginDir`] pass the plugin dir's `.mcp.json` bytes — the strict JSON
+/// driver patches it like any other surface; the constant manifest beside it
+/// ([`plugin_dir::render_plugin_dir`]) is the caller's I/O.
 #[must_use]
 pub fn apply(
     dialect: McpDialect,
@@ -150,12 +151,10 @@ pub fn apply(
         McpDialect::ClaudeProjectJson
         | McpDialect::CursorJson
         | McpDialect::OpencodeJson
-        | McpDialect::OpenclawJson => jsonc_edit::apply(dialect, current, desired, prior),
+        | McpDialect::OpenclawJson
+        | McpDialect::ClaudePluginDir => jsonc_edit::apply(dialect, current, desired, prior),
         McpDialect::CodexToml => toml_patch::apply(current, desired, prior),
         McpDialect::HermesYaml => yaml_splice::apply(current, desired, prior),
-        McpDialect::ClaudePluginDir => unprovable(
-            "the Claude plugin dir is rendered whole, not patched — use plugin_dir::render_plugin_dir",
-        ),
     }
 }
 
@@ -167,10 +166,10 @@ pub fn observe(dialect: McpDialect, current: Option<&[u8]>) -> Observed {
         McpDialect::ClaudeProjectJson
         | McpDialect::CursorJson
         | McpDialect::OpencodeJson
-        | McpDialect::OpenclawJson => jsonc_edit::observe(dialect, current),
+        | McpDialect::OpenclawJson
+        | McpDialect::ClaudePluginDir => jsonc_edit::observe(dialect, current),
         McpDialect::CodexToml => toml_patch::observe(current),
         McpDialect::HermesYaml => yaml_splice::observe(current),
-        McpDialect::ClaudePluginDir => plugin_dir::observe(current),
     }
 }
 
@@ -188,27 +187,16 @@ pub fn holds_unmanaged_content(dialect: McpDialect, current: Option<&[u8]>) -> b
     }
     let bytes = current.unwrap_or_default();
     match dialect {
+        // The plugin dir's `.mcp.json` is wholly topos-owned by construction: the shared JSON
+        // walk answers the same question there (any sibling key or non-managed entry), and the
+        // CALLER turns a `true` into a whole-surface back-off instead of mere ownership loss.
         McpDialect::ClaudeProjectJson
         | McpDialect::CursorJson
         | McpDialect::OpencodeJson
-        | McpDialect::OpenclawJson => jsonc_edit::holds_unmanaged(dialect, bytes),
+        | McpDialect::OpenclawJson
+        | McpDialect::ClaudePluginDir => jsonc_edit::holds_unmanaged(dialect, bytes),
         McpDialect::CodexToml => toml_patch::holds_unmanaged(bytes),
         McpDialect::HermesYaml => yaml_splice::holds_unmanaged(bytes),
-        // The plugin dir's `.mcp.json` is wholly topos-owned by construction: its exact shape
-        // holding only managed-looking keys, or somebody else's bytes.
-        McpDialect::ClaudePluginDir => {
-            let Ok(root) = serde_json::from_slice::<Value>(bytes) else {
-                return true;
-            };
-            let Some(obj) = root.as_object() else {
-                return true;
-            };
-            obj.iter().any(|(k, v)| {
-                k != "mcpServers"
-                    || v.as_object()
-                        .is_none_or(|m| m.keys().any(|key| !key.starts_with(MANAGED_KEY_PREFIX)))
-            })
-        }
     }
 }
 
@@ -802,11 +790,33 @@ mod tests {
     }
 
     #[test]
-    fn the_dispatcher_routes_and_the_plugin_dir_apply_is_refused() {
-        let out = apply(McpDialect::ClaudePluginDir, None, &[], &BTreeMap::new());
-        assert!(matches!(out.plan, EditPlan::Unprovable(_)));
+    fn the_dispatcher_routes_every_dialect_including_the_plugin_dir() {
         // A JSON dialect routes (absent + nothing desired = Leave).
         let out = apply(McpDialect::CursorJson, None, &[], &BTreeMap::new());
         assert_eq!(out.plan, EditPlan::Leave);
+        // The plugin dir's `.mcp.json` is a real driver surface: a fresh apply writes exactly
+        // what the whole-dir renderer would, and the standard drift/removal rules run on it.
+        let e = entry("topos-a", "https://a");
+        let out = apply(
+            McpDialect::ClaudePluginDir,
+            None,
+            std::slice::from_ref(&e),
+            &BTreeMap::new(),
+        );
+        assert!(out.created_file);
+        let EditPlan::Write(bytes) = &out.plan else {
+            panic!("fresh plugin apply writes: {:?}", out.plan);
+        };
+        let rendered = plugin_dir::render_plugin_dir(std::slice::from_ref(&e));
+        assert_eq!(bytes, &rendered[1].1, "driver bytes == the renderer's");
+        // Idempotent re-apply → Leave; removal returns the managed document to empty.
+        let ledger: BTreeMap<String, String> = out.fingerprints.iter().cloned().collect();
+        let again = apply(McpDialect::ClaudePluginDir, Some(bytes), &[e], &ledger);
+        assert_eq!(again.plan, EditPlan::Leave);
+        let removed = apply(McpDialect::ClaudePluginDir, Some(bytes), &[], &ledger);
+        assert_eq!(
+            removed.states,
+            vec![("topos-a".to_owned(), EntryState::Removed)]
+        );
     }
 }

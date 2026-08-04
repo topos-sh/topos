@@ -1,6 +1,8 @@
-//! The guarded JSON(C) patcher — ONE driver behind four dialects:
-//! [`McpDialect::CursorJson`], [`McpDialect::ClaudeProjectJson`], [`McpDialect::OpencodeJson`]
-//! (strict JSON) and [`McpDialect::OpenclawJson`] (JSONC: comments + trailing commas legal).
+//! The guarded JSON(C) patcher — ONE driver behind five dialects:
+//! [`McpDialect::CursorJson`], [`McpDialect::ClaudeProjectJson`], [`McpDialect::OpencodeJson`],
+//! [`McpDialect::ClaudePluginDir`] (strict JSON; the plugin dir's `.mcp.json` — the constant
+//! manifest beside it is the caller's I/O) and [`McpDialect::OpenclawJson`] (JSONC: comments +
+//! trailing commas legal).
 //!
 //! Editing goes through `jsonc-parser`'s lossless CST so every byte outside our managed entries
 //! — user formatting, key order, and (where legal) comments — is preserved; upserts and removes
@@ -65,6 +67,14 @@ fn dialect_spec(dialect: McpDialect) -> Option<DialectSpec> {
             path: &["mcpServers"],
             strictness: Strictness::Strict,
             name: "Claude Code",
+        },
+        // The topos-owned plugin dir's `.mcp.json`: the exact `mcpServers` document topos writes.
+        // The caller (the engine) treats ANY unmanaged content there as a back-off, renders the
+        // constant manifest beside every write, and prunes the dir when the last entry leaves.
+        McpDialect::ClaudePluginDir => DialectSpec {
+            path: &["mcpServers"],
+            strictness: Strictness::Strict,
+            name: "Claude Code plugin",
         },
         McpDialect::CursorJson => DialectSpec {
             path: &["mcpServers"],

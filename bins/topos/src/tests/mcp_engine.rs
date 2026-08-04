@@ -943,6 +943,120 @@ fn a_suspect_header_fails_the_demand_closed_with_a_warning() {
     );
 }
 
+/// A user's sibling top-level key in the plugin dir's `.mcp.json` is content topos did not
+/// write: the surface backs off whole — unprovable, byte-identical, disclosed — and the key is
+/// NEVER destroyed, neither by an update rewrite nor by removal deleting the file.
+#[test]
+fn a_sibling_key_in_the_plugin_mcp_json_backs_the_surface_off_and_survives() {
+    let home = Scratch::new("plugin-sibling");
+    let fs = RealFs;
+    let layout = Layout::new(&home.0.join(".topos"));
+    let io = person_io(&fs, &layout, &home.0);
+    let claude_only = |d: &McpDemand| {
+        let mut d = d.clone();
+        d.harness_filter = vec!["claude-code".into()];
+        d
+    };
+    let v1 = demand(
+        "s_a",
+        "alpha",
+        Some("eng"),
+        &server_json("https://mcp.example/v1"),
+    );
+    mcp_engine::converge(
+        &io,
+        &[claude_only(&v1)],
+        SYNTHETIC,
+        &all_slugs(),
+        &no_hold(),
+        true,
+    );
+    // The user adds a sibling top-level key beside mcpServers.
+    let mcp_path = home.0.join(".claude/skills/topos-mcp/.mcp.json");
+    let mut root: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&mcp_path).unwrap()).unwrap();
+    root.as_object_mut()
+        .unwrap()
+        .insert("theme".to_owned(), serde_json::json!("dark"));
+    let edited = serde_json::to_string_pretty(&root).unwrap() + "\n";
+    std::fs::write(&mcp_path, &edited).unwrap();
+
+    // An update (the url moved) must not rewrite the file over the sibling key.
+    let v2 = demand(
+        "s_a",
+        "alpha",
+        Some("eng"),
+        &server_json("https://mcp.example/v2"),
+    );
+    let out = mcp_engine::converge(
+        &io,
+        &[claude_only(&v2)],
+        SYNTHETIC,
+        &all_slugs(),
+        &no_hold(),
+        true,
+    );
+    let now = std::fs::read_to_string(&mcp_path).unwrap();
+    assert!(
+        now.contains("\"theme\""),
+        "the user's sibling key survives an update: {now}"
+    );
+    assert_eq!(now, edited, "the surface backs off byte-identical");
+    assert_eq!(state_of(&out, "s_a", "claude-code").state, "unprovable");
+
+    // A removal (the demand drops) must not delete the file over the sibling key either.
+    mcp_engine::converge(&io, &[], SYNTHETIC, &all_slugs(), &no_hold(), true);
+    let kept = std::fs::read_to_string(&mcp_path)
+        .unwrap_or_else(|e| panic!("the plugin .mcp.json was deleted over a user key: {e}"));
+    assert!(kept.contains("\"theme\""), "{kept}");
+}
+
+/// A hand-deleted plugin dir must not leave phantom ledger entries: the next removal-allowed
+/// converge stale-drops the rows the surface no longer holds, so the key retires and the bundle
+/// can actually leave.
+#[test]
+fn a_hand_deleted_plugin_dir_sheds_its_ledger_entries_on_the_next_converge() {
+    let home = Scratch::new("plugin-deleted");
+    let fs = RealFs;
+    let layout = Layout::new(&home.0.join(".topos"));
+    let io = person_io(&fs, &layout, &home.0);
+    let mut d = demand(
+        "s_a",
+        "alpha",
+        Some("eng"),
+        &server_json("https://mcp.example/a"),
+    );
+    d.harness_filter = vec!["claude-code".into()];
+    mcp_engine::converge(
+        &io,
+        std::slice::from_ref(&d),
+        SYNTHETIC,
+        &all_slugs(),
+        &no_hold(),
+        true,
+    );
+    assert!(
+        mcp_ledger::read(&fs, &layout)
+            .unwrap()
+            .has_entries_for("s_a")
+    );
+    // The user deletes the whole plugin dir by hand.
+    std::fs::remove_dir_all(home.0.join(".claude/skills/topos-mcp")).unwrap();
+
+    // The demand drops: the ledger must shed the phantom rows and retire the key.
+    mcp_engine::converge(&io, &[], SYNTHETIC, &all_slugs(), &no_hold(), true);
+    let ledger = mcp_ledger::read(&fs, &layout).unwrap();
+    assert!(
+        !ledger.has_entries_for("s_a"),
+        "phantom entries survive a hand-deleted plugin dir: {ledger:?}"
+    );
+    assert_eq!(
+        ledger.retired.get("topos-eng-alpha").map(String::as_str),
+        Some("s_a"),
+        "{ledger:?}"
+    );
+}
+
 /// F1's byte-loss belt, per dialect: a NON-prefixed user entry added to a file topos CREATED is
 /// invisible to the drivers' states — the last-entry removal must still never delete the file
 /// over it.

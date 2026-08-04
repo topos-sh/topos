@@ -56,7 +56,8 @@ pub enum SurfaceRoot {
 /// [`entry_value`](super::entry_value)).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum McpDialect {
-    /// A topos-OWNED Claude Code plugin directory (`plugin_dir` renders it whole).
+    /// A topos-OWNED Claude Code plugin directory: its `.mcp.json` is a strict-JSON driver
+    /// surface (top-level `mcpServers`); `plugin_dir` renders the constant manifest beside it.
     ClaudePluginDir,
     /// A project `.mcp.json` (strict JSON, top-level `mcpServers`).
     ClaudeProjectJson,
@@ -79,8 +80,8 @@ static MCP_HARNESSES: &[McpHarness] = &[
     McpHarness {
         slug: "claude-code",
         display_name: "Claude Code",
-        // An OWNED plugin DIRECTORY (not a patched file): `plugin_dir` renders the whole
-        // `.claude-plugin/plugin.json` + `.mcp.json` pair under this dir.
+        // An OWNED plugin DIRECTORY: the `.mcp.json` under it is patched through the strict
+        // JSON driver; `plugin_dir` renders the constant `.claude-plugin/plugin.json` beside it.
         user_surface: Some(McpSurface {
             root: SurfaceRoot::ClaudeHome,
             suffix: "skills/topos-mcp",

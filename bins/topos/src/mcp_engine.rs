@@ -21,7 +21,10 @@
 //!   double belt: `owns_file` is invalidated at the FIRST sighting of any content beyond our
 //!   managed entries, and the delete re-reads the post-image and fires only when it is
 //!   structurally empty (a plain user entry a driver's states cannot see is never destroyed),
-//! - the wholly-topos-owned Claude Code plugin dir (rendered whole — never patched).
+//! - the wholly-topos-owned Claude Code plugin dir: its `.mcp.json` rides the SAME shared file
+//!   converge as every dialect; any content topos did not write backs the surface off whole
+//!   (unprovable, byte-identical), the constant manifest is written/healed beside it, and the
+//!   dir is pruned when the last entry leaves.
 //!
 //! The engine is OFFLINE by construction: demands carry the stored `server.json` bytes, so a dead
 //! network still heals config files from the store + ledger.
@@ -166,6 +169,12 @@ fn parse_server_json(bytes: &[u8]) -> Result<ParsedServer, String> {
             // whose value the gate never validated as a shareable literal. (`isRequired` with a
             // plain literal value is fine — the value satisfies the requirement; the gate's
             // valid vectors carry exactly that shape.)
+            //
+            // DISCIPLINE: this block is a MATCHING RE-CHECK of the shared validation gate
+            // (`crate::mcp_validate`), rule for rule. Every refusal the engine could make
+            // BEYOND the gate either moves into the gate (with shared vectors, both tiers) or
+            // is deleted — the engine never grows a private rule, because a bundle the gate
+            // publishes must never be permanently unplaceable here.
             if h.get("isSecret").and_then(Value::as_bool) == Some(true) {
                 return Err(format!("header {name:?} is marked secret"));
             }
@@ -422,20 +431,19 @@ pub(crate) fn converge(
                 (key.clone(), (d.bundle_id.clone(), d.version_id.clone()))
             })
             .collect();
-        let surface_out = if dialect == McpDialect::ClaudePluginDir {
-            converge_plugin_dir(io, &mut ledger, h, &path, &desired, &preserved, &provenance)
-        } else {
-            converge_file(
-                io,
-                &mut ledger,
-                h,
-                &path,
-                dialect,
-                &desired,
-                &preserved,
-                &provenance,
-            )
-        };
+        // The plugin dir's driver surface is its `.mcp.json`; the manifest beside it and the
+        // dir prune are `converge_file`'s dialect-specific I/O.
+        let path = surface_file(&path, dialect);
+        let surface_out = converge_file(
+            io,
+            &mut ledger,
+            h,
+            &path,
+            dialect,
+            &desired,
+            &preserved,
+            &provenance,
+        );
         ledger_dirty |= surface_out.ledger_dirty;
         out.warnings.extend(surface_out.warnings);
         for (key, state) in surface_out.states {
@@ -538,20 +546,17 @@ pub(crate) fn remove_bundle(
         // keys, and every other entry — ours or not — reads foreign and stays byte-identical.
         let only_this = |_l: &McpLedger, entry_key: &str| entry_key != key;
         let provenance = BTreeMap::new();
-        let surface_out = if dialect == McpDialect::ClaudePluginDir {
-            converge_plugin_dir(io, &mut ledger, h, &path, &[], &only_this, &provenance)
-        } else {
-            converge_file(
-                io,
-                &mut ledger,
-                h,
-                &path,
-                dialect,
-                &[],
-                &only_this,
-                &provenance,
-            )
-        };
+        let path = surface_file(&path, dialect);
+        let surface_out = converge_file(
+            io,
+            &mut ledger,
+            h,
+            &path,
+            dialect,
+            &[],
+            &only_this,
+            &provenance,
+        );
         ledger_dirty |= surface_out.ledger_dirty;
         out.warnings.extend(surface_out.warnings);
         for (state_key, state) in surface_out.states {
@@ -721,6 +726,19 @@ fn converge_file(
     // managed-LOOKING keys, so a plain user entry added to a topos-created file is invisible to
     // their states — this is the sighting that makes the whole-file-ownership flag stop lying.
     let unmanaged = mcp::holds_unmanaged_content(dialect, current.as_deref());
+    // The plugin dir is wholly topos-owned by construction, so content topos did not write is
+    // not a mere loss of whole-file ownership — it is a takeover. Back the surface off whole:
+    // unprovable, disclosed, byte-identical (a user's sibling key is never dropped by a rewrite,
+    // and removal never deletes the file over it).
+    let is_plugin = dialect == McpDialect::ClaudePluginDir;
+    if is_plugin && unmanaged {
+        return SurfaceOutcome::unprovable(
+            desired,
+            h,
+            path,
+            "the topos plugin dir holds content topos did not write",
+        );
+    }
     let outcome = mcp::apply(dialect, current.as_deref(), desired, &prior);
     match outcome.plan {
         EditPlan::Unprovable(reason) => SurfaceOutcome::unprovable(desired, h, path, &reason),
@@ -737,6 +755,19 @@ fn converge_file(
             );
             if unmanaged {
                 surface.ledger_dirty |= clear_owns_file(ledger, h.slug, path);
+            }
+            // The plugin manifest is constant and carries no entry state: re-heal a hand-deleted
+            // one beside entries that remain (best-effort, no journal needed).
+            if is_plugin
+                && !outcome.fingerprints.is_empty()
+                && let Some(manifest) = plugin_manifest_path(path)
+                && !io.fs.exists(&manifest)
+            {
+                let _ = crate::config_io::replace_config(
+                    io.fs,
+                    &manifest,
+                    &plugin_dir::manifest_bytes(),
+                );
             }
             surface
         }
@@ -772,7 +803,19 @@ fn converge_file(
             );
             let path_owned = path.to_path_buf();
             let fs = io.fs;
-            let write = move || crate::config_io::replace_config(fs, &path_owned, &bytes);
+            // The plugin surface writes its constant manifest beside the entries file — before
+            // it, so a crash never leaves entries without the manifest that makes them load.
+            let manifest = if is_plugin {
+                plugin_manifest_path(path)
+            } else {
+                None
+            };
+            let write = move || -> std::io::Result<()> {
+                if let Some(m) = &manifest {
+                    crate::config_io::replace_config(fs, m, &plugin_dir::manifest_bytes())?;
+                }
+                crate::config_io::replace_config(fs, &path_owned, &bytes)
+            };
             match journaled_write(io, ledger, path, intents, &write) {
                 Ok(()) => {
                     let mut surface = fold_states(h, path, &outcome.states, desired);
@@ -791,6 +834,9 @@ fn converge_file(
                         && post_image_structurally_empty(io, dialect, path)
                         && io.fs.remove_file(path).is_ok()
                     {
+                        if is_plugin {
+                            prune_plugin_dir(io.fs, path);
+                        }
                         surface.warnings.push(format!(
                             "MCP_FILE_REMOVED {}: {} held only topos entries and was deleted",
                             h.slug,
@@ -1009,329 +1055,48 @@ fn fold_states(
 }
 
 // =================================================================================================
-// The Claude Code plugin dir — a wholly-topos-owned DIRECTORY, rendered whole.
+// The Claude Code plugin dir — a wholly-topos-owned DIRECTORY whose `.mcp.json` is an ordinary
+// driver surface; these helpers carry the parts the pure driver cannot know (the constant
+// manifest beside it, the dir prune when the last entry leaves).
 // =================================================================================================
 
-#[allow(clippy::too_many_arguments)]
-fn converge_plugin_dir(
-    io: &ScopeIo<'_>,
-    ledger: &mut McpLedger,
-    h: &McpHarness,
-    dir: &Path,
-    desired: &[McpEntry],
-    preserved: &dyn Fn(&McpLedger, &str) -> bool,
-    provenance: &BTreeMap<String, (String, String)>,
-) -> SurfaceOutcome {
-    let mcp_path = dir.join(plugin_dir::PLUGIN_MCP_PATH);
-    let manifest_path = dir.join(plugin_dir::PLUGIN_MANIFEST_PATH);
-    let prior = ledger.prior_for(h.slug);
-    let kept: BTreeSet<String> = prior
-        .keys()
-        .filter(|k| preserved(ledger, k))
-        .cloned()
-        .collect();
+/// The driver surface FILE for a resolved descriptor surface: the plugin DIR's `.mcp.json` for
+/// [`McpDialect::ClaudePluginDir`], the path itself for every file dialect.
+fn surface_file(path: &Path, dialect: McpDialect) -> PathBuf {
+    if dialect == McpDialect::ClaudePluginDir {
+        path.join(plugin_dir::PLUGIN_MCP_PATH)
+    } else {
+        path.to_path_buf()
+    }
+}
 
-    let current = match io.fs.read_opt(&mcp_path) {
-        Ok(c) => c,
-        Err(e) => {
-            return SurfaceOutcome::unprovable(
-                desired,
-                h,
-                &mcp_path,
-                &format!("reading {} failed ({e})", mcp_path.display()),
-            );
-        }
+/// The constant manifest's path beside a plugin `.mcp.json`.
+fn plugin_manifest_path(mcp_path: &Path) -> Option<PathBuf> {
+    mcp_path
+        .parent()
+        .map(|dir| dir.join(plugin_dir::PLUGIN_MANIFEST_PATH))
+}
+
+/// Prune the plugin dir after its `.mcp.json` left: drop the constant manifest, then each dir
+/// level that holds nothing else — the whole-file ownership proof extended to the directory
+/// level, so a dir with ANY foreign occupant is left standing. Best-effort throughout (a stray
+/// empty dir is recoverable; destroyed bytes are not).
+fn prune_plugin_dir(fs: &dyn FsOps, mcp_path: &Path) {
+    let Some(dir) = mcp_path.parent() else {
+        return;
     };
-    if desired.is_empty() && prior.is_empty() && current.is_none() {
-        return SurfaceOutcome::empty();
+    let manifest = dir.join(plugin_dir::PLUGIN_MANIFEST_PATH);
+    let _ = fs.remove_file(&manifest);
+    let empty = |d: &Path| fs.read_dir(d).is_ok_and(|entries| entries.is_empty());
+    if let Some(manifest_dir) = manifest.parent()
+        && manifest_dir != dir
+        && fs.exists(manifest_dir)
+        && empty(manifest_dir)
+    {
+        let _ = fs.remove_dir_all(manifest_dir);
     }
-    // Parse the current file OURSELVES (strict JSON): the dir is wholly topos-owned, so the
-    // values are needed verbatim to carry held entries through a whole-dir rewrite.
-    let found_values: BTreeMap<String, Value> = match &current {
-        None => BTreeMap::new(),
-        Some(bytes) => match serde_json::from_slice::<Value>(bytes)
-            .ok()
-            .as_ref()
-            .and_then(|v| v.get("mcpServers"))
-            .and_then(Value::as_object)
-        {
-            Some(map) => map.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
-            None => {
-                // A foreign occupant (unparseable / wrong shape) of the topos-owned dir: back
-                // off whole.
-                return SurfaceOutcome::unprovable(
-                    desired,
-                    h,
-                    &mcp_path,
-                    "the topos plugin dir holds content topos did not write",
-                );
-            }
-        },
-    };
-    let found_fps: BTreeMap<String, String> = found_values
-        .iter()
-        .map(|(k, v)| (k.clone(), mcp::fingerprint_value(v)))
-        .collect();
-    let desired_values: BTreeMap<String, Value> = desired
-        .iter()
-        .map(|e| {
-            (
-                e.key.clone(),
-                mcp::entry_value(McpDialect::ClaudePluginDir, e),
-            )
-        })
-        .collect();
-    let desired_fps: BTreeMap<String, String> = desired_values
-        .iter()
-        .map(|(k, v)| (k.clone(), mcp::fingerprint_value(v)))
-        .collect();
-
-    // Classify every present entry. The dir is wholly ours, so anything neither at its desired
-    // value nor prior-matched is drift (ledger-known) or foreign (not ours at all).
-    let mut drifted: BTreeSet<String> = BTreeSet::new();
-    for (k, fp) in &found_fps {
-        if desired_fps.get(k) == Some(fp) || prior.get(k) == Some(fp) {
-            continue;
-        }
-        if prior.contains_key(k) || kept.contains(k) {
-            drifted.insert(k.clone());
-        } else {
-            return SurfaceOutcome::unprovable(
-                desired,
-                h,
-                &mcp_path,
-                "the topos plugin dir holds an entry topos did not write",
-            );
-        }
-    }
-    if !drifted.is_empty() {
-        // A hand-edited entry in a whole-rendered dir blocks the rewrite (never overwritten).
-        let mut out = SurfaceOutcome::empty();
-        for e in desired {
-            let state = if drifted.contains(&e.key) {
-                agent_state(
-                    h.slug,
-                    "drifted",
-                    Some("hand-edited since topos wrote it — left in place"),
-                    Some(&mcp_path),
-                )
-            } else if found_fps.get(&e.key) == desired_fps.get(&e.key) {
-                agent_state(h.slug, "current", None, Some(&mcp_path))
-            } else {
-                agent_state(
-                    h.slug,
-                    "unprovable",
-                    Some("held back: a hand-edited entry blocks rewriting the topos plugin dir"),
-                    Some(&mcp_path),
-                )
-            };
-            out.states.push((e.key.clone(), state));
-        }
-        for k in &drifted {
-            if !desired_fps.contains_key(k) {
-                out.states.push((
-                    k.clone(),
-                    agent_state(
-                        h.slug,
-                        "drifted",
-                        Some("hand-edited since topos wrote it — left in place"),
-                        Some(&mcp_path),
-                    ),
-                ));
-            }
-        }
-        return out;
-    }
-
-    // The NEXT file content: the desired entries, plus every held entry's current value verbatim.
-    let mut next_values = desired_values.clone();
-    for k in &kept {
-        if let Some(v) = found_values.get(k) {
-            next_values.insert(k.clone(), v.clone());
-        }
-    }
-
-    if next_values.is_empty() {
-        // Removal of the last entries. Ownership proof: every present entry was classified ours
-        // above (prior-matched — drift/foreign already returned), so the two files go, and the
-        // dirs are pruned when they hold nothing else.
-        if found_values.is_empty() && current.is_none() {
-            return SurfaceOutcome::empty();
-        }
-        let intents: BTreeMap<String, PendingIntent> = found_fps
-            .keys()
-            .map(|k| {
-                (
-                    placement_key(h.slug, k),
-                    PendingIntent {
-                        bundle_id: ledger.bundle_of_key(k).unwrap_or_default().to_owned(),
-                        version_id: String::new(),
-                        file: mcp_path.display().to_string(),
-                        fingerprint: String::new(),
-                        owns_file: false,
-                    },
-                )
-            })
-            .collect();
-        let fs = io.fs;
-        let mcp_p = mcp_path.clone();
-        let manifest_p = manifest_path.clone();
-        let dir_p = dir.to_path_buf();
-        let write = move || -> std::io::Result<()> {
-            fs.remove_file(&mcp_p)?;
-            let _ = fs.remove_file(&manifest_p);
-            // Prune the dirs only when they hold nothing else (the ownership proof extended to
-            // the directory level).
-            let only = |d: &Path, expect: &[&str]| -> bool {
-                fs.read_dir(d).is_ok_and(|entries| {
-                    entries.iter().all(|p| {
-                        p.file_name()
-                            .and_then(|n| n.to_str())
-                            .is_some_and(|n| expect.contains(&n))
-                    })
-                })
-            };
-            let claude_plugin = dir_p.join(".claude-plugin");
-            if fs.exists(&claude_plugin) && only(&claude_plugin, &[]) {
-                let _ = fs.remove_dir_all(&claude_plugin);
-            }
-            if only(&dir_p, &[]) {
-                let _ = fs.remove_dir_all(&dir_p);
-            }
-            Ok(())
-        };
-        return match journaled_write(io, ledger, &mcp_path, intents, &write) {
-            Ok(()) => {
-                let mut out = SurfaceOutcome::empty();
-                out.ledger_dirty = true;
-                for k in found_fps.keys() {
-                    out.states.push((
-                        k.clone(),
-                        agent_state(h.slug, "removed", None, Some(&mcp_path)),
-                    ));
-                }
-                out
-            }
-            Err(reason) => SurfaceOutcome::unprovable(desired, h, &mcp_path, &reason),
-        };
-    }
-
-    let next_fps: BTreeMap<String, String> = next_values
-        .iter()
-        .map(|(k, v)| (k.clone(), mcp::fingerprint_value(v)))
-        .collect();
-    let unchanged = next_fps == found_fps && io.fs.exists(&manifest_path);
-    // Per-key outcome states (desired keys + removals), computed against the PRE-write file.
-    let mut states: Vec<(String, McpAgentState)> = Vec::new();
-    for e in desired {
-        let state = match found_fps.get(&e.key) {
-            None => agent_state(h.slug, "current", Some(h.reload_note), Some(&mcp_path)),
-            Some(fp) if desired_fps.get(&e.key) == Some(fp) => {
-                agent_state(h.slug, "current", None, Some(&mcp_path))
-            }
-            Some(_) => agent_state(h.slug, "current", Some(h.reload_note), Some(&mcp_path)),
-        };
-        states.push((e.key.clone(), state));
-    }
-    for k in found_fps.keys() {
-        if !next_values.contains_key(k) {
-            states.push((
-                k.clone(),
-                agent_state(h.slug, "removed", None, Some(&mcp_path)),
-            ));
-        }
-    }
-
-    if unchanged {
-        let fps: Vec<(String, String)> = next_fps.into_iter().collect();
-        let dirty = sync_ledger_entries(ledger, h.slug, &mcp_path, &fps, &kept, provenance, true);
-        return SurfaceOutcome {
-            states,
-            ledger_dirty: dirty,
-            warnings: Vec::new(),
-        };
-    }
-
-    // Render whole: the constant manifest + the entries file (keys sorted, 2-space, trailing
-    // newline — the plugin_dir shape).
-    let manifest_bytes = plugin_dir::render_plugin_dir(&[])
-        .into_iter()
-        .find(|(p, _)| p == plugin_dir::PLUGIN_MANIFEST_PATH)
-        .map(|(_, b)| b)
-        .unwrap_or_default();
-    let mut root = serde_json::Map::new();
-    root.insert(
-        "mcpServers".to_owned(),
-        Value::Object(
-            next_values
-                .iter()
-                .map(|(k, v)| (k.clone(), v.clone()))
-                .collect(),
-        ),
-    );
-    let mut mcp_bytes =
-        serde_json::to_string_pretty(&Value::Object(root)).unwrap_or_else(|_| "{}".into());
-    mcp_bytes.push('\n');
-
-    let owns_file = true; // the dir is wholly topos-owned by construction
-    let mut intents = BTreeMap::new();
-    for (k, fp) in &next_fps {
-        let ledger_key = placement_key(h.slug, k);
-        let standing = ledger.entries.get(&ledger_key);
-        if standing.map(|e| e.fingerprint.as_str()) != Some(fp.as_str()) {
-            let (bundle_id, version_id) = provenance.get(k).cloned().unwrap_or_else(|| {
-                (
-                    ledger.bundle_of_key(k).unwrap_or_default().to_owned(),
-                    String::new(),
-                )
-            });
-            intents.insert(
-                ledger_key,
-                PendingIntent {
-                    bundle_id,
-                    version_id,
-                    file: mcp_path.display().to_string(),
-                    fingerprint: fp.clone(),
-                    owns_file,
-                },
-            );
-        }
-    }
-    let prefix = format!("{}/", h.slug);
-    for ledger_key in ledger.entries.keys() {
-        if let Some(key) = ledger_key.strip_prefix(&prefix)
-            && !next_fps.contains_key(key)
-        {
-            intents.insert(
-                ledger_key.clone(),
-                PendingIntent {
-                    bundle_id: ledger
-                        .entries
-                        .get(ledger_key)
-                        .map(|e| e.bundle_id.clone())
-                        .unwrap_or_default(),
-                    version_id: String::new(),
-                    file: mcp_path.display().to_string(),
-                    fingerprint: String::new(),
-                    owns_file: false,
-                },
-            );
-        }
-    }
-    let fs = io.fs;
-    let manifest_p = manifest_path.clone();
-    let mcp_p = mcp_path.clone();
-    let write = move || -> std::io::Result<()> {
-        crate::config_io::replace_config(fs, &manifest_p, &manifest_bytes)?;
-        crate::config_io::replace_config(fs, &mcp_p, mcp_bytes.as_bytes())
-    };
-    match journaled_write(io, ledger, &mcp_path, intents, &write) {
-        Ok(()) => SurfaceOutcome {
-            states,
-            ledger_dirty: true,
-            warnings: Vec::new(),
-        },
-        Err(reason) => SurfaceOutcome::unprovable(desired, h, &mcp_path, &reason),
+    if empty(dir) {
+        let _ = fs.remove_dir_all(dir);
     }
 }
 

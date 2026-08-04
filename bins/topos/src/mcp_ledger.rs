@@ -299,15 +299,9 @@ pub(crate) fn dialect_lookup<'a>(
         if project {
             h.project_surface.map(|(_, d)| d)
         } else {
-            h.user_surface.map(|s| {
-                if s.dialect == topos_harness::mcp::McpDialect::ClaudePluginDir {
-                    // The intent journal records the plugin dir's `.mcp.json`, which observes
-                    // through the plugin-dir dialect directly.
-                    topos_harness::mcp::McpDialect::ClaudePluginDir
-                } else {
-                    s.dialect
-                }
-            })
+            // The intent journal records the driver surface FILE — for the plugin dir that is
+            // its `.mcp.json`, which observes through the same dialect as every other surface.
+            h.user_surface.map(|s| s.dialect)
         }
     }
 }
