@@ -95,6 +95,11 @@
     "note": "Not JSON at all — the commonest paste mistake, refused before anything is read out of it."
   },
   {
+    "file": "invalid/nesting-too-deep.json",
+    "verdict": "MCP_INVALID",
+    "note": "200 nested containers. serde_json refuses past 127 levels (its default recursion limit), and the web gate caps at the same depth explicitly — one verdict, both languages, no stack overflow either side."
+  },
+  {
     "file": "valid/remote-uppercase-scheme.json",
     "verdict": "ok",
     "note": "The scheme is case-insensitive: HTTPS:// is the same https the gate requires."

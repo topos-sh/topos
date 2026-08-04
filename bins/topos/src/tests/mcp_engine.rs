@@ -2121,6 +2121,123 @@ fn a_targeted_go_back_converges_the_configs_to_the_restored_document() {
     assert_eq!(agents, ["cursor", "openclaw"].into());
 }
 
+/// ITEM PAIR (targeted go-back honors narrowing): a bundle narrowed to ONE harness must stay in
+/// that one harness through a targeted `update <mcp>@<version>` — the go-back's converge reaches
+/// only the harnesses that already hold a ledger entry here, so a harness the narrowing excluded
+/// never gains one. Before the fix the targeted demand carried an EMPTY filter, which
+/// `filter_admits` reads as ALL harnesses: openclaw (detected, engaged, excluded by the row)
+/// gained an entry the sweep then had to claw back.
+#[test]
+fn a_targeted_go_back_never_reaches_a_narrowing_excluded_harness() {
+    let rig = Rig::new("goback-narrow");
+    rig.seed_session();
+    seed_harness_dirs(&rig.home.0); // BOTH hermetic slugs detect; the narrowing admits one.
+    let v = mk_version(&[(
+        "server.json",
+        server_json("https://mcp.example/linear").as_bytes(),
+    )]);
+    let plane = FakePlane::new().with_version("s_linear", &v);
+    plane.serves(vec![delivered_mcp("s_linear", "linear", &v)]);
+    let dir = FakeDirectory {
+        skills: vec![mcp_catalog_entry("s_linear", "linear", &v)],
+        channels: Vec::new(),
+    };
+    rig.write_global(&format!(
+        "[bundles]\n\"{HOST}/{WS_NAME}\" = \"*\"\n\n[defaults.mcp]\nharness = [\"cursor\"]\n"
+    ));
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    sweep(&ctx, &plane, &dir);
+    let openclaw = rig.home.0.join(".openclaw/openclaw.json");
+    assert!(
+        rig.home.0.join(".cursor/mcp.json").exists() && !openclaw.exists(),
+        "the sweep placed cursor alone"
+    );
+
+    let out = ops::pull(
+        &ctx,
+        ops::PullScope::One {
+            name: "linear".into(),
+            workspace: None,
+            mode: ops::TargetMode::GoBack(ops::VersionRef::Full(v.id)),
+            store: ops::StoreScope::Here,
+        },
+    )
+    .expect("the go-back applies");
+
+    // The excluded harness stayed excluded — no config was born for it.
+    assert!(
+        !openclaw.exists(),
+        "a narrowing-excluded harness must not gain an entry on a targeted go-back"
+    );
+    let text = std::fs::read_to_string(rig.home.0.join(".cursor/mcp.json")).unwrap();
+    assert!(text.contains("https://mcp.example/linear"), "{text}");
+    let row = &out.data.skills[0];
+    let agents: BTreeSet<&str> = row.harnesses.iter().map(|h| h.agent.as_str()).collect();
+    assert_eq!(agents, ["cursor"].into(), "{row:?}");
+}
+
+/// ITEM PAIR (keyless targeted converge skips): with the LEDGER deleted, a targeted go-back has
+/// no ownership record to reuse — it must write NOTHING and say so, leaving the heal to the next
+/// sweep. Before the fix it minted a fresh `topos-local-linear` key and placed a DUPLICATE entry
+/// beside the original `topos-eng-linear` one (now foreign and unremovable).
+#[test]
+fn a_deleted_ledger_makes_the_targeted_go_back_skip_with_a_warning() {
+    let rig = Rig::new("goback-keyless");
+    rig.seed_session();
+    seed_harness_dirs(&rig.home.0);
+    let v = mk_version(&[(
+        "server.json",
+        server_json("https://mcp.example/linear").as_bytes(),
+    )]);
+    let (plane, dir) = deliver_linear(&rig, &v);
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    sweep(&ctx, &plane, &dir);
+    let cursor = rig.home.0.join(".cursor/mcp.json");
+    let openclaw = rig.home.0.join(".openclaw/openclaw.json");
+    let before = (
+        std::fs::read(&cursor).unwrap(),
+        std::fs::read(&openclaw).unwrap(),
+    );
+
+    // The failure shape: the ownership record is GONE (the kind marker still classifies).
+    std::fs::remove_file(rig.layout().mcp_ledger_path()).unwrap();
+
+    // The converge the go-back hand-runs: zero writes, one honest warning.
+    let sid = crate::id::SkillId::parse("s_linear").unwrap();
+    let (states, warnings) = crate::mcp_engine::converge_bundle_now(&ctx, &sid, "linear");
+    assert!(states.is_empty(), "{states:?}");
+    assert!(
+        warnings
+            .iter()
+            .any(|w| w.contains("MCP_OWNERSHIP_MISSING") && w.contains("next update heals")),
+        "{warnings:?}"
+    );
+
+    // And through the whole verb: the configs are byte-identical — no duplicate key appeared.
+    ops::pull(
+        &ctx,
+        ops::PullScope::One {
+            name: "linear".into(),
+            workspace: None,
+            mode: ops::TargetMode::GoBack(ops::VersionRef::Full(v.id)),
+            store: ops::StoreScope::Here,
+        },
+    )
+    .expect("the go-back still applies store-side");
+    let after = (
+        std::fs::read(&cursor).unwrap(),
+        std::fs::read(&openclaw).unwrap(),
+    );
+    assert_eq!(
+        before, after,
+        "no config byte moved without an ownership record"
+    );
+    assert!(
+        !String::from_utf8_lossy(&after.0).contains("topos-local"),
+        "no duplicate locally-minted entry"
+    );
+}
+
 /// ITEM PAIR (empty map ≠ mcp): a SKILL delivered at project scope with NO detected agent records
 /// an empty placement map — it must NOT be reported to the fleet as held (there are no bytes
 /// anywhere an agent reads). Before the fix the empty map rode the config-placed exemption and

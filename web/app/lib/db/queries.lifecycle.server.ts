@@ -266,7 +266,8 @@ export async function unarchiveBundle(
       if (serverName === null) {
         return { outcome: "mcp_name_taken" } as const;
       }
-      const claimed = await mcpNameTaken(actor, serverName, bundleId);
+      // On the HELD client — a pool checkout under the lock is the exhaustion shape.
+      const claimed = await mcpNameTaken(actor, serverName, bundleId, tx);
       if (claimed.kind !== "free") {
         return { outcome: "mcp_name_taken" } as const;
       }

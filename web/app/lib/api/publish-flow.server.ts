@@ -298,17 +298,28 @@ export async function publishFlow(args: PublishFlowArgs): Promise<Response> {
 
   const details: Record<string, unknown> = {};
   const envelope = await inFinalTx(async (tx) => {
-    // THE SECOND LOOK AT THE EMBEDDED NAME. The gate above answered before the custody call, so
-    // two publishes claiming one name can both pass it; this one runs under the per-workspace
-    // lock, which makes the winner's registration committed-and-visible before the loser reads.
-    // What it can and cannot do, plainly: the vault call has ALREADY landed by here — a genesis
-    // loser leaves bytes with no catalog row, and a re-publish that renames itself into a
-    // collision has already moved that bundle's `current`. The lock serializes the CATALOG
-    // decision and answers the denial; un-moving a pointer is not in its reach (publish-then-
-    // register is the pre-existing sequencing, and this check does not change it).
+    // THE SECOND LOOK AT THE EMBEDDED NAME. The gate above answered before the custody call —
+    // that pre-check (mcpCandidateRefusal's name scan, no lock) is what makes the COMMON case
+    // refuse before any byte moves; being unlocked, it is not the last word, so this one re-runs
+    // under the per-workspace lock, which makes the winner's registration committed-and-visible
+    // before the loser reads. What it can and cannot do, plainly: the vault call has ALREADY
+    // landed by here — a genesis loser leaves bytes with no catalog row, and a re-publish that
+    // renames itself into a collision has already moved that bundle's `current`. The lock
+    // serializes the CATALOG decision and answers the denial; un-moving a pointer is not in its
+    // reach (publish-then-register is the pre-existing sequencing, and this check does not
+    // change it). NAMED RESIDUAL: two concurrent RE-publishes claiming one newly-free name can
+    // both pass the pre-check inside its race window, and the loser then carries a live pointer
+    // (its version IS current) alongside a DENIED receipt — the catalog stays unambiguous (one
+    // registered claimant), but the loser's own `current` serves a name the workspace refused
+    // it. The real fix is a PERSISTED-NAME invariant (an indexed embedded-name column with a
+    // unique constraint, decided before custody moves); until then the pre-check narrows the
+    // window and this lock keeps the registry lane's answer single-valued.
     if (mcpServerName !== null) {
       await lockMcpNamesInTx(tx, actor.workspaceId);
-      const taken = await mcpNameTaken(actor, mcpServerName, bundleId);
+      // The scan rides THIS transaction's client: reads under the held lock must never check a
+      // second client out of the pool (concurrent same-workspace publishes would exhaust it with
+      // the lock-holder starved behind its own waiters).
+      const taken = await mcpNameTaken(actor, mcpServerName, bundleId, tx);
       if (taken.kind !== "free") {
         const refusal = mcpNameTakenRefusal(mcpServerName, taken);
         const receipt = buildReceipt({

@@ -369,6 +369,112 @@ describe("the locked re-check", () => {
   });
 });
 
+/**
+ * ITEM PAIR (deny before custody, the re-publish arm): a RE-publish whose document claims a name
+ * another bundle here already holds refuses at the PRE-check — before `publishVersion`, so its
+ * `current` never moves against a name the workspace then denies it. The locked re-check stays
+ * the authority for the narrowed race window (see the named residual in publish-flow); this pins
+ * the common case: no custody call at all on a provable collision.
+ */
+describe("the pre-check refuses a re-publish before custody moves", () => {
+  it("a re-publish claiming another bundle's name is DENIED with zero custody calls", async () => {
+    const KEEP = { ...WEATHER, name: "io.github.acme/keeper" };
+    const MOVE = { ...WEATHER, name: "io.github.acme/mover" };
+    await seedPublishedServer("s_keeper", "keeper", KEEP);
+    await seedPublishedServer("s_mover", "mover", MOVE);
+
+    // s_mover renames itself into s_keeper's embedded name.
+    const envelope = await runFlow({
+      skillId: "s_mover",
+      kind: "mcp",
+      expected: 1,
+      files: [serverJsonFile({ ...KEEP, version: "2.0.0" })],
+    });
+    expect(errorOf(envelope)?.code).toBe("MCP_NAME_TAKEN");
+    expect(errorOf(envelope)?.context.message).toContain("keeper");
+    // The refusal preceded custody: the pointer never moved, no bytes were ingested.
+    expect(vault.calls).toEqual([]);
+  });
+});
+
+/**
+ * ITEM PAIR (the locked scan rides the held client): every catalog read under
+ * `lockMcpNamesInTx` must run on the transaction that HOLDS the lock — a `getDb()` read there
+ * checks a second client out of the pool while the first sits locked, and N concurrent
+ * same-workspace publishes exhaust the pool with the lock-holder starved behind its own
+ * waiters. Two behavioral proofs, no mocks: transaction-visibility (a row the holding
+ * transaction wrote but has not committed is visible ONLY on its own client), and the whole
+ * flow completing with every other pool client held.
+ */
+describe("the locked scan rides the held transaction client", () => {
+  it("sees rows the holding transaction wrote but has not committed", async () => {
+    const { mcpNameTaken } = await import("@/lib/mcp/catalog.server");
+    const { lockMcpNamesInTx, mcpBundleCount } = await import("@/lib/db/queries.mcp.server");
+    const { getDb } = await import("@/lib/db/index.server");
+    const { sql } = await import("drizzle-orm");
+    const actor = asSession(wsId, "u_auth", "cs_auth", "member");
+    const GHOST = { ...WEATHER, name: "io.github.acme/ghost" };
+    const versionId = versionIdFor("s_ghost");
+    vault.seed(wsId, "s_ghost", versionId, [
+      { path: "server.json", content: JSON.stringify(GHOST, null, 2) },
+    ]);
+    const baseline = await mcpBundleCount(actor);
+
+    await expect(
+      getDb().transaction(async (tx) => {
+        await lockMcpNamesInTx(tx, wsId);
+        // A registration THIS transaction wrote and has not committed — visible only on the
+        // held client. Before the fix both reads ran on a fresh pool client and missed it.
+        await tx.execute(sql`
+          INSERT INTO web.bundle (id, workspace_id, name, kind, status)
+          VALUES ('s_ghost', ${wsId}, 'ghost', 'mcp', 'active')`);
+        await tx.execute(sql`
+          INSERT INTO plane.version (workspace_id, bundle_id, version_id, commit_id, author_display)
+          VALUES (${wsId}, 's_ghost', ${versionId}, ${versionId}, 'seed')`);
+        await tx.execute(sql`
+          INSERT INTO plane.current_pointer (workspace_id, bundle_id, version_id, moved_by_display)
+          VALUES (${wsId}, 's_ghost', ${versionId}, 'seed')`);
+        expect(await mcpBundleCount(actor, tx)).toBe(baseline + 1);
+        const taken = await mcpNameTaken(actor, "io.github.acme/ghost", null, tx);
+        expect(taken.kind).toBe("taken");
+        throw new Error("rollback — leave no trace");
+      }),
+    ).rejects.toThrow("rollback");
+
+    // The rolled-back registration is gone from the pool's view, as it always was.
+    const { mcpNameTaken: fresh } = await import("@/lib/mcp/catalog.server");
+    expect(
+      (await fresh(asSession(wsId, "u_auth", "cs_auth", "member"), "io.github.acme/ghost", null))
+        .kind,
+    ).toBe("free");
+  });
+
+  it("a re-publish's locked scan completes with every other pool client held", async () => {
+    const { getPool } = await import("@/lib/db/index.server");
+    const RESERVE = { ...WEATHER, name: "io.github.acme/reserve" };
+    await seedPublishedServer("s_reserve", "reserve", RESERVE);
+
+    const pool = getPool();
+    const max = (pool as unknown as { options: { max?: number } }).options.max ?? 10;
+    // Hold every client but ONE — the final transaction takes that one, and the locked scan
+    // must ride it. Before the fix the scan waited on a second checkout that could never come.
+    const held = await Promise.all(Array.from({ length: max - 1 }, () => pool.connect()));
+    try {
+      const envelope = await runFlow({
+        skillId: "s_reserve",
+        kind: "mcp",
+        expected: 1,
+        files: [serverJsonFile({ ...RESERVE, version: "1.0.1" })],
+      });
+      expect(envelope.ok).toBe(true);
+    } finally {
+      for (const client of held) {
+        client.release();
+      }
+    }
+  }, 20_000);
+});
+
 describe("every other kind is untouched", () => {
   it("a skill publish carrying no server.json lands exactly as before", async () => {
     const envelope = await runFlow({

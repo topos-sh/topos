@@ -38,12 +38,23 @@ export const MAX_MCP_BUNDLES_SCANNED = 500;
 type Tx = Parameters<Parameters<ReturnType<typeof getDb>["transaction"]>[0]>[0];
 
 /**
+ * The one client a scan's reads run on. Every caller that scans UNDER the advisory lock passes
+ * the transaction that holds it: the lock-holder's reads must ride the client it already owns —
+ * a second `getDb()` checkout there is a pool client acquired while one is held, and N
+ * concurrent publishes of one workspace would exhaust the pool with the lock-holder starved
+ * behind its own waiters. Absent (the unlocked pre-checks, the registry lane), the shared pool
+ * answers.
+ */
+export type McpDbClient = ReturnType<typeof getDb> | Tx;
+
+/**
  * Serialize this workspace's embedded-name decisions. The uniqueness rule reads BYTES (a
  * version's document says what name it claims), so there is no column to put a unique index on
  * — the lock is what makes "scan, then register" atomic against another publish doing the same
  * thing at the same moment. Every door that ends up REGISTERING or RESTORING an `mcp` bundle
- * takes it inside its final transaction and re-runs the scan under it; a transaction-scoped
- * lock needs no release path (a rollback drops it with everything else).
+ * takes it inside its final transaction and re-runs the scan under it — ON the same transaction
+ * client (see [`McpDbClient`]); a transaction-scoped lock needs no release path (a rollback
+ * drops it with everything else).
  */
 export async function lockMcpNamesInTx(tx: Tx, workspaceId: string): Promise<void> {
   await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${workspaceId} || ':mcp-name'))`);
@@ -57,9 +68,10 @@ export async function lockMcpNamesInTx(tx: Tx, workspaceId: string): Promise<voi
 export async function mcpBundlesWithCurrent(
   actor: MemberActor | SessionActor,
   limit = MAX_MCP_BUNDLES_SCANNED,
+  db: McpDbClient = getDb(),
 ): Promise<McpBundleRow[]> {
   const ws = actor.workspaceId;
-  const rows = await getDb()
+  const rows = await db
     .select({
       bundleId: bundle.id,
       name: bundle.name,
@@ -84,8 +96,11 @@ export async function mcpBundlesWithCurrent(
 
 /** How many published, active `kind: 'mcp'` bundles the workspace holds — the completeness
  * check a capped scan compares itself against. */
-export async function mcpBundleCount(actor: MemberActor | SessionActor): Promise<number> {
-  const rows = await getDb().execute(sql`
+export async function mcpBundleCount(
+  actor: MemberActor | SessionActor,
+  db: McpDbClient = getDb(),
+): Promise<number> {
+  const rows = await db.execute(sql`
     SELECT count(*)::int AS n
     FROM web.bundle b
     JOIN plane.current_pointer cp

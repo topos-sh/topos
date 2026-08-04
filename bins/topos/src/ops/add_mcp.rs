@@ -313,14 +313,28 @@ fn fetch_arm(
     // the document this import would write — so the retry finishes the job instead of refusing it
     // forever. Anything else (foreign bytes, a registered row) still refuses by name, so a person
     // renames or removes deliberately instead of discovering an overwrite afterwards.
-    if ctx.fs.exists(&bundle_dir) && !resumable_leftover(ctx, &target, &bundle_dir, &document) {
-        return Err(ClientError::InvalidArgument(format!(
-            "{} already exists — {} would be written there; move or remove it, or import the \
-             folder directly (`topos add --mcp {}`)",
-            bundle_dir.display(),
-            summary.name,
-            bundle_dir.display()
-        )));
+    if ctx.fs.exists(&bundle_dir) {
+        if !resumable_leftover(ctx, &target, &bundle_dir, &document) {
+            return Err(ClientError::InvalidArgument(format!(
+                "{} already exists — {} would be written there; move or remove it, or import the \
+                 folder directly (`topos add --mcp {}`)",
+                bundle_dir.display(),
+                summary.name,
+                bundle_dir.display()
+            )));
+        }
+        // A matching `server.json` proves the DOCUMENT is ours — not the folder. Resuming
+        // registers the WHOLE standing dir, so the whole dir passes the same candidate gate the
+        // adopt door runs: the exact allowed file set plus the per-file credential scan. A stray
+        // script or a credential-bearing README beside our own document refuses by name instead
+        // of riding the resume into the row.
+        let scanned = crate::scan::scan(&bundle_dir)?;
+        let files: Vec<(&str, &[u8])> = scanned
+            .files
+            .iter()
+            .map(|f| (f.path.as_str(), f.bytes.as_slice()))
+            .collect();
+        mcp_validate::validate_candidate_files(&files)?;
     }
 
     let agents = engaged_agents(ctx, &target, global);

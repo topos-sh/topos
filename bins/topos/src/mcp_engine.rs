@@ -1458,6 +1458,18 @@ pub(crate) fn record_kind(
 /// targeted verb never touches another bundle's entries). Best-effort by construction: the store
 /// move already landed, and the next sweep reaches the same configs — failures come back as
 /// warning lines beside the per-agent states.
+///
+/// OWNED-ONLY CONVERGENCE: the targeted run does not re-derive the row's harness narrowing (that
+/// lives in the scope plan the sweep resolves), so it must not fan out past what the narrowing
+/// last admitted. Two rails hold that line:
+///
+/// - it runs only when the ledger holds this bundle's MINTED key — with the ledger gone there is
+///   no ownership record to reuse, and minting fresh here would land a DUPLICATE `topos-local-*`
+///   entry beside the original (now-foreign, unremovable) one. Skip with an honest warning; the
+///   next sweep re-mints under the full scope plan and heals this scope;
+/// - it converges only the harnesses that ALREADY hold a ledger entry for this bundle in this
+///   scope. A harness the narrowing excluded never gained an entry, so it stays untouched; a
+///   narrowing CHANGE is the sweep's job, not a go-back's.
 pub(crate) fn converge_bundle_now(
     ctx: &crate::ctx::Ctx<'_>,
     sid: &crate::id::SkillId,
@@ -1469,6 +1481,39 @@ pub(crate) fn converge_bundle_now(
     let Ok(Some((version_id, server_json))) = stored_server_json(ctx, sid) else {
         return (Vec::new(), Vec::new());
     };
+    let ledger = match mcp_ledger::read(ctx.fs, &ctx.layout) {
+        Ok(l) => l,
+        Err(e) => {
+            // The same fail-closed answer the sweep's converge gives an unreadable ledger.
+            return (
+                Vec::new(),
+                vec![format!(
+                    "MCP_LEDGER_UNREADABLE: {} — no MCP config is read or written this run",
+                    e.detail()
+                )],
+            );
+        }
+    };
+    let Some(key) = ledger.keys.get(sid.as_str()).cloned() else {
+        return (
+            Vec::new(),
+            vec![format!(
+                "MCP_OWNERSHIP_MISSING {name}: ownership record missing here — the next update \
+                 heals this scope"
+            )],
+        );
+    };
+    let descriptors = mcp::descriptor::mcp_harnesses();
+    // The harnesses that provably hold this bundle's entry here — the whole reach of a targeted
+    // converge. None ⇒ nothing placed, nothing stale, nothing to do.
+    let owned: Vec<String> = descriptors
+        .iter()
+        .filter(|h| ledger.entries.contains_key(&placement_key(h.slug, &key)))
+        .map(|h| h.slug.to_owned())
+        .collect();
+    if owned.is_empty() {
+        return (Vec::new(), Vec::new());
+    }
     let project_root = ctx.layout.project_root().map(Path::to_path_buf);
     let cwd = project_root.clone().or_else(|| roots.cwd.clone());
     let detected: BTreeSet<String> =
@@ -1482,22 +1527,20 @@ pub(crate) fn converge_bundle_now(
         home: roots.home.clone(),
         project_root,
     };
-    // The row's harness narrowing is not re-derived here (it lives in the scope plan the sweep
-    // resolves); the minted key already exists for a placed bundle, and the next sweep re-applies
-    // any narrowing. `workspace_slug: None` is safe for the same reason — the key is reused, not
-    // re-minted.
+    // `workspace_slug: None` is safe: the key check above proved the mint will find and reuse the
+    // existing key, never build a fresh one from the namespace rule.
     let demand = McpDemand {
         bundle_id: sid.as_str().to_owned(),
         name: name.to_owned(),
         workspace_slug: None,
         version_id,
         server_json,
-        harness_filter: Vec::new(),
+        harness_filter: owned,
     };
     let outcome = converge(
         &io,
         std::slice::from_ref(&demand),
-        mcp::descriptor::mcp_harnesses(),
+        descriptors,
         &detected,
         &HashSet::new(),
         false,

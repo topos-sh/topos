@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 import { SECRET_ENTROPY, SECRET_PATTERNS } from "@/lib/mcp/secret-patterns.generated";
 import {
   findSecret,
+  findSecretDeep,
   MCP_ALLOWED_FILES,
   type McpValidation,
   suggestedNameFor,
@@ -322,5 +323,43 @@ describe("edge shapes", () => {
   it("accepts a document string as readily as its bytes", () => {
     const text = readFileSync(join(FIXTURES, "valid/remote-no-auth.json"), "utf8");
     expect(validateServerJson(text).ok).toBe(true);
+  });
+});
+
+/**
+ * ITEM PAIR (deep nesting, the web half): a document nested past the shared cap answers the
+ * TYPED refusal — never a RangeError. On the Rust side serde_json refuses such a document at the
+ * parse (its default recursion limit); this tier's `JSON.parse` is iterative and would accept
+ * far deeper documents, so the explicit depth cap is what keeps the two gates vector-identical,
+ * and the explicit-stack walk in `findSecretDeep` is what keeps the scan itself crash-free.
+ * Before the fix the recursive walk blew the call stack: ~120k nested arrays under the byte cap
+ * threw instead of refusing.
+ */
+describe("deep nesting answers a typed refusal, never a crash", () => {
+  const nested = (n: number) => "[".repeat(n) + "]".repeat(n);
+
+  it("a 120k-deep document under the byte cap is MCP_INVALID, not a RangeError", () => {
+    const result = validateServerJson(nested(120_000));
+    expect(result.ok).toBe(false);
+    expect(result.ok === false && result.code).toBe("MCP_INVALID");
+    expect(result.ok === false && result.message).toBe("document nesting too deep");
+  });
+
+  it("the cap sits exactly where serde_json's recursion limit does: 127 parses, 128 refuses", () => {
+    // 127 containers pass the depth gate — the refusal is the later SHAPE check, which proves
+    // the document was read past the cap.
+    const at127 = validateServerJson(nested(127));
+    expect(at127.ok === false && at127.message).toBe("a server.json document is a JSON object");
+    // The 128th container is where serde stops on the Rust side — and where this cap stops too.
+    const at128 = validateServerJson(nested(128));
+    expect(at128.ok === false && at128.message).toBe("document nesting too deep");
+  });
+
+  it("findSecretDeep walks a pathological document on an explicit stack", () => {
+    // No throw, no hit on empty nesting…
+    expect(findSecretDeep(JSON.parse(nested(120_000)))).toBeNull();
+    // …and a token buried in nested containers is still found, keys and values alike.
+    const buried = { a: [{ b: { note: `ghp_${"A1b2C3d4E5".repeat(4)}` } }] };
+    expect(findSecretDeep(buried)).toBe("github-token");
   });
 });

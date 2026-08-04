@@ -1,6 +1,6 @@
 import { lookup } from "node:dns/promises";
 import { isIPv4 } from "node:net";
-import { MAX_SERVER_JSON_BYTES } from "@/lib/mcp/validate.server";
+import { MAX_SERVER_JSON_BYTES, nestsTooDeep } from "@/lib/mcp/validate.server";
 
 /**
  * THE TWO SERVER-SIDE FETCHES the MCP import page can make, and the guard that makes the
@@ -374,6 +374,12 @@ export function unwrapServerDocument(text: string): Record<string, unknown> | nu
   try {
     parsed = JSON.parse(text);
   } catch {
+    return null;
+  }
+  // A document nested past the gate's depth cap passes through UNTOUCHED: `JSON.stringify` in
+  // the canonicalizer below is recursive, so re-serializing it would blow the stack — and the
+  // gate refuses such a document with its typed answer anyway, which this hand-off preserves.
+  if (nestsTooDeep(parsed)) {
     return null;
   }
   if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {

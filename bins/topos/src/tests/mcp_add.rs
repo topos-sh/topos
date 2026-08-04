@@ -476,6 +476,60 @@ fn a_resume_refuses_foreign_bytes_and_a_registered_row() {
     assert!(err.detail().contains("already exists"), "{}", err.detail());
 }
 
+/// ITEM PAIR (resume runs the whole-dir gate, arm 1): a leftover whose `server.json` matches the
+/// intended document but which carries a STRAY FILE beside it is not an interrupted import's own
+/// state — it is somebody's folder wearing our document. The resume refuses through the same
+/// candidate gate the adopt door runs, naming the file. Before the fix the resume checked
+/// `server.json` alone and registered the foreign bytes.
+#[test]
+fn a_resume_with_a_stray_sibling_refuses_naming_the_file() {
+    let rig = Rig::new("resume-stray");
+    rig.write_global("[bundles]\n");
+    let leftover = rig.layout().home().join("mcp").join("weather");
+    std::fs::create_dir_all(&leftover).unwrap();
+    std::fs::write(leftover.join("server.json"), canonical(&good_server())).unwrap();
+    std::fs::write(leftover.join("evil.sh"), b"#!/bin/sh\necho pwned\n").unwrap();
+    let docs = FakeDocs::serving(&good_server());
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+
+    let err =
+        ops::add_mcp(&ctx, Some(&docs), "io.github.acme/weather", true, true).expect_err("refused");
+    assert_eq!(err.code(), "MCP_INVALID");
+    assert!(err.detail().contains("evil.sh"), "{}", err.detail());
+    assert_eq!(rig.global_text(), "[bundles]\n", "no row was registered");
+    assert!(
+        std::fs::read(leftover.join("evil.sh")).is_ok(),
+        "the refusal touches nothing"
+    );
+}
+
+/// ITEM PAIR (resume runs the whole-dir gate, arm 2): an ALLOWED sibling still runs the per-file
+/// credential scan — a README carrying a token refuses `MCP_SECRET_REFUSED` naming the file,
+/// exactly as the adopt door would. Before the fix the resume registered the credential-bearing
+/// folder.
+#[test]
+fn a_resume_with_a_credential_readme_refuses() {
+    let rig = Rig::new("resume-readme");
+    rig.write_global("[bundles]\n");
+    let leftover = rig.layout().home().join("mcp").join("weather");
+    std::fs::create_dir_all(&leftover).unwrap();
+    std::fs::write(leftover.join("server.json"), canonical(&good_server())).unwrap();
+    std::fs::write(
+        leftover.join("README.md"),
+        format!("Set GITHUB_TOKEN to ghp_{}.\n", "A1b2C3d4E5".repeat(4)),
+    )
+    .unwrap();
+    let docs = FakeDocs::serving(&good_server());
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+
+    let err =
+        ops::add_mcp(&ctx, Some(&docs), "io.github.acme/weather", true, true).expect_err("refused");
+    assert_eq!(err.code(), "MCP_SECRET_REFUSED");
+    assert!(err.detail().contains("README.md"), "{}", err.detail());
+    assert!(!err.detail().contains("ghp_"), "{}", err.detail());
+    assert_eq!(rig.global_text(), "[bundles]\n", "no row was registered");
+}
+
 // =================================================================================================
 // The LOCAL door
 // =================================================================================================

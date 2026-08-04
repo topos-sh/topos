@@ -178,29 +178,80 @@ export function findSecret(raw: string): string | null {
  * The same scan over the PARSED document: every decoded string — keys and values, at any depth —
  * runs the pattern + entropy belt. This is what the raw pass cannot see: a token spelled in
  * `\uXXXX` escapes decodes to the credential the raw bytes never showed.
+ *
+ * Traversal is an EXPLICIT stack, never recursion: `JSON.parse` is iterative, so a document
+ * nested a hundred thousand levels deep parses fine — and a recursive walk over it would blow
+ * the call stack and turn a typed refusal into a crash. (The gate's own depth cap refuses such
+ * documents before this runs; the explicit stack keeps this function safe standalone.)
  */
 export function findSecretDeep(value: unknown): string | null {
-  if (typeof value === "string") {
-    return findSecret(value);
-  }
-  if (Array.isArray(value)) {
-    for (const entry of value) {
-      const hit = findSecretDeep(entry);
+  // Two item shapes so the walk visits strings, keys, and values in exactly the order the
+  // recursive spelling did — the FIRST hit names the refusal, and which one is "first" must not
+  // change with the traversal mechanics.
+  type Item = { key: string } | { value: unknown };
+  const stack: Item[] = [{ value }];
+  for (let item = stack.pop(); item !== undefined; item = stack.pop()) {
+    if ("key" in item) {
+      const hit = findSecret(item.key);
       if (hit !== null) {
         return hit;
       }
+      continue;
     }
-    return null;
-  }
-  if (typeof value === "object" && value !== null) {
-    for (const [key, entry] of Object.entries(value)) {
-      const hit = findSecret(key) ?? findSecretDeep(entry);
+    const current = item.value;
+    if (typeof current === "string") {
+      const hit = findSecret(current);
       if (hit !== null) {
         return hit;
+      }
+      continue;
+    }
+    if (Array.isArray(current)) {
+      for (let i = current.length - 1; i >= 0; i -= 1) {
+        stack.push({ value: current[i] });
+      }
+      continue;
+    }
+    if (typeof current === "object" && current !== null) {
+      const entries = Object.entries(current);
+      for (let i = entries.length - 1; i >= 0; i -= 1) {
+        const [key, entry] = entries[i] as [string, unknown];
+        stack.push({ value: entry });
+        stack.push({ key });
       }
     }
   }
   return null;
+}
+
+/**
+ * The depth cap the parse rail wears, mirroring serde_json's default recursion limit so the two
+ * gates stay vector-identical: serde refuses the 128th nested container, so documents up to 127
+ * containers deep parse on both sides and anything deeper is `MCP_INVALID` on both sides. (Here
+ * `JSON.parse` is iterative and would accept far deeper documents — the cap is what keeps this
+ * tier from accepting a document the Rust gate refuses.)
+ */
+export const MAX_DOCUMENT_DEPTH = 128;
+
+/** Whether the parsed document nests containers `MAX_DOCUMENT_DEPTH` deep or deeper — an
+ * explicit-stack walk, for the same no-recursion reason as [`findSecretDeep`]. */
+export function nestsTooDeep(root: unknown): boolean {
+  const stack: { value: unknown; depth: number }[] = [{ value: root, depth: 1 }];
+  for (let item = stack.pop(); item !== undefined; item = stack.pop()) {
+    const { value, depth } = item;
+    const isContainer = Array.isArray(value) || (typeof value === "object" && value !== null);
+    if (!isContainer) {
+      continue;
+    }
+    if (depth >= MAX_DOCUMENT_DEPTH) {
+      return true;
+    }
+    const children = Array.isArray(value) ? value : Object.values(value);
+    for (const child of children) {
+      stack.push({ value: child, depth: depth + 1 });
+    }
+  }
+  return false;
 }
 
 // ── The gate ────────────────────────────────────────────────────────────────────────────────
@@ -239,6 +290,12 @@ export function validateServerJson(raw: Uint8Array | string): McpValidation {
     parsed = JSON.parse(text);
   } catch {
     return refuse("MCP_INVALID", "that is not JSON — a server.json document is a JSON object");
+  }
+  // The depth cap sits WITH the parse, before anything walks the document: on the Rust side a
+  // document this deep never parses at all (serde's recursion limit), so refusing here — before
+  // even the credential scan — is what keeps the two gates answering identically.
+  if (nestsTooDeep(parsed)) {
+    return refuse("MCP_INVALID", "document nesting too deep");
   }
 
   // FIRST, before anything is read out of the document: does it carry a credential? Two passes —

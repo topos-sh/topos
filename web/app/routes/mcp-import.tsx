@@ -198,7 +198,8 @@ export async function action({ request, params }: ActionFunctionArgs) {
         // so — the published bytes stand in the vault with no catalog row, which is the same
         // sequencing the session lane has (custody first, catalog second).
         await lockMcpNamesInTx(tx, workspace.id);
-        const taken = await mcpNameTaken(actor, validated.summary.name, bundleId);
+        // On the HELD client — a pool checkout under the lock is the exhaustion shape.
+        const taken = await mcpNameTaken(actor, validated.summary.name, bundleId, tx);
         if (taken.kind !== "free") {
           return { refused: mcpNameTakenRefusal(validated.summary.name, taken) };
         }

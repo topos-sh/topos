@@ -1130,6 +1130,28 @@ mod tests {
         assert_eq!(both.url, "https://calendar.acme.example/mcp");
     }
 
+    /// ITEM PAIR (deep nesting, the Rust half): a document nested past serde_json's default
+    /// recursion limit is refused MCP_INVALID at the PARSE — no stack is consumed per level, so
+    /// there is nothing to overflow. The boundary is pinned exactly (127 containers parse, the
+    /// 128th refuses) because the web gate mirrors it with an explicit depth cap: the two gates
+    /// must answer the same verdict for the same bytes.
+    #[test]
+    fn nesting_past_the_recursion_limit_is_mcp_invalid_at_the_parse() {
+        let nested = |n: usize| format!("{}{}", "[".repeat(n), "]".repeat(n));
+
+        // 127 levels PARSE — the refusal is the later shape check, proving the depth was fine.
+        let e = validate_server_json(nested(127).as_bytes()).expect_err("an array is no document");
+        assert_eq!(e.code, McpRefusalCode::Invalid);
+        assert!(e.message.contains("JSON object"), "{}", e.message);
+
+        // The 128th container is where serde stops — refused at the parse, typed, no panic.
+        for n in [128usize, 200] {
+            let e = validate_server_json(nested(n).as_bytes()).expect_err("too deep");
+            assert_eq!(e.code, McpRefusalCode::Invalid, "depth {n}");
+            assert!(e.message.contains("not JSON"), "depth {n}: {}", e.message);
+        }
+    }
+
     /// The scan reads the WHOLE raw text, so a credential anywhere in the document — not only in a
     /// header — refuses before a single field is read out of it.
     #[test]

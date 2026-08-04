@@ -2,6 +2,7 @@ import type { MemberActor, SessionActor } from "@/lib/auth/guards.server";
 import {
   MAX_MCP_BUNDLES_SCANNED,
   type McpBundleRow,
+  type McpDbClient,
   mcpBundleCount,
   mcpBundlesWithCurrent,
 } from "@/lib/db/queries.mcp.server";
@@ -106,15 +107,23 @@ export async function serverDocumentOf(
  * One capped pass over the workspace's published MCP servers. Rows whose document cannot be
  * read are DROPPED from the entries and mark the pass incomplete — the registry lane serves
  * what it can prove, and the uniqueness gate refuses what it cannot.
+ *
+ * `db` is the client the CATALOG reads run on. A caller scanning under `lockMcpNamesInTx` MUST
+ * pass the transaction that holds the lock — the reads then ride the held client instead of
+ * checking a second one out of the pool while the first sits locked (the pool-exhaustion shape).
+ * The vault reads below are HTTP, not pool clients, and stay as they are. Note the two reads run
+ * SEQUENTIALLY on a transaction client (one session, no pipelining) — the `Promise.all` here is
+ * ordering, not parallelism, when `db` is a transaction.
  */
 export async function scanMcpCatalog(
   actor: MemberActor | SessionActor,
   limit = MAX_MCP_BUNDLES_SCANNED,
+  db?: McpDbClient,
 ): Promise<McpCatalogScan> {
   const ws = actor.workspaceId;
   const [rows, total] = await Promise.all([
-    mcpBundlesWithCurrent(actor, limit),
-    mcpBundleCount(actor),
+    mcpBundlesWithCurrent(actor, limit, db),
+    mcpBundleCount(actor, db),
   ]);
   let incomplete = total > rows.length;
   const entries: McpCatalogEntry[] = [];
@@ -144,13 +153,17 @@ export type McpNameCheck =
  * whichever one sorted first. So the collision is refused at the door instead of resolved by
  * accident. An INDETERMINATE answer (a scan that could not see the whole catalog) is not a
  * free one — the gate fails toward the refusal.
+ *
+ * `db`: the locked re-checks pass their transaction so the scan reads on the HELD client (see
+ * [`scanMcpCatalog`]); the unlocked pre-checks omit it.
  */
 export async function mcpNameTaken(
   actor: MemberActor | SessionActor,
   serverName: string,
   exceptBundleId: string | null,
+  db?: McpDbClient,
 ): Promise<McpNameCheck> {
-  const scan = await scanMcpCatalog(actor);
+  const scan = await scanMcpCatalog(actor, MAX_MCP_BUNDLES_SCANNED, db);
   const hit = scan.entries.find(
     (entry) => entry.serverName === serverName && entry.row.bundleId !== exceptBundleId,
   );
