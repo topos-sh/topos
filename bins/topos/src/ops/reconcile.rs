@@ -435,6 +435,11 @@ struct Sweep {
     /// The delivery cache was unreadable this run: the mcp hold computation is blind, so removal
     /// convergence is withheld entirely (freeze, never guess).
     mcp_blind: bool,
+    /// `(scope label, bundle identity)` → the index in `rows` of the receipt row that bundle's
+    /// per-agent states belong to. The join key is the IDENTITY, never the display name: a
+    /// workspace `linear` and a local `linear` can stand in one scope, and a name match would hand
+    /// one bundle's config outcomes to the other's row.
+    mcp_rows: BTreeMap<(String, String), usize>,
 }
 
 impl Sweep {
@@ -474,6 +479,22 @@ impl Sweep {
 
     fn push(&mut self, row: PullSkill) {
         self.rows.push(row);
+    }
+
+    /// The index the NEXT pushed row will take — captured by the mcp arms so a converge outcome
+    /// finds its own receipt row by identity (see [`Sweep::mcp_rows`]).
+    fn next_row_index(&self) -> usize {
+        self.rows.len()
+    }
+
+    /// File a bundle's receipt row under its identity in this scope. `None` = the bundle produced
+    /// no row this run (a sync that failed, a governance converge that spoke for it), which simply
+    /// leaves the converge's states off the receipt.
+    fn note_mcp_row(&mut self, label: &str, bundle_id: &str, index: Option<usize>) {
+        if let Some(index) = index {
+            self.mcp_rows
+                .insert((label.to_owned(), bundle_id.to_owned()), index);
+        }
     }
 
     /// Record one failed set expansion: its members are unknowable this run, so nothing under the
@@ -1801,14 +1822,16 @@ fn reconcile_thing<'a>(
                 // A path row whose dir is a placement of an already-GOVERNED bundle is a landed
                 // publish's PENDING transfer (the local rewrite half failed) — converge it here,
                 // idempotently, disclosed.
+                let mut row_index = None;
                 if !converge_pending_governance(env, &dir, sweep) {
+                    row_index = Some(sweep.next_row_index());
                     sweep.push(plain_row(&display, PullAction::UpToDate, None, &sc.label));
                 }
                 // A `kind = "mcp"` path row: the dir IS the bundle (`server.json` at its root) —
                 // adopted-path custody as ever, no skill placement; the demand feeds the scope's
                 // MCP converge with `workspace_slug: None`.
                 if row.fields().kind.as_deref() == Some("mcp") {
-                    local_mcp_demand(env, sc, row, &dir, &display, sweep);
+                    local_mcp_demand(env, sc, row, &dir, &display, row_index, sweep);
                 }
             } else {
                 sweep.warnings.push(format!(
@@ -1907,6 +1930,7 @@ fn local_mcp_demand(
     row: &PlanRow,
     dir: &Path,
     display: &str,
+    row_index: Option<usize>,
     sweep: &mut Sweep,
 ) {
     let bundle_id = local_bundle_identity(env, sc, dir, display);
@@ -1918,6 +1942,7 @@ fn local_mcp_demand(
                 &mut sweep.mcp_warned_slugs,
                 &mut sweep.warnings,
             );
+            sweep.note_mcp_row(&sc.label, &bundle_id, row_index);
             sweep.mcp_demands.entry(sc.label.clone()).or_default().push(
                 crate::mcp_engine::McpDemand {
                     bundle_id,
@@ -2252,6 +2277,7 @@ fn reconcile_feed<'a>(
                 } else {
                     None
                 };
+                let mut row_index = None;
                 match sync_engine::sync_one_planned(
                     &run_ctx,
                     &sid,
@@ -2268,6 +2294,7 @@ fn reconcile_feed<'a>(
                                 .disclosures
                                 .push(draft_synced_line(&ds.name, row.synced_placements));
                         }
+                        row_index = Some(sweep.next_row_index());
                         sweep.push(row);
                     }
                     Err(e) => note_item_failure(env.ctx, &mut sweep.warnings, &ds.name, &e),
@@ -2281,6 +2308,7 @@ fn reconcile_feed<'a>(
                         &ds.name,
                         Some(&run.session.workspace_name),
                         mcp_filter(sc, None, &mut sweep.mcp_warned_slugs, &mut sweep.warnings),
+                        row_index,
                         sweep,
                     );
                 }
@@ -2543,6 +2571,7 @@ fn sync_workspace_skill<'a>(
             }
         }
     }
+    let mut row_index = None;
     match outcome {
         Ok(mut row) => {
             row.workspace_id = Some(run.session.workspace_id.clone());
@@ -2561,6 +2590,7 @@ fn sync_workspace_skill<'a>(
                 disclose_namespaced(&run_ctx, &sid, &st.display, &mut sweep.warnings);
                 disclose_git_visible(&run_ctx, &sid, &target.name, &mut sweep.warnings);
             }
+            row_index = Some(sweep.next_row_index());
             sweep.push(row);
         }
         Err(e) => note_item_failure(ctx, &mut sweep.warnings, &target.name, &e),
@@ -2578,6 +2608,7 @@ fn sync_workspace_skill<'a>(
             &target.name,
             Some(&run.session.workspace_name),
             st.mcp_harness_filter.clone(),
+            row_index,
             sweep,
         );
     }
@@ -2596,10 +2627,12 @@ fn push_stored_mcp_demand(
     name: &str,
     workspace_slug: Option<&str>,
     harness_filter: Vec<String>,
+    row_index: Option<usize>,
     sweep: &mut Sweep,
 ) {
     match crate::mcp_engine::stored_server_json(run_ctx, sid) {
         Ok(Some((version_id, server_json))) => {
+            sweep.note_mcp_row(&sc.label, sid.as_str(), row_index);
             sweep.mcp_demands.entry(sc.label.clone()).or_default().push(
                 crate::mcp_engine::McpDemand {
                     bundle_id: sid.as_str().to_owned(),
@@ -4035,12 +4068,14 @@ fn run_mcp_converge(
             }
         }
         for bundle in outcome.bundles {
-            // The receipt row for this bundle in this scope carries the per-agent outcomes.
-            if let Some(row) = sweep
-                .rows
-                .iter_mut()
-                .find(|r| r.skill == bundle.name && r.scope.as_deref() == Some(label.as_str()))
-            {
+            // The receipt row for this bundle in this scope carries the per-agent outcomes — found
+            // by the IDENTITY the demand was filed under, so a workspace `linear` and a local
+            // `linear` standing in one scope never trade states.
+            let at = sweep
+                .mcp_rows
+                .get(&(label.clone(), bundle.bundle_id.clone()))
+                .copied();
+            if let Some(row) = at.and_then(|i| sweep.rows.get_mut(i)) {
                 row.harnesses = bundle.states.clone();
             }
             // The merged map (the applied report + the delivery cache): person wins per slug,

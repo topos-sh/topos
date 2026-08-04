@@ -9501,3 +9501,78 @@ fn a_protect_describe_reach_failure_warns_instead_of_vanishing() {
         other => panic!("a bare protect describes: {other:?}"),
     }
 }
+
+/// A gate-valid `server.json` for the MCP rows below (the converge re-runs the whole gate).
+fn mcp_server_json(url: &str) -> String {
+    format!(
+        "{{\"name\":\"io.test/x\",\"description\":\"A test server.\",\"version\":\"1.0.0\",\
+         \"remotes\":[{{\"type\":\"streamable-http\",\"url\":\"{url}\"}}]}}"
+    )
+}
+
+/// TWO bundles of the SAME NAME in one scope — the workspace `linear` a feed delivers and a local
+/// `linear` folder a row adopts — each keep their OWN per-agent config states on the receipt. The
+/// converge's outcomes join to a row by the bundle's identity: matching on the display name handed
+/// whichever row came first both bundles' outcomes and left the other row silent about entries
+/// that really landed.
+#[test]
+fn two_same_named_mcp_bundles_in_one_scope_each_keep_their_own_states() {
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let rig = Rig::new("mcp-same-name");
+    rig.seed_session();
+    // cursor + openclaw both detect off the fake home and hang their surfaces there, so this stays
+    // hermetic whatever the dev machine has installed.
+    std::fs::create_dir_all(rig.home.0.join(".cursor")).unwrap();
+    std::fs::create_dir_all(rig.home.0.join(".openclaw")).unwrap();
+
+    let v = mk_version(&[(
+        "server.json",
+        FileMode::Regular,
+        mcp_server_json("https://mcp.example/workspace").as_bytes(),
+    )]);
+    let plane = FakePlane::new(log).with_version("s_linear", &v);
+    let mut ds = delivered("s_linear", "linear", &v);
+    ds.kind = "mcp".into();
+    plane.serves(vec![ds]);
+    let mut entry = catalog_entry("s_linear", "linear", &v);
+    entry.kind = "mcp".into();
+    let dir = FakeDirectory::new(vec![entry], Vec::new());
+
+    // The LOCAL bundle of the same name: its own folder, its own address.
+    let local = rig.work.0.join("linear");
+    std::fs::create_dir_all(&local).unwrap();
+    std::fs::write(
+        local.join("server.json"),
+        mcp_server_json("https://mcp.example/local"),
+    )
+    .unwrap();
+    rig.write_global(&format!(
+        "[bundles]\n\"{HOST}/{WS_NAME}\" = \"*\"\n\"{}\" = {{ kind = \"mcp\" }}\n\n\
+         [defaults.mcp]\nharness = [\"cursor\", \"openclaw\"]\n",
+        local.display()
+    ));
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    let out = sweep(&ctx, &plane, &dir);
+
+    let rows: Vec<&topos_types::results::PullSkill> = out
+        .data
+        .skills
+        .iter()
+        .filter(|s| s.skill == "linear")
+        .collect();
+    assert_eq!(rows.len(), 2, "one row each: {:?}", out.data.skills);
+    for row in rows {
+        let mut agents: Vec<&str> = row.harnesses.iter().map(|h| h.agent.as_str()).collect();
+        agents.sort_unstable();
+        assert_eq!(agents, ["cursor", "openclaw"], "{row:?}");
+    }
+    // Both entries really landed, each under its own minted key.
+    let text = std::fs::read_to_string(rig.home.0.join(".cursor/mcp.json")).unwrap();
+    assert!(
+        text.contains("topos-eng-linear")
+            && text.contains("topos-local-linear")
+            && text.contains("https://mcp.example/workspace")
+            && text.contains("https://mcp.example/local"),
+        "{text}"
+    );
+}
