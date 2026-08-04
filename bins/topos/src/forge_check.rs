@@ -176,10 +176,17 @@ impl SourceCheck {
 /// permanently un-updated: `topos add … --yes` would fetch it, install it, and write the row, while
 /// the automatic update went on refusing to dial the source the person just proved is alive.
 ///
-/// Best-effort: a machine that cannot record the forgetting simply asks again later, which is the
-/// safe direction.
+/// A machine that cannot record the forgetting DISCARDS the whole document instead. Keeping it
+/// would keep the verdict, and the verdict is the thing that stops the lane asking — so failing
+/// quietly the other way would leave a source the person just proved alive permanently
+/// un-updated. Losing the document costs one round of re-checking everything, which is the
+/// direction a failure here should fall.
 pub(crate) fn forget(fs: &dyn FsOps, layout: &Layout, source: &str) {
+    let drop_it = || {
+        let _ = fs.remove_file(&layout.forge_check_path());
+    };
     let Ok(_guard) = lock(fs, layout) else {
+        drop_it();
         return;
     };
     let mut doc = read(fs, layout);
@@ -190,8 +197,11 @@ pub(crate) fn forget(fs: &dyn FsOps, layout: &Layout, source: &str) {
         return;
     }
     doc.schema_version = PERSISTED_SCHEMA_VERSION;
-    let _ = fs.create_dir_all(&layout.state_dir());
-    let _ = crate::doc::write_doc(fs, &layout.forge_check_path(), &doc);
+    if fs.create_dir_all(&layout.state_dir()).is_err()
+        || crate::doc::write_doc(fs, &layout.forge_check_path(), &doc).is_err()
+    {
+        drop_it();
+    }
 }
 
 /// Read the document. FAILS OPEN: absent, unreadable, or written by a build this one does not

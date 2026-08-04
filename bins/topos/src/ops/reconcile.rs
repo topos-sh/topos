@@ -2540,16 +2540,39 @@ fn reconcile_repo_set(
         harness_slots(&sctx, roots.as_ref(), global, &row_harness, &tracked, name)
     };
     let is_tracked_name = |name: &str| slots_for(name).iter().all(|s| s.import.is_some());
-    // Tracked AND at a given commit — presence alone is not convergence, since a refresh that was
-    // refused (local edits, a busy lock) leaves the member tracked at the OLD commit.
+    // Tracked, AT a given commit, and its BYTES STILL ON DISK — the one predicate every
+    // "nothing to do here" decision in this arm is allowed to rest on.
+    //
+    // Presence alone is not convergence: a refresh the engine refused (local edits, a busy lock)
+    // leaves that member tracked at the OLD commit while its siblings move on. And a record alone
+    // is not bytes: the sidecar survives a wiped agent directory — an ordinary harness reinstall —
+    // so an import can claim a commit for a copy that is no longer anywhere.
     let tracked_at = |name: &str, at: &str| {
         let slots = slots_for(name);
         !slots.is_empty()
             && slots.iter().all(|s| {
                 s.import.is_some_and(|i| {
                     commit_matches(i.origin.commit.as_deref().unwrap_or_default(), at)
+                        && doc::read_map(sctx.fs, &sctx.layout.published(&i.sid).map)
+                            .ok()
+                            .flatten()
+                            .is_some_and(|m| {
+                                m.placements.iter().any(|pl| sctx.fs.exists(Path::new(pl)))
+                            })
                 })
             })
+    };
+    // EVERY member the last landing recorded, each really converged at `at`.
+    //
+    // Every member, not the first one: `forge_imports` sorts by name, so a "the recorded commit
+    // matches" test reads the ALPHABETICALLY FIRST member's commit and calls the whole row settled
+    // on it. A repo holding `alpha` and `beta` where only `beta`'s refresh was refused then looks
+    // converged the moment `alpha` moves — and `beta` sits a commit behind, reporting up to date,
+    // with no event left to heal it.
+    let recorded_all_at = |at: &str| {
+        !tracked.is_empty()
+            && recorded_member_set(&tracked)
+                .is_some_and(|members| members.iter().all(|m| tracked_at(m, at)))
     };
 
     // A pinned row that every tracked member already satisfies is settled — no forge call, ever.
@@ -2624,20 +2647,12 @@ fn reconcile_repo_set(
             }
         };
         renamed_line(&origin, &head, sweep);
-        let recorded = tracked
-            .first()
-            .and_then(|i| i.origin.commit.clone())
-            .unwrap_or_default();
-        let unchanged = (!tracked.is_empty() && members_complete && commit_matches(&recorded, &head.commit))
-                // …or this scope already finished with this exact head, which is the only thing
-                // that can answer for a repository holding no skills at all: nothing is installed
-                // to compare against, and without this the archive would be re-downloaded every
-                // cadence to rediscover that it is empty.
-                // …or this scope already finished with this exact head AND its store still proves
-                // it. The mark answers the one case nothing installed can — a repository holding
-                // no skills at all — but it is machine state vouching for a checkout's bytes, so
-                // it is never taken on trust.
-                || lane.settled_here(&origin, &git_ref, &sc.label, &head.commit, tracked_at);
+        let unchanged = recorded_all_at(&head.commit)
+            // …or this scope already finished with this exact head AND its store still proves it.
+            // The mark answers the one case nothing installed can — a repository holding no skills
+            // at all — but it is machine state vouching for a checkout's bytes, so it is never
+            // taken on trust.
+            || lane.settled_here(&origin, &git_ref, &sc.label, &head.commit, tracked_at);
         if unchanged {
             converge_in_place(sweep, targets);
             return;
@@ -2677,12 +2692,27 @@ fn reconcile_repo_set(
     // the refetch above a ONE-TIME cost: the next run's predicate can tell a partial landing from
     // a complete one, and a settled pin stops dialing.
     record_member_sets(&sctx, &tracked, &resolved, &discovered, &mut sweep.warnings);
-    let is_tracked = is_tracked_name;
-    // The repo has not moved AND every discovered member is already tracked: settled. (An
-    // UNTRACKED member at the same commit — a partial add landing — still installs below.)
+    // Every discovered member really sits on the fetched commit: settled. (An UNTRACKED member at
+    // the same commit — a partial add landing — still installs below.)
+    //
+    // A PINNED row reaches this every due round, because a pin nothing satisfies never settles
+    // above. Testing presence here rather than the commit meant a member whose refresh was refused
+    // was skipped before the install loop could try again — and a pin never moves, so unlike the
+    // floating row there was no later push to heal it: a permanent silent non-update, re-fetching
+    // the same archive every interval to skip the same member.
+    //
+    // "Nothing to do" also means nothing to UNDO: a member the archive no longer holds has to be
+    // retired by the loop below, so a row whose repository dropped something is never settled here.
+    // (The old commit comparison guarded that by accident; a repository that emptied out entirely
+    // would otherwise short-circuit past its own cleanup.)
+    let nothing_to_retire = tracked.iter().all(|i| {
+        discovered
+            .iter()
+            .any(|d| i.lock.name == *d || subdir_leaf(&i.origin).as_deref() == Some(d))
+    });
     if !resolved.is_empty()
-        && commit_matches(&recorded, &resolved)
-        && discovered.iter().all(|d| is_tracked(d))
+        && nothing_to_retire
+        && discovered.iter().all(|d| tracked_at(d, &resolved))
     {
         for import in &tracked {
             if !set_selected && !targets.hit(&[import.lock.name.as_str()]) {
@@ -2733,15 +2763,11 @@ fn reconcile_repo_set(
             continue;
         }
         let slots = slots_for(name);
-        // EVERY slot's copy already at the fetched commit is settled — only the unfilled (or
-        // moved) ones go through the install/refresh below.
-        if !resolved.is_empty()
-            && slots.iter().all(|s| {
-                s.import.is_some_and(|i| {
-                    commit_matches(i.origin.commit.as_deref().unwrap_or_default(), &resolved)
-                })
-            })
-        {
+        // EVERY slot's copy already at the fetched commit AND still on disk is settled — only the
+        // unfilled, moved, or vanished ones go through the install/refresh below. The same rule as
+        // every other "nothing to do" test in this arm, for the same reason: a record whose bytes
+        // were wiped out from under it is not a copy.
+        if !resolved.is_empty() && tracked_at(name, &resolved) {
             let landed = slots
                 .first()
                 .and_then(|s| s.import)

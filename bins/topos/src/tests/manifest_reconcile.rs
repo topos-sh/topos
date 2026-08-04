@@ -2863,6 +2863,153 @@ fn a_fresh_checkout_installs_now_rather_than_waiting_out_another_scopes_interval
     );
 }
 
+/// A repo whose members refuse differently: `alpha` refreshes cleanly, `beta` carries local edits
+/// and its refresh is refused. Two members are the point — with one, the sole tracked import IS the
+/// refused one, and a "first recorded commit matches" test can never wrongly pass.
+fn two_member_repo(top: &str, alpha: &[u8], beta: &[u8]) -> Vec<u8> {
+    build_repo_targz(
+        top,
+        &[
+            ("skills/alpha/SKILL.md", alpha),
+            ("skills/beta/SKILL.md", beta),
+        ],
+    )
+}
+
+#[test]
+fn a_sibling_moving_on_never_settles_a_member_whose_refresh_was_refused() {
+    // `forge_imports` sorts by name, so a row's "recorded commit" read from the FIRST tracked
+    // import is alphabetically first — `alpha`. Once alpha moves to the new head, a row-level
+    // comparison says the whole row is current while `beta`, whose refresh was refused, sits a
+    // commit behind reporting up to date. On a quiet repository that lasts until the next push.
+    let rig = Rig::new("repo-sibling-settles");
+    rig.write_global("[bundles]\n\"github.com/o/r\" = \"*\"\n");
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let plane = FakePlane::new(log);
+    let dir = FakeDirectory::new(Vec::new(), Vec::new());
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    let git = FakeGit::new(two_member_repo(
+        "o-r-aaaaaaaaaaaa1",
+        b"# alpha v1\n",
+        b"# beta v1\n",
+    ));
+    update_now(&ctx, &plane, &dir, &git);
+    let beta = rig.home.0.join(".claude/skills/beta/SKILL.md");
+    assert!(beta.exists());
+
+    // beta gets local edits; upstream moves. alpha refreshes, beta's refresh is refused.
+    std::fs::write(&beta, "# beta v1 MY EDITS\n").unwrap();
+    git.serve(two_member_repo(
+        "o-r-bbbbbbbbbbbb2",
+        b"# alpha v2\n",
+        b"# beta v2\n",
+    ));
+    forge_interval_elapsed(&rig);
+    update_now(&ctx, &plane, &dir, &git);
+    assert_eq!(
+        std::fs::read_to_string(rig.home.0.join(".claude/skills/alpha/SKILL.md")).unwrap(),
+        "# alpha v2\n",
+        "the sibling moved on"
+    );
+
+    // The person resolves the edits. The very next update must carry beta forward — nothing
+    // upstream has changed, so a row that called itself settled would never revisit it.
+    std::fs::write(&beta, "# beta v1\n").unwrap();
+    forge_interval_elapsed(&rig);
+    update_now(&ctx, &plane, &dir, &git);
+    assert_eq!(
+        std::fs::read_to_string(&beta).unwrap(),
+        "# beta v2\n",
+        "a member left behind by a refusal is still owed the update"
+    );
+}
+
+#[test]
+fn a_pinned_row_keeps_trying_a_member_whose_refresh_was_refused() {
+    // Strictly worse than the floating case: a pin never moves, so there is no later push to heal
+    // it. A presence-only settled test here means the member never reaches the pin — ever — while
+    // the archive is re-downloaded every interval to skip it again.
+    let rig = Rig::new("repo-pinned-refusal");
+    rig.write_global("[bundles]\n\"github.com/o/r\" = \"aaaaaaaaaaaa1\"\n");
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let plane = FakePlane::new(log);
+    let dir = FakeDirectory::new(Vec::new(), Vec::new());
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    let git = FakeGit::new(two_member_repo(
+        "o-r-aaaaaaaaaaaa1",
+        b"# alpha v1\n",
+        b"# beta v1\n",
+    ));
+    update_now(&ctx, &plane, &dir, &git);
+    let beta = rig.home.0.join(".claude/skills/beta/SKILL.md");
+    assert!(beta.exists());
+
+    // Repin to a new commit, with beta carrying edits so its refresh is refused.
+    std::fs::write(&beta, "# beta v1 MY EDITS\n").unwrap();
+    git.serve(two_member_repo(
+        "o-r-bbbbbbbbbbbb2",
+        b"# alpha v2\n",
+        b"# beta v2\n",
+    ));
+    rig.write_global("[bundles]\n\"github.com/o/r\" = \"bbbbbbbbbbbb2\"\n");
+    forge_interval_elapsed(&rig);
+    update_now(&ctx, &plane, &dir, &git);
+    assert_eq!(
+        std::fs::read_to_string(rig.home.0.join(".claude/skills/alpha/SKILL.md")).unwrap(),
+        "# alpha v2\n",
+        "the sibling reached the pin"
+    );
+
+    // Edits resolved. The pin has not moved and never will, so this update is the only chance
+    // beta will ever get.
+    std::fs::write(&beta, "# beta v1\n").unwrap();
+    forge_interval_elapsed(&rig);
+    update_now(&ctx, &plane, &dir, &git);
+    assert_eq!(
+        std::fs::read_to_string(&beta).unwrap(),
+        "# beta v2\n",
+        "a pin with no healing event must keep trying the member it could not place"
+    );
+}
+
+#[test]
+fn a_wiped_agent_directory_is_re_placed_not_declared_current() {
+    // A record is not bytes. The sidecar survives a wiped agent directory — an ordinary harness
+    // reinstall, or somebody clearing `~/.claude` — and every import goes on claiming its commit
+    // for a copy that is no longer anywhere. A settled test resting on records alone would call
+    // the row current forever while the skills are simply gone.
+    let rig = Rig::new("repo-wiped-agent-dir");
+    rig.write_global("[bundles]\n\"github.com/o/r\" = \"*\"\n");
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let plane = FakePlane::new(log);
+    let dir = FakeDirectory::new(Vec::new(), Vec::new());
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    let git = FakeGit::new(build_repo_targz(
+        "o-r-aaaaaaaaaaaa1",
+        &[("skills/alpha/SKILL.md", b"# alpha v1\n")],
+    ));
+    update_now(&ctx, &plane, &dir, &git);
+    let placed = rig.home.0.join(".claude/skills/alpha/SKILL.md");
+    assert!(placed.exists());
+
+    // The agent directory goes; the sidecar stays exactly as it was.
+    std::fs::remove_dir_all(rig.home.0.join(".claude")).unwrap();
+    assert!(
+        crate::ops::forge_imports(&ctx)
+            .iter()
+            .any(|i| i.lock.name == "alpha"),
+        "the record still claims the member"
+    );
+
+    forge_interval_elapsed(&rig);
+    let out = update_now(&ctx, &plane, &dir, &git);
+    assert!(
+        placed.exists(),
+        "bytes that are gone are not current: {:?}",
+        out.warnings
+    );
+}
+
 #[test]
 fn a_refused_refresh_is_not_a_convergence() {
     // A settlement mark says "there is nothing to do here at this head", and the probe trusts it.
