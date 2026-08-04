@@ -1,5 +1,5 @@
 import type { LoaderFunctionArgs } from "react-router";
-import { checkBelt } from "@/lib/api/belt.server";
+import { laneGate } from "@/lib/api/compat.server";
 import { NO_STORE, uniformNotFound } from "@/lib/api/wire.server";
 import { requireSessionActor } from "@/lib/auth/guards.server";
 import { deliveryFor, emptyDeliveryFor } from "@/lib/db/queries.lane.server";
@@ -12,9 +12,9 @@ import { deliveryFor, emptyDeliveryFor } from "@/lib/db/queries.lane.server";
  * flows over a pending session, but the client learns its standing instead of a phantom 404.
  */
 export async function loader({ request, params }: LoaderFunctionArgs): Promise<Response> {
-  const belted = checkBelt(request);
-  if (belted !== null) {
-    return belted;
+  const gated = laneGate(request);
+  if (gated !== null) {
+    return gated;
   }
   const actor = await requireSessionActor(request, params.ws ?? "", { allowPending: true });
   const body =

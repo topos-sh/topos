@@ -1,6 +1,8 @@
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { MIN_CLI_VERSION } from "@/lib/api/compat.server";
+import { SERVER_RELEASE_VERSION } from "@/lib/plane/contract/version";
 import { action as catchAllAction, loader as catchAllLoader } from "@/routes/api.v1.$";
 import { action as channelProtAction } from "@/routes/api.v1.channel-protection";
 import { loader as channelsLoader, action as channelsWrongMethod } from "@/routes/api.v1.channels";
@@ -1455,5 +1457,92 @@ describe("skill current (the conditional-GET currency read)", () => {
       { ws: wsId, skill: "s_nope" },
     );
     await expectUniform404(unknown);
+  });
+});
+
+describe("the client version floor (the lane gate, ahead of every route's own logic)", () => {
+  /** A topos far below the floor, and the one this repo currently builds. */
+  const OLD = { "user-agent": "topos/0.1.1" };
+  const CURRENT = { "user-agent": `topos/${SERVER_RELEASE_VERSION}` };
+
+  /** The 426's machine-readable half — one shape, whatever route answered it. */
+  async function expectUpgradeRequired(res: Response): Promise<void> {
+    expect(res.status).toBe(426);
+    const body = (await res.json()) as {
+      error: { code: string; retryable: boolean; context: { min_cli_version: string } };
+      next_actions: { code: string; argv: string[] }[];
+    };
+    expect(body.error.code).toBe("CLI_UPDATE_REQUIRED");
+    expect(body.error.retryable).toBe(false);
+    expect(body.error.context.min_cli_version).toBe(MIN_CLI_VERSION);
+    expect(body.next_actions[0]?.argv).toEqual(["topos", "self-update"]);
+  }
+
+  it("delivery: refused BEFORE the credential is resolved — an old client learns WHY, not a 404", async () => {
+    // No credential at all, which every other test in this file proves is the uniform 404. The
+    // floor runs first, so the answer names the real problem instead of an unanswerable miss.
+    await expectUpgradeRequired(
+      await drive(
+        deliveryLoader,
+        req("GET", `/api/v1/workspaces/${wsId}/delivery`, { headers: OLD }),
+        {
+          ws: wsId,
+        },
+      ),
+    );
+    // And with a perfectly good credential, the same refusal — nothing about the caller's
+    // standing changes what the lane can speak.
+    await expectUpgradeRequired(
+      await drive(
+        deliveryLoader,
+        req("GET", `/api/v1/workspaces/${wsId}/delivery`, { cred: CREDS.mem, headers: OLD }),
+        { ws: wsId },
+      ),
+    );
+  });
+
+  it("delivery: the CURRENT client is untouched — the route answers exactly as it always does", async () => {
+    const res = await drive(
+      deliveryLoader,
+      req("GET", `/api/v1/workspaces/${wsId}/delivery`, { cred: CREDS.mem, headers: CURRENT }),
+      { ws: wsId },
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { skills: DeliveredSkill[] };
+    expect(body.skills.map((s) => s.skill_id).sort()).toEqual(await deliveredSkillIds(CREDS.mem));
+  });
+
+  it("login authorize: the unauthenticated start refuses an old client too", async () => {
+    // The flow's start takes no credential, so the floor is the only thing standing between an
+    // unspeakable client and a minted flow row — it must fire here as well.
+    await expectUpgradeRequired(
+      await drive(
+        deviceAuthorizeAction,
+        req("POST", "/api/v1/login/authorize", {
+          body: { requested_name: "ancient-box" },
+          headers: OLD,
+        }),
+        {},
+      ),
+    );
+    const res = await drive(
+      deviceAuthorizeAction,
+      req("POST", "/api/v1/login/authorize", {
+        body: { requested_name: "current-box" },
+        headers: CURRENT,
+      }),
+      {},
+    );
+    expect(res.status).toBe(200);
+    expect((await res.json()) as { device_code: string }).toHaveProperty("device_code");
+  });
+
+  it("the catch-all wears it too — an unmatched path refuses before the uniform 404", async () => {
+    await expectUpgradeRequired(
+      await drive(catchAllLoader, req("GET", "/api/v1/nope", { headers: OLD }), {}),
+    );
+    await expectUniform404(
+      await drive(catchAllAction, req("POST", "/api/v1/nope", { headers: CURRENT }), {}),
+    );
   });
 });

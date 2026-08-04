@@ -33,6 +33,14 @@ const SAFETY: Record<string, Safety> = {
   // mutates is that command's story — unknown. It only ever rides a retryable transport outcome,
   // so the retry certainly dials.
   RETRY: { needs_network: true },
+  // A version floor's one way out: fetch a release and replace the running binary. The caution
+  // names the release the argv actually asks for, which is not always the latest (a floor can
+  // point BACKWARD, at the server's own version).
+  SELF_UPDATE: {
+    mutates: true,
+    needs_network: true,
+    risk_note: "replaces the topos binary on this machine with the named release",
+  },
 };
 
 /** Build a next-action object, filling the safety metadata from the one table above. */

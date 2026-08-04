@@ -1,6 +1,6 @@
 import type { ActionFunctionArgs } from "react-router";
-import { checkBelt } from "@/lib/api/belt.server";
 import { parseCandidate, parsePublishHead, receiptNow } from "@/lib/api/candidate.server";
+import { laneGate } from "@/lib/api/compat.server";
 import { publishFlow } from "@/lib/api/publish-flow.server";
 import { buildReceipt, deniedEnvelope, envelopeResponse } from "@/lib/api/receipts.server";
 import { badRequest, readCappedBody, uniformNotFound } from "@/lib/api/wire.server";
@@ -17,9 +17,9 @@ import { findReceipt } from "@/lib/db/queries.custody.server";
 const BODY_CAP = 160 * 1024 * 1024;
 
 export async function action({ request }: ActionFunctionArgs): Promise<Response> {
-  const belted = checkBelt(request);
-  if (belted !== null) {
-    return belted;
+  const gated = laneGate(request);
+  if (gated !== null) {
+    return gated;
   }
   if (request.method !== "POST") {
     return uniformNotFound();

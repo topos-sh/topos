@@ -1,5 +1,5 @@
 import type { ActionFunctionArgs } from "react-router";
-import { checkBelt } from "@/lib/api/belt.server";
+import { laneGate } from "@/lib/api/compat.server";
 import { okStatusEnvelope } from "@/lib/api/row-envelopes.server";
 import { bearerToken, uniformNotFound } from "@/lib/api/wire.server";
 import { revokeSessionByCredential } from "@/lib/db/identity.server";
@@ -14,9 +14,9 @@ import { revokeSessionByCredential } from "@/lib/db/identity.server";
  * client-side.
  */
 export async function action({ request }: ActionFunctionArgs): Promise<Response> {
-  const belted = checkBelt(request);
-  if (belted !== null) {
-    return belted;
+  const gated = laneGate(request);
+  if (gated !== null) {
+    return gated;
   }
   if (request.method !== "DELETE") {
     return uniformNotFound();

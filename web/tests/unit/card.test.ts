@@ -20,6 +20,8 @@ const ORIGIN = "http://localhost:3000";
 let cardFace: typeof import("@/lib/card.server").cardFace;
 let cardResponse: typeof import("@/lib/card.server").cardResponse;
 let INSTALL_LINE: string;
+let SERVER_RELEASE_VERSION: string;
+let MIN_CLI_VERSION: string;
 
 beforeAll(async () => {
   installTestEnv();
@@ -27,6 +29,8 @@ beforeAll(async () => {
   cardFace = mod.cardFace;
   cardResponse = mod.cardResponse;
   INSTALL_LINE = mod.INSTALL_LINE;
+  SERVER_RELEASE_VERSION = (await import("@/lib/plane/contract/version")).SERVER_RELEASE_VERSION;
+  MIN_CLI_VERSION = (await import("@/lib/api/compat.server")).MIN_CLI_VERSION;
 });
 
 /** A request at `path` carrying `accept` (omit `accept` for no Accept header at all). */
@@ -92,11 +96,17 @@ describe("cardResponse — the served card", () => {
       schema_version: number;
       card: string;
       api_base_url: string;
+      server_version: string;
+      min_cli_version: string;
     };
     expect(body.schema_version).toBe(1);
     expect(body.card).toBe("topos-protocol-card");
     // The API base a client re-roots onto is this origin's /api mount — the app is the door.
     expect(body.api_base_url).toBe(`${ORIGIN}/api`);
+    // The version declaration a client reads BEFORE it commits to this server: what this build
+    // is, and the oldest topos it still speaks to.
+    expect(body.server_version).toBe(SERVER_RELEASE_VERSION);
+    expect(body.min_cli_version).toBe(MIN_CLI_VERSION);
   });
 
   it("serves the markdown card as text/plain with the same headers and the teaching copy", async () => {

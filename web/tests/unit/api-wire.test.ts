@@ -9,10 +9,12 @@ import { installTestEnv } from "./helpers/test-env";
  */
 
 let wire: typeof import("@/lib/api/wire.server");
+let SERVER_RELEASE_VERSION: string;
 
 beforeAll(async () => {
   installTestEnv();
   wire = await import("@/lib/api/wire.server");
+  SERVER_RELEASE_VERSION = (await import("@/lib/plane/contract/version")).SERVER_RELEASE_VERSION;
 });
 
 describe("the uniform 404", () => {
@@ -76,6 +78,54 @@ describe("the frozen 429", () => {
         next_actions: [{ code: "RETRY", argv: [], needs_network: true }],
       },
     });
+  });
+});
+
+describe("the version floor's 426", () => {
+  it("answers the permanent CLI_UPDATE_REQUIRED envelope with the runnable fix", async () => {
+    const res = wire.upgradeRequired("0.1.1", "0.1.15");
+    expect(res.status).toBe(426);
+    expect(res.headers.get("content-type")).toContain("application/json");
+    const selfUpdate = {
+      code: "SELF_UPDATE",
+      argv: ["topos", "self-update"],
+      mutates: true,
+      needs_network: true,
+      risk_note: "replaces the topos binary on this machine with the named release",
+    };
+    expect(await res.json()).toEqual({
+      schema_version: 1,
+      command: "error",
+      ok: false,
+      data: {},
+      warnings: [],
+      next_actions: [selfUpdate],
+      error: {
+        code: "CLI_UPDATE_REQUIRED",
+        outcome: "PERMANENT_FAILURE",
+        retryable: false,
+        affected: {},
+        context: {
+          message:
+            "this server no longer speaks to topos 0.1.1 — it requires topos 0.1.15 or later; " +
+            "run topos self-update",
+          min_cli_version: "0.1.15",
+          server_version: SERVER_RELEASE_VERSION,
+        },
+        next_actions: [selfUpdate],
+      },
+    });
+  });
+
+  it("names the silence when the caller declared no version", async () => {
+    const body = (await wire.upgradeRequired(null, "0.1.30").json()) as {
+      error: { context: { message: string; min_cli_version: string } };
+    };
+    expect(body.error.context.message).toBe(
+      "this server no longer speaks to a client that does not name its version — it requires " +
+        "topos 0.1.30 or later; run topos self-update",
+    );
+    expect(body.error.context.min_cli_version).toBe("0.1.30");
   });
 });
 

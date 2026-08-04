@@ -1,0 +1,188 @@
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
+import { beforeAll, describe, expect, it, vi } from "vitest";
+import { installTestEnv } from "./helpers/test-env";
+
+/**
+ * The SERVER half of the version floor (app/lib/api/compat.server.ts). Two things are proved
+ * here, and they pull in opposite directions on purpose:
+ *  - the floor REFUSES what it can prove is too old, and nothing else — an unreadable
+ *    User-Agent, a foreign client, a version this build cannot parse all pass, because a
+ *    mechanism meant to make the next wire break one sentence must not become an incident;
+ *  - the shipped constants are DAY-ONE QUIET: a fleet on any current release meets the floor
+ *    never, which is asserted against the repo's own version statement rather than a copy.
+ */
+
+let compat: typeof import("@/lib/api/compat.server");
+let SERVER_RELEASE_VERSION: string;
+
+/** The workspace manifest's release version — the repo's ONE statement of what this build is. */
+const CARGO_VERSION = (() => {
+  const manifest = readFileSync(resolve(__dirname, "..", "..", "..", "Cargo.toml"), "utf8");
+  const section = manifest.split("[workspace.package]")[1] ?? "";
+  const hit = section.match(/^\s*version\s*=\s*"([^"]+)"/m);
+  if (hit === null) {
+    throw new Error("no [workspace.package] version in Cargo.toml");
+  }
+  return hit[1];
+})();
+
+beforeAll(async () => {
+  installTestEnv({ TOPOS_WEB_RATELIMIT: "off" });
+  compat = await import("@/lib/api/compat.server");
+  SERVER_RELEASE_VERSION = (await import("@/lib/plane/contract/version")).SERVER_RELEASE_VERSION;
+});
+
+/** The decision under the SHIPPED constants — what a real request meets today. */
+function decide(userAgent: string | null) {
+  return compat.decideClientFloor(userAgent, compat.MIN_CLI_VERSION, "0.1.21");
+}
+
+describe("the floor under the shipped constants", () => {
+  it("refuses a client provably below it", () => {
+    expect(decide("topos/0.1.14")).toEqual({ refused: true, clientVersion: "0.1.14" });
+    expect(decide("topos/0.0.1")).toEqual({ refused: true, clientVersion: "0.0.1" });
+  });
+
+  it("passes the floor release itself and everything after it", () => {
+    expect(decide("topos/0.1.15")).toEqual({ refused: false, clientVersion: "0.1.15" });
+    expect(decide("topos/0.1.20")).toEqual({ refused: false, clientVersion: "0.1.20" });
+    expect(decide("topos/1.0.0")).toEqual({ refused: false, clientVersion: "1.0.0" });
+  });
+
+  it("passes every caller that does not identify itself as a topos it can read", () => {
+    // A pre-mechanism topos sends no User-Agent at all — the case the whole interval is built
+    // around, and the one that must stay silent.
+    expect(decide(null)).toEqual({ refused: false, clientVersion: null });
+    expect(decide("")).toEqual({ refused: false, clientVersion: null });
+    // Foreign clients: a human's curl, the HTTP library's own default.
+    expect(decide("curl/8.7.1")).toEqual({ refused: false, clientVersion: null });
+    expect(decide("ureq/3.3.0")).toEqual({ refused: false, clientVersion: null });
+    // Our product token carrying something this build cannot read: unidentified, never a guess.
+    expect(decide("topos/garbage")).toEqual({ refused: false, clientVersion: null });
+    expect(decide("topos/")).toEqual({ refused: false, clientVersion: null });
+    expect(decide("topos/0.1")).toEqual({ refused: false, clientVersion: null });
+    expect(decide("topos/v0.1.14")).toEqual({ refused: false, clientVersion: null });
+    // A digit run no release could carry: unidentified, so the message can never show a person
+    // something that is not a plain three-number version.
+    expect(decide("topos/99999999999999999999.0.0")).toEqual({
+      refused: false,
+      clientVersion: null,
+    });
+  });
+
+  it("decides on the semver core — a pre-release/build suffix never moves the boundary", () => {
+    expect(decide("topos/0.1.15-rc.1")).toEqual({ refused: false, clientVersion: "0.1.15" });
+    expect(decide("topos/0.1.14-rc.1")).toEqual({ refused: true, clientVersion: "0.1.14" });
+    expect(decide("topos/0.1.20+build.7")).toEqual({ refused: false, clientVersion: "0.1.20" });
+  });
+
+  it("reads the version off the FIRST product token and re-renders it from its own digits", () => {
+    // A trailing comment or second product never changes the verdict.
+    expect(decide("topos/0.1.14 (linux; x86_64)")).toEqual({
+      refused: true,
+      clientVersion: "0.1.14",
+    });
+    // What a refusal shows is OUR three numbers, never the caller's span of bytes.
+    expect(decide("topos/0.01.014").clientVersion).toBe("0.1.14");
+    // A topos token that is not first is not this client identifying itself.
+    expect(decide("evil/1.0 topos/0.1.14")).toEqual({ refused: false, clientVersion: null });
+  });
+});
+
+describe("the future rule — when the floor outruns the header", () => {
+  it("refuses silence once the floor rises past the release that started sending a version", () => {
+    // The day a wire break lands above 0.1.21, a caller sending nothing is PROVABLY older than
+    // the floor (every release from 0.1.21 on names itself), so silence stops passing.
+    expect(compat.decideClientFloor(null, "0.1.30", "0.1.21")).toEqual({
+      refused: true,
+      clientVersion: null,
+    });
+    expect(compat.decideClientFloor("curl/8.7.1", "0.1.30", "0.1.21")).toEqual({
+      refused: true,
+      clientVersion: null,
+    });
+    // An identified client is still judged on its own number, either side of that line.
+    expect(compat.decideClientFloor("topos/0.1.30", "0.1.30", "0.1.21").refused).toBe(false);
+    expect(compat.decideClientFloor("topos/0.1.29", "0.1.30", "0.1.21").refused).toBe(true);
+  });
+});
+
+describe("day-one quiet — the shipped constants, asserted", () => {
+  it("keeps the floor at or below the release that started sending a version", () => {
+    // While this holds, an unidentified caller passes — no deployment can refuse a topos that
+    // was never taught to name itself.
+    expect(decide(null).refused).toBe(false);
+    expect(compat.MIN_CLI_VERSION).toBe("0.1.15");
+  });
+
+  it("keeps the floor at or below this build's own release", () => {
+    // A floor raised past the release that carries it would refuse the fleet on deploy day.
+    expect(SERVER_RELEASE_VERSION).toBe(CARGO_VERSION);
+    expect(decide(`topos/${SERVER_RELEASE_VERSION}`).refused).toBe(false);
+  });
+
+  it("passes the CLI this repo currently builds", () => {
+    expect(decide(`topos/${CARGO_VERSION}`)).toEqual({
+      refused: false,
+      clientVersion: CARGO_VERSION,
+    });
+  });
+});
+
+describe("clientFloor — the wired decision", () => {
+  const req = (userAgent?: string) =>
+    new Request("http://x/api/v1/workspaces/w/me", {
+      headers: userAgent === undefined ? {} : { "user-agent": userAgent },
+    });
+
+  it("passes a current client and every unidentified caller", () => {
+    expect(compat.clientFloor(req(`topos/${CARGO_VERSION}`))).toBeNull();
+    expect(compat.clientFloor(req())).toBeNull();
+    expect(compat.clientFloor(req("curl/8.7.1"))).toBeNull();
+  });
+
+  it("answers the 426 for a below-floor client, naming the floor and nothing of the header", async () => {
+    const res = compat.clientFloor(req("topos/0.1.1 (secret-looking bytes)"));
+    expect(res).not.toBeNull();
+    const refusal = res as Response;
+    expect(refusal.status).toBe(426);
+    const body = (await refusal.json()) as {
+      error: { code: string; context: { message: string; min_cli_version: string } };
+    };
+    expect(body.error.code).toBe("CLI_UPDATE_REQUIRED");
+    expect(body.error.context.min_cli_version).toBe(compat.MIN_CLI_VERSION);
+    expect(body.error.context.message).toContain("topos 0.1.1");
+    // The caller's own bytes never make it back out.
+    expect(body.error.context.message).not.toContain("secret-looking");
+  });
+});
+
+describe("laneGate — the lane's front door", () => {
+  const lane = (userAgent: string) =>
+    new Request("http://x/api/v1/workspaces/w/me", { headers: { "user-agent": userAgent } });
+
+  it("holds the floor with the belt knob OFF", () => {
+    // This file runs belt-off, as every e2e stack and edge-limited deployment does. The floor is
+    // not the belt's passenger: turning rate limiting off must never open the lane to a client
+    // this server cannot speak to.
+    expect((compat.laneGate(lane("topos/0.1.1")) as Response).status).toBe(426);
+    expect(compat.laneGate(lane(`topos/${CARGO_VERSION}`))).toBeNull();
+  });
+
+  it("runs the BELT first — a drained bucket answers 429, old client or not", async () => {
+    // Rate limiting applies to old clients too: an unanswerable refusal is still unbounded work,
+    // so the 429 must win over the 426 when both apply.
+    vi.resetModules();
+    installTestEnv({ TOPOS_WEB_RATELIMIT: "on" });
+    const belted = await import("@/lib/api/compat.server");
+    (await import("@/lib/api/belt.server")).resetBelt();
+
+    let limited: Response | null = null;
+    for (let i = 0; i < 5000 && limited === null; i++) {
+      limited = belted.laneGate(lane(`topos/${CARGO_VERSION}`));
+    }
+    expect(limited?.status).toBe(429);
+    expect((belted.laneGate(lane("topos/0.1.1")) as Response).status).toBe(429);
+  });
+});

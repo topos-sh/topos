@@ -420,6 +420,7 @@ export interface components {
          * @example CONTACT_ADMIN
          * @example FETCH_FULL_DIFF
          * @example NEXT_PAGE
+         * @example SELF_UPDATE
          */
         ActionCode: string;
         /**
@@ -1456,10 +1457,21 @@ export interface components {
             /** @description The constant discriminant a client dispatches on (`"topos-protocol-card"`). */
             card: string;
             /**
+             * @description The oldest CLI release this server still speaks to — the last wire-breaking release. Absent
+             *     from a producer that predates the field.
+             */
+            min_cli_version?: string | null;
+            /**
              * Format: int32
              * @description Always `1` for this contract version (the schema pins it `const`).
              */
             schema_version: number;
+            /**
+             * @description The serving build's release version (the bare semver core, no leading `v`). Absent from a
+             *     producer that predates the field — a client reads such a card as "nothing declared" and
+             *     proceeds.
+             */
+            server_version?: string | null;
         };
         /**
          * @description `GET /v1/workspaces/{ws}/skills/{skill}/reach` response — the audience a change to this skill

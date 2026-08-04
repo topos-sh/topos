@@ -1,5 +1,5 @@
 import type { LoaderFunctionArgs } from "react-router";
-import { checkBelt } from "@/lib/api/belt.server";
+import { laneGate } from "@/lib/api/compat.server";
 import { uniformNotFound } from "@/lib/api/wire.server";
 
 /**
@@ -9,9 +9,9 @@ import { uniformNotFound } from "@/lib/api/wire.server";
  * echo, no existence signal, no react-router 400/405.
  */
 export async function loader({ request }: LoaderFunctionArgs): Promise<Response> {
-  return checkBelt(request) ?? uniformNotFound();
+  return laneGate(request) ?? uniformNotFound();
 }
 
 export async function action({ request }: LoaderFunctionArgs): Promise<Response> {
-  return checkBelt(request) ?? uniformNotFound();
+  return laneGate(request) ?? uniformNotFound();
 }

@@ -60,10 +60,19 @@ test.describe("anonymous — the constant protocol card + teaser (no existence o
     // Byte-identical: the ONLY input to the card is the deployment's own base, never the path.
     expect(bodyReal).toBe(bodyMissing);
 
-    const card = JSON.parse(bodyReal) as { card: string; api_base_url: string };
+    const card = JSON.parse(bodyReal) as {
+      card: string;
+      api_base_url: string;
+      server_version: string;
+      min_cli_version: string;
+    };
     expect(card.card).toBe(CARD);
     // The API base the card teaches a client to re-root onto: this origin's own /api mount.
     expect(card.api_base_url).toBe(`${BASE_URL}/api`);
+    // The version declaration a client reads BEFORE it commits to this server: what this build
+    // is, and the oldest topos it still speaks to. Both are bare semver cores, no leading `v`.
+    expect(card.server_version).toMatch(/^\d+\.\d+\.\d+$/);
+    expect(card.min_cli_version).toMatch(/^\d+\.\d+\.\d+$/);
 
     // Card headers: never cached keyed on path, varies on Accept, never indexed.
     expect(real.headers()["cache-control"]).toContain("no-store");

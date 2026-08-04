@@ -1,6 +1,6 @@
 import type { LoaderFunctionArgs } from "react-router";
-import { checkBelt } from "@/lib/api/belt.server";
 import { HEX_64 } from "@/lib/api/candidate.server";
+import { laneGate } from "@/lib/api/compat.server";
 import { badRequest, internalError, uniformNotFound } from "@/lib/api/wire.server";
 import { requireSessionActor } from "@/lib/auth/guards.server";
 import { publishTargetOf } from "@/lib/db/queries.custody.server";
@@ -14,9 +14,9 @@ import { custodyObjectStream } from "@/lib/plane/reads.server";
  * hash) and the client re-verifies every byte against the content id.
  */
 export async function loader({ request, params }: LoaderFunctionArgs): Promise<Response> {
-  const belted = checkBelt(request);
-  if (belted !== null) {
-    return belted;
+  const gated = laneGate(request);
+  if (gated !== null) {
+    return gated;
   }
   const objectId = params.objectId ?? "";
   if (!HEX_64.test(objectId)) {

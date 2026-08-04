@@ -1,5 +1,5 @@
 import type { LoaderFunctionArgs } from "react-router";
-import { checkBelt } from "@/lib/api/belt.server";
+import { laneGate } from "@/lib/api/compat.server";
 import { NO_STORE, uniformNotFound } from "@/lib/api/wire.server";
 import { requireSessionActor } from "@/lib/auth/guards.server";
 import { openProposalsIndex } from "@/lib/db/queries.lane.server";
@@ -13,9 +13,9 @@ import { custodyCurrent, custodyVersionMeta } from "@/lib/plane/reads.server";
  * `stale` derives from custody (the candidate's first parent no longer `current`).
  */
 export async function loader({ request, params }: LoaderFunctionArgs): Promise<Response> {
-  const belted = checkBelt(request);
-  if (belted !== null) {
-    return belted;
+  const gated = laneGate(request);
+  if (gated !== null) {
+    return gated;
   }
   const actor = await requireSessionActor(request, params.ws ?? "");
   const open = await openProposalsIndex(actor);

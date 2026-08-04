@@ -1,5 +1,5 @@
 import type { LoaderFunctionArgs } from "react-router";
-import { checkBelt } from "@/lib/api/belt.server";
+import { laneGate } from "@/lib/api/compat.server";
 import { NO_STORE, uniformNotFound } from "@/lib/api/wire.server";
 import { requireSessionActor } from "@/lib/auth/guards.server";
 import { laneMe } from "@/lib/db/queries.lane.server";
@@ -14,9 +14,9 @@ import { workspaceAddress } from "@/lib/ws-url.server";
  * person's display identity (email is a login attribute, not an authority key).
  */
 export async function loader({ request, params }: LoaderFunctionArgs): Promise<Response> {
-  const belted = checkBelt(request);
-  if (belted !== null) {
-    return belted;
+  const gated = laneGate(request);
+  if (gated !== null) {
+    return gated;
   }
   // One of the exactly TWO pending-tolerant routes: a live pending session proves standing
   // (the person IS seated), so the normal body answers with `session_status` "pending" instead

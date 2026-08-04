@@ -1,5 +1,5 @@
 import type { LoaderFunctionArgs } from "react-router";
-import { checkBelt } from "@/lib/api/belt.server";
+import { laneGate } from "@/lib/api/compat.server";
 import { NO_STORE, uniformNotFound } from "@/lib/api/wire.server";
 import { requireSessionActor } from "@/lib/auth/guards.server";
 import { publishTargetOf } from "@/lib/db/queries.custody.server";
@@ -12,9 +12,9 @@ import { custodyCurrent } from "@/lib/plane/reads.server";
  * or none at all — is the uniform 404.
  */
 export async function loader({ request, params }: LoaderFunctionArgs): Promise<Response> {
-  const belted = checkBelt(request);
-  if (belted !== null) {
-    return belted;
+  const gated = laneGate(request);
+  if (gated !== null) {
+    return gated;
   }
   const actor = await requireSessionActor(request, params.ws ?? "");
   const skillId = params.skill ?? "";

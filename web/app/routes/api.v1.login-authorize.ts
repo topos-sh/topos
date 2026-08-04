@@ -1,5 +1,5 @@
 import type { ActionFunctionArgs } from "react-router";
-import { checkBelt } from "@/lib/api/belt.server";
+import { laneGate } from "@/lib/api/compat.server";
 import { badRequest, readCappedBody, uniformNotFound } from "@/lib/api/wire.server";
 import {
   LOGIN_FLOW_POLL_INTERVAL_SECS,
@@ -23,7 +23,7 @@ import { isWorkspaceNameShape } from "@/lib/workspace-name";
  * (such a name can never exist). A login mints ONE workspace-scoped session; further
  * workspaces are further logins (or the lane-side `login/connect`).
  *
- * No credential yet: this is the flow's unauthenticated start (the belt is its only gate).
+ * No credential yet: this is the flow's unauthenticated start (the lane gate is its only gate).
  * The response's `device_code` (the RFC 8628 field name — the gh-proven device-authorization
  * grant shape) is the polling secret — and, once approved, the session's ONE bearer credential
  * (promoted at the exchange; the poll echoes it back from the field the client already holds).
@@ -33,9 +33,9 @@ const MAX_REQUESTED_NAME = 200;
 const MAX_INVITE_TOKEN = 512;
 
 export async function action({ request }: ActionFunctionArgs): Promise<Response> {
-  const belted = checkBelt(request);
-  if (belted !== null) {
-    return belted;
+  const gated = laneGate(request);
+  if (gated !== null) {
+    return gated;
   }
   if (request.method !== "POST") {
     return uniformNotFound();

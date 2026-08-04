@@ -1,5 +1,5 @@
 import type { LoaderFunctionArgs } from "react-router";
-import { checkBelt } from "@/lib/api/belt.server";
+import { laneGate } from "@/lib/api/compat.server";
 import { NO_STORE, uniformNotFound } from "@/lib/api/wire.server";
 import { requireSessionActor } from "@/lib/auth/guards.server";
 import { laneChannels } from "@/lib/db/queries.lane.server";
@@ -10,9 +10,9 @@ import { laneChannels } from "@/lib/db/queries.lane.server";
  * name-sorted bundle references. Per-member and hot, never cacheable.
  */
 export async function loader({ request, params }: LoaderFunctionArgs): Promise<Response> {
-  const belted = checkBelt(request);
-  if (belted !== null) {
-    return belted;
+  const gated = laneGate(request);
+  if (gated !== null) {
+    return gated;
   }
   const actor = await requireSessionActor(request, params.ws ?? "");
   const channels = await laneChannels(actor);

@@ -1,3 +1,5 @@
+import { MIN_CLI_VERSION } from "@/lib/api/compat.server";
+import { SERVER_RELEASE_VERSION } from "@/lib/plane/contract/version";
 import { apiBase } from "@/lib/plane/follow-base.server";
 
 /**
@@ -6,10 +8,16 @@ import { apiBase } from "@/lib/plane/follow-base.server";
  * unmatched path. A fetch that is not a browser must still teach a client what to do WITHOUT
  * leaking whether the path names anything: one constant card for every path and every caller —
  * no path echo, no existence signal. It mirrors the vault's own fallback card (same
- * negotiation, same teaching): a machine face (JSON — the discriminant + the API base to
- * re-root onto) for a client asking for JSON, a human/agent markdown card for everything that
- * is not a browser. A browser (an Accept naming text/html) gets `null` — the route renders its
- * own HTML page, which must be equally constant for an anonymous caller.
+ * negotiation, same teaching): a machine face (JSON — the discriminant, the API base to re-root
+ * onto, and this deployment's version declaration) for a client asking for JSON, a human/agent
+ * markdown card for everything that is not a browser. A browser (an Accept naming text/html)
+ * gets `null` — the route renders its own HTML page, which must be equally constant for an
+ * anonymous caller.
+ *
+ * The version pair is the client's half of the compatibility interval, readable BEFORE a login
+ * commits to a server: what this build is, and the oldest topos it still speaks to. Both are
+ * constants of the deployment, disclose nothing about who or what it holds, and are already
+ * public in the release the operator is running.
  */
 
 /** The checksum-verified installer one-liner (the same line the vault's card teaches). */
@@ -76,7 +84,13 @@ export function cardResponse(request: Request): Response | null {
   }
   if (face === "json") {
     return Response.json(
-      { schema_version: 1, card: "topos-protocol-card", api_base_url: apiBase(request) },
+      {
+        schema_version: 1,
+        card: "topos-protocol-card",
+        api_base_url: apiBase(request),
+        server_version: SERVER_RELEASE_VERSION,
+        min_cli_version: MIN_CLI_VERSION,
+      },
       { headers: CARD_HEADERS },
     );
   }

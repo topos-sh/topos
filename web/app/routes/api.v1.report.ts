@@ -1,5 +1,5 @@
 import type { ActionFunctionArgs } from "react-router";
-import { checkBelt } from "@/lib/api/belt.server";
+import { laneGate } from "@/lib/api/compat.server";
 import { badRequest, readCappedBody, uniformNotFound } from "@/lib/api/wire.server";
 import { requireSessionActor } from "@/lib/auth/guards.server";
 import { reportApplied } from "@/lib/db/queries.lane.server";
@@ -16,9 +16,9 @@ const HEX_64 = /^[0-9a-f]{64}$/;
 const SKILL_ID = /^[a-z0-9_-]{1,128}$/;
 
 export async function action({ request, params }: ActionFunctionArgs): Promise<Response> {
-  const belted = checkBelt(request);
-  if (belted !== null) {
-    return belted;
+  const gated = laneGate(request);
+  if (gated !== null) {
+    return gated;
   }
   if (request.method !== "PUT") {
     return uniformNotFound();

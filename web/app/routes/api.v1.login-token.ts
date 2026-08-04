@@ -1,5 +1,5 @@
 import type { ActionFunctionArgs } from "react-router";
-import { checkBelt } from "@/lib/api/belt.server";
+import { laneGate } from "@/lib/api/compat.server";
 import { badRequest, readCappedBody, uniformNotFound } from "@/lib/api/wire.server";
 import { pollLoginFlow, workspaceRowById } from "@/lib/db/identity.server";
 
@@ -23,9 +23,9 @@ import { pollLoginFlow, workspaceRowById } from "@/lib/db/identity.server";
 const BODY_CAP = 8 * 1024;
 
 export async function action({ request }: ActionFunctionArgs): Promise<Response> {
-  const belted = checkBelt(request);
-  if (belted !== null) {
-    return belted;
+  const gated = laneGate(request);
+  if (gated !== null) {
+    return gated;
   }
   if (request.method !== "POST") {
     return uniformNotFound();

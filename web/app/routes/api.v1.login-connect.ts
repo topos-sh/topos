@@ -1,5 +1,5 @@
 import type { ActionFunctionArgs } from "react-router";
-import { checkBelt } from "@/lib/api/belt.server";
+import { laneGate } from "@/lib/api/compat.server";
 import { badRequest, bearerToken, readCappedBody, uniformNotFound } from "@/lib/api/wire.server";
 import { connectSession } from "@/lib/db/identity.server";
 
@@ -22,9 +22,9 @@ const MAX_REQUESTED_NAME = 200;
 const MAX_WORKSPACE = 200;
 
 export async function action({ request }: ActionFunctionArgs): Promise<Response> {
-  const belted = checkBelt(request);
-  if (belted !== null) {
-    return belted;
+  const gated = laneGate(request);
+  if (gated !== null) {
+    return gated;
   }
   if (request.method !== "POST") {
     return uniformNotFound();

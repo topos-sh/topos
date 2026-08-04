@@ -7,10 +7,12 @@ import { Buffer } from "node:buffer";
  * The posture, verbatim from the vault: a protocol outcome (OK / DENIED / CONFLICT) is ALWAYS a
  * 200 carrying its envelope; a non-2xx is ONLY a transport/auth fault — 400 for a malformed
  * body/id, 404 for EVERY miss (missing/blank credential, unknown credential, revoked device,
- * unknown workspace, non-member — one indistinguishable body, never a 401/403), 429 from the
- * belt, 500 for a store fault. Nothing here discloses what exists.
+ * unknown workspace, non-member — one indistinguishable body, never a 401/403), 426 for a client
+ * below the version floor, 429 from the belt, 500 for a store fault. Nothing here discloses what
+ * exists.
  */
 
+import { SERVER_RELEASE_VERSION } from "@/lib/plane/contract/version";
 import { type NextAction, nextAction } from "./next-actions.server";
 
 const WIRE_SCHEMA_VERSION = 1;
@@ -108,6 +110,45 @@ export function rateLimited(retryAfterSeconds: number): Response {
       status: 429,
       headers: { ...JSON_HEADERS, "retry-after": String(retryAfterSeconds) },
     },
+  );
+}
+
+/**
+ * The version floor's refusal — HTTP 426, the ONE answer a client below the floor gets on every
+ * lane path. A dead end, not a fault: the same request refuses until the binary is replaced, so
+ * the envelope is permanent, un-retryable, and carries the fix STRUCTURALLY (`SELF_UPDATE`) as
+ * well as in prose. Both versions ride in `context` so a client too old to have been taught this
+ * status can still read what is required of it.
+ *
+ * `clientVersion` is the version RE-RENDERED from the numbers the floor parsed (`null` when the
+ * caller named none) — never a span of the caller's own header bytes, which are attacker-shaped
+ * and would otherwise land in a body this server hands back out.
+ *
+ * The floor itself rides as a parameter rather than an import: `compat.server.ts` owns that
+ * number and reaches for this envelope, so reading it back from there would close a cycle.
+ */
+export function upgradeRequired(clientVersion: string | null, minCliVersion: string): Response {
+  const selfUpdate = nextAction("SELF_UPDATE", ["topos", "self-update"]);
+  const who =
+    clientVersion === null ? "a client that does not name its version" : `topos ${clientVersion}`;
+  return new Response(
+    JSON.stringify(
+      errorEnvelope("error", {
+        code: "CLI_UPDATE_REQUIRED",
+        outcome: "PERMANENT_FAILURE",
+        retryable: false,
+        affected: {},
+        context: {
+          message:
+            `this server no longer speaks to ${who} — it requires topos ` +
+            `${minCliVersion} or later; run topos self-update`,
+          min_cli_version: minCliVersion,
+          server_version: SERVER_RELEASE_VERSION,
+        },
+        next_actions: [selfUpdate],
+      }),
+    ),
+    { status: 426, headers: JSON_HEADERS },
   );
 }
 

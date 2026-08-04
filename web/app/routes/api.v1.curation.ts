@@ -1,5 +1,5 @@
 import type { ActionFunctionArgs } from "react-router";
-import { checkBelt } from "@/lib/api/belt.server";
+import { laneGate } from "@/lib/api/compat.server";
 import { rowOpResponse } from "@/lib/api/row-envelopes.server";
 import { uniformNotFound } from "@/lib/api/wire.server";
 import { requireSessionActor } from "@/lib/auth/guards.server";
@@ -19,9 +19,9 @@ const CURATION_DENIED = {
 } as const;
 
 export async function action({ request, params }: ActionFunctionArgs): Promise<Response> {
-  const belted = checkBelt(request);
-  if (belted !== null) {
-    return belted;
+  const gated = laneGate(request);
+  if (gated !== null) {
+    return gated;
   }
   if (request.method !== "PUT" && request.method !== "DELETE") {
     return uniformNotFound();
