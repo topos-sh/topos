@@ -2196,6 +2196,112 @@ fn a_repo_set_member_reads_as_current_in_list_not_detached() {
 }
 
 #[test]
+fn two_rows_over_one_gone_repo_ask_once_and_say_it_once() {
+    // A set line and a member line of the SAME repository are two rows about one subject. A
+    // verdict reached for the first must hold the second — otherwise a deleted repo named twice
+    // costs two requests and says the same sentence twice in one breath.
+    let rig = Rig::new("repo-two-rows-gone");
+    rig.write_global("[bundles]\n\"github.com/o/r\" = \"*\"\n\"github.com/o/r/alpha\" = \"*\"\n");
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let plane = FakePlane::new(log);
+    let dir = FakeDirectory::new(Vec::new(), Vec::new());
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    let git = FakeGit::new(build_repo_targz(
+        "o-r-aaaaaaaaaaaa1",
+        &[("skills/alpha/SKILL.md", b"# alpha v1\n")],
+    ));
+    git.fail_with(FetchFault::Gone);
+
+    let out = update_now(&ctx, &plane, &dir, &git);
+    assert_eq!(
+        git.probes() + git.fetches(),
+        1,
+        "one repository, one question"
+    );
+    let said: Vec<&String> = out
+        .warnings
+        .iter()
+        .filter(|w| w.starts_with("REMOTE_FETCH"))
+        .collect();
+    assert_eq!(said.len(), 1, "said once, not once per row: {said:?}");
+}
+
+#[test]
+fn a_pinned_rows_fetch_is_recorded_as_a_check_like_any_other() {
+    // A pinned row never probes: it is settled and silent, or it fetches. The fetch is still a
+    // check, and "recorded always" has to mean always — otherwise `status` would show nothing
+    // about a source topos had just contacted.
+    let rig = Rig::new("repo-pinned-record");
+    rig.write_global("[bundles]\n\"github.com/o/r\" = \"aaaaaaaaaaaa1\"\n");
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let plane = FakePlane::new(log);
+    let dir = FakeDirectory::new(Vec::new(), Vec::new());
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    let git = FakeGit::new(build_repo_targz(
+        "o-r-aaaaaaaaaaaa1",
+        &[("skills/alpha/SKILL.md", b"# alpha v1\n")],
+    ));
+    update_now(&ctx, &plane, &dir, &git);
+    assert_eq!(git.probes(), 0, "a pinned row is never probed");
+    assert!(git.fetches() > 0, "it fetched the pinned bytes");
+
+    let doc = crate::forge_check::read(&rig.fs, &rig.layout());
+    let rec = doc
+        .sources
+        .get("github.com/o/r")
+        .unwrap_or_else(|| panic!("the pinned fetch is recorded: {:?}", doc.sources));
+    assert_eq!(rec.checked_at_ms, rig_now(&rig));
+    assert_eq!(rec.answered_at_ms, Some(rig_now(&rig)));
+    assert!(rec.failure.is_none(), "{rec:?}");
+}
+
+#[test]
+fn a_machine_with_no_external_rows_schedules_nothing() {
+    // A clock is about a subject. Nothing was checked — no external rows at all — so there is no
+    // turn to have taken and no next turn to schedule; the document is not even born.
+    let rig = Rig::new("repo-no-rows");
+    rig.write_global("[bundles]\n");
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let plane = FakePlane::new(log);
+    let dir = FakeDirectory::new(Vec::new(), Vec::new());
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    let git = FakeGit::new(build_repo_targz("o-r-aaaaaaaaaaaa1", &[]));
+    update_now(&ctx, &plane, &dir, &git);
+    assert!(
+        !rig.layout().forge_check_path().exists(),
+        "no source, no clock"
+    );
+}
+
+#[test]
+fn a_failed_check_on_an_uninstalled_member_says_one_thing_not_two() {
+    // The fault is the whole story. Adding "this machine has not fetched it yet" beside it would
+    // be a second, weaker sentence about the same event — and would read as a separate problem.
+    let rig = Rig::new("repo-one-sentence");
+    rig.write_global("[bundles]\n\"github.com/o/r/alpha\" = \"*\"\n");
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let plane = FakePlane::new(log);
+    let dir = FakeDirectory::new(Vec::new(), Vec::new());
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    let git = FakeGit::new(build_repo_targz(
+        "o-r-aaaaaaaaaaaa1",
+        &[("skills/alpha/SKILL.md", b"# alpha v1\n")],
+    ));
+    git.fail_with(FetchFault::Unreachable);
+    let out = update_now(&ctx, &plane, &dir, &git);
+    assert!(
+        out.warnings.iter().any(|w| w.starts_with("REMOTE_FETCH")),
+        "the fault is named: {:?}",
+        out.warnings
+    );
+    assert!(
+        !out.warnings.iter().any(|w| w.starts_with("NOT_INSTALLED")),
+        "and only once: {:?}",
+        out.warnings
+    );
+}
+
+#[test]
 fn every_check_is_recorded_and_visible_to_status_and_list() {
     // ACCEPTANCE 4's first two tiers: recorded ALWAYS, and shown on demand — the answer to "is
     // this even working?", from local state alone.
