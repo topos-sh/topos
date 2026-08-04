@@ -245,6 +245,17 @@ fn next_actions(command: &str, argv: &[String], err: &ClientError) -> Vec<NextAc
                 "--json".into(),
             ],
         )],
+        // A server bundle at a skill door: the fix is the `--mcp` spelling, runnable as-is.
+        ClientError::McpFlagRequired { dir } => vec![crate::actions::next_action(
+            ActionCode::from("RUN_COMMAND".to_owned()),
+            vec![
+                "topos".into(),
+                "add".into(),
+                "--mcp".into(),
+                dir.clone(),
+                "--json".into(),
+            ],
+        )],
         ClientError::AlreadyTrackedName { name } => vec![crate::actions::next_action(
             ActionCode::from("RUN_COMMAND".to_owned()),
             vec!["topos".into(), "diff".into(), name.clone(), "--json".into()],

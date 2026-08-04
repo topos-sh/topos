@@ -33,14 +33,33 @@ use super::manifest_edit::EditTarget;
 /// preimage, so it must stay constant for a deterministic id.
 const ADD_MESSAGE: &str = "topos: add";
 
+/// Whether `dir`'s root holds a `server.json` and no `SKILL.md` — the MCP bundle shape. The plain
+/// skill doors ([`add`], [`adopt_path`], publish's auto-add) refuse it toward `topos add --mcp`
+/// ([`ClientError::McpFlagRequired`]) instead of silently adopting a server document as a SKILL
+/// and delivering raw JSON into skills dirs.
+///
+/// # Errors
+/// [`ClientError::McpFlagRequired`] naming the `--mcp` spelling.
+pub(crate) fn refuse_unflagged_mcp_dir(ctx: &Ctx<'_>, source: &Path) -> Result<(), ClientError> {
+    let has_server = matches!(ctx.fs.read_opt(&source.join("server.json")), Ok(Some(_)));
+    if has_server && !ctx.fs.exists(&source.join("SKILL.md")) {
+        return Err(ClientError::McpFlagRequired {
+            dir: source.display().to_string(),
+        });
+    }
+    Ok(())
+}
+
 /// Adopt the skill rooted at `source`, naming it from the source itself (a recognized harness dir's name,
 /// else frontmatter-then-basename) — the direct-path entry point (a path-shaped positional).
 ///
 /// # Errors
+/// [`ClientError::McpFlagRequired`] for an MCP server bundle named without `--mcp`;
 /// [`ClientError::SourceOverlap`] if `source` overlaps `~/.topos/`; [`ClientError::EmptyBundle`] /
 /// [`ClientError::Scan`] from the scan; [`ClientError::SkillExists`] on an id collision; otherwise a
 /// store/io failure.
 pub(crate) fn add(ctx: &Ctx<'_>, source: &Path) -> Result<AddData, ClientError> {
+    refuse_unflagged_mcp_dir(ctx, source)?;
     add_with_name(ctx, source, None, true)
 }
 
@@ -63,9 +82,20 @@ pub(crate) fn adopt_path(
     target: &EditTarget,
     source: &Path,
 ) -> Result<AddData, ClientError> {
+    refuse_unflagged_mcp_dir(ctx, source)?;
+    adopt_path_any_kind(ctx, target, source)
+}
+
+/// [`adopt_path`] minus the server-bundle guard — `add --mcp`'s own local door, which adopts
+/// exactly that shape deliberately (the flag IS the declaration the guard asks for).
+pub(crate) fn adopt_path_any_kind(
+    ctx: &Ctx<'_>,
+    target: &EditTarget,
+    source: &Path,
+) -> Result<AddData, ClientError> {
     match unclaimed_record(ctx, target, source)? {
         Some(data) => Ok(data),
-        None => add(ctx, source),
+        None => add_with_name(ctx, source, None, true),
     }
 }
 

@@ -696,6 +696,46 @@ fn remove_keeps_an_edited_import_folder_and_says_so() {
     assert!(note.contains("kept"), "{note}");
 }
 
+/// ITEM PAIR (forgetting `--mcp`): a plain `topos add ./folder` — and publish's auto-add — on a
+/// folder whose root holds `server.json` and no `SKILL.md` refuses with the `--mcp` hint instead
+/// of silently adopting a SKILL that delivers raw JSON into skills dirs. The `--mcp` door itself
+/// still adopts the same folder, and a folder carrying a SKILL.md stays an ordinary skill adopt.
+#[test]
+fn a_server_bundle_at_a_skill_door_refuses_toward_the_mcp_flag() {
+    let rig = Rig::new("miskind");
+    rig.seed_session();
+    rig.write_global("[bundles]\n");
+    let dir = rig.work.0.join("weather");
+    write_bundle(&dir, &good_server());
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+
+    // The plain add door.
+    let err = ops::add(&ctx, &dir).expect_err("refused");
+    assert_eq!(err.code(), "MCP_FLAG_REQUIRED");
+    assert!(err.detail().contains("--mcp"), "{}", err.detail());
+    assert!(err.detail().contains("SKILL.md"), "{}", err.detail());
+    assert!(
+        !rig.layout().skills_dir().exists(),
+        "nothing was adopted: {}",
+        err.detail()
+    );
+
+    // The publish door's auto-add pre-step refuses the same way, before anything lands.
+    let err =
+        ops::ensure_tracked(&ctx, None, dir.to_str().unwrap()).expect_err("publish refuses too");
+    assert_eq!(err.code(), "MCP_FLAG_REQUIRED");
+
+    // The `--mcp` door still adopts that exact folder.
+    ops::add_mcp(&ctx, None, dir.to_str().unwrap(), true).expect("the flagged door adopts");
+
+    // A SKILL.md beside a server.json reads as a skill — the guard never fires on it.
+    let skill = rig.work.0.join("notes");
+    std::fs::create_dir_all(&skill).unwrap();
+    std::fs::write(skill.join("SKILL.md"), b"# notes\n").unwrap();
+    std::fs::write(skill.join("server.json"), b"{}\n").unwrap();
+    ops::add(&ctx, &skill).expect("a SKILL.md dir adopts as a skill");
+}
+
 /// A folder with no root `server.json` is not an MCP bundle — the refusal says exactly that
 /// instead of adopting a skill under a flag that promised a server.
 #[test]

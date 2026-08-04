@@ -641,6 +641,15 @@ pub(crate) enum ClientError {
         code: crate::mcp_validate::McpRefusalCode,
         message: String,
     },
+    /// A plain `add`/`publish` named a folder whose root holds a `server.json` and no `SKILL.md`
+    /// — an MCP server bundle, which the skill door would silently mis-kind (raw JSON delivered
+    /// into skills dirs). The refusal names the flag that adds it as what it is; `dir` is the
+    /// user's own spelling, shown VERBATIM.
+    #[error(
+        "{dir} looks like an MCP server (its root holds server.json and no SKILL.md) — \
+         `topos add --mcp {dir}` adds it as one"
+    )]
+    McpFlagRequired { dir: String },
 }
 
 impl From<crate::mcp_validate::McpRefusal> for ClientError {
@@ -740,6 +749,8 @@ impl ClientError {
             // The MCP gate's own vocabulary, carried through unflattened — the client and the web
             // tier refuse the same document with the same word.
             ClientError::McpRefused { code, .. } => code.as_str(),
+            // A server bundle at a skill door: the fix is the `--mcp` spelling, machine-runnable.
+            ClientError::McpFlagRequired { .. } => "MCP_FLAG_REQUIRED",
         }
     }
 

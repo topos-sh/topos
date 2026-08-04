@@ -274,7 +274,7 @@ fn adopt_local(ctx: &Ctx<'_>, dir: &Path, global: bool) -> Result<Box<AddData>, 
 
     let scope = medit::add_scope(ctx, global)?;
     let sctx = super::ctx_with_layout(ctx, &scope.layout);
-    let mut data = super::adopt_path(&sctx, &scope.target, dir)?;
+    let mut data = super::adopt_path_any_kind(&sctx, &scope.target, dir)?;
     medit::note_added_path_kind_in(ctx, &mut data, &scope.target, dir, Some("mcp"))?;
     // The durable kind marker, beside the adopted store's docs — what keeps this record
     // classifying as config-placed even if the scope's ledger is ever lost.
