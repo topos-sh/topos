@@ -1,5 +1,6 @@
 import { lookup } from "node:dns/promises";
 import { isIPv4 } from "node:net";
+import { curatedServerByName, curatedServerDocument } from "@/lib/mcp/curated.server";
 import { MAX_SERVER_JSON_BYTES, nestsTooDeep } from "@/lib/mcp/validate.server";
 
 /**
@@ -338,8 +339,16 @@ export async function fetchRegistryServer(
   );
 }
 
-/** Where the page's three arms get their bytes. A paste never leaves the process. */
-export type McpSourceKind = "registry" | "url" | "paste";
+/**
+ * Where the page's four arms get their bytes. Only two of them reach the network: a paste never
+ * leaves the process, and a `curated` pick reads a row out of the committed list.
+ */
+export type McpSourceKind = "registry" | "url" | "paste" | "curated";
+
+/** The two arms that make an outbound request — the belt and the SSRF guard are theirs alone. */
+export function fetchesUpstream(kind: McpSourceKind): boolean {
+  return kind === "registry" || kind === "url";
+}
 
 export interface McpSource {
   kind: McpSourceKind;
@@ -347,9 +356,9 @@ export interface McpSource {
 }
 
 /**
- * The ONE door the import page uses, so the three arms differ in exactly one place. The
+ * The ONE door the import page uses, so the four arms differ in exactly one place. The
  * fetcher is a parameter (the upstream importer's pattern) — production dials the network,
- * tests hand back bytes, and the paste arm calls it not at all.
+ * tests hand back bytes, and the two local arms call it not at all.
  */
 export async function loadServerDocument(
   source: McpSource,
@@ -357,6 +366,15 @@ export async function loadServerDocument(
 ): Promise<FetchedDocument> {
   if (source.kind === "paste") {
     return { text: source.value, url: "" };
+  }
+  if (source.kind === "curated") {
+    // A picked row is looked up, never trusted as bytes: the form posts an id, and an id this
+    // list does not hold is refused here rather than turned into a document.
+    const entry = curatedServerByName(source.value);
+    if (entry === undefined) {
+      throw new McpFetchError("that is not one of the servers on this list");
+    }
+    return { text: JSON.stringify(curatedServerDocument(entry)), url: "" };
   }
   if (source.kind === "registry") {
     return await fetchRegistryServer(source.value, fetcher);

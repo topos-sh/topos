@@ -15,10 +15,10 @@ import { type StubVault, startStubVault } from "./helpers/stub-vault";
  * transport re-pointed at an in-process stub vault, and the fetch seam replaced so no test
  * touches the network.
  *
- * The three sources are one code path by design: whatever the bytes came from, the preview
- * canonicalizes them and runs the same gate the session lane runs, and the publish arm runs it
- * AGAIN on the bytes the form posted back — the form is a client, and a client's word is not
- * the gate. That second run is what these tests lean on hardest.
+ * The four sources are one code path by design: whatever the bytes came from — a picked row off
+ * the built-in list included — the preview canonicalizes them and runs the same gate the session
+ * lane runs, and the publish arm runs it AGAIN on the bytes the form posted back — the form is a
+ * client, and a client's word is not the gate. That second run is what these tests lean on hardest.
  *
  * The SSRF guard is exercised directly, with the resolver mocked: what matters is which
  * ADDRESSES it refuses, and a test that needed real DNS to say so would be testing DNS.
@@ -43,8 +43,12 @@ vi.mock("@/lib/mcp/fetch.server", async (importOriginal) => {
     ...actual,
     loadServerDocument: async (source: { kind: string; value: string }) => {
       fetched.calls.push(source);
-      if (source.kind === "paste") {
-        return { text: source.value, url: "" };
+      // The two arms that never reach the network run for real — the point of a curated pick is
+      // that it produces the SAME bytes the gate would judge in production.
+      if (source.kind === "paste" || source.kind === "curated") {
+        return await actual.loadServerDocument(
+          source as { kind: "paste" | "curated"; value: string },
+        );
       }
       if (fetched.fail !== null) {
         throw new actual.McpFetchError(fetched.fail);
@@ -205,6 +209,39 @@ describe("the preview", () => {
     const { status } = await post({ intent: "preview", source: "url", url: "  " });
     expect(status).toBe(400);
     expect(fetched.calls).toEqual([]);
+  });
+
+  it("reads a CURATED pick out of the committed list, with its own catalog name", async () => {
+    const { CURATED_MCP_SERVERS } = await import("@/lib/mcp/curated.server");
+    const entry = CURATED_MCP_SERVERS[0];
+    expect(entry).toBeDefined();
+    const { body } = await post({
+      intent: "preview",
+      source: "curated",
+      server: entry?.name ?? "",
+    });
+    expect(body.summary).toMatchObject({
+      name: entry?.name,
+      url: entry?.url,
+      transport: "streamable-http",
+      authHint: entry?.auth,
+    });
+    // The row's own slug, not the registry name's tail — which for most of the list is "mcp".
+    expect(body.suggestedName).toBe(entry?.slug);
+    expect(body.origin).toBe("the built-in list");
+    // A pick is not a fetch: nothing was written and no network arm was spent.
+    expect(vault.calls).toEqual([]);
+  });
+
+  it("refuses a pick this list does not hold, rather than inventing a document", async () => {
+    const { status, body } = await post({
+      intent: "preview",
+      source: "curated",
+      server: "io.github.nobody/not-on-the-list",
+    });
+    expect(status).toBe(400);
+    expect(String(body.error)).toContain("not one of the servers on this list");
+    expect(vault.published).toEqual([]);
   });
 });
 

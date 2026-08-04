@@ -1,4 +1,5 @@
 import { Buffer } from "node:buffer";
+import { useState } from "react";
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
 import { data, Form, Link, redirect, useActionData, useLoaderData } from "react-router";
 import { BusyFields, buttonClasses, Card, Chip, PageHeader, SectionHeading } from "@/components/ui";
@@ -9,7 +10,13 @@ import { inFinalTx, registerGenesisBundleInTx } from "@/lib/db/queries.custody.s
 import { lockMcpNamesInTx } from "@/lib/db/queries.mcp.server";
 import { mcpNameTaken } from "@/lib/mcp/catalog.server";
 import {
+  type CuratedMcpRow,
+  curatedServerByName,
+  curatedServerRows,
+} from "@/lib/mcp/curated.server";
+import {
   canonicalServerJson,
+  fetchesUpstream,
   loadServerDocument,
   McpFetchError,
   type McpSourceKind,
@@ -33,18 +40,21 @@ export function meta() {
 }
 
 /**
- * ADD AN MCP SERVER — the web import flow for a `kind: 'mcp'` bundle. Three ways in, ONE
+ * ADD AN MCP SERVER — the web import flow for a `kind: 'mcp'` bundle. FOUR ways in, ONE
  * preview and ONE publish:
  *
+ *  · a PICK from the built-in list of popular servers (app/lib/mcp/curated.server.ts) — the
+ *    page's resting state, because knowing an address by heart is the rare case;
  *  · a REGISTRY NAME — the server document as the official registry serves it today;
  *  · a DIRECT URL to a server.json — SSRF-guarded, https-only, redirect-refusing;
  *  · a PASTED document — no fetch at all, which is the safe path for a server that lives
  *    inside the network this process runs in.
  *
- * All three land in the same place: the document is canonicalized, run through the same gate
+ * All four land in the same place: the document is canonicalized, run through the same gate
  * every publish passes (app/lib/mcp/validate.server.ts), and shown as what it actually
  * promises — endpoint, transport, literal headers, and whether the publisher declares an auth
- * dance. Nothing is written until the second click.
+ * dance. A picked row gets no shortcut past any of it; it only saves the typing. Nothing is
+ * written until the second click.
  *
  * The published bundle is EXACTLY one file, `server.json`, holding the canonical bytes the
  * preview displayed. The publish arm re-validates them rather than trusting the round-trip:
@@ -56,10 +66,12 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
   return {
     wsName: workspace.name,
     channels: channels.map((c) => ({ name: c.name, isDefault: c.isDefault, mode: c.mode })),
+    // Display fields only — the documents themselves never leave this tier.
+    curated: curatedServerRows(),
   };
 }
 
-const SOURCE_KINDS: McpSourceKind[] = ["registry", "url", "paste"];
+const SOURCE_KINDS: McpSourceKind[] = ["registry", "url", "paste", "curated"];
 /** A pasted document is bounded the same way a fetched one is (the gate's own ceiling). */
 const MAX_PASTE_CHARS = 256 * 1024;
 
@@ -97,14 +109,21 @@ function canonicalize(text: string): string {
   return unwrapped === null ? text : canonicalServerJson(unwrapped);
 }
 
+/** The form field each arm reads its one value out of. */
+const SOURCE_FIELD: Record<McpSourceKind, string> = {
+  registry: "registry_name",
+  url: "url",
+  paste: "document",
+  curated: "server",
+};
+
 /** Read the one source field the chosen arm uses. */
 function sourceFrom(formData: FormData): { kind: McpSourceKind; value: string } | null {
   const kind = String(formData.get("source") ?? "");
   if (!SOURCE_KINDS.includes(kind as McpSourceKind)) {
     return null;
   }
-  const field = kind === "registry" ? "registry_name" : kind === "url" ? "url" : "document";
-  const value = String(formData.get(field) ?? "").trim();
+  const value = String(formData.get(SOURCE_FIELD[kind as McpSourceKind]) ?? "").trim();
   if (value.length === 0 || value.length > MAX_PASTE_CHARS) {
     return null;
   }
@@ -122,8 +141,9 @@ export async function action({ request, params }: ActionFunctionArgs) {
       return refusal("preview", "Pick a source and fill in the matching field.");
     }
     // The two fetching arms reach the network from this process — belted per acting user, the
-    // same belt the GitHub import wears (route actions bypass the /api/v1 belt entirely).
-    if (source.kind !== "paste" && !allowUpstreamFetch(actor.userId)) {
+    // same belt the GitHub import wears (route actions bypass the /api/v1 belt entirely). A
+    // paste and a picked row never leave the process, so neither spends the belt.
+    if (fetchesUpstream(source.kind) && !allowUpstreamFetch(actor.userId)) {
       throw data(null, { status: 429 });
     }
     let text: string;
@@ -131,7 +151,12 @@ export async function action({ request, params }: ActionFunctionArgs) {
     try {
       const fetched = await loadServerDocument(source);
       text = fetched.text;
-      origin = source.kind === "paste" ? "pasted" : fetched.url;
+      origin =
+        source.kind === "paste"
+          ? "pasted"
+          : source.kind === "curated"
+            ? "the built-in list"
+            : fetched.url;
     } catch (error) {
       return refusal(
         "preview",
@@ -143,11 +168,15 @@ export async function action({ request, params }: ActionFunctionArgs) {
     if (!validated.ok) {
       return refusal("preview", validated.message, validated.code);
     }
+    // A curated row carries the catalog name it should be published under, because the tail of
+    // its registry name is usually just "mcp" — which would suggest that for every one of them.
+    const curated =
+      source.kind === "curated" ? curatedServerByName(validated.summary.name) : undefined;
     return data<PreviewData>({
       form: "preview",
       origin,
       summary: validated.summary,
-      suggestedName: suggestedNameFor(validated.summary.name),
+      suggestedName: curated?.slug ?? suggestedNameFor(validated.summary.name),
       document,
     });
   }
@@ -238,6 +267,7 @@ export async function action({ request, params }: ActionFunctionArgs) {
 }
 
 export default function McpImport() {
+  const { curated } = useLoaderData<typeof loader>();
   const actionData = useActionData<typeof action>();
   const wsPath = useWsPath();
   const flying = useSubmittingIntent();
@@ -264,16 +294,125 @@ export default function McpImport() {
         fill in, and documents carrying a key are refused: a credential belongs on the machine that
         uses it, never in something the whole team receives.
       </p>
-      <SourceForm busy={busy} flying={flying} />
+      <ServerPicker servers={curated} busy={busy} />
+      <CustomSource busy={busy} flying={flying} />
       {error !== undefined && <RefusalNote error={error.error} code={error.code} />}
       {preview !== undefined && <PreviewCard preview={preview} />}
     </div>
   );
 }
 
+/** Does this row match what someone typed? Title, blurb, host and registry name all count. */
+function matches(server: CuratedMcpRow, query: string): boolean {
+  const needle = query.trim().toLowerCase();
+  if (needle.length === 0) {
+    return true;
+  }
+  return `${server.title} ${server.description} ${server.host} ${server.name}`
+    .toLowerCase()
+    .includes(needle);
+}
+
+/** The auth chip — the one thing about a server worth knowing before choosing it. */
+function AuthChip({ auth }: { auth: "oauth" | "none" }) {
+  return auth === "oauth" ? (
+    <Chip tone="accent">oauth</Chip>
+  ) : (
+    <Chip tone="neutral">no sign-in</Chip>
+  );
+}
+
+/**
+ * THE PICKER — the popular servers, filtered by one text box, each row a submit button carrying
+ * its own registry name. ONE form, N submit buttons: a button's `name`/`value` is what the
+ * browser posts, so choosing is a plain submit with no client state to keep in step, and every
+ * row is reachable by Tab and Enter without anything being wired for it.
+ *
+ * The filter is the one piece of state here, and it is purely local — the list is small, ships
+ * with the page, and never needs a round trip to narrow.
+ */
+function ServerPicker({ servers, busy }: { servers: CuratedMcpRow[]; busy: boolean }) {
+  const [query, setQuery] = useState("");
+  const visible = servers.filter((server) => matches(server, query));
+  return (
+    <section aria-labelledby="mcp-picker-heading" className="space-y-3" data-testid="mcp-picker">
+      <SectionHeading>
+        <span id="mcp-picker-heading">Popular servers</span>
+      </SectionHeading>
+      <p className="max-w-2xl text-dim text-sm leading-relaxed">
+        Each of these is a remote endpoint its vendor documents, carrying no credential. Where a
+        chip says <span className="font-medium text-ink">oauth</span>, each person signs in through
+        their own agent the first time it is used — on their machine, never here.
+      </p>
+      <label className="block max-w-sm">
+        <span className="mb-1 block font-medium text-dim text-sm">Search these servers</span>
+        <input
+          type="search"
+          value={query}
+          data-testid="mcp-picker-search"
+          onChange={(event) => setQuery(event.target.value)}
+          placeholder="linear, docs, deploys…"
+          className="block h-11 w-full rounded-md border border-line px-3 text-ink text-sm placeholder:text-faint focus:border-accent focus:outline-none"
+        />
+      </label>
+      <Form method="post">
+        <input type="hidden" name="intent" value="preview" />
+        <input type="hidden" name="source" value="curated" />
+        <BusyFields busy={busy} className="grid gap-2 sm:grid-cols-2">
+          {visible.map((server) => (
+            <button
+              key={server.name}
+              type="submit"
+              name="server"
+              value={server.name}
+              data-testid="mcp-picker-option"
+              className="flex flex-col items-start gap-1 rounded-lg border border-line-soft bg-panel px-4 py-3 text-left transition-colors hover:bg-panel2 focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              <span className="flex flex-wrap items-center gap-2">
+                <span className="font-medium text-ink text-sm">{server.title}</span>
+                <AuthChip auth={server.auth} />
+              </span>
+              <span className="text-dim text-sm leading-snug">{server.description}</span>
+              <span className="break-all font-mono text-[12px] text-faint">{server.host}</span>
+            </button>
+          ))}
+        </BusyFields>
+      </Form>
+      <p aria-live="polite" className="text-faint text-xs">
+        {visible.length === servers.length
+          ? `${servers.length} servers`
+          : visible.length === 1
+            ? "1 server matches"
+            : `${visible.length} servers match`}
+        {visible.length === 0 && " — add it below as a custom server."}
+      </p>
+    </section>
+  );
+}
+
+/**
+ * THE CUSTOM ARM — the three typed sources, unchanged, behind a disclosure so the page rests on
+ * the list. `<details>` because it is the browser's own disclosure: keyboard-operable, announced,
+ * and open by nothing more than a click.
+ */
+function CustomSource({ busy, flying }: { busy: boolean; flying: string | null }) {
+  return (
+    <details className="max-w-2xl border-line-soft border-t pt-4" data-testid="mcp-custom">
+      <summary className="cursor-pointer font-medium text-dim text-sm hover:text-ink">
+        Custom server
+      </summary>
+      <p className="mt-2 max-w-2xl text-faint text-xs leading-relaxed">
+        Anything not on the list: a server the official registry carries, a URL serving a{" "}
+        <code className="font-mono">server.json</code>, or the document itself.
+      </p>
+      <SourceForm busy={busy} flying={flying} />
+    </details>
+  );
+}
+
 function SourceForm({ busy, flying }: { busy: boolean; flying: string | null }) {
   return (
-    <Form method="post" className="max-w-2xl space-y-4">
+    <Form method="post" className="mt-4 max-w-2xl space-y-4">
       <input type="hidden" name="intent" value="preview" />
       <BusyFields busy={busy} className="space-y-4">
         <label className="block">

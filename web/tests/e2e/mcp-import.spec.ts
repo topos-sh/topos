@@ -4,13 +4,14 @@ import { gotoSettled } from "./sign-in";
 
 /**
  * ADDING AN MCP SERVER, the whole way through: the signed-in owner opens the import page from
- * the dashboard, pastes a server document, reads what it promises, publishes, and finds it in
- * the catalog as a `kind: 'mcp'` bundle.
+ * the dashboard, picks a server or pastes a document, reads what it promises, publishes, and
+ * finds it in the catalog as a `kind: 'mcp'` bundle.
  *
- * The PASTE arm is the one this spec drives on purpose — it makes no outbound request, so the
- * test asserts the product rather than the network, and it is the arm a team with an internal
- * server actually uses. The bytes land through the ordinary custody path (the fixture vault),
- * so a green run means the whole publish really happened, not that a form validated.
+ * Two arms, and neither touches the network: the PICKER reads a row out of the committed list,
+ * and the PASTE arm is what a team with an internal server uses. Both land in the same preview
+ * and the same publish, which is the point being asserted. The bytes go through the ordinary
+ * custody path (the fixture vault), so a green run means the whole publish really happened, not
+ * that a form validated.
  */
 
 const SERVER_NAME = "io.github.acme/tide-tables";
@@ -41,6 +42,40 @@ test.beforeEach(async () => {
   );
 });
 
+test("the picker lists popular servers, filters, and lands a pick in the same preview", async ({
+  page,
+}) => {
+  await gotoSettled(page, "/");
+  await page.getByRole("link", { name: "Add MCP server" }).click();
+  await expect(page.getByRole("heading", { name: "Add an MCP server" })).toBeVisible();
+
+  // The page RESTS on the list: no typing needed to see what is on offer.
+  const picker = page.getByTestId("mcp-picker");
+  await expect(picker).toBeVisible();
+  const options = page.getByTestId("mcp-picker-option");
+  const total = await options.count();
+  expect(total).toBeGreaterThanOrEqual(20);
+
+  // The search narrows it without a round trip.
+  await page.getByTestId("mcp-picker-search").fill("linear");
+  await expect(options).toHaveCount(1);
+  await expect(options.first()).toContainText("Linear");
+  await expect(options.first()).toContainText("mcp.linear.app");
+
+  // Choosing one is a submit that lands in the SAME preview a paste reaches.
+  await options.first().click();
+  const preview = page.getByTestId("mcp-preview");
+  await expect(preview).toBeVisible();
+  await expect(preview).toContainText("app.linear/linear");
+  await expect(preview).toContainText("streamable-http");
+  await expect(preview).toContainText("oauth");
+  await expect(page.getByTestId("mcp-preview-url")).toHaveText("https://mcp.linear.app/mcp");
+  // The suggested catalog name is the product's, not the registry name's "mcp" tail.
+  await expect(page.getByLabel("Publish as")).toHaveValue("linear");
+  // A preview still writes nothing.
+  expect(await adminQuery(`select 1 from web.bundle where name = 'linear'`)).toHaveLength(0);
+});
+
 test("paste a server.json, preview what it promises, publish it into the catalog", async ({
   page,
 }) => {
@@ -49,6 +84,8 @@ test("paste a server.json, preview what it promises, publish it into the catalog
   await page.getByRole("link", { name: "Add MCP server" }).click();
   await expect(page.getByRole("heading", { name: "Add an MCP server" })).toBeVisible();
 
+  // The typed sources sit behind the disclosure; the picker is what the page opens on.
+  await page.getByText("Custom server", { exact: true }).click();
   await page.getByLabel("Where it comes from").selectOption("paste");
   await page.getByTestId("mcp-paste").fill(DOCUMENT);
   await page.getByRole("button", { name: "Preview" }).click();
@@ -85,6 +122,7 @@ test("paste a server.json, preview what it promises, publish it into the catalog
 
 test("a document carrying a credential is refused, and nothing is published", async ({ page }) => {
   await gotoSettled(page, "/mcp/import");
+  await page.getByText("Custom server", { exact: true }).click();
   await page.getByLabel("Where it comes from").selectOption("paste");
   await page.getByTestId("mcp-paste").fill(
     JSON.stringify({
