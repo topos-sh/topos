@@ -654,6 +654,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
                 merge_preview: None,
                 synced_placements: None,
                 scope: Some("person".to_owned()),
+                harnesses: Vec::new(),
             }],
             proposals_awaiting: 0,
         })
@@ -694,6 +695,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
                 merge_preview: None,
                 synced_placements: None,
                 scope: Some("person".to_owned()),
+                harnesses: Vec::new(),
             }],
             proposals_awaiting: 0,
         })
@@ -736,6 +738,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
                 merge_preview: None,
                 synced_placements: None,
                 scope: Some("person".to_owned()),
+                harnesses: Vec::new(),
             }],
             proposals_awaiting: 0,
         })
@@ -1255,6 +1258,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
                 merge_preview: None,
                 synced_placements: None,
                 scope: Some("person".to_owned()),
+                harnesses: Vec::new(),
             }],
             proposals_awaiting: 1,
             notices: vec![WireNotice {
@@ -1310,6 +1314,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
                 }),
                 synced_placements: None,
                 scope: Some("person".to_owned()),
+                harnesses: Vec::new(),
             }],
             proposals_awaiting: 0,
             notices: Vec::new(),

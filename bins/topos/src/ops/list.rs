@@ -360,8 +360,7 @@ fn skill_entry(row: &Row) -> SkillEntry {
         source: (!row.source.is_empty()).then(|| row.source.clone()),
         status,
         cause,
-        // Threaded from the delivery cache once the mcp engine records kinds (this increment).
-        kind: None,
+        kind: row.kind.clone(),
     }
 }
 
@@ -449,6 +448,8 @@ fn ghost_detail(
         pin: None,
         placements: ghost.placements.clone(),
         state: ghost_state(&ghost.entry),
+        kind: ghost.entry.kind.clone(),
+        harnesses: Vec::new(),
     })
 }
 
@@ -571,7 +572,7 @@ fn store_ghosts(
                 source,
                 status,
                 cause,
-                kind: None,
+                kind: delivered.and_then(|(_, d)| d.kind.clone()),
             }
         };
         out.push(Ghost {
@@ -2179,6 +2180,8 @@ mod tests {
                     pin: None,
                     placements: Vec::new(),
                     state: StatusItemState::Applied,
+                    kind: None,
+                    harnesses: Vec::new(),
                 }),
                 footprint: footprint.clone(),
                 ..ListData::default()

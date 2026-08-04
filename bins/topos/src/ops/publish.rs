@@ -933,6 +933,10 @@ fn enrolled_publish(
                                 via_channels: Vec::new(),
                                 via_manifest: true,
                                 assigned_by: None,
+                                // The catalog kind is the server's answer; the next sweep's
+                                // delivery heals it (a seed row is provenance, not authority).
+                                kind: None,
+                                harness_states: Vec::new(),
                                 picked: false,
                             },
                         );

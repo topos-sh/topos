@@ -225,8 +225,13 @@ pub(crate) fn sync_one_planned(
     // coverage adds a target; a record only ever leaves through an explicit verb). The reconciled
     // map carries every recorded placement — appended targets are never-materialized until an apply.
     let applied_eq_observed = sync.applied == sync.observed;
+    // A CONFIG-PLACED (mcp) record reached without an injected planner (a targeted accept, a
+    // resume) keeps its EMPTY plan: skill-dir placement must never engage for it — its bytes
+    // reach agents through the config converge alone.
+    let mcp_record = plan_fn.is_none() && crate::mcp_engine::is_mcp_record(ctx, skill_id);
     let make_plan = |map: &PlacementMap| match plan_fn {
         Some(f) => f(ctx, skill_id, &lock, map),
+        None if mcp_record => crate::placement::PlacementPlan::default(),
         None => placement::plan_for_skill(ctx, skill_id, &lock, map),
     };
     let plan = make_plan(&map);
@@ -464,7 +469,13 @@ pub(crate) fn go_back(
     let lock: Lock = read_required(ctx, &sp.lock, "lock.json")?;
     let map: PlacementMap = read_map_required(ctx, &sp)?;
     let name = lock.name.clone();
-    let plan = placement::plan_for_skill(ctx, skill_id, &lock, &map);
+    // An mcp record's go-back moves the STORE state only — no skill-dir placement may be planned
+    // for it (the next converge re-renders configs from the restored version's server.json).
+    let plan = if crate::mcp_engine::is_mcp_record(ctx, skill_id) {
+        crate::placement::PlacementPlan::default()
+    } else {
+        placement::plan_for_skill(ctx, skill_id, &lock, &map)
+    };
     let map = placement::reconcile_map(&map, &plan);
     let managed = placement::managed_indices(&map, &plan);
 
@@ -558,6 +569,7 @@ pub(crate) fn go_back(
         merge_preview: None,
         synced_placements: None,
         scope: None,
+        harnesses: Vec::new(),
     })
 }
 
@@ -581,7 +593,12 @@ pub(crate) fn reset_to_base(
     let sync: SyncState = read_required(ctx, &sp.sync, "sync.json")?;
     let lock: Lock = read_required(ctx, &sp.lock, "lock.json")?;
     let map: PlacementMap = read_map_required(ctx, &sp)?;
-    let plan = placement::plan_for_skill(ctx, sid, &lock, &map);
+    // Same rule as the go-back: an mcp record never gets skill-dir placements planned.
+    let plan = if crate::mcp_engine::is_mcp_record(ctx, sid) {
+        crate::placement::PlacementPlan::default()
+    } else {
+        placement::plan_for_skill(ctx, sid, &lock, &map)
+    };
     let map = placement::reconcile_map(&map, &plan);
     let managed = placement::managed_indices(&map, &plan);
 
@@ -1533,6 +1550,7 @@ fn state_row(name: &str, sync: &SyncState, action: PullAction) -> PullSkill {
         merge_preview: None,
         synced_placements: None,
         scope: None,
+        harnesses: Vec::new(),
     }
 }
 
@@ -1550,6 +1568,7 @@ fn applied_row(name: &str, sync: &SyncState, _target: [u8; 32]) -> PullSkill {
         merge_preview: None,
         synced_placements: None,
         scope: None,
+        harnesses: Vec::new(),
     }
 }
 
@@ -1567,6 +1586,7 @@ fn synced_row(name: &str, sync: &SyncState, n: u32) -> PullSkill {
         merge_preview: None,
         synced_placements: Some(n),
         scope: None,
+        harnesses: Vec::new(),
     }
 }
 
@@ -1586,6 +1606,7 @@ fn offer_row(name: &str, sync: &SyncState, target: [u8; 32], target_digest_hex: 
         merge_preview: None,
         synced_placements: None,
         scope: None,
+        harnesses: Vec::new(),
     }
 }
 
@@ -1611,5 +1632,6 @@ fn diverged_row(
         merge_preview,
         synced_placements: None,
         scope: None,
+        harnesses: Vec::new(),
     }
 }

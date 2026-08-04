@@ -1868,6 +1868,11 @@ fn apply_arms(
     editor.write(ctx.fs, &target.path)?;
 
     let mut items = items;
+    // An MCP bundle's row drop (or off-switch) converges the affected scope's CONFIG entries
+    // INLINE, so the receipt names the per-agent removals — and discloses a hand-edited entry
+    // left behind — instead of deferring the fact to the next sweep. Best-effort: the row edit
+    // already landed, and the next sweep's removal convergence reaches the same end state.
+    converge_removed_mcp(ctx, target, global, &arms, &mut items);
     if let Some(note) = born
         && let Some(first) = items.first_mut()
     {
@@ -1881,6 +1886,156 @@ fn apply_arms(
         items,
         applied: true,
     }))
+}
+
+/// The inline MCP removal convergence a `remove` apply runs (see the call site): for each dropped
+/// row (or written `"off"` switch) whose bundle is a `kind = "mcp"` one, run
+/// [`crate::mcp_engine::remove_bundle`] against the edited scope and fold the per-agent outcomes
+/// into that item's receipt note.
+fn converge_removed_mcp(
+    ctx: &Ctx<'_>,
+    target: &EditTarget,
+    global: bool,
+    arms: &[Arm],
+    items: &mut [RemoveItem],
+) {
+    let Some(roots) = ctx.roots.clone() else {
+        return;
+    };
+    // The edited scope's store: the home layout for `-g`, the checkout's own (existing) store
+    // otherwise — a removal never mints a store.
+    let (layout, project_root) = if global {
+        (Some(ctx.layout.clone()), None)
+    } else {
+        (
+            crate::sidecar::existing_project_store(ctx.fs, &target.dir),
+            Some(target.dir.clone()),
+        )
+    };
+    let Some(layout) = layout else {
+        return;
+    };
+    if !ctx.fs.exists(&layout.mcp_ledger_path()) {
+        return; // nothing was ever config-placed in this scope
+    }
+    let cache = crate::sync_status::read(ctx.fs, &ctx.layout).unwrap_or_default();
+    let detected: std::collections::BTreeSet<String> = topos_harness::registry::detected_harnesses(
+        &roots.home,
+        project_root.as_deref().or(roots.cwd.as_deref()),
+    )
+    .iter()
+    .map(|h| h.slug.to_owned())
+    .collect();
+    let io = crate::mcp_engine::ScopeIo {
+        fs: ctx.fs,
+        layout: &layout,
+        home: roots.home.clone(),
+        project_root: project_root.clone(),
+    };
+    for (arm, item) in arms.iter().zip(items.iter_mut()) {
+        let Some(bundle_id) = mcp_bundle_of_arm(ctx, target, &cache, arm) else {
+            continue;
+        };
+        let outcome = crate::mcp_engine::remove_bundle(
+            &io,
+            topos_harness::mcp::descriptor::mcp_harnesses(),
+            &detected,
+            &bundle_id,
+        );
+        let mut lines: Vec<String> = Vec::new();
+        for removed in &outcome.removed {
+            let file = removed.state.file.as_deref().unwrap_or("its config");
+            lines.push(match removed.state.state.as_str() {
+                "drifted" => format!(
+                    "{}: hand-edited entry left in place ({file})",
+                    removed.state.agent
+                ),
+                _ => format!("{}: server entry removed from {file}", removed.state.agent),
+            });
+        }
+        for w in &outcome.warnings {
+            lines.push(w.clone());
+        }
+        if lines.is_empty() {
+            continue;
+        }
+        let folded = lines.join(" · ");
+        item.note = Some(match item.note.take() {
+            Some(prev) => format!("{prev} · {folded}"),
+            None => folded,
+        });
+    }
+}
+
+/// The mcp bundle one removal arm drops, when it drops one: a `kind = "mcp"` local path row (its
+/// tracked identity), or a workspace bundle the delivery cache knows as `mcp` (its skill id).
+/// `None` for everything else — a skill row, a feed drop, a set split (a split member's config
+/// entries leave through the next sweep's removal convergence, like a feed drop's skills leave
+/// its dirs).
+fn mcp_bundle_of_arm(
+    ctx: &Ctx<'_>,
+    target: &EditTarget,
+    cache: &crate::sync_status::SyncStatus,
+    arm: &Arm,
+) -> Option<String> {
+    let ws_bundle = |host: &str, workspace: &str, bundle: &str| -> Option<String> {
+        cache
+            .workspaces
+            .iter()
+            .find(|(_, e)| {
+                e.host.as_deref() == Some(host) && e.workspace_name.as_deref() == Some(workspace)
+            })
+            .and_then(|(_, e)| {
+                e.delivered
+                    .iter()
+                    .find(|(_, d)| d.name == bundle && d.kind.as_deref() == Some("mcp"))
+                    .map(|(id, _)| id.clone())
+            })
+    };
+    match arm {
+        Arm::RowDrop { row, .. } => match &row.shape {
+            KeyShape::WorkspaceBundle {
+                host,
+                workspace,
+                bundle,
+            } => ws_bundle(host, workspace, bundle),
+            KeyShape::LocalPath { raw } if row.fields().kind.as_deref() == Some("mcp") => {
+                let dir = if Path::new(raw).is_absolute() {
+                    PathBuf::from(raw)
+                } else {
+                    target.dir.join(raw.trim_start_matches("./"))
+                };
+                // The tracked identity: the scope's own store first (a project row's custody
+                // lives in the checkout), then the home store — the same identity the demand
+                // side minted the config key under.
+                let tracked = dir.canonicalize().ok().and_then(|canonical| {
+                    let project = crate::sidecar::existing_project_store(ctx.fs, &target.dir)
+                        .and_then(|playout| {
+                            let pctx = crate::ops::pull::ctx_with_layout(ctx, &playout);
+                            crate::ops::add::tracked_skill_at(&pctx, &canonical)
+                                .ok()
+                                .flatten()
+                        });
+                    project.or_else(|| {
+                        crate::ops::add::tracked_skill_at(ctx, &canonical)
+                            .ok()
+                            .flatten()
+                    })
+                });
+                Some(tracked.unwrap_or_else(|| format!("local:{}", row.display_name())))
+            }
+            _ => None,
+        },
+        Arm::OffWrite { reference, .. } => match keys::classify_key(reference) {
+            Ok(KeyShape::WorkspaceBundle {
+                host,
+                workspace,
+                bundle,
+            }) => ws_bundle(&host, &workspace, &bundle),
+            _ => None,
+        },
+        Arm::FeedDrop { .. } | Arm::SetSplit { .. } => None,
+    }
 }
 
 /// Re-prove every arm against the EXACT document instance about to be edited — the caller reads

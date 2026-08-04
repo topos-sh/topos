@@ -85,6 +85,11 @@ pub(crate) struct Row {
     pub placements: Vec<String>,
     /// A BUNDLE line (not an `"off"` switch) — what the inventory counts as a delivered skill.
     pub bundle: bool,
+    /// The cached bundle kind (`Some("mcp")` for a config-placed bundle; `None` = a skill).
+    pub kind: Option<String>,
+    /// For an `mcp` line: the per-agent config states the last converge cached (agent + state +
+    /// placed file) — the deep dive shows them instead of placement dirs.
+    pub harness_states: Vec<topos_types::results::McpAgentState>,
 }
 
 /// One scope's whole resolution: its label, its governing file, its lines, and the disclosure
@@ -397,6 +402,8 @@ fn scope_rows(
         let mut via_channels = Vec::new();
         let mut attribution = None;
         let mut workspace_id = None;
+        let mut kind = row.fields().kind.clone();
+        let mut harness_states = Vec::new();
         let applied = match &row.shape {
             KeyShape::WorkspaceBundle {
                 host,
@@ -407,6 +414,8 @@ fn scope_rows(
                     via_channels = hit.ds.via_channels.clone();
                     attribution = attribution_of(hit.ds);
                     workspace_id = Some(hit.workspace_id.to_owned());
+                    kind = kind.or_else(|| hit.ds.kind.clone());
+                    harness_states = hit.ds.harness_states.clone();
                     // A PINNED row's target is its pin, never the served current: the pin is what
                     // `update` delivers here, so measuring against `current` would report a row
                     // sitting exactly where it was asked to sit as "behind — `topos update` lands
@@ -446,6 +455,8 @@ fn scope_rows(
             pin: row.pin(),
             placements: applied.placements,
             bundle: true,
+            kind,
+            harness_states,
         });
     }
 
@@ -542,6 +553,8 @@ fn scope_rows(
                 pin: None,
                 placements: applied.placements,
                 bundle: true,
+                kind: ds.kind.clone(),
+                harness_states: ds.harness_states.clone(),
             });
             itemized += 1;
         }
@@ -598,6 +611,8 @@ fn scope_rows(
                 pin: None,
                 placements: applied.placements,
                 bundle: true,
+                kind: ds.kind.clone(),
+                harness_states: ds.harness_states.clone(),
             });
             itemized += 1;
         }
@@ -662,6 +677,8 @@ fn scope_rows(
             pin: None,
             placements: Vec::new(),
             bundle: false,
+            kind: None,
+            harness_states: Vec::new(),
         });
     }
     out
@@ -742,6 +759,10 @@ pub(crate) fn detail_for(
         pin: row.pin.clone(),
         placements: row.placements.clone(),
         state: row.state,
+        kind: row.kind.clone(),
+        // For an mcp line: the cached per-agent config entries (placed file + state) — the deep
+        // dive's answer instead of placement dirs.
+        harnesses: row.harness_states.clone(),
     })
 }
 
@@ -1474,6 +1495,8 @@ pub(crate) mod testkit {
                 via_channels: vec!["everyone".to_owned()],
                 via_manifest: false,
                 assigned_by: by.map(str::to_owned),
+                kind: None,
+                harness_states: Vec::new(),
                 picked: by.is_none(),
             },
         )

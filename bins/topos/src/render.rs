@@ -1154,6 +1154,11 @@ fn list_row(entry: &SkillEntry, scope: &str) -> String {
 fn list_columns(entry: &SkillEntry) -> String {
     use topos_types::results::{DetachCause, SkillStatus};
     let mut s = String::new();
+    // The kind badge: a config-placed bundle reads differently from a skill (its "installed"
+    // lives in agent config files, not skill dirs).
+    if let Some(kind) = &entry.kind {
+        s.push_str(&format!("  [{kind}]"));
+    }
     // `draft` already shows via its own flag; skip it here to avoid a doubled note.
     if let Some(status) = entry.status
         && !matches!(status, SkillStatus::Draft)
@@ -1761,6 +1766,25 @@ fn list_detail_tty(detail: &topos_types::results::ListDetail) -> String {
     }
     if !detail.placements.is_empty() {
         s.push_str(&format!("\n  placed in {}", detail.placements.join(", ")));
+    }
+    // An mcp bundle's "where": per-agent config entries (placed file + state), instead of
+    // placement dirs.
+    if detail.kind.as_deref() == Some("mcp") {
+        if detail.harnesses.is_empty() {
+            s.push_str("\n  an MCP server bundle — no agent config entries recorded yet");
+        } else {
+            s.push_str("\n  an MCP server bundle, configured in:");
+            for h in &detail.harnesses {
+                let file = h.file.as_deref().unwrap_or("(no file recorded)");
+                match (h.state.as_str(), h.note.as_deref()) {
+                    ("current", _) => s.push_str(&format!("\n    {}: {file}", h.agent)),
+                    (state, Some(note)) => {
+                        s.push_str(&format!("\n    {}: {file} — {state} ({note})", h.agent));
+                    }
+                    (state, None) => s.push_str(&format!("\n    {}: {file} — {state}", h.agent)),
+                }
+            }
+        }
     }
     let state = match detail.state {
         StatusItemState::Applied => "applied".to_owned(),
@@ -2431,11 +2455,16 @@ pub(crate) fn pull_tty(data: &PullData, warnings: &[String], disclosures: &[Stri
         .skills
         .iter()
         .filter_map(|s| {
-            if matches!(s.action, topos_types::results::PullAction::UpToDate) {
+            // An up-to-date row stays out of the table — UNLESS it is an mcp bundle with a
+            // per-agent state that needs eyes (drift, a conflict, an unprovable surface): a
+            // compact receipt must not swallow those.
+            let noteworthy = s.harnesses.iter().any(|h| h.state != "current");
+            if matches!(s.action, topos_types::results::PullAction::UpToDate) && !noteworthy {
                 up_to_date += 1;
                 return None;
             }
-            let (line, extra) = pull_row(s);
+            let (line, mut extra) = pull_row(s);
+            extra.extend(s.harnesses.iter().map(mcp_agent_line));
             Some((s.skill.as_str(), line, extra))
         })
         .collect();
@@ -2529,6 +2558,20 @@ fn notice_line(n: &topos_types::requests::WireNotice) -> String {
 }
 
 /// One non-up-to-date skill's line (after the padded name) + any indented detail lines.
+/// One agent's MCP config outcome as a receipt sub-line (`agent: placed — restart Cursor`). The
+/// state vocabulary is open; an unrecognized state renders verbatim with its note.
+fn mcp_agent_line(h: &topos_types::results::McpAgentState) -> String {
+    match (h.state.as_str(), h.note.as_deref()) {
+        ("current", Some(note)) => format!("{}: placed — {note}", h.agent),
+        ("current", None) => format!("{}: current", h.agent),
+        ("not-supported", Some(note)) => format!("{}: not placed — {note}", h.agent),
+        ("not-supported", None) => format!("{}: not placed", h.agent),
+        ("drifted", _) => format!("{}: hand-edited — left in place", h.agent),
+        (state, Some(note)) => format!("{}: {state} — {note}", h.agent),
+        (state, None) => format!("{}: {state}", h.agent),
+    }
+}
+
 fn pull_row(s: &PullSkill) -> (String, Vec<String>) {
     use topos_types::results::PullAction;
     let name = &s.skill;
@@ -2825,6 +2868,7 @@ mod tests {
             merge_preview: None,
             synced_placements: None,
             scope: None,
+            harnesses: Vec::new(),
         }
     }
 
@@ -3320,6 +3364,8 @@ mod tests {
             pin: None,
             placements: Vec::new(),
             state,
+            kind: None,
+            harnesses: Vec::new(),
         };
         let render = |d| {
             list_tty(&ListOutcome {
@@ -3577,6 +3623,8 @@ mod tests {
                     pin: None,
                     placements: vec!["/home/dev/.claude/skills/deploy".to_owned()],
                     state: S::Applied,
+                    kind: None,
+                    harnesses: Vec::new(),
                 }),
                 signed_in: true,
                 ..ListData::default()

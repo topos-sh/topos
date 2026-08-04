@@ -234,6 +234,15 @@ impl Layout {
         self.state_dir().join("forge_check.json")
     }
 
+    /// `state/mcp_ledger.json` — this SCOPE's MCP config-placement ownership ledger (see
+    /// `crate::mcp_ledger`): the minted config keys, the committed `key → fingerprint` entries
+    /// per harness config file, and the crash-recovery intent journal. Per scope — the same
+    /// accessor serves the home store and a project store (a checkout's entries are the project
+    /// scope's own). A plain doc — keys and fingerprints, never a secret.
+    pub(crate) fn mcp_ledger_path(&self) -> PathBuf {
+        self.state_dir().join("mcp_ledger.json")
+    }
+
     /// `state/visited_stores.json` — the machine-local index of project stores the reconcile has
     /// visited (see `crate::visited_stores`): what makes every applied report COMPLETE across
     /// checkouts, whichever one the update runs from. A plain doc — paths, never a secret.

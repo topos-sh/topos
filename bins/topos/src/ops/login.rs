@@ -979,6 +979,7 @@ mod tests {
                     .map(|n| DeliverySkill {
                         skill_id: format!("sk_{n}"),
                         name: n.clone(),
+                        kind: "skill".to_owned(),
                         review_required: false,
                         version_id: [0u8; 32],
                         generation: 1,
@@ -1002,7 +1003,7 @@ mod tests {
         fn report_applied(
             &self,
             _ws: &str,
-            _applied: &[(String, [u8; 32])],
+            _applied: &[crate::plane::AppliedSkillReport],
         ) -> Result<(), PlaneError> {
             Ok(())
         }

@@ -391,6 +391,7 @@ pub(crate) fn escape_recorded(
             merge_preview: None,
             synced_placements: None,
             scope: None,
+            harnesses: Vec::new(),
         });
     };
     let store = Store::open(&sp.store)?;
@@ -1005,6 +1006,7 @@ fn merged_row(
         merge_preview: None,
         synced_placements: None,
         scope: None,
+        harnesses: Vec::new(),
     }
 }
 
@@ -1039,6 +1041,7 @@ fn conflicted_row(
         merge_preview: None,
         synced_placements: None,
         scope: None,
+        harnesses: Vec::new(),
     }
 }
 

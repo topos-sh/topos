@@ -105,6 +105,15 @@ pub(crate) struct DeliveredSkill {
     /// `true` when the caller's own pick (a self-assignment) delivers it ("picked by you").
     #[serde(default, skip_serializing_if = "is_false")]
     pub picked: bool,
+    /// The catalog's bundle kind, cached when it is not the default (`Some("mcp")` for a
+    /// config-placed MCP-server bundle) — what lets `list`/`status` answer the kind (and the
+    /// offline reconcile route the bundle) without a network call. Absent ⇒ `"skill"`. Additive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    /// For an `mcp` bundle: the per-agent config states the last converge recorded (slug + state
+    /// + note + placed file) — the offline source for `list <name>`'s per-agent detail. Additive.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub harness_states: Vec<topos_types::results::McpAgentState>,
 }
 
 /// serde skip helper — a `false` bool is the common case and stays out of the on-disk bytes.

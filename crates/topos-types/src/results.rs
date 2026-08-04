@@ -95,6 +95,32 @@ pub struct PullSkill {
     /// rows predating the field. **INFERRED** (additive).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scope: Option<String>,
+    /// Per-agent applied states for a config-placed (`mcp`) bundle: which detected agents hold
+    /// the server entry and how. Empty (and omitted) for file-bundle skills. **INFERRED**
+    /// (additive).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub harnesses: Vec<McpAgentState>,
+}
+
+/// One agent's (harness's) state for a config-placed (`mcp`) bundle on this installation.
+/// `state` is an OPEN vocabulary — `current` / `drifted` / `not-supported` / `unprovable` /
+/// `conflicting` / `removed`; a reader ignores a state it does not recognize. **INFERRED**
+/// (additive).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
+pub struct McpAgentState {
+    /// The harness registry slug (e.g. `claude-code`, `cursor`).
+    pub agent: String,
+    /// The state — an OPEN vocabulary (see the struct doc).
+    pub state: String,
+    /// A short human-readable qualifier (why not-supported / how a change goes live), when one
+    /// exists.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+    /// The config file the entry lives in (the `list <name>` deep dive shows it; receipts omit
+    /// it).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file: Option<String>,
 }
 
 /// The predicted verdict of a three-way merge that has NOT been run against the placements — a pure
@@ -449,6 +475,14 @@ pub struct ListDetail {
     pub placements: Vec<String>,
     /// The line's state (the resolution's own vocabulary).
     pub state: StatusItemState,
+    /// The catalog bundle kind (`"mcp"` for a config-placed MCP-server bundle). Absent ⇒
+    /// `"skill"`. **INFERRED** (additive).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    /// For an `mcp` bundle: the per-agent config entries this machine records (the placed file +
+    /// state), shown instead of placement dirs. **INFERRED** (additive).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub harnesses: Vec<McpAgentState>,
 }
 
 /// One external source's last auto-update check — the answer to "is this even working?", computed
@@ -1692,6 +1726,7 @@ mod tests {
                 merge_preview: None,
                 synced_placements: None,
                 scope: None,
+                harnesses: Vec::new(),
             }],
             proposals_awaiting: 0,
             notices: Vec::new(),

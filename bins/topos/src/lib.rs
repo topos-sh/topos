@@ -38,6 +38,8 @@ pub(crate) mod logfile;
 #[allow(dead_code)]
 pub(crate) mod manifest;
 pub(crate) mod materialize;
+pub(crate) mod mcp_engine;
+pub(crate) mod mcp_ledger;
 pub(crate) mod op_wal;
 pub(crate) mod ops;
 pub(crate) mod placement;

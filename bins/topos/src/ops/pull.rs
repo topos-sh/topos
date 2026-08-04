@@ -536,7 +536,12 @@ pub(super) fn applied_snapshot(
                 continue;
             };
             // A placement the sweep removed (or never laid) is not held, whatever the doc says.
-            if !map.placements.iter().any(|p| ctx.fs.exists(Path::new(p))) {
+            // A CONFIG-PLACED (mcp) record legitimately has NO placement dirs — its applied
+            // version is the store's held current, reported whenever the delivered set names it
+            // (the per-agent config states ride the same report row).
+            if !map.placements.is_empty()
+                && !map.placements.iter().any(|p| ctx.fs.exists(Path::new(p)))
+            {
                 continue;
             }
             if let Ok(commit) = super::parse_hex32(&map.applied_commit)

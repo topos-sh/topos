@@ -73,6 +73,14 @@ generated `docs/cli.md` (`cargo xtask gen-cli-ref`).
 - `placement` — where a bundle's bytes land per scope (shared-dir-first over the home;
   project-rooted with containment proven at the write boundary), composing
   `topos-harness::{coverage,registry}`.
+- `mcp_engine` + `mcp_ledger` — the `kind = "mcp"` bundle's delivery half: a store-only sync
+  (lock custody, no dir placement) feeds a per-scope config CONVERGE over
+  `topos-harness::mcp`'s pure drivers — server.json parsed fail-closed, per-harness surfaces
+  joined onto detection (project surfaces containment-proven), removal via prior-matched keys
+  with drift left in place. `mcp_ledger` (`state/mcp_ledger.json`, per scope) is the ownership
+  record: minted immutable config keys (retired, never reused), `key → fingerprint` entries,
+  and the intent journal every config write rides (crash recovery promotes or drops by
+  observing the file).
 - `plane_http` — the blocking `ureq` transports; one `SessionTransports` set per session;
   `resolve_session_lane` picks a write verb's lane. `scan` — the bundle scanner (rejects
   fs-level hazards before the kernel digest). `config_io` + `ctx` — the injected

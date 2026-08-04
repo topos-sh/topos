@@ -268,6 +268,7 @@ mod tests {
             merge_preview: None,
             synced_placements: None,
             scope: None,
+            harnesses: Vec::new(),
         }
     }
 

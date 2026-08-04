@@ -207,6 +207,9 @@ pub(crate) struct DeliverySkill {
     pub skill_id: String,
     /// The catalog's user-facing name (a fresh install's directory name).
     pub name: String,
+    /// The catalog's bundle kind (`"skill"` / `"mcp"`) — the reconcile routes an `"mcp"` bundle
+    /// through the config-placement engine instead of the skill-dir placement.
+    pub kind: String,
     /// Whether the bundle is effectively `reviewed` (the client's publish-preflight posture; the
     /// server re-decides authoritatively on every write).
     pub review_required: bool,
@@ -247,6 +250,16 @@ pub(crate) struct DeliverySnapshot {
     pub declined: Vec<(String, String)>,
 }
 
+/// One applied-report row: the skill, the version this installation holds, and — for a
+/// config-placed (`mcp`) bundle — the per-agent config states the fleet page shows. Empty
+/// `harnesses` for ordinary file bundles.
+#[derive(Debug, Clone)]
+pub(crate) struct AppliedSkillReport {
+    pub skill_id: String,
+    pub version_id: [u8; 32],
+    pub harnesses: Vec<topos_types::results::McpAgentState>,
+}
+
 /// The delivery + fleet transport, per enrolled workspace. The production impl rides the workspace
 /// Bearer credential; the reconcile tests feed fixtures.
 pub(crate) trait DeliverySource {
@@ -255,12 +268,13 @@ pub(crate) trait DeliverySource {
     /// warns — never a clean.
     fn fetch_delivery(&self, workspace_id: &str) -> Result<DeliverySnapshot, PlaneError>;
 
-    /// Report what this device holds after its reconcile (skill id → applied version). Best-effort
-    /// visibility (the fleet page's truth): a failure warns, never blocks the sync.
+    /// Report what this device holds after its reconcile (skill id → applied version, plus the
+    /// per-agent config states of an `mcp` bundle). Best-effort visibility (the fleet page's
+    /// truth): a failure warns, never blocks the sync.
     fn report_applied(
         &self,
         workspace_id: &str,
-        applied: &[(String, [u8; 32])],
+        applied: &[AppliedSkillReport],
     ) -> Result<(), PlaneError>;
 
     /// Bind a DELIVERED skill to its workspace scope on the READ transport. The per-skill

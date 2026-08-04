@@ -424,6 +424,17 @@ struct Sweep {
     /// Per scope label, every NAME its rows MENTION — delivered or not. A name a row still names is
     /// never cleaned, so a transient failure can not read as a drop.
     mentioned: BTreeMap<String, HashSet<String>>,
+    /// Per scope label: the MCP demands this sweep resolved (`kind = "mcp"` rows and feed items,
+    /// with the stored `server.json` bytes) — what [`crate::mcp_engine::converge`] runs on.
+    mcp_demands: BTreeMap<String, Vec<crate::mcp_engine::McpDemand>>,
+    /// Per scope label: mcp bundle ids whose demand state is UNKNOWABLE this run (a row whose
+    /// resolution failed, a store not yet holding bytes) — the engine holds their config entries.
+    mcp_hold: BTreeMap<String, HashSet<String>>,
+    /// `harness = [...]` slugs already warned about as not MCP-capable (one line per slug per run).
+    mcp_warned_slugs: HashSet<String>,
+    /// The delivery cache was unreadable this run: the mcp hold computation is blind, so removal
+    /// convergence is withheld entirely (freeze, never guess).
+    mcp_blind: bool,
 }
 
 impl Sweep {
@@ -1007,6 +1018,8 @@ pub(crate) fn manifest_update(
             sweep
                 .warnings
                 .push(format!("SYNC_STATUS_UNREADABLE: {}", e.detail()));
+            // The mcp hold computation reads this cache; blind, it must freeze removals.
+            sweep.mcp_blind = true;
             sync_status::SyncStatus::default()
         }
     };
@@ -1327,6 +1340,20 @@ pub(crate) fn manifest_update(
         );
     }
 
+    // ---- 6.5 MCP convergence, per scope: the demanded bundles' server entries land in (or
+    // leave) each engaged agent's config, from the store's held bytes — offline included. Runs
+    // AFTER the cleaning (removal convergence must see the settled demand set) and BEFORE the
+    // report (the per-agent states ride the applied rows and the delivery cache).
+    let mcp_states = run_mcp_converge(
+        &env,
+        &driven,
+        person.as_ref(),
+        project.as_ref(),
+        project_frozen,
+        opts,
+        &mut sweep,
+    );
+
     // ---- 7. Report applied state + refresh the delivery cache, per session. ----
     let mentioned = sweep
         .mentioned_anywhere()
@@ -1377,10 +1404,21 @@ pub(crate) fn manifest_update(
                 // versions in different stores says so here, where the pick was made — a local
                 // fact, disclosed whether or not the report reaches the plane.
                 sweep.disclosures.extend(snapshot.splits.iter().cloned());
+                // Each mcp row carries its per-agent states (the fleet page's truth); file
+                // bundles ride with an empty list, byte-identical to the prior wire shape.
+                let applied_rows: Vec<crate::plane::AppliedSkillReport> = snapshot
+                    .applied
+                    .iter()
+                    .map(|(skill_id, commit)| crate::plane::AppliedSkillReport {
+                        skill_id: skill_id.clone(),
+                        version_id: *commit,
+                        harnesses: mcp_states.get(skill_id).cloned().unwrap_or_default(),
+                    })
+                    .collect();
                 match run
                     .transports
                     .plane
-                    .report_applied(&run.session.workspace_id, &snapshot.applied)
+                    .report_applied(&run.session.workspace_id, &applied_rows)
                 {
                     Ok(()) => report_ok = true,
                     Err(e) => {
@@ -1417,6 +1455,8 @@ pub(crate) fn manifest_update(
                     via_channels: ds.via_channels.clone(),
                     via_manifest: false,
                     assigned_by: ds.assigned_by.clone(),
+                    kind: (ds.kind != "skill").then(|| ds.kind.clone()),
+                    harness_states: Vec::new(),
                     picked: ds.picked,
                 },
             );
@@ -1450,6 +1490,12 @@ pub(crate) fn manifest_update(
                 {
                     delivered_cache.insert(skill_id.clone(), ds.clone());
                 }
+            }
+        }
+        // The converge's per-agent states ride the cache rows (the offline `list <name>` answer).
+        for (skill_id, row) in &mut delivered_cache {
+            if let Some(states) = mcp_states.get(skill_id) {
+                row.harness_states = states.clone();
             }
         }
         let declined: BTreeMap<String, String> = snap
@@ -1688,8 +1734,15 @@ fn reconcile_thing<'a>(
                 ));
                 return;
             };
+            let mcp = entry.kind == "mcp";
             let target = CatalogTarget::from_entry(entry);
-            let override_dir = row_override(sc, row, entry.kind.as_str(), env, sweep);
+            // A config-placed bundle has no placement dirs, so a path override has nothing to
+            // aim; the row's `harness` narrowing rides the demand instead.
+            let override_dir = if mcp {
+                None
+            } else {
+                row_override(sc, row, entry.kind.as_str(), env, sweep)
+            };
             sweep.explicit.insert(target.skill_id.clone());
             // A manifest-row delivery records its provenance in the cache too (marked
             // `via_manifest`), so the offline surfaces know which workspace governs the name.
@@ -1704,10 +1757,18 @@ fn reconcile_thing<'a>(
                     via_channels: Vec::new(),
                     via_manifest: true,
                     assigned_by: None,
+                    kind: mcp.then(|| target.kind.clone()),
+                    harness_states: Vec::new(),
                     picked: false,
                 },
             ));
             let st = SyncTarget {
+                mcp_harness_filter: mcp_filter(
+                    sc,
+                    Some(row),
+                    &mut sweep.mcp_warned_slugs,
+                    &mut sweep.warnings,
+                ),
                 target,
                 pin: row.pin(),
                 display: display.clone(),
@@ -1721,7 +1782,19 @@ fn reconcile_thing<'a>(
             owner,
             repo,
             skill,
-        } => reconcile_repo_skill(env, sc, row, host, owner, repo, skill, sweep),
+        } => {
+            // GitHub-sourced MCP bundles are not yet supported: the typed refusal names the
+            // constraint instead of silently placing nothing.
+            if row.fields().kind.as_deref() == Some("mcp") {
+                sweep.warnings.push(format!(
+                    "MCP_GITHUB_UNSUPPORTED {}: \"{}\" — GitHub-sourced MCP bundles are not yet \
+                     supported; publish the bundle to a workspace and add it from there",
+                    sc.label, row.reference
+                ));
+                return;
+            }
+            reconcile_repo_skill(env, sc, row, host, owner, repo, skill, sweep);
+        }
         KeyShape::LocalPath { raw } => {
             let dir = local_dir(env.ctx, sc, raw);
             if env.ctx.fs.exists(&dir) {
@@ -1731,16 +1804,136 @@ fn reconcile_thing<'a>(
                 if !converge_pending_governance(env, &dir, sweep) {
                     sweep.push(plain_row(&display, PullAction::UpToDate, None, &sc.label));
                 }
+                // A `kind = "mcp"` path row: the dir IS the bundle (`server.json` at its root) —
+                // adopted-path custody as ever, no skill placement; the demand feeds the scope's
+                // MCP converge with `workspace_slug: None`.
+                if row.fields().kind.as_deref() == Some("mcp") {
+                    local_mcp_demand(env, sc, row, &dir, &display, sweep);
+                }
             } else {
                 sweep.warnings.push(format!(
                     "PATH_MISSING {}: \"{raw}\" — the folder is gone; `topos remove {raw}` drops \
                      the row",
                     sc.label
                 ));
+                if row.fields().kind.as_deref() == Some("mcp") {
+                    // The bundle cannot be read this run: hold its config entries in place.
+                    sweep
+                        .mcp_hold
+                        .entry(sc.label.clone())
+                        .or_default()
+                        .insert(local_bundle_identity(env, sc, &dir, &display));
+                }
             }
         }
         // A feed or channel never lands in `things`; a repo set never does either.
         _ => {}
+    }
+}
+
+/// The MCP harness narrowing one demand carries: the row's own `harness = [...]` beats
+/// `[defaults.mcp]`'s; empty = every MCP-capable harness. A spelled slug that is not one of the
+/// MCP-capable harnesses is dropped with ONE warning per run (never silently ignored).
+fn mcp_filter(
+    sc: &ScopeCtx<'_>,
+    row: Option<&PlanRow>,
+    warned: &mut HashSet<String>,
+    warnings: &mut Vec<String>,
+) -> Vec<String> {
+    let raw: Vec<String> = row
+        .and_then(|r| r.fields().harness)
+        .or_else(|| {
+            sc.plan
+                .defaults
+                .iter()
+                .find(|(k, _)| k == "mcp")
+                .and_then(|(_, kd)| kd.harness.clone())
+        })
+        .unwrap_or_default();
+    let known: Vec<&str> = topos_harness::mcp::descriptor::mcp_harnesses()
+        .iter()
+        .map(|h| h.slug)
+        .collect();
+    raw.into_iter()
+        .filter(|slug| {
+            if known.contains(&slug.as_str()) {
+                true
+            } else {
+                if warned.insert(slug.clone()) {
+                    warnings.push(format!(
+                        "MCP_HARNESS_UNKNOWN: \"{slug}\" is not an MCP-capable agent here \
+                         (known: {}) — the slug is ignored",
+                        known.join(", ")
+                    ));
+                }
+                false
+            }
+        })
+        .collect()
+}
+
+/// The ledger identity of a LOCAL `kind = "mcp"` row: the tracked skill id when a store records
+/// the dir (custody survives a later publish, which keeps the id), else a name-keyed local
+/// identity.
+fn local_bundle_identity(env: &Env<'_>, sc: &ScopeCtx<'_>, dir: &Path, display: &str) -> String {
+    let _ = sc;
+    dir.canonicalize()
+        .ok()
+        .and_then(|canonical| owning_store_at(env.ctx, &canonical))
+        .map(|(_, id)| id)
+        .unwrap_or_else(|| format!("local:{display}"))
+}
+
+/// Feed the scope's MCP demand list from a LOCAL path row: `server.json` read straight from the
+/// row's dir (the dir IS the bundle). An unreadable/absent `server.json` warns and HOLDS the
+/// bundle's standing entries rather than reading absence as an empty server.
+fn local_mcp_demand(
+    env: &Env<'_>,
+    sc: &ScopeCtx<'_>,
+    row: &PlanRow,
+    dir: &Path,
+    display: &str,
+    sweep: &mut Sweep,
+) {
+    let bundle_id = local_bundle_identity(env, sc, dir, display);
+    match env.ctx.fs.read_opt(&dir.join("server.json")) {
+        Ok(Some(bytes)) => {
+            let filter = mcp_filter(
+                sc,
+                Some(row),
+                &mut sweep.mcp_warned_slugs,
+                &mut sweep.warnings,
+            );
+            sweep.mcp_demands.entry(sc.label.clone()).or_default().push(
+                crate::mcp_engine::McpDemand {
+                    bundle_id,
+                    name: display.to_owned(),
+                    workspace_slug: None,
+                    version_id: String::new(),
+                    server_json: bytes,
+                    harness_filter: filter,
+                },
+            );
+        }
+        Ok(None) => {
+            sweep.warnings.push(format!(
+                "MCP_UNPLACEABLE {}: \"{display}\" — the folder holds no server.json at its root",
+                sc.label
+            ));
+            sweep
+                .mcp_hold
+                .entry(sc.label.clone())
+                .or_default()
+                .insert(bundle_id);
+        }
+        Err(e) => {
+            note_item_failure(env.ctx, &mut sweep.warnings, display, &e.into());
+            sweep
+                .mcp_hold
+                .entry(sc.label.clone())
+                .or_default()
+                .insert(bundle_id);
+        }
     }
 }
 
@@ -1828,6 +2021,7 @@ fn reconcile_set<'a>(
                 .collect();
             let total = batch.len();
             for (position, entry) in batch.into_iter().enumerate() {
+                let mcp = entry.kind == "mcp";
                 let target = CatalogTarget::from_entry(entry);
                 // Book the provenance BEFORE the sync (a per-item failure does not unmake the fact
                 // that this channel provides the name).
@@ -1842,12 +2036,24 @@ fn reconcile_set<'a>(
                         via_channels: vec![channel.clone()],
                         via_manifest: true,
                         assigned_by: None,
+                        kind: mcp.then(|| target.kind.clone()),
+                        harness_states: Vec::new(),
                         picked: false,
                     },
                 ));
                 let display = target.name.clone();
-                let override_dir = row_override(sc, row, entry.kind.as_str(), env, sweep);
+                let override_dir = if mcp {
+                    None
+                } else {
+                    row_override(sc, row, entry.kind.as_str(), env, sweep)
+                };
                 let st = SyncTarget {
+                    mcp_harness_filter: mcp_filter(
+                        sc,
+                        Some(row),
+                        &mut sweep.mcp_warned_slugs,
+                        &mut sweep.warnings,
+                    ),
                     target,
                     pin: None,
                     display,
@@ -1861,6 +2067,16 @@ fn reconcile_set<'a>(
             }
         }
         KeyShape::RepoSet { host, owner, repo } => {
+            // The same typed refusal as the repo-skill arm: GitHub-sourced MCP bundles are not
+            // yet supported.
+            if row.fields().kind.as_deref() == Some("mcp") {
+                sweep.warnings.push(format!(
+                    "MCP_GITHUB_UNSUPPORTED {}: \"{}\" — GitHub-sourced MCP bundles are not yet \
+                     supported; publish the bundle to a workspace and add it from there",
+                    sc.label, row.reference
+                ));
+                return;
+            }
             reconcile_repo_set(env, sc, row, host, owner, repo, targets, sweep);
         }
         _ => {}
@@ -1936,9 +2152,16 @@ fn reconcile_feed<'a>(
             let total = batch.len();
             for (position, ds) in batch.into_iter().enumerate() {
                 let st = SyncTarget {
+                    mcp_harness_filter: mcp_filter(
+                        sc,
+                        None,
+                        &mut sweep.mcp_warned_slugs,
+                        &mut sweep.warnings,
+                    ),
                     target: CatalogTarget {
                         skill_id: ds.skill_id.clone(),
                         name: ds.name.clone(),
+                        kind: ds.kind.clone(),
                         version_id: to_hex(&ds.version_id),
                         generation: ds.generation,
                         bundle_digest: Some(ds.bundle_digest),
@@ -1999,7 +2222,25 @@ fn reconcile_feed<'a>(
                     run.transports.plane.as_plane(),
                     env.follow,
                 );
-                match sync_engine::sync_one_with(&run_ctx, &sid, &fc, Invocation::Sweep, None) {
+                // OFFLINE MCP convergence: the store's held bytes still feed the config engine
+                // (config files heal without a network), through the same store-only route the
+                // online path takes — never the dir-placement planner.
+                let mcp = ds.kind.as_deref() == Some("mcp");
+                let plan_fn: Option<&sync_engine::PlanFn<'_>> = if mcp {
+                    Some(&|_: &Ctx<'_>, _: &str, _: &Lock, _: &PlacementMap| {
+                        crate::placement::PlacementPlan::default()
+                    })
+                } else {
+                    None
+                };
+                match sync_engine::sync_one_planned(
+                    &run_ctx,
+                    &sid,
+                    &fc,
+                    Invocation::Sweep,
+                    None,
+                    plan_fn,
+                ) {
                     Ok(mut row) => {
                         row.workspace_id = Some(run.session.workspace_id.clone());
                         row.scope = Some(sc.label.clone());
@@ -2011,6 +2252,18 @@ fn reconcile_feed<'a>(
                         sweep.push(row);
                     }
                     Err(e) => note_item_failure(env.ctx, &mut sweep.warnings, &ds.name, &e),
+                }
+                if mcp {
+                    push_stored_mcp_demand(
+                        env,
+                        sc,
+                        &run_ctx,
+                        &sid,
+                        &ds.name,
+                        Some(&run.session.workspace_name),
+                        mcp_filter(sc, None, &mut sweep.mcp_warned_slugs, &mut sweep.warnings),
+                        sweep,
+                    );
                 }
             }
         }
@@ -2025,6 +2278,9 @@ fn reconcile_feed<'a>(
 struct CatalogTarget {
     skill_id: String,
     name: String,
+    /// The catalog's bundle kind (`"skill"` / `"mcp"`) — an `"mcp"` target takes the STORE-ONLY
+    /// sync (no dir placement) and feeds the scope's MCP demand list.
+    kind: String,
     version_id: String,
     generation: u64,
     bundle_digest: Option<[u8; 32]>,
@@ -2036,6 +2292,7 @@ impl CatalogTarget {
         Self {
             skill_id: e.skill_id.clone(),
             name: e.name.clone(),
+            kind: e.kind.clone(),
             version_id: e.version_id.clone(),
             generation: e.generation,
             bundle_digest: super::parse_hex32(&e.bundle_digest).ok(),
@@ -2053,6 +2310,9 @@ struct SyncTarget {
     display: String,
     /// The project-relative placement override the row (or its kind default) resolved to.
     override_dir: Option<String>,
+    /// For an `"mcp"` target: the harness slugs the row (or `[defaults.mcp]`) narrows placement
+    /// to — carried onto the scope's [`mcp_engine::McpDemand`]. Empty = every MCP harness.
+    mcp_harness_filter: Vec<String>,
     /// Where this bundle sits in the BATCH its source is converging — what turns the activity line
     /// into "updating docs (2 of 7)". `None` for a lone explicit row, which is a batch of one and
     /// says so by not counting.
@@ -2156,11 +2416,20 @@ fn sync_workspace_skill<'a>(
     // byte-identical copy (a handed-over old-world placement, a teammate's committed copy) BECOMES
     // the placement instead of a namespaced sibling.
     let adopt_digest = target.bundle_digest;
+    // THE MCP DIVERT: a `kind = "mcp"` bundle runs the SAME store sync — fetch + store +
+    // lock.json custody, so `list`/`log`/`diff`/`update <n>@<v>` all answer — but with an EMPTY
+    // placement plan: no dir placement, no baselines, no drafts, no diff3. The engine over zero
+    // placements degenerates to pure store/lock/sync advancement; the bundle's bytes reach agents
+    // only through the scope's config converge (`mcp_engine`), fed below.
+    let mcp = target.kind == "mcp";
     // A project root the containment rail refused is a placement that DID NOT HAPPEN — collected
     // from wherever the engine computes the plan, so the receipt says so instead of the bundle
     // quietly landing nowhere.
     let escapes: std::cell::RefCell<Vec<String>> = std::cell::RefCell::new(Vec::new());
     let plan_fn = |ctx: &Ctx<'_>, skill_id: &str, lock: &Lock, map: &PlacementMap| {
+        if mcp {
+            return crate::placement::PlacementPlan::default();
+        }
         // The row's `name` is what the directory is called; everything else about the bundle keeps
         // its catalog identity.
         let mut named = lock.clone();
@@ -2263,14 +2532,76 @@ fn sync_workspace_skill<'a>(
             }
             // Disclose a delivery the naming ladder had to place BESIDE a same-named occupant the
             // record does not own (the never-clobber outcome) — and a project placement a
-            // bundle's OWN root ignore file leaves visible to git.
-            if let ResolvedScope::Project { .. } = sc.scope {
+            // bundle's OWN root ignore file leaves visible to git. An mcp bundle placed nothing.
+            if !mcp && let ResolvedScope::Project { .. } = sc.scope {
                 disclose_namespaced(&run_ctx, &sid, &st.display, &mut sweep.warnings);
                 disclose_git_visible(&run_ctx, &sid, &target.name, &mut sweep.warnings);
             }
             sweep.push(row);
         }
         Err(e) => note_item_failure(ctx, &mut sweep.warnings, &target.name, &e),
+    }
+    // The demand feeds the config converge from the STORE's held bytes — whatever the sync above
+    // decided, as long as a received version is on disk (an update that failed this run still
+    // heals config entries from the last held version; a store with nothing yet HOLDS the
+    // bundle's standing entries instead).
+    if mcp {
+        push_stored_mcp_demand(
+            env,
+            sc,
+            &run_ctx,
+            &sid,
+            &target.name,
+            Some(&run.session.workspace_name),
+            st.mcp_harness_filter.clone(),
+            sweep,
+        );
+    }
+}
+
+/// Feed one scope's MCP demand list from the scope store's CURRENT tree (see
+/// [`crate::mcp_engine::stored_server_json`]). A store holding no received version yet — or one
+/// this build cannot read — HOLDS the bundle instead: its standing config entries must not read
+/// as undemanded while the bytes are unknowable.
+#[allow(clippy::too_many_arguments)]
+fn push_stored_mcp_demand(
+    env: &Env<'_>,
+    sc: &ScopeCtx<'_>,
+    run_ctx: &Ctx<'_>,
+    sid: &SkillId,
+    name: &str,
+    workspace_slug: Option<&str>,
+    harness_filter: Vec<String>,
+    sweep: &mut Sweep,
+) {
+    match crate::mcp_engine::stored_server_json(run_ctx, sid) {
+        Ok(Some((version_id, server_json))) => {
+            sweep.mcp_demands.entry(sc.label.clone()).or_default().push(
+                crate::mcp_engine::McpDemand {
+                    bundle_id: sid.as_str().to_owned(),
+                    name: name.to_owned(),
+                    workspace_slug: workspace_slug.map(str::to_owned),
+                    version_id,
+                    server_json,
+                    harness_filter,
+                },
+            );
+        }
+        Ok(None) => {
+            sweep
+                .mcp_hold
+                .entry(sc.label.clone())
+                .or_default()
+                .insert(sid.as_str().to_owned());
+        }
+        Err(e) => {
+            note_item_failure(env.ctx, &mut sweep.warnings, name, &e);
+            sweep
+                .mcp_hold
+                .entry(sc.label.clone())
+                .or_default()
+                .insert(sid.as_str().to_owned());
+        }
     }
 }
 
@@ -3412,6 +3743,10 @@ fn held_skill_ids(ctx: &Ctx<'_>, visited: &[sidecar::Layout]) -> HashSet<String>
         let Ok(entries) = ctx.fs.read_dir(&layout.skills_dir()) else {
             continue;
         };
+        // A CONFIG-PLACED (mcp) record holds no dirs — its "still held" proof is the scope's mcp
+        // ledger still recording entries for it. Read once per store, best-effort (an unreadable
+        // ledger holds nothing here; the converge already warned about it).
+        let ledger = crate::mcp_ledger::read(ctx.fs, layout).unwrap_or_default();
         for entry in entries {
             let Some(id) = entry.file_name().and_then(|n| n.to_str()) else {
                 continue;
@@ -3422,7 +3757,12 @@ fn held_skill_ids(ctx: &Ctx<'_>, visited: &[sidecar::Layout]) -> HashSet<String>
             let Ok(Some(map)) = doc::read_map(ctx.fs, &layout.published(&sid).map) else {
                 continue;
             };
-            if map.placements.iter().any(|p| ctx.fs.exists(Path::new(p))) {
+            let held = if map.placements.is_empty() {
+                ledger.has_entries_for(sid.as_str())
+            } else {
+                map.placements.iter().any(|p| ctx.fs.exists(Path::new(p)))
+            };
+            if held {
                 out.insert(sid.into_string());
             }
         }
@@ -3526,6 +3866,175 @@ fn disclose(env: &Env<'_>, person: Option<&ScopePlan>, sweep: &mut Sweep) {
 }
 
 // =================================================================================================
+// MCP convergence (the config-placement half of the sweep).
+// =================================================================================================
+
+/// Run [`crate::mcp_engine::converge`] once per DRIVEN, RESOLVED scope, over the demands the
+/// fan-out collected, and fold the outcomes back into the sweep: per-agent states onto the
+/// receipt rows, removal/drift disclosures, and the merged `skill_id → states` map the applied
+/// report and the delivery cache read (person scope wins per slug — the same store the applied
+/// pick prefers).
+///
+/// FREEZE DISCIPLINE mirrors the cleaner's: removals run only on a full (untargeted) sweep of a
+/// scope whose manifest RESOLVED, with a readable delivery cache; and every bundle whose demand
+/// state is unknowable this run — an unreached workspace's cached deliveries, a failed channel's
+/// members, a mentioned-but-unresolved row — is HELD in place, unreported.
+fn run_mcp_converge(
+    env: &Env<'_>,
+    driven: &Driven,
+    person: Option<&ScopePlan>,
+    project: Option<&(PathBuf, ScopePlan)>,
+    project_frozen: bool,
+    opts: &ManifestUpdateOpts,
+    sweep: &mut Sweep,
+) -> HashMap<String, Vec<topos_types::results::McpAgentState>> {
+    let mut merged: HashMap<String, Vec<topos_types::results::McpAgentState>> = HashMap::new();
+    let Some(roots) = env.ctx.roots.clone() else {
+        return merged; // no machine roots: no config surface is resolvable
+    };
+    // The MACHINE-LEVEL holds every scope shares: cached deliveries of workspaces that produced
+    // no fresh snapshot this run (unreached, pending, ended, or logged out), and members of a
+    // channel whose expansion failed.
+    let mut machine_hold: HashSet<String> = HashSet::new();
+    for (ws_id, entry) in &env.prior.workspaces {
+        let fresh = env
+            .runs
+            .iter()
+            .any(|r| &r.session.workspace_id == ws_id && r.snapshot.is_some());
+        for (skill_id, ds) in &entry.delivered {
+            if !fresh
+                || ds
+                    .via_channels
+                    .iter()
+                    .any(|c| sweep.failed_channels.contains(&(ws_id.clone(), c.clone())))
+            {
+                machine_hold.insert(skill_id.clone());
+            }
+        }
+    }
+
+    // Person first (its states win the per-slug merge), then the project fills gaps.
+    let mut scopes_to_run: Vec<(String, sidecar::Layout, Option<PathBuf>, bool)> = Vec::new();
+    if driven.person && person.is_some() {
+        scopes_to_run.push((
+            ResolvedScope::Person.label(),
+            env.ctx.layout.clone(),
+            None,
+            true,
+        ));
+    }
+    if driven.project
+        && !project_frozen
+        && let Some((dir, _)) = project
+    {
+        let label = ResolvedScope::Project { dir: dir.clone() }.label();
+        let has_demands = sweep.mcp_demands.get(&label).is_some_and(|d| !d.is_empty());
+        // Demands mint the store through the ordinary shell (self-ignoring `.topos/`); a
+        // removal-only converge visits an EXISTING store and never mints one.
+        let layout = if has_demands {
+            match sidecar::ensure_project_store(env.ctx.fs, dir) {
+                Ok(l) => Some(l),
+                Err(e) => {
+                    sweep
+                        .warnings
+                        .push(format!("MCP_STORE_FAILED {}: {}", label, e.detail()));
+                    None
+                }
+            }
+        } else {
+            sidecar::existing_project_store(env.ctx.fs, dir)
+        };
+        if let Some(layout) = layout {
+            scopes_to_run.push((label, layout, Some(dir.clone()), false));
+        }
+    }
+
+    for (label, layout, project_root, person_scope) in scopes_to_run {
+        let demands = sweep.mcp_demands.remove(&label).unwrap_or_default();
+        // The common non-mcp machine: no demands and no ledger — nothing to converge, nothing to
+        // read.
+        if demands.is_empty() && !env.ctx.fs.exists(&layout.mcp_ledger_path()) {
+            continue;
+        }
+        let mut hold = machine_hold.clone();
+        hold.extend(sweep.mcp_hold.remove(&label).unwrap_or_default());
+        // A name a row still MENTIONS whose demand did not land this run (a catalog fetch
+        // failure, a refused resolution) must hold its entries too — matched through the cache's
+        // name → id rows.
+        if let Some(mentioned) = sweep.mentioned.get(&label) {
+            let demanded: HashSet<&str> = demands.iter().map(|d| d.bundle_id.as_str()).collect();
+            for entry in env.prior.workspaces.values() {
+                for (skill_id, ds) in &entry.delivered {
+                    if mentioned.contains(&ds.name) && !demanded.contains(skill_id.as_str()) {
+                        hold.insert(skill_id.clone());
+                    }
+                }
+            }
+        }
+        let allow_removals = opts.targets.is_empty() && !sweep.mcp_blind;
+        let cwd = project_root.clone().or_else(|| roots.cwd.clone());
+        let detected: std::collections::BTreeSet<String> =
+            topos_harness::registry::detected_harnesses(&roots.home, cwd.as_deref())
+                .iter()
+                .map(|h| h.slug.to_owned())
+                .collect();
+        let io = crate::mcp_engine::ScopeIo {
+            fs: env.ctx.fs,
+            layout: &layout,
+            home: roots.home.clone(),
+            project_root: project_root.clone(),
+        };
+        let outcome = crate::mcp_engine::converge(
+            &io,
+            &demands,
+            topos_harness::mcp::descriptor::mcp_harnesses(),
+            &detected,
+            &hold,
+            allow_removals,
+        );
+        sweep.warnings.extend(outcome.warnings);
+        for removed in &outcome.removed {
+            let line = match removed.state.state.as_str() {
+                "drifted" => format!(
+                    "MCP_DRIFTED {}: a hand-edited entry in {} is left in place",
+                    removed.state.agent,
+                    removed.state.file.as_deref().unwrap_or("its config"),
+                ),
+                _ => format!(
+                    "MCP_REMOVED {}: server entry removed from {}",
+                    removed.state.agent,
+                    removed.state.file.as_deref().unwrap_or("its config"),
+                ),
+            };
+            if !sweep.disclosures.contains(&line) {
+                sweep.disclosures.push(line);
+            }
+        }
+        for bundle in outcome.bundles {
+            // The receipt row for this bundle in this scope carries the per-agent outcomes.
+            if let Some(row) = sweep
+                .rows
+                .iter_mut()
+                .find(|r| r.skill == bundle.name && r.scope.as_deref() == Some(label.as_str()))
+            {
+                row.harnesses = bundle.states.clone();
+            }
+            // The merged map (the applied report + the delivery cache): person wins per slug,
+            // the project fills slugs the person scope did not touch.
+            let entry = merged.entry(bundle.bundle_id).or_default();
+            for state in bundle.states {
+                let replace = person_scope || !entry.iter().any(|s| s.agent == state.agent);
+                if replace {
+                    entry.retain(|s| s.agent != state.agent);
+                    entry.push(state);
+                }
+            }
+        }
+    }
+    merged
+}
+
+// =================================================================================================
 // Cleaning.
 // =================================================================================================
 
@@ -3542,6 +4051,11 @@ fn disclose(env: &Env<'_>, person: Option<&ScopePlan>, sweep: &mut Sweep) {
 /// workspace with no fresh delivery, the members of a set that failed to expand, and every name a
 /// row still mentions. The driven gate comes first on purpose — an undriven scope resolved no rows
 /// this run, so its whole recorded set would read as undemanded and retire.
+///
+/// CONFIG-PLACED (mcp) records pass through here UNTOUCHED by construction: they hold no
+/// placement dirs, so `clean_written_placements` finds no targets and the withdraw arm cleans
+/// nothing — their removal convergence is [`run_mcp_converge`]'s (the config entries leave
+/// through the drivers' prior-matched removal, never through a dir sweep).
 fn clean_undemanded(
     env: &Env<'_>,
     driven: &Driven,
@@ -4075,6 +4589,7 @@ fn plain_row(
         merge_preview: None,
         synced_placements: None,
         scope: Some(scope.to_owned()),
+        harnesses: Vec::new(),
     }
 }
 

@@ -19,7 +19,11 @@ use crate::fs_seam::FsOps;
 ///
 /// # Errors
 /// An underlying [`FsOps`] failure (parent-create or the atomic write).
-fn replace_config(fs: &dyn FsOps, target: &Path, bytes: &[u8]) -> io::Result<()> {
+///
+/// `pub(crate)`: the MCP placement engine (`crate::mcp_engine`) writes harness config files
+/// through this same dance directly over the ctx's fs seam — the identical durability +
+/// foreign-file care, without threading a second store seam through the reconcile.
+pub(crate) fn replace_config(fs: &dyn FsOps, target: &Path, bytes: &[u8]) -> io::Result<()> {
     // A first-ever write may need the config dir created — but only when absent, so the common case
     // adds no extra fault-tick (keeping the crash sweep's op count stable).
     if let Some(parent) = target.parent()

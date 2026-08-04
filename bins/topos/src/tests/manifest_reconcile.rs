@@ -275,6 +275,9 @@ fn store_versions(layout: &Layout, skill_id: &str) -> usize {
 
 type CallLog = Arc<Mutex<Vec<String>>>;
 
+/// One reported applied row as the fake records it: `(skill_id, version hex, mcp states)`.
+type ReportedRow = (String, String, Vec<topos_types::results::McpAgentState>);
+
 /// The per-session plane fake: a delivery script + versions keyed by `(skill, version-hex)`.
 #[derive(Clone)]
 struct FakePlane {
@@ -282,8 +285,9 @@ struct FakePlane {
     versions: HashMap<(String, String), FetchedVersion>,
     log: CallLog,
     /// The LAST applied report's rows, `(skill_id, version hex)` — the wire carries exactly one
-    /// row per (session, bundle), so this is what the cross-store pick actually reported.
-    reported: Arc<Mutex<Vec<(String, String)>>>,
+    /// row per (session, bundle), so this is what the cross-store pick actually reported —
+    /// `(skill_id, version hex, per-agent mcp states)`.
+    reported: Arc<Mutex<Vec<ReportedRow>>>,
 }
 impl FakePlane {
     fn new(log: CallLog) -> Self {
@@ -345,6 +349,7 @@ fn delivered(skill_id: &str, name: &str, v: &Version) -> DeliverySkill {
     DeliverySkill {
         skill_id: skill_id.into(),
         name: name.into(),
+        kind: "skill".into(),
         review_required: false,
         version_id: v.id,
         generation: 1,
@@ -390,12 +395,22 @@ impl DeliverySource for FakePlane {
             Err(_) => Err(PlaneError::NotFound),
         }
     }
-    fn report_applied(&self, _ws: &str, applied: &[(String, [u8; 32])]) -> Result<(), PlaneError> {
+    fn report_applied(
+        &self,
+        _ws: &str,
+        applied: &[crate::plane::AppliedSkillReport],
+    ) -> Result<(), PlaneError> {
         *self.reported.lock().unwrap() = applied
             .iter()
-            .map(|(id, v)| (id.clone(), topos_core::digest::to_hex(v)))
+            .map(|r| {
+                (
+                    r.skill_id.clone(),
+                    topos_core::digest::to_hex(&r.version_id),
+                    r.harnesses.clone(),
+                )
+            })
             .collect();
-        let mut ids: Vec<&str> = applied.iter().map(|(id, _)| id.as_str()).collect();
+        let mut ids: Vec<&str> = applied.iter().map(|r| r.skill_id.as_str()).collect();
         ids.sort_unstable();
         self.log
             .lock()
@@ -5961,7 +5976,7 @@ fn a_bundle_held_at_two_versions_reports_the_person_copy_and_discloses_the_split
     let reported = plane.reported.lock().unwrap().clone();
     let row = reported
         .iter()
-        .find(|(id, _)| id == "s_deploy")
+        .find(|(id, ..)| id == "s_deploy")
         .unwrap_or_else(|| panic!("the bundle is reported: {reported:?}"));
     assert_eq!(row.1, topos_core::digest::to_hex(&v2.id), "{reported:?}");
     // And the split the single row cannot carry is said out loud.

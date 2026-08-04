@@ -367,6 +367,7 @@ impl crate::plane::DeliverySource for UreqPlane {
                 review_required: ds.protection == "reviewed",
                 skill_id: ds.skill_id,
                 name: ds.name,
+                kind: ds.kind,
                 generation: ds.generation,
                 via_channels: ds.via.channels,
                 assigned_by: ds.via.assigned_by,
@@ -424,7 +425,7 @@ impl crate::plane::DeliverySource for UreqPlane {
     fn report_applied(
         &self,
         workspace_id: &str,
-        applied: &[(String, [u8; 32])],
+        applied: &[crate::plane::AppliedSkillReport],
     ) -> Result<(), PlaneError> {
         let cred = self.credential.clone().ok_or(PlaneError::NotFound)?;
         ensure_url_safe_ids("report", workspace_id)?;
@@ -433,13 +434,19 @@ impl crate::plane::DeliverySource for UreqPlane {
             schema_version: topos_types::WIRE_SCHEMA_VERSION,
             applied: applied
                 .iter()
-                .map(
-                    |(skill_id, commit)| topos_types::requests::WireAppliedSkill {
-                        skill_id: skill_id.clone(),
-                        version_id: topos_core::digest::to_hex(commit),
-                        harnesses: Vec::new(),
-                    },
-                )
+                .map(|row| topos_types::requests::WireAppliedSkill {
+                    skill_id: row.skill_id.clone(),
+                    version_id: topos_core::digest::to_hex(&row.version_id),
+                    harnesses: row
+                        .harnesses
+                        .iter()
+                        .map(|h| topos_types::requests::WireHarnessState {
+                            slug: h.agent.clone(),
+                            state: h.state.clone(),
+                            note: h.note.clone(),
+                        })
+                        .collect(),
+                })
                 .collect(),
         };
         let body = serde_json::to_vec(&report)
