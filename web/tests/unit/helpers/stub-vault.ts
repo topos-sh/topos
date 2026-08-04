@@ -47,6 +47,8 @@ function idFor(prefix: string, n: number): string {
 export async function startStubVault(): Promise<StubVault> {
   const versions = new Map<string, StubFile[]>();
   const objects = new Map<string, Buffer>();
+  /** The CAS generation per bundle — what a pointer move is fenced on. */
+  const generations = new Map<string, number>();
   const calls: StubCall[] = [];
   const published: StubVault["published"] = [];
   let minted = 0;
@@ -116,6 +118,68 @@ export async function startStubVault(): Promise<StubVault> {
               }
             : {}),
         });
+      });
+      return;
+    }
+
+    // The two POINTER MOVES: an approve promoting an existing version, and a revert carrying an
+    // older version's files forward as a new one. Both are CAS'd on the generation, so a stale
+    // `expected_generation` answers the vault's own 409 rather than moving anything.
+    const move = url.match(
+      /^\/internal\/v1\/workspaces\/([^/]+)\/bundles\/([^/]+)\/(pointer|revert)$/,
+    );
+    if (method === "POST" && move?.[1] && move[2] && move[3]) {
+      const [, ws, bundle, route] = move as unknown as [string, string, string, string];
+      const chunks: Buffer[] = [];
+      request.on("data", (chunk) => chunks.push(chunk as Buffer));
+      request.on("end", () => {
+        const body = JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}") as {
+          version_id?: string;
+          to_version_id?: string;
+          expected_generation?: number;
+        };
+        calls.push({ route, ws, bundle });
+        const genKey = key(ws, bundle, "generation");
+        const generation = generations.get(genKey) ?? 1;
+        if (
+          typeof body.expected_generation === "number" &&
+          body.expected_generation !== generation
+        ) {
+          return json(409, { code: "CONFLICT", generation });
+        }
+        const source = body.version_id ?? body.to_version_id ?? "";
+        const files = versions.get(key(ws, bundle, source));
+        if (files === undefined) {
+          return json(404, { code: "NOT_FOUND" });
+        }
+        // An approve points AT the version it was handed; a revert mints a new one carrying the
+        // good version's files (the forward commit), which is what the vault does.
+        let landed = source;
+        if (route === "revert") {
+          minted += 1;
+          landed = idFor("re", minted);
+          seed(ws, bundle, landed, files);
+        }
+        generations.set(genKey, generation + 1);
+        const pointer = {
+          version_id: landed,
+          generation: generation + 1,
+          moved_at_ms: Date.now(),
+          moved_by_display: "stub",
+          replayed: false,
+        };
+        return json(
+          200,
+          route === "pointer"
+            ? pointer
+            : {
+                version_id: landed,
+                commit_id: landed,
+                bundle_digest: "d".repeat(64),
+                deduped: false,
+                pointer,
+              },
+        );
       });
       return;
     }

@@ -2,6 +2,7 @@ import { and, eq, sql } from "drizzle-orm";
 import type { MemberActor, SessionActor } from "@/lib/auth/guards.server";
 import { auditInTx, mintProposalId } from "@/lib/db/identity.server";
 import { getDb } from "@/lib/db/index.server";
+import { lockMcpNamesInTx } from "@/lib/db/queries.mcp.server";
 import {
   bundle,
   channel,
@@ -11,6 +12,8 @@ import {
   proposal,
   workspace,
 } from "@/lib/db/schema.app";
+import { mcpNameTaken, serverDocumentOf } from "@/lib/mcp/catalog.server";
+import { type McpGateRefusal, mcpNameTakenRefusal } from "@/lib/mcp/publish-gate.server";
 
 /**
  * The custody-op ORCHESTRATION's data half — everything the publish/propose/review/revert
@@ -464,4 +467,42 @@ export async function resolveProposalInTx(
 /** Run one final-transaction body (the routes' row-write + receipt step). */
 export async function inFinalTx<T>(fn: (tx: Tx) => Promise<T>): Promise<T> {
   return await getDb().transaction(fn);
+}
+
+/**
+ * THE EMBEDDED-NAME CLAIM A POINTER MOVE MAKES. An `mcp` bundle carries a SECOND name — the
+ * registry name inside the version its `current` points at — and that name is unique across the
+ * workspace's active catalog, which is what keeps `…/servers/{name}` single-valued. Publishing,
+ * re-publishing and unarchiving all re-claim it under one per-workspace advisory lock; MOVING the
+ * pointer is the same claim by another route (an approve promotes a candidate that may rename the
+ * server; a revert carries an older name forward), so it takes the same lock and asks the same
+ * question about the version that is ABOUT to become current.
+ *
+ * Called inside the transaction that then performs the move: the lock is what makes check-then-
+ * move atomic against a publish claiming the name in between, and a transaction-scoped lock needs
+ * no release path. The scan rides THIS transaction's client (see `McpDbClient`).
+ *
+ * `null` is "claim it". Anything else is the refusal to answer with, in the words every other
+ * door uses. A version whose document this tier cannot read end to end refuses too: not
+ * provably free is not free, the same way an incomplete catalog scan is not.
+ */
+export async function mcpNameClaimRefusalInTx(
+  tx: Tx,
+  actor: MemberActor | SessionActor,
+  bundleId: string,
+  versionId: string,
+): Promise<McpGateRefusal | null> {
+  await lockMcpNamesInTx(tx, actor.workspaceId);
+  const document = await serverDocumentOf(actor.workspaceId, bundleId, versionId);
+  const serverName = typeof document?.name === "string" ? document.name : null;
+  if (serverName === null) {
+    return {
+      code: "MCP_NAME_TAKEN",
+      message:
+        "this version's server.json could not be read here, so the registry name it claims cannot be confirmed free",
+    };
+  }
+  // On the HELD client — a pool checkout under the lock is the exhaustion shape.
+  const taken = await mcpNameTaken(actor, serverName, bundleId, tx);
+  return taken.kind === "free" ? null : mcpNameTakenRefusal(serverName, taken);
 }

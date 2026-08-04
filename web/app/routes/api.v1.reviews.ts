@@ -16,6 +16,7 @@ import {
   inFinalTx,
   insertReceiptInTx,
   lockOpenProposalInTx,
+  mcpNameClaimRefusalInTx,
   publishTargetOf,
   resolveProposalInTx,
 } from "@/lib/db/queries.custody.server";
@@ -138,11 +139,38 @@ export async function action({ request }: ActionFunctionArgs): Promise<Response>
       await inFinalTx((tx) => insertReceiptInTx(tx, actor, head.opId, raw, envelope));
       return envelopeResponse(envelope);
     }
-    const moved = await movePointer(actor.workspaceId, target.bundleId, {
-      version_id: proposalId,
-      expected_generation: head.expected,
-      attribution: actor.display,
-    });
+    const promote = () =>
+      movePointer(actor.workspaceId, target.bundleId, {
+        version_id: proposalId,
+        expected_generation: head.expected,
+        attribution: actor.display,
+      });
+    // AN APPROVE IS A NAME CLAIM when the bundle is an MCP server: promoting the candidate makes
+    // the registry name INSIDE it this workspace's, and that name must be no other active
+    // bundle's — the same rule publish, re-publish and unarchive each enforce. The claim and the
+    // move ride ONE transaction holding the per-workspace name lock, so a publish cannot take the
+    // name between the check and the move; every other kind moves the pointer exactly as before.
+    const claimed =
+      target.kind === "mcp"
+        ? await inFinalTx(async (tx) => {
+            const refusal = await mcpNameClaimRefusalInTx(tx, actor, target.bundleId, proposalId);
+            return refusal === null
+              ? ({ refusal: null, moved: await promote() } as const)
+              : ({ refusal } as const);
+          })
+        : ({ refusal: null, moved: await promote() } as const);
+    if (claimed.refusal !== null) {
+      const envelope = deniedEnvelope(
+        "review",
+        claimed.refusal.code,
+        target.name,
+        buildReceipt({ ...receiptBase, outcome: "DENIED" }),
+        { message: claimed.refusal.message },
+      );
+      await inFinalTx((tx) => insertReceiptInTx(tx, actor, head.opId, raw, envelope));
+      return envelopeResponse(envelope);
+    }
+    const moved = claimed.moved;
     if (moved.kind === "not_found") {
       // The candidate's bytes are gone (purged/reclaimed) — the proposal cannot promote.
       const envelope = deniedEnvelope(

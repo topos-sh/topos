@@ -475,6 +475,180 @@ describe("the locked scan rides the held transaction client", () => {
   }, 20_000);
 });
 
+/**
+ * THE TWO DOORS THAT MOVE A POINTER WITHOUT PUBLISHING BYTES: approving a proposal, and
+ * reverting. Both make the version they land on this bundle's `current`, so both make the
+ * registry name INSIDE that version this workspace's — the very claim publish, re-publish and
+ * unarchive each refuse to grant twice. Without the check the sequence is: propose a rename onto
+ * a free name · someone else publishes and claims it · approve the proposal — and the workspace
+ * ends up with two active mcp bundles embedding one name, which makes the registry lane's
+ * `…/servers/{name}` a coin flip.
+ *
+ * Driven through the REAL served actions with a reviewer's bearer, against the scratch database
+ * and the stub vault: a denial that never reached a custody route is proven by an empty recorder.
+ */
+describe("promoting a version claims its embedded name", () => {
+  const REVIEWER_BEARER = "dk_reviewer";
+  const ORIGIN = "http://x";
+
+  async function reviewsPost(body: Record<string, unknown>): Promise<Record<string, unknown>> {
+    const { action } = await import("@/routes/api.v1.reviews");
+    const res = await action({
+      request: new Request(`${ORIGIN}/api/v1/reviews`, {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${REVIEWER_BEARER}`,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({ workspace_id: wsId, op_id: opId(), ...body }),
+      }),
+      params: {},
+      context: {},
+    } as unknown as Parameters<typeof action>[0]);
+    return (await res.json()) as Record<string, unknown>;
+  }
+
+  async function revertsPost(body: Record<string, unknown>): Promise<Record<string, unknown>> {
+    const { action } = await import("@/routes/api.v1.reverts");
+    const res = await action({
+      request: new Request(`${ORIGIN}/api/v1/reverts`, {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${REVIEWER_BEARER}`,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          workspace_id: wsId,
+          op_id: opId(),
+          expected: 1,
+          author: "Reviewer <r@b.test>",
+          message: "back to the good one",
+          ...body,
+        }),
+      }),
+      params: {},
+      context: {},
+    } as unknown as Parameters<typeof action>[0]);
+    return (await res.json()) as Record<string, unknown>;
+  }
+
+  /** A candidate version standing in the vault, pointed at by nothing — a proposal's bytes. */
+  function seedCandidate(bundleId: string, versionId: string, document: unknown): void {
+    vault.seed(wsId, bundleId, versionId, [
+      { path: "server.json", content: JSON.stringify(document, null, 2) },
+    ]);
+  }
+
+  async function openProposal(
+    id: string,
+    bundleId: string,
+    candidateVersionId: string,
+  ): Promise<void> {
+    await db.q(
+      `INSERT INTO web.proposal (id, workspace_id, bundle_id, candidate_version_id, proposed_by, status)
+       VALUES ($1, $2, $3, $4, 'u_rev', 'open')`,
+      [id, wsId, bundleId, candidateVersionId],
+    );
+  }
+
+  beforeAll(async () => {
+    await seedUser(db, "u_rev", "Reviewer", "reviewer@example.com");
+    await seatUser(db, wsId, "u_rev", "reviewer");
+    await seedSession(db, REVIEWER_BEARER, wsId, "u_rev");
+  });
+
+  it("refuses an approve whose candidate renames the server onto a taken name", async () => {
+    const HELD = { ...WEATHER, name: "io.github.acme/harbour" };
+    const RENAMER = { ...WEATHER, name: "io.github.acme/estuary" };
+    // The name the candidate would claim is already another active bundle's.
+    await seedPublishedServer("s_harbour", "harbour", HELD);
+    await seedPublishedServer("s_renamer", "estuary", RENAMER);
+    const candidate = "1a".repeat(32);
+    seedCandidate("s_renamer", candidate, { ...HELD, version: "9.9.9" });
+    await openProposal("p_rename", "s_renamer", candidate);
+
+    const envelope = await reviewsPost({
+      skill_id: "s_renamer",
+      expected: 1,
+      proposal: candidate,
+      decision: "approve",
+    });
+    expect(envelope.ok).toBe(false);
+    expect(errorOf(envelope)?.code).toBe("MCP_NAME_TAKEN");
+    expect(errorOf(envelope)?.context.message).toContain("harbour");
+    // The pointer never moved — the refusal preceded the custody call, and the proposal stands.
+    expect(vault.calls).toEqual([]);
+    const rows = await db.q<{ status: string }>(`SELECT status FROM web.proposal WHERE id = $1`, [
+      "p_rename",
+    ]);
+    expect(rows[0]?.status).toBe("open");
+  });
+
+  it("approves a candidate whose embedded name is free", async () => {
+    const FREE = { ...WEATHER, name: "io.github.acme/lagoon" };
+    await seedPublishedServer("s_lagoon", "lagoon", FREE);
+    const candidate = "2b".repeat(32);
+    seedCandidate("s_lagoon", candidate, { ...FREE, version: "1.2.0" });
+    await openProposal("p_lagoon", "s_lagoon", candidate);
+
+    const envelope = await reviewsPost({
+      skill_id: "s_lagoon",
+      expected: 1,
+      proposal: candidate,
+      decision: "approve",
+    });
+    expect(envelope.ok).toBe(true);
+    expect(vault.calls).toEqual([{ route: "pointer", ws: wsId, bundle: "s_lagoon" }]);
+    const rows = await db.q<{ status: string }>(`SELECT status FROM web.proposal WHERE id = $1`, [
+      "p_lagoon",
+    ]);
+    expect(rows[0]?.status).toBe("approved");
+  });
+
+  it("refuses a revert that would carry a taken name forward", async () => {
+    const HELD = { ...WEATHER, name: "io.github.acme/jetty" };
+    const NOW = { ...WEATHER, name: "io.github.acme/slipway" };
+    await seedPublishedServer("s_jetty", "jetty", HELD);
+    await seedPublishedServer("s_slipway", "slipway", NOW);
+    // The good version predates the rename: reverting to it re-claims s_jetty's name.
+    const good = "3c".repeat(32);
+    seedCandidate("s_slipway", good, { ...HELD, version: "0.9.0" });
+
+    const envelope = await revertsPost({ skill_id: "s_slipway", good });
+    expect(envelope.ok).toBe(false);
+    expect(errorOf(envelope)?.code).toBe("MCP_NAME_TAKEN");
+    expect(errorOf(envelope)?.context.message).toContain("jetty");
+    expect(vault.calls).toEqual([]);
+  });
+
+  it("reverts to a good version whose embedded name is this bundle's own", async () => {
+    const OWN = { ...WEATHER, name: "io.github.acme/quay" };
+    await seedPublishedServer("s_quay", "quay", OWN);
+    const good = "4d".repeat(32);
+    seedCandidate("s_quay", good, { ...OWN, version: "0.9.0" });
+
+    const envelope = await revertsPost({ skill_id: "s_quay", good });
+    expect(envelope.ok).toBe(true);
+    expect(vault.calls).toEqual([{ route: "revert", ws: wsId, bundle: "s_quay" }]);
+  });
+
+  it("leaves a plain skill's approve exactly as it was", async () => {
+    await seedBundle(db, wsId, "s_skill_prop", "skill-prop");
+    const candidate = "5e".repeat(32);
+    vault.seed(wsId, "s_skill_prop", candidate, [{ path: "SKILL.md", content: "# v2" }]);
+    await openProposal("p_skill", "s_skill_prop", candidate);
+
+    const envelope = await reviewsPost({
+      skill_id: "s_skill_prop",
+      expected: 1,
+      proposal: candidate,
+      decision: "approve",
+    });
+    expect(envelope.ok).toBe(true);
+    expect(vault.calls).toEqual([{ route: "pointer", ws: wsId, bundle: "s_skill_prop" }]);
+  });
+});
+
 describe("every other kind is untouched", () => {
   it("a skill publish carrying no server.json lands exactly as before", async () => {
     const envelope = await runFlow({

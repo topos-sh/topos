@@ -15,6 +15,7 @@ import {
   findReceipt,
   inFinalTx,
   insertReceiptInTx,
+  mcpNameClaimRefusalInTx,
   publishTargetOf,
 } from "@/lib/db/queries.custody.server";
 import { revertPointer } from "@/lib/plane/custody.server";
@@ -120,12 +121,39 @@ export async function action({ request }: ActionFunctionArgs): Promise<Response>
   // names exactly that version, so the custody lane records the wire's author + message
   // verbatim (a substituted display string would derive a different id and the client would
   // refuse the OK).
-  const reverted = await revertPointer(actor.workspaceId, target.bundleId, {
-    to_version_id: good,
-    expected_generation: head.expected,
-    attribution: author,
-    message,
-  });
+  const carryForward = () =>
+    revertPointer(actor.workspaceId, target.bundleId, {
+      to_version_id: good,
+      expected_generation: head.expected,
+      attribution: author,
+      message,
+    });
+  // A REVERT IS A NAME CLAIM TOO when the bundle is an MCP server: the good version's tree comes
+  // forward, registry name and all, and that name must be no other active bundle's — the rule
+  // every publishing door enforces. The claim and the move ride ONE transaction holding the
+  // per-workspace name lock (a publish cannot take the name in between); every other kind reverts
+  // exactly as before.
+  const claimed =
+    target.kind === "mcp"
+      ? await inFinalTx(async (tx) => {
+          const refusal = await mcpNameClaimRefusalInTx(tx, actor, target.bundleId, good);
+          return refusal === null
+            ? ({ refusal: null, reverted: await carryForward() } as const)
+            : ({ refusal } as const);
+        })
+      : ({ refusal: null, reverted: await carryForward() } as const);
+  if (claimed.refusal !== null) {
+    const envelope = deniedEnvelope(
+      "revert",
+      claimed.refusal.code,
+      target.name,
+      buildReceipt({ ...receiptBase, outcome: "DENIED" }),
+      { message: claimed.refusal.message },
+    );
+    await inFinalTx((tx) => insertReceiptInTx(tx, actor, head.opId, raw, envelope));
+    return envelopeResponse(envelope);
+  }
+  const reverted = claimed.reverted;
   if (reverted.kind === "conflict") {
     const receipt = buildReceipt({
       ...receiptBase,
