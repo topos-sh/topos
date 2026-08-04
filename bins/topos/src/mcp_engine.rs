@@ -82,11 +82,11 @@ pub(crate) struct ScopeIo<'a> {
     pub project_root: Option<PathBuf>,
 }
 
-/// One bundle's per-agent outcome this converge.
+/// One bundle's per-agent outcome this converge — answered by the IDENTITY the demand was filed
+/// under (receipt rows join on it; the display name is the row's own business).
 #[derive(Debug)]
 pub(crate) struct BundleStates {
     pub bundle_id: String,
-    pub name: String,
     pub states: Vec<McpAgentState>,
 }
 
@@ -497,7 +497,6 @@ pub(crate) fn converge(
         .enumerate()
         .map(|(i, d)| BundleStates {
             bundle_id: d.bundle_id.clone(),
-            name: d.name.clone(),
             states: states.remove(&i).unwrap_or_default(),
         })
         .collect();
