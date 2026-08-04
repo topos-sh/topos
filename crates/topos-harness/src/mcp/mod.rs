@@ -174,6 +174,44 @@ pub fn observe(dialect: McpDialect, current: Option<&[u8]>) -> Observed {
     }
 }
 
+/// Whether the surface holds ANY content beyond what topos itself writes: content outside the
+/// dialect's managed slot (comments and extra keys included), or a non-managed-looking entry
+/// inside it. The caller's whole-file-ownership reasoning — "may the file be DELETED when the
+/// last entry leaves?" — consults this, so the answer FAILS TOWARD KEEPING: anything
+/// indeterminate (unparseable, wrong-shaped) answers `true`. An absent or whitespace-only
+/// surface answers `false` (there is nothing there at all). Managed-LOOKING entries that are
+/// not in the caller's ledger are NOT this question — the drivers' `Foreign` state names them.
+#[must_use]
+pub fn holds_unmanaged_content(dialect: McpDialect, current: Option<&[u8]>) -> bool {
+    if effectively_absent(current) {
+        return false;
+    }
+    let bytes = current.unwrap_or_default();
+    match dialect {
+        McpDialect::ClaudeProjectJson
+        | McpDialect::CursorJson
+        | McpDialect::OpencodeJson
+        | McpDialect::OpenclawJson => jsonc_edit::holds_unmanaged(dialect, bytes),
+        McpDialect::CodexToml => toml_patch::holds_unmanaged(bytes),
+        McpDialect::HermesYaml => yaml_splice::holds_unmanaged(bytes),
+        // The plugin dir's `.mcp.json` is wholly topos-owned by construction: its exact shape
+        // holding only managed-looking keys, or somebody else's bytes.
+        McpDialect::ClaudePluginDir => {
+            let Ok(root) = serde_json::from_slice::<Value>(bytes) else {
+                return true;
+            };
+            let Some(obj) = root.as_object() else {
+                return true;
+            };
+            obj.iter().any(|(k, v)| {
+                k != "mcpServers"
+                    || v.as_object()
+                        .is_none_or(|m| m.keys().any(|key| !key.starts_with(MANAGED_KEY_PREFIX)))
+            })
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------------------------
 // The fingerprint — ONE canonical structural rendering shared by every dialect.
 // ---------------------------------------------------------------------------------------------
@@ -676,6 +714,91 @@ mod tests {
             "foreign never enters the ledger"
         );
         assert!(fp_of("topos-gone").is_none());
+    }
+
+    #[test]
+    fn holds_unmanaged_content_separates_topos_created_files_from_user_bytes() {
+        let file_dialects = [
+            McpDialect::ClaudeProjectJson,
+            McpDialect::CursorJson,
+            McpDialect::OpencodeJson,
+            McpDialect::OpenclawJson,
+            McpDialect::CodexToml,
+            McpDialect::HermesYaml,
+        ];
+        for d in file_dialects {
+            // Absent / whitespace-only: nothing there at all.
+            assert!(!holds_unmanaged_content(d, None), "{d:?}");
+            assert!(!holds_unmanaged_content(d, Some(b"  \n")), "{d:?}");
+            // A file topos created from scratch holds nothing unmanaged.
+            let created = apply(d, None, &[entry("topos-x", "https://x")], &BTreeMap::new());
+            let EditPlan::Write(bytes) = &created.plan else {
+                panic!("{d:?}: fresh apply writes");
+            };
+            assert!(!holds_unmanaged_content(d, Some(bytes)), "{d:?}");
+            // Garbage is indeterminate → true (fail toward keeping).
+            assert!(holds_unmanaged_content(d, Some(b"\xff\xfe")), "{d:?}");
+        }
+        // A NON-prefixed user entry inside the managed slot answers true in every dialect.
+        for (d, text) in [
+            (
+                McpDialect::CursorJson,
+                "{\n  \"mcpServers\": {\n    \"mine\": { \"url\": \"https://u\" }\n  }\n}\n",
+            ),
+            (
+                McpDialect::OpencodeJson,
+                "{\n  \"mcp\": {\n    \"mine\": { \"url\": \"https://u\" }\n  }\n}\n",
+            ),
+            (
+                McpDialect::OpenclawJson,
+                "{\n  \"mcp\": {\n    \"servers\": {\n      \"mine\": { \"url\": \"https://u\" }\n    }\n  }\n}\n",
+            ),
+            (
+                McpDialect::CodexToml,
+                "[mcp_servers.mine]\nurl = \"https://u\"\n",
+            ),
+            (
+                McpDialect::HermesYaml,
+                "mcp_servers:\n  mine: {url: \"https://u\"}\n",
+            ),
+        ] {
+            assert!(holds_unmanaged_content(d, Some(text.as_bytes())), "{d:?}");
+        }
+        // Content OUTSIDE the managed slot answers true; OpenCode's own $schema line does not.
+        assert!(holds_unmanaged_content(
+            McpDialect::CursorJson,
+            Some(b"{\n  \"mcpServers\": {},\n  \"theme\": \"dark\"\n}\n"),
+        ));
+        assert!(holds_unmanaged_content(
+            McpDialect::CodexToml,
+            Some(b"model = \"o5\"\n"),
+        ));
+        assert!(!holds_unmanaged_content(
+            McpDialect::OpencodeJson,
+            Some(b"{\n  \"$schema\": \"https://opencode.ai/config.json\",\n  \"mcp\": {}\n}\n"),
+        ));
+        assert!(holds_unmanaged_content(
+            McpDialect::OpencodeJson,
+            Some(
+                b"{\n  \"$schema\": \"https://elsewhere.example/schema.json\",\n  \"mcp\": {}\n}\n"
+            ),
+        ));
+        // A comment is user content even where the harness tolerates it (topos writes strict
+        // JSON everywhere).
+        assert!(holds_unmanaged_content(
+            McpDialect::OpenclawJson,
+            Some(b"// mine\n{\n  \"mcp\": { \"servers\": {} }\n}\n"),
+        ));
+        // The plugin dir's .mcp.json: its own shape is managed; anything else is not.
+        let rendered = plugin_dir::render_plugin_dir(&[entry("topos-a", "https://a")]);
+        assert!(!holds_unmanaged_content(
+            McpDialect::ClaudePluginDir,
+            Some(&rendered[1].1),
+        ));
+        assert!(holds_unmanaged_content(
+            McpDialect::ClaudePluginDir,
+            Some(b"{\n  \"mcpServers\": {\n    \"mine\": {}\n  }\n}\n"),
+        ));
     }
 
     #[test]

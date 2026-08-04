@@ -47,6 +47,10 @@ enum Strictness {
     Jsonc,
 }
 
+/// OpenCode's own fresh-file sibling — the ONE key a topos-created document carries beside the
+/// entries slot.
+const OPENCODE_SCHEMA: &str = "https://opencode.ai/config.json";
+
 /// One dialect's parameters: the key path to the entries object, the syntax mode, and the
 /// harness display name for honest `Unprovable` reasons.
 struct DialectSpec {
@@ -198,6 +202,45 @@ pub fn observe(dialect: McpDialect, current: Option<&[u8]>) -> Observed {
     Observed {
         entries: out,
         parseable: true,
+    }
+}
+
+/// Whether the file holds content beyond a topos-created document: any top-level key outside the
+/// dialect's own fresh-file shape, any non-`topos-` entry in the managed slot, or a syntax
+/// (comments, extensions, garbage) topos never writes — a topos-created file is STRICT JSON in
+/// every dialect, even OpenClaw's, which merely tolerates more. Fail-closed: anything
+/// unreadable answers `true` (the caller's whole-file-ownership reasoning fails TOWARD keeping
+/// the file).
+#[must_use]
+pub fn holds_unmanaged(dialect: McpDialect, bytes: &[u8]) -> bool {
+    let Some(spec) = dialect_spec(dialect) else {
+        return true;
+    };
+    let Ok(root) = serde_json::from_slice::<Value>(bytes) else {
+        return true;
+    };
+    walk_unmanaged(&root, spec.path, dialect)
+}
+
+/// The recursive half of [`holds_unmanaged`]: at each level of the key path only the slot key
+/// (and, at OpenCode's top level, its own `$schema` line at the exact fresh-file value) may
+/// exist; at the leaf every entry key must be managed-looking.
+fn walk_unmanaged(value: &Value, path: &[&str], dialect: McpDialect) -> bool {
+    let Some(obj) = value.as_object() else {
+        return true;
+    };
+    match path.split_first() {
+        None => obj.keys().any(|k| !k.starts_with(MANAGED_KEY_PREFIX)),
+        Some((slot, rest)) => obj.iter().any(|(k, v)| {
+            if k == *slot {
+                walk_unmanaged(v, rest, dialect)
+            } else {
+                !(dialect == McpDialect::OpencodeJson
+                    && path.len() == 1
+                    && k == "$schema"
+                    && v.as_str() == Some(OPENCODE_SCHEMA))
+            }
+        }),
     }
 }
 
@@ -435,7 +478,7 @@ fn fresh_doc(dialect: McpDialect, spec: &DialectSpec, desired: &[McpEntry]) -> V
         let mut with_schema = Map::new();
         with_schema.insert(
             "$schema".to_owned(),
-            Value::String("https://opencode.ai/config.json".to_owned()),
+            Value::String(OPENCODE_SCHEMA.to_owned()),
         );
         for (k, v) in std::mem::take(obj) {
             with_schema.insert(k, v);

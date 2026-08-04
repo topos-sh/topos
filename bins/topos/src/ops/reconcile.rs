@@ -1872,15 +1872,29 @@ fn mcp_filter(
         .collect()
 }
 
-/// The ledger identity of a LOCAL `kind = "mcp"` row: the tracked skill id when a store records
-/// the dir (custody survives a later publish, which keeps the id), else a name-keyed local
-/// identity.
+/// The ledger identity of a LOCAL `kind = "mcp"` row: the tracked skill id when THIS SCOPE'S
+/// OWN store records the dir (custody survives a later publish, which keeps the id), else a
+/// name-keyed local identity. ONLY the scope's store is asked — the same rule `add --mcp`'s
+/// inline converge minted the config key under — because the OTHER scope may track the same
+/// folder under its own id, and answering with it would retire this scope's standing key and
+/// re-mint a suffixed one: the one way a config entry's name could move, stranding any OAuth
+/// token a harness filed under it.
 fn local_bundle_identity(env: &Env<'_>, sc: &ScopeCtx<'_>, dir: &Path, display: &str) -> String {
-    let _ = sc;
+    let scope_layout = match &sc.scope {
+        ResolvedScope::Person => Some(env.ctx.layout.clone()),
+        ResolvedScope::Project { dir: project_dir } => {
+            sidecar::existing_project_store(env.ctx.fs, project_dir)
+        }
+    };
     dir.canonicalize()
         .ok()
-        .and_then(|canonical| owning_store_at(env.ctx, &canonical))
-        .map(|(_, id)| id)
+        .zip(scope_layout)
+        .and_then(|(canonical, layout)| {
+            let sctx = super::pull::ctx_with_layout(env.ctx, &layout);
+            super::add::tracked_skill_at(&sctx, &canonical)
+                .ok()
+                .flatten()
+        })
         .unwrap_or_else(|| format!("local:{display}"))
 }
 

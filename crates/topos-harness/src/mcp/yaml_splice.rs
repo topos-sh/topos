@@ -16,18 +16,20 @@
 //! double-quoted (PyYAML is YAML 1.1 — an unquoted scalar can coerce); header names follow the
 //! example spelling (bare for `[A-Za-z0-9_-]`, double-quoted otherwise); the entry key stays
 //! bare (`[a-z0-9-]` is safe). Managed lines are identified by the sentinel suffix ALONE, and
-//! only at the block's own child indent — a deeper look-alike (inside a nested value) is never
-//! claimed, never scrubbed.
+//! must sit at the block's own child indent: a sentinel-bearing line at ANY other indent inside
+//! the block fails the whole analysis closed — it may be OUR OWN entry re-indented (or a pasted
+//! copy of one), and reasoning around it could re-insert a key the block already holds, minting
+//! a duplicate YAML key that bricks the whole config.
 //!
 //! Unprovable (zero writes): a BOM; duplicate `mcp_servers:` keys; a flow-style value on the key
 //! line (any non-comment remainder after the colon); quoted/alternate key spellings; tab
-//! indentation in the block; a sentinel line whose KEY cannot even be read; a duplicate managed
-//! key. A sentinel line whose VALUE fails the flow parse is `Drifted` — untouched, never
-//! removed. When the key is absent the block is appended at EOF (one separating newline
-//! guaranteed); upserts land directly under the key line; removes/updates touch only their own
-//! line. Verified by construction AND assertion: the output minus sentinel lines must be
-//! byte-identical, in order, to the input minus sentinel lines — any surprise downgrades to
-//! [`EditPlan::Unprovable`].
+//! indentation in the block; a sentinel line at an indent other than the child indent; a
+//! sentinel line whose KEY cannot even be read; a duplicate managed key. A sentinel line whose
+//! VALUE fails the flow parse is `Drifted` — untouched, never removed. When the key is absent
+//! the block is appended at EOF (one separating newline guaranteed); upserts land directly under
+//! the key line; removes/updates touch only their own line. Verified by construction AND
+//! assertion: the output minus sentinel lines must be byte-identical, in order, to the input
+//! minus sentinel lines — any surprise downgrades to [`EditPlan::Unprovable`].
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -167,6 +169,39 @@ pub fn observe(current: Option<&[u8]>) -> Observed {
     }
 }
 
+/// Whether the file holds content beyond what topos itself writes: anything but the one bare
+/// `mcp_servers:` key line, blank lines, and sentinel-managed entry lines at the child indent.
+/// Comments, plain child keys, other top-level keys, and every unprovable shape answer `true` —
+/// the caller's whole-file-ownership reasoning fails TOWARD keeping the file.
+#[must_use]
+pub fn holds_unmanaged(bytes: &[u8]) -> bool {
+    let Ok(text) = std::str::from_utf8(bytes) else {
+        return true;
+    };
+    let Ok(shape) = analyze(text) else {
+        return true;
+    };
+    let lines = split_lines(text);
+    let (key_idx, managed_lines): (Option<usize>, BTreeSet<usize>) = match &shape {
+        Shape::NoKey => (None, BTreeSet::new()),
+        Shape::Region(region) => (
+            Some(region.key_idx),
+            region.managed.iter().map(|(i, _, _)| *i).collect(),
+        ),
+    };
+    lines.iter().enumerate().any(|(i, line)| {
+        if Some(i) == key_idx {
+            // The key line must be EXACTLY the bare spelling topos writes (a trailing comment
+            // is somebody's annotation).
+            return line.trim_end() != "mcp_servers:";
+        }
+        if managed_lines.contains(&i) {
+            return false;
+        }
+        !line.trim().is_empty()
+    })
+}
+
 // ---------------------------------------------------------------------------------------------
 // Analysis — the provable-shape gate.
 // ---------------------------------------------------------------------------------------------
@@ -275,7 +310,15 @@ fn analyze(text: &str) -> Result<Shape, String> {
         let trimmed = line.trim();
         if trimmed.ends_with(SENTINEL) {
             if indent_of(line) != child_indent {
-                continue; // a deeper look-alike — never claimed, never scrubbed
+                // FAIL-CLOSED, never skipped: an off-indent sentinel line may be OUR entry
+                // re-indented (or a pasted copy). Treating it as invisible would let the splice
+                // re-insert a key the block already holds — a duplicate YAML key that can brick
+                // the whole config — or silently drop the original from every report.
+                return Err(
+                    "a topos:mcp sentinel line sits at an unexpected indent under mcp_servers; \
+                     refusing to touch the block"
+                        .to_owned(),
+                );
             }
             let Some((key, body)) = trimmed.split_once(':') else {
                 return Err("a topos:mcp sentinel line has no readable key".to_owned());
@@ -803,14 +846,67 @@ mod tests {
     }
 
     #[test]
-    fn nested_sentinel_lookalikes_are_never_claimed() {
-        // A deeper-indented sentinel-suffixed line (inside some nested value) is not at the
-        // child indent — untouched, unreported, and never scrubbed.
-        const NESTED: &str =
-            "mcp_servers:\n  their: {url: \"https://x\"}\n    deep: {url: \"u\"}  # topos:mcp\n";
-        let out = apply(Some(NESTED.as_bytes()), &[], &BTreeMap::new());
-        assert_eq!(out.plan, EditPlan::Leave);
-        assert!(out.states.is_empty(), "{:?}", out.states);
+    fn off_indent_sentinel_lines_fail_the_whole_block_closed() {
+        let unprovable_zero_writes = |text: &str| {
+            let out = apply(
+                Some(text.as_bytes()),
+                &[entry("topos-x", "https://ours")],
+                &BTreeMap::new(),
+            );
+            let EditPlan::Unprovable(reason) = &out.plan else {
+                panic!("expected Unprovable for {text:?}, got {:?}", out.plan);
+            };
+            assert!(
+                reason.contains("indent") || reason.contains("duplicate managed key"),
+                "{reason}"
+            );
+            assert!(out.states.is_empty() && out.fingerprints.is_empty());
+            // And observe is honest about the same shape: unknowable, never a guess.
+            let o = observe(Some(text.as_bytes()));
+            assert!(!o.parseable && o.entries.is_empty(), "{text:?}");
+        };
+        // THE REVIEWER'S REPRODUCTION: a pasted sentinel entry at indent 4 sits ABOVE ours at
+        // indent 2. The first content line sets the detected child indent to 4, which used to
+        // make OUR indent-2 line invisible — a re-apply then minted a DUPLICATE `topos-x:` line
+        // (malformed YAML Hermes may reject whole, the original orphaned). Now: Unprovable,
+        // zero writes.
+        unprovable_zero_writes(
+            "mcp_servers:\n    topos-y: {url: \"https://pasted\"}  # topos:mcp\n  topos-x: {url: \"https://ours\"}  # topos:mcp\n",
+        );
+        // The same key on TWO sentinel lines at different indents.
+        unprovable_zero_writes(
+            "mcp_servers:\n    topos-x: {url: \"https://pasted\"}  # topos:mcp\n  topos-x: {url: \"https://ours\"}  # topos:mcp\n",
+        );
+        // A duplicate-same-key sentinel pair at the SAME indent.
+        unprovable_zero_writes(
+            "mcp_servers:\n  topos-x: {url: \"https://one\"}  # topos:mcp\n  topos-x: {url: \"https://two\"}  # topos:mcp\n",
+        );
+        // A deeper-indented look-alike inside a nested value fails closed too — it may equally
+        // be a re-indented managed line, and nothing is provable around it.
+        unprovable_zero_writes(
+            "mcp_servers:\n  their: {url: \"https://x\"}\n    deep: {url: \"u\"}  # topos:mcp\n",
+        );
+    }
+
+    #[test]
+    fn holds_unmanaged_separates_topos_only_files_from_user_content() {
+        // A wholly topos-created file (key line + sentinel entries) holds nothing unmanaged;
+        // neither does the post-removal skeleton or an empty file.
+        let ours = write_of(&apply(
+            None,
+            &[entry("topos-x", "https://x")],
+            &BTreeMap::new(),
+        ));
+        assert!(!holds_unmanaged(ours.as_bytes()));
+        assert!(!holds_unmanaged(b"mcp_servers:\n"));
+        assert!(!holds_unmanaged(b""));
+        // User content answers true: a plain child entry, another top-level key, a comment, a
+        // trailing comment on the key line, and every unprovable shape.
+        assert!(holds_unmanaged(b"mcp_servers:\n  their: {url: \"u\"}\n"));
+        assert!(holds_unmanaged(b"model: gpt-9\nmcp_servers:\n"));
+        assert!(holds_unmanaged(b"# my config\nmcp_servers:\n"));
+        assert!(holds_unmanaged(b"mcp_servers: # servers\n"));
+        assert!(holds_unmanaged("\u{feff}mcp_servers:\n".as_bytes()));
     }
 
     #[test]

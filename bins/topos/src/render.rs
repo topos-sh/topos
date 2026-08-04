@@ -647,7 +647,9 @@ pub(crate) fn add_tty(data: &AddData) -> String {
         out.push_str(&format!("note: {note}\n"));
     }
     // A SET reference (a channel, a feed, a whole repo) has no bytes of its own — the "Adopted @
-    // <version>" line would be a fabrication, so the receipt states what the row expands to.
+    // <version>" line would be a fabrication, so the receipt states what the row expands to. A
+    // LOCAL-PATH reference with no record is the fetched `add --mcp` arm (a pointer row, no
+    // version history minted): the receipt names the server recorded, never a channel.
     if data.skill_id.is_empty() {
         let sentence = match data
             .reference
@@ -660,6 +662,11 @@ pub(crate) fn add_tty(data: &AddData) -> String {
             ),
             Some(crate::manifest::keys::KeyShape::RepoSet { .. }) => format!(
                 "Added the '{}' repository — its skills deliver with `topos update`.",
+                data.name
+            ),
+            Some(crate::manifest::keys::KeyShape::LocalPath { .. }) => format!(
+                "Added the '{}' MCP server — its entry lands in each agent's own MCP config \
+                 (named above) and stays current with `topos update`.",
                 data.name
             ),
             _ => format!(
@@ -2913,13 +2920,60 @@ mod tests {
     use crate::ops::ListOutcome;
 
     use super::{
-        auth_status_next_actions, auth_status_tty, list_tty, log_tty, publish_tty, pull_tty,
-        safe_message, status_tty, welcome_tty,
+        add_tty, auth_status_next_actions, auth_status_tty, list_tty, log_tty, publish_tty,
+        pull_tty, safe_message, status_tty, welcome_tty,
     };
 
     /// A synthetic invocation for the render tests: what a user typed past the binary name.
     fn typed(tokens: &[&str]) -> Vec<String> {
         tokens.iter().map(|t| (*t).to_owned()).collect()
+    }
+
+    /// The fetched `add --mcp` arm's receipt (a local-path row, no version minted) names the MCP
+    /// server that was recorded — with the row, the per-agent note, and the undo — never a
+    /// channel.
+    #[test]
+    fn a_fetched_mcp_add_receipt_names_the_server_not_a_channel() {
+        let data = topos_types::results::AddData {
+            skill_id: String::new(),
+            name: "weather".to_owned(),
+            version_id: "0".repeat(64),
+            bundle_digest: "0".repeat(64),
+            tracked: true,
+            harness: None,
+            harness_slug: None,
+            currency: None,
+            triggers: Vec::new(),
+            origin: None,
+            manifest: Some("/home/u/.topos/topos.toml".to_owned()),
+            reference: Some("/home/u/.topos/mcp/weather".to_owned()),
+            undo: vec![
+                "topos".to_owned(),
+                "remove".to_owned(),
+                "-g".to_owned(),
+                "/home/u/.topos/mcp/weather".to_owned(),
+            ],
+            governed_copy: None,
+            published_match: None,
+            note: Some(
+                "MCP server io.github.acme/weather v1.4.0 — https://weather.acme.example/mcp \
+                 over streamable-http · cursor: server entry in /home/u/.cursor/mcp.json"
+                    .to_owned(),
+            ),
+        };
+        let text = add_tty(&data);
+        assert!(text.contains("MCP server"), "{text}");
+        assert!(
+            !text.contains("channel"),
+            "an MCP import is not a channel: {text}"
+        );
+        // The row + undo lead; the per-agent note rides along.
+        assert!(
+            text.contains("undo: topos remove -g /home/u/.topos/mcp/weather"),
+            "{text}"
+        );
+        assert!(text.contains("cursor: server entry in"), "{text}");
+        assert!(text.contains("'weather'"), "{text}");
     }
 
     fn row(name: &str, action: PullAction) -> PullSkill {

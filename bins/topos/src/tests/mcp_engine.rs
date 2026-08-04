@@ -229,10 +229,13 @@ fn mk_version(files: &[(&str, &[u8])]) -> Version {
     }
 }
 
-/// The common server.json fixture (no auth hint = Unknown).
+/// The common server.json fixture (no auth hint = Unknown) — GATE-VALID: the converge re-runs
+/// the full `mcp_validate` gate on every demand's bytes, exactly as real stored bundles passed
+/// it at publish.
 fn server_json(url: &str) -> String {
     format!(
-        "{{\"name\":\"io.test/x\",\"remotes\":[{{\"type\":\"streamable-http\",\"url\":\"{url}\",\
+        "{{\"name\":\"io.test/x\",\"description\":\"A test server.\",\"version\":\"1.0.0\",\
+         \"remotes\":[{{\"type\":\"streamable-http\",\"url\":\"{url}\",\
          \"headers\":[{{\"name\":\"X-Team\",\"value\":\"eng\"}}]}}]}}"
     )
 }
@@ -888,13 +891,13 @@ fn the_oauth_capability_filter_withholds_unknown_and_oauth_servers() {
     let unknown = demand("s_u", "u", Some("eng"), &server_json("https://u.example"));
     let oauth = {
         let mut d = demand("s_o", "o", Some("eng"), "");
-        d.server_json = br#"{"remotes":[{"type":"streamable-http","url":"https://o.example"}],"_meta":{"sh.topos/auth":"oauth"}}"#
+        d.server_json = br#"{"name":"io.test/o","description":"O.","version":"1.0.0","remotes":[{"type":"streamable-http","url":"https://o.example"}],"_meta":{"sh.topos/auth":"oauth"}}"#
             .to_vec();
         d
     };
     let none = {
         let mut d = demand("s_n", "n", Some("eng"), "");
-        d.server_json = br#"{"remotes":[{"type":"streamable-http","url":"https://n.example"}],"_meta":{"sh.topos/auth":"none"}}"#
+        d.server_json = br#"{"name":"io.test/n","description":"N.","version":"1.0.0","remotes":[{"type":"streamable-http","url":"https://n.example"}],"_meta":{"sh.topos/auth":"none"}}"#
             .to_vec();
         d
     };
@@ -923,11 +926,13 @@ fn a_suspect_header_fails_the_demand_closed_with_a_warning() {
     let layout = Layout::new(&home.0.join(".topos"));
     let io = person_io(&fs, &layout, &home.0);
     let mut d = demand("s_a", "alpha", Some("eng"), "");
-    d.server_json = br#"{"remotes":[{"type":"streamable-http","url":"https://a.example","headers":[{"name":"Authorization","isSecret":true}]}]}"#.to_vec();
+    d.server_json = br#"{"name":"io.test/a","description":"A.","version":"1.0.0","remotes":[{"type":"streamable-http","url":"https://a.example","headers":[{"name":"Authorization","isSecret":true}]}]}"#.to_vec();
     d.harness_filter = vec!["cursor".into()];
     let out = mcp_engine::converge(&io, &[d], SYNTHETIC, &all_slugs(), &no_hold(), true);
     assert!(
-        out.warnings.iter().any(|w| w.contains("marked secret")),
+        out.warnings
+            .iter()
+            .any(|w| w.contains("MCP_SECRET_REFUSED")),
         "{:?}",
         out.warnings
     );
@@ -936,6 +941,178 @@ fn a_suspect_header_fails_the_demand_closed_with_a_warning() {
         !home.0.join(".cursor/mcp.json").exists(),
         "nothing was placed"
     );
+}
+
+/// F1's byte-loss belt, per dialect: a NON-prefixed user entry added to a file topos CREATED is
+/// invisible to the drivers' states — the last-entry removal must still never delete the file
+/// over it.
+#[test]
+fn a_user_entry_added_to_a_topos_created_file_survives_last_entry_removal() {
+    type Inject = Box<dyn Fn(&str) -> String>;
+    let json_inject = |path: &[&str]| -> Inject {
+        let path: Vec<String> = path.iter().map(|s| (*s).to_owned()).collect();
+        Box::new(move |text: &str| {
+            let mut root: serde_json::Value = serde_json::from_str(text).unwrap();
+            let mut slot = &mut root;
+            for key in &path {
+                slot = slot.get_mut(key).unwrap();
+            }
+            slot.as_object_mut().unwrap().insert(
+                "mine".to_owned(),
+                serde_json::json!({ "url": "https://user.example" }),
+            );
+            let mut out = serde_json::to_string_pretty(&root).unwrap();
+            out.push('\n');
+            out
+        })
+    };
+    let cases: Vec<(&str, &str, &str, Inject)> = vec![
+        (
+            "cursor",
+            ".cursor/mcp.json",
+            "mine",
+            json_inject(&["mcpServers"]),
+        ),
+        (
+            "opencode",
+            ".opencode/opencode.json",
+            "mine",
+            json_inject(&["mcp"]),
+        ),
+        (
+            "openclaw",
+            ".openclaw/openclaw.json",
+            "mine",
+            json_inject(&["mcp", "servers"]),
+        ),
+        (
+            "codex",
+            ".codex/config.toml",
+            "model",
+            Box::new(|text: &str| format!("model = \"o5\"\n{text}")) as Inject,
+        ),
+        (
+            "hermes-agent",
+            ".hermes/config.yaml",
+            "their",
+            Box::new(|text: &str| format!("{text}  their: {{url: \"https://user.example\"}}\n"))
+                as Inject,
+        ),
+    ];
+    for (slug, rel, user_marker, inject) in cases {
+        let home = Scratch::new(&format!("keep-{slug}"));
+        let fs = RealFs;
+        let layout = Layout::new(&home.0.join(".topos"));
+        let io = person_io(&fs, &layout, &home.0);
+        let mut d = demand(
+            "s_a",
+            "alpha",
+            Some("eng"),
+            &server_json("https://mcp.example/a"),
+        );
+        d.harness_filter = vec![slug.to_owned()];
+        mcp_engine::converge(
+            &io,
+            std::slice::from_ref(&d),
+            SYNTHETIC,
+            &all_slugs(),
+            &no_hold(),
+            true,
+        );
+        let file = home.0.join(rel);
+        let created = std::fs::read_to_string(&file).unwrap_or_else(|e| panic!("{slug}: {e}"));
+        // The USER adds a plain (non-topos) entry to the file topos created.
+        std::fs::write(&file, inject(&created)).unwrap();
+
+        // The demand drops: our entry leaves, the FILE STAYS with the user's content.
+        let out = mcp_engine::converge(&io, &[], SYNTHETIC, &all_slugs(), &no_hold(), true);
+        assert!(out.warnings.is_empty(), "{slug}: {:?}", out.warnings);
+        let kept = std::fs::read_to_string(&file)
+            .unwrap_or_else(|e| panic!("{slug}: the file was deleted over a user entry: {e}"));
+        assert!(
+            kept.contains(user_marker),
+            "{slug}: the user's entry survives: {kept}"
+        );
+        assert!(
+            !kept.contains("topos-eng-alpha"),
+            "{slug}: ours is gone: {kept}"
+        );
+        let ledger = mcp_ledger::read(&fs, &layout).unwrap();
+        assert!(!ledger.has_entries_for("s_a"), "{slug}");
+    }
+}
+
+/// F1 belt two: the moment a converge OBSERVES user content in a file topos created, the
+/// ledger's whole-file-ownership flag goes false — a later removal can never trust a flag the
+/// file has outgrown.
+#[test]
+fn a_converge_that_sees_user_content_flips_owns_file_false() {
+    let home = Scratch::new("flip");
+    let fs = RealFs;
+    let layout = Layout::new(&home.0.join(".topos"));
+    let io = person_io(&fs, &layout, &home.0);
+    let mut d = demand(
+        "s_a",
+        "alpha",
+        Some("eng"),
+        &server_json("https://mcp.example/a"),
+    );
+    d.harness_filter = vec!["cursor".into()];
+    mcp_engine::converge(
+        &io,
+        std::slice::from_ref(&d),
+        SYNTHETIC,
+        &all_slugs(),
+        &no_hold(),
+        true,
+    );
+    let lk = mcp_ledger::placement_key("cursor", "topos-eng-alpha");
+    assert!(
+        mcp_ledger::read(&fs, &layout).unwrap().entries[&lk].owns_file,
+        "created → wholly owned"
+    );
+    // The user adds a plain entry; the next converge (demand unchanged, a LEAVE) must record
+    // that the file is no longer wholly ours.
+    let cursor = home.0.join(".cursor/mcp.json");
+    let mut root: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&cursor).unwrap()).unwrap();
+    root["mcpServers"].as_object_mut().unwrap().insert(
+        "mine".to_owned(),
+        serde_json::json!({ "url": "https://user.example" }),
+    );
+    std::fs::write(&cursor, serde_json::to_string_pretty(&root).unwrap() + "\n").unwrap();
+    let out = mcp_engine::converge(
+        &io,
+        std::slice::from_ref(&d),
+        SYNTHETIC,
+        &all_slugs(),
+        &no_hold(),
+        true,
+    );
+    assert_eq!(state_of(&out, "s_a", "cursor").state, "current");
+    assert!(
+        !mcp_ledger::read(&fs, &layout).unwrap().entries[&lk].owns_file,
+        "the flag stops lying at the first sighting"
+    );
+}
+
+/// F4: the engine resolves the SAME remote the publish gate approved — the first with
+/// `type == "streamable-http"` AND a url, in one predicate. A url-less streamable remote ahead
+/// of the real one must not fail (or redirect) the demand.
+#[test]
+fn the_engine_places_the_remote_the_gate_approved_not_the_first_typed_one() {
+    let home = Scratch::new("remote-pick");
+    let fs = RealFs;
+    let layout = Layout::new(&home.0.join(".topos"));
+    let io = person_io(&fs, &layout, &home.0);
+    let mut d = demand("s_two", "two", Some("eng"), "");
+    d.server_json = br#"{"name":"io.test/two","description":"Two remotes.","version":"1.0.0","remotes":[{"type":"streamable-http"},{"type":"streamable-http","url":"https://second.example/mcp"}]}"#.to_vec();
+    d.harness_filter = vec!["cursor".into()];
+    let out = mcp_engine::converge(&io, &[d], SYNTHETIC, &all_slugs(), &no_hold(), true);
+    assert!(out.warnings.is_empty(), "{:?}", out.warnings);
+    assert_eq!(state_of(&out, "s_two", "cursor").state, "current");
+    let text = std::fs::read_to_string(home.0.join(".cursor/mcp.json")).unwrap();
+    assert!(text.contains("https://second.example/mcp"), "{text}");
 }
 
 #[test]
@@ -1553,6 +1730,70 @@ fn row_harness_narrowing_beats_defaults_and_unknown_slugs_warn_once() {
     );
 }
 
+/// F3: a local `kind = "mcp"` row's `server.json` is re-read from disk EVERY sweep — a
+/// post-adopt edit smuggling a credential, an insecure endpoint, or a template must be refused
+/// at the converge boundary with the typed code: nothing new placed, the standing entries left
+/// as-is (removal only on demand-drop, never on a now-invalid source).
+#[test]
+fn a_tampered_local_row_is_held_with_the_typed_refusal_and_prior_entries_stay() {
+    let rig = Rig::new("tamper");
+    seed_harness_dirs(&rig.home.0);
+    let dir = rig.home.0.join("weather");
+    std::fs::create_dir_all(&dir).unwrap();
+    let good = |url: &str, header_value: &str| {
+        format!(
+            "{{\"name\":\"io.test/w\",\"description\":\"W.\",\"version\":\"1.0.0\",\
+             \"remotes\":[{{\"type\":\"streamable-http\",\"url\":\"{url}\",\
+             \"headers\":[{{\"name\":\"X-R\",\"value\":\"{header_value}\"}}]}}]}}"
+        )
+    };
+    std::fs::write(dir.join("server.json"), good("https://w.example/mcp", "eu")).unwrap();
+    rig.write_global(&format!(
+        "[bundles]\n\"{}\" = {{ kind = \"mcp\", harness = [\"cursor\"] }}\n",
+        dir.display()
+    ));
+    let plane = FakePlane::new();
+    let fdir = FakeDirectory {
+        skills: Vec::new(),
+        channels: Vec::new(),
+    };
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    let out = sweep(&ctx, &plane, &fdir);
+    assert!(out.warnings.is_empty(), "{:?}", out.warnings);
+    let cursor = rig.home.0.join(".cursor/mcp.json");
+    let placed = std::fs::read_to_string(&cursor).unwrap();
+    assert!(placed.contains("https://w.example/mcp"), "{placed}");
+
+    // Each tamper: the sweep warns with the TYPED refusal code, the config file stays
+    // byte-identical (the credential never reaches it), and the ledger keeps the entry.
+    let token = format!("ghp_{}", "A1b2C3d4E5".repeat(4));
+    for (tampered, code) in [
+        (good("https://w.example/mcp", &token), "MCP_SECRET_REFUSED"),
+        (good("http://w.example/mcp", "eu"), "MCP_INSECURE_URL"),
+        (
+            good("https://{tenant}.example/mcp", "eu"),
+            "MCP_URL_TEMPLATE",
+        ),
+    ] {
+        std::fs::write(dir.join("server.json"), &tampered).unwrap();
+        let out = sweep(&ctx, &plane, &fdir);
+        assert!(
+            out.warnings.iter().any(|w| w.contains(code)),
+            "{code}: {:?}",
+            out.warnings
+        );
+        let now = std::fs::read_to_string(&cursor).unwrap();
+        assert_eq!(now, placed, "{code}: the placed config never moves");
+        assert!(!now.contains("ghp_"), "{code}: no credential lands");
+        assert!(
+            mcp_ledger::read(&rig.fs, &rig.layout())
+                .unwrap()
+                .has_entries_for("local:weather"),
+            "{code}: the standing entry is held, not dropped"
+        );
+    }
+}
+
 #[test]
 fn a_github_sourced_mcp_row_is_refused_with_the_typed_constraint() {
     let rig = Rig::new("ghmcp");
@@ -1571,6 +1812,73 @@ fn a_github_sourced_mcp_row_is_refused_with_the_typed_constraint() {
             .any(|w| w.contains("MCP_GITHUB_UNSUPPORTED")),
         "{:?}",
         out.warnings
+    );
+}
+
+/// F6: the SAME folder adopted in BOTH scopes must keep each scope's config key stable. The
+/// reconcile resolves a local row's ledger identity against THE SCOPE'S OWN store — never the
+/// other scope's — because add-time minted the key under the scope's tracked id, and a
+/// cross-scope answer would retire that key and re-mint `-2` (the one path an entry name could
+/// move, orphaning any OAuth token filed under it).
+#[test]
+fn dual_scope_adoption_keeps_each_scopes_config_key_stable() {
+    let rig = Rig::new("dual");
+    seed_harness_dirs(&rig.home.0);
+    rig.write_global("[bundles]\n");
+    let proj = Scratch::new("dual-proj");
+    std::fs::create_dir_all(proj.0.join(".git")).unwrap();
+    std::fs::write(proj.0.join(crate::manifest::MANIFEST_FILE), "[bundles]\n").unwrap();
+    let dir = proj.0.join("weather");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("server.json"),
+        "{\"name\":\"io.test/w\",\"description\":\"W.\",\"version\":\"1.0.0\",\
+         \"remotes\":[{\"type\":\"streamable-http\",\"url\":\"https://w.example/mcp\"}]}",
+    )
+    .unwrap();
+    let ctx = rig.ctx_at(Some(&proj.0));
+    // Adopt at PROJECT scope (the checkout's store tracks the dir under the project id), then
+    // the SAME folder with `-g` (the home store tracks it under its own id).
+    let ops::AddMcpOutcome::Applied(_) =
+        ops::add_mcp(&ctx, None, dir.to_str().unwrap(), false, false).expect("project adopt")
+    else {
+        panic!("a local folder applies immediately");
+    };
+    let ops::AddMcpOutcome::Applied(_) =
+        ops::add_mcp(&ctx, None, dir.to_str().unwrap(), true, false).expect("global adopt")
+    else {
+        panic!("a local folder applies immediately");
+    };
+    let playout = crate::sidecar::existing_project_store(&rig.fs, &proj.0)
+        .expect("the project adopt minted the checkout's store");
+    let before = mcp_ledger::read(&rig.fs, &playout).unwrap();
+    assert_eq!(before.keys.len(), 1, "{before:?}");
+    let (proj_bundle, proj_key) = before.keys.iter().next().unwrap();
+    let (proj_bundle, proj_key) = (proj_bundle.clone(), proj_key.clone());
+    let cursor = proj.0.join(".cursor/mcp.json");
+    let placed = std::fs::read_to_string(&cursor).unwrap();
+    assert!(placed.contains(&proj_key), "{placed}");
+
+    // The sweep must resolve the SAME identity the add minted the key under: no retire, no
+    // `-2` re-mint, the config entry's name never moves.
+    let plane = FakePlane::new();
+    let fdir = FakeDirectory {
+        skills: Vec::new(),
+        channels: Vec::new(),
+    };
+    sweep(&ctx, &plane, &fdir);
+    let after = mcp_ledger::read(&rig.fs, &playout).unwrap();
+    assert_eq!(
+        after.keys.get(&proj_bundle),
+        Some(&proj_key),
+        "the project scope's key must survive the sweep: {after:?}"
+    );
+    assert!(after.retired.is_empty(), "nothing was retired: {after:?}");
+    let now = std::fs::read_to_string(&cursor).unwrap();
+    assert!(now.contains(&proj_key), "{now}");
+    assert!(
+        !now.contains(&format!("{proj_key}-2")),
+        "the entry name never moves: {now}"
     );
 }
 

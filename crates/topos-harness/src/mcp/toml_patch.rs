@@ -148,6 +148,42 @@ pub fn observe(current: Option<&[u8]>) -> Observed {
     }
 }
 
+/// Whether the file holds content beyond topos's own `[mcp_servers.topos-*]` tables. The check
+/// is the driver's own scrub: remove every managed-looking child (and the emptied parent) and
+/// ask whether anything still renders. A comment attached to one of OUR tables travels with it —
+/// exactly as the driver's removal moves it — and everything else survives the scrub and
+/// answers `true`. Fail-closed: unparseable answers `true` (the caller's whole-file-ownership
+/// reasoning fails TOWARD keeping the file).
+#[must_use]
+pub fn holds_unmanaged(bytes: &[u8]) -> bool {
+    let Ok(text) = std::str::from_utf8(bytes) else {
+        return true;
+    };
+    let Ok(mut doc) = text.parse::<DocumentMut>() else {
+        return true;
+    };
+    match doc.get_mut(SERVERS_KEY) {
+        None => {}
+        Some(item) => {
+            let Some(servers) = item.as_table_mut() else {
+                return true; // a spelling topos never writes
+            };
+            let managed: Vec<String> = servers
+                .iter()
+                .filter(|(k, _)| k.starts_with(MANAGED_KEY_PREFIX))
+                .map(|(k, _)| k.to_owned())
+                .collect();
+            for key in &managed {
+                servers.remove(key);
+            }
+            if servers.is_empty() {
+                doc.remove(SERVERS_KEY);
+            }
+        }
+    }
+    !doc.to_string().trim().is_empty()
+}
+
 // ---------------------------------------------------------------------------------------------
 // Reading + rendering.
 // ---------------------------------------------------------------------------------------------

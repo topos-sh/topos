@@ -17,7 +17,10 @@
 //!   redirected),
 //! - removal convergence: ledger entries whose bundle is no longer demanded leave through the
 //!   drivers' prior-matched removal; DRIFTED entries are left byte-identical and disclosed; a
-//!   file topos created and still wholly owned is deleted when its last entry leaves,
+//!   file topos created and still wholly owned is deleted when its last entry leaves — behind a
+//!   double belt: `owns_file` is invalidated at the FIRST sighting of any content beyond our
+//!   managed entries, and the delete re-reads the post-image and fires only when it is
+//!   structurally empty (a plain user entry a driver's states cannot see is never destroyed),
 //! - the wholly-topos-owned Claude Code plugin dir (rendered whole — never patched).
 //!
 //! The engine is OFFLINE by construction: demands carry the stored `server.json` bytes, so a dead
@@ -134,10 +137,16 @@ fn parse_server_json(bytes: &[u8]) -> Result<ParsedServer, String> {
         .get("remotes")
         .and_then(Value::as_array)
         .ok_or_else(|| "server.json carries no remotes[] list".to_owned())?;
+    // The FIRST remote with `type == "streamable-http"` AND a url — ONE predicate, the same
+    // pick the gate makes (`crate::mcp_validate`), so the engine can never resolve a different
+    // remote than the one the gate approved.
     let remote = remotes
         .iter()
-        .find(|r| r.get("type").and_then(Value::as_str) == Some("streamable-http"))
-        .ok_or_else(|| "server.json carries no streamable-http remote".to_owned())?;
+        .find(|r| {
+            r.get("type").and_then(Value::as_str) == Some("streamable-http")
+                && r.get("url").and_then(Value::as_str).is_some()
+        })
+        .ok_or_else(|| "server.json carries no streamable-http remote with a url".to_owned())?;
     let url = remote
         .get("url")
         .and_then(Value::as_str)
@@ -230,12 +239,20 @@ pub(crate) fn converge(
         return out;
     }
 
-    // Parse every demand once. A parse/gate failure HOLDS the bundle (its standing entries must
-    // not read as undemanded) and reports per engaged harness below.
+    // Parse every demand once. The FULL server-document gate (`mcp_validate`) re-runs on the
+    // demand bytes here, fail-closed, BEFORE the placement parse: a local row's `server.json` is
+    // re-read from disk every converge and can have been edited since it was adopted (a smuggled
+    // credential, an http endpoint, a template), and the converge boundary trusts no earlier
+    // check — content-addressed workspace bytes were gated at publish, but the re-check is one
+    // call. A refusal HOLDS the bundle (its standing entries must not read as undemanded,
+    // nothing new is placed) and the warning names the typed refusal code.
     let mut parsed: Vec<(usize, ParsedServer)> = Vec::new();
     let mut failed: BTreeMap<usize, String> = BTreeMap::new();
     for (i, d) in demands.iter().enumerate() {
-        match parse_server_json(&d.server_json) {
+        let gated = crate::mcp_validate::validate_server_json(&d.server_json)
+            .map_err(|r| format!("{}: {}", r.code.as_str(), r.message))
+            .and_then(|_| parse_server_json(&d.server_json));
+        match gated {
             Ok(p) => parsed.push((i, p)),
             Err(reason) => {
                 out.warnings.push(format!(
@@ -700,6 +717,10 @@ fn converge_file(
     if desired.is_empty() && prior.is_empty() {
         return SurfaceOutcome::empty();
     }
+    // Whether the file holds ANY content beyond topos-managed entries. The drivers classify only
+    // managed-LOOKING keys, so a plain user entry added to a topos-created file is invisible to
+    // their states — this is the sighting that makes the whole-file-ownership flag stop lying.
+    let unmanaged = mcp::holds_unmanaged_content(dialect, current.as_deref());
     let outcome = mcp::apply(dialect, current.as_deref(), desired, &prior);
     match outcome.plan {
         EditPlan::Unprovable(reason) => SurfaceOutcome::unprovable(desired, h, path, &reason),
@@ -714,11 +735,15 @@ fn converge_file(
                 provenance,
                 false,
             );
+            if unmanaged {
+                surface.ledger_dirty |= clear_owns_file(ledger, h.slug, path);
+            }
             surface
         }
         EditPlan::Write(bytes) => {
             // Whole-file ownership for the NEXT ledger state: topos creates the file now, or it
-            // owned every byte at the last write AND this reconcile saw nothing that is not ours.
+            // owned every byte at the last write AND this reconcile saw nothing that is not ours
+            // — neither a drifted/foreign managed entry NOR any unmanaged content.
             let owned_before = {
                 let prefix = format!("{}/", h.slug);
                 let mine: Vec<&LedgerEntry> = ledger
@@ -733,7 +758,8 @@ fn converge_file(
                 .states
                 .iter()
                 .all(|(_, s)| !matches!(s, EntryState::Drifted | EntryState::Foreign));
-            let owns_file = outcome.created_file || (owned_before && all_ours && kept.is_empty());
+            let owns_file =
+                outcome.created_file || (owned_before && all_ours && kept.is_empty() && !unmanaged);
 
             let intents = write_intents(
                 ledger,
@@ -753,12 +779,16 @@ fn converge_file(
                     surface.ledger_dirty = true;
                     // The file topos wholly owned just lost its LAST entry: nothing of ours
                     // remains — delete it (through the seam; the write above already proved the
-                    // path safe).
+                    // path safe). CONSERVATIVE BELT before any whole-file delete: RE-READ the
+                    // just-written post-image and delete ONLY when it is structurally empty —
+                    // no managed entries left AND nothing beyond the fresh-creation skeleton.
+                    // The ownership flag is a recorded claim; the post-image is the fact.
                     if desired.is_empty()
                         && owns_file
                         && !ledger.entries.iter().any(|(k, e)| {
                             k.starts_with(&format!("{}/", h.slug)) && Path::new(&e.file) == path
                         })
+                        && post_image_structurally_empty(io, dialect, path)
                         && io.fs.remove_file(path).is_ok()
                     {
                         surface.warnings.push(format!(
@@ -773,6 +803,35 @@ fn converge_file(
             }
         }
     }
+}
+
+/// Belt two of the whole-file-ownership discipline: the ledger's `owns_file` flags for `path` go
+/// false the moment a converge OBSERVES content in the file beyond topos's managed entries — so
+/// a later removal can never trust a flag the file has outgrown.
+fn clear_owns_file(ledger: &mut McpLedger, slug: &str, path: &Path) -> bool {
+    let prefix = format!("{slug}/");
+    let mut dirty = false;
+    for (k, e) in &mut ledger.entries {
+        if k.starts_with(&prefix) && Path::new(&e.file) == path && e.owns_file {
+            e.owns_file = false;
+            dirty = true;
+        }
+    }
+    dirty
+}
+
+/// Belt one, at the delete boundary: re-read the just-written post-image and answer whether
+/// NOTHING but our removal remains — provably readable, zero managed entries, and no content
+/// beyond what a fresh topos-created file would hold. Any read failure or indeterminate shape
+/// answers `false` (the file is kept; a stray skeleton is recoverable, destroyed bytes are not).
+fn post_image_structurally_empty(io: &ScopeIo<'_>, dialect: McpDialect, path: &Path) -> bool {
+    let Ok(post) = io.fs.read_opt(path) else {
+        return false;
+    };
+    let observed = mcp::observe(dialect, post.as_deref());
+    observed.parseable
+        && observed.entries.is_empty()
+        && !mcp::holds_unmanaged_content(dialect, post.as_deref())
 }
 
 /// The pending intents one Write commits: every fingerprint that differs from the standing entry
