@@ -48,6 +48,13 @@ export interface CuratedMcpServer {
   auth: "oauth" | "none";
   /** The remote `streamable-http` endpoint, as the vendor documents it. */
   url: string;
+  /**
+   * The vendored brand mark this row flies, keyed into [`MCP_BRAND_MARKS`]. OPTIONAL on purpose:
+   * the icon set carries most of these brands and not all of them, and a row the set has no mark
+   * for stays without one rather than acquiring a drawn-here approximation. Absent is a stated
+   * fact about the icon set, never a gap to fill.
+   */
+  logo?: string;
 }
 
 /**
@@ -69,6 +76,7 @@ export const CURATED_MCP_SERVERS: readonly CuratedMcpServer[] = [
     description: "Bases, tables and records in Airtable.",
     auth: "oauth",
     url: "https://mcp.airtable.com/mcp",
+    logo: "airtable",
   },
   {
     name: "com.asana/mcp",
@@ -77,6 +85,7 @@ export const CURATED_MCP_SERVERS: readonly CuratedMcpServer[] = [
     description: "Tasks, projects and portfolios in Asana.",
     auth: "oauth",
     url: "https://mcp.asana.com/v2/mcp",
+    logo: "asana",
   },
   {
     name: "com.atlassian/atlassian-mcp-server",
@@ -85,6 +94,7 @@ export const CURATED_MCP_SERVERS: readonly CuratedMcpServer[] = [
     description: "Jira issues and Confluence pages, through Atlassian's Rovo server.",
     auth: "oauth",
     url: "https://mcp.atlassian.com/v1/mcp/authv2",
+    logo: "atlassian",
   },
   {
     name: "com.canva/mcp",
@@ -101,6 +111,7 @@ export const CURATED_MCP_SERVERS: readonly CuratedMcpServer[] = [
     description: "Tasks, lists and docs in a ClickUp workspace.",
     auth: "oauth",
     url: "https://mcp.clickup.com/mcp",
+    logo: "clickup",
   },
   {
     name: "com.cloudflare.mcp/mcp",
@@ -109,6 +120,7 @@ export const CURATED_MCP_SERVERS: readonly CuratedMcpServer[] = [
     description: "Search Cloudflare's product documentation.",
     auth: "none",
     url: "https://docs.mcp.cloudflare.com/mcp",
+    logo: "cloudflare",
   },
   {
     name: "com.context7/mcp",
@@ -133,6 +145,7 @@ export const CURATED_MCP_SERVERS: readonly CuratedMcpServer[] = [
     description: "Files and folders in a Dropbox account.",
     auth: "oauth",
     url: "https://mcp.dropbox.com/mcp",
+    logo: "dropbox",
   },
   {
     name: "com.figma.mcp/mcp",
@@ -141,6 +154,7 @@ export const CURATED_MCP_SERVERS: readonly CuratedMcpServer[] = [
     description: "Design files, components and variables in Figma.",
     auth: "oauth",
     url: "https://mcp.figma.com/mcp",
+    logo: "figma",
   },
   {
     name: "com.github/mcp",
@@ -149,6 +163,7 @@ export const CURATED_MCP_SERVERS: readonly CuratedMcpServer[] = [
     description: "Repositories, issues, pull requests and code search on GitHub.",
     auth: "oauth",
     url: "https://api.githubcopilot.com/mcp/",
+    logo: "github",
   },
   {
     name: "com.gitlab/mcp",
@@ -157,6 +172,7 @@ export const CURATED_MCP_SERVERS: readonly CuratedMcpServer[] = [
     description: "Projects, issues and merge requests on GitLab.com.",
     auth: "oauth",
     url: "https://gitlab.com/api/v4/mcp",
+    logo: "gitlab",
   },
   {
     name: "com.grafana/mcp",
@@ -165,6 +181,7 @@ export const CURATED_MCP_SERVERS: readonly CuratedMcpServer[] = [
     description: "Dashboards, datasources and alerts in Grafana Cloud.",
     auth: "oauth",
     url: "https://mcp.grafana.com/mcp",
+    logo: "grafana",
   },
   {
     name: "com.intercom/mcp",
@@ -173,6 +190,7 @@ export const CURATED_MCP_SERVERS: readonly CuratedMcpServer[] = [
     description: "Conversations, contacts and help articles in Intercom.",
     auth: "oauth",
     url: "https://mcp.intercom.com/mcp",
+    logo: "intercom",
   },
   {
     name: "app.linear/linear",
@@ -181,6 +199,7 @@ export const CURATED_MCP_SERVERS: readonly CuratedMcpServer[] = [
     description: "Issues, projects and cycles in Linear.",
     auth: "oauth",
     url: "https://mcp.linear.app/mcp",
+    logo: "linear",
   },
   {
     name: "com.microsoft.learn/mcp",
@@ -197,6 +216,7 @@ export const CURATED_MCP_SERVERS: readonly CuratedMcpServer[] = [
     description: "Postgres projects, branches and queries on Neon.",
     auth: "oauth",
     url: "https://mcp.neon.tech/mcp",
+    logo: "neon",
   },
   {
     name: "com.netlify/mcp",
@@ -205,6 +225,7 @@ export const CURATED_MCP_SERVERS: readonly CuratedMcpServer[] = [
     description: "Sites, deploys and build logs on Netlify.",
     auth: "oauth",
     url: "https://netlify-mcp.netlify.app/mcp",
+    logo: "netlify",
   },
   {
     name: "com.notion/mcp",
@@ -213,6 +234,7 @@ export const CURATED_MCP_SERVERS: readonly CuratedMcpServer[] = [
     description: "Pages, databases and comments in a Notion workspace.",
     auth: "oauth",
     url: "https://mcp.notion.com/mcp",
+    logo: "notion",
   },
   {
     name: "com.pagerduty/mcp",
@@ -221,6 +243,7 @@ export const CURATED_MCP_SERVERS: readonly CuratedMcpServer[] = [
     description: "Incidents, services and on-call schedules in PagerDuty.",
     auth: "oauth",
     url: "https://mcp.pagerduty.com/mcp",
+    logo: "pagerduty",
   },
   {
     name: "io.sentry/mcp",
@@ -229,6 +252,7 @@ export const CURATED_MCP_SERVERS: readonly CuratedMcpServer[] = [
     description: "Errors, issues and releases in Sentry.",
     auth: "oauth",
     url: "https://mcp.sentry.dev/mcp",
+    logo: "sentry",
   },
   {
     name: "com.slack/mcp",
@@ -245,6 +269,7 @@ export const CURATED_MCP_SERVERS: readonly CuratedMcpServer[] = [
     description: "Customers, payments, subscriptions and invoices in Stripe.",
     auth: "oauth",
     url: "https://mcp.stripe.com",
+    logo: "stripe",
   },
   {
     name: "com.supabase/mcp",
@@ -253,6 +278,7 @@ export const CURATED_MCP_SERVERS: readonly CuratedMcpServer[] = [
     description: "Projects, database schema and logs on Supabase.",
     auth: "oauth",
     url: "https://mcp.supabase.com/mcp",
+    logo: "supabase",
   },
   {
     name: "com.vercel/vercel-mcp",
@@ -261,6 +287,7 @@ export const CURATED_MCP_SERVERS: readonly CuratedMcpServer[] = [
     description: "Projects, deployments and logs on Vercel.",
     auth: "oauth",
     url: "https://mcp.vercel.com",
+    logo: "vercel",
   },
 ];
 
@@ -307,6 +334,8 @@ export interface CuratedMcpRow {
   version: string;
   transport: typeof STREAMABLE_HTTP;
   document: string;
+  /** The brand mark key, when the icon set carries this brand — see [`CuratedMcpServer.logo`]. */
+  logo?: string;
 }
 
 /** What the loader hands the page: every row, in the list's own order. */
@@ -322,6 +351,9 @@ export function curatedServerRows(): CuratedMcpRow[] {
     version: CURATED_VERSION,
     transport: STREAMABLE_HTTP,
     document: canonicalServerJson(curatedServerDocument(entry)),
+    // Spread rather than assigned: `exactOptionalPropertyTypes` aside, a row for a brand the icon
+    // set does not carry should have no `logo` key at all, not one holding `undefined`.
+    ...(entry.logo === undefined ? {} : { logo: entry.logo }),
   }));
 }
 

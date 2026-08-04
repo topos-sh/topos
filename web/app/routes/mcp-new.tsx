@@ -2,6 +2,7 @@ import { Buffer } from "node:buffer";
 import { useId, useState } from "react";
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
 import { data, Form, Link, redirect, useActionData, useLoaderData } from "react-router";
+import { McpMark } from "@/components/mcp-mark";
 import { BusyFields, buttonClasses, Card, Chip, PageHeader, SectionHeading } from "@/components/ui";
 import {
   Dialog,
@@ -413,20 +414,27 @@ function ServerPicker({
             type="button"
             onClick={() => onPick(server)}
             data-testid="mcp-picker-option"
-            className="flex flex-col items-stretch gap-0.5 rounded-lg border border-line-soft bg-panel px-3 py-2.5 text-left transition-colors hover:border-line hover:bg-panel2 focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-2"
+            className="flex items-start gap-2 rounded-lg border border-line-soft bg-panel px-3 py-2.5 text-left transition-colors hover:border-line hover:bg-panel2 focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-2"
           >
-            <span className="flex items-center gap-1.5">
-              <span className="min-w-0 flex-1 truncate font-medium text-ink text-sm">
-                {server.title}
+            {/* Leading, never stacked: the mark rides beside the three lines rather than above
+                them, so a row costs the same height it did before anyone had a logo. */}
+            <McpMark logo={server.logo} className="mt-0.5" />
+            <span className="flex min-w-0 flex-1 flex-col items-stretch gap-0.5">
+              <span className="flex items-center gap-1.5">
+                <span className="min-w-0 flex-1 truncate font-medium text-ink text-sm">
+                  {server.title}
+                </span>
+                <span className="shrink-0">
+                  <AuthChip auth={server.auth} />
+                </span>
               </span>
-              <span className="shrink-0">
-                <AuthChip auth={server.auth} />
+              <span className="w-full truncate text-dim text-xs leading-snug">
+                {server.description}
+              </span>
+              <span className="w-full truncate font-mono text-[11px] text-faint">
+                {server.host}
               </span>
             </span>
-            <span className="w-full truncate text-dim text-xs leading-snug">
-              {server.description}
-            </span>
-            <span className="w-full truncate font-mono text-[11px] text-faint">{server.host}</span>
           </button>
         ))}
       </div>
@@ -485,6 +493,9 @@ function AddServerDialog({
         </DialogHeader>
         <div className="space-y-2 rounded-md border border-line-soft bg-panel2 px-3 py-2.5">
           <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+            {/* The same mark the row carried, so the answer to "is this the one you clicked?" is
+                the first thing on the block rather than a name to re-read. */}
+            <McpMark logo={server.logo} className="size-4" />
             <span className="font-mono text-[13px] text-ink">{server.name}</span>
             <span className="text-faint text-xs">{server.version}</span>
             <Chip tone="neutral">{server.transport}</Chip>
