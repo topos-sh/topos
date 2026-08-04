@@ -1,0 +1,15 @@
+{
+  "name": "io.github.acme/inventory",
+  "description": "Read-only stock levels per warehouse.",
+  "version": "2.0.1",
+  "remotes": [
+    {
+      "type": "streamable-http",
+      "url": "https://inventory.acme.example/mcp",
+      "headers": [
+        { "name": "X-Region", "value": "eu-west-1" },
+        { "name": "X-Client", "value": "topos", "isSecret": false, "isRequired": true }
+      ]
+    }
+  ]
+}

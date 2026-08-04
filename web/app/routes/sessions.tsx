@@ -536,11 +536,57 @@ function SkillStates({ skills, declined }: { skills: SessionSkillState[]; declin
                 current is <ShortId value={skill.currentVersionId} />
               </span>
             )}
+            <HarnessChips harnesses={skill.harnesses} />
           </li>
         );
       })}
     </ul>
   );
+}
+
+/**
+ * The per-harness applied state a CONFIG-placed bundle (an MCP server) reports: one chip per
+ * agent this machine detected, saying whether that agent's config actually holds the entry.
+ * A FILE bundle reports none — its one applied version already says everything — so nothing
+ * renders and the row reads exactly as it did before.
+ *
+ * The state word is the CLIENT'S, an open vocabulary kept verbatim: the four this tier knows
+ * get a tone, and anything else renders as the plain neutral chip rather than being dropped —
+ * a newer client must be able to say something this build has not heard of yet. The `note` is
+ * the client's own sentence, carried as a native tooltip: it is untrusted text about one
+ * machine, not page copy.
+ */
+function HarnessChips({ harnesses }: { harnesses: SessionSkillState["harnesses"] }) {
+  if (harnesses === null || harnesses.length === 0) {
+    return null;
+  }
+  return (
+    <span data-testid="sessions-harness-chips" className="flex flex-wrap items-center gap-1.5">
+      {harnesses.map((harness) => (
+        <span key={harness.slug} title={harness.note}>
+          <Chip tone={harnessTone(harness.state)}>
+            {harness.slug} {harness.state}
+          </Chip>
+        </span>
+      ))}
+    </span>
+  );
+}
+
+/** current is good; drifted/unprovable/conflicting want attention; not-supported is neither.
+ * Exported for the unit suite: the vocabulary is the CLIENT'S and open, so which words earn
+ * which tone — and that an unheard-of word still renders — is worth pinning. */
+export function harnessTone(state: string): "verified" | "pending" | "faint" | "neutral" {
+  if (state === "current") {
+    return "verified";
+  }
+  if (state === "drifted" || state === "unprovable" || state === "conflicting") {
+    return "pending";
+  }
+  if (state === "not-supported") {
+    return "faint";
+  }
+  return "neutral";
 }
 
 /** Turned off on the web, still present locally — the honest gap between a decision and a disk. */

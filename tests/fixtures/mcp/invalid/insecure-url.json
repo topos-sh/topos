@@ -1,0 +1,11 @@
+{
+  "name": "io.github.acme/plaintext",
+  "description": "An endpoint served without transport security.",
+  "version": "1.0.0",
+  "remotes": [
+    {
+      "type": "streamable-http",
+      "url": "http://plaintext.acme.example/mcp"
+    }
+  ]
+}

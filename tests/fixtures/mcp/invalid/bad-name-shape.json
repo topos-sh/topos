@@ -1,0 +1,11 @@
+{
+  "name": "io.github.acme/team/server",
+  "description": "A name with two slashes, which the registry grammar forbids.",
+  "version": "1.0.0",
+  "remotes": [
+    {
+      "type": "streamable-http",
+      "url": "https://two-slashes.acme.example/mcp"
+    }
+  ]
+}

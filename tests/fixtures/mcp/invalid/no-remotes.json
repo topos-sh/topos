@@ -1,0 +1,5 @@
+{
+  "name": "io.github.acme/nowhere",
+  "description": "A server document that names no endpoint at all.",
+  "version": "1.0.0"
+}

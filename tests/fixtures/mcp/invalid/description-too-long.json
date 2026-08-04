@@ -1,0 +1,11 @@
+{
+  "name": "io.github.acme/verbose",
+  "description": "This description runs well past the hundred character ceiling the registry sets for a server summary line.",
+  "version": "1.0.0",
+  "remotes": [
+    {
+      "type": "streamable-http",
+      "url": "https://verbose.acme.example/mcp"
+    }
+  ]
+}

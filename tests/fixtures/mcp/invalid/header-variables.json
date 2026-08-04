@@ -1,0 +1,20 @@
+{
+  "name": "io.github.acme/templated-header",
+  "description": "A header value assembled from per-installation variables.",
+  "version": "1.0.0",
+  "remotes": [
+    {
+      "type": "streamable-http",
+      "url": "https://templated.acme.example/mcp",
+      "headers": [
+        {
+          "name": "X-Account",
+          "value": "acct-{account}",
+          "variables": {
+            "account": { "description": "The account this install belongs to." }
+          }
+        }
+      ]
+    }
+  ]
+}

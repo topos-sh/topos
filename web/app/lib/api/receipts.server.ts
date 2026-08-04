@@ -156,12 +156,18 @@ export function conflictEnvelope(args: {
 
 /** A typed DENIED envelope (role gates, lifecycle refusals, key reuse). The receipt is REQUIRED
  * by the type — the wire contract says every write 200 carries one, and an optional parameter is
- * how a receipt-less DENIED (the op-WAL wedge class) slips back in at a future call site. */
+ * how a receipt-less DENIED (the op-WAL wedge class) slips back in at a future call site.
+ *
+ * `context` is the refusal's own detail, empty unless the code needs one. The role and
+ * lifecycle gates say everything in their code (the client renders the sentence); a CONTENT
+ * refusal — a server document that names the wrong transport, or a name already taken — has to
+ * name WHAT is wrong or the caller cannot fix it, and that message rides here. */
 export function deniedEnvelope(
   command: string,
   code: string,
   skillName: string | undefined,
   receipt: ReceiptShape,
+  context: Record<string, unknown> = {},
 ): Record<string, unknown> {
   const nextActions: NextAction[] = [
     nextAction("REQUEST_ACCESS", []),
@@ -174,7 +180,7 @@ export function deniedEnvelope(
       outcome: "DENIED",
       retryable: false,
       affected: skillName === undefined ? {} : { skill: skillName },
-      context: {},
+      context,
       next_actions: nextActions,
     },
     receipt,

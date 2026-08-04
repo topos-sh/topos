@@ -1,0 +1,10 @@
+{
+  "description": "A server document with no name to be known by.",
+  "version": "1.0.0",
+  "remotes": [
+    {
+      "type": "streamable-http",
+      "url": "https://anon.acme.example/mcp"
+    }
+  ]
+}

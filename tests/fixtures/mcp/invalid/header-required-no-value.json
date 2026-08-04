@@ -1,0 +1,14 @@
+{
+  "name": "io.github.acme/blank-slot",
+  "description": "A required header the document leaves for someone to fill in.",
+  "version": "1.0.0",
+  "remotes": [
+    {
+      "type": "streamable-http",
+      "url": "https://blank.acme.example/mcp",
+      "headers": [
+        { "name": "Authorization", "isRequired": true }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,14 @@
+{
+  "name": "io.github.acme/tickets",
+  "description": "Search and comment on support tickets.",
+  "version": "0.9.0",
+  "remotes": [
+    {
+      "type": "streamable-http",
+      "url": "https://tickets.acme.example/mcp"
+    }
+  ],
+  "_meta": {
+    "sh.topos/auth": "oauth"
+  }
+}

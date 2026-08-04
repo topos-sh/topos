@@ -18,7 +18,7 @@ export function Chip({
   tone = "neutral",
   children,
 }: {
-  tone?: "neutral" | "accent" | "verified" | "pending" | "unverified";
+  tone?: "neutral" | "accent" | "verified" | "pending" | "unverified" | "faint";
   children: ReactNode;
 }) {
   const tones: Record<string, string> = {
@@ -27,6 +27,9 @@ export function Chip({
     verified: "bg-green-50 text-green-800",
     pending: "bg-amber-50 text-amber-800",
     unverified: "bg-panel2 text-dim",
+    // The quietest chip: a fact that is neither good nor bad and should not draw the eye —
+    // "this harness does not do MCP at all". Same surface as neutral, one text step down.
+    faint: "bg-panel2 text-faint",
   };
   return (
     <span

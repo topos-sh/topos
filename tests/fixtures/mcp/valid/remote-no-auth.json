@@ -1,0 +1,12 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.acme/weather",
+  "description": "Current conditions and forecasts for a named place.",
+  "version": "1.4.0",
+  "remotes": [
+    {
+      "type": "streamable-http",
+      "url": "https://weather.acme.example/mcp"
+    }
+  ]
+}

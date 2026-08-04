@@ -1,0 +1,10 @@
+{
+  "name": "io.github.acme/unversioned",
+  "description": "A server document that never says which version it is.",
+  "remotes": [
+    {
+      "type": "streamable-http",
+      "url": "https://unversioned.acme.example/mcp"
+    }
+  ]
+}

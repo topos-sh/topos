@@ -1,0 +1,97 @@
+[
+  {
+    "file": "valid/remote-no-auth.json",
+    "verdict": "ok",
+    "note": "The plain case: one streamable-http remote over https, no headers, nothing to fill in."
+  },
+  {
+    "file": "valid/remote-literal-header.json",
+    "verdict": "ok",
+    "note": "Literal header values are fine — they carry no credential and every install sends the same bytes."
+  },
+  {
+    "file": "valid/remote-oauth-meta.json",
+    "verdict": "ok",
+    "note": "The publisher extension point declares OAuth; the summary reports it as a hint, and no secret rides the document."
+  },
+  {
+    "file": "valid/remote-sse-and-streamable.json",
+    "verdict": "ok",
+    "note": "Two remotes offered; the first streamable-http one is picked and the event-stream sibling is ignored."
+  },
+  {
+    "file": "invalid/packages-local.json",
+    "verdict": "MCP_LOCAL_REFUSED",
+    "note": "A non-empty packages[] means the server installs and runs locally — out of scope for a shared bundle."
+  },
+  {
+    "file": "invalid/sse-only.json",
+    "verdict": "MCP_NO_STREAMABLE_REMOTE",
+    "note": "Only the event-stream transport is offered; there is nothing this can place."
+  },
+  {
+    "file": "invalid/no-remotes.json",
+    "verdict": "MCP_NO_STREAMABLE_REMOTE",
+    "note": "No remotes at all reads exactly like sse-only: no endpoint to hand an agent."
+  },
+  {
+    "file": "invalid/insecure-url.json",
+    "verdict": "MCP_INSECURE_URL",
+    "note": "Plain http would put every call and every reply on the wire in the clear."
+  },
+  {
+    "file": "invalid/url-template.json",
+    "verdict": "MCP_URL_TEMPLATE",
+    "note": "A {placeholder} in the URL means the document is not yet an address — someone has to fill it in per machine."
+  },
+  {
+    "file": "invalid/header-is-secret.json",
+    "verdict": "MCP_SECRET_REFUSED",
+    "note": "isSecret says out loud that the value is a credential; a shared bundle never carries one."
+  },
+  {
+    "file": "invalid/header-required-no-value.json",
+    "verdict": "MCP_SECRET_REFUSED",
+    "note": "A required header with no literal value is a credential slot by another name."
+  },
+  {
+    "file": "invalid/header-variables.json",
+    "verdict": "MCP_SECRET_REFUSED",
+    "note": "Per-installation variables make the header something each machine fills in — the same slot again."
+  },
+  {
+    "file": "invalid/header-token-value.json",
+    "verdict": "MCP_SECRET_REFUSED",
+    "note": "A literal value that has the shape of a token: the flag was omitted, the credential was not."
+  },
+  {
+    "file": "invalid/url-query-token.json",
+    "verdict": "MCP_SECRET_REFUSED",
+    "note": "The credential rides the query string instead of a header; the scan reads the whole document, so it lands the same way."
+  },
+  {
+    "file": "invalid/missing-name.json",
+    "verdict": "MCP_INVALID",
+    "note": "name is required — it is the identity the catalog and the registry lane both key on."
+  },
+  {
+    "file": "invalid/bad-name-shape.json",
+    "verdict": "MCP_INVALID",
+    "note": "The grammar is exactly one slash between a reverse-DNS namespace and a server name."
+  },
+  {
+    "file": "invalid/description-too-long.json",
+    "verdict": "MCP_INVALID",
+    "note": "description is capped at 100 characters."
+  },
+  {
+    "file": "invalid/missing-version.json",
+    "verdict": "MCP_INVALID",
+    "note": "version is required; without it there is nothing to compare a later publish against."
+  },
+  {
+    "file": "invalid/not-json.txt",
+    "verdict": "MCP_INVALID",
+    "note": "Not JSON at all — the commonest paste mistake, refused before anything is read out of it."
+  }
+]

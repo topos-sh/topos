@@ -1,3 +1,4 @@
+import { Buffer } from "node:buffer";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   asSession,
@@ -85,6 +86,31 @@ const CANDIDATE = {
   message: "genesis",
 };
 
+/**
+ * A candidate an MCP-kind publish can actually carry. Kind is what this suite is about, but a
+ * bundle that IS an MCP server also passes the server-document gate (mcp-publish-gate.test.ts
+ * owns that rule), so every case whose effective kind is 'mcp' hands over a real document —
+ * otherwise these tests would be asserting the kind gate through a document refusal.
+ */
+const MCP_CANDIDATE = {
+  ...CANDIDATE,
+  files: [
+    {
+      path: "server.json",
+      mode: "100644",
+      content_base64: Buffer.from(
+        JSON.stringify({
+          name: "io.github.acme/widget",
+          description: "A widget server.",
+          version: "1.0.0",
+          remotes: [{ type: "streamable-http", url: "https://widget.acme.example/mcp" }],
+        }),
+        "utf8",
+      ).toString("base64"),
+    },
+  ],
+};
+
 /** Drive the shared flow the way both doors do, and give back the parsed envelope. */
 async function runFlow(args: {
   skillId: string;
@@ -92,6 +118,8 @@ async function runFlow(args: {
   expected?: number;
   forceProposal?: boolean;
   displayName?: string | null;
+  /** Send the MCP-shaped candidate (for a case whose effective kind is 'mcp'). */
+  mcpCandidate?: boolean;
 }): Promise<Record<string, unknown>> {
   const { publishFlow } = await import("@/lib/api/publish-flow.server");
   const raw = JSON.stringify({ skill_id: args.skillId, op: opSeq });
@@ -101,7 +129,7 @@ async function runFlow(args: {
     opId: opId(),
     skillId: args.skillId,
     expected: args.expected ?? 0,
-    candidate: CANDIDATE,
+    candidate: args.mcpCandidate === true ? MCP_CANDIDATE : CANDIDATE,
     displayName: args.displayName ?? "Widget",
     channel: null,
     kind: args.kind ?? null,
@@ -138,7 +166,7 @@ beforeEach(() => {
 
 describe("genesis mints the declared kind", () => {
   it("a publish declaring 'mcp' is born 'mcp'", async () => {
-    const envelope = await runFlow({ skillId: "s_born_mcp", kind: "mcp" });
+    const envelope = await runFlow({ skillId: "s_born_mcp", kind: "mcp", mcpCandidate: true });
     expect(envelope.ok).toBe(true);
     expect(await kindOf("s_born_mcp")).toBe("mcp");
   });
@@ -150,7 +178,12 @@ describe("genesis mints the declared kind", () => {
   });
 
   it("genesis by PROPOSAL carries the kind identically (it still lands directly)", async () => {
-    const envelope = await runFlow({ skillId: "s_born_prop", kind: "mcp", forceProposal: true });
+    const envelope = await runFlow({
+      skillId: "s_born_prop",
+      kind: "mcp",
+      forceProposal: true,
+      mcpCandidate: true,
+    });
     expect(envelope.ok).toBe(true);
     // No base to review against: the forced proposal takes the direct arm, so the kind rides
     // the same ONE registration.
@@ -163,8 +196,15 @@ describe("genesis mints the declared kind", () => {
 describe("an existing bundle's kind is fixed at birth", () => {
   beforeAll(async () => {
     await seedBundle(db, wsId, "s_std", "std", { kind: "skill" });
-    await seedBundle(db, wsId, "s_srv", "srv", { kind: "mcp" });
-    await seedBundle(db, wsId, "s_srv_rev", "srv-rev", { kind: "mcp", protection: "reviewed" });
+    // No pointer on the MCP rows: what they hold is the server-document gate's business
+    // (mcp-publish-gate.test.ts), and an unreadable document would refuse these cases for a
+    // reason that has nothing to do with kind.
+    await seedBundle(db, wsId, "s_srv", "srv", { kind: "mcp", withPointer: false });
+    await seedBundle(db, wsId, "s_srv_rev", "srv-rev", {
+      kind: "mcp",
+      protection: "reviewed",
+      withPointer: false,
+    });
   });
 
   it("a DIFFERENT kind is DENIED `KIND_MISMATCH` — and nothing reached the vault", async () => {
@@ -207,14 +247,19 @@ describe("an existing bundle's kind is fixed at birth", () => {
   });
 
   it("RE-ASSERTING the stored kind is a no-op — the publish proceeds", async () => {
-    const envelope = await runFlow({ skillId: "s_srv", kind: "mcp", expected: 1 });
+    const envelope = await runFlow({
+      skillId: "s_srv",
+      kind: "mcp",
+      expected: 1,
+      mcpCandidate: true,
+    });
     expect(envelope.ok).toBe(true);
     expect(vault.publish).toEqual([{ ws: wsId, bundleId: "s_srv" }]);
     expect(await kindOf("s_srv")).toBe("mcp");
   });
 
   it("naming NO kind leaves the stored one alone", async () => {
-    const envelope = await runFlow({ skillId: "s_srv", expected: 1 });
+    const envelope = await runFlow({ skillId: "s_srv", expected: 1, mcpCandidate: true });
     expect(envelope.ok).toBe(true);
     expect(vault.publish).toEqual([{ ws: wsId, bundleId: "s_srv" }]);
     expect(await kindOf("s_srv")).toBe("mcp");

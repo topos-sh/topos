@@ -161,9 +161,21 @@ function DashboardPage({
           </div>
         }
         actions={
-          <Link to={wsPath("settings")} className={buttonClasses("quiet")}>
-            Settings
-          </Link>
+          <>
+            {/* The two ways to put something in this catalog from the web: a skill's bytes from
+                a public repository, and an MCP server's address. Both land as ordinary bundles
+                the moment they are published, which is why they sit together here rather than
+                anywhere the catalog is not. */}
+            <Link to={wsPath("skills/import")} className={buttonClasses("quiet")}>
+              Add from GitHub
+            </Link>
+            <Link to={wsPath("mcp/import")} className={buttonClasses("quiet")}>
+              Add MCP server
+            </Link>
+            <Link to={wsPath("settings")} className={buttonClasses("quiet")}>
+              Settings
+            </Link>
+          </>
         }
       />
 

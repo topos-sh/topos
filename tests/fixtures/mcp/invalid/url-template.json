@@ -1,0 +1,11 @@
+{
+  "name": "io.github.acme/tenant-scoped",
+  "description": "An endpoint whose host is filled in per installation.",
+  "version": "1.1.0",
+  "remotes": [
+    {
+      "type": "streamable-http",
+      "url": "https://{tenant}.acme.example/mcp"
+    }
+  ]
+}

@@ -1,0 +1,3 @@
+name: io.github.acme/yaml-not-json
+description: someone pasted a config file, not a server document
+version: 1.0.0

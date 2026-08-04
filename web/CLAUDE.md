@@ -97,6 +97,14 @@ caller.
   remark/rehype chain; closed component set; nav.json must match disk; the CLI reference page
   splices the generated `docs/cli.md`). Edit the MDX → `bun run gen:docs` → commit; `check:docs`
   fails on drift. `/docs/<page>.md` is the plain-markdown twin; `/docs/llms.txt` the index.
+- **The MCP lane:** `kind: 'mcp'` bundles carry ONE file, `server.json`, gated by
+  `app/lib/mcp/` — a remote `streamable-http` endpoint over https, no `{placeholder}`, no
+  credential (the shapes live in the repo-root `tests/fixtures/mcp/`, compiled into
+  `secret-patterns.generated.ts`), and an embedded registry name no other bundle here claims.
+  Both publish doors run the same gate before any custody call: the session lane's
+  publish/propose and the `mcp/import` page (registry name · SSRF-guarded URL · paste).
+  `…/registry/v0.1/servers[/{name}/versions[/latest]]` serves the workspace's catalog in the
+  official read-API shape, member-gated by cookie OR bearer, uniform-404 otherwise.
 - **Signed-in:** dashboard · skill browser + lifecycle ceremonies (tabs: Current · Proposals ·
   History · owner Settings; `skills/import` add-from-GitHub + the Upstream panel) · the rendered
   review UI (diff, approve/reject, comments, revert) · `/profile` (Mine grouped by provenance +
@@ -127,7 +135,8 @@ every DB/vault read per-request fresh.
 Gates (`bun run check`, all in CI): `check:tokens` (DESIGN.md ↔ `app.css`), `check:boundary` (no
 crypto outside the named carve-out; vault URL/`fetch(`/`/internal/v1` confined to the one
 transport; `.server` discipline; route-guard allowlist; DAL confinement; zero client env),
-`check:email`, `check:contract` (OpenAPI-generated `schema.d.ts`), `check:docs`, `check:bundle`
+`check:email`, `check:contract` (OpenAPI-generated `schema.d.ts`), `check:docs`,
+`check:mcp-patterns` (the credential shapes ↔ the generated module), `check:bundle`
 (post-build client-bundle byte-scan). Repo-level `scripts/check-db-grants.sh` proves the
 cross-lane grants by logging in as each role.
 
@@ -139,6 +148,7 @@ bun run test         # vitest unit — NOT `bun test` (bun's own runner writes s
                      # then reports as obsolete; CI fails on those)
 bun run test:e2e     # playwright — E2E_{PLANE,APP,SMTP}_PORT override for side-by-side checkouts
 bun run gen:docs     # recompile /docs from the repo's docs/*.mdx into the committed module
+bun run gen:mcp-patterns  # recompile the credential shapes from tests/fixtures/mcp/
 bun run check        # biome + the gates above + typecheck
 ```
 

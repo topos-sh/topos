@@ -19,6 +19,7 @@ import {
   publishTargetOf,
   registerGenesisBundleInTx,
 } from "@/lib/db/queries.custody.server";
+import { mcpCandidateRefusal } from "@/lib/mcp/publish-gate.server";
 import { commitVersion, publishVersion } from "@/lib/plane/custody.server";
 
 /**
@@ -28,7 +29,8 @@ import { commitVersion, publishVersion } from "@/lib/plane/custody.server";
  * /v1/proposals` (the explicit propose — the same flow with the reroute forced).
  *
  * Sequence per op: the caller already authenticated the device and replayed the op receipt;
- * this flow (c) resolves the protection gate + the kind gate, (d) registers a GENESIS bundle
+ * this flow (c) resolves the protection gate, the kind gate, and — for an MCP bundle — the
+ * server-document gate (app/lib/mcp/publish-gate.server.ts), (d) registers a GENESIS bundle
  * (server-minted id + birth name + birth KIND + `everyone`/`--to` placement + the author
  * self-follow), (e) makes the vault call, and (f) lands the final web transaction —
  * registration/placement/proposal/audit writes + the op receipt carrying the terminal envelope
@@ -155,6 +157,33 @@ export async function publishFlow(args: PublishFlowArgs): Promise<Response> {
     const envelope = deniedEnvelope(command, "KIND_MISMATCH", target.name, receipt);
     await inFinalTx((tx) => insertReceiptInTx(tx, actor, opId, raw, envelope));
     return envelopeResponse(envelope);
+  }
+
+  // THE MCP GATE: when the bundle IS (or is being born as) an MCP server, the candidate's
+  // `server.json` decides whether it may land at all — a remote https endpoint, no
+  // per-installation template, no credential, and an embedded registry name no other bundle
+  // here already claims. Placed beside the kind gate and for the same reason: a refusal must
+  // leave no ingested bytes behind, so it answers BEFORE any custody call. Every other kind
+  // passes straight through — this is the one branch on the catalog tag.
+  const effectiveKind = target?.kind ?? args.kind ?? "skill";
+  if (effectiveKind === "mcp") {
+    const refusal = await mcpCandidateRefusal(actor, candidate.files, target?.bundleId ?? skillId);
+    if (refusal !== null) {
+      const receipt = buildReceipt({
+        opId,
+        command,
+        outcome: "DENIED",
+        workspaceId: actor.workspaceId,
+        skillId: target?.bundleId ?? skillId,
+        expectedGeneration: expected,
+        createdAt,
+      });
+      const envelope = deniedEnvelope(command, refusal.code, skillName, receipt, {
+        message: refusal.message,
+      });
+      await inFinalTx((tx) => insertReceiptInTx(tx, actor, opId, raw, envelope));
+      return envelopeResponse(envelope);
+    }
   }
 
   // I-COMMIT-PARITY: the commit frame's author + message are the WIRE's — the device derived

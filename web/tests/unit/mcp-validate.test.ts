@@ -1,0 +1,182 @@
+import { readFileSync } from "node:fs";
+import { join, resolve } from "node:path";
+import { describe, expect, it } from "vitest";
+import { SECRET_ENTROPY, SECRET_PATTERNS } from "@/lib/mcp/secret-patterns.generated";
+import { findSecret, suggestedNameFor, validateServerJson } from "@/lib/mcp/validate.server";
+
+/**
+ * The MCP server-document gate, driven by the SHARED vectors at the repo root
+ * (`tests/fixtures/mcp/`) — the same files a client-side reader validates against, so the two
+ * languages can never quietly disagree about what is accepted. Every vector names one verdict:
+ * `ok`, or the exact refusal code. A rule change here fails until the vector changes with it.
+ */
+
+// tests/unit → web → repo root.
+const FIXTURES = resolve(__dirname, "..", "..", "..", "tests", "fixtures", "mcp");
+
+interface Vector {
+  file: string;
+  verdict: string;
+  note: string;
+}
+
+const vectors = JSON.parse(readFileSync(join(FIXTURES, "vectors.json"), "utf8")) as Vector[];
+const bytesOf = (file: string) => readFileSync(join(FIXTURES, file));
+
+describe("the shared refusal vectors", () => {
+  it("covers both verdicts and every refusal code the gate can answer", () => {
+    expect(vectors.length).toBeGreaterThan(0);
+    const codes = new Set(vectors.map((v) => v.verdict));
+    expect([...codes].sort()).toEqual([
+      "MCP_INSECURE_URL",
+      "MCP_INVALID",
+      "MCP_LOCAL_REFUSED",
+      "MCP_NO_STREAMABLE_REMOTE",
+      "MCP_SECRET_REFUSED",
+      "MCP_URL_TEMPLATE",
+      "ok",
+    ]);
+    // Every vector carries a note: the file says WHY, not just what.
+    for (const vector of vectors) {
+      expect(vector.note.length).toBeGreaterThan(20);
+    }
+  });
+
+  it.each(
+    vectors.map((v) => [v.file, v.verdict, v.note] as const),
+  )("%s → %s", (file, verdict, note) => {
+    const result = validateServerJson(bytesOf(file));
+    if (verdict === "ok") {
+      expect(result.ok, `${file}: ${note}`).toBe(true);
+      return;
+    }
+    expect(result.ok, `${file}: ${note}`).toBe(false);
+    expect(result.ok === false && result.code).toBe(verdict);
+    // A refusal always says something a human can act on.
+    expect(result.ok === false && result.message.length).toBeGreaterThan(10);
+  });
+});
+
+describe("the accepted summary", () => {
+  it("reads the endpoint, the transport, and no auth claim when none is declared", () => {
+    const result = validateServerJson(bytesOf("valid/remote-no-auth.json"));
+    expect(result.ok).toBe(true);
+    expect(result.ok === true && result.summary).toEqual({
+      name: "io.github.acme/weather",
+      description: "Current conditions and forecasts for a named place.",
+      version: "1.4.0",
+      url: "https://weather.acme.example/mcp",
+      transport: "streamable-http",
+      headers: [],
+      // Declaring nothing is NOT the same claim as declaring "none".
+      authHint: null,
+    });
+  });
+
+  it("keeps literal headers verbatim", () => {
+    const result = validateServerJson(bytesOf("valid/remote-literal-header.json"));
+    expect(result.ok === true && result.summary.headers).toEqual([
+      { name: "X-Region", value: "eu-west-1" },
+      { name: "X-Client", value: "topos" },
+    ]);
+  });
+
+  it("reports the publisher's oauth hint from _meta", () => {
+    const result = validateServerJson(bytesOf("valid/remote-oauth-meta.json"));
+    expect(result.ok === true && result.summary.authHint).toBe("oauth");
+  });
+
+  it("picks the streamable-http remote when an event-stream sibling is offered first", () => {
+    const result = validateServerJson(bytesOf("valid/remote-sse-and-streamable.json"));
+    expect(result.ok === true && result.summary.url).toBe("https://calendar.acme.example/mcp");
+    expect(result.ok === true && result.summary.transport).toBe("streamable-http");
+  });
+
+  it("suggests the tail segment of the registry name as the catalog name", () => {
+    expect(suggestedNameFor("io.github.acme/weather")).toBe("weather");
+    expect(suggestedNameFor("weather")).toBe("weather");
+  });
+});
+
+describe("the credential scan", () => {
+  it("runs from the SAME JSON the vectors carry — value for value", () => {
+    const source = JSON.parse(readFileSync(join(FIXTURES, "secret-patterns.json"), "utf8")) as {
+      patterns: { name: string; regex: string }[];
+      entropy: { minLength: number; threshold: number };
+    };
+    expect(SECRET_PATTERNS.map((p) => ({ name: p.name, regex: p.regex }))).toEqual(source.patterns);
+    expect({ ...SECRET_ENTROPY }).toEqual(source.entropy);
+  });
+
+  it.each([
+    ["a classic forge token", "ghp_A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8"],
+    ["a fine-grained forge token", "github_pat_11ABCDEFG0abcdefghijklmnop"],
+    ["a model-provider key", "sk-proj-9fJ2mQ8xVb3nT7kLp0WzYcRd5AeHgUiO"],
+    ["a chat-platform token", "xoxb-1234567890-abcdefghijkl"],
+    ["a cloud access key id", "AKIAIOSFODNN7EXAMPLE"],
+    ["a repository-host token", "glpat-ABCdef123456789012345"],
+    ["a search-provider key", "AIzaSyA1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6"],
+    ["a presented bearer credential", "Bearer abcdefghijklmnopqrstuvwxyz012345"],
+    ["a long hex key", "0123456789abcdef0123456789abcdef"],
+  ])("names %s", (_label, token) => {
+    expect(findSecret(`{"value":"${token}"}`)).not.toBeNull();
+  });
+
+  it.each([
+    ["ordinary prose", "The quick brown fox jumps over the lazy dog near the river bank."],
+    ["a reverse-DNS server name", "io.github.modelcontextprotocol/servers-everything"],
+    ["an https endpoint", "https://api.githubcopilot.com/mcp/v1/streamable-endpoint"],
+    ["a semantic version", "2026.8.3-rc.1"],
+    ["a region slug", "eu-west-1-production-gateway"],
+    ["a user-agent-ish string", "Mozilla-5-0-compatible-topos-registry"],
+  ])("leaves %s alone", (_label, text) => {
+    expect(findSecret(text)).toBeNull();
+  });
+});
+
+describe("edge shapes", () => {
+  it("refuses empty bytes", () => {
+    const result = validateServerJson(new Uint8Array(0));
+    expect(result.ok === false && result.code).toBe("MCP_INVALID");
+  });
+
+  it("refuses a JSON array (a document is an object)", () => {
+    const result = validateServerJson("[]");
+    expect(result.ok === false && result.code).toBe("MCP_INVALID");
+  });
+
+  it("refuses an unparseable endpoint before it can be treated as an address", () => {
+    const result = validateServerJson(
+      JSON.stringify({
+        name: "io.github.acme/broken",
+        description: "An endpoint that is not a URL.",
+        version: "1.0.0",
+        remotes: [{ type: "streamable-http", url: "not a url" }],
+      }),
+    );
+    expect(result.ok === false && result.code).toBe("MCP_INVALID");
+  });
+
+  it("refuses remote-level variables even when the URL is a plain address", () => {
+    const result = validateServerJson(
+      JSON.stringify({
+        name: "io.github.acme/varied",
+        description: "Variables with nothing left to fill.",
+        version: "1.0.0",
+        remotes: [
+          {
+            type: "streamable-http",
+            url: "https://varied.acme.example/mcp",
+            variables: { tenant: { description: "which tenant" } },
+          },
+        ],
+      }),
+    );
+    expect(result.ok === false && result.code).toBe("MCP_SECRET_REFUSED");
+  });
+
+  it("accepts a document string as readily as its bytes", () => {
+    const text = readFileSync(join(FIXTURES, "valid/remote-no-auth.json"), "utf8");
+    expect(validateServerJson(text).ok).toBe(true);
+  });
+});

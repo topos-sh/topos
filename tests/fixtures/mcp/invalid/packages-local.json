@@ -1,0 +1,18 @@
+{
+  "name": "io.github.acme/filesystem",
+  "description": "Reads and writes files on the machine that runs it.",
+  "version": "1.0.0",
+  "packages": [
+    {
+      "registryType": "npm",
+      "identifier": "@acme/mcp-filesystem",
+      "version": "1.0.0"
+    }
+  ],
+  "remotes": [
+    {
+      "type": "streamable-http",
+      "url": "https://files.acme.example/mcp"
+    }
+  ]
+}

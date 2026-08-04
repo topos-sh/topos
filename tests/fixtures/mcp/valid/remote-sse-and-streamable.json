@@ -1,0 +1,15 @@
+{
+  "name": "io.github.acme/calendar",
+  "description": "Team calendar reads over the streaming transport.",
+  "version": "3.2.0",
+  "remotes": [
+    {
+      "type": "sse",
+      "url": "https://calendar.acme.example/sse"
+    },
+    {
+      "type": "streamable-http",
+      "url": "https://calendar.acme.example/mcp"
+    }
+  ]
+}
