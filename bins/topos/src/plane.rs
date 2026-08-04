@@ -738,6 +738,15 @@ pub(crate) trait ContributeSource {
     /// # Errors
     /// As [`publish`](Self::publish).
     fn review(&self, body: ReviewRequest) -> Result<WriteReceipt, ClientError>;
+
+    /// The server's constant protocol card, best-effort — the publish preflight's version probe:
+    /// a `kind = "mcp"` publish needs a server that RECORDS bundle kinds, and an older one would
+    /// silently file the bundle as a skill. `None` = unknown (an unreadable card, a fake) — the
+    /// caller fails toward silence, exactly like the login-time floor. The real transport
+    /// overrides this with the unauthenticated card GET on its base URL.
+    fn protocol_card(&self) -> Option<WireProtocolCard> {
+        None
+    }
 }
 
 // ---------------------------------------------------------------------------------------------

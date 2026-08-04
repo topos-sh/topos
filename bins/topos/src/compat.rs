@@ -26,6 +26,14 @@ pub(crate) const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// release moves this floor in the same change.
 pub(crate) const MIN_SERVER_VERSION: &str = "0.1.15";
 
+/// The oldest server that RECORDS MCP bundle kinds — the floor a `kind = "mcp"` publish checks
+/// before its op WAL, because an older server ignores the additive `kind` field and silently
+/// files the bundle as a SKILL while the client receipt claims otherwise. This constant rides the
+/// RELEASE THAT INTRODUCES MCP KINDS: it must equal the workspace version that release ships as,
+/// so the release's version-bump change moves it too (and never again after — later servers all
+/// know the kind).
+pub(crate) const MCP_MIN_SERVER_VERSION: &str = "0.1.22";
+
 /// A minimal semver-core `>` : compare (major, minor, patch), ignoring any pre-release/build suffix. Tags
 /// come from our own release pipeline (`vX.Y.Z`), so the core triple is sufficient; a malformed side is
 /// treated as (0,0,0) so a valid newer version still wins. (Shared by the self-updater, the passive
@@ -104,6 +112,30 @@ pub(crate) fn ensure_server_supported(card: &WireProtocolCard) -> Result<(), Cli
     }
 }
 
+/// The MCP half of the client-side floor, checked only when a publish would record a
+/// `kind = "mcp"` bundle: a card provably below [`MCP_MIN_SERVER_VERSION`] refuses — the server
+/// would silently record a SKILL. Everything else passes, the same fail-toward-silence rule as
+/// [`ensure_server_supported`]: an unreadable card (`None`), one declaring nothing, and one
+/// stamping a string this build cannot read are not evidence of an old server.
+///
+/// # Errors
+/// [`ClientError::McpServerTooOld`] when the card names a version below the MCP floor.
+pub(crate) fn ensure_server_records_mcp(
+    card: Option<&WireProtocolCard>,
+) -> Result<(), ClientError> {
+    let refused = card
+        .and_then(|c| c.server_version.as_deref())
+        .filter(|declared| {
+            normalized_version(declared)
+                .is_some_and(|v| parse_core(&v) < parse_core(MCP_MIN_SERVER_VERSION))
+        })
+        .and_then(normalized_version);
+    match refused {
+        Some(server_version) => Err(ClientError::McpServerTooOld { server_version }),
+        None => Ok(()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -143,6 +175,35 @@ mod tests {
         }
         // A version this build DOES read comes back as our own three numbers.
         assert_eq!(normalized_version("v0.1.15-rc2").as_deref(), Some("0.1.15"));
+    }
+
+    #[test]
+    fn the_mcp_floor_refuses_below_and_fails_toward_silence() {
+        let card = |server_version: Option<&str>| WireProtocolCard {
+            schema_version: 1,
+            card: "topos-protocol-card".to_owned(),
+            api_base_url: "https://topos.example/api".to_owned(),
+            server_version: server_version.map(str::to_owned),
+            min_cli_version: None,
+        };
+        // Provably below the MCP floor: refused with OUR rendering of the version.
+        let err = ensure_server_records_mcp(Some(&card(Some("v0.1.9")))).unwrap_err();
+        match err {
+            ClientError::McpServerTooOld { server_version } => {
+                assert_eq!(server_version, "0.1.9");
+            }
+            other => panic!("expected McpServerTooOld, got {other:?}"),
+        }
+        // At the floor and above: passes.
+        assert!(ensure_server_records_mcp(Some(&card(Some(MCP_MIN_SERVER_VERSION)))).is_ok());
+        assert!(ensure_server_records_mcp(Some(&card(Some("1.0.0")))).is_ok());
+        // Silence is never a refusal: no card, no declaration, an unreadable stamp.
+        assert!(ensure_server_records_mcp(None).is_ok());
+        assert!(ensure_server_records_mcp(Some(&card(None))).is_ok());
+        assert!(ensure_server_records_mcp(Some(&card(Some("dev")))).is_ok());
+        // Day-one-quiet: this build's own server half is never refused (the release that carries
+        // MCP kinds ships CLI and server at ONE workspace version).
+        assert!(ensure_server_records_mcp(Some(&card(Some(CURRENT_VERSION)))).is_ok());
     }
 
     #[test]

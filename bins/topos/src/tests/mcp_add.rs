@@ -1106,6 +1106,100 @@ fn a_stray_sibling_never_reaches_the_wal() {
     assert!(wal.is_empty(), "no op record was written: {wal:?}");
 }
 
+/// A [`RecordingPublish`] whose protocol card declares an OLD server — one that predates MCP
+/// bundle kinds and would silently record a SKILL.
+#[derive(Clone, Default)]
+struct OldServerPublish {
+    inner: RecordingPublish,
+}
+impl crate::plane::ContributeSource for OldServerPublish {
+    fn publish(
+        &self,
+        b: topos_types::requests::PublishRequest,
+    ) -> Result<crate::plane::WriteReceipt, ClientError> {
+        self.inner.publish(b)
+    }
+    fn propose(
+        &self,
+        b: topos_types::requests::ProposeRequest,
+    ) -> Result<crate::plane::WriteReceipt, ClientError> {
+        self.inner.propose(b)
+    }
+    fn revert(
+        &self,
+        b: topos_types::requests::RevertRequest,
+    ) -> Result<crate::plane::WriteReceipt, ClientError> {
+        self.inner.revert(b)
+    }
+    fn review(
+        &self,
+        b: topos_types::requests::ReviewRequest,
+    ) -> Result<crate::plane::WriteReceipt, ClientError> {
+        self.inner.review(b)
+    }
+    fn protocol_card(&self) -> Option<topos_types::requests::WireProtocolCard> {
+        Some(topos_types::requests::WireProtocolCard {
+            schema_version: 1,
+            card: "topos-protocol-card".to_owned(),
+            api_base_url: format!("https://{HOST}/api"),
+            server_version: Some("0.1.9".to_owned()),
+            min_cli_version: None,
+        })
+    }
+}
+
+/// ITEM PAIR (pre-MCP server): publishing a `kind = "mcp"` bundle to a server whose card predates
+/// MCP support refuses with the typed server-too-old shape BEFORE the op WAL — nothing is minted,
+/// nothing reaches the wire — instead of the server silently recording a SKILL while the client
+/// receipt claims an mcp bundle landed.
+#[test]
+fn an_mcp_publish_to_a_pre_mcp_server_refuses_before_the_wal() {
+    let rig = Rig::new("pub-oldsrv");
+    rig.seed_session();
+    rig.write_global("[bundles]\n");
+    let dir = rig.work.0.join("weather");
+    write_bundle(&dir, &good_server());
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    ops::add_mcp(&ctx, None, dir.to_str().unwrap(), true).unwrap();
+
+    let recorder = OldServerPublish::default();
+    let rec = recorder.clone();
+    let session_connect = move |_s: &Session| ops::SessionTransports {
+        plane: Box::new(NoDelivery),
+        directory: Box::new(FakeDirectory::new(Vec::new(), Vec::new())),
+        contribute: Box::new(rec.clone()),
+        governance: Box::new(NoGovernance),
+    };
+    let cc = |_base: &str, _tok: Option<&str>| -> Box<dyn crate::plane::ContributeSource> {
+        Box::new(OldServerPublish::default())
+    };
+    let err = ops::publish(
+        &ctx,
+        &cc,
+        None,
+        Some(&session_connect),
+        None,
+        "weather",
+        false,
+        None,
+        None,
+        None,
+    )
+    .expect_err("a pre-MCP server refuses the mcp publish");
+    assert_eq!(err.code(), "SERVER_TOO_OLD");
+    assert!(err.detail().contains("0.1.9"), "{}", err.detail());
+    assert!(err.detail().contains("MCP"), "{}", err.detail());
+    assert!(
+        recorder.inner.seen.lock().unwrap().is_empty(),
+        "nothing was sent to the plane"
+    );
+    let ops_dir = rig.layout().ops_dir();
+    let wal: Vec<_> = std::fs::read_dir(&ops_dir)
+        .map(|d| d.flatten().collect())
+        .unwrap_or_default();
+    assert!(wal.is_empty(), "no op record was written: {wal:?}");
+}
+
 /// A clean mcp bundle publishes with its KIND: the op record carries it, the wire body carries it,
 /// and the receipt names it — so the workspace records what the bundle IS.
 #[test]

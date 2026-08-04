@@ -1306,6 +1306,11 @@ impl ContributeSource for UreqDeviceClient {
     fn review(&self, body: ReviewRequest) -> Result<WriteReceipt, ClientError> {
         self.post_write("/v1/reviews", &body.workspace_id, &body, "review")
     }
+    fn protocol_card(&self) -> Option<WireProtocolCard> {
+        // Best-effort by contract: an unreadable card answers `None`, never an error — the one
+        // caller (the mcp publish preflight) fails toward silence on it.
+        EnrollSource::fetch_card(self, &self.base_url).ok()
+    }
 }
 
 // =================================================================================================

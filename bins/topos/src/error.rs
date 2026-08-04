@@ -461,6 +461,18 @@ pub(crate) enum ClientError {
         crate::compat::MIN_SERVER_VERSION
     )]
     ServerTooOld { server_version: String },
+    /// The MCP corner of the same client-side floor, checked only when a publish would record a
+    /// `kind = "mcp"` bundle: the workspace's server predates MCP bundle kinds, so its catalog
+    /// would silently record a SKILL while the client receipt claimed otherwise. Refused BEFORE
+    /// the op WAL — nothing is minted, nothing is sent — with the server-too-old shape (the same
+    /// wire code + `server_version` field), so an agent branches exactly as it does on the login
+    /// floor. The one remedy is the server's, so only that is named.
+    #[error(
+        "that server does not record MCP bundles yet — it runs {server_version}, and publishing \
+         one needs {} or later; ask whoever runs the server to update it",
+        crate::compat::MCP_MIN_SERVER_VERSION
+    )]
+    McpServerTooOld { server_version: String },
     /// A self-update download (`topos upgrade`) did not match the sha256 the release `SHA256SUMS` lists —
     /// refused BEFORE the binary is touched (the mandatory, never-skippable integrity gate). The message is
     /// all-public (the asset name + the two hashes), so it is safe to show verbatim.
@@ -716,6 +728,8 @@ impl ClientError {
             // code verbatim, so an agent branches identically whether it read the 426 body or not.
             ClientError::UpdateRequired { .. } => "CLI_UPDATE_REQUIRED",
             ClientError::ServerTooOld { .. } => "SERVER_TOO_OLD",
+            // The MCP corner shares the shape and the code — agents branch identically.
+            ClientError::McpServerTooOld { .. } => "SERVER_TOO_OLD",
             // A self-update checksum mismatch is an integrity failure (same family as verify-on-read).
             ClientError::ChecksumMismatch { .. } => "INTEGRITY_ERROR",
             // A failed (or missing) release signature is the same integrity family — same code, so an
@@ -812,10 +826,11 @@ impl ClientError {
             // A definitive 4xx rejection — the op cannot succeed as-is.
             ClientError::PlaneRejected(_) => TerminalOutcome::PermanentFailure,
             // Neither side of the version floor heals on a retry: the same binary meets the same
-            // server and gets the same answer. The way out is a different binary, never a loop.
-            ClientError::UpdateRequired { .. } | ClientError::ServerTooOld { .. } => {
-                TerminalOutcome::PermanentFailure
-            }
+            // server and gets the same answer. The way out is a different binary, never a loop —
+            // and for the MCP corner, a newer SERVER.
+            ClientError::UpdateRequired { .. }
+            | ClientError::ServerTooOld { .. }
+            | ClientError::McpServerTooOld { .. } => TerminalOutcome::PermanentFailure,
             // A tampered/corrupt download will not heal on a retry against the same bad bytes.
             ClientError::ChecksumMismatch { .. } => TerminalOutcome::PermanentFailure,
             // A release that fails (or lacks) its mandatory signature will not heal on a retry either —

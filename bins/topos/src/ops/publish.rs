@@ -320,10 +320,16 @@ pub(crate) fn publish_describe(
         });
     }
     // The BUNDLE KIND, and — for an mcp one — the gate. The describe refuses exactly where the
-    // apply would, so a document carrying a credential is named here rather than after `--yes`.
+    // apply would, so a document carrying a credential — or a server too old to record the kind —
+    // is named here rather than after `--yes`.
     let bundle_kind = publish_bundle_kind(ctx, ctx, id.as_str(), &map, &scanned);
     if bundle_kind.as_deref() == Some(MCP_KIND) {
         gate_mcp_bundle(&scanned, &skill_name)?;
+        if let Some(l) = &lane {
+            crate::compat::ensure_server_records_mcp(
+                l.transports.contribute.protocol_card().as_ref(),
+            )?;
+        }
     }
 
     // A skill has a `current` to be identical TO when it is FOLLOWED (the bytes this client holds are
@@ -891,10 +897,13 @@ fn enrolled_publish(
     // The BUNDLE KIND, and — for an mcp one — the GATE, BEFORE the WAL is even consulted: the
     // shared refusal rules run against the scanned draft, so a `server.json` carrying a credential
     // never reaches the local store, the op record, or the wire. Refusal-first means the refusal
-    // IS the whole outcome; nothing has happened when it fires.
+    // IS the whole outcome; nothing has happened when it fires. The server-version preflight sits
+    // beside it: a server that predates MCP kinds would silently record a SKILL, so it refuses
+    // typed here rather than mis-kind on the wire.
     let bundle_kind = publish_bundle_kind(outer_ctx, ctx, id.as_str(), &map, &scanned);
     if bundle_kind.as_deref() == Some(MCP_KIND) {
         gate_mcp_bundle(&scanned, &lock.name)?;
+        crate::compat::ensure_server_records_mcp(transport.protocol_card().as_ref())?;
     }
 
     // Resume a crashed prior publish/propose for this skill (replay the SAME op_id) before minting a new
