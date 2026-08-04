@@ -447,14 +447,50 @@ fn scope_rows(
     // fact standing in the way.
     for row in &plan.sets {
         let identity = row.shape.canonical();
+        // A REPO set's expansion is not in the delivery cache (no workspace serves it) — it is
+        // in this scope's own store, where every landed member records the origin it came from.
+        // Itemizing it here is what makes those members CLAIMED: without a resolved row naming
+        // them, the ghost walk below reads live, managed copies as leftovers nothing demands and
+        // reports them detached, flatly contradicting the `update` that is keeping them current.
+        if let KeyShape::RepoSet { host, owner, repo } = &row.shape {
+            let origin = format!("{host}/{owner}/{repo}");
+            for member in repo_set_members(ctx, layout, &origin) {
+                if !claimed.insert(member.reference.clone()) {
+                    continue;
+                }
+                collide(
+                    &mut by_name,
+                    &mut out.collisions,
+                    &member.name,
+                    &identity,
+                    &member.applied.version.clone().unwrap_or_default(),
+                );
+                out.rows.push(Row {
+                    name: member.name,
+                    reference: member.reference,
+                    source: file.clone().unwrap_or_default(),
+                    via_channels: Vec::new(),
+                    attribution: None,
+                    version: member.applied.version,
+                    digest: member.applied.digest,
+                    state: member.applied.state,
+                    workspace_id: None,
+                    source_file: file.clone(),
+                    source_key: Some(row.reference.clone()),
+                    feed: None,
+                    pin: row.pin(),
+                    placements: member.applied.placements,
+                    bundle: true,
+                });
+            }
+            continue;
+        }
         let KeyShape::Channel {
             host,
             workspace,
             channel,
         } = &row.shape
         else {
-            // A repo set expands only at reconcile time; offline, its members answer through the
-            // scope store's explicit rows when adopted. Nothing cheap to itemize here.
             continue;
         };
         let entry = ws_entry(cache, host, workspace);
@@ -908,6 +944,37 @@ fn stored_by_name(
         .get(name)?
         .clone();
     Some(applied_for_id(ctx, Some(layout), &id, ""))
+}
+
+/// One member a repo-set row delivers, as the inventory renders it.
+struct RepoSetMember {
+    name: String,
+    /// The canonical 4-segment reference for the member (`<host>/<owner>/<repo>/<skill>`).
+    reference: String,
+    applied: Applied,
+}
+
+/// The members a repo-set row delivers INTO THIS SCOPE, read from the scope's own store: every
+/// import that records this origin. That record is written when the member lands and rewritten on
+/// every refresh, so it is the offline answer to "what does this line deliver here?" — the same
+/// role the delivery cache plays for a channel line.
+///
+/// No served version is knowable offline, so a member never reads `behind` — only applied, edited,
+/// or unknown, exactly as any other stored-by-name resolution.
+fn repo_set_members(ctx: &Ctx<'_>, layout: Option<&Layout>, origin: &str) -> Vec<RepoSetMember> {
+    let Some(layout) = layout else {
+        return Vec::new();
+    };
+    let sctx = crate::ops::ctx_with_layout(ctx, layout);
+    crate::ops::forge_imports(&sctx)
+        .into_iter()
+        .filter(|i| i.origin.source == origin)
+        .map(|i| RepoSetMember {
+            reference: format!("{origin}/{}", i.lock.name),
+            applied: applied_for_id(ctx, Some(layout), i.sid.as_str(), ""),
+            name: i.lock.name,
+        })
+        .collect()
 }
 
 /// One cached delivery a line resolves against.
