@@ -51,7 +51,7 @@ reads silence as one.
 <Tabs>
   <Tab title="The browser">
     The left panel carries an **MCP servers** section of its own, next to Skills; its `+` (and
-    **Add MCP server** on the dashboard) opens `<origin>/<workspace>/mcp/new`. The page opens on
+    **Add an MCP server** on the dashboard) opens `<origin>/mcp/new`. The page opens on
     a searchable grid of popular servers — Linear, Notion, GitHub, Sentry, Figma and the rest —
     each showing what it connects to and whether a sign-in is coming. Click one and it asks,
     there and then, whether to add it: the endpoint, the auth, the exact `server.json` bytes,
@@ -107,9 +107,10 @@ bytes you can read and commit.
 `--mcp` names a *source*, never a workspace bundle. `topos add @acme/weather` already gets the
 server with its kind intact, because the workspace records what each bundle is.
 
-Published servers live under their own addresses — `<origin>/<workspace>/mcp/<name>`, listed in
-the **MCP servers** section of the panel and of the dashboard. Nothing about a server is filed
-under skills.
+Published servers live under their own addresses — `<origin>/mcp/<name>`, listed in the **MCP
+servers** section of the panel and of the dashboard. Nothing about a server is filed under skills.
+(An install *is* its workspace, so every path on this page is origin-rooted; a deployment hosting
+several workspaces nests all of them under `/<workspace>`.)
 
 ## How delivery works
 
@@ -156,6 +157,30 @@ sign in — that stays the agent's own business:
 
 Each agent's exact config file — and the environment variables that move it — is in
 [Supported agents](/docs/harnesses#mcp-servers).
+
+## Updating a server
+
+```bash
+topos publish weather --yes
+```
+
+A server is updated from the folder that authored it — the one you adopted with `topos add --mcp
+./tools/weather`, or the one a fetched import wrote out (`~/.topos/mcp/weather/` for a `-g` import).
+Edit its `server.json` — a moved endpoint, a new version string, a changed header — and publish it.
+The document runs the same gate it ran the first time, and on a `reviewed` bundle the publish opens
+a [proposal](/docs/review) instead: the approval is what moves `current`. Every machine picks the
+new address up on its next update, in place, under the key it already has — so a sign-in already
+filed there survives.
+
+An MCP bundle's bytes stay in Topos's store rather than in a directory, so a machine that only
+*receives* the server holds no copy to edit. Updates come from the machine the folder is on; keep it
+in a repo if more than one person should be able to publish them.
+
+The browser is a way in, not a way to update: each import mints a **new** bundle, so importing a
+document whose registry name this workspace already publishes is refused, naming the server that
+already holds it and linking to its page. A server that arrived that way has no authoring folder on
+anyone's machine, so replacing it means archiving it on its own **Settings** tab — which frees the
+registry name — and importing the new document.
 
 ## Machine scope and project scope
 
@@ -238,6 +263,20 @@ Everything else about the write is conservative: comments and formatting in a co
 are preserved, an unrelated server entry is never disturbed, and applying the same set twice leaves
 the file byte-identical.
 
+### Handing one back
+
+Drift lasts until you end it, and ending it is one deletion:
+
+```bash
+topos update
+```
+
+Delete the entry from the agent's config first, then run that. The key is absent again, so the next
+converge writes the current document fresh and the entry is Topos's from then on — every later
+change reaches it. Editing the entry back by hand works too, but only if you land on the exact bytes
+Topos last wrote; deleting it is the reliable spelling. Until you do, updates to that server stop at
+that entry — and every update says so, on the line naming the agent.
+
 ## Removing one
 
 ```bash
@@ -259,9 +298,9 @@ A workspace serves its own MCP servers in the registry's read format, so a tool 
 to a registry can be pointed at Topos instead and get the servers your team curates:
 
 ```
-GET <origin>/<workspace>/registry/v0.1/servers
-GET <origin>/<workspace>/registry/v0.1/servers/<name>/versions
-GET <origin>/<workspace>/registry/v0.1/servers/<name>/versions/latest
+GET <origin>/registry/v0.1/servers
+GET <origin>/registry/v0.1/servers/<name>/versions
+GET <origin>/registry/v0.1/servers/<name>/versions/latest
 ```
 
 `<name>` is the document's own registry name (`io.github.acme/weather`), so its slash is
