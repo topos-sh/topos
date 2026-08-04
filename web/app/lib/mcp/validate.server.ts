@@ -386,6 +386,17 @@ export function validateServerJson(raw: Uint8Array | string): McpValidation {
   let text: string;
   if (typeof raw === "string") {
     text = raw;
+    // The ceiling is on BYTES, and a paste is counted in characters: a document of multibyte text
+    // can sit under any character limit a form imposes and still be over this cap once encoded.
+    // Refusing here is what keeps a preview from promising what the publish door will refuse.
+    // (UTF-16 length is a lower bound on the UTF-8 byte count, so an oversize string never has to
+    // be encoded at all.)
+    if (
+      text.length > MAX_SERVER_JSON_BYTES ||
+      new TextEncoder().encode(text).byteLength > MAX_SERVER_JSON_BYTES
+    ) {
+      return refuse("MCP_INVALID", "server.json is too large to be a server document");
+    }
   } else {
     // STRICT decode: an invalid byte refuses outright — a lossy replacement char could both hide
     // what the bytes spelled and let an unreadable document parse as if it were readable.

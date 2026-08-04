@@ -6,6 +6,7 @@ import { SECRET_ENTROPY, SECRET_PATTERNS } from "@/lib/mcp/secret-patterns.gener
 import {
   findSecret,
   findSecretDeep,
+  MAX_SERVER_JSON_BYTES,
   MCP_ALLOWED_FILES,
   type McpValidation,
   STREAMABLE_HTTP,
@@ -510,5 +511,27 @@ describe("the model-provider key shape reads keys and not hyphenated prose", () 
     expect(result.ok === false && result.message).toContain("openai-style-key");
     // …and the refusal never echoes the value back.
     expect(result.ok === false && result.message).not.toContain("sk-proj");
+  });
+});
+
+/** The document ceiling is on BYTES — a character count is not one. */
+describe("the size ceiling", () => {
+  it("refuses a multibyte string that is under the character cap and over the byte cap", () => {
+    // Every `é` is two bytes: 200_000 characters of it is 400_000 bytes, well past the 256 KB
+    // ceiling, while the character count alone would let it through.
+    const padding = "é".repeat(200_000);
+    const document = JSON.stringify({
+      name: "io.github.acme/oversize",
+      description: "A document whose characters fit and whose bytes do not.",
+      version: "1.0.0",
+      note: padding,
+      remotes: [{ type: STREAMABLE_HTTP, url: "https://oversize.acme.example/mcp" }],
+    });
+    expect(document.length).toBeLessThan(MAX_SERVER_JSON_BYTES);
+    const result = validateServerJson(document);
+    expect(result.ok === false && result.code).toBe("MCP_INVALID");
+    expect(result.ok === false && result.message).toContain("too large");
+    // The same document under the ceiling is read normally.
+    expect(validateServerJson(document.replace(padding, "short")).ok).toBe(true);
   });
 });
