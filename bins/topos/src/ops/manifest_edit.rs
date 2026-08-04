@@ -2074,11 +2074,10 @@ fn mcp_bundle_of_arm(
                 bundle,
             } => ws_bundle(host, workspace, bundle),
             KeyShape::LocalPath { raw } if row.fields().kind.as_deref() == Some("mcp") => {
-                let dir = if Path::new(raw).is_absolute() {
-                    PathBuf::from(raw)
-                } else {
-                    target.dir.join(raw.trim_start_matches("./"))
-                };
+                // Resolved the way every local-path key resolves ([`row_dir`], the `~/` arm
+                // included), so a home-spelled row canonicalizes to the identity its adopt
+                // recorded instead of falling back to a `local:` guess no ledger key answers.
+                let dir = row_dir(ctx, target, raw);
                 // The tracked identity: the scope's own store first (a project row's custody
                 // lives in the checkout), then the home store — the same identity the demand
                 // side minted the config key under.

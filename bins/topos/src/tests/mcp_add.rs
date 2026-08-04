@@ -663,6 +663,66 @@ fn add_mcp_and_remove_are_exact_file_inverses() {
     );
 }
 
+/// A `~/`-spelled row resolves like every other local-path key: `remove` of an adopted mcp
+/// bundle whose row the person re-spelled home-rooted still finds the tracked identity the adopt
+/// recorded, and the inline converge takes its config entries out with the row — they do not
+/// linger undisclosed for the next sweep.
+#[test]
+fn a_tilde_spelled_adopted_row_converges_its_config_entries_out_on_remove() {
+    let rig = Rig::new("tilde");
+    rig.write_global("[bundles]\n");
+    // One MCP-capable agent set up in the fake home, so the add's converge places an entry.
+    std::fs::create_dir_all(rig.home.0.join(".cursor")).unwrap();
+    let dir = rig.home.0.join("weather");
+    write_bundle(&dir, &good_server());
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    ops::add_mcp(&ctx, None, dir.to_str().unwrap(), true).unwrap();
+    let cursor = rig.home.0.join(".cursor/mcp.json");
+    assert!(
+        std::fs::read_to_string(&cursor)
+            .unwrap()
+            .contains("weather.acme.example"),
+        "the add placed the entry"
+    );
+
+    // The person re-spells the row by hand, `~/`-rooted.
+    let respelled = rig
+        .global_text()
+        .replace(&dir.display().to_string(), "~/weather");
+    assert!(respelled.contains("\"~/weather\""), "{respelled}");
+    std::fs::write(rig.manifest(), &respelled).unwrap();
+
+    let session_connect = |_s: &Session| ops::SessionTransports {
+        plane: Box::new(NoDelivery),
+        directory: Box::new(FakeDirectory::new(Vec::new(), Vec::new())),
+        contribute: Box::new(RecordingPublish::default()),
+        governance: Box::new(NoGovernance),
+    };
+    let outcome = ops::remove_global(
+        &ctx,
+        &session_connect,
+        &["~/weather".to_owned()],
+        None,
+        true,
+    )
+    .unwrap();
+    let ops::RemoveOutcome::Applied(removed) = outcome else {
+        panic!("the re-spelled row still removes");
+    };
+    // The inline converge answered on the receipt AND the entry actually left.
+    let note = removed.items[0].note.clone().unwrap_or_default();
+    assert!(
+        note.contains("server entry removed"),
+        "the inline converge must reach a ~/ row's entries: {note}"
+    );
+    assert!(
+        std::fs::read_to_string(&cursor)
+            .map(|t| !t.contains("weather.acme.example"))
+            .unwrap_or(true),
+        "the config entry left with the row"
+    );
+}
+
 /// ITEM PAIR (the folder half of the fetched inverse): `remove` of a fetched import deletes the
 /// bundle folder the import itself wrote — the row, the config entries, AND the folder go, so the
 /// undo the add receipt led with restores the whole prior state. Verified, not assumed: the
