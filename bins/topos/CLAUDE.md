@@ -90,11 +90,18 @@ generated `docs/cli.md` (`cargo xtask gen-cli-ref`).
   keeps kind classification alive if the ledger is lost — marker → delivery cache → manifest row
   → ledger, failing CLOSED over an empty placement map) feeds a per-scope config CONVERGE over
   `topos-harness::mcp`'s pure drivers — server.json parsed fail-closed, per-harness surfaces
-  joined onto detection (project surfaces containment-proven), removal via prior-matched keys
-  with drift left in place. `mcp_ledger` (`state/mcp_ledger.json`, per scope) is the ownership
-  record: minted immutable config keys (retired, never reused), `key → fingerprint` entries,
-  and the intent journal every config write rides (crash recovery promotes or drops by
-  observing the file).
+  joined onto detection (project surfaces containment-proven) and narrowed by ONE shared
+  resolution (the row's own `harness = [...]`, else `[defaults.mcp]`) so an add never places
+  where the next sweep would claw it back, removal via prior-matched keys with drift left in
+  place. ONE converge path serves every surface, the wholly-topos-owned Claude plugin dir
+  included (its `.mcp.json` is an ordinary driver surface; content topos did not write backs the
+  whole surface off), and every entry point — the sweep, add's inline converge, a targeted
+  accept/go-back, `remove` — serializes on the per-scope `locks/mcp.lock` (unavailable = a
+  refusal, never a fallback). `mcp_ledger` (`state/mcp_ledger.json`, per scope) is the ownership
+  record: minted immutable config keys (retired, never reused), `key → fingerprint` entries
+  scoped to the FILE they were written into (a surface path that moves leaves a disclosed stale
+  class rather than re-pointed custody), and the intent journal every config write rides (crash
+  recovery promotes or drops by OBSERVING the file; an unreadable file keeps the standing entry).
 - `plane_http` — the blocking `ureq` transports; one `SessionTransports` set per session;
   `resolve_session_lane` picks a write verb's lane. `scan` — the bundle scanner (rejects
   fs-level hazards before the kernel digest). `config_io` + `ctx` — the injected

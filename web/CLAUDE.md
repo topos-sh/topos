@@ -111,10 +111,16 @@ caller.
   `secret-patterns.generated.ts`), and an embedded registry name no other bundle here claims.
   Both publish doors run the same gate before any custody call: the session lane's
   publish/propose and the `mcp/new` page — the MCP section's own way in (built-in list ·
-  registry name · SSRF-guarded URL · paste). The built-in list is committed data the loader
-  ships whole, documents included, so picking one opens its confirm dialog with no round trip;
-  the publish re-derives those bytes from the list. The three typed sources keep their
-  server-side preview.
+  registry name · SSRF-guarded URL — the guard DIALS the addresses it vetted (`https.request`
+  with our own `lookup`, so nothing resolves a second time) · paste). The built-in list is
+  committed data the loader ships whole, documents included, so picking one opens its confirm
+  dialog with no round trip; the publish re-derives those bytes from the list. The three typed
+  sources keep their server-side preview. The embedded name is re-claimed under one per-workspace
+  lock by every door that MOVES a pointer onto an mcp version — publish, re-publish, unarchive,
+  review approve, revert; the wire doors word that refusal once (`mcpNameTakenRefusal`), pointing
+  at the bundle already holding the name. `mcp/new` mints a NEW bundle per import and discloses
+  what the publish did to the REACH: a curated channel withholds a member's placement, and the
+  bundle face says so.
   `…/registry/v0.1/servers[/{name}/versions[/latest]]` serves the workspace's catalog in the
   official read-API shape, member-gated by cookie OR bearer, uniform-404 otherwise.
 - **Signed-in:** dashboard (skills and MCP servers as separate sections) · bundle browser +
