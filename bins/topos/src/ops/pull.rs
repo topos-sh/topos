@@ -95,6 +95,11 @@ pub(crate) struct PullOutcome {
     /// a failure, or answered unreadably) — state kept, retry next session; the quiet hook warns
     /// only once the staleness window is blown.
     pub unreachable: Vec<UnreachableWorkspace>,
+    /// FINAL refusals discovered this run — a repository the forge says is gone, one sentence
+    /// each, said once and then never again. They ride their own channel because the silent
+    /// sweep's warnings are discarded: a fact that is only ever stated once must not be stated on
+    /// a channel that throws it away.
+    pub forge_gone: Vec<String>,
     /// Forges that answered nothing about one or more rows THIS run — the git lane's twin of
     /// `unreachable`, and gated the same way. One entry per HOST, never per row.
     pub stale_forge: Vec<StaleForge>,
@@ -202,6 +207,7 @@ impl PullOutcome {
             access_gone: Vec::new(),
             unreachable: Vec::new(),
             stale_forge: Vec::new(),
+            forge_gone: Vec::new(),
         }
     }
 }
@@ -628,6 +634,10 @@ pub(crate) fn quiet_hook_lines(
              skills are frozen in place"
         ));
     }
+    // A repository the forge says is GONE is not a staleness nudge — it is a fact about the row
+    // that will not change until somebody edits it. Said once, here, whatever else the run had to
+    // say: this is the only channel a silent sweep has, and "once" has to mean once out loud.
+    lines.extend(out.forge_gone.iter().cloned());
     // A forge that went quiet gets the SAME posture as a workspace that did: recorded always,
     // shown on demand by `status`/`list`, and said here only once the silence has run long enough
     // to mean something. One line names the host, how many skills sit behind it, and — because

@@ -2570,6 +2570,195 @@ fn re_adding_a_repo_that_came_back_re_enables_its_automatic_update() {
 }
 
 #[test]
+fn a_deletion_the_silent_sweep_finds_is_actually_said() {
+    // "Report once" has to mean once OUT LOUD. The silent sweep discards the warnings channel, so
+    // a deletion discovered by the sweep — the ordinary way it is discovered — would be recorded
+    // as reported, never shown, and then suppressed forever.
+    let rig = Rig::new("repo-quiet-deletion");
+    rig.write_global("[bundles]\n\"github.com/o/r\" = \"*\"\n");
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let plane = FakePlane::new(log);
+    let dir = FakeDirectory::new(Vec::new(), Vec::new());
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    let git = FakeGit::new(build_repo_targz(
+        "o-r-aaaaaaaaaaaa1",
+        &[("skills/alpha/SKILL.md", b"# alpha v1\n")],
+    ));
+    update_now(&ctx, &plane, &dir, &git);
+
+    git.fail_with(FetchFault::Gone);
+    forge_interval_elapsed(&rig);
+    let out = quiet_sweep(&ctx, &plane, &dir, &git);
+    let lines = ops::quiet_hook_lines(&rig.fs, &rig.layout(), rig_now(&rig), &out);
+    assert_eq!(lines.len(), 1, "the sweep says it: {lines:?}");
+    assert!(lines[0].contains("github.com/o/r"), "{:?}", lines[0]);
+    assert!(lines[0].contains("still work"), "{:?}", lines[0]);
+
+    // And exactly once: the next sweep neither dials nor repeats it.
+    forge_interval_elapsed(&rig);
+    let out = quiet_sweep(&ctx, &plane, &dir, &git);
+    let lines = ops::quiet_hook_lines(&rig.fs, &rig.layout(), rig_now(&rig), &out);
+    assert!(lines.is_empty(), "and only once: {lines:?}");
+}
+
+#[test]
+fn an_emptied_repository_stays_probe_only() {
+    // A repository that drops its last skill leaves retained custody records still naming the OLD
+    // commit, so "what is installed" can never again match the head. Without remembering that this
+    // scope already finished at that head, the archive would be downloaded every single cadence to
+    // rediscover that there is nothing in it.
+    let rig = Rig::new("repo-emptied");
+    rig.write_global("[bundles]\n\"github.com/o/r\" = \"*\"\n");
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let plane = FakePlane::new(log);
+    let dir = FakeDirectory::new(Vec::new(), Vec::new());
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    let git = FakeGit::new(build_repo_targz(
+        "o-r-aaaaaaaaaaaa1",
+        &[("skills/alpha/SKILL.md", b"# alpha v1\n")],
+    ));
+    update_now(&ctx, &plane, &dir, &git);
+
+    // The repo empties out.
+    git.serve(build_repo_targz(
+        "o-r-bbbbbbbbbbbb2",
+        &[("README.md", b"nothing to share any more\n")],
+    ));
+    forge_interval_elapsed(&rig);
+    update_now(&ctx, &plane, &dir, &git);
+    let fetches = git.fetches();
+
+    // Every later round sees the same head and downloads NOTHING.
+    for _ in 0..3 {
+        forge_interval_elapsed(&rig);
+        let out = quiet_sweep(&ctx, &plane, &dir, &git);
+        assert!(
+            !out.disclosures.iter().any(|d| d.starts_with("GIT_UPDATED")),
+            "and does not re-announce a move that already happened: {:?}",
+            out.disclosures
+        );
+    }
+    assert_eq!(
+        git.fetches(),
+        fetches,
+        "an unchanged empty repository is probed, never downloaded"
+    );
+    assert!(git.probes() > 0, "it is still checked");
+}
+
+#[test]
+fn scoped_forge_health_answers_about_the_scopes_own_pin() {
+    // Two scopes can track one repository at different pins. Those are different questions with
+    // different answers, and a scoped read must report the one IT asks. A project-only `status`
+    // showing the machine-only pin's failure would be a report about somebody else's row.
+    let rig = Rig::new("repo-scoped-health");
+    // The MACHINE pins a commit that is gone; the PROJECT pins one that is fine. The machine's
+    // question sorts LAST, so a source-level filter would let it win the "newest" fold.
+    rig.write_global("[bundles]\n\"github.com/o/r\" = \"ffffffffffff9\"\n");
+    let proj = project(
+        "proj-scoped-health",
+        "[bundles]\n\"github.com/o/r\" = \"aaaaaaaaaaaa1\"\n",
+    );
+    let pctx = rig.ctx_at(Some(&proj.0));
+    let now = rig_now(&rig);
+    let fine = crate::forge_check::SourceCheck {
+        checked_at_ms: now,
+        answered_at_ms: Some(now),
+        commit: Some("aaaaaaaaaaaa1".to_owned()),
+        failure: None,
+        settled_at: Default::default(),
+    };
+    let gone = crate::forge_check::SourceCheck {
+        checked_at_ms: now,
+        answered_at_ms: None,
+        commit: None,
+        failure: Some(crate::forge_check::CheckFailure {
+            reason: "repo not found".to_owned(),
+            gone: true,
+            reached: true,
+            git_ref: "ffffffffffff9".to_owned(),
+            reported: true,
+        }),
+        settled_at: Default::default(),
+    };
+    crate::forge_check::record_round(
+        &rig.fs,
+        &rig.layout(),
+        now,
+        &[
+            (
+                crate::forge_check::question("github.com/o/r", "aaaaaaaaaaaa1"),
+                fine,
+            ),
+            (
+                crate::forge_check::question("github.com/o/r", "ffffffffffff9"),
+                gone,
+            ),
+        ],
+    )
+    .unwrap();
+
+    // The project's own question answered fine, so its `status` says nothing is wrong.
+    let here = ops::status_snapshot(&pctx, ops::ScopeView::Here).unwrap();
+    assert_eq!(here.forge.len(), 1, "{:?}", here.forge);
+    assert_eq!(here.forge[0].source, "github.com/o/r");
+    assert!(
+        here.forge[0].error.is_none() && !here.forge[0].gone,
+        "a project-only read must not carry the machine-only pin's refusal: {:?}",
+        here.forge[0]
+    );
+    assert_eq!(here.forge[0].commit.as_deref(), Some("aaaaaaaaaaaa1"));
+
+    // The MACHINE scope asks the other question, and gets the other answer.
+    let machine = ops::status_snapshot(&pctx, ops::ScopeView::Machine).unwrap();
+    assert_eq!(machine.forge.len(), 1, "{:?}", machine.forge);
+    assert!(
+        machine.forge[0].gone,
+        "the machine's own pin is the one that is gone: {:?}",
+        machine.forge[0]
+    );
+}
+
+#[test]
+fn every_focused_list_view_carries_the_forge_health() {
+    // The focused views return early. Each of them is just as likely to be run on a machine that
+    // tracks external sources, and the shared tail renders this block for all of them.
+    let rig = Rig::new("repo-focused-views");
+    rig.write_global("[bundles]\n\"github.com/o/r\" = \"*\"\n");
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let plane = FakePlane::new(log);
+    let dir = FakeDirectory::new(Vec::new(), Vec::new());
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    let git = FakeGit::new(build_repo_targz(
+        "o-r-aaaaaaaaaaaa1",
+        &[("skills/alpha/SKILL.md", b"# alpha v1\n")],
+    ));
+    update_now(&ctx, &plane, &dir, &git);
+
+    for req in [
+        ops::ListRequest {
+            name: Some("alpha".to_owned()),
+            ..ops::ListRequest::default()
+        },
+        ops::ListRequest::default(),
+    ] {
+        let named = req.name.clone();
+        let listed =
+            crate::ops::list_with(&ctx, &req, None, None, crate::ops::RowPage::unlimited())
+                .unwrap();
+        assert!(
+            listed
+                .data
+                .forge
+                .iter()
+                .any(|f| f.source == "github.com/o/r"),
+            "the {named:?} view carries it too: {:?}",
+            listed.data.forge
+        );
+    }
+}
+
+#[test]
 fn every_check_is_recorded_and_visible_to_status_and_list() {
     // ACCEPTANCE 4's first two tiers: recorded ALWAYS, and shown on demand — the answer to "is
     // this even working?", from local state alone.

@@ -99,6 +99,11 @@ pub(crate) struct ScopeResolution {
     /// The SET rows the file adopts, canonical (`<host>/<ws>/channels/<name>`, repo sets) — the
     /// `--remote` view's "adopted in which file" lookup.
     pub sets: Vec<String>,
+    /// The exact forge QUESTIONS this scope asks — `<source>#<ref>`, one per external row, the ref
+    /// being the row's pin (empty when it floats). The check log is filed under exactly these, so
+    /// carrying them is what lets a scoped read answer about its OWN rows: two scopes can track one
+    /// repository at different pins, and a hidden scope's newer answer is not this one's news.
+    pub forge_questions: Vec<String>,
     /// This scope's OWN store (the machine sidecar / the checkout's `.topos/state/<user>/`),
     /// when one exists — the inventory's ghost walk reads it for records no row claims (the
     /// built-in meta-skill, detached/frozen copies). Never cross-scope.
@@ -335,6 +340,7 @@ pub(crate) fn resolve(
             rows: project_out.rows,
             notes: project_notes,
             sets: plan.sets.iter().map(|r| r.shape.canonical()).collect(),
+            forge_questions: forge_questions(plan),
             store: project_store,
         });
     }
@@ -348,6 +354,7 @@ pub(crate) fn resolve(
             .iter()
             .map(|r| r.shape.canonical())
             .collect(),
+        forge_questions: forge_questions(&person_plan),
         store: Some(ctx.layout.clone()),
     });
     Ok(Resolved {
@@ -946,6 +953,28 @@ fn stored_by_name(
     Some(applied_for_id(ctx, Some(layout), &id, ""))
 }
 
+/// The forge QUESTIONS one scope's recipe asks: every external row, at the ref the row spells.
+/// This is the key the check log files outcomes under, so it is what a scoped read must match on —
+/// the same row at two different pins in two scopes is two questions, and only one of them is any
+/// given scope's business.
+fn forge_questions(plan: &ScopePlan) -> Vec<String> {
+    plan.sets
+        .iter()
+        .chain(plan.things.iter())
+        .filter(|row| row.shape.is_forge())
+        .map(|row| {
+            let source = match &row.shape {
+                KeyShape::RepoSet { host, owner, repo }
+                | KeyShape::RepoSkill {
+                    host, owner, repo, ..
+                } => format!("{host}/{owner}/{repo}"),
+                _ => String::new(),
+            };
+            crate::forge_check::question(&source, &row.pin().unwrap_or_default())
+        })
+        .collect()
+}
+
 /// The last auto-update check of every external source the SHOWN scopes name. Read from the
 /// machine's own check log — the scopes supply which sources are in play, the log supplies what
 /// happened to each.
@@ -956,32 +985,20 @@ fn stored_by_name(
 /// question ("is my GitHub row still being kept current?") is the same question in both. A source
 /// no check has touched yet contributes nothing: an empty answer is honest, an invented one is not.
 pub(crate) fn forge_sources(ctx: &Ctx<'_>, shown: &[&ScopeResolution]) -> Vec<ForgeSource> {
-    let mut wanted: BTreeSet<String> = BTreeSet::new();
-    for section in shown {
-        for set in &section.sets {
-            if let Ok(KeyShape::RepoSet { host, owner, repo }) = keys::classify_key(set) {
-                wanted.insert(format!("{host}/{owner}/{repo}"));
-            }
-        }
-        for row in &section.rows {
-            if let Ok(KeyShape::RepoSkill {
-                host, owner, repo, ..
-            }) = keys::classify_key(&row.reference)
-            {
-                wanted.insert(format!("{host}/{owner}/{repo}"));
-            }
-        }
-    }
+    let wanted: BTreeSet<&str> = shown
+        .iter()
+        .flat_map(|section| section.forge_questions.iter().map(String::as_str))
+        .collect();
     // The log is filed per QUESTION (a source at a ref); the display is per SOURCE. Where one
-    // repository was asked about at two refs, the most RECENT check is the one that answers "is
+    // repository is asked about at two refs BY THE SHOWN SCOPES, the most RECENT check answers "is
     // this still being kept current?" — an older question's outcome is not news about the source.
     let log = crate::forge_check::read(ctx.fs, &ctx.layout);
     let mut newest: BTreeMap<&str, &crate::forge_check::SourceCheck> = BTreeMap::new();
     for (key, check) in &log.sources {
-        let source = crate::forge_check::source_of(key);
-        if !wanted.contains(source) {
+        if !wanted.contains(key.as_str()) {
             continue;
         }
+        let source = crate::forge_check::source_of(key);
         newest
             .entry(source)
             .and_modify(|held| {

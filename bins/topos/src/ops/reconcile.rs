@@ -523,6 +523,11 @@ struct ForgeLane<'a> {
     /// The same rule for the cheap check: one probe per `(origin, ref)` per round. Two rows over
     /// one repository ask one question — the answer cannot differ between them.
     heads: std::cell::RefCell<Vec<(String, RepoHead)>>,
+    /// The FINAL refusals this round discovered, as person-facing sentences. A deletion is said
+    /// ONCE, and the silent sweep's warnings channel is discarded — so the line has to travel on a
+    /// structured channel the quiet renderer reads, or the one time it would ever be said is a
+    /// time nobody hears it.
+    announce: std::cell::RefCell<Vec<String>>,
     /// The `origin#ref` questions this round actually put a request out for. A question ASKED is
     /// asked once; a question nobody asked is not answered by someone else's failure — which is
     /// why this is tracked apart from the outcome map.
@@ -552,6 +557,7 @@ impl<'a> ForgeLane<'a> {
             backoff: std::cell::Cell::new(None),
             repos: std::cell::RefCell::new(Vec::new()),
             heads: std::cell::RefCell::new(Vec::new()),
+            announce: std::cell::RefCell::new(Vec::new()),
             dialed: std::cell::RefCell::new(BTreeSet::new()),
             now_ms,
         }
@@ -601,6 +607,9 @@ impl<'a> ForgeLane<'a> {
                 if let Some(e) = &mut entry.failure {
                     e.reported = true;
                 }
+            }
+            if !f.reported {
+                self.announce_gone(origin, &f.reason);
             }
             return Some(ForgeHold::Gone {
                 reason: f.reason,
@@ -695,16 +704,15 @@ impl<'a> ForgeLane<'a> {
         if commit.is_empty() {
             // No commit could be read from the archive. The check still happened, so record it as
             // answered; claiming a commit nobody found would be worse than admitting none.
-            let prior = self.prior.sources.get(&key).and_then(|p| p.commit.clone());
-            self.seen.borrow_mut().insert(
-                key,
-                SourceCheck {
-                    checked_at_ms: self.now_ms,
-                    answered_at_ms: Some(self.now_ms),
-                    commit: prior,
-                    failure: None,
-                },
-            );
+            let prior = self.prior.sources.get(&key);
+            let record = SourceCheck {
+                checked_at_ms: self.now_ms,
+                answered_at_ms: Some(self.now_ms),
+                commit: prior.and_then(|p| p.commit.clone()),
+                failure: None,
+                settled_at: self.carried_settled(&key),
+            };
+            self.seen.borrow_mut().insert(key, record);
             return;
         }
         self.note_answer(origin, git_ref, commit);
@@ -713,15 +721,28 @@ impl<'a> ForgeLane<'a> {
     /// Record a source that answered. Clears any standing failure — including a settled one, so a
     /// repo that comes back is simply back.
     fn note_answer(&self, origin: &str, git_ref: &str, commit: &str) {
-        self.seen.borrow_mut().insert(
-            forge_check::question(origin, git_ref),
-            SourceCheck {
-                checked_at_ms: self.now_ms,
-                answered_at_ms: Some(self.now_ms),
-                commit: Some(commit.to_owned()),
-                failure: None,
-            },
-        );
+        let key = forge_check::question(origin, git_ref);
+        let record = SourceCheck {
+            checked_at_ms: self.now_ms,
+            answered_at_ms: Some(self.now_ms),
+            commit: Some(commit.to_owned()),
+            failure: None,
+            settled_at: self.carried_settled(&key),
+        };
+        self.seen.borrow_mut().insert(key, record);
+    }
+
+    /// The convergence marks already standing for a question. They survive every outcome: whether
+    /// a check answered, failed, or was skipped says nothing about whether a scope had previously
+    /// finished converging, and dropping them would send the next round back to the archive.
+    fn carried_settled(&self, key: &str) -> BTreeMap<String, String> {
+        self.seen
+            .borrow()
+            .get(key)
+            .map(|c| c.settled_at.clone())
+            .filter(|m| !m.is_empty())
+            .or_else(|| self.prior.sources.get(key).map(|c| c.settled_at.clone()))
+            .unwrap_or_default()
     }
 
     /// Record a failed check, and trip the breaker if the forge was never reached at all.
@@ -756,8 +777,52 @@ impl<'a> ForgeLane<'a> {
                 // discovered the deletion and the round after it both announce it.
                 reported: fault.permanent(),
             }),
+            settled_at: self.carried_settled(&key),
         };
         self.seen.borrow_mut().insert(key, record);
+        if fault.permanent() {
+            self.announce_gone(origin, &crate::render::safe_message(e));
+        }
+    }
+
+    /// Whether this question was already reconciled to completion in this scope AT `head` — the
+    /// answer to "the repository has not moved, so is there anything left to do?" when the
+    /// installed set cannot answer it (see [`forge_check::SourceCheck::settled_at`]).
+    fn settled_at(&self, origin: &str, git_ref: &str, scope: &str, head: &str) -> bool {
+        !head.is_empty()
+            && self
+                .prior
+                .sources
+                .get(&forge_check::question(origin, git_ref))
+                .and_then(|c| c.settled_at.get(scope))
+                .is_some_and(|at| at == head)
+    }
+
+    /// Record that this question is fully converged in this scope at `head`.
+    fn note_settled(&self, origin: &str, git_ref: &str, scope: &str, head: &str) {
+        if head.is_empty() {
+            return;
+        }
+        let key = forge_check::question(origin, git_ref);
+        let carried = self.carried_settled(&key);
+        let mut seen = self.seen.borrow_mut();
+        let entry = seen.entry(key).or_default();
+        if entry.settled_at.is_empty() {
+            entry.settled_at = carried;
+        }
+        entry.settled_at.insert(scope.to_owned(), head.to_owned());
+    }
+
+    /// A final refusal, as the one sentence a person gets about it.
+    fn announce_gone(&self, origin: &str, reason: &str) {
+        let line = format!(
+            "topos: {origin} — {reason}; the copies here still work, and `topos update` retries \
+             once the row names something that resolves"
+        );
+        let mut said = self.announce.borrow_mut();
+        if !said.contains(&line) {
+            said.push(line);
+        }
     }
 
     /// Record the round's short-circuit for a source the breaker skipped — it had its turn, and
@@ -781,6 +846,7 @@ impl<'a> ForgeLane<'a> {
                     git_ref: git_ref.to_owned(),
                     reported: false,
                 }),
+                settled_at: prior.map(|p| p.settled_at.clone()).unwrap_or_default(),
             });
     }
 }
@@ -1141,7 +1207,7 @@ pub(crate) fn manifest_update(
         // the sources contacted above had their turn, and leaving the clock untouched would make
         // a mistyped target a way to re-dial the forge as often as someone retypes it.
         if let Some(lane) = &lane {
-            let _ = close_forge_round(ctx, lane, now_millis, &mut sweep.warnings);
+            let _ = close_forge_round(ctx, lane, now_millis, &mut sweep.warnings, &mut Vec::new());
         }
         // The refusal names the scope actually SEARCHED. Under the scope rule a name can be
         // perfectly real one scope over, and "not in any manifest" would send someone to re-add
@@ -1385,8 +1451,11 @@ pub(crate) fn manifest_update(
     // A failed round that left the due time untouched would retry at the very next session start
     // — turning the one failure into a request per session, which is the traffic the interval
     // exists to prevent. So: the lane ran, therefore it waits.
+    let mut forge_gone: Vec<String> = Vec::new();
     let stale_forge = match lane {
-        Some(lane) => close_forge_round(ctx, &lane, now_millis, &mut sweep.warnings),
+        Some(lane) => {
+            close_forge_round(ctx, &lane, now_millis, &mut sweep.warnings, &mut forge_gone)
+        }
         None => Vec::new(),
     };
 
@@ -1403,6 +1472,7 @@ pub(crate) fn manifest_update(
         access_gone,
         unreachable,
         stale_forge,
+        forge_gone,
     })
 }
 
@@ -1418,7 +1488,9 @@ fn close_forge_round(
     lane: &ForgeLane<'_>,
     now_ms: i64,
     warnings: &mut Vec<String>,
+    gone: &mut Vec<String>,
 ) -> Vec<StaleForge> {
+    gone.extend(lane.announce.borrow().iter().cloned());
     let outcomes: Vec<(String, SourceCheck)> = lane.seen.borrow().clone().into_iter().collect();
     if outcomes.is_empty() {
         // Nothing was checked — every row settled on its pin, or this machine tracks no external
@@ -2459,7 +2531,13 @@ fn reconcile_repo_set(
             .first()
             .and_then(|i| i.origin.commit.clone())
             .unwrap_or_default();
-        if !tracked.is_empty() && members_complete && commit_matches(&recorded, &head.commit) {
+        let unchanged = (!tracked.is_empty() && members_complete && commit_matches(&recorded, &head.commit))
+                // …or this scope already finished with this exact head, which is the only thing
+                // that can answer for a repository holding no skills at all: nothing is installed
+                // to compare against, and without this the archive would be re-downloaded every
+                // cadence to rediscover that it is empty.
+                || lane.settled_at(&origin, &git_ref, &sc.label, &head.commit);
+        if unchanged {
             converge_in_place(sweep, targets);
             return;
         }
@@ -2571,6 +2649,13 @@ fn reconcile_repo_set(
             continue;
         }
         install_or_refresh_repo_skill(env, sc, &sctx, &spec, &targz, name, &slots, sweep);
+    }
+    // The pass finished. If every member the archive holds is now tracked here — including the
+    // case where it holds NONE — this scope is converged at this head, and the next probe that
+    // sees the same head has nothing to download. Recorded only on a complete pass: a member that
+    // failed to install leaves real work, and skipping the refetch would strand it.
+    if discovered.iter().all(|d| is_tracked(d)) {
+        lane.note_settled(&origin, &git_ref, &sc.label, &resolved);
     }
 }
 

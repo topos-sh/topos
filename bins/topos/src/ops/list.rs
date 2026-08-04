@@ -127,6 +127,27 @@ pub(crate) fn list_with(
         }
     }
 
+    // The scope sections shown in full. Under `--untracked` every tracked scope covering the cwd
+    // rides along (the TTY renders each as one summary line), so nothing is invisible beside the
+    // discovery listing.
+    let in_project = resolved.project().is_some();
+    let sections: Vec<&ScopeResolution> = if req.untracked {
+        resolved.scopes.iter().collect()
+    } else {
+        match req.view {
+            ScopeView::Here => vec![resolved.project().unwrap_or_else(|| resolved.machine())],
+            ScopeView::Machine => vec![resolved.machine()],
+            ScopeView::All => resolved.scopes.iter().collect(),
+        }
+    };
+
+    // The external sources' health, over the sections THIS INVOCATION SHOWS — computed BEFORE any
+    // of the focused views, every one of which returns early. `--agent`, `--remote` and the
+    // one-skill deep dive all answer about machines that track external sources too, and the
+    // shared tail renders this block for all of them; leaving it empty there would make the
+    // contract true only of the view that happens to fall through.
+    data.forge = inventory::forge_sources(ctx, &sections);
+
     if req.footprint {
         // The `~/.topos/` walk PLUS any harness config path topos holds a managed entry in
         // (disclosed, never deleted) — every topos-owned path outside skill dirs.
@@ -198,25 +219,6 @@ pub(crate) fn list_with(
             untracked_view: req.untracked,
         });
     }
-
-    // The scope sections shown in full. Under `--untracked` every tracked scope covering the cwd
-    // rides along (the TTY renders each as one summary line), so nothing is invisible beside the
-    // discovery listing.
-    let in_project = resolved.project().is_some();
-    let sections: Vec<&ScopeResolution> = if req.untracked {
-        resolved.scopes.iter().collect()
-    } else {
-        match req.view {
-            ScopeView::Here => vec![resolved.project().unwrap_or_else(|| resolved.machine())],
-            ScopeView::Machine => vec![resolved.machine()],
-            ScopeView::All => resolved.scopes.iter().collect(),
-        }
-    };
-
-    // The external sources' health, over the sections THIS INVOCATION SHOWS — assigned BEFORE the
-    // deep dive, which returns early: a repo-backed `list <name>` needs the same answer to "is this
-    // still being kept current?" as the listing does, and more so.
-    data.forge = inventory::forge_sources(ctx, &sections);
 
     // The one-skill deep dive, over the sections THIS INVOCATION SELECTS — the scope flags mean
     // the same thing here as on the listing, so `-g` answers from the machine scope alone even
