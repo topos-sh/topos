@@ -25,7 +25,7 @@
 //! the plane last served (with the attribution each row carries and the caller's declines), which
 //! `status`/`list` read without a network call and [`CacheFollow`] is built over.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
@@ -521,7 +521,18 @@ struct ForgeLane<'a> {
     /// The same rule for the cheap check: one probe per `(origin, ref)` per round. Two rows over
     /// one repository ask one question — the answer cannot differ between them.
     heads: std::cell::RefCell<Vec<(String, RepoHead)>>,
+    /// The `origin#ref` questions this round actually put a request out for. A question ASKED is
+    /// asked once; a question nobody asked is not answered by someone else's failure — which is
+    /// why this is tracked apart from the outcome map.
+    dialed: std::cell::RefCell<BTreeSet<String>>,
     now_ms: i64,
+}
+
+/// The QUESTION a row puts to a forge: which source, at which ref. Everything the lane counts
+/// once per round is counted per question, because that is the granularity at which an answer is
+/// actually the same answer.
+fn question(origin: &str, git_ref: &str) -> String {
+    format!("{origin}#{git_ref}")
 }
 
 /// Why the lane will not dial for a source right now — each with what, if anything, to say.
@@ -546,11 +557,18 @@ impl<'a> ForgeLane<'a> {
             backoff: std::cell::Cell::new(None),
             repos: std::cell::RefCell::new(Vec::new()),
             heads: std::cell::RefCell::new(Vec::new()),
+            dialed: std::cell::RefCell::new(BTreeSet::new()),
             now_ms,
         }
     }
 
     /// Whether this source may be dialed, and why not when it may not.
+    ///
+    /// The unit is the QUESTION — a `(source, ref)` pair — not the source. Two rows naming one
+    /// repository at the same ref ask one question, so a failure already suffered answers the
+    /// second row too. Two rows naming it at DIFFERENT refs ask different questions, and one
+    /// failing says nothing about the other: editing a row's ref is the documented way to reopen a
+    /// settled verdict, and a sibling row must not be able to silence it.
     ///
     /// A verdict reached EARLIER IN THIS ROUND counts as much as one carried in from a previous
     /// one: two manifest rows can name a single repository (a set line and a member line of it),
@@ -561,11 +579,12 @@ impl<'a> ForgeLane<'a> {
         // whatever the answer was. Without this a failing repo named twice costs two requests and
         // says the same sentence twice in one breath, because only the never-reached fault opens
         // the breaker and every other fault would fall straight through to a second dial.
-        if self
-            .seen
-            .borrow()
-            .get(origin)
-            .is_some_and(|c| c.failure.is_some())
+        if self.dialed.borrow().contains(&question(origin, git_ref))
+            && self
+                .seen
+                .borrow()
+                .get(origin)
+                .is_some_and(|c| c.failure.is_some())
         {
             return Some(ForgeHold::Attempted);
         }
@@ -577,11 +596,16 @@ impl<'a> ForgeLane<'a> {
             .cloned()
             && let Some(f) = settled.failure.clone()
         {
-            // Carry the standing verdict into this round's record so it survives, and mark it said.
-            let mut seen = self.seen.borrow_mut();
-            let entry = seen.entry(origin.to_owned()).or_insert(settled);
-            if let Some(e) = &mut entry.failure {
-                e.reported = true;
+            // The standing record already says everything, so it is left exactly where it is.
+            // Writing it back would make a round that dialed NOTHING look like one that did, and
+            // the clock would then be pushed out on every run over sources nobody asked about. The
+            // one thing worth persisting is having finally said it out loud.
+            if !f.reported {
+                let mut seen = self.seen.borrow_mut();
+                let entry = seen.entry(origin.to_owned()).or_insert(settled);
+                if let Some(e) = &mut entry.failure {
+                    e.reported = true;
+                }
             }
             return Some(ForgeHold::Gone {
                 reason: f.reason,
@@ -605,10 +629,11 @@ impl<'a> ForgeLane<'a> {
         git_ref: &str,
         spec: &crate::source::RemoteSpec,
     ) -> Result<RepoHead, ClientError> {
-        let key = format!("{}#{git_ref}", spec.origin());
+        let key = question(origin, git_ref);
         if let Some((_, head)) = self.heads.borrow().iter().find(|(k, _)| *k == key) {
             return Ok(head.clone());
         }
+        self.dialed.borrow_mut().insert(key.clone());
         match self.git.probe(spec) {
             Ok(head) => {
                 self.heads.borrow_mut().push((key, head.clone()));
@@ -635,34 +660,15 @@ impl<'a> ForgeLane<'a> {
         git_ref: &str,
         spec: &crate::source::RemoteSpec,
     ) -> Result<Rc<Vec<u8>>, ClientError> {
-        let key = format!("{}#{}", spec.origin(), git_ref);
+        let key = question(origin, git_ref);
         if let Some((_, bytes)) = self.repos.borrow().iter().find(|(k, _)| *k == key) {
             return Ok(Rc::clone(bytes));
         }
+        self.dialed.borrow_mut().insert(key.clone());
         match self.git.fetch(spec) {
             Ok(bytes) => {
                 let bytes = Rc::new(bytes);
                 self.repos.borrow_mut().push((key, Rc::clone(&bytes)));
-                // A pinned row never probes — it is settled and silent, or it fetches. So the
-                // fetch is where ITS check gets recorded; a floating row's probe has already
-                // recorded a better answer (with the head it saw), and that is left alone.
-                let answered = self
-                    .seen
-                    .borrow()
-                    .get(origin)
-                    .is_some_and(|c| c.failure.is_none());
-                if !answered {
-                    let prior = self.prior.sources.get(origin);
-                    self.seen.borrow_mut().insert(
-                        origin.to_owned(),
-                        SourceCheck {
-                            checked_at_ms: self.now_ms,
-                            answered_at_ms: Some(self.now_ms),
-                            commit: prior.and_then(|p| p.commit.clone()),
-                            failure: None,
-                        },
-                    );
-                }
                 Ok(bytes)
             }
             Err(e) => {
@@ -670,6 +676,50 @@ impl<'a> ForgeLane<'a> {
                 Err(e)
             }
         }
+    }
+
+    /// Record a source whose ARCHIVE arrived and decoded — the pinned row's equivalent of a probe
+    /// answering, recorded here rather than at the fetch because an HTTP 200 is not yet a landing:
+    /// a body that turns out to be unreadable must not be filed as a successful check, and the
+    /// commit worth recording is the one the bytes actually carry.
+    fn note_landed(&self, origin: &str, commit: &str) {
+        // The archive names its commit in the SHORT form; a probe earlier this round may have
+        // named the same commit in full. Same commit, better spelling — keep the better one rather
+        // than writing the fuller answer back down to its own prefix. (The borrow is released
+        // before `note_answer` takes its own.)
+        let already = self
+            .seen
+            .borrow()
+            .get(origin)
+            .and_then(|c| c.commit.clone());
+        if !commit.is_empty()
+            && let Some(seen) = already
+            && commit_matches(&seen, commit)
+            && seen.len() >= commit.len()
+        {
+            self.note_answer(origin, &seen);
+            return;
+        }
+        if commit.is_empty() {
+            // No commit could be read from the archive. The check still happened, so record it as
+            // answered; claiming a commit nobody found would be worse than admitting none.
+            let prior = self
+                .prior
+                .sources
+                .get(origin)
+                .and_then(|p| p.commit.clone());
+            self.seen.borrow_mut().insert(
+                origin.to_owned(),
+                SourceCheck {
+                    checked_at_ms: self.now_ms,
+                    answered_at_ms: Some(self.now_ms),
+                    commit: prior,
+                    failure: None,
+                },
+            );
+            return;
+        }
+        self.note_answer(origin, commit);
     }
 
     /// Record a source that answered. Clears any standing failure — including a settled one, so a
@@ -712,6 +762,7 @@ impl<'a> ForgeLane<'a> {
                 failure: Some(CheckFailure {
                     reason: crate::render::safe_message(e),
                     gone: fault.permanent(),
+                    reached: fault.reached(),
                     git_ref: git_ref.to_owned(),
                     // A final answer is SAID by the arm that received it, in this same round, so
                     // it is recorded as already said. Recording it unsaid would make the round
@@ -738,6 +789,7 @@ impl<'a> ForgeLane<'a> {
                              remaining sources were skipped"
                         .to_owned(),
                     gone: false,
+                    reached: false,
                     git_ref: String::new(),
                     reported: false,
                 }),
@@ -1401,7 +1453,9 @@ fn close_forge_round(
     let mut by_host: BTreeMap<String, StaleForge> = BTreeMap::new();
     for (source, check) in &outcomes {
         // A source the forge ANSWERED about — including "it is gone" — is not a host that went
-        // quiet: it said its piece, and the row-level line already carried it.
+        // quiet: it said its piece, and the row-level line already carried it. The REASON is not
+        // carried into this line either: it is one sentence in an agent's context window, and
+        // `status`/`list` are where the detail belongs.
         let Some(failure) = check.failure.as_ref().filter(|f| !f.gone) else {
             continue;
         };
@@ -1410,9 +1464,13 @@ fn close_forge_round(
             host,
             sources: 0,
             answered_at: check.answered_at_ms,
-            reason: failure.reason.clone(),
+            reached: failure.reached,
         });
         entry.sources += 1;
+        // A host that answered ANY of its rows was reached. Calling it unreachable because a
+        // different row also failed would name the wrong problem, and the reason clause beside it
+        // would contradict the word.
+        entry.reached |= failure.reached;
         entry.answered_at = match (entry.answered_at, check.answered_at_ms) {
             // "Never answered" is the oldest thing there is; it just is not stale (see
             // `forge_check::is_stale`), so it wins the fold and stays honest.
@@ -2429,11 +2487,16 @@ fn reconcile_repo_set(
     let tree = match crate::git_source::extract_tree(&targz) {
         Ok(t) => t,
         Err(e) => {
+            // An archive that arrived and would not decode is a FAILED check, not a passed one:
+            // the request succeeded, the answer did not.
+            lane.note_fault(&origin, &git_ref, &e);
             note_item_failure(env.ctx, &mut sweep.warnings, &row.reference, &e);
+            converge_in_place(sweep, targets);
             return;
         }
     };
     let resolved = tree.commit.clone().unwrap_or_default();
+    lane.note_landed(&origin, &resolved);
     let recorded = tracked
         .first()
         .and_then(|i| i.origin.commit.clone())
@@ -2577,7 +2640,12 @@ fn reconcile_repo_skill(
     let git_ref = pin.clone().unwrap_or_default();
     if let Some(hold) = lane.hold(&origin, &git_ref) {
         forge_hold_line(sc, &row.reference, &hold, sweep);
-        converge_in_place(sweep);
+        // Only a TRACKED copy has something to converge. The not-installed-yet line would
+        // otherwise repeat the fault another row just reported — or, behind a settled verdict,
+        // reappear every single round about a row nothing is going to fetch.
+        if tracked.is_some() {
+            converge_in_place(sweep);
+        }
         return;
     }
     let spec = crate::source::RemoteSpec {
@@ -2631,10 +2699,22 @@ fn reconcile_repo_skill(
             return;
         }
     };
+    // The archive has to decode before any of it counts — including as a CHECK. A 200 carrying an
+    // unreadable body is a request that succeeded and an answer that did not.
+    let tree = match crate::git_source::extract_tree(&targz) {
+        Ok(t) => t,
+        Err(e) => {
+            lane.note_fault(&origin, &git_ref, &e);
+            note_item_failure(env.ctx, &mut sweep.warnings, &row.reference, &e);
+            if tracked.is_some() {
+                converge_in_place(sweep);
+            }
+            return;
+        }
+    };
+    lane.note_landed(&origin, &tree.commit.clone().unwrap_or_default());
     // Every slot's copy at the same commit is settled: nothing moves without a real change.
-    if let Some(import) = &tracked
-        && let Ok(tree) = crate::git_source::extract_tree(&targz)
-    {
+    if let Some(import) = &tracked {
         let resolved = tree.commit.clone().unwrap_or_default();
         let recorded = import.origin.commit.clone().unwrap_or_default();
         let all_at_resolved = !resolved.is_empty()

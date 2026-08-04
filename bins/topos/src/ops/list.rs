@@ -114,7 +114,6 @@ pub(crate) fn list_with(
     let mut warnings: Vec<String> = Vec::new();
     let mut data = ListData {
         signed_in,
-        forge: inventory::forge_sources(ctx, &resolved.scopes),
         ..ListData::default()
     };
     let mut truncated: Vec<BucketTruncation> = Vec::new();
@@ -259,6 +258,8 @@ pub(crate) fn list_with(
         req.skills.iter().any(|s| s == name)
             || req.channels.iter().any(|c| via.iter().any(|v| v == c))
     };
+    // The external sources' health, over the sections THIS INVOCATION SHOWS.
+    data.forge = inventory::forge_sources(ctx, &sections);
     for (section, section_ghosts) in sections.iter().zip(&ghosts) {
         let mut rows: Vec<SkillEntry> = section
             .inventory_rows()

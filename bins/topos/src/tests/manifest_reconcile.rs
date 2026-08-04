@@ -2302,6 +2302,135 @@ fn a_failed_check_on_an_uninstalled_member_says_one_thing_not_two() {
 }
 
 #[test]
+fn editing_a_sibling_rows_ref_reopens_it_past_another_rows_settled_verdict() {
+    // Editing the ref is the documented way to reopen a settled verdict. A SECOND row naming the
+    // same repository at its old ref must not be able to take that away: the one-turn rule is
+    // about the QUESTION asked, and two rows at different refs ask different questions.
+    let rig = Rig::new("repo-sibling-reopen");
+    rig.write_global("[bundles]\n\"github.com/o/r/alpha\" = \"*\"\n\"github.com/o/r\" = \"*\"\n");
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let plane = FakePlane::new(log);
+    let dir = FakeDirectory::new(Vec::new(), Vec::new());
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    let git = FakeGit::new(build_repo_targz(
+        "o-r-aaaaaaaaaaaa1",
+        &[("skills/alpha/SKILL.md", b"# alpha v1\n")],
+    ));
+    // Both rows settle on a gone verdict at the floating ref.
+    git.fail_with(FetchFault::Gone);
+    update_now(&ctx, &plane, &dir, &git);
+    let settled = git.probes() + git.fetches();
+    assert!(settled > 0);
+
+    // Now ONE of them is edited to a pin. The other still spells the old floating ref and is
+    // reconciled first — it must not silence the edited one.
+    rig.write_global(
+        "[bundles]\n\"github.com/o/r/alpha\" = \"*\"\n\"github.com/o/r\" = \"ffffffffffff9\"\n",
+    );
+    forge_interval_elapsed(&rig);
+    update_now(&ctx, &plane, &dir, &git);
+    assert!(
+        git.probes() + git.fetches() > settled,
+        "the edited row asks again despite its sibling's standing verdict"
+    );
+}
+
+#[test]
+fn a_round_that_only_carried_verdicts_schedules_nothing() {
+    // A carried verdict is not a dial. Writing it back into the round's outcomes would make a run
+    // that asked nobody anything look like one that did — and push the clock out for sources that
+    // were never contacted.
+    let rig = Rig::new("repo-carried-only");
+    rig.write_global("[bundles]\n\"github.com/o/r\" = \"*\"\n");
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let plane = FakePlane::new(log);
+    let dir = FakeDirectory::new(Vec::new(), Vec::new());
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    let git = FakeGit::new(build_repo_targz(
+        "o-r-aaaaaaaaaaaa1",
+        &[("skills/alpha/SKILL.md", b"# alpha v1\n")],
+    ));
+    git.fail_with(FetchFault::Gone);
+    update_now(&ctx, &plane, &dir, &git);
+    let due_after_the_real_round = forge_next_due(&rig);
+
+    // A later round finds only the standing verdict: it dials nothing, and moves nothing.
+    forge_interval_elapsed(&rig);
+    let parked = forge_next_due(&rig);
+    let dialed = git.probes() + git.fetches();
+    quiet_sweep(&ctx, &plane, &dir, &git);
+    assert_eq!(git.probes() + git.fetches(), dialed, "nothing was asked");
+    assert_eq!(
+        forge_next_due(&rig),
+        parked,
+        "and nothing was scheduled: {due_after_the_real_round}"
+    );
+}
+
+#[test]
+fn a_reachable_but_failing_forge_is_not_called_unreachable() {
+    // "Unreachable" names a network. A forge that answers 403 or 500 was reached and answered
+    // badly, which is a different thing to go look at — and the line must not say the wrong one.
+    let rig = Rig::new("repo-answered-badly");
+    rig.write_global("[bundles]\n\"github.com/o/r\" = \"*\"\n");
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let plane = FakePlane::new(log);
+    let dir = FakeDirectory::new(Vec::new(), Vec::new());
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    let git = FakeGit::new(build_repo_targz(
+        "o-r-aaaaaaaaaaaa1",
+        &[("skills/alpha/SKILL.md", b"# alpha v1\n")],
+    ));
+    update_now(&ctx, &plane, &dir, &git);
+
+    git.fail_with(FetchFault::unavailable());
+    forge_interval_elapsed(&rig);
+    let out = quiet_sweep(&ctx, &plane, &dir, &git);
+    assert_eq!(out.stale_forge.len(), 1, "{:?}", out.stale_forge);
+    assert!(out.stale_forge[0].reached, "the forge answered");
+    let stale_now = rig_now(&rig) + crate::forge_check::STALE_AFTER_MS + DAY_MS;
+    let lines = ops::quiet_hook_lines(&rig.fs, &rig.layout(), stale_now, &out);
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert!(
+        !lines[0].contains("unreachable"),
+        "a host that answered is not unreachable: {:?}",
+        lines[0]
+    );
+    assert!(lines[0].contains("github.com"), "{:?}", lines[0]);
+    assert!(lines[0].contains("they still work"), "{:?}", lines[0]);
+}
+
+#[test]
+fn an_unreadable_archive_is_a_failed_check_not_a_passed_one() {
+    // The request succeeded; the answer did not. Recording a 200 as a good check would let
+    // `status` report success for a round that could not install anything — and would file the
+    // PREVIOUS commit as the one just seen.
+    let rig = Rig::new("repo-bad-archive");
+    rig.write_global("[bundles]\n\"github.com/o/r\" = \"aaaaaaaaaaaa1\"\n");
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let plane = FakePlane::new(log);
+    let dir = FakeDirectory::new(Vec::new(), Vec::new());
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    let git = FakeGit::new(b"this is not a gzip archive".to_vec());
+    let out = update_now(&ctx, &plane, &dir, &git);
+    assert!(!out.warnings.is_empty(), "the round failed");
+
+    let doc = crate::forge_check::read(&rig.fs, &rig.layout());
+    let rec = doc
+        .sources
+        .get("github.com/o/r")
+        .unwrap_or_else(|| panic!("the attempt is recorded: {:?}", doc.sources));
+    assert!(
+        rec.failure.is_some(),
+        "an unreadable archive is a FAILED check: {rec:?}"
+    );
+    assert_eq!(
+        rec.answered_at_ms, None,
+        "it never really answered: {rec:?}"
+    );
+}
+
+#[test]
 fn every_check_is_recorded_and_visible_to_status_and_list() {
     // ACCEPTANCE 4's first two tiers: recorded ALWAYS, and shown on demand — the answer to "is
     // this even working?", from local state alone.
