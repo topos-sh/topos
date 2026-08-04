@@ -632,6 +632,23 @@ describe("promoting a version claims its embedded name", () => {
     expect(vault.calls).toEqual([{ route: "revert", ws: wsId, bundle: "s_quay" }]);
   });
 
+  it("still answers UNKNOWN_VERSION when the vault holds no such candidate", async () => {
+    // The name check must not swallow the vault's own answer: a candidate that does not exist
+    // cannot become `current`, so the move gets to say so in its own words.
+    const GONE = { ...WEATHER, name: "io.github.acme/sandbar" };
+    await seedPublishedServer("s_sandbar", "sandbar", GONE);
+    const candidate = "6f".repeat(32);
+    await openProposal("p_sandbar", "s_sandbar", candidate);
+
+    const envelope = await reviewsPost({
+      skill_id: "s_sandbar",
+      expected: 1,
+      proposal: candidate,
+      decision: "approve",
+    });
+    expect(errorOf(envelope)?.code).toBe("UNKNOWN_VERSION");
+  });
+
   it("leaves a plain skill's approve exactly as it was", async () => {
     await seedBundle(db, wsId, "s_skill_prop", "skill-prop");
     const candidate = "5e".repeat(32);

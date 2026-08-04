@@ -14,6 +14,7 @@ import {
 } from "@/lib/db/schema.app";
 import { mcpNameTaken, serverDocumentOf } from "@/lib/mcp/catalog.server";
 import { type McpGateRefusal, mcpNameTakenRefusal } from "@/lib/mcp/publish-gate.server";
+import { custodyVersionMetaFresh } from "@/lib/plane/reads.server";
 
 /**
  * The custody-op ORCHESTRATION's data half — everything the publish/propose/review/revert
@@ -493,6 +494,14 @@ export async function mcpNameClaimRefusalInTx(
   versionId: string,
 ): Promise<McpGateRefusal | null> {
   await lockMcpNamesInTx(tx, actor.workspaceId);
+  // A version the vault does not hold at all is not this check's business — it cannot become
+  // `current`, and the move that follows answers it in its own words (unknown / purged). The
+  // read is the cache-bypassing one: retention moves even though bytes do not. Every OTHER way
+  // of being unreadable IS this check's business and fails closed below.
+  const meta = await custodyVersionMetaFresh(actor.workspaceId, bundleId, versionId);
+  if (!meta.ok && meta.kind === "not_found") {
+    return null;
+  }
   const document = await serverDocumentOf(actor.workspaceId, bundleId, versionId);
   const serverName = typeof document?.name === "string" ? document.name : null;
   if (serverName === null) {
