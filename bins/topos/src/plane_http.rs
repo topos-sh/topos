@@ -1728,10 +1728,6 @@ const GITHUB_HOST: &str = "github.com";
 /// full listing.
 const ADVERTISEMENT_PREFIX_BYTES: u64 = 16 * 1024;
 
-/// The furthest out a host's own backoff signal may push the next check. A header asking to be
-/// left alone for a week is a header topos declines to take literally.
-const MAX_BACKOFF_SECS: i64 = 24 * 60 * 60;
-
 /// The blocking `ureq` release source: the GitHub API for latest-tag resolution + raw asset GETs.
 pub(crate) struct UreqReleases {
     agent: ureq::Agent,
@@ -1954,7 +1950,7 @@ impl crate::git_source::GitTarballSource for UreqGitSource {
                         "{} — the download from {GITHUB_API_HOST} was cut short",
                         spec.label()
                     ),
-                    fault: FetchFault::Unavailable,
+                    fault: FetchFault::unavailable(),
                 }
             }),
             404 => Err(ClientError::RemoteFetch {
@@ -1966,7 +1962,7 @@ impl crate::git_source::GitTarballSource for UreqGitSource {
             }),
             s => Err(ClientError::RemoteFetch {
                 msg: format!("{} — {}", spec.label(), status_reason(GITHUB_API_HOST, s)),
-                fault: FetchFault::Unavailable,
+                fault: FetchFault::unavailable(),
             }),
         }
     }
@@ -2002,54 +1998,30 @@ impl crate::git_source::GitTarballSource for UreqGitSource {
         // repo actually lives now. Read BEFORE the body is consumed.
         let renamed_to = renamed_target(&resp, &spec.owner, &spec.repo);
         let retry_after_ms = retry_after_ms(&resp);
-        match status {
-            200..=299 => {}
-            // The unauthenticated ref lane answers 401 for a repo it will not show anyone —
-            // deleted, made private, or never real — and cannot tell those apart without leaking
-            // which. All three are the same thing to an anonymous client: this reference will not
-            // resolve again until it changes.
-            401 | 403 | 404 => {
-                return Err(ClientError::RemoteFetch {
-                    msg: format!(
-                        "{} — repo not found (deleted, renamed away, or no longer public)",
-                        spec.label()
-                    ),
-                    fault: FetchFault::Gone,
-                });
-            }
-            s => {
-                return Err(ClientError::RemoteFetch {
-                    msg: format!("{} — {}", spec.label(), status_reason(GITHUB_HOST, s)),
-                    fault: FetchFault::Unavailable,
-                });
-            }
+        if let Some(fault) = advertisement_fault(status, retry_after_ms) {
+            let msg = if fault.permanent() {
+                format!(
+                    "{} — repo not found (deleted, renamed away, or no longer public)",
+                    spec.label()
+                )
+            } else {
+                format!("{} — {}", spec.label(), status_reason(GITHUB_HOST, status))
+            };
+            return Err(ClientError::RemoteFetch { msg, fault });
         }
-        // Read a bounded PREFIX, never the whole advertisement: a busy repo advertises megabytes
-        // of refs, and HEAD is the first record — so the answer always lies in the first few
-        // hundred bytes, and reading past them would undo the saving this probe exists for.
-        let body = read_body_reported_limited(
-            resp,
-            &progress::Silent,
-            0,
-            false,
-            ADVERTISEMENT_PREFIX_BYTES,
-        );
-        // An over-limit body comes back as a fault here; the prefix is far larger than any HEAD
-        // record, so what that really means is the answer was not the advertisement at all.
-        let body = body.map_err(|_| ClientError::RemoteFetch {
-            msg: format!(
-                "{} — the answer from {GITHUB_HOST} was cut short",
-                spec.label()
-            ),
-            fault: FetchFault::Unavailable,
-        })?;
+        // Read a bounded PREFIX, never the whole advertisement: a busy repository advertises
+        // MEGABYTES of refs, and HEAD is the first record — so the answer always lies in the first
+        // few hundred bytes, and reading past them would undo the saving this probe exists for.
+        // Running past the prefix is therefore the ordinary case, never a fault: the reader stops
+        // and the rest of the body is dropped on the floor.
+        let body = read_body_prefix(resp, ADVERTISEMENT_PREFIX_BYTES);
         let commit = crate::git_source::parse_head_advertisement(&body).ok_or_else(|| {
             ClientError::RemoteFetch {
                 msg: format!(
                     "{} — {GITHUB_HOST} sent a ref listing topos could not read",
                     spec.label()
                 ),
-                fault: FetchFault::Unavailable,
+                fault: FetchFault::unavailable(),
             }
         })?;
         Ok(RepoHead {
@@ -2058,6 +2030,56 @@ impl crate::git_source::GitTarballSource for UreqGitSource {
             retry_after_ms,
         })
     }
+}
+
+/// How a ref-advertisement STATUS classifies — `None` for the ones that carry an answer.
+///
+/// The one distinction worth stating out loud: 401 and 404 are final, and 403 is NOT. A forge says
+/// "you are asking too often" with a 403 as readily as "you may not have this", and reading a rate
+/// limit as a deletion would settle the source permanently — turning a busy afternoon into a row
+/// that never updates again until somebody edits it. The unauthenticated ref lane, by contrast,
+/// answers 401 for every repo it will not show anyone (deleted, made private, never real) and
+/// cannot tell those apart without leaking which; to an anonymous client they are one thing.
+fn advertisement_fault(status: u16, retry_after_ms: Option<i64>) -> Option<FetchFault> {
+    match status {
+        200..=299 => None,
+        401 | 404 => Some(FetchFault::Gone),
+        // The backoff rides the fault: 429 and 503 are answers that FAIL, so a success-only path
+        // would discard the one thing they came to say.
+        _ => Some(FetchFault::Unavailable { retry_after_ms }),
+    }
+}
+
+/// Read AT MOST `limit` bytes of a body and drop the rest, unread.
+///
+/// The ordinary body reader treats an over-limit body as a fault, which is right when the caller
+/// wanted the whole thing. Here the caller wants a PREFIX on purpose — a repository's ref
+/// advertisement runs to megabytes and the record being looked for is the first one — so running
+/// past the limit is the expected case, not a failure. A read that faults part-way returns
+/// whatever did arrive: the parser above decides whether the answer is in it, and says so in terms
+/// of the answer rather than the socket.
+fn read_body_prefix(resp: ureq::http::Response<ureq::Body>, limit: u64) -> Vec<u8> {
+    use std::io::Read;
+    let cap = usize::try_from(limit).unwrap_or(usize::MAX);
+    // The reader's own ceiling sits above what is read, so the loop always stops first and the
+    // limit is never what ends it.
+    let mut reader = resp
+        .into_body()
+        .into_with_config()
+        .limit(limit.saturating_mul(2))
+        .reader();
+    let mut out = vec![0u8; cap];
+    let mut filled = 0usize;
+    while filled < cap {
+        match reader.read(&mut out[filled..]) {
+            Ok(0) => break,
+            Ok(n) => filled += n,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(_) => break,
+        }
+    }
+    out.truncate(filled);
+    out
 }
 
 /// Which half of the retryable family a `ureq` fault belongs to: did the host ANSWER?
@@ -2074,7 +2096,7 @@ fn transport_fault(e: &ureq::Error) -> FetchFault {
         | E::Protocol(_)
         | E::LargeResponseHeader(..)
         | E::TooManyRedirects
-        | E::RedirectFailed => FetchFault::Unavailable,
+        | E::RedirectFailed => FetchFault::unavailable(),
         _ => FetchFault::Unreachable,
     }
 }
@@ -2118,7 +2140,12 @@ fn retry_after_ms(resp: &ureq::http::Response<ureq::Body>) -> Option<i64> {
             .as_millis(),
     )
     .ok()?;
-    Some(now.saturating_add(secs.clamp(0, MAX_BACKOFF_SECS).saturating_mul(1000)))
+    Some(
+        now.saturating_add(
+            secs.saturating_mul(1000)
+                .clamp(0, crate::forge_check::MAX_BACKOFF_MS),
+        ),
+    )
 }
 
 /// A GitHub owner/repo path segment: ASCII alphanumerics + `.`, `_`, `-`, non-empty — the last-line guard
@@ -2152,6 +2179,54 @@ fn plane_err(e: PlaneError) -> ClientError {
         PlaneError::Unavailable(m) | PlaneError::Unreachable(m) | PlaneError::Malformed(m) => {
             ClientError::Plane(m)
         }
+    }
+}
+
+#[cfg(test)]
+mod forge_probe_tests {
+    use super::*;
+
+    #[test]
+    fn a_rate_limit_never_settles_a_source_the_way_a_deletion_does() {
+        // The distinction the whole lane rests on. A forge answers 403 for "too often" as readily
+        // as for "not yours"; calling that permanent would stop checking a perfectly live
+        // repository until somebody noticed and edited the row.
+        assert_eq!(advertisement_fault(200, None), None);
+        for gone in [401, 404] {
+            assert_eq!(
+                advertisement_fault(gone, None),
+                Some(FetchFault::Gone),
+                "{gone}"
+            );
+        }
+        for transient in [403, 429, 500, 502, 503] {
+            let fault = advertisement_fault(transient, None).expect("a fault");
+            assert!(
+                !fault.permanent(),
+                "{transient} must be retryable: {fault:?}"
+            );
+            assert!(fault.reached(), "{transient}: the forge answered");
+        }
+    }
+
+    #[test]
+    fn a_backoff_survives_the_answer_that_carried_it() {
+        // `Retry-After` arrives on answers that FAIL. A success-only path would parse it and then
+        // throw it away, which is the same as never reading it.
+        let at = 1_800_000_000_000;
+        assert_eq!(
+            advertisement_fault(429, Some(at)).and_then(FetchFault::retry_after_ms),
+            Some(at)
+        );
+        assert_eq!(
+            advertisement_fault(503, Some(at)).and_then(FetchFault::retry_after_ms),
+            Some(at)
+        );
+        // A final answer carries no invitation to come back.
+        assert_eq!(
+            advertisement_fault(404, Some(at)).and_then(FetchFault::retry_after_ms),
+            None
+        );
     }
 }
 

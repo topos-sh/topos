@@ -1883,7 +1883,7 @@ fn a_dead_network_costs_one_timeout_for_the_whole_round() {
         "o-r-aaaaaaaaaaaa1",
         &[("skills/alpha/SKILL.md", b"# alpha v1\n")],
     ));
-    git.fail_with(FetchFault::Unavailable);
+    git.fail_with(FetchFault::unavailable());
     quiet_sweep(&ctx, &plane, &dir, &git);
     assert_eq!(
         git.probes() + git.fetches(),

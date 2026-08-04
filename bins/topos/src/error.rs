@@ -20,13 +20,24 @@ pub(crate) enum FetchFault {
     Unreachable,
     /// The host answered, but not usefully — a failure status, a rate-limit refusal, or a body
     /// that never fully arrived. Retry later; nothing here is about this source's existence.
-    Unavailable,
+    ///
+    /// `retry_after_ms` is the instant (epoch millis) the host asked to be left alone until, when
+    /// it said so. It rides the FAULT rather than a success path because the answers that carry it
+    /// — 429, 503 — are exactly the ones that fail.
+    Unavailable { retry_after_ms: Option<i64> },
     /// The host answered ABOUT this source, permanently: gone, invisible, or not a repo at all.
     /// Retrying the same reference gets the same answer.
     Gone,
 }
 
 impl FetchFault {
+    /// The host answered unusefully and asked for nothing in particular.
+    pub(crate) fn unavailable() -> Self {
+        Self::Unavailable {
+            retry_after_ms: None,
+        }
+    }
+
     /// Whether retrying the same reference can never help — what the terminal outcome and the
     /// envelope's `retryable` bit derive from.
     pub(crate) fn permanent(self) -> bool {
@@ -37,6 +48,14 @@ impl FetchFault {
     /// circuit breaker.
     pub(crate) fn reached(self) -> bool {
         !matches!(self, Self::Unreachable)
+    }
+
+    /// When the host asked to be called back, if it did.
+    pub(crate) fn retry_after_ms(self) -> Option<i64> {
+        match self {
+            Self::Unavailable { retry_after_ms } => retry_after_ms,
+            _ => None,
+        }
     }
 }
 
