@@ -3,18 +3,21 @@
 //! Three spellings, one act. The flag declares the intent, and the SOURCE's shape decides which
 //! door it goes through:
 //!
-//! - a **local folder** holding a `server.json` at its root — the dir IS the bundle. The bytes are
-//!   already the person's own, so there is nothing to consent to: the gate runs, the folder is
-//!   adopted exactly as `topos add ./dir` adopts one, and the row it records gains `kind = "mcp"`.
+//! - a **local folder** holding a `server.json` at its root — the dir IS the bundle. The gate
+//!   runs, the folder is adopted exactly as `topos add ./dir` adopts one, and the row it records
+//!   gains `kind = "mcp"`.
 //! - an **official-registry name** (`io.github.<owner>/<server>`) or an **https URL** to a
-//!   `server.json` — bytes from a source this machine has never seen. That is a NEW-SOURCE TRUST
-//!   moment, so a bare run DESCRIBES (what the server is, where it points, which agents it would
-//!   reach) and changes nothing; `--yes` writes the document, records the row, and converges.
+//!   `server.json` — fetched, gated, and APPLIED immediately: the canonical document is written
+//!   out as a bundle folder, the row is recorded, the scope's configs converge, and the receipt
+//!   LEADS with the undo (`topos remove <ref>`), which restores the whole prior state — row,
+//!   config entries, and the folder this import itself wrote (see [`McpImports`]). `--yes` stays
+//!   an accepted no-op on both doors.
 //!
-//! Everything both doors put in front of a person comes from [`crate::mcp_validate`] — the same
-//! rules, refusal codes, and credential shapes the web tier enforces, from the same vectors at
-//! `tests/fixtures/mcp/`. A document carrying a credential is refused BEFORE a byte is written,
-//! so the refusal is the whole outcome and nothing lands half-trusted.
+//! Everything both doors accept comes from [`crate::mcp_validate`] — the same rules, refusal
+//! codes, and credential shapes the web tier enforces, from the same vectors at
+//! `tests/fixtures/mcp/`. The VALIDATION gate stands on every door: a document carrying a
+//! credential is refused BEFORE a byte is written, so the refusal is the whole outcome and
+//! nothing lands half-trusted.
 //!
 //! ## What the fetched arm does NOT do
 //!
@@ -26,14 +29,15 @@
 //! identity, and every later `update` re-reads the same folder. Authoring a server to SHARE with
 //! the team is the local-folder door, which does adopt and therefore does publish.
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 
-use topos_types::results::{AddData, AddDescribeData, McpServerSummary};
+use topos_types::results::{AddData, McpServerSummary};
 
 use crate::ctx::Ctx;
 use crate::error::ClientError;
 use crate::mcp_validate::{self, McpSummary};
+use crate::sidecar::Layout;
 
 use super::manifest_edit::{self as medit, EditTarget};
 
@@ -54,19 +58,6 @@ pub(crate) trait McpDocSource {
     /// [`ClientError::RemoteFetch`] for every transport / status / size fault, with `permanent`
     /// separating what a retry can fix from what it cannot.
     fn fetch(&self, url: &str) -> Result<Vec<u8>, ClientError>;
-}
-
-/// What `add --mcp` did — or, for a never-seen source, what it WOULD do. The same two-phase shape
-/// the forge-import arm uses.
-#[derive(Debug)]
-pub(crate) enum AddMcpOutcome {
-    /// The row is written, the bytes are in place, and the config converge has run.
-    Applied(Box<AddData>),
-    /// A registry name or URL this machine has not read before: what it holds and what would land.
-    Described {
-        data: Box<AddDescribeData>,
-        yes_argv: Vec<String>,
-    },
 }
 
 // =================================================================================================
@@ -193,7 +184,8 @@ fn canonical_server_json(document: &serde_json::Value) -> Vec<u8> {
 // The verb
 // =================================================================================================
 
-/// `topos add --mcp <name|url|path> [-g] [--yes]`.
+/// `topos add --mcp <name|url|path> [-g]`. Every door applies immediately with an undo-led
+/// receipt; `--yes` is parsed by the CLI and changes nothing here.
 ///
 /// # Errors
 /// [`ClientError::McpRefused`] when the gate refuses the document (the shared, typed vocabulary);
@@ -206,16 +198,15 @@ pub(crate) fn add_mcp(
     docs: Option<&dyn McpDocSource>,
     source: &str,
     global: bool,
-    yes: bool,
-) -> Result<AddMcpOutcome, ClientError> {
+) -> Result<Box<AddData>, ClientError> {
     let host = medit::manifest_host(ctx);
     let exists = |p: &Path| ctx.fs.exists(p);
     match classify_mcp_source(source, host.as_deref(), &exists) {
         McpSourceShape::Path(dir) => adopt_local(ctx, &dir, global),
         McpSourceShape::Registry(name) => {
-            fetch_arm(ctx, docs, source, &registry_url(&name), global, yes)
+            fetch_arm(ctx, docs, source, &registry_url(&name), global)
         }
-        McpSourceShape::Url(url) => fetch_arm(ctx, docs, source, &url.clone(), global, yes),
+        McpSourceShape::Url(url) => fetch_arm(ctx, docs, source, &url.clone(), global),
         McpSourceShape::Reference => Err(ClientError::InvalidArgument(format!(
             "`{source}` names a workspace bundle — a workspace already records what each bundle \
              is, so `topos add {source}` gets it with its kind intact; `--mcp` imports a server \
@@ -241,7 +232,7 @@ pub(crate) fn add_mcp(
 /// scan over every file's bytes — a stray script beside `server.json` refuses before anything is
 /// adopted. Applies immediately — an on-disk folder is the person's own material, and the row is
 /// its exact inverse away.
-fn adopt_local(ctx: &Ctx<'_>, dir: &Path, global: bool) -> Result<AddMcpOutcome, ClientError> {
+fn adopt_local(ctx: &Ctx<'_>, dir: &Path, global: bool) -> Result<Box<AddData>, ClientError> {
     let server = dir.join("server.json");
     if ctx.fs.read_opt(&server)?.is_none() {
         return Err(ClientError::InvalidArgument(format!(
@@ -270,32 +261,32 @@ fn adopt_local(ctx: &Ctx<'_>, dir: &Path, global: bool) -> Result<AddMcpOutcome,
     if let Ok(sid) = crate::id::SkillId::parse(&data.skill_id) {
         crate::mcp_engine::write_kind_marker(&sctx, &sid);
     }
+    let agents = engaged_agents(ctx, &scope.target, global);
     let lines = converge_one(ctx, &scope.target, global, &data.skill_id, &data.name);
-    fold_receipt(&mut data, &summary, &lines);
-    Ok(AddMcpOutcome::Applied(Box::new(data)))
+    fold_receipt(&mut data, &summary, dir, agents, &lines);
+    Ok(Box::new(data))
 }
 
 // -------------------------------------------------------------------------------------------------
 // The FETCHED-DOCUMENT door
 // -------------------------------------------------------------------------------------------------
 
-/// A registry name or URL: fetch once (the read serves both the describe and the apply), gate the
-/// bytes, then either describe or land them.
+/// A registry name or URL: fetch, gate the bytes, and LAND them — the row plus the converge, with
+/// the undo leading the receipt.
 fn fetch_arm(
     ctx: &Ctx<'_>,
     docs: Option<&dyn McpDocSource>,
     source: &str,
     url: &str,
     global: bool,
-    yes: bool,
-) -> Result<AddMcpOutcome, ClientError> {
+) -> Result<Box<AddData>, ClientError> {
     let Some(docs) = docs else {
         return Err(ClientError::InvalidArgument(
             "importing a server by name or URL needs a network source — this run has none".into(),
         ));
     };
     // The scope resolves BEFORE the fetch, so a folder with no `topos.toml` refuses without
-    // dialing anything — and the describe below never mints a project store.
+    // dialing anything — and a refused scope never mints a project store.
     let Some(target) = medit::edit_target(ctx, global)? else {
         return Err(ClientError::NoManifest);
     };
@@ -339,45 +330,23 @@ fn fetch_arm(
     }
 
     let agents = engaged_agents(ctx, &target, global);
-    if !yes {
-        let mut yes_argv = vec![
-            "topos".to_owned(),
-            "add".to_owned(),
-            "--mcp".to_owned(),
-            source.to_owned(),
-        ];
-        if global {
-            yes_argv.push("-g".to_owned());
-        }
-        yes_argv.push("--yes".to_owned());
-        return Ok(AddMcpOutcome::Described {
-            data: Box::new(AddDescribeData {
-                source: source.to_owned(),
-                members: Vec::new(),
-                manifest: target.path.display().to_string(),
-                reference: row_spelling(&target, global, &bundle_dir),
-                value: "{ kind = \"mcp\" }".to_owned(),
-                note: None,
-                mcp: Some(summarize(&summary, &bundle_dir, agents)),
-            }),
-            yes_argv,
-        });
-    }
 
     // ---- APPLY ----
-    // The BYTES first (the row must never point at a folder that is not there), then the row, then
-    // the converge — each step convergent on its own, so a failure part-way leaves a state the
-    // next `update` finishes rather than a half-trusted one.
+    // The BYTES first (the row must never point at a folder that is not there), then the import
+    // record (what lets `remove` prove the folder is still ours), then the row, then the converge
+    // — each step convergent on its own, so a failure part-way leaves a state the next retry or
+    // `update` finishes rather than a half-trusted one.
     let scope = medit::add_scope(ctx, global)?;
     ctx.fs.create_dir_all(&bundle_dir)?;
     crate::atomic::atomic_write(ctx.fs, &bundle_dir.join("server.json"), &document)?;
+    record_import(ctx, &scope.layout, &bundle_dir, &document)?;
 
     let mut data = row_only_receipt(&slug);
     medit::note_added_path_kind_in(ctx, &mut data, &scope.target, &bundle_dir, Some("mcp"))?;
     let bundle_id = format!("local:{slug}");
     let lines = converge_one(ctx, &scope.target, global, &bundle_id, &slug);
-    fold_receipt(&mut data, &summary, &lines);
-    Ok(AddMcpOutcome::Applied(Box::new(data)))
+    fold_receipt(&mut data, &summary, &bundle_dir, agents, &lines);
+    Ok(Box::new(data))
 }
 
 /// An interrupted import's leftovers, and nothing else: the standing dir is UNREGISTERED (no row
@@ -436,22 +405,6 @@ fn bundle_destination(ctx: &Ctx<'_>, target: &EditTarget, global: bool, slug: &s
         .join(slug)
 }
 
-/// The row key [`medit::note_added_path_kind_in`] will write for `bundle_dir` — computed here only
-/// so the DESCRIBE can print the exact line the apply lands (the writer re-derives it itself).
-fn row_spelling(target: &EditTarget, global: bool, bundle_dir: &Path) -> String {
-    let dir = target
-        .dir
-        .canonicalize()
-        .unwrap_or_else(|_| target.dir.clone());
-    let abs = bundle_dir
-        .canonicalize()
-        .unwrap_or_else(|_| bundle_dir.to_path_buf());
-    if !global && abs.starts_with(&dir) {
-        return medit::path_reference(&dir, &abs);
-    }
-    abs.display().to_string()
-}
-
 /// The receipt shape a row-only add returns (the fetched arm mints no version history — see the
 /// module docs). Same fields the reference arms fill for a feed or channel row.
 fn row_only_receipt(name: &str) -> AddData {
@@ -472,7 +425,110 @@ fn row_only_receipt(name: &str) -> AddData {
         governed_copy: None,
         published_match: None,
         note: None,
+        mcp: None,
     }
+}
+
+// -------------------------------------------------------------------------------------------------
+// The import record — what makes `remove` the fetched arm's verifiable FULL inverse
+// -------------------------------------------------------------------------------------------------
+
+/// `state/mcp_imports.json` — the machine-local custody record of the folders the FETCHED arm
+/// itself wrote: canonical bundle dir → the sha256 of the exact `server.json` bytes the import
+/// landed there. The `remove` path deletes such a folder ONLY when it still holds exactly that
+/// one file at exactly those bytes; anything else — an edited document, a sibling file, no record
+/// at all (an adopted folder is the person's own material) — is KEPT and disclosed. No undo beats
+/// a wrong one: the add receipt may present `topos remove <ref>` as the full inverse only because
+/// this record makes the folder half verifiable.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub(crate) struct McpImports {
+    #[serde(default)]
+    pub schema_version: u32,
+    /// Canonical bundle-dir path → sha256 hex of the written `server.json` bytes.
+    #[serde(default)]
+    pub imports: BTreeMap<String, String>,
+}
+
+/// The record's path in one scope's store.
+fn imports_path(layout: &Layout) -> PathBuf {
+    layout.state_dir().join("mcp_imports.json")
+}
+
+/// Record the document this import just wrote at `dir` (read-modify-write; an unreadable document
+/// starts fresh — the worst outcome of a lost record is a KEPT folder, disclosed).
+fn record_import(
+    ctx: &Ctx<'_>,
+    layout: &Layout,
+    dir: &Path,
+    document: &[u8],
+) -> Result<(), ClientError> {
+    ctx.fs.create_dir_all(&layout.state_dir())?;
+    let path = imports_path(layout);
+    let mut doc: McpImports = crate::doc::read_doc(ctx.fs, &path)?.unwrap_or_default();
+    doc.schema_version = topos_types::PERSISTED_SCHEMA_VERSION;
+    let canon = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
+    doc.imports.insert(
+        canon.display().to_string(),
+        topos_core::digest::to_hex(&topos_core::digest::sha256(document)),
+    );
+    crate::doc::write_doc(ctx.fs, &path, &doc)
+}
+
+/// The `remove` path's half of the inverse: delete the folder a fetched import wrote at `dir` —
+/// IF this scope's record proves it, and IF the folder still holds exactly the recorded bytes.
+/// Returns the disclosure line for the removal receipt; `None` when the folder was never a
+/// recorded import (an adopted folder — untouched, nothing to say).
+///
+/// Fail toward KEEPING: an unreadable record, extra files, different bytes — every indeterminate
+/// answer keeps the folder and says so. The record row is dropped either way (the manifest row is
+/// gone, so the custody question is closed).
+pub(crate) fn remove_imported_bundle(ctx: &Ctx<'_>, layout: &Layout, dir: &Path) -> Option<String> {
+    let path = imports_path(layout);
+    let mut doc: McpImports = crate::doc::read_doc(ctx.fs, &path).ok().flatten()?;
+    let canon = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
+    let key = canon.display().to_string();
+    let recorded = doc.imports.remove(&key)?;
+    let _ = crate::doc::write_doc(ctx.fs, &path, &doc);
+    if !ctx.fs.exists(&canon) {
+        return None; // already gone — nothing to delete, nothing to keep
+    }
+    if import_still_pristine(ctx, &canon, &recorded) {
+        return match ctx.fs.remove_dir_all(&canon) {
+            Ok(()) => Some(format!(
+                "the folder this import wrote ({}) still held exactly the fetched document and \
+                 was removed with the row",
+                canon.display()
+            )),
+            Err(e) => Some(format!(
+                "the folder this import wrote ({}) could not be removed ({e}) — it is left in \
+                 place",
+                canon.display()
+            )),
+        };
+    }
+    Some(format!(
+        "kept {} — its bytes no longer match what this import wrote, so nothing there is deleted",
+        canon.display()
+    ))
+}
+
+/// Whether `dir` still holds EXACTLY what the import wrote: one entry, `server.json`, whose bytes
+/// hash to the recorded digest. Any read failure answers `false` (kept, disclosed).
+fn import_still_pristine(ctx: &Ctx<'_>, dir: &Path, recorded_sha: &str) -> bool {
+    let Ok(entries) = ctx.fs.read_dir(dir) else {
+        return false;
+    };
+    if entries.len() != 1 {
+        return false;
+    }
+    let only = &entries[0];
+    if only.file_name().is_none_or(|n| n != "server.json") {
+        return false;
+    }
+    let Ok(Some(bytes)) = ctx.fs.read_opt(only) else {
+        return false;
+    };
+    topos_core::digest::to_hex(&topos_core::digest::sha256(&bytes)) == recorded_sha
 }
 
 // -------------------------------------------------------------------------------------------------
@@ -627,7 +683,7 @@ fn engaged_agents(ctx: &Ctx<'_>, target: &EditTarget, global: bool) -> Vec<Strin
     out
 }
 
-/// The typed describe payload — derived facts only; the document is never echoed whole.
+/// The typed receipt payload — derived facts only; the document is never echoed whole.
 fn summarize(summary: &McpSummary, bundle_dir: &Path, agents: Vec<String>) -> McpServerSummary {
     McpServerSummary {
         server: summary.name.clone(),
@@ -642,9 +698,17 @@ fn summarize(summary: &McpSummary, bundle_dir: &Path, agents: Vec<String>) -> Mc
     }
 }
 
-/// Fold what landed into the add receipt's note: the server this row now points at, then the
-/// per-agent outcomes of the converge that just ran.
-fn fold_receipt(data: &mut AddData, summary: &McpSummary, lines: &[String]) {
+/// Fold what landed into the add receipt: the typed `mcp` block (the same derived facts the
+/// two-phase describe used to carry), then the prose note — the server this row now points at
+/// and the per-agent outcomes of the converge that just ran.
+fn fold_receipt(
+    data: &mut AddData,
+    summary: &McpSummary,
+    bundle_dir: &Path,
+    agents: Vec<String>,
+    lines: &[String],
+) {
+    data.mcp = Some(summarize(summary, bundle_dir, agents));
     let auth = match summary.auth_hint {
         Some(hint) => format!(", auth {}", hint.as_str()),
         None => String::new(),

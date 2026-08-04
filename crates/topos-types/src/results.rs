@@ -757,6 +757,12 @@ pub struct AddData {
     /// **Additive.**
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
+    /// The MCP SERVER this add landed (`add --mcp`): what the gated document says it is, the
+    /// endpoint every agent will call, and the agents the converge reached — typed, so a JSON
+    /// consumer never parses the prose note. Absent for every other add. **INFERRED**
+    /// (additive-only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mcp: Option<McpServerSummary>,
 }
 
 /// The describe a bare `add` of a git source returns: the source, what was discovered in it, and
@@ -782,17 +788,11 @@ pub struct AddDescribeData {
     /// fetches and installs the skills the row names. **INFERRED** (additive-only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
-    /// The MCP SERVER this describe would import (`add --mcp <name|url>`): what the fetched
-    /// document says it is, where it points, and which agents would get it. Absent for every
-    /// other source — a git import has no endpoint to disclose. **INFERRED** (additive-only).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub mcp: Option<McpServerSummary>,
 }
 
-/// What a fetched MCP `server.json` says, after the gate accepted it — the facts a first-trust
-/// describe puts in front of a person before any byte is written, and the facts the applied
-/// receipt repeats. DERIVED from the document; the document itself is never echoed whole.
-/// **INFERRED** (additive-only).
+/// What a fetched MCP `server.json` says, after the gate accepted it — the facts the applied
+/// receipt carries beside the undo. DERIVED from the document; the document itself is never
+/// echoed whole. **INFERRED** (additive-only).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
 pub struct McpServerSummary {
@@ -815,10 +815,10 @@ pub struct McpServerSummary {
     /// reaches here — the gate refuses the whole document instead.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub headers: Vec<String>,
-    /// The folder the document would be written to (the bundle IS its directory).
+    /// The folder holding the document (the bundle IS its directory).
     pub bundle: String,
-    /// The agents detected here that the row would reach — the honest breadth line, so nobody
-    /// learns after the fact which config files were about to change.
+    /// The agents set up here that the row reaches, after any `harness` narrowing — the honest
+    /// breadth line, so nobody has to reverse-engineer which config files changed.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub agents: Vec<String>,
 }

@@ -179,7 +179,8 @@ pub(crate) enum Command {
     /// `add topos` restores the built-in topos skill. With `--mcp` the source is an MCP
     /// SERVER instead — an official-registry name, an https link to its server.json, or a folder
     /// holding one — and your agents get it as a tool endpoint in their own MCP config rather than
-    /// as a skill folder; a server fetched from the network shows what it is and waits for `--yes`.
+    /// as a skill folder; every `--mcp` source applies immediately, and the receipt leads with
+    /// the undo (`topos remove <name>`).
     Add {
         /// What to add: a workspace skill, channel, or feed; a local folder; or a GitHub repo.
         source: String,

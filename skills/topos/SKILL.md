@@ -154,8 +154,8 @@ user wants a tool endpoint (not instructions) on this machine or in this repo, o
 have one:
 
 ```
-topos add --mcp io.github.acme/weather      # an official-registry name — describes, then --yes
-topos add --mcp https://…/server.json       # a link to the document — same two-phase
+topos add --mcp io.github.acme/weather      # an official-registry name — applies, undo-led
+topos add --mcp https://…/server.json       # a link to the document — same immediate apply
 topos add --mcp ./tools/weather             # a folder holding one — applies immediately
 topos publish weather                       # share it: same verb, same consent bar as a skill
 ```

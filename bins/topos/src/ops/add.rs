@@ -147,6 +147,7 @@ fn unclaimed_record(
         undo: Vec::new(),
         governed_copy: None,
         published_match: None,
+        mcp: None,
         // The receipt would otherwise read as a fresh adopt while carrying a version older than
         // this run: say what actually happened.
         note: Some(format!(
@@ -399,6 +400,8 @@ pub(crate) fn add_with_name(
         // Set by the manifest half when the edit was not the plain row write (a file born here, a
         // redundant row withheld, an `off` switch deleted, a standing web decline).
         note: None,
+        // Set by `add --mcp`'s receipt fold; a plain adopt is not a server.
+        mcp: None,
     })
 }
 

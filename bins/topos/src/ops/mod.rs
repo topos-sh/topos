@@ -54,7 +54,7 @@ pub(crate) use add::{
     add_with_name, adopt_path, governed_copy_suggestion, keep_as_yours, plan_bare_add,
     resolve_add_target, split_target, tracked_skill_at,
 };
-pub(crate) use add_mcp::{AddMcpOutcome, McpDocSource, add_mcp};
+pub(crate) use add_mcp::{McpDocSource, add_mcp};
 pub(crate) use arm::{arm_detected, probe_detected, scrub_all};
 pub(crate) use builtin::{ensure_builtin, is_builtin, restore_builtin};
 pub(crate) use connect::device_challenge;

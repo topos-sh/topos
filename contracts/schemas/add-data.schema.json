@@ -55,6 +55,17 @@
         "null"
       ]
     },
+    "mcp": {
+      "description": "The MCP SERVER this add landed (`add --mcp`): what the gated document says it is, the\nendpoint every agent will call, and the agents the converge reached — typed, so a JSON\nconsumer never parses the prose note. Absent for every other add. **INFERRED**\n(additive-only).",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/McpServerSummary"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "name": {
       "type": "string"
     },
@@ -221,6 +232,65 @@
         "claude-code",
         "openclaw",
         "hermes"
+      ]
+    },
+    "McpServerSummary": {
+      "description": "What a fetched MCP `server.json` says, after the gate accepted it — the facts the applied\nreceipt carries beside the undo. DERIVED from the document; the document itself is never\nechoed whole. **INFERRED** (additive-only).",
+      "type": "object",
+      "properties": {
+        "agents": {
+          "description": "The agents set up here that the row reaches, after any `harness` narrowing — the honest\nbreadth line, so nobody has to reverse-engineer which config files changed.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "auth": {
+          "description": "The publisher's `_meta` auth word (`oauth` / `none`) when the document declared one.\nAbsent means it said nothing — which is NOT a claim that no credential is needed.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "bundle": {
+          "description": "The folder holding the document (the bundle IS its directory).",
+          "type": "string"
+        },
+        "description": {
+          "description": "The publisher's one-line summary (the registry caps it at 100 characters).",
+          "type": "string"
+        },
+        "headers": {
+          "description": "The names of the LITERAL headers every call will carry. A credential-shaped header never\nreaches here — the gate refuses the whole document instead.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "server": {
+          "description": "The registry name (`io.github.<owner>/<server>`) — the server's own identity.",
+          "type": "string"
+        },
+        "transport": {
+          "description": "The transport, always `streamable-http` today: the one a shared bundle can promise, since\nthe same URL has to work from every machine.",
+          "type": "string"
+        },
+        "url": {
+          "description": "The endpoint an agent will call — always `https`, never a template.",
+          "type": "string"
+        },
+        "version": {
+          "description": "The version the document declares.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "server",
+        "description",
+        "version",
+        "url",
+        "transport",
+        "bundle"
       ]
     },
     "PublishedMatch": {

@@ -1900,6 +1900,11 @@ fn apply_arms(
     // left behind — instead of deferring the fact to the next sweep. Best-effort: the row edit
     // already landed, and the next sweep's removal convergence reaches the same end state.
     converge_removed_mcp(ctx, target, global, &arms, &mut items);
+    // The folder half of the fetched import's inverse: a bundle folder `add --mcp <name|url>`
+    // itself wrote leaves with the row — but ONLY when its bytes still match what the import
+    // wrote (the scope's import record proves it); anything else is kept, disclosed. An adopted
+    // folder has no record and is never touched.
+    remove_imported_mcp_dirs(ctx, target, global, &arms, &mut items);
     if let Some(note) = born
         && let Some(first) = items.first_mut()
     {
@@ -1990,6 +1995,48 @@ fn converge_removed_mcp(
         item.note = Some(match item.note.take() {
             Some(prev) => format!("{prev} · {folded}"),
             None => folded,
+        });
+    }
+}
+
+/// Delete the bundle folders the FETCHED `add --mcp` arm itself wrote, for every dropped
+/// `kind = "mcp"` local-path row — through [`super::add_mcp::remove_imported_bundle`], which
+/// verifies the folder still holds exactly the imported bytes (the scope's import record) and
+/// KEEPS it disclosed otherwise. Runs AFTER the config converge, so removal never races the
+/// entries that pointed at the folder.
+fn remove_imported_mcp_dirs(
+    ctx: &Ctx<'_>,
+    target: &EditTarget,
+    global: bool,
+    arms: &[Arm],
+    items: &mut [RemoveItem],
+) {
+    // The edited scope's store — where the fetched arm filed its import record.
+    let layout = if global {
+        Some(ctx.layout.clone())
+    } else {
+        crate::sidecar::existing_project_store(ctx.fs, &target.dir)
+    };
+    let Some(layout) = layout else {
+        return;
+    };
+    for (arm, item) in arms.iter().zip(items.iter_mut()) {
+        let Arm::RowDrop { row, .. } = arm else {
+            continue;
+        };
+        let KeyShape::LocalPath { raw } = &row.shape else {
+            continue;
+        };
+        if row.fields().kind.as_deref() != Some("mcp") {
+            continue;
+        }
+        let dir = row_dir(ctx, target, raw);
+        let Some(line) = super::add_mcp::remove_imported_bundle(ctx, &layout, &dir) else {
+            continue;
+        };
+        item.note = Some(match item.note.take() {
+            Some(prev) => format!("{prev} · {line}"),
+            None => line,
         });
     }
 }

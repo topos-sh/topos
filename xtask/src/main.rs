@@ -421,13 +421,12 @@ fn fixtures() -> Vec<(&'static str, String)> {
     use topos_types::persisted::ConflictPathKind;
     use topos_types::requests::{WireDelivery, WireDeliverySkill, WireNotice, WireVia};
     use topos_types::results::{
-        AddData, AddDescribeData, Conflict, ConflictPathReport, DiffData, DiffPatchInfo,
-        DiffSource, EnrollmentPending, InviteReadData, ListData, LogData, LoginData, LogoutData,
-        MergePreview, MergePreviewVerdict, MergeReport, ProtectData, PublishData,
-        PublishDescribeData, PublishGate, PublishedMatch, PullAction, PullData, PullSkill,
-        RemoveData, RemoveItem, RemoveKind, ReviewIndexData, ReviewIndexEntry, SkillEntry,
-        SkillStatus, StatusData, StatusScope, StatusScopeSummary, StatusTrigger,
-        WorkspaceSyncReport,
+        AddData, Conflict, ConflictPathReport, DiffData, DiffPatchInfo, DiffSource,
+        EnrollmentPending, InviteReadData, ListData, LogData, LoginData, LogoutData, MergePreview,
+        MergePreviewVerdict, MergeReport, ProtectData, PublishData, PublishDescribeData,
+        PublishGate, PublishedMatch, PullAction, PullData, PullSkill, RemoveData, RemoveItem,
+        RemoveKind, ReviewIndexData, ReviewIndexEntry, SkillEntry, SkillStatus, StatusData,
+        StatusScope, StatusScopeSummary, StatusTrigger, WorkspaceSyncReport,
     };
     use topos_types::results::{AttentionCount, ListScope, McpServerSummary};
     use topos_types::{ActionCode, Affected, JsonEnvelope, Receipt, TerminalOutcome, WireError};
@@ -469,6 +468,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
             // The fixture rig has no session, so no workspace can publish the same name.
             published_match: None,
             note: None,
+            mcp: None,
         })
         .expect("AddData serializes"),
         warnings: vec![],
@@ -507,6 +507,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
                  name is on this machine, and acme publishes it"
                     .to_owned(),
             ),
+            mcp: None,
         })
         .expect("AddData serializes"),
         warnings: vec![],
@@ -547,6 +548,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
                 identical: true,
             }),
             note: None,
+            mcp: None,
         })
         .expect("AddData serializes"),
         warnings: vec![],
@@ -594,49 +596,56 @@ fn fixtures() -> Vec<(&'static str, String)> {
         }),
     };
 
-    // `add --mcp <registry-name>` with no `--yes` — the two-phase DESCRIBE for an MCP server this
-    // machine has never read. Nothing has been written: the envelope IS the disclosure (what the
-    // server is, the endpoint every agent will call, the folder and the row that would appear, and
-    // the agents it would reach), and the one `next_actions` entry is the command that applies it.
-    let add_mcp_describe = JsonEnvelope {
+    // `add --mcp <registry-name>` — the fetched arm APPLIES immediately: an undo-led APPLY
+    // RECEIPT (the `UNDO` next action is the full inverse — the row, the config entries, and the
+    // bundle folder this import itself wrote), with the typed `mcp` block carrying the server
+    // facts a JSON consumer reads. The fetched arm mints no version history, so the identity
+    // fields hold the row-only sentinels.
+    let add_mcp_applied = JsonEnvelope {
         schema_version: 1,
         command: "add".to_owned(),
         ok: true,
-        data: serde_json::json!({
-            "describe": AddDescribeData {
-                source: "io.github.acme/weather".to_owned(),
-                // A server document holds no member list — the `mcp` block below carries its facts.
-                members: Vec::new(),
-                manifest: "/home/ada/.topos/topos.toml".to_owned(),
-                reference: "/home/ada/.topos/mcp/weather".to_owned(),
-                value: "{ kind = \"mcp\" }".to_owned(),
-                note: None,
-                mcp: Some(McpServerSummary {
-                    server: "io.github.acme/weather".to_owned(),
-                    description: "Current conditions and forecasts for a named place.".to_owned(),
-                    version: "1.4.0".to_owned(),
-                    url: "https://weather.acme.example/mcp".to_owned(),
-                    transport: "streamable-http".to_owned(),
-                    auth: Some("oauth".to_owned()),
-                    // Only LITERAL headers reach a receipt — a credential-shaped one refuses the
-                    // whole document instead.
-                    headers: vec!["X-Region".to_owned()],
-                    bundle: "/home/ada/.topos/mcp/weather".to_owned(),
-                    agents: vec!["Claude Code".to_owned(), "Cursor".to_owned()],
-                }),
-            }
-        }),
+        data: serde_json::to_value(AddData {
+            skill_id: String::new(),
+            name: "weather".to_owned(),
+            version_id: "0".repeat(64),
+            bundle_digest: "0".repeat(64),
+            tracked: true,
+            harness: None,
+            harness_slug: None,
+            currency: None,
+            triggers: Vec::new(),
+            origin: None,
+            manifest: Some("/home/ada/.topos/topos.toml".to_owned()),
+            reference: Some("/home/ada/.topos/mcp/weather".to_owned()),
+            undo: argv(&["topos", "remove", "-g", "/home/ada/.topos/mcp/weather"]),
+            governed_copy: None,
+            published_match: None,
+            note: Some(
+                "MCP server io.github.acme/weather v1.4.0 — https://weather.acme.example/mcp \
+                 over streamable-http, auth oauth · cursor: server entry in \
+                 /home/ada/.cursor/mcp.json — restart Cursor"
+                    .to_owned(),
+            ),
+            mcp: Some(McpServerSummary {
+                server: "io.github.acme/weather".to_owned(),
+                description: "Current conditions and forecasts for a named place.".to_owned(),
+                version: "1.4.0".to_owned(),
+                url: "https://weather.acme.example/mcp".to_owned(),
+                transport: "streamable-http".to_owned(),
+                auth: Some("oauth".to_owned()),
+                // Only LITERAL headers reach a receipt — a credential-shaped one refuses the
+                // whole document instead.
+                headers: vec!["X-Region".to_owned()],
+                bundle: "/home/ada/.topos/mcp/weather".to_owned(),
+                agents: vec!["Claude Code".to_owned(), "Cursor".to_owned()],
+            }),
+        })
+        .expect("AddData serializes"),
         warnings: vec![],
         next_actions: vec![topos::actions::next_action(
-            ActionCode::from("APPLY_DESCRIBED".to_owned()),
-            argv(&[
-                "topos",
-                "add",
-                "--mcp",
-                "io.github.acme/weather",
-                "-g",
-                "--yes",
-            ]),
+            ActionCode::from("UNDO".to_owned()),
+            argv(&["topos", "remove", "-g", "/home/ada/.topos/mcp/weather"]),
         )],
         receipt: None,
         error: None,
@@ -1694,7 +1703,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
             emit_json(&add_ambiguous_workspace),
         ),
         ("json/add.ambiguous-scope", emit_json(&add_ambiguous_scope)),
-        ("json/add.mcp-describe", emit_json(&add_mcp_describe)),
+        ("json/add.mcp-applied", emit_json(&add_mcp_applied)),
         ("json/list.ok", emit_json(&list_ok)),
         ("json/diff.ok", emit_json(&diff_ok)),
         ("json/log.ok", emit_json(&log_ok)),

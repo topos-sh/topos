@@ -122,7 +122,7 @@ receipt; read the undo, and tell the person what changed.
 | `review <target> --approve\|--reject\|--withdraw` | The **verdict flag is the apply**; a target with no verdict is the preview. `--yes` means nothing here |
 | `revert`, `protect`, `invite <emails…>`, `update --reset`, `uninstall` | Two-phase |
 | `add` | Immediate — **except** a git source, which lists what it found and waits for `--yes`. Every time, including a repo already in a local `topos.toml` |
-| `add --mcp` | Immediate for a folder already on this disk; a registry name or URL is a source this machine has never read, so it describes and waits for `--yes` ([MCP servers](/docs/mcp)) |
+| `add --mcp` | Immediate — the receipt leads with the undo (`topos remove <name>` restores the row, the config entries, and the folder a fetched import wrote) ([MCP servers](/docs/mcp)) |
 | `remove` | Two-phase when local work would be lost (a draft ahead, a permanent local delete) **or** when the row is a channel/repo line that would be rewritten to its members; immediate otherwise |
 | `init`, `fmt`, `login`, `logout`, `update`, `list`, `diff`, `log`, `status`, `self-update` | Immediate, with receipt (`--yes` is an accepted no-op) |
 

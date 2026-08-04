@@ -8,17 +8,6 @@
       "description": "The manifest FILE the row would land in.",
       "type": "string"
     },
-    "mcp": {
-      "description": "The MCP SERVER this describe would import (`add --mcp <name|url>`): what the fetched\ndocument says it is, where it points, and which agents would get it. Absent for every\nother source — a git import has no endpoint to disclose. **INFERRED** (additive-only).",
-      "anyOf": [
-        {
-          "$ref": "#/$defs/McpServerSummary"
-        },
-        {
-          "type": "null"
-        }
-      ]
-    },
     "members": {
       "description": "The skills discovered in it (leaf directory names).",
       "type": "array",
@@ -51,66 +40,5 @@
     "manifest",
     "reference",
     "value"
-  ],
-  "$defs": {
-    "McpServerSummary": {
-      "description": "What a fetched MCP `server.json` says, after the gate accepted it — the facts a first-trust\ndescribe puts in front of a person before any byte is written, and the facts the applied\nreceipt repeats. DERIVED from the document; the document itself is never echoed whole.\n**INFERRED** (additive-only).",
-      "type": "object",
-      "properties": {
-        "agents": {
-          "description": "The agents detected here that the row would reach — the honest breadth line, so nobody\nlearns after the fact which config files were about to change.",
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        },
-        "auth": {
-          "description": "The publisher's `_meta` auth word (`oauth` / `none`) when the document declared one.\nAbsent means it said nothing — which is NOT a claim that no credential is needed.",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "bundle": {
-          "description": "The folder the document would be written to (the bundle IS its directory).",
-          "type": "string"
-        },
-        "description": {
-          "description": "The publisher's one-line summary (the registry caps it at 100 characters).",
-          "type": "string"
-        },
-        "headers": {
-          "description": "The names of the LITERAL headers every call will carry. A credential-shaped header never\nreaches here — the gate refuses the whole document instead.",
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        },
-        "server": {
-          "description": "The registry name (`io.github.<owner>/<server>`) — the server's own identity.",
-          "type": "string"
-        },
-        "transport": {
-          "description": "The transport, always `streamable-http` today: the one a shared bundle can promise, since\nthe same URL has to work from every machine.",
-          "type": "string"
-        },
-        "url": {
-          "description": "The endpoint an agent will call — always `https`, never a template.",
-          "type": "string"
-        },
-        "version": {
-          "description": "The version the document declares.",
-          "type": "string"
-        }
-      },
-      "required": [
-        "server",
-        "description",
-        "version",
-        "url",
-        "transport",
-        "bundle"
-      ]
-    }
-  }
+  ]
 }

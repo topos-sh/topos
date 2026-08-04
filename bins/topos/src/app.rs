@@ -10,6 +10,7 @@ use clap::Parser;
 use serde::Serialize;
 use topos_harness::{ClaudeCode, ConfigStore, HarnessAdapter, OpenClaw};
 use topos_types::HarnessId;
+use topos_types::results::AddData;
 
 use crate::cli::{AuthCmd, Cli, Command};
 use crate::ctx::Ctx;
@@ -554,20 +555,19 @@ fn run_command(
             if mcp {
                 let docs =
                     crate::plane_http::UreqMcpSource::new().with_progress(Rc::clone(&progress));
-                let result = ops::add_mcp(&ctx, Some(&docs), &source, global, yes);
+                // Every `--mcp` door applies immediately with an undo-led receipt; `--yes` stays
+                // parsed and changes nothing here (the flag's own help says so).
+                let result = ops::add_mcp(&ctx, Some(&docs), &source, global);
                 // The arming sweep + the built-in ride an APPLIED import exactly as they ride any
                 // other adopt receipt (the same trigger-arming moment).
-                let result = result.map(|outcome| match outcome {
-                    ops::AddMcpOutcome::Applied(mut data) => {
-                        if data.currency.is_some() {
-                            data.triggers = breadth_arm(&ctx.roots, harness.as_ref(), &fs);
-                            if let Err(e) = ops::ensure_builtin(&ctx) {
-                                let _ = diag.note(cmd_name, &e);
-                            }
+                let result = result.map(|mut data| {
+                    if data.currency.is_some() {
+                        data.triggers = breadth_arm(&ctx.roots, harness.as_ref(), &fs);
+                        if let Err(e) = ops::ensure_builtin(&ctx) {
+                            let _ = diag.note(cmd_name, &e);
                         }
-                        ops::AddMcpOutcome::Applied(data)
                     }
-                    described => described,
+                    data
                 });
                 return finish_add_mcp(json, cmd_name, result, &diag);
             }
@@ -1964,17 +1964,16 @@ fn finish_add_reference(
     }
 }
 
-/// The `add --mcp` finisher — the same two-phase shape as the reference arm, with the describe
-/// rendering the SERVER (what it is, where it points, which agents it reaches) instead of a repo's
-/// member list.
+/// The `add --mcp` finisher — an APPLY RECEIPT that leads with the undo, like every other ungated
+/// arm; the typed `mcp` block on the payload carries the server facts a JSON consumer reads.
 fn finish_add_mcp(
     json: bool,
     command: &str,
-    result: Result<ops::AddMcpOutcome, ClientError>,
+    result: Result<Box<AddData>, ClientError>,
     diag: &Diag<'_>,
 ) -> ExitCode {
     match result {
-        Ok(ops::AddMcpOutcome::Applied(data)) => {
+        Ok(data) => {
             if json {
                 let value = serde_json::to_value(&data).unwrap_or_default();
                 let mut envelope = render::ok_envelope(command, value);
@@ -1982,17 +1981,6 @@ fn finish_add_mcp(
                 println!("{}", render::to_json(&envelope));
             } else {
                 println!("{}", render::add_tty(&data));
-            }
-            ExitCode::SUCCESS
-        }
-        Ok(ops::AddMcpOutcome::Described { data, yes_argv }) => {
-            if json {
-                let value = serde_json::json!({ "describe": data });
-                let mut envelope = render::ok_envelope(command, value);
-                envelope.next_actions = render::describe_next_actions(vec![yes_argv.clone()]);
-                println!("{}", render::to_json(&envelope));
-            } else {
-                println!("{}", render::add_mcp_describe_tty(&data, &yes_argv));
             }
             ExitCode::SUCCESS
         }

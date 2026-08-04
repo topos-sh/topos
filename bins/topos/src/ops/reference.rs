@@ -428,6 +428,7 @@ fn set_data(name: &str) -> AddData {
         governed_copy: None,
         published_match: None,
         note: None,
+        mcp: None,
     }
 }
 
@@ -602,7 +603,6 @@ fn add_forge(
                 value: value_spelling(&value),
                 note,
                 // A git import has no server endpoint to disclose.
-                mcp: None,
             }),
             yes_argv,
         });
@@ -830,7 +830,6 @@ pub(crate) fn add_forge_selected(
                 value: "*".to_owned(),
                 note: Some(format!("lands into: {}", placed.join(", "))),
                 // A git import has no server endpoint to disclose.
-                mcp: None,
             }),
             yes_argv,
         });

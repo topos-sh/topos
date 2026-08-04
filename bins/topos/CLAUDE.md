@@ -79,8 +79,10 @@ generated `docs/cli.md` (`cargo xtask gen-cli-ref`).
   raw text; the named shapes are compiled-in matcher fns — no regex engine ships — and a
   dev-dependency `regex` referees them against the JSON's own sources in test). `ops/add_mcp` is
   `add --mcp`: a local folder is gated then adopted in place with `kind = "mcp"` on its row; a
-  registry name or https URL is a new-source trust moment (describe → `--yes`) that writes the
-  canonical document, records the row, and converges the scope's config. `publish` reads the kind
+  registry name or https URL is fetched, gated, and applied immediately with an undo-led receipt
+  (the canonical document written, the row recorded, the scope's config converged; the per-scope
+  `state/mcp_imports.json` record is what lets `remove` delete the written folder only when its
+  bytes still match). `publish` reads the kind
   (ledger → delivery cache → the manifest row, the last only when the draft carries a root
   `server.json`), re-runs the gate BEFORE the op WAL, and threads it onto the wire.
 - `mcp_engine` + `mcp_ledger` — the `kind = "mcp"` bundle's delivery half: a store-only sync

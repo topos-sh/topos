@@ -2066,16 +2066,8 @@ fn dual_scope_adoption_keeps_each_scopes_config_key_stable() {
     let ctx = rig.ctx_at(Some(&proj.0));
     // Adopt at PROJECT scope (the checkout's store tracks the dir under the project id), then
     // the SAME folder with `-g` (the home store tracks it under its own id).
-    let ops::AddMcpOutcome::Applied(_) =
-        ops::add_mcp(&ctx, None, dir.to_str().unwrap(), false, false).expect("project adopt")
-    else {
-        panic!("a local folder applies immediately");
-    };
-    let ops::AddMcpOutcome::Applied(_) =
-        ops::add_mcp(&ctx, None, dir.to_str().unwrap(), true, false).expect("global adopt")
-    else {
-        panic!("a local folder applies immediately");
-    };
+    ops::add_mcp(&ctx, None, dir.to_str().unwrap(), false).expect("project adopt");
+    ops::add_mcp(&ctx, None, dir.to_str().unwrap(), true).expect("global adopt");
     let playout = crate::sidecar::existing_project_store(&rig.fs, &proj.0)
         .expect("the project adopt minted the checkout's store");
     let before = mcp_ledger::read(&rig.fs, &playout).unwrap();
