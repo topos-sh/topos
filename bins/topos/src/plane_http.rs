@@ -2222,7 +2222,7 @@ impl crate::ops::McpDocSource for UreqMcpSource {
         let resp = self
             .agent
             .get(url)
-            .header("User-Agent", RELEASE_USER_AGENT)
+            .header("User-Agent", USER_AGENT)
             .header("Accept", "application/json")
             .call()
             .map_err(|e| ClientError::RemoteFetch {
