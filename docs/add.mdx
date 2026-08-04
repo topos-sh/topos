@@ -213,10 +213,11 @@ With `--mcp` the source is a **remote MCP server** rather than a skill: an offic
 an https link to its `server.json`, or a folder holding one. It records the same one line, but your
 agents get it as a tool endpoint in their own MCP config instead of as a skill folder.
 
-A registry name or a URL is bytes this machine has never read, so a bare run shows what the server
-is — its endpoint, whether a sign-in is coming, which agents it would reach — and changes nothing;
-apply with `--yes`. A folder already on your disk is adopted immediately, with the usual undo. What
-Topos refuses to place, and why: [MCP servers](/docs/mcp).
+Every spelling applies immediately, and the receipt leads with the undo: what the server is, its
+endpoint, whether a sign-in is coming, which agents it reached, and the one `topos remove` that
+takes it all back. A folder already on your disk is adopted in place and `remove` never deletes it;
+a fetched document is written out as a folder, and that folder leaves with the row. What Topos
+refuses to place, and why: [MCP servers](/docs/mcp).
 
 ## Stop receiving
 
