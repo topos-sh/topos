@@ -1604,6 +1604,102 @@ fn a_star_repo_row_moves_only_on_an_explicit_update() {
 }
 
 #[test]
+fn a_repo_set_member_reads_as_current_in_list_not_detached() {
+    // The two commands must not contradict each other. `update` keeps a GitHub-sourced skill
+    // current; `list` rendered the very same copy as "[detached] … removed from the skill list",
+    // because a repo-set row's expansion was never itemized and the ghost walk therefore read a
+    // live, managed copy as an abandoned leftover. Asserted against BOTH commands in one test,
+    // because the bug WAS the disagreement.
+    let rig = Rig::new("repo-list-current");
+    rig.write_global("[bundles]\n\"github.com/o/r\" = \"*\"\n");
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let plane = FakePlane::new(log);
+    let dir = FakeDirectory::new(Vec::new(), Vec::new());
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    let git = FakeGit::new(build_repo_targz(
+        "o-r-aaaaaaaaaaaa1",
+        &[
+            ("skills/alpha/SKILL.md", b"# alpha v1\n"),
+            ("skills/beta/SKILL.md", b"# beta v1\n"),
+        ],
+    ));
+    gate_add(&ctx, &plane, &dir, &git, "github.com/o/r");
+
+    // What `update` says: both members are managed and current.
+    let out = ops::manifest_update(
+        &ctx,
+        &connect(&plane, &dir),
+        Some(&git as &dyn crate::git_source::GitTarballSource),
+        &ops::ManifestUpdateOpts::default(),
+    )
+    .unwrap();
+    for name in ["alpha", "beta"] {
+        assert!(
+            out.data.skills.iter().any(|s| s.skill == name),
+            "update manages {name}: {:?}",
+            out.data.skills
+        );
+        assert!(
+            rig.home
+                .0
+                .join(format!(".claude/skills/{name}/SKILL.md"))
+                .exists(),
+            "{name}'s bytes are placed"
+        );
+    }
+
+    // What `list` says: the SAME thing. A member is a live row of the set that delivers it —
+    // never a ghost, never detached, never "removed from the skill list".
+    let listed = crate::ops::list_with(
+        &ctx,
+        &ops::ListRequest::default(),
+        None,
+        None,
+        crate::ops::RowPage::unlimited(),
+    )
+    .unwrap();
+    let rows: Vec<&topos_types::results::SkillEntry> = listed
+        .data
+        .scopes
+        .iter()
+        .flat_map(|sc| sc.rows.iter())
+        .collect();
+    for name in ["alpha", "beta"] {
+        let row = rows
+            .iter()
+            .find(|r| r.skill == name)
+            .unwrap_or_else(|| panic!("list itemizes {name}: {rows:?}"));
+        assert_ne!(
+            row.status,
+            Some(topos_types::results::SkillStatus::Detached),
+            "{name} is managed by update, so list must not call it detached: {row:?}"
+        );
+        assert!(
+            row.cause.is_none(),
+            "a live member has no detach cause: {row:?}"
+        );
+        assert_eq!(
+            row.status,
+            Some(topos_types::results::SkillStatus::Current),
+            "{row:?}"
+        );
+        // The source column names WHO ASKED — the manifest row, exactly as for every other kind
+        // of line. That is the whole point: the member is an ordinary delivered row now.
+        assert!(
+            row.source
+                .as_deref()
+                .is_some_and(|src| src.ends_with("topos.toml")),
+            "{row:?}"
+        );
+    }
+
+    // And the rendered text carries no contradiction either.
+    let text = crate::render::list_tty(&listed);
+    assert!(!text.contains("[detached]"), "{text}");
+    assert!(!text.contains("removed from the skill list"), "{text}");
+}
+
+#[test]
 fn an_untracked_repo_row_refuses_toward_the_add_gate() {
     // The refusal is the SAME on the quiet sweep (no forge lane) and on a targeted skill row —
     // a network would not change it: trust is the gate, not reachability.
