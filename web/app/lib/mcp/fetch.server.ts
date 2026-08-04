@@ -1,5 +1,7 @@
 import { lookup } from "node:dns/promises";
+import { request as httpsRequest } from "node:https";
 import { isIPv4 } from "node:net";
+import { Readable } from "node:stream";
 import { MAX_SERVER_JSON_BYTES, nestsTooDeep } from "@/lib/mcp/validate.server";
 
 /**
@@ -11,9 +13,11 @@ import { MAX_SERVER_JSON_BYTES, nestsTooDeep } from "@/lib/mcp/validate.server";
  * URL a member types is an SSRF primitive unless it is checked: the guard below refuses
  * anything but https, resolves the host itself, and refuses every address that is not on the
  * public internet — loopback, private space, link-local (the cloud metadata endpoint lives
- * there), unique-local v6, and the unspecified/multicast ranges. Redirects are `manual`, so a
- * 3xx cannot walk a checked host into an unchecked one; the size cap and timeout bound what a
- * hostile endpoint can cost.
+ * there), unique-local v6, the NAT64 prefixes that carry v4 space, and the unspecified/multicast
+ * ranges. The connection is then DIALED at those vetted addresses, so nothing resolves a second
+ * time and a rebinding answer has nowhere to land. A 3xx is refused rather than followed, so a
+ * checked host cannot walk the fetch into an unchecked one; the size cap and timeout bound what
+ * a hostile endpoint can cost.
  *
  * The official registry is a FIXED host and needs no host guard — but it gets the same cap,
  * timeout and manual-redirect discipline, because "we trust the host" is not a reason to let
@@ -172,6 +176,14 @@ function isPrivateV6(address: string): boolean {
   if (mapped !== null) {
     return isPrivateV4(mapped);
   }
+  const [, g1, g2] = groups as [number, number, number];
+  if (g0 === 0x0064 && g1 === 0xff9b) {
+    // NAT64: 64:ff9b::/96 (the well-known prefix) and 64:ff9b:1::/48 (local-use). Both are v4
+    // space wearing a v6 address — a translator on the path turns them back into an IPv4
+    // connection, which is the whole v4 private range reachable through a shape the v4 rules
+    // above never see. Refused entire, translator or not.
+    return groups.slice(2, 6).every((g) => g === 0) || g2 === 0x0001;
+  }
   if ((g0 & 0xffc0) === 0xfe80) {
     return true; // link-local fe80::/10
   }
@@ -188,20 +200,27 @@ export type AddressLookup = (hostname: string) => Promise<{ address: string; fam
 
 const dnsLookup: AddressLookup = async (hostname) => await lookup(hostname, { all: true });
 
+/** A URL that passed the guard, carrying the exact addresses the guard proved public. */
+export interface VettedUrl {
+  url: URL;
+  /** What this hostname resolved to at check time — and the ONLY addresses the fetch dials. */
+  addresses: { address: string; family: number }[];
+}
+
 /**
  * Resolve a member-supplied URL and refuse it unless EVERY address it resolves to is on the
  * public internet. Every address, not the first: a hostname that answers with one public and
  * one loopback address is a rebinding attempt, and picking the good one would be picking the
  * attacker's other one on the next lookup.
  *
- * This does not close the TOCTOU window between the check and the connection — nothing at this
- * layer can, short of dialing the address directly — but it refuses the whole class of
- * "point it at 169.254.169.254" that a text field otherwise invites.
+ * The vetted addresses come BACK rather than being thrown away, because the connection is then
+ * made to exactly them (see [`dial`]) — a second resolution between this check and the socket
+ * is what a rebinding attack is, and there is no window left for it if nothing resolves twice.
  */
 export async function assertPublicHttpsUrl(
   raw: string,
   resolve: AddressLookup = dnsLookup,
-): Promise<URL> {
+): Promise<VettedUrl> {
   let url: URL;
   try {
     url = new URL(raw.trim());
@@ -232,7 +251,16 @@ export async function assertPublicHttpsUrl(
       throw new McpFetchError("that host is on a private network — this server will not fetch it");
     }
   }
-  return url;
+  return {
+    url,
+    // Normalized: a resolver that answers without a family tag still has to be dialable, and the
+    // socket layer needs the number.
+    addresses: addresses.map((entry) => ({
+      address: entry.address,
+      family:
+        entry.family === 4 || entry.family === 6 ? entry.family : isIPv4(entry.address) ? 4 : 6,
+    })),
+  };
 }
 
 // ── The fetches ─────────────────────────────────────────────────────────────────────────────
@@ -290,20 +318,91 @@ function assertJsonish(response: Response): void {
   }
 }
 
-async function httpGet(url: string): Promise<FetchedDocument> {
+/**
+ * THE CONNECTION ITSELF, made to the addresses the guard vetted and to no others.
+ *
+ * `fetch` resolves the hostname a SECOND time, inside itself, which is the rebinding window the
+ * guard could never close: an attacker's DNS answers public on the check and 169.254.169.254 on
+ * the connection. `https.request` takes a `lookup`, so the socket layer asks US for the address
+ * and gets back exactly what was proved public a moment earlier. Nothing resolves twice.
+ *
+ * TLS is unaffected: the hostname still rides as SNI and the certificate is still checked
+ * against it — pinning the address is not the same as connecting to an IP.
+ *
+ * The IncomingMessage is handed back as an ordinary `Response` so the status, content-type and
+ * body-cap rules below stay one implementation.
+ */
+function dial(vetted: VettedUrl): Promise<Response> {
+  const { url, addresses } = vetted;
+  const hostname = url.hostname.replace(/^\[|\]$/g, "");
+  return new Promise<Response>((resolve, reject) => {
+    const request = httpsRequest(
+      {
+        hostname,
+        port: url.port === "" ? 443 : Number(url.port),
+        path: `${url.pathname}${url.search}`,
+        method: "GET",
+        // `identity` because this client does not decompress: a body that arrived compressed is
+        // refused below rather than handed to the validator as bytes it cannot read.
+        headers: { accept: "application/json", "accept-encoding": "identity" },
+        // No pooling: every request gets its own socket, so no earlier connection to this host
+        // can carry this one.
+        agent: false,
+        signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+        lookup: (_host, options, callback) => {
+          const wanted =
+            options.family === 4 || options.family === 6
+              ? addresses.filter((entry) => entry.family === options.family)
+              : addresses;
+          if (wanted.length === 0 || wanted[0] === undefined) {
+            callback(new Error("no vetted address"), "", 0);
+            return;
+          }
+          if (options.all === true) {
+            callback(null, wanted as never, 0);
+            return;
+          }
+          callback(null, wanted[0].address, wanted[0].family);
+        },
+      },
+      (message) => {
+        const status = message.statusCode ?? 0;
+        const headers = new Headers();
+        for (const [name, value] of Object.entries(message.headers)) {
+          try {
+            headers.set(name, Array.isArray(value) ? value.join(", ") : (value ?? ""));
+          } catch {
+            // A header this runtime will not model is not one any rule below reads.
+          }
+        }
+        // A body-less status cannot be given a body, so it is answered as the empty document it
+        // is — the validator then refuses it for what it is rather than for how it arrived.
+        if (status === 204 || status === 205 || status === 304 || status < 200) {
+          message.destroy();
+          resolve(new Response(null, { status: status < 200 ? 500 : status, headers }));
+          return;
+        }
+        resolve(
+          new Response(Readable.toWeb(message) as ReadableStream<Uint8Array>, { status, headers }),
+        );
+      },
+    );
+    request.on("error", reject);
+    request.end();
+  });
+}
+
+async function httpGet(vetted: VettedUrl): Promise<FetchedDocument> {
+  const url = vetted.url.toString();
   let response: Response;
   try {
-    response = await fetch(url, {
-      // A 3xx is off-script: the guard checked THIS host, and following a redirect would hand
-      // the fetch to one it never saw.
-      redirect: "manual",
-      headers: { accept: "application/json" },
-      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
-    });
+    response = await dial(vetted);
   } catch {
     throw new McpFetchError("that fetch did not complete");
   }
   if (response.status >= 300 && response.status < 400) {
+    // A 3xx is off-script: the guard checked THIS host, and following a redirect would hand the
+    // fetch to one it never saw.
     await response.body?.cancel();
     throw new McpFetchError("that URL redirects — give the address it redirects to");
   }
@@ -311,14 +410,18 @@ async function httpGet(url: string): Promise<FetchedDocument> {
     await response.body?.cancel();
     throw new McpFetchError(`that URL answered ${response.status}`);
   }
+  const encoding = (response.headers.get("content-encoding") ?? "").toLowerCase();
+  if (encoding !== "" && encoding !== "identity") {
+    await response.body?.cancel();
+    throw new McpFetchError(`that URL served ${encoding} bytes, not a JSON document`);
+  }
   assertJsonish(response);
   return { text: await readCapped(response), url };
 }
 
-/** The default production fetcher: SSRF-guarded, capped, redirect-refusing. */
+/** The default production fetcher: SSRF-guarded, address-pinned, capped, redirect-refusing. */
 export const httpFetchServerJson: ServerJsonFetcher = async (url) => {
-  await assertPublicHttpsUrl(url);
-  return await httpGet(url);
+  return await httpGet(await assertPublicHttpsUrl(url));
 };
 
 /**

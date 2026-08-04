@@ -504,6 +504,14 @@ describe("the SSRF guard", () => {
     ["a v4-mapped loopback in hex", "::ffff:7f00:1"],
     ["a v4-mapped private 10/8 in hex", "::ffff:a00:1"],
     ["a v4-translated loopback (the NAT64-ish prefix)", "::ffff:0:7f00:1"],
+    // The REAL NAT64 prefixes: a translator on the path turns these back into an IPv4
+    // connection, so the whole v4 private range is reachable through an address the v4 rules
+    // never see. Both the well-known /96 and the local-use /48 are refused entire.
+    ["the well-known NAT64 prefix carrying the metadata address", "64:ff9b::a9fe:a9fe"],
+    ["the well-known NAT64 prefix in dotted form", "64:ff9b::169.254.169.254"],
+    ["the well-known NAT64 prefix carrying loopback", "64:ff9b::7f00:1"],
+    ["the local-use NAT64 prefix", "64:ff9b:1::1"],
+    ["the local-use NAT64 prefix, deeper in", "64:ff9b:1:2:3:4:5:6"],
   ])("refuses %s", async (_label, address) => {
     const { assertPublicHttpsUrl, McpFetchError } = await import("@/lib/mcp/fetch.server");
     await expect(
@@ -551,19 +559,33 @@ describe("the SSRF guard", () => {
     // The other half of folding v4-embedded shapes: an ordinary public v6 with a `::` run must
     // still parse and pass, or the guard would refuse most of the v6 internet as unreadable.
     const { assertPublicHttpsUrl } = await import("@/lib/mcp/fetch.server");
-    const url = await assertPublicHttpsUrl(
+    const vetted = await assertPublicHttpsUrl(
       "https://v6.test/server.json",
       addresses("2606:4700::6810:84e5"),
     );
-    expect(url.host).toBe("v6.test");
+    expect(vetted.url.host).toBe("v6.test");
   });
 
   it("allows an ordinary public address", async () => {
     const { assertPublicHttpsUrl } = await import("@/lib/mcp/fetch.server");
-    const url = await assertPublicHttpsUrl(
+    const vetted = await assertPublicHttpsUrl(
       "https://example.test/server.json",
       addresses("93.184.216.34", "2606:2800:220:1:248:1893:25c8:1946"),
     );
-    expect(url.host).toBe("example.test");
+    expect(vetted.url.host).toBe("example.test");
+  });
+
+  it("hands back the addresses it proved public, which are the ones the fetch dials", async () => {
+    // The rebinding window closes only if nothing resolves twice: the guard's answer carries the
+    // vetted addresses so the connection is made to exactly them, family tags and all.
+    const { assertPublicHttpsUrl } = await import("@/lib/mcp/fetch.server");
+    const vetted = await assertPublicHttpsUrl(
+      "https://example.test/server.json",
+      addresses("93.184.216.34", "2606:2800:220:1:248:1893:25c8:1946"),
+    );
+    expect(vetted.addresses).toEqual([
+      { address: "93.184.216.34", family: 4 },
+      { address: "2606:2800:220:1:248:1893:25c8:1946", family: 6 },
+    ]);
   });
 });
