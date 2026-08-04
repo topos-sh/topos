@@ -1,0 +1,11 @@
+{
+  "name": "io.github.acme/shouty",
+  "description": "The scheme is case-insensitive; HTTPS is https.",
+  "version": "1.0.0",
+  "remotes": [
+    {
+      "type": "streamable-http",
+      "url": "HTTPS://shouty.acme.example/mcp"
+    }
+  ]
+}

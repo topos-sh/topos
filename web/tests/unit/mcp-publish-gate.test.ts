@@ -1,6 +1,7 @@
 import { Buffer } from "node:buffer";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import {
+  asOwner,
   asSession,
   bootWorkspace,
   createScratchDb,
@@ -66,6 +67,9 @@ async function runFlow(args: {
   kind?: string | null;
   expected?: number;
   forceProposal?: boolean;
+  /** The birth display name — distinct per bundle where two publishes run at once, so the
+   * race under test is the EMBEDDED name's and not the catalog name's. */
+  displayName?: string;
 }): Promise<Record<string, unknown>> {
   const { publishFlow } = await import("@/lib/api/publish-flow.server");
   const raw = JSON.stringify({ skill_id: args.skillId, op: opSeq });
@@ -76,13 +80,50 @@ async function runFlow(args: {
     skillId: args.skillId,
     expected: args.expected ?? 0,
     candidate: { files: args.files, parents: [], author: "Author <a@b.test>", message: "genesis" },
-    displayName: "Weather",
+    displayName: args.displayName ?? "Weather",
     channel: null,
     kind: args.kind ?? null,
     command: "publish",
     forceProposal: args.forceProposal ?? false,
   });
   return (await res.json()) as Record<string, unknown>;
+}
+
+/**
+ * The custody rows a landed publish leaves behind — the version and the `current` pointer the
+ * catalog scan joins against — WITHOUT the catalog row, plus the document in the stub's byte
+ * store. The stub vault deliberately writes no `plane.*` rows, so a publish that is about to
+ * register through the flow gets them here, exactly as the real vault would have left them.
+ */
+async function seedCustody(bundleId: string, document: unknown): Promise<void> {
+  const versionId = versionIdFor(bundleId);
+  await db.q(
+    `INSERT INTO plane.version (workspace_id, bundle_id, version_id, commit_id, author_display)
+     VALUES ($1, $2, $3, $3, 'seed')`,
+    [wsId, bundleId, versionId],
+  );
+  await db.q(
+    `INSERT INTO plane.current_pointer (workspace_id, bundle_id, version_id, moved_by_display)
+     VALUES ($1, $2, $3, 'seed')`,
+    [wsId, bundleId, versionId],
+  );
+  vault.seed(wsId, bundleId, versionId, [
+    { path: "server.json", content: JSON.stringify(document, null, 2) },
+  ]);
+}
+
+/** An mcp bundle that is already published here: the catalog row, its custody rows, and the
+ * document the vault serves for its `current`. */
+async function seedPublishedServer(
+  bundleId: string,
+  name: string,
+  document: unknown,
+): Promise<void> {
+  const versionId = versionIdFor(bundleId);
+  await seedBundle(db, wsId, bundleId, name, { kind: "mcp", versionId });
+  vault.seed(wsId, bundleId, versionId, [
+    { path: "server.json", content: JSON.stringify(document, null, 2) },
+  ]);
 }
 
 const errorOf = (envelope: Record<string, unknown>) =>
@@ -260,6 +301,71 @@ describe("the embedded name is unique per workspace", () => {
       files: [serverJsonFile({ ...WEATHER, name: "io.github.acme/surf" })],
     });
     expect(envelope.ok).toBe(true);
+  });
+});
+
+/**
+ * The name check answers before the custody call, which makes it a PRE-check: by the time a
+ * bundle is actually registered, another publish may have taken the name. Every door that
+ * registers therefore looks again inside its final transaction, under one per-workspace
+ * advisory lock. These two are the arms that lock: the publish flow, and the unarchive that
+ * re-claims a name archiving had freed.
+ */
+describe("the locked re-check", () => {
+  it("two concurrent genesis publishes of one embedded name serialize", async () => {
+    const RACE = { ...WEATHER, name: "io.github.acme/race" };
+    await seedCustody("s_race_a", RACE);
+    await seedCustody("s_race_b", RACE);
+    const envelopes = await Promise.all([
+      runFlow({
+        skillId: "s_race_a",
+        kind: "mcp",
+        displayName: "Race A",
+        files: [serverJsonFile(RACE)],
+      }),
+      runFlow({
+        skillId: "s_race_b",
+        kind: "mcp",
+        displayName: "Race B",
+        files: [serverJsonFile(RACE)],
+      }),
+    ]);
+    // Exactly one of them owns the name; the other is told so in the same words the pre-check
+    // uses. Which one wins is the lock's business, not the test's.
+    expect(envelopes.filter((e) => e.ok === true)).toHaveLength(1);
+    const denied = envelopes.filter((e) => e.ok === false);
+    expect(denied).toHaveLength(1);
+    expect(errorOf(denied[0] ?? {})?.code).toBe("MCP_NAME_TAKEN");
+    // And the catalog agrees: one active mcp bundle claims the name, not two.
+    const rows = await db.q<{ n: number }>(
+      `SELECT count(*)::int AS n FROM web.bundle
+       WHERE workspace_id = $1 AND kind = 'mcp' AND status = 'active'
+         AND id IN ('s_race_a', 's_race_b')`,
+      [wsId],
+    );
+    expect(Number(rows[0]?.n)).toBe(1);
+  });
+
+  it("unarchiving an mcp bundle re-runs the name scan", async () => {
+    const PIER = { ...WEATHER, name: "io.github.acme/pier" };
+    const owner = asOwner(wsId, "u_auth", "Author");
+    const { archiveBundle, unarchiveBundle } = await import("@/lib/db/queries.lifecycle.server");
+    // A published server, archived — which frees BOTH its names: the catalog one and the
+    // registry name its document embeds.
+    await seedPublishedServer("s_pier_a", "pier", PIER);
+    expect((await archiveBundle(owner, "s_pier_a")).outcome).toBe("archived");
+    // Someone else publishes that registry name in the meantime, under a catalog name of their
+    // own — so the base-name check has nothing to say and only the embedded one can refuse.
+    await seedPublishedServer("s_pier_b", "pier-two", PIER);
+    expect(await unarchiveBundle(owner, "s_pier_a")).toEqual({ outcome: "mcp_name_taken" });
+
+    // A plain skill's unarchive never asks any of this — it has no second name to claim.
+    await seedBundle(db, wsId, "s_plain_arch", "plain-arch");
+    expect((await archiveBundle(owner, "s_plain_arch")).outcome).toBe("archived");
+    expect(await unarchiveBundle(owner, "s_plain_arch")).toEqual({
+      outcome: "unarchived",
+      name: "plain-arch",
+    });
   });
 });
 

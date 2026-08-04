@@ -72,29 +72,113 @@ function isPrivateV4(address: string): boolean {
   return false;
 }
 
-/** The v6 ranges that are not the public internet (including v4-mapped forms). */
+/**
+ * Parse an IPv6 literal into its eight 16-bit groups (`::` expanded, an embedded dotted quad
+ * folded into the last two groups). `null` when the string is not a well-formed address.
+ */
+function ipv6Groups(value: string): number[] | null {
+  let head = value;
+  let tail = "";
+  const gap = value.indexOf("::");
+  if (gap !== -1) {
+    if (value.indexOf("::", gap + 1) !== -1) {
+      return null; // two gaps
+    }
+    head = value.slice(0, gap);
+    tail = value.slice(gap + 2);
+  }
+  const parse = (part: string): number[] | null => {
+    if (part === "") {
+      return [];
+    }
+    const groups: number[] = [];
+    const pieces = part.split(":");
+    for (const [i, piece] of pieces.entries()) {
+      // A trailing dotted quad (the v4-embedded spelling) becomes the last two groups.
+      if (i === pieces.length - 1 && piece.includes(".")) {
+        const quad = piece.split(".").map((n) => Number.parseInt(n, 10));
+        if (quad.length !== 4 || quad.some((n) => !Number.isInteger(n) || n < 0 || n > 255)) {
+          return null;
+        }
+        const [a, b, c, d] = quad as [number, number, number, number];
+        groups.push((a << 8) | b, (c << 8) | d);
+        continue;
+      }
+      if (!/^[0-9a-f]{1,4}$/.test(piece)) {
+        return null;
+      }
+      groups.push(Number.parseInt(piece, 16));
+    }
+    return groups;
+  };
+  const headGroups = parse(head);
+  const tailGroups = parse(tail);
+  if (headGroups === null || tailGroups === null) {
+    return null;
+  }
+  if (gap === -1) {
+    return headGroups.length === 8 ? headGroups : null;
+  }
+  const fill = 8 - headGroups.length - tailGroups.length;
+  if (fill < 1) {
+    return null; // `::` must stand for at least one zero group
+  }
+  return [...headGroups, ...Array<number>(fill).fill(0), ...tailGroups];
+}
+
+/**
+ * The IPv4 address a v6 literal embeds, when its shape says "this IS a v4 address": v4-mapped
+ * `::ffff:a.b.c.d` / `::ffff:7f00:1`, v4-compatible `::a.b.c.d`, and the NAT64-ish translated
+ * `::ffff:0:a.b.c.d` — hex and dotted spellings alike, because the groups are numbers by now.
+ */
+function embeddedV4(groups: number[]): string | null {
+  const [g0, g1, g2, g3, g4, g5, g6, g7] = groups as [
+    number,
+    number,
+    number,
+    number,
+    number,
+    number,
+    number,
+    number,
+  ];
+  if (g0 !== 0 || g1 !== 0 || g2 !== 0 || g3 !== 0) {
+    return null;
+  }
+  const prefix =
+    (g4 === 0 && g5 === 0xffff) || // v4-mapped ::ffff:0:0/96
+    (g4 === 0xffff && g5 === 0) || // v4-translated ::ffff:0:0:0/96 (the NAT64-ish shape)
+    (g4 === 0 && g5 === 0 && (g6 !== 0 || g7 > 1)); // v4-compatible ::/96 (not :: or ::1)
+  if (!prefix) {
+    return null;
+  }
+  return `${g6 >> 8}.${g6 & 0xff}.${g7 >> 8}.${g7 & 0xff}`;
+}
+
+/** The v6 ranges that are not the public internet (including every v4-embedded form). */
 function isPrivateV6(address: string): boolean {
   const value = address.toLowerCase().split("%")[0] ?? "";
-  if (value === "::" || value === "::1") {
-    return true; // unspecified · loopback
+  const groups = ipv6Groups(value);
+  if (groups === null) {
+    return true; // unparseable is not provably public — refuse
   }
-  // v4-mapped/compatible: judge the embedded v4 address by the v4 rules.
-  const mapped = value.match(/^::(?:ffff:)?(\d+\.\d+\.\d+\.\d+)$/);
-  if (mapped?.[1] !== undefined) {
-    return isPrivateV4(mapped[1]);
+  const [g0] = groups as [number];
+  if (groups.every((g, i) => (i === 7 ? g <= 1 : g === 0))) {
+    return true; // unspecified (::) · loopback (::1), whatever spelling they arrived in
   }
-  if (
-    value.startsWith("fe8") ||
-    value.startsWith("fe9") ||
-    value.startsWith("fea") ||
-    value.startsWith("feb")
-  ) {
+  // v4-mapped / v4-compatible / v4-translated — hex or dotted spelling: judge the EMBEDDED v4
+  // address by the v4 rules (`[::ffff:7f00:1]` is 127.0.0.1 to the socket layer).
+  const mapped = embeddedV4(groups);
+  if (mapped !== null) {
+    return isPrivateV4(mapped);
+  }
+  if ((g0 & 0xffc0) === 0xfe80) {
     return true; // link-local fe80::/10
   }
-  if (value.startsWith("fc") || value.startsWith("fd")) {
+  if ((g0 & 0xfe00) === 0xfc00) {
     return true; // unique-local fc00::/7
   }
-  if (value.startsWith("ff")) {
+  if (g0 >= 0xff00) {
     return true; // multicast
   }
   return false;
@@ -185,7 +269,13 @@ async function readCapped(response: Response): Promise<string> {
     bytes.set(chunk, offset);
     offset += chunk.byteLength;
   }
-  return new TextDecoder().decode(bytes);
+  // STRICT decode — a lossy replacement char here would hand the validator different bytes than
+  // the endpoint served, and the gate downstream refuses invalid UTF-8 outright anyway.
+  try {
+    return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch {
+    throw new McpFetchError("that document is not valid UTF-8");
+  }
 }
 
 /** JSON, or something close enough that a JSON body is plausible. An HTML page is not. */

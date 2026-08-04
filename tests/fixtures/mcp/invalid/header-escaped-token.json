@@ -1,0 +1,14 @@
+{
+  "name": "io.github.acme/escaped",
+  "description": "A credential spelled entirely in unicode escapes.",
+  "version": "1.0.0",
+  "remotes": [
+    {
+      "type": "streamable-http",
+      "url": "https://escaped.acme.example/mcp",
+      "headers": [
+        { "name": "X-Extra", "value": "\u0067\u0068\u0070\u005f\u0041\u0031\u0062\u0032\u0043\u0033\u0064\u0034\u0045\u0035\u0041\u0031\u0062\u0032\u0043\u0033\u0064\u0034\u0045\u0035\u0041\u0031\u0062\u0032\u0043\u0033\u0064\u0034\u0045\u0035\u0041\u0031\u0062\u0032\u0043\u0033" }
+      ]
+    }
+  ]
+}

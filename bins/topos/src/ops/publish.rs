@@ -580,22 +580,29 @@ fn publish_bundle_kind(
     super::path_row_kind(outer_ctx, &dirs).ok().flatten()
 }
 
-/// REFUSAL-FIRST: an mcp bundle's `server.json` goes through the same gate the web tier runs
-/// ([`crate::mcp_validate`]) BEFORE the op is built — so a document carrying a credential never
-/// reaches the local store, the op WAL, or the wire. A publish that would ship one is refused with
-/// the shared typed code, and nothing at all has happened.
+/// REFUSAL-FIRST: an mcp bundle's WHOLE candidate goes through the same gate the web tier runs
+/// ([`crate::mcp_validate::validate_candidate_files`]) BEFORE the op is built — the exact allowed
+/// file set, a credential scan over every file's bytes, and the full server-document rules — so a
+/// stray sibling or a document carrying a credential never reaches the local store, the op WAL, or
+/// the wire. A publish that would ship one is refused with the shared typed code, and nothing at
+/// all has happened.
 ///
 /// # Errors
 /// [`ClientError::InvalidArgument`] when the folder holds no root `server.json` (an mcp bundle IS
 /// its document); [`ClientError::McpRefused`] with the gate's own code otherwise.
 fn gate_mcp_bundle(scanned: &scan::ScannedBundle, skill_name: &str) -> Result<(), ClientError> {
-    let Some(file) = scanned.files.iter().find(|f| f.path == "server.json") else {
+    if !scanned.files.iter().any(|f| f.path == "server.json") {
         return Err(ClientError::InvalidArgument(format!(
             "'{skill_name}' is recorded as an MCP bundle but holds no server.json at its root — \
              an MCP bundle IS its document"
         )));
-    };
-    crate::mcp_validate::validate_server_json(&file.bytes)?;
+    }
+    let files: Vec<(&str, &[u8])> = scanned
+        .files
+        .iter()
+        .map(|f| (f.path.as_str(), f.bytes.as_slice()))
+        .collect();
+    crate::mcp_validate::validate_candidate_files(&files)?;
     Ok(())
 }
 

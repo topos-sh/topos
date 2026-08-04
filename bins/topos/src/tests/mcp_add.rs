@@ -409,6 +409,73 @@ fn an_occupied_destination_refuses_by_name() {
     assert_eq!(std::fs::read(taken.join("mine.txt")).unwrap(), b"keep me");
 }
 
+/// The canonical bytes the fetched door stores for a document — pretty-printed, trailing newline
+/// (what `unwrap_server_document` writes).
+fn canonical(body: &str) -> Vec<u8> {
+    let doc: serde_json::Value = serde_json::from_str(body).unwrap();
+    format!("{}\n", serde_json::to_string_pretty(&doc).unwrap()).into_bytes()
+}
+
+/// ITEM PAIR (resumable import): an interrupted import's own leftovers — the dir landed, the row
+/// did not — RESUME on retry: the destination is unregistered and its `server.json` bytes equal
+/// the intended document, so the retry writes the row, converges, and reports. Before the fix the
+/// retry refused forever on "already exists".
+#[test]
+fn an_interrupted_import_resumes_when_the_leftover_matches() {
+    let rig = Rig::new("resume");
+    rig.write_global("[bundles]\n");
+    // The crash window's exact state: the canonical document on disk, no manifest row.
+    let leftover = rig.layout().home().join("mcp").join("weather");
+    std::fs::create_dir_all(&leftover).unwrap();
+    std::fs::write(leftover.join("server.json"), canonical(&good_server())).unwrap();
+    let docs = FakeDocs::serving(&good_server());
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+
+    let outcome = ops::add_mcp(&ctx, Some(&docs), "io.github.acme/weather", true, true)
+        .expect("the retry resumes");
+    let AddMcpOutcome::Applied(data) = outcome else {
+        panic!("--yes applies the resumed import");
+    };
+    assert_eq!(data.name, "weather");
+    let text = rig.global_text();
+    assert!(
+        text.contains(&format!(
+            "\"{}\" = {{ kind = \"mcp\" }}",
+            leftover.display()
+        )),
+        "the row landed this time: {text}"
+    );
+}
+
+/// The resume window is EXACTLY the leftover shape: different bytes are somebody's material and a
+/// registered row is a live bundle — both still refuse by name.
+#[test]
+fn a_resume_refuses_foreign_bytes_and_a_registered_row() {
+    let rig = Rig::new("resume-guard");
+    rig.write_global("[bundles]\n");
+    let dir = rig.layout().home().join("mcp").join("weather");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("server.json"),
+        b"{\"name\":\"io.github.other/x\"}\n",
+    )
+    .unwrap();
+    let docs = FakeDocs::serving(&good_server());
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+
+    // Foreign bytes: refused, untouched.
+    let err =
+        ops::add_mcp(&ctx, Some(&docs), "io.github.acme/weather", true, true).expect_err("refused");
+    assert!(err.detail().contains("already exists"), "{}", err.detail());
+
+    // A registered row: the full import lands once, then a second run refuses the same way.
+    std::fs::write(dir.join("server.json"), canonical(&good_server())).unwrap();
+    ops::add_mcp(&ctx, Some(&docs), "io.github.acme/weather", true, true).expect("resumes");
+    let err =
+        ops::add_mcp(&ctx, Some(&docs), "io.github.acme/weather", true, true).expect_err("refused");
+    assert!(err.detail().contains("already exists"), "{}", err.detail());
+}
+
 // =================================================================================================
 // The LOCAL door
 // =================================================================================================
@@ -490,6 +557,63 @@ fn a_folder_without_a_server_json_refuses() {
 
     let err = ops::add_mcp(&ctx, None, dir.to_str().unwrap(), true, false).expect_err("refused");
     assert!(err.detail().contains("server.json"), "{}", err.detail());
+    assert_eq!(rig.global_text(), "[bundles]\n", "nothing was recorded");
+}
+
+/// ITEM PAIR (sibling files, the adopt door): an MCP candidate is EXACTLY `server.json` +
+/// `README.md` + `topos-mcp.toml` — a stray script beside the document refuses (naming the
+/// allowed set) before anything is adopted, and an allowed README's bytes still run the
+/// credential scan. Before the fix the adopt gate read `server.json` alone and let both through.
+#[test]
+fn a_stray_sibling_refuses_at_the_adopt_gate() {
+    let rig = Rig::new("siblings");
+    rig.write_global("[bundles]\n");
+    let dir = rig.work.0.join("weather");
+    write_bundle(&dir, &good_server());
+    std::fs::write(dir.join("evil.sh"), b"#!/bin/sh\necho pwned\n").unwrap();
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+
+    let err = ops::add_mcp(&ctx, None, dir.to_str().unwrap(), true, false).expect_err("refused");
+    assert_eq!(err.code(), "MCP_INVALID");
+    assert!(
+        err.detail()
+            .contains("server.json, README.md, topos-mcp.toml"),
+        "{}",
+        err.detail()
+    );
+    assert_eq!(rig.global_text(), "[bundles]\n", "nothing was recorded");
+
+    // The allowed trio adopts — and the store gains the durable kind marker beside its docs.
+    std::fs::remove_file(dir.join("evil.sh")).unwrap();
+    std::fs::write(dir.join("README.md"), b"How to use this server.\n").unwrap();
+    std::fs::write(dir.join("topos-mcp.toml"), b"# reserved\n").unwrap();
+    let outcome = ops::add_mcp(&ctx, None, dir.to_str().unwrap(), true, false).unwrap();
+    let AddMcpOutcome::Applied(data) = outcome else {
+        panic!("the allowed set applies");
+    };
+    let sid = crate::id::SkillId::parse(&data.skill_id).unwrap();
+    let marker = std::fs::read_to_string(rig.layout().published(&sid).kind).expect("kind.json");
+    assert!(marker.contains("\"mcp\""), "{marker}");
+}
+
+/// The sibling scan is a CREDENTIAL gate too: a token in the README refuses exactly like one in
+/// the document.
+#[test]
+fn an_allowed_readme_with_a_credential_refuses_at_the_adopt_gate() {
+    let rig = Rig::new("readme-secret");
+    rig.write_global("[bundles]\n");
+    let dir = rig.work.0.join("weather");
+    write_bundle(&dir, &good_server());
+    std::fs::write(
+        dir.join("README.md"),
+        format!("Set GITHUB_TOKEN to ghp_{}.\n", "A1b2C3d4E5".repeat(4)),
+    )
+    .unwrap();
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+
+    let err = ops::add_mcp(&ctx, None, dir.to_str().unwrap(), true, false).expect_err("refused");
+    assert_eq!(err.code(), "MCP_SECRET_REFUSED");
+    assert!(err.detail().contains("README.md"), "{}", err.detail());
     assert_eq!(rig.global_text(), "[bundles]\n", "nothing was recorded");
 }
 
@@ -701,6 +825,37 @@ fn a_secret_bearing_mcp_bundle_never_reaches_the_wal() {
     let recorder = RecordingPublish::default();
     let err = publish_through(&ctx, &recorder, "weather").expect_err("refused");
     assert_eq!(err.code(), "MCP_SECRET_REFUSED");
+    assert!(
+        recorder.seen.lock().unwrap().is_empty(),
+        "nothing was sent to the plane"
+    );
+    let ops_dir = rig.layout().ops_dir();
+    let wal: Vec<_> = std::fs::read_dir(&ops_dir)
+        .map(|d| d.flatten().collect())
+        .unwrap_or_default();
+    assert!(wal.is_empty(), "no op record was written: {wal:?}");
+}
+
+/// ITEM PAIR (sibling files, the publish door): the preflight gates the WHOLE candidate — a stray
+/// script a draft gained beside `server.json` refuses BEFORE the op WAL, naming the allowed set.
+/// Before the fix the preflight validated `server.json` alone and shipped the stray file.
+#[test]
+fn a_stray_sibling_never_reaches_the_wal() {
+    let rig = Rig::new("pub-siblings");
+    rig.seed_session();
+    rig.write_global("[bundles]\n");
+    let dir = rig.work.0.join("weather");
+    // Adopt it CLEAN; then the draft gains the stray file — the author's own edit, exactly where
+    // the gate has to fire.
+    write_bundle(&dir, &good_server());
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    ops::add_mcp(&ctx, None, dir.to_str().unwrap(), true, false).unwrap();
+    std::fs::write(dir.join("evil.sh"), b"#!/bin/sh\necho pwned\n").unwrap();
+
+    let recorder = RecordingPublish::default();
+    let err = publish_through(&ctx, &recorder, "weather").expect_err("refused");
+    assert_eq!(err.code(), "MCP_INVALID");
+    assert!(err.detail().contains("evil.sh"), "{}", err.detail());
     assert!(
         recorder.seen.lock().unwrap().is_empty(),
         "nothing was sent to the plane"

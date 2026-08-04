@@ -227,8 +227,19 @@ pub(crate) fn sync_one_planned(
     let applied_eq_observed = sync.applied == sync.observed;
     // A CONFIG-PLACED (mcp) record reached without an injected planner (a targeted accept, a
     // resume) keeps its EMPTY plan: skill-dir placement must never engage for it — its bytes
-    // reach agents through the config converge alone.
-    let mcp_record = plan_fn.is_none() && crate::mcp_engine::is_mcp_record(ctx, skill_id);
+    // reach agents through the config converge alone. The classification is the DURABLE chain
+    // (marker → delivery cache → manifest row → ledger); over an EMPTY map with no answer it
+    // fails CLOSED — a store-only record whose kind evidence is lost must never have its bytes
+    // materialized into skill dirs on a guess.
+    let mcp_record = plan_fn.is_none()
+        && match crate::mcp_engine::record_kind(ctx, skill_id, &map) {
+            crate::mcp_engine::RecordKind::Mcp => true,
+            crate::mcp_engine::RecordKind::Skill => false,
+            crate::mcp_engine::RecordKind::Indeterminate if map.placements.is_empty() => {
+                return Err(kind_indeterminate(&name));
+            }
+            crate::mcp_engine::RecordKind::Indeterminate => false,
+        };
     let make_plan = |map: &PlacementMap| match plan_fn {
         Some(f) => f(ctx, skill_id, &lock, map),
         None if mcp_record => crate::placement::PlacementPlan::default(),
@@ -452,6 +463,20 @@ pub(crate) fn sync_one_planned(
     }
 }
 
+/// The typed refusal every empty-map + unknowable-kind path answers: the record may be a
+/// config-placed (mcp) bundle whose kind evidence was lost, and materializing its bytes into
+/// skill dirs on a guess is exactly the corruption the marker exists to prevent.
+fn kind_indeterminate(name: &str) -> ClientError {
+    ClientError::PlacementUnsupported {
+        reason: format!(
+            "{name}'s store records no placements and its bundle kind cannot be determined (no \
+             kind marker, no delivery record, no config ledger) — refusing to plan skill \
+             placement for what may be a config-placed MCP bundle; a full `topos update` sweep \
+             restores the record"
+        ),
+    }
+}
+
 /// `topos pull <skill>@<ref>` — install an older version's exact bytes locally (a deliberate go-back),
 /// set `held` to suppress the next auto fast-forward, and **do NOT change the `observed` target** (the
 /// team's `current` is untouched; the go-back is a local pin). The target must be present in this skill's
@@ -470,8 +495,17 @@ pub(crate) fn go_back(
     let map: PlacementMap = read_map_required(ctx, &sp)?;
     let name = lock.name.clone();
     // An mcp record's go-back moves the STORE state only — no skill-dir placement may be planned
-    // for it (the next converge re-renders configs from the restored version's server.json).
-    let plan = if crate::mcp_engine::is_mcp_record(ctx, skill_id) {
+    // for it (the converge below re-renders configs from the restored version's server.json).
+    // Same durable classification + fail-closed rule as the targeted sync above.
+    let mcp_record = match crate::mcp_engine::record_kind(ctx, skill_id, &map) {
+        crate::mcp_engine::RecordKind::Mcp => true,
+        crate::mcp_engine::RecordKind::Skill => false,
+        crate::mcp_engine::RecordKind::Indeterminate if map.placements.is_empty() => {
+            return Err(kind_indeterminate(&name));
+        }
+        crate::mcp_engine::RecordKind::Indeterminate => false,
+    };
+    let plan = if mcp_record {
         crate::placement::PlacementPlan::default()
     } else {
         placement::plan_for_skill(ctx, skill_id, &lock, &map)
@@ -555,6 +589,21 @@ pub(crate) fn go_back(
         },
     )?;
     log_apply(ctx, skill_id, "pull-goback", target, &report);
+    // THE GO-BACK CONVERGE: for a config-placed bundle the store move alone changes nothing an
+    // agent reads — converge this scope's configs NOW, so the restored document is what they
+    // carry before the command reports success (the next sweep would heal it anyway; a targeted
+    // verb must not leave the window open). Converge warnings ride stderr, the same channel every
+    // best-effort sweep fact uses.
+    let harnesses = if mcp_record {
+        let sid = crate::id::SkillId::parse(skill_id)?;
+        let (states, warnings) = crate::mcp_engine::converge_bundle_now(ctx, &sid, &name);
+        for w in warnings {
+            eprintln!("topos update: {w}");
+        }
+        states
+    } else {
+        Vec::new()
+    };
     Ok(PullSkill {
         skill: name,
         // The workspace provenance is stamped by the pull aggregator (`pull.rs`), which owns the
@@ -569,7 +618,7 @@ pub(crate) fn go_back(
         merge_preview: None,
         synced_placements: None,
         scope: None,
-        harnesses: Vec::new(),
+        harnesses,
     })
 }
 
@@ -593,11 +642,16 @@ pub(crate) fn reset_to_base(
     let sync: SyncState = read_required(ctx, &sp.sync, "sync.json")?;
     let lock: Lock = read_required(ctx, &sp.lock, "lock.json")?;
     let map: PlacementMap = read_map_required(ctx, &sp)?;
-    // Same rule as the go-back: an mcp record never gets skill-dir placements planned.
-    let plan = if crate::mcp_engine::is_mcp_record(ctx, sid) {
-        crate::placement::PlacementPlan::default()
-    } else {
-        placement::plan_for_skill(ctx, sid, &lock, &map)
+    // Same rule as the go-back: an mcp record never gets skill-dir placements planned, and an
+    // empty-map record with no kind evidence fails CLOSED rather than materializing on a guess.
+    let plan = match crate::mcp_engine::record_kind(ctx, sid, &map) {
+        crate::mcp_engine::RecordKind::Mcp => crate::placement::PlacementPlan::default(),
+        crate::mcp_engine::RecordKind::Indeterminate if map.placements.is_empty() => {
+            return Err(kind_indeterminate(&lock.name));
+        }
+        crate::mcp_engine::RecordKind::Skill | crate::mcp_engine::RecordKind::Indeterminate => {
+            placement::plan_for_skill(ctx, sid, &lock, &map)
+        }
     };
     let map = placement::reconcile_map(&map, &plan);
     let managed = placement::managed_indices(&map, &plan);

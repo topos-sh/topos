@@ -127,10 +127,8 @@ impl Install {
             ".claude",
             ".codex",
             ".cursor",
-            ".opencode",
-            // OpenCode is DETECTED under the XDG config root, not under `~/.opencode` (which is
-            // only where its MCP config file lives) — both are seeded so the row engages the way
-            // a real install does.
+            // OpenCode lives wholly under the XDG config root — the dir it is DETECTED by is the
+            // same dir its MCP config file sits in.
             ".config/opencode",
             ".openclaw",
             ".hermes",
@@ -204,7 +202,7 @@ fn seed_user_configs(home: &Path) -> Vec<(&'static str, PathBuf, String)> {
         ),
         (
             "opencode",
-            home.join(".opencode").join("opencode.json"),
+            home.join(".config").join("opencode").join("opencode.json"),
             "{\n  \"$schema\": \"https://opencode.ai/config.json\",\n  \"mcp\": {\n    \"house\": {\n      \"type\": \"remote\",\n      \"url\": \"https://house.example/mcp\",\n      \"enabled\": true\n    }\n  }\n}\n"
                 .to_owned(),
         ),
@@ -474,7 +472,7 @@ fn the_mcp_bundle_loop_across_six_agents() {
     );
 
     // OpenCode — the remote type plus the explicit enable.
-    let opencode = read_json(&home.join(".opencode").join("opencode.json"));
+    let opencode = read_json(&home.join(".config").join("opencode").join("opencode.json"));
     assert_eq!(
         opencode["mcp"][KEY],
         json!({ "enabled": true, "type": "remote", "url": SERVER_URL }),
@@ -686,9 +684,16 @@ fn the_mcp_bundle_loop_across_six_agents() {
         read_json(&proj.join(".cursor").join("mcp.json"))["mcpServers"][KEY],
         json!({ "url": SERVER_URL })
     );
+    // OpenCode's project config is the checkout ROOT's `opencode.json`, born with its `$schema`.
+    let proj_opencode = proj.join("opencode.json");
+    let proj_oc_text = read(&proj_opencode);
     assert_eq!(
-        read_json(&proj.join(".opencode").join("opencode.json"))["mcp"][KEY],
+        read_json(&proj_opencode)["mcp"][KEY],
         json!({ "enabled": true, "type": "remote", "url": SERVER_URL })
+    );
+    assert!(
+        proj_oc_text.starts_with("{\n  \"$schema\": \"https://opencode.ai/config.json\","),
+        "a fresh opencode.json leads with its schema: {proj_oc_text}"
     );
     // …and NOTHING reached the user surfaces (they still hold exactly the person's own bytes).
     assert!(!plugin.exists(), "no user-scope plugin dir was written");
@@ -731,7 +736,7 @@ fn the_mcp_bundle_loop_across_six_agents() {
             { "agent": "cursor", "state": "current",
               "file": canon(&proj.join(".cursor").join("mcp.json")) },
             { "agent": "opencode", "state": "current",
-              "file": canon(&proj.join(".opencode").join("opencode.json")) },
+              "file": canon(&proj_opencode) },
             { "agent": "openclaw", "state": "not-supported", "note": "no project-level config" },
             { "agent": "hermes-agent", "state": "not-supported", "note": "no project-level config" },
         ]),

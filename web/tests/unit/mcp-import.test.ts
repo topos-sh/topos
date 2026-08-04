@@ -314,6 +314,12 @@ describe("the SSRF guard", () => {
     ["unique-local v6", "fd00::1"],
     ["link-local v6", "fe80::1"],
     ["a v4-mapped loopback", "::ffff:127.0.0.1"],
+    // The same three addresses a resolver is just as free to hand back in HEX: `::ffff:7f00:1`
+    // IS 127.0.0.1 to the socket layer, and reading the spelling instead of the address is
+    // exactly how a guard lets one through.
+    ["a v4-mapped loopback in hex", "::ffff:7f00:1"],
+    ["a v4-mapped private 10/8 in hex", "::ffff:a00:1"],
+    ["a v4-translated loopback (the NAT64-ish prefix)", "::ffff:0:7f00:1"],
   ])("refuses %s", async (_label, address) => {
     const { assertPublicHttpsUrl, McpFetchError } = await import("@/lib/mcp/fetch.server");
     await expect(
@@ -355,6 +361,17 @@ describe("the SSRF guard", () => {
         throw new Error("ENOTFOUND");
       }),
     ).rejects.toBeInstanceOf(McpFetchError);
+  });
+
+  it("allows a public v6 address written in its compressed form", async () => {
+    // The other half of folding v4-embedded shapes: an ordinary public v6 with a `::` run must
+    // still parse and pass, or the guard would refuse most of the v6 internet as unreadable.
+    const { assertPublicHttpsUrl } = await import("@/lib/mcp/fetch.server");
+    const url = await assertPublicHttpsUrl(
+      "https://v6.test/server.json",
+      addresses("2606:4700::6810:84e5"),
+    );
+    expect(url.host).toBe("v6.test");
   });
 
   it("allows an ordinary public address", async () => {

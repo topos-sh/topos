@@ -2240,6 +2240,11 @@ fn reconcile_feed<'a>(
                 // (config files heal without a network), through the same store-only route the
                 // online path takes — never the dir-placement planner.
                 let mcp = ds.kind.as_deref() == Some("mcp");
+                // The marker back-fills offline too: a store synced before the marker existed
+                // gains it from the cache's word, so the cache row's loss stops mattering.
+                if mcp {
+                    crate::mcp_engine::write_kind_marker(&run_ctx, &sid);
+                }
                 let plan_fn: Option<&sync_engine::PlanFn<'_>> = if mcp {
                     Some(&|_: &Ctx<'_>, _: &str, _: &Lock, _: &PlacementMap| {
                         crate::placement::PlacementPlan::default()
@@ -2509,6 +2514,11 @@ fn sync_workspace_skill<'a>(
             note_item_failure(ctx, &mut sweep.warnings, &target.name, &e);
             return;
         }
+    }
+    // The DURABLE kind marker, laid the moment the scope store exists: kind classification for
+    // every later targeted verb must not hang on the deletable ledger or a delivery cache row.
+    if mcp {
+        crate::mcp_engine::write_kind_marker(&run_ctx, &sid);
     }
     run.transports
         .plane

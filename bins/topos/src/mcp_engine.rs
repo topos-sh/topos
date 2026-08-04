@@ -1336,14 +1336,179 @@ fn converge_plugin_dir(
 }
 
 /// Whether this scope's store tracks `skill_id` as a CONFIG-PLACED (mcp) bundle — the scope's
-/// ledger minted (or retired) a config key for it. The classic per-skill engine paths (a targeted
-/// go-back, a reset, a plan with no injected planner) consult this so an mcp record NEVER gets
-/// skill-dir placements planned for it. Best-effort: an unreadable ledger answers `false` (the
-/// converge already warned loudly about it).
+/// ledger minted (or retired) a config key for it. ONE rung of [`record_kind`]'s chain (the
+/// ledger is deletable state, so it is consulted LAST); also the publish preflight's cheapest
+/// source. Best-effort: an unreadable ledger answers `false` (the converge already warned loudly
+/// about it).
 pub(crate) fn is_mcp_record(ctx: &crate::ctx::Ctx<'_>, skill_id: &str) -> bool {
     mcp_ledger::read(ctx.fs, &ctx.layout)
         .map(|l| l.keys.contains_key(skill_id) || l.retired.values().any(|b| b == skill_id))
         .unwrap_or(false)
+}
+
+// =================================================================================================
+// The durable kind marker + the classification the per-skill engine paths trust.
+// =================================================================================================
+
+/// The tiny per-skill `kind.json` marker (`skills/<id>/kind.json`, beside `map.json`): the ONE
+/// durable record of what a store-only bundle IS. Written at the first mcp sync/adopt in each
+/// scope store, never rewritten, never deleted by any sweep — so a lost config ledger cannot make
+/// an mcp record classify as a skill and get `server.json` materialized into skill dirs.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub(crate) struct KindDoc {
+    pub schema_version: u32,
+    pub kind: String,
+}
+
+/// The marker's word for `sid` in `layout`'s store, when one is recorded. Best-effort read: an
+/// unreadable marker answers `None` (classification falls through its other rungs, and the
+/// empty-map arm fails CLOSED).
+pub(crate) fn kind_marker(
+    fs: &dyn FsOps,
+    layout: &Layout,
+    sid: &crate::id::SkillId,
+) -> Option<String> {
+    crate::doc::read_doc::<KindDoc>(fs, &layout.published(sid).kind)
+        .ok()
+        .flatten()
+        .map(|d| d.kind)
+}
+
+/// Record `sid` as an mcp bundle in this scope's store — idempotent, best-effort (the marker is a
+/// belt: classification fails closed without it, so a failed write degrades to a refusal, never to
+/// a wrong placement).
+pub(crate) fn write_kind_marker(ctx: &crate::ctx::Ctx<'_>, sid: &crate::id::SkillId) {
+    let path = ctx.layout.published(sid).kind;
+    if matches!(crate::doc::read_doc::<KindDoc>(ctx.fs, &path), Ok(Some(_))) {
+        return;
+    }
+    let _ = crate::doc::write_doc(
+        ctx.fs,
+        &path,
+        &KindDoc {
+            schema_version: topos_types::PERSISTED_SCHEMA_VERSION,
+            kind: "mcp".to_owned(),
+        },
+    );
+}
+
+/// What a tracked record IS, for the paths that must decide between skill-dir placement and the
+/// config converge.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RecordKind {
+    /// A config-placed (mcp) bundle — skill-dir placement must never engage.
+    Mcp,
+    /// An ordinary skill — the dir-placement planner runs.
+    Skill,
+    /// No source answered. Over an EMPTY placement map the caller must FAIL CLOSED (refuse skill
+    /// planning with a typed message) — a store-only mcp record whose evidence was lost must never
+    /// have `server.json` materialized into skill dirs.
+    Indeterminate,
+}
+
+/// Classify `skill_id` in THIS scope: the durable marker → the offline delivery cache → the
+/// manifest row that demands the placements → the config ledger. Each rung answers only when it
+/// genuinely knows; a cache entry with no `kind` tag IS an answer (the cache spells `kind` only
+/// when it is not the default `"skill"`).
+pub(crate) fn record_kind(
+    ctx: &crate::ctx::Ctx<'_>,
+    skill_id: &str,
+    map: &topos_types::persisted::PlacementMap,
+) -> RecordKind {
+    if let Ok(sid) = crate::id::SkillId::parse(skill_id)
+        && let Some(kind) = kind_marker(ctx.fs, &ctx.layout, &sid)
+    {
+        return if kind == "mcp" {
+            RecordKind::Mcp
+        } else {
+            RecordKind::Skill
+        };
+    }
+    if let Ok(cache) = crate::sync_status::read(ctx.fs, &ctx.layout)
+        && let Some(delivered) = cache
+            .workspaces
+            .values()
+            .find_map(|ws| ws.delivered.get(skill_id))
+    {
+        return if delivered.kind.as_deref() == Some("mcp") {
+            RecordKind::Mcp
+        } else {
+            RecordKind::Skill
+        };
+    }
+    if !map.placements.is_empty() {
+        let dirs: Vec<PathBuf> = map.placements.iter().map(PathBuf::from).collect();
+        if let Ok(Some(kind)) = crate::ops::path_row_kind(ctx, &dirs) {
+            return if kind == "mcp" {
+                RecordKind::Mcp
+            } else {
+                RecordKind::Skill
+            };
+        }
+    }
+    if is_mcp_record(ctx, skill_id) {
+        return RecordKind::Mcp;
+    }
+    RecordKind::Indeterminate
+}
+
+/// Converge THIS scope's config entries for ONE bundle right now — the store/lock just moved (a
+/// go-back), and the command must not return success while agent configs still carry the previous
+/// document. Same wiring as the sweep's converge, narrowed to one demand; removals stay OFF (a
+/// targeted verb never touches another bundle's entries). Best-effort by construction: the store
+/// move already landed, and the next sweep reaches the same configs — failures come back as
+/// warning lines beside the per-agent states.
+pub(crate) fn converge_bundle_now(
+    ctx: &crate::ctx::Ctx<'_>,
+    sid: &crate::id::SkillId,
+    name: &str,
+) -> (Vec<McpAgentState>, Vec<String>) {
+    let Some(roots) = ctx.roots.clone() else {
+        return (Vec::new(), Vec::new());
+    };
+    let Ok(Some((version_id, server_json))) = stored_server_json(ctx, sid) else {
+        return (Vec::new(), Vec::new());
+    };
+    let project_root = ctx.layout.project_root().map(Path::to_path_buf);
+    let cwd = project_root.clone().or_else(|| roots.cwd.clone());
+    let detected: BTreeSet<String> =
+        topos_harness::registry::detected_harnesses(&roots.home, cwd.as_deref())
+            .iter()
+            .map(|h| h.slug.to_owned())
+            .collect();
+    let io = ScopeIo {
+        fs: ctx.fs,
+        layout: &ctx.layout,
+        home: roots.home.clone(),
+        project_root,
+    };
+    // The row's harness narrowing is not re-derived here (it lives in the scope plan the sweep
+    // resolves); the minted key already exists for a placed bundle, and the next sweep re-applies
+    // any narrowing. `workspace_slug: None` is safe for the same reason — the key is reused, not
+    // re-minted.
+    let demand = McpDemand {
+        bundle_id: sid.as_str().to_owned(),
+        name: name.to_owned(),
+        workspace_slug: None,
+        version_id,
+        server_json,
+        harness_filter: Vec::new(),
+    };
+    let outcome = converge(
+        &io,
+        std::slice::from_ref(&demand),
+        mcp::descriptor::mcp_harnesses(),
+        &detected,
+        &HashSet::new(),
+        false,
+    );
+    let states = outcome
+        .bundles
+        .into_iter()
+        .find(|b| b.bundle_id == demand.bundle_id)
+        .map(|b| b.states)
+        .unwrap_or_default();
+    (states, outcome.warnings)
 }
 
 // =================================================================================================

@@ -97,7 +97,9 @@ caller.
   remark/rehype chain; closed component set; nav.json must match disk; the CLI reference page
   splices the generated `docs/cli.md`). Edit the MDX → `bun run gen:docs` → commit; `check:docs`
   fails on drift. `/docs/<page>.md` is the plain-markdown twin; `/docs/llms.txt` the index.
-- **The MCP lane:** `kind: 'mcp'` bundles carry ONE file, `server.json`, gated by
+- **The MCP lane:** `kind: 'mcp'` bundles carry `server.json` (required; `README.md` and the
+  reserved `topos-mcp.toml` are the only allowed siblings — every file's bytes run the
+  credential scan), gated by
   `app/lib/mcp/` — a remote `streamable-http` endpoint over https, no `{placeholder}`, no
   credential (the shapes live in the repo-root `tests/fixtures/mcp/`, compiled into
   `secret-patterns.generated.ts`), and an embedded registry name no other bundle here claims.

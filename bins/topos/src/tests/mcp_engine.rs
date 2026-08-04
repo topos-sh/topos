@@ -1342,19 +1342,19 @@ fn a_fault_at_any_write_never_tears_state_and_the_next_converge_heals() {
 
 // =================================================================================================
 // The reconcile integration (the delivery loop; Home-rooted real descriptors only — cursor,
-// opencode, openclaw — so no test can reach outside the fake home whatever the dev env sets).
+// openclaw — so no test can reach outside the fake home whatever the dev env sets. opencode's
+// user surface hangs off `$XDG_CONFIG_HOME` the way claude-code's / codex's / hermes's hang off
+// theirs, so person scope leaves it out; its coverage is the PROJECT test below, where every
+// surface is checkout-relative and hermetic by construction).
 // =================================================================================================
 
-/// The wave-1 slugs whose REAL surfaces are Home-rooted (hermetic under a fake `$HOME`).
-const SAFE: &str = "harness = [\"cursor\", \"opencode\", \"openclaw\"]";
+/// The wave-1 slugs whose REAL user surfaces are Home-rooted (hermetic under a fake `$HOME`).
+const SAFE: &str = "harness = [\"cursor\", \"openclaw\"]";
 
-/// Seed the fake home so cursor + openclaw detect (their detect dirs exist); opencode engages
-/// through its already-existing surface FILE (both engagement paths covered).
+/// Seed the fake home so cursor + openclaw detect (their detect dirs exist).
 fn seed_harness_dirs(home: &Path) {
     std::fs::create_dir_all(home.join(".cursor")).unwrap();
     std::fs::create_dir_all(home.join(".openclaw")).unwrap();
-    std::fs::create_dir_all(home.join(".opencode")).unwrap();
-    std::fs::write(home.join(".opencode/opencode.json"), b"{}\n").unwrap();
 }
 
 #[test]
@@ -1396,10 +1396,9 @@ fn a_workspace_mcp_bundle_lands_in_configs_reports_harnesses_and_caches_kind() {
         "no shared-dir copy either"
     );
 
-    // The three hermetic configs hold the entry.
+    // The two hermetic configs hold the entry.
     for path in [
         rig.home.0.join(".cursor/mcp.json"),
-        rig.home.0.join(".opencode/opencode.json"),
         rig.home.0.join(".openclaw/openclaw.json"),
     ] {
         let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{path:?}: {e}"));
@@ -1417,7 +1416,7 @@ fn a_workspace_mcp_bundle_lands_in_configs_reports_harnesses_and_caches_kind() {
         .find(|s| s.skill == "linear")
         .unwrap();
     let agents: BTreeSet<&str> = row.harnesses.iter().map(|h| h.agent.as_str()).collect();
-    assert_eq!(agents, ["cursor", "opencode", "openclaw"].into());
+    assert_eq!(agents, ["cursor", "openclaw"].into());
     assert!(
         row.harnesses.iter().all(|h| h.state == "current"),
         "{row:?}"
@@ -1430,13 +1429,13 @@ fn a_workspace_mcp_bundle_lands_in_configs_reports_harnesses_and_caches_kind() {
         .find(|(id, ..)| id == "s_linear")
         .unwrap_or_else(|| panic!("reported: {reported:?}"));
     assert_eq!(version, &topos_core::digest::to_hex(&v.id));
-    assert_eq!(harnesses.len(), 3, "{harnesses:?}");
+    assert_eq!(harnesses.len(), 2, "{harnesses:?}");
 
     // The offline cache carries the kind + the per-agent states.
     let cache = sync_status::read(&rig.fs, &rig.layout()).unwrap();
     let ds = &cache.workspaces[WS].delivered["s_linear"];
     assert_eq!(ds.kind.as_deref(), Some("mcp"));
-    assert_eq!(ds.harness_states.len(), 3, "{ds:?}");
+    assert_eq!(ds.harness_states.len(), 2, "{ds:?}");
 
     // And `list` answers the kind + the per-agent detail offline.
     let list = ops::list_with(
@@ -1452,7 +1451,7 @@ fn a_workspace_mcp_bundle_lands_in_configs_reports_harnesses_and_caches_kind() {
     .unwrap();
     let detail = list.data.detail.unwrap();
     assert_eq!(detail.kind.as_deref(), Some("mcp"));
-    assert_eq!(detail.harnesses.len(), 3, "{detail:?}");
+    assert_eq!(detail.harnesses.len(), 2, "{detail:?}");
     assert!(detail.placements.is_empty());
 }
 
@@ -1565,15 +1564,15 @@ fn a_project_row_lands_only_in_project_surfaces_and_openclaw_hermes_read_not_sup
     let rig = Rig::new("project");
     rig.seed_session();
     seed_harness_dirs(&rig.home.0);
-    // claude-code + codex engage hermetically at PROJECT scope: their project surfaces are
-    // checkout-relative. Seed codex's project file so it engages without a detect dir.
+    // claude-code + codex + opencode engage hermetically at PROJECT scope: their project surfaces
+    // are checkout-relative. Seed codex's and opencode's project files so they engage without a
+    // detect dir (opencode's sits at the checkout ROOT).
     std::fs::create_dir_all(rig.home.0.join(".claude")).unwrap();
     let proj = Scratch::new("project-co");
     std::fs::create_dir_all(proj.0.join(".git")).unwrap();
     std::fs::create_dir_all(proj.0.join(".codex")).unwrap();
     std::fs::write(proj.0.join(".codex/config.toml"), b"").unwrap();
-    std::fs::create_dir_all(proj.0.join(".opencode")).unwrap();
-    std::fs::write(proj.0.join(".opencode/opencode.json"), b"").unwrap();
+    std::fs::write(proj.0.join("opencode.json"), b"").unwrap();
     std::fs::write(
         proj.0.join(crate::manifest::MANIFEST_FILE),
         format!("[bundles]\n\"{HOST}/{WS_NAME}/linear\" = \"*\"\n"),
@@ -1596,7 +1595,7 @@ fn a_project_row_lands_only_in_project_surfaces_and_openclaw_hermes_read_not_sup
         ".mcp.json",
         ".codex/config.toml",
         ".cursor/mcp.json",
-        ".opencode/opencode.json",
+        "opencode.json",
     ] {
         let text =
             std::fs::read_to_string(proj.0.join(rel)).unwrap_or_else(|e| panic!("{rel}: {e}"));
@@ -1604,13 +1603,6 @@ fn a_project_row_lands_only_in_project_surfaces_and_openclaw_hermes_read_not_sup
     }
     assert!(
         !rig.home.0.join(".cursor/mcp.json").exists(),
-        "person scope untouched"
-    );
-    assert!(
-        !rig.home.0.join(".opencode/opencode.json").exists()
-            || !std::fs::read_to_string(rig.home.0.join(".opencode/opencode.json"))
-                .unwrap()
-                .contains("topos-"),
         "person scope untouched"
     );
 
@@ -1704,18 +1696,16 @@ fn row_harness_narrowing_beats_defaults_and_unknown_slugs_warn_once() {
         skills: vec![mcp_catalog_entry("s_a", "alpha", &v)],
         channels: Vec::new(),
     };
-    // The default says cursor+opencode; the ROW narrows to cursor alone and adds a bogus slug.
+    // The default says cursor+openclaw; the ROW narrows to cursor alone and adds a bogus slug.
     rig.write_global(&format!(
         "[bundles]\n\"{HOST}/{WS_NAME}/alpha\" = {{ version = \"*\", harness = [\"cursor\", \"notepad\"] }}\n\
-         \n[defaults.mcp]\nharness = [\"cursor\", \"opencode\"]\n"
+         \n[defaults.mcp]\nharness = [\"cursor\", \"openclaw\"]\n"
     ));
     let ctx = rig.ctx_at(Some(&rig.work.0));
     let out = sweep(&ctx, &plane, &dir);
     assert!(rig.home.0.join(".cursor/mcp.json").exists());
     assert!(
-        !std::fs::read_to_string(rig.home.0.join(".opencode/opencode.json"))
-            .unwrap()
-            .contains("topos-"),
+        !rig.home.0.join(".openclaw/openclaw.json").exists(),
         "the row narrows PAST the default"
     );
     let unknown: Vec<&String> = out
@@ -1939,4 +1929,255 @@ fn remove_of_an_mcp_row_converges_inline_and_the_receipt_names_the_removals() {
         ledger.retired.get("topos-eng-alpha").map(String::as_str),
         Some("s_a")
     );
+}
+
+// =================================================================================================
+// The durable kind marker: classification survives a lost ledger, fails closed without evidence,
+// a targeted go-back converges configs, and the applied report never claims an empty-map skill.
+// =================================================================================================
+
+/// Deliver ONE mcp bundle at machine scope over the hermetic slugs, returning the plane + dir the
+/// follow-up sweeps and targeted verbs reuse.
+fn deliver_linear(rig: &Rig, v: &Version) -> (FakePlane, FakeDirectory) {
+    let plane = FakePlane::new().with_version("s_linear", v);
+    plane.serves(vec![delivered_mcp("s_linear", "linear", v)]);
+    let dir = FakeDirectory {
+        skills: vec![mcp_catalog_entry("s_linear", "linear", v)],
+        channels: Vec::new(),
+    };
+    rig.write_global(&format!(
+        "[bundles]\n\"{HOST}/{WS_NAME}\" = \"*\"\n\n[defaults.mcp]\n{SAFE}\n"
+    ));
+    (plane, dir)
+}
+
+/// ITEM PAIR (kind fails durable): the store + empty map stand, the LEDGER is gone — a targeted
+/// go-back must still classify the record as config-placed and materialize NO skill dirs. Before
+/// the fix, classification hung on the ledger alone: its loss let the skill planner run and
+/// `server.json` landed in skill dirs.
+#[test]
+fn a_lost_ledger_never_lets_a_targeted_go_back_materialize_skill_dirs() {
+    let rig = Rig::new("lost-ledger");
+    rig.seed_session();
+    seed_harness_dirs(&rig.home.0);
+    let v = mk_version(&[(
+        "server.json",
+        server_json("https://mcp.example/linear").as_bytes(),
+    )]);
+    let (plane, dir) = deliver_linear(&rig, &v);
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    sweep(&ctx, &plane, &dir);
+
+    // The failure shape: the ledger is gone, and so is the delivery cache — the MARKER alone must
+    // answer.
+    std::fs::remove_file(rig.layout().mcp_ledger_path()).unwrap();
+    std::fs::remove_file(rig.layout().sync_status_path()).unwrap();
+
+    let out = ops::pull(
+        &ctx,
+        ops::PullScope::One {
+            name: "linear".into(),
+            workspace: None,
+            mode: ops::TargetMode::GoBack(ops::VersionRef::Full(v.id)),
+            store: ops::StoreScope::Here,
+        },
+    )
+    .expect("the marker classifies the record; the go-back applies store-only");
+    assert_eq!(out.data.skills.len(), 1);
+
+    // NOTHING materialized into skill dirs, and the map still records zero placements.
+    assert!(
+        !rig.work.0.join("skills").exists(),
+        "no harness skill dir was created"
+    );
+    assert!(!rig.home.0.join(".agents").exists(), "no shared-dir copy");
+    let sid = crate::id::SkillId::parse("s_linear").unwrap();
+    let map = crate::doc::read_map(&rig.fs, &rig.layout().published(&sid).map)
+        .unwrap()
+        .unwrap();
+    assert!(map.placements.is_empty(), "{map:?}");
+}
+
+/// ITEM PAIR (fail closed): with the map EMPTY and every kind source gone — marker, cache, ledger
+/// — the targeted verb REFUSES with the typed placement error instead of guessing "skill" and
+/// materializing. Before the fix the guess ran the planner.
+#[test]
+fn an_empty_map_with_no_kind_evidence_fails_closed_on_targeted_verbs() {
+    let rig = Rig::new("no-evidence");
+    rig.seed_session();
+    seed_harness_dirs(&rig.home.0);
+    let v = mk_version(&[(
+        "server.json",
+        server_json("https://mcp.example/linear").as_bytes(),
+    )]);
+    let (plane, dir) = deliver_linear(&rig, &v);
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    sweep(&ctx, &plane, &dir);
+
+    let sid = crate::id::SkillId::parse("s_linear").unwrap();
+    std::fs::remove_file(rig.layout().mcp_ledger_path()).unwrap();
+    std::fs::remove_file(rig.layout().sync_status_path()).unwrap();
+    std::fs::remove_file(rig.layout().published(&sid).kind).unwrap();
+
+    let Err(err) = ops::pull(
+        &ctx,
+        ops::PullScope::One {
+            name: "linear".into(),
+            workspace: None,
+            mode: ops::TargetMode::GoBack(ops::VersionRef::Full(v.id)),
+            store: ops::StoreScope::Here,
+        },
+    ) else {
+        panic!("kind indeterminate over an empty map must refuse");
+    };
+    assert_eq!(err.code(), "PLACEMENT_UNSUPPORTED");
+    assert!(err.detail().contains("kind"), "{}", err.detail());
+    assert!(
+        !rig.work.0.join("skills").exists(),
+        "nothing materialized on the refusal"
+    );
+}
+
+/// ITEM PAIR (go-back converges configs): a targeted `update <mcp>@<version>` must leave the
+/// agent configs carrying the RESTORED document before it returns success. Before the fix only
+/// the store/lock moved — the configs kept the newer URL until the next sweep.
+#[test]
+fn a_targeted_go_back_converges_the_configs_to_the_restored_document() {
+    let rig = Rig::new("goback-converge");
+    rig.seed_session();
+    seed_harness_dirs(&rig.home.0);
+    let v1 = mk_version(&[(
+        "server.json",
+        server_json("https://mcp.example/v1").as_bytes(),
+    )]);
+    let v2 = mk_version(&[(
+        "server.json",
+        server_json("https://mcp.example/v2").as_bytes(),
+    )]);
+    let plane = FakePlane::new()
+        .with_version("s_linear", &v1)
+        .with_version("s_linear", &v2);
+    plane.serves(vec![delivered_mcp("s_linear", "linear", &v1)]);
+    let dir = FakeDirectory {
+        skills: vec![mcp_catalog_entry("s_linear", "linear", &v1)],
+        channels: Vec::new(),
+    };
+    rig.write_global(&format!(
+        "[bundles]\n\"{HOST}/{WS_NAME}\" = \"*\"\n\n[defaults.mcp]\n{SAFE}\n"
+    ));
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    sweep(&ctx, &plane, &dir);
+    let cursor = rig.home.0.join(".cursor/mcp.json");
+    assert!(
+        std::fs::read_to_string(&cursor)
+            .unwrap()
+            .contains("https://mcp.example/v1")
+    );
+
+    // The team moves to v2 (generation 2 — a publish moved the pointer); the sweep converges the
+    // configs onto it.
+    let mut served2 = delivered_mcp("s_linear", "linear", &v2);
+    served2.generation = 2;
+    plane.serves(vec![served2]);
+    let mut entry2 = mcp_catalog_entry("s_linear", "linear", &v2);
+    entry2.generation = 2;
+    let dir2 = FakeDirectory {
+        skills: vec![entry2],
+        channels: Vec::new(),
+    };
+    let out2 = sweep(&ctx, &plane, &dir2);
+    assert!(
+        std::fs::read_to_string(&cursor)
+            .unwrap()
+            .contains("https://mcp.example/v2"),
+        "warnings: {:?} rows: {:?}",
+        out2.warnings,
+        out2.data
+            .skills
+            .iter()
+            .map(|s| (&s.skill, &s.action))
+            .collect::<Vec<_>>()
+    );
+
+    // The deliberate go-back: the configs carry v1's document again BEFORE the verb returns.
+    let out = ops::pull(
+        &ctx,
+        ops::PullScope::One {
+            name: "linear".into(),
+            workspace: None,
+            mode: ops::TargetMode::GoBack(ops::VersionRef::Full(v1.id)),
+            store: ops::StoreScope::Here,
+        },
+    )
+    .expect("the go-back applies");
+    let text = std::fs::read_to_string(&cursor).unwrap();
+    assert!(
+        text.contains("https://mcp.example/v1") && !text.contains("https://mcp.example/v2"),
+        "the configs carry the restored document immediately: {text}"
+    );
+    // The row reports the per-agent outcomes of the converge it just ran.
+    let row = &out.data.skills[0];
+    let agents: BTreeSet<&str> = row.harnesses.iter().map(|h| h.agent.as_str()).collect();
+    assert_eq!(agents, ["cursor", "openclaw"].into());
+}
+
+/// ITEM PAIR (empty map ≠ mcp): a SKILL delivered at project scope with NO detected agent records
+/// an empty placement map — it must NOT be reported to the fleet as held (there are no bytes
+/// anywhere an agent reads). Before the fix the empty map rode the config-placed exemption and
+/// the report claimed it current.
+#[test]
+fn a_scoped_out_skill_with_an_empty_map_is_not_reported_held() {
+    let rig = Rig::new("scoped-out");
+    rig.seed_session();
+    // Deliberately NO detect dirs anywhere: the project plan has no agent to place for.
+    let v = mk_version(&[("SKILL.md", b"# alpha\n")]);
+    let plane = FakePlane::new().with_version("s_alpha", &v);
+    let mut delivered = delivered_mcp("s_alpha", "alpha", &v);
+    delivered.kind = "skill".into();
+    plane.serves(vec![delivered]);
+    let mut entry = mcp_catalog_entry("s_alpha", "alpha", &v);
+    entry.kind = "skill".into();
+    let dir = FakeDirectory {
+        skills: vec![entry],
+        channels: Vec::new(),
+    };
+    // Person scope demands nothing; the PROJECT manifest carries the feed row.
+    rig.write_global("[bundles]\n");
+    std::fs::write(
+        rig.work.0.join("topos.toml"),
+        format!("[bundles]\n\"{HOST}/{WS_NAME}\" = \"*\"\n"),
+    )
+    .unwrap();
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    sweep(&ctx, &plane, &dir);
+
+    let reported = plane.reported.lock().unwrap().clone();
+    assert!(
+        !reported.iter().any(|(id, ..)| id == "s_alpha"),
+        "an empty-map skill placed nowhere must not be reported held: {reported:?}"
+    );
+}
+
+/// ITEM PAIR (bare diff): a delivered, store-only mcp bundle's bare `diff` answers the honest
+/// no-local-draft shape — an empty diff whose endpoint is the held current — instead of the
+/// "placement map has no placement" corruption error the pre-fix path tripped.
+#[test]
+fn a_bare_diff_of_a_config_placed_bundle_answers_the_empty_no_draft_shape() {
+    let rig = Rig::new("bare-diff");
+    rig.seed_session();
+    seed_harness_dirs(&rig.home.0);
+    let v = mk_version(&[(
+        "server.json",
+        server_json("https://mcp.example/linear").as_bytes(),
+    )]);
+    let (plane, dir) = deliver_linear(&rig, &v);
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    sweep(&ctx, &plane, &dir);
+
+    let d = ops::diff(&ctx, "linear", None, ops::DiffBudget::resolve(None, true)).unwrap();
+    assert_eq!(d.diff, "", "no working tree — no draft to show");
+    assert!(!d.truncated);
+    assert_eq!(d.version_id, topos_core::digest::to_hex(&v.id));
+    assert_eq!(d.bundle_digest, topos_core::digest::to_hex(&v.digest));
+    assert!(d.files.is_empty());
 }

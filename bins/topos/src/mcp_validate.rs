@@ -36,6 +36,27 @@ pub(crate) const MAX_SERVER_JSON_BYTES: usize = 256 * 1024;
 /// The one transport a shared bundle can promise: the same URL works from every machine.
 pub(crate) const STREAMABLE_HTTP: &str = "streamable-http";
 
+/// The WHOLE file set an MCP candidate may carry: the document (required, at the root), an
+/// optional README, and the reserved `topos-mcp.toml`. Anything else is refused by name — a
+/// bundle whose behavior is one JSON document must not smuggle scripts or extra payloads beside
+/// it. Mirrors the web tier's `MCP_ALLOWED_FILES`.
+pub(crate) const MCP_ALLOWED_FILES: &[&str] = &["server.json", "README.md", "topos-mcp.toml"];
+
+/// Header NAMES that carry a credential by definition — refused case-insensitively, independent
+/// of `isSecret`, value shape, or entropy. A literal `Authorization: Basic …` is somebody's
+/// credential whatever the flags say. Mirrors the web tier's list exactly.
+const CREDENTIAL_HEADER_NAMES: &[&str] = &[
+    "authorization",
+    "proxy-authorization",
+    "cookie",
+    "set-cookie",
+    "x-api-key",
+    "api-key",
+    "x-auth-token",
+    "x-access-token",
+    "private-token",
+];
+
 /// The registry's name grammar: `<reverse.dns.namespace>/<server-name>`, exactly one slash.
 const NAME_MIN: usize = 3;
 const NAME_MAX: usize = 200;
@@ -386,6 +407,20 @@ pub(crate) fn find_secret(raw: &str) -> Option<&'static str> {
     None
 }
 
+/// The same scan over the PARSED document: every decoded string — keys and values, at any depth —
+/// runs the pattern + entropy belt. This is what the raw pass cannot see: a token spelled in
+/// `\uXXXX` escapes decodes to the credential the raw bytes never showed.
+fn find_secret_deep(value: &Value) -> Option<&'static str> {
+    match value {
+        Value::String(s) => find_secret(s),
+        Value::Array(list) => list.iter().find_map(find_secret_deep),
+        Value::Object(map) => map
+            .iter()
+            .find_map(|(k, v)| find_secret(k).or_else(|| find_secret_deep(v))),
+        _ => None,
+    }
+}
+
 // =================================================================================================
 // The gate
 // =================================================================================================
@@ -418,19 +453,25 @@ fn has_entries(v: Option<&Value>) -> bool {
 /// # Errors
 /// One [`McpRefusal`] per the module docs; the order is the web tier's, exactly.
 pub(crate) fn validate_server_json(raw: &[u8]) -> Result<McpSummary, McpRefusal> {
-    let text = String::from_utf8_lossy(raw);
+    // STRICT decode: an invalid byte refuses outright — a lossy replacement char could both hide
+    // what the bytes spelled and let an unreadable document parse as if it were readable.
+    let Ok(text) = std::str::from_utf8(raw) else {
+        return refuse(McpRefusalCode::Invalid, "the document is not valid UTF-8");
+    };
     if text.is_empty() {
         return refuse(McpRefusalCode::Invalid, "the document is empty");
     }
-    let Ok(parsed) = serde_json::from_str::<Value>(&text) else {
+    let Ok(parsed) = serde_json::from_str::<Value>(text) else {
         return refuse(
             McpRefusalCode::Invalid,
             "that is not JSON — a server.json document is a JSON object",
         );
     };
 
-    // FIRST, before anything is read out of the document: does it carry a credential?
-    if let Some(kind) = find_secret(&text) {
+    // FIRST, before anything is read out of the document: does it carry a credential? Two passes —
+    // the raw text (nothing a caller strips can hide from it) and the DECODED strings (nothing a
+    // publisher escapes can hide from that one).
+    if let Some(kind) = find_secret(text).or_else(|| find_secret_deep(&parsed)) {
         return refuse(
             McpRefusalCode::SecretRefused,
             format!(
@@ -525,10 +566,23 @@ pub(crate) fn validate_server_json(raw: &[u8]) -> Result<McpSummary, McpRefusal>
              machine can use",
         );
     }
-    match url_scheme(&url) {
-        None => return refuse(McpRefusalCode::Invalid, "the endpoint is not a URL"),
-        Some("https") => {}
-        Some(_) => return refuse(McpRefusalCode::InsecureUrl, "the endpoint must be https"),
+    match parse_endpoint_url(&url) {
+        EndpointUrl::Invalid => {
+            return refuse(McpRefusalCode::Invalid, "the endpoint is not a URL");
+        }
+        // userinfo in the address IS a credential — refused before the scheme is even judged, so
+        // an http URL carrying one still names the real problem.
+        EndpointUrl::Userinfo => {
+            return refuse(
+                McpRefusalCode::SecretRefused,
+                "the endpoint URL carries credentials (user:password@) — a shared bundle never \
+                 holds one",
+            );
+        }
+        EndpointUrl::Scheme(scheme) if scheme == "https" => {}
+        EndpointUrl::Scheme(_) => {
+            return refuse(McpRefusalCode::InsecureUrl, "the endpoint must be https");
+        }
     }
     // A remote-level `variables` block only exists to fill a template in. There is no template
     // left by now, so it is a fill-in slot with nothing to fill — and the thing it would fill is
@@ -550,6 +604,17 @@ pub(crate) fn validate_server_json(raw: &[u8]) -> Result<McpSummary, McpRefusal>
                 .unwrap_or_default();
             if hname.is_empty() {
                 return refuse(McpRefusalCode::Invalid, "every header needs a name");
+            }
+            // A credential-bearing header NAME refuses whatever the value or the flags say —
+            // before isSecret, before the value shape, independent of entropy.
+            if CREDENTIAL_HEADER_NAMES.contains(&hname.to_ascii_lowercase().as_str()) {
+                return refuse(
+                    McpRefusalCode::SecretRefused,
+                    format!(
+                        "the header {hname} carries a credential by definition — a shared bundle \
+                         never holds one"
+                    ),
+                );
             }
             if entry.get("isSecret").and_then(Value::as_bool) == Some(true) {
                 return refuse(
@@ -609,24 +674,151 @@ pub(crate) fn validate_server_json(raw: &[u8]) -> Result<McpSummary, McpRefusal>
     })
 }
 
-/// The URL's scheme, lowercased, when the string is shaped like one (`<scheme>://<rest>` with a
-/// non-empty authority). `None` for anything else — the caller refuses it as "not a URL".
-fn url_scheme(url: &str) -> Option<&str> {
-    let (scheme, rest) = url.split_once("://")?;
-    if scheme.is_empty() || rest.is_empty() {
-        return None;
-    }
-    if !scheme
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '.' | '-'))
+/// What the endpoint-URL shape check answers. Mirrors the web gate's `new URL()` semantics on
+/// the shared vectors: the scheme is case-insensitive; the host must be nonempty and free of
+/// spaces / control characters (`https://not a url` and `https://?x` are NOT URLs); nonempty
+/// userinfo is its own answer, checked only once the whole address parses (a malformed host
+/// wins, exactly as the WHATWG parser throws before userinfo is ever reported).
+enum EndpointUrl {
+    /// Not a URL at all — refused as `MCP_INVALID`.
+    Invalid,
+    /// A parseable URL carrying a nonempty username or password — refused as a credential.
+    Userinfo,
+    /// A parseable, userinfo-free URL: its scheme, lowercased.
+    Scheme(String),
+}
+
+fn parse_endpoint_url(url: &str) -> EndpointUrl {
+    let Some((scheme, rest)) = url.split_once("://") else {
+        return EndpointUrl::Invalid;
+    };
+    let mut scheme_chars = scheme.chars();
+    let starts_alpha = scheme_chars.next().is_some_and(|c| c.is_ascii_alphabetic());
+    if !starts_alpha
+        || !scheme_chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '.' | '-'))
     {
-        return None;
+        return EndpointUrl::Invalid;
     }
-    match scheme {
-        "https" => Some("https"),
-        "http" => Some("http"),
-        _ => Some("other"),
+    // The authority runs to the first path/query/fragment delimiter (all ASCII, so every index
+    // below stays on a char boundary).
+    let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let authority = &rest[..authority_end];
+    if authority.is_empty() {
+        return EndpointUrl::Invalid;
     }
+    // Userinfo splits at the LAST `@` (the WHATWG rule); the host is judged FIRST, so a broken
+    // host answers Invalid even when userinfo rides along.
+    let (userinfo, hostport) = match authority.rfind('@') {
+        Some(i) => (Some(&authority[..i]), &authority[i + 1..]),
+        None => (None, authority),
+    };
+    if hostport.starts_with('[') {
+        // A bracketed v6 literal: nonempty hex/colon/dot inside, an optional numeric port after.
+        let Some(close) = hostport.find(']') else {
+            return EndpointUrl::Invalid;
+        };
+        let inside = &hostport[1..close];
+        if inside.is_empty()
+            || !inside
+                .chars()
+                .all(|c| c.is_ascii_hexdigit() || matches!(c, ':' | '.'))
+        {
+            return EndpointUrl::Invalid;
+        }
+        let after = &hostport[close + 1..];
+        let port_ok = after.is_empty()
+            || (after.starts_with(':') && after[1..].chars().all(|c| c.is_ascii_digit()));
+        if !port_ok {
+            return EndpointUrl::Invalid;
+        }
+    } else {
+        let (host, port) = match hostport.rfind(':') {
+            Some(i) => (&hostport[..i], Some(&hostport[i + 1..])),
+            None => (hostport, None),
+        };
+        // An empty port (`https://host:/`) parses; a non-numeric one does not.
+        if port.is_some_and(|p| !p.chars().all(|c| c.is_ascii_digit())) {
+            return EndpointUrl::Invalid;
+        }
+        if host.is_empty()
+            || host.contains(':')
+            || host.chars().any(|c| {
+                c.is_ascii_control()
+                    || c.is_whitespace()
+                    || matches!(
+                        c,
+                        '<' | '>' | '^' | '|' | '\\' | '"' | '[' | ']' | '@' | '/' | '?' | '#'
+                    )
+            })
+        {
+            return EndpointUrl::Invalid;
+        }
+    }
+    if let Some(ui) = userinfo {
+        let (user, password) = ui.split_once(':').unwrap_or((ui, ""));
+        if !user.is_empty() || !password.is_empty() {
+            return EndpointUrl::Userinfo;
+        }
+    }
+    EndpointUrl::Scheme(scheme.to_ascii_lowercase())
+}
+
+/// Validate a WHOLE MCP candidate: the exact file set ([`MCP_ALLOWED_FILES`] — `server.json`
+/// required, `README.md` and the reserved `topos-mcp.toml` optional), a credential scan over
+/// EVERY allowed file's bytes (raw for the siblings; raw + decoded strings for the JSON
+/// document, inside [`validate_server_json`]), and then the full document gate. The one gate the
+/// publish preflight and the `add --mcp` local adopt answer to — the exact mirror of the web
+/// tier's `validateCandidateFiles`.
+///
+/// # Errors
+/// One [`McpRefusal`]; the check order is the web tier's, exactly.
+pub(crate) fn validate_candidate_files(files: &[(&str, &[u8])]) -> Result<McpSummary, McpRefusal> {
+    let Some((_, server)) = files.iter().find(|(path, _)| *path == "server.json") else {
+        return refuse(
+            McpRefusalCode::Invalid,
+            "an MCP bundle carries server.json at its root — this candidate has none",
+        );
+    };
+    for (path, _) in files {
+        if !MCP_ALLOWED_FILES.contains(path) {
+            return refuse(
+                McpRefusalCode::Invalid,
+                format!(
+                    "an MCP bundle may hold only {} — {path} is not part of one",
+                    MCP_ALLOWED_FILES.join(", ")
+                ),
+            );
+        }
+    }
+    if server.len() > MAX_SERVER_JSON_BYTES {
+        return refuse(
+            McpRefusalCode::Invalid,
+            "server.json is too large to be a server document",
+        );
+    }
+    // Every sibling's bytes run the credential scan (the document runs its own, twice over,
+    // inside the gate below).
+    for (path, bytes) in files {
+        if *path == "server.json" {
+            continue;
+        }
+        let Ok(text) = std::str::from_utf8(bytes) else {
+            return refuse(
+                McpRefusalCode::Invalid,
+                format!("{path} is not valid UTF-8"),
+            );
+        };
+        if let Some(kind) = find_secret(text) {
+            return refuse(
+                McpRefusalCode::SecretRefused,
+                format!(
+                    "{path} carries what looks like a credential ({kind}) — a shared bundle \
+                     never holds one"
+                ),
+            );
+        }
+    }
+    validate_server_json(server)
 }
 
 /// The bundle name a server document suggests: the tail segment of its registry name (the part
@@ -827,32 +1019,70 @@ mod tests {
         }
     }
 
-    /// THE VECTORS: every shared refusal vector, driven through the real gate. A rule cannot
-    /// change here without the repo-root vector changing too.
+    /// THE VECTORS: every shared refusal vector, driven through the real gate. Three entry
+    /// shapes, all two-language: `file` (one document), `raw_base64` (bytes no text file can
+    /// carry — the invalid-UTF-8 case), and `files` (a whole candidate, driven through
+    /// [`validate_candidate_files`]). A rule cannot change here without the repo-root vector
+    /// changing too.
     #[test]
     fn every_shared_vector_gets_its_verdict() {
+        use base64::Engine as _;
         let root = fixtures_root();
         let text = std::fs::read_to_string(root.join("vectors.json")).expect("vectors.json");
         let vectors: serde_json::Value = serde_json::from_str(&text).expect("vectors.json is JSON");
         let list = vectors.as_array().expect("vectors.json is an array");
         assert!(!list.is_empty(), "the vector list must not be empty");
         for v in list {
-            let file = v["file"].as_str().expect("a file");
             let want = v["verdict"].as_str().expect("a verdict");
-            let bytes = std::fs::read(root.join(file)).expect("a readable vector document");
-            let got = validate_server_json(&bytes);
+            let (label, got) = if let Some(file) = v["file"].as_str() {
+                let bytes = std::fs::read(root.join(file)).expect("a readable vector document");
+                (file.to_owned(), validate_server_json(&bytes))
+            } else if let Some(b64) = v["raw_base64"].as_str() {
+                let bytes = base64::engine::general_purpose::STANDARD
+                    .decode(b64)
+                    .expect("raw_base64 decodes");
+                ("raw_base64".to_owned(), validate_server_json(&bytes))
+            } else if let Some(files) = v["files"].as_array() {
+                let owned: Vec<(String, Vec<u8>)> = files
+                    .iter()
+                    .map(|f| {
+                        let path = f["path"].as_str().expect("a candidate path").to_owned();
+                        let bytes = match f["file"].as_str() {
+                            Some(fixture) => {
+                                std::fs::read(root.join(fixture)).expect("a readable fixture")
+                            }
+                            None => f["content"]
+                                .as_str()
+                                .expect("a candidate carries file or content")
+                                .as_bytes()
+                                .to_vec(),
+                        };
+                        (path, bytes)
+                    })
+                    .collect();
+                let borrowed: Vec<(&str, &[u8])> = owned
+                    .iter()
+                    .map(|(p, b)| (p.as_str(), b.as_slice()))
+                    .collect();
+                (
+                    format!("files[{}]", owned.len()),
+                    validate_candidate_files(&borrowed),
+                )
+            } else {
+                panic!("a vector entry needs file, raw_base64, or files");
+            };
             match (want, &got) {
                 ("ok", Ok(_)) => {}
                 ("ok", Err(e)) => panic!(
-                    "{file}: expected ok, got {} ({})",
+                    "{label}: expected ok, got {} ({})",
                     e.code.as_str(),
                     e.message
                 ),
-                (code, Ok(s)) => panic!("{file}: expected {code}, got ok ({})", s.name),
+                (code, Ok(s)) => panic!("{label}: expected {code}, got ok ({})", s.name),
                 (code, Err(e)) => assert_eq!(
                     e.code.as_str(),
                     code,
-                    "{file}: {} — {}",
+                    "{label}: {} — {}",
                     v["note"].as_str().unwrap_or_default(),
                     e.message
                 ),
@@ -997,5 +1227,171 @@ mod tests {
             McpRefusalCode::InsecureUrl
         );
         assert!(validate_server_json(doc("https://x.example/mcp").as_bytes()).is_ok());
+    }
+
+    /// The URL shape check mirrors the web gate's `new URL()` on every case the vectors pin: a
+    /// spaced host and an empty host are NOT URLs, the scheme is case-insensitive, ports parse
+    /// (empty included), and an unbracketed v6 host is refused like the WHATWG parser throws.
+    #[test]
+    fn url_validation_matches_the_web_gates_new_url_semantics() {
+        let doc = |url: &str| {
+            format!(
+                r#"{{"name":"io.github.a/b","description":"d","version":"1","remotes":[{{"type":"streamable-http","url":"{url}"}}]}}"#
+            )
+        };
+        let code = |url: &str| {
+            validate_server_json(doc(url).as_bytes())
+                .map(|_| ())
+                .map_err(|e| e.code)
+        };
+        assert_eq!(code("https://not a url"), Err(McpRefusalCode::Invalid));
+        assert_eq!(code("https://?x"), Err(McpRefusalCode::Invalid));
+        assert_eq!(code("https://"), Err(McpRefusalCode::Invalid));
+        assert_eq!(code("HTTPS://HOST/mcp"), Ok(()));
+        assert_eq!(code("https://host:8080/mcp"), Ok(()));
+        assert_eq!(code("https://host:/mcp"), Ok(()));
+        assert_eq!(code("https://host:port/mcp"), Err(McpRefusalCode::Invalid));
+        assert_eq!(code("https://::1/mcp"), Err(McpRefusalCode::Invalid));
+        assert_eq!(code("https://[::1]/mcp"), Ok(()));
+        // An EMPTY userinfo parses (the web gate passes `https://@host/`); a nonempty one is a
+        // credential.
+        assert_eq!(code("https://@host/mcp"), Ok(()));
+        assert_eq!(
+            code("https://alice:s3cret@host/mcp"),
+            Err(McpRefusalCode::SecretRefused)
+        );
+        assert_eq!(
+            code("https://:s3cret@host/mcp"),
+            Err(McpRefusalCode::SecretRefused)
+        );
+    }
+
+    /// ITEM PAIR (url-userinfo): a credential riding the address refuses as a secret — on the
+    /// pre-fix gate this parsed as a plain https URL and PASSED.
+    #[test]
+    fn url_userinfo_refuses_as_a_secret() {
+        let doc = r#"{"name":"io.github.a/b","description":"d","version":"1","remotes":[{"type":"streamable-http","url":"https://alice:s3cret@host/mcp"}]}"#;
+        let e = validate_server_json(doc.as_bytes()).expect_err("refused");
+        assert_eq!(e.code, McpRefusalCode::SecretRefused);
+        assert!(e.message.contains("user:password@"), "{}", e.message);
+    }
+
+    /// ITEM PAIR (escaped credential): a token spelled entirely in \uXXXX escapes never shows in
+    /// the raw text — the decoded-string walk catches it. The pre-fix gate (raw scan only)
+    /// PASSED this document.
+    #[test]
+    fn escaped_credentials_are_caught_by_the_decoded_string_walk() {
+        let token = format!(
+            "ghp_{}",
+            "A1b2C3d4E5".repeat(4).chars().take(36).collect::<String>()
+        );
+        let escaped: String = token
+            .chars()
+            .map(|c| format!("\\u{:04x}", c as u32))
+            .collect();
+        let doc = format!(
+            r#"{{"name":"io.github.a/b","description":"d","version":"1","remotes":[{{"type":"streamable-http","url":"https://x.example/mcp","headers":[{{"name":"X-Extra","value":"{escaped}"}}]}}]}}"#
+        );
+        assert!(
+            !doc.contains("ghp_"),
+            "the raw text must not show the token"
+        );
+        let e = validate_server_json(doc.as_bytes()).expect_err("refused");
+        assert_eq!(e.code, McpRefusalCode::SecretRefused);
+        assert!(e.message.contains("github-token"), "{}", e.message);
+        // …and the DECODED value never echoes back either.
+        assert!(!e.message.contains("ghp_"), "{}", e.message);
+    }
+
+    /// ITEM PAIR (header names): a credential-bearing header NAME refuses whatever the value
+    /// looks like — flags and entropy aside, case-insensitively. The pre-fix gate accepted a
+    /// literal `Authorization: Basic …`.
+    #[test]
+    fn credential_bearing_header_names_refuse_independent_of_value() {
+        let doc = |name: &str, value: &str| {
+            format!(
+                r#"{{"name":"io.github.a/b","description":"d","version":"1","remotes":[{{"type":"streamable-http","url":"https://x.example/mcp","headers":[{{"name":"{name}","value":"{value}"}}]}}]}}"#
+            )
+        };
+        for name in [
+            "Authorization",
+            "proxy-authorization",
+            "COOKIE",
+            "Set-Cookie",
+            "X-Api-Key",
+            "api-key",
+            "X-Auth-Token",
+            "x-access-token",
+            "Private-Token",
+        ] {
+            let e = validate_server_json(doc(name, "plain").as_bytes()).expect_err(name);
+            assert_eq!(e.code, McpRefusalCode::SecretRefused, "{name}");
+        }
+        // The Basic shape neither pattern nor entropy would catch — the NAME is the evidence.
+        let e = validate_server_json(doc("Authorization", "Basic Zm9vOmJhcg==").as_bytes())
+            .expect_err("refused");
+        assert_eq!(e.code, McpRefusalCode::SecretRefused);
+        // An unlisted literal header still passes.
+        assert!(validate_server_json(doc("X-Region", "eu-west-1").as_bytes()).is_ok());
+    }
+
+    /// ITEM PAIR (strict UTF-8): one invalid byte inside a string refuses INVALID. The pre-fix
+    /// gate decoded lossily, so the replacement char parsed as JSON and the document PASSED.
+    #[test]
+    fn invalid_utf8_refuses_invalid() {
+        let mut bytes = br#"{"name":"io.github.a/b","description":"caf"#.to_vec();
+        bytes.push(0xE9);
+        bytes.extend_from_slice(
+            br#"","version":"1","remotes":[{"type":"streamable-http","url":"https://x.example/mcp"}]}"#,
+        );
+        let e = validate_server_json(&bytes).expect_err("refused");
+        assert_eq!(e.code, McpRefusalCode::Invalid);
+        assert!(e.message.contains("UTF-8"), "{}", e.message);
+    }
+
+    /// ITEM PAIR (sibling files): the candidate gate refuses any file outside the allowed trio
+    /// (naming the set) and runs the credential scan over every allowed sibling's bytes. The
+    /// pre-fix gates read server.json alone and let both candidates through.
+    #[test]
+    fn the_candidate_allowlist_refuses_strays_and_scans_sibling_bytes() {
+        let server =
+            std::fs::read(fixtures_root().join("valid/remote-no-auth.json")).expect("fixture");
+        // The exact allowed trio passes.
+        let readme = b"How to use this server.\n".to_vec();
+        let toml = b"# reserved\n".to_vec();
+        assert!(
+            validate_candidate_files(&[
+                ("server.json", server.as_slice()),
+                ("README.md", readme.as_slice()),
+                ("topos-mcp.toml", toml.as_slice()),
+            ])
+            .is_ok()
+        );
+        // A stray file refuses, naming the allowed set.
+        let e = validate_candidate_files(&[
+            ("server.json", server.as_slice()),
+            ("evil.sh", b"#!/bin/sh\necho pwned\n".as_slice()),
+        ])
+        .expect_err("refused");
+        assert_eq!(e.code, McpRefusalCode::Invalid);
+        assert!(
+            e.message.contains("server.json, README.md, topos-mcp.toml"),
+            "{}",
+            e.message
+        );
+        assert!(e.message.contains("evil.sh"), "{}", e.message);
+        // A README carrying a token refuses exactly like the document would.
+        let hot = format!("Set GITHUB_TOKEN to ghp_{}.\n", "A1b2C3d4E5".repeat(4));
+        let e = validate_candidate_files(&[
+            ("server.json", server.as_slice()),
+            ("README.md", hot.as_bytes()),
+        ])
+        .expect_err("refused");
+        assert_eq!(e.code, McpRefusalCode::SecretRefused);
+        assert!(e.message.starts_with("README.md"), "{}", e.message);
+        // No server.json at all is its own message.
+        let e = validate_candidate_files(&[("README.md", readme.as_slice())]).expect_err("refused");
+        assert_eq!(e.code, McpRefusalCode::Invalid);
+        assert!(e.message.contains("has none"), "{}", e.message);
     }
 }

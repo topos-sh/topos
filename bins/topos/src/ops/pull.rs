@@ -538,10 +538,15 @@ pub(super) fn applied_snapshot(
             // A placement the sweep removed (or never laid) is not held, whatever the doc says.
             // A CONFIG-PLACED (mcp) record legitimately has NO placement dirs — its applied
             // version is the store's held current, reported whenever the delivered set names it
-            // (the per-agent config states ride the same report row).
-            if !map.placements.is_empty()
-                && !map.placements.iter().any(|p| ctx.fs.exists(Path::new(p)))
-            {
+            // (the per-agent config states ride the same report row). That no-dirs claim is
+            // gated on the DURABLE kind marker: a skill whose harness narrowing matched no
+            // detected agent also records an empty map, and reporting IT as held would tell the
+            // fleet page this device serves bytes it placed nowhere.
+            if map.placements.is_empty() {
+                if crate::mcp_engine::kind_marker(ctx.fs, layout, &sid).as_deref() != Some("mcp") {
+                    continue;
+                }
+            } else if !map.placements.iter().any(|p| ctx.fs.exists(Path::new(p))) {
                 continue;
             }
             if let Ok(commit) = super::parse_hex32(&map.applied_commit)

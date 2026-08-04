@@ -1,0 +1,11 @@
+{
+  "name": "io.github.acme/emptyhost",
+  "description": "An https URL with no host at all.",
+  "version": "1.0.0",
+  "remotes": [
+    {
+      "type": "streamable-http",
+      "url": "https://?x"
+    }
+  ]
+}

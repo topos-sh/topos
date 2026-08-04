@@ -1,0 +1,11 @@
+{
+  "name": "io.github.acme/notaurl",
+  "description": "An https-prefixed string that is not an address.",
+  "version": "1.0.0",
+  "remotes": [
+    {
+      "type": "streamable-http",
+      "url": "https://not a url"
+    }
+  ]
+}

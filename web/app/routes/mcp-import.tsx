@@ -6,6 +6,8 @@ import { requireMemberInScope } from "@/lib/auth/guards.server";
 import { auditInTx, mintBundleId } from "@/lib/db/identity.server";
 import { channelsOf } from "@/lib/db/queries.channels.server";
 import { inFinalTx, registerGenesisBundleInTx } from "@/lib/db/queries.custody.server";
+import { lockMcpNamesInTx } from "@/lib/db/queries.mcp.server";
+import { mcpNameTaken } from "@/lib/mcp/catalog.server";
 import {
   canonicalServerJson,
   loadServerDocument,
@@ -13,7 +15,12 @@ import {
   type McpSourceKind,
   unwrapServerDocument,
 } from "@/lib/mcp/fetch.server";
-import { mcpCandidateRefusal, SERVER_JSON } from "@/lib/mcp/publish-gate.server";
+import {
+  type McpGateRefusal,
+  mcpCandidateRefusal,
+  mcpNameTakenRefusal,
+  SERVER_JSON,
+} from "@/lib/mcp/publish-gate.server";
 import { type McpSummary, suggestedNameFor, validateServerJson } from "@/lib/mcp/validate.server";
 import { useSubmittingIntent } from "@/lib/pending";
 import { publishVersion } from "@/lib/plane/custody.server";
@@ -166,9 +173,9 @@ export async function action({ request, params }: ActionFunctionArgs) {
     // The SAME gate the session lane runs, on the same bytes, before any custody call — a
     // refused document leaves nothing behind, and the web door gets no exemption from the
     // embedded-name uniqueness rule.
-    const refused = await mcpCandidateRefusal(actor, files, null);
-    if (refused !== null) {
-      return refusal("publish", refused.message, refused.code);
+    const gate = await mcpCandidateRefusal(actor, files, null);
+    if (gate.refusal !== null) {
+      return refusal("publish", gate.refusal.message, gate.refusal.code);
     }
     const validated = validateServerJson(document);
     if (!validated.ok) {
@@ -183,32 +190,47 @@ export async function action({ request, params }: ActionFunctionArgs) {
     if (published.kind !== "ok") {
       return refusal("publish", "The publish did not land — try again.", undefined, 500);
     }
-    const registered = await inFinalTx(async (tx) => {
-      // The birth name folds from the document's tail segment (or whatever the member typed
-      // over it) through the catalog's own mint — same rules, same collision suffixes.
-      const registration = await registerGenesisBundleInTx(
-        tx,
-        actor,
-        bundleId,
-        name.length > 0 ? name : suggestedNameFor(validated.summary.name),
-        channel.length > 0 ? channel : null,
-        "mcp",
-      );
-      await auditInTx(tx, {
-        workspaceId: workspace.id,
-        actor: { userId: actor.userId, display: actor.display },
-        kind: "mcp_imported",
-        subject: bundleId,
-        outcome: "ok",
-        details: {
-          server: validated.summary.name,
-          version: validated.summary.version,
-          url: validated.summary.url,
-        },
-      });
-      return registration;
-    });
-    throw redirect(wsPathServer(workspace.name, `skills/${registered.name}`));
+    const landed = await inFinalTx<{ refused: McpGateRefusal } | { refused: null; name: string }>(
+      async (tx) => {
+        // The embedded name, looked at again under the lock every registering door takes: the
+        // gate above answered before the vault call, so another publish could have claimed the
+        // name in between. On a collision this transaction registers NOTHING and the page says
+        // so — the published bytes stand in the vault with no catalog row, which is the same
+        // sequencing the session lane has (custody first, catalog second).
+        await lockMcpNamesInTx(tx, workspace.id);
+        const taken = await mcpNameTaken(actor, validated.summary.name, bundleId);
+        if (taken.kind !== "free") {
+          return { refused: mcpNameTakenRefusal(validated.summary.name, taken) };
+        }
+        // The birth name folds from the document's tail segment (or whatever the member typed
+        // over it) through the catalog's own mint — same rules, same collision suffixes.
+        const registration = await registerGenesisBundleInTx(
+          tx,
+          actor,
+          bundleId,
+          name.length > 0 ? name : suggestedNameFor(validated.summary.name),
+          channel.length > 0 ? channel : null,
+          "mcp",
+        );
+        await auditInTx(tx, {
+          workspaceId: workspace.id,
+          actor: { userId: actor.userId, display: actor.display },
+          kind: "mcp_imported",
+          subject: bundleId,
+          outcome: "ok",
+          details: {
+            server: validated.summary.name,
+            version: validated.summary.version,
+            url: validated.summary.url,
+          },
+        });
+        return { refused: null, name: registration.name };
+      },
+    );
+    if (landed.refused !== null) {
+      return refusal("publish", landed.refused.message, landed.refused.code);
+    }
+    throw redirect(wsPathServer(workspace.name, `skills/${landed.name}`));
   }
 
   return refusal("publish", "Unknown action.");

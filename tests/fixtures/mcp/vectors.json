@@ -93,5 +93,56 @@
     "file": "invalid/not-json.txt",
     "verdict": "MCP_INVALID",
     "note": "Not JSON at all — the commonest paste mistake, refused before anything is read out of it."
+  },
+  {
+    "file": "valid/remote-uppercase-scheme.json",
+    "verdict": "ok",
+    "note": "The scheme is case-insensitive: HTTPS:// is the same https the gate requires."
+  },
+  {
+    "file": "invalid/header-escaped-token.json",
+    "verdict": "MCP_SECRET_REFUSED",
+    "note": "The token is spelled entirely in \\uXXXX escapes, so the raw text never shows it — the scan over the DECODED strings does."
+  },
+  {
+    "file": "invalid/header-authorization.json",
+    "verdict": "MCP_SECRET_REFUSED",
+    "note": "Authorization is a credential-bearing header NAME — refused whatever the value looks like, flags and entropy aside."
+  },
+  {
+    "file": "invalid/url-userinfo.json",
+    "verdict": "MCP_SECRET_REFUSED",
+    "note": "userinfo in the endpoint URL is a credential in the address itself."
+  },
+  {
+    "file": "invalid/url-not-a-url.json",
+    "verdict": "MCP_INVALID",
+    "note": "An https prefix does not make an address: the host carries spaces, which no URL parser accepts."
+  },
+  {
+    "file": "invalid/url-empty-host.json",
+    "verdict": "MCP_INVALID",
+    "note": "No host at all — https:// followed by a query is not an address."
+  },
+  {
+    "raw_base64": "eyJuYW1lIjoiaW8uZ2l0aHViLmFjbWUvYnJva2VuIiwiZGVzY3JpcHRpb24iOiJjYWbpIiwidmVyc2lvbiI6IjEuMC4wIiwicmVtb3RlcyI6W3sidHlwZSI6InN0cmVhbWFibGUtaHR0cCIsInVybCI6Imh0dHBzOi8vYnJva2VuLmFjbWUuZXhhbXBsZS9tY3AifV19",
+    "verdict": "MCP_INVALID",
+    "note": "One invalid UTF-8 byte inside a string: a lossy decode would parse it, so both gates must decode STRICTLY and refuse."
+  },
+  {
+    "files": [
+      { "path": "server.json", "file": "valid/remote-no-auth.json" },
+      { "path": "evil.sh", "content": "#!/bin/sh\necho pwned\n" }
+    ],
+    "verdict": "MCP_INVALID",
+    "note": "An MCP candidate may hold exactly server.json, README.md, and topos-mcp.toml — any other file refuses, naming the allowed set."
+  },
+  {
+    "files": [
+      { "path": "server.json", "file": "valid/remote-no-auth.json" },
+      { "path": "README.md", "content": "Set GITHUB_TOKEN to ghp_A1b2C3d4E5A1b2C3d4E5A1b2C3d4E5A1b2C3 before use.\n" }
+    ],
+    "verdict": "MCP_SECRET_REFUSED",
+    "note": "Every allowed file's bytes run the credential scan — a token in the README refuses exactly like one in the document."
   }
 ]

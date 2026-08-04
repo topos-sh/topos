@@ -39,6 +39,35 @@ const VERSION_MAX = 255;
 /** A hard ceiling on the document itself — a server.json is a page of text, never a payload. */
 export const MAX_SERVER_JSON_BYTES = 256 * 1024;
 
+/**
+ * The WHOLE file set an MCP candidate may carry: the document (required, at the root), an
+ * optional README, and the reserved `topos-mcp.toml`. Anything else is refused by name — a
+ * bundle whose behavior is one JSON document must not smuggle scripts or extra payloads beside
+ * it.
+ */
+export const MCP_ALLOWED_FILES = ["server.json", "README.md", "topos-mcp.toml"] as const;
+
+/**
+ * Header NAMES that carry a credential by definition — refused case-insensitively, independent
+ * of `isSecret`, value shape, or entropy. A literal `Authorization: Basic …` is somebody's
+ * credential whatever the flags say.
+ */
+const CREDENTIAL_HEADER_NAMES = new Set([
+  "authorization",
+  "proxy-authorization",
+  "cookie",
+  "set-cookie",
+  "x-api-key",
+  "api-key",
+  "x-auth-token",
+  "x-access-token",
+  "private-token",
+]);
+
+/** The one strict decoder: invalid UTF-8 is refused, never replaced (a replacement char can hide
+ * what the raw bytes spelled). */
+const strictUtf8 = new TextDecoder("utf-8", { fatal: true });
+
 /** The one transport a shared bundle can promise: the same URL works from every machine. */
 export const STREAMABLE_HTTP = "streamable-http";
 
@@ -145,6 +174,35 @@ export function findSecret(raw: string): string | null {
   return null;
 }
 
+/**
+ * The same scan over the PARSED document: every decoded string — keys and values, at any depth —
+ * runs the pattern + entropy belt. This is what the raw pass cannot see: a token spelled in
+ * `\uXXXX` escapes decodes to the credential the raw bytes never showed.
+ */
+export function findSecretDeep(value: unknown): string | null {
+  if (typeof value === "string") {
+    return findSecret(value);
+  }
+  if (Array.isArray(value)) {
+    for (const entry of value) {
+      const hit = findSecretDeep(entry);
+      if (hit !== null) {
+        return hit;
+      }
+    }
+    return null;
+  }
+  if (typeof value === "object" && value !== null) {
+    for (const [key, entry] of Object.entries(value)) {
+      const hit = findSecret(key) ?? findSecretDeep(entry);
+      if (hit !== null) {
+        return hit;
+      }
+    }
+  }
+  return null;
+}
+
 // ── The gate ────────────────────────────────────────────────────────────────────────────────
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -161,7 +219,18 @@ function hasEntries(value: unknown): boolean {
  * not a re-serialization, so nothing a caller strips can hide a credential from it.
  */
 export function validateServerJson(raw: Uint8Array | string): McpValidation {
-  const text = typeof raw === "string" ? raw : new TextDecoder().decode(raw);
+  let text: string;
+  if (typeof raw === "string") {
+    text = raw;
+  } else {
+    // STRICT decode: an invalid byte refuses outright — a lossy replacement char could both hide
+    // what the bytes spelled and let an unreadable document parse as if it were readable.
+    try {
+      text = strictUtf8.decode(raw);
+    } catch {
+      return refuse("MCP_INVALID", "the document is not valid UTF-8");
+    }
+  }
   if (text.length === 0) {
     return refuse("MCP_INVALID", "the document is empty");
   }
@@ -172,8 +241,10 @@ export function validateServerJson(raw: Uint8Array | string): McpValidation {
     return refuse("MCP_INVALID", "that is not JSON — a server.json document is a JSON object");
   }
 
-  // FIRST, before anything is read out of the document: does it carry a credential?
-  const secret = findSecret(text);
+  // FIRST, before anything is read out of the document: does it carry a credential? Two passes —
+  // the raw text (nothing a caller strips can hide from it) and the DECODED strings (nothing a
+  // publisher escapes can hide from that one).
+  const secret = findSecret(text) ?? findSecretDeep(parsed);
   if (secret !== null) {
     return refuse(
       "MCP_SECRET_REFUSED",
@@ -247,6 +318,14 @@ export function validateServerJson(raw: Uint8Array | string): McpValidation {
   } catch {
     return refuse("MCP_INVALID", "the endpoint is not a URL");
   }
+  // userinfo in the address IS a credential — refused before the scheme is even judged, so an
+  // http URL carrying one still names the real problem.
+  if (parsedUrl.username !== "" || parsedUrl.password !== "") {
+    return refuse(
+      "MCP_SECRET_REFUSED",
+      "the endpoint URL carries credentials (user:password@) — a shared bundle never holds one",
+    );
+  }
   if (parsedUrl.protocol !== "https:") {
     return refuse("MCP_INSECURE_URL", "the endpoint must be https");
   }
@@ -265,6 +344,14 @@ export function validateServerJson(raw: Uint8Array | string): McpValidation {
   for (const entry of rawHeaders) {
     if (!isRecord(entry) || typeof entry.name !== "string" || entry.name.length === 0) {
       return refuse("MCP_INVALID", "every header needs a name");
+    }
+    // A credential-bearing header NAME refuses whatever the value or the flags say — before
+    // isSecret, before the value shape, independent of entropy.
+    if (CREDENTIAL_HEADER_NAMES.has(entry.name.toLowerCase())) {
+      return refuse(
+        "MCP_SECRET_REFUSED",
+        `the header ${entry.name} carries a credential by definition — a shared bundle never holds one`,
+      );
     }
     if (entry.isSecret === true) {
       return refuse(
@@ -305,6 +392,63 @@ export function validateServerJson(raw: Uint8Array | string): McpValidation {
       authHint,
     },
   };
+}
+
+/** One candidate file, as bytes — the shape the whole-candidate gate below judges. */
+export interface McpCandidateFile {
+  path: string;
+  bytes: Uint8Array;
+}
+
+/**
+ * Validate a WHOLE MCP candidate: the exact file set ([`MCP_ALLOWED_FILES`] — `server.json`
+ * required, `README.md` and the reserved `topos-mcp.toml` optional), a credential scan over
+ * EVERY allowed file's bytes (raw for the siblings; raw + decoded strings for the JSON document,
+ * inside [`validateServerJson`]), and then the full document gate. The one function both publish
+ * doors and the local-adopt gate answer to — a bundle whose behavior is one JSON document must
+ * not smuggle scripts or extra payloads beside it.
+ */
+export function validateCandidateFiles(files: McpCandidateFile[]): McpValidation {
+  const server = files.find((f) => f.path === "server.json");
+  if (server === undefined) {
+    return refuse(
+      "MCP_INVALID",
+      "an MCP bundle carries server.json at its root — this candidate has none",
+    );
+  }
+  const allowed = new Set<string>(MCP_ALLOWED_FILES);
+  for (const file of files) {
+    if (!allowed.has(file.path)) {
+      return refuse(
+        "MCP_INVALID",
+        `an MCP bundle may hold only ${MCP_ALLOWED_FILES.join(", ")} — ${file.path} is not part of one`,
+      );
+    }
+  }
+  if (server.bytes.byteLength > MAX_SERVER_JSON_BYTES) {
+    return refuse("MCP_INVALID", "server.json is too large to be a server document");
+  }
+  // Every sibling's bytes run the credential scan (the document runs its own, twice over, inside
+  // the gate below).
+  for (const file of files) {
+    if (file.path === "server.json") {
+      continue;
+    }
+    let text: string;
+    try {
+      text = strictUtf8.decode(file.bytes);
+    } catch {
+      return refuse("MCP_INVALID", `${file.path} is not valid UTF-8`);
+    }
+    const secret = findSecret(text);
+    if (secret !== null) {
+      return refuse(
+        "MCP_SECRET_REFUSED",
+        `${file.path} carries what looks like a credential (${secret}) — a shared bundle never holds one`,
+      );
+    }
+  }
+  return validateServerJson(server.bytes);
 }
 
 /**

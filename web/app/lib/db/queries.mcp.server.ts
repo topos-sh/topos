@@ -35,6 +35,20 @@ export interface McpBundleRow {
  */
 export const MAX_MCP_BUNDLES_SCANNED = 500;
 
+type Tx = Parameters<Parameters<ReturnType<typeof getDb>["transaction"]>[0]>[0];
+
+/**
+ * Serialize this workspace's embedded-name decisions. The uniqueness rule reads BYTES (a
+ * version's document says what name it claims), so there is no column to put a unique index on
+ * — the lock is what makes "scan, then register" atomic against another publish doing the same
+ * thing at the same moment. Every door that ends up REGISTERING or RESTORING an `mcp` bundle
+ * takes it inside its final transaction and re-runs the scan under it; a transaction-scoped
+ * lock needs no release path (a rollback drops it with everything else).
+ */
+export async function lockMcpNamesInTx(tx: Tx, workspaceId: string): Promise<void> {
+  await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${workspaceId} || ':mcp-name'))`);
+}
+
 /**
  * Every ACTIVE `kind: 'mcp'` bundle in the actor's workspace that has something published,
  * catalog-name order, capped. An archived or never-published bundle is absent: it delivers

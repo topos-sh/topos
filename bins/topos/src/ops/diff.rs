@@ -178,6 +178,23 @@ fn diff_draft_vs_current(
 
     let map: PlacementMap = doc::read_map(ctx.fs, &sp.map)?
         .ok_or_else(|| ClientError::Corrupt("missing placement map".to_owned()))?;
+    // A CONFIG-PLACED (mcp) bundle has no working tree — its bytes live in agent configs, not in
+    // an editable dir — so the honest bare-diff answer is the no-local-draft shape: an empty diff
+    // whose endpoint IS the held current (never the "map has no placement" corruption error a
+    // store-only record would otherwise trip).
+    if map.placements.is_empty()
+        && crate::mcp_engine::record_kind(ctx, &lock.skill_id, &map)
+            == crate::mcp_engine::RecordKind::Mcp
+    {
+        return Ok(DiffData {
+            source: DiffSource::Local,
+            version_id: lock.base_commit.clone(),
+            bundle_digest: lock.bundle_digest.clone(),
+            diff: String::new(),
+            truncated: false,
+            files: Vec::new(),
+        });
+    }
     // The draft side is the WORK TREE — the single edited copy when one exists (draft-anywhere),
     // else the first placement; several divergent copies freeze typed.
     let placement = crate::placement::work_tree_dir(ctx, &lock.name, &map)?;

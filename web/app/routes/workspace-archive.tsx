@@ -74,6 +74,15 @@ export async function action({ request, params }: ActionFunctionArgs) {
   );
 }
 
+/**
+ * The MCP arm's own copy. The shared map words the CATALOG-name refusals; this outcome is about
+ * the other name an MCP bundle carries — the registry name inside its document, which the
+ * workspace's active servers must not share. It covers the unreadable case too, so it says what
+ * is actually known: not provably free.
+ */
+const MCP_NAME_TAKEN_COPY =
+  "Its registry name isn't free here any more — another active server claims it, or this one's own document couldn't be read. Unarchive is refused; retire that server first.";
+
 async function unarchiveIntent(request: Request, ws: string, formData: FormData) {
   const owner = await requireWorkspaceOwner(request, ws);
   const skillId = String(formData.get("skill_id") ?? "");
@@ -109,7 +118,10 @@ async function unarchiveIntent(request: Request, ws: string, formData: FormData)
   return data<ArchiveActionData>({
     op: "unarchive",
     skillId,
-    message: unarchiveDeniedCopy(outcome.outcome),
+    message:
+      outcome.outcome === "mcp_name_taken"
+        ? MCP_NAME_TAKEN_COPY
+        : unarchiveDeniedCopy(outcome.outcome),
   });
 }
 

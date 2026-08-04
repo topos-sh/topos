@@ -2,7 +2,10 @@ import { and, asc, eq, sql } from "drizzle-orm";
 import type { MemberActor, OwnerActor } from "@/lib/auth/guards.server";
 import { auditInTx } from "@/lib/db/identity.server";
 import { getDb } from "@/lib/db/index.server";
+import { lockMcpNamesInTx } from "@/lib/db/queries.mcp.server";
 import { bundle, bundleNameHint, channelBundle, notice, proposal } from "@/lib/db/schema.app";
+import { planeCurrentPointer } from "@/lib/db/schema.custody";
+import { mcpNameTaken, serverDocumentOf } from "@/lib/mcp/catalog.server";
 import { deleteBundleBytes, purgeVersionBytes } from "@/lib/plane/custody.server";
 
 /**
@@ -196,9 +199,30 @@ export async function archiveBundle(actor: OwnerActor, bundleId: string): Promis
   });
 }
 
+/**
+ * The registry name an `mcp` bundle's CURRENT version embeds, or null when this tier cannot
+ * read it end to end — no `current` at all, bytes the vault will not serve, or a document
+ * today's gate refuses. Null is never "no name": it is "not provably free", and the caller
+ * refuses on it.
+ */
+async function embeddedServerName(tx: Tx, ws: string, bundleId: string): Promise<string | null> {
+  const pointer = await tx
+    .select({ versionId: planeCurrentPointer.versionId })
+    .from(planeCurrentPointer)
+    .where(and(eq(planeCurrentPointer.workspaceId, ws), eq(planeCurrentPointer.bundleId, bundleId)))
+    .limit(1);
+  const versionId = pointer[0]?.versionId;
+  if (versionId === undefined) {
+    return null;
+  }
+  const document = await serverDocumentOf(ws, bundleId, versionId);
+  return typeof document?.name === "string" ? document.name : null;
+}
+
 export type UnarchiveOutcome =
   | { outcome: "unarchived"; name: string }
   | { outcome: "name_taken" }
+  | { outcome: "mcp_name_taken" }
   | { outcome: "not_archived" }
   | { outcome: "unknown_skill" };
 
@@ -211,7 +235,7 @@ export async function unarchiveBundle(
   const ws = actor.workspaceId;
   return await getDb().transaction(async (tx) => {
     const rows = await tx
-      .select({ status: bundle.status, baseName: bundle.baseName })
+      .select({ status: bundle.status, baseName: bundle.baseName, kind: bundle.kind })
       .from(bundle)
       .where(and(eq(bundle.workspaceId, ws), eq(bundle.id, bundleId)))
       .limit(1);
@@ -229,6 +253,23 @@ export async function unarchiveBundle(
       .limit(1);
     if (taken.length > 0) {
       return { outcome: "name_taken" } as const;
+    }
+    // An MCP bundle carries a SECOND name — the registry name inside its document — and that
+    // one is unique across the workspace's active catalog, which is what keeps the registry
+    // read lane's `…/servers/{name}` unambiguous. Archiving freed it, so restoring is a claim
+    // on it all over again: the scan re-runs here under the same lock a publish takes, and an
+    // answer that is not provably free refuses rather than resurrect an ambiguity an agent's
+    // lookup would then resolve by accident.
+    if (row.kind === "mcp") {
+      await lockMcpNamesInTx(tx, ws);
+      const serverName = await embeddedServerName(tx, ws, bundleId);
+      if (serverName === null) {
+        return { outcome: "mcp_name_taken" } as const;
+      }
+      const claimed = await mcpNameTaken(actor, serverName, bundleId);
+      if (claimed.kind !== "free") {
+        return { outcome: "mcp_name_taken" } as const;
+      }
     }
     await tx
       .update(bundle)

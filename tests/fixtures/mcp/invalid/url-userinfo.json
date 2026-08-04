@@ -1,0 +1,11 @@
+{
+  "name": "io.github.acme/userinfo",
+  "description": "A credential riding the endpoint URL's userinfo.",
+  "version": "1.0.0",
+  "remotes": [
+    {
+      "type": "streamable-http",
+      "url": "https://alice:s3cret@host/mcp"
+    }
+  ]
+}

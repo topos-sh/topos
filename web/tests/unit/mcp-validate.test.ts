@@ -1,27 +1,75 @@
+import { Buffer } from "node:buffer";
 import { readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import { SECRET_ENTROPY, SECRET_PATTERNS } from "@/lib/mcp/secret-patterns.generated";
-import { findSecret, suggestedNameFor, validateServerJson } from "@/lib/mcp/validate.server";
+import {
+  findSecret,
+  MCP_ALLOWED_FILES,
+  type McpValidation,
+  suggestedNameFor,
+  validateCandidateFiles,
+  validateServerJson,
+} from "@/lib/mcp/validate.server";
 
 /**
  * The MCP server-document gate, driven by the SHARED vectors at the repo root
  * (`tests/fixtures/mcp/`) — the same files a client-side reader validates against, so the two
  * languages can never quietly disagree about what is accepted. Every vector names one verdict:
  * `ok`, or the exact refusal code. A rule change here fails until the vector changes with it.
+ *
+ * A vector arrives in one of three shapes, because a candidate is more than a readable document:
+ * `file` is one fixture read as bytes, `raw_base64` is a document whose exact BYTES matter (an
+ * invalid UTF-8 sequence has no fixture-file spelling that survives an editor), and `files` is a
+ * whole candidate — the file set the allowlist judges and whose siblings the credential scan
+ * reads.
  */
 
 // tests/unit → web → repo root.
 const FIXTURES = resolve(__dirname, "..", "..", "..", "tests", "fixtures", "mcp");
 
-interface Vector {
-  file: string;
-  verdict: string;
-  note: string;
+/** One file of a multi-file vector: a fixture on disk, or literal content spelled inline. */
+interface VectorFile {
+  path: string;
+  file?: string;
+  content?: string;
 }
+
+type Vector = { verdict: string; note: string } & (
+  | { file: string }
+  | { raw_base64: string }
+  | { files: VectorFile[] }
+);
 
 const vectors = JSON.parse(readFileSync(join(FIXTURES, "vectors.json"), "utf8")) as Vector[];
 const bytesOf = (file: string) => readFileSync(join(FIXTURES, file));
+
+/** What a row is called in the report — the fixture path, the file set, or just "raw". */
+function titleOf(vector: Vector): string {
+  if ("file" in vector) {
+    return vector.file;
+  }
+  if ("files" in vector) {
+    return vector.files.map((f) => f.path).join(" + ");
+  }
+  return "raw";
+}
+
+/** Drive the gate the way this vector's shape asks to be driven. */
+function runVector(vector: Vector): McpValidation {
+  if ("file" in vector) {
+    return validateServerJson(bytesOf(vector.file));
+  }
+  if ("raw_base64" in vector) {
+    return validateServerJson(Buffer.from(vector.raw_base64, "base64"));
+  }
+  return validateCandidateFiles(
+    vector.files.map((f) => ({
+      path: f.path,
+      bytes: f.file === undefined ? Buffer.from(f.content ?? "", "utf8") : bytesOf(f.file),
+    })),
+  );
+}
 
 describe("the shared refusal vectors", () => {
   it("covers both verdicts and every refusal code the gate can answer", () => {
@@ -43,14 +91,14 @@ describe("the shared refusal vectors", () => {
   });
 
   it.each(
-    vectors.map((v) => [v.file, v.verdict, v.note] as const),
-  )("%s → %s", (file, verdict, note) => {
-    const result = validateServerJson(bytesOf(file));
+    vectors.map((v) => [titleOf(v), v.verdict, v] as const),
+  )("%s → %s", (title, verdict, vector) => {
+    const result = runVector(vector);
     if (verdict === "ok") {
-      expect(result.ok, `${file}: ${note}`).toBe(true);
+      expect(result.ok, `${title}: ${vector.note}`).toBe(true);
       return;
     }
-    expect(result.ok, `${file}: ${note}`).toBe(false);
+    expect(result.ok, `${title}: ${vector.note}`).toBe(false);
     expect(result.ok === false && result.code).toBe(verdict);
     // A refusal always says something a human can act on.
     expect(result.ok === false && result.message.length).toBeGreaterThan(10);
@@ -131,6 +179,102 @@ describe("the credential scan", () => {
     ["a user-agent-ish string", "Mozilla-5-0-compatible-topos-registry"],
   ])("leaves %s alone", (_label, text) => {
     expect(findSecret(text)).toBeNull();
+  });
+});
+
+describe("what the raw text alone would miss", () => {
+  const DOCUMENT = {
+    name: "io.github.acme/probe",
+    description: "A server used to probe the gate.",
+    version: "1.0.0",
+  };
+  /** The probe document with one remote, plus whatever this case wants said about it. */
+  const withRemote = (remote: Record<string, unknown>) =>
+    JSON.stringify({
+      ...DOCUMENT,
+      remotes: [{ type: "streamable-http", url: "https://probe.acme.example/mcp", ...remote }],
+    });
+
+  it("an escaped credential is caught by the decoded-string walk", () => {
+    const token = "ghp_A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8";
+    const escaped = [...token]
+      .map((ch) => `\\u${ch.charCodeAt(0).toString(16).padStart(4, "0")}`)
+      .join("");
+    // Hand-built rather than stringified: the point is that the BYTES spell `\uXXXX` and the
+    // JSON parser is what turns them back into a token.
+    const raw = `{"name":"io.github.acme/escaped","description":"An escaped credential.","version":"1.0.0","remotes":[{"type":"streamable-http","url":"https://probe.acme.example/mcp","headers":[{"name":"X-Trace","value":"${escaped}"}]}]}`;
+    // The raw pass is blind to it — every escape breaks the token run, and no pattern matches.
+    expect(findSecret(raw)).toBeNull();
+    const result = validateServerJson(raw);
+    expect(result.ok === false && result.code).toBe("MCP_SECRET_REFUSED");
+  });
+
+  it("credential-bearing header names refuse independent of value", () => {
+    // Values chosen to be innocent on their own: the NAME is what refuses, and the case it is
+    // written in makes no difference.
+    for (const [name, value] of [
+      ["Authorization", "Basic hello"],
+      ["COOKIE", "session=1"],
+    ]) {
+      const result = validateServerJson(withRemote({ headers: [{ name, value }] }));
+      expect(result.ok === false && result.code, name).toBe("MCP_SECRET_REFUSED");
+      expect(result.ok === false && result.message).toContain(name);
+    }
+  });
+
+  it("url userinfo refuses as a secret", () => {
+    const result = validateServerJson(
+      withRemote({ url: "https://svc:hunter2@probe.acme.example/mcp" }),
+    );
+    expect(result.ok === false && result.code).toBe("MCP_SECRET_REFUSED");
+  });
+
+  it("invalid utf-8 refuses invalid", () => {
+    // A lone 0xE9 inside a string value. A lossy decode replaces it and the document parses as
+    // if it were readable, so refusing depends entirely on decoding strictly.
+    const bytes = Buffer.concat([
+      Buffer.from('{"name":"io.github.acme/probe","description":"caf', "utf8"),
+      Buffer.from([0xe9]),
+      Buffer.from(
+        '","version":"1.0.0","remotes":[{"type":"streamable-http","url":"https://probe.acme.example/mcp"}]}',
+        "utf8",
+      ),
+    ]);
+    expect(JSON.parse(new TextDecoder().decode(bytes)).name).toBe("io.github.acme/probe");
+    const result = validateServerJson(bytes);
+    expect(result.ok === false && result.code).toBe("MCP_INVALID");
+    expect(result.ok === false && result.message).toContain("UTF-8");
+  });
+
+  it("the candidate allowlist refuses a stray file and scans sibling bytes", () => {
+    const server = { path: "server.json", bytes: bytesOf("valid/remote-no-auth.json") };
+    const stray = validateCandidateFiles([
+      server,
+      { path: "install.sh", bytes: Buffer.from("#!/bin/sh\necho hi\n", "utf8") },
+    ]);
+    expect(stray.ok === false && stray.code).toBe("MCP_INVALID");
+    // The refusal names the WHOLE allowed set — the author learns the rule, not one violation.
+    for (const allowed of MCP_ALLOWED_FILES) {
+      expect(stray.ok === false && stray.message).toContain(allowed);
+    }
+    const readme = validateCandidateFiles([
+      server,
+      {
+        path: "README.md",
+        bytes: Buffer.from(
+          "Export GITHUB_TOKEN=ghp_A1b2C3d4E5A1b2C3d4E5A1b2C3d4E5A1b2C3 first.\n",
+          "utf8",
+        ),
+      },
+    ]);
+    expect(readme.ok === false && readme.code).toBe("MCP_SECRET_REFUSED");
+    // The allowed set is a ceiling, not a demand: the exact trio, all clean, passes.
+    const trio = validateCandidateFiles([
+      server,
+      { path: "README.md", bytes: Buffer.from("What this server does.\n", "utf8") },
+      { path: "topos-mcp.toml", bytes: Buffer.from("# reserved\n", "utf8") },
+    ]);
+    expect(trio.ok).toBe(true);
   });
 });
 

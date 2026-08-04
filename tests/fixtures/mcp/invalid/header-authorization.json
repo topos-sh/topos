@@ -1,0 +1,14 @@
+{
+  "name": "io.github.acme/basic-auth",
+  "description": "A credential-bearing header name with a literal value.",
+  "version": "1.0.0",
+  "remotes": [
+    {
+      "type": "streamable-http",
+      "url": "https://basic.acme.example/mcp",
+      "headers": [
+        { "name": "Authorization", "value": "Basic Zm9vOmJhcg==" }
+      ]
+    }
+  ]
+}

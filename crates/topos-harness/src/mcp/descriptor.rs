@@ -3,13 +3,13 @@
 //! live docs + local binaries; slugs match [`registry`](crate::registry) rows exactly (asserted
 //! in tests), so the placement engine joins this table onto the registry's detection probe.
 //!
-//! Path resolution mirrors the registry's rule: a per-harness env override (`$CLAUDE_CONFIG_DIR`,
-//! `$CODEX_HOME`, `$HERMES_HOME`) read trimmed/non-empty, else a home-relative default — so every
-//! resolver stays testable against a temp home.
+//! Path resolution mirrors the registry's rule: an env override (`$XDG_CONFIG_HOME`,
+//! `$CLAUDE_CONFIG_DIR`, `$CODEX_HOME`, `$HERMES_HOME`) read trimmed/non-empty, else a
+//! home-relative default — so every resolver stays testable against a temp home.
 
 use std::path::{Path, PathBuf};
 
-use crate::triggers::env_override;
+use crate::triggers::{env_override, resolve_config_home};
 
 /// One MCP-capable harness's config surfaces.
 #[derive(Debug)]
@@ -42,6 +42,8 @@ pub struct McpSurface {
 pub enum SurfaceRoot {
     /// The user's home dir.
     Home,
+    /// `$XDG_CONFIG_HOME`, else `home/.config`.
+    Config,
     /// `$CLAUDE_CONFIG_DIR`, else `home/.claude`.
     ClaudeHome,
     /// `$CODEX_HOME`, else `home/.codex`.
@@ -117,11 +119,12 @@ static MCP_HARNESSES: &[McpHarness] = &[
         slug: "opencode",
         display_name: "OpenCode",
         user_surface: Some(McpSurface {
-            root: SurfaceRoot::Home,
-            suffix: ".opencode/opencode.json",
+            root: SurfaceRoot::Config,
+            suffix: "opencode/opencode.json",
             dialect: McpDialect::OpencodeJson,
         }),
-        project_surface: Some((".opencode/opencode.json", McpDialect::OpencodeJson)),
+        // The project config sits at the checkout root, not under a dot-dir.
+        project_surface: Some(("opencode.json", McpDialect::OpencodeJson)),
         // Automatic on 401 + dynamic client registration.
         oauth_capable: true,
         reload_note: "restart opencode",
@@ -172,6 +175,7 @@ pub fn user_surface_path(h: &McpHarness, home: &Path) -> Option<PathBuf> {
     let surface = h.user_surface.as_ref()?;
     let base = match surface.root {
         SurfaceRoot::Home => home.to_path_buf(),
+        SurfaceRoot::Config => resolve_config_home(home),
         SurfaceRoot::ClaudeHome => {
             env_override("CLAUDE_CONFIG_DIR").unwrap_or_else(|| home.join(".claude"))
         }
@@ -260,12 +264,12 @@ mod tests {
         let s = oc.user_surface.unwrap();
         assert_eq!(
             (s.root, s.suffix),
-            (SurfaceRoot::Home, ".opencode/opencode.json")
+            (SurfaceRoot::Config, "opencode/opencode.json")
         );
         assert_eq!(s.dialect, McpDialect::OpencodeJson);
         assert_eq!(
             oc.project_surface,
-            Some((".opencode/opencode.json", McpDialect::OpencodeJson))
+            Some(("opencode.json", McpDialect::OpencodeJson))
         );
 
         let claw = get("openclaw");
@@ -293,10 +297,6 @@ mod tests {
             Some(PathBuf::from("/test-home/.cursor/mcp.json"))
         );
         assert_eq!(
-            user_surface_path(mcp_harness("opencode").unwrap(), home),
-            Some(PathBuf::from("/test-home/.opencode/opencode.json"))
-        );
-        assert_eq!(
             user_surface_path(mcp_harness("openclaw").unwrap(), home),
             Some(PathBuf::from("/test-home/.openclaw/openclaw.json"))
         );
@@ -308,5 +308,14 @@ mod tests {
         assert!(codex.ends_with("config.toml"), "{codex:?}");
         let hermes = user_surface_path(mcp_harness("hermes-agent").unwrap(), home).unwrap();
         assert!(hermes.ends_with("config.yaml"), "{hermes:?}");
+        let oc = user_surface_path(mcp_harness("opencode").unwrap(), home).unwrap();
+        assert!(oc.ends_with("opencode/opencode.json"), "{oc:?}");
+        // With no `$XDG_CONFIG_HOME` it lands under `home/.config`.
+        if std::env::var_os("XDG_CONFIG_HOME").is_none() {
+            assert_eq!(
+                oc,
+                PathBuf::from("/test-home/.config/opencode/opencode.json")
+            );
+        }
     }
 }

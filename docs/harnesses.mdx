@@ -124,12 +124,12 @@ agent it can't detect gets nothing, and a file whose shape can't be proven safe 
 | Claude Code | `~/.claude/skills/topos-mcp/` † (a Topos-owned plugin directory) | `.mcp.json` | next session; `/reload-plugins` reloads live | `/mcp` |
 | Codex | `~/.codex/config.toml` † | `.codex/config.toml` ‡ | restart `codex` | `codex mcp login <name>` |
 | Cursor | `~/.cursor/mcp.json` | `.cursor/mcp.json` | restart Cursor | Cursor's own, on first use |
-| OpenCode | `~/.opencode/opencode.json` | `.opencode/opencode.json` | restart `opencode` | automatic on the first `401` |
+| OpenCode | `~/.config/opencode/opencode.json` † | `opencode.json` (repo root) | restart `opencode` | automatic on the first `401` |
 | OpenClaw | `~/.openclaw/openclaw.json` | — (none) | automatically | `openclaw mcp login <name>` |
 | Hermes Agent | `~/.hermes/config.yaml` † | — (none) | `/reload-mcp` in a session, or next session | the entry declares `auth: oauth` |
 
-† `$CLAUDE_CONFIG_DIR`, `$CODEX_HOME`, and `$HERMES_HOME` move these roots, exactly as they move
-the skills directories above.
+† `$CLAUDE_CONFIG_DIR`, `$CODEX_HOME`, `$HERMES_HOME`, and `$XDG_CONFIG_HOME` move these roots,
+exactly as they move the skills directories above.
 
 ‡ Codex reads a project config only once you have trusted that repository inside Codex.
 

@@ -46,6 +46,10 @@ pub(crate) struct SkillPaths {
     /// repo): the origin repo, resolved commit, subdir, and license. A best-effort adjunct written after
     /// adoption (never part of the atomic core), so its absence just means "no recorded upstream."
     pub origin: PathBuf,
+    /// The durable bundle-KIND marker — written at the first mcp sync/adopt in this scope, so kind
+    /// classification survives a lost config ledger (`crate::mcp_engine::record_kind`). Absent for
+    /// every ordinary skill and for stores written before the marker existed.
+    pub kind: PathBuf,
 }
 
 impl SkillPaths {
@@ -57,6 +61,7 @@ impl SkillPaths {
             sync: base.join("sync.json"),
             conflict: base.join("conflict.json"),
             origin: base.join("origin.json"),
+            kind: base.join("kind.json"),
         }
     }
 }

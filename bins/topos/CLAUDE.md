@@ -84,7 +84,9 @@ generated `docs/cli.md` (`cargo xtask gen-cli-ref`).
   (ledger → delivery cache → the manifest row, the last only when the draft carries a root
   `server.json`), re-runs the gate BEFORE the op WAL, and threads it onto the wire.
 - `mcp_engine` + `mcp_ledger` — the `kind = "mcp"` bundle's delivery half: a store-only sync
-  (lock custody, no dir placement) feeds a per-scope config CONVERGE over
+  (lock custody, no dir placement; a durable per-skill `kind.json` marker written at first sync
+  keeps kind classification alive if the ledger is lost — marker → delivery cache → manifest row
+  → ledger, failing CLOSED over an empty placement map) feeds a per-scope config CONVERGE over
   `topos-harness::mcp`'s pure drivers — server.json parsed fail-closed, per-harness surfaces
   joined onto detection (project surfaces containment-proven), removal via prior-matched keys
   with drift left in place. `mcp_ledger` (`state/mcp_ledger.json`, per scope) is the ownership

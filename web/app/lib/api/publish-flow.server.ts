@@ -19,7 +19,9 @@ import {
   publishTargetOf,
   registerGenesisBundleInTx,
 } from "@/lib/db/queries.custody.server";
-import { mcpCandidateRefusal } from "@/lib/mcp/publish-gate.server";
+import { lockMcpNamesInTx } from "@/lib/db/queries.mcp.server";
+import { mcpNameTaken } from "@/lib/mcp/catalog.server";
+import { mcpCandidateRefusal, mcpNameTakenRefusal } from "@/lib/mcp/publish-gate.server";
 import { commitVersion, publishVersion } from "@/lib/plane/custody.server";
 
 /**
@@ -166,9 +168,12 @@ export async function publishFlow(args: PublishFlowArgs): Promise<Response> {
   // leave no ingested bytes behind, so it answers BEFORE any custody call. Every other kind
   // passes straight through — this is the one branch on the catalog tag.
   const effectiveKind = target?.kind ?? args.kind ?? "skill";
+  // The name this candidate's document claims, once the gate has accepted it — carried down to
+  // the final transaction, where it is checked a second time under the lock.
+  let mcpServerName: string | null = null;
   if (effectiveKind === "mcp") {
-    const refusal = await mcpCandidateRefusal(actor, candidate.files, target?.bundleId ?? skillId);
-    if (refusal !== null) {
+    const gate = await mcpCandidateRefusal(actor, candidate.files, target?.bundleId ?? skillId);
+    if (gate.refusal !== null) {
       const receipt = buildReceipt({
         opId,
         command,
@@ -178,12 +183,13 @@ export async function publishFlow(args: PublishFlowArgs): Promise<Response> {
         expectedGeneration: expected,
         createdAt,
       });
-      const envelope = deniedEnvelope(command, refusal.code, skillName, receipt, {
-        message: refusal.message,
+      const envelope = deniedEnvelope(command, gate.refusal.code, skillName, receipt, {
+        message: gate.refusal.message,
       });
       await inFinalTx((tx) => insertReceiptInTx(tx, actor, opId, raw, envelope));
       return envelopeResponse(envelope);
     }
+    mcpServerName = gate.serverName;
   }
 
   // I-COMMIT-PARITY: the commit frame's author + message are the WIRE's — the device derived
@@ -292,6 +298,35 @@ export async function publishFlow(args: PublishFlowArgs): Promise<Response> {
 
   const details: Record<string, unknown> = {};
   const envelope = await inFinalTx(async (tx) => {
+    // THE SECOND LOOK AT THE EMBEDDED NAME. The gate above answered before the custody call, so
+    // two publishes claiming one name can both pass it; this one runs under the per-workspace
+    // lock, which makes the winner's registration committed-and-visible before the loser reads.
+    // What it can and cannot do, plainly: the vault call has ALREADY landed by here — a genesis
+    // loser leaves bytes with no catalog row, and a re-publish that renames itself into a
+    // collision has already moved that bundle's `current`. The lock serializes the CATALOG
+    // decision and answers the denial; un-moving a pointer is not in its reach (publish-then-
+    // register is the pre-existing sequencing, and this check does not change it).
+    if (mcpServerName !== null) {
+      await lockMcpNamesInTx(tx, actor.workspaceId);
+      const taken = await mcpNameTaken(actor, mcpServerName, bundleId);
+      if (taken.kind !== "free") {
+        const refusal = mcpNameTakenRefusal(mcpServerName, taken);
+        const receipt = buildReceipt({
+          opId,
+          command,
+          outcome: "DENIED",
+          workspaceId: actor.workspaceId,
+          skillId: bundleId,
+          expectedGeneration: expected,
+          createdAt,
+        });
+        const denied = deniedEnvelope(command, refusal.code, skillName, receipt, {
+          message: refusal.message,
+        });
+        await insertReceiptInTx(tx, actor, opId, raw, denied);
+        return denied;
+      }
+    }
     if (isGenesis) {
       const registration = await registerGenesisBundleInTx(
         tx,

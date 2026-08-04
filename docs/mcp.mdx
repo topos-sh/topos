@@ -14,7 +14,9 @@ own MCP config.
 
 One file, `server.json`, in the format the
 [official MCP registry](https://registry.modelcontextprotocol.io) serves — the same document that
-registry hands out, unchanged. Two constraints decide everything else on this page:
+registry hands out, unchanged. (A `README.md` and the reserved `topos-mcp.toml` may sit beside it;
+nothing else may — any other file refuses at publish, and every file's bytes run the same
+credential scan the document does.) Two constraints decide everything else on this page:
 
 - **Remote.** The document offers a `streamable-http` endpoint over `https`. Nothing is installed
   and nothing runs locally, so the same bytes work from every machine on the team.
@@ -142,8 +144,8 @@ Each agent's exact config file — and the environment variables that move it �
 The two scopes work as they do for skills: your own `~/.topos/topos.toml` (or, with no such file,
 what your workspaces give you) follows you, and a repo's committed `topos.toml` governs that
 checkout. An MCP row in a project file lands **only in project-level config** — `.mcp.json`,
-`.cursor/mcp.json`, `.codex/config.toml`, `.opencode/opencode.json` — and never falls back to your
-home config, so a committed file can't quietly reconfigure a contributor's machine.
+`.cursor/mcp.json`, `.codex/config.toml`, `opencode.json` — and never falls back to your home
+config, so a committed file can't quietly reconfigure a contributor's machine.
 
 Two agents have no project-level MCP config at all, and a project row says so instead of pretending:
 

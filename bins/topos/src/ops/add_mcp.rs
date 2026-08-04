@@ -234,24 +234,41 @@ pub(crate) fn add_mcp(
 // The LOCAL FOLDER door
 // -------------------------------------------------------------------------------------------------
 
-/// A folder already on this machine: gate it, adopt it in place exactly as a plain `add <path>`
-/// does, record the row WITH its kind, and converge the scope's MCP config. Applies immediately —
-/// an on-disk folder is the person's own material, and the row is its exact inverse away.
+/// A folder already on this machine: gate it WHOLE, adopt it in place exactly as a plain
+/// `add <path>` does, record the row WITH its kind, and converge the scope's MCP config. The gate
+/// is the candidate gate, not just the document's: the exact allowed file set and a credential
+/// scan over every file's bytes — a stray script beside `server.json` refuses before anything is
+/// adopted. Applies immediately — an on-disk folder is the person's own material, and the row is
+/// its exact inverse away.
 fn adopt_local(ctx: &Ctx<'_>, dir: &Path, global: bool) -> Result<AddMcpOutcome, ClientError> {
     let server = dir.join("server.json");
-    let Some(bytes) = ctx.fs.read_opt(&server)? else {
+    if ctx.fs.read_opt(&server)?.is_none() {
         return Err(ClientError::InvalidArgument(format!(
             "{} holds no server.json at its root — an MCP bundle IS its folder, and the document \
              is what topos places",
             dir.display()
         )));
     };
-    let summary = mcp_validate::validate_server_json(&bytes)?;
+    // The WHOLE folder goes through the candidate gate — the same allowlist + per-file scan the
+    // publish preflight and the web tier run (a subdirectory's files carry their nested paths, so
+    // the allowlist refuses them by name too).
+    let scanned = crate::scan::scan(dir)?;
+    let files: Vec<(&str, &[u8])> = scanned
+        .files
+        .iter()
+        .map(|f| (f.path.as_str(), f.bytes.as_slice()))
+        .collect();
+    let summary = mcp_validate::validate_candidate_files(&files)?;
 
     let scope = medit::add_scope(ctx, global)?;
     let sctx = super::ctx_with_layout(ctx, &scope.layout);
     let mut data = super::adopt_path(&sctx, &scope.target, dir)?;
     medit::note_added_path_kind_in(ctx, &mut data, &scope.target, dir, Some("mcp"))?;
+    // The durable kind marker, beside the adopted store's docs — what keeps this record
+    // classifying as config-placed even if the scope's ledger is ever lost.
+    if let Ok(sid) = crate::id::SkillId::parse(&data.skill_id) {
+        crate::mcp_engine::write_kind_marker(&sctx, &sid);
+    }
     let lines = converge_one(ctx, &scope.target, global, &data.skill_id, &data.name);
     fold_receipt(&mut data, &summary, &lines);
     Ok(AddMcpOutcome::Applied(Box::new(data)))
@@ -290,9 +307,13 @@ fn fetch_arm(
 
     let slug = mcp_validate::suggested_name_for(&summary.name);
     let bundle_dir = bundle_destination(ctx, &target, global, &slug);
-    // A folder already standing at the destination is never written through: the refusal names it,
-    // so a person renames or removes deliberately instead of discovering an overwrite afterwards.
-    if ctx.fs.exists(&bundle_dir) {
+    // A folder already standing at the destination is never written through — with ONE resumable
+    // exception: an interrupted import's own leftovers (the dir landed, the row did not). Those
+    // are provably ours — no manifest row names the dir AND its `server.json` bytes equal exactly
+    // the document this import would write — so the retry finishes the job instead of refusing it
+    // forever. Anything else (foreign bytes, a registered row) still refuses by name, so a person
+    // renames or removes deliberately instead of discovering an overwrite afterwards.
+    if ctx.fs.exists(&bundle_dir) && !resumable_leftover(ctx, &target, &bundle_dir, &document) {
         return Err(ClientError::InvalidArgument(format!(
             "{} already exists — {} would be written there; move or remove it, or import the \
              folder directly (`topos add --mcp {}`)",
@@ -342,6 +363,48 @@ fn fetch_arm(
     let lines = converge_one(ctx, &scope.target, global, &bundle_id, &slug);
     fold_receipt(&mut data, &summary, &lines);
     Ok(AddMcpOutcome::Applied(Box::new(data)))
+}
+
+/// An interrupted import's leftovers, and nothing else: the standing dir is UNREGISTERED (no row
+/// in the target manifest resolves to it) and its `server.json` bytes equal the document this
+/// import would write. Different bytes are somebody's material; a registered row is a live bundle
+/// — both refuse exactly as before.
+fn resumable_leftover(ctx: &Ctx<'_>, target: &EditTarget, dir: &Path, document: &[u8]) -> bool {
+    let Ok(Some(standing)) = ctx.fs.read_opt(&dir.join("server.json")) else {
+        return false;
+    };
+    if standing != document {
+        return false;
+    }
+    !dir_registered(ctx, target, dir)
+}
+
+/// Whether any local-path row in the target manifest resolves to `dir` (canonicalized compare, so
+/// the row's `./<slug>` spelling and the absolute destination read as the same folder).
+fn dir_registered(ctx: &Ctx<'_>, target: &EditTarget, dir: &Path) -> bool {
+    let canon = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
+    let Ok(Some(text)) = medit::read_text(ctx, &target.path) else {
+        return false;
+    };
+    let Ok(doc) = crate::manifest::document::parse_manifest(&text, target.scope) else {
+        return false;
+    };
+    doc.rows.iter().any(|row| {
+        let crate::manifest::keys::KeyShape::LocalPath { raw } = &row.shape else {
+            return false;
+        };
+        let resolved = if let Some(rest) = raw.strip_prefix("~/") {
+            match ctx.roots.as_ref() {
+                Some(roots) => roots.home.join(rest),
+                None => return false,
+            }
+        } else if Path::new(raw).is_absolute() {
+            PathBuf::from(raw)
+        } else {
+            target.dir.join(raw.trim_start_matches("./"))
+        };
+        resolved.canonicalize().unwrap_or(resolved) == canon
+    })
 }
 
 /// Where a fetched document's folder goes: under the sidecar's own `mcp/` at person scope (topos's
