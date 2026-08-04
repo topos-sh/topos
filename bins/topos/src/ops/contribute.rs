@@ -82,6 +82,8 @@ fn plane_err(e: PlaneError) -> ClientError {
         PlaneError::NotFound => {
             ClientError::Plane("the server does not serve this, or not to you".to_owned())
         }
+        // The version floor survives the mapping — it is the one plane fault with a fix.
+        PlaneError::UpdateRequired { min } => ClientError::UpdateRequired { min },
         PlaneError::Unavailable(m) | PlaneError::Unreachable(m) | PlaneError::Malformed(m) => {
             ClientError::Plane(m)
         }

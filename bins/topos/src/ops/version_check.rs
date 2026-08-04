@@ -20,11 +20,10 @@
 use serde::{Deserialize, Serialize};
 use topos_types::PERSISTED_SCHEMA_VERSION;
 
+use crate::compat::{CURRENT_VERSION, version_gt};
 use crate::fs_seam::FsOps;
 use crate::release::ReleaseProbe;
 use crate::sidecar::Layout;
-
-use super::self_update::{CURRENT_VERSION, version_gt};
 
 /// At most one probe per day.
 pub(crate) const CHECK_INTERVAL_MS: i64 = 24 * 60 * 60 * 1000;

@@ -197,6 +197,15 @@ pub(crate) fn sync_one_planned(
             }
         }
         Err(PlaneError::NotFound) => return Ok(state_row(&name, &sync, PullAction::UpToDate)),
+        // The server refuses this build outright. A targeted update says so (nothing about this
+        // skill will move until the binary is replaced); a sweep keeps converging from the local
+        // store, exactly as it does for a plane that cannot be read — the delivery lane's own
+        // warning is what carries the fix.
+        Err(PlaneError::UpdateRequired { min }) => {
+            if explicit && inv != Invocation::Escape {
+                return Err(ClientError::UpdateRequired { min });
+            }
+        }
         Err(PlaneError::Unavailable(m) | PlaneError::Unreachable(m)) => {
             // Targeted accept: surface the failure. Bare sweep + the escape: fall through to drive `applied`
             // toward `observed` from the LOCAL store — a pending apply (or an escape) whose target is
@@ -1402,6 +1411,9 @@ fn fetch_served(
     match ctx.plane.fetch_version(skill_id, version_id) {
         Ok(v) => Ok(Some(v)),
         Err(PlaneError::NotFound) => Ok(None),
+        // The version floor keeps its own identity here too — a backfill that stops because the
+        // server refuses this build has one fix, and it is not "retry".
+        Err(PlaneError::UpdateRequired { min }) => Err(ClientError::UpdateRequired { min }),
         Err(PlaneError::Unavailable(m) | PlaneError::Unreachable(m) | PlaneError::Malformed(m)) => {
             Err(ClientError::Plane(m))
         }

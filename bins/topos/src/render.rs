@@ -209,6 +209,24 @@ fn next_actions(command: &str, argv: &[String], err: &ClientError) -> Vec<NextAc
             ActionCode::from("UPDATE_CLI".to_owned()),
             vec!["topos".into(), "self-update".into()],
         )],
+        // The server refused this build: the only way forward is a newer one. The floor it named
+        // rides the message, not the argv — `self-update` lands the latest, which clears any floor.
+        ClientError::UpdateRequired { .. } => vec![crate::actions::next_action(
+            ActionCode::SelfUpdate,
+            vec!["topos".into(), "self-update".into()],
+        )],
+        // The mirror image: THIS build is ahead of the server. Only one of the two remedies is
+        // this machine's to run, so only that one rides as an argv — pinned to the server's own
+        // release, which is the version it is provably able to speak to.
+        ClientError::ServerTooOld { server_version } => vec![crate::actions::next_action(
+            ActionCode::SelfUpdate,
+            vec![
+                "topos".into(),
+                "self-update".into(),
+                "--version".into(),
+                format!("v{server_version}"),
+            ],
+        )],
         // Divergent per-placement edits: the prose names the loss-led discard; mirror it (the
         // bare `--reset` DESCRIBES — nothing is dropped without its own `--yes`).
         ClientError::PlacementsDiverged { skill, .. } => vec![crate::actions::next_action(
@@ -4588,5 +4606,47 @@ mod tests {
             None,
             "no invented hint where there is no way out"
         );
+    }
+
+    #[test]
+    fn both_halves_of_the_version_floor_offer_the_binary_they_need() {
+        use topos_types::ActionCode;
+
+        use crate::error::ClientError;
+
+        // The server refused this build (its 426): the message states the floor, the block states
+        // the one command that clears it.
+        let refused = ClientError::UpdateRequired {
+            min: Some("0.1.15".to_owned()),
+        };
+        assert_eq!(
+            super::safe_message(&refused),
+            "this server no longer speaks to this topos version — it requires at least topos 0.1.15"
+        );
+        assert_eq!(
+            super::err_hint_tty("update", &typed(&["update"]), &refused),
+            Some("try:\n  topos self-update".to_owned())
+        );
+        // A refusal that named no floor still refuses, and still offers the same one way out.
+        let bare = ClientError::UpdateRequired { min: None };
+        assert!(super::safe_message(&bare).ends_with("it requires a newer topos"));
+        assert_eq!(
+            super::err_hint_tty("update", &typed(&["update"]), &bare),
+            Some("try:\n  topos self-update".to_owned())
+        );
+
+        // The mirror image — THIS build is ahead of the server. The remedy that belongs to another
+        // person rides the prose; the one this machine can run rides as an argv, pinned to the
+        // server's own release.
+        let ahead = ClientError::ServerTooOld {
+            server_version: "0.1.9".to_owned(),
+        };
+        assert_eq!(
+            super::err_hint_tty("login", &typed(&["login"]), &ahead),
+            Some("try:\n  topos self-update --version v0.1.9".to_owned())
+        );
+        let actions = super::next_actions("login", &typed(&["login"]), &ahead);
+        assert_eq!(actions[0].code, ActionCode::SelfUpdate);
+        assert_eq!(actions[0].mutates, Some(true));
     }
 }

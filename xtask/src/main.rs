@@ -1538,6 +1538,38 @@ fn fixtures() -> Vec<(&'static str, String)> {
         error: None,
     };
 
+    // The version floor's CLIENT half: the protocol card declared a server older than the oldest
+    // wire this build speaks, so the login refuses before anything is minted. Both remedies are
+    // real, but only one is this machine's to run — so only that one rides as an argv, pinned to
+    // the server's own release.
+    let server_too_old_actions = vec![topos::actions::next_action(
+        ActionCode::SelfUpdate,
+        argv(&["topos", "self-update", "--version", "v0.1.9"]),
+    )];
+    let login_server_too_old = JsonEnvelope {
+        schema_version: 1,
+        command: "login".to_owned(),
+        ok: false,
+        data: serde_json::json!({}),
+        warnings: vec![],
+        next_actions: server_too_old_actions.clone(),
+        receipt: None,
+        error: Some(WireError {
+            code: "SERVER_TOO_OLD".to_owned(),
+            outcome: TerminalOutcome::PermanentFailure,
+            retryable: false,
+            affected: Affected::default(),
+            expected_generation: None,
+            current_generation: None,
+            context: serde_json::json!({
+                "message": "that server is too old for this topos — it runs 0.1.9, and this \
+                            build speaks to 0.1.15 and later; ask whoever runs the server to \
+                            update it, or pin this machine back to the server's release"
+            }),
+            next_actions: server_too_old_actions,
+        }),
+    };
+
     // `logout` — the session ended: the server-side revoke landed, the local row deleted. Skills,
     // drafts, and manifests stay; `topos login <address>` starts a fresh session.
     let logout_ok = JsonEnvelope {
@@ -1600,6 +1632,10 @@ fn fixtures() -> Vec<(&'static str, String)> {
         ("json/publish.conflict", emit_json(&publish_conflict)),
         ("json/login.pending", emit_json(&login_pending)),
         ("json/login.ok", emit_json(&login_ok)),
+        (
+            "json/login.server-too-old",
+            emit_json(&login_server_too_old),
+        ),
         ("json/logout.ok", emit_json(&logout_ok)),
         ("json/delivery.ok", emit_json(&delivery_ok)),
         ("json/delivery.pending", emit_json(&delivery_pending)),

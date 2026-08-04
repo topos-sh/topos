@@ -996,6 +996,20 @@ fn the_bare_name_refusals_match_their_committed_envelopes() {
 }
 
 #[test]
+fn the_server_floor_refusal_matches_its_committed_envelope() {
+    // The client half of the version floor: the card named a server older than this build speaks
+    // to. The message names both remedies; the one this machine can run rides as an argv, pinned
+    // to the server's own release.
+    assert_golden_err(
+        "login.server-too-old",
+        "login",
+        &crate::error::ClientError::ServerTooOld {
+            server_version: "0.1.9".to_owned(),
+        },
+    );
+}
+
+#[test]
 fn a_global_add_refusal_keeps_g_in_every_spelled_follow_up() {
     // `add -g <name>` refused: following a spelled subscribe must land the row machine-wide, not
     // silently in this folder's manifest — both the prose and every runnable argv carry `-g`.

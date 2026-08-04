@@ -114,6 +114,14 @@ fn safety(code: &ActionCode, argv: &[String]) -> Safety {
             Some(true),
             Some("replaces the topos binary with the latest release"),
         ),
+        // A version floor's one way out: fetch a release and replace the running binary. Same
+        // facts as `UPDATE_CLI`; the caution names the release the argv actually asks for, which
+        // is not always the latest (a floor can point BACKWARD, at the server's own version).
+        "SELF_UPDATE" => Safety::new(
+            Some(true),
+            Some(true),
+            Some("replaces the topos binary on this machine with the named release"),
+        ),
         // The keep-as-yours salvage: re-adopt the RETAINED local copy — offline by construction.
         "KEEP_AS_YOURS" => Safety::new(
             Some(true),

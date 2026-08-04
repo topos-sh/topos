@@ -66,7 +66,8 @@
         "RETRY",
         "CONTACT_ADMIN",
         "FETCH_FULL_DIFF",
-        "NEXT_PAGE"
+        "NEXT_PAGE",
+        "SELF_UPDATE"
       ]
     },
     "Affected": {

@@ -118,6 +118,16 @@ fn workspace_sentence(name: &str, hint: Option<&WorkspaceHint>) -> String {
     )
 }
 
+/// The floor clause of an update-required refusal: the version the server named, when it named one
+/// this build could read. A 426 with an unreadable body still refuses — the status alone is the
+/// whole signal, and "a newer topos" is the honest thing to say about a floor nobody stated.
+fn required_version(min: Option<&str>) -> String {
+    match min {
+        Some(v) => format!("at least topos {v}"),
+        None => "a newer topos".to_owned(),
+    }
+}
+
 /// A local-core failure. `#[non_exhaustive]` so new verbs can add variants without breaking matches.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
@@ -377,6 +387,27 @@ pub(crate) enum ClientError {
     /// op provably did NOT land), so its op-WAL is dropped rather than replayed forever.
     #[error("the server rejected this request (HTTP {0})")]
     PlaneRejected(u16),
+    /// The SERVER's half of the version floor: it answered HTTP 426 — it no longer speaks to a
+    /// topos this old. Not transient (the same request refuses until this binary is replaced), and
+    /// not the caller's mistake, so it reads as its own dead end rather than a rejected request.
+    /// `min` is the floor the refusal named, when it named one this build could read; the fix
+    /// rides structurally as the `SELF_UPDATE` next action.
+    #[error(
+        "this server no longer speaks to this topos version — it requires {}",
+        required_version(min.as_deref())
+    )]
+    UpdateRequired { min: Option<String> },
+    /// The CLIENT's half of the same floor, read off the protocol card before a login commits: the
+    /// server is older than the oldest release this build speaks to. Both remedies are real, so
+    /// both are named — the person who runs the server can update it, or this machine can go back
+    /// to the server's release (the runnable pin rides the `SELF_UPDATE` next action).
+    #[error(
+        "that server is too old for this topos — it runs {server_version}, and this build speaks \
+         to {} and later; ask whoever runs the server to update it, or pin this machine back to \
+         the server's release",
+        crate::compat::MIN_SERVER_VERSION
+    )]
+    ServerTooOld { server_version: String },
     /// A self-update download (`topos upgrade`) did not match the sha256 the release `SHA256SUMS` lists —
     /// refused BEFORE the binary is touched (the mandatory, never-skippable integrity gate). The message is
     /// all-public (the asset name + the two hashes), so it is safe to show verbatim.
@@ -599,6 +630,10 @@ impl ClientError {
             ClientError::PendingOp { .. } => "PENDING_OP",
             ClientError::WorkspaceSelection(_) => "WORKSPACE_SELECTION",
             ClientError::PlaneRejected(_) => "PLANE_REJECTED",
+            // The two halves of the version floor. The server-refused half carries the SERVER's own
+            // code verbatim, so an agent branches identically whether it read the 426 body or not.
+            ClientError::UpdateRequired { .. } => "CLI_UPDATE_REQUIRED",
+            ClientError::ServerTooOld { .. } => "SERVER_TOO_OLD",
             // A self-update checksum mismatch is an integrity failure (same family as verify-on-read).
             ClientError::ChecksumMismatch { .. } => "INTEGRITY_ERROR",
             // A failed (or missing) release signature is the same integrity family — same code, so an
@@ -688,6 +723,11 @@ impl ClientError {
             ClientError::PendingOp { .. } => TerminalOutcome::RetryableFailure,
             // A definitive 4xx rejection — the op cannot succeed as-is.
             ClientError::PlaneRejected(_) => TerminalOutcome::PermanentFailure,
+            // Neither side of the version floor heals on a retry: the same binary meets the same
+            // server and gets the same answer. The way out is a different binary, never a loop.
+            ClientError::UpdateRequired { .. } | ClientError::ServerTooOld { .. } => {
+                TerminalOutcome::PermanentFailure
+            }
             // A tampered/corrupt download will not heal on a retry against the same bad bytes.
             ClientError::ChecksumMismatch { .. } => TerminalOutcome::PermanentFailure,
             // A release that fails (or lacks) its mandatory signature will not heal on a retry either —

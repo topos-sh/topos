@@ -895,6 +895,15 @@ pub struct WireProtocolCard {
     pub card: String,
     /// The API base URL the client re-roots onto (the origin serving `/v1`).
     pub api_base_url: String,
+    /// The serving build's release version (the bare semver core, no leading `v`). Absent from a
+    /// producer that predates the field — a client reads such a card as "nothing declared" and
+    /// proceeds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server_version: Option<String>,
+    /// The oldest CLI release this server still speaks to — the last wire-breaking release. Absent
+    /// from a producer that predates the field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_cli_version: Option<String>,
 }
 
 /// `GET /v1/workspaces/{ws}/me` response — the caller's own membership describe: who you are here,
@@ -1530,5 +1539,36 @@ mod tests {
         }))
         .unwrap();
         assert!(poll.session_status.is_none());
+    }
+
+    #[test]
+    fn the_protocol_card_carries_its_version_declaration_and_reads_without_one() {
+        // The two declarations ride the constant card so a client can judge, before it commits to
+        // a login, whether the two ends still speak the same wire.
+        let card = WireProtocolCard {
+            schema_version: 1,
+            card: "topos-protocol-card".to_owned(),
+            api_base_url: "https://topos.example/api".to_owned(),
+            server_version: Some("0.1.20".to_owned()),
+            min_cli_version: Some("0.1.15".to_owned()),
+        };
+        let v = serde_json::to_value(&card).unwrap();
+        assert_eq!(v["server_version"], "0.1.20");
+        assert_eq!(v["min_cli_version"], "0.1.15");
+        let back: WireProtocolCard = serde_json::from_value(v).unwrap();
+        assert_eq!(back.server_version.as_deref(), Some("0.1.20"));
+        // A producer predating the fields still parses — they are absent, never zero-valued, and
+        // an undeclared version is never read as a claim about anything.
+        let old: WireProtocolCard = serde_json::from_value(serde_json::json!({
+            "schema_version": 1,
+            "card": "topos-protocol-card",
+            "api_base_url": "https://topos.example/api",
+        }))
+        .unwrap();
+        assert!(old.server_version.is_none() && old.min_cli_version.is_none());
+        // …and an undeclared version omits on the way out, so the card stays byte-identical to
+        // what it has always been.
+        let v = serde_json::to_value(&old).unwrap();
+        assert!(v.get("server_version").is_none() && v.get("min_cli_version").is_none());
     }
 }

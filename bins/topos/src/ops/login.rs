@@ -244,8 +244,12 @@ pub(crate) fn login(
         }
     }
 
-    // The constant protocol card at the origin declares the API base (same-security re-root).
+    // The constant protocol card at the origin declares the API base (same-security re-root) and,
+    // where the server is new enough to say so, its own version — judged against this build's floor
+    // BEFORE anything is minted, so an unspeakable server costs a sentence rather than a browser
+    // round-trip that ends in a wire error.
     let card = (connectors.enroll)(&target.origin).fetch_card(&target.origin)?;
+    crate::compat::ensure_server_supported(&card)?;
     let base_url = resolve_api_base(&target.origin, &card.api_base_url)?;
     // THE START IS THE DECLARATION: the flow records write-once how its approval is accelerated
     // back, which is what lets the approval page pre-arm itself and keep the code off this
@@ -879,9 +883,10 @@ mod tests {
     /// none), and the write-once loopback binding.
     type StartRecord = (Option<String>, bool);
 
-    /// A fake login transport: the card declares an API base; the poll answers a scripted
-    /// sequence (pending → granted); every start's declaration is recorded. State is Rc-shared so
-    /// the connector can mint a fresh box per call over ONE script.
+    /// A fake login transport: the card declares an API base + this build's own version facts (a
+    /// real card, so every flow test proves a field-carrying card flows end to end); the poll
+    /// answers a scripted sequence (pending → granted); every start's declaration is recorded.
+    /// State is Rc-shared so the connector can mint a fresh box per call over ONE script.
     #[derive(Clone, Default)]
     struct FakeEnroll {
         polls: Rc<RefCell<Vec<DeviceAuthPoll>>>,
@@ -889,6 +894,8 @@ mod tests {
         /// server gone unreachable).
         poll_fault: Rc<RefCell<Option<String>>>,
         starts: Rc<RefCell<Vec<StartRecord>>>,
+        /// The version the served card DECLARES (`None` = a card predating the declaration).
+        server_version: Option<String>,
     }
     impl FakeEnroll {
         fn scripted(polls: Vec<DeviceAuthPoll>) -> Self {
@@ -896,6 +903,7 @@ mod tests {
                 polls: Rc::new(RefCell::new(polls)),
                 poll_fault: Rc::default(),
                 starts: Rc::default(),
+                server_version: Some(crate::compat::CURRENT_VERSION.to_owned()),
             }
         }
     }
@@ -905,6 +913,13 @@ mod tests {
                 schema_version: 1,
                 card: "topos-protocol-card".to_owned(),
                 api_base_url: "https://topos.example.com/api".to_owned(),
+                // A server that names its version names the floor it holds too — the two
+                // declarations travel together.
+                min_cli_version: self
+                    .server_version
+                    .as_ref()
+                    .map(|_| crate::compat::MIN_SERVER_VERSION.to_owned()),
+                server_version: self.server_version.clone(),
             })
         }
         fn device_auth_start(
@@ -1054,6 +1069,12 @@ mod tests {
             self
         }
 
+        /// The server's card declares `version` instead of this build's own.
+        fn declaring(mut self, version: &str) -> Self {
+            self.enroll.server_version = Some(version.to_owned());
+            self
+        }
+
         /// Run `f` with the connectors wired over this rig's fakes.
         fn with<R>(&self, f: impl FnOnce(&LoginConnectors<'_>) -> R) -> R {
             let enroll = {
@@ -1135,6 +1156,67 @@ mod tests {
             assert_eq!(s.credential, "sess-secret");
             assert_eq!(s.session_id, "sn_1");
         });
+    }
+
+    #[test]
+    fn a_server_below_this_builds_floor_refuses_before_the_flow_starts() {
+        let home = scratch("floor");
+        with_ctx(&home, |ctx| {
+            // The card declares a release older than the oldest wire this build speaks — refuse at
+            // the card, before a browser, a flow code, or a WAL exists to clean up.
+            let rig = Rig::new(Vec::new()).declaring("0.1.9");
+            rig.with(|connectors| {
+                let err = login(ctx, connectors, Some("topos.example.com/eng"), false).unwrap_err();
+                match &err {
+                    ClientError::ServerTooOld { server_version } => {
+                        assert_eq!(server_version, "0.1.9");
+                    }
+                    other => panic!("expected ServerTooOld, got {other:?}"),
+                }
+                let message = crate::render::safe_message(&err);
+                assert!(message.contains("0.1.9"), "{message}");
+                // BOTH remedies are named — one is another person's to run, one is this machine's.
+                assert!(message.contains("ask whoever runs the server"), "{message}");
+                // …and the machine's own remedy is runnable, pinned to the server's release.
+                let hint = crate::render::err_hint_tty("login", &["login".to_owned()], &err)
+                    .expect("the dead end offers the pin");
+                assert!(
+                    hint.contains("topos self-update --version v0.1.9"),
+                    "{hint}"
+                );
+                assert!(
+                    rig.enroll.starts.borrow().is_empty(),
+                    "nothing was started against an unspeakable server"
+                );
+                assert!(enroll::read_wal(ctx.fs, &ctx.layout).unwrap().is_none());
+            });
+        });
+    }
+
+    #[test]
+    fn a_server_at_or_above_the_floor_and_one_declaring_nothing_both_proceed() {
+        for (tag, rig) in [
+            // The ordinary case: a card carrying today's truth.
+            ("current", Rig::new(Vec::new())),
+            // A server newer than this build is not this direction's problem (its own 426 is).
+            ("newer", Rig::new(Vec::new()).declaring("9.9.9")),
+            // A producer predating the declaration says nothing, and silence is not a claim.
+            ("silent", {
+                let mut rig = Rig::new(Vec::new());
+                rig.enroll.server_version = None;
+                rig
+            }),
+        ] {
+            let home = scratch(&format!("floor-ok-{tag}"));
+            with_ctx(&home, |ctx| {
+                rig.with(|connectors| {
+                    let start =
+                        login(ctx, connectors, Some("topos.example.com/eng"), false).unwrap();
+                    assert!(start.pending.is_some(), "{tag}");
+                    assert_eq!(rig.enroll.starts.borrow().len(), 1, "{tag}");
+                });
+            });
+        }
     }
 
     #[test]

@@ -90,6 +90,10 @@ pub(crate) enum PlaneError {
     /// The plane answered but this read failed transiently (a 5xx / unexpected status / a truncated
     /// body) — keep state, retry later (a retryable warning). Never trips the sweep breaker.
     Unavailable(String),
+    /// The server refused this build outright (HTTP 426): it no longer speaks to a topos this old.
+    /// Not transient — every read against that server answers the same until this binary is
+    /// replaced. `min` is the oldest CLI the refusal named, when it named one readably.
+    UpdateRequired { min: Option<String> },
     /// The served response was structurally malformed (a corrupt/forged record or bytes) — surface it.
     Malformed(String),
 }

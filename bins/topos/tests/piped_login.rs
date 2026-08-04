@@ -15,8 +15,8 @@ use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 fn bin() -> &'static str {
@@ -36,10 +36,13 @@ fn scratch(tag: &str) -> PathBuf {
 
 /// The loopback login fixture: serves the constant protocol card at any path, the
 /// `/v1/login/authorize` start, and an always-`pending` token poll. Returns the base URL, a live
-/// poll counter, and a stop flag the test sets on teardown.
+/// poll counter, every request's `User-Agent`, and a stop flag the test sets on teardown.
 struct Fixture {
     base: String,
     polls: Arc<AtomicUsize>,
+    /// The `User-Agent` of every request the fixture answered — how a server tells which client
+    /// it is talking to, and the only thing a client floor can be held by.
+    agents: Arc<Mutex<Vec<String>>>,
     stop: Arc<AtomicBool>,
 }
 
@@ -51,14 +54,19 @@ fn spawn_fixture() -> Fixture {
     let port = listener.local_addr().expect("local addr").port();
     let base = format!("http://127.0.0.1:{port}");
     let polls = Arc::new(AtomicUsize::new(0));
+    let agents = Arc::new(Mutex::new(Vec::new()));
     let stop = Arc::new(AtomicBool::new(false));
-    let (base_for_card, polls_thread, stop_thread) =
-        (base.clone(), Arc::clone(&polls), Arc::clone(&stop));
+    let (base_for_card, polls_thread, agents_thread, stop_thread) = (
+        base.clone(),
+        Arc::clone(&polls),
+        Arc::clone(&agents),
+        Arc::clone(&stop),
+    );
     std::thread::spawn(move || {
         while !stop_thread.load(Ordering::Relaxed) {
             match listener.accept() {
                 Ok((stream, _)) => {
-                    handle(stream, &base_for_card, &polls_thread);
+                    handle(stream, &base_for_card, &polls_thread, &agents_thread);
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                     std::thread::sleep(Duration::from_millis(10));
@@ -67,12 +75,17 @@ fn spawn_fixture() -> Fixture {
             }
         }
     });
-    Fixture { base, polls, stop }
+    Fixture {
+        base,
+        polls,
+        agents,
+        stop,
+    }
 }
 
 /// Answer one login-wire request. Every response carries `Connection: close`, so ureq opens a
 /// fresh connection per request and each accept sees exactly one.
-fn handle(mut stream: TcpStream, base: &str, polls: &AtomicUsize) {
+fn handle(mut stream: TcpStream, base: &str, polls: &AtomicUsize, agents: &Mutex<Vec<String>>) {
     // A stream accepted from a non-blocking listener inherits the flag on macOS — force it
     // blocking so the read waits for the request bytes instead of racing to an empty read.
     let _ = stream.set_nonblocking(false);
@@ -81,6 +94,13 @@ fn handle(mut stream: TcpStream, base: &str, polls: &AtomicUsize) {
     let n = stream.read(&mut buf).unwrap_or(0);
     let request = String::from_utf8_lossy(&buf[..n]);
     let line = request.lines().next().unwrap_or("");
+    if let Some(ua) = request.lines().find_map(|l| {
+        let (name, value) = l.split_once(':')?;
+        name.eq_ignore_ascii_case("user-agent")
+            .then(|| value.trim().to_owned())
+    }) {
+        agents.lock().expect("record the user agent").push(ua);
+    }
     let body = if line.contains("/v1/login/authorize") {
         // The login start: a short poll interval keeps a --wait run brisk.
         format!(
@@ -92,7 +112,12 @@ fn handle(mut stream: TcpStream, base: &str, polls: &AtomicUsize) {
     } else {
         // Any other path is the constant protocol card (the bare-origin card fetch); the base it
         // re-roots onto is this same server.
-        format!(r#"{{"schema_version":1,"card":"topos-protocol-card","api_base_url":"{base}"}}"#)
+        format!(
+            // Card declarations included, as a real server serves them: this fake speaks the
+            // version the client under test is built from, and names the client floor it holds.
+            r#"{{"schema_version":1,"card":"topos-protocol-card","api_base_url":"{base}","server_version":"{}","min_cli_version":"0.1.15"}}"#,
+            env!("CARGO_PKG_VERSION")
+        )
     };
     let resp = format!(
         "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\nconnection: close\r\ncontent-length: {}\r\n\r\n{body}",
@@ -184,6 +209,15 @@ fn a_piped_login_prints_the_instructions_and_exits_without_the_blocking_wait() {
     );
     // Begin performs the authorize, not a token poll — the poll is the resume's job.
     assert_eq!(fx.polls.load(Ordering::Relaxed), 0, "begin does not poll");
+    // EVERY session-lane request names this build — a server holds its client floor by this
+    // header, so a silent transport is a silent floor.
+    let agents = fx.agents.lock().expect("read the recorded agents").clone();
+    let expected = format!("topos/{}", env!("CARGO_PKG_VERSION"));
+    assert!(agents.len() >= 2, "the card + the authorize both landed");
+    assert!(
+        agents.iter().all(|ua| *ua == expected),
+        "every request identifies itself as {expected}: {agents:?}"
+    );
 
     // Re-invoke — resume: a SINGLE poll, still pending, exits promptly again (never a blocking loop).
     let out = run_piped(&home, &fx.base, &["login"], Duration::from_secs(30));

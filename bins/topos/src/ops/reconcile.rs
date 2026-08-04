@@ -615,6 +615,19 @@ pub(crate) fn manifest_update(
             // its items as undemanded. They differ ONLY in what the person is told — the staleness
             // nudge is true of all three, but blaming the network for a 500 or for garbled bytes
             // would send someone the wrong way.
+            // The server refuses this build outright — the one fault a person can clear right now,
+            // so the warning names the fix instead of the network. It degrades like the three
+            // below (the offline cache keeps the local converge working); the sweep never aborts
+            // for one session.
+            Err(PlaneError::UpdateRequired { min }) => {
+                sweep.warnings.push(format!(
+                    "CLI_UPDATE_REQUIRED {}: {} — run `topos self-update`",
+                    s.workspace_name,
+                    crate::render::safe_message(&ClientError::UpdateRequired { min })
+                ));
+                unreachable.push(stale_signal(s, StaleReason::Unavailable));
+                runs.push(offline_run(s, transports));
+            }
             Err(PlaneError::Unreachable(m)) => {
                 sweep
                     .warnings
@@ -901,6 +914,9 @@ pub(crate) fn manifest_update(
                     Err(e) => {
                         let m = match e {
                             PlaneError::NotFound => "access gone".to_owned(),
+                            PlaneError::UpdateRequired { .. } => {
+                                "this topos is too old for that server".to_owned()
+                            }
                             PlaneError::Unreachable(m)
                             | PlaneError::Unavailable(m)
                             | PlaneError::Malformed(m) => m,
@@ -1002,6 +1018,9 @@ pub(crate) fn manifest_update(
                 {
                     let m = match e {
                         PlaneError::NotFound => "access gone".to_owned(),
+                        PlaneError::UpdateRequired { .. } => {
+                            "this topos is too old for that server".to_owned()
+                        }
                         PlaneError::Unreachable(m)
                         | PlaneError::Unavailable(m)
                         | PlaneError::Malformed(m) => m,

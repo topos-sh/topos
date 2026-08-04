@@ -1,0 +1,44 @@
+{
+  "schema_version": 1,
+  "command": "login",
+  "ok": false,
+  "data": {},
+  "warnings": [],
+  "next_actions": [
+    {
+      "code": "SELF_UPDATE",
+      "argv": [
+        "topos",
+        "self-update",
+        "--version",
+        "v0.1.9"
+      ],
+      "mutates": true,
+      "needs_network": true,
+      "risk_note": "replaces the topos binary on this machine with the named release"
+    }
+  ],
+  "error": {
+    "code": "SERVER_TOO_OLD",
+    "outcome": "PERMANENT_FAILURE",
+    "retryable": false,
+    "affected": {},
+    "context": {
+      "message": "that server is too old for this topos — it runs 0.1.9, and this build speaks to 0.1.15 and later; ask whoever runs the server to update it, or pin this machine back to the server's release"
+    },
+    "next_actions": [
+      {
+        "code": "SELF_UPDATE",
+        "argv": [
+          "topos",
+          "self-update",
+          "--version",
+          "v0.1.9"
+        ],
+        "mutates": true,
+        "needs_network": true,
+        "risk_note": "replaces the topos binary on this machine with the named release"
+      }
+    ]
+  }
+}

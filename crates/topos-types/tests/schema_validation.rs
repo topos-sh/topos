@@ -9,7 +9,9 @@
 use jsonschema::Validator;
 use schemars::schema_for;
 use serde_json::{Value, json};
-use topos_types::requests::{WireDelivery, WireDeliverySkill, WireNotice, WireVia};
+use topos_types::requests::{
+    WireDelivery, WireDeliverySkill, WireNotice, WireProtocolCard, WireVia,
+};
 use topos_types::{CurrentRecord, PointerScope, Receipt, TerminalOutcome, WireCurrentRecord};
 
 fn validator_for<T: schemars::JsonSchema>() -> Validator {
@@ -186,5 +188,43 @@ fn receipt_accepts_valid_and_rejects_malformed() {
     assert!(
         !v.is_valid(&bad),
         "a non-hex bundle_digest must be rejected"
+    );
+}
+
+#[test]
+fn the_protocol_card_accepts_a_version_declaration_and_its_absence() {
+    let v = validator_for::<WireProtocolCard>();
+    let good = serde_json::to_value(WireProtocolCard {
+        schema_version: 1,
+        card: "topos-protocol-card".into(),
+        api_base_url: "https://topos.example/api".into(),
+        server_version: Some("0.1.20".into()),
+        min_cli_version: Some("0.1.15".into()),
+    })
+    .unwrap();
+    assert!(v.is_valid(&good), "a card with both declarations validates");
+
+    // The declarations are ADDITIVE: the card a producer predating them serves still validates.
+    let bare = json!({
+        "schema_version": 1,
+        "card": "topos-protocol-card",
+        "api_base_url": "https://topos.example/api",
+    });
+    assert!(v.is_valid(&bare), "an undeclared card must still validate");
+
+    // A version is a string — a number would sail through a hand-rolled reader and fail nowhere.
+    let mut bad = good.clone();
+    bad["server_version"] = json!(0.1);
+    assert!(
+        !v.is_valid(&bad),
+        "a non-string server_version must be rejected"
+    );
+
+    // schema_version stays pinned const 1 — the declarations did not move the contract version.
+    let mut bad = good.clone();
+    bad["schema_version"] = json!(2);
+    assert!(
+        !v.is_valid(&bad),
+        "schema_version != 1 must be rejected (const)"
     );
 }

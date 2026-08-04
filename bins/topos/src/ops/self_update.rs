@@ -11,14 +11,13 @@ use serde::Serialize;
 
 use topos_core::digest::{sha256, to_hex};
 
+use crate::compat::{CURRENT_VERSION, version_gt};
 use crate::ctx::Ctx;
 use crate::error::ClientError;
 use crate::release::ReleaseSource;
 
 /// The compiled target triple (from build.rs) — the asset this binary knows how to replace itself with.
 const TARGET_TRIPLE: &str = env!("TOPOS_TARGET");
-/// This build's version, e.g. "0.1.0".
-pub(crate) const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// The default release download base (GitHub). Overridable via TOPOS_INSTALL_BASE_URL (mirrors/air-gap).
 pub(crate) const DEFAULT_BASE_URL: &str = "https://github.com/topos-sh/topos/releases";
 
@@ -326,28 +325,6 @@ fn expected_sum(sums: &str, asset: &str) -> Option<String> {
     None
 }
 
-/// A minimal semver-core `>` : compare (major, minor, patch), ignoring any pre-release/build suffix. Tags
-/// come from our own release pipeline (`vX.Y.Z`), so the core triple is sufficient; a malformed side is
-/// treated as (0,0,0) so a valid newer version still wins. (Shared with the passive version check —
-/// one newer-than decision, never two implementations to drift.)
-pub(super) fn version_gt(a: &str, b: &str) -> bool {
-    parse_core(a) > parse_core(b)
-}
-
-fn parse_core(v: &str) -> (u64, u64, u64) {
-    let core = v
-        .trim_start_matches('v')
-        .split(['-', '+'])
-        .next()
-        .unwrap_or("");
-    let mut it = core.split('.').map(|p| p.parse::<u64>().unwrap_or(0));
-    (
-        it.next().unwrap_or(0),
-        it.next().unwrap_or(0),
-        it.next().unwrap_or(0),
-    )
-}
-
 /// A generous ceiling on the extracted binary, so a crafted asset can't expand to exhaust memory. This is
 /// only reachable PAST the checksum gate (an attacker controlling both the tarball AND its SHA256SUMS —
 /// the default HTTPS+GitHub path is TLS-authenticated); it is defense-in-depth for a self-updater.
@@ -417,10 +394,10 @@ mod tests {
     use topos_harness::ClaudeCode;
 
     use super::{
-        CURRENT_VERSION, RELEASE_PUBKEY, SelfUpdateAction, SelfUpdateOpts, TARGET_TRIPLE,
-        expected_sum, extract_topos, map_replace_error, normalize_tag, parse_core, self_update,
-        self_update_with_key, version_gt,
+        RELEASE_PUBKEY, SelfUpdateAction, SelfUpdateOpts, TARGET_TRIPLE, expected_sum,
+        extract_topos, map_replace_error, normalize_tag, self_update, self_update_with_key,
     };
+    use crate::compat::CURRENT_VERSION;
     use crate::ctx::Ctx;
     use crate::error::ClientError;
     use crate::fs_seam::RealFs;
@@ -511,20 +488,6 @@ mod tests {
     fn normalize_tag_forces_a_leading_v() {
         assert_eq!(normalize_tag("v0.2.0"), "v0.2.0");
         assert_eq!(normalize_tag("0.2.0"), "v0.2.0");
-    }
-
-    #[test]
-    fn version_gt_compares_the_semver_core() {
-        assert!(version_gt("0.2.0", "0.1.0"));
-        assert!(!version_gt("0.1.0", "0.1.0"));
-        assert!(version_gt("1.0.0", "0.9.9"));
-        // A pre-release/build suffix is ignored — the core triple decides.
-        assert_eq!(parse_core("0.2.0-rc1"), (0, 2, 0));
-        assert_eq!(parse_core("0.2.0+build.7"), (0, 2, 0));
-        // A malformed side parses to (0,0,0), so a valid newer version still wins.
-        assert_eq!(parse_core(""), (0, 0, 0));
-        assert!(version_gt("0.1.0", ""));
-        assert!(!version_gt("", "0.1.0"));
     }
 
     #[test]

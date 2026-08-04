@@ -163,7 +163,12 @@ fn handle(mut stream: TcpStream, base: &str, observed: &Mutex<Observed>, approve
     } else {
         // Anything else (the card fetch; the granted receipt's best-effort delivery read, which
         // tolerates a miss) gets the constant protocol card.
-        format!(r#"{{"schema_version":1,"card":"topos-protocol-card","api_base_url":"{base}"}}"#)
+        format!(
+            // Card declarations included, as a real server serves them: this fake speaks the
+            // version the client under test is built from, and names the client floor it holds.
+            r#"{{"schema_version":1,"card":"topos-protocol-card","api_base_url":"{base}","server_version":"{}","min_cli_version":"0.1.15"}}"#,
+            env!("CARGO_PKG_VERSION")
+        )
     };
     let resp = format!(
         "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\nconnection: close\r\ncontent-length: {}\r\n\r\n{body}",

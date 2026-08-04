@@ -52,6 +52,11 @@ const RECV_BODY_TIMEOUT_SECS: u64 = 300;
 /// with headroom for the metadata/record JSON. `ureq`'s default `read_to_vec` caps at 10 MiB, too small.
 const MAX_FETCH_BYTES: u64 = 128 * 1024 * 1024;
 
+/// How EVERY transport in this module identifies itself, carrying this build's version. The release
+/// and forge lanes have always sent it (GitHub 403s a request without one); the session lanes send
+/// it too, so a server can hold a client floor by the same header rather than by guesswork.
+const USER_AGENT: &str = concat!("topos/", env!("CARGO_PKG_VERSION"));
+
 /// The blocking `ureq` plane transport. Holds the base URL, the device's ONE Bearer credential, a
 /// non-secret `skill_id → workspace_id` map (the URL-path scope each skill's reads splice), the
 /// enrolled workspaces (the delivery lane's fan-out), and one configured agent (connection-pooled,
@@ -194,6 +199,7 @@ impl UreqPlane {
                 None => read_body(resp),
             },
             HttpClass::NotFound => Err(PlaneError::NotFound),
+            HttpClass::UpgradeRequired => Err(update_required(resp)),
             // No conditional headers are sent here, so 304 cannot occur; fold it in with other statuses.
             HttpClass::NotModified | HttpClass::Other => Err(PlaneError::Unavailable(
                 status_reason(&host_label(&self.base_url), status),
@@ -240,6 +246,7 @@ impl PlaneSource for UreqPlane {
         match classify(status) {
             HttpClass::NotModified => Ok(PointerFetch::NotModified),
             HttpClass::NotFound => Err(PlaneError::NotFound),
+            HttpClass::UpgradeRequired => Err(update_required(resp)),
             HttpClass::Other => Err(PlaneError::Unavailable(status_reason(
                 &host_label(&self.base_url),
                 status,
@@ -406,6 +413,7 @@ impl crate::plane::DeliverySource for UreqPlane {
         match classify(status) {
             HttpClass::Ok => Ok(()),
             HttpClass::NotFound => Err(PlaneError::NotFound),
+            HttpClass::UpgradeRequired => Err(update_required(resp)),
             HttpClass::NotModified | HttpClass::Other => Err(PlaneError::Unavailable(
                 status_reason(&host_label(&self.base_url), status),
             )),
@@ -451,6 +459,7 @@ impl crate::plane::DeliverySource for UreqPlane {
         match classify(status) {
             HttpClass::Ok => Ok(()),
             HttpClass::NotFound => Err(PlaneError::NotFound),
+            HttpClass::UpgradeRequired => Err(update_required(resp)),
             HttpClass::NotModified | HttpClass::Other => Err(PlaneError::Unavailable(
                 status_reason(&host_label(&self.base_url), status),
             )),
@@ -461,13 +470,15 @@ impl crate::plane::DeliverySource for UreqPlane {
 /// The one agent configuration both transports share: status-as-error OFF (every status comes back as an
 /// inspectable response; only a genuine transport/timeout/TLS fault surfaces as `Err`) + the three
 /// timeouts, so neither a dead plane (connect), a silent head (recv-response), nor a stalled/trickling
-/// body (recv-body) can hang the session-start hook.
+/// body (recv-body) can hang the session-start hook + the [`USER_AGENT`] every request identifies
+/// itself with (set once on the agent, so no call site can forget it).
 fn agent_config() -> ureq::config::Config {
     ureq::Agent::config_builder()
         .http_status_as_error(false)
         .timeout_connect(Some(Duration::from_secs(CONNECT_TIMEOUT_SECS)))
         .timeout_recv_response(Some(Duration::from_secs(RECV_RESPONSE_TIMEOUT_SECS)))
         .timeout_recv_body(Some(Duration::from_secs(RECV_BODY_TIMEOUT_SECS)))
+        .user_agent(USER_AGENT)
         .build()
 }
 
@@ -525,6 +536,9 @@ enum HttpClass {
     NotModified,
     /// 404 — not served here (unauthorized/unknown/scope-mismatch are all the indistinguishable 404).
     NotFound,
+    /// 426 — the server holds a client floor and this build is below it. A dead end, not a fault:
+    /// the same request refuses until this binary is replaced.
+    UpgradeRequired,
     /// Any other status (5xx, an unexpected 3xx/4xx) — treat as transiently unavailable.
     Other,
 }
@@ -535,7 +549,45 @@ fn classify(status: u16) -> HttpClass {
         200..=299 => HttpClass::Ok,
         304 => HttpClass::NotModified,
         404 => HttpClass::NotFound,
+        426 => HttpClass::UpgradeRequired,
         _ => HttpClass::Other,
+    }
+}
+
+/// The floor a 426 refusal named, read out of the error envelope's
+/// `error.context.min_cli_version`. Best-effort by design: the STATUS is the whole signal, and a
+/// body that is missing, truncated, or shaped some other way costs only the version clause. What
+/// comes back is re-rendered from the numbers this build parsed ([`crate::compat`]), so a refusal's
+/// message can never carry a span of the server's own bytes.
+fn min_cli_from_refusal(bytes: &[u8]) -> Option<String> {
+    let body: serde_json::Value = serde_json::from_slice(bytes).ok()?;
+    let declared = body
+        .get("error")?
+        .get("context")?
+        .get("min_cli_version")?
+        .as_str()?;
+    crate::compat::normalized_version(declared)
+}
+
+/// The typed dead end behind a 426, in both error families — one construction so the read lane and
+/// the session lane say the same thing. The body is read for its floor clause only; a read failure
+/// is not a second error (the refusal stands either way).
+fn update_required(resp: ureq::http::Response<ureq::Body>) -> PlaneError {
+    let bytes = read_body(resp).unwrap_or_default();
+    PlaneError::UpdateRequired {
+        min: min_cli_from_refusal(&bytes),
+    }
+}
+
+/// [`update_required`] in the client family, for the session lanes (which speak [`ClientError`]).
+fn update_required_client(resp: ureq::http::Response<ureq::Body>) -> ClientError {
+    plane_err(update_required(resp))
+}
+
+/// The same dead end when the body is already in hand (the pure envelope mappings).
+fn update_required_from(bytes: &[u8]) -> ClientError {
+    ClientError::UpdateRequired {
+        min: min_cli_from_refusal(bytes),
     }
 }
 
@@ -965,11 +1017,17 @@ impl EnrollSource for UreqDeviceClient {
             .call()
             .map_err(|e| ClientError::Plane(transport_reason(&self.host(), &e)))?;
         let status = resp.status().as_u16();
-        if classify(status) != HttpClass::Ok {
-            return Err(ClientError::Plane(format!(
-                "{} — it answered HTTP {status} instead of the topos protocol card",
-                self.host()
-            )));
+        match classify(status) {
+            HttpClass::Ok => {}
+            // The card read is the FIRST contact, so a server holding a client floor refuses even
+            // here — and the honest answer is the floor, not "that is not a topos server".
+            HttpClass::UpgradeRequired => return Err(update_required_client(resp)),
+            _ => {
+                return Err(ClientError::Plane(format!(
+                    "{} — it answered HTTP {status} instead of the topos protocol card",
+                    self.host()
+                )));
+            }
         }
         let bytes = read_body(resp).map_err(plane_err)?;
         parse_card(&bytes)
@@ -991,8 +1049,10 @@ impl EnrollSource for UreqDeviceClient {
         .map_err(|e| ClientError::Corrupt(format!("authorize body: {e}")))?;
         let url = format!("{}/v1/login/authorize", self.base_url);
         let (status, bytes) = self.post_json(&url, &body, "device authorize")?;
-        if classify(status) != HttpClass::Ok {
-            return Err(ClientError::Plane(status_reason(&self.host(), status)));
+        match classify(status) {
+            HttpClass::Ok => {}
+            HttpClass::UpgradeRequired => return Err(update_required_from(&bytes)),
+            _ => return Err(ClientError::Plane(status_reason(&self.host(), status))),
         }
         let resp: DeviceAuthStartResponse = serde_json::from_slice(&bytes).map_err(|e| {
             ClientError::WireInvalid(format!("authorize response is malformed: {e}"))
@@ -1025,8 +1085,10 @@ impl EnrollSource for UreqDeviceClient {
 /// keys URL splices + the session row). **Pure** (status + bytes in), so every arm is unit-tested
 /// without a socket.
 fn map_poll_response(host: &str, status: u16, bytes: &[u8]) -> Result<DeviceAuthPoll, ClientError> {
-    if classify(status) != HttpClass::Ok {
-        return Err(ClientError::Plane(status_reason(host, status)));
+    match classify(status) {
+        HttpClass::Ok => {}
+        HttpClass::UpgradeRequired => return Err(update_required_from(bytes)),
+        _ => return Err(ClientError::Plane(status_reason(host, status))),
     }
     let resp: DeviceAuthPollResponse = serde_json::from_slice(bytes)
         .map_err(|e| ClientError::WireInvalid(format!("poll response is malformed: {e}")))?;
@@ -1085,6 +1147,7 @@ fn map_login_connect(
                 target: "workspace".to_owned(),
             });
         }
+        HttpClass::UpgradeRequired => return Err(update_required_from(bytes)),
         HttpClass::NotModified | HttpClass::Other => {
             return Err(ClientError::Plane(status_reason(host, status)));
         }
@@ -1166,6 +1229,7 @@ impl GovernanceSource for UreqDeviceClient {
             HttpClass::NotFound => Err(ClientError::TargetNotFound {
                 target: "session".to_owned(),
             }),
+            HttpClass::UpgradeRequired => Err(update_required_client(resp)),
             HttpClass::NotModified | HttpClass::Other => {
                 Err(ClientError::Plane(status_reason(&self.host(), status)))
             }
@@ -1182,8 +1246,10 @@ fn map_invite_envelope(
     status: u16,
     bytes: &[u8],
 ) -> Result<InvitationData, ClientError> {
-    if classify(status) != HttpClass::Ok {
-        return Err(ClientError::Plane(status_reason(host, status)));
+    match classify(status) {
+        HttpClass::Ok => {}
+        HttpClass::UpgradeRequired => return Err(update_required_from(bytes)),
+        _ => return Err(ClientError::Plane(status_reason(host, status))),
     }
     let env: JsonEnvelope = serde_json::from_slice(bytes)
         .map_err(|e| ClientError::WireInvalid(format!("invitation envelope is malformed: {e}")))?;
@@ -1280,6 +1346,7 @@ impl UreqDeviceClient {
             HttpClass::NotFound => Err(ClientError::TargetNotFound {
                 target: target.to_owned(),
             }),
+            HttpClass::UpgradeRequired => Err(update_required_client(resp)),
             HttpClass::NotModified | HttpClass::Other => {
                 Err(ClientError::Plane(status_reason(&self.host(), status)))
             }
@@ -1337,6 +1404,7 @@ impl UreqDeviceClient {
             HttpClass::NotFound => Err(ClientError::TargetNotFound {
                 target: target.to_owned(),
             }),
+            HttpClass::UpgradeRequired => Err(update_required_client(resp)),
             HttpClass::NotModified | HttpClass::Other => {
                 // Mirror the contribute writes: a definitive 4xx (≠429) provably did not land.
                 Err(if (400..500).contains(&status) && status != 429 {
@@ -1583,15 +1651,21 @@ fn parse_card(bytes: &[u8]) -> Result<WireProtocolCard, ClientError> {
 /// (`.ok()`), never assuming `outcome == Ok ⟹ data is a record`. **Pure** (status + bytes), so every arm is
 /// unit-tested without a socket (mirrors [`map_invite_envelope`]).
 fn map_write_envelope(host: &str, status: u16, bytes: &[u8]) -> Result<WriteReceipt, ClientError> {
-    if classify(status) != HttpClass::Ok {
+    match classify(status) {
+        HttpClass::Ok => {}
+        // A version floor refuses the write outright — as definitive a "did not land" as any other
+        // 4xx, told as the dead end it is so the op-WAL is dropped rather than replayed forever.
+        HttpClass::UpgradeRequired => return Err(update_required_from(bytes)),
         // A 4xx other than 429 is a DEFINITIVE rejection — the op provably did NOT land (a bad request /
         // payload-too-large), so the caller drops the op-WAL instead of replaying it forever. A 5xx / 429 /
         // timeout is AMBIGUOUS (the op may have landed) — keep the WAL for a safe same-op_id replay.
-        return Err(if (400..500).contains(&status) && status != 429 {
-            ClientError::PlaneRejected(status)
-        } else {
-            ClientError::Plane(status_reason(host, status))
-        });
+        _ => {
+            return Err(if (400..500).contains(&status) && status != 429 {
+                ClientError::PlaneRejected(status)
+            } else {
+                ClientError::Plane(status_reason(host, status))
+            });
+        }
     }
     let JsonEnvelope {
         ok,
@@ -1635,12 +1709,10 @@ fn map_write_envelope(host: &str, status: u16, bytes: &[u8]) -> Result<WriteRece
 // UreqReleases — the real release source for `topos upgrade` (the native self-updater). Speaks the
 // GitHub REST API for latest-tag resolution + raw asset GETs over the same blocking agent as the plane
 // transports (its own rustls+ring stack — no new dependency edge). GitHub 403s a request without a
-// `User-Agent`, so every request carries this build's. The checksum verify + atomic replace stay in the
-// op; this is a dumb byte fetcher.
+// `User-Agent`; the shared agent config sets [`USER_AGENT`] for every transport here, so these
+// requests carry one without saying so. The checksum verify + atomic replace stay in the op; this is
+// a dumb byte fetcher.
 // =================================================================================================
-
-/// The user-agent GitHub requires (it 403s a request without one). Carries this build's version.
-const RELEASE_USER_AGENT: &str = concat!("topos/", env!("CARGO_PKG_VERSION"));
 
 /// The host the release + forge lanes talk to — named in every message about them, so a person
 /// reads which of the two servers in play was the one that went quiet.
@@ -1685,7 +1757,6 @@ impl crate::release::ReleaseSource for UreqReleases {
         let resp = self
             .agent
             .get(url)
-            .header("User-Agent", RELEASE_USER_AGENT)
             .header("Accept", "application/vnd.github+json")
             .call()
             .map_err(|e| ClientError::Plane(transport_reason(GITHUB_API_HOST, &e)))?;
@@ -1713,7 +1784,6 @@ impl crate::release::ReleaseSource for UreqReleases {
         let resp = self
             .agent
             .get(url)
-            .header("User-Agent", RELEASE_USER_AGENT)
             .call()
             .map_err(|e| ClientError::Plane(transport_reason(&host_label(url), &e)))?;
         let status = resp.status().as_u16();
@@ -1753,6 +1823,8 @@ impl UreqVersionProbe {
             // ONE global ceiling over the whole request (DNS + connect + TLS + response), so the
             // probe can never hold a finished command hostage.
             .timeout_global(Some(Duration::from_secs(VERSION_PROBE_TIMEOUT_SECS)))
+            // The one thing this config shares with `agent_config`: GitHub 403s a UA-less request.
+            .user_agent(USER_AGENT)
             .build();
         Self {
             agent: ureq::Agent::new_with_config(config),
@@ -1762,12 +1834,7 @@ impl UreqVersionProbe {
 
 impl crate::release::ReleaseProbe for UreqVersionProbe {
     fn latest_release_location(&self) -> Option<String> {
-        let resp = self
-            .agent
-            .get(VERSION_PROBE_URL)
-            .header("User-Agent", RELEASE_USER_AGENT)
-            .call()
-            .ok()?;
+        let resp = self.agent.get(VERSION_PROBE_URL).call().ok()?;
         if !resp.status().is_redirection() {
             return None;
         }
@@ -1781,8 +1848,9 @@ impl crate::release::ReleaseProbe for UreqVersionProbe {
 // =================================================================================================
 // UreqGitSource — the real remote-source fetcher for `add <owner/repo>`. Downloads a repo as a `.tar.gz`
 // from GitHub's API tarball endpoint (which 302-redirects to codeload; the agent follows it) over the same
-// blocking agent as the other transports. GitHub 403s a UA-less request, so every call carries this
-// build's. Extraction + selection + the byte-exact digest stay in the op; this is a dumb byte fetcher.
+// blocking agent as the other transports — whose config carries the [`USER_AGENT`] GitHub demands
+// (it 403s a UA-less request). Extraction + selection + the byte-exact digest stay in the op; this
+// is a dumb byte fetcher.
 // =================================================================================================
 
 /// The blocking `ureq` remote-source: a public repo tarball over the GitHub API.
@@ -1851,7 +1919,6 @@ impl crate::git_source::GitTarballSource for UreqGitSource {
         let resp = self
             .agent
             .get(&url)
-            .header("User-Agent", RELEASE_USER_AGENT)
             .header("Accept", "application/vnd.github+json")
             .call()
             .map_err(|e| ClientError::RemoteFetch {
@@ -1914,6 +1981,9 @@ fn plane_err(e: PlaneError) -> ClientError {
         PlaneError::NotFound => {
             ClientError::Plane("the server does not serve this, or not to you".into())
         }
+        // The version floor keeps its identity across the two families — flattening it into the
+        // generic plane fault would cost the one thing the caller can act on.
+        PlaneError::UpdateRequired { min } => ClientError::UpdateRequired { min },
         PlaneError::Unavailable(m) | PlaneError::Unreachable(m) | PlaneError::Malformed(m) => {
             ClientError::Plane(m)
         }
@@ -2040,11 +2110,80 @@ mod tests {
         assert_eq!(classify(201), HttpClass::Ok);
         assert_eq!(classify(304), HttpClass::NotModified);
         assert_eq!(classify(404), HttpClass::NotFound);
+        // The server's client floor — its own class, never folded in with the transient statuses.
+        assert_eq!(classify(426), HttpClass::UpgradeRequired);
         // 5xx / unexpected statuses are transiently unavailable, never silently OK.
         assert_eq!(classify(500), HttpClass::Other);
         assert_eq!(classify(503), HttpClass::Other);
         assert_eq!(classify(403), HttpClass::Other);
         assert_eq!(classify(302), HttpClass::Other);
+    }
+
+    /// A server's 426 refusal envelope, as the app serves it.
+    fn refusal_bytes(min: &str) -> Vec<u8> {
+        serde_json::to_vec(&serde_json::json!({
+            "schema_version": 1,
+            "command": "error",
+            "ok": false,
+            "data": {},
+            "warnings": [],
+            "error": {
+                "code": "CLI_UPDATE_REQUIRED",
+                "outcome": "PERMANENT_FAILURE",
+                "retryable": false,
+                "affected": {},
+                "context": {
+                    "message": "this topos is too old for this server",
+                    "min_cli_version": min,
+                    "server_version": "0.2.0",
+                },
+                "next_actions": [],
+            },
+        }))
+        .expect("serialize a refusal")
+    }
+
+    #[test]
+    fn a_426_is_the_typed_dead_end_whatever_the_body_says() {
+        // The floor the refusal named rides the typed error, so the message can state it.
+        let err = map_write_envelope("topos.test", 426, &refusal_bytes("0.1.15")).unwrap_err();
+        assert!(
+            matches!(&err, ClientError::UpdateRequired { min } if min.as_deref() == Some("0.1.15")),
+            "{err:?}"
+        );
+        assert_eq!(err.code(), "CLI_UPDATE_REQUIRED");
+        assert_eq!(err.outcome(), TerminalOutcome::PermanentFailure);
+        // The STATUS is the whole signal: an unreadable, empty, or oddly-shaped body still refuses,
+        // just without the version clause.
+        for body in [
+            b"not json".as_slice(),
+            b"".as_slice(),
+            br#"{"error":{}}"#.as_slice(),
+            br#"{"error":{"context":{"min_cli_version":42}}}"#.as_slice(),
+        ] {
+            for err in [
+                map_write_envelope("topos.test", 426, body).unwrap_err(),
+                map_invite_envelope("topos.test", 426, body).unwrap_err(),
+                map_poll_response("topos.test", 426, body).unwrap_err(),
+                map_login_connect("topos.test", 426, body).unwrap_err(),
+            ] {
+                assert!(
+                    matches!(&err, ClientError::UpdateRequired { min } if min.is_none()),
+                    "{err:?}"
+                );
+            }
+        }
+        // A version the client cannot read is not echoed back at a person — it is simply not a
+        // floor this build can state.
+        assert_eq!(
+            min_cli_from_refusal(&refusal_bytes("<script>whatever</script>")),
+            None
+        );
+        // What it can read comes back as this build's own rendering of the numbers.
+        assert_eq!(
+            min_cli_from_refusal(&refusal_bytes("v0.1.15-rc1")).as_deref(),
+            Some("0.1.15")
+        );
     }
 
     /// A meta frame whose `object_id`s are the real sha256 of the canned bytes (so verify passes).
@@ -2554,6 +2693,17 @@ mod tests {
         )
         .expect("a clean card parses");
         assert_eq!(ok.api_base_url, "https://topos.sh/api");
+        // A card predating the version declaration parses with neither field — this build reads
+        // that as "nothing declared", not as a claim.
+        assert!(ok.server_version.is_none() && ok.min_cli_version.is_none());
+        // A card that DOES declare them carries both through untouched (the floor check reads them
+        // afterwards; parsing judges nothing).
+        let declared = parse_card(
+            br#"{"schema_version":1,"card":"topos-protocol-card","api_base_url":"https://topos.sh/api","server_version":"0.1.20","min_cli_version":"0.1.15"}"#,
+        )
+        .expect("a card with the declarations parses");
+        assert_eq!(declared.server_version.as_deref(), Some("0.1.20"));
+        assert_eq!(declared.min_cli_version.as_deref(), Some("0.1.15"));
         // A card with an empty base, a wrong discriminant, or a non-card body is refused typed.
         for bad in [
             br#"{"schema_version":1,"card":"topos-protocol-card","api_base_url":"  "}"#.as_slice(),

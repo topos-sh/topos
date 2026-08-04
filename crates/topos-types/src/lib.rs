@@ -145,7 +145,7 @@ pub struct NextAction {
 /// The closed initial action-code vocabulary (each maps to its producing outcome). Advertised in
 /// the [`ActionCode`] schema's `examples` so a cross-language consumer learns the set without
 /// reading Rust; additive-only — new codes append here.
-pub const KNOWN_ACTION_CODES: [&str; 10] = [
+pub const KNOWN_ACTION_CODES: [&str; 11] = [
     "PROPOSE_PUBLISH",
     "REBASE_AND_RETRY",
     "RESOLVE_DIVERGED_DRAFT",
@@ -156,6 +156,7 @@ pub const KNOWN_ACTION_CODES: [&str; 10] = [
     "CONTACT_ADMIN",
     "FETCH_FULL_DIFF",
     "NEXT_PAGE",
+    "SELF_UPDATE",
 ];
 
 /// The action-code vocabulary. Known variants serialize to their SCREAMING_SNAKE string; an
@@ -172,6 +173,7 @@ pub enum ActionCode {
     ContactAdmin,         // non-self-service denials
     FetchFullDiff,        // a byte-capped diff — the argv re-runs it uncapped
     NextPage,             // a row-capped enumeration — the argv fetches the next page
+    SelfUpdate,           // a version floor — this binary is on the wrong side of it
     /// A forward-compatible code this build doesn't know — execute the action's `argv` anyway.
     /// Only constructible via the normalizing [`From<String>`], which maps a known string to its
     /// variant first, so an `Unknown` can never alias a known code (the inner value is private).
@@ -204,6 +206,7 @@ impl ActionCode {
             ActionCode::ContactAdmin => "CONTACT_ADMIN",
             ActionCode::FetchFullDiff => "FETCH_FULL_DIFF",
             ActionCode::NextPage => "NEXT_PAGE",
+            ActionCode::SelfUpdate => "SELF_UPDATE",
             ActionCode::Unknown(s) => s.as_str(),
         }
     }
@@ -222,6 +225,7 @@ impl From<String> for ActionCode {
             "CONTACT_ADMIN" => ActionCode::ContactAdmin,
             "FETCH_FULL_DIFF" => ActionCode::FetchFullDiff,
             "NEXT_PAGE" => ActionCode::NextPage,
+            "SELF_UPDATE" => ActionCode::SelfUpdate,
             _ => ActionCode::Unknown(UnknownActionCode(s)),
         }
     }
