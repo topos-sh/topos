@@ -23,6 +23,8 @@ const SKILL_ID = "s_e2e_chan";
 const SKILL_NAME = "chan-notes";
 const SKILL2_ID = "s_e2e_chan2";
 const SKILL2_NAME = "chan-guide";
+const MCP_ID = "s_e2e_chan_mcp";
+const MCP_NAME = "chan-server";
 const CHAN_MEMBER = "chan-member@example.com";
 
 test.describe.configure({ mode: "serial" });
@@ -39,6 +41,9 @@ test.beforeAll(async () => {
   );
   await ensureBundle({ id: SKILL_ID, name: SKILL_NAME });
   await ensureBundle({ id: SKILL2_ID, name: SKILL2_NAME });
+  // A channel carries both kinds, so the picker over the catalog must offer both — this row is
+  // what makes its MCP-servers section exist.
+  await ensureBundle({ id: MCP_ID, name: MCP_NAME, kind: "mcp" });
 });
 
 test("the index lists everyone first; a member creates a channel and lands on it", async ({
@@ -341,6 +346,18 @@ test("the owner adds a skill via the Skills-face picker; the row links out and t
   // dropdown. A channel carries both kinds, so the picker offers the whole catalog. Choosing only
   // stages it on the trigger; nothing lands yet.
   await page.getByRole("main").getByRole("button", { name: "Choose one" }).click();
+
+  // The catalog holds both kinds, so the menu carries the rail's two sections rather than one
+  // interleaved list — headings visible, skills first, and each row under its own kind.
+  const menu = page.getByRole("menu");
+  await expect(menu.getByText("Skills", { exact: true })).toBeVisible();
+  await expect(menu.getByText("MCP servers", { exact: true })).toBeVisible();
+  const skillsGroup = menu.getByRole("group", { name: "Skills" });
+  const serversGroup = menu.getByRole("group", { name: "MCP servers" });
+  await expect(serversGroup.getByRole("menuitem", { name: MCP_NAME })).toBeVisible();
+  await expect(skillsGroup.getByRole("menuitem", { name: MCP_NAME })).toHaveCount(0);
+  await expect(skillsGroup.getByRole("menuitem", { name: SKILL2_NAME })).toBeVisible();
+
   await page.getByRole("menuitem", { name: SKILL2_NAME }).click();
   await expect(page.getByRole("main").getByRole("link", { name: SKILL2_NAME })).toHaveCount(0);
 

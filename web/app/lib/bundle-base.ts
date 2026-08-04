@@ -29,6 +29,27 @@ export function sectionLabel(base: BundleBase): string {
   return base === "mcp" ? "MCP servers" : "Skills";
 }
 
+/**
+ * A mixed catalog list split into the sections it reads as — skills first, then MCP servers, the
+ * order the rail and the dashboard use. Any surface that offers BOTH kinds at once (a picker over
+ * the whole catalog) groups them through this, so the two never interleave under one heading.
+ *
+ * An EMPTY section is dropped, not rendered empty: a workspace with no MCP servers should see a
+ * plain list of skills, not a heading standing over nothing.
+ */
+export function groupByBase<T extends { kind: string }>(
+  rows: readonly T[],
+): { base: BundleBase; label: string; rows: T[] }[] {
+  const bases: BundleBase[] = ["skills", "mcp"];
+  return bases
+    .map((base) => ({
+      base,
+      label: sectionLabel(base),
+      rows: rows.filter((row) => baseForKind(row.kind) === base),
+    }))
+    .filter((group) => group.rows.length > 0);
+}
+
 /** What one of them is called in a sentence ("Assigning to everyone puts this <noun> …"). */
 export function bundleNoun(base: BundleBase): string {
   return base === "mcp" ? "MCP server" : "skill";

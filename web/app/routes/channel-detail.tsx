@@ -1,5 +1,5 @@
 import { Check, ChevronsUpDown, Package, Plug, Plus } from "lucide-react";
-import { useState } from "react";
+import { Fragment, useState } from "react";
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
 import {
   data,
@@ -17,8 +17,10 @@ import { buttonClasses, Card, Chip, SectionHeading } from "@/components/ui";
 import {
   DropdownMenu,
   DropdownMenuContent,
+  DropdownMenuGroup,
   DropdownMenuItem,
   DropdownMenuLabel,
+  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import {
@@ -29,7 +31,7 @@ import {
   requireWorkspaceOwner,
 } from "@/lib/auth/guards.server";
 import { getAuth } from "@/lib/auth/server";
-import { baseForKind, bundlePath } from "@/lib/bundle-base";
+import { baseForKind, bundlePath, groupByBase } from "@/lib/bundle-base";
 import { recordAdminEvent } from "@/lib/db/audit.server";
 import {
   type ChannelDetail as ChannelDetailData,
@@ -589,11 +591,17 @@ function RemoveSkillControl({ channelId, skillId }: { channelId: string; skillId
  * button beside it performs the act (a surprise-free two-step, like every other form here). The
  * staged choice is validated against the CURRENT addable list, so a successful add — which
  * revalidates the skill out of the catalog — resets the trigger to its placeholder by itself.
+ *
+ * The catalog holds both kinds, so the MENU carries the rail's two sections — Skills, then MCP
+ * servers — rather than one interleaved list: the two are different things, and a name alone
+ * doesn't say which you are about to place. A section with nothing in it is not rendered at all.
+ * Collapsed, the trigger's own glyph carries what the heading said about the staged row.
  */
 function AddSkillForm({ channelId, addable }: { channelId: string; addable: AddableSkill[] }) {
   const fetcher = useFetcher<SkillCurationActionData>();
   const [stagedId, setStagedId] = useState<string | null>(null);
   const staged = addable.find((skill) => skill.skillId === stagedId);
+  const groups = groupByBase(addable);
   const pending = fetcher.state !== "idle";
   const error =
     fetcher.data?.form === "add" && fetcher.data.error.length > 0 ? fetcher.data.error : undefined;
@@ -610,6 +618,8 @@ function AddSkillForm({ channelId, addable }: { channelId: string; addable: Adda
             >
               {staged === undefined ? (
                 <Plus className="size-4 shrink-0 text-faint" aria-hidden="true" />
+              ) : baseForKind(staged.kind) === "mcp" ? (
+                <Plug className="size-4 shrink-0 text-faint" aria-hidden="true" />
               ) : (
                 <Package className="size-4 shrink-0 text-faint" aria-hidden="true" />
               )}
@@ -620,15 +630,29 @@ function AddSkillForm({ channelId, addable }: { channelId: string; addable: Adda
             </button>
           </DropdownMenuTrigger>
           <DropdownMenuContent align="start" className="min-w-56">
-            <DropdownMenuLabel className="font-normal text-faint text-xs">
-              Workspace catalog
-            </DropdownMenuLabel>
-            {addable.map((skill) => (
-              <DropdownMenuItem key={skill.skillId} onSelect={() => setStagedId(skill.skillId)}>
-                {baseForKind(skill.kind) === "mcp" ? <Plug /> : <Package />}
-                <span className="min-w-0 flex-1 truncate">{skill.displayName ?? skill.name}</span>
-                {skill.skillId === stagedId && <Check className="ml-auto size-4 text-accent" />}
-              </DropdownMenuItem>
+            {groups.map((group, index) => (
+              <Fragment key={group.base}>
+                {index > 0 && <DropdownMenuSeparator />}
+                <DropdownMenuGroup aria-label={group.label}>
+                  <DropdownMenuLabel className="font-normal text-faint text-xs">
+                    {group.label}
+                  </DropdownMenuLabel>
+                  {group.rows.map((skill) => (
+                    <DropdownMenuItem
+                      key={skill.skillId}
+                      onSelect={() => setStagedId(skill.skillId)}
+                    >
+                      {group.base === "mcp" ? <Plug /> : <Package />}
+                      <span className="min-w-0 flex-1 truncate">
+                        {skill.displayName ?? skill.name}
+                      </span>
+                      {skill.skillId === stagedId && (
+                        <Check className="ml-auto size-4 text-accent" />
+                      )}
+                    </DropdownMenuItem>
+                  ))}
+                </DropdownMenuGroup>
+              </Fragment>
             ))}
           </DropdownMenuContent>
         </DropdownMenu>
