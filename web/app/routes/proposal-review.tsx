@@ -29,6 +29,7 @@ import { requireCanonicalBase } from "@/lib/bundle-base.server";
 import {
   inFinalTx,
   lockOpenProposalInTx,
+  mcpNameClaimRefusalInTx,
   resolveProposalInTx,
 } from "@/lib/db/queries.custody.server";
 import { workspacePolicyOf } from "@/lib/db/queries.policy.server";
@@ -316,6 +317,9 @@ export interface ReviewFormState {
     | "reason_required"
     | "error";
   submittedReason?: string;
+  /** On a `denied` that has something specific to say, the copy the panel renders in place of
+   * its general refusal line. */
+  message?: string;
 }
 
 /**
@@ -366,8 +370,10 @@ export async function action({ request, params }: ActionFunctionArgs) {
  * bundle's EFFECTIVE protection (its pin, else the workspace default); the CAS binds the
  * generation the REVIEWER's render diffed against — a fresh pointer read that disagrees means
  * the diff they approved is stale, and the honest answer is a conflict, never a silent approve
- * of something unseen. On a landed move the proposal row resolves (FOR UPDATE-locked) in one
- * final transaction; a concurrently-resolved row changes nothing the pointer already says.
+ * of something unseen. An MCP bundle's promote also RE-CLAIMS the registry name inside the
+ * candidate, under the per-workspace name lock, in the same transaction as the move. On a landed
+ * move the proposal row resolves (FOR UPDATE-locked) in one final transaction; a
+ * concurrently-resolved row changes nothing the pointer already says.
  */
 async function approveAction(
   request: Request,
@@ -406,11 +412,30 @@ async function approveAction(
     // The pointer moved since the reviewer's render — their diff no longer shows the change.
     return data<ReviewFormState>({ status: "conflict" });
   }
-  const moved = await movePointer(ws, row.skillId, {
-    version_id: versionId,
-    expected_generation: current.data.generation,
-    attribution: actor.display,
-  });
+  const promote = () =>
+    movePointer(ws, row.skillId, {
+      version_id: versionId,
+      expected_generation: current.data.generation,
+      attribution: actor.display,
+    });
+  // AN APPROVE IS A NAME CLAIM when the bundle is an MCP server: promoting the candidate makes
+  // the registry name INSIDE it this workspace's, and that name must be no other active bundle's
+  // — the same rule publish, re-publish, unarchive and the session lane's own approve enforce.
+  // The claim and the move ride ONE transaction holding the per-workspace name lock, so a publish
+  // cannot take the name between the check and the move; every other kind moves exactly as before.
+  const claimed =
+    row.kind === "mcp"
+      ? await inFinalTx(async (tx) => {
+          const refusal = await mcpNameClaimRefusalInTx(tx, actor, row.skillId, versionId);
+          return refusal === null
+            ? ({ refusal: null, moved: await promote() } as const)
+            : ({ refusal } as const);
+        })
+      : ({ refusal: null, moved: await promote() } as const);
+  if (claimed.refusal !== null) {
+    return data<ReviewFormState>({ status: "denied", message: claimed.refusal.message });
+  }
+  const moved = claimed.moved;
   if (moved.kind === "fault" || moved.kind === "rejected") {
     return data<ReviewFormState>({ status: "error" });
   }

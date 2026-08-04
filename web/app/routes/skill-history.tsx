@@ -14,6 +14,7 @@ import {
 import { baseOf, bundleNameOf, bundlePath, useBundleBase } from "@/lib/bundle-base";
 import { requireCanonicalBase } from "@/lib/bundle-base.server";
 import { recordAdminEvent } from "@/lib/db/audit.server";
+import { inFinalTx, mcpNameClaimRefusalInTx } from "@/lib/db/queries.custody.server";
 import { purgeVersion } from "@/lib/db/queries.lifecycle.server";
 import { skillIndexRow } from "@/lib/db/queries.server";
 import { resolveSkillName } from "@/lib/db/resolve.server";
@@ -169,7 +170,9 @@ export async function action({ request, params }: ActionFunctionArgs) {
  * the belt runs after the guard (a stranger burns no token) and before the vault call, keyed by
  * the guard-minted actor's user id. The CAS binding is the generation the page rendered against —
  * the vault refuses a moved pointer instead of rolling back over something the reviewer didn't
- * see. One admin_event lands per attempt (the vault records only the pass-through display).
+ * see. An MCP bundle's roll-back also RE-CLAIMS the registry name the good version embeds, under
+ * the per-workspace name lock, in the same transaction as the move. One admin_event lands per
+ * attempt (the vault records only the pass-through display).
  */
 async function revertAction(request: Request, ws: string, skill: string, form: FormData) {
   const actor = await requireReviewer(request, ws);
@@ -190,14 +193,39 @@ async function revertAction(request: Request, ws: string, skill: string, form: F
   }
   const short = good.slice(0, 12);
 
-  const outcome = await revertPointer(ws, row.skillId, {
-    to_version_id: good,
-    expected_generation: expected,
-    attribution: actor.display,
-    // The browser ceremony composes its own frame (no device pre-derives this id) — a
-    // deterministic message keeps a double-submit's retry converging on the same commit.
-    message: `Revert to ${good}`,
-  });
+  const carryForward = () =>
+    revertPointer(ws, row.skillId, {
+      to_version_id: good,
+      expected_generation: expected,
+      attribution: actor.display,
+      // The browser ceremony composes its own frame (no device pre-derives this id) — a
+      // deterministic message keeps a double-submit's retry converging on the same commit.
+      message: `Revert to ${good}`,
+    });
+  // A REVERT IS A NAME CLAIM TOO when the bundle is an MCP server: the good version's tree comes
+  // forward, registry name and all, and that name must be no other active bundle's — the rule
+  // every publishing door enforces. The claim and the move ride ONE transaction holding the
+  // per-workspace name lock (a publish cannot take the name in between); every other kind reverts
+  // exactly as before.
+  const claimed =
+    row.kind === "mcp"
+      ? await inFinalTx(async (tx) => {
+          const refusal = await mcpNameClaimRefusalInTx(tx, actor, row.skillId, good);
+          return refusal === null
+            ? ({ refusal: null, reverted: await carryForward() } as const)
+            : ({ refusal } as const);
+        })
+      : ({ refusal: null, reverted: await carryForward() } as const);
+  if (claimed.refusal !== null) {
+    await recordAdminEvent(actor, {
+      kind: "revert",
+      subject: row.skillId,
+      detail: short,
+      outcome: "denied",
+    });
+    return data<RevertActionData>({ status: "denied", reason: claimed.refusal.message });
+  }
+  const outcome = claimed.reverted;
   if (outcome.kind === "fault") {
     await recordAdminEvent(actor, {
       kind: "revert",

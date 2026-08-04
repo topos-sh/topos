@@ -30,6 +30,9 @@ export interface StubVault {
   url: string;
   /** Register a version's files so a later read resolves them (the "already published" state). */
   seed(ws: string, bundleId: string, versionId: string, files: StubFile[]): void;
+  /** Give a bundle a `current` pointer the reads answer — what the vault would already hold for
+   * an already-published bundle (`seed` alone leaves a version unpointed, as a candidate is). */
+  point(ws: string, bundleId: string, versionId: string, generation?: number): void;
   /** The write calls this stub answered, oldest first. */
   calls: StubCall[];
   /** Files a `publish` call carried, oldest first — what actually crossed the boundary. */
@@ -49,6 +52,8 @@ export async function startStubVault(): Promise<StubVault> {
   const objects = new Map<string, Buffer>();
   /** The CAS generation per bundle — what a pointer move is fenced on. */
   const generations = new Map<string, number>();
+  /** The version each bundle's `current` names — read back by the GET below. */
+  const currents = new Map<string, string>();
   const calls: StubCall[] = [];
   const published: StubVault["published"] = [];
   let minted = 0;
@@ -67,6 +72,11 @@ export async function startStubVault(): Promise<StubVault> {
     for (const file of files) {
       objects.set(objectIdOf(versionId, file.path), Buffer.from(file.content, "utf8"));
     }
+  };
+
+  const point: StubVault["point"] = (ws, bundleId, versionId, generation = 1) => {
+    currents.set(key(ws, bundleId, "current"), versionId);
+    generations.set(key(ws, bundleId, "generation"), generation);
   };
 
   const server = createServer((request, response) => {
@@ -101,6 +111,9 @@ export async function startStubVault(): Promise<StubVault> {
         }));
         seed(ws, bundle, versionId, files);
         published.push({ ws, bundle, versionId, files });
+        if (route === "publish") {
+          point(ws, bundle, versionId, 1);
+        }
         json(200, {
           version_id: versionId,
           commit_id: versionId,
@@ -161,6 +174,7 @@ export async function startStubVault(): Promise<StubVault> {
           seed(ws, bundle, landed, files);
         }
         generations.set(genKey, generation + 1);
+        currents.set(key(ws, bundle, "current"), landed);
         const pointer = {
           version_id: landed,
           generation: generation + 1,
@@ -182,6 +196,23 @@ export async function startStubVault(): Promise<StubVault> {
         );
       });
       return;
+    }
+
+    // The pointer READ the browser doors take before a move — the generation their CAS binds.
+    const current = url.match(/^\/internal\/v1\/workspaces\/([^/]+)\/bundles\/([^/]+)\/current$/);
+    if (method === "GET" && current?.[1] && current[2]) {
+      const [, ws, bundle] = current as unknown as [string, string, string];
+      const versionId = currents.get(key(ws, bundle, "current"));
+      if (versionId === undefined) {
+        return json(404, { code: "NOT_FOUND" });
+      }
+      return json(200, {
+        version_id: versionId,
+        generation: generations.get(key(ws, bundle, "generation")) ?? 1,
+        moved_at_ms: 1_700_000_000_000,
+        moved_by_display: "stub",
+        bundle_digest: "d".repeat(64),
+      });
     }
 
     const meta = url.match(
@@ -230,6 +261,7 @@ export async function startStubVault(): Promise<StubVault> {
   return {
     url: `http://127.0.0.1:${port}`,
     seed,
+    point,
     calls,
     published,
     async close() {

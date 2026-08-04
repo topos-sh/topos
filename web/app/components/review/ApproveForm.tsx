@@ -17,6 +17,9 @@ interface ReviewActionData {
     | "denied"
     | "error";
   submittedReason?: string;
+  /** On a `denied` that has something specific to say, the copy rendered in place of the
+   * general refusal line (an MCP candidate whose registry name another bundle holds). */
+  message?: string;
 }
 
 /**
@@ -73,7 +76,7 @@ export function ApproveForm({
       )}
       {state?.status === "denied" && (
         <p className="text-red-600 text-sm" role="alert">
-          The server declined this decision.
+          {state.message ?? "The server declined this decision."}
         </p>
       )}
       {state?.status === "error" && (
