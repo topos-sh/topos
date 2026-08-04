@@ -29,7 +29,7 @@ use topos_types::{CurrencyKind, HarnessId, TriggerReport, TriggerState};
 
 use crate::ctx::Ctx;
 use crate::error::ClientError;
-use crate::fs_seam::{FaultFs, RealFs};
+use crate::fs_seam::{FaultFs, FsOps as _, RealFs};
 use crate::ids::test_sources::{FixedClock, SeqIds};
 use crate::mcp_engine::{self, McpDemand, ScopeIo};
 use crate::mcp_ledger;
@@ -1009,6 +1009,62 @@ fn a_sibling_key_in_the_plugin_mcp_json_backs_the_surface_off_and_survives() {
     let kept = std::fs::read_to_string(&mcp_path)
         .unwrap_or_else(|e| panic!("the plugin .mcp.json was deleted over a user key: {e}"));
     assert!(kept.contains("\"theme\""), "{kept}");
+}
+
+/// Every converge entry point serializes on the scope's `locks/mcp.lock`: a run that starts
+/// while another process holds it WAITS instead of interleaving the ledger + config
+/// read-modify-write (flock contends across open file descriptions, so a second in-process
+/// guard stands in for a sibling process here).
+#[test]
+fn converges_serialize_on_the_per_scope_mcp_lock() {
+    let home = Scratch::new("mcp-lock");
+    let fs = RealFs;
+    let layout = Layout::new(&home.0.join(".topos"));
+    std::fs::create_dir_all(layout.locks_dir()).unwrap();
+    let held = fs
+        .lock_exclusive(&layout.locks_dir().join("mcp.lock"))
+        .unwrap();
+
+    let home_path = home.0.clone();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let worker = std::thread::spawn(move || {
+        let fs = RealFs;
+        let layout = Layout::new(&home_path.join(".topos"));
+        let io = ScopeIo {
+            fs: &fs,
+            layout: &layout,
+            home: home_path.clone(),
+            project_root: None,
+        };
+        let mut d = demand(
+            "s_a",
+            "alpha",
+            Some("eng"),
+            &server_json("https://mcp.example/a"),
+        );
+        d.harness_filter = vec!["cursor".into()];
+        let out = mcp_engine::converge(&io, &[d], SYNTHETIC, &all_slugs(), &no_hold(), true);
+        tx.send(out).unwrap();
+    });
+
+    // While the lock is held the converge must not complete (and must not have written).
+    assert!(
+        rx.recv_timeout(std::time::Duration::from_millis(400))
+            .is_err(),
+        "a converge must wait for the scope's mcp lock"
+    );
+    assert!(
+        !home.0.join(".cursor/mcp.json").exists(),
+        "no config byte moves while another converge holds the lock"
+    );
+    drop(held);
+    let out = rx
+        .recv_timeout(std::time::Duration::from_secs(10))
+        .expect("the released lock lets the converge finish");
+    worker.join().unwrap();
+    assert!(out.warnings.is_empty(), "{:?}", out.warnings);
+    assert_eq!(state_of(&out, "s_a", "cursor").state, "current");
+    assert!(home.0.join(".cursor/mcp.json").exists());
 }
 
 /// A surface path move (an env-override change) leaves the ledger row recorded at the OLD file:

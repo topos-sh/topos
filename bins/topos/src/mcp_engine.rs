@@ -221,6 +221,13 @@ pub(crate) fn converge(
     allow_removals: bool,
 ) -> ConvergeOutcome {
     let mut out = ConvergeOutcome::default();
+    let _lock = match converge_lock(io) {
+        Ok(guard) => guard,
+        Err(warning) => {
+            out.warnings.push(warning);
+            return out;
+        }
+    };
 
     // The ledger — fail closed whole: without it no ownership question is answerable, so nothing
     // is read or written.
@@ -507,6 +514,13 @@ pub(crate) fn remove_bundle(
     bundle_id: &str,
 ) -> ConvergeOutcome {
     let mut out = ConvergeOutcome::default();
+    let _lock = match converge_lock(io) {
+        Ok(guard) => guard,
+        Err(warning) => {
+            out.warnings.push(warning);
+            return out;
+        }
+    };
     let mut ledger = match mcp_ledger::read(io.fs, io.layout) {
         Ok(l) => l,
         Err(e) => {
@@ -578,6 +592,38 @@ pub(crate) fn remove_bundle(
             .push(format!("MCP_LEDGER_WRITE_FAILED: {}", e.detail()));
     }
     out
+}
+
+/// The per-scope MCP converge lock (`locks/mcp.lock`, blocking): every entry point that runs the
+/// ledger + config read-modify-write — the sweep's [`converge`], add's inline converge, a
+/// targeted go-back's [`converge_bundle_now`], and [`remove_bundle`] — serializes on it, so two
+/// processes can never interleave a read-modify-write over the same scope's configs.
+///
+/// LOCK ORDER, fixed: the sweep already holds `locks/currency.lock` when it converges, so this
+/// lock is strictly INNER — taken only inside [`converge`]/[`remove_bundle`], released on return,
+/// and NOTHING acquires another lock while holding it. No path takes it twice: the two holders
+/// never call each other, and [`converge_bundle_now`] reads the ledger only ADVISORILY (deriving
+/// its reach) before its one `converge` call takes the lock and re-reads authoritatively.
+///
+/// Failure is a refusal, not a fallback: without the lock nothing is read or written this run
+/// (the warning says so), because an unserialized converge could interleave with another and
+/// tear the ledger-vs-config agreement.
+fn converge_lock(io: &ScopeIo<'_>) -> Result<crate::fs_seam::LockGuard, String> {
+    let locks = io.layout.locks_dir();
+    // Created only when absent so the common case adds no mutating op (the crash sweep counts
+    // them).
+    if !io.fs.exists(&locks)
+        && let Err(e) = io.fs.create_dir_all(&locks)
+    {
+        return Err(format!(
+            "MCP_LOCK_UNAVAILABLE: creating {} failed ({e}) — no MCP config is read or written \
+             this run",
+            locks.display()
+        ));
+    }
+    io.fs.lock_exclusive(&locks.join("mcp.lock")).map_err(|e| {
+        format!("MCP_LOCK_UNAVAILABLE: {e} — no MCP config is read or written this run")
+    })
 }
 
 /// Whether a demand's harness narrowing admits `slug` (empty = all).
@@ -1288,6 +1334,8 @@ pub(crate) fn converge_bundle_now(
     let Ok(Some((version_id, server_json))) = stored_server_json(ctx, sid) else {
         return (Vec::new(), Vec::new());
     };
+    // An ADVISORY (unlocked) read: it only derives the targeted reach below. The authoritative
+    // read-modify-write happens inside `converge`, under the per-scope converge lock.
     let ledger = match mcp_ledger::read(ctx.fs, &ctx.layout) {
         Ok(l) => l,
         Err(e) => {
