@@ -88,13 +88,18 @@ pub fn apply(
         let Some(servers) = doc.get_mut(SERVERS_KEY).and_then(Item::as_table_mut) else {
             return unprovable("mcp_servers vanished during edit");
         };
-        // Keep the replaced table's document position so the file doesn't reorder.
-        let position = servers
-            .get(&entry.key)
-            .and_then(Item::as_table)
-            .and_then(Table::position);
+        // Keep the replaced table's document position so the file doesn't reorder, and
+        // TRANSPLANT its decor — a user comment attached above `[mcp_servers.<key>]` travels
+        // with the table, so an update must carry it onto the replacement instead of dropping
+        // it with the old table.
+        let old = servers.get(&entry.key).and_then(Item::as_table);
+        let position = old.and_then(Table::position);
+        let decor = old.map(|t| t.decor().clone());
         let mut table = entry_table(entry);
         table.set_position(position);
+        if let Some(decor) = decor {
+            *table.decor_mut() = decor;
+        }
         servers.insert(&entry.key, Item::Table(table));
     }
     if let Err(reason) = upsert_entries(&mut doc, desired, &rec.inserts) {
@@ -509,6 +514,30 @@ mod tests {
             vec![("topos-x".to_owned(), EntryState::Foreign)]
         );
         assert!(out.fingerprints.is_empty());
+    }
+
+    /// A user comment attached directly above a topos-managed table is the user's byte: an
+    /// UPDATE transplants it onto the replacement table instead of destroying it. (Removal-side
+    /// loss is inherent — the comment is attached to a table that is leaving.)
+    #[test]
+    fn an_update_transplants_the_users_comment_above_our_table() {
+        const FILE: &str = "model = \"o5\"\n\n# team linear server — ask #tools before edits\n[mcp_servers.topos-x]\nurl = \"https://one.example\"\n";
+        let v1 = entry("topos-x", "https://one.example");
+        let v2 = entry("topos-x", "https://two.example");
+        let prior: BTreeMap<String, String> =
+            [("topos-x".to_owned(), fp(&v1))].into_iter().collect();
+        let out = apply(Some(FILE.as_bytes()), std::slice::from_ref(&v2), &prior);
+        assert_eq!(
+            out.states,
+            vec![("topos-x".to_owned(), EntryState::Updated)]
+        );
+        let text = write_of(&out);
+        assert!(
+            text.contains("# team linear server — ask #tools before edits\n[mcp_servers.topos-x]"),
+            "the comment rides the update: {text}"
+        );
+        assert!(text.contains("url = \"https://two.example\""), "{text}");
+        assert!(!text.contains("one.example"), "{text}");
     }
 
     #[test]
