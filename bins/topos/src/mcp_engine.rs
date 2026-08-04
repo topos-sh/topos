@@ -23,8 +23,10 @@
 //!   structurally empty (a plain user entry a driver's states cannot see is never destroyed),
 //! - the wholly-topos-owned Claude Code plugin dir: its `.mcp.json` rides the SAME shared file
 //!   converge as every dialect; any content topos did not write backs the surface off whole
-//!   (unprovable, byte-identical), the constant manifest is written/healed beside it, and the
-//!   dir is pruned when the last entry leaves.
+//!   (unprovable, byte-identical), the constant manifest is written/healed beside it only while
+//!   its bytes are provably topos's own (absent, or byte-identical to the rendering — a
+//!   hand-edited manifest is left standing, disclosed), and the dir is pruned when the last
+//!   entry leaves.
 //!
 //! The engine is OFFLINE by construction: demands carry the stored `server.json` bytes, so a dead
 //! network still heals config files from the store + ledger.
@@ -883,11 +885,14 @@ fn converge_surface(
             let path_owned = path.to_path_buf();
             let fs = io.fs;
             // The plugin surface writes its constant manifest beside the entries file — before
-            // it, so a crash never leaves entries without the manifest that makes them load.
-            let manifest = if is_plugin {
-                plugin_manifest_path(path)
+            // it, so a crash never leaves entries without the manifest that makes them load. The
+            // manifest rides the same foreign-occupant rule as every other byte: (re)written
+            // only when absent or still byte-identical to what topos renders; a hand-edited one
+            // is left standing, disclosed.
+            let (manifest, mut manifest_kept) = if is_plugin {
+                plugin_manifest_verdict(io.fs, h.slug, path)
             } else {
-                None
+                (None, None)
             };
             let write = move || -> std::io::Result<()> {
                 if let Some(m) = &manifest {
@@ -914,13 +919,18 @@ fn converge_surface(
                         && io.fs.remove_file(path).is_ok()
                     {
                         if is_plugin {
-                            prune_plugin_dir(io.fs, path);
+                            // The prune re-answers the manifest question at the delete boundary
+                            // — its disclosure (kept, dir stays) supersedes the write-time one.
+                            manifest_kept = prune_plugin_dir(io.fs, h.slug, path);
                         }
                         surface.warnings.push(format!(
                             "MCP_FILE_REMOVED {}: {} held only topos entries and was deleted",
                             h.slug,
                             path.display()
                         ));
+                    }
+                    if let Some(kept) = manifest_kept {
+                        surface.warnings.push(kept);
                     }
                     surface
                 }
@@ -1164,16 +1174,55 @@ fn plugin_manifest_path(mcp_path: &Path) -> Option<PathBuf> {
         .map(|dir| dir.join(plugin_dir::PLUGIN_MANIFEST_PATH))
 }
 
-/// Prune the plugin dir after its `.mcp.json` left: drop the constant manifest, then each dir
-/// level that holds nothing else — the whole-file ownership proof extended to the directory
-/// level, so a dir with ANY foreign occupant is left standing. Best-effort throughout (a stray
-/// empty dir is recoverable; destroyed bytes are not).
-fn prune_plugin_dir(fs: &dyn FsOps, mcp_path: &Path) {
-    let Some(dir) = mcp_path.parent() else {
-        return;
+/// Whether the constant manifest beside a plugin `.mcp.json` is topos's to write or delete:
+/// `(Some(path), None)` when it is absent or still byte-identical to
+/// [`plugin_dir::manifest_bytes`], else `(None, Some(disclosure))` — hand-edited (or unreadable,
+/// so unprovable) bytes are a foreign occupant, left standing.
+fn plugin_manifest_verdict(
+    fs: &dyn FsOps,
+    slug: &str,
+    mcp_path: &Path,
+) -> (Option<PathBuf>, Option<String>) {
+    let Some(manifest) = plugin_manifest_path(mcp_path) else {
+        return (None, None);
     };
+    match fs.read_opt(&manifest) {
+        Ok(None) => (Some(manifest), None),
+        Ok(Some(bytes)) if bytes == plugin_dir::manifest_bytes() => (Some(manifest), None),
+        _ => {
+            let kept = format!(
+                "MCP_PLUGIN_MANIFEST_KEPT {slug}: {} is not the manifest topos wrote — left in \
+                 place",
+                manifest.display()
+            );
+            (None, Some(kept))
+        }
+    }
+}
+
+/// Prune the plugin dir after its `.mcp.json` left: drop the constant manifest — only while its
+/// bytes are still exactly [`plugin_dir::manifest_bytes`] — then each dir level that holds
+/// nothing else: the whole-file ownership proof extended to the directory level, so a dir with
+/// ANY foreign occupant is left standing. A hand-edited manifest is such an occupant — kept, the
+/// dir kept with it, and the returned disclosure says so. Best-effort throughout (a stray empty
+/// dir is recoverable; destroyed bytes are not).
+fn prune_plugin_dir(fs: &dyn FsOps, slug: &str, mcp_path: &Path) -> Option<String> {
+    let dir = mcp_path.parent()?;
     let manifest = dir.join(plugin_dir::PLUGIN_MANIFEST_PATH);
-    let _ = fs.remove_file(&manifest);
+    let mut kept = None;
+    match fs.read_opt(&manifest) {
+        Ok(None) => {}
+        Ok(Some(bytes)) if bytes == plugin_dir::manifest_bytes() => {
+            let _ = fs.remove_file(&manifest);
+        }
+        _ => {
+            kept = Some(format!(
+                "MCP_PLUGIN_MANIFEST_KEPT {slug}: {} is not the manifest topos wrote — left in \
+                 place, so the plugin dir stays",
+                manifest.display()
+            ));
+        }
+    }
     let empty = |d: &Path| fs.read_dir(d).is_ok_and(|entries| entries.is_empty());
     if let Some(manifest_dir) = manifest.parent()
         && manifest_dir != dir
@@ -1185,6 +1234,7 @@ fn prune_plugin_dir(fs: &dyn FsOps, mcp_path: &Path) {
     if empty(dir) {
         let _ = fs.remove_dir_all(dir);
     }
+    kept
 }
 
 /// Whether this scope's store tracks `skill_id` as a CONFIG-PLACED (mcp) bundle — the scope's

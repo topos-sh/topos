@@ -1011,6 +1011,137 @@ fn a_sibling_key_in_the_plugin_mcp_json_backs_the_surface_off_and_survives() {
     assert!(kept.contains("\"theme\""), "{kept}");
 }
 
+/// The constant `.claude-plugin/plugin.json` rides the foreign-occupant rule too: a hand-edited
+/// manifest is never rewritten by the next entry change and never deleted by the last entry's
+/// removal — kept byte-identical, the dir left standing over it, both disclosed. (A pristine
+/// manifest still heals and prunes exactly as before — see the six-dialect and removal tests.)
+#[test]
+fn a_hand_edited_plugin_manifest_survives_update_and_removal_disclosed() {
+    let home = Scratch::new("plugin-manifest");
+    let fs = RealFs;
+    let layout = Layout::new(&home.0.join(".topos"));
+    let io = person_io(&fs, &layout, &home.0);
+    let claude_only = |d: &McpDemand| {
+        let mut d = d.clone();
+        d.harness_filter = vec!["claude-code".into()];
+        d
+    };
+    let v1 = demand(
+        "s_a",
+        "alpha",
+        Some("eng"),
+        &server_json("https://mcp.example/v1"),
+    );
+    mcp_engine::converge(
+        &io,
+        &[claude_only(&v1)],
+        SYNTHETIC,
+        &all_slugs(),
+        &no_hold(),
+        true,
+    );
+    // The user edits the manifest by hand.
+    let manifest = home
+        .0
+        .join(".claude/skills/topos-mcp/.claude-plugin/plugin.json");
+    let edited = std::fs::read_to_string(&manifest)
+        .unwrap()
+        .replace("Topos MCP", "My MCP");
+    std::fs::write(&manifest, &edited).unwrap();
+
+    // An entry UPDATE (the url moved) rewrites the .mcp.json — and must not touch the manifest.
+    let v2 = demand(
+        "s_a",
+        "alpha",
+        Some("eng"),
+        &server_json("https://mcp.example/v2"),
+    );
+    let out = mcp_engine::converge(
+        &io,
+        &[claude_only(&v2)],
+        SYNTHETIC,
+        &all_slugs(),
+        &no_hold(),
+        true,
+    );
+    assert_eq!(state_of(&out, "s_a", "claude-code").state, "current");
+    let mcp_path = home.0.join(".claude/skills/topos-mcp/.mcp.json");
+    assert!(
+        std::fs::read_to_string(&mcp_path).unwrap().contains("/v2"),
+        "the entry itself still updates"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&manifest).unwrap(),
+        edited,
+        "the hand-edited manifest survives an entry update byte-identical"
+    );
+    assert!(
+        out.warnings
+            .iter()
+            .any(|w| w.contains("MCP_PLUGIN_MANIFEST_KEPT")),
+        "the kept manifest is disclosed: {:?}",
+        out.warnings
+    );
+
+    // The LAST entry's removal deletes the wholly-owned .mcp.json — and keeps the edited
+    // manifest, the dir standing over it, disclosed.
+    let out = mcp_engine::converge(&io, &[], SYNTHETIC, &all_slugs(), &no_hold(), true);
+    assert!(!mcp_path.exists(), "the wholly-owned entries file leaves");
+    assert_eq!(
+        std::fs::read_to_string(&manifest)
+            .unwrap_or_else(|e| panic!("the hand-edited manifest was destroyed on removal: {e}")),
+        edited,
+        "the hand edit survives the last entry's removal"
+    );
+    assert!(
+        home.0.join(".claude/skills/topos-mcp").exists(),
+        "the dir stays with its foreign occupant"
+    );
+    assert!(
+        out.warnings
+            .iter()
+            .any(|w| w.contains("MCP_PLUGIN_MANIFEST_KEPT")),
+        "{:?}",
+        out.warnings
+    );
+}
+
+/// The heal path stays: a hand-DELETED manifest (absent, so provably nobody's) is re-written
+/// pristine beside entries that remain.
+#[test]
+fn a_hand_deleted_plugin_manifest_heals_back_beside_remaining_entries() {
+    let home = Scratch::new("plugin-heal");
+    let fs = RealFs;
+    let layout = Layout::new(&home.0.join(".topos"));
+    let io = person_io(&fs, &layout, &home.0);
+    let mut d = demand(
+        "s_a",
+        "alpha",
+        Some("eng"),
+        &server_json("https://mcp.example/a"),
+    );
+    d.harness_filter = vec!["claude-code".into()];
+    mcp_engine::converge(
+        &io,
+        std::slice::from_ref(&d),
+        SYNTHETIC,
+        &all_slugs(),
+        &no_hold(),
+        true,
+    );
+    let manifest = home
+        .0
+        .join(".claude/skills/topos-mcp/.claude-plugin/plugin.json");
+    std::fs::remove_file(&manifest).unwrap();
+
+    // The next converge (nothing changed — a Leave) re-heals the constant file.
+    mcp_engine::converge(&io, &[d], SYNTHETIC, &all_slugs(), &no_hold(), true);
+    assert_eq!(
+        std::fs::read(&manifest).unwrap_or_else(|e| panic!("the manifest was not healed: {e}")),
+        plugin_dir::manifest_bytes()
+    );
+}
+
 /// Every converge entry point serializes on the scope's `locks/mcp.lock`: a run that starts
 /// while another process holds it WAITS instead of interleaving the ledger + config
 /// read-modify-write (flock contends across open file descriptions, so a second in-process
