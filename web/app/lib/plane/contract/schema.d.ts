@@ -782,6 +782,11 @@ export interface components {
              * @description The generation the proposal is born against (its base); a stale base later makes it non-current.
              */
             expected: number;
+            /**
+             * @description The catalog `kind` this proposal declares for a BRAND-NEW bundle (same semantics as
+             *     [`PublishRequest::kind`] — a reroute-to-proposal genesis still carries it). **Additive.**
+             */
+            kind?: string | null;
             /** @description The client-minted UUIDv4 idempotency key (replays the stored receipt on retry). */
             op_id: string;
             /** @description The target skill id within the workspace. */
@@ -914,6 +919,12 @@ export interface components {
              * @description The generation this publish's compare-and-set targets; a stale value yields `CONFLICT`.
              */
             expected: number;
+            /**
+             * @description The catalog `kind` this publish declares for a BRAND-NEW bundle (`"mcp"` for an MCP-server
+             *     bundle; absent ⇒ `"skill"`). Genesis-only: an existing bundle's kind is fixed at birth, and
+             *     a publish naming a different kind is refused before any custody write. **Additive.**
+             */
+            kind?: string | null;
             /** @description The client-minted UUIDv4 idempotency key — the same `op_id` replays the stored receipt byte-for-byte. */
             op_id: string;
             /** @description The target skill id within the workspace. */
@@ -1067,6 +1078,13 @@ export interface components {
          *     reconcile.
          */
         WireAppliedSkill: {
+            /**
+             * @description Per-harness applied states for a config-placed (`mcp`) bundle: which detected agents hold
+             *     the entry and how (`state` is an OPEN vocabulary — `current` / `drifted` / `not-supported` /
+             *     `unprovable`; a reader ignores a state it does not recognize). Empty for file-bundle
+             *     skills. **Additive.**
+             */
+            harnesses?: components["schemas"]["WireHarnessState"][];
             /** @description The skill id (the `<skill>` path segment). */
             skill_id: string;
             /** @description The version this device holds (64-char lowercase hex). */
@@ -1282,6 +1300,15 @@ export interface components {
          * @enum {string}
          */
         WireFileMode: "100644" | "100755";
+        /** @description One harness's applied state for a config-placed (`mcp`) bundle on this installation. */
+        WireHarnessState: {
+            /** @description A short human-readable qualifier (why not-supported / what drifted), when one exists. */
+            note?: string | null;
+            /** @description The harness registry slug (e.g. `claude-code`, `cursor`). */
+            slug: string;
+            /** @description The state — an OPEN vocabulary (`current` / `drifted` / `not-supported` / `unprovable`). */
+            state: string;
+        };
         /** @description One proposal event in a skill's history (open, and every resolution). */
         WireLogProposal: {
             /** @description When the proposal was opened (server-stamped string). */

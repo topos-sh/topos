@@ -54,8 +54,9 @@ const CHANNEL_NAME_MAX = 64;
 type Tx = Parameters<Parameters<ReturnType<typeof getDb>["transaction"]>[0]>[0];
 
 /** A REAL `text[]` value — an `ARRAY[...]::text[]` constructor with every element its own bind
- * parameter, so no hand-rolled literal ever has to escape a value. */
-function pgTextArray(values: string[]) {
+ * parameter, so no hand-rolled literal ever has to escape a value. NULL elements ride through
+ * (the report's per-row harness block is absent on a file bundle). */
+function pgTextArray(values: (string | null)[]) {
   return values.length === 0
     ? sql`ARRAY[]::text[]`
     : sql`ARRAY[${sql.join(
@@ -314,22 +315,39 @@ export async function deliveryFor(actor: FeedActor): Promise<DeliveryBody> {
 
 // ── The applied-state report ─────────────────────────────────────────────────────────────────
 
+/** One harness's applied state for a config-placed ('mcp') bundle, as the session reports it:
+ * the registry slug, the state word (an OPEN vocabulary — stored verbatim, never branched on),
+ * and an optional short qualifier. */
+export interface ReportedHarnessState {
+  slug: string;
+  state: string;
+  note?: string;
+}
+
 /**
- * The sessions page's applied-state report: UPSERT this session's (bundle, applied version)
- * rows and DELETE the rows it no longer reports — the session's report is a complete snapshot
- * of what the installation holds for this workspace, so absence is meaningful (a removed
- * project or an edited manifest stops reporting a bundle and the row goes). A report is
- * CLIENT-ASSERTED data, so every named bundle is re-checked to exist in the workspace. The
- * write FENCES on the live ACTIVE session row (FOR UPDATE): an in-flight report that lost a
- * race with a revocation must not resurrect state the ending just cascaded away.
+ * The sessions page's applied-state report: UPSERT this session's (bundle, applied version,
+ * per-harness states) rows and DELETE the rows it no longer reports — the session's report is
+ * a complete snapshot of what the installation holds for this workspace, so absence is
+ * meaningful (a removed project or an edited manifest stops reporting a bundle and the row
+ * goes). A report is CLIENT-ASSERTED data, so every named bundle is re-checked to exist in the
+ * workspace. The write FENCES on the live ACTIVE session row (FOR UPDATE): an in-flight report
+ * that lost a race with a revocation must not resurrect state the ending just cascaded away.
  */
 export async function reportApplied(
   actor: SessionActor,
-  applied: { skillId: string; versionId: string }[],
+  applied: { skillId: string; versionId: string; harnesses?: ReportedHarnessState[] | null }[],
 ): Promise<"ok" | "session_ended"> {
   const ws = actor.workspaceId;
   const skillIds = pgTextArray(applied.map((a) => a.skillId));
   const versionIds = pgTextArray(applied.map((a) => a.versionId));
+  // The per-harness block rides as JSON text and lands cast — NULL where the session reported
+  // none. Absence and emptiness are the SAME fact (a file bundle has no harness story), so an
+  // empty list never reaches the column: one shape to read back, whatever the caller passed.
+  const harnessStates = pgTextArray(
+    applied.map((a) =>
+      a.harnesses == null || a.harnesses.length === 0 ? null : JSON.stringify(a.harnesses),
+    ),
+  );
   return await getDb().transaction(async (tx) => {
     // The same liveness the guard decides — active AND unexpired — re-checked inside the
     // fence: a session may pass the route guard a breath before expiry and must not write
@@ -345,12 +363,16 @@ export async function reportApplied(
       return "session_ended";
     }
     await tx.execute(sql`
-      INSERT INTO web.session_bundle_state (session_id, bundle_id, applied_version_id, reported_at)
-      SELECT ${actor.sessionId}, r.skill_id, r.version_id, now()
-      FROM UNNEST(${skillIds}, ${versionIds}) AS r(skill_id, version_id)
+      INSERT INTO web.session_bundle_state
+        (session_id, bundle_id, applied_version_id, harness_state, reported_at)
+      SELECT ${actor.sessionId}, r.skill_id, r.version_id, r.harness_state::jsonb, now()
+      FROM UNNEST(${skillIds}, ${versionIds}, ${harnessStates})
+        AS r(skill_id, version_id, harness_state)
       JOIN web.bundle b ON b.id = r.skill_id AND b.workspace_id = ${ws}
       ON CONFLICT (session_id, bundle_id) DO UPDATE
-        SET applied_version_id = excluded.applied_version_id, reported_at = excluded.reported_at
+        SET applied_version_id = excluded.applied_version_id,
+            harness_state = excluded.harness_state,
+            reported_at = excluded.reported_at
     `);
     await tx.execute(sql`
       DELETE FROM web.session_bundle_state st

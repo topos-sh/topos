@@ -156,6 +156,8 @@ export function versionIdFor(bundleId: string): string {
 }
 
 export interface SeedBundleOptions {
+  /** The catalog kind tag — 'skill' unless the bundle is something else ('mcp'). */
+  kind?: string;
   status?: "active" | "archived" | "deleted";
   baseName?: string | null;
   displayName?: string | null;
@@ -176,15 +178,16 @@ export async function seedBundle(
 ): Promise<{ versionId: string | null }> {
   const status = opts.status ?? "active";
   await db.q(
-    `INSERT INTO web.bundle (id, workspace_id, name, display_name, status, protection, base_name, archived_at, deleted_at)
-     VALUES ($1, $2, $3, $4, $5, $6, $7,
-             CASE WHEN $5 IN ('archived', 'deleted') THEN now() END,
-             CASE WHEN $5 = 'deleted' THEN now() END)`,
+    `INSERT INTO web.bundle (id, workspace_id, name, display_name, kind, status, protection, base_name, archived_at, deleted_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8,
+             CASE WHEN $6 IN ('archived', 'deleted') THEN now() END,
+             CASE WHEN $6 = 'deleted' THEN now() END)`,
     [
       id,
       ws,
       name,
       opts.displayName ?? null,
+      opts.kind ?? "skill",
       status,
       opts.protection ?? null,
       opts.baseName ?? null,

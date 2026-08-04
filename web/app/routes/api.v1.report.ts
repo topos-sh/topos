@@ -2,7 +2,7 @@ import type { ActionFunctionArgs } from "react-router";
 import { laneGate } from "@/lib/api/compat.server";
 import { badRequest, readCappedBody, uniformNotFound } from "@/lib/api/wire.server";
 import { requireSessionActor } from "@/lib/auth/guards.server";
-import { reportApplied } from "@/lib/db/queries.lane.server";
+import { type ReportedHarnessState, reportApplied } from "@/lib/db/queries.lane.server";
 
 /**
  * `PUT /api/v1/workspaces/{ws}/report` — the session's post-reconcile applied snapshot
@@ -14,6 +14,53 @@ const BODY_CAP = 64 * 1024;
 const HEX_64 = /^[0-9a-f]{64}$/;
 // The vault's own id rule, mirrored: lowercase path-safe charset, 1–128 bytes.
 const SKILL_ID = /^[a-z0-9_-]{1,128}$/;
+// The harness registry's slug spelling (`claude-code`, `cursor`) and the applied-state word.
+// The state VOCABULARY is open — the client's word, kept verbatim — so only its shape is
+// checked; a reader that meets an unknown state ignores it.
+const HARNESS_SLUG = /^[a-z0-9-]{1,64}$/;
+const HARNESS_STATE = /^[a-z-]{1,32}$/;
+/** More harnesses than any one installation runs — the shape cap on a client-asserted list. */
+const MAX_HARNESSES = 12;
+const MAX_NOTE = 200;
+
+/**
+ * The optional per-harness block a config-placed ('mcp') bundle's row carries. Absent or empty
+ * ⇒ null (a file bundle's one applied version says everything). This route refuses a malformed
+ * body rather than trimming it: the report is the fleet's evidence, so a garbled row must be
+ * fixed at the client, not silently half-stored.
+ */
+function parseHarnesses(raw: unknown): ReportedHarnessState[] | null | string {
+  if (raw === undefined || raw === null) {
+    return null;
+  }
+  if (!Array.isArray(raw) || raw.length > MAX_HARNESSES) {
+    return "malformed report entry: harnesses";
+  }
+  const states: ReportedHarnessState[] = [];
+  for (const entry of raw as unknown[]) {
+    const h = entry as { slug?: unknown; state?: unknown; note?: unknown };
+    if (typeof h !== "object" || h === null) {
+      return "malformed report entry: harnesses";
+    }
+    if (typeof h.slug !== "string" || !HARNESS_SLUG.test(h.slug)) {
+      return "malformed report entry: harness slug";
+    }
+    if (typeof h.state !== "string" || !HARNESS_STATE.test(h.state)) {
+      return "malformed report entry: harness state";
+    }
+    if (h.note !== undefined && h.note !== null) {
+      if (typeof h.note !== "string" || h.note.length > MAX_NOTE) {
+        return "malformed report entry: harness note";
+      }
+    }
+    states.push({
+      slug: h.slug,
+      state: h.state,
+      ...(typeof h.note === "string" ? { note: h.note } : {}),
+    });
+  }
+  return states.length === 0 ? null : states;
+}
 
 export async function action({ request, params }: ActionFunctionArgs): Promise<Response> {
   const gated = laneGate(request);
@@ -40,16 +87,24 @@ export async function action({ request, params }: ActionFunctionArgs): Promise<R
   if (report.schema_version !== 1) {
     return badRequest("malformed report body: schema_version");
   }
-  const applied: { skillId: string; versionId: string }[] = [];
+  const applied: {
+    skillId: string;
+    versionId: string;
+    harnesses: ReportedHarnessState[] | null;
+  }[] = [];
   for (const entry of report.applied as unknown[]) {
-    const row = entry as { skill_id?: unknown; version_id?: unknown };
+    const row = entry as { skill_id?: unknown; version_id?: unknown; harnesses?: unknown };
     if (typeof row.skill_id !== "string" || !SKILL_ID.test(row.skill_id)) {
       return badRequest("malformed report entry: skill_id");
     }
     if (typeof row.version_id !== "string" || !HEX_64.test(row.version_id)) {
       return badRequest("malformed report entry: version_id must be 64-char lowercase hex");
     }
-    applied.push({ skillId: row.skill_id, versionId: row.version_id });
+    const harnesses = parseHarnesses(row.harnesses);
+    if (typeof harnesses === "string") {
+      return badRequest(harnesses);
+    }
+    applied.push({ skillId: row.skill_id, versionId: row.version_id, harnesses });
   }
   const actor = await requireSessionActor(request, params.ws ?? "");
   const outcome = await reportApplied(actor, applied);

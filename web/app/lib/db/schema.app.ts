@@ -661,6 +661,11 @@ export const sessionBundleState = webSchema.table(
       .notNull()
       .references(() => bundle.id, { onDelete: "cascade" }),
     appliedVersionId: text("applied_version_id").notNull(),
+    /** The per-harness applied states a CONFIG-placed bundle reports ('mcp'): a
+     * `[{slug, state, note?}]` snapshot of which detected agents hold the entry and how. NULL
+     * for a file bundle, whose one applied version says everything. The state vocabulary is
+     * OPEN — the client's word, stored verbatim for display, never branched on. */
+    harnessState: jsonb("harness_state"),
     reportedAt: timestamp("reported_at", { withTimezone: true }).defaultNow().notNull(),
   },
   (table) => [

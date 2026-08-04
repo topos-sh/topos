@@ -28,10 +28,13 @@ import { commitVersion, publishVersion } from "@/lib/plane/custody.server";
  * /v1/proposals` (the explicit propose — the same flow with the reroute forced).
  *
  * Sequence per op: the caller already authenticated the device and replayed the op receipt;
- * this flow (c) resolves the protection gate, (d) registers a GENESIS bundle (server-minted
- * id + birth name + `everyone`/`--to` placement + the author self-follow), (e) makes the vault
- * call, and (f) lands the final web transaction — registration/placement/proposal/audit writes
- * + the op receipt carrying the terminal envelope verbatim. The vault call carries the ACTOR's
+ * this flow (c) resolves the protection gate + the kind gate, (d) registers a GENESIS bundle
+ * (server-minted id + birth name + birth KIND + `everyone`/`--to` placement + the author
+ * self-follow), (e) makes the vault call, and (f) lands the final web transaction —
+ * registration/placement/proposal/audit writes + the op receipt carrying the terminal envelope
+ * verbatim. Genesis registration happens on ONE path — the direct arm below, which a forced
+ * proposal also takes when no bundle is registered yet (there is no base to review against) —
+ * so the declared kind rides publish and propose identically. The vault call carries the ACTOR's
  * display as the attribution (the vault stores display strings, never identities).
  */
 export interface PublishFlowArgs {
@@ -44,6 +47,10 @@ export interface PublishFlowArgs {
   candidate: WireCandidate;
   displayName: string | null;
   channel: string | null;
+  /** The catalog kind a GENESIS publish declares ('mcp' for an MCP-server bundle; null ⇒
+   * 'skill'). On an already-registered bundle it is only ever a re-assertion: a value that
+   * differs from the stored kind refuses the op before any byte moves. */
+  kind?: string | null;
   /** The envelope command (`publish` on both arms — the CLI verb). */
   command: string;
   /** True on the explicit `POST /v1/proposals` arm — always commit-only. */
@@ -126,6 +133,26 @@ export async function publishFlow(args: PublishFlowArgs): Promise<Response> {
       createdAt,
     });
     const envelope = deniedEnvelope(command, "SKILL_NOT_ACTIVE", target.name, receipt);
+    await inFinalTx((tx) => insertReceiptInTx(tx, actor, opId, raw, envelope));
+    return envelopeResponse(envelope);
+  }
+
+  // KIND IS BIRTH METADATA: a bundle's kind is fixed at genesis, so a publish that names a
+  // DIFFERENT one is describing a different thing under an existing identity — refused here,
+  // BEFORE any custody call, so no bytes are ingested against the mismatch (a silent accept
+  // would leave the catalog saying one thing and the bundle being another). Naming the SAME
+  // kind, or naming none, is a no-op.
+  if (target !== undefined && args.kind != null && args.kind !== target.kind) {
+    const receipt = buildReceipt({
+      opId,
+      command,
+      outcome: "DENIED",
+      workspaceId: actor.workspaceId,
+      skillId: target.bundleId,
+      expectedGeneration: expected,
+      createdAt,
+    });
+    const envelope = deniedEnvelope(command, "KIND_MISMATCH", target.name, receipt);
     await inFinalTx((tx) => insertReceiptInTx(tx, actor, opId, raw, envelope));
     return envelopeResponse(envelope);
   }
@@ -243,6 +270,7 @@ export async function publishFlow(args: PublishFlowArgs): Promise<Response> {
         bundleId,
         displayName,
         channel,
+        args.kind ?? null,
       );
       if (registration.placement !== undefined) {
         details.placement = registration.placement;

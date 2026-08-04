@@ -2,6 +2,7 @@ import { and, asc, eq, inArray, sql } from "drizzle-orm";
 import type { MemberActor, UserActor } from "@/lib/auth/guards.server";
 import { sessionUnexpiredSql } from "@/lib/db/identity.server";
 import { getDb } from "@/lib/db/index.server";
+import type { ReportedHarnessState } from "@/lib/db/queries.lane.server";
 import { bundle, cliSession, sessionBundleState, workspace } from "@/lib/db/schema.app";
 import { planeCurrentPointer } from "@/lib/db/schema.custody";
 
@@ -85,6 +86,10 @@ export interface SessionSkillState {
   /** The workspace's current version, or null when nothing is published (or withdrawn). */
   currentVersionId: string | null;
   status: SessionSkillStatus;
+  /** The per-harness applied states a CONFIG-placed ('mcp') bundle reports — which detected
+   * agents hold the entry and how. NULL for a file bundle, whose one applied version says
+   * everything. The state word is the client's, kept verbatim (an open vocabulary). */
+  harnesses: ReportedHarnessState[] | null;
   /** When this row was last reported (epoch-ms). */
   reportedAtMs: number;
 }
@@ -129,6 +134,13 @@ export interface WorkspaceSessions {
   sessionMaxAgeMs: number | null;
   /** Whether the actor sees ALL sessions (reviewer/owner) or only their own. */
   wholeWorkspace: boolean;
+}
+
+/** The stored jsonb block as the pages read it: a list, or null when the session reported none
+ * (a file bundle). The column is the client's own word — shape-checked at the report door, so
+ * this only re-establishes the type across the jsonb boundary. */
+function harnessesOf(stored: unknown): ReportedHarnessState[] | null {
+  return Array.isArray(stored) ? (stored as ReportedHarnessState[]) : null;
 }
 
 function freshnessOf(lastSeenAtMs: number | null, windowMs: number, now: number): SessionFreshness {
@@ -194,6 +206,7 @@ export async function workspaceSessions(actor: MemberActor): Promise<WorkspaceSe
       sessionId: sessionBundleState.sessionId,
       skillId: sessionBundleState.bundleId,
       appliedVersionId: sessionBundleState.appliedVersionId,
+      harnessState: sessionBundleState.harnessState,
       reportedAtMs: sql<string>`(extract(epoch from ${sessionBundleState.reportedAt}) * 1000)::bigint`,
       skillName: bundle.name,
       skillStatus: bundle.status,
@@ -249,6 +262,7 @@ export async function workspaceSessions(actor: MemberActor): Promise<WorkspaceSe
       appliedVersionId: row.appliedVersionId,
       currentVersionId: row.currentVersionId,
       status,
+      harnesses: harnessesOf(row.harnessState),
       reportedAtMs: Number(row.reportedAtMs),
     };
     const list = statesBySession.get(row.sessionId);
@@ -297,6 +311,9 @@ export interface AppliedOnSession {
   appliedVersionId: string;
   /** Whether that version is the workspace's `current`. */
   current: boolean;
+  /** The per-harness applied states this machine reported for a config-placed ('mcp') bundle;
+   * null for a file bundle. */
+  harnesses: ReportedHarnessState[] | null;
   reportedAtMs: number;
 }
 
@@ -310,7 +327,8 @@ export async function yourSessionsApplying(
   bundleId: string,
 ): Promise<AppliedOnSession[]> {
   const rows = await getDb().execute(sql`
-    SELECT cs.id, cs.display_name, st.applied_version_id, cp.version_id AS current_version_id,
+    SELECT cs.id, cs.display_name, st.applied_version_id, st.harness_state,
+           cp.version_id AS current_version_id,
            (extract(epoch from st.reported_at) * 1000)::bigint AS reported_ms
     FROM web.session_bundle_state st
     JOIN web.cli_session cs ON cs.id = st.session_id
@@ -325,6 +343,7 @@ export async function yourSessionsApplying(
       id: string;
       display_name: string;
       applied_version_id: string;
+      harness_state: unknown;
       current_version_id: string | null;
       reported_ms: string;
     }[]
@@ -333,6 +352,7 @@ export async function yourSessionsApplying(
     displayName: r.display_name,
     appliedVersionId: r.applied_version_id,
     current: r.current_version_id !== null && r.current_version_id === r.applied_version_id,
+    harnesses: harnessesOf(r.harness_state),
     reportedAtMs: Number(r.reported_ms),
   }));
 }

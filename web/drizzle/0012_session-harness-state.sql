@@ -1,0 +1,1 @@
+ALTER TABLE "web"."session_bundle_state" ADD COLUMN "harness_state" jsonb;

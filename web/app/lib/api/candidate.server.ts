@@ -10,6 +10,10 @@ export const HEX_64 = /^[0-9a-f]{64}$/;
 export const WIRE_ID = /^[A-Za-z0-9._-]{1,128}$/;
 /** The canonical lowercase-hyphenated UUID spelling op ids are keyed on. */
 export const OP_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+/** The catalog `kind` tag's spelling — a short lowercase slug ('skill', 'mcp'). The vocabulary
+ * itself stays OPEN (the catalog records what a bundle is; nothing branches on the value here),
+ * so only the SHAPE is checked. */
+export const BUNDLE_KIND = /^[a-z][a-z0-9-]{0,31}$/;
 
 const FILE_MODES = new Set(["100644", "100755"]);
 
@@ -87,6 +91,22 @@ export function parsePublishHead(raw: Record<string, unknown>): PublishFamilyHea
     return "malformed expected generation";
   }
   return { workspaceId, skillId, opId, expected };
+}
+
+/**
+ * The optional genesis `kind` a publish-family body may declare. Absent or null ⇒ null (the
+ * catalog's own default, 'skill', stands); a present value must be a well-shaped slug — a
+ * malformed one is a refusal string, never a silent drop, because kind is birth metadata the
+ * bundle carries for life.
+ */
+export function parseBundleKind(raw: unknown): { kind: string | null } | string {
+  if (raw === undefined || raw === null) {
+    return { kind: null };
+  }
+  if (typeof raw !== "string" || !BUNDLE_KIND.test(raw)) {
+    return "malformed kind";
+  }
+  return { kind: raw };
 }
 
 /** RFC-3339 seconds + Z — the receipt timestamp spelling (no millis). */

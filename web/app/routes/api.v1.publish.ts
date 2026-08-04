@@ -1,5 +1,10 @@
 import type { ActionFunctionArgs } from "react-router";
-import { parseCandidate, parsePublishHead, receiptNow } from "@/lib/api/candidate.server";
+import {
+  parseBundleKind,
+  parseCandidate,
+  parsePublishHead,
+  receiptNow,
+} from "@/lib/api/candidate.server";
 import { laneGate } from "@/lib/api/compat.server";
 import { publishFlow } from "@/lib/api/publish-flow.server";
 import { buildReceipt, deniedEnvelope, envelopeResponse } from "@/lib/api/receipts.server";
@@ -46,6 +51,10 @@ export async function action({ request }: ActionFunctionArgs): Promise<Response>
   if (typeof candidate === "string") {
     return badRequest(candidate);
   }
+  const kind = parseBundleKind(body.kind);
+  if (typeof kind === "string") {
+    return badRequest(kind);
+  }
 
   const actor = await requireSessionActor(request, head.workspaceId);
   const replay = await findReceipt(actor, head.opId, raw);
@@ -74,6 +83,7 @@ export async function action({ request }: ActionFunctionArgs): Promise<Response>
     candidate,
     displayName: typeof body.display_name === "string" ? body.display_name : null,
     channel: typeof body.channel === "string" ? body.channel : null,
+    kind: kind.kind,
     upstream: parseUpstream(body.upstream),
     command: "publish",
     forceProposal: false,

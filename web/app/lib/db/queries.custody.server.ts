@@ -74,6 +74,9 @@ export interface PublishTarget {
   bundleId: string;
   name: string;
   status: string;
+  /** The catalog kind the bundle was born with — fixed at genesis (a publish naming a
+   * different one is refused before any custody write). */
+  kind: string;
   /** The RESOLVED protection: the per-bundle pin, else the workspace default. */
   protection: "open" | "reviewed";
 }
@@ -89,6 +92,7 @@ export async function publishTargetOf(
       bundleId: bundle.id,
       name: bundle.name,
       status: bundle.status,
+      kind: bundle.kind,
       protection: sql<string>`COALESCE(${bundle.protection}, ${workspace.protectionDefault}, 'open')`,
     })
     .from(bundle)
@@ -168,9 +172,10 @@ export interface GenesisRegistration {
 /**
  * Register a NEW bundle at its genesis publish, inside the caller's final transaction: the
  * bundle row (name minted from the display name with suffix-on-collision — `name`, `name-2`,
- * `name-3`…), an EXCLUSIVE placement, and the author's self-follow stance. Placement is
- * exclusive because `--to` is the targeting mechanism: with NO `--to` the bundle lands in the
- * default `everyone` channel; with a `--to` channel named (`everyone` included — no
+ * `name-3`…; `kind` is the catalog tag the publish declared, 'skill' when it declared none —
+ * birth-only, never rewritten), an EXCLUSIVE placement, and the author's self-follow stance.
+ * Placement is exclusive because `--to` is the targeting mechanism: with NO `--to` the bundle
+ * lands in the default `everyone` channel; with a `--to` channel named (`everyone` included — no
  * string-match bypass) it lands in THAT channel alone. EVERY placement is gated by the
  * channel's mode (custody is never curation-blocked; REACH is — including the default channel,
  * including genesis): a curated channel withholds a member's placement with
@@ -194,6 +199,7 @@ export async function registerGenesisBundleInTx(
   bundleId: string,
   displayName: string | null,
   toChannel: string | null,
+  kind: string | null = null,
 ): Promise<GenesisRegistration> {
   const ws = actor.workspaceId;
   const base = mintCatalogName(displayName, bundleId);
@@ -226,6 +232,9 @@ export async function registerGenesisBundleInTx(
       workspaceId: ws,
       name,
       displayName,
+      // What this bundle IS, recorded once at birth ('skill' when the publish declares
+      // nothing) — the catalog tag every later publish is checked against.
+      kind: kind ?? "skill",
       createdBy: actor.userId,
     })
     .onConflictDoNothing({ target: bundle.id });
