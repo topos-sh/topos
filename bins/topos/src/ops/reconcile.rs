@@ -529,6 +529,9 @@ enum ForgeHold {
     /// The forge answered about this source and the answer was final. Said ONCE, then never again
     /// until the row that names it changes.
     Gone { reason: String, first_time: bool },
+    /// This source already had its turn in this round and it did not work. The row that reached it
+    /// first has already said so; a second row saying the same thing is noise.
+    Attempted,
     /// The forge was already unreachable earlier in this round.
     Down,
 }
@@ -553,30 +556,36 @@ impl<'a> ForgeLane<'a> {
     /// one: two manifest rows can name a single repository (a set line and a member line of it),
     /// and they must not cost two requests and two identical sentences about the same repo.
     fn hold(&self, origin: &str, git_ref: &str) -> Option<ForgeHold> {
-        let settled = self
+        // ONE TURN PER SOURCE PER ROUND. Two manifest rows can name a single repository (a set
+        // line and a member line of it), and a question already asked has already been answered —
+        // whatever the answer was. Without this a failing repo named twice costs two requests and
+        // says the same sentence twice in one breath, because only the never-reached fault opens
+        // the breaker and every other fault would fall straight through to a second dial.
+        if self
             .seen
             .borrow()
             .get(origin)
-            .or_else(|| self.prior.sources.get(origin))
-            .filter(|c| !c.worth_dialing(git_ref))
-            .cloned();
-        if let Some(source) = settled
-            && let Some(f) = source.failure.clone()
+            .is_some_and(|c| c.failure.is_some())
         {
-            // Carry the verdict into this round's record so it survives, and mark it said.
+            return Some(ForgeHold::Attempted);
+        }
+        if let Some(settled) = self
+            .prior
+            .sources
+            .get(origin)
+            .filter(|c| !c.worth_dialing(git_ref))
+            .cloned()
+            && let Some(f) = settled.failure.clone()
+        {
+            // Carry the standing verdict into this round's record so it survives, and mark it said.
             let mut seen = self.seen.borrow_mut();
-            let said = seen
-                .get(origin)
-                .and_then(|c| c.failure.as_ref())
-                .is_some_and(|f| f.reported);
-            let entry = seen.entry(origin.to_owned()).or_insert(source);
-            let first_time = !f.reported && !said;
+            let entry = seen.entry(origin.to_owned()).or_insert(settled);
             if let Some(e) = &mut entry.failure {
                 e.reported = true;
             }
             return Some(ForgeHold::Gone {
                 reason: f.reason,
-                first_time,
+                first_time: !f.reported,
             });
         }
         // The breaker is open. The source still had its turn this round, so it is recorded as
@@ -682,10 +691,16 @@ impl<'a> ForgeLane<'a> {
         let fault = match e {
             ClientError::RemoteFetch { fault, .. } => *fault,
             // Anything else got far enough to be a fault about the bytes, not about the dial.
-            _ => FetchFault::Unavailable,
+            _ => FetchFault::unavailable(),
         };
         if !fault.reached() {
             self.down.set(true);
+        }
+        // A host that answered "not now, come back at T" said it on the way to failing. Honor it
+        // in the one direction backoffs are ever honored: later, never sooner.
+        if let Some(at) = fault.retry_after_ms() {
+            let held = self.backoff.get().unwrap_or(i64::MIN);
+            self.backoff.set(Some(held.max(at)));
         }
         let prior = self.prior.sources.get(origin);
         self.seen.borrow_mut().insert(
@@ -1082,6 +1097,12 @@ pub(crate) fn manifest_update(
         reconcile_scope(&env, &sc, &mut targets, &mut sweep);
     }
     if let Some(t) = targets.unmatched() {
+        // A dial that already happened must be paid for even though this run is about to refuse:
+        // the sources contacted above had their turn, and leaving the clock untouched would make
+        // a mistyped target a way to re-dial the forge as often as someone retypes it.
+        if let Some(lane) = &lane {
+            let _ = close_forge_round(ctx, lane, now_millis, &mut sweep.warnings);
+        }
         // The refusal names the scope actually SEARCHED. Under the scope rule a name can be
         // perfectly real one scope over, and "not in any manifest" would send someone to re-add
         // what they already have — so each arm says where it looked and offers the other scope's
@@ -3011,15 +3032,22 @@ fn forge_hold_line(sc: &ScopeCtx<'_>, reference: &str, hold: &ForgeHold, sweep: 
     }
 }
 
-/// The DISCLOSURE a followed rename earns: the row still works (the forge redirected and the check
-/// followed it), and the person is told the canonical spelling so the row can be updated at leisure.
-/// A rename is never a failure, so this never rides the channel the receipt counts as one.
+/// The DISCLOSURE a followed rename earns: the row still works, because the forge redirected and
+/// the check followed it. A rename is never a failure, so this never rides the channel the receipt
+/// counts as one.
+///
+/// It deliberately stops at the FACT and does not advise respelling the row. The tracked copies
+/// record the origin they were imported under, so a row edited to the new name would find nothing
+/// tracked, try a fresh install, and collide with the copy already sitting there — an update that
+/// stops updating, caused by following our own advice. Recognizing the old provenance under a new
+/// spelling is what would make that advice safe, and until it exists the honest thing to say is
+/// that nothing needs doing.
 fn renamed_line(origin: &str, head: &RepoHead, sweep: &mut Sweep) {
     if let Some((owner, repo)) = &head.renamed_to {
         let host = origin.split('/').next().unwrap_or_default();
         sweep.disclosures.push(format!(
-            "GIT_RENAMED {origin}: now {host}/{owner}/{repo} — the row still resolves through the \
-             forge's redirect; spelling it the new way keeps it direct"
+            "GIT_RENAMED {origin}: the forge now serves this as {host}/{owner}/{repo} and \
+             redirects to it — the row keeps working as written"
         ));
     }
 }

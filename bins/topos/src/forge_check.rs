@@ -38,6 +38,11 @@ pub(crate) const CHECK_INTERVAL_MS: i64 = 6 * 60 * 60 * 1000;
 /// The widest spread added to [`CHECK_INTERVAL_MS`] when scheduling the next check.
 pub(crate) const CHECK_JITTER_MS: i64 = 60 * 60 * 1000;
 
+/// The furthest out a host's own backoff signal may push the next check. A header asking to be
+/// left alone for a week is a header topos declines to take literally — but anything up to a day
+/// is honored, so the sanity ceiling on a stored due time has to allow for it.
+pub(crate) const MAX_BACKOFF_MS: i64 = 24 * 60 * 60 * 1000;
+
 /// How long a source may go unchecked before the silent sweep is willing to SAY so. Far longer
 /// than the interval on purpose: at six-hourly checks this is dozens of consecutive failures, so
 /// the line means "this has really stopped working", not "a train went into a tunnel". It matches
@@ -124,10 +129,12 @@ pub(crate) fn read(fs: &dyn FsOps, layout: &Layout) -> ForgeCheck {
 /// Whether a SCHEDULED round may dial now.
 ///
 /// A due time absurdly far ahead is treated as due rather than obeyed: a backwards clock step (or
-/// a corrupted value) must not suspend auto-updates until wall time catches up. Anything beyond
-/// one whole interval-plus-spread from now could not have been written by this code at this clock.
+/// a corrupted value) must not suspend auto-updates until wall time catches up. The ceiling admits
+/// everything [`next_due`] can legitimately produce — the interval, its spread, AND a host's own
+/// backoff — because a due time this code really wrote must never be mistaken for corruption and
+/// dialed through.
 pub(crate) fn due(doc: &ForgeCheck, now_ms: i64) -> bool {
-    let ceiling = now_ms.saturating_add(CHECK_INTERVAL_MS + CHECK_JITTER_MS);
+    let ceiling = now_ms.saturating_add(CHECK_INTERVAL_MS + CHECK_JITTER_MS + MAX_BACKOFF_MS);
     now_ms >= doc.next_check_at_ms || doc.next_check_at_ms > ceiling
 }
 
@@ -258,6 +265,17 @@ mod tests {
             ..ForgeCheck::default()
         };
         assert!(due(&doc, now));
+
+        // But a due time this code really wrote is OBEYED, however far out — a host that asked
+        // for a day must get a day, not be dialed through as if the file were corrupt.
+        let honored = ForgeCheck {
+            next_check_at_ms: next_due(now, CHECK_JITTER_MS, Some(now + MAX_BACKOFF_MS)),
+            ..ForgeCheck::default()
+        };
+        assert!(
+            !due(&honored, now),
+            "a host's longest legitimate backoff holds"
+        );
     }
 
     #[test]

@@ -774,6 +774,31 @@ mod tests {
     }
 
     #[test]
+    fn a_busy_repos_advertisement_answers_from_its_first_few_hundred_bytes() {
+        // The reason the probe reads a bounded PREFIX at all: a busy repository advertises
+        // megabytes of refs, and downloading them would undo the saving the probe exists for.
+        // HEAD is advertised first, so a prefix cut far short of the end still carries the answer
+        // — and the records straddling the cut must not turn that answer into a failure.
+        let mut adv = pkt(&[
+            b"# service=git-upload-pack\n",
+            b"",
+            b"c9ff496891c278ad660bc0ab85c1f0b72059464a HEAD\0multi_ack symref=HEAD:refs/heads/master\n",
+        ]);
+        for i in 0..20_000u32 {
+            let line = format!("{:040x} refs/pull/{i}/head\n", i);
+            adv.extend_from_slice(&pkt(&[line.as_bytes()]));
+        }
+        assert!(adv.len() > 1_000_000, "a genuinely large advertisement");
+        for cut in [600, 16 * 1024, 64 * 1024] {
+            assert_eq!(
+                parse_head_advertisement(&adv[..cut]).as_deref(),
+                Some("c9ff496891c278ad660bc0ab85c1f0b72059464a"),
+                "a {cut}-byte prefix still answers"
+            );
+        }
+    }
+
+    #[test]
     fn a_truncated_advertisement_answers_nothing_rather_than_guessing() {
         // The caller reads a bounded PREFIX (a busy repo advertises megabytes of refs), so a
         // record running past the end is the ordinary case at the cut — and must never be read as
