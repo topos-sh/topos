@@ -27,6 +27,16 @@ what only a cross-crate composed run can prove.
   governance-transferring genesis publish → project-manifest delivery → silent fast-forward →
   protect/review → the person-scope feed lane and its `-g` arms → the owner-side session end),
   plus the deny/logout arms.
+- **`tests/mcp_e2e.rs`** — the `kind = "mcp"` bundle loop: `add --mcp` adopting a local
+  `server.json` folder, the publish that makes it a catalog bundle (witnessed on the row, the
+  delivery lane, and the workspace's registry-shape read API), a second member's sweep landing the
+  entry in ALL SIX MCP-capable agents' configs in their exact dialects, the applied report's
+  per-agent states reaching the workspace, removal converging every surface back to the person's
+  own bytes, a hand-edited entry left DRIFTED and disclosed, project scope reaching the four
+  project surfaces alone, and the two kinds coexisting under one skills root. The ONE suite that
+  drives the REAL CLI BINARY as a subprocess over a fake `$HOME` — harness detection and the config
+  surfaces resolve against the environment, so only a real process proves them (the fixture rig
+  still owns the browser login; both halves share one `~/.topos`).
 - **`tests/hardening_e2e.rs`** — pinned references delivering exactly their version and holding
   across sweeps; `publish --to` refusing nonexistent channels without minting one.
 - **`tests/uniform_e2e.rs`** — the NON-ORACLE discipline over real HTTP: byte-identical uniform
@@ -37,7 +47,9 @@ what only a cross-crate composed run can prove.
 
 Requires a Postgres via `DATABASE_URL` (each test provisions its own database; provisioned DBs
 are left behind — point at a disposable server), `node` on PATH, and the web app built once
-(`cd web && bun install && bun run build`). Keep `SQLX_OFFLINE=true` for compilation.
+(`cd web && bun install && bun run build`). The MCP suite additionally drives the client binary —
+`cargo build -p topos` puts it beside the test binaries; the suite builds it on demand when it is
+missing. Keep `SQLX_OFFLINE=true` for compilation.
 
 ```sh
 export DATABASE_URL="postgres://postgres:postgres@localhost:5432/postgres"

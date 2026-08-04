@@ -807,6 +807,32 @@ impl Stack {
         self.device_request("GET", Some(credential), path, None)
     }
 
+    /// GET an ORIGIN-ROOTED path under a session bearer — for the lanes the app serves at the
+    /// workspace FACE rather than under `/api` (the MCP registry-shape read API,
+    /// `/registry/v0.1/servers`, which a registry client dials by its own path grammar).
+    pub(crate) fn origin_get_json(&self, credential: &str, path: &str) -> HttpAnswer {
+        let agent = blocking_agent();
+        let mut resp = agent
+            .get(format!("{}{path}", self.origin))
+            .force_send_body()
+            .header("Accept", "application/json")
+            .header("Authorization", format!("Bearer {credential}"))
+            .send(&[][..])
+            .expect("origin-rooted GET over loopback");
+        let status = resp.status().as_u16();
+        let mut body = String::new();
+        let _ = resp
+            .body_mut()
+            .as_reader()
+            .take(4 * 1024 * 1024)
+            .read_to_string(&mut body);
+        HttpAnswer {
+            status,
+            body,
+            location: None,
+        }
+    }
+
     /// PUT a bodyless device-lane row op.
     pub(crate) fn device_put(&self, credential: &str, path: &str) -> HttpAnswer {
         self.device_request("PUT", Some(credential), path, None)
