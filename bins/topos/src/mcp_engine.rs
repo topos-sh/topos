@@ -686,6 +686,10 @@ fn journaled_write(
     Ok(())
 }
 
+/// One surface's converge, with the stale-row disclosure the ledger's file-scoped priors imply:
+/// a row recorded at ANOTHER file (a surface path moved — e.g. an env-override change) is not a
+/// prior here and is never dropped against this surface — it is warned about, naming the old
+/// file, and left in place.
 #[allow(clippy::too_many_arguments)]
 fn converge_file(
     io: &ScopeIo<'_>,
@@ -697,7 +701,37 @@ fn converge_file(
     preserved: &dyn Fn(&McpLedger, &str) -> bool,
     provenance: &BTreeMap<String, (String, String)>,
 ) -> SurfaceOutcome {
-    let mut prior = ledger.prior_for(h.slug);
+    let stale: Vec<String> = ledger
+        .stale_rows(h.slug, path)
+        .into_iter()
+        .map(|(key, old)| {
+            format!(
+                "MCP_ENTRY_STALE_PATH {}: {key} is recorded in {old}, but this scope's surface \
+                 is {} — the old entry is left in place",
+                h.slug,
+                path.display()
+            )
+        })
+        .collect();
+    let mut out = converge_surface(io, ledger, h, path, dialect, desired, preserved, provenance);
+    if !stale.is_empty() {
+        out.warnings.splice(0..0, stale);
+    }
+    out
+}
+
+#[allow(clippy::too_many_arguments)]
+fn converge_surface(
+    io: &ScopeIo<'_>,
+    ledger: &mut McpLedger,
+    h: &McpHarness,
+    path: &Path,
+    dialect: McpDialect,
+    desired: &[McpEntry],
+    preserved: &dyn Fn(&McpLedger, &str) -> bool,
+    provenance: &BTreeMap<String, (String, String)>,
+) -> SurfaceOutcome {
+    let mut prior = ledger.prior_for(h.slug, path);
     let kept: BTreeSet<String> = prior
         .keys()
         .filter(|k| preserved(ledger, k))
@@ -943,6 +977,12 @@ fn write_intents(
         if kept.contains(key) || next.contains_key(key) {
             continue;
         }
+        // A row recorded at ANOTHER file is the disclosed stale class — never removal-intended
+        // against this surface (recovery would observe THIS file, read the key as absent, and
+        // drop custody of a live entry elsewhere).
+        if Path::new(&entry.file) != path {
+            continue;
+        }
         intents.insert(
             ledger_key.clone(),
             PendingIntent {
@@ -975,16 +1015,18 @@ fn sync_ledger_entries(
         .map(|(k, f)| (k.as_str(), f.as_str()))
         .collect();
     let mut dirty = false;
-    // Drop standing entries the surface no longer carries (not the preserved ones).
+    // Drop standing entries the surface no longer carries (not the preserved ones, and never a
+    // row recorded at ANOTHER file — that is the disclosed stale class, left in place).
     let prefix = format!("{slug}/");
     let stale: Vec<String> = ledger
         .entries
-        .keys()
-        .filter(|k| {
+        .iter()
+        .filter(|(k, e)| {
             k.strip_prefix(&prefix)
                 .is_some_and(|key| !next.contains_key(key) && !kept.contains(key))
+                && Path::new(&e.file) == path
         })
-        .cloned()
+        .map(|(k, _)| k.clone())
         .collect();
     for k in stale {
         ledger.entries.remove(&k);

@@ -1011,6 +1011,73 @@ fn a_sibling_key_in_the_plugin_mcp_json_backs_the_surface_off_and_survives() {
     assert!(kept.contains("\"theme\""), "{kept}");
 }
 
+/// A surface path move (an env-override change) leaves the ledger row recorded at the OLD file:
+/// the converge must not silently drop or re-point it — the row is a disclosed stale class,
+/// warned with the old path, the row and the old file's bytes both left in place.
+#[test]
+fn a_moved_surface_path_discloses_the_stale_row_and_never_drops_it() {
+    let home = Scratch::new("moved");
+    let fs = RealFs;
+    let layout = Layout::new(&home.0.join(".topos"));
+    let io = person_io(&fs, &layout, &home.0);
+    let mut d = demand(
+        "s_a",
+        "alpha",
+        Some("eng"),
+        &server_json("https://mcp.example/a"),
+    );
+    d.harness_filter = vec!["cursor".into()];
+    mcp_engine::converge(
+        &io,
+        std::slice::from_ref(&d),
+        SYNTHETIC,
+        &all_slugs(),
+        &no_hold(),
+        true,
+    );
+    let old_file = home.0.join(".cursor/mcp.json");
+    let placed = std::fs::read_to_string(&old_file).unwrap();
+
+    // The surface resolves ELSEWHERE now (the descriptor's suffix moved).
+    static MOVED: &[McpHarness] = &[McpHarness {
+        slug: "cursor",
+        display_name: "Cursor",
+        user_surface: Some(McpSurface {
+            root: SurfaceRoot::Home,
+            suffix: ".cursor-next/mcp.json",
+            dialect: McpDialect::CursorJson,
+        }),
+        project_surface: None,
+        oauth_capable: true,
+        reload_note: "restart cursor",
+    }];
+    // An undemanded removal run over the moved surface: the row is NOT dropped, the old file is
+    // NOT touched, and the stale class is disclosed naming the old path.
+    let out = mcp_engine::converge(&io, &[], MOVED, &all_slugs(), &no_hold(), true);
+    assert!(
+        out.warnings
+            .iter()
+            .any(|w| w.contains("MCP_ENTRY_STALE_PATH") && w.contains(".cursor/mcp.json")),
+        "{:?}",
+        out.warnings
+    );
+    assert_eq!(
+        std::fs::read_to_string(&old_file).unwrap(),
+        placed,
+        "the old file's bytes stay untouched"
+    );
+    let ledger = mcp_ledger::read(&fs, &layout).unwrap();
+    assert!(
+        ledger.has_entries_for("s_a"),
+        "the stale row is kept, never silently dropped: {ledger:?}"
+    );
+    assert_eq!(
+        Path::new(&ledger.entries[&mcp_ledger::placement_key("cursor", "topos-eng-alpha")].file),
+        old_file,
+        "the row still names the old file"
+    );
+}
+
 /// A hand-deleted plugin dir must not leave phantom ledger entries: the next removal-allowed
 /// converge stale-drops the rows the surface no longer holds, so the key retires and the bundle
 /// can actually leave.

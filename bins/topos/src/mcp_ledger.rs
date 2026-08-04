@@ -27,6 +27,7 @@
 //! closed, and an empty re-seed would turn every managed entry foreign.
 
 use std::collections::BTreeMap;
+use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 use topos_types::PERSISTED_SCHEMA_VERSION;
@@ -91,14 +92,35 @@ pub(crate) struct PendingIntent {
 }
 
 impl McpLedger {
-    /// The `entries` under one harness slug, as the driver's `entry_key → fingerprint` prior map.
-    pub(crate) fn prior_for(&self, slug: &str) -> BTreeMap<String, String> {
+    /// The `entries` under one harness slug RECORDED IN `file`, as the driver's
+    /// `entry_key → fingerprint` prior map. Rows recorded at a different file are NOT priors for
+    /// this surface — a fingerprint proves what topos wrote into THAT file, and treating it as a
+    /// prior for another would silently re-point custody after a surface path moves (an env
+    /// override change), orphaning the live entry at the old path. [`Self::stale_rows`] names
+    /// those rows for disclosure instead.
+    pub(crate) fn prior_for(&self, slug: &str, file: &Path) -> BTreeMap<String, String> {
         let prefix = format!("{slug}/");
         self.entries
             .iter()
+            .filter(|(_, e)| Path::new(&e.file) == file)
             .filter_map(|(k, e)| {
                 k.strip_prefix(&prefix)
                     .map(|key| (key.to_owned(), e.fingerprint.clone()))
+            })
+            .collect()
+    }
+
+    /// The `(entry_key, recorded file)` rows under `slug` whose recorded file is NOT `file` —
+    /// the disclosed stale class a surface-path move leaves behind. The caller warns with the
+    /// old path and leaves the rows (and the old files) in place.
+    pub(crate) fn stale_rows(&self, slug: &str, file: &Path) -> Vec<(String, String)> {
+        let prefix = format!("{slug}/");
+        self.entries
+            .iter()
+            .filter(|(_, e)| Path::new(&e.file) != file)
+            .filter_map(|(k, e)| {
+                k.strip_prefix(&prefix)
+                    .map(|key| (key.to_owned(), e.file.clone()))
             })
             .collect()
     }
@@ -196,10 +218,13 @@ impl McpLedger {
             let Some(dialect) = dialect_of(slug) else {
                 continue;
             };
-            let bytes = fs
-                .read_opt(std::path::Path::new(&intent.file))
-                .ok()
-                .flatten();
+            // A read ERROR is not absence: whether the write landed is unknowable, so the
+            // intent drops and the STANDING entry stays authoritative (fail toward keeping —
+            // treating an IO error as an empty file would let a removal intent count as landed
+            // and orphan a live entry the config may still hold).
+            let Ok(bytes) = fs.read_opt(Path::new(&intent.file)) else {
+                continue;
+            };
             let observed = topos_harness::mcp::observe(dialect, bytes.as_deref());
             let landed = if intent.fingerprint.is_empty() {
                 // A removal intent: landed when the key is gone (an unparseable file answers
@@ -487,6 +512,105 @@ mod tests {
         assert!(
             !l.entries
                 .contains_key(&placement_key("cursor", "topos-ws-gone"))
+        );
+    }
+
+    #[test]
+    fn recovery_keeps_the_standing_entry_when_the_intended_file_is_unreadable() {
+        use std::os::unix::fs::PermissionsExt;
+        let fs = RealFs;
+        let dir = std::env::temp_dir().join(format!(
+            "topos-mcpl-unread-{}-{}",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("t").len()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let protected = dir.join("protected");
+        std::fs::create_dir_all(&protected).unwrap();
+        let file = protected.join("mcp.json");
+        std::fs::write(&file, b"{}").unwrap();
+        std::fs::set_permissions(&protected, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let restore = || {
+            let _ = std::fs::set_permissions(&protected, std::fs::Permissions::from_mode(0o755));
+            let _ = std::fs::remove_dir_all(&dir);
+        };
+        if fs.read_opt(&file).is_ok() {
+            // Privileges that ignore file modes (root): the read fault cannot be staged here.
+            restore();
+            return;
+        }
+
+        let lk = placement_key("cursor", "topos-ws-a");
+        let mut l = McpLedger::default();
+        l.entries.insert(
+            lk.clone(),
+            LedgerEntry {
+                bundle_id: "s_1".into(),
+                version_id: "v1".into(),
+                file: file.display().to_string(),
+                fingerprint: "fp-standing".into(),
+                owns_file: false,
+            },
+        );
+        // A REMOVAL intent against a file whose read ERRORS: whether the write landed is
+        // unknowable, so the intent must drop and the standing entry must stay — an IO error
+        // read as "file absent" would count the removal as landed and orphan a live entry.
+        l.pending.insert(
+            lk.clone(),
+            PendingIntent {
+                bundle_id: "s_1".into(),
+                version_id: String::new(),
+                file: file.display().to_string(),
+                fingerprint: String::new(),
+                owns_file: false,
+            },
+        );
+        let dialect_of = |_: &str| Some(topos_harness::mcp::McpDialect::CursorJson);
+        let recovered = l.recover_pending(&fs, &dialect_of);
+        restore();
+        assert!(recovered);
+        assert!(l.pending.is_empty(), "the intent drops");
+        assert_eq!(
+            l.entries[&lk].fingerprint, "fp-standing",
+            "the standing entry stays authoritative on a read error"
+        );
+    }
+
+    #[test]
+    fn priors_are_scoped_to_the_recorded_file_and_stale_rows_are_named() {
+        let mut l = McpLedger::default();
+        l.keys.insert("s_1".into(), "topos-ws-a".into());
+        l.entries.insert(
+            placement_key("cursor", "topos-ws-a"),
+            LedgerEntry {
+                bundle_id: "s_1".into(),
+                version_id: "v1".into(),
+                file: "/old/home/.cursor/mcp.json".into(),
+                fingerprint: "fp-old".into(),
+                owns_file: false,
+            },
+        );
+        let here = Path::new("/new/home/.cursor/mcp.json");
+        assert!(
+            l.prior_for("cursor", here).is_empty(),
+            "a row recorded at another file is no prior for this surface"
+        );
+        assert_eq!(
+            l.prior_for("cursor", Path::new("/old/home/.cursor/mcp.json"))
+                .get("topos-ws-a")
+                .map(String::as_str),
+            Some("fp-old")
+        );
+        assert_eq!(
+            l.stale_rows("cursor", here),
+            vec![(
+                "topos-ws-a".to_owned(),
+                "/old/home/.cursor/mcp.json".to_owned()
+            )]
+        );
+        assert!(
+            l.stale_rows("cursor", Path::new("/old/home/.cursor/mcp.json"))
+                .is_empty()
         );
     }
 }
