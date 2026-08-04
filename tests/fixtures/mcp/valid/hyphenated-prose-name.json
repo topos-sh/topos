@@ -1,0 +1,11 @@
+{
+  "name": "io.github.acme/task-management-and-scheduling",
+  "description": "Task-management-and-scheduling reads for the whole team.",
+  "version": "1.1.0",
+  "remotes": [
+    {
+      "type": "streamable-http",
+      "url": "https://tasks.acme.example/mcp"
+    }
+  ]
+}

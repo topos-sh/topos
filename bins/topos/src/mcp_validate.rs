@@ -21,8 +21,9 @@
 //!
 //! ## Why matcher functions instead of a regex engine
 //!
-//! Every shape in the list is `<literal prefix><character class>{min,…}`. Existence of a match is
-//! therefore decidable by "find the prefix, count the run" — no backtracking, no engine, and no
+//! Every shape in the list is `<literal prefix><character class>{min,…}`, optionally behind a
+//! `(^|[^A-Za-z0-9])` left boundary. Existence of a match is therefore decidable by "find the
+//! prefix, look at what precedes it, count the run" — no backtracking, no engine, and no
 //! `regex` crate in the shipped binary (which would add four crates to a client whose whole point
 //! is being a small static download). The engine is a DEV-dependency instead, used by the
 //! equivalence test below: it compiles the JSON's own regex sources and asserts, over a cross
@@ -80,7 +81,8 @@ pub(crate) enum McpRefusalCode {
     NoStreamableRemote,
     /// The endpoint is plain http.
     InsecureUrl,
-    /// The endpoint carries a `{placeholder}`, so it is not an address.
+    /// The endpoint — or a header value — carries a `{placeholder}`, so it is not a literal every
+    /// machine can use.
     UrlTemplate,
     /// The document carries (or reserves a slot for) a credential.
     SecretRefused,
@@ -226,6 +228,24 @@ fn literal_run(text: &str, lit: &str, class: fn(char) -> bool, min: usize) -> bo
     false
 }
 
+/// [`literal_run`] with a LEFT BOUNDARY: the literal must start the text or follow a character
+/// outside `[A-Za-z0-9]` — the `(^|[^A-Za-z0-9])` prefix a shape wears when its literal is short
+/// enough to fall inside an ordinary word. Without it, `sk-` matches in the middle of
+/// `task-management-and-scheduling` and a server named for what it does reads as a credential.
+fn boundary_literal_run(text: &str, lit: &str, class: fn(char) -> bool, min: usize) -> bool {
+    debug_assert!(lit.is_ascii(), "literal prefixes are ASCII by construction");
+    let mut from = 0usize;
+    while let Some(off) = text[from..].find(lit) {
+        let hit = from + off;
+        let boundary = text[..hit].chars().next_back().is_none_or(|c| !alnum(c));
+        if boundary && run_len(&text[hit + lit.len()..], class) >= min {
+            return true;
+        }
+        from = hit + 1;
+    }
+    false
+}
+
 /// `gh[pousr]_[A-Za-z0-9]{36,255}` — the bracket is five literals.
 fn github_token(text: &str) -> bool {
     ["ghp_", "gho_", "ghu_", "ghs_", "ghr_"]
@@ -279,8 +299,8 @@ const SECRET_PATTERNS: &[SecretPattern] = &[
     },
     SecretPattern {
         name: "openai-style-key",
-        regex: r"sk-[A-Za-z0-9_-]{20,}",
-        is_match: |t| literal_run(t, "sk-", alnum_us_dash, 20),
+        regex: r"(^|[^A-Za-z0-9])sk-[A-Za-z0-9_-]{20,}",
+        is_match: |t| boundary_literal_run(t, "sk-", alnum_us_dash, 20),
     },
     SecretPattern {
         name: "stripe-live-key",
@@ -447,6 +467,137 @@ fn has_entries(v: Option<&Value>) -> bool {
     v.and_then(Value::as_object).is_some_and(|m| !m.is_empty())
 }
 
+/// A `variables` block DECLARED at all — any non-null value, an empty `{}` included. A header
+/// wearing one is a per-machine fill-in whether or not the slots are listed, and the placement
+/// engine refuses exactly this shape when it renders a config entry: the gate refuses it here so
+/// a bundle can never be publishable and permanently unplaceable. (The remote-level rule above
+/// stays the narrower `has_entries` — nothing downstream re-checks it.)
+fn declares_variables(v: Option<&Value>) -> bool {
+    v.is_some_and(|v| !v.is_null())
+}
+
+/// The hygiene and credential rules ONE `remotes[]` entry answers to, whichever entry it is:
+/// the address is a plain https URL with no template, no userinfo and a host that parses; the
+/// entry reserves no per-installation fill-in; and every header carries a literal, credential-free
+/// value. Returns that entry's headers, so the placed remote's survive into the summary.
+///
+/// # Errors
+/// One [`McpRefusal`]; the check order is the web tier's, exactly.
+fn check_remote(remote: &Value) -> Result<Vec<McpHeader>, McpRefusal> {
+    // An entry with no string `url` names no address — there is nothing to judge but its headers.
+    if let Some(url) = remote.get("url").and_then(Value::as_str) {
+        // The template check comes before the URL parse: `https://{tenant}.example/mcp` PARSES,
+        // and would otherwise pass as an https address whose host is a literal brace word.
+        if url.contains('{') || url.contains('}') {
+            return refuse(
+                McpRefusalCode::UrlTemplate,
+                "the endpoint carries a {placeholder} — it is a template, not an address every \
+                 machine can use",
+            );
+        }
+        match parse_endpoint_url(url) {
+            EndpointUrl::Invalid => {
+                return refuse(McpRefusalCode::Invalid, "the endpoint is not a URL");
+            }
+            // userinfo in the address IS a credential — refused before the scheme is even judged,
+            // so an http URL carrying one still names the real problem.
+            EndpointUrl::Userinfo => {
+                return refuse(
+                    McpRefusalCode::SecretRefused,
+                    "the endpoint URL carries credentials (user:password@) — a shared bundle \
+                     never holds one",
+                );
+            }
+            EndpointUrl::Scheme(scheme) if scheme == "https" => {}
+            EndpointUrl::Scheme(_) => {
+                return refuse(McpRefusalCode::InsecureUrl, "the endpoint must be https");
+            }
+        }
+    }
+    // A remote-level `variables` block only exists to fill a template in. There is no template
+    // left by now, so it is a fill-in slot with nothing to fill — and the thing it would fill is
+    // exactly what this gate exists to keep out.
+    if has_entries(remote.get("variables")) {
+        return refuse(
+            McpRefusalCode::SecretRefused,
+            "the endpoint declares per-installation variables — a shared bundle carries the same \
+             bytes everywhere",
+        );
+    }
+
+    let mut headers = Vec::new();
+    if let Some(list) = remote.get("headers").and_then(Value::as_array) {
+        for entry in list {
+            let hname = entry
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            if hname.is_empty() {
+                return refuse(McpRefusalCode::Invalid, "every header needs a name");
+            }
+            // A credential-bearing header NAME refuses whatever the value or the flags say —
+            // before isSecret, before the value shape, independent of entropy.
+            if CREDENTIAL_HEADER_NAMES.contains(&hname.to_ascii_lowercase().as_str()) {
+                return refuse(
+                    McpRefusalCode::SecretRefused,
+                    format!(
+                        "the header {hname} carries a credential by definition — a shared bundle \
+                         never holds one"
+                    ),
+                );
+            }
+            if entry.get("isSecret").and_then(Value::as_bool) == Some(true) {
+                return refuse(
+                    McpRefusalCode::SecretRefused,
+                    format!(
+                        "the header {hname} is declared secret — a shared bundle never carries a \
+                         credential"
+                    ),
+                );
+            }
+            if declares_variables(entry.get("variables")) {
+                return refuse(
+                    McpRefusalCode::SecretRefused,
+                    format!("the header {hname} is assembled from per-installation variables"),
+                );
+            }
+            // A header with no literal value is a slot somebody fills in on each machine — the
+            // same thing `isSecret` names out loud, whether or not `isRequired` says so.
+            let value = entry
+                .get("value")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            if value.is_empty() {
+                return refuse(
+                    McpRefusalCode::SecretRefused,
+                    format!(
+                        "the header {hname} has no value — it is a slot for a per-machine \
+                         credential"
+                    ),
+                );
+            }
+            // A brace pair in the value is the header's own template: something fills it in per
+            // machine, which is the one thing a shared bundle cannot carry. The placement engine
+            // refuses this shape too — the gate refuses it first, so the refusal reaches the
+            // author instead of every member's sweep.
+            if value.contains('{') && value.contains('}') {
+                return refuse(
+                    McpRefusalCode::UrlTemplate,
+                    format!(
+                        "the header {hname} carries a {{placeholder}} — it is a template, not a \
+                         value every machine can send"
+                    ),
+                );
+            }
+            headers.push(McpHeader {
+                name: hname.to_owned(),
+                value: value.to_owned(),
+            });
+        }
+    }
+    Ok(headers)
+}
+
 /// Validate one server document. `raw` is the bytes as fetched or read from disk — the scan reads
 /// THEM, not a re-serialization, so nothing a caller strips can hide a credential from it.
 ///
@@ -534,124 +685,40 @@ pub(crate) fn validate_server_json(raw: &[u8]) -> Result<McpSummary, McpRefusal>
         );
     }
 
-    // FIRST streamable-http wins: a document may offer several transports, and the ordering is the
-    // publisher's own preference.
-    let remote = root
+    let remotes: &[Value] = root
         .get("remotes")
         .and_then(Value::as_array)
-        .and_then(|list| {
-            list.iter().find(|e| {
-                e.get("type").and_then(Value::as_str) == Some(STREAMABLE_HTTP)
-                    && e.get("url").and_then(Value::as_str).is_some()
-            })
-        });
-    let Some(remote) = remote else {
+        .map_or(&[], Vec::as_slice);
+    // FIRST streamable-http wins: a document may offer several transports, and the ordering is the
+    // publisher's own preference. Which one is PLACED is decided here; which ones are JUDGED is
+    // every one of them, below.
+    let placed = remotes.iter().position(|e| {
+        e.get("type").and_then(Value::as_str) == Some(STREAMABLE_HTTP)
+            && e.get("url").and_then(Value::as_str).is_some()
+    });
+    let Some(placed) = placed else {
         return refuse(
             McpRefusalCode::NoStreamableRemote,
             "no streamable-http remote — Topos places servers an agent reaches over that transport",
         );
     };
-    let url = remote
+
+    // EVERY remote runs the hygiene and credential rules, in document order — not just the one
+    // that gets placed. A sibling entry (an `sse` fallback, a second endpoint) travels in the same
+    // bytes to the same machines, so a credential in its address or its headers is shared exactly
+    // as widely as one in the placed remote's.
+    let mut headers = Vec::new();
+    for (i, entry) in remotes.iter().enumerate() {
+        let found = check_remote(entry)?;
+        if i == placed {
+            headers = found;
+        }
+    }
+    let url = remotes[placed]
         .get("url")
         .and_then(Value::as_str)
         .unwrap_or_default()
         .to_owned();
-
-    // The template check comes before the URL parse: `https://{tenant}.example/mcp` PARSES, and
-    // would otherwise pass as an https address whose host is a literal brace word.
-    if url.contains('{') || url.contains('}') {
-        return refuse(
-            McpRefusalCode::UrlTemplate,
-            "the endpoint carries a {placeholder} — it is a template, not an address every \
-             machine can use",
-        );
-    }
-    match parse_endpoint_url(&url) {
-        EndpointUrl::Invalid => {
-            return refuse(McpRefusalCode::Invalid, "the endpoint is not a URL");
-        }
-        // userinfo in the address IS a credential — refused before the scheme is even judged, so
-        // an http URL carrying one still names the real problem.
-        EndpointUrl::Userinfo => {
-            return refuse(
-                McpRefusalCode::SecretRefused,
-                "the endpoint URL carries credentials (user:password@) — a shared bundle never \
-                 holds one",
-            );
-        }
-        EndpointUrl::Scheme(scheme) if scheme == "https" => {}
-        EndpointUrl::Scheme(_) => {
-            return refuse(McpRefusalCode::InsecureUrl, "the endpoint must be https");
-        }
-    }
-    // A remote-level `variables` block only exists to fill a template in. There is no template
-    // left by now, so it is a fill-in slot with nothing to fill — and the thing it would fill is
-    // exactly what this gate exists to keep out.
-    if has_entries(remote.get("variables")) {
-        return refuse(
-            McpRefusalCode::SecretRefused,
-            "the endpoint declares per-installation variables — a shared bundle carries the same \
-             bytes everywhere",
-        );
-    }
-
-    let mut headers = Vec::new();
-    if let Some(list) = remote.get("headers").and_then(Value::as_array) {
-        for entry in list {
-            let hname = entry
-                .get("name")
-                .and_then(Value::as_str)
-                .unwrap_or_default();
-            if hname.is_empty() {
-                return refuse(McpRefusalCode::Invalid, "every header needs a name");
-            }
-            // A credential-bearing header NAME refuses whatever the value or the flags say —
-            // before isSecret, before the value shape, independent of entropy.
-            if CREDENTIAL_HEADER_NAMES.contains(&hname.to_ascii_lowercase().as_str()) {
-                return refuse(
-                    McpRefusalCode::SecretRefused,
-                    format!(
-                        "the header {hname} carries a credential by definition — a shared bundle \
-                         never holds one"
-                    ),
-                );
-            }
-            if entry.get("isSecret").and_then(Value::as_bool) == Some(true) {
-                return refuse(
-                    McpRefusalCode::SecretRefused,
-                    format!(
-                        "the header {hname} is declared secret — a shared bundle never carries a \
-                         credential"
-                    ),
-                );
-            }
-            if has_entries(entry.get("variables")) {
-                return refuse(
-                    McpRefusalCode::SecretRefused,
-                    format!("the header {hname} is assembled from per-installation variables"),
-                );
-            }
-            // A header with no literal value is a slot somebody fills in on each machine — the
-            // same thing `isSecret` names out loud, whether or not `isRequired` says so.
-            let value = entry
-                .get("value")
-                .and_then(Value::as_str)
-                .unwrap_or_default();
-            if value.is_empty() {
-                return refuse(
-                    McpRefusalCode::SecretRefused,
-                    format!(
-                        "the header {hname} has no value — it is a slot for a per-machine \
-                         credential"
-                    ),
-                );
-            }
-            headers.push(McpHeader {
-                name: hname.to_owned(),
-                value: value.to_owned(),
-            });
-        }
-    }
 
     let auth_hint = match root
         .get("_meta")
@@ -1089,7 +1156,7 @@ mod tests {
         }
     }
 
-    /// The four VALID vectors are not just accepted — the summary they yield is the one the
+    /// The VALID vectors are not just accepted — the summary they yield is the one the
     /// receipts print: the FIRST streamable-http remote, its literal headers, the auth hint only
     /// when the document actually declared one.
     #[test]
@@ -1124,9 +1191,155 @@ mod tests {
         let oauth = validate_server_json(&read("remote-oauth-meta.json")).expect("ok");
         assert_eq!(oauth.auth_hint, Some(McpAuthHint::Oauth));
 
-        // Two remotes offered: the first streamable-http one wins, the sse sibling is ignored.
+        // Two remotes offered: the first streamable-http one is PLACED, and the clean sse sibling
+        // is judged by the same rules without changing what the summary reports.
         let both = validate_server_json(&read("remote-sse-and-streamable.json")).expect("ok");
         assert_eq!(both.url, "https://calendar.acme.example/mcp");
+    }
+
+    /// EVERY `remotes[]` entry answers the hygiene and credential rules — not just the one that
+    /// gets placed. A sibling entry travels in the same bytes to the same machines, so a password
+    /// in its address or a credential in its headers is shared exactly as widely.
+    #[test]
+    fn every_remote_is_judged_not_only_the_one_that_gets_placed() {
+        let doc = |sibling: &str| {
+            format!(
+                r#"{{"name":"io.github.a/b","description":"d","version":"1","remotes":[{sibling},{{"type":"streamable-http","url":"https://clean.example/mcp"}}]}}"#
+            )
+        };
+        let code = |sibling: &str| {
+            validate_server_json(doc(sibling).as_bytes())
+                .map(|_| ())
+                .map_err(|e| e.code)
+        };
+        // A fallback whose address carries a password.
+        assert_eq!(
+            code(r#"{"type":"sse","url":"https://svc:hunter2pw@internal.example/sse"}"#),
+            Err(McpRefusalCode::SecretRefused)
+        );
+        // …one presenting a credential header.
+        assert_eq!(
+            code(
+                r#"{"type":"sse","url":"https://x.example/sse","headers":[{"name":"Authorization","value":"Basic Zm9vOmJhcg=="}]}"#
+            ),
+            Err(McpRefusalCode::SecretRefused)
+        );
+        // …one whose header is a per-machine slot.
+        assert_eq!(
+            code(r#"{"type":"sse","url":"https://x.example/sse","headers":[{"name":"X-Key"}]}"#),
+            Err(McpRefusalCode::SecretRefused)
+        );
+        // …one on the clear.
+        assert_eq!(
+            code(r#"{"type":"sse","url":"http://x.example/sse"}"#),
+            Err(McpRefusalCode::InsecureUrl)
+        );
+        // …one that is still a template.
+        assert_eq!(
+            code(r#"{"type":"sse","url":"https://{tenant}.example/sse"}"#),
+            Err(McpRefusalCode::UrlTemplate)
+        );
+        // …and one whose address is not an address at all.
+        assert_eq!(
+            code(r#"{"type":"sse","url":"not a url"}"#),
+            Err(McpRefusalCode::Invalid)
+        );
+        // A clean sibling passes, as does an entry naming no address — there is nothing to judge
+        // in one, and any `type` stays legal.
+        assert_eq!(
+            code(r#"{"type":"sse","url":"https://x.example/sse"}"#),
+            Ok(())
+        );
+        assert_eq!(code(r#"{"type":"stdio"}"#), Ok(()));
+        // The sibling is judged, never reported: the summary still carries the PLACED remote's
+        // address and its headers alone.
+        let summary = validate_server_json(
+            doc(r#"{"type":"sse","url":"https://x.example/sse","headers":[{"name":"X-Old","value":"1"}]}"#)
+                .as_bytes(),
+        )
+        .expect("ok");
+        assert_eq!(summary.url, "https://clean.example/mcp");
+        assert!(summary.headers.is_empty());
+    }
+
+    /// The two rules the placement engine enforces when it renders a config entry, enforced HERE
+    /// so a bundle can never be publishable and permanently unplaceable: a header `variables`
+    /// block declared at all (an empty `{}` included), and a brace pair in a header VALUE.
+    #[test]
+    fn a_header_that_could_never_be_placed_refuses_at_the_gate() {
+        let doc = |header: &str| {
+            format!(
+                r#"{{"name":"io.github.a/b","description":"d","version":"1","remotes":[{{"type":"streamable-http","url":"https://x.example/mcp","headers":[{header}]}}]}}"#
+            )
+        };
+        let code = |header: &str| {
+            validate_server_json(doc(header).as_bytes())
+                .map(|_| ())
+                .map_err(|e| e.code)
+        };
+        // An empty variables block lists no slot — it is a fill-in all the same.
+        assert_eq!(
+            code(r#"{"name":"X-T","value":"acme","variables":{}}"#),
+            Err(McpRefusalCode::SecretRefused)
+        );
+        assert_eq!(
+            code(r#"{"name":"X-T","value":"acme","variables":{"tenant":{"description":"which"}}}"#),
+            Err(McpRefusalCode::SecretRefused)
+        );
+        // A brace pair in the value is the header's own template.
+        assert_eq!(
+            code(r#"{"name":"X-T","value":"{tenant}"}"#),
+            Err(McpRefusalCode::UrlTemplate)
+        );
+        assert_eq!(
+            code(r#"{"name":"X-T","value":"tenant-{id}-eu"}"#),
+            Err(McpRefusalCode::UrlTemplate)
+        );
+        // A lone brace is not a template — and an explicit null declares nothing.
+        assert_eq!(code(r#"{"name":"X-T","value":"a{b"}"#), Ok(()));
+        assert_eq!(
+            code(r#"{"name":"X-T","value":"acme","variables":null}"#),
+            Ok(())
+        );
+    }
+
+    /// The `sk-` shape wears a LEFT BOUNDARY: a key never starts mid-word, so hyphenated prose
+    /// (`task-management-and-scheduling`) is not a credential — while a real key still is.
+    #[test]
+    fn the_openai_shape_reads_keys_and_not_hyphenated_prose() {
+        assert_eq!(find_secret("task-management-and-scheduling"), None);
+        assert_eq!(
+            find_secret("io.github.acme/task-management-and-scheduling"),
+            None
+        );
+        assert_eq!(
+            find_secret(r#"{"value":"sk-proj-9fJ2mQ8xVb3nT7kLp0WzYcRd5AeHgUiO"}"#),
+            Some("openai-style-key")
+        );
+        // At the very start of the text, and after a separator that is not alphanumeric.
+        assert_eq!(
+            find_secret(&format!("sk-{}", "a".repeat(20))),
+            Some("openai-style-key")
+        );
+        assert_eq!(
+            find_secret(&format!(" sk-{}", "a".repeat(20))),
+            Some("openai-style-key")
+        );
+        // The whole document says the same thing, both ways round.
+        let root = fixtures_root();
+        let prose = validate_server_json(
+            &std::fs::read(root.join("valid/hyphenated-prose-name.json")).expect("a vector"),
+        )
+        .expect("hyphenated prose is not a credential");
+        assert_eq!(prose.name, "io.github.acme/task-management-and-scheduling");
+        let key = validate_server_json(
+            &std::fs::read(root.join("invalid/openai-key-header.json")).expect("a vector"),
+        )
+        .expect_err("a real key refuses");
+        assert_eq!(key.code, McpRefusalCode::SecretRefused);
+        assert!(key.message.contains("openai-style-key"), "{}", key.message);
+        // …and the refusal never echoes the value back.
+        assert!(!key.message.contains("sk-proj"), "{}", key.message);
     }
 
     /// ITEM PAIR (deep nesting, the Rust half): a document nested past serde_json's default

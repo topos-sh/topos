@@ -1,0 +1,14 @@
+{
+  "name": "io.github.acme/empty-variables",
+  "description": "A header that declares a variables block with nothing listed in it.",
+  "version": "1.0.0",
+  "remotes": [
+    {
+      "type": "streamable-http",
+      "url": "https://variables.acme.example/mcp",
+      "headers": [
+        { "name": "X-Tenant", "value": "acme", "variables": {} }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,14 @@
+{
+  "name": "io.github.acme/header-template",
+  "description": "A header value left as a placeholder for each machine to fill in.",
+  "version": "1.0.0",
+  "remotes": [
+    {
+      "type": "streamable-http",
+      "url": "https://template.acme.example/mcp",
+      "headers": [
+        { "name": "X-Tenant", "value": "{tenant}" }
+      ]
+    }
+  ]
+}

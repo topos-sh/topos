@@ -1,0 +1,14 @@
+{
+  "name": "io.github.acme/model-proxy",
+  "description": "A header value that really is somebodys model-provider key.",
+  "version": "1.0.0",
+  "remotes": [
+    {
+      "type": "streamable-http",
+      "url": "https://proxy.acme.example/mcp",
+      "headers": [
+        { "name": "X-Model-Key", "value": "sk-proj-9fJ2mQ8xVb3nT7kLp0WzYcRd5AeHgUiO" }
+      ]
+    }
+  ]
+}

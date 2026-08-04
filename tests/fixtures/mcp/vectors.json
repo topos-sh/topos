@@ -149,5 +149,35 @@
     ],
     "verdict": "MCP_SECRET_REFUSED",
     "note": "Every allowed file's bytes run the credential scan — a token in the README refuses exactly like one in the document."
+  },
+  {
+    "file": "invalid/sibling-remote-userinfo.json",
+    "verdict": "MCP_SECRET_REFUSED",
+    "note": "The placed remote is clean and a sibling carries a password in its address — every remotes[] entry travels in the same bytes, so every one of them is judged."
+  },
+  {
+    "file": "invalid/sibling-remote-credential-header.json",
+    "verdict": "MCP_SECRET_REFUSED",
+    "note": "A credential-bearing header on a remote that is not the one being placed: sharing it is exactly as wide, so the header rules run over every entry too."
+  },
+  {
+    "file": "invalid/header-empty-variables.json",
+    "verdict": "MCP_SECRET_REFUSED",
+    "note": "A header declaring an empty variables block is still a per-machine fill-in — and the placement engine refuses it, so a bundle carrying one would publish and never land."
+  },
+  {
+    "file": "invalid/header-template-value.json",
+    "verdict": "MCP_URL_TEMPLATE",
+    "note": "A brace pair in a header value is the header's own template: somebody fills it in per machine, which is the one thing shared bytes cannot carry."
+  },
+  {
+    "file": "invalid/openai-key-header.json",
+    "verdict": "MCP_SECRET_REFUSED",
+    "note": "A real model-provider key in a header value: the left boundary the sk- shape now wears does not weaken it, because a key never starts mid-word."
+  },
+  {
+    "file": "valid/hyphenated-prose-name.json",
+    "verdict": "ok",
+    "note": "Hyphenated prose is not a credential: a server named task-management-and-scheduling holds sk- mid-word, and the shape's left boundary is what tells the two apart."
   }
 ]

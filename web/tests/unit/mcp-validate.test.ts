@@ -8,6 +8,7 @@ import {
   findSecretDeep,
   MCP_ALLOWED_FILES,
   type McpValidation,
+  STREAMABLE_HTTP,
   suggestedNameFor,
   validateCandidateFiles,
   validateServerJson,
@@ -370,5 +371,144 @@ describe("deep nesting answers a typed refusal, never a crash", () => {
     // …and a token buried in nested containers is still found, keys and values alike.
     const buried = { a: [{ b: { note: `ghp_${"A1b2C3d4E5".repeat(4)}` } }] };
     expect(findSecretDeep(buried)).toBe("github-token");
+  });
+});
+
+/**
+ * EVERY `remotes[]` entry answers the hygiene and credential rules — not just the one that gets
+ * placed. A sibling entry travels in the same bytes to the same machines, so a password in its
+ * address or a credential in its headers is shared exactly as widely.
+ */
+describe("every remote is judged, not only the one that gets placed", () => {
+  const withSibling = (sibling: Record<string, unknown>) =>
+    JSON.stringify({
+      name: "io.github.acme/sibling",
+      description: "A clean endpoint beside a sibling.",
+      version: "1.0.0",
+      remotes: [sibling, { type: STREAMABLE_HTTP, url: "https://clean.acme.example/mcp" }],
+    });
+  const codeOf = (sibling: Record<string, unknown>) => {
+    const result = validateServerJson(withSibling(sibling));
+    return result.ok === true ? "ok" : result.code;
+  };
+
+  it.each([
+    [
+      "an address carrying a password",
+      { type: "sse", url: "https://svc:hunter2pw@internal.example/sse" },
+      "MCP_SECRET_REFUSED",
+    ],
+    [
+      "a credential header",
+      {
+        type: "sse",
+        url: "https://x.example/sse",
+        headers: [{ name: "Authorization", value: "Basic Zm9vOmJhcg==" }],
+      },
+      "MCP_SECRET_REFUSED",
+    ],
+    [
+      "a value-less header slot",
+      { type: "sse", url: "https://x.example/sse", headers: [{ name: "X-Key" }] },
+      "MCP_SECRET_REFUSED",
+    ],
+    ["an endpoint on the clear", { type: "sse", url: "http://x.example/sse" }, "MCP_INSECURE_URL"],
+    [
+      "an endpoint still templated",
+      { type: "sse", url: "https://{tenant}.example/sse" },
+      "MCP_URL_TEMPLATE",
+    ],
+    ["an address that is not one", { type: "sse", url: "not a url" }, "MCP_INVALID"],
+    // Any `type` stays legal, and an entry naming no address has nothing to judge.
+    ["a clean event-stream sibling", { type: "sse", url: "https://x.example/sse" }, "ok"],
+    ["an entry with no address at all", { type: "stdio" }, "ok"],
+  ])("%s refuses %s", (_label, sibling, verdict) => {
+    expect(codeOf(sibling)).toBe(verdict);
+  });
+
+  it("judges the sibling without ever reporting it", () => {
+    const result = validateServerJson(
+      withSibling({
+        type: "sse",
+        url: "https://x.example/sse",
+        headers: [{ name: "X-Old", value: "1" }],
+      }),
+    );
+    expect(result.ok === true && result.summary.url).toBe("https://clean.acme.example/mcp");
+    expect(result.ok === true && result.summary.headers).toEqual([]);
+  });
+});
+
+/**
+ * The two rules the client's placement engine enforces when it renders a config entry, enforced
+ * HERE so a bundle can never be publishable and permanently unplaceable.
+ */
+describe("a header that could never be placed refuses at the gate", () => {
+  const withHeader = (header: Record<string, unknown>) =>
+    JSON.stringify({
+      name: "io.github.acme/headers",
+      description: "One header, judged.",
+      version: "1.0.0",
+      remotes: [
+        {
+          type: STREAMABLE_HTTP,
+          url: "https://headers.acme.example/mcp",
+          headers: [header],
+        },
+      ],
+    });
+  const codeOf = (header: Record<string, unknown>) => {
+    const result = validateServerJson(withHeader(header));
+    return result.ok === true ? "ok" : result.code;
+  };
+
+  it.each([
+    // An empty variables block lists no slot — it is a fill-in all the same.
+    [
+      "an empty variables block",
+      { name: "X-T", value: "acme", variables: {} },
+      "MCP_SECRET_REFUSED",
+    ],
+    [
+      "a listed variables block",
+      { name: "X-T", value: "acme", variables: { tenant: { description: "which" } } },
+      "MCP_SECRET_REFUSED",
+    ],
+    // A brace pair in the value is the header's own template.
+    ["a placeholder value", { name: "X-T", value: "{tenant}" }, "MCP_URL_TEMPLATE"],
+    ["a partly-placeholder value", { name: "X-T", value: "tenant-{id}-eu" }, "MCP_URL_TEMPLATE"],
+    // A lone brace is not a template, and an explicit null declares nothing.
+    ["a lone brace", { name: "X-T", value: "a{b" }, "ok"],
+    ["a null variables block", { name: "X-T", value: "acme", variables: null }, "ok"],
+  ])("%s → %s", (_label, header, verdict) => {
+    expect(codeOf(header)).toBe(verdict);
+  });
+});
+
+/**
+ * The `sk-` shape wears a LEFT BOUNDARY: a key never starts mid-word, so hyphenated prose is not
+ * a credential — while a real key still is.
+ */
+describe("the model-provider key shape reads keys and not hyphenated prose", () => {
+  it("leaves a server named for what it does alone", () => {
+    expect(findSecret("task-management-and-scheduling")).toBeNull();
+    expect(findSecret("io.github.acme/task-management-and-scheduling")).toBeNull();
+    const result = validateServerJson(bytesOf("valid/hyphenated-prose-name.json"));
+    expect(result.ok === true && result.summary.name).toBe(
+      "io.github.acme/task-management-and-scheduling",
+    );
+  });
+
+  it("still names a real key, wherever it sits", () => {
+    expect(findSecret('{"value":"sk-proj-9fJ2mQ8xVb3nT7kLp0WzYcRd5AeHgUiO"}')).toBe(
+      "openai-style-key",
+    );
+    expect(findSecret(`sk-${"a".repeat(20)}`)).toBe("openai-style-key");
+    expect(findSecret(` sk-${"a".repeat(20)}`)).toBe("openai-style-key");
+    const result = validateServerJson(bytesOf("invalid/openai-key-header.json"));
+    expect(result.ok === false && result.code).toBe("MCP_SECRET_REFUSED");
+    expect(result.ok === false && result.message).toContain("openai-style-key");
+    // …and the refusal never echoes the value back.
+    expect(result.ok === false && result.message).not.toContain("sk-proj");
   });
 });

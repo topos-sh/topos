@@ -11,7 +11,7 @@ export interface SecretPattern {
 export const SECRET_PATTERNS: readonly SecretPattern[] = [
   { name: "github-token", regex: "gh[pousr]_[A-Za-z0-9]{36,255}" },
   { name: "github-fine-grained-token", regex: "github_pat_[A-Za-z0-9_]{22,255}" },
-  { name: "openai-style-key", regex: "sk-[A-Za-z0-9_-]{20,}" },
+  { name: "openai-style-key", regex: "(^|[^A-Za-z0-9])sk-[A-Za-z0-9_-]{20,}" },
   { name: "stripe-live-key", regex: "sk_live_[A-Za-z0-9]{16,}" },
   { name: "stripe-test-key", regex: "sk_test_[A-Za-z0-9]{16,}" },
   { name: "slack-token", regex: "xox[bp]-[A-Za-z0-9-]{10,}" },

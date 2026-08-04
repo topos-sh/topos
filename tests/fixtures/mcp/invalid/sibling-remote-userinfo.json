@@ -1,0 +1,15 @@
+{
+  "name": "io.github.acme/sibling-userinfo",
+  "description": "A clean endpoint beside a fallback that carries a password.",
+  "version": "1.0.0",
+  "remotes": [
+    {
+      "type": "sse",
+      "url": "https://svc:hunter2pw@internal.example/sse"
+    },
+    {
+      "type": "streamable-http",
+      "url": "https://sibling.acme.example/mcp"
+    }
+  ]
+}

@@ -15,7 +15,7 @@ import { SECRET_ENTROPY, SECRET_PATTERNS } from "./secret-patterns.generated";
  *  · `MCP_LOCAL_REFUSED`        — a non-empty `packages[]`: the server installs and runs locally
  *  · `MCP_NO_STREAMABLE_REMOTE` — no `streamable-http` remote (sse-only, or no remotes at all)
  *  · `MCP_INSECURE_URL`         — the endpoint is plain http
- *  · `MCP_URL_TEMPLATE`         — the endpoint carries a `{placeholder}`, so it is not an address
+ *  · `MCP_URL_TEMPLATE`         — the endpoint, or a header value, carries a `{placeholder}`
  *  · `MCP_SECRET_REFUSED`       — the document carries (or reserves a slot for) a credential
  *
  * The shape rules mirror the official registry schema (2025-12-11): `name` is exactly one slash
@@ -101,11 +101,16 @@ export interface McpSummary {
   authHint: "oauth" | "none" | null;
 }
 
-export type McpValidation =
-  | { ok: true; summary: McpSummary }
-  | { ok: false; code: McpRefusalCode; message: string };
+/** One refused document: the machine-branchable code plus the sentence a person reads. */
+export interface McpRefusal {
+  ok: false;
+  code: McpRefusalCode;
+  message: string;
+}
 
-function refuse(code: McpRefusalCode, message: string): McpValidation {
+export type McpValidation = { ok: true; summary: McpSummary } | McpRefusal;
+
+function refuse(code: McpRefusalCode, message: string): McpRefusal {
   return { ok: false, code, message };
 }
 
@@ -265,6 +270,115 @@ function hasEntries(value: unknown): boolean {
 }
 
 /**
+ * A `variables` block DECLARED at all — anything but absent or null, an empty `{}` included. A
+ * header wearing one is a per-machine fill-in whether or not the slots are listed, and the
+ * client's placement engine refuses exactly this shape when it renders a config entry: the gate
+ * refuses it here so a bundle can never be publishable and permanently unplaceable. (The
+ * remote-level rule stays the narrower `hasEntries` — nothing downstream re-checks it.)
+ */
+function declaresVariables(value: unknown): boolean {
+  return value !== undefined && value !== null;
+}
+
+/** What one remote's check answers: its headers, or the refusal the whole document takes. */
+type RemoteCheck = { ok: true; headers: McpHeader[] } | McpRefusal;
+
+/**
+ * The hygiene and credential rules ONE `remotes[]` entry answers to, whichever entry it is: the
+ * address is a plain https URL with no template, no userinfo and a host that parses; the entry
+ * reserves no per-installation fill-in; and every header carries a literal, credential-free value.
+ * Returns that entry's headers, so the placed remote's survive into the summary.
+ */
+function checkRemote(remote: Record<string, unknown>): RemoteCheck {
+  // An entry with no string `url` names no address — there is nothing to judge but its headers.
+  if (typeof remote.url === "string") {
+    const url = remote.url;
+    // The template check comes before the URL parse: `https://{tenant}.example/mcp` PARSES, and
+    // would otherwise pass as an https address whose host is a literal brace word.
+    if (/[{}]/.test(url)) {
+      return refuse(
+        "MCP_URL_TEMPLATE",
+        "the endpoint carries a {placeholder} — it is a template, not an address every machine can use",
+      );
+    }
+    let parsedUrl: URL;
+    try {
+      parsedUrl = new URL(url);
+    } catch {
+      return refuse("MCP_INVALID", "the endpoint is not a URL");
+    }
+    // userinfo in the address IS a credential — refused before the scheme is even judged, so an
+    // http URL carrying one still names the real problem.
+    if (parsedUrl.username !== "" || parsedUrl.password !== "") {
+      return refuse(
+        "MCP_SECRET_REFUSED",
+        "the endpoint URL carries credentials (user:password@) — a shared bundle never holds one",
+      );
+    }
+    if (parsedUrl.protocol !== "https:") {
+      return refuse("MCP_INSECURE_URL", "the endpoint must be https");
+    }
+  }
+  // A remote-level `variables` block only exists to fill a template in. There is no template
+  // left by now, so it is a fill-in slot with nothing to fill — and the thing it would fill is
+  // exactly what this gate exists to keep out.
+  if (hasEntries(remote.variables)) {
+    return refuse(
+      "MCP_SECRET_REFUSED",
+      "the endpoint declares per-installation variables — a shared bundle carries the same bytes everywhere",
+    );
+  }
+
+  const rawHeaders = Array.isArray(remote.headers) ? remote.headers : [];
+  const headers: McpHeader[] = [];
+  for (const entry of rawHeaders) {
+    if (!isRecord(entry) || typeof entry.name !== "string" || entry.name.length === 0) {
+      return refuse("MCP_INVALID", "every header needs a name");
+    }
+    // A credential-bearing header NAME refuses whatever the value or the flags say — before
+    // isSecret, before the value shape, independent of entropy.
+    if (CREDENTIAL_HEADER_NAMES.has(entry.name.toLowerCase())) {
+      return refuse(
+        "MCP_SECRET_REFUSED",
+        `the header ${entry.name} carries a credential by definition — a shared bundle never holds one`,
+      );
+    }
+    if (entry.isSecret === true) {
+      return refuse(
+        "MCP_SECRET_REFUSED",
+        `the header ${entry.name} is declared secret — a shared bundle never carries a credential`,
+      );
+    }
+    if (declaresVariables(entry.variables)) {
+      return refuse(
+        "MCP_SECRET_REFUSED",
+        `the header ${entry.name} is assembled from per-installation variables`,
+      );
+    }
+    // A header with no literal value is a slot somebody fills in on each machine — the same
+    // thing `isSecret` names out loud, whether or not `isRequired` says so.
+    if (typeof entry.value !== "string" || entry.value.length === 0) {
+      return refuse(
+        "MCP_SECRET_REFUSED",
+        `the header ${entry.name} has no value — it is a slot for a per-machine credential`,
+      );
+    }
+    // A brace pair in the value is the header's own template: something fills it in per machine,
+    // which is the one thing a shared bundle cannot carry. The client's placement engine refuses
+    // this shape too — the gate refuses it first, so the refusal reaches the author instead of
+    // every member's sweep.
+    if (entry.value.includes("{") && entry.value.includes("}")) {
+      return refuse(
+        "MCP_URL_TEMPLATE",
+        `the header ${entry.name} carries a {placeholder} — it is a template, not a value every machine can send`,
+      );
+    }
+    headers.push({ name: entry.name, value: entry.value });
+  }
+  return { ok: true, headers };
+}
+
+/**
  * Validate one server document. `raw` is the bytes as fetched or pasted — the scan reads THEM,
  * not a re-serialization, so nothing a caller strips can hide a credential from it.
  */
@@ -347,90 +461,34 @@ export function validateServerJson(raw: Uint8Array | string): McpValidation {
 
   const remotes = Array.isArray(parsed.remotes) ? parsed.remotes : [];
   // FIRST streamable-http wins: a document may offer several transports, and the ordering is
-  // the publisher's own preference.
-  const remote = remotes.find(
+  // the publisher's own preference. Which one is PLACED is decided here; which ones are JUDGED
+  // is every one of them, below.
+  const placed = remotes.findIndex(
     (entry): entry is Record<string, unknown> =>
       isRecord(entry) && entry.type === STREAMABLE_HTTP && typeof entry.url === "string",
   );
-  if (remote === undefined) {
+  if (placed === -1) {
     return refuse(
       "MCP_NO_STREAMABLE_REMOTE",
       "no streamable-http remote — Topos places servers an agent reaches over that transport",
     );
   }
 
-  const url = remote.url as string;
-  // The template check comes before the URL parse: `https://{tenant}.example/mcp` PARSES, and
-  // would otherwise pass as an https address whose host is a literal brace word.
-  if (/[{}]/.test(url)) {
-    return refuse(
-      "MCP_URL_TEMPLATE",
-      "the endpoint carries a {placeholder} — it is a template, not an address every machine can use",
-    );
-  }
-  let parsedUrl: URL;
-  try {
-    parsedUrl = new URL(url);
-  } catch {
-    return refuse("MCP_INVALID", "the endpoint is not a URL");
-  }
-  // userinfo in the address IS a credential — refused before the scheme is even judged, so an
-  // http URL carrying one still names the real problem.
-  if (parsedUrl.username !== "" || parsedUrl.password !== "") {
-    return refuse(
-      "MCP_SECRET_REFUSED",
-      "the endpoint URL carries credentials (user:password@) — a shared bundle never holds one",
-    );
-  }
-  if (parsedUrl.protocol !== "https:") {
-    return refuse("MCP_INSECURE_URL", "the endpoint must be https");
-  }
-  // A remote-level `variables` block only exists to fill a template in. There is no template
-  // left by now, so it is a fill-in slot with nothing to fill — and the thing it would fill is
-  // exactly what this gate exists to keep out.
-  if (hasEntries(remote.variables)) {
-    return refuse(
-      "MCP_SECRET_REFUSED",
-      "the endpoint declares per-installation variables — a shared bundle carries the same bytes everywhere",
-    );
-  }
-
-  const rawHeaders = Array.isArray(remote.headers) ? remote.headers : [];
-  const headers: McpHeader[] = [];
-  for (const entry of rawHeaders) {
-    if (!isRecord(entry) || typeof entry.name !== "string" || entry.name.length === 0) {
-      return refuse("MCP_INVALID", "every header needs a name");
+  // EVERY remote runs the hygiene and credential rules, in document order — not just the one
+  // that gets placed. A sibling entry (an `sse` fallback, a second endpoint) travels in the same
+  // bytes to the same machines, so a credential in its address or its headers is shared exactly
+  // as widely as one in the placed remote's.
+  let headers: McpHeader[] = [];
+  for (const [i, entry] of remotes.entries()) {
+    const checked = checkRemote(isRecord(entry) ? entry : {});
+    if (!checked.ok) {
+      return checked;
     }
-    // A credential-bearing header NAME refuses whatever the value or the flags say — before
-    // isSecret, before the value shape, independent of entropy.
-    if (CREDENTIAL_HEADER_NAMES.has(entry.name.toLowerCase())) {
-      return refuse(
-        "MCP_SECRET_REFUSED",
-        `the header ${entry.name} carries a credential by definition — a shared bundle never holds one`,
-      );
+    if (i === placed) {
+      headers = checked.headers;
     }
-    if (entry.isSecret === true) {
-      return refuse(
-        "MCP_SECRET_REFUSED",
-        `the header ${entry.name} is declared secret — a shared bundle never carries a credential`,
-      );
-    }
-    if (hasEntries(entry.variables)) {
-      return refuse(
-        "MCP_SECRET_REFUSED",
-        `the header ${entry.name} is assembled from per-installation variables`,
-      );
-    }
-    // A header with no literal value is a slot somebody fills in on each machine — the same
-    // thing `isSecret` names out loud, whether or not `isRequired` says so.
-    if (typeof entry.value !== "string" || entry.value.length === 0) {
-      return refuse(
-        "MCP_SECRET_REFUSED",
-        `the header ${entry.name} has no value — it is a slot for a per-machine credential`,
-      );
-    }
-    headers.push({ name: entry.name, value: entry.value });
   }
+  const url = (remotes[placed] as Record<string, unknown>).url as string;
 
   const meta = isRecord(parsed._meta) ? parsed._meta : {};
   const declared = meta["sh.topos/auth"];
