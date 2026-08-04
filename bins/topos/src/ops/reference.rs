@@ -41,9 +41,10 @@ pub(crate) enum AddRefOutcome {
     /// The row is written (and, where it delivers bytes, they landed). Boxed: `AddData` dwarfs
     /// the describe variant.
     Applied(Box<AddData>),
-    /// A git source this machine has never used: what it holds and what would be written.
+    /// A git source this machine has never used: what it holds and what would be written. Boxed
+    /// for the same reason `Applied` is — neither variant should set the enum's size.
     Described {
-        data: AddDescribeData,
+        data: Box<AddDescribeData>,
         yes_argv: Vec<String>,
     },
 }
@@ -593,14 +594,16 @@ fn add_forge(
             )
         });
         return Ok(AddRefOutcome::Described {
-            data: AddDescribeData {
+            data: Box::new(AddDescribeData {
                 source: source_label,
                 members,
                 manifest: target.path.display().to_string(),
                 reference,
                 value: value_spelling(&value),
                 note,
-            },
+                // A git import has no server endpoint to disclose.
+                mcp: None,
+            }),
             yes_argv,
         });
     }
@@ -699,7 +702,7 @@ fn add_forge(
 pub(crate) enum AddManyOutcome {
     Applied(Vec<AddData>),
     Described {
-        data: AddDescribeData,
+        data: Box<AddDescribeData>,
         yes_argv: Vec<String>,
     },
 }
@@ -819,14 +822,16 @@ pub(crate) fn add_forge_selected(
             })
             .collect();
         return Ok(AddManyOutcome::Described {
-            data: AddDescribeData {
+            data: Box::new(AddDescribeData {
                 source: origin_label,
                 members,
                 manifest: target.path.display().to_string(),
                 reference: spec.label(),
                 value: "*".to_owned(),
                 note: Some(format!("lands into: {}", placed.join(", "))),
-            },
+                // A git import has no server endpoint to disclose.
+                mcp: None,
+            }),
             yes_argv,
         });
     }
@@ -1099,6 +1104,47 @@ pub(crate) fn find_path_line(
         });
         let Some(row) = hit else { continue };
         return Ok(Some((path, row.reference.clone())));
+    }
+    Ok(None)
+}
+
+/// The BUNDLE KIND the manifest records for a local bundle: the `kind` field on the nearest
+/// local-path row that resolves to one of `skill_dirs`. This is the only place a local folder's
+/// kind is written down — a path has no catalog to ask — so `publish` reads it here to decide what
+/// it is shipping. `None` = no such row, or a row that names no kind (an ordinary skill).
+///
+/// # Errors
+/// A manifest read/parse failure.
+pub(crate) fn path_row_kind(
+    ctx: &Ctx<'_>,
+    skill_dirs: &[std::path::PathBuf],
+) -> Result<Option<String>, ClientError> {
+    let dirs: Vec<std::path::PathBuf> = skill_dirs
+        .iter()
+        .map(|d| d.canonicalize().unwrap_or_else(|_| d.clone()))
+        .collect();
+    for (path, _scope, rows) in medit::local_rows(ctx)? {
+        let manifest_dir = path.parent().map(std::path::Path::to_path_buf);
+        for row in &rows {
+            let KeyShape::LocalPath { raw } = &row.shape else {
+                continue;
+            };
+            let literal = std::path::Path::new(raw);
+            let resolved = if literal.is_absolute() {
+                literal.to_path_buf()
+            } else {
+                match &manifest_dir {
+                    Some(dir) => dir.join(raw.trim_start_matches("./")),
+                    None => continue,
+                }
+            };
+            let resolved = resolved.canonicalize().unwrap_or(resolved);
+            if dirs.contains(&resolved)
+                && let Some(kind) = row.fields().kind.clone()
+            {
+                return Ok(Some(kind));
+            }
+        }
     }
     Ok(None)
 }

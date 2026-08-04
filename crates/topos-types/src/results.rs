@@ -782,6 +782,45 @@ pub struct AddDescribeData {
     /// fetches and installs the skills the row names. **INFERRED** (additive-only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
+    /// The MCP SERVER this describe would import (`add --mcp <name|url>`): what the fetched
+    /// document says it is, where it points, and which agents would get it. Absent for every
+    /// other source — a git import has no endpoint to disclose. **INFERRED** (additive-only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mcp: Option<McpServerSummary>,
+}
+
+/// What a fetched MCP `server.json` says, after the gate accepted it — the facts a first-trust
+/// describe puts in front of a person before any byte is written, and the facts the applied
+/// receipt repeats. DERIVED from the document; the document itself is never echoed whole.
+/// **INFERRED** (additive-only).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
+pub struct McpServerSummary {
+    /// The registry name (`io.github.<owner>/<server>`) — the server's own identity.
+    pub server: String,
+    /// The publisher's one-line summary (the registry caps it at 100 characters).
+    pub description: String,
+    /// The version the document declares.
+    pub version: String,
+    /// The endpoint an agent will call — always `https`, never a template.
+    pub url: String,
+    /// The transport, always `streamable-http` today: the one a shared bundle can promise, since
+    /// the same URL has to work from every machine.
+    pub transport: String,
+    /// The publisher's `_meta` auth word (`oauth` / `none`) when the document declared one.
+    /// Absent means it said nothing — which is NOT a claim that no credential is needed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth: Option<String>,
+    /// The names of the LITERAL headers every call will carry. A credential-shaped header never
+    /// reaches here — the gate refuses the whole document instead.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub headers: Vec<String>,
+    /// The folder the document would be written to (the bundle IS its directory).
+    pub bundle: String,
+    /// The agents detected here that the row would reach — the honest breadth line, so nobody
+    /// learns after the fact which config files were about to change.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub agents: Vec<String>,
 }
 
 /// `fmt [-g]` — rewrite a manifest into the normal form. **INFERRED** (additive-only).
@@ -1118,6 +1157,12 @@ pub struct PublishData {
     /// (additive-only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rewrite_skipped: Option<String>,
+    /// The BUNDLE KIND this publish shipped, when it is not the ordinary skill: `"mcp"` for a
+    /// server document. It rides the write to the catalog, so the workspace records what the
+    /// bundle IS and every receiving machine places it the right way. Absent = a skill.
+    /// **INFERRED** (additive-only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
 }
 
 /// The disclosure a `publish` attaches when it ADDED the skill to topos before shipping — the auto-add
@@ -1516,6 +1561,12 @@ pub struct PublishDescribeData {
     /// **INFERRED** (additive-only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub converted_from: Option<String>,
+    /// The BUNDLE KIND this publish would ship, when it is not the ordinary skill: `"mcp"` for a
+    /// server document. Named on the describe because it decides what the workspace records and
+    /// how every receiving machine places the bytes. Absent = a skill. **INFERRED**
+    /// (additive-only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
 }
 
 /// The gate a `publish` describe predicts. **INFERRED value set.**
@@ -1761,6 +1812,7 @@ mod tests {
             origin_note: None,
             rewrite_pending: None,
             rewrite_skipped: None,
+            kind: None,
         };
         let v = serde_json::to_value(&done).unwrap();
         assert_eq!(v["version_id"], "a".repeat(64));

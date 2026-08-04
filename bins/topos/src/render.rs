@@ -796,6 +796,60 @@ pub(crate) fn add_describe_tty(
     s
 }
 
+/// The `add --mcp` DESCRIBE's TTY: what the server IS, where it points, what it will cost in
+/// reach — then the one command that applies it. Nothing has changed when this prints.
+///
+/// The endpoint leads, because it is the fact a person is actually consenting to: from here on,
+/// their agents will call THAT address. The auth line is stated only when the publisher declared
+/// one — silence is not a claim that no credential is needed, and saying "none" for it would be.
+pub(crate) fn add_mcp_describe_tty(
+    data: &topos_types::results::AddDescribeData,
+    yes_argv: &[String],
+) -> String {
+    let Some(mcp) = &data.mcp else {
+        // Never constructed without one; degrade to the ordinary describe rather than panic.
+        return add_describe_tty(data, yes_argv);
+    };
+    let mut s = format!(
+        "{} is an MCP server this machine has not used before — nothing has been written yet.\n",
+        mcp.server
+    );
+    s.push_str(&format!("  {}\n", mcp.description));
+    s.push_str(&format!("  version {}\n", mcp.version));
+    s.push_str(&format!("  endpoint {} ({})\n", mcp.url, mcp.transport));
+    match &mcp.auth {
+        Some(hint) if hint == "oauth" => {
+            s.push_str("  sign-in: your agent will be asked to authorize on first use\n");
+        }
+        Some(hint) if hint == "none" => {
+            s.push_str("  sign-in: the publisher says none is needed\n");
+        }
+        Some(hint) => s.push_str(&format!("  sign-in: {hint}\n")),
+        None => {}
+    }
+    if !mcp.headers.is_empty() {
+        s.push_str(&format!("  headers sent: {}\n", mcp.headers.join(", ")));
+    }
+    s.push_str(&format!("Would write {}\n", mcp.bundle));
+    s.push_str(&format!(
+        "Would record in {}:\n  \"{}\" = {}\n",
+        data.manifest, data.reference, data.value
+    ));
+    if mcp.agents.is_empty() {
+        s.push_str("No MCP-capable agent is set up here yet — the row waits for one.\n");
+    } else {
+        s.push_str(&format!("Reaches: {}\n", mcp.agents.join(", ")));
+    }
+    if let Some(note) = &data.note {
+        s.push_str(&format!("note: {note}\n"));
+    }
+    s.push_str(&format!(
+        "Nothing has changed yet — apply with:\n  {}",
+        argv_line(yes_argv)
+    ));
+    s
+}
+
 /// The `fmt` receipt — one line: what moved, or that nothing had to.
 pub(crate) fn fmt_tty(data: &topos_types::results::FmtData) -> String {
     if data.changed {
@@ -2082,6 +2136,11 @@ pub(crate) fn publish_describe_tty(
         .as_deref()
         .unwrap_or(&data.workspace_id);
     let mut s = format!("Publish '{}' to {ws}:", data.skill);
+    // The KIND, when it is not the ordinary skill: it decides what the workspace records and how
+    // every receiving machine places the bytes, so it is named before anything else about them.
+    if let Some(kind) = &data.kind {
+        s.push_str(&format!("\n  kind: {kind}"));
+    }
     s.push_str(&format!("\n  digest {}", short(&data.bundle_digest)));
     let gate = match data.gate {
         PublishGate::Lands => "open — this moves current directly",
@@ -2157,6 +2216,14 @@ pub(crate) fn publish_tty(data: &PublishData) -> String {
         short(&data.version_id),
         short(&data.bundle_digest),
     ));
+    // The KIND the catalog now records — stated because it is what decides how every receiving
+    // machine places these bytes (an mcp bundle lands in each agent's MCP config, not a folder).
+    if let Some(kind) = &data.kind {
+        out.push_str(&format!(
+            "\nthe workspace records it as a `{kind}` bundle — teammates' agents get it as a \
+             server entry in their own config, not a skill folder."
+        ));
+    }
     // A withheld placement is disclosed next to the success it qualifies: the publish landed,
     // the curated channel's reference did not — placement takes reviewer or owner.
     if let Some(ch) = &data.placement_withheld {
@@ -2902,6 +2969,7 @@ mod tests {
             origin_note: None,
             rewrite_pending: None,
             rewrite_skipped: None,
+            kind: None,
         });
         assert!(line.starts_with("Published smoke-notes@"), "{line}");
         assert!(
@@ -2928,6 +2996,7 @@ mod tests {
             origin_note: None,
             rewrite_pending: None,
             rewrite_skipped: None,
+            kind: None,
         });
         assert!(line.starts_with("Published smoke-notes@"), "{line}");
         assert!(
@@ -2962,6 +3031,7 @@ mod tests {
             origin_note: None,
             rewrite_pending: None,
             rewrite_skipped: None,
+            kind: None,
         });
         assert!(line.starts_with("Published smoke-notes@"), "{line}");
         let handoff = format!("\nbring a teammate: {invite}");
@@ -2996,6 +3066,7 @@ mod tests {
                 manifest: None,
                 reference: None,
                 converted_from: None,
+                kind: None,
             },
             &["topos".to_owned(), "publish".to_owned(), "--yes".to_owned()],
         );

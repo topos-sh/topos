@@ -176,7 +176,10 @@ pub(crate) enum Command {
     /// catalogs of the workspaces you are connected to — when only a workspace has it, that is
     /// what you get. A GitHub source shows what it found and waits for `--yes`, every time — a
     /// skill is instructions your agent will follow, and that listing is there to be read.
-    /// `add topos` restores the built-in topos skill.
+    /// `add topos` restores the built-in topos skill. With `--mcp` the source is an MCP
+    /// SERVER instead — an official-registry name, an https link to its server.json, or a folder
+    /// holding one — and your agents get it as a tool endpoint in their own MCP config rather than
+    /// as a skill folder; a server fetched from the network shows what it is and waits for `--yes`.
     Add {
         /// What to add: a workspace skill, channel, or feed; a local folder; or a GitHub repo.
         source: String,
@@ -187,6 +190,10 @@ pub(crate) enum Command {
         /// `'*'` = all). Default: the agent detected here.
         #[arg(long, short = 'a', value_name = "SLUG")]
         agent: Vec<String>,
+        /// Import an MCP server: an official-registry name (io.github.x/y), an https URL to its
+        /// server.json, or a local folder holding one.
+        #[arg(long, conflicts_with_all = ["skill", "agent"])]
+        mcp: bool,
         /// Add it machine-wide (your `~/.topos/topos.toml`) instead of to this folder's file.
         #[arg(long, short = 'g')]
         global: bool,

@@ -66,6 +66,13 @@ indicatif.workspace = true
 # tests. A dev-dependency ONLY — check-arch's `-e normal` tree proves the production binary never
 # carries a signer.
 minisign = "0.7"
+# Test-only REGEX ENGINE — the referee for `mcp_validate`'s hand-compiled credential matchers. The
+# shared `tests/fixtures/mcp/secret-patterns.json` is the one source; the shipped binary carries
+# matcher FUNCTIONS (every shape is `<literal><class>{min,…}`, so existence needs no engine and the
+# client stays a small static download), and this dev-dependency compiles the JSON's own regex
+# sources so a test can prove the two agree over a probe corpus. Already in the lock via
+# `jsonschema`; dual MIT/Apache-2.0 (rust-lang); check-arch's `-e normal` tree never sees it.
+regex = "1"
 
 [lints]
 workspace = true

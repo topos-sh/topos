@@ -1,0 +1,45 @@
+{
+  "schema_version": 1,
+  "command": "add",
+  "ok": true,
+  "data": {
+    "describe": {
+      "manifest": "/home/ada/.topos/topos.toml",
+      "mcp": {
+        "agents": [
+          "Claude Code",
+          "Cursor"
+        ],
+        "auth": "oauth",
+        "bundle": "/home/ada/.topos/mcp/weather",
+        "description": "Current conditions and forecasts for a named place.",
+        "headers": [
+          "X-Region"
+        ],
+        "server": "io.github.acme/weather",
+        "transport": "streamable-http",
+        "url": "https://weather.acme.example/mcp",
+        "version": "1.4.0"
+      },
+      "reference": "/home/ada/.topos/mcp/weather",
+      "source": "io.github.acme/weather",
+      "value": "{ kind = \"mcp\" }"
+    }
+  },
+  "warnings": [],
+  "next_actions": [
+    {
+      "code": "APPLY_DESCRIBED",
+      "argv": [
+        "topos",
+        "add",
+        "--mcp",
+        "io.github.acme/weather",
+        "-g",
+        "--yes"
+      ],
+      "mutates": true,
+      "needs_network": true
+    }
+  ]
+}

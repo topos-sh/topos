@@ -542,9 +542,35 @@ fn run_command(
             source,
             skill,
             agent,
+            mcp,
             global,
             yes,
         } => {
+            // `--mcp` declares WHAT is being imported, so it is read before every resolution
+            // ladder below: an MCP server is a tool endpoint, not a skill folder, and none of the
+            // ladder's answers (untracked discovery, the keep-as-yours fork, the workspace
+            // catalogs) mean anything for one. The `-s`/`-a` selectors are forge-import
+            // narrowings and clap already refuses them alongside it.
+            if mcp {
+                let docs =
+                    crate::plane_http::UreqMcpSource::new().with_progress(Rc::clone(&progress));
+                let result = ops::add_mcp(&ctx, Some(&docs), &source, global, yes);
+                // The arming sweep + the built-in ride an APPLIED import exactly as they ride any
+                // other adopt receipt (the same trigger-arming moment).
+                let result = result.map(|outcome| match outcome {
+                    ops::AddMcpOutcome::Applied(mut data) => {
+                        if data.currency.is_some() {
+                            data.triggers = breadth_arm(&ctx.roots, harness.as_ref(), &fs);
+                            if let Err(e) = ops::ensure_builtin(&ctx) {
+                                let _ = diag.note(cmd_name, &e);
+                            }
+                        }
+                        ops::AddMcpOutcome::Applied(data)
+                    }
+                    described => described,
+                });
+                return finish_add_mcp(json, cmd_name, result, &diag);
+            }
             // The `-s`/`-a` SELECTORS (single, multiple, or the `*` fan-outs) narrow a REMOTE
             // import — which members land, into which agent dirs. They pass through the SAME
             // describe-first shape and the SAME per-scope store as a bare `add owner/repo`: a
@@ -1931,6 +1957,42 @@ fn finish_add_reference(
                 println!("{}", render::to_json(&envelope));
             } else {
                 println!("{}", render::add_describe_tty(&data, &yes_argv));
+            }
+            ExitCode::SUCCESS
+        }
+        Err(e) => emit_err(json, command, &e, diag),
+    }
+}
+
+/// The `add --mcp` finisher — the same two-phase shape as the reference arm, with the describe
+/// rendering the SERVER (what it is, where it points, which agents it reaches) instead of a repo's
+/// member list.
+fn finish_add_mcp(
+    json: bool,
+    command: &str,
+    result: Result<ops::AddMcpOutcome, ClientError>,
+    diag: &Diag<'_>,
+) -> ExitCode {
+    match result {
+        Ok(ops::AddMcpOutcome::Applied(data)) => {
+            if json {
+                let value = serde_json::to_value(&data).unwrap_or_default();
+                let mut envelope = render::ok_envelope(command, value);
+                envelope.next_actions = render::undo_next_actions(&data.undo);
+                println!("{}", render::to_json(&envelope));
+            } else {
+                println!("{}", render::add_tty(&data));
+            }
+            ExitCode::SUCCESS
+        }
+        Ok(ops::AddMcpOutcome::Described { data, yes_argv }) => {
+            if json {
+                let value = serde_json::json!({ "describe": data });
+                let mut envelope = render::ok_envelope(command, value);
+                envelope.next_actions = render::describe_next_actions(vec![yes_argv.clone()]);
+                println!("{}", render::to_json(&envelope));
+            } else {
+                println!("{}", render::add_mcp_describe_tty(&data, &yes_argv));
             }
             ExitCode::SUCCESS
         }

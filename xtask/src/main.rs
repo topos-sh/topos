@@ -421,14 +421,15 @@ fn fixtures() -> Vec<(&'static str, String)> {
     use topos_types::persisted::ConflictPathKind;
     use topos_types::requests::{WireDelivery, WireDeliverySkill, WireNotice, WireVia};
     use topos_types::results::{
-        AddData, Conflict, ConflictPathReport, DiffData, DiffPatchInfo, DiffSource,
-        EnrollmentPending, InviteReadData, ListData, LogData, LoginData, LogoutData, MergePreview,
-        MergePreviewVerdict, MergeReport, ProtectData, PublishData, PublishDescribeData,
-        PublishGate, PublishedMatch, PullAction, PullData, PullSkill, RemoveData, RemoveItem,
-        RemoveKind, ReviewIndexData, ReviewIndexEntry, SkillEntry, SkillStatus, StatusData,
-        StatusScope, StatusScopeSummary, StatusTrigger, WorkspaceSyncReport,
+        AddData, AddDescribeData, Conflict, ConflictPathReport, DiffData, DiffPatchInfo,
+        DiffSource, EnrollmentPending, InviteReadData, ListData, LogData, LoginData, LogoutData,
+        MergePreview, MergePreviewVerdict, MergeReport, ProtectData, PublishData,
+        PublishDescribeData, PublishGate, PublishedMatch, PullAction, PullData, PullSkill,
+        RemoveData, RemoveItem, RemoveKind, ReviewIndexData, ReviewIndexEntry, SkillEntry,
+        SkillStatus, StatusData, StatusScope, StatusScopeSummary, StatusTrigger,
+        WorkspaceSyncReport,
     };
-    use topos_types::results::{AttentionCount, ListScope};
+    use topos_types::results::{AttentionCount, ListScope, McpServerSummary};
     use topos_types::{ActionCode, Affected, JsonEnvelope, Receipt, TerminalOutcome, WireError};
 
     let argv = |parts: &[&str]| parts.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
@@ -591,6 +592,54 @@ fn fixtures() -> Vec<(&'static str, String)> {
             }),
             next_actions: ambiguous_workspace_actions,
         }),
+    };
+
+    // `add --mcp <registry-name>` with no `--yes` — the two-phase DESCRIBE for an MCP server this
+    // machine has never read. Nothing has been written: the envelope IS the disclosure (what the
+    // server is, the endpoint every agent will call, the folder and the row that would appear, and
+    // the agents it would reach), and the one `next_actions` entry is the command that applies it.
+    let add_mcp_describe = JsonEnvelope {
+        schema_version: 1,
+        command: "add".to_owned(),
+        ok: true,
+        data: serde_json::json!({
+            "describe": AddDescribeData {
+                source: "io.github.acme/weather".to_owned(),
+                // A server document holds no member list — the `mcp` block below carries its facts.
+                members: Vec::new(),
+                manifest: "/home/ada/.topos/topos.toml".to_owned(),
+                reference: "/home/ada/.topos/mcp/weather".to_owned(),
+                value: "{ kind = \"mcp\" }".to_owned(),
+                note: None,
+                mcp: Some(McpServerSummary {
+                    server: "io.github.acme/weather".to_owned(),
+                    description: "Current conditions and forecasts for a named place.".to_owned(),
+                    version: "1.4.0".to_owned(),
+                    url: "https://weather.acme.example/mcp".to_owned(),
+                    transport: "streamable-http".to_owned(),
+                    auth: Some("oauth".to_owned()),
+                    // Only LITERAL headers reach a receipt — a credential-shaped one refuses the
+                    // whole document instead.
+                    headers: vec!["X-Region".to_owned()],
+                    bundle: "/home/ada/.topos/mcp/weather".to_owned(),
+                    agents: vec!["Claude Code".to_owned(), "Cursor".to_owned()],
+                }),
+            }
+        }),
+        warnings: vec![],
+        next_actions: vec![topos::actions::next_action(
+            ActionCode::from("APPLY_DESCRIBED".to_owned()),
+            argv(&[
+                "topos",
+                "add",
+                "--mcp",
+                "io.github.acme/weather",
+                "-g",
+                "--yes",
+            ]),
+        )],
+        receipt: None,
+        error: None,
     };
 
     // (d) The LOCAL ambiguity, enriched: two directories carry the name in one harness, and a
@@ -1165,6 +1214,8 @@ fn fixtures() -> Vec<(&'static str, String)> {
             manifest: None,
             reference: None,
             converted_from: None,
+            // The ordinary skill publish: the additive kind tag omits (absent = a skill).
+            kind: None,
         })
         .expect("PublishDescribeData serializes"),
         warnings: vec![],
@@ -1204,6 +1255,8 @@ fn fixtures() -> Vec<(&'static str, String)> {
             origin_note: None,
             rewrite_pending: None,
             rewrite_skipped: None,
+            // The ordinary skill publish: the additive kind tag omits (absent = a skill).
+            kind: None,
         })
         .expect("PublishData serializes"),
         warnings: vec![],
@@ -1641,6 +1694,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
             emit_json(&add_ambiguous_workspace),
         ),
         ("json/add.ambiguous-scope", emit_json(&add_ambiguous_scope)),
+        ("json/add.mcp-describe", emit_json(&add_mcp_describe)),
         ("json/list.ok", emit_json(&list_ok)),
         ("json/diff.ok", emit_json(&diff_ok)),
         ("json/log.ok", emit_json(&log_ok)),

@@ -40,6 +40,13 @@
         "null"
       ]
     },
+    "kind": {
+      "description": "The BUNDLE KIND this publish shipped, when it is not the ordinary skill: `\"mcp\"` for a\nserver document. It rides the write to the catalog, so the workspace records what the\nbundle IS and every receiving machine places it the right way. Absent = a skill.\n**INFERRED** (additive-only).",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "manifest": {
       "description": "The GOVERNANCE-TRANSFER receipt half: the manifest whose local-path line this publish\nrewrote to the governed workspace reference. Absent when no manifest referenced the bundle\nby path (an already-governed republish). **INFERRED** (additive-only).",
       "type": [

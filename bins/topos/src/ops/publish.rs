@@ -319,6 +319,12 @@ pub(crate) fn publish_describe(
             got: pin.clone(),
         });
     }
+    // The BUNDLE KIND, and — for an mcp one — the gate. The describe refuses exactly where the
+    // apply would, so a document carrying a credential is named here rather than after `--yes`.
+    let bundle_kind = publish_bundle_kind(ctx, ctx, id.as_str(), &map, &scanned);
+    if bundle_kind.as_deref() == Some(MCP_KIND) {
+        gate_mcp_bundle(&scanned, &skill_name)?;
+    }
 
     // A skill has a `current` to be identical TO when it is FOLLOWED (the bytes this client holds are
     // `lock.bundle_digest`) OR it has ever been published from here (`sync.observed != GENESIS` — a
@@ -517,9 +523,80 @@ pub(crate) fn publish_describe(
             manifest: transfer_manifest,
             reference: transfer_reference,
             converted_from: transfer_from,
+            kind: bundle_kind,
         },
         warnings,
     ))
+}
+
+/// The `kind` tag a `kind = "mcp"` bundle carries everywhere: the manifest row, the catalog, the
+/// wire, the WAL.
+pub(crate) const MCP_KIND: &str = "mcp";
+
+/// What KIND of bundle a publish is shipping, when it is not the ordinary skill. Three sources,
+/// asked cheapest-and-most-durable first:
+///
+/// 1. this scope's MCP LEDGER — a bundle whose config keys were minted here IS an mcp one,
+///    whatever anyone has since edited a manifest to say;
+/// 2. the delivery CACHE — a republish of a bundle the workspace already governs as `mcp`;
+/// 3. the MANIFEST row that demands it — a local path row's `kind` field is the only place a
+///    folder's kind is recorded, because a local path has no catalog to ask. This is the FIRST
+///    publish of a locally-authored server, so it is load-bearing — but it is only consulted when
+///    the draft actually carries a root `server.json`, which an mcp bundle does by definition and
+///    a skill never does. That keeps an ordinary publish from reading every manifest in reach to
+///    answer a question its own bytes already settle.
+///
+/// `None` means "a skill", which is what every publish before this one shipped: an absent tag on
+/// the wire reads as `"skill"` by the request's own default, so nothing changes for them.
+fn publish_bundle_kind(
+    outer_ctx: &Ctx<'_>,
+    store_ctx: &Ctx<'_>,
+    skill_id: &str,
+    map: &PlacementMap,
+    scanned: &scan::ScannedBundle,
+) -> Option<String> {
+    if crate::mcp_engine::is_mcp_record(store_ctx, skill_id) {
+        return Some(MCP_KIND.to_owned());
+    }
+    let governed = crate::sync_status::read(outer_ctx.fs, &outer_ctx.layout)
+        .ok()
+        .and_then(|cache| {
+            cache
+                .workspaces
+                .values()
+                .find_map(|ws| ws.delivered.get(skill_id).and_then(|d| d.kind.clone()))
+        });
+    if governed.is_some() {
+        return governed;
+    }
+    if !scanned.files.iter().any(|f| f.path == "server.json") {
+        return None;
+    }
+    let dirs: Vec<std::path::PathBuf> = map
+        .placements
+        .iter()
+        .map(std::path::PathBuf::from)
+        .collect();
+    super::path_row_kind(outer_ctx, &dirs).ok().flatten()
+}
+
+/// REFUSAL-FIRST: an mcp bundle's `server.json` goes through the same gate the web tier runs
+/// ([`crate::mcp_validate`]) BEFORE the op is built — so a document carrying a credential never
+/// reaches the local store, the op WAL, or the wire. A publish that would ship one is refused with
+/// the shared typed code, and nothing at all has happened.
+///
+/// # Errors
+/// [`ClientError::InvalidArgument`] when the folder holds no root `server.json` (an mcp bundle IS
+/// its document); [`ClientError::McpRefused`] with the gate's own code otherwise.
+fn gate_mcp_bundle(scanned: &scan::ScannedBundle, skill_name: &str) -> Result<(), ClientError> {
+    let Some(file) = scanned.files.iter().find(|f| f.path == "server.json") else {
+        return Err(ClientError::InvalidArgument(format!(
+            "'{skill_name}' is recorded as an MCP bundle but holds no server.json at its root — \
+             an MCP bundle IS its document"
+        )));
+    };
+    crate::mcp_validate::validate_server_json(&file.bytes)?;
+    Ok(())
 }
 
 /// The server's FRESH per-skill protection for the describe's gate — the delivery read carries it (each
@@ -804,6 +881,15 @@ fn enrolled_publish(
         });
     }
 
+    // The BUNDLE KIND, and — for an mcp one — the GATE, BEFORE the WAL is even consulted: the
+    // shared refusal rules run against the scanned draft, so a `server.json` carrying a credential
+    // never reaches the local store, the op record, or the wire. Refusal-first means the refusal
+    // IS the whole outcome; nothing has happened when it fires.
+    let bundle_kind = publish_bundle_kind(outer_ctx, ctx, id.as_str(), &map, &scanned);
+    if bundle_kind.as_deref() == Some(MCP_KIND) {
+        gate_mcp_bundle(&scanned, &lock.name)?;
+    }
+
     // Resume a crashed prior publish/propose for this skill (replay the SAME op_id) before minting a new
     // one — the plane returns the byte-identical receipt, so there is no double-advance / duplicate commit.
     let kinds = [OpKind::PublishDirect, OpKind::PublishPropose];
@@ -846,6 +932,7 @@ fn enrolled_publish(
             &scanned,
             scanned.bundle_digest,
             message,
+            bundle_kind.clone(),
         ) {
             Ok(rec) => rec,
             // NO-CHANGE means an earlier publish of these bytes already LANDED — the retry a
@@ -933,9 +1020,12 @@ fn enrolled_publish(
                                 via_channels: Vec::new(),
                                 via_manifest: true,
                                 assigned_by: None,
-                                // The catalog kind is the server's answer; the next sweep's
-                                // delivery heals it (a seed row is provenance, not authority).
-                                kind: None,
+                                // The kind this publish SHIPPED, replayed from the op record.
+                                // A seed row is provenance, not authority — the next sweep's
+                                // delivery still brings the catalog's answer — but leaving it
+                                // blank made the very next `remove` of a just-published mcp
+                                // bundle miss its config converge.
+                                kind: rec.bundle_kind.clone(),
                                 harness_states: Vec::new(),
                                 picked: false,
                             },
@@ -1166,6 +1256,7 @@ fn build_publish_op(
     scanned: &scan::ScannedBundle,
     digest: [u8; 32],
     message: Option<&str>,
+    bundle_kind: Option<String>,
 ) -> Result<OpRecord, ClientError> {
     // The commit message: `-m <message>` when given (folded into `commit_id`, so it changes the version
     // identity), else the default. It also rides the local store commit, so a WAL replay re-renders the
@@ -1263,7 +1354,10 @@ fn build_publish_op(
         // entry after it (a revert/review carries no name and preserves the stored one).
         display_name: Some(lock.name.clone()),
         channel: channel.map(str::to_owned),
-        bundle_kind: None,
+        // The BUNDLE KIND rides the WAL, so a replay re-sends the same `kind` the first attempt
+        // did (`contribute::run_write` reads it back onto `PublishRequest`/`ProposeRequest`) —
+        // the catalog can never learn a different answer from a retry than from the original.
+        bundle_kind,
         last_receipt: None,
     })
 }
@@ -1332,6 +1426,9 @@ fn map_outcome(
                 origin_note: None,
                 rewrite_pending: None,
                 rewrite_skipped: None,
+                // The kind the catalog now records for this bundle, replayed from the op record —
+                // so a WAL retry's receipt says exactly what the first attempt's said.
+                kind: rec.bundle_kind.clone(),
             }))
         }
         TerminalOutcome::NeedsReview => {

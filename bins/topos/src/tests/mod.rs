@@ -5,6 +5,7 @@
 mod builtin_skill;
 mod durability;
 mod manifest_reconcile;
+mod mcp_add;
 mod mcp_engine;
 mod publish_autoadd;
 mod sync;

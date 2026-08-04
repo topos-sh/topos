@@ -630,6 +630,26 @@ pub(crate) enum ClientError {
         candidates: Vec<TargetCandidate>,
         global: bool,
     },
+    /// An MCP server document the gate refused ([`crate::mcp_validate`]) — the shared, two-language
+    /// rule set at `tests/fixtures/mcp/`. The code is the vector's own
+    /// (`MCP_INVALID` · `MCP_LOCAL_REFUSED` · `MCP_NO_STREAMABLE_REMOTE` · `MCP_INSECURE_URL` ·
+    /// `MCP_URL_TEMPLATE` · `MCP_SECRET_REFUSED`), so an agent branches on the same word both
+    /// tiers use; the message is this code's own sentence and is shown VERBATIM. It never quotes
+    /// the document — a refusal for carrying a credential must not echo the credential.
+    #[error("{message}")]
+    McpRefused {
+        code: crate::mcp_validate::McpRefusalCode,
+        message: String,
+    },
+}
+
+impl From<crate::mcp_validate::McpRefusal> for ClientError {
+    fn from(r: crate::mcp_validate::McpRefusal) -> Self {
+        ClientError::McpRefused {
+            code: r.code,
+            message: r.message,
+        }
+    }
 }
 
 impl ClientError {
@@ -717,6 +737,9 @@ impl ClientError {
             // The address-grammar ambiguity shares the tracked-name ambiguity's code (agents branch the
             // same); the candidates additionally ride the envelope's `data.candidates`.
             ClientError::AmbiguousTarget { .. } => "AMBIGUOUS_NAME",
+            // The MCP gate's own vocabulary, carried through unflattened — the client and the web
+            // tier refuse the same document with the same word.
+            ClientError::McpRefused { code, .. } => code.as_str(),
         }
     }
 

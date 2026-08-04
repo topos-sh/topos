@@ -94,7 +94,7 @@ topos fmt [OPTIONS]
 
 ### `topos add`
 
-Get skills and keep them updated. The source can be a skill or channel from your workspace (`code-review`, `@acme/code-review`, `@acme/channels/backend`), a whole workspace's feed (`@acme`, with `-g`), a local folder (`./tools/my-skill`), or a public GitHub repo (`owner/repo` for every skill in it, `owner/repo/name` for one). Records one line in the nearest `topos.toml` at or above this folder — or in your machine-wide file (`~/.topos/topos.toml`) with `-g` — and installs right away. With no `topos.toml` covering this folder it stops and says so: `topos init` creates one here, or add `-g`. A plain name is looked for both in the skills already sitting in your agents' folders and in the catalogs of the workspaces you are connected to — when only a workspace has it, that is what you get. A GitHub source shows what it found and waits for `--yes`, every time — a skill is instructions your agent will follow, and that listing is there to be read. `add topos` restores the built-in topos skill
+Get skills and keep them updated. The source can be a skill or channel from your workspace (`code-review`, `@acme/code-review`, `@acme/channels/backend`), a whole workspace's feed (`@acme`, with `-g`), a local folder (`./tools/my-skill`), or a public GitHub repo (`owner/repo` for every skill in it, `owner/repo/name` for one). Records one line in the nearest `topos.toml` at or above this folder — or in your machine-wide file (`~/.topos/topos.toml`) with `-g` — and installs right away. With no `topos.toml` covering this folder it stops and says so: `topos init` creates one here, or add `-g`. A plain name is looked for both in the skills already sitting in your agents' folders and in the catalogs of the workspaces you are connected to — when only a workspace has it, that is what you get. A GitHub source shows what it found and waits for `--yes`, every time — a skill is instructions your agent will follow, and that listing is there to be read. `add topos` restores the built-in topos skill. With `--mcp` the source is an MCP SERVER instead — an official-registry name, an https link to its server.json, or a folder holding one — and your agents get it as a tool endpoint in their own MCP config rather than as a skill folder; a server fetched from the network shows what it is and waits for `--yes`
 
 ```
 topos add [OPTIONS] <SOURCE>
@@ -105,6 +105,7 @@ topos add [OPTIONS] <SOURCE>
 | `<SOURCE>` | What to add: a workspace skill, channel, or feed; a local folder; or a GitHub repo |
 | `-s, --skill <NAME>` | When a GitHub repo holds several skills, pick which one(s) (repeatable; `'*'` = all) |
 | `-a, --agent <SLUG>` | Which agent to install a GitHub import for (a slug like `cursor`; repeatable; `'*'` = all). Default: the agent detected here |
+| `--mcp` | Import an MCP server: an official-registry name (io.github.x/y), an https URL to its server.json, or a local folder holding one |
 | `-g, --global` | Add it machine-wide (your `~/.topos/topos.toml`) instead of to this folder's file |
 | `--yes` | Confirm adding from a GitHub source, after reading what it found (everything else applies immediately, and `--yes` changes nothing there) |
 

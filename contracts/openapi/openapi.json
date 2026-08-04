@@ -3051,6 +3051,13 @@
             ],
             "description": "The paste-able teammate handoff line (`Ask your agent: …`) — the join instruction that\nbrings a teammate's machine into the workspace, composed from the workspace's server\norigin + address. Absent when the address is not known (a best-effort read — the publish\nitself is unaffected). **INFERRED** (additive-only)."
           },
+          "kind": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The BUNDLE KIND this publish shipped, when it is not the ordinary skill: `\"mcp\"` for a\nserver document. It rides the write to the catalog, so the workspace records what the\nbundle IS and every receiving machine places it the right way. Absent = a skill.\n**INFERRED** (additive-only)."
+          },
           "manifest": {
             "type": [
               "string",

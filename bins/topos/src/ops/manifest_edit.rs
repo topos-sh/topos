@@ -598,6 +598,26 @@ pub(crate) fn note_added_path_in(
     target: &EditTarget,
     source: &Path,
 ) -> Result<(), ClientError> {
+    note_added_path_kind_in(ctx, data, target, source, None)
+}
+
+/// [`note_added_path_in`] carrying a BUNDLE KIND. `kind` is `None` for the ordinary skill adopt
+/// (the row's value stays the bare `"*"`, exactly as before) and `Some("mcp")` for an MCP server
+/// folder, whose row becomes the inline table `{ kind = "mcp" }` — the one place the manifest
+/// records what a local folder IS, because a local path has no catalog to ask.
+///
+/// The value is still ONE row at ONE key, so `remove` stays `add`'s exact file inverse: it drops
+/// the whole row, kind and all.
+///
+/// # Errors
+/// As [`write_row`].
+pub(crate) fn note_added_path_kind_in(
+    ctx: &Ctx<'_>,
+    data: &mut AddData,
+    target: &EditTarget,
+    source: &Path,
+    kind: Option<&str>,
+) -> Result<(), ClientError> {
     // Canonicalize best-effort (symlinks resolve; a vanished dir keeps the typed spelling).
     let source_abs = source.canonicalize().unwrap_or_else(|_| {
         if source.is_absolute() {
@@ -619,7 +639,14 @@ pub(crate) fn note_added_path_in(
     } else {
         source_abs.display().to_string()
     };
-    write_row(ctx, data, target, &reference, &EntryValue::Star)
+    let value = match kind {
+        None => EntryValue::Star,
+        Some(k) => EntryValue::Fields(crate::manifest::document::EntryFields {
+            kind: Some(k.to_owned()),
+            ..crate::manifest::document::EntryFields::default()
+        }),
+    };
+    write_row(ctx, data, target, &reference, &value)
 }
 
 /// [`note_added_path_in`] resolving the target from the scope flag — the BACKSTOP for a caller

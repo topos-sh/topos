@@ -3616,6 +3616,7 @@ dependencies = [
  "indicatif",
  "minisign",
  "minisign-verify",
+ "regex",
  "rustix",
  "serde",
  "serde_json",

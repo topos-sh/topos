@@ -2159,6 +2159,123 @@ fn retry_after_ms(resp: &ureq::http::Response<ureq::Body>) -> Option<i64> {
     )
 }
 
+// =================================================================================================
+// UreqMcpSource — the MCP server-document fetcher behind `add --mcp <name|url>`. One GET, capped,
+// bounded, redirect-refusing. Nothing else in the client reads a member-supplied URL, so the whole
+// discipline lives here rather than in a shared helper that would invite reuse without it.
+// =================================================================================================
+
+/// The blocking `ureq` MCP-document source: an https GET of one `server.json`.
+pub(crate) struct UreqMcpSource {
+    agent: ureq::Agent,
+    /// The ACTIVITY sink — the op names the source it is fetching, so this transport stays quiet
+    /// underneath it (the phase is already open by the time `fetch` runs).
+    progress: Rc<dyn ProgressSink>,
+}
+
+impl std::fmt::Debug for UreqMcpSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("UreqMcpSource").finish_non_exhaustive()
+    }
+}
+
+impl UreqMcpSource {
+    pub(crate) fn new() -> Self {
+        Self {
+            // A server document is a page of text: bound the whole exchange tightly rather than
+            // letting a hostile endpoint occupy the process for the transport's generous default.
+            agent: ureq::Agent::new_with_config(
+                ureq::Agent::config_builder()
+                    .http_status_as_error(false)
+                    // A 3xx is off-script: an https URL a person typed is the address topos
+                    // fetches, not the start of a chain it follows somewhere else.
+                    .max_redirects(0)
+                    .timeout_global(Some(Duration::from_secs(MCP_FETCH_TIMEOUT_SECS)))
+                    .build(),
+            ),
+            progress: Rc::new(progress::Silent),
+        }
+    }
+
+    /// Attach the invocation's activity sink (the composition root's). Without it the transport is
+    /// silent, which is exactly what the unit tests and fixtures want.
+    pub(crate) fn with_progress(mut self, progress: Rc<dyn ProgressSink>) -> Self {
+        self.progress = progress;
+        self
+    }
+}
+
+/// The whole exchange's ceiling — connect, headers, and body together.
+const MCP_FETCH_TIMEOUT_SECS: u64 = 15;
+
+impl crate::ops::McpDocSource for UreqMcpSource {
+    fn fetch(&self, url: &str) -> Result<Vec<u8>, ClientError> {
+        let host = url_host(url).unwrap_or("the server").to_owned();
+        // https only — the caller's shape check already decided this, and repeating it here is the
+        // last-line guard before a request is made.
+        if !url.starts_with("https://") {
+            return Err(ClientError::RemoteFetch {
+                msg: format!("{url} — a server.json is fetched over https only"),
+                permanent: true,
+            });
+        }
+        let resp = self
+            .agent
+            .get(url)
+            .header("User-Agent", RELEASE_USER_AGENT)
+            .header("Accept", "application/json")
+            .call()
+            .map_err(|e| ClientError::RemoteFetch {
+                msg: format!("{url} — {}", transport_reason(&host, &e)),
+                permanent: false,
+            })?;
+        let status = resp.status().as_u16();
+        match status {
+            200..=299 => {}
+            300..=399 => {
+                return Err(ClientError::RemoteFetch {
+                    msg: format!(
+                        "{url} — that address redirects; give the address it redirects to"
+                    ),
+                    permanent: true,
+                });
+            }
+            404 => {
+                return Err(ClientError::RemoteFetch {
+                    msg: format!("{url} — no server document there (HTTP 404)"),
+                    permanent: true,
+                });
+            }
+            s => {
+                return Err(ClientError::RemoteFetch {
+                    msg: format!("{url} — {}", status_reason(&host, s)),
+                    permanent: !matches!(s, 429 | 500..=599),
+                });
+            }
+        }
+        // The document cap is the SAME one the web tier enforces — a server.json is a page of
+        // text, never a payload, and the stream is cut the moment it goes over.
+        let limit = u64::try_from(crate::mcp_validate::MAX_SERVER_JSON_BYTES).unwrap_or(u64::MAX);
+        read_body_reported_limited(resp, &*self.progress, 0, true, limit).map_err(|_| {
+            ClientError::RemoteFetch {
+                msg: format!(
+                    "{url} — the document was cut short, or is too large to be a server.json"
+                ),
+                permanent: false,
+            }
+        })
+    }
+}
+
+/// The host part of an `https://…` URL, for the transport messages.
+fn url_host(url: &str) -> Option<&str> {
+    let rest = url.strip_prefix("https://")?;
+    let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let authority = &rest[..end];
+    let host = authority.rsplit('@').next()?;
+    (!host.is_empty()).then_some(host)
+}
+
 /// A GitHub owner/repo path segment: ASCII alphanumerics + `.`, `_`, `-`, non-empty — the last-line guard
 /// before splicing into the request path (mirrors [`ensure_url_safe_ids`]).
 fn is_repo_seg(s: &str) -> bool {

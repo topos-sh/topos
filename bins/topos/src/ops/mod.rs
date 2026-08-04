@@ -17,6 +17,7 @@
 //! short-version-prefix resolver.
 
 mod add;
+mod add_mcp;
 mod arm;
 mod auth;
 mod builtin;
@@ -53,6 +54,7 @@ pub(crate) use add::{
     add_with_name, adopt_path, governed_copy_suggestion, keep_as_yours, plan_bare_add,
     resolve_add_target, split_target, tracked_skill_at,
 };
+pub(crate) use add_mcp::{AddMcpOutcome, McpDocSource, add_mcp};
 pub(crate) use arm::{arm_detected, probe_detected, scrub_all};
 pub(crate) use builtin::{ensure_builtin, is_builtin, restore_builtin};
 pub(crate) use connect::device_challenge;
@@ -101,7 +103,7 @@ pub(crate) use reconcile::{
 pub(crate) use reconcile::handover_legacy_project_rows;
 pub(crate) use reference::{
     AddManyOutcome, AddRefOutcome, GovernedOutcome, WriteLane, add_forge_selected, add_reference,
-    find_path_line, resolve_session_lane, rewrite_to_governed,
+    find_path_line, path_row_kind, resolve_session_lane, rewrite_to_governed,
 };
 // The withdrawal/exclusion clean is driven through `remove`/the reconcile; the direct re-export
 // serves the placement-breadth suite's foreign-preservation regression.

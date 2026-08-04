@@ -73,6 +73,16 @@ generated `docs/cli.md` (`cargo xtask gen-cli-ref`).
 - `placement` — where a bundle's bytes land per scope (shared-dir-first over the home;
   project-rooted with containment proven at the write boundary), composing
   `topos-harness::{coverage,registry}`.
+- `mcp_validate` + `ops/add_mcp` — the `kind = "mcp"` bundle's AUTHORING half. `mcp_validate` is
+  the server-document gate, mirroring the web tier rule for rule over the shared vectors at
+  `tests/fixtures/mcp/` (six typed refusal codes; the credential scan runs FIRST, over the whole
+  raw text; the named shapes are compiled-in matcher fns — no regex engine ships — and a
+  dev-dependency `regex` referees them against the JSON's own sources in test). `ops/add_mcp` is
+  `add --mcp`: a local folder is gated then adopted in place with `kind = "mcp"` on its row; a
+  registry name or https URL is a new-source trust moment (describe → `--yes`) that writes the
+  canonical document, records the row, and converges the scope's config. `publish` reads the kind
+  (ledger → delivery cache → the manifest row, the last only when the draft carries a root
+  `server.json`), re-runs the gate BEFORE the op WAL, and threads it onto the wire.
 - `mcp_engine` + `mcp_ledger` — the `kind = "mcp"` bundle's delivery half: a store-only sync
   (lock custody, no dir placement) feeds a per-scope config CONVERGE over
   `topos-harness::mcp`'s pure drivers — server.json parsed fail-closed, per-harness surfaces

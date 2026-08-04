@@ -31,6 +31,13 @@
       "description": "Whether this publish restores an ancestor's bytes (a revert-shaped publish, same gate).",
       "type": "boolean"
     },
+    "kind": {
+      "description": "The BUNDLE KIND this publish would ship, when it is not the ordinary skill: `\"mcp\"` for a\nserver document. Named on the describe because it decides what the workspace records and\nhow every receiving machine places the bytes. Absent = a skill. **INFERRED**\n(additive-only).",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "manifest": {
       "description": "The PREDICTED governance transfer: the manifest whose local-path line the apply would\nrewrite to the governed workspace reference. Absent when no manifest references the bundle\nby path. **INFERRED** (additive-only).",
       "type": [

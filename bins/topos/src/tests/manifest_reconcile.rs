@@ -422,7 +422,7 @@ impl DeliverySource for FakePlane {
 
 /// The per-session directory fake: the catalog + channel indexes; everything else unreachable.
 #[derive(Clone)]
-struct FakeDirectory {
+pub(super) struct FakeDirectory {
     skills: Vec<WireSkillIndexEntry>,
     channels: Vec<WireChannelEntry>,
     /// When set, the index reads fail (a transport fault) — the freeze suites flip it.
@@ -430,7 +430,7 @@ struct FakeDirectory {
 }
 
 impl FakeDirectory {
-    fn new(skills: Vec<WireSkillIndexEntry>, channels: Vec<WireChannelEntry>) -> Self {
+    pub(super) fn new(skills: Vec<WireSkillIndexEntry>, channels: Vec<WireChannelEntry>) -> Self {
         Self {
             skills,
             channels,
@@ -535,7 +535,7 @@ impl crate::plane::ContributeSource for NoContribute {
         unreachable!("no contribute in these flows")
     }
 }
-struct NoGovernance;
+pub(super) struct NoGovernance;
 impl crate::plane::GovernanceSource for NoGovernance {
     fn invite(
         &self,
