@@ -391,6 +391,14 @@ fn scope_rows(
     let mut claimed: BTreeSet<String> = BTreeSet::new();
     let mut by_name: BTreeMap<String, (String, String)> = BTreeMap::new();
     let mut index: Option<BTreeMap<String, String>> = None;
+    // This scope's MCP ownership ledger — the ONLY record a LOCAL mcp row (a folder adopted in
+    // place, a document imported by name or URL) has of where its config entries went: no
+    // workspace delivers it, so no delivery cache ever describes it. Read once, and only when the
+    // document is there, so the ordinary machine with no mcp bundles touches nothing.
+    let ledger = layout
+        .filter(|l| ctx.fs.exists(&l.mcp_ledger_path()))
+        .and_then(|l| crate::mcp_ledger::read(ctx.fs, l).ok())
+        .unwrap_or_default();
 
     // 1. The explicit THING rows — one bundle each, the row's own fields winning.
     for row in &plan.things {
@@ -404,6 +412,10 @@ fn scope_rows(
         let mut workspace_id = None;
         let mut kind = row.fields().kind.clone();
         let mut harness_states = Vec::new();
+        // The identities this row could be filed under in the scope's MCP ledger, in order: a
+        // workspace bundle by its skill id; a local folder by the id this scope's store tracks it
+        // by, or — for an imported document no store adopted — its name-keyed local identity.
+        let mut ledger_ids: Vec<String> = Vec::new();
         let applied = match &row.shape {
             KeyShape::WorkspaceBundle {
                 host,
@@ -416,6 +428,7 @@ fn scope_rows(
                     workspace_id = Some(hit.workspace_id.to_owned());
                     kind = kind.or_else(|| hit.ds.kind.clone());
                     harness_states = hit.ds.harness_states.clone();
+                    ledger_ids.push(hit.skill_id.to_owned());
                     // A PINNED row's target is its pin, never the served current: the pin is what
                     // `update` delivers here, so measuring against `current` would report a row
                     // sitting exactly where it was asked to sit as "behind — `topos update` lands
@@ -423,13 +436,18 @@ fn scope_rows(
                     let target = row.pin().unwrap_or_else(|| hit.ds.served_version.clone());
                     applied_for_id(ctx, layout, hit.skill_id, &target)
                 }
-                None => stored_by_name(ctx, layout, &mut index, &name)
-                    .unwrap_or_else(|| Applied::plain(session_state(all, host, workspace))),
+                None => {
+                    ledger_ids.extend(stored_id(ctx, layout, &mut index, &name));
+                    stored_by_name(ctx, layout, &mut index, &name)
+                        .unwrap_or_else(|| Applied::plain(session_state(all, host, workspace)))
+                }
             },
             // A local folder: its presence IS the delivery (adopted in place — there is no
             // upstream to be behind or ahead of).
             KeyShape::LocalPath { raw } => {
                 if ctx.fs.exists(&local_dir(ctx, base.as_deref(), raw)) {
+                    ledger_ids.extend(stored_id(ctx, layout, &mut index, &name));
+                    ledger_ids.push(format!("local:{name}"));
                     stored_by_name(ctx, layout, &mut index, &name)
                         .unwrap_or_else(|| Applied::plain(StatusItemState::Applied))
                 } else {
@@ -439,6 +457,12 @@ fn scope_rows(
             // A repo skill: only this scope's store can answer it offline.
             _ => stored_by_name(ctx, layout, &mut index, &name).unwrap_or_else(Applied::unknown),
         };
+        // An mcp row the delivery cache says nothing about — every LOCAL one — takes its per-agent
+        // entries from this scope's ledger. Without the join the deep dive reads "no agent config
+        // entries recorded yet" forever, about entries this very scope placed.
+        if kind.as_deref() == Some("mcp") && harness_states.is_empty() {
+            harness_states = ledger_states(&ledger, &ledger_ids);
+        }
         out.rows.push(Row {
             name,
             reference: identity,
@@ -969,12 +993,55 @@ fn stored_by_name(
     index: &mut Option<BTreeMap<String, String>>,
     name: &str,
 ) -> Option<Applied> {
+    let id = stored_id(ctx, layout, index, name)?;
+    Some(applied_for_id(ctx, layout, &id, ""))
+}
+
+/// The skill id this scope's store files a NAME under, when it holds one (the same index
+/// [`stored_by_name`] reads, built at most once per scope).
+fn stored_id(
+    ctx: &Ctx<'_>,
+    layout: Option<&Layout>,
+    index: &mut Option<BTreeMap<String, String>>,
+    name: &str,
+) -> Option<String> {
     let layout = layout?;
-    let id = index
+    index
         .get_or_insert_with(|| store_index(ctx, layout))
-        .get(name)?
-        .clone();
-    Some(applied_for_id(ctx, Some(layout), &id, ""))
+        .get(name)
+        .cloned()
+}
+
+/// The per-agent config entries one scope's MCP ledger records for a bundle. The ledger holds only
+/// COMMITTED placements — a drifted or unprovable surface commits none — so every entry it answers
+/// is one topos wrote and last knew as current: the same "as of the last converge" claim a cached
+/// workspace row makes, for the local rows no cache describes.
+///
+/// The first identity that answers wins: a bundle is filed under ONE of the spellings its row
+/// could carry, never several at once.
+fn ledger_states(
+    ledger: &crate::mcp_ledger::McpLedger,
+    ids: &[String],
+) -> Vec<topos_types::results::McpAgentState> {
+    ids.iter()
+        .find_map(|id| {
+            let states: Vec<topos_types::results::McpAgentState> = ledger
+                .entries
+                .iter()
+                .filter(|(_, e)| &e.bundle_id == id)
+                .filter_map(|(key, e)| {
+                    Some(topos_types::results::McpAgentState {
+                        // The ledger key is `"<harness slug>/<entry key>"`.
+                        agent: key.split_once('/')?.0.to_owned(),
+                        state: "current".to_owned(),
+                        note: None,
+                        file: Some(e.file.clone()),
+                    })
+                })
+                .collect();
+            (!states.is_empty()).then_some(states)
+        })
+        .unwrap_or_default()
 }
 
 /// The forge QUESTIONS one scope's recipe asks: every external row, at the ref the row spells.
@@ -2239,6 +2306,76 @@ mod tests {
             // A token no scope delivers is the uniform not-found.
             let err = detail_for(&sections, &all, "nowhere").expect_err("an unknown token");
             assert!(matches!(err, ClientError::TargetNotFound { .. }), "{err:?}");
+        });
+    }
+
+    /// A LOCAL mcp row's config entries live in this scope's ledger and NOWHERE else — no
+    /// workspace delivers the bundle, so no delivery cache can describe it. The deep answer reads
+    /// them there instead of saying "no agent config entries recorded yet" about entries this very
+    /// scope placed. Another bundle's entries never ride along.
+    #[test]
+    fn a_local_mcp_row_reads_its_agent_entries_from_the_scope_ledger() {
+        use crate::mcp_ledger::{LedgerEntry, McpLedger, placement_key};
+
+        let home = TempHome::new();
+        let cwd = home.0.join("plain");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let dir = home.0.join("weather");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("server.json"), b"{}\n").unwrap();
+        home.global(&format!(
+            "[bundles]\n\"{}\" = {{ kind = \"mcp\" }}\n",
+            dir.display()
+        ));
+
+        let entry = |bundle: &str, file: &str| LedgerEntry {
+            bundle_id: bundle.to_owned(),
+            version_id: String::new(),
+            file: file.to_owned(),
+            fingerprint: "fp".to_owned(),
+            owns_file: false,
+        };
+        let mut ledger = McpLedger::default();
+        ledger.entries.insert(
+            placement_key("cursor", "topos-local-weather"),
+            entry("local:weather", "/agents/cursor/mcp.json"),
+        );
+        ledger.entries.insert(
+            placement_key("codex", "topos-local-weather"),
+            entry("local:weather", "/agents/codex/config.toml"),
+        );
+        // A DIFFERENT bundle's committed entry, under the same harness.
+        ledger.entries.insert(
+            placement_key("cursor", "topos-local-notes"),
+            entry("local:notes", "/agents/cursor/mcp.json"),
+        );
+        crate::mcp_ledger::write(&RealFs, &home.layout(), &ledger).unwrap();
+
+        with_ctx(&home, Some(&cwd), |ctx| {
+            let (all, cache) = read_sources(ctx).unwrap();
+            let r = resolve(ctx, &all, &cache).unwrap();
+            let sections: Vec<&ScopeResolution> = r.scopes.iter().collect();
+            let detail = detail_for(&sections, &all, "weather").expect("the deep answer");
+            assert_eq!(detail.kind.as_deref(), Some("mcp"));
+            let agents: Vec<(&str, &str, &str)> = detail
+                .harnesses
+                .iter()
+                .map(|h| {
+                    (
+                        h.agent.as_str(),
+                        h.state.as_str(),
+                        h.file.as_deref().unwrap_or_default(),
+                    )
+                })
+                .collect();
+            assert_eq!(
+                agents,
+                vec![
+                    ("codex", "current", "/agents/codex/config.toml"),
+                    ("cursor", "current", "/agents/cursor/mcp.json"),
+                ],
+                "only this bundle's committed entries, each naming its file"
+            );
         });
     }
 }
