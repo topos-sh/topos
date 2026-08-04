@@ -767,10 +767,11 @@ pub(crate) fn add_describe_tty(
     data: &topos_types::results::AddDescribeData,
     yes_argv: &[String],
 ) -> String {
-    let mut s = format!(
-        "{} — nothing has been downloaded into your agents yet.\n",
-        data.source
-    );
+    // The opener NAMES the source and claims nothing about the machine. It used to say nothing had
+    // been downloaded yet, which was true only of a source being seen for the first time — and a
+    // describe now happens on every add, including one whose skills are already installed here.
+    // The closing line is where "nothing has changed yet" belongs, and it is true of both.
+    let mut s = format!("{}\n", data.source);
     if data.members.is_empty() {
         s.push_str("It holds no skills topos can see.\n");
     } else {
