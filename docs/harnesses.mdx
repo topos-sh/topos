@@ -135,8 +135,10 @@ exactly as they move the skills directories above.
 
 Each file is written in its own dialect and nothing else in it is disturbed: JSON stays JSON,
 OpenClaw's JSONC keeps its comments and trailing commas, Codex gets a `[mcp_servers.…]` table,
-Hermes gets a one-line entry under `mcp_servers:`. The Claude Code user surface is the exception —
-a plugin directory Topos owns whole and rewrites rather than patches.
+Hermes gets a one-line entry under `mcp_servers:`. The Claude Code user surface is a directory
+Topos creates and owns, and its `.mcp.json` is patched entry by entry like every other JSON config
+— put something of your own in that directory and Topos stops writing there at all rather than
+write over it.
 
 OpenClaw and Hermes Agent have **no project-level MCP config**, so a project row reports
 `not placed — no project-level config` for them rather than falling back to your home config. Those

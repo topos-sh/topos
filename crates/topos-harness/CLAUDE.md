@@ -46,16 +46,20 @@ trust/consent state.
   automatic derivation from the registry.
 - **`mcp`** — pure MCP-server config placement for six harnesses; bytes in → an `EditPlan` out,
   the CLI owns ALL file I/O. A descriptor table (registry-slug-keyed: user/project surface +
-  dialect + reload copy) over four drivers: `jsonc_edit` (Cursor / Claude-project / OpenCode
-  strict JSON + OpenClaw JSONC, through a lossless CST — comments and formatting preserved),
-  `toml_patch` (Codex `[mcp_servers.*]` via `toml_edit`), `yaml_splice` (Hermes one-line
-  sentinel-marked flow entries, the `hermes.rs` line-surgical idiom), and `plugin_dir` (the
-  wholly-topos-owned Claude Code plugin dir, rendered whole). Ownership keys on the `topos-`
+  dialect + reload copy) over three editing drivers: `jsonc_edit` (Cursor / Claude-project /
+  OpenCode strict JSON + OpenClaw JSONC — and the Claude Code plugin dir's `.mcp.json` — through
+  a lossless CST, comments and formatting preserved), `toml_patch` (Codex `[mcp_servers.*]` via
+  `toml_edit`) and `yaml_splice` (Hermes one-line sentinel-marked flow entries, the `hermes.rs`
+  line-surgical idiom); `plugin_dir` renders only what a driver cannot know — the constant
+  `.claude-plugin/plugin.json` manifest and the fresh-dir shape. Ownership keys on the `topos-`
   key prefix PLUS the caller's `key → fingerprint` ledger (sha256 over a canonical structural
   rendering, so reflow never reads as drift); a prior-mismatched entry is `Drifted` and a
   ledger-less one `Foreign` — both untouched, always; per-dialect entry shapes are exact (a
   wrong key can brick a harness) and every edit is post-verified — any unprovable input or
-  verification surprise yields `Unprovable` with ZERO byte changes.
+  verification surprise yields `Unprovable` with ZERO byte changes. `apply` refuses BEFORE
+  planning an edit when the input does not re-serialize byte-identical through its own dialect
+  (a BOM, unusual line endings): the round-trip precondition is the dispatcher's, not each
+  driver's discretion.
 - **`registry`** — the baked ~73-harness table (detection + skills-root resolution;
   `detected_harnesses`), plus `choose_skill_dir`, the ONE placement-naming discipline every
   target dir follows (`topos` is `RESERVED_SKILL_DIR`, the built-in's name).
