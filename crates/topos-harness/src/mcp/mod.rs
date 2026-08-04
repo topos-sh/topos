@@ -140,6 +140,13 @@ pub struct Observed {
 /// [`McpDialect::ClaudePluginDir`] pass the plugin dir's `.mcp.json` bytes — the strict JSON
 /// driver patches it like any other surface; the constant manifest beside it
 /// ([`plugin_dir::render_plugin_dir`]) is the caller's I/O.
+///
+/// THE DISPATCHER-ENFORCED byte-preservation precondition: before any edit lands, the parsed
+/// input must re-serialize byte-identical to the original through the driver's own editor —
+/// otherwise a rewrite would silently normalize bytes the driver never modeled (a BOM, CRLF
+/// line endings), so the plan is downgraded to [`EditPlan::Unprovable`] with an honest reason.
+/// The guarantee lives HERE, not in per-driver discretion: a driver may check earlier for a
+/// better message, but no `Write` leaves this function against a non-round-tripping input.
 #[must_use]
 pub fn apply(
     dialect: McpDialect,
@@ -147,7 +154,7 @@ pub fn apply(
     desired: &[McpEntry],
     prior: &BTreeMap<String, String>,
 ) -> ApplyOutcome {
-    match dialect {
+    let outcome = match dialect {
         McpDialect::ClaudeProjectJson
         | McpDialect::CursorJson
         | McpDialect::OpencodeJson
@@ -155,6 +162,38 @@ pub fn apply(
         | McpDialect::ClaudePluginDir => jsonc_edit::apply(dialect, current, desired, prior),
         McpDialect::CodexToml => toml_patch::apply(current, desired, prior),
         McpDialect::HermesYaml => yaml_splice::apply(current, desired, prior),
+    };
+    // A `Write` over EXISTING content must be provably lossless outside the edit. A creation
+    // (absent or whitespace-only input) has nothing to preserve.
+    if matches!(outcome.plan, EditPlan::Write(_))
+        && !effectively_absent(current)
+        && !input_round_trips(dialect, current.unwrap_or_default())
+    {
+        return unprovable(
+            "the config does not re-serialize byte-identical (a BOM or unusual line endings?); \
+             refusing to edit",
+        );
+    }
+    outcome
+}
+
+/// Whether `bytes` re-serialize byte-identical through `dialect`'s editor — the [`apply`]
+/// dispatcher's precondition for any `Write` over existing content.
+fn input_round_trips(dialect: McpDialect, bytes: &[u8]) -> bool {
+    let Ok(text) = std::str::from_utf8(bytes) else {
+        return false;
+    };
+    match dialect {
+        McpDialect::ClaudeProjectJson
+        | McpDialect::CursorJson
+        | McpDialect::OpencodeJson
+        | McpDialect::OpenclawJson
+        | McpDialect::ClaudePluginDir => jsonc_edit::round_trips(dialect, text),
+        McpDialect::CodexToml => toml_patch::round_trips(text),
+        // The Hermes splicer is line-surgical: its "parse" IS the input lines, untouched lines
+        // are carried verbatim by construction, and its own verification asserts the output
+        // minus sentinel lines is byte-identical, in order, to the input minus sentinel lines.
+        McpDialect::HermesYaml => true,
     }
 }
 
@@ -787,6 +826,110 @@ mod tests {
             McpDialect::ClaudePluginDir,
             Some(b"{\n  \"mcpServers\": {\n    \"mine\": {}\n  }\n}\n"),
         ));
+    }
+
+    /// The dispatcher's byte-preservation precondition: a `Write` over existing content is
+    /// allowed ONLY when the input provably re-serializes byte-identical — a file the editor
+    /// would silently normalize (CRLF → LF, a stripped BOM) is refused whole, zero byte changes.
+    #[test]
+    fn the_dispatcher_refuses_to_edit_input_that_does_not_round_trip() {
+        let e = [entry("topos-a", "https://a")];
+        let none: BTreeMap<String, String> = BTreeMap::new();
+
+        // CRLF TOML: toml_edit re-serializes LF, so an insert would rewrite the user's whole
+        // file with foreign line endings — refused at the dispatcher, honestly.
+        const CRLF_TOML: &str = "# my codex config\r\nmodel = \"o5\"\r\n";
+        let out = apply(McpDialect::CodexToml, Some(CRLF_TOML.as_bytes()), &e, &none);
+        let EditPlan::Unprovable(reason) = &out.plan else {
+            panic!("CRLF TOML must refuse the edit: {:?}", out.plan);
+        };
+        assert!(reason.contains("byte-identical"), "{reason}");
+        assert!(out.states.is_empty() && out.fingerprints.is_empty());
+
+        // A BOM-carrying TOML file: the BOM would be stripped on rewrite — refused.
+        const BOM_TOML: &str = "\u{feff}model = \"o5\"\n";
+        let out = apply(McpDialect::CodexToml, Some(BOM_TOML.as_bytes()), &e, &none);
+        assert!(
+            matches!(out.plan, EditPlan::Unprovable(_)),
+            "BOM TOML must refuse the edit: {:?}",
+            out.plan
+        );
+
+        // Reading is unaffected: a CRLF file whose managed entry is already at the desired
+        // value needs no edit — Leave, states honest, zero byte changes.
+        let placed = entry("topos-x", "https://u");
+        let current_crlf = "[mcp_servers.topos-x]\r\nurl = \"https://u\"\r\n".to_owned();
+        let prior: BTreeMap<String, String> = [(
+            "topos-x".to_owned(),
+            fingerprint_value(&entry_value(McpDialect::CodexToml, &placed)),
+        )]
+        .into_iter()
+        .collect();
+        let out = apply(
+            McpDialect::CodexToml,
+            Some(current_crlf.as_bytes()),
+            std::slice::from_ref(&placed),
+            &prior,
+        );
+        assert_eq!(out.plan, EditPlan::Leave);
+        assert_eq!(
+            out.states,
+            vec![("topos-x".to_owned(), EntryState::Current)]
+        );
+
+        // A whitespace-only CRLF file is a CREATION (no user content to preserve) — it writes.
+        let out = apply(McpDialect::CodexToml, Some(b" \r\n"), &e, &none);
+        assert!(out.created_file, "{:?}", out.plan);
+        assert!(matches!(out.plan, EditPlan::Write(_)));
+    }
+
+    /// CRLF JSON round-trips the lossless CST, so it stays editable — and every untouched user
+    /// line keeps its bytes, CRLF included.
+    #[test]
+    fn crlf_json_stays_editable_with_user_lines_byte_preserved() {
+        const CRLF: &str = "{\r\n  \"mcpServers\": {\r\n    \"mine\": {\r\n      \"url\": \"https://user.example\"\r\n    }\r\n  }\r\n}\r\n";
+        let out = apply(
+            McpDialect::CursorJson,
+            Some(CRLF.as_bytes()),
+            &[entry("topos-a", "https://a")],
+            &BTreeMap::new(),
+        );
+        let EditPlan::Write(bytes) = &out.plan else {
+            panic!("CRLF JSON is losslessly editable: {:?}", out.plan);
+        };
+        let text = String::from_utf8(bytes.clone()).unwrap();
+        assert!(
+            text.contains("\"mine\": {\r\n      \"url\": \"https://user.example\"\r\n    }"),
+            "user CRLF lines byte-preserved: {text:?}"
+        );
+        assert!(text.contains("topos-a"));
+    }
+
+    /// CRLF YAML: the line splicer carries every untouched user line verbatim — CRLF included —
+    /// and only adds its own sentinel line.
+    #[test]
+    fn crlf_yaml_user_lines_are_preserved_byte_for_byte() {
+        const CRLF: &str =
+            "model: gpt\r\nmcp_servers:\r\n  their: {url: \"https://user.example\"}\r\n";
+        let out = apply(
+            McpDialect::HermesYaml,
+            Some(CRLF.as_bytes()),
+            &[entry("topos-a", "https://a")],
+            &BTreeMap::new(),
+        );
+        let EditPlan::Write(bytes) = &out.plan else {
+            panic!("CRLF YAML is line-surgically editable: {:?}", out.plan);
+        };
+        let text = String::from_utf8(bytes.clone()).unwrap();
+        assert!(
+            text.contains("model: gpt\r\n"),
+            "user CRLF lines byte-preserved: {text:?}"
+        );
+        assert!(
+            text.contains("  their: {url: \"https://user.example\"}\r\n"),
+            "{text:?}"
+        );
+        assert!(text.contains("topos-a"));
     }
 
     #[test]

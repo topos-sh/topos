@@ -176,6 +176,18 @@ pub fn apply(
     outcome(EditPlan::Write(out_text.into_bytes()), rec, false)
 }
 
+/// Whether the input re-serializes byte-identical through this driver's editor (the dispatcher's
+/// byte-preservation precondition — see [`apply`](super::apply)). The CST is lossless by
+/// construction, so this holds for anything it parses in the dialect's mode.
+#[must_use]
+pub(crate) fn round_trips(dialect: McpDialect, text: &str) -> bool {
+    let Some(spec) = dialect_spec(dialect) else {
+        return false;
+    };
+    CstRootNode::parse(text, &parse_options(spec.strictness))
+        .is_ok_and(|root| root.to_string() == text)
+}
+
 /// Read the surface without writing: `key → fingerprint` for every `topos-`-prefixed entry.
 #[must_use]
 pub fn observe(dialect: McpDialect, current: Option<&[u8]>) -> Observed {

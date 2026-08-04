@@ -107,6 +107,16 @@ pub fn apply(
     outcome(EditPlan::Write(out_text.into_bytes()), rec, false)
 }
 
+/// Whether the input re-serializes byte-identical through `toml_edit` (the dispatcher's
+/// byte-preservation precondition — see [`apply`](super::apply)). `toml_edit` normalizes what it
+/// does not model — a BOM is dropped, CRLF line endings come back LF — so a file it cannot
+/// reproduce byte-for-byte is one this driver must not rewrite.
+#[must_use]
+pub(crate) fn round_trips(text: &str) -> bool {
+    text.parse::<DocumentMut>()
+        .is_ok_and(|doc| doc.to_string() == text)
+}
+
 /// Read the surface without writing: `key → fingerprint` for every `topos-`-prefixed entry.
 /// Reads accept any table-LIKE `mcp_servers` spelling (broader than the edit path — reading
 /// cannot damage anything).
