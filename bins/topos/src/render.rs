@@ -1802,7 +1802,10 @@ fn list_detail_tty(detail: &topos_types::results::ListDetail) -> String {
         if detail.harnesses.is_empty() {
             s.push_str("\n  an MCP server bundle — no agent config entries recorded yet");
         } else {
-            s.push_str("\n  an MCP server bundle, configured in:");
+            // "as of the last converge": these entries are what the ledger / delivery cache
+            // recorded when topos last wrote — a hand edit since then surfaces only when the
+            // next converge looks, so the heading claims exactly that much.
+            s.push_str("\n  an MCP server bundle, configured in (as of the last converge):");
             for h in &detail.harnesses {
                 let file = h.file.as_deref().unwrap_or("(no file recorded)");
                 match (h.state.as_str(), h.note.as_deref()) {

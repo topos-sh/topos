@@ -1014,8 +1014,10 @@ fn stored_id(
 
 /// The per-agent config entries one scope's MCP ledger records for a bundle. The ledger holds only
 /// COMMITTED placements — a drifted or unprovable surface commits none — so every entry it answers
-/// is one topos wrote and last knew as current: the same "as of the last converge" claim a cached
-/// workspace row makes, for the local rows no cache describes.
+/// is one topos wrote and last knew as current: `state: "current"` here is an "as of the last
+/// converge" claim (the deep dive's rendered heading says so), the same one a cached workspace row
+/// makes, for the local rows no cache describes. It is NOT a live probe — an entry hand-edited
+/// since that converge still answers `current` until the next converge observes the drift.
 ///
 /// The first identity that answers wins: a bundle is filed under ONE of the spellings its row
 /// could carry, never several at once.
@@ -1033,6 +1035,8 @@ fn ledger_states(
                     Some(topos_types::results::McpAgentState {
                         // The ledger key is `"<harness slug>/<entry key>"`.
                         agent: key.split_once('/')?.0.to_owned(),
+                        // As of the last converge (see the fn doc) — the ledger's fingerprint,
+                        // not a live read of the file.
                         state: "current".to_owned(),
                         note: None,
                         file: Some(e.file.clone()),
