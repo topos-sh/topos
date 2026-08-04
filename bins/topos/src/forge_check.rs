@@ -89,6 +89,10 @@ pub(crate) struct CheckFailure {
     /// real. Retrying the same reference gets the same answer, so it is not retried.
     #[serde(default)]
     pub gone: bool,
+    /// The forge ANSWERED at all. A rate-limited or erroring host is a different thing from one
+    /// that could not be dialed, and the line a person reads must not call the first the second.
+    #[serde(default)]
+    pub reached: bool,
     /// The row's ref at the time (a pin, or empty for a floating row). An edit that changes what
     /// the row asks for changes this key, and the question re-opens.
     #[serde(default)]
@@ -303,6 +307,7 @@ mod tests {
             failure: Some(CheckFailure {
                 reason: "gone".into(),
                 gone: true,
+                reached: true,
                 git_ref: String::new(),
                 reported: true,
             }),
@@ -321,6 +326,7 @@ mod tests {
             failure: Some(CheckFailure {
                 reason: "could not connect".into(),
                 gone: false,
+                reached: false,
                 git_ref: String::new(),
                 reported: false,
             }),

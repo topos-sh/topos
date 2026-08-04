@@ -57,11 +57,15 @@ pub(crate) fn status_snapshot(ctx: &Ctx<'_>, view: ScopeView) -> Result<StatusDa
     let show_machine = !in_project || matches!(view, ScopeView::Machine | ScopeView::All);
 
     let mut scopes = Vec::new();
+    // The sections this invocation SHOWS — what the forge health below is answered over, so `-g`
+    // never surfaces a failure belonging to a project the invocation did not ask about.
+    let mut shown: Vec<&inventory::ScopeResolution> = Vec::new();
     if show_project {
         let sr = resolved
             .project()
             .expect("in_project implies a project scope");
         scopes.push(scope_body(sr, &resolved, None, in_project));
+        shown.push(sr);
     }
     if show_machine {
         scopes.push(scope_body(
@@ -70,6 +74,7 @@ pub(crate) fn status_snapshot(ctx: &Ctx<'_>, view: ScopeView) -> Result<StatusDa
             awaiting,
             in_project,
         ));
+        shown.push(resolved.machine());
     }
     // The machine scope not shown in full rides ONE summary line with ITS pending counts.
     let machine_summary = (!show_machine).then(|| StatusScopeSummary {
@@ -83,7 +88,7 @@ pub(crate) fn status_snapshot(ctx: &Ctx<'_>, view: ScopeView) -> Result<StatusDa
         signed_in,
         sessions: session_rows,
         triggers: Vec::new(),
-        forge: inventory::forge_sources(ctx, &resolved.scopes),
+        forge: inventory::forge_sources(ctx, &shown),
         scopes,
         machine_summary,
     })

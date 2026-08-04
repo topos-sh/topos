@@ -946,16 +946,18 @@ fn stored_by_name(
     Some(applied_for_id(ctx, Some(layout), &id, ""))
 }
 
-/// The last auto-update check of every external source the RESOLVED scopes name, newest spelling
-/// first. Read from the machine's own check log — the scopes supply which sources are in play, the
-/// log supplies what happened to each.
+/// The last auto-update check of every external source the SHOWN scopes name. Read from the
+/// machine's own check log — the scopes supply which sources are in play, the log supplies what
+/// happened to each.
 ///
-/// Both read verbs show the same rows, because the question ("is my GitHub row still being kept
-/// current?") is the same question in both. A source no check has touched yet contributes nothing:
-/// an empty answer is honest, an invented one is not.
-pub(crate) fn forge_sources(ctx: &Ctx<'_>, scopes: &[ScopeResolution]) -> Vec<ForgeSource> {
+/// SHOWN, not resolved: the scope flags mean the same thing here as everywhere else, so `-g`
+/// answers about the machine scope alone and never surfaces a failure belonging to a project the
+/// invocation deliberately did not ask about. Both read verbs show the same rows, because the
+/// question ("is my GitHub row still being kept current?") is the same question in both. A source
+/// no check has touched yet contributes nothing: an empty answer is honest, an invented one is not.
+pub(crate) fn forge_sources(ctx: &Ctx<'_>, shown: &[&ScopeResolution]) -> Vec<ForgeSource> {
     let mut wanted: BTreeSet<String> = BTreeSet::new();
-    for section in scopes {
+    for section in shown {
         for set in &section.sets {
             if let Ok(KeyShape::RepoSet { host, owner, repo }) = keys::classify_key(set) {
                 wanted.insert(format!("{host}/{owner}/{repo}"));

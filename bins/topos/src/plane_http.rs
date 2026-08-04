@@ -1941,6 +1941,9 @@ impl crate::git_source::GitTarballSource for UreqGitSource {
                 ),
                 fault: transport_fault(&e),
             })?;
+        // Read BEFORE the body is consumed. A pinned row never probes, so the archive request is
+        // the only place its host can ask to be left alone for a while.
+        let retry_after_ms = retry_after_ms(&resp);
         match resp.status().as_u16() {
             // Streamed: GitHub's tarball redirect answers chunked (no `Content-Length`), so the
             // line shows the figure climbing rather than a percentage it cannot know.
@@ -1962,7 +1965,7 @@ impl crate::git_source::GitTarballSource for UreqGitSource {
             }),
             s => Err(ClientError::RemoteFetch {
                 msg: format!("{} — {}", spec.label(), status_reason(GITHUB_API_HOST, s)),
-                fault: FetchFault::unavailable(),
+                fault: FetchFault::Unavailable { retry_after_ms },
             }),
         }
     }

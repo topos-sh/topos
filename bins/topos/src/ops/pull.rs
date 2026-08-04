@@ -114,8 +114,10 @@ pub(crate) struct StaleForge {
     /// The OLDEST last-answered time across those sources; `None` = one of them has never
     /// answered at all (and so is not stale — there is nothing to be stale from).
     pub answered_at: Option<i64>,
-    /// What went wrong, in a person's terms.
-    pub reason: String,
+    /// The host ANSWERED at least one of these rows — it just did not answer usefully. A
+    /// rate-limited forge and an unreachable one are different things to go look at, and the line
+    /// says which.
+    pub reached: bool,
 }
 
 /// One workspace left without a fresh delivery this run. It carries BOTH halves of the workspace's
@@ -637,8 +639,14 @@ pub(crate) fn quiet_hook_lines(
             .answered_at
             .map(|at| sync_status::human_duration(now_millis.saturating_sub(at)));
         lines.push(format!(
-            "topos: {} unreachable — {} {} not checked{} ({}); they still work",
+            "topos: {} {} — {} {} not checked{}; they still work",
             forge.host,
+            // A host that answered is not unreachable, whatever else went wrong with the answer.
+            if forge.reached {
+                "is not answering checks"
+            } else {
+                "unreachable"
+            },
             forge.sources,
             if forge.sources == 1 {
                 "skill"
@@ -646,7 +654,6 @@ pub(crate) fn quiet_hook_lines(
                 "skills"
             },
             ago.map(|a| format!(" for {a}")).unwrap_or_default(),
-            forge.reason
         ));
     }
     if out.unreachable.is_empty() {
