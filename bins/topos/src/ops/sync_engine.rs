@@ -382,7 +382,9 @@ pub(crate) fn sync_one_planned(
             // The bytes already equal the target (a crash after a prior swap, or an idempotent re-pull):
             // advance `applied` with NO swap, never a false DIVERGED — and no spurious draft snapshot.
             heal_forward(ctx, &sp, &map, &managed, &lock, &sync, &t)?;
-            Ok(applied_row(&name, &sync, target_commit))
+            let mut row = applied_row(&name, &sync, target_commit);
+            row.harnesses = converge_explicit_mcp(ctx, mcp_record && explicit, skill_id, &name);
+            Ok(row)
         }
         ApplyClass::CleanForward => {
             // A swap happens only here, and only when `work_eq_base` (a clean follower) — so a swap never
@@ -391,7 +393,9 @@ pub(crate) fn sync_one_planned(
                 .applies_bytes()
             {
                 apply_forward(ctx, &sp, &map, &managed, &lock, &sync, skill_id, &t)?;
-                Ok(applied_row(&name, &sync, target_commit))
+                let mut row = applied_row(&name, &sync, target_commit);
+                row.harnesses = converge_explicit_mcp(ctx, mcp_record && explicit, skill_id, &name);
+                Ok(row)
             } else {
                 // confirm-each / first-receive TOFU: re-disclose the digest as a one-tap offer; nothing
                 // materializes (a bare sweep never auto-lands a never-received skill — I-TOFU).
@@ -461,6 +465,33 @@ pub(crate) fn sync_one_planned(
             }
         }
     }
+}
+
+/// THE TARGETED-ACCEPT CONVERGE — the same rule the go-back applies below: for a config-placed
+/// bundle the store move alone changes nothing an agent reads, so an explicit
+/// `topos update <mcp-name>` converges this scope's configs NOW and threads the per-agent states
+/// onto the row, instead of reporting success while every config keeps the previous document
+/// until the next sweep. `run` is false for everything that is not an explicit mcp apply (the
+/// bare sweep's converge is the reconcile's own). Best-effort by construction: the store move
+/// already landed, and the next sweep reaches the same configs — warnings ride stderr, the
+/// channel every targeted converge uses.
+fn converge_explicit_mcp(
+    ctx: &Ctx<'_>,
+    run: bool,
+    skill_id: &str,
+    name: &str,
+) -> Vec<topos_types::results::McpAgentState> {
+    if !run {
+        return Vec::new();
+    }
+    let Ok(sid) = crate::id::SkillId::parse(skill_id) else {
+        return Vec::new();
+    };
+    let (states, warnings) = crate::mcp_engine::converge_bundle_now(ctx, &sid, name);
+    for w in warnings {
+        eprintln!("topos update: {w}");
+    }
+    states
 }
 
 /// The typed refusal every empty-map + unknowable-kind path answers: the record may be a

@@ -269,6 +269,44 @@ fn a_fetched_server_applies_immediately_with_an_undo_led_receipt() {
     assert!(mcp.bundle.ends_with("weather"), "{}", mcp.bundle);
 }
 
+/// ITEM PAIR (add honors the narrowing): with `[defaults.mcp] harness = ["cursor"]` standing and
+/// TWO MCP-capable agents set up, `add --mcp` places into cursor ALONE — the same narrowing the
+/// sweep resolves, so the next sweep has nothing to claw back — and the receipt's breadth line
+/// lists only the narrowed agent. Before the fix the inline converge carried an EMPTY filter,
+/// which the engine reads as ALL harnesses.
+#[test]
+fn the_add_converge_honors_the_defaults_narrowing() {
+    let rig = Rig::new("narrow");
+    rig.write_global("[bundles]\n\n[defaults.mcp]\nharness = [\"cursor\"]\n");
+    // Both hermetic agents are set up in the fake home; the narrowing admits one.
+    std::fs::create_dir_all(rig.home.0.join(".cursor")).unwrap();
+    std::fs::create_dir_all(rig.home.0.join(".openclaw")).unwrap();
+    let docs = FakeDocs::serving(&good_server());
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+
+    let data = ops::add_mcp(&ctx, Some(&docs), "io.github.acme/weather", true).unwrap();
+    let cursor = rig.home.0.join(".cursor/mcp.json");
+    let openclaw = rig.home.0.join(".openclaw/openclaw.json");
+    assert!(
+        cursor.exists(),
+        "the narrowed harness gets the entry: {data:?}"
+    );
+    let placed = std::fs::read_to_string(&cursor).unwrap();
+    assert!(
+        placed.contains("https://weather.acme.example/mcp"),
+        "{placed}"
+    );
+    assert!(
+        !openclaw.exists(),
+        "a narrowing-excluded harness must not gain an entry on add"
+    );
+    // The breadth line is the narrowed one — never every engaged agent.
+    let mcp = data.mcp.expect("the typed block");
+    assert_eq!(mcp.agents, vec!["Cursor".to_owned()], "{:?}", mcp.agents);
+    let note = data.note.clone().unwrap_or_default();
+    assert!(!note.contains("openclaw"), "{note}");
+}
+
 /// What lands: the canonical document (pretty-printed, trailing newline) plus ONE row whose
 /// value is the inline table that records what the folder IS.
 #[test]

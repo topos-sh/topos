@@ -1863,11 +1863,27 @@ fn mcp_filter(
     warned: &mut HashSet<String>,
     warnings: &mut Vec<String>,
 ) -> Vec<String> {
-    let raw: Vec<String> = row
-        .and_then(|r| r.fields().harness)
+    mcp_harness_narrowing(
+        row.and_then(|r| r.fields().harness),
+        &sc.plan.defaults,
+        warned,
+        warnings,
+    )
+}
+
+/// The ONE resolution of an MCP demand's harness narrowing — shared by the sweep (through
+/// [`mcp_filter`]) and `add --mcp`'s inline converge, so the add can never fan out past what the
+/// next sweep would keep. `row_harness` is the row's own `harness = [...]` (beats the defaults);
+/// `defaults` the scope's `[defaults.<kind>]` sections.
+pub(crate) fn mcp_harness_narrowing(
+    row_harness: Option<Vec<String>>,
+    defaults: &[(String, crate::manifest::document::KindDefaults)],
+    warned: &mut HashSet<String>,
+    warnings: &mut Vec<String>,
+) -> Vec<String> {
+    let raw: Vec<String> = row_harness
         .or_else(|| {
-            sc.plan
-                .defaults
+            defaults
                 .iter()
                 .find(|(k, _)| k == "mcp")
                 .and_then(|(_, kd)| kd.harness.clone())

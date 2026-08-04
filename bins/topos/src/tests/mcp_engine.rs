@@ -2405,6 +2405,116 @@ fn a_targeted_go_back_never_reaches_a_narrowing_excluded_harness() {
     assert_eq!(agents, ["cursor"].into(), "{row:?}");
 }
 
+/// A plane that serves ONE bundle's `current` pointer (the targeted-accept read) over the fake
+/// version store — what `topos update <mcp-name>` dials when the pointer has advanced.
+struct ServesCurrent {
+    inner: FakePlane,
+    record: topos_types::WireCurrentRecord,
+}
+impl PlaneSource for ServesCurrent {
+    fn get_current(
+        &self,
+        skill_id: &str,
+        _known: Option<KnownCurrent>,
+    ) -> Result<PointerFetch, PlaneError> {
+        if skill_id == self.record.scope.skill_id {
+            Ok(PointerFetch::Record(self.record.clone()))
+        } else {
+            Err(PlaneError::NotFound)
+        }
+    }
+    fn fetch_version(
+        &self,
+        skill_id: &str,
+        version_id: [u8; 32],
+    ) -> Result<FetchedVersion, PlaneError> {
+        self.inner.fetch_version(skill_id, version_id)
+    }
+}
+
+/// ITEM PAIR (targeted accept converges): `topos update <mcp-name>` must not report success while
+/// every agent config still carries the previous document. The accept advances the store AND
+/// converges this scope's configs before returning, threading the per-agent states onto the row —
+/// the same converge the go-back runs. Before the fix the targeted path gave an mcp record an
+/// empty placement plan and left the configs stale until the next sweep.
+#[test]
+fn a_targeted_accept_updates_the_configs_before_reporting_success() {
+    let rig = Rig::new("accept-converge");
+    rig.seed_session();
+    seed_harness_dirs(&rig.home.0);
+    let v1 = mk_version(&[(
+        "server.json",
+        server_json("https://mcp.example/v1").as_bytes(),
+    )]);
+    let v2 = mk_version(&[(
+        "server.json",
+        server_json("https://mcp.example/v2").as_bytes(),
+    )]);
+    let (plane, dir) = deliver_linear(&rig, &v1);
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    sweep(&ctx, &plane, &dir);
+    let cursor = rig.home.0.join(".cursor/mcp.json");
+    assert!(
+        std::fs::read_to_string(&cursor)
+            .unwrap()
+            .contains("https://mcp.example/v1"),
+        "the sweep placed v1"
+    );
+
+    // The pointer advanced to v2; the person runs the targeted accept.
+    let serves = ServesCurrent {
+        inner: FakePlane::new().with_version("s_linear", &v2),
+        record: topos_types::WireCurrentRecord {
+            schema_version: topos_types::WIRE_SCHEMA_VERSION,
+            scope: topos_types::PointerScope {
+                workspace_id: WS.to_owned(),
+                skill_id: "s_linear".to_owned(),
+            },
+            record: topos_types::CurrentRecord {
+                version_id: topos_core::digest::to_hex(&v2.id),
+                generation: 2,
+            },
+        },
+    };
+    let follow = ops::CacheFollow::load(&rig.fs, &rig.layout());
+    let ctx2 = Ctx {
+        progress: crate::progress::silent(),
+        fs: &rig.fs,
+        ids: &rig.ids,
+        clock: &rig.clock,
+        device_id: "d_test".into(),
+        layout: rig.layout(),
+        harness: &rig.harness,
+        plane: &serves,
+        follow: &follow,
+        roots: Some(crate::ctx::AgentRoots {
+            home: rig.home.0.clone(),
+            cwd: Some(rig.work.0.clone()),
+        }),
+    };
+    let out = ops::pull(
+        &ctx2,
+        ops::PullScope::One {
+            name: "linear".into(),
+            workspace: None,
+            mode: ops::TargetMode::AcceptPending,
+            store: ops::StoreScope::Here,
+        },
+    )
+    .expect("the accept applies");
+
+    // The configs carry v2 BEFORE the verb returned — and the row reports the per-agent states.
+    let text = std::fs::read_to_string(&cursor).unwrap();
+    assert!(
+        text.contains("https://mcp.example/v2") && !text.contains("https://mcp.example/v1"),
+        "the accept converged the configs: {text}"
+    );
+    let row = &out.data.skills[0];
+    assert_eq!(row.action, topos_types::results::PullAction::FastForwarded);
+    let agents: BTreeSet<&str> = row.harnesses.iter().map(|h| h.agent.as_str()).collect();
+    assert_eq!(agents, ["cursor", "openclaw"].into(), "{row:?}");
+}
+
 /// ITEM PAIR (keyless targeted converge skips): with the LEDGER deleted, a targeted go-back has
 /// no ownership record to reuse — it must write NOTHING and say so, leaving the heal to the next
 /// sweep. Before the fix it minted a fresh `topos-local-linear` key and placed a DUPLICATE entry

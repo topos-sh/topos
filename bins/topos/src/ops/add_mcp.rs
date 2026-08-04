@@ -261,7 +261,8 @@ fn adopt_local(ctx: &Ctx<'_>, dir: &Path, global: bool) -> Result<Box<AddData>, 
     if let Ok(sid) = crate::id::SkillId::parse(&data.skill_id) {
         crate::mcp_engine::write_kind_marker(&sctx, &sid);
     }
-    let agents = engaged_agents(ctx, &scope.target, global);
+    let (filter, _) = row_narrowing(ctx, &scope.target, &data.name);
+    let agents = engaged_agents(ctx, &scope.target, global, &filter);
     let lines = converge_one(ctx, &scope.target, global, &data.skill_id, &data.name);
     fold_receipt(&mut data, &summary, dir, agents, &lines);
     Ok(Box::new(data))
@@ -329,7 +330,11 @@ fn fetch_arm(
         mcp_validate::validate_candidate_files(&files)?;
     }
 
-    let agents = engaged_agents(ctx, &target, global);
+    // The breadth line honors the scope's narrowing exactly as the converge below will (the row
+    // is not written yet, so only `[defaults.mcp]` can narrow here — a fresh row spells no
+    // `harness` of its own).
+    let (filter, _) = row_narrowing(ctx, &target, &slug);
+    let agents = engaged_agents(ctx, &target, global, &filter);
 
     // ---- APPLY ----
     // The BYTES first (the row must never point at a folder that is not there), then the import
@@ -583,13 +588,17 @@ fn converge_one(
         home: roots.home.clone(),
         project_root,
     };
+    // The SAME narrowing the sweep resolves for this row (`harness = [...]` beating
+    // `[defaults.mcp]`) — one shared resolution, so the add can never place into a harness the
+    // next sweep would claw back.
+    let (filter, filter_warnings) = row_narrowing(ctx, target, name);
     let demand = crate::mcp_engine::McpDemand {
         bundle_id: bundle_id.to_owned(),
         name: name.to_owned(),
         workspace_slug: None,
         version_id: String::new(),
         server_json,
-        harness_filter: Vec::new(),
+        harness_filter: filter,
     };
     let outcome = crate::mcp_engine::converge(
         &io,
@@ -599,7 +608,7 @@ fn converge_one(
         &HashSet::new(),
         false,
     );
-    let mut lines: Vec<String> = Vec::new();
+    let mut lines: Vec<String> = filter_warnings;
     for bundle in &outcome.bundles {
         for state in &bundle.states {
             let where_ = state.file.as_deref().unwrap_or("its config");
@@ -651,10 +660,49 @@ fn row_dir_of(ctx: &Ctx<'_>, target: &EditTarget, bundle_id: &str, name: &str) -
     best
 }
 
+/// The SAME harness narrowing the sweep would resolve for this scope's row named `name`: the
+/// row's own `harness = [...]` (when the row is already written) beating `[defaults.mcp]` —
+/// through the one shared resolution ([`super::reconcile::mcp_harness_narrowing`]), warnings and
+/// all. A manifest that cannot be read narrows nothing (the converge still runs; the next sweep
+/// re-resolves).
+fn row_narrowing(ctx: &Ctx<'_>, target: &EditTarget, name: &str) -> (Vec<String>, Vec<String>) {
+    let Ok(Some(text)) = medit::read_text(ctx, &target.path) else {
+        return (Vec::new(), Vec::new());
+    };
+    let Ok(doc) = crate::manifest::document::parse_manifest(&text, target.scope) else {
+        return (Vec::new(), Vec::new());
+    };
+    let row_harness = doc.rows.iter().find_map(|row| {
+        let crate::manifest::keys::KeyShape::LocalPath { raw } = &row.shape else {
+            return None;
+        };
+        (Path::new(raw).file_name().is_some_and(|n| n == name))
+            .then(|| match &row.value {
+                crate::manifest::document::EntryValue::Fields(f) => f.harness.clone(),
+                _ => None,
+            })
+            .flatten()
+    });
+    let mut warned = HashSet::new();
+    let mut warnings = Vec::new();
+    let filter = super::reconcile::mcp_harness_narrowing(
+        row_harness,
+        &doc.defaults,
+        &mut warned,
+        &mut warnings,
+    );
+    (filter, warnings)
+}
+
 /// The MCP-capable agents this scope's converge would engage — the same predicate the engine uses
-/// (the harness is detected here, OR its config file already exists), so the describe's breadth
-/// line is the one the apply delivers.
-fn engaged_agents(ctx: &Ctx<'_>, target: &EditTarget, global: bool) -> Vec<String> {
+/// (the harness is detected here, OR its config file already exists), narrowed by the same
+/// `filter` the demand carries — so the receipt's breadth line is the one the converge delivers.
+fn engaged_agents(
+    ctx: &Ctx<'_>,
+    target: &EditTarget,
+    global: bool,
+    filter: &[String],
+) -> Vec<String> {
     let Some(roots) = ctx.roots.clone() else {
         return Vec::new();
     };
@@ -668,6 +716,9 @@ fn engaged_agents(ctx: &Ctx<'_>, target: &EditTarget, global: bool) -> Vec<Strin
     .collect();
     let mut out = Vec::new();
     for h in topos_harness::mcp::descriptor::mcp_harnesses() {
+        if !filter.is_empty() && !filter.iter().any(|s| s == h.slug) {
+            continue;
+        }
         let surface = match &project_root {
             Some(root) => h.project_surface.and_then(|(rel, _)| {
                 let path = root.join(rel);

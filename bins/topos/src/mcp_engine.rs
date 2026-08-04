@@ -595,7 +595,7 @@ pub(crate) fn remove_bundle(
 
 /// The per-scope MCP converge lock (`locks/mcp.lock`, blocking): every entry point that runs the
 /// ledger + config read-modify-write — the sweep's [`converge`], add's inline converge, a
-/// targeted go-back's [`converge_bundle_now`], and [`remove_bundle`] — serializes on it, so two
+/// targeted go-back's / accept's [`converge_bundle_now`], and [`remove_bundle`] — serializes on it, so two
 /// processes can never interleave a read-modify-write over the same scope's configs.
 ///
 /// LOCK ORDER, fixed: the sweep already holds `locks/currency.lock` when it converges, so this
@@ -1305,9 +1305,9 @@ pub(crate) fn record_kind(
 }
 
 /// Converge THIS scope's config entries for ONE bundle right now — the store/lock just moved (a
-/// go-back), and the command must not return success while agent configs still carry the previous
-/// document. Same wiring as the sweep's converge, narrowed to one demand; removals stay OFF (a
-/// targeted verb never touches another bundle's entries). Best-effort by construction: the store
+/// go-back, a targeted accept), and the command must not return success while agent configs still
+/// carry the previous document. Same wiring as the sweep's converge, narrowed to one demand;
+/// removals stay OFF (a targeted verb never touches another bundle's entries). Best-effort by construction: the store
 /// move already landed, and the next sweep reaches the same configs — failures come back as
 /// warning lines beside the per-agent states.
 ///
