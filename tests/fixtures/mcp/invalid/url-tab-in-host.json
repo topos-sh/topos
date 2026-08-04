@@ -1,0 +1,11 @@
+{
+  "name": "io.github.acme/tabbed",
+  "description": "A tab inside the host — stripped by one parser before it ever reads the address.",
+  "version": "1.0.0",
+  "remotes": [
+    {
+      "type": "streamable-http",
+      "url": "https://x\t.example/mcp"
+    }
+  ]
+}

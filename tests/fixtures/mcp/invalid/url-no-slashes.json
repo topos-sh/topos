@@ -1,0 +1,11 @@
+{
+  "name": "io.github.acme/noslashes",
+  "description": "A scheme with no slashes after it: one parser invents the address, the other refuses.",
+  "version": "1.0.0",
+  "remotes": [
+    {
+      "type": "streamable-http",
+      "url": "https:example.com/mcp"
+    }
+  ]
+}

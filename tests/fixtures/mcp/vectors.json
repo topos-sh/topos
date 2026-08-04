@@ -179,5 +179,25 @@
     "file": "valid/hyphenated-prose-name.json",
     "verdict": "ok",
     "note": "Hyphenated prose is not a credential: a server named task-management-and-scheduling holds sk- mid-word, and the shape's left boundary is what tells the two apart."
+  },
+  {
+    "file": "invalid/url-no-slashes.json",
+    "verdict": "MCP_INVALID",
+    "note": "https:example.com/mcp is an address to one URL parser (which supplies the slashes) and nothing at all to the other — so neither tier reads it, and a document spelling it can never be published and then land."
+  },
+  {
+    "file": "invalid/url-backslash-authority.json",
+    "verdict": "MCP_INVALID",
+    "note": "A backslash in the authority: one parser ends the host at it and sees no userinfo, the other reads h\\ as a user name. The shape refuses before either reading is taken, so both tiers answer the same code."
+  },
+  {
+    "file": "invalid/url-tab-in-host.json",
+    "verdict": "MCP_INVALID",
+    "note": "A tab inside the host is deleted by one parser before it parses and refused outright by the other. An address whose meaning depends on who reads it is not one."
+  },
+  {
+    "file": "valid/astral-description.json",
+    "verdict": "ok",
+    "note": "A description of 84 characters that occupies 134 UTF-16 units: the ceiling counts CHARACTERS on both tiers, so an emoji costs one wherever it is measured."
   }
 ]

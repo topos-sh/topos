@@ -284,6 +284,45 @@ function declaresVariables(value: unknown): boolean {
 type RemoteCheck = { ok: true; headers: McpHeader[] } | McpRefusal;
 
 /**
+ * The one sentence both tiers say when an endpoint is spelled in a way they would read
+ * differently — same words, same code, either side of the wire.
+ */
+const AMBIGUOUS_ENDPOINT_MESSAGE =
+  "the endpoint is not a plain address — a shared endpoint spells scheme://host, with no backslash, tab or line break anywhere in it";
+
+/**
+ * Is this endpoint spelled so that EVERY reader gets the same address out of it?
+ *
+ * This tier hands its URLs to `new URL()` (a WHATWG parser) and the client hand-parses them, and
+ * the two disagree on three spellings — each one a repair the WHATWG parser performs silently:
+ *
+ *  · **no `://`** — `https:example.com/mcp` gains its slashes from the special-scheme rule and
+ *    parses as `https://example.com/mcp`; the client sees no authority at all.
+ *  · **a backslash** — it ENDS the authority (`https://h\@x.example/mcp` is host `h`, no
+ *    userinfo); the client splits at the last `@`, reads `h\` as a user name, and refuses the
+ *    document as carrying a credential.
+ *  · **a tab, CR or LF** — deleted from the input BEFORE parsing, so `https://x<TAB>.example/mcp`
+ *    is the host `x.example`; the client refuses whitespace in a host.
+ *
+ * None of the three is an address anyone means to write, and each one lands a different verdict
+ * per language — a document this tier accepts would be refused by every member's converge, every
+ * sweep, forever. So both tiers refuse the SHAPE up front rather than each parsing its own
+ * reading. Mirrors the client's `is_unambiguous_endpoint` exactly.
+ */
+function endpointIsUnambiguous(url: string): boolean {
+  return url.includes("://") && !/[\\\t\r\n]/.test(url);
+}
+
+/**
+ * How many CODE POINTS a string carries — the unit the client's gate counts in (`chars()`), and
+ * the one a person means by "characters". `.length` counts UTF-16 units instead, so a single
+ * emoji would cost two and this tier would refuse a description the client had already accepted.
+ */
+function codePointLength(text: string): number {
+  return [...text].length;
+}
+
+/**
  * The hygiene and credential rules ONE `remotes[]` entry answers to, whichever entry it is: the
  * address is a plain https URL with no template, no userinfo and a host that parses; the entry
  * reserves no per-installation fill-in; and every header carries a literal, credential-free value.
@@ -300,6 +339,12 @@ function checkRemote(remote: Record<string, unknown>): RemoteCheck {
         "MCP_URL_TEMPLATE",
         "the endpoint carries a {placeholder} — it is a template, not an address every machine can use",
       );
+    }
+    // BEFORE the parse, and BEFORE the userinfo rule: the spellings the two tiers would read
+    // DIFFERENTLY. Answering the same code on both is what this ordering buys — a document
+    // refused here can never be published on one tier and then refuse forever on the other.
+    if (!endpointIsUnambiguous(url)) {
+      return refuse("MCP_INVALID", AMBIGUOUS_ENDPOINT_MESSAGE);
     }
     let parsedUrl: URL;
     try {
@@ -437,8 +482,15 @@ export function validateServerJson(raw: Uint8Array | string): McpValidation {
     return refuse("MCP_INVALID", "a server.json document is a JSON object");
   }
 
+  // Every bound below counts CODE POINTS, the unit the client's gate counts in — see
+  // `codePointLength`. A limit that means one thing here and another there is a document one
+  // tier publishes and the other refuses.
   const name = parsed.name;
-  if (typeof name !== "string" || name.length < NAME_MIN || name.length > NAME_MAX) {
+  if (
+    typeof name !== "string" ||
+    codePointLength(name) < NAME_MIN ||
+    codePointLength(name) > NAME_MAX
+  ) {
     return refuse("MCP_INVALID", `name is required, ${NAME_MIN}–${NAME_MAX} characters`);
   }
   if (!NAME_SHAPE.test(name)) {
@@ -451,12 +503,16 @@ export function validateServerJson(raw: Uint8Array | string): McpValidation {
   if (
     typeof description !== "string" ||
     description.length === 0 ||
-    description.length > DESCRIPTION_MAX
+    codePointLength(description) > DESCRIPTION_MAX
   ) {
     return refuse("MCP_INVALID", `description is required, 1–${DESCRIPTION_MAX} characters`);
   }
   const version = parsed.version;
-  if (typeof version !== "string" || version.length === 0 || version.length > VERSION_MAX) {
+  if (
+    typeof version !== "string" ||
+    version.length === 0 ||
+    codePointLength(version) > VERSION_MAX
+  ) {
     return refuse("MCP_INVALID", "version is required");
   }
 

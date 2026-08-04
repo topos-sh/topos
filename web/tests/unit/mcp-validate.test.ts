@@ -514,6 +514,90 @@ describe("the model-provider key shape reads keys and not hyphenated prose", () 
   });
 });
 
+/**
+ * The three spellings `new URL()` SILENTLY REPAIRS and the client's hand-parse does not. Each one
+ * would otherwise be a document this door publishes and every member's converge refuses on every
+ * sweep, forever — so the shape is refused up front, on both tiers, with the same code.
+ *
+ * The backslash case is what pins the ORDER: this parser ends the authority at the backslash and
+ * reports no userinfo, while the client splits at the last `@` and calls `h\` a credential. The
+ * pre-scan running before either reading is what makes the two answers one answer.
+ */
+describe("an endpoint the two parsers read apart refuses as invalid", () => {
+  const withUrl = (url: string) =>
+    JSON.stringify({
+      name: "io.github.acme/spelling",
+      description: "One endpoint, spelled for two parsers.",
+      version: "1.0.0",
+      remotes: [{ type: STREAMABLE_HTTP, url }],
+    });
+  const codeOf = (url: string) => {
+    const result = validateServerJson(withUrl(url));
+    return result.ok === true ? "ok" : result.code;
+  };
+
+  it.each([
+    // The WHATWG parser supplies the missing slashes for a special scheme; the client sees no
+    // authority at all.
+    ["a scheme with no slashes", "https:example.com/mcp", "MCP_INVALID"],
+    // A backslash ends the authority here and reads as userinfo there.
+    ["a backslash in the authority", "https://h\\@x.example/mcp", "MCP_INVALID"],
+    // Tab, CR and LF are deleted from the input BEFORE this parser parses.
+    ["a tab in the host", "https://x\t.example/mcp", "MCP_INVALID"],
+    ["a carriage return in the host", "https://x\r.example/mcp", "MCP_INVALID"],
+    ["a newline in the host", "https://x\n.example/mcp", "MCP_INVALID"],
+    // The rule is the whole URL, not just its authority: a backslash is a `/` to this parser and
+    // a literal byte to the client, so it refuses wherever it sits.
+    ["a backslash in the path", "https://x.example\\mcp", "MCP_INVALID"],
+    // …and an ordinary address is untouched by any of it.
+    ["a plain address", "https://x.example/mcp", "ok"],
+  ])("%s → %s", (_label, url, verdict) => {
+    expect(codeOf(url)).toBe(verdict);
+  });
+
+  it("names the shape instead of echoing the address back", () => {
+    const result = validateServerJson(withUrl("https:example.com/mcp"));
+    expect(result.ok === false && result.message).toContain("scheme://host");
+    expect(result.ok === false && result.message).not.toContain("example.com");
+  });
+
+  it("refuses the backslash BEFORE the userinfo rule can call it a credential", () => {
+    // Reaching the userinfo rule with this address answers MCP_SECRET_REFUSED on the client. The
+    // pre-scan is what makes both tiers say MCP_INVALID on the same bytes.
+    const result = validateServerJson(withUrl("https://h\\@x.example/mcp"));
+    expect(result.ok === false && result.code).toBe("MCP_INVALID");
+  });
+});
+
+/**
+ * The length ceilings count CHARACTERS — code points — because that is the unit the client's gate
+ * counts in. Counting UTF-16 units here made an emoji cost two and refused descriptions the
+ * client had already accepted.
+ */
+describe("the length ceilings count characters, not UTF-16 units", () => {
+  it("accepts a description inside the ceiling whose UTF-16 length is past it", () => {
+    const result = validateServerJson(bytesOf("valid/astral-description.json"));
+    expect(result.ok).toBe(true);
+    const description = result.ok === true ? result.summary.description : "";
+    expect([...description].length).toBe(84);
+    expect(description.length).toBeGreaterThan(100);
+  });
+
+  it("still refuses one character past the ceiling, counted the same way", () => {
+    const document = (count: number) =>
+      JSON.stringify({
+        name: "io.github.acme/counted",
+        description: "🌍".repeat(count),
+        version: "1.0.0",
+        remotes: [{ type: STREAMABLE_HTTP, url: "https://counted.acme.example/mcp" }],
+      });
+    expect(validateServerJson(document(100)).ok).toBe(true);
+    const over = validateServerJson(document(101));
+    expect(over.ok === false && over.code).toBe("MCP_INVALID");
+    expect(over.ok === false && over.message).toContain("description");
+  });
+});
+
 /** The document ceiling is on BYTES — a character count is not one. */
 describe("the size ceiling", () => {
   it("refuses a multibyte string that is under the character cap and over the byte cap", () => {

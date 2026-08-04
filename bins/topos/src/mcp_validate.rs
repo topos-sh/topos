@@ -476,6 +476,33 @@ fn declares_variables(v: Option<&Value>) -> bool {
     v.is_some_and(|v| !v.is_null())
 }
 
+/// The one sentence both tiers say when an endpoint is spelled in a way they would read
+/// differently — same words, same code, either side of the wire.
+const AMBIGUOUS_ENDPOINT_MESSAGE: &str = concat!(
+    "the endpoint is not a plain address — a shared endpoint spells scheme://host, ",
+    "with no backslash, tab or line break anywhere in it"
+);
+
+/// Is this endpoint spelled so that EVERY reader gets the same address out of it?
+///
+/// The web tier hands its URLs to a WHATWG parser and this tier hand-parses them, and the two
+/// disagree on three spellings — each one a repair the WHATWG parser performs silently:
+///
+///  · **no `://`** — `https:example.com/mcp` gains its slashes from the special-scheme rule and
+///    parses as `https://example.com/mcp`; the hand-parse sees no authority at all.
+///  · **a backslash** — it ENDS the authority (`https://h\@x.example/mcp` is host `h`, no
+///    userinfo); the hand-parse splits at the last `@` and reads `h\` as a user name, which its
+///    own userinfo rule then refuses as a credential.
+///  · **a tab, CR or LF** — deleted from the input BEFORE parsing, so `https://x<TAB>.example/mcp`
+///    is the host `x.example`; the hand-parse refuses whitespace in a host.
+///
+/// None of the three is an address anyone means to write, and each one lands a different verdict
+/// per language, so both tiers refuse the SHAPE up front rather than each parsing its own reading.
+/// Mirrors the web tier's `endpointIsUnambiguous` exactly.
+fn is_unambiguous_endpoint(url: &str) -> bool {
+    url.contains("://") && !url.contains(['\\', '\t', '\r', '\n'])
+}
+
 /// The hygiene and credential rules ONE `remotes[]` entry answers to, whichever entry it is:
 /// the address is a plain https URL with no template, no userinfo and a host that parses; the
 /// entry reserves no per-installation fill-in; and every header carries a literal, credential-free
@@ -494,6 +521,12 @@ fn check_remote(remote: &Value) -> Result<Vec<McpHeader>, McpRefusal> {
                 "the endpoint carries a {placeholder} — it is a template, not an address every \
                  machine can use",
             );
+        }
+        // BEFORE the parse, and BEFORE the userinfo rule: the spellings the two tiers would read
+        // DIFFERENTLY. Answering the same code on both is what this ordering buys — a document
+        // refused here can never be published on one tier and then refuse forever on the other.
+        if !is_unambiguous_endpoint(url) {
+            return refuse(McpRefusalCode::Invalid, AMBIGUOUS_ENDPOINT_MESSAGE);
         }
         match parse_endpoint_url(url) {
             EndpointUrl::Invalid => {
@@ -745,7 +778,9 @@ pub(crate) fn validate_server_json(raw: &[u8]) -> Result<McpSummary, McpRefusal>
 /// the shared vectors: the scheme is case-insensitive; the host must be nonempty and free of
 /// spaces / control characters (`https://not a url` and `https://?x` are NOT URLs); nonempty
 /// userinfo is its own answer, checked only once the whole address parses (a malformed host
-/// wins, exactly as the WHATWG parser throws before userinfo is ever reported).
+/// wins, exactly as the WHATWG parser throws before userinfo is ever reported). The three
+/// spellings the two parsers would read DIFFERENTLY never reach here — [`is_unambiguous_endpoint`]
+/// refuses them first, on both tiers.
 enum EndpointUrl {
     /// Not a URL at all — refused as `MCP_INVALID`.
     Invalid,
@@ -1260,6 +1295,76 @@ mod tests {
         .expect("ok");
         assert_eq!(summary.url, "https://clean.example/mcp");
         assert!(summary.headers.is_empty());
+    }
+
+    /// The three spellings a WHATWG parser SILENTLY REPAIRS and this hand-parse does not. Each
+    /// one would otherwise be a document the web door publishes and every member's converge
+    /// refuses on every sweep, forever — so the shape is refused up front, on both tiers, with
+    /// the same code.
+    ///
+    /// The backslash case is what pins the ORDER: reaching the userinfo rule with it answers
+    /// `MCP_SECRET_REFUSED` here (`h\` reads as a user name) while the web tier, whose parser
+    /// ends the authority at the backslash, sees no userinfo at all. The pre-scan running first
+    /// is what makes the two answers one answer.
+    #[test]
+    fn an_endpoint_the_two_parsers_read_apart_refuses_as_invalid() {
+        let doc = |url: &str| {
+            format!(
+                r#"{{"name":"io.github.a/b","description":"d","version":"1","remotes":[{{"type":"streamable-http","url":"{url}"}}]}}"#
+            )
+        };
+        let code = |url: &str| {
+            validate_server_json(doc(url).as_bytes())
+                .map(|_| ())
+                .map_err(|e| e.code)
+        };
+        // No `://` at all: the WHATWG parser supplies the slashes for a special scheme.
+        assert_eq!(
+            code("https:example.com/mcp"),
+            Err(McpRefusalCode::Invalid),
+            "a scheme with no slashes is not an address"
+        );
+        // A backslash ENDS the authority over there and reads as userinfo over here.
+        assert_eq!(
+            code(r"https://h\\@x.example/mcp"),
+            Err(McpRefusalCode::Invalid),
+            "the shape refuses before the userinfo rule can call it a credential"
+        );
+        // Tab, CR and LF are DELETED from the input before the WHATWG parse.
+        for ws in [r"\t", r"\r", r"\n"] {
+            assert_eq!(
+                code(&format!("https://x{ws}.example/mcp")),
+                Err(McpRefusalCode::Invalid),
+                "whitespace one parser strips cannot decide a host"
+            );
+        }
+        // The rule is the whole URL, not just its authority: a backslash in the path is a `/` to
+        // the WHATWG parser and a literal byte here, so it is refused wherever it sits.
+        assert_eq!(
+            code(r"https://x.example\\mcp"),
+            Err(McpRefusalCode::Invalid)
+        );
+        // …and an ordinary address is untouched by any of it.
+        assert_eq!(code("https://x.example/mcp"), Ok(()));
+        // The sentence names the shape rather than echoing the address back.
+        let refusal = validate_server_json(doc("https:example.com/mcp").as_bytes())
+            .expect_err("a scheme with no slashes refuses");
+        assert!(refusal.message.contains("scheme://host"));
+        assert!(!refusal.message.contains("example.com"));
+    }
+
+    /// The length ceilings count CHARACTERS on both tiers. A description of astral-plane text
+    /// fits inside 100 of them while occupying 134 UTF-16 units — the unit the web tier used to
+    /// count in, which refused what this one had already accepted.
+    #[test]
+    fn the_ceilings_count_characters_not_utf16_units() {
+        let root = fixtures_root();
+        let astral = validate_server_json(
+            &std::fs::read(root.join("valid/astral-description.json")).expect("a vector"),
+        )
+        .expect("84 characters is inside the ceiling, whatever they encode to");
+        assert_eq!(astral.description.chars().count(), 84);
+        assert!(astral.description.encode_utf16().count() > DESCRIPTION_MAX);
     }
 
     /// The two rules the placement engine enforces when it renders a config entry, enforced HERE

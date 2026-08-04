@@ -1,0 +1,11 @@
+{
+  "name": "io.github.acme/backslash",
+  "description": "A backslash inside the authority — where the two URL readings part company.",
+  "version": "1.0.0",
+  "remotes": [
+    {
+      "type": "streamable-http",
+      "url": "https://h\\@x.example/mcp"
+    }
+  ]
+}
