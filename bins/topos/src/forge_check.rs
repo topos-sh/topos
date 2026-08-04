@@ -92,6 +92,17 @@ pub(crate) struct SourceCheck {
     /// The last check's failure; absent when it answered.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub failure: Option<CheckFailure>,
+    /// Per SCOPE label, the head this question was last FULLY reconciled at — the archive was
+    /// fetched, every member it holds is tracked, and nothing was left to converge.
+    ///
+    /// It exists because "what is installed" cannot always answer "is there anything to do". A
+    /// repository that drops its last skill leaves retained custody records still naming the OLD
+    /// commit, and a repository that never held one leaves nothing at all; in both cases the
+    /// tracked-imports comparison says "behind" forever, and the archive is downloaded again on
+    /// every cadence to rediscover that there is nothing in it. Per scope, because scopes converge
+    /// independently and one having finished says nothing about the other.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub settled_at: BTreeMap<String, String>,
 }
 
 /// A failed check, kept in enough detail to decide whether to ask again.
@@ -452,6 +463,7 @@ mod tests {
             answered_at_ms: Some(at),
             commit: Some(commit.to_owned()),
             failure: None,
+            settled_at: BTreeMap::new(),
         };
         record_round(
             &fs,
