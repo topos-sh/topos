@@ -443,7 +443,7 @@ impl crate::plane::DeliverySource for UreqPlane {
                         .map(|h| topos_types::requests::WireHarnessState {
                             slug: h.agent.clone(),
                             state: h.state.clone(),
-                            note: h.note.clone(),
+                            note: h.note.as_deref().map(clip_report_note),
                         })
                         .collect(),
                 })
@@ -474,6 +474,24 @@ impl crate::plane::DeliverySource for UreqPlane {
             )),
         }
     }
+}
+
+/// The report door's ceiling on one harness note, counted the way the server counts (UTF-16 code
+/// units) — a longer note is refused, and the WHOLE snapshot with it.
+const MAX_REPORT_NOTE_UTF16: usize = 200;
+
+/// Clip a harness note to [`MAX_REPORT_NOTE_UTF16`] before it rides the applied report — engine
+/// notes embed filesystem paths and OS errors, and one long reason must never cost the fleet the
+/// entire snapshot. Whole characters only: a non-BMP character that would straddle the ceiling is
+/// dropped, never split into a lone surrogate.
+fn clip_report_note(note: &str) -> String {
+    let mut units = 0usize;
+    note.chars()
+        .take_while(|c| {
+            units += c.len_utf16();
+            units <= MAX_REPORT_NOTE_UTF16
+        })
+        .collect()
 }
 
 /// The one agent configuration both transports share: status-as-error OFF (every status comes back as an
@@ -2457,6 +2475,27 @@ mod tests {
             .status(200)
             .body(ureq::Body::builder().data(bytes))
             .expect("a canned response builds")
+    }
+
+    #[test]
+    fn a_long_harness_note_is_clipped_to_the_report_ceiling_without_splitting_a_pair() {
+        // 199 BMP units, then a non-BMP character (2 UTF-16 units) astride the ceiling: the
+        // whole character is dropped — 199 units, never a lone surrogate at unit 200.
+        let mut long = "a".repeat(199);
+        long.push('🦀');
+        long.push_str(&"b".repeat(40));
+        let clipped = clip_report_note(&long);
+        assert_eq!(clipped, "a".repeat(199));
+
+        // A non-BMP character that FITS exactly at the ceiling is kept whole.
+        let mut exact = "a".repeat(198);
+        exact.push('🦀');
+        let clipped = clip_report_note(&exact);
+        assert_eq!(clipped, exact);
+        assert_eq!(clipped.encode_utf16().count(), MAX_REPORT_NOTE_UTF16);
+
+        // A short note passes through untouched.
+        assert_eq!(clip_report_note("restart cursor"), "restart cursor");
     }
 
     #[test]
