@@ -5,27 +5,44 @@ sidebar_label: Self-host
 ---
 
 ```bash title="Try it on a laptop"
-mkdir -p scripts
-curl -fsSL https://topos.sh/compose.yml        -o docker-compose.yml
-curl -fsSL https://topos.sh/compose-init-db.sh -o scripts/compose-init-db.sh
-chmod +x scripts/compose-init-db.sh
-printf 'TOPOS_WEB_AUTH_SECRET=%s\nTOPOS_INTERNAL_TOKEN=%s\n' \
-  "$(openssl rand -hex 32)" "$(openssl rand -hex 32)" > .env
+git clone --depth 1 --branch <release-tag> https://github.com/topos-sh/topos
+cd topos
+cp .env.example .env      # paste two `openssl rand -hex 32` outputs into the two blank lines
 docker compose up -d
 ```
 
-That is the whole install: two files, two prebuilt images, no clone and no build. The second file
-is the database's first-boot provisioning script — the compose file mounts it to create the two
-application roles. Skip it and the database never reports healthy, on purpose: it is better to stop
-than to run a database with no application roles in it. Then open
-`http://localhost:3000` **in a browser** — the first browser request is what mints the workspace and
-prints the setup link to the logs. Open that link, create the first account, and connect a machine
-with `topos login http://localhost:3000`: the CLI accepts an explicit `http://` address for
-localhost.
+That is the whole install — take the tag from
+[the releases page](https://github.com/topos-sh/topos/releases). Nothing is compiled on the box: the
+checkout pins both prebuilt images to that release, alongside the compose file and the database's
+first-boot provisioning script, so a clone is one self-consistent deployment and `git status` is
+your diff against it. `.env.example` is the whole config surface — every knob, commented, showing
+the value already in force — and the two blank lines at its top are the only edits a laptop trial
+needs.
+
+Leave either secret blank and `docker compose` refuses to parse the file, naming the variable and
+the command that generates one. That happens in your terminal before a single container starts —
+there is nothing to dig out of a log.
+
+Then open `http://localhost:3000` **in a browser** — the first browser request is what mints the
+workspace and prints the setup link to the logs. Open that link, create the first account, and
+connect a machine with `topos login http://localhost:3000`: the CLI accepts an explicit `http://`
+address for localhost.
 
 <Note>
-  The two secrets are required even for a laptop try-out — the app refuses to start on the
-  published compose defaults, because they are public values.
+  The two secrets ship with no defaults on purpose: a default secret in a public repository is a
+  secret everybody has. Compose refuses at parse time while either is missing or empty, and the app
+  carries the same refusal at boot — the backstop for deployments that do not come through compose.
+</Note>
+
+<Note>
+  **Would rather not clone?** `https://topos.sh/compose.yml` and
+  `https://topos.sh/compose-init-db.sh` serve the current deployment recipe as two files: fetch the
+  second to `scripts/compose-init-db.sh`, where the compose file mounts it into the database's
+  first-boot hook, and `chmod +x` it — `curl` cannot carry an execute bit, and without it initdb
+  skips the script and the database never reports healthy (deliberately: better to stop than to run
+  a database with no application roles in it). Those URLs always serve what is *current* rather than
+  a release you chose, so pin `TOPOS_VERSION=vX.Y.Z` in the `.env` you write the two secrets into.
+  The same script is also the recipe for [bringing your own Postgres](#bring-your-own-postgres).
 </Note>
 
 There is no reduced open-source edition: the CLI, the sharing server, and the entire web app —
@@ -59,20 +76,20 @@ by the public repository's release workflow:
 | `ghcr.io/topos-sh/topos-web` | The product app — the surface you reach |
 | `ghcr.io/topos-sh/topos-plane` | Byte custody, internal-only |
 
-One `TOPOS_VERSION` pins both, and the compose file ships pinned to a release rather than tracking
-`latest`. That is deliberate: your server and your team's CLIs speak one wire, so a server that
-jumped forward on its own would break machines you cannot see. Upgrading is a decision you make —
-see [Upgrades](#upgrades).
+The checkout pins both to the release it was cut for rather than tracking `latest`, and
+`TOPOS_VERSION` in your `.env` overrides that without moving the tree. Pinning is deliberate: your
+server and your team's CLIs speak one wire, so a server that jumped forward on its own would break
+machines you cannot see. Upgrading is a decision you make — see [Upgrades](#upgrades).
 
 Every release publishes an immutable digest and an SBOM per image, and the manifests carry build
-provenance you can check against the workflow that produced them (substitute the release you pinned
-— `TOPOS_VERSION` lives in `.env`, which your shell does not read):
+provenance you can check against the workflow that produced them (substitute the release you
+checked out):
 
 ```bash
 gh attestation verify oci://ghcr.io/topos-sh/topos-web:vX.Y.Z --repo topos-sh/topos
 ```
 
-To run a patched tree instead, clone the repository and add the build override — same file, same
+To run a patched tree instead, add the build override beside the compose file — same file, same
 topology, images built from your checkout:
 
 ```bash
@@ -83,7 +100,8 @@ docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
 
 <Steps>
   <Step title="Set the five values that must change">
-    Create a `.env` beside `docker-compose.yml`:
+    Fill them into the file you already copied — `cp .env.example .env`, beside
+    `docker-compose.yml`. Every line below is in there, commented, with its current value:
 
     ```bash title=".env"
     # The public origin, behind your reverse proxy. Required.
@@ -103,9 +121,10 @@ docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
     TOPOS_WORKSPACE_NAME=acme
     ```
 
-    Compose does **not** expand `$(…)` in a `.env` file — paste the literals in. The app refuses to
-    boot on the shipped defaults for the two secrets; the database passwords are not enforced, but
-    change them anyway.
+    Compose does **not** expand `$(…)` in a `.env` file — paste the literals in. The two secrets
+    have no defaults to fall back on: blank, and compose refuses to parse. The database passwords
+    are not enforced, but change them anyway — on the first `up`, before the volume exists, since
+    the roles are created once and a later change only locks the applications out.
   </Step>
   <Step title="Bring it up">
     ```bash
@@ -161,10 +180,12 @@ curl -fsS -H 'Accept: application/json' https://topos.example.com
 ```
 
 Liveness answers `{"ok":true}`, and the protocol card answers
-`{"schema_version":1,"card":"topos-protocol-card","api_base_url":"https://topos.example.com/api"}`.
-From a clone, `bash scripts/compose-smoke.sh` runs the same end-to-end smoke the repo's CI does —
-it builds the images from that tree and boots a throwaway stack, so it proves a source tree rather
-than your running deployment.
+`{"schema_version":1,"card":"topos-protocol-card","api_base_url":"https://topos.example.com/api","server_version":"0.1.20","min_cli_version":"0.1.15"}`.
+The last two fields are this deployment's compatibility declaration — the release it runs, and the
+oldest `topos` it still speaks to (see [Upgrades](#upgrades)). In the checkout,
+`bash scripts/compose-smoke.sh` runs the same end-to-end smoke the repo's CI does — it builds the
+images from that tree and boots a throwaway stack, so it proves a source tree rather than your
+running deployment.
 
 <Warning>
   If `api_base_url` comes back as `http://…` or `localhost`, `TOPOS_PUBLIC_URL` is unset or wrong,
@@ -224,12 +245,13 @@ whole-catalog export are all on **Settings → General**, owner-only — see
 
 ## Upgrades
 
-An upgrade is a version and two commands. Set `TOPOS_VERSION` in your `.env` to the
-[release](https://github.com/topos-sh/topos/releases) you want, then:
+An upgrade is a tag and two commands. Check out the
+[release](https://github.com/topos-sh/topos/releases) you want — the compose file, the provisioning
+script and the two image pins move together — then pull it:
 
 ```bash
-docker compose pull
-docker compose up -d
+git fetch --tags && git checkout vX.Y.Z
+docker compose pull && docker compose up -d
 docker compose logs -f web
 ```
 
@@ -238,11 +260,10 @@ boot, before binding a port — no migration command to run by hand, and a broke
 loudly rather than serving an unmigrated database.
 
 <Note>
-  **Upgrading an install you originally cloned?** Two things changed with prebuilt images. The
-  compose file no longer builds, so `--build` does nothing and `docker compose pull` is what moves
-  you; and the project name is now pinned to `topos` rather than taken from the directory. If your
-  checkout lives in a directory named something else, compose will look for `topos_*` volumes and
-  find none — it starts as an empty install rather than touching your data.
+  **Upgrading an install older than the pinned project name?** The compose file now sets
+  `name: topos` rather than taking the project name from the directory. If your checkout lives in a
+  directory named something else, compose will look for `topos_*` volumes and find none — it starts
+  as an empty install rather than touching your data.
 
   Keep your existing volumes by keeping your existing project name — `docker compose -p <your-old-name>`
   on every command, or `COMPOSE_PROJECT_NAME=<your-old-name>` in your `.env`. **Renaming the directory
@@ -252,11 +273,19 @@ loudly rather than serving an unmigrated database.
 </Note>
 
 **Back up first** — migrations apply automatically and there is no automated downgrade. Rolling
-back is: stop the stack, restore the pre-upgrade backup, set `TOPOS_VERSION` back to the previous
-release, `pull` and `up -d`, and pin clients to match (`topos self-update --version <tag>`).
+back is: stop the stack, restore the pre-upgrade backup, check out the previous tag, `pull` and
+`up -d`, and pin clients to match (`topos self-update --version <tag>`).
 
-There is no negotiated client-server compatibility mechanism — keep the CLI and the server on the
-same `0.x` line, and after a server upgrade tell people to run `topos self-update`.
+Each side declares a compatibility floor, so an upgrade is not a fleet-wide chase. The server's
+protocol card carries the release it runs and the oldest CLI it speaks to; every CLI carries the
+oldest server it speaks to. Both floors sit at the last wire-breaking release — `0.1.15` today —
+and move only when the next break lands. A CLI below the server's floor is refused with one
+sentence whose fix is `topos self-update`, and an agent reads the same refusal structurally and can
+run it itself. A server below the CLI's floor is refused at `topos login`, before anything commits,
+with both remedies named: ask whoever runs the server to upgrade it, or pin that machine back with
+`topos self-update --version <tag>`. So after upgrading a server you do not hunt for machines —
+anything too old refuses loudly, with the fix in the refusal. Pairings from before the mechanism
+declare nothing and simply pass, until the next actual break.
 
 <Warning>
   **Postgres major versions are not an in-place bump.** The bundled image is digest-pinned at
@@ -295,9 +324,9 @@ again), or your `.env` (rotating `TOPOS_WEB_AUTH_SECRET` signs every browser out
 
 ## Bring your own Postgres
 
-To use a managed database instead of the bundled `db`, run the same provisioning script your
-deployment already fetched — the one the bundled database runs at first boot (idempotent, needs a
-superuser once). Point `PGHOST`/`PGPORT` at your server:
+To use a managed database instead of the bundled `db`, run the provisioning script from your
+checkout — the one the bundled database runs at first boot (idempotent, needs a superuser once).
+Point `PGHOST`/`PGPORT` at your server:
 
 ```bash
 POSTGRES_USER=<superuser> POSTGRES_DB=topos \
@@ -305,9 +334,9 @@ TOPOS_PLANE_DB_PASSWORD=<secret> TOPOS_WEB_DB_PASSWORD=<secret> \
   sh scripts/compose-init-db.sh
 ```
 
-Take it from the deployment you are running rather than from `main`
-(`curl -fsSL https://topos.sh/compose-init-db.sh -o scripts/compose-init-db.sh`), so the roles it
-creates match the images you pinned.
+Take it from the release you are deploying rather than from `main`, so the roles it creates match
+the images you pinned — in a checkout that is automatic; a deployment that skipped the clone
+fetches it from `https://topos.sh/compose-init-db.sh`, which always serves the current recipe.
 
 Then override each service's `DATABASE_URL` (append `?sslmode=require` for a networked database)
 and start with `docker compose up -d --no-deps plane web`, keeping the bundled `db` down. Match

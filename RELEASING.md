@@ -31,16 +31,30 @@ Preconditions:
    before anything is built or pushed:
    - `[workspace.package] version` in the root `Cargo.toml` → `X.Y.Z` (or `X.Y.Z-rc.N`), then run
      `cargo build` so `Cargo.lock` picks up the new member versions. The release builds with
-     `--locked`, so a stale `Cargo.lock` fails it.
+     `--locked`, so a stale `Cargo.lock` fails it. The web app reads the same number: run
+     `cd web && bun run gen:plane` and commit the regenerated
+     `web/app/lib/plane/contract/version.ts`, which is the release version the app declares on its
+     protocol card. CI's `check:contract` gate fails while it is stale.
    - The image pin in `docker-compose.yml` → `${TOPOS_VERSION:-vX.Y.Z}` on **both** services. That
-     file is the published deployment artifact (served at `/compose.yml`), so it must name the
-     release it ships with. A `-rc.N` tag is exempt — the pin stays on the last stable release,
-     because a candidate is not what a self-hoster should land on.
+     file is the published deployment artifact (served at `/compose.yml`, and the file a self-host
+     clone of the tag runs), so it must name the release it ships with. A `-rc.N` tag is exempt —
+     the pin stays on the last stable release, because a candidate is not what a self-hoster should
+     land on.
 
    Commit them together.
 3. No changelog to maintain: `release.yml` generates the GitHub release notes (an asset table, the
    self-host quickstart, the image pull lines, the verify commands, and a minisign note). A
    behavior change's doc updates land in the same change that introduced it, per `CONTRIBUTING.md`.
+4. **A wire-breaking release moves BOTH compatibility floors, in the same change as the break.**
+   Each side declares the oldest counterpart it speaks to: `MIN_SERVER_VERSION` in
+   `bins/topos/src/compat.rs` (the oldest server the CLI dials) and `MIN_CLI_VERSION` in
+   `web/app/lib/api/compat.server.ts` (the oldest CLI the server answers). Set both to the release
+   that breaks the wire — that is the entire mechanism, and a break that ships without moving them
+   is a break that fails silently on somebody's machine instead of refusing with its own fix. An
+   additive release moves neither. One consequence is already written into the server half: a
+   client that does not identify itself passes only while the CLI floor sits at or below `0.1.21`,
+   the first release whose CLI names its version on the session lane. Raise the floor past that and
+   silence stops being ambiguous — unidentified clients are refused with the rest.
 
 Cut it — from the pushed `main` commit that bumped the version:
 

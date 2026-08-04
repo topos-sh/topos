@@ -24,7 +24,7 @@ prompts, and every refusal names its own fix. Five rules cover almost everything
 | Surface | What it is |
 |---|---|
 | `<origin>/agent` | A plain-text setup walkthrough for agents — install, login, first commands. Humans bootstrap you with: `Set up Topos for us: fetch https://topos.sh/agent and follow it.` |
-| The protocol card | Fetch **any** path on a Topos server with `Accept: application/json` and you get `{"schema_version":1,"card":"topos-protocol-card","api_base_url":"…"}` — byte-identical on every path. This is API-base discovery, and how you confirm an address is a Topos server at all |
+| The protocol card | Fetch **any** path on a Topos server with `Accept: application/json` and you get `{"schema_version":1,"card":"topos-protocol-card","api_base_url":"…","server_version":"0.1.20","min_cli_version":"0.1.15"}` — byte-identical on every path. This is API-base discovery, and how you confirm an address is a Topos server at all |
 | The built-in `topos` skill | Lands in your skills directories when Topos wires into an agent: a `SKILL.md`, an `INSTALL.md`, and the command reference — so a fresh agent learns Topos from inside its own context |
 | These docs | Append `.md` to any page URL for plain markdown; `/docs/llms.txt` is the index |
 | `npx skills add topos-sh/topos` | The same skill with no binary — its `INSTALL.md` walks you through the real install |
