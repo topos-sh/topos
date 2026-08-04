@@ -15,7 +15,11 @@ import { requireMemberInScope } from "@/lib/auth/guards.server";
 import { bundlePath } from "@/lib/bundle-base";
 import { auditInTx, mintBundleId } from "@/lib/db/identity.server";
 import { channelsOf } from "@/lib/db/queries.channels.server";
-import { inFinalTx, registerGenesisBundleInTx } from "@/lib/db/queries.custody.server";
+import {
+  type GenesisRegistration,
+  inFinalTx,
+  registerGenesisBundleInTx,
+} from "@/lib/db/queries.custody.server";
 import { lockMcpNamesInTx } from "@/lib/db/queries.mcp.server";
 import { mcpNameTaken } from "@/lib/mcp/catalog.server";
 import {
@@ -79,6 +83,9 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
   return {
     wsName: workspace.name,
     channels: channels.map((c) => ({ name: c.name, isDefault: c.isDefault, mode: c.mode })),
+    // The viewer's own role, because a CURATED channel takes a member's placement away and the
+    // picker must say so BEFORE the publish rather than after it (see `channelOptionLabel`).
+    role: actor.role,
     // The whole built-in list, documents included — see `CuratedMcpRow` for why the bytes ride
     // along instead of being fetched on click.
     curated: curatedServerRows(),
@@ -257,48 +264,63 @@ export async function action({ request, params }: ActionFunctionArgs) {
     if (published.kind !== "ok") {
       return refuseHere("The publish did not land — try again.", undefined, 500);
     }
-    const landed = await inFinalTx<{ refused: McpGateRefusal } | { refused: null; name: string }>(
-      async (tx) => {
-        // The embedded name, looked at again under the lock every registering door takes: the
-        // gate above answered before the vault call, so another publish could have claimed the
-        // name in between. On a collision this transaction registers NOTHING and the page says
-        // so — the published bytes stand in the vault with no catalog row, which is the same
-        // sequencing the session lane has (custody first, catalog second).
-        await lockMcpNamesInTx(tx, workspace.id);
-        // On the HELD client — a pool checkout under the lock is the exhaustion shape.
-        const taken = await mcpNameTaken(actor, validated.summary.name, bundleId, tx);
-        if (taken.kind !== "free") {
-          return { refused: mcpNameTakenRefusal(validated.summary.name, taken) };
-        }
-        // The birth name folds from the document's tail segment (or whatever the member typed
-        // over it) through the catalog's own mint — same rules, same collision suffixes.
-        const registration = await registerGenesisBundleInTx(
-          tx,
-          actor,
-          bundleId,
-          name.length > 0 ? name : suggestedNameFor(validated.summary.name),
-          channel.length > 0 ? channel : null,
-          "mcp",
-        );
-        await auditInTx(tx, {
-          workspaceId: workspace.id,
-          actor: { userId: actor.userId, display: actor.display },
-          kind: "mcp_imported",
-          subject: bundleId,
-          outcome: "ok",
-          details: {
-            server: validated.summary.name,
-            version: validated.summary.version,
-            url: validated.summary.url,
-          },
-        });
-        return { refused: null, name: registration.name };
-      },
-    );
+    const landed = await inFinalTx<
+      | { refused: McpGateRefusal }
+      | { refused: null; name: string; placement: GenesisRegistration["placement"] }
+    >(async (tx) => {
+      // The embedded name, looked at again under the lock every registering door takes: the
+      // gate above answered before the vault call, so another publish could have claimed the
+      // name in between. On a collision this transaction registers NOTHING and the page says
+      // so — the published bytes stand in the vault with no catalog row, which is the same
+      // sequencing the session lane has (custody first, catalog second).
+      await lockMcpNamesInTx(tx, workspace.id);
+      // On the HELD client — a pool checkout under the lock is the exhaustion shape.
+      const taken = await mcpNameTaken(actor, validated.summary.name, bundleId, tx);
+      if (taken.kind !== "free") {
+        return { refused: mcpNameTakenRefusal(validated.summary.name, taken) };
+      }
+      // The birth name folds from the document's tail segment (or whatever the member typed
+      // over it) through the catalog's own mint — same rules, same collision suffixes.
+      const registration = await registerGenesisBundleInTx(
+        tx,
+        actor,
+        bundleId,
+        name.length > 0 ? name : suggestedNameFor(validated.summary.name),
+        channel.length > 0 ? channel : null,
+        "mcp",
+      );
+      await auditInTx(tx, {
+        workspaceId: workspace.id,
+        actor: { userId: actor.userId, display: actor.display },
+        kind: "mcp_imported",
+        subject: bundleId,
+        outcome: "ok",
+        details: {
+          server: validated.summary.name,
+          version: validated.summary.version,
+          url: validated.summary.url,
+        },
+      });
+      return { refused: null, name: registration.name, placement: registration.placement };
+    });
     if (landed.refused !== null) {
       return refuseHere(landed.refused.message, landed.refused.code);
     }
-    throw redirect(wsPathServer(workspace.name, bundlePath("mcp", landed.name)));
+    // WHAT ACTUALLY HAPPENED TO THE REACH. The publish landed; the PLACEMENT is a separate
+    // outcome and may have been withheld (a curated channel takes a member's placement — the
+    // default `everyone` included) or found nothing to place into. The dialog promised "every
+    // agent the channel reaches gets that address", so a withheld placement must be said out
+    // loud on the page the redirect lands on rather than read as a silent success.
+    const path = wsPathServer(workspace.name, bundlePath("mcp", landed.name));
+    if (landed.placement === undefined || landed.placement === "placed") {
+      throw redirect(path);
+    }
+    const named =
+      channel.length > 0
+        ? channel
+        : ((await channelsOf(actor)).find((c) => c.isDefault)?.name ?? "");
+    const query = new URLSearchParams({ placement: landed.placement, channel: named });
+    throw redirect(`${path}?${query.toString()}`);
   }
 
   return refusal("publish", "Unknown action.");
@@ -565,10 +587,30 @@ function AddServerDialog({
   );
 }
 
+/**
+ * What one destination reads as, for THIS viewer. A curated channel is curation-gated: a member's
+ * placement into it is withheld and the publish lands catalog-only. That is worth knowing before
+ * the button is pressed, not after — so the option says it, in the same words the page says
+ * afterwards. Reviewers and owners place into a curated channel freely, so they see nothing extra.
+ *
+ * Exported for the unit suite: which viewer sees which label is the whole disclosure.
+ */
+export function channelOptionLabel(
+  channel: { name: string; mode: string },
+  label: string,
+  role: "owner" | "reviewer" | "member",
+): string {
+  return channel.mode === "curated" && role === "member"
+    ? `${label} — curated; placement needs a reviewer`
+    : label;
+}
+
 /** The destination channel, label and all — written once for both publishing surfaces. */
 function ChannelField() {
-  const { channels } = useLoaderData<typeof loader>();
+  const { channels, role } = useLoaderData<typeof loader>();
   const id = useId();
+  const fallback = { name: "", mode: "open" };
+  const everyone = channels.find((channel) => channel.isDefault) ?? fallback;
   return (
     <div className="min-w-40 flex-1">
       <label htmlFor={id} className="mb-1 block font-medium text-dim text-sm">
@@ -580,12 +622,14 @@ function ChannelField() {
         defaultValue=""
         className="block h-11 w-full rounded-md border border-line bg-panel px-3 text-ink text-sm focus:border-accent focus:outline-none"
       >
-        <option value="">Everyone (the default channel)</option>
+        <option value="">
+          {channelOptionLabel(everyone, "Everyone (the default channel)", role)}
+        </option>
         {channels
           .filter((channel) => !channel.isDefault)
           .map((channel) => (
             <option key={channel.name} value={channel.name}>
-              {channel.name}
+              {channelOptionLabel(channel, channel.name, role)}
             </option>
           ))}
       </select>

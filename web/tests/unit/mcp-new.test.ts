@@ -396,6 +396,89 @@ describe("publishing a picked row", () => {
   });
 });
 
+/**
+ * WHAT THE PUBLISH DID TO THE REACH. A curated channel withholds a MEMBER's placement — the
+ * default `everyone` included — so the bundle lands in the catalog and reaches nobody. The dialog
+ * promises "every agent the channel reaches gets that address", so the outcome has to survive the
+ * redirect and be said on the page it lands on; before this it was dropped on the floor.
+ */
+describe("a withheld placement is disclosed", () => {
+  async function defaultChannelMode(mode: "open" | "curated"): Promise<void> {
+    await db.q(`UPDATE web.channel SET mode = $2 WHERE workspace_id = $1 AND is_default`, [
+      wsId,
+      mode,
+    ]);
+  }
+
+  it("carries the withheld outcome and the channel through the redirect", async () => {
+    await defaultChannelMode("curated");
+    try {
+      const { status, location } = await post({
+        intent: "publish",
+        document: JSON.stringify({ ...WEATHER, name: "io.github.acme/withheld" }, null, 2),
+        name: "withheld",
+        channel: "",
+      });
+      expect(status).toBe(302);
+      expect(location).toBe("/mcp/withheld?placement=curated_role_required&channel=everyone");
+      // The publish itself still landed — custody is never curation-blocked.
+      const rows = await db.q<{ kind: string }>(`SELECT kind FROM web.bundle WHERE name = $1`, [
+        "withheld",
+      ]);
+      expect(rows[0]?.kind).toBe("mcp");
+      // And it is in NO channel, which is exactly what the note says.
+      const placed = await db.q<{ n: number }>(
+        `SELECT count(*)::int AS n FROM web.channel_bundle cb
+         JOIN web.bundle b ON b.id = cb.bundle_id WHERE b.name = 'withheld'`,
+      );
+      expect(Number(placed[0]?.n)).toBe(0);
+    } finally {
+      await defaultChannelMode("open");
+    }
+  });
+
+  it("says nothing when the placement actually happened", async () => {
+    const { status, location } = await post({
+      intent: "publish",
+      document: JSON.stringify({ ...WEATHER, name: "io.github.acme/placed" }, null, 2),
+      name: "placed-here",
+      channel: "",
+    });
+    expect(status).toBe(302);
+    expect(location).toBe("/mcp/placed-here");
+  });
+
+  it("names the withheld channel on the page the redirect lands on", async () => {
+    const { placementNote } = await import("@/routes/skill-current");
+    expect(placementNote("curated_role_required", "release-eng")).toBe(
+      "Published to the catalog — placing it into #release-eng takes a reviewer or owner.",
+    );
+    expect(placementNote("channel_not_found", "gone")).toBe(
+      "Published to the catalog — #gone was not there to place it into.",
+    );
+    // The parameters are forgeable, so an unknown outcome renders nothing and a channel name
+    // this app would never mint is never echoed back into the page.
+    expect(placementNote("placed", "everyone")).toBeNull();
+    expect(placementNote(null, null)).toBeNull();
+    expect(placementNote("curated_role_required", "<script>alert(1)</script>")).toBe(
+      "Published to the catalog — placing it into that channel takes a reviewer or owner.",
+    );
+  });
+
+  it("tells a member which destinations would withhold the placement", async () => {
+    const { channelOptionLabel } = await import("@/routes/mcp-new");
+    const curated = { name: "release-eng", mode: "curated" };
+    const open = { name: "everyone", mode: "open" };
+    expect(channelOptionLabel(curated, "release-eng", "member")).toBe(
+      "release-eng — curated; placement needs a reviewer",
+    );
+    // A reviewer or owner places into a curated channel freely — nothing extra to say.
+    expect(channelOptionLabel(curated, "release-eng", "reviewer")).toBe("release-eng");
+    expect(channelOptionLabel(curated, "release-eng", "owner")).toBe("release-eng");
+    expect(channelOptionLabel(open, "everyone", "member")).toBe("everyone");
+  });
+});
+
 describe("the SSRF guard", () => {
   const addresses =
     (...list: string[]) =>

@@ -1,5 +1,13 @@
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
-import { data, Form, Link, redirect, useLoaderData, useNavigation } from "react-router";
+import {
+  data,
+  Form,
+  Link,
+  redirect,
+  useLoaderData,
+  useNavigation,
+  useSearchParams,
+} from "react-router";
 import { VersionFiles } from "@/components/browse/version-files";
 import { ConfirmButton } from "@/components/confirm";
 import { relativeTime } from "@/components/format";
@@ -261,6 +269,7 @@ function SkillCurrentContent({
         openProposals={openProposals}
         showSettings={isOwner}
       />
+      <PlacementNote />
       {versionId !== null && versionFiles !== null ? (
         <VersionFiles skill={skill} versionId={versionId} currentChip {...versionFiles} />
       ) : (
@@ -281,6 +290,47 @@ function SkillCurrentContent({
       />
       <SkillInviteAffordance mailArmed={mailArmed} isOwner={isOwner} noun={noun} />
     </div>
+  );
+}
+
+/** A channel name as this app mints them — the only spelling the note below will echo back. */
+const CHANNEL_NAME = /^[a-z0-9][a-z0-9-]{0,63}$/;
+
+/**
+ * WHAT THE PUBLISH DID NOT DO. A bundle can land in the catalog while its PLACEMENT is withheld:
+ * a curated channel takes a member's placement (the default `everyone` included), and a channel
+ * deleted mid-publish has nothing to place into. The act said so on the receipt; the page the
+ * publisher lands on has to say it too, or the bundle reads as delivered when it reaches nobody.
+ *
+ * The two facts arrive as query parameters, which makes them FORGEABLE — so nothing here trusts
+ * them with anything: an unknown outcome renders nothing at all, and the channel name is echoed
+ * only when it is spelled the way this app mints channel names.
+ *
+ * Exported for the unit suite: the sentence each outcome earns is the disclosure.
+ */
+export function placementNote(placement: string | null, channel: string | null): string | null {
+  const named = channel !== null && CHANNEL_NAME.test(channel) ? `#${channel}` : "that channel";
+  if (placement === "curated_role_required") {
+    return `Published to the catalog — placing it into ${named} takes a reviewer or owner.`;
+  }
+  if (placement === "channel_not_found") {
+    return `Published to the catalog — ${named} was not there to place it into.`;
+  }
+  return null;
+}
+
+function PlacementNote() {
+  const [params] = useSearchParams();
+  const note = placementNote(params.get("placement"), params.get("channel"));
+  if (note === null) {
+    return null;
+  }
+  return (
+    <Card className="px-4 py-3">
+      <p role="status" data-testid="placement-note" className="text-dim text-sm">
+        {note}
+      </p>
+    </Card>
   );
 }
 

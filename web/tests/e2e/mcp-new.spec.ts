@@ -1,6 +1,6 @@
 import { expect, type Page, test } from "@playwright/test";
-import { adminQuery, ensureBundle } from "./seed";
-import { gotoSettled } from "./sign-in";
+import { adminQuery, ensureBundle, ensureSeatedUser } from "./seed";
+import { gotoSettled, signIn } from "./sign-in";
 
 /**
  * ADDING AN MCP SERVER, the whole way through: the signed-in owner opens the add-a-server page
@@ -16,6 +16,8 @@ import { gotoSettled } from "./sign-in";
 
 const SERVER_NAME = "io.github.acme/tide-tables";
 const CATALOG_NAME = "tide-tables";
+/** A plain member — the one role a curated channel withholds a placement from. */
+const MEMBER = "mcp-member@example.com";
 
 const DOCUMENT = JSON.stringify(
   {
@@ -231,6 +233,51 @@ test("an MCP server has its own section, its own + , and its own address", async
   await page.waitForURL("**/mcp/panel-server");
   await gotoSettled(page, "/mcp/panel-skill");
   await page.waitForURL("**/skills/panel-skill");
+});
+
+/**
+ * A CURATED DESTINATION TAKES A MEMBER'S PLACEMENT — and the page says so twice: on the way in,
+ * as the destination's own label, and on the way out, on the server's page. The publish itself
+ * still lands (custody is never curation-blocked); what is withheld is the REACH, and a page that
+ * showed a plain success here would be promising an address nobody was given.
+ */
+test("a member publishing into a curated channel is told the placement was withheld", async ({
+  page,
+}) => {
+  await ensureSeatedUser(MEMBER, "member");
+  await adminQuery(`update web.channel set mode = 'curated' where is_default`);
+  try {
+    await signIn(page, MEMBER);
+    await gotoSettled(page, "/mcp/new");
+
+    // On the way IN: the destination says what it will do with a member's placement.
+    await expect(page.getByLabel("Into")).toContainText(
+      "Everyone (the default channel) — curated; placement needs a reviewer",
+    );
+
+    await page.getByText("Custom server", { exact: true }).click();
+    await page.getByLabel("Where it comes from").selectOption("paste");
+    await page.getByTestId("mcp-paste").fill(DOCUMENT);
+    await page.getByRole("button", { name: "Preview" }).click();
+    await expect(page.getByTestId("mcp-preview")).toBeVisible();
+    await page.getByTestId("mcp-publish").click();
+
+    // On the way OUT: the server's own page carries the one line that says what did not happen.
+    await page.waitForURL(`**/mcp/${CATALOG_NAME}?*`);
+    await expect(page.getByTestId("placement-note")).toContainText(
+      "Published to the catalog — placing it into #everyone takes a reviewer or owner.",
+    );
+    // And the row really is in no channel — the note is not decoration.
+    expect(
+      await adminQuery(
+        `select 1 from web.channel_bundle cb join web.bundle b on b.id = cb.bundle_id
+         where b.name = $1`,
+        [CATALOG_NAME],
+      ),
+    ).toHaveLength(0);
+  } finally {
+    await adminQuery(`update web.channel set mode = 'open' where is_default`);
+  }
 });
 
 test("a document carrying a credential is refused, and nothing is published", async ({ page }) => {
