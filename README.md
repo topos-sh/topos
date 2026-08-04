@@ -217,24 +217,28 @@ Team skills here are managed by topos - read the `topos` skill before working wi
 ## Self-hosting
 
 The whole product runs from one compose file, and your workspace address is simply your
-origin. Both images are prebuilt and multi-arch, so there is nothing to clone and nothing to
-compile.
+origin. Both images are prebuilt and multi-arch, so nothing is compiled on the box - the clone is
+how you get the compose file, the database's first-boot provisioning script and the two image
+pins as one release ([tags here](https://github.com/topos-sh/topos/releases)).
 
 ```sh
-mkdir -p scripts
-curl -fsSL https://topos.sh/compose.yml        -o docker-compose.yml
-curl -fsSL https://topos.sh/compose-init-db.sh -o scripts/compose-init-db.sh
-chmod +x scripts/compose-init-db.sh
-printf 'TOPOS_WEB_AUTH_SECRET=%s\nTOPOS_INTERNAL_TOKEN=%s\n' \
-  "$(openssl rand -hex 32)" "$(openssl rand -hex 32)" > .env
+git clone --depth 1 --branch <release-tag> https://github.com/topos-sh/topos
+cd topos
+cp .env.example .env      # paste two `openssl rand -hex 32` outputs into the two blank lines
 docker compose up -d
 ```
 
-Two files: the deployment itself, and the script that creates the database's roles on first boot.
+`.env.example` is the whole config surface, and its two blank lines are the only required edits:
+compose refuses to parse the file while either is empty, naming the variable and the fix in your
+terminal before anything starts. Scripting it? Write the two instead of copying:
 
-The two secrets are required even for a laptop try-out. Open `http://localhost:3000` in a
-browser - the first browser visit creates the workspace and prints a one-time setup link to the
-logs:
+```sh
+printf 'TOPOS_WEB_AUTH_SECRET=%s\nTOPOS_INTERNAL_TOKEN=%s\n' \
+  "$(openssl rand -hex 32)" "$(openssl rand -hex 32)" > .env
+```
+
+Open `http://localhost:3000` in a browser - the first browser visit creates the workspace and
+prints a one-time setup link to the logs:
 
 ```sh
 docker compose logs web | grep 'Finish setup:'

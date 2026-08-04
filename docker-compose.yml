@@ -1,56 +1,71 @@
-# Self-host Topos in one command: the web app (the ONE public surface), the stateless plane behind it,
-# and a pinned Postgres, on one internal network.
+# Self-host Topos: the web app (the ONE public surface), the stateless plane behind it, and a pinned
+# Postgres, on one internal network. Clone a release, paste two secrets, start it.
 #
-#   docker compose up -d           # the app on http://localhost:3000; the plane + Postgres beside it,
-#                                  # reachable only on the compose network (no published ports)
+#   git clone --depth 1 --branch <release-tag> https://github.com/topos-sh/topos
+#   cd topos
+#   cp .env.example .env      # paste two `openssl rand -hex 32` outputs into the two blank lines
+#   docker compose up -d      # the app on http://localhost:3000; the plane + Postgres beside it,
+#                             # reachable only on the compose network (no published ports)
 #
-# ── TWO files, not one ─────────────────────────────────────────────────────────────────────────────────
+# The tag is the unit of a deployment: this file, the database's provisioning script, and the two image
+# pins are cut together, so a checkout is one self-consistent release and `git status` is your diff
+# against it. Latest tag: https://github.com/topos-sh/topos/releases/latest
+#
+# ── the two secrets ────────────────────────────────────────────────────────────────────────────────────
+# `.env.example` is the entire config surface — every knob, commented, with the value in force. The two
+# BLANK lines at its top are the only required edits, and they have no defaults on purpose: the
+# `${…:?…}` interpolations below make compose REFUSE TO PARSE while either is missing or empty. That
+# refusal lands in your terminal, before a container starts, naming the variable and the command that
+# generates one — rather than a stack that comes up running on a secret published in a public repo.
+#
+# ── a real deployment ──────────────────────────────────────────────────────────────────────────────────
+# Same file: uncomment and fill TOPOS_PUBLIC_URL (the public https origin your reverse proxy terminates
+# on — the app cannot infer it, see the web service below), TOPOS_WORKSPACE_NAME, and the five SMTP vars
+# if more than one person will use this install (mail is how an invited teammate proves their address).
+#
+# ── upgrading ──────────────────────────────────────────────────────────────────────────────────────────
+#
+#   git fetch --tags && git checkout vX.Y.Z
+#   docker compose pull && docker compose up -d
+#
+# Deliberately explicit: the server and the `topos` CLIs your team runs speak one wire, so an unattended
+# jump to a newer server is a way to break machines you cannot see. The checkout pins BOTH images to the
+# release it belongs to (the TOPOS_VERSION defaults below); setting TOPOS_VERSION in `.env` overrides
+# them without moving the tree, and a `:latest` tag is published if you would rather track it and take
+# the upgrade discipline on yourself. Release notes: https://github.com/topos-sh/topos/releases
+#
+# ── prebuilt images, not a build ───────────────────────────────────────────────────────────────────────
+# Both application images are PULLED from GHCR — no Rust toolchain, no Node, nothing compiled on the box.
+# They are multi-arch (linux/amd64 + linux/arm64), built by the release workflow of the public
+# repository, provenance-attested and SBOM'd (`gh attestation verify`).
+#
+# To BUILD from source instead (contributing, or a patched tree), add the override beside this file:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
+#
+# ── TWO files, if you skip the clone ───────────────────────────────────────────────────────────────────
 # This file mounts `./scripts/compose-init-db.sh` into the database's first-boot hook — the script that
 # creates the two application roles and their schemas. It is a SEPARATE file on purpose (it is also the
-# recipe for a managed/external Postgres), so a deployment fetches both:
+# recipe for a managed/external Postgres, below), and both are served beside each other, so a deployment
+# that would rather not clone fetches the two:
 #
 #   mkdir -p scripts
 #   curl -fsSL https://topos.sh/compose.yml         -o docker-compose.yml
 #   curl -fsSL https://topos.sh/compose-init-db.sh  -o scripts/compose-init-db.sh
 #   chmod +x scripts/compose-init-db.sh
 #
-# Miss the second one and Docker would helpfully create a DIRECTORY at that path; the database's
+# `curl` cannot carry an execute bit, hence the `chmod` — without it initdb skips the script. Miss the
+# second file entirely and Docker would helpfully create a DIRECTORY at that path; the database's
 # healthcheck below proves a real role exists precisely so that mistake stops the stack instead of
-# quietly producing a database with no application roles in it.
+# quietly producing a database with no application roles in it. Those two URLs always serve the CURRENT
+# recipe, so a fetched deployment wants TOPOS_VERSION pinned in its `.env` to stay reproducible — which
+# is the whole reason the clone is the recommended shape.
 #
-# ── prebuilt images, not a build ───────────────────────────────────────────────────────────────────────
-# Both application images are PULLED from GHCR, so this file is the only thing you need — no clone, no
-# Rust toolchain, no Node. They are multi-arch (linux/amd64 + linux/arm64), built by the release
-# workflow of the public repository, provenance-attested and SBOM'd (`gh attestation verify`).
-#
-# TOPOS_VERSION pins BOTH images to one release, deliberately: the server and the `topos` CLIs your team
-# runs speak one wire, so an unattended jump to a newer server is a way to break machines you cannot see.
-# Upgrading is explicit and takes two commands:
-#
-#   TOPOS_VERSION=vX.Y.Z docker compose pull      # or edit the default below
-#   TOPOS_VERSION=vX.Y.Z docker compose up -d
-#
-# A `:latest` tag is published too, if you would rather track it — set TOPOS_VERSION=latest and take the
-# upgrade discipline on yourself. Release notes: https://github.com/topos-sh/topos/releases
-#
-# To BUILD from source instead (contributing, or a patched tree), add the override beside this file:
-#
-#   docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
-#
-# The TOPOLOGY after the door cutover: the WEB APP is the only thing the world reaches. It fronts `/api`,
-# serves the resource addresses + the constant protocol card, and drives the plane over an internal
-# session lane. The PLANE has NO published port — it answers on the compose-internal network only, at
-# `http://plane:8787`. Postgres is a SEPARATE service (never baked into an app image); the plane migrates
-# the `plane` schema on boot, the web app migrates its own `web` schema at first request.
-#
-# ── the change-me defaults ─────────────────────────────────────────────────────────────────────────────
-# Every secret below has a `change-me-…` default so a first `up` works with zero setup on a laptop. They
-# are FINE for a local trial and UNSAFE for anything reachable: for a real deployment you MUST override
-#   TOPOS_INTERNAL_TOKEN   (the app↔plane internal-lane bearer)
-#   TOPOS_WEB_AUTH_SECRET  (Better Auth session signing — must be ≥ 32 chars)
-#   TOPOS_PLANE_DB_PASSWORD / TOPOS_WEB_DB_PASSWORD   (the two database roles)
-# and set TOPOS_PUBLIC_URL to your externally reachable origin (behind a TLS-terminating reverse proxy).
-# Put them in a `.env` file beside this one, or export them in the shell.
+# The TOPOLOGY: the WEB APP is the only thing the world reaches. It fronts `/api`, serves the resource
+# addresses + the constant protocol card, and drives the plane over an internal session lane. The PLANE
+# has NO published port — it answers on the compose-internal network only, at `http://plane:8787`.
+# Postgres is a SEPARATE service (never baked into an app image); each application migrates its own
+# schema AT BOOT, before it serves — the plane its `plane` schema, the web app its `web` schema.
 #
 # ── bring your own Postgres ────────────────────────────────────────────────────────────────────────────
 # To use a managed/external database instead of the bundled `db`: create the two roles + the `plane`
@@ -61,7 +76,7 @@
 
 # The project name, pinned rather than derived from whatever the directory happens to be called. It is
 # what prefixes the two volumes (`topos_pg-data`, `topos_plane-data`), so the backup and restore commands
-# in the docs name real volumes no matter where this file was downloaded to. `docker compose -p <other>`
+# in the docs name real volumes no matter what the checkout directory is called. `docker compose -p <other>`
 # still overrides it.
 name: topos
 
@@ -95,9 +110,10 @@ services:
     healthcheck:
       # Accepting connections is NOT enough to be healthy: the two application roles must exist.
       # initdb runs the provisioning script ONCE, on a fresh volume — so if that script never
-      # arrived (see the header: it is a second file, fetched beside this one), postgres still
-      # comes up perfectly serviceable with only the superuser, and the apps then fail to
-      # authenticate forever against a database that reports itself fine. Proving a role here turns
+      # arrived or never ran (a clone always carries it; a fetch is a second file, and `curl`
+      # cannot carry its execute bit), postgres still comes up perfectly serviceable with only the
+      # superuser, and the apps then fail to authenticate forever against a database that reports
+      # itself fine. Proving a role here turns
       # that silent half-install into a db that never goes healthy, which is what `depends_on`
       # already knows how to wait on and what `docker compose ps` shows you at a glance.
       test:
@@ -126,8 +142,9 @@ services:
       # The vault is pure byte custody with ONE caller: it needs no public base, no verification
       # pages, no mode — just the database, the stores, and the internal lane's shared bearer.
       # The app is the only holder; with it unset the vault answers 404 on the whole /internal
-      # lane. Must match the web app's PLANE_INTERNAL_TOKEN below.
-      TOPOS_PLANE_INTERNAL_TOKEN: ${TOPOS_INTERNAL_TOKEN:-change-me-internal-token}
+      # lane. REQUIRED, with no default: the same value the web app gets below, and compose
+      # refuses to parse this file until `.env` carries it.
+      TOPOS_PLANE_INTERNAL_TOKEN: "${TOPOS_INTERNAL_TOKEN:?generate one with: openssl rand -hex 32 — set it in .env (cp .env.example .env)}"
     volumes:
       # The git-object + large-object stores. Snapshot these BEFORE the database (see the
       # README's backup order).
@@ -149,9 +166,10 @@ services:
       # Connects as topos_web (owns schema `web` — identity, policy, product rows; reads `plane`
       # read-only, grant-enforced). Migrates its own `web` schema at container start, before serving.
       DATABASE_URL: postgres://topos_web:${TOPOS_WEB_DB_PASSWORD:-web}@db:5432/${POSTGRES_DB:-topos}
-      # The internal session lane — the plane, over the compose network, with the shared bearer.
+      # The internal session lane — the plane, over the compose network, with the shared bearer
+      # (the same TOPOS_INTERNAL_TOKEN the plane above reads; one value, two consumers).
       PLANE_INTERNAL_URL: http://plane:8787
-      PLANE_INTERNAL_TOKEN: ${TOPOS_INTERNAL_TOKEN:-change-me-internal-token}
+      PLANE_INTERNAL_TOKEN: "${TOPOS_INTERNAL_TOKEN:?generate one with: openssl rand -hex 32 — set it in .env (cp .env.example .env)}"
       # The app's externally reachable origin — the ONE public base every client-visible URL rides:
       # the resource addresses, the protocol card's `api_base_url` (this origin + `/api`), and the
       # sign-in/verification pages. Behind a TLS-terminating proxy this MUST be set to the public
@@ -163,9 +181,11 @@ services:
       # default would instead make localhost CANONICAL — and the app 301s browsers on any other host
       # to it, bouncing every remote visitor back to their own machine.
       TOPOS_PUBLIC_URL: ${TOPOS_PUBLIC_URL:-}
-      # Better Auth: the session-signing secret (≥ 32 chars — the app refuses to parse a shorter one) and
-      # the public origin sessions are minted for. BETTER_AUTH_URL is the app's externally reachable origin.
-      BETTER_AUTH_SECRET: ${TOPOS_WEB_AUTH_SECRET:-change-me-auth-secret-change-me-auth-secret}
+      # Better Auth: the session-signing secret and the public origin sessions are minted for.
+      # The secret is REQUIRED, with no default — it signs every session cookie, so a shipped one
+      # would be a forging key anyone could look up. ≥ 32 chars (the app refuses to parse a shorter
+      # one); `openssl rand -hex 32` gives 64. BETTER_AUTH_URL is the app's reachable origin.
+      BETTER_AUTH_SECRET: "${TOPOS_WEB_AUTH_SECRET:?generate one with: openssl rand -hex 32 — set it in .env (cp .env.example .env)}"
       BETTER_AUTH_URL: ${TOPOS_PUBLIC_URL:-http://localhost:3000}
       # The first-boot workspace: its address slug (renameable later in the product) and an
       # optional preset setup code (CI/IaC). Unset, a fresh high-entropy claim code is minted on

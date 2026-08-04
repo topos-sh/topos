@@ -142,11 +142,11 @@ const serverSchema = z.object({
 export type ServerEnv = z.infer<typeof serverSchema>;
 
 /**
- * The secrets `docker-compose.yml` defaults so a first `up` works with zero setup. They are FINE
- * on a laptop and unsafe the moment the stack is reachable — and they are published in a
- * public repository, so the auth secret in particular is a session-forging key anyone can look
- * up. The compose header says to override them; this makes the deployment REFUSE rather than
- * rely on the operator having read it. Keep in lockstep with `docker-compose.yml`.
+ * Secrets `docker-compose.yml` once defaulted, so that a first `up` needed zero setup. It no
+ * longer does — the two are required at parse time now, and `.env.example` carries them blank —
+ * but these exact strings stay refused FOREVER: they sit in this repository's public git history,
+ * so the auth secret is a session-forging key anyone can look up, and a deployment that copied an
+ * older compose file (or an older `.env`) forward must not quietly keep running on one.
  */
 const SHIPPED_DEFAULTS: ReadonlyArray<[keyof ServerEnv, string]> = [
   ["BETTER_AUTH_SECRET", "change-me-auth-secret-change-me-auth-secret"],
@@ -154,10 +154,11 @@ const SHIPPED_DEFAULTS: ReadonlyArray<[keyof ServerEnv, string]> = [
 ];
 
 /**
- * Refuse the published defaults in production. Scoped to `APP_ENV === "production"` on purpose:
- * the zero-setup laptop path keeps working exactly as before, and it is the deliberate reason
- * the defaults exist. Compose sets `APP_ENV: production`, so a self-hoster who reaches for the
- * stack as shipped is told at boot instead of running on a public secret.
+ * Refuse the once-published defaults in production. Compose now refuses to even parse without
+ * real values, so this is the BACKSTOP for every other path to a running app — a hand-written
+ * unit file, a PaaS env panel, an old compose file kept around. Scoped to
+ * `APP_ENV === "production"` on purpose: a dev tree may hold whatever placeholder it likes, and
+ * compose is what sets `APP_ENV: production`.
  */
 function assertNoShippedDefaults(env: ServerEnv): void {
   if (env.APP_ENV !== "production") {
@@ -168,8 +169,8 @@ function assertNoShippedDefaults(env: ServerEnv): void {
   );
   if (offenders.length > 0) {
     throw new Error(
-      `refusing to start: ${offenders.join(", ")} still hold${offenders.length === 1 ? "s" : ""} the published compose default. ` +
-        "These are public values — set real secrets (see the docker-compose.yml header) before exposing this deployment.",
+      `refusing to start: ${offenders.join(", ")} still hold${offenders.length === 1 ? "s" : ""} a value this project once shipped as a default. ` +
+        "These are public values — set real secrets in .env (see .env.example) before exposing this deployment.",
     );
   }
 }

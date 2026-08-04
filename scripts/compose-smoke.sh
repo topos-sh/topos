@@ -18,18 +18,40 @@ PROJECT="topos-smoke-$$"
 # Preset the setup code (the CI/IaC hatch) so the smoke can drive the claim page itself.
 export TOPOS_SETUP_CODE="smoke-setup-code-$$-0123456789abcdef"
 export TOPOS_WORKSPACE_NAME="smoke-team"
-# Real secrets, like a real deployment. The compose file's `change-me-…` defaults exist so a first
-# `up` works on a laptop, and the app REFUSES to boot on them when APP_ENV=production (they are
-# published values in a public repo — a session-signing key anyone can look up). The smoke runs the
-# production path, so it overrides them exactly as the compose header tells an operator to.
+# The two secrets a deployment must supply, exactly as `.env.example` tells an operator to. They have
+# no defaults: the compose file makes them required interpolations, which is what the refusal check
+# below proves — nothing starts until they are real.
 export TOPOS_WEB_AUTH_SECRET="smoke-auth-secret-$$-0123456789abcdef0123456789abcdef"
 export TOPOS_INTERNAL_TOKEN="smoke-internal-token-$$-0123456789abcdef"
 # The BUILD override: the smoke's whole point is proving that THIS tree's images build and boot, so it
 # never pulls the released ones the plain compose file pins.
 compose() { docker compose -p "$PROJECT" -f docker-compose.yml -f docker-compose.build.yml "$@"; }
-cleanup() { compose down -v --remove-orphans >/dev/null 2>&1 || true; rm -f "$COOKIES"; }
+cleanup() { compose down -v --remove-orphans >/dev/null 2>&1 || true; rm -f "$COOKIES" "$EMPTY_ENV"; }
 COOKIES="$(mktemp)"
+EMPTY_ENV="$(mktemp)"
 trap cleanup EXIT
+
+# ── the missing secrets refuse AT PARSE TIME ─────────────────────────────────────────────────────────
+# Before anything is built: with the two secrets unset, `config` must FAIL and say which variable is
+# missing. That refusal is the whole first-run contract — a self-hoster who copied `.env.example` and
+# did not fill it learns so in the terminal, not from a stack running on a public secret. The empty
+# `--env-file` is deliberate: a developer's own `.env` sits beside this compose file and would
+# otherwise supply the very values this case is about.
+echo "== asserting the two secrets are required at compose parse time =="
+refusal="$(env -u TOPOS_WEB_AUTH_SECRET -u TOPOS_INTERNAL_TOKEN \
+  docker compose -f docker-compose.yml --env-file "$EMPTY_ENV" config 2>&1)" && {
+  echo "FAIL: compose parsed with no secrets set — the required interpolations are gone"
+  exit 1
+}
+case "$refusal" in
+  *TOPOS_WEB_AUTH_SECRET*|*TOPOS_INTERNAL_TOKEN*) ;;
+  *) echo "FAIL: the parse refusal names neither secret: $refusal"; exit 1 ;;
+esac
+printf '%s' "$refusal" | grep -q 'required' || {
+  echo "FAIL: the parse refusal never says the variable is required: $refusal"
+  exit 1
+}
+echo "PASS: compose refuses to parse without the secrets ($(printf '%s' "$refusal" | head -1))."
 
 echo "== building + starting the stack (project $PROJECT) =="
 compose up -d --build
@@ -94,12 +116,18 @@ card_json_deep="$(curl -s -H 'Accept: application/json' http://localhost:3000/so
 printf '%s' "$card_json" | grep -q 'topos-protocol-card' || { echo "FAIL: JSON card missing marker: $card_json"; exit 1; }
 printf '%s' "$card_json" | grep -q '"api_base_url":"http://localhost:3000/api"' \
   || { echo "FAIL: card api_base_url wrong: $card_json"; exit 1; }
+# The compatibility fields a CLI reads before it trusts this server. PRESENCE only — pinning the
+# numbers here would make every release bump fail a smoke that has nothing to say about it.
+printf '%s' "$card_json" | grep -q '"server_version":"' \
+  || { echo "FAIL: card carries no server_version: $card_json"; exit 1; }
+printf '%s' "$card_json" | grep -q '"min_cli_version":"' \
+  || { echo "FAIL: card carries no min_cli_version: $card_json"; exit 1; }
 [ "$card_json" = "$card_json_deep" ] || { echo "FAIL: JSON card differs between / and a deep path"; exit 1; }
 card_md_root="$(curl -s http://localhost:3000/)"
 card_md_deep="$(curl -s http://localhost:3000/some/deep/path)"
 printf '%s' "$card_md_root" | grep -q 'topos login' || { echo "FAIL: markdown card missing the login teaching"; exit 1; }
 [ "$card_md_root" = "$card_md_deep" ] || { echo "FAIL: markdown card differs between / and a deep path"; exit 1; }
-echo "PASS: both card faces answer, byte-identical, with the app-rooted api base."
+echo "PASS: both card faces answer, byte-identical, with the app-rooted api base + the version fields."
 
 # ── the session lane answers the uniform miss on an unknown credential ───────────────────────────────
 echo "== probing the session lane with an unknown bearer =="
