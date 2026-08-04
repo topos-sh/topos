@@ -2098,7 +2098,9 @@ fn five_rows_behind_one_quiet_forge_produce_one_line_and_only_when_stale() {
     let lines = ops::quiet_hook_lines(&rig.fs, &rig.layout(), stale_now, &out);
     assert_eq!(lines.len(), 1, "{lines:?}");
     assert!(lines[0].contains("github.com"), "{:?}", lines[0]);
-    assert!(lines[0].contains("5 skills"), "{:?}", lines[0]);
+    // SOURCES, not skills: one repository row can hold any number of skills, so counting the
+    // repositories and calling them skills would be a number about the wrong thing.
+    assert!(lines[0].contains("5 sources"), "{:?}", lines[0]);
     assert!(
         lines[0].contains("they still work"),
         "the consequence, so `unreachable` does not read as breakage: {:?}",
@@ -2248,7 +2250,10 @@ fn a_pinned_rows_fetch_is_recorded_as_a_check_like_any_other() {
     let doc = crate::forge_check::read(&rig.fs, &rig.layout());
     let rec = doc
         .sources
-        .get("github.com/o/r")
+        .get(&crate::forge_check::question(
+            "github.com/o/r",
+            "aaaaaaaaaaaa1",
+        ))
         .unwrap_or_else(|| panic!("the pinned fetch is recorded: {:?}", doc.sources));
     assert_eq!(rec.checked_at_ms, rig_now(&rig));
     assert_eq!(rec.answered_at_ms, Some(rig_now(&rig)));
@@ -2418,7 +2423,10 @@ fn an_unreadable_archive_is_a_failed_check_not_a_passed_one() {
     let doc = crate::forge_check::read(&rig.fs, &rig.layout());
     let rec = doc
         .sources
-        .get("github.com/o/r")
+        .get(&crate::forge_check::question(
+            "github.com/o/r",
+            "aaaaaaaaaaaa1",
+        ))
         .unwrap_or_else(|| panic!("the attempt is recorded: {:?}", doc.sources));
     assert!(
         rec.failure.is_some(),
@@ -2427,6 +2435,137 @@ fn an_unreadable_archive_is_a_failed_check_not_a_passed_one() {
     assert_eq!(
         rec.answered_at_ms, None,
         "it never really answered: {rec:?}"
+    );
+}
+
+#[test]
+fn a_member_the_repo_dropped_reads_detached_not_current() {
+    // The mirror image of the bug the set-member enumeration exists to fix, and just as much a lie.
+    // When upstream drops a member, the reconcile retires its placements but KEEPS its origin and
+    // lock — custody outlives delivery. Enumerating every retained record would make `list` call a
+    // withdrawn member live, so only records that still hold placed bytes are claimed.
+    let rig = Rig::new("repo-dropped-member");
+    rig.write_global("[bundles]\n\"github.com/o/r\" = \"*\"\n");
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let plane = FakePlane::new(log);
+    let dir = FakeDirectory::new(Vec::new(), Vec::new());
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    let git = FakeGit::new(build_repo_targz(
+        "o-r-aaaaaaaaaaaa1",
+        &[
+            ("skills/alpha/SKILL.md", b"# alpha v1\n"),
+            ("skills/beta/SKILL.md", b"# beta v1\n"),
+        ],
+    ));
+    update_now(&ctx, &plane, &dir, &git);
+    assert!(rig.home.0.join(".claude/skills/beta/SKILL.md").exists());
+
+    // Upstream drops `beta`. The update retires its placements; its custody record stays.
+    git.serve(build_repo_targz(
+        "o-r-bbbbbbbbbbbb2",
+        &[("skills/alpha/SKILL.md", b"# alpha v2\n")],
+    ));
+    forge_interval_elapsed(&rig);
+    let out = update_now(&ctx, &plane, &dir, &git);
+    assert!(
+        out.data
+            .skills
+            .iter()
+            .any(|s| s.skill == "beta" && s.action == PullAction::Withdrawn),
+        "the member was retired: {:?}",
+        out.data.skills
+    );
+    assert!(
+        crate::ops::forge_imports(&ctx)
+            .iter()
+            .any(|i| i.lock.name == "beta"),
+        "and its custody record is deliberately kept"
+    );
+
+    // What `list` must say about it: NOT that the repo row still delivers it.
+    let listed = crate::ops::list_with(
+        &ctx,
+        &ops::ListRequest::default(),
+        None,
+        None,
+        crate::ops::RowPage::unlimited(),
+    )
+    .unwrap();
+    let rows: Vec<&topos_types::results::SkillEntry> = listed
+        .data
+        .scopes
+        .iter()
+        .flat_map(|sc| sc.rows.iter())
+        .collect();
+    let beta = rows
+        .iter()
+        .find(|r| r.skill == "beta")
+        .unwrap_or_else(|| panic!("the kept copy is still shown: {rows:?}"));
+    assert_eq!(
+        beta.status,
+        Some(topos_types::results::SkillStatus::Detached),
+        "a member the repo no longer holds is a leftover, not a delivery: {beta:?}"
+    );
+    // …while the member that IS still delivered reads exactly as it did before.
+    let alpha = rows.iter().find(|r| r.skill == "alpha").expect("alpha");
+    assert_eq!(
+        alpha.status,
+        Some(topos_types::results::SkillStatus::Current),
+        "{alpha:?}"
+    );
+}
+
+#[test]
+fn re_adding_a_repo_that_came_back_re_enables_its_automatic_update() {
+    // A verdict is a record of what a forge SAID. A forge that has just handed over the bytes has
+    // said something newer — so a repository deleted, written off, and later restored must not stay
+    // permanently un-updated because a refusal is still on file.
+    let rig = Rig::new("repo-came-back");
+    rig.write_global("[bundles]\n\"github.com/o/r\" = \"*\"\n");
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let plane = FakePlane::new(log);
+    let dir = FakeDirectory::new(Vec::new(), Vec::new());
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    let git = FakeGit::new(build_repo_targz(
+        "o-r-aaaaaaaaaaaa1",
+        &[("skills/alpha/SKILL.md", b"# alpha v1\n")],
+    ));
+
+    // Gone. The verdict settles and the lane stops asking.
+    git.fail_with(FetchFault::Gone);
+    update_now(&ctx, &plane, &dir, &git);
+    forge_interval_elapsed(&rig);
+    let settled = git.probes() + git.fetches();
+    update_now(&ctx, &plane, &dir, &git);
+    assert_eq!(
+        git.probes() + git.fetches(),
+        settled,
+        "a settled verdict stops the dialing"
+    );
+
+    // The repository comes back, and the person re-adds it. The add succeeds, which is newer
+    // evidence than the refusal.
+    *git.fault.lock().unwrap() = None;
+    gate_add(&ctx, &plane, &dir, &git, "github.com/o/r");
+    assert!(rig.home.0.join(".claude/skills/alpha/SKILL.md").exists());
+
+    // THE POINT: automatic updates work again. Without the forgetting the lane would go on
+    // refusing to dial a source the person just proved is alive.
+    git.serve(build_repo_targz(
+        "o-r-bbbbbbbbbbbb2",
+        &[("skills/alpha/SKILL.md", b"# alpha v2\n")],
+    ));
+    forge_interval_elapsed(&rig);
+    let before = git.probes() + git.fetches();
+    quiet_sweep(&ctx, &plane, &dir, &git);
+    assert!(
+        git.probes() + git.fetches() > before,
+        "the restored source is checked again"
+    );
+    assert_eq!(
+        std::fs::read_to_string(rig.home.0.join(".claude/skills/alpha/SKILL.md")).unwrap(),
+        "# alpha v2\n",
+        "and the silent sweep carries it forward again"
     );
 }
 

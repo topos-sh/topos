@@ -972,19 +972,34 @@ pub(crate) fn forge_sources(ctx: &Ctx<'_>, shown: &[&ScopeResolution]) -> Vec<Fo
             }
         }
     }
+    // The log is filed per QUESTION (a source at a ref); the display is per SOURCE. Where one
+    // repository was asked about at two refs, the most RECENT check is the one that answers "is
+    // this still being kept current?" — an older question's outcome is not news about the source.
     let log = crate::forge_check::read(ctx.fs, &ctx.layout);
-    wanted
-        .into_iter()
-        .filter_map(|source| {
-            let check = log.sources.get(&source)?;
-            Some(ForgeSource {
-                source,
-                checked_at: check.checked_at_ms,
-                answered_at: check.answered_at_ms,
-                commit: check.commit.clone(),
-                error: check.failure.as_ref().map(|f| f.reason.clone()),
-                gone: check.failure.as_ref().is_some_and(|f| f.gone),
+    let mut newest: BTreeMap<&str, &crate::forge_check::SourceCheck> = BTreeMap::new();
+    for (key, check) in &log.sources {
+        let source = crate::forge_check::source_of(key);
+        if !wanted.contains(source) {
+            continue;
+        }
+        newest
+            .entry(source)
+            .and_modify(|held| {
+                if check.checked_at_ms >= held.checked_at_ms {
+                    *held = check;
+                }
             })
+            .or_insert(check);
+    }
+    newest
+        .into_iter()
+        .map(|(source, check)| ForgeSource {
+            source: source.to_owned(),
+            checked_at: check.checked_at_ms,
+            answered_at: check.answered_at_ms,
+            commit: check.commit.clone(),
+            error: check.failure.as_ref().map(|f| f.reason.clone()),
+            gone: check.failure.as_ref().is_some_and(|f| f.gone),
         })
         .collect()
 }
@@ -997,10 +1012,17 @@ struct RepoSetMember {
     applied: Applied,
 }
 
-/// The members a repo-set row delivers INTO THIS SCOPE, read from the scope's own store: every
-/// import that records this origin. That record is written when the member lands and rewritten on
-/// every refresh, so it is the offline answer to "what does this line deliver here?" — the same
-/// role the delivery cache plays for a channel line.
+/// The members a repo-set row DELIVERS into this scope right now, read from the scope's own store:
+/// the imports that record this origin AND still hold placed bytes here. That record is written
+/// when a member lands and rewritten on every refresh, so it is the offline answer to "what does
+/// this line deliver here?" — the same role the delivery cache plays for a channel line.
+///
+/// STILL HOLD is the load-bearing half. When an upstream repository drops a member, the reconcile
+/// retires its placements but deliberately KEEPS the origin and lock: the bytes are custody, and
+/// custody outlives delivery. A record whose placements are gone is therefore exactly what the
+/// ghost walk exists to describe — a retained leftover, detached — and claiming it here would make
+/// `list` assert a withdrawn member is live, which is the same lie as the one this enumeration was
+/// added to stop, told in the other direction.
 ///
 /// No served version is knowable offline, so a member never reads `behind` — only applied, edited,
 /// or unknown, exactly as any other stored-by-name resolution.
@@ -1011,13 +1033,24 @@ fn repo_set_members(ctx: &Ctx<'_>, layout: Option<&Layout>, origin: &str) -> Vec
     let sctx = crate::ops::ctx_with_layout(ctx, layout);
     crate::ops::forge_imports(&sctx)
         .into_iter()
-        .filter(|i| i.origin.source == origin)
+        .filter(|i| i.origin.source == origin && holds_placed_bytes(ctx, layout, &i.sid))
         .map(|i| RepoSetMember {
             reference: format!("{origin}/{}", i.lock.name),
             applied: applied_for_id(ctx, Some(layout), i.sid.as_str(), ""),
             name: i.lock.name,
         })
         .collect()
+}
+
+/// Whether this scope still holds MANAGED bytes on disk for a skill id — a recorded placement that
+/// really exists. The placement map is the record of what was written; a retirement empties it (or
+/// leaves paths that are gone), and that absence is the difference between a delivery and a
+/// leftover.
+fn holds_placed_bytes(ctx: &Ctx<'_>, layout: &Layout, sid: &crate::id::SkillId) -> bool {
+    let Ok(Some(map)) = doc::read_map(ctx.fs, &layout.published(sid).map) else {
+        return false;
+    };
+    map.placements.iter().any(|p| ctx.fs.exists(Path::new(p)))
 }
 
 /// One cached delivery a line resolves against.

@@ -109,7 +109,8 @@ pub(crate) struct PullOutcome {
 pub(crate) struct StaleForge {
     /// The forge (`github.com`) — what the line names, because that is the thing that went quiet.
     pub host: String,
-    /// How many of this run's sources sit behind it.
+    /// How many of this run's SOURCES sit behind it — repositories, not skills. One repository
+    /// can hold any number of skills, so the line must say what it is counting.
     pub sources: usize,
     /// The OLDEST last-answered time across those sources; `None` = one of them has never
     /// answered at all (and so is not stale — there is nothing to be stale from).
@@ -649,9 +650,9 @@ pub(crate) fn quiet_hook_lines(
             },
             forge.sources,
             if forge.sources == 1 {
-                "skill"
+                "source"
             } else {
-                "skills"
+                "sources"
             },
             ago.map(|a| format!(" for {a}")).unwrap_or_default(),
         ));
