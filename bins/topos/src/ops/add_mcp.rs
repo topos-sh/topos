@@ -68,12 +68,16 @@ pub(crate) trait McpDocSource {
 /// testable without a filesystem, a network, or a session.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum McpSourceShape {
-    /// A folder on this machine that exists — the bytes in front of you win over any spelling.
+    /// A PATH-SPELLED folder on this machine that exists (`./x`, `../x`, `~/x`, `/abs`, `.`,
+    /// `..`) — the one spelling that opens the local door.
     Path(PathBuf),
     /// An official-registry server name (`<reverse.dns>/<server>`).
     Registry(String),
     /// An https URL to a `server.json` document.
     Url(String),
+    /// A registry-shaped token that ALSO names a real directory here: refused, naming both
+    /// spellings — a folder must never silently turn a registry import into a local adopt.
+    DirShadowsRegistry(String),
     /// A workspace / channel / feed / forge reference. `--mcp` has nothing to add to one: a
     /// workspace bundle already carries its kind in the catalog.
     Reference,
@@ -82,12 +86,15 @@ pub(crate) enum McpSourceShape {
 }
 
 /// Classify a `--mcp` positional. `host` is this machine's default manifest host (the workspace
-/// reference grammar's), `exists` answers whether a path-shaped token names a real directory.
+/// reference grammar's), `exists` answers whether a token names a real directory.
 ///
-/// The order is deliberate: an `@`-led token is unambiguously a workspace sugar; a real folder
-/// beats every shorthand; a scheme is a URL; and only then does the registry's own name grammar
-/// get to claim a `<a.b>/<c>` token — except when its first segment is a server this machine talks
-/// to (or `github.com`), which would make `--mcp` a way to mislabel a governed reference.
+/// The order is deliberate: an `@`-led token is unambiguously a workspace sugar; ONLY a path
+/// SPELLING opens the Path door (a bare token never silently adopts a folder — a directory
+/// literally named like a registry server must not hijack the import); a scheme is a URL; and
+/// only then does the registry's own name grammar get to claim a `<a.b>/<c>` token — except when
+/// its first segment is a server this machine talks to (or `github.com`), which would make
+/// `--mcp` a way to mislabel a governed reference. A registry-shaped token that ALSO names a real
+/// directory refuses toward both explicit spellings instead of picking one.
 pub(crate) fn classify_mcp_source(
     source: &str,
     host: Option<&str>,
@@ -100,19 +107,20 @@ pub(crate) fn classify_mcp_source(
     if token.starts_with('@') || token.starts_with('#') {
         return McpSourceShape::Reference;
     }
-    // A path spelling, or any token that names a folder that is actually here.
+    // ONLY a path spelling opens the Path door.
     let looks_path = token.starts_with("./")
         || token.starts_with("../")
         || token.starts_with("~/")
         || token.starts_with('/')
         || token == "."
         || token == "..";
-    if (looks_path || !token.contains("://")) && exists(Path::new(token)) {
-        return McpSourceShape::Path(PathBuf::from(token));
-    }
     if looks_path {
-        // A path spelling that names nothing is a missing folder, not a registry name.
-        return McpSourceShape::Unreadable;
+        return if exists(Path::new(token)) {
+            McpSourceShape::Path(PathBuf::from(token))
+        } else {
+            // A path spelling that names nothing is a missing folder, not a registry name.
+            McpSourceShape::Unreadable
+        };
     }
     if token.contains("://") {
         return if token.starts_with("https://") {
@@ -127,7 +135,13 @@ pub(crate) fn classify_mcp_source(
         return McpSourceShape::Reference;
     }
     if mcp_validate::is_registry_name(token) {
-        return McpSourceShape::Registry(token.to_owned());
+        // A real directory wearing the registry name cannot silently claim the import — the
+        // refusal names the `./` spelling for the folder and keeps the bare token the registry's.
+        return if exists(Path::new(token)) {
+            McpSourceShape::DirShadowsRegistry(token.to_owned())
+        } else {
+            McpSourceShape::Registry(token.to_owned())
+        };
     }
     if token.contains('/') {
         // Three or more segments, or a segment the registry grammar rejects: whatever it is, it is
@@ -207,6 +221,12 @@ pub(crate) fn add_mcp(
             fetch_arm(ctx, docs, source, &registry_url(&name), global)
         }
         McpSourceShape::Url(url) => fetch_arm(ctx, docs, source, &url.clone(), global),
+        McpSourceShape::DirShadowsRegistry(token) => Err(ClientError::InvalidArgument(format!(
+            "`{token}` is both a folder here and an official-registry server name — say which: \
+             `topos add --mcp ./{token}` imports the folder; the bare `{token}` is the registry \
+             spelling, refused while the folder stands (move or rename it to fetch from the \
+             registry)"
+        ))),
         McpSourceShape::Reference => Err(ClientError::InvalidArgument(format!(
             "`{source}` names a workspace bundle — a workspace already records what each bundle \
              is, so `topos add {source}` gets it with its kind intact; `--mcp` imports a server \
@@ -825,23 +845,37 @@ mod tests {
         );
     }
 
-    /// The bytes in front of you win: a token naming a real folder is a local import however the
-    /// grammar would otherwise read it.
+    /// ITEM PAIR (registry-name hijack): ONLY a path spelling opens the Path door. A directory
+    /// literally named `io.github.acme/weather` must not turn a registry import into an ungated
+    /// local adopt — the collision refuses, naming both spellings out.
     #[test]
-    fn a_real_folder_beats_every_shorthand() {
+    fn only_a_path_spelling_opens_the_path_door() {
         assert_eq!(
             classify_mcp_source("./servers/weather", None, &everything_exists),
             McpSourceShape::Path(PathBuf::from("./servers/weather"))
         );
-        // Even a registry-shaped token, when a folder of that name is actually here.
+        // A registry-shaped token that ALSO names a real directory refuses toward BOTH explicit
+        // spellings — never a silent local adopt.
         assert_eq!(
             classify_mcp_source("io.github.acme/weather", None, &everything_exists),
-            McpSourceShape::Path(PathBuf::from("io.github.acme/weather"))
+            McpSourceShape::DirShadowsRegistry("io.github.acme/weather".to_owned())
         );
         // A path SPELLING that names nothing is a missing folder, never a registry name.
         assert_eq!(
             classify_mcp_source("./servers/weather", None, &nothing_exists),
             McpSourceShape::Unreadable
+        );
+        // A bare word naming a real folder no longer adopts it — `./weather` is the spelling that
+        // does.
+        assert_eq!(
+            classify_mcp_source("weather", None, &everything_exists),
+            McpSourceShape::Unreadable
+        );
+        // A non-registry, non-path token naming a real folder reads as a reference, exactly as it
+        // does when nothing exists — the bytes on disk never re-classify a spelling.
+        assert_eq!(
+            classify_mcp_source("io.github.acme/team/weather", None, &everything_exists),
+            classify_mcp_source("io.github.acme/team/weather", None, &nothing_exists),
         );
     }
 
