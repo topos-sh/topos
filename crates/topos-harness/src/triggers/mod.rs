@@ -13,9 +13,8 @@
 //!   strict-JSON config file): `gemini-cli`, `cursor`, `droid`.
 //! - `file_drop` — one topos-owned file at a harness-defined path: `github-copilot`, `opencode`,
 //!   `goose`, `amp`, `cline`.
-//! - `codex` is special: its config is TOML (no TOML dependency exists in this crate), so it is a
-//!   line-anchored merge mirroring the Hermes YAML discipline — provable shapes only, fail-closed
-//!   on everything else.
+//! - `codex` is special: its config is TOML, handled as a line-anchored merge mirroring the
+//!   Hermes YAML discipline — provable shapes only, fail-closed on everything else.
 //!
 //! Every adapter here mirrors the big-three idiom: content-blind, an injected home (never the
 //! real `~`), durable writes through the [`ConfigStore`] port, sentinel/marker-keyed ownership,

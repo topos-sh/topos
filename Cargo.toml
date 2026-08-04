@@ -56,6 +56,7 @@ base64 = "0.22"               # bins/topos: the contribute candidate's content_b
 # editor: comments and layout survive a `topos add`). 0.25 parses TOML 1.1 (multiline inline
 # tables) by default — the `+spec-1.1.0` build metadata names the spec level.
 toml_edit = "0.25"
+jsonc-parser = { version = "0.26", features = ["cst"] } # topos-harness: lossless JSON(C) CST edit of harness MCP configs — comments/formatting preserved, fail-closed on parse (MIT)
 getrandom = "0.2"             # plane-store: per-ingest op ids + serializable-retry jitter
 gix = { version = "0.85", default-features = false } # topos-gitstore: dumb object mechanics (plumbing-only; members add the lean features they need)
 imara-diff = "0.1"            # topos-gitstore: the diff ENGINE behind the unified-diff renderer (pure-Rust histogram/Myers); we own the unified-diff FORMATTING so the `diff` golden stays byte-stable across its releases

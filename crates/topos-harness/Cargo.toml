@@ -11,6 +11,10 @@ description = "The HarnessAdapter trait + the Claude Code reference impl (other 
 [dependencies]
 topos-types.workspace = true
 serde_json.workspace = true # strict-JSON config edit for the Claude Code settings.json hook (content-blind)
+jsonc-parser.workspace = true # mcp: lossless JSON(C) CST upsert/remove of managed MCP entries (cursor/claude/opencode/openclaw)
+toml_edit.workspace = true # mcp: format-preserving [mcp_servers.*] patch of Codex's config.toml
+sha2.workspace = true # mcp: the structural entry fingerprint (sha256 over a canonical JSON rendering)
+hex.workspace = true # mcp: fingerprint hex encoding (the shared std-crate codec)
 
 [lints]
 workspace = true

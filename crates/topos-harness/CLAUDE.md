@@ -44,6 +44,18 @@ trust/consent state.
 - **`coverage`** — whether a harness reads the shared `~/.agents/skills` dir, with PROVENANCE
   (`Probed`/`Docs`/`Unknown` — no evidence = not covered, fail closed); override table over an
   automatic derivation from the registry.
+- **`mcp`** — pure MCP-server config placement for six harnesses; bytes in → an `EditPlan` out,
+  the CLI owns ALL file I/O. A descriptor table (registry-slug-keyed: user/project surface +
+  dialect + reload copy) over four drivers: `jsonc_edit` (Cursor / Claude-project / OpenCode
+  strict JSON + OpenClaw JSONC, through a lossless CST — comments and formatting preserved),
+  `toml_patch` (Codex `[mcp_servers.*]` via `toml_edit`), `yaml_splice` (Hermes one-line
+  sentinel-marked flow entries, the `hermes.rs` line-surgical idiom), and `plugin_dir` (the
+  wholly-topos-owned Claude Code plugin dir, rendered whole). Ownership keys on the `topos-`
+  key prefix PLUS the caller's `key → fingerprint` ledger (sha256 over a canonical structural
+  rendering, so reflow never reads as drift); a prior-mismatched entry is `Drifted` and a
+  ledger-less one `Foreign` — both untouched, always; per-dialect entry shapes are exact (a
+  wrong key can brick a harness) and every edit is post-verified — any unprovable input or
+  verification surprise yields `Unprovable` with ZERO byte changes.
 - **`registry`** — the baked ~73-harness table (detection + skills-root resolution;
   `detected_harnesses`), plus `choose_skill_dir`, the ONE placement-naming discipline every
   target dir follows (`topos` is `RESERVED_SKILL_DIR`, the built-in's name).
@@ -54,4 +66,5 @@ without re-implementing durability. Each adapter's exact config shapes and evide
 documented in its module doc; a pilot's exact build stays a MUST-VERIFY (a failed probe degrades
 the report, never rebuilds an adapter).
 
-Dependencies: `topos-core`, `topos-types`, `serde_json`, plus the platform std surface.
+Dependencies: `topos-types`, `serde_json`, `jsonc-parser` (the mcp CST edit), `toml_edit`,
+`sha2` + `hex` (the mcp fingerprint), plus the platform std surface.

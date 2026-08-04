@@ -18,6 +18,7 @@ use topos_types::{CurrencyKind, HarnessId, TriggerReport};
 mod claude_code;
 pub mod coverage;
 mod hermes;
+pub mod mcp;
 mod openclaw;
 pub mod registry;
 pub mod triggers;
