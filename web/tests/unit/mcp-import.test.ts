@@ -254,9 +254,10 @@ describe("the publish", () => {
       name: "weather",
       channel: "",
     });
-    // The arm lands by redirect to the new skill's page.
+    // The arm lands by redirect to the new server's page — in the MCP section, never under
+    // /skills: the kind decides which base addresses a bundle.
     expect(status).toBe(302);
-    expect(location).toBe("/skills/weather");
+    expect(location).toBe("/mcp/weather");
 
     expect(vault.published).toHaveLength(1);
     expect(vault.published[0]?.files).toEqual([{ path: "server.json", content: document }]);

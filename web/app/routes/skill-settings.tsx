@@ -13,6 +13,8 @@ import {
   requireOwnerInScope,
   requireWorkspaceOwner,
 } from "@/lib/auth/guards.server";
+import { type BundleBase, baseOf, bundlePath, useBundleBase } from "@/lib/bundle-base";
+import { requireCanonicalBase } from "@/lib/bundle-base.server";
 import { recordAdminEvent } from "@/lib/db/audit.server";
 import {
   archiveBundle,
@@ -32,8 +34,8 @@ import { wsPathServer } from "@/lib/ws-url.server";
 const ARCHIVE_BOUNDARY =
   "Archiving retires it for the whole team — machines keep their local copies.";
 
-export function meta({ params }: { params: { skill?: string } }) {
-  return [{ title: `Settings · ${params.skill ?? "skill"}` }];
+export function meta({ params }: { params: { skill?: string; server?: string } }) {
+  return [{ title: `Settings · ${params.server ?? params.skill ?? "skill"}` }];
 }
 
 /** How the skill's protection resolves for the render: the pin, or the inherited default. */
@@ -50,7 +52,8 @@ type ProtectionChoice = "inherit" | "open" | "reviewed";
  */
 export async function loader({ request, params }: LoaderFunctionArgs) {
   const { workspace, actor: owner } = await requireOwnerInScope(request, params);
-  const skill = params.skill;
+  const base = baseOf(params);
+  const skill = params.server ?? params.skill;
   if (!skill) {
     notFound();
   }
@@ -58,10 +61,17 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
   if (row === undefined) {
     const resolved = await resolveSkillName(owner, skill);
     if (resolved !== undefined && resolved.via === "hint" && resolved.status === "active") {
-      throw redirect(wsPathServer(workspace.name, `skills/${resolved.name}/settings`));
+      throw redirect(wsPathServer(workspace.name, bundlePath(base, resolved.name, "/settings")));
     }
     notFound();
   }
+  requireCanonicalBase({
+    wsName: workspace.name,
+    base,
+    kind: row.kind,
+    name: skill,
+    tail: "/settings",
+  });
   const [bundleRow, policy, upstream] = await Promise.all([
     bundleById(owner, row.skillId),
     workspacePolicyOf(owner),
@@ -112,14 +122,15 @@ export async function action({ request, params }: ActionFunctionArgs) {
   // 400-vs-404 split would be a workspace-existence oracle the GET faces deliberately close.
   const { workspace } = await requireMemberInScope(request, params);
   const ws = workspace.id;
-  const skill = params.skill;
+  const base = baseOf(params);
+  const skill = params.server ?? params.skill;
   if (!skill) {
     notFound();
   }
   const formData = await request.formData();
   const intent = String(formData.get("intent") ?? "");
   if (intent === "rename") {
-    return renameIntent(request, ws, workspace.name, skill, formData);
+    return renameIntent(request, ws, workspace.name, base, skill, formData);
   }
   if (intent === "archive") {
     return archiveIntent(request, ws, workspace.name, skill);
@@ -137,6 +148,7 @@ async function renameIntent(
   request: Request,
   ws: string,
   wsName: string,
+  base: BundleBase,
   skill: string,
   formData: FormData,
 ) {
@@ -171,7 +183,7 @@ async function renameIntent(
     });
   }
   if (outcome.outcome === "renamed") {
-    throw redirect(wsPathServer(wsName, `skills/${outcome.name}/settings`));
+    throw redirect(wsPathServer(wsName, bundlePath(base, outcome.name, "/settings")));
   }
   await recordAdminEvent(owner, {
     kind: "skill_renamed",
@@ -282,6 +294,7 @@ export default function SkillSettings() {
     protectionDefault,
   } = useLoaderData<typeof loader>();
   const wsPath = useWsPath();
+  const base = useBundleBase();
   return (
     <div className="space-y-8">
       <SkillHeader
@@ -292,7 +305,7 @@ export default function SkillSettings() {
         kind={kind}
       />
       <SkillTabs
-        basePath={wsPath(`skills/${skill}`)}
+        basePath={wsPath(bundlePath(base, skill))}
         active="settings"
         openProposals={openProposals}
         showSettings

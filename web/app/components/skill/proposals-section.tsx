@@ -2,6 +2,7 @@ import { Link } from "react-router";
 import { relativeTime } from "@/components/format";
 import { CopyCommand } from "@/components/review/CopyCommand";
 import { Card, Chip, SectionHeading, ShortId } from "@/components/ui";
+import { bundlePath, useBundleBase } from "@/lib/bundle-base";
 import { buildDiffCommand } from "@/lib/diff/command";
 import { useWsPath } from "@/lib/ws-path";
 
@@ -77,6 +78,7 @@ export function ProposalsSection({
 
 function OpenRow({ skill, proposal }: { skill: string; proposal: ProposalListItem }) {
   const wsPath = useWsPath();
+  const base = useBundleBase();
   return (
     <li className="flex min-h-14 flex-wrap items-center gap-x-4 gap-y-1 border-line-soft border-b px-4 py-3 last:border-b-0">
       <span className="flex items-center gap-1.5 text-sm text-dim">
@@ -92,13 +94,13 @@ function OpenRow({ skill, proposal }: { skill: string; proposal: ProposalListIte
           label="Copy diff command"
         />
         <Link
-          to={wsPath(`skills/${skill}/versions/${proposal.candidateVersionId}`)}
+          to={wsPath(bundlePath(base, skill, `/versions/${proposal.candidateVersionId}`))}
           className="inline-flex min-h-9 items-center rounded-md border border-line px-3 font-mono text-[13px] text-dim hover:bg-panel2 focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-2"
         >
           Files
         </Link>
         <Link
-          to={wsPath(`skills/${skill}/proposals/${proposal.candidateVersionId}`)}
+          to={wsPath(bundlePath(base, skill, `/proposals/${proposal.candidateVersionId}`))}
           className="inline-flex min-h-9 items-center rounded-md border border-line px-3 font-mono text-[13px] text-dim hover:bg-panel2 focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-2"
         >
           Review
@@ -116,10 +118,11 @@ const RESOLVED_LABEL: Record<string, string> = {
 
 function ResolvedRow({ skill, proposal }: { skill: string; proposal: ProposalListItem }) {
   const wsPath = useWsPath();
+  const base = useBundleBase();
   return (
     <li className="flex min-h-12 flex-wrap items-center gap-x-4 gap-y-1 border-line-soft border-b px-4 py-3 last:border-b-0">
       <Link
-        to={wsPath(`skills/${skill}/proposals/${proposal.candidateVersionId}`)}
+        to={wsPath(bundlePath(base, skill, `/proposals/${proposal.candidateVersionId}`))}
         className="flex items-center gap-1.5 rounded text-sm text-dim focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-2"
       >
         <ShortId value={proposal.candidateVersionId} />

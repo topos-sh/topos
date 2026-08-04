@@ -50,10 +50,11 @@ reads silence as one.
 
 <Tabs>
   <Tab title="The browser">
-    From your workspace dashboard, **Add MCP server** (`<origin>/<workspace>/mcp/import`). The
-    page opens on a searchable list of popular servers — Linear, Notion, GitHub, Sentry, Figma
-    and the rest — each showing what it connects to and whether a sign-in is coming. Choose one,
-    preview what it promises, then publish it under a name and into a channel.
+    The left panel carries an **MCP servers** section of its own, next to Skills; its `+` (and
+    **Add MCP server** on the dashboard) opens `<origin>/<workspace>/mcp/import`. The page opens
+    on a searchable list of popular servers — Linear, Notion, GitHub, Sentry, Figma and the rest
+    — each showing what it connects to and whether a sign-in is coming. Choose one, preview what
+    it promises, then publish it under a name and into a channel.
 
     Anything not on that list goes in under **Custom server**, which is the same three typed
     sources as ever: the MCP registry by name, a URL to a `server.json`, or the document pasted
@@ -99,6 +100,10 @@ bytes you can read and commit.
 
 `--mcp` names a *source*, never a workspace bundle. `topos add @acme/weather` already gets the
 server with its kind intact, because the workspace records what each bundle is.
+
+Published servers live under their own addresses — `<origin>/<workspace>/mcp/<name>`, listed in
+the **MCP servers** section of the panel and of the dashboard. Nothing about a server is filed
+under skills.
 
 ## How delivery works
 

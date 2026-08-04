@@ -1,5 +1,6 @@
 import { Link } from "react-router";
 import { Card, Chip } from "@/components/ui";
+import { bundlePath, useBundleBase } from "@/lib/bundle-base";
 import type { ListingEntry } from "@/lib/view/tree";
 import { useWsPath } from "@/lib/ws-path";
 
@@ -48,6 +49,7 @@ function ListingRow({
   entry: ListingEntry;
 }) {
   const wsPath = useWsPath();
+  const base = useBundleBase();
   // A 16px base plus one 16px step per tree level.
   const indent = { paddingLeft: `${16 + entry.depth * 16}px` };
 
@@ -65,7 +67,7 @@ function ListingRow({
   // Re-encode each segment so a name with a URL-unsafe character round-trips through the
   // catch-all route unharmed.
   const encoded = entry.path.split("/").map(encodeURIComponent).join("/");
-  const href = wsPath(`skills/${skill}/versions/${versionId}/files/${encoded}`);
+  const href = wsPath(bundlePath(base, skill, `/versions/${versionId}/files/${encoded}`));
   return (
     <li className="border-line-soft border-b last:border-b-0">
       <Link

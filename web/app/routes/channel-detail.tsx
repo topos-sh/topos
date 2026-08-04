@@ -1,4 +1,4 @@
-import { Check, ChevronsUpDown, Package, Plus } from "lucide-react";
+import { Check, ChevronsUpDown, Package, Plug, Plus } from "lucide-react";
 import { useState } from "react";
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
 import {
@@ -29,6 +29,7 @@ import {
   requireWorkspaceOwner,
 } from "@/lib/auth/guards.server";
 import { getAuth } from "@/lib/auth/server";
+import { baseForKind, bundlePath } from "@/lib/bundle-base";
 import { recordAdminEvent } from "@/lib/db/audit.server";
 import {
   type ChannelDetail as ChannelDetailData,
@@ -53,7 +54,13 @@ export function meta({ params }: { params: { channel?: string } }) {
 }
 
 /** One catalog entry the add picker can place — slimmed to what the option needs. */
-type AddableSkill = { skillId: string; name: string; displayName: string | null };
+type AddableSkill = {
+  skillId: string;
+  name: string;
+  displayName: string | null;
+  /** The catalog kind — the picker says which rows are MCP servers. */
+  kind: string;
+};
 
 /**
  * The channel FACE — resource address and the channel's default SKILLS tab as ONE route. A channel
@@ -95,7 +102,12 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
   const addable: AddableSkill[] = canCurate
     ? (await skillIndexOf(memberActor, workspace.id))
         .filter((row) => !placed.has(row.skillId))
-        .map((row) => ({ skillId: row.skillId, name: row.name, displayName: row.displayName }))
+        .map((row) => ({
+          skillId: row.skillId,
+          name: row.name,
+          displayName: row.displayName,
+          kind: row.kind,
+        }))
     : [];
   return {
     face: "page" as const,
@@ -459,9 +471,11 @@ function StanceSection({ detail }: { detail: ChannelDetailData }) {
 }
 
 /**
- * The skill references the channel delivers — each a link to its skill page (by catalog name) —
- * plus the curation controls the viewer is allowed: a quiet Remove on each row and an add picker
- * beneath, or (for a member on a curated channel) an honest read-only note.
+ * What the channel delivers — each reference a link to its own page (by catalog name), skills and
+ * MCP servers alike: a channel is a curated SET, and splitting it by kind would split the one act
+ * of curating it. The labels say which is which; the links go to each kind's own section. Plus the
+ * curation controls the viewer is allowed: a quiet Remove on each row and an add picker beneath,
+ * or (for a member on a curated channel) an honest read-only note.
  */
 function SkillsSection({
   detail,
@@ -476,10 +490,10 @@ function SkillsSection({
   return (
     <section aria-labelledby="skills-heading" className="space-y-3">
       <SectionHeading>
-        <span id="skills-heading">Skills</span>
+        <span id="skills-heading">Skills and MCP servers</span>
       </SectionHeading>
       {detail.skills.length === 0 ? (
-        <p className="text-dim text-sm">This channel references no skills yet.</p>
+        <p className="text-dim text-sm">This channel references nothing yet.</p>
       ) : (
         <Card className="overflow-hidden">
           <ul>
@@ -489,7 +503,7 @@ function SkillsSection({
                 skill={skill}
                 channelId={detail.channelId}
                 canCurate={canCurate}
-                to={wsPath(`skills/${skill.name}`)}
+                to={wsPath(bundlePath(baseForKind(skill.kind), skill.name))}
               />
             ))}
           </ul>
@@ -525,6 +539,7 @@ function SkillRow({
           <span className="min-w-0 truncate font-medium text-ink text-sm">
             {skill.displayName ?? skill.name}
           </span>
+          {baseForKind(skill.kind) === "mcp" && <Chip tone="neutral">MCP server</Chip>}
         </Link>
       ) : (
         <div className="flex min-w-0 flex-1 items-center gap-2 px-4 py-3">
@@ -584,7 +599,7 @@ function AddSkillForm({ channelId, addable }: { channelId: string; addable: Adda
     fetcher.data?.form === "add" && fetcher.data.error.length > 0 ? fetcher.data.error : undefined;
   return (
     <div className="space-y-2">
-      <span className="block font-medium text-dim text-sm">Add a skill</span>
+      <span className="block font-medium text-dim text-sm">Add a skill or MCP server</span>
       <div className="flex flex-wrap items-center gap-2">
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
@@ -599,18 +614,18 @@ function AddSkillForm({ channelId, addable }: { channelId: string; addable: Adda
                 <Package className="size-4 shrink-0 text-faint" aria-hidden="true" />
               )}
               <span className="min-w-0 flex-1 truncate text-left font-medium">
-                {staged === undefined ? "Choose a skill" : (staged.displayName ?? staged.name)}
+                {staged === undefined ? "Choose one" : (staged.displayName ?? staged.name)}
               </span>
               <ChevronsUpDown className="size-4 shrink-0 text-faint" aria-hidden="true" />
             </button>
           </DropdownMenuTrigger>
           <DropdownMenuContent align="start" className="min-w-56">
             <DropdownMenuLabel className="font-normal text-faint text-xs">
-              Workspace skills
+              Workspace catalog
             </DropdownMenuLabel>
             {addable.map((skill) => (
               <DropdownMenuItem key={skill.skillId} onSelect={() => setStagedId(skill.skillId)}>
-                <Package />
+                {baseForKind(skill.kind) === "mcp" ? <Plug /> : <Package />}
                 <span className="min-w-0 flex-1 truncate">{skill.displayName ?? skill.name}</span>
                 {skill.skillId === stagedId && <Check className="ml-auto size-4 text-accent" />}
               </DropdownMenuItem>

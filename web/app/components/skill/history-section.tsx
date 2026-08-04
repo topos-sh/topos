@@ -2,6 +2,7 @@ import { Link } from "react-router";
 import { firstLine } from "@/components/format";
 import { RevertControl } from "@/components/skill/revert-control";
 import { Card, Chip, SectionHeading, ShortId } from "@/components/ui";
+import { bundlePath, useBundleBase } from "@/lib/bundle-base";
 import { useWsPath } from "@/lib/ws-path";
 
 /**
@@ -49,7 +50,8 @@ export type HistorySectionData =
  */
 export function HistorySection({ skill, data }: { skill: string; data: HistorySectionData }) {
   const wsPath = useWsPath();
-  const basePath = wsPath(`skills/${skill}`);
+  const base = useBundleBase();
+  const basePath = wsPath(bundlePath(base, skill));
   // The version links point at the version file page (`…/versions/{id}`); the PAGING links
   // (second-parent, Show-older) carry the `?from=` cursor on the History tab route itself.
   const historyPath = `${basePath}/history`;

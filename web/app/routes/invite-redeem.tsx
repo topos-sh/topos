@@ -14,6 +14,7 @@ import { composition } from "@/composition.server";
 import { actorFromSession, notFound } from "@/lib/auth/guards.server";
 import { withInvitationCeremony } from "@/lib/auth/registration.server";
 import { getAuth } from "@/lib/auth/server";
+import { baseForKind, bundlePath } from "@/lib/bundle-base";
 import {
   acceptInvitationByToken,
   declineInvitationByToken,
@@ -100,9 +101,13 @@ function acceptLanding(
     return `/verify?${qs.toString()}`;
   }
   if (hint !== null) {
+    // The hint carries the catalog kind, so a first destination lands in the section that
+    // actually addresses it — a server under mcp/, a skill under skills/.
     return wsPathServer(
       workspaceName,
-      hint.kind === "channel" ? `channels/${hint.name}` : `skills/${hint.name}`,
+      hint.kind === "channel"
+        ? `channels/${hint.name}`
+        : bundlePath(baseForKind(hint.kind), hint.name),
     );
   }
   return wsPathServer(workspaceName);

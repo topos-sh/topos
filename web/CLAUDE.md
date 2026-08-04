@@ -82,12 +82,19 @@ caller.
   `workspace.id` never appears in a URL. `/new` (self-serve workspace creation) mounts in multi
   only; reserved slugs (`app/topos-web/segments.ts` ∪ composition's list) refuse byte-identically
   to taken names.
-- **Faces + the card:** workspace root / channel / skill are each ONE route under
+- **Faces + the card:** workspace root / channel / skill / MCP server are each ONE route under
   `face-shell.tsx`. A non-browser document fetch gets the CONSTANT protocol card
-  (`card.server.ts`, byte-identical on every path; `api_base_url` = this origin's `/api`). Skill
+  (`card.server.ts`, byte-identical on every path; `api_base_url` = this origin's `/api`). Bundle
   and channel faces are members-only — anonymous/non-member gets the house 404,
   existence-blind. Uniform miss surface: the root ErrorBoundary → `error-screen.tsx` (no
   `error.data`, path, or stack).
+- **Two bases over ONE set of bundle pages** (`app/lib/bundle-base.ts`): the catalog `kind`
+  decides where a bundle is addressed — `skills/:skill` or `mcp/:server` — and the face + its
+  five subpages mount under BOTH (the MCP mount carries explicit route ids; the MOUNT is told
+  apart by param NAME, never by route id). Each mount is kind-FENCED: a member on the wrong base
+  is redirected to the canonical path (`bundle-base.server.ts`), everyone else already met the
+  404. The sidebar, the dashboard index and the breadcrumb registry read the same mapping;
+  channel curation deliberately carries both kinds in one set and labels them.
 - **Machine discovery** (origin-rooted in both tenancies): `/llms.txt`,
   `/.well-known/agent-skills/index.json` (+ `/.well-known/skills/` alias) serving the built-in
   `topos` skill; its sha256 is computed in `agent-skills.server.ts` from the same bytes served —
@@ -103,11 +110,13 @@ caller.
   credential (the shapes live in the repo-root `tests/fixtures/mcp/`, compiled into
   `secret-patterns.generated.ts`), and an embedded registry name no other bundle here claims.
   Both publish doors run the same gate before any custody call: the session lane's
-  publish/propose and the `mcp/import` page (registry name · SSRF-guarded URL · paste).
+  publish/propose and the `mcp/import` page — the MCP section's own way in (built-in list ·
+  registry name · SSRF-guarded URL · paste).
   `…/registry/v0.1/servers[/{name}/versions[/latest]]` serves the workspace's catalog in the
   official read-API shape, member-gated by cookie OR bearer, uniform-404 otherwise.
-- **Signed-in:** dashboard · skill browser + lifecycle ceremonies (tabs: Current · Proposals ·
-  History · owner Settings; `skills/import` add-from-GitHub + the Upstream panel) · the rendered
+- **Signed-in:** dashboard (skills and MCP servers as separate sections) · bundle browser +
+  lifecycle ceremonies (tabs: Current · Proposals · History · owner Settings; `skills/import`
+  add-from-GitHub + the Upstream panel) · the rendered
   review UI (diff, approve/reject, comments, revert) · `/profile` (Mine grouped by provenance +
   Library) · `/visibility` · channel pages (tabs: Skills/curation · Members · History ·
   Settings) · roster · workspace Settings (General policy knobs · whole-catalog export ·

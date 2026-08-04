@@ -11,6 +11,7 @@ import { composition } from "@/composition.server";
 import { serverEnv } from "@/env.server";
 import { actorFromSession, memberInScope } from "@/lib/auth/guards.server";
 import { getAuth } from "@/lib/auth/server";
+import { baseForKind, bundlePath } from "@/lib/bundle-base";
 import { theWorkspace } from "@/lib/db/identity.server";
 import { rosterOf } from "@/lib/db/queries.roster.server";
 import { type SkillIndexRow, skillIndexOf } from "@/lib/db/queries.server";
@@ -140,6 +141,9 @@ function DashboardPage({
   onboarding: OnboardingState | null;
 }) {
   const wsPath = useWsPath();
+  // The catalog holds both kinds; the page addresses each in its own section.
+  const skills = index.filter((row) => baseForKind(row.kind) === "skills");
+  const servers = index.filter((row) => baseForKind(row.kind) === "mcp");
   return (
     <div className="space-y-8">
       <PageHeader
@@ -155,7 +159,15 @@ function DashboardPage({
           <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
             <code className="font-mono">{slug}</code>
             <span aria-hidden="true">·</span>
-            <span>{index.length === 1 ? "1 skill" : `${index.length} skills`}</span>
+            <span>{skills.length === 1 ? "1 skill" : `${skills.length} skills`}</span>
+            {servers.length > 0 && (
+              <>
+                <span aria-hidden="true">·</span>
+                <span>
+                  {servers.length === 1 ? "1 MCP server" : `${servers.length} MCP servers`}
+                </span>
+              </>
+            )}
             <span aria-hidden="true">·</span>
             <span>{memberCount === 1 ? "1 member" : `${memberCount} members`}</span>
           </div>
@@ -181,13 +193,14 @@ function DashboardPage({
 
       {onboarding && <OnboardingChecklist state={onboarding} />}
 
-      {index.length === 0 ? (
+      {index.length === 0 &&
         // While the checklist is up its publish step carries the same instructions the
         // empty-state card would — showing both would say it twice.
-        onboarding ? null : (
-          <NoSkills shareAddress={shareAddress} />
-        )
-      ) : (
+        (onboarding ? null : <NoSkills shareAddress={shareAddress} />)}
+
+      {/* Two kinds, two sections — a skill and an MCP server are read for different reasons, so
+          the index never runs them together. Each renders only when it holds something. */}
+      {skills.length > 0 && (
         <section aria-labelledby="skill-index-heading" className="space-y-3">
           <div className="flex items-center justify-between gap-3">
             <SectionHeading>
@@ -197,7 +210,25 @@ function DashboardPage({
           </div>
           <Card className="overflow-hidden">
             <ul>
-              {index.map((row) => (
+              {skills.map((row) => (
+                <CatalogRow key={row.skillId} row={row} />
+              ))}
+            </ul>
+          </Card>
+        </section>
+      )}
+
+      {servers.length > 0 && (
+        <section aria-labelledby="mcp-index-heading" className="space-y-3">
+          <div className="flex items-center justify-between gap-3">
+            <SectionHeading>
+              <span id="mcp-index-heading">MCP servers</span>
+            </SectionHeading>
+            <span className="text-faint text-xs">Every agent on the team is pointed at these.</span>
+          </div>
+          <Card className="overflow-hidden">
+            <ul>
+              {servers.map((row) => (
                 <CatalogRow key={row.skillId} row={row} />
               ))}
             </ul>
@@ -221,7 +252,7 @@ function DashboardPage({
 }
 
 /**
- * One catalog row, rendered ENTIRELY from the DB read (no per-row vault call): the skill's name,
+ * One catalog row, rendered ENTIRELY from the DB read (no per-row vault call): the bundle's name,
  * the current pointer's short hash, when the pointer last moved (`updatedAtMs` is epoch-ms —
  * `new Date(ms)` here at the display edge), the open-proposal badge, and the recorded
  * `bundle_digest`. When nothing is published yet the pointer is absent — render that honestly
@@ -232,7 +263,7 @@ function CatalogRow({ row }: { row: SkillIndexRow }) {
   return (
     <li className="border-line-soft border-b last:border-b-0">
       <Link
-        to={wsPath(`skills/${row.name}`)}
+        to={wsPath(bundlePath(baseForKind(row.kind), row.name))}
         className="flex flex-col gap-1 px-4 py-3 hover:bg-panel2 focus-visible:outline-2 focus-visible:outline-accent focus-visible:-outline-offset-2"
       >
         <div className="flex flex-wrap items-center gap-x-3 gap-y-1">

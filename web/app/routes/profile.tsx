@@ -3,6 +3,7 @@ import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
 import { data, Link, useFetcher, useLoaderData, useSearchParams } from "react-router";
 import { buttonClasses, Card, Chip, PageHeader, SectionHeading, ShortId } from "@/components/ui";
 import { requireMember, requireMemberInScope } from "@/lib/auth/guards.server";
+import { baseForKind, bundlePath } from "@/lib/bundle-base";
 import {
   type AssignedBundle,
   type AssignedChannel,
@@ -70,6 +71,7 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
       skillId: row.skillId,
       name: row.name,
       displayName: row.displayName,
+      kind: row.kind,
       versionId: row.versionId,
       state: declined.has(row.skillId)
         ? ("off" as const)
@@ -310,7 +312,7 @@ function ChannelGroup({
         )}
       </div>
       {channel.bundles.length === 0 ? (
-        <p className="text-faint text-sm">This channel carries no skills yet.</p>
+        <p className="text-faint text-sm">This channel carries nothing yet.</p>
       ) : (
         <BundleRows
           rows={channel.bundles.map((b) => ({ ...b, attribution: channel.attribution }))}
@@ -357,7 +359,7 @@ function BundleRows({ rows, unaddable = false }: { rows: Row[]; unaddable?: bool
             )}
           >
             <Link
-              to={wsPath(`skills/${row.name}`)}
+              to={wsPath(bundlePath(baseForKind(row.kind), row.name))}
               className={cn(
                 "min-w-0 truncate text-sm hover:underline",
                 row.declined ? "text-dim" : "font-medium text-ink",
@@ -449,8 +451,8 @@ function LibraryView({ library }: { library: LoaderData["library"] }) {
   return (
     <div className="space-y-4">
       <p className="max-w-2xl text-dim text-sm leading-relaxed">
-        Every skill this workspace holds. Adding one puts it in your feed on every machine you log
-        in from; it stays in the library either way.
+        Every skill and MCP server this workspace holds. Adding one puts it in your feed on every
+        machine you log in from; it stays in the library either way.
       </p>
       <Card className="overflow-hidden">
         <ul>
@@ -462,7 +464,7 @@ function LibraryView({ library }: { library: LoaderData["library"] }) {
             >
               <Package aria-hidden className="size-4 shrink-0 text-faint" />
               <Link
-                to={wsPath(`skills/${entry.name}`)}
+                to={wsPath(bundlePath(baseForKind(entry.kind), entry.name))}
                 className="min-w-0 truncate font-medium text-ink text-sm hover:underline"
               >
                 {entry.displayName ?? entry.name}

@@ -1,5 +1,6 @@
 import { Link } from "react-router";
 import { ShortId } from "@/components/ui";
+import { bundlePath, useBundleBase } from "@/lib/bundle-base";
 import { useWsPath } from "@/lib/ws-path";
 
 const CRUMB_LINK =
@@ -22,8 +23,9 @@ export function PathBreadcrumb({
   segments: readonly string[];
 }) {
   const wsPath = useWsPath();
-  const skillHref = wsPath(`skills/${skill}`);
-  const listingHref = wsPath(`skills/${skill}/versions/${versionId}`);
+  const base = useBundleBase();
+  const skillHref = wsPath(bundlePath(base, skill));
+  const listingHref = wsPath(bundlePath(base, skill, `/versions/${versionId}`));
   return (
     <nav
       aria-label="Breadcrumb"

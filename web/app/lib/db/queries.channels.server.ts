@@ -160,6 +160,8 @@ export interface ChannelSkillRef {
   skillId: string;
   name: string;
   displayName: string | null;
+  /** The catalog kind — what decides which section addresses it ('skill' | 'mcp'). */
+  kind: string;
   /** Defensive: archive UNPLACES, so a placed reference should be active — render honestly if not. */
   status: "active" | "archived" | "deleted";
 }
@@ -201,6 +203,7 @@ export async function channelDetail(
         skillId: channelBundle.bundleId,
         name: bundle.name,
         displayName: bundle.displayName,
+        kind: bundle.kind,
         status: bundle.status,
       })
       .from(channelBundle)

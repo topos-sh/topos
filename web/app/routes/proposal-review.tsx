@@ -24,6 +24,8 @@ import {
   requireMemberInScope,
   requireReviewer,
 } from "@/lib/auth/guards.server";
+import { baseOf, bundleNameOf } from "@/lib/bundle-base";
+import { requireCanonicalBase } from "@/lib/bundle-base.server";
 import {
   inFinalTx,
   lockOpenProposalInTx,
@@ -66,9 +68,13 @@ function parseGeneration(value: string): number | undefined {
   return n <= Number.MAX_SAFE_INTEGER ? n : undefined;
 }
 
-export function meta({ params }: { params: { skill?: string; versionId?: string } }) {
+export function meta({
+  params,
+}: {
+  params: { skill?: string; server?: string; versionId?: string };
+}) {
   const short = (params.versionId ?? "").slice(0, 12);
-  return [{ title: `${params.skill ?? "skill"} @${short} · Topos` }];
+  return [{ title: `${params.server ?? params.skill ?? "skill"} @${short} · Topos` }];
 }
 
 // ── The loader ────────────────────────────────────────────────────────────────────────────────
@@ -101,17 +107,25 @@ interface RenderedDiffFile {
 export async function loader({ request, params }: LoaderFunctionArgs) {
   const { workspace, actor } = await requireMemberInScope(request, params);
   const ws = workspace.id;
-  const skill = params.skill as string;
+  const base = baseOf(params);
+  const skill = bundleNameOf(params);
   const versionId = params.versionId as string;
   if (!VERSION_ID.test(versionId)) {
     notFound();
   }
 
-  // The existence probe is the DB catalog: an unknown skill NAME is the uniform 404.
+  // The existence probe is the DB catalog: an unknown bundle NAME is the uniform 404.
   const row = await skillIndexRow(actor, skill);
   if (row === undefined) {
     notFound();
   }
+  requireCanonicalBase({
+    wsName: workspace.name,
+    base,
+    kind: row.kind,
+    name: skill,
+    tail: `/proposals/${versionId}`,
+  });
   const skillId = row.skillId;
 
   const proposal = await proposalByCandidate(actor, skillId, versionId);
@@ -330,7 +344,7 @@ export async function action({ request, params }: ActionFunctionArgs) {
   // 400-vs-404 split would be a workspace-existence oracle the GET faces deliberately close.
   const { workspace } = await requireMemberInScope(request, params);
   const ws = workspace.id;
-  const skill = params.skill as string;
+  const skill = bundleNameOf(params);
   const versionId = params.versionId as string;
   const form = await request.formData();
   const intent = String(form.get("intent") ?? "");

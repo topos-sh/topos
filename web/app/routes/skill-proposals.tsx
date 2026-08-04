@@ -4,20 +4,22 @@ import { type ProposalListItem, ProposalsSection } from "@/components/skill/prop
 import { SkillHeader } from "@/components/skill/skill-header";
 import { SkillTabs } from "@/components/skill/skill-tabs";
 import { notFound, requireMemberInScope } from "@/lib/auth/guards.server";
+import { baseOf, bundleNameOf, bundlePath, useBundleBase } from "@/lib/bundle-base";
+import { requireCanonicalBase } from "@/lib/bundle-base.server";
 import { proposalsOf, skillIndexRow } from "@/lib/db/queries.server";
 import { resolveSkillName } from "@/lib/db/resolve.server";
 import { useWsPath } from "@/lib/ws-path";
 import { wsPathServer } from "@/lib/ws-url.server";
 
-export function meta({ params }: { params: { skill?: string } }) {
-  return [{ title: `${params.skill ?? "skill"} · proposals · Topos` }];
+export function meta({ params }: { params: { skill?: string; server?: string } }) {
+  return [{ title: `${params.server ?? params.skill ?? "skill"} · proposals · Topos` }];
 }
 
 /**
- * The skill's Proposals tab — the review queue as its own shareable route (a sibling of Current
+ * The bundle's Proposals tab — the review queue as its own shareable route (a sibling of Current
  * and History; each `…/proposals/{versionId}` review page is a MEMBER of this collection). Same
- * guard-then-probe order as every skill page: requireMember before any data, then the DB catalog
- * probe as the uniform 404 (an unknown NAME).
+ * guard-then-probe order as every bundle page: requireMember before any data, then the DB catalog
+ * probe as the uniform 404 (an unknown NAME) and the kind fence.
  *
  * Proposals are the app's OWN rows now — one read, no vault call: the open ones first (the
  * queue), then the resolved record (who decided, and why on a reject). The tab badge (the DB
@@ -25,16 +27,24 @@ export function meta({ params }: { params: { skill?: string } }) {
  */
 export async function loader({ request, params }: LoaderFunctionArgs) {
   const { workspace, actor } = await requireMemberInScope(request, params);
-  const skill = params.skill as string;
+  const base = baseOf(params);
+  const skill = bundleNameOf(params);
   const row = await skillIndexRow(actor, skill);
   if (row === undefined) {
     // A rename left an old name behind: follow the resolving hint to the live name; else 404.
     const resolved = await resolveSkillName(actor, skill);
     if (resolved !== undefined && resolved.via === "hint" && resolved.status === "active") {
-      throw redirect(wsPathServer(workspace.name, `skills/${resolved.name}/proposals`));
+      throw redirect(wsPathServer(workspace.name, bundlePath(base, resolved.name, "/proposals")));
     }
     notFound();
   }
+  requireCanonicalBase({
+    wsName: workspace.name,
+    base,
+    kind: row.kind,
+    name: skill,
+    tail: "/proposals",
+  });
 
   const rows = await proposalsOf(actor, row.skillId);
   const proposals: ProposalListItem[] = rows.map((p) => ({
@@ -64,6 +74,7 @@ export default function SkillProposalsPage() {
   const { isOwner, wsName, skill, currentShort, displayName, kind, openProposals, proposals } =
     useLoaderData<typeof loader>();
   const wsPath = useWsPath();
+  const base = useBundleBase();
   return (
     <div className="space-y-6">
       <SkillHeader
@@ -74,7 +85,7 @@ export default function SkillProposalsPage() {
         kind={kind}
       />
       <SkillTabs
-        basePath={wsPath(`skills/${skill}`)}
+        basePath={wsPath(bundlePath(base, skill))}
         active="proposals"
         openProposals={openProposals}
         showSettings={isOwner}

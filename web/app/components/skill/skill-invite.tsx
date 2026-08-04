@@ -15,9 +15,10 @@ interface SkillInviteReply {
 }
 
 /**
- * "Invite a teammate to this skill" — a quiet, collapsed affordance on the skill face. A member
+ * "Invite a teammate to this skill" — a quiet, collapsed affordance on the bundle face. A member
  * expands it to a single-email form; submitting mints an invitation whose FIRST destination is
- * THIS skill, so the mail leads with the skill and the invitee lands looking at it. Inviting is
+ * THIS bundle, so the mail leads with it and the invitee lands looking at it. `noun` is what the
+ * copy calls the bundle (a skill, or an MCP server) — the page reads it off its own kind. Inviting is
  * OWNER-ONLY, and it REQUIRES armed mail (the invitation's identity proof is a mailbox
  * round-trip) — so when mail is unarmed, or the viewer is not an owner, the expanded panel says
  * so honestly instead of offering a form that can only fail. The action re-checks both
@@ -27,9 +28,11 @@ interface SkillInviteReply {
 export function SkillInviteAffordance({
   mailArmed,
   isOwner,
+  noun,
 }: {
   mailArmed: boolean;
   isOwner: boolean;
+  noun: string;
 }) {
   const fetcher = useFetcher<SkillInviteReply>();
   const [open, setOpen] = useState(false);
@@ -54,7 +57,7 @@ export function SkillInviteAffordance({
         </button>
         {state?.status === "invited" && (
           <p className="text-dim text-sm" role="status">
-            Invited {state.invited} — the mail leads with this skill.
+            Invited {state.invited} — the mail leads with this {noun}.
           </p>
         )}
       </div>
@@ -110,16 +113,16 @@ export function SkillInviteAffordance({
             </BusyFields>
           </fetcher.Form>
           <p className="text-faint text-xs">
-            The invitation leads with this skill — it is the first thing the invitee sees.
+            The invitation leads with this {noun} — it is the first thing the invitee sees.
           </p>
         </>
       )}
 
       {state?.status === "invited" && (
         <p className="text-dim text-sm" role="status">
-          Invited {state.invited} — the mail leads with this skill.{" "}
+          Invited {state.invited} — the mail leads with this {noun}.{" "}
           {state.emailSent
-            ? "They were emailed the invite; accepting puts this skill in front of them first."
+            ? `They were emailed the invite; accepting puts this ${noun} in front of them first.`
             : "The invitation stands, but the mail didn't send — invite the address again to resend."}
         </p>
       )}

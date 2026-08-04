@@ -98,6 +98,8 @@ export interface AssignedBundle {
   bundleId: string;
   name: string;
   displayName: string | null;
+  /** The catalog kind — what decides which section addresses it ('skill' | 'mcp'). */
+  kind: string;
   /** The workspace's `current`, or null while nothing has been published to the name. */
   versionId: string | null;
   declined: boolean;
@@ -146,6 +148,7 @@ interface RawBundle {
   id: string;
   name: string;
   display_name: string | null;
+  kind: string;
   version_id: string | null;
 }
 
@@ -214,7 +217,7 @@ export async function assignedView(actor: FeedActor): Promise<AssignedView> {
     channelIds.length === 0
       ? Promise.resolve({ rows: [] })
       : db.execute(sql`
-          SELECT cb.channel_id, b.id, b.name, b.display_name, cp.version_id
+          SELECT cb.channel_id, b.id, b.name, b.display_name, b.kind, cp.version_id
           FROM web.channel_bundle cb
           JOIN web.bundle b
             ON b.id = cb.bundle_id AND b.workspace_id = ${ws} AND b.status = 'active'
@@ -226,7 +229,7 @@ export async function assignedView(actor: FeedActor): Promise<AssignedView> {
     directIds.length === 0
       ? Promise.resolve({ rows: [] })
       : db.execute(sql`
-          SELECT b.id, b.name, b.display_name, cp.version_id
+          SELECT b.id, b.name, b.display_name, b.kind, cp.version_id
           FROM web.bundle b
           LEFT JOIN plane.current_pointer cp
             ON cp.workspace_id = ${ws} AND cp.bundle_id = b.id
@@ -240,6 +243,7 @@ export async function assignedView(actor: FeedActor): Promise<AssignedView> {
     bundleId: r.id,
     name: r.name,
     displayName: r.display_name,
+    kind: r.kind,
     versionId: r.version_id,
     declined: declined.has(r.id),
   });

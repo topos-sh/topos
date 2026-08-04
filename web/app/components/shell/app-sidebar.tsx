@@ -9,6 +9,7 @@ import {
   LogOut,
   MonitorSmartphone,
   Package,
+  Plug,
   Plus,
   Settings,
   UserRound,
@@ -77,13 +78,15 @@ const NAV_ICONS: Record<string, ElementType> = {
  * identity (static in single tenancy, a seat DROPDOWN in multi; the `topos_` wordmark holds the
  * slot when no workspace is in scope) beside the ONE collapse toggle — both live in the header
  * strip, stacked vertically when icon-collapsed so the toggle stays reachable; the workspace's
- * Skills and Channels, each with a section-header `+ new`; the workspace nav (Members · Settings)
- * as plain items at the bottom; and the account menu in the footer. The Skills/Channels/nav
- * sections render only when a workspace is in scope — every list is loader-derived (`workspace`),
- * passed once as a prop; the seat DROPDOWN reads the React Query the shell route's loader seeded
- * (so first paint has data, and a membership change updates it live). The account menu renders the
- * resolved nav registry's non-`workspace` sections, so a downstream build's appended entries
- * appear there with no shell change.
+ * Skills, MCP servers and Channels, each with a section-header `+ new`; the workspace nav
+ * (Members · Settings) as plain items at the bottom; and the account menu in the footer. A skill
+ * and an MCP server are separate sections with separate ways in — the Skills `+` opens the publish
+ * dialog, the MCP `+` opens the add-a-server page — because they are different things even though
+ * one catalog holds both. The sections render only when a workspace is in scope — every list is
+ * loader-derived (`workspace`), passed once as a prop; the seat DROPDOWN reads the React Query the
+ * shell route's loader seeded (so first paint has data, and a membership change updates it live).
+ * The account menu renders the resolved nav registry's non-`workspace` sections, so a downstream
+ * build's appended entries appear there with no shell change.
  */
 export function AppSidebar({
   display,
@@ -155,6 +158,7 @@ export function AppSidebar({
               wsSegment={wsSegment}
               pathname={location.pathname}
             />
+            <McpSection workspace={workspace} wsSegment={wsSegment} pathname={location.pathname} />
             <ChannelsSection
               workspace={workspace}
               wsSegment={wsSegment}
@@ -301,8 +305,8 @@ function WorkspaceIdentity({
   );
 }
 
-/** The workspace's catalog (active skills, name-sorted) with a `+ new` that opens the publish
- * dialog. Names only — the dashboard stays the fuller index. */
+/** The workspace's SKILLS (active, name-sorted) with a `+ new` that opens the publish dialog —
+ * which offers skills alone. Names only — the dashboard stays the fuller index. */
 function SkillsSection({
   workspace,
   wsSegment,
@@ -342,6 +346,59 @@ function SkillsSection({
                   <Link to={href}>
                     <Package />
                     <span>{skill.label}</span>
+                  </Link>
+                </SidebarMenuButton>
+              </SidebarMenuItem>
+            );
+          })
+        )}
+      </SidebarMenu>
+    </SidebarGroup>
+  );
+}
+
+/**
+ * The workspace's MCP SERVERS (active, name-sorted) with a `+ new` linking to the add-a-server
+ * page. It renders even when empty — the section header carries the only `+` in the rail, and a
+ * section that hides until it has something in it hides the way to put the first thing in it.
+ * That is also how the Skills section above behaves.
+ */
+function McpSection({
+  workspace,
+  wsSegment,
+  pathname,
+}: {
+  workspace: SidebarWorkspace;
+  wsSegment: string | null;
+  pathname: string;
+}) {
+  return (
+    <SidebarGroup>
+      <SidebarGroupLabel>MCP servers</SidebarGroupLabel>
+      <SidebarGroupAction asChild aria-label="Add an MCP server">
+        <Link to={wsHref(wsSegment, "mcp/import")}>
+          <Plus />
+        </Link>
+      </SidebarGroupAction>
+      <SidebarMenu>
+        {workspace.servers.length === 0 ? (
+          <li className="px-2 py-1 text-faint text-xs group-data-[collapsible=icon]:hidden">
+            No MCP servers yet.
+          </li>
+        ) : (
+          workspace.servers.map((server) => {
+            const href = wsHref(wsSegment, `mcp/${server.name}`);
+            return (
+              <SidebarMenuItem key={server.name}>
+                <SidebarMenuButton
+                  asChild
+                  tooltip={server.label}
+                  isActive={isActivePath(pathname, href)}
+                  className="data-[active=true]:bg-accent-wash! data-[active=true]:text-ink!"
+                >
+                  <Link to={href}>
+                    <Plug />
+                    <span>{server.label}</span>
                   </Link>
                 </SidebarMenuButton>
               </SidebarMenuItem>

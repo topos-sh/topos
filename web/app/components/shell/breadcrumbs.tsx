@@ -1,4 +1,5 @@
 import { Link, type Params, useMatches } from "react-router";
+import { baseOf, bundlePath, sectionLabel } from "@/lib/bundle-base";
 import type { SidebarWorkspace } from "@/lib/shell/chrome.server";
 import { wsHref } from "@/lib/ws-path";
 
@@ -48,6 +49,23 @@ function skillLabel(data: unknown, urlName: string): string {
   return typeof display === "string" && display.length > 0 ? display : urlName;
 }
 
+/** The bundle a match addresses: which base it arrived on (the MCP mount names its param
+ *  `server`), the section label that base sits under, and the name in the URL. Null when the
+ *  match carries no bundle at all (a loader shape that isn't the page variant). */
+function bundleCrumbs(data: unknown, params: Params, tail: Crumb[] = []): Crumb[] | null {
+  const name = params.server ?? params.skill;
+  if (name === undefined) {
+    return null;
+  }
+  const base = baseOf(params);
+  // The section head is UNLINKED — neither Skills nor MCP servers has an index page.
+  return [
+    { label: sectionLabel(base) },
+    { label: skillLabel(data, name), sub: bundlePath(base, name) },
+    ...tail,
+  ];
+}
+
 /** A channel tab's trail: Channels → #name → <tab>. Channel names carry no separate display, so
  *  the URL segment IS the name; a missing segment (shouldn't happen on a loaded page) → root-only. */
 function channelTab(params: Params, tab: string): Crumb[] | null {
@@ -62,17 +80,9 @@ function channelTab(params: Params, tab: string): Crumb[] | null {
   ];
 }
 
-/** A skill tab's trail: Skills (unlinked — there is no skills index page) → <name> → <tab>. */
+/** A bundle tab's trail: the section (unlinked — neither has an index page) → <name> → <tab>. */
 function skillTab(data: unknown, params: Params, tab: string): Crumb[] | null {
-  const name = params.skill;
-  if (name === undefined) {
-    return null;
-  }
-  return [
-    { label: "Skills" },
-    { label: skillLabel(data, name), sub: `skills/${name}` },
-    { label: tab },
-  ];
+  return bundleCrumbs(data, params, [{ label: tab }]);
 }
 
 /** The file-view tail: the manifest path the loader resolved (the one truth — never the raw URL),
@@ -90,8 +100,48 @@ function fileTail(data: unknown, params: Params): string | undefined {
   return splat !== undefined && splat.length > 0 ? splat : undefined;
 }
 
+const bundleCurrent: CrumbBuilder = ({ data, params }) => bundleCrumbs(data, params);
+const bundleHistory: CrumbBuilder = ({ data, params }) => skillTab(data, params, "History");
+const bundleProposals: CrumbBuilder = ({ data, params }) => skillTab(data, params, "Proposals");
+const bundleSettings: CrumbBuilder = ({ data, params }) => skillTab(data, params, "Settings");
+
+const bundleReview: CrumbBuilder = ({ data, params }) => {
+  const name = params.server ?? params.skill;
+  const versionId = params.versionId;
+  if (name === undefined || versionId === undefined) {
+    return null;
+  }
+  const base = baseOf(params);
+  return bundleCrumbs(data, params, [
+    { label: "Proposals", sub: bundlePath(base, name, "/proposals") },
+    { label: versionId.slice(0, 12) },
+  ]);
+};
+
+const bundleVersion: CrumbBuilder = ({ data, params }) => {
+  const versionId = params.versionId;
+  return versionId === undefined
+    ? null
+    : bundleCrumbs(data, params, [{ label: versionId.slice(0, 12) }]);
+};
+
+const bundleFile: CrumbBuilder = ({ data, params }) => {
+  const name = params.server ?? params.skill;
+  const versionId = params.versionId;
+  if (name === undefined || versionId === undefined) {
+    return null;
+  }
+  const base = baseOf(params);
+  const tail = fileTail(data, params);
+  return bundleCrumbs(data, params, [
+    { label: versionId.slice(0, 12), sub: bundlePath(base, name, `/versions/${versionId}`) },
+    ...(tail === undefined ? [] : [{ label: tail }]),
+  ]);
+};
+
 /**
- * THE registry — route module id (React Router derives it from the route file: `routes/<name>`) →
+ * THE registry — route module id (React Router derives it from the route file: `routes/<name>`, or
+ * the explicit id the table gave a second mount) →
  * its crumb tail. This is the single place breadcrumb knowledge is recorded; adding a page's trail
  * is one line here, and an unlisted route simply renders root-only.
  */
@@ -109,56 +159,26 @@ const REGISTRY: Record<string, CrumbBuilder> = {
   "routes/channel-history": ({ params }) => channelTab(params, "History"),
   "routes/channel-settings": ({ params }) => channelTab(params, "Settings"),
 
-  // Skills. There is no skills index page, so the "Skills" root is an unlinked segment.
-  "routes/skill-current": ({ data, params }) => {
-    const name = params.skill;
-    return name === undefined ? null : [{ label: "Skills" }, { label: skillLabel(data, name) }];
-  },
-  "routes/skill-history": ({ data, params }) => skillTab(data, params, "History"),
-  "routes/skill-proposals": ({ data, params }) => skillTab(data, params, "Proposals"),
-  "routes/skill-settings": ({ data, params }) => skillTab(data, params, "Settings"),
-  "routes/proposal-review": ({ data, params }) => {
-    const name = params.skill;
-    const versionId = params.versionId;
-    if (name === undefined || versionId === undefined) {
-      return null;
-    }
-    return [
-      { label: "Skills" },
-      { label: skillLabel(data, name), sub: `skills/${name}` },
-      { label: "Proposals", sub: `skills/${name}/proposals` },
-      { label: versionId.slice(0, 12) },
-    ];
-  },
-  "routes/version-files": ({ data, params }) => {
-    const name = params.skill;
-    const versionId = params.versionId;
-    if (name === undefined || versionId === undefined) {
-      return null;
-    }
-    return [
-      { label: "Skills" },
-      { label: skillLabel(data, name), sub: `skills/${name}` },
-      { label: versionId.slice(0, 12) },
-    ];
-  },
-  "routes/file-view": ({ data, params }) => {
-    const name = params.skill;
-    const versionId = params.versionId;
-    if (name === undefined || versionId === undefined) {
-      return null;
-    }
-    const crumbs: Crumb[] = [
-      { label: "Skills" },
-      { label: skillLabel(data, name), sub: `skills/${name}` },
-      { label: versionId.slice(0, 12), sub: `skills/${name}/versions/${versionId}` },
-    ];
-    const tail = fileTail(data, params);
-    if (tail !== undefined) {
-      crumbs.push({ label: tail });
-    }
-    return crumbs;
-  },
+  // Bundles. Neither section has an index page, so its head is an unlinked segment — and each
+  // page module mounts TWICE (under `skills/` and under `mcp/`), so every builder is registered
+  // under both ids and reads the section off the route params.
+  "routes/skill-current": bundleCurrent,
+  "mcp-current": bundleCurrent,
+  "routes/skill-history": bundleHistory,
+  "mcp-history": bundleHistory,
+  "routes/skill-proposals": bundleProposals,
+  "mcp-proposals": bundleProposals,
+  "routes/skill-settings": bundleSettings,
+  "mcp-settings": bundleSettings,
+  "routes/proposal-review": bundleReview,
+  "mcp-proposal-review": bundleReview,
+  "routes/version-files": bundleVersion,
+  "mcp-versions": bundleVersion,
+  "routes/file-view": bundleFile,
+  "mcp-file-view": bundleFile,
+
+  // The MCP section's way in (the Skills one, add-from-GitHub, carries no trail today).
+  "routes/mcp-import": () => [{ label: "MCP servers" }, { label: "Add a server" }],
 
   // Workspace nav.
   "routes/profile": () => [{ label: "Your skills" }],

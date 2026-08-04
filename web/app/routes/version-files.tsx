@@ -6,15 +6,21 @@ import { Breadcrumbs } from "@/components/shell/breadcrumbs";
 import { ShortId } from "@/components/ui";
 import { notFound, requireMemberInScope } from "@/lib/auth/guards.server";
 import { loadVersionFilesData } from "@/lib/browse/version-files.server";
+import { baseOf, bundleNameOf, bundlePath, useBundleBase } from "@/lib/bundle-base";
+import { requireCanonicalBase } from "@/lib/bundle-base.server";
 import { skillIndexRow } from "@/lib/db/queries.server";
 import { custodyCurrent } from "@/lib/plane/reads.server";
 import { useWsPath } from "@/lib/ws-path";
 
 const HEX64 = /^[0-9a-f]{64}$/;
 
-export function meta({ params }: { params: { skill?: string; versionId?: string } }) {
+export function meta({
+  params,
+}: {
+  params: { skill?: string; server?: string; versionId?: string };
+}) {
   const short = (params.versionId ?? "").slice(0, 12);
-  return [{ title: `${params.skill ?? "skill"} @${short} · files · Topos` }];
+  return [{ title: `${params.server ?? params.skill ?? "skill"} @${short} · files · Topos` }];
 }
 
 /**
@@ -33,7 +39,8 @@ export function meta({ params }: { params: { skill?: string; versionId?: string 
 export async function loader({ request, params }: LoaderFunctionArgs) {
   const { workspace, actor } = await requireMemberInScope(request, params);
   const ws = workspace.id;
-  const skill = params.skill as string;
+  const base = baseOf(params);
+  const skill = bundleNameOf(params);
   const versionId = params.versionId as string;
   if (!HEX64.test(versionId)) {
     notFound();
@@ -42,6 +49,13 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
   if (row === undefined) {
     notFound();
   }
+  requireCanonicalBase({
+    wsName: workspace.name,
+    base,
+    kind: row.kind,
+    name: skill,
+    tail: `/versions/${versionId}`,
+  });
 
   const [versionFiles, current] = await Promise.all([
     loadVersionFilesData(actor, row.skillId, versionId),
@@ -55,12 +69,13 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
 export default function VersionFilesPage() {
   const { skill, versionId, isCurrent, versionFiles } = useLoaderData<typeof loader>();
   const wsPath = useWsPath();
+  const base = useBundleBase();
   return (
     <BrowseShell>
       <div>
         <header className="flex flex-wrap items-center gap-x-2 gap-y-1">
           <Link
-            to={wsPath(`skills/${skill}`)}
+            to={wsPath(bundlePath(base, skill))}
             className="rounded-sm font-display font-semibold text-ink text-lg tracking-[-0.02em] underline decoration-hairline underline-offset-4 transition-colors hover:decoration-ink focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-2"
           >
             {skill}

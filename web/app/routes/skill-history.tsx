@@ -11,6 +11,8 @@ import {
   requireReviewer,
   requireWorkspaceOwner,
 } from "@/lib/auth/guards.server";
+import { baseOf, bundleNameOf, bundlePath, useBundleBase } from "@/lib/bundle-base";
+import { requireCanonicalBase } from "@/lib/bundle-base.server";
 import { recordAdminEvent } from "@/lib/db/audit.server";
 import { purgeVersion } from "@/lib/db/queries.lifecycle.server";
 import { skillIndexRow } from "@/lib/db/queries.server";
@@ -41,8 +43,8 @@ function parseGeneration(value: string): number | undefined {
   return n <= Number.MAX_SAFE_INTEGER ? n : undefined;
 }
 
-export function meta({ params }: { params: { skill?: string } }) {
-  return [{ title: `${params.skill ?? "skill"} · history · Topos` }];
+export function meta({ params }: { params: { skill?: string; server?: string } }) {
+  return [{ title: `${params.server ?? params.skill ?? "skill"} · history · Topos` }];
 }
 
 /** The typed reply the per-row RevertControl fetcher reads back (intent=revert). */
@@ -53,11 +55,11 @@ interface RevertActionData {
 }
 
 /**
- * The skill's History tab — the first-parent version walk as its own shareable route (a sibling
+ * The bundle's History tab — the first-parent version walk as its own shareable route (a sibling
  * of Current and Proposals), carrying the `?from=` cursor for Show-older / second-parent paging.
- * Same guard-then-probe order as every skill page: requireMember before any data, then the DB
- * catalog probe as the uniform 404 (an unknown NAME), with an honest empty body when the name
- * exists but nothing is published yet.
+ * Same guard-then-probe order as every bundle page: requireMember before any data, then the DB
+ * catalog probe as the uniform 404 (an unknown NAME) and the kind fence, with an honest empty body
+ * when the name exists but nothing is published yet.
  *
  * The walk runs HERE in the loader (the pure walk from history.server.ts, its metadata fetcher
  * on the internal custody lane over the immutable skillId) so HistorySection renders as a plain
@@ -68,7 +70,9 @@ interface RevertActionData {
 export async function loader({ request, params }: LoaderFunctionArgs) {
   const { workspace, actor } = await requireMemberInScope(request, params);
   const ws = workspace.id;
-  const skill = params.skill as string;
+  const base = baseOf(params);
+  const skill = bundleNameOf(params);
+  const search = new URL(request.url).search;
   const row = await skillIndexRow(actor, skill);
   if (row === undefined) {
     // A rename left an old name behind: follow the resolving hint to the live name's History tab
@@ -76,12 +80,19 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
     const resolved = await resolveSkillName(actor, skill);
     if (resolved !== undefined && resolved.via === "hint" && resolved.status === "active") {
       throw redirect(
-        wsPathServer(workspace.name, `skills/${resolved.name}/history`) +
-          new URL(request.url).search,
+        wsPathServer(workspace.name, bundlePath(base, resolved.name, "/history")) + search,
       );
     }
     notFound();
   }
+  requireCanonicalBase({
+    wsName: workspace.name,
+    base,
+    kind: row.kind,
+    name: skill,
+    tail: "/history",
+    search,
+  });
 
   const rawFrom = new URL(request.url).searchParams.get("from") ?? undefined;
   const resume = rawFrom !== undefined && HEX64.test(rawFrom) ? rawFrom : undefined;
@@ -141,7 +152,7 @@ export async function action({ request, params }: ActionFunctionArgs) {
   // 400-vs-404 split would be a workspace-existence oracle the GET faces deliberately close.
   const { workspace } = await requireMemberInScope(request, params);
   const ws = workspace.id;
-  const skill = params.skill as string;
+  const skill = bundleNameOf(params);
   const form = await request.formData();
   const intent = String(form.get("intent") ?? "");
   if (intent === "revert") {
@@ -305,6 +316,7 @@ export default function SkillHistoryPage() {
     canPurge,
   } = useLoaderData<typeof loader>();
   const wsPath = useWsPath();
+  const base = useBundleBase();
   return (
     <div className="space-y-6">
       <SkillHeader
@@ -315,7 +327,7 @@ export default function SkillHistoryPage() {
         kind={kind}
       />
       <SkillTabs
-        basePath={wsPath(`skills/${skill}`)}
+        basePath={wsPath(bundlePath(base, skill))}
         active="history"
         openProposals={openProposals}
         showSettings={isOwner}

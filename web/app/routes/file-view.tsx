@@ -6,6 +6,8 @@ import { ViewToggle } from "@/components/browse/view-toggle";
 import { Breadcrumbs } from "@/components/shell/breadcrumbs";
 import { Card, Chip } from "@/components/ui";
 import { notFound, requireMemberInScope } from "@/lib/auth/guards.server";
+import { baseOf, bundleNameOf, bundlePath } from "@/lib/bundle-base";
+import { requireCanonicalBase } from "@/lib/bundle-base.server";
 import { skillIndexRow } from "@/lib/db/queries.server";
 import { classifyBytes, decodeTextVerbatim } from "@/lib/diff/classify";
 import { MAX_BLOB_BYTES, MAX_HIGHLIGHT_BYTES } from "@/lib/diff/model";
@@ -30,13 +32,17 @@ function decodedSegments(segments: readonly string[]): string[] | undefined {
   }
 }
 
-export function meta({ params }: { params: { skill?: string; versionId?: string; "*"?: string } }) {
+export function meta({
+  params,
+}: {
+  params: { skill?: string; server?: string; versionId?: string; "*"?: string };
+}) {
   const short = (params.versionId ?? "").slice(0, 12);
   const splat = params["*"] ?? "";
   const segments = splat.length > 0 ? splat.split("/") : [];
   const display = decodedSegments(segments) ?? segments;
   const last = display[display.length - 1] ?? "";
-  return [{ title: `${params.skill ?? "skill"} @${short} · ${last} · Topos` }];
+  return [{ title: `${params.server ?? params.skill ?? "skill"} @${short} · ${last} · Topos` }];
 }
 
 /** How a file's bytes are presented once fetched (or why they weren't). */
@@ -61,7 +67,8 @@ type FileContent =
 export async function loader({ request, params }: LoaderFunctionArgs) {
   const { workspace, actor } = await requireMemberInScope(request, params);
   const ws = workspace.id;
-  const skill = params.skill as string;
+  const base = baseOf(params);
+  const skill = bundleNameOf(params);
   const versionId = params.versionId as string;
   const splat = params["*"] ?? "";
   const raw = new URL(request.url).searchParams.get("view") === "raw";
@@ -73,6 +80,14 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
   if (row === undefined) {
     notFound();
   }
+  requireCanonicalBase({
+    wsName: workspace.name,
+    base,
+    kind: row.kind,
+    name: skill,
+    tail: `/versions/${versionId}/files/${splat}`,
+    search: raw ? "?view=raw" : "",
+  });
 
   const meta = await custodyVersionMeta(ws, row.skillId, versionId);
   if (!meta.ok) {
@@ -99,7 +114,7 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
   const encodedPath = displaySegments.map(encodeURIComponent).join("/");
   const fileBasePath = wsPathServer(
     workspace.name,
-    `skills/${skill}/versions/${versionId}/files/${encodedPath}`,
+    bundlePath(base, skill, `/versions/${versionId}/files/${encodedPath}`),
   );
   const executable = file.mode === "100755";
 

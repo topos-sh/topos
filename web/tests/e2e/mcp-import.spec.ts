@@ -1,5 +1,5 @@
 import { expect, test } from "@playwright/test";
-import { adminQuery } from "./seed";
+import { adminQuery, ensureBundle } from "./seed";
 import { gotoSettled } from "./sign-in";
 
 /**
@@ -36,8 +36,11 @@ const DOCUMENT = JSON.stringify(
 
 test.beforeEach(async () => {
   // A previous run's copy would collide on the embedded name (deliberately) — clear it first.
+  // The picked row publishes under its own catalog name, so that one goes too: both assertions
+  // below read "nothing is written yet" off the catalog.
   await adminQuery(
-    `delete from web.bundle where name like $1 and workspace_id in (select id from web.workspace)`,
+    `delete from web.bundle where (name like $1 or name = 'linear')
+       and workspace_id in (select id from web.workspace)`,
     [`${CATALOG_NAME}%`],
   );
 });
@@ -104,20 +107,57 @@ test("paste a server.json, preview what it promises, publish it into the catalog
 
   await page.getByTestId("mcp-publish").click();
 
-  // The publish lands on the new skill's page, and the catalog row is an mcp bundle.
-  await page.waitForURL(`**/skills/${CATALOG_NAME}`);
+  // The publish lands on the new server's OWN page — under /mcp, never /skills — and the
+  // catalog row is an mcp bundle.
+  await page.waitForURL(`**/mcp/${CATALOG_NAME}`);
   await expect(page.getByRole("heading", { name: CATALOG_NAME })).toBeVisible();
   const rows = await adminQuery<{ kind: string }>(`select kind from web.bundle where name = $1`, [
     CATALOG_NAME,
   ]);
   expect(rows[0]?.kind).toBe("mcp");
 
-  // And the dashboard lists it with its kind, like any other bundle.
+  // And the dashboard lists it under MCP servers, with its kind, like any other bundle.
   await gotoSettled(page, "/");
   // Scoped to the content pane: the sidebar lists the same name, and both links are real.
   await expect(
     page.getByRole("main").getByRole("link", { name: new RegExp(CATALOG_NAME) }),
   ).toContainText("mcp");
+});
+
+/**
+ * WHERE A SERVER LIVES. The founder's rule, asserted end to end: an MCP server is its own
+ * section with its own way in and its own address — never a row under Skills. The two seeded
+ * bundles differ ONLY in kind, so anything that mixes them shows up here.
+ */
+test("an MCP server has its own section, its own + , and its own address", async ({ page }) => {
+  await ensureBundle({ id: "s_e2e_mcp_panel", name: "panel-server", kind: "mcp" });
+  await ensureBundle({ id: "s_e2e_skill_panel", name: "panel-skill" });
+  await gotoSettled(page, "/");
+
+  // The rail carries a section per kind, and each lists only its own.
+  const skills = page.locator('[data-sidebar="group"]', { hasText: "Skills" }).first();
+  const servers = page.locator('[data-sidebar="group"]', { hasText: "MCP servers" }).first();
+  await expect(servers.getByRole("link", { name: "panel-server" })).toBeVisible();
+  await expect(servers.getByRole("link", { name: "panel-skill" })).toHaveCount(0);
+  await expect(skills.getByRole("link", { name: "panel-skill" })).toBeVisible();
+  await expect(skills.getByRole("link", { name: "panel-server" })).toHaveCount(0);
+
+  // The Skills `+` opens the publish dialog (skills only); the MCP `+` is a link to the
+  // add-a-server page.
+  await expect(page.getByRole("button", { name: "Publish a skill from your agent" })).toBeVisible();
+  await page.getByRole("link", { name: "Add an MCP server" }).click();
+  await expect(page.getByRole("heading", { name: "Add an MCP server" })).toBeVisible();
+
+  // The server's page is at its own address, and its trail reads as the MCP section.
+  await gotoSettled(page, "/mcp/panel-server");
+  await expect(page.getByRole("heading", { name: "panel-server" })).toBeVisible();
+  await expect(page.getByRole("navigation", { name: "Breadcrumb" })).toContainText("MCP servers");
+
+  // A member who addresses it the other way is sent to the canonical path — both directions.
+  await gotoSettled(page, "/skills/panel-server");
+  await page.waitForURL("**/mcp/panel-server");
+  await gotoSettled(page, "/mcp/panel-skill");
+  await page.waitForURL("**/skills/panel-skill");
 });
 
 test("a document carrying a credential is refused, and nothing is published", async ({ page }) => {

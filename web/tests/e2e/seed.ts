@@ -121,22 +121,25 @@ export async function ensureBundle(args: {
   id: string;
   name: string;
   displayName?: string | null;
+  /** The catalog kind tag — 'skill' unless the bundle is something else ('mcp'). */
+  kind?: string;
   protection?: "open" | "reviewed" | null;
   createdBy?: string | null;
 }): Promise<void> {
   const ws = await theWorkspace();
   await adminQuery(
-    `insert into web.bundle (id, workspace_id, name, display_name, protection, created_by)
-     values ($1, $2, $3, $4, $5, $6)
+    `insert into web.bundle (id, workspace_id, name, display_name, kind, protection, created_by)
+     values ($1, $2, $3, $4, $5, $6, $7)
      on conflict (id) do update
        set name = excluded.name, display_name = excluded.display_name,
-           protection = excluded.protection,
+           kind = excluded.kind, protection = excluded.protection,
            status = 'active', base_name = null, archived_at = null, deleted_at = null`,
     [
       args.id,
       ws.id,
       args.name,
       args.displayName ?? null,
+      args.kind ?? "skill",
       args.protection ?? null,
       args.createdBy ?? null,
     ],

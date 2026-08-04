@@ -38,15 +38,21 @@ export function ossRoutes(options: OssRoutesOptions = {}): RouteConfigEntry[] {
   const tenancy = options.tenancy ?? "single";
   const file = (p: string) => `${dir}routes/${p}`;
 
-  // The three shareable FACES (workspace root · a skill · a channel): resource address and
-  // canonical page are ONE route. They mount under face-shell.tsx (no login bounce — anonymous is
-  // a valid state that renders the constant teaser). In single mode the workspace root is the
-  // origin index; in multi it is `/:ws`.
+  // The four shareable FACES (workspace root · a skill · an MCP server · a channel): resource
+  // address and canonical page are ONE route. They mount under face-shell.tsx (no login bounce —
+  // anonymous is a valid state that renders the constant teaser). In single mode the workspace
+  // root is the origin index; in multi it is `/:ws`.
+  //
+  // A skill and an MCP server are the SAME page module under TWO bases: the kind decides which
+  // one addresses a given bundle, and each mount fences itself (app/lib/bundle-base.server.ts).
+  // The mount is told apart by its PARAM NAME (`:skill` vs `:server`), never by route id — a
+  // downstream build re-roots these modules, which renames ids.
   const faceChildren: RouteConfigEntry[] = [
     tenancy === "multi"
       ? route(":ws", file("workspace-dashboard.tsx"))
       : index(file("workspace-dashboard.tsx")),
     route(faceSub(tenancy, "skills/:skill"), file("skill-current.tsx")),
+    route(faceSub(tenancy, "mcp/:server"), file("skill-current.tsx"), { id: "mcp-current" }),
     route(faceSub(tenancy, "channels/:channel"), file("channel-detail.tsx")),
   ];
 
@@ -194,8 +200,9 @@ function memberWorkspaceChildren(
     route("visibility", file("visibility.tsx")),
     // Add-from-GitHub: server-side fetch → preview → publish WITH upstream provenance.
     route("skills/import", file("skill-import.tsx")),
-    // Add-an-MCP-server: registry name / URL / paste → preview → publish as a `kind: 'mcp'`
-    // bundle whose one file is the server document.
+    // Add-an-MCP-server — the MCP section's own way in (its `+ new`): pick / registry name /
+    // URL / paste → preview → publish as a `kind: 'mcp'` bundle whose one file is the server
+    // document. Nothing here offers a skill, and the Skills `+` offers no server.
     route("mcp/import", file("mcp-import.tsx")),
     route("members", file("workspace-members.tsx")),
     route("settings/archive", file("workspace-archive.tsx")),
@@ -218,6 +225,19 @@ function memberWorkspaceChildren(
     route("skills/:skill/settings", file("skill-settings.tsx")),
     route("skills/:skill/versions/:versionId", file("version-files.tsx")),
     route("skills/:skill/versions/:versionId/files/*", file("file-view.tsx")),
+    // The SAME subpages under the MCP base — one module each, kind-fenced, so a server's tabs
+    // stay inside the MCP section instead of walking the reader back into Skills. The static
+    // `mcp/import` above outranks `mcp/:server`, exactly as `skills/import` does.
+    route("mcp/:server/history", file("skill-history.tsx"), { id: "mcp-history" }),
+    route("mcp/:server/proposals", file("skill-proposals.tsx"), { id: "mcp-proposals" }),
+    route("mcp/:server/proposals/:versionId", file("proposal-review.tsx"), {
+      id: "mcp-proposal-review",
+    }),
+    route("mcp/:server/settings", file("skill-settings.tsx"), { id: "mcp-settings" }),
+    route("mcp/:server/versions/:versionId", file("version-files.tsx"), { id: "mcp-versions" }),
+    route("mcp/:server/versions/:versionId/files/*", file("file-view.tsx"), {
+      id: "mcp-file-view",
+    }),
   ];
   return tenancy === "multi" ? prefix(":ws", children) : children;
 }

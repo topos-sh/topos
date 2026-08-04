@@ -32,7 +32,7 @@ export interface InviteEmailInput {
   /** The inviter's email (attribution). */
   invitedBy: string;
   /** The optional first-destination hint the invitation leads with (`kind` is the bundle
-   * catalog's tag — 'skill' today — or 'channel'). */
+   * catalog's tag — 'skill' or 'mcp' — or 'channel'). */
   hint?: { kind: string; name: string };
 }
 
@@ -60,11 +60,13 @@ function inviteLines({
   text: string;
   html: string;
 } {
-  const hintLead = hint === undefined ? "" : ` — starting with the ${hint.name} ${hint.kind}`;
+  // The hint's kind is the catalog tag; the mail says what a person calls it.
+  const hintNoun = hint === undefined ? "" : hint.kind === "mcp" ? "MCP server" : hint.kind;
+  const hintLead = hint === undefined ? "" : ` — starting with the ${hint.name} ${hintNoun}`;
   const subject = `You're invited to ${workspaceDisplayName} on Topos${hintLead}`;
   const intro =
     `${invitedBy} invited you to ${workspaceDisplayName} on Topos — shared skills for your AI agents.` +
-    (hint === undefined ? "" : ` First up: the ${hint.name} ${hint.kind}.`);
+    (hint === undefined ? "" : ` First up: the ${hint.name} ${hintNoun}.`);
   const agentPaste = `Set up Topos for us: fetch ${agentUrl} and follow it. Our invite: ${inviteUrl}`;
   const text =
     `${intro}\n\n` +
@@ -78,7 +80,7 @@ function inviteLines({
     `<p>${escapeHtml(invitedBy)} invited you to <strong>${escapeHtml(workspaceDisplayName)}</strong> on Topos — shared skills for your AI agents.${
       hint === undefined
         ? ""
-        : ` First up: the <strong>${escapeHtml(hint.name)}</strong> ${escapeHtml(hint.kind)}.`
+        : ` First up: the <strong>${escapeHtml(hint.name)}</strong> ${escapeHtml(hintNoun)}.`
     }</p>` +
     `<p><a href="${escapeHtml(inviteUrl)}">Accept in your browser</a></p>` +
     `<p>Or ask your agent to join — paste this to it:</p>` +

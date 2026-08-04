@@ -1,5 +1,6 @@
 import { composition } from "@/composition.server";
 import { requireMember, type UserActor } from "@/lib/auth/guards.server";
+import { baseForKind } from "@/lib/bundle-base";
 import { channelsOf } from "@/lib/db/queries.channels.server";
 import { membershipsFor, skillIndexOf, type WorkspaceMembership } from "@/lib/db/queries.server";
 import { destinationPathname } from "@/lib/destination-path";
@@ -24,9 +25,9 @@ export interface ResolvedNavEntry {
   href: string;
 }
 
-/** One catalog entry the sidebar's Skills section renders — the name it routes on + its label. */
+/** One catalog entry a sidebar section renders — the name it routes on + its label. */
 export interface SidebarSkill {
-  /** The catalog NAME the skill face routes on (`skills/<name>`). */
+  /** The catalog NAME the bundle face routes on (`skills/<name>`, `mcp/<name>`). */
   name: string;
   /** The advisory display label (the author's folder name, else the name). */
   label: string;
@@ -54,7 +55,11 @@ export interface SidebarWorkspace {
   /** The FULL shareable address the publish dialog composes its `topos login` line from
    *  (single → the bare origin, multi → `<origin>/<name>`). */
   shareAddress: string;
+  /** The `kind: 'skill'` catalog, name-sorted — the Skills section. */
   skills: SidebarSkill[];
+  /** The `kind: 'mcp'` catalog, name-sorted — the MCP servers section. Split HERE, once, so no
+   *  component filters a mixed list. */
+  servers: SidebarSkill[];
   channels: SidebarChannel[];
 }
 
@@ -65,7 +70,7 @@ export interface ChromeData {
   sidebarOpen: boolean;
   /** The address grammar the sidebar builds its membership links under. */
   tenancy: "single" | "multi";
-  /** The active workspace's Skills + Channels sections + identity — null when off-workspace. */
+  /** The active workspace's Skills + MCP + Channels sections + identity — null off-workspace. */
   workspace: SidebarWorkspace | null;
 }
 
@@ -102,8 +107,8 @@ export function activeMembership(
 }
 
 /** Load the rail memberships, resolve every nav slot's href for the active workspace, fetch the
- * active workspace's Skills + Channels lists, read the persisted collapse state. One place, both
- * layouts. */
+ * active workspace's Skills + MCP-servers + Channels lists, read the persisted collapse state.
+ * One place, both layouts. */
 export async function loadChrome(request: Request, actor: UserActor): Promise<ChromeData> {
   const memberships = await membershipsFor(actor);
   const active = activeMembership(request, memberships);
@@ -131,12 +136,19 @@ export async function loadChrome(request: Request, actor: UserActor): Promise<Ch
       skillIndexOf(member, active.id),
       channelsOf(member),
     ]);
+    // ONE catalog read, split by kind: a skill and an MCP server are addressed in different
+    // sections, so the rail never mixes them.
+    const entry = (s: (typeof skills)[number]) => ({
+      name: s.name,
+      label: s.displayName ?? s.name,
+    });
     workspace = {
       id: active.id,
       displayName: active.displayName,
       address: active.address,
       shareAddress: workspaceAddress(request, active.address),
-      skills: skills.map((s) => ({ name: s.name, label: s.displayName ?? s.name })),
+      skills: skills.filter((s) => baseForKind(s.kind) === "skills").map(entry),
+      servers: skills.filter((s) => baseForKind(s.kind) === "mcp").map(entry),
       channels: channels.map((c) => ({ name: c.name, isDefault: c.isDefault })),
     };
   }

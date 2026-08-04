@@ -4,6 +4,7 @@ import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
 import { data, Form, Link, redirect, useActionData, useLoaderData } from "react-router";
 import { BusyFields, buttonClasses, Card, Chip, PageHeader, SectionHeading } from "@/components/ui";
 import { requireMemberInScope } from "@/lib/auth/guards.server";
+import { bundlePath } from "@/lib/bundle-base";
 import { auditInTx, mintBundleId } from "@/lib/db/identity.server";
 import { channelsOf } from "@/lib/db/queries.channels.server";
 import { inFinalTx, registerGenesisBundleInTx } from "@/lib/db/queries.custody.server";
@@ -36,7 +37,7 @@ import { useWsPath } from "@/lib/ws-path";
 import { wsPathServer } from "@/lib/ws-url.server";
 
 export function meta() {
-  return [{ title: "Add an MCP server" }];
+  return [{ title: "Add an MCP server · Topos" }];
 }
 
 /**
@@ -260,7 +261,7 @@ export async function action({ request, params }: ActionFunctionArgs) {
     if (landed.refused !== null) {
       return refusal("publish", landed.refused.message, landed.refused.code);
     }
-    throw redirect(wsPathServer(workspace.name, `skills/${landed.name}`));
+    throw redirect(wsPathServer(workspace.name, bundlePath("mcp", landed.name)));
   }
 
   return refusal("publish", "Unknown action.");
