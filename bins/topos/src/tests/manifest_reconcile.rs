@@ -618,22 +618,32 @@ fn update_now(
     .unwrap()
 }
 
-/// Wind the forge clock back so the next scheduled sweep is due — the injected-clock equivalent of
-/// waiting out the interval (the rig's clock is fixed, so the DUE TIME is what moves).
+/// Wind EVERY recorded question's clock back so the next scheduled sweep is due — the
+/// injected-clock equivalent of waiting out the interval (the rig's clock is fixed, so the DUE
+/// TIMES are what move).
 fn forge_interval_elapsed(rig: &Rig) {
-    let mut doc = crate::forge_check::read(&rig.fs, &rig.layout());
-    doc.next_check_at_ms = rig_now(rig);
+    let doc = crate::forge_check::read(&rig.fs, &rig.layout());
     let outcomes: Vec<(String, crate::forge_check::SourceCheck)> = doc
         .sources
         .iter()
-        .map(|(k, v)| (k.clone(), v.clone()))
+        .map(|(k, v)| {
+            let mut v = v.clone();
+            for at in v.next_check_at.values_mut() {
+                *at = rig_now(rig);
+            }
+            (k.clone(), v)
+        })
         .collect();
-    crate::forge_check::record_round(&rig.fs, &rig.layout(), rig_now(rig), &outcomes).unwrap();
+    crate::forge_check::record_round(&rig.fs, &rig.layout(), None, &outcomes).unwrap();
 }
 
-/// When the machine's forge clock says the next scheduled check falls due.
-fn forge_next_due(rig: &Rig) -> i64 {
-    crate::forge_check::read(&rig.fs, &rig.layout()).next_check_at_ms
+/// When ONE scope's turn at a question next falls due (0 = it has never taken one, i.e. "now").
+fn forge_next_due(rig: &Rig, source: &str, git_ref: &str, scope: &str) -> i64 {
+    crate::forge_check::read(&rig.fs, &rig.layout())
+        .sources
+        .get(&crate::forge_check::question(source, git_ref))
+        .and_then(|c| c.next_check_at.get(scope).copied())
+        .unwrap_or(0)
 }
 
 // =================================================================================================
@@ -1806,9 +1816,8 @@ fn a_failed_check_advances_the_clock_like_a_successful_one() {
     assert!(out.data.skills.is_empty(), "{:?}", out.data.skills);
 
     // The clock moved anyway — a whole interval out, exactly as a successful round would leave it.
-    let due = forge_next_due(&rig);
     assert_eq!(
-        due,
+        forge_next_due(&rig, "github.com/o/r", "", "person"),
         rig_now(&rig) + crate::forge_check::CHECK_INTERVAL_MS,
         "a failed round waits exactly as long as one that worked"
     );
@@ -1861,9 +1870,13 @@ fn a_dead_network_costs_one_timeout_for_the_whole_round() {
         "{:?}",
         doc.sources
     );
-    assert_eq!(
-        doc.next_check_at_ms,
-        rig_now(&rig) + crate::forge_check::CHECK_INTERVAL_MS
+    assert!(
+        doc.sources.values().all(|c| c
+            .next_check_at
+            .values()
+            .all(|at| *at == rig_now(&rig) + crate::forge_check::CHECK_INTERVAL_MS)),
+        "each skipped source schedules its own next turn: {:?}",
+        doc.sources
     );
     // The skipped rows say nothing of their own: the source that actually failed already did, and
     // "we skipped this because something else broke" is noise about someone else's problem.
@@ -2357,16 +2370,16 @@ fn a_round_that_only_carried_verdicts_schedules_nothing() {
     ));
     git.fail_with(FetchFault::Gone);
     update_now(&ctx, &plane, &dir, &git);
-    let due_after_the_real_round = forge_next_due(&rig);
+    let due_after_the_real_round = forge_next_due(&rig, "github.com/o/r", "", "person");
 
     // A later round finds only the standing verdict: it dials nothing, and moves nothing.
     forge_interval_elapsed(&rig);
-    let parked = forge_next_due(&rig);
+    let parked = forge_next_due(&rig, "github.com/o/r", "", "person");
     let dialed = git.probes() + git.fetches();
     quiet_sweep(&ctx, &plane, &dir, &git);
     assert_eq!(git.probes() + git.fetches(), dialed, "nothing was asked");
     assert_eq!(
-        forge_next_due(&rig),
+        forge_next_due(&rig, "github.com/o/r", "", "person"),
         parked,
         "and nothing was scheduled: {due_after_the_real_round}"
     );
@@ -2662,6 +2675,7 @@ fn scoped_forge_health_answers_about_the_scopes_own_pin() {
     let pctx = rig.ctx_at(Some(&proj.0));
     let now = rig_now(&rig);
     let fine = crate::forge_check::SourceCheck {
+        next_check_at: Default::default(),
         checked_at_ms: now,
         answered_at_ms: Some(now),
         commit: Some("aaaaaaaaaaaa1".to_owned()),
@@ -2669,6 +2683,7 @@ fn scoped_forge_health_answers_about_the_scopes_own_pin() {
         settled_at: Default::default(),
     };
     let gone = crate::forge_check::SourceCheck {
+        next_check_at: Default::default(),
         checked_at_ms: now,
         answered_at_ms: None,
         commit: None,
@@ -2684,7 +2699,7 @@ fn scoped_forge_health_answers_about_the_scopes_own_pin() {
     crate::forge_check::record_round(
         &rig.fs,
         &rig.layout(),
-        now,
+        None,
         &[
             (
                 crate::forge_check::question("github.com/o/r", "aaaaaaaaaaaa1"),
@@ -2756,6 +2771,207 @@ fn every_focused_list_view_carries_the_forge_health() {
             listed.data.forge
         );
     }
+}
+
+#[test]
+fn a_second_checkout_is_never_starved_by_the_first_ones_sweeps() {
+    // THE failure this increment exists to remove, reintroduced by a machine-wide clock. A sweep
+    // only ever visits the checkout it starts in plus the machine manifest. If one global due time
+    // governed the lane, the first checkout active after each due moment would spend the turn, and
+    // a second project — never visited at a due moment — would never be checked at all.
+    let rig = Rig::new("repo-two-checkouts");
+    let a = project("proj-a", "[bundles]\n\"github.com/o/a\" = \"*\"\n");
+    let b = project("proj-b", "[bundles]\n\"github.com/o/b\" = \"*\"\n");
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let plane = FakePlane::new(log);
+    let dir = FakeDirectory::new(Vec::new(), Vec::new());
+    let actx = rig.ctx_at(Some(&a.0));
+    let bctx = rig.ctx_at(Some(&b.0));
+    let git = FakeGit::new(build_repo_targz(
+        "o-r-aaaaaaaaaaaa1",
+        &[("skills/alpha/SKILL.md", b"# alpha v1\n")],
+    ));
+
+    // Both check once, so both have a clock.
+    quiet_sweep(&actx, &plane, &dir, &git);
+    quiet_sweep(&bctx, &plane, &dir, &git);
+    assert!(b.0.join(".claude/skills/alpha/SKILL.md").exists());
+
+    // Now A is the only checkout anyone works in. Its sweeps run at every due moment.
+    for _ in 0..3 {
+        forge_interval_elapsed(&rig);
+        quiet_sweep(&actx, &plane, &dir, &git);
+    }
+    // B has not been visited since, so its clock must still be due — A cannot have spent B's turn.
+    assert!(
+        crate::forge_check::due(
+            &crate::forge_check::read(&rig.fs, &rig.layout()),
+            &crate::forge_check::question("github.com/o/b", ""),
+            &b.0.display().to_string(),
+            rig_now(&rig)
+        ),
+        "the second checkout's row is still owed a check"
+    );
+
+    // And the moment somebody opens B, upstream really does reach it.
+    git.serve(build_repo_targz(
+        "o-r-bbbbbbbbbbbb2",
+        &[("skills/alpha/SKILL.md", b"# alpha v2\n")],
+    ));
+    quiet_sweep(&bctx, &plane, &dir, &git);
+    assert_eq!(
+        std::fs::read_to_string(b.0.join(".claude/skills/alpha/SKILL.md")).unwrap(),
+        "# alpha v2\n",
+        "the second checkout is not starved"
+    );
+}
+
+#[test]
+fn a_fresh_checkout_installs_now_rather_than_waiting_out_another_scopes_interval() {
+    // A turn belongs to a SCOPE. Two checkouts share a question but not a state, so a clone must
+    // fetch on its first sweep instead of sitting empty until an interval another checkout started
+    // runs out — while a scope that HAS taken its turn still waits, whatever the answer was.
+    let rig = Rig::new("repo-fresh-clone");
+    let a = project("clone-a", "[bundles]\n\"github.com/o/r\" = \"*\"\n");
+    let b = project("clone-b", "[bundles]\n\"github.com/o/r\" = \"*\"\n");
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let plane = FakePlane::new(log);
+    let dir = FakeDirectory::new(Vec::new(), Vec::new());
+    let git = FakeGit::new(build_repo_targz(
+        "o-r-aaaaaaaaaaaa1",
+        &[("skills/alpha/SKILL.md", b"# alpha v1\n")],
+    ));
+
+    quiet_sweep(&rig.ctx_at(Some(&a.0)), &plane, &dir, &git);
+    assert!(a.0.join(".claude/skills/alpha/SKILL.md").exists());
+
+    // B has never asked. Its sweep — well inside the interval A started — must still install.
+    quiet_sweep(&rig.ctx_at(Some(&b.0)), &plane, &dir, &git);
+    assert!(
+        b.0.join(".claude/skills/alpha/SKILL.md").exists(),
+        "a fresh checkout is waiting on bytes, not on somebody else's cadence"
+    );
+
+    // Both have now had their turn: neither dials again inside the interval.
+    let dialed = git.probes() + git.fetches();
+    quiet_sweep(&rig.ctx_at(Some(&a.0)), &plane, &dir, &git);
+    quiet_sweep(&rig.ctx_at(Some(&b.0)), &plane, &dir, &git);
+    assert_eq!(
+        git.probes() + git.fetches(),
+        dialed,
+        "a scope that has taken its turn waits"
+    );
+}
+
+#[test]
+fn a_refused_refresh_is_not_a_convergence() {
+    // A settlement mark says "there is nothing to do here at this head", and the probe trusts it.
+    // So it must only ever be written when the work really happened: a refresh the engine REFUSED
+    // — a member carrying local edits — leaves that member at the OLD commit, and recording
+    // settlement over it would suppress the retry even after the edits are resolved.
+    let rig = Rig::new("repo-refused-refresh");
+    rig.write_global("[bundles]\n\"github.com/o/r\" = \"*\"\n");
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let plane = FakePlane::new(log);
+    let dir = FakeDirectory::new(Vec::new(), Vec::new());
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    let git = FakeGit::new(build_repo_targz(
+        "o-r-aaaaaaaaaaaa1",
+        &[("skills/alpha/SKILL.md", b"# alpha v1\n")],
+    ));
+    update_now(&ctx, &plane, &dir, &git);
+    let placed = rig.home.0.join(".claude/skills/alpha/SKILL.md");
+    assert!(placed.exists());
+
+    // Local edits, then upstream moves. The refresh keeps the edits rather than clobbering them,
+    // so the member stays at the old commit — this round converged nothing.
+    std::fs::write(&placed, "# alpha v1 WITH MY EDITS\n").unwrap();
+    git.serve(build_repo_targz(
+        "o-r-bbbbbbbbbbbb2",
+        &[("skills/alpha/SKILL.md", b"# alpha v2\n")],
+    ));
+    forge_interval_elapsed(&rig);
+    update_now(&ctx, &plane, &dir, &git);
+
+    // Whatever the engine chose to do with the edits, it must not have recorded the new head as
+    // settled unless the member really sits on it.
+    let doc = crate::forge_check::read(&rig.fs, &rig.layout());
+    let rec = doc
+        .sources
+        .get(&crate::forge_check::question("github.com/o/r", ""))
+        .expect("recorded");
+    let landed_on_new_head = crate::ops::forge_imports(&ctx)
+        .iter()
+        .any(|i| i.lock.name == "alpha" && i.origin.commit.as_deref() == Some("bbbbbbbbbbbb2"));
+    if !landed_on_new_head {
+        // The EARLIER round really did converge at the old head, and that mark rightly stands.
+        // What must not exist is a mark claiming the NEW head, which nothing reached.
+        assert!(
+            rec.settled_at.values().all(|m| m.head != "bbbbbbbbbbbb2"),
+            "a refusal is not a convergence: {:?}",
+            rec.settled_at
+        );
+    }
+
+    // And the row keeps being fetched until it really is converged.
+    let fetches = git.fetches();
+    forge_interval_elapsed(&rig);
+    update_now(&ctx, &plane, &dir, &git);
+    if !landed_on_new_head {
+        assert!(
+            git.fetches() > fetches,
+            "unfinished work is retried, not written off"
+        );
+    }
+}
+
+#[test]
+fn a_settlement_mark_is_never_trusted_over_a_deleted_store() {
+    // The mark lives in machine state, which outlives any one checkout. Delete the project store
+    // (or reclone at the same path) and the mark is still there while the bytes it vouches for are
+    // not — so honoring it unread would leave the fresh checkout with the row installed nowhere and
+    // the lane convinced there was nothing to do.
+    let rig = Rig::new("repo-store-deleted");
+    let proj = project(
+        "proj-store-deleted",
+        "[bundles]\n\"github.com/o/r\" = \"*\"\n",
+    );
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let plane = FakePlane::new(log);
+    let dir = FakeDirectory::new(Vec::new(), Vec::new());
+    let pctx = rig.ctx_at(Some(&proj.0));
+    let git = FakeGit::new(build_repo_targz(
+        "o-r-aaaaaaaaaaaa1",
+        &[("skills/alpha/SKILL.md", b"# alpha v1\n")],
+    ));
+    update_now(&pctx, &plane, &dir, &git);
+    assert!(proj.0.join(".claude/skills/alpha/SKILL.md").exists());
+    let mark = crate::forge_check::read(&rig.fs, &rig.layout());
+    assert!(
+        mark.sources.values().any(|c| !c.settled_at.is_empty()),
+        "the pass recorded a settlement: {:?}",
+        mark.sources
+    );
+
+    // The checkout is wiped and recloned at the same path — the machine's mark survives it.
+    std::fs::remove_dir_all(proj.0.join(".topos")).unwrap();
+    std::fs::remove_dir_all(proj.0.join(".claude")).unwrap();
+    assert!(
+        !crate::forge_check::read(&rig.fs, &rig.layout())
+            .sources
+            .values()
+            .all(|c| c.settled_at.is_empty()),
+        "the mark is still on file"
+    );
+
+    // The fresh checkout must be installed, not written off.
+    forge_interval_elapsed(&rig);
+    let out = update_now(&pctx, &plane, &dir, &git);
+    assert!(
+        proj.0.join(".claude/skills/alpha/SKILL.md").exists(),
+        "a mark whose bytes are gone proves nothing: {:?}",
+        out.warnings
+    );
 }
 
 #[test]

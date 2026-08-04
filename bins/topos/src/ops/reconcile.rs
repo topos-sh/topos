@@ -511,6 +511,11 @@ struct ForgeLane<'a> {
     /// What was recorded BEFORE this round — the settled refusals, and how long each source has
     /// gone without an answer.
     prior: forge_check::ForgeCheck,
+    /// Whether this round waits on each question's own clock, or answers now because a person
+    /// asked. Held here because the decision is made per question, at the moment the row is
+    /// reconciled — one clock for the whole lane would let the first checkout visited after a due
+    /// time spend the turn for a second checkout the sweep never even looked at.
+    cadence: ForgeCadence,
     /// This round's outcome per QUESTION (`<source>#<ref>`). Per question, not per source: one
     /// repository named at two refs produces two independent facts, and filing them together would
     /// let a floating row that works erase a pinned row's final verdict.
@@ -528,6 +533,9 @@ struct ForgeLane<'a> {
     /// structured channel the quiet renderer reads, or the one time it would ever be said is a
     /// time nobody hears it.
     announce: std::cell::RefCell<Vec<String>>,
+    /// The `(question, scope)` turns this round took — what the clock is written against. A turn
+    /// is a scope's, not a machine's: two checkouts share a question but not a state.
+    turns: std::cell::RefCell<BTreeSet<(String, String)>>,
     /// The `origin#ref` questions this round actually put a request out for. A question ASKED is
     /// asked once; a question nobody asked is not answered by someone else's failure — which is
     /// why this is tracked apart from the outcome map.
@@ -540,6 +548,9 @@ enum ForgeHold {
     /// The forge answered about this source and the answer was final. Said ONCE, then never again
     /// until the row that names it changes.
     Gone { reason: String, first_time: bool },
+    /// This question is inside its own interval. Nothing is dialed and nothing is said: waiting
+    /// is the ordinary state of a row that was checked recently.
+    NotDue,
     /// This source already had its turn in this round and it did not work. The row that reached it
     /// first has already said so; a second row saying the same thing is noise.
     Attempted,
@@ -548,9 +559,15 @@ enum ForgeHold {
 }
 
 impl<'a> ForgeLane<'a> {
-    fn new(git: &'a dyn GitTarballSource, prior: forge_check::ForgeCheck, now_ms: i64) -> Self {
+    fn new(
+        git: &'a dyn GitTarballSource,
+        prior: forge_check::ForgeCheck,
+        now_ms: i64,
+        cadence: ForgeCadence,
+    ) -> Self {
         Self {
             git,
+            cadence,
             down: std::cell::Cell::new(false),
             prior,
             seen: std::cell::RefCell::new(BTreeMap::new()),
@@ -559,6 +576,7 @@ impl<'a> ForgeLane<'a> {
             heads: std::cell::RefCell::new(Vec::new()),
             announce: std::cell::RefCell::new(Vec::new()),
             dialed: std::cell::RefCell::new(BTreeSet::new()),
+            turns: std::cell::RefCell::new(BTreeSet::new()),
             now_ms,
         }
     }
@@ -574,12 +592,30 @@ impl<'a> ForgeLane<'a> {
     /// A verdict reached EARLIER IN THIS ROUND counts as much as one carried in from a previous
     /// one: two manifest rows can name a single repository (a set line and a member line of it),
     /// and they must not cost two requests and two identical sentences about the same repo.
-    fn hold(&self, origin: &str, git_ref: &str) -> Option<ForgeHold> {
+    fn hold(&self, origin: &str, git_ref: &str, scope: &str) -> Option<ForgeHold> {
         // ONE TURN PER QUESTION PER ROUND. A question already asked has already been answered —
         // whatever the answer was. Without this a failing repo named twice costs two requests and
         // says the same sentence twice in one breath, because only the never-reached fault opens
         // the breaker and every other fault would fall straight through to a second dial.
         let key = forge_check::question(origin, git_ref);
+        // NOT DUE YET — this question's own clock, not the lane's. A round that is early for one
+        // row is not early for another, and the row this sweep cannot see is exactly the row a
+        // machine-wide clock strands.
+        //
+        // And per SCOPE, because a turn is a scope's. A checkout that has never asked has never had
+        // one, so a fresh clone fetches now instead of sitting empty until an interval another
+        // checkout started runs out; a scope that HAS asked waits, whatever the answer was, which
+        // is what stops one dead network becoming a request per session.
+        if self.cadence == ForgeCadence::Scheduled
+            && !self.dialed.borrow().contains(&key)
+            && !forge_check::due(&self.prior, &key, scope, self.now_ms)
+        {
+            return Some(ForgeHold::NotDue);
+        }
+        // This scope is taking its turn now, whatever comes of it.
+        self.turns
+            .borrow_mut()
+            .insert((key.clone(), scope.to_owned()));
         if self.dialed.borrow().contains(&key)
             && self
                 .seen
@@ -710,6 +746,7 @@ impl<'a> ForgeLane<'a> {
                 answered_at_ms: Some(self.now_ms),
                 commit: prior.and_then(|p| p.commit.clone()),
                 failure: None,
+                next_check_at: self.carried_due(&key),
                 settled_at: self.carried_settled(&key),
             };
             self.seen.borrow_mut().insert(key, record);
@@ -727,6 +764,7 @@ impl<'a> ForgeLane<'a> {
             answered_at_ms: Some(self.now_ms),
             commit: Some(commit.to_owned()),
             failure: None,
+            next_check_at: self.carried_due(&key),
             settled_at: self.carried_settled(&key),
         };
         self.seen.borrow_mut().insert(key, record);
@@ -735,7 +773,7 @@ impl<'a> ForgeLane<'a> {
     /// The convergence marks already standing for a question. They survive every outcome: whether
     /// a check answered, failed, or was skipped says nothing about whether a scope had previously
     /// finished converging, and dropping them would send the next round back to the archive.
-    fn carried_settled(&self, key: &str) -> BTreeMap<String, String> {
+    fn carried_settled(&self, key: &str) -> BTreeMap<String, forge_check::Settled> {
         self.seen
             .borrow()
             .get(key)
@@ -777,6 +815,7 @@ impl<'a> ForgeLane<'a> {
                 // discovered the deletion and the round after it both announce it.
                 reported: fault.permanent(),
             }),
+            next_check_at: self.carried_due(&key),
             settled_at: self.carried_settled(&key),
         };
         self.seen.borrow_mut().insert(key, record);
@@ -785,21 +824,55 @@ impl<'a> ForgeLane<'a> {
         }
     }
 
-    /// Whether this question was already reconciled to completion in this scope AT `head` — the
-    /// answer to "the repository has not moved, so is there anything left to do?" when the
-    /// installed set cannot answer it (see [`forge_check::SourceCheck::settled_at`]).
-    fn settled_at(&self, origin: &str, git_ref: &str, scope: &str, head: &str) -> bool {
-        !head.is_empty()
-            && self
-                .prior
-                .sources
-                .get(&forge_check::question(origin, git_ref))
-                .and_then(|c| c.settled_at.get(scope))
-                .is_some_and(|at| at == head)
+    /// The per-scope turns already recorded for a question, so an outcome that reschedules only
+    /// the scope that ran does not wipe another scope's standing turn.
+    fn carried_due(&self, key: &str) -> BTreeMap<String, i64> {
+        self.seen
+            .borrow()
+            .get(key)
+            .map(|c| c.next_check_at.clone())
+            .filter(|m| !m.is_empty())
+            .or_else(|| self.prior.sources.get(key).map(|c| c.next_check_at.clone()))
+            .unwrap_or_default()
     }
 
-    /// Record that this question is fully converged in this scope at `head`.
-    fn note_settled(&self, origin: &str, git_ref: &str, scope: &str, head: &str) {
+    /// Whether this question was already reconciled to completion in this scope AT `head`, AND the
+    /// scope's store still proves it — every member that head holds is tracked here, at that head.
+    ///
+    /// The re-proof is the whole point. The mark lives in machine state, which outlives any one
+    /// checkout: delete a project's store or reclone at the same path and the mark survives while
+    /// the bytes it vouches for do not. Trusting it unread would leave the fresh checkout with the
+    /// row installed nowhere and the lane convinced there was nothing to do. A head holding NO
+    /// members has nothing to prove, which is the case the mark exists for.
+    fn settled_here(
+        &self,
+        origin: &str,
+        git_ref: &str,
+        scope: &str,
+        head: &str,
+        tracked_at: impl Fn(&str, &str) -> bool,
+    ) -> bool {
+        if head.is_empty() {
+            return false;
+        }
+        self.prior
+            .sources
+            .get(&forge_check::question(origin, git_ref))
+            .and_then(|c| c.settled_at.get(scope))
+            .is_some_and(|mark| {
+                mark.head == head && mark.members.iter().all(|m| tracked_at(m, head))
+            })
+    }
+
+    /// Record that this question is fully converged in this scope at `head`, holding `members`.
+    fn note_settled(
+        &self,
+        origin: &str,
+        git_ref: &str,
+        scope: &str,
+        head: &str,
+        members: &[String],
+    ) {
         if head.is_empty() {
             return;
         }
@@ -810,7 +883,13 @@ impl<'a> ForgeLane<'a> {
         if entry.settled_at.is_empty() {
             entry.settled_at = carried;
         }
-        entry.settled_at.insert(scope.to_owned(), head.to_owned());
+        entry.settled_at.insert(
+            scope.to_owned(),
+            forge_check::Settled {
+                head: head.to_owned(),
+                members: members.to_vec(),
+            },
+        );
     }
 
     /// A final refusal, as the one sentence a person gets about it.
@@ -846,6 +925,7 @@ impl<'a> ForgeLane<'a> {
                     git_ref: git_ref.to_owned(),
                     reported: false,
                 }),
+                next_check_at: prior.map(|p| p.next_check_at.clone()).unwrap_or_default(),
                 settled_at: prior.map(|p| p.settled_at.clone()).unwrap_or_default(),
             });
     }
@@ -1148,13 +1228,7 @@ pub(crate) fn manifest_update(
     // run that is not due simply carries no lane (the arms then converge tracked bytes in place,
     // exactly as they do offline).
     let forge_state = forge_check::read(ctx.fs, &ctx.layout);
-    let forge_due = match opts.forge {
-        ForgeCadence::Now => true,
-        ForgeCadence::Scheduled => forge_check::due(&forge_state, now_millis),
-    };
-    let lane = git
-        .filter(|_| forge_due)
-        .map(|g| ForgeLane::new(g, forge_state, now_millis));
+    let lane = git.map(|g| ForgeLane::new(g, forge_state, now_millis, opts.forge));
 
     let env = Env {
         ctx,
@@ -1497,16 +1571,28 @@ fn close_forge_round(
         // source at all. There is no turn to have taken, so there is no next turn to schedule.
         return Vec::new();
     }
-    let next = forge_check::next_due(
-        now_ms,
-        i64::try_from(
-            ctx.ids
-                .jitter_below(u64::try_from(forge_check::CHECK_JITTER_MS).unwrap_or(0)),
-        )
-        .unwrap_or(0),
-        lane.backoff.get(),
-    );
-    if let Err(e) = forge_check::record_round(ctx.fs, &ctx.layout, next, &outcomes) {
+    // Each question schedules ITSELF, with its own independent spread: a fleet that jittered as
+    // one machine would still arrive in waves per repository.
+    let turns = lane.turns.borrow();
+    let outcomes: Vec<(String, SourceCheck)> = outcomes
+        .into_iter()
+        .map(|(key, mut check)| {
+            // Each SCOPE that took a turn schedules its own next one, with its own independent
+            // spread: a fleet that jittered as one machine would still arrive in waves.
+            for (_, scope) in turns.iter().filter(|(q, _)| *q == key) {
+                let jitter = i64::try_from(
+                    ctx.ids
+                        .jitter_below(u64::try_from(forge_check::CHECK_JITTER_MS).unwrap_or(0)),
+                )
+                .unwrap_or(0);
+                check
+                    .next_check_at
+                    .insert(scope.clone(), forge_check::next_due(now_ms, jitter));
+            }
+            (key, check)
+        })
+        .collect();
+    if let Err(e) = forge_check::record_round(ctx.fs, &ctx.layout, lane.backoff.get(), &outcomes) {
         warnings.push(format!("FORGE_CHECK_WRITE_FAILED: {}", e.detail()));
     }
 
@@ -2454,6 +2540,17 @@ fn reconcile_repo_set(
         harness_slots(&sctx, roots.as_ref(), global, &row_harness, &tracked, name)
     };
     let is_tracked_name = |name: &str| slots_for(name).iter().all(|s| s.import.is_some());
+    // Tracked AND at a given commit — presence alone is not convergence, since a refresh that was
+    // refused (local edits, a busy lock) leaves the member tracked at the OLD commit.
+    let tracked_at = |name: &str, at: &str| {
+        let slots = slots_for(name);
+        !slots.is_empty()
+            && slots.iter().all(|s| {
+                s.import.is_some_and(|i| {
+                    commit_matches(i.origin.commit.as_deref().unwrap_or_default(), at)
+                })
+            })
+    };
 
     // A pinned row that every tracked member already satisfies is settled — no forge call, ever.
     // (A granted origin with NOTHING tracked yet in this scope's store — a partial add landing,
@@ -2498,7 +2595,7 @@ fn reconcile_repo_set(
         return;
     };
     let git_ref = pin.clone().unwrap_or_default();
-    if let Some(hold) = lane.hold(&origin, &git_ref) {
+    if let Some(hold) = lane.hold(&origin, &git_ref, &sc.label) {
         forge_hold_line(sc, &row.reference, &hold, sweep);
         converge_in_place(sweep, targets);
         return;
@@ -2536,7 +2633,11 @@ fn reconcile_repo_set(
                 // that can answer for a repository holding no skills at all: nothing is installed
                 // to compare against, and without this the archive would be re-downloaded every
                 // cadence to rediscover that it is empty.
-                || lane.settled_at(&origin, &git_ref, &sc.label, &head.commit);
+                // …or this scope already finished with this exact head AND its store still proves
+                // it. The mark answers the one case nothing installed can — a repository holding
+                // no skills at all — but it is machine state vouching for a checkout's bytes, so
+                // it is never taken on trust.
+                || lane.settled_here(&origin, &git_ref, &sc.label, &head.commit, tracked_at);
         if unchanged {
             converge_in_place(sweep, targets);
             return;
@@ -2650,12 +2751,28 @@ fn reconcile_repo_set(
         }
         install_or_refresh_repo_skill(env, sc, &sctx, &spec, &targz, name, &slots, sweep);
     }
-    // The pass finished. If every member the archive holds is now tracked here — including the
-    // case where it holds NONE — this scope is converged at this head, and the next probe that
-    // sees the same head has nothing to download. Recorded only on a complete pass: a member that
-    // failed to install leaves real work, and skipping the refetch would strand it.
-    if discovered.iter().all(|d| is_tracked(d)) {
-        lane.note_settled(&origin, &git_ref, &sc.label, &resolved);
+    // The pass finished. CONVERGENCE IS RE-READ FROM THE STORE, not inferred from the plan: the
+    // slot view above was captured before any of the installs ran, and it only ever asked whether
+    // a member was tracked at all. A refresh the engine REFUSED — a member carrying local edits, a
+    // lock it could not take — leaves that member tracked at the OLD commit and would otherwise
+    // pass, writing a settlement mark over work that never happened and suppressing the retry
+    // until upstream moved again. So the mark is written only when every discovered member really
+    // is at the resolved head, which is also true, vacuously and correctly, of a head holding none.
+    let converged = {
+        let landed = tracked_repo_members(&sctx, &origin);
+        let at_head = |name: &str| {
+            let slots = harness_slots(&sctx, roots.as_ref(), global, &row_harness, &landed, name);
+            !slots.is_empty()
+                && slots.iter().all(|s| {
+                    s.import.is_some_and(|i| {
+                        commit_matches(i.origin.commit.as_deref().unwrap_or_default(), &resolved)
+                    })
+                })
+        };
+        discovered.iter().all(|d| at_head(d))
+    };
+    if converged {
+        lane.note_settled(&origin, &git_ref, &sc.label, &resolved, &discovered);
     }
 }
 
@@ -2711,7 +2828,7 @@ fn reconcile_repo_skill(
         return;
     };
     let git_ref = pin.clone().unwrap_or_default();
-    if let Some(hold) = lane.hold(&origin, &git_ref) {
+    if let Some(hold) = lane.hold(&origin, &git_ref, &sc.label) {
         forge_hold_line(sc, &row.reference, &hold, sweep);
         // Only a TRACKED copy has something to converge. The not-installed-yet line would
         // otherwise repeat the fault another row just reported — or, behind a settled verdict,
