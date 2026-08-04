@@ -110,8 +110,8 @@ topos add db-migrations
 topos add vercel-labs/skills/find-skills --yes
 ```
 
-The `--yes` confirms a GitHub source this machine has not used before. The commands install the
-skills and write `topos.toml` at the repo root - commit it, and every machine in the checkout
+The `--yes` confirms what the GitHub repo holds, after a bare run lists it. The commands install
+the skills and write `topos.toml` at the repo root - commit it, and every machine in the checkout
 converges on the same set. The entries it adds:
 
 ```toml
@@ -193,8 +193,8 @@ topos publish dedupe-tickets --to triage-bot --yes
 ```
 
 One rule across all commands: anything that reaches other people, throws away local work, or
-adds from a GitHub repository you have not used before previews first - a bare run prints what
-would change and changes nothing, and `--yes` applies it. Everything else applies immediately
+adds from a GitHub repository previews first - a bare run prints what would change and changes
+nothing, and `--yes` applies it. Everything else applies immediately
 and prints an undo command. Agents use the same commands with `--json`, which never prompts.
 
 ## Docs

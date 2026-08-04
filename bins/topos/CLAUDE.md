@@ -20,24 +20,27 @@ generated `docs/cli.md` (`cargo xtask gen-cli-ref`).
   credential in `identity/sessions.json` (0600). Login IS the standing acceptance — delivery is
   silent from then on, npm-style; `logout` is the server-side self-end.
 - **The client writes NO server state.** Declines and assignments are web acts; the one
-  machine-local negative is the `"off"` row. The one consent gate is FIRST TRUST of a forge
-  origin (`state/forge_trust.json`, machine-scoped, `--yes`) — a manifest row is demand, never
-  consent.
+  machine-local negative is the `"off"` row. A manifest row IS the demand: the reconcile converges
+  a git row automatically, like every other kind, and the describe-then-`--yes` shape belongs to
+  the `add` verb — where a person is present to read what a repo holds.
 - **`update` is the manifest reconcile:** one delivery call per live session, per-scope resolution
-  (explicit rows beat sets beat feed; forge rows advance only on an explicit update, pins never
-  move), per-scope placement over per-scope stores (person = `~/.topos/`; project = the checkout's
-  own `.topos/state/<user>/`, every project path proven inside the checkout — refused, never
-  redirected), then a snapshot-first clean of what each scope no longer demands and an applied
-  report per session. `update --quiet` is the harness-hook sweep: self-throttled,
-  schema-conservative stdout (`--hook claude-code` opts that harness into `reloadSkills`).
+  (explicit rows beat sets beat feed; pins never move), per-scope placement over per-scope stores
+  (person = `~/.topos/`; project = the checkout's own `.topos/state/<user>/`, every project path
+  proven inside the checkout — refused, never redirected), then a snapshot-first clean of what each
+  scope no longer demands and an applied report per session. Forge rows ride their OWN hardcoded
+  clock (`forge_check`, machine-scoped, no config surface): a floating row is PROBED (the git ref
+  advertisement — outside the REST allowance) and downloaded only on a real change, with a
+  per-round circuit breaker and a clock that advances on failure too. `update --quiet` is the
+  harness-hook sweep: self-throttled, schema-conservative stdout (`--hook claude-code` opts that
+  harness into `reloadSkills`).
 - **`add`/`remove` are exact file inverses** (property-tested). `add` is source-polymorphic
   (workspace refs, a path adopted in place, a forge import, `add topos` for the built-in); a BARE
   NAME resolves against both the untracked local inventory and the connected workspaces' catalogs
   — one local dir adopts in place, a name only a workspace publishes subscribes to its canonical
   reference, and either side ambiguous refuses naming every way out;
   `remove` drops the row / writes `"off"` / rewrites a set line minus its members. Two-phase
-  (describe → `--yes`) only for loss, a set split, or first trust; everything else applies
-  immediately with an undo-led receipt.
+  (describe → `--yes`) for loss, a set split, and every git source (the listing is the point of
+  the command); everything else applies immediately with an undo-led receipt.
 - **Contribute:** `publish` (a landed publish of a path-ref item transfers governance — catalog
   entry + the manifest line rewritten to the workspace reference), `review`, `revert`, `protect`,
   `invite` — op-WAL idempotent retry over each skill's session lane.
@@ -48,9 +51,10 @@ generated `docs/cli.md` (`cargo xtask gen-cli-ref`).
   dir-handle-anchored writes, private-file primitives) + crash-safe JSON docs with fail-closed
   schema migration. Every durable mutation goes through here; crash-safety contracts live in the
   module docs.
-- `sidecar`, `forge_trust`, `visited_stores`, `sync_status` — the per-scope store layout +
-  recovery sweep, and the machine-local state documents (trust registry, visited project stores,
-  the offline delivery cache that keeps `status`/`list` honest).
+- `sidecar`, `forge_check`, `visited_stores`, `sync_status` — the per-scope store layout +
+  recovery sweep, and the machine-local state documents (the forge auto-update clock + per-source
+  check log, visited project stores, the offline delivery cache that keeps `status`/`list`
+  honest).
 - `manifest/` (`keys`, `document`, `normal`, `scopes`) — the reference grammar, the
   format-preserving `toml_edit` editor (property-tested exact inverse), the normal form, scope
   discovery. `ops/manifest_edit` picks the file a verb edits and owns file birth + the

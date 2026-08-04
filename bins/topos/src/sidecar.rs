@@ -219,11 +219,13 @@ impl Layout {
         self.state_dir().join("builtin.json")
     }
 
-    /// `state/forge_trust.json` — the MACHINE's forge first-trust registry (see
-    /// `crate::forge_trust`): the origins `add`'s consent moment granted. Home store only — a
-    /// project store's contents travel with the checkout and must never carry consent.
-    pub(crate) fn forge_trust_path(&self) -> PathBuf {
-        self.state_dir().join("forge_trust.json")
+    /// `state/forge_check.json` — the MACHINE's forge auto-update clock and per-source check log
+    /// (see `crate::forge_check`): when the next scheduled check is due, and how each tracked
+    /// source's last one went. Home store only: the clock governs THIS machine's outbound traffic,
+    /// which is a machine fact whatever checkout the rows live in. A plain doc — timestamps,
+    /// commits and public reasons, never a secret.
+    pub(crate) fn forge_check_path(&self) -> PathBuf {
+        self.state_dir().join("forge_check.json")
     }
 
     /// `state/visited_stores.json` — the machine-local index of project stores the reconcile has

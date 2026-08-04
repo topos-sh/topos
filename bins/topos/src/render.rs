@@ -761,14 +761,14 @@ pub(crate) fn add_tty(data: &AddData) -> String {
     out
 }
 
-/// The FIRST-TRUST describe of a git source this machine has never used: what the source holds,
-/// what would be written where, and the one command that applies it. Nothing has landed.
+/// The describe an `add` of a git source always returns: what the source holds, what would be
+/// written where, and the one command that applies it. Nothing has landed.
 pub(crate) fn add_describe_tty(
     data: &topos_types::results::AddDescribeData,
     yes_argv: &[String],
 ) -> String {
     let mut s = format!(
-        "{} is new to this machine — nothing has been downloaded into your agents yet.\n",
+        "{} — nothing has been downloaded into your agents yet.\n",
         data.source
     );
     if data.members.is_empty() {
@@ -1041,6 +1041,12 @@ pub(crate) fn list_tty(out: &ListOutcome) -> String {
 /// footprint in `--json`, so they print it here too.
 fn push_list_tail(s: &mut String, out: &ListOutcome) {
     let data = &out.data;
+    // The external sources' last check — the same block `status` shows, for the same reason.
+    let forge = forge_block(&data.forge);
+    if !forge.is_empty() {
+        s.push_str(forge.trim_start_matches('\n'));
+        s.push('\n');
+    }
     // An explicit `--limit`/`--offset` page on the TTY: one line per capped bucket.
     for t in &data.truncated {
         s.push_str(&format!(
@@ -1660,6 +1666,7 @@ pub(crate) fn status_tty(d: &topos_types::results::StatusData) -> String {
         };
         s.push_str(&format!("\nmachine-wide: {counts} — `{}`", m.command));
     }
+    s.push_str(&forge_block(&d.forge));
     if !d.triggers.is_empty() {
         s.push_str("\nauto-update triggers:");
         for t in &d.triggers {
@@ -1675,6 +1682,40 @@ pub(crate) fn status_tty(d: &topos_types::results::StatusData) -> String {
         }
     }
     s
+}
+
+/// The external sources' last auto-update check, as `status` and `list` both show it — the plain
+/// answer to "is this even working?". Empty when nothing external is tracked here.
+///
+/// A failure is stated where a person can act on it, never counted as an emergency: the copies on
+/// disk keep working through every one of these, which is why the silent sweep stays quiet about
+/// them until they have been failing for a long time.
+fn forge_block(sources: &[topos_types::results::ForgeSource]) -> String {
+    if sources.is_empty() {
+        return String::new();
+    }
+    let mut s = String::from("\nexternal sources:");
+    for f in sources {
+        s.push_str(&format!("\n  {}", f.source));
+        match (&f.error, &f.commit) {
+            (Some(e), _) if f.gone => {
+                s.push_str(&format!(" — {e}; not retried until the row changes"));
+            }
+            (Some(e), _) => s.push_str(&format!(" — last check failed: {e}")),
+            (None, Some(c)) => s.push_str(&format!(" — {}", short_hex_ref(c))),
+            (None, None) => {}
+        }
+        s.push_str(&format!(
+            " (checked {})",
+            fmt_utc_millis(u64::try_from(f.checked_at).unwrap_or(0))
+        ));
+    }
+    s
+}
+
+/// A commit as a receipt spells it — short enough to read, long enough to recognize.
+fn short_hex_ref(c: &str) -> &str {
+    &c[..c.len().min(12)]
 }
 
 /// One attention count, phrased (`2 updates pending` / `1 assignment not applied` / `1 draft
@@ -3804,6 +3845,7 @@ mod tests {
                     note: Some("presence needs a live scheduler query".to_owned()),
                 },
             ],
+            forge: Vec::new(),
         };
         let text = status_tty(&connected);
         assert!(text.contains("topos 0.1.0"), "{text}");
@@ -4569,7 +4611,7 @@ mod tests {
                 &typed(&["add"]),
                 &ClientError::RemoteFetch {
                     msg: "acme/skills".to_owned(),
-                    permanent: false
+                    fault: crate::error::FetchFault::Unreachable
                 }
             ),
             Some("this is often transient — running it again is safe".to_owned())
@@ -4583,7 +4625,7 @@ mod tests {
                 &typed(&["add"]),
                 &ClientError::RemoteFetch {
                     msg: "acme/skills".to_owned(),
-                    permanent: true
+                    fault: crate::error::FetchFault::Gone
                 }
             ),
             None

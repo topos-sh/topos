@@ -94,7 +94,7 @@ topos fmt [OPTIONS]
 
 ### `topos add`
 
-Get skills and keep them updated. The source can be a skill or channel from your workspace (`code-review`, `@acme/code-review`, `@acme/channels/backend`), a whole workspace's feed (`@acme`, with `-g`), a local folder (`./tools/my-skill`), or a public GitHub repo (`owner/repo` for every skill in it, `owner/repo/name` for one). Records one line in the nearest `topos.toml` at or above this folder — or in your machine-wide file (`~/.topos/topos.toml`) with `-g` — and installs right away. With no `topos.toml` covering this folder it stops and says so: `topos init` creates one here, or add `-g`. A plain name is looked for both in the skills already sitting in your agents' folders and in the catalogs of the workspaces you are connected to — when only a workspace has it, that is what you get. A GitHub source you have never used before shows what it found and waits for `--yes`. `add topos` restores the built-in topos skill
+Get skills and keep them updated. The source can be a skill or channel from your workspace (`code-review`, `@acme/code-review`, `@acme/channels/backend`), a whole workspace's feed (`@acme`, with `-g`), a local folder (`./tools/my-skill`), or a public GitHub repo (`owner/repo` for every skill in it, `owner/repo/name` for one). Records one line in the nearest `topos.toml` at or above this folder — or in your machine-wide file (`~/.topos/topos.toml`) with `-g` — and installs right away. With no `topos.toml` covering this folder it stops and says so: `topos init` creates one here, or add `-g`. A plain name is looked for both in the skills already sitting in your agents' folders and in the catalogs of the workspaces you are connected to — when only a workspace has it, that is what you get. A GitHub source shows what it found and waits for `--yes`, every time — a skill is instructions your agent will follow, and that listing is there to be read. `add topos` restores the built-in topos skill
 
 ```
 topos add [OPTIONS] <SOURCE>
@@ -106,7 +106,7 @@ topos add [OPTIONS] <SOURCE>
 | `-s, --skill <NAME>` | When a GitHub repo holds several skills, pick which one(s) (repeatable; `'*'` = all) |
 | `-a, --agent <SLUG>` | Which agent to install a GitHub import for (a slug like `cursor`; repeatable; `'*'` = all). Default: the agent detected here |
 | `-g, --global` | Add it machine-wide (your `~/.topos/topos.toml`) instead of to this folder's file |
-| `--yes` | Confirm adding from a GitHub source this machine has never used before (everything else applies immediately, and `--yes` changes nothing there) |
+| `--yes` | Confirm adding from a GitHub source, after reading what it found (everything else applies immediately, and `--yes` changes nothing there) |
 
 
 ### `topos remove`
@@ -127,7 +127,7 @@ topos remove [OPTIONS] [SKILL]...
 
 ### `topos update`
 
-Fetch and apply the latest version of what you asked for, where you are standing: this folder's `topos.toml` when one covers it, and otherwise your machine-wide set (your own `topos.toml` and the skills your workspaces give you). `-g` updates the machine-wide set even from inside a project. The background auto-update that runs at the start of each agent session always covers both, so nothing goes stale while you work in one folder. Safe to run by hand any time. `topos update <skill>` updates one skill; `topos update <skill>@<version>` puts that version's bytes back on this machine only
+Fetch and apply the latest version of what you asked for, where you are standing: this folder's `topos.toml` when one covers it, and otherwise your machine-wide set (your own `topos.toml` and the skills your workspaces give you). `-g` updates the machine-wide set even from inside a project. The background auto-update that runs at the start of each agent session always covers both, so nothing goes stale while you work in one folder. Running it by hand checks everything now, including your GitHub lines — the background sweep checks those a few times a day rather than every session. Safe to run any time. `topos update <skill>` updates one skill; `topos update <skill>@<version>` puts that version's bytes back on this machine only
 
 ```
 topos update [OPTIONS] [TARGETS]...

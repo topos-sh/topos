@@ -26,7 +26,7 @@ pub(crate) mod ctx;
 pub(crate) mod doc;
 pub(crate) mod enroll;
 pub(crate) mod error;
-pub(crate) mod forge_trust;
+pub(crate) mod forge_check;
 pub(crate) mod fs_seam;
 pub(crate) mod git_source;
 pub(crate) mod id;

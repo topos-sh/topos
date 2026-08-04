@@ -114,6 +114,7 @@ pub(crate) fn list_with(
     let mut warnings: Vec<String> = Vec::new();
     let mut data = ListData {
         signed_in,
+        forge: inventory::forge_sources(ctx, &resolved.scopes),
         ..ListData::default()
     };
     let mut truncated: Vec<BucketTruncation> = Vec::new();

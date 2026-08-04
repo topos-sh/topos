@@ -38,7 +38,9 @@ use topos_types::results::{ExchangeFault, PullAction, PullData, PullSkill, Works
 use topos_types::{CurrentRecord, PointerScope, WIRE_SCHEMA_VERSION, WireCurrentRecord};
 
 use crate::ctx::Ctx;
-use crate::error::ClientError;
+use crate::error::{ClientError, FetchFault};
+use crate::forge_check::{self, CheckFailure, SourceCheck};
+use crate::git_source::{GitTarballSource, RepoHead};
 use crate::id::SkillId;
 use crate::manifest::keys::KeyShape;
 use crate::manifest::scopes::{self, PlanRow, ResolvedScope, ScopePlan};
@@ -50,7 +52,7 @@ use crate::sessions::{self, SESSION_ACTIVE, SESSION_ENDED, SESSION_PENDING, Sess
 use crate::sync_status::{self, DeliveredSkill, WorkspaceSync};
 use crate::{doc, placement, sidecar};
 
-use super::pull::{PullOutcome, StaleReason, UnreachableWorkspace};
+use super::pull::{PullOutcome, StaleForge, StaleReason, UnreachableWorkspace};
 use super::sync_engine::{self, Invocation};
 
 /// The per-session transports the reconcile drives: the byte/delivery lane (one `UreqPlane` under
@@ -100,6 +102,25 @@ pub(crate) struct ManifestUpdateOpts {
     /// Which scope(s) to DRIVE (see [`UpdateScope`]). Both plans are still read either way — the
     /// selector decides which ones converge, clean, and disclose.
     pub scope: UpdateScope,
+    /// Whether this run may contact a forge now, or only when the auto-update clock says so.
+    pub forge: ForgeCadence,
+}
+
+/// When a run is allowed to contact a forge.
+///
+/// The two lanes keep separate clocks because they cost different things. Delivery asks ONE server
+/// about every bundle at once, so the sweep's own few-minute throttle already bounds it; a forge
+/// answers about one repository per request, against an allowance shared by everyone behind an
+/// address. So the silent sweep carries the forge lane on the much slower schedule
+/// `crate::forge_check` keeps, while a person who typed the command gets an answer now.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum ForgeCadence {
+    /// A hand-run `update`: dial now, whatever the clock says.
+    #[default]
+    Now,
+    /// The silent sweep: dial only once the interval has elapsed. Either way the clock advances,
+    /// so a round that failed waits exactly as long as one that worked.
+    Scheduled,
 }
 
 /// The scope(s) this run resolved to drive, and how the receipt names them. Two booleans rather
@@ -464,11 +485,223 @@ struct Env<'a> {
     ctx: &'a Ctx<'a>,
     runs: &'a [SessionRun],
     follow: &'a CacheFollow,
-    /// The forge lane. `None` on the background sweep: git rows move only on an explicit update.
-    git: Option<&'a dyn crate::git_source::GitTarballSource>,
+    /// The forge lane. `None` when this run may not contact a forge at all — a scheduled sweep
+    /// inside its interval — and the arms then converge tracked bytes in place, unchanged.
+    forge: Option<&'a ForgeLane<'a>>,
     prior: &'a sync_status::SyncStatus,
-    /// One tarball per repo per sweep (a repo named by both a set and a skill row fetches once).
+}
+
+// =================================================================================================
+// The forge lane — one round's contact with the outside, and everything that round learns.
+// =================================================================================================
+
+/// ONE reconcile round's forge lane: the transport, the round's circuit breaker, the tarball cache,
+/// and the check outcomes the round records.
+///
+/// The breaker is the twin of the delivery lane's ([`super::pull`]): the FIRST fault that never
+/// reached a forge short-circuits every remaining source, so a machine with no network pays one
+/// connect timeout for the whole round instead of one per row — which is what keeps a session-start
+/// sweep inside its budget. A fault the forge ANSWERED with never trips it: a 500 about one
+/// repository says nothing about the next. Nothing is blacklisted and no source is remembered as
+/// bad; the breaker dies with the round.
+struct ForgeLane<'a> {
+    git: &'a dyn GitTarballSource,
+    /// The forge could not be reached earlier in this round.
+    down: std::cell::Cell<bool>,
+    /// What was recorded BEFORE this round — the settled refusals, and how long each source has
+    /// gone without an answer.
+    prior: forge_check::ForgeCheck,
+    /// This round's outcome per source.
+    seen: std::cell::RefCell<BTreeMap<String, SourceCheck>>,
+    /// The furthest-out instant any host asked to be left alone until this round.
+    backoff: std::cell::Cell<Option<i64>>,
+    /// One tarball per `(origin, ref)` per round — a repo named by both a set row and a skill row
+    /// is fetched once.
     repos: std::cell::RefCell<Vec<(String, Rc<Vec<u8>>)>>,
+    /// The same rule for the cheap check: one probe per `(origin, ref)` per round. Two rows over
+    /// one repository ask one question — the answer cannot differ between them.
+    heads: std::cell::RefCell<Vec<(String, RepoHead)>>,
+    now_ms: i64,
+}
+
+/// Why the lane will not dial for a source right now — each with what, if anything, to say.
+enum ForgeHold {
+    /// The forge answered about this source and the answer was final. Said ONCE, then never again
+    /// until the row that names it changes.
+    Gone { reason: String, first_time: bool },
+    /// The forge was already unreachable earlier in this round.
+    Down,
+}
+
+impl<'a> ForgeLane<'a> {
+    fn new(git: &'a dyn GitTarballSource, prior: forge_check::ForgeCheck, now_ms: i64) -> Self {
+        Self {
+            git,
+            down: std::cell::Cell::new(false),
+            prior,
+            seen: std::cell::RefCell::new(BTreeMap::new()),
+            backoff: std::cell::Cell::new(None),
+            repos: std::cell::RefCell::new(Vec::new()),
+            heads: std::cell::RefCell::new(Vec::new()),
+            now_ms,
+        }
+    }
+
+    /// Whether this source may be dialed, and why not when it may not.
+    fn hold(&self, origin: &str, git_ref: &str) -> Option<ForgeHold> {
+        if let Some(prior) = self.prior.sources.get(origin)
+            && !prior.worth_dialing(git_ref)
+            && let Some(f) = &prior.failure
+        {
+            // Carry the settled verdict into this round's record so it survives, and mark it said.
+            let mut seen = self.seen.borrow_mut();
+            let entry = seen
+                .entry(origin.to_owned())
+                .or_insert_with(|| SourceCheck {
+                    failure: Some(CheckFailure {
+                        reported: true,
+                        ..f.clone()
+                    }),
+                    ..prior.clone()
+                });
+            let first_time = !f.reported;
+            if let Some(e) = &mut entry.failure {
+                e.reported = true;
+            }
+            return Some(ForgeHold::Gone {
+                reason: f.reason.clone(),
+                first_time,
+            });
+        }
+        // The breaker is open. The source still had its turn this round, so it is recorded as
+        // checked-and-unanswered — otherwise the clock would treat it as never tried and the whole
+        // round would come back at the next session start.
+        if self.down.get() {
+            self.note_short_circuit(origin);
+            return Some(ForgeHold::Down);
+        }
+        None
+    }
+
+    /// What commit a source points at now, without downloading it.
+    fn probe(
+        &self,
+        origin: &str,
+        git_ref: &str,
+        spec: &crate::source::RemoteSpec,
+    ) -> Result<RepoHead, ClientError> {
+        let key = format!("{}#{git_ref}", spec.origin());
+        if let Some((_, head)) = self.heads.borrow().iter().find(|(k, _)| *k == key) {
+            return Ok(head.clone());
+        }
+        match self.git.probe(spec) {
+            Ok(head) => {
+                self.heads.borrow_mut().push((key, head.clone()));
+                // A host's own backoff signal is honored in ONE direction: it may push the next
+                // round further out, never pull it in.
+                if let Some(at) = head.retry_after_ms {
+                    let held = self.backoff.get().unwrap_or(i64::MIN);
+                    self.backoff.set(Some(held.max(at)));
+                }
+                self.note_answer(origin, &head.commit);
+                Ok(head)
+            }
+            Err(e) => {
+                self.note_fault(origin, git_ref, &e);
+                Err(e)
+            }
+        }
+    }
+
+    /// A source's archive, fetched at most once per round.
+    fn fetch(
+        &self,
+        origin: &str,
+        git_ref: &str,
+        spec: &crate::source::RemoteSpec,
+    ) -> Result<Rc<Vec<u8>>, ClientError> {
+        let key = format!("{}#{}", spec.origin(), git_ref);
+        if let Some((_, bytes)) = self.repos.borrow().iter().find(|(k, _)| *k == key) {
+            return Ok(Rc::clone(bytes));
+        }
+        match self.git.fetch(spec) {
+            Ok(bytes) => {
+                let bytes = Rc::new(bytes);
+                self.repos.borrow_mut().push((key, Rc::clone(&bytes)));
+                Ok(bytes)
+            }
+            Err(e) => {
+                self.note_fault(origin, git_ref, &e);
+                Err(e)
+            }
+        }
+    }
+
+    /// Record a source that answered. Clears any standing failure — including a settled one, so a
+    /// repo that comes back is simply back.
+    fn note_answer(&self, origin: &str, commit: &str) {
+        self.seen.borrow_mut().insert(
+            origin.to_owned(),
+            SourceCheck {
+                checked_at_ms: self.now_ms,
+                answered_at_ms: Some(self.now_ms),
+                commit: Some(commit.to_owned()),
+                failure: None,
+            },
+        );
+    }
+
+    /// Record a failed check, and trip the breaker if the forge was never reached at all.
+    fn note_fault(&self, origin: &str, git_ref: &str, e: &ClientError) {
+        let fault = match e {
+            ClientError::RemoteFetch { fault, .. } => *fault,
+            // Anything else got far enough to be a fault about the bytes, not about the dial.
+            _ => FetchFault::Unavailable,
+        };
+        if !fault.reached() {
+            self.down.set(true);
+        }
+        let prior = self.prior.sources.get(origin);
+        self.seen.borrow_mut().insert(
+            origin.to_owned(),
+            SourceCheck {
+                checked_at_ms: self.now_ms,
+                answered_at_ms: prior.and_then(|p| p.answered_at_ms),
+                commit: prior.and_then(|p| p.commit.clone()),
+                failure: Some(CheckFailure {
+                    reason: crate::render::safe_message(e),
+                    gone: fault.permanent(),
+                    git_ref: git_ref.to_owned(),
+                    // A final answer is SAID by the arm that received it, in this same round, so
+                    // it is recorded as already said. Recording it unsaid would make the round
+                    // that discovered the deletion and the round after it both announce it.
+                    reported: fault.permanent(),
+                }),
+            },
+        );
+    }
+
+    /// Record the round's short-circuit for a source the breaker skipped — it had its turn, and
+    /// the clock must treat it as checked.
+    fn note_short_circuit(&self, origin: &str) {
+        let prior = self.prior.sources.get(origin);
+        self.seen
+            .borrow_mut()
+            .entry(origin.to_owned())
+            .or_insert_with(|| SourceCheck {
+                checked_at_ms: self.now_ms,
+                answered_at_ms: prior.and_then(|p| p.answered_at_ms),
+                commit: prior.and_then(|p| p.commit.clone()),
+                failure: Some(CheckFailure {
+                    reason: "the forge was already unreachable earlier in this run — the \
+                             remaining sources were skipped"
+                        .to_owned(),
+                    gone: false,
+                    git_ref: String::new(),
+                    reported: false,
+                }),
+            });
+    }
 }
 
 /// One scope under reconciliation: its recipe, where its bytes go, and what receipts call it.
@@ -763,13 +996,25 @@ pub(crate) fn manifest_update(
         }
     }
 
+    // ---- The forge lane's own clock. Delivery has already run above on the sweep's cadence;
+    // whether a repository is asked about is a separate decision on a much slower schedule, and a
+    // run that is not due simply carries no lane (the arms then converge tracked bytes in place,
+    // exactly as they do offline).
+    let forge_state = forge_check::read(ctx.fs, &ctx.layout);
+    let forge_due = match opts.forge {
+        ForgeCadence::Now => true,
+        ForgeCadence::Scheduled => forge_check::due(&forge_state, now_millis),
+    };
+    let lane = git
+        .filter(|_| forge_due)
+        .map(|g| ForgeLane::new(g, forge_state, now_millis));
+
     let env = Env {
         ctx,
         runs: &runs,
         follow: &follow,
-        git,
+        forge: lane.as_ref(),
         prior: &prior_sync,
-        repos: std::cell::RefCell::new(Vec::new()),
     };
 
     // ---- 3. `--rebuild`, BEFORE the fan-out: absorb, then drop, then let the sweep re-project.
@@ -1048,6 +1293,16 @@ pub(crate) fn manifest_update(
         })
         .collect();
 
+    // ---- 8. CLOSE THE FORGE ROUND. This is the single place the clock is written, and it is
+    // written whether the round found everything current, moved bytes, or reached nothing at all.
+    // A failed round that left the due time untouched would retry at the very next session start
+    // — turning the one failure into a request per session, which is the traffic the interval
+    // exists to prevent. So: the lane ran, therefore it waits.
+    let stale_forge = match lane {
+        Some(lane) => close_forge_round(ctx, &lane, now_millis, &mut sweep.warnings),
+        None => Vec::new(),
+    };
+
     Ok(PullOutcome {
         data: PullData {
             skills: sweep.rows,
@@ -1060,7 +1315,60 @@ pub(crate) fn manifest_update(
         disclosures: sweep.disclosures,
         access_gone,
         unreachable,
+        stale_forge,
     })
+}
+
+/// Persist what the forge round learned and hand back the per-HOST staleness signals the silent
+/// renderer gates on.
+///
+/// Per host, never per row: five rows behind one unreachable forge is ONE thing that happened, and
+/// saying it five times into an agent's context window would be five times the interruption for
+/// the same fact. The signal carries the OLDEST last-answer across the host's failing sources, so
+/// the renderer's staleness question is asked about the source that has gone longest without one.
+fn close_forge_round(
+    ctx: &Ctx<'_>,
+    lane: &ForgeLane<'_>,
+    now_ms: i64,
+    warnings: &mut Vec<String>,
+) -> Vec<StaleForge> {
+    let outcomes: Vec<(String, SourceCheck)> = lane.seen.borrow().clone().into_iter().collect();
+    let next = forge_check::next_due(
+        now_ms,
+        i64::try_from(
+            ctx.ids
+                .jitter_below(u64::try_from(forge_check::CHECK_JITTER_MS).unwrap_or(0)),
+        )
+        .unwrap_or(0),
+        lane.backoff.get(),
+    );
+    if let Err(e) = forge_check::record_round(ctx.fs, &ctx.layout, next, &outcomes) {
+        warnings.push(format!("FORGE_CHECK_WRITE_FAILED: {}", e.detail()));
+    }
+
+    let mut by_host: BTreeMap<String, StaleForge> = BTreeMap::new();
+    for (source, check) in &outcomes {
+        // A source the forge ANSWERED about — including "it is gone" — is not a host that went
+        // quiet: it said its piece, and the row-level line already carried it.
+        let Some(failure) = check.failure.as_ref().filter(|f| !f.gone) else {
+            continue;
+        };
+        let host = source.split('/').next().unwrap_or(source).to_owned();
+        let entry = by_host.entry(host.clone()).or_insert_with(|| StaleForge {
+            host,
+            sources: 0,
+            answered_at: check.answered_at_ms,
+            reason: failure.reason.clone(),
+        });
+        entry.sources += 1;
+        entry.answered_at = match (entry.answered_at, check.answered_at_ms) {
+            // "Never answered" is the oldest thing there is; it just is not stale (see
+            // `forge_check::is_stale`), so it wins the fold and stays honest.
+            (_, None) | (None, _) => None,
+            (Some(a), Some(b)) => Some(a.min(b)),
+        };
+    }
+    by_host.into_values().collect()
 }
 
 // =================================================================================================
@@ -1915,10 +2223,11 @@ fn disclose_namespaced(ctx: &Ctx<'_>, sid: &SkillId, name: &str, warnings: &mut 
 }
 
 // =================================================================================================
-// The forge arms — git rows move ONLY on an explicit update, and NEVER first-install: an origin
-// the MACHINE's trust registry (`crate::forge_trust`, home sidecar) has not granted refuses toward
-// the `topos add … --yes` gate. Neither a manifest row NOR per-checkout store contents vouch —
-// both are repo facts anyone could have committed: demand, never consent.
+// The forge arms — a `topos.toml` row pointing at a repository is kept current like everything
+// else: the sweep checks it on the forge lane's own clock and a change lands silently. The row IS
+// the demand and the consent alike, the same way a dependency listed in a project's package file is
+// fetched by the ordinary install; the two-phase describe lives in `add`, where a person is present
+// to read it, not in the automatic converge.
 // =================================================================================================
 
 /// The store a forge row's tracked imports live in, per scope: the person scope's home store, or
@@ -1931,32 +2240,13 @@ fn forge_store_layout(ctx: &Ctx<'_>, scope: &ResolvedScope) -> crate::sidecar::L
     }
 }
 
-/// The typed refusal an UNTRACKED forge origin earns on any update: nothing is fetched, nothing
-/// installs, and the line names the exact gate command (`topos add … --yes` — the describe-first
-/// first-trust ceremony) and where to run it.
-fn first_trust_line(sc: &ScopeCtx<'_>, reference: &str) -> String {
-    match &sc.scope {
-        ResolvedScope::Person => format!(
-            "FIRST_TRUST {}: \"{reference}\" — an external source this machine has not adopted \
-             through its first-trust gate; nothing is fetched or installed by `update` until \
-             `topos add -g {reference} --yes` adds it once",
-            sc.label
-        ),
-        ResolvedScope::Project { dir } => format!(
-            "FIRST_TRUST {}: \"{reference}\" — an external source this machine has not adopted \
-             through its first-trust gate; nothing is fetched or installed by `update` until \
-             `topos add {reference} --yes` (run from {}) adds it once",
-            sc.label,
-            dir.display()
-        ),
-    }
-}
-
-/// A whole repo: every skill it holds. `"*"` tracks the repo's default branch (one fetch per sweep,
-/// compared against the recorded commit); a pinned row NEVER moves — a tracked import whose recorded
-/// commit prefix-matches the pin is up to date, and a pin that MOVED re-imports at the new pin.
-/// Tracked members ABSENT from the freshly-fetched archive get the ordinary undemanded cleaning
-/// (snapshot-first) in the same explicit update that rendered them `-member`.
+/// A whole repo: every skill it holds. `"*"` tracks the repo's default branch — PROBED first
+/// (which commit does it point at now?) and downloaded only when that answer differs from what is
+/// recorded, so a repo that has not moved costs one small request instead of an archive. A pinned
+/// row NEVER moves: a tracked import whose recorded commit prefix-matches the pin is up to date, and
+/// a pin that MOVED re-imports at the new pin. Tracked members ABSENT from the freshly-fetched
+/// archive get the ordinary undemanded cleaning (snapshot-first) in the same update that rendered
+/// them `-member`.
 #[allow(clippy::too_many_arguments)]
 fn reconcile_repo_set(
     env: &Env<'_>,
@@ -1974,22 +2264,14 @@ fn reconcile_repo_set(
     // live in the project's own store, so two checkouts of one repo row never share state.
     let store_layout = forge_store_layout(env.ctx, &sc.scope);
     let sctx = super::pull::ctx_with_layout(env.ctx, &store_layout);
-    // THE ROW IS DEMAND, and it is demand BEFORE any gate below can return: the members this
-    // scope already tracks for the origin are mentioned first, so the undemanded clean can never
-    // read a refusal as a drop. A first-trust refusal says "nothing is fetched or installed" —
-    // and a run that installs nothing must destroy nothing either; the same reason a transient
-    // fetch failure never retires a tracked member (the mention is what protects both).
+    // THE ROW IS DEMAND, and it is demand BEFORE anything below can return early: the members
+    // this scope already tracks for the origin are mentioned first, so the undemanded clean can
+    // never read a failed check as a drop. A run that installs nothing must destroy nothing
+    // either — the same reason a transient fetch failure never retires a tracked member (the
+    // mention is what protects both).
     let tracked = tracked_repo_members(&sctx, &origin);
     for import in &tracked {
         sweep.mention(&sc.label, &import.lock.name);
-    }
-    // FIRST TRUST is the MACHINE registry (the home sidecar), consulted in EVERY scope — never
-    // store contents: a checkout can commit a valid-looking `.topos/` store, and per-checkout
-    // files are demand, not consent. The reconcile never first-installs an ungranted origin;
-    // the add gate is the one way in.
-    if !crate::forge_trust::is_trusted(env.ctx, &origin) {
-        sweep.warnings.push(first_trust_line(sc, &row.reference));
-        return;
     }
     let pin = row.pin();
     // The row's own placement decision (`harness = [...]`, written by a `-a` selector import):
@@ -2015,9 +2297,8 @@ fn reconcile_repo_set(
     // An import that recorded NO member set is not evidence of completeness either: "nothing is
     // missing" and "nothing is known" are different answers, and reading the second as the first
     // pins a legacy-shaped import to whatever partial landing it happens to hold, forever. So the
-    // absent record is UNSETTLED: the next explicit update refetches ONCE, records the archive's
-    // member list (below), and converges — after which the ordinary predicate answers. The quiet
-    // sweep still never dials a forge (it carries no git source at all).
+    // absent record is UNSETTLED: the next update refetches ONCE, records the archive's member
+    // list (below), and converges — after which the ordinary predicate answers.
     let members_complete = recorded_member_set(&tracked)
         .is_some_and(|recorded| recorded.iter().all(|m| is_tracked_name(m)));
     let pin_satisfied = pin.as_ref().is_some_and(|p| {
@@ -2028,8 +2309,7 @@ fn reconcile_repo_set(
                 .all(|i| commit_matches(i.origin.commit.as_deref().unwrap_or_default(), p))
     });
 
-    let Some(git) = env.git.filter(|_| !pin_satisfied) else {
-        // Offline (or settled): tracked members converge in place.
+    let converge_in_place = |sweep: &mut Sweep, targets: &mut Targets| {
         for import in &tracked {
             if !set_selected && !targets.hit(&[import.lock.name.as_str()]) {
                 continue;
@@ -2041,8 +2321,18 @@ fn reconcile_repo_set(
                 &sc.label,
             ));
         }
+    };
+    let Some(lane) = env.forge.filter(|_| !pin_satisfied) else {
+        // Not dialing this round (the clock says wait), or settled: converge in place.
+        converge_in_place(sweep, targets);
         return;
     };
+    let git_ref = pin.clone().unwrap_or_default();
+    if let Some(hold) = lane.hold(&origin, &git_ref) {
+        forge_hold_line(sc, &row.reference, &hold, sweep);
+        converge_in_place(sweep, targets);
+        return;
+    }
 
     let spec = crate::source::RemoteSpec {
         host: crate::source::GitHost::GitHub,
@@ -2051,10 +2341,36 @@ fn reconcile_repo_set(
         git_ref: pin.clone(),
         subdir: None,
     };
-    let targz = match fetch_repo(env, git, &spec) {
+    // THE CHEAP CHECK. A floating row asks what the default branch points at now; if that is what
+    // is already installed and the recorded member list is fully landed, the round is over for
+    // this source without a byte of archive moving. A PINNED row skips the probe: it is either
+    // settled above (and never dials) or must fetch the pinned bytes regardless.
+    if pin.is_none() {
+        let head = match lane.probe(&origin, &git_ref, &spec) {
+            Ok(h) => h,
+            Err(e) => {
+                // Ending here is the point: falling through to the archive would pay a second
+                // round-trip for an answer the first one already failed to get.
+                note_item_failure(env.ctx, &mut sweep.warnings, &row.reference, &e);
+                converge_in_place(sweep, targets);
+                return;
+            }
+        };
+        renamed_line(&origin, &head, sweep);
+        let recorded = tracked
+            .first()
+            .and_then(|i| i.origin.commit.clone())
+            .unwrap_or_default();
+        if !tracked.is_empty() && members_complete && commit_matches(&recorded, &head.commit) {
+            converge_in_place(sweep, targets);
+            return;
+        }
+    }
+    let targz = match lane.fetch(&origin, &git_ref, &spec) {
         Ok(t) => t,
         Err(e) => {
             note_item_failure(env.ctx, &mut sweep.warnings, &row.reference, &e);
+            converge_in_place(sweep, targets);
             return;
         }
     };
@@ -2173,11 +2489,6 @@ fn reconcile_repo_skill(
     let fields = row.fields();
     let store_layout = forge_store_layout(env.ctx, &sc.scope);
     let sctx = super::pull::ctx_with_layout(env.ctx, &store_layout);
-    // The same MACHINE-registry gate as the repo-set arm: store contents never grant.
-    if !crate::forge_trust::is_trusted(env.ctx, &origin) {
-        sweep.warnings.push(first_trust_line(sc, &row.reference));
-        return;
-    }
     let members = tracked_repo_members(&sctx, &origin);
     // Same placement decision as the set arm: the row's `harness` list is one converge slot per
     // agent (no field = the one default slot).
@@ -2193,25 +2504,30 @@ fn reconcile_repo_skill(
                 .is_some_and(|i| commit_matches(i.origin.commit.as_deref().unwrap_or_default(), p))
         })
     });
-    let Some(git) = env.git.filter(|_| !pin_satisfied) else {
-        match &tracked {
-            Some(import) => {
-                sweep.push(plain_row(
-                    &import.lock.name,
-                    PullAction::UpToDate,
-                    None,
-                    &sc.label,
-                ));
-            }
-            // The origin is trusted; only THIS member has not been fetched yet.
-            None => sweep.warnings.push(format!(
-                "NOT_INSTALLED {}: \"{}\" — an external skill this machine has not fetched yet \
-                 (network required)",
-                sc.label, row.reference
-            )),
-        }
+    let converge_in_place = |sweep: &mut Sweep| match &tracked {
+        Some(import) => sweep.push(plain_row(
+            &import.lock.name,
+            PullAction::UpToDate,
+            None,
+            &sc.label,
+        )),
+        // Nothing to converge: this member has never been fetched here.
+        None => sweep.warnings.push(format!(
+            "NOT_INSTALLED {}: \"{}\" — an external skill this machine has not fetched yet \
+             (network required)",
+            sc.label, row.reference
+        )),
+    };
+    let Some(lane) = env.forge.filter(|_| !pin_satisfied) else {
+        converge_in_place(sweep);
         return;
     };
+    let git_ref = pin.clone().unwrap_or_default();
+    if let Some(hold) = lane.hold(&origin, &git_ref) {
+        forge_hold_line(sc, &row.reference, &hold, sweep);
+        converge_in_place(sweep);
+        return;
+    }
     let spec = crate::source::RemoteSpec {
         host: crate::source::GitHost::GitHub,
         owner: owner.to_owned(),
@@ -2221,10 +2537,39 @@ fn reconcile_repo_skill(
         // NAME selects the skill.
         subdir: fields.subdir.clone(),
     };
-    let targz = match fetch_repo(env, git, &spec) {
+    // THE CHEAP CHECK, exactly as in the set arm: a floating row that already holds the commit the
+    // default branch points at is settled without downloading anything.
+    if pin.is_none() {
+        let head = match lane.probe(&origin, &git_ref, &spec) {
+            Ok(h) => h,
+            Err(e) => {
+                note_item_failure(env.ctx, &mut sweep.warnings, &row.reference, &e);
+                converge_in_place(sweep);
+                return;
+            }
+        };
+        renamed_line(&origin, &head, sweep);
+        let settled = !slots.is_empty()
+            && slots.iter().all(|s| {
+                s.import.is_some_and(|i| {
+                    commit_matches(i.origin.commit.as_deref().unwrap_or_default(), &head.commit)
+                })
+            });
+        if settled && let Some(import) = &tracked {
+            sweep.push(plain_row(
+                &import.lock.name,
+                PullAction::UpToDate,
+                None,
+                &sc.label,
+            ));
+            return;
+        }
+    }
+    let targz = match lane.fetch(&origin, &git_ref, &spec) {
         Ok(t) => t,
         Err(e) => {
             note_item_failure(env.ctx, &mut sweep.warnings, &row.reference, &e);
+            converge_in_place(sweep);
             return;
         }
     };
@@ -2611,24 +2956,35 @@ fn refresh_repo_skill(
     }
 }
 
-/// One tarball per `(origin, ref)` per sweep — a repo named by both a set row and a skill row is
-/// fetched once.
-fn fetch_repo(
-    env: &Env<'_>,
-    git: &dyn crate::git_source::GitTarballSource,
-    spec: &crate::source::RemoteSpec,
-) -> Result<Rc<Vec<u8>>, ClientError> {
-    let key = format!(
-        "{}#{}",
-        spec.origin(),
-        spec.git_ref.as_deref().unwrap_or("")
-    );
-    if let Some((_, bytes)) = env.repos.borrow().iter().find(|(k, _)| *k == key) {
-        return Ok(Rc::clone(bytes));
+/// The line a source the lane declined to dial earns.
+///
+/// A GONE source is named ONCE and then left alone: the reference is what has to change, and
+/// repeating the same sentence at every session start would train a person to stop reading them.
+/// The breaker's short-circuit says nothing at all — the source that actually failed already did,
+/// and "we skipped this because something else broke" is noise about someone else's problem.
+fn forge_hold_line(sc: &ScopeCtx<'_>, reference: &str, hold: &ForgeHold, sweep: &mut Sweep) {
+    if let ForgeHold::Gone { reason, first_time } = hold
+        && *first_time
+    {
+        sweep.warnings.push(format!(
+            "REMOTE_FETCH {}: \"{reference}\" — {reason}; the copies here still work, and \
+             `topos update` retries once the row names something that resolves",
+            sc.label
+        ));
     }
-    let bytes = Rc::new(git.fetch(spec)?);
-    env.repos.borrow_mut().push((key, Rc::clone(&bytes)));
-    Ok(bytes)
+}
+
+/// The DISCLOSURE a followed rename earns: the row still works (the forge redirected and the check
+/// followed it), and the person is told the canonical spelling so the row can be updated at leisure.
+/// A rename is never a failure, so this never rides the channel the receipt counts as one.
+fn renamed_line(origin: &str, head: &RepoHead, sweep: &mut Sweep) {
+    if let Some((owner, repo)) = &head.renamed_to {
+        let host = origin.split('/').next().unwrap_or_default();
+        sweep.disclosures.push(format!(
+            "GIT_RENAMED {origin}: now {host}/{owner}/{repo} — the row still resolves through the \
+             forge's redirect; spelling it the new way keeps it direct"
+        ));
+    }
 }
 
 /// The ONE receipt line a moved git source earns: what it was, what it is, and which members that

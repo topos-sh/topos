@@ -33,7 +33,8 @@ use topos_types::requests::{
 };
 use topos_types::{JsonEnvelope, TerminalOutcome, WireCurrentRecord};
 
-use crate::error::ClientError;
+use crate::error::{ClientError, FetchFault};
+use crate::git_source::RepoHead;
 use crate::plane::{
     ConnectedSession, ContributeSource, DeviceAuthPoll, DeviceAuthStart, DirectorySource,
     EnrollSource, EnrolledGrant, EnrolledWorkspace, FetchedFile, FetchedVersion, GovernanceSource,
@@ -1718,6 +1719,19 @@ fn map_write_envelope(host: &str, status: u16, bytes: &[u8]) -> Result<WriteRece
 /// reads which of the two servers in play was the one that went quiet.
 const GITHUB_API_HOST: &str = "api.github.com";
 
+/// The host the git lanes talk to — where a repo's refs and its web identity live (the REST API
+/// answers on [`GITHUB_API_HOST`] instead).
+const GITHUB_HOST: &str = "github.com";
+
+/// How much of a ref advertisement the update check reads. HEAD is advertised first, so this is
+/// orders of magnitude more than one record needs and orders of magnitude less than a busy repo's
+/// full listing.
+const ADVERTISEMENT_PREFIX_BYTES: u64 = 16 * 1024;
+
+/// The furthest out a host's own backoff signal may push the next check. A header asking to be
+/// left alone for a week is a header topos declines to take literally.
+const MAX_BACKOFF_SECS: i64 = 24 * 60 * 60;
+
 /// The blocking `ureq` release source: the GitHub API for latest-tag resolution + raw asset GETs.
 pub(crate) struct UreqReleases {
     agent: ureq::Agent,
@@ -1893,15 +1907,17 @@ impl crate::git_source::GitTarballSource for UreqGitSource {
         if !is_repo_seg(&spec.owner) || !is_repo_seg(&spec.repo) {
             return Err(ClientError::RemoteFetch {
                 msg: format!("{} — that is not a valid owner/repo", spec.label()),
-                permanent: true,
+                fault: FetchFault::Gone,
             });
         }
         // GitHub's `/tarball/{ref}` (ref optional → the default branch) redirects to codeload.
+        // A RENAMED repo answers 301 on the way there and the agent follows it, so a rename keeps
+        // working rather than reading as a missing repo.
         let url = match &spec.git_ref {
             Some(r) => {
                 let r = sanitize_ref(r).ok_or_else(|| ClientError::RemoteFetch {
                     msg: format!("{} — that is not a valid ref", spec.label()),
-                    permanent: true,
+                    fault: FetchFault::Gone,
                 })?;
                 format!(
                     "https://api.github.com/repos/{}/{}/tarball/{r}",
@@ -1927,7 +1943,7 @@ impl crate::git_source::GitTarballSource for UreqGitSource {
                     spec.label(),
                     transport_reason(GITHUB_API_HOST, &e)
                 ),
-                permanent: false,
+                fault: transport_fault(&e),
             })?;
         match resp.status().as_u16() {
             // Streamed: GitHub's tarball redirect answers chunked (no `Content-Length`), so the
@@ -1938,7 +1954,7 @@ impl crate::git_source::GitTarballSource for UreqGitSource {
                         "{} — the download from {GITHUB_API_HOST} was cut short",
                         spec.label()
                     ),
-                    permanent: false,
+                    fault: FetchFault::Unavailable,
                 }
             }),
             404 => Err(ClientError::RemoteFetch {
@@ -1946,14 +1962,163 @@ impl crate::git_source::GitTarballSource for UreqGitSource {
                     "{} — repo or ref not found (only public repos are supported today)",
                     spec.label()
                 ),
-                permanent: true,
+                fault: FetchFault::Gone,
             }),
             s => Err(ClientError::RemoteFetch {
                 msg: format!("{} — {}", spec.label(), status_reason(GITHUB_API_HOST, s)),
-                permanent: false,
+                fault: FetchFault::Unavailable,
             }),
         }
     }
+
+    fn probe(&self, spec: &crate::source::RemoteSpec) -> Result<RepoHead, ClientError> {
+        let _ = spec.host.domain();
+        if !is_repo_seg(&spec.owner) || !is_repo_seg(&spec.repo) {
+            return Err(ClientError::RemoteFetch {
+                msg: format!("{} — that is not a valid owner/repo", spec.label()),
+                fault: FetchFault::Gone,
+            });
+        }
+        // The git smart-HTTP ref advertisement — what `git ls-remote` asks for. Deliberately NOT
+        // the REST API: an unauthenticated REST call costs one of a shared IP's 60 hourly requests
+        // whether it answers with the commit or with "not modified", which is a budget a whole
+        // office behind one address would burn through. This endpoint is outside that allowance
+        // entirely, and answers in a few hundred bytes.
+        let url = format!(
+            "https://{GITHUB_HOST}/{}/{}.git/info/refs?service=git-upload-pack",
+            spec.owner, spec.repo
+        );
+        let _phase = progress::phase(&*self.progress, &format!("checking {}", spec.origin()));
+        let resp = self
+            .agent
+            .get(&url)
+            .call()
+            .map_err(|e| ClientError::RemoteFetch {
+                msg: format!("{} — {}", spec.label(), transport_reason(GITHUB_HOST, &e)),
+                fault: transport_fault(&e),
+            })?;
+        let status = resp.status().as_u16();
+        // A rename redirects here too; the agent followed it, so the final URI names where the
+        // repo actually lives now. Read BEFORE the body is consumed.
+        let renamed_to = renamed_target(&resp, &spec.owner, &spec.repo);
+        let retry_after_ms = retry_after_ms(&resp);
+        match status {
+            200..=299 => {}
+            // The unauthenticated ref lane answers 401 for a repo it will not show anyone —
+            // deleted, made private, or never real — and cannot tell those apart without leaking
+            // which. All three are the same thing to an anonymous client: this reference will not
+            // resolve again until it changes.
+            401 | 403 | 404 => {
+                return Err(ClientError::RemoteFetch {
+                    msg: format!(
+                        "{} — repo not found (deleted, renamed away, or no longer public)",
+                        spec.label()
+                    ),
+                    fault: FetchFault::Gone,
+                });
+            }
+            s => {
+                return Err(ClientError::RemoteFetch {
+                    msg: format!("{} — {}", spec.label(), status_reason(GITHUB_HOST, s)),
+                    fault: FetchFault::Unavailable,
+                });
+            }
+        }
+        // Read a bounded PREFIX, never the whole advertisement: a busy repo advertises megabytes
+        // of refs, and HEAD is the first record — so the answer always lies in the first few
+        // hundred bytes, and reading past them would undo the saving this probe exists for.
+        let body = read_body_reported_limited(
+            resp,
+            &progress::Silent,
+            0,
+            false,
+            ADVERTISEMENT_PREFIX_BYTES,
+        );
+        // An over-limit body comes back as a fault here; the prefix is far larger than any HEAD
+        // record, so what that really means is the answer was not the advertisement at all.
+        let body = body.map_err(|_| ClientError::RemoteFetch {
+            msg: format!(
+                "{} — the answer from {GITHUB_HOST} was cut short",
+                spec.label()
+            ),
+            fault: FetchFault::Unavailable,
+        })?;
+        let commit = crate::git_source::parse_head_advertisement(&body).ok_or_else(|| {
+            ClientError::RemoteFetch {
+                msg: format!(
+                    "{} — {GITHUB_HOST} sent a ref listing topos could not read",
+                    spec.label()
+                ),
+                fault: FetchFault::Unavailable,
+            }
+        })?;
+        Ok(RepoHead {
+            commit,
+            renamed_to,
+            retry_after_ms,
+        })
+    }
+}
+
+/// Which half of the retryable family a `ureq` fault belongs to: did the host ANSWER?
+///
+/// Only a definitively-reached fault is called reached. Everything else — including anything the
+/// non-exhaustive error enum grows later — is treated as never-reached, because that is the safe
+/// direction: reading a dead network as reachable costs one connect timeout PER source in a sweep,
+/// while reading a reachable host as dead costs one skipped round.
+fn transport_fault(e: &ureq::Error) -> FetchFault {
+    use ureq::Error as E;
+    match e {
+        // Bytes were already flowing, or the peer spoke and was merely unintelligible.
+        E::Timeout(ureq::Timeout::RecvBody | ureq::Timeout::RecvResponse)
+        | E::Protocol(_)
+        | E::LargeResponseHeader(..)
+        | E::TooManyRedirects
+        | E::RedirectFailed => FetchFault::Unavailable,
+        _ => FetchFault::Unreachable,
+    }
+}
+
+/// The `<owner>/<repo>` a response actually landed on, when redirects moved it off the one asked
+/// for. `None` when the reference is still canonical (the common case) or the final URI does not
+/// carry a recognizable repo path — a rename is reported only on evidence.
+fn renamed_target(
+    resp: &ureq::http::Response<ureq::Body>,
+    owner: &str,
+    repo: &str,
+) -> Option<(String, String)> {
+    use ureq::ResponseExt;
+    let path = resp.get_uri().path();
+    let mut segs = path.trim_start_matches('/').split('/');
+    let landed_owner = segs.next()?;
+    let landed_repo = segs.next()?.strip_suffix(".git").unwrap_or_default();
+    if landed_owner.is_empty() || landed_repo.is_empty() {
+        return None;
+    }
+    (landed_owner != owner || landed_repo != repo)
+        .then(|| (landed_owner.to_owned(), landed_repo.to_owned()))
+}
+
+/// A `Retry-After` header as an absolute instant (epoch millis), when the host sent one. Only the
+/// delta-seconds form is honored — the HTTP-date form would need a date parser this binary does
+/// not carry, and a backoff signal it cannot read is simply one it does not act on.
+fn retry_after_ms(resp: &ureq::http::Response<ureq::Body>) -> Option<i64> {
+    let secs: i64 = resp
+        .headers()
+        .get("retry-after")?
+        .to_str()
+        .ok()?
+        .trim()
+        .parse()
+        .ok()?;
+    let now = i64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()?
+            .as_millis(),
+    )
+    .ok()?;
+    Some(now.saturating_add(secs.clamp(0, MAX_BACKOFF_SECS).saturating_mul(1000)))
 }
 
 /// A GitHub owner/repo path segment: ASCII alphanumerics + `.`, `_`, `-`, non-empty — the last-line guard

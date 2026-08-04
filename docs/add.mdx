@@ -167,10 +167,13 @@ New files are verified against the workspace's records before anything lands, an
 edits are never overwritten** — updates merge around them, and a genuine conflict is frozen with a
 named way out. Details: [Review, protect, roll back](/docs/review#your-edits-are-safe).
 
-Two things deliberately do **not** move on their own: a pinned version never moves, and a git
-source moves only when you run `topos update` yourself. The quiet session-start sweep never
-contacts GitHub, so no agent session pays for a round-trip to a forge; when you do run it, the
-receipt names the commit it moved to and which skills appeared or disappeared.
+One thing deliberately does **not** move on its own: a pinned version. Everything else is kept
+current for you, GitHub lines included — those are checked a few times a day rather than at every
+session start, because a forge answers about one repository per request and a whole office can
+share one allowance. The check itself is cheap: Topos asks what commit the repo is on now and
+downloads it only when that has actually changed. When something moves, the receipt names the
+commit it moved to and which skills appeared or disappeared. `topos update`, typed by hand, checks
+everything immediately.
 
 ## Import from GitHub
 
@@ -180,14 +183,14 @@ topos add vercel-labs/skills/find-skills
 topos add vercel-labs/skills@e173b8c
 ```
 
-Every skill the repo holds, one of them, or the repo frozen at a commit. The first time you add
-from a repo, a bare run shows what it found — the source, the skills in it, and the exact line it
-would write — and changes nothing. Read it, then apply with `--yes`. After that the source is
-trusted here and further adds from it land immediately with an undo-led receipt.
+Every skill the repo holds, one of them, or the repo frozen at a commit. A bare run shows what it
+found — the source, the skills in it, and the exact line it would write — and changes nothing. Read
+it, then apply with `--yes`. That happens every time you add from a repo, not just the first: the
+listing is the point of typing the command.
 
 <Warning>
   A skill is instructions your agent will follow, and Topos verifies nothing about a third-party
-  repo's contents. That first listing is there to be read.
+  repo's contents. That listing is there to be read.
 </Warning>
 
 Without a pin, a repo entry tracks its default branch. To freeze one, give a commit — or paste a

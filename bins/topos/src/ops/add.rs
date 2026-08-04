@@ -436,10 +436,9 @@ pub(crate) struct OriginDoc {
 /// harness dir, refuses to clobber it, materializes the byte-exact skill there, then adopts it through the
 /// unchanged [`add_with_name`] core and records the provenance.
 ///
-/// This is the byte-placing PRIMITIVE, not a verb: it asks nothing about trust. The first-trust
-/// ceremony (describe → `--yes` → the machine registry grant) lives one layer up, in
-/// [`super::reference`], which every user-facing forge arm — bare reference and `-s`/`-a` selector
-/// alike — goes through before reaching here.
+/// This is the byte-placing PRIMITIVE, not a verb: it asks nothing. The describe → `--yes`
+/// ceremony lives one layer up, in [`super::reference`], which every user-facing forge arm — bare
+/// reference and `-s`/`-a` selector alike — goes through before reaching here.
 ///
 /// # Errors
 /// The remote-import family ([`ClientError::RemoteFetch`] / [`ClientError::NoSkillInSource`] /

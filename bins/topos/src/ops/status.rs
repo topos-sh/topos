@@ -83,6 +83,7 @@ pub(crate) fn status_snapshot(ctx: &Ctx<'_>, view: ScopeView) -> Result<StatusDa
         signed_in,
         sessions: session_rows,
         triggers: Vec::new(),
+        forge: inventory::forge_sources(ctx, &resolved.scopes),
         scopes,
         machine_summary,
     })

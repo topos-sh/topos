@@ -49,9 +49,12 @@ The sweep self-throttles (default 300 seconds), so a trigger can fire on every s
 cheaply. It always covers **both** sets — your machine-wide one and any `topos.toml` covering the
 folder the session starts in — so nothing goes stale while you spend the day in one checkout. That
 is the one way it differs from a `topos update` you type, which converges the scope you are standing
-in. The sweep also stays off the network it doesn't need: it talks to your workspaces and to nothing
-else, so a skill imported from a git repo moves only when you run `topos update` yourself, never
-because a session started.
+in. The sweep also stays off the network it doesn't need. Your workspaces answer about every skill
+at once, so they are asked on the throttle above; a GitHub repository answers about itself alone, so
+those lines are checked on their own much slower rhythm — a few times a day, spread out so a fleet
+of machines doesn't arrive at once — and the check asks what commit the repo is on before deciding
+whether anything is worth downloading. `topos status` and `topos list` show when each source was
+last checked and whether it answered.
 
 It speaks only when there is something worth saying — skills actually changed, or there is a fact
 you shouldn't miss, like a workspace this machine can no longer reach whose skills are now frozen

@@ -36,6 +36,13 @@
         "type": "string"
       }
     },
+    "forge": {
+      "description": "The last auto-update check of every external source the shown scopes name.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/ForgeSource"
+      }
+    },
     "machine_summary": {
       "description": "The machine scope's one-line summary, present only when the machine scope is NOT shown in\nfull (the default view inside a project).",
       "anyOf": [
@@ -218,6 +225,51 @@
           "type": "string",
           "const": "signed-out"
         }
+      ]
+    },
+    "ForgeSource": {
+      "description": "One external source's last auto-update check — the answer to \"is this even working?\", computed\nentirely from local state. Every check is recorded whatever its outcome, so a source that has\ngone quiet is visible here long before the silent sweep is willing to interrupt a session over\nit. **INFERRED** (additive).",
+      "type": "object",
+      "properties": {
+        "answered_at": {
+          "description": "When it last ANSWERED (epoch millis). Absent = it never has.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64"
+        },
+        "checked_at": {
+          "description": "When it was last checked (epoch millis), whatever came of that check.",
+          "type": "integer",
+          "format": "int64"
+        },
+        "commit": {
+          "description": "The commit the last answering check saw.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "error": {
+          "description": "Why the last check failed. Absent = it succeeded.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "gone": {
+          "description": "The failure is FINAL — the forge says this source is gone, so it is not retried until the\nrow that names it changes.",
+          "type": "boolean"
+        },
+        "source": {
+          "description": "The source a manifest row names (`<host>/<owner>/<repo>`).",
+          "type": "string"
+        }
+      },
+      "required": [
+        "source",
+        "checked_at"
       ]
     },
     "ListDetail": {

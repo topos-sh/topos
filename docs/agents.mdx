@@ -110,7 +110,8 @@ under `contracts/fixtures/json/`.
 
 ## Consent: when Topos asks first
 
-Topos asks first only when an act **reaches the team, loses local work, or trusts something new**.
+Topos asks first only when an act **reaches the team or loses local work** — plus `add` from a git
+source, where the preview is the listing you came for.
 Those commands are two-phase: a bare run previews, writes nothing, and hands you the exact `--yes`
 argv. Everything else — self-scoped and reversible — applies immediately and prints an undo-led
 receipt; read the undo, and tell the person what changed.
@@ -120,7 +121,7 @@ receipt; read the undo, and tell the person what changed.
 | `publish` | Two-phase. The preview never adopts an untracked source |
 | `review <target> --approve\|--reject\|--withdraw` | The **verdict flag is the apply**; a target with no verdict is the preview. `--yes` means nothing here |
 | `revert`, `protect`, `invite <emails…>`, `update --reset`, `uninstall` | Two-phase |
-| `add` | Immediate — **except** a git source this machine has never used, which lists what it found and waits for `--yes`. Once a repo is in a local `topos.toml`, further adds from it are immediate |
+| `add` | Immediate — **except** a git source, which lists what it found and waits for `--yes`. Every time, including a repo already in a local `topos.toml` |
 | `remove` | Two-phase when local work would be lost (a draft ahead, a permanent local delete) **or** when the row is a channel/repo line that would be rewritten to its members; immediate otherwise |
 | `init`, `fmt`, `login`, `logout`, `update`, `list`, `diff`, `log`, `status`, `self-update` | Immediate, with receipt (`--yes` is an accepted no-op) |
 
@@ -161,7 +162,9 @@ divides the requests you can act on from the ones you hand back to the human.
 Also worth knowing: `topos status` is offline and read-only — the health panel (binary version,
 `sessions`, `triggers`, and per-scope `attention` counts, each carrying the `command` that resolves
 it), with no inventory in it, which is `list`'s job; `update --quiet` overrides `--json`, sweeps
-both scopes, and exits `0` on a network blip (it is what the session-start hook runs); redacted
+both scopes, and exits `0` on a network blip (it is what the session-start hook runs) — it keeps
+GitHub lines current too, on a slower rhythm than the workspace lane, and `status`/`list` carry a
+`forge` array with each source's last check; redacted
 errors carry the safe message in `error.context.message`, and the full source chain always lands in
 `~/.topos/log.jsonl` (`TOPOS_DEBUG=1` prints it to stderr).
 

@@ -23,7 +23,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use topos_types::persisted::{Lock, SyncState};
-use topos_types::results::{ListDetail, StatusItemState, StatusRegime};
+use topos_types::results::{ForgeSource, ListDetail, StatusItemState, StatusRegime};
 
 use crate::ctx::Ctx;
 use crate::error::ClientError;
@@ -944,6 +944,47 @@ fn stored_by_name(
         .get(name)?
         .clone();
     Some(applied_for_id(ctx, Some(layout), &id, ""))
+}
+
+/// The last auto-update check of every external source the RESOLVED scopes name, newest spelling
+/// first. Read from the machine's own check log — the scopes supply which sources are in play, the
+/// log supplies what happened to each.
+///
+/// Both read verbs show the same rows, because the question ("is my GitHub row still being kept
+/// current?") is the same question in both. A source no check has touched yet contributes nothing:
+/// an empty answer is honest, an invented one is not.
+pub(crate) fn forge_sources(ctx: &Ctx<'_>, scopes: &[ScopeResolution]) -> Vec<ForgeSource> {
+    let mut wanted: BTreeSet<String> = BTreeSet::new();
+    for section in scopes {
+        for set in &section.sets {
+            if let Ok(KeyShape::RepoSet { host, owner, repo }) = keys::classify_key(set) {
+                wanted.insert(format!("{host}/{owner}/{repo}"));
+            }
+        }
+        for row in &section.rows {
+            if let Ok(KeyShape::RepoSkill {
+                host, owner, repo, ..
+            }) = keys::classify_key(&row.reference)
+            {
+                wanted.insert(format!("{host}/{owner}/{repo}"));
+            }
+        }
+    }
+    let log = crate::forge_check::read(ctx.fs, &ctx.layout);
+    wanted
+        .into_iter()
+        .filter_map(|source| {
+            let check = log.sources.get(&source)?;
+            Some(ForgeSource {
+                source,
+                checked_at: check.checked_at_ms,
+                answered_at: check.answered_at_ms,
+                commit: check.commit.clone(),
+                error: check.failure.as_ref().map(|f| f.reason.clone()),
+                gone: check.failure.as_ref().is_some_and(|f| f.gone),
+            })
+        })
+        .collect()
 }
 
 /// One member a repo-set row delivers, as the inventory renders it.

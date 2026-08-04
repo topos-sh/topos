@@ -23,8 +23,9 @@ use topos_types::results::{ExchangeFault, PullAction};
 use topos_types::{CurrencyKind, HarnessId, TriggerReport, TriggerState};
 
 use crate::ctx::Ctx;
-use crate::error::ClientError;
+use crate::error::{ClientError, FetchFault};
 use crate::fs_seam::{FsOps, RealFs};
+use crate::git_source::RepoHead;
 use crate::ids::test_sources::{FixedClock, SeqIds};
 use crate::plane::{
     DeliverySkill, DeliverySnapshot, DeliverySource, DirectorySource, FetchedFile, FetchedVersion,
@@ -577,6 +578,62 @@ fn sweep_scoped(
 /// delivery is the promise, so it may never narrow to the folder the session happened to start in.
 fn sweep_both(ctx: &Ctx<'_>, plane: &FakePlane, dir: &FakeDirectory) -> ops::PullOutcome {
     sweep_scoped(ctx, plane, dir, ops::UpdateScope::Both)
+}
+
+/// THE HOOK'S ACTUAL POSTURE — what `topos update --quiet` really runs: both scopes, the forge
+/// lane present, and the forge dialed only when its own clock says the interval has elapsed.
+fn quiet_sweep(
+    ctx: &Ctx<'_>,
+    plane: &FakePlane,
+    dir: &FakeDirectory,
+    git: &FakeGit,
+) -> ops::PullOutcome {
+    ops::manifest_update(
+        ctx,
+        &connect(plane, dir),
+        Some(git as &dyn crate::git_source::GitTarballSource),
+        &ops::ManifestUpdateOpts {
+            scope: ops::UpdateScope::Both,
+            forge: ops::ForgeCadence::Scheduled,
+            ..ops::ManifestUpdateOpts::default()
+        },
+    )
+    .unwrap()
+}
+
+/// A hand-run `topos update` WITH the forge lane — the person-typed posture, which never waits for
+/// the clock.
+fn update_now(
+    ctx: &Ctx<'_>,
+    plane: &FakePlane,
+    dir: &FakeDirectory,
+    git: &FakeGit,
+) -> ops::PullOutcome {
+    ops::manifest_update(
+        ctx,
+        &connect(plane, dir),
+        Some(git as &dyn crate::git_source::GitTarballSource),
+        &ops::ManifestUpdateOpts::default(),
+    )
+    .unwrap()
+}
+
+/// Wind the forge clock back so the next scheduled sweep is due — the injected-clock equivalent of
+/// waiting out the interval (the rig's clock is fixed, so the DUE TIME is what moves).
+fn forge_interval_elapsed(rig: &Rig) {
+    let mut doc = crate::forge_check::read(&rig.fs, &rig.layout());
+    doc.next_check_at_ms = rig_now(rig);
+    let outcomes: Vec<(String, crate::forge_check::SourceCheck)> = doc
+        .sources
+        .iter()
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+    crate::forge_check::record_round(&rig.fs, &rig.layout(), rig_now(rig), &outcomes).unwrap();
+}
+
+/// When the machine's forge clock says the next scheduled check falls due.
+fn forge_next_due(rig: &Rig) -> i64 {
+    crate::forge_check::read(&rig.fs, &rig.layout()).next_check_at_ms
 }
 
 // =================================================================================================
@@ -1456,17 +1513,27 @@ fn build_repo_targz(top: &str, entries: &[(&str, &[u8])]) -> Vec<u8> {
     tar.into_inner().unwrap().finish().unwrap()
 }
 
-/// The forge fake: ONE archive at a time, and a fetch counter (the "never dialed" witness).
+/// The forge fake: ONE archive at a time, separate counters for the two transport calls (the
+/// "never dialed" and "never downloaded" witnesses), and an injectable fault so a test can make
+/// the forge fail exactly the way it wants to.
 #[derive(Clone)]
 struct FakeGit {
     archive: Arc<Mutex<Vec<u8>>>,
     fetches: Arc<Mutex<u32>>,
+    probes: Arc<Mutex<u32>>,
+    /// What every call answers with instead of the archive, once set.
+    fault: Arc<Mutex<Option<FetchFault>>>,
+    /// What the probe reports the repo has been renamed to.
+    renamed: Arc<Mutex<Option<(String, String)>>>,
 }
 impl FakeGit {
     fn new(targz: Vec<u8>) -> Self {
         Self {
             archive: Arc::new(Mutex::new(targz)),
             fetches: Arc::new(Mutex::new(0)),
+            probes: Arc::new(Mutex::new(0)),
+            fault: Arc::new(Mutex::new(None)),
+            renamed: Arc::new(Mutex::new(None)),
         }
     }
     fn serve(&self, targz: Vec<u8>) {
@@ -1475,16 +1542,56 @@ impl FakeGit {
     fn fetches(&self) -> u32 {
         *self.fetches.lock().unwrap()
     }
+    fn probes(&self) -> u32 {
+        *self.probes.lock().unwrap()
+    }
+    /// Every call from now on fails this way.
+    fn fail_with(&self, fault: FetchFault) {
+        *self.fault.lock().unwrap() = Some(fault);
+    }
+    fn rename_to(&self, owner: &str, repo: &str) {
+        *self.renamed.lock().unwrap() = Some((owner.to_owned(), repo.to_owned()));
+    }
+    /// The commit the current archive carries — what an honest probe of it reports.
+    fn head(&self) -> String {
+        crate::git_source::extract_tree(&self.archive.lock().unwrap().clone())
+            .ok()
+            .and_then(|t| t.commit)
+            .unwrap_or_default()
+    }
+    fn injected(&self) -> Option<ClientError> {
+        self.fault
+            .lock()
+            .unwrap()
+            .map(|fault| ClientError::RemoteFetch {
+                msg: "o/r — the fake forge was told to fail".to_owned(),
+                fault,
+            })
+    }
 }
 impl crate::git_source::GitTarballSource for FakeGit {
     fn fetch(&self, _spec: &crate::source::RemoteSpec) -> Result<Vec<u8>, ClientError> {
         *self.fetches.lock().unwrap() += 1;
-        Ok(self.archive.lock().unwrap().clone())
+        match self.injected() {
+            Some(e) => Err(e),
+            None => Ok(self.archive.lock().unwrap().clone()),
+        }
+    }
+    fn probe(&self, _spec: &crate::source::RemoteSpec) -> Result<RepoHead, ClientError> {
+        *self.probes.lock().unwrap() += 1;
+        match self.injected() {
+            Some(e) => Err(e),
+            None => Ok(RepoHead {
+                commit: self.head(),
+                renamed_to: self.renamed.lock().unwrap().clone(),
+                retry_after_ms: None,
+            }),
+        }
     }
 }
 
-/// Pass the first-trust gate for a forge reference — the consented `topos add … --yes` an
-/// untracked origin's refusal names.
+/// Apply a forge reference through `add --yes` — the accepted describe an interactive add always
+/// shows first.
 fn gate_add(ctx: &Ctx<'_>, plane: &FakePlane, dir: &FakeDirectory, git: &FakeGit, raw: &str) {
     match ops::add_reference(
         ctx,
@@ -1502,7 +1609,10 @@ fn gate_add(ctx: &Ctx<'_>, plane: &FakePlane, dir: &FakeDirectory, git: &FakeGit
 }
 
 #[test]
-fn a_star_repo_row_moves_only_on_an_explicit_update() {
+fn a_floating_repo_row_advances_through_the_silent_sweep_alone() {
+    // ACCEPTANCE 1. No human command anywhere in this test after the row is in place: the sweep
+    // that runs at a session start is what carries a GitHub row to a new upstream commit, exactly
+    // as it carries a workspace-delivered one.
     let rig = Rig::new("repo");
     // No session: a pure forge recipe.
     rig.write_global("[bundles]\n\"github.com/o/r\" = \"*\"\n");
@@ -1518,34 +1628,18 @@ fn a_star_repo_row_moves_only_on_an_explicit_update() {
         ],
     ));
 
-    // An UNTRACKED origin never first-installs from `update` — however explicit the run: the row
-    // is demand (a repo fact anyone could have committed), never consent. The refusal names the
-    // gate.
-    let out = ops::manifest_update(
-        &ctx,
-        &connect(&plane, &dir),
-        Some(&git as &dyn crate::git_source::GitTarballSource),
-        &ops::ManifestUpdateOpts::default(),
-    )
-    .unwrap();
-    let w = out
-        .warnings
-        .iter()
-        .find(|w| w.starts_with("FIRST_TRUST"))
-        .expect("the gate line");
-    assert!(w.contains("topos add -g github.com/o/r --yes"), "{w}");
-    assert_eq!(git.fetches(), 0, "nothing is fetched before the gate");
-    assert!(out.data.skills.is_empty(), "{:?}", out.data.skills);
-
-    // THROUGH the gate: the consented add installs every skill the repo holds.
-    gate_add(&ctx, &plane, &dir, &git, "github.com/o/r");
+    // The FIRST sweep installs what the row demands — no prior `add`, no consent moment, no
+    // ceremony: a committed row is the demand, and the automatic update honors it.
+    let out = quiet_sweep(&ctx, &plane, &dir, &git);
     let alpha = rig.home.0.join(".claude/skills/alpha/SKILL.md");
     let beta = rig.home.0.join(".claude/skills/beta/SKILL.md");
-    assert!(alpha.exists() && beta.exists());
-    let after_install = git.fetches();
+    assert!(
+        alpha.exists() && beta.exists(),
+        "the sweep installs a cloned project's row: {:?}",
+        out.warnings
+    );
 
-    // The BACKGROUND sweep passes no forge lane: tracked members converge in place, and the forge
-    // is never dialed — a session start must never depend on github.
+    // Upstream moves. Inside the interval the sweep does not even ask.
     git.serve(build_repo_targz(
         "o-r-bbbbbbbbbbbb2",
         &[
@@ -1554,12 +1648,17 @@ fn a_star_repo_row_moves_only_on_an_explicit_update() {
             ("skills/gamma/SKILL.md", b"# gamma v1\n"),
         ],
     ));
-    let quiet = sweep(&ctx, &plane, &dir);
-    assert_eq!(git.fetches(), after_install, "the quiet sweep never dials");
+    let (probes, fetches) = (git.probes(), git.fetches());
+    let quiet = quiet_sweep(&ctx, &plane, &dir, &git);
+    assert_eq!(
+        (git.probes(), git.fetches()),
+        (probes, fetches),
+        "inside the interval the silent sweep asks the forge nothing"
+    );
     assert_eq!(
         std::fs::read_to_string(&alpha).unwrap(),
         "# alpha v1\n",
-        "no forge lane, no move"
+        "and nothing moves"
     );
     assert!(
         quiet
@@ -1571,14 +1670,9 @@ fn a_star_repo_row_moves_only_on_an_explicit_update() {
         quiet.data.skills
     );
 
-    // The EXPLICIT update moves it — and says exactly what moved.
-    let out = ops::manifest_update(
-        &ctx,
-        &connect(&plane, &dir),
-        Some(&git as &dyn crate::git_source::GitTarballSource),
-        &ops::ManifestUpdateOpts::default(),
-    )
-    .unwrap();
+    // Once the interval has elapsed, the NEXT session start lands it — and says what moved.
+    forge_interval_elapsed(&rig);
+    let out = quiet_sweep(&ctx, &plane, &dir, &git);
     let line = out
         .disclosures
         .iter()
@@ -1598,18 +1692,427 @@ fn a_star_repo_row_moves_only_on_an_explicit_update() {
     assert_eq!(
         std::fs::read_to_string(&alpha).unwrap(),
         "# alpha v2\n",
-        "the explicit update lands the new bytes"
+        "the silent sweep lands the new bytes"
     );
     assert!(rig.home.0.join(".claude/skills/gamma/SKILL.md").exists());
 }
 
 #[test]
+fn an_unchanged_repo_is_probed_and_never_downloaded() {
+    // ACCEPTANCE 2, asserted on the TRANSPORT SEAM rather than by timing: a repo that has not
+    // moved costs one probe and zero archives. This is the whole reason the lane can run on a
+    // clock at all — the check has to be cheap enough to make automatic.
+    let rig = Rig::new("repo-cheap");
+    rig.write_global("[bundles]\n\"github.com/o/r\" = \"*\"\n");
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let plane = FakePlane::new(log);
+    let dir = FakeDirectory::new(Vec::new(), Vec::new());
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    let git = FakeGit::new(build_repo_targz(
+        "o-r-aaaaaaaaaaaa1",
+        &[("skills/alpha/SKILL.md", b"# alpha v1\n")],
+    ));
+    update_now(&ctx, &plane, &dir, &git);
+    assert!(rig.home.0.join(".claude/skills/alpha/SKILL.md").exists());
+
+    let fetches = git.fetches();
+    let probes = git.probes();
+    forge_interval_elapsed(&rig);
+    let out = quiet_sweep(&ctx, &plane, &dir, &git);
+    assert_eq!(
+        git.fetches(),
+        fetches,
+        "an unchanged repo downloads NOTHING: {:?}",
+        out.warnings
+    );
+    assert_eq!(git.probes(), probes + 1, "it costs exactly one probe");
+    assert!(
+        out.data
+            .skills
+            .iter()
+            .any(|s| s.skill == "alpha" && s.action == PullAction::UpToDate),
+        "{:?}",
+        out.data.skills
+    );
+}
+
+#[test]
+fn the_forge_clock_is_separate_from_the_workspace_cadence() {
+    // ACCEPTANCE 3. In ONE run: the workspace lane dials (its own throttle governs it, and it is
+    // not this one), while the forge lane — inside its much longer interval — asks nothing.
+    let rig = Rig::new("repo-two-clocks");
+    rig.seed_session();
+    let v = one_file(b"# deploy\n");
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let plane = FakePlane::new(log.clone()).with_version("s_deploy", &v);
+    plane.serve(DeliverySnapshot {
+        skills: vec![delivered("s_deploy", "deploy", &v)],
+        ..empty_snapshot()
+    });
+    let dir = FakeDirectory::new(vec![catalog_entry("s_deploy", "deploy", &v)], Vec::new());
+    rig.write_global(&format!(
+        "[bundles]\n\"{HOST}/{WS_NAME}\" = \"*\"\n\"github.com/o/r\" = \"*\"\n"
+    ));
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    let git = FakeGit::new(build_repo_targz(
+        "o-r-aaaaaaaaaaaa1",
+        &[("skills/alpha/SKILL.md", b"# alpha v1\n")],
+    ));
+    quiet_sweep(&ctx, &plane, &dir, &git);
+    let (probes, fetches) = (git.probes(), git.fetches());
+    log.lock().unwrap().clear();
+
+    // A second session start, inside the forge interval.
+    let out = quiet_sweep(&ctx, &plane, &dir, &git);
+    assert_eq!(
+        (git.probes(), git.fetches()),
+        (probes, fetches),
+        "zero forge requests inside the interval"
+    );
+    assert!(
+        log.lock().unwrap().iter().any(|l| l == "report s_deploy"),
+        "the workspace lane keeps its own cadence in the same run: {:?}",
+        log.lock().unwrap()
+    );
+    assert!(
+        out.data.skills.iter().any(|s| s.skill == "deploy"),
+        "{:?}",
+        out.data.skills
+    );
+}
+
+#[test]
+fn a_failed_check_advances_the_clock_like_a_successful_one() {
+    // ACCEPTANCE 4 — the highest-risk detail in the whole change. A check that FAILED has still
+    // had its turn. If the clock only moved on success, one unreachable forge would be re-dialed
+    // at every single session start, which is precisely the traffic the interval exists to
+    // prevent. So: the lane ran, therefore it waits.
+    let rig = Rig::new("repo-clock-on-failure");
+    rig.write_global("[bundles]\n\"github.com/o/r\" = \"*\"\n");
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let plane = FakePlane::new(log);
+    let dir = FakeDirectory::new(Vec::new(), Vec::new());
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    let git = FakeGit::new(build_repo_targz(
+        "o-r-aaaaaaaaaaaa1",
+        &[("skills/alpha/SKILL.md", b"# alpha v1\n")],
+    ));
+
+    // A round that reaches nothing at all.
+    git.fail_with(FetchFault::Unreachable);
+    let out = quiet_sweep(&ctx, &plane, &dir, &git);
+    let attempted = git.probes() + git.fetches();
+    assert!(attempted > 0, "the round really did try");
+    assert!(out.data.skills.is_empty(), "{:?}", out.data.skills);
+
+    // The clock moved anyway — a whole interval out, exactly as a successful round would leave it.
+    let due = forge_next_due(&rig);
+    assert_eq!(
+        due,
+        rig_now(&rig) + crate::forge_check::CHECK_INTERVAL_MS,
+        "a failed round waits exactly as long as one that worked"
+    );
+
+    // THE REGRESSION: the next session start inside the window asks nothing and says nothing.
+    let out = quiet_sweep(&ctx, &plane, &dir, &git);
+    assert_eq!(
+        git.probes() + git.fetches(),
+        attempted,
+        "the failure is not re-dialed at the next session start"
+    );
+    let lines = ops::quiet_hook_lines(&rig.fs, &rig.layout(), rig_now(&rig), &out);
+    assert!(lines.is_empty(), "and emits no line: {lines:?}");
+}
+
+#[test]
+fn a_dead_network_costs_one_timeout_for_the_whole_round() {
+    // ACCEPTANCE 5. Five rows, one dead forge: the breaker short-circuits after the first fault
+    // that never reached it, so a session start pays ONE connect timeout rather than five. The
+    // clock still advances, and every row is recorded as checked — a skipped source had its turn.
+    let rig = Rig::new("repo-breaker");
+    rig.write_global(
+        "[bundles]\n\"github.com/o/a\" = \"*\"\n\"github.com/o/b\" = \"*\"\n\
+         \"github.com/o/c\" = \"*\"\n\"github.com/o/d\" = \"*\"\n\"github.com/o/e\" = \"*\"\n",
+    );
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let plane = FakePlane::new(log);
+    let dir = FakeDirectory::new(Vec::new(), Vec::new());
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    let git = FakeGit::new(build_repo_targz(
+        "o-r-aaaaaaaaaaaa1",
+        &[("skills/alpha/SKILL.md", b"# alpha v1\n")],
+    ));
+    git.fail_with(FetchFault::Unreachable);
+
+    let out = quiet_sweep(&ctx, &plane, &dir, &git);
+    assert_eq!(
+        git.probes() + git.fetches(),
+        1,
+        "ONE dial for five rows behind one dead forge"
+    );
+    // Every source is nonetheless recorded as checked this round, so none of them comes straight
+    // back at the next session start.
+    let doc = crate::forge_check::read(&rig.fs, &rig.layout());
+    assert_eq!(doc.sources.len(), 5, "{:?}", doc.sources);
+    assert!(
+        doc.sources
+            .values()
+            .all(|c| c.checked_at_ms == rig_now(&rig)),
+        "{:?}",
+        doc.sources
+    );
+    assert_eq!(
+        doc.next_check_at_ms,
+        rig_now(&rig) + crate::forge_check::CHECK_INTERVAL_MS
+    );
+    // The skipped rows say nothing of their own: the source that actually failed already did, and
+    // "we skipped this because something else broke" is noise about someone else's problem.
+    assert!(
+        !out.warnings
+            .iter()
+            .any(|w| w.contains("already unreachable")),
+        "{:?}",
+        out.warnings
+    );
+
+    // A forge that ANSWERS about one repo never trips it — the answer says nothing about the next.
+    let rig = Rig::new("repo-breaker-http");
+    rig.write_global("[bundles]\n\"github.com/o/a\" = \"*\"\n\"github.com/o/b\" = \"*\"\n");
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    let git = FakeGit::new(build_repo_targz(
+        "o-r-aaaaaaaaaaaa1",
+        &[("skills/alpha/SKILL.md", b"# alpha v1\n")],
+    ));
+    git.fail_with(FetchFault::Unavailable);
+    quiet_sweep(&ctx, &plane, &dir, &git);
+    assert_eq!(
+        git.probes() + git.fetches(),
+        2,
+        "an HTTP-level answer about one repo must not short-circuit the other"
+    );
+}
+
+#[test]
+fn a_machine_with_no_prior_grant_auto_updates_a_cloned_projects_row() {
+    // ACCEPTANCE 6. The first-trust registry is gone: a committed row IS the demand, and a fresh
+    // machine that has never seen the source converges it automatically. The interactive `add`
+    // keeps its describe — that is where a person is present to read the answer.
+    let rig = Rig::new("repo-no-grant");
+    let proj = project("proj-cloned", "[bundles]\n\"github.com/o/r\" = \"*\"\n");
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let plane = FakePlane::new(log);
+    let dir = FakeDirectory::new(Vec::new(), Vec::new());
+    let pctx = rig.ctx_at(Some(&proj.0));
+    let git = FakeGit::new(build_repo_targz(
+        "o-r-aaaaaaaaaaaa1",
+        &[("skills/alpha/SKILL.md", b"# alpha v1\n")],
+    ));
+    // Nothing has ever granted this origin, and no such registry exists to grant it.
+    assert!(!rig.layout().state_dir().join("forge_trust.json").exists());
+
+    let out = quiet_sweep(&pctx, &plane, &dir, &git);
+    assert!(
+        proj.0.join(".claude/skills/alpha/SKILL.md").exists(),
+        "the clone's row converges on its own: {:?}",
+        out.warnings
+    );
+    assert!(
+        !out.warnings.iter().any(|w| w.contains("FIRST_TRUST")),
+        "{:?}",
+        out.warnings
+    );
+    assert!(
+        crate::sidecar::existing_project_store(&rig.fs, &proj.0).is_some(),
+        "installed through the project's own store"
+    );
+
+    // The interactive add still DESCRIBES first — including for this now-tracked source.
+    let outcome = ops::add_reference(
+        &pctx,
+        &connect(&plane, &dir),
+        Some(&git as &dyn crate::git_source::GitTarballSource),
+        "github.com/o/r",
+        false,
+        false,
+    )
+    .unwrap();
+    match outcome {
+        ops::AddRefOutcome::Described { data, yes_argv } => {
+            assert_eq!(data.source, "github.com/o/r");
+            assert!(yes_argv.contains(&"--yes".to_owned()), "{yes_argv:?}");
+        }
+        ops::AddRefOutcome::Applied(_) => {
+            panic!("an interactive add of a git source always describes first")
+        }
+    }
+}
+
+#[test]
+fn a_deleted_repo_is_reported_once_and_then_left_alone() {
+    // ACCEPTANCE 7a. A repo the forge says is gone is a fact about the ROW, not about the
+    // network: saying it every session would train a person to stop reading. Said once, then the
+    // lane stops asking until the row that names it changes.
+    let rig = Rig::new("repo-deleted");
+    rig.write_global("[bundles]\n\"github.com/o/r\" = \"*\"\n");
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let plane = FakePlane::new(log);
+    let dir = FakeDirectory::new(Vec::new(), Vec::new());
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    let git = FakeGit::new(build_repo_targz(
+        "o-r-aaaaaaaaaaaa1",
+        &[("skills/alpha/SKILL.md", b"# alpha v1\n")],
+    ));
+    update_now(&ctx, &plane, &dir, &git);
+    let alpha = rig.home.0.join(".claude/skills/alpha/SKILL.md");
+    assert!(alpha.exists());
+
+    // The repo is deleted upstream.
+    git.fail_with(FetchFault::Gone);
+    forge_interval_elapsed(&rig);
+    let out = quiet_sweep(&ctx, &plane, &dir, &git);
+    let dialed = git.probes() + git.fetches();
+    assert!(
+        out.warnings.iter().any(|w| w.starts_with("REMOTE_FETCH")),
+        "the refusal is said: {:?}",
+        out.warnings
+    );
+    assert!(alpha.exists(), "the bytes already here keep working");
+
+    // Round two: not asked, not said.
+    forge_interval_elapsed(&rig);
+    let out = quiet_sweep(&ctx, &plane, &dir, &git);
+    assert_eq!(
+        git.probes() + git.fetches(),
+        dialed,
+        "a settled verdict stops the dialing"
+    );
+    assert!(
+        !out.warnings.iter().any(|w| w.starts_with("REMOTE_FETCH")),
+        "and is not repeated: {:?}",
+        out.warnings
+    );
+    assert!(
+        out.data
+            .skills
+            .iter()
+            .any(|s| s.skill == "alpha" && s.action == PullAction::UpToDate),
+        "the row still converges in place: {:?}",
+        out.data.skills
+    );
+
+    // EDITING the row re-opens the question — the verdict was about what the row said. (The pin
+    // names a commit nothing here holds, so the row is genuinely unsettled and does want an
+    // answer; a pin already satisfied would rightly never dial at all.)
+    rig.write_global("[bundles]\n\"github.com/o/r\" = \"ffffffffffff9\"\n");
+    forge_interval_elapsed(&rig);
+    quiet_sweep(&ctx, &plane, &dir, &git);
+    assert!(
+        git.probes() + git.fetches() > dialed,
+        "a changed row asks again"
+    );
+}
+
+#[test]
+fn a_renamed_repo_keeps_working_and_says_where_it_went() {
+    // ACCEPTANCE 7b. The forge redirects a renamed repo and the check follows it, so the row goes
+    // on resolving. A rename is never reported as a missing repo — and never as a failure at all:
+    // the person is simply told the canonical spelling, on the channel for things that WORKED.
+    let rig = Rig::new("repo-renamed");
+    rig.write_global("[bundles]\n\"github.com/o/r\" = \"*\"\n");
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let plane = FakePlane::new(log);
+    let dir = FakeDirectory::new(Vec::new(), Vec::new());
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    let git = FakeGit::new(build_repo_targz(
+        "o-r-aaaaaaaaaaaa1",
+        &[("skills/alpha/SKILL.md", b"# alpha v1\n")],
+    ));
+    update_now(&ctx, &plane, &dir, &git);
+
+    git.rename_to("newowner", "newrepo");
+    git.serve(build_repo_targz(
+        "o-r-bbbbbbbbbbbb2",
+        &[("skills/alpha/SKILL.md", b"# alpha v2\n")],
+    ));
+    forge_interval_elapsed(&rig);
+    let out = quiet_sweep(&ctx, &plane, &dir, &git);
+    assert_eq!(
+        std::fs::read_to_string(rig.home.0.join(".claude/skills/alpha/SKILL.md")).unwrap(),
+        "# alpha v2\n",
+        "the renamed repo keeps delivering: {:?}",
+        out.warnings
+    );
+    let line = out
+        .disclosures
+        .iter()
+        .find(|d| d.starts_with("GIT_RENAMED"))
+        .unwrap_or_else(|| panic!("the rename note: {:?}", out.disclosures));
+    assert!(line.contains("github.com/newowner/newrepo"), "{line}");
+    assert!(
+        !out.warnings.iter().any(|w| w.contains("not found")),
+        "a rename is never reported as a missing repo: {:?}",
+        out.warnings
+    );
+}
+
+#[test]
+fn five_rows_behind_one_quiet_forge_produce_one_line_and_only_when_stale() {
+    // ACCEPTANCE 8. The silent sweep's only channel is text injected into an agent's context
+    // window, so its budget is a person's attention: five rows behind one dead forge is ONE thing
+    // that happened. And it is said only once the silence has run long enough to mean something —
+    // a blip must never interrupt a session.
+    let rig = Rig::new("repo-one-line");
+    rig.write_global(
+        "[bundles]\n\"github.com/o/a\" = \"*\"\n\"github.com/o/b\" = \"*\"\n\
+         \"github.com/o/c\" = \"*\"\n\"github.com/o/d\" = \"*\"\n\"github.com/o/e\" = \"*\"\n",
+    );
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let plane = FakePlane::new(log);
+    let dir = FakeDirectory::new(Vec::new(), Vec::new());
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    let archive = build_repo_targz(
+        "o-r-aaaaaaaaaaaa1",
+        &[("skills/alpha/SKILL.md", b"# alpha v1\n")],
+    );
+    // All five answer once, so each has a last-answered time to be stale FROM.
+    for name in ["a", "b", "c", "d", "e"] {
+        let git = FakeGit::new(archive.clone());
+        forge_interval_elapsed(&rig);
+        update_now(&ctx, &plane, &dir, &git);
+        let _ = name;
+    }
+    let git = FakeGit::new(archive);
+    git.fail_with(FetchFault::Unreachable);
+    forge_interval_elapsed(&rig);
+    let out = quiet_sweep(&ctx, &plane, &dir, &git);
+    assert_eq!(out.stale_forge.len(), 1, "one host: {:?}", out.stale_forge);
+    assert_eq!(out.stale_forge[0].host, "github.com");
+    assert_eq!(out.stale_forge[0].sources, 5);
+
+    // A fresh miss says NOTHING — the copies still work, and a transient blip is not news.
+    let lines = ops::quiet_hook_lines(&rig.fs, &rig.layout(), rig_now(&rig), &out);
+    assert!(lines.is_empty(), "not stale yet: {lines:?}");
+
+    // Long after the last answer, ONE line — naming the host, the count, and the consequence.
+    let stale_now = rig_now(&rig) + crate::forge_check::STALE_AFTER_MS + DAY_MS;
+    let lines = ops::quiet_hook_lines(&rig.fs, &rig.layout(), stale_now, &out);
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert!(lines[0].contains("github.com"), "{:?}", lines[0]);
+    assert!(lines[0].contains("5 skills"), "{:?}", lines[0]);
+    assert!(
+        lines[0].contains("they still work"),
+        "the consequence, so `unreachable` does not read as breakage: {:?}",
+        lines[0]
+    );
+}
+
+#[test]
 fn a_repo_set_member_reads_as_current_in_list_not_detached() {
-    // The two commands must not contradict each other. `update` keeps a GitHub-sourced skill
-    // current; `list` rendered the very same copy as "[detached] … removed from the skill list",
-    // because a repo-set row's expansion was never itemized and the ghost walk therefore read a
-    // live, managed copy as an abandoned leftover. Asserted against BOTH commands in one test,
-    // because the bug WAS the disagreement.
+    // ACCEPTANCE 9 — the two commands must not contradict each other. `update` keeps a
+    // GitHub-sourced skill current; `list` used to render the very same copy as
+    // "[detached] … removed from the skill list", because the set row's expansion was never
+    // itemized and the ghost walk therefore read a live, managed copy as an abandoned leftover.
+    // Asserted against BOTH commands in one test, because the bug WAS the disagreement.
     let rig = Rig::new("repo-list-current");
     rig.write_global("[bundles]\n\"github.com/o/r\" = \"*\"\n");
     let log: CallLog = Arc::new(Mutex::new(Vec::new()));
@@ -1623,16 +2126,9 @@ fn a_repo_set_member_reads_as_current_in_list_not_detached() {
             ("skills/beta/SKILL.md", b"# beta v1\n"),
         ],
     ));
-    gate_add(&ctx, &plane, &dir, &git, "github.com/o/r");
 
     // What `update` says: both members are managed and current.
-    let out = ops::manifest_update(
-        &ctx,
-        &connect(&plane, &dir),
-        Some(&git as &dyn crate::git_source::GitTarballSource),
-        &ops::ManifestUpdateOpts::default(),
-    )
-    .unwrap();
+    let out = update_now(&ctx, &plane, &dir, &git);
     for name in ["alpha", "beta"] {
         assert!(
             out.data.skills.iter().any(|s| s.skill == name),
@@ -1700,111 +2196,55 @@ fn a_repo_set_member_reads_as_current_in_list_not_detached() {
 }
 
 #[test]
-fn an_untracked_repo_row_refuses_toward_the_add_gate() {
-    // The refusal is the SAME on the quiet sweep (no forge lane) and on a targeted skill row —
-    // a network would not change it: trust is the gate, not reachability.
-    let rig = Rig::new("repo-gate");
-    rig.write_global("[bundles]\n\"github.com/o/r\" = \"*\"\n\"github.com/x/y/tool\" = \"*\"\n");
+fn every_check_is_recorded_and_visible_to_status_and_list() {
+    // ACCEPTANCE 4's first two tiers: recorded ALWAYS, and shown on demand — the answer to "is
+    // this even working?", from local state alone.
+    let rig = Rig::new("repo-recorded");
+    rig.write_global("[bundles]\n\"github.com/o/r\" = \"*\"\n");
     let log: CallLog = Arc::new(Mutex::new(Vec::new()));
     let plane = FakePlane::new(log);
     let dir = FakeDirectory::new(Vec::new(), Vec::new());
     let ctx = rig.ctx_at(Some(&rig.work.0));
-    let out = sweep(&ctx, &plane, &dir);
-    let lines: Vec<&String> = out
-        .warnings
-        .iter()
-        .filter(|w| w.starts_with("FIRST_TRUST"))
-        .collect();
-    assert_eq!(lines.len(), 2, "{:?}", out.warnings);
-    assert!(
-        lines
-            .iter()
-            .any(|w| w.contains("topos add -g github.com/o/r --yes")),
-        "{lines:?}"
-    );
-    // A four-segment SKILL row names ITS OWN reference as the gate (adding it is what makes the
-    // origin tracked).
-    assert!(
-        lines
-            .iter()
-            .any(|w| w.contains("topos add -g github.com/x/y/tool --yes")),
-        "{lines:?}"
-    );
-    assert!(
-        !out.warnings.iter().any(|w| w.contains("network required")),
-        "trust, not reachability: {:?}",
-        out.warnings
-    );
-}
-
-#[test]
-fn a_committed_project_store_never_grants_forge_trust() {
-    // RED TEAM: a malicious checkout commits a valid-looking `.topos/` project store (real
-    // lock.json + origin.json — here minted by a real add on ANOTHER machine) plus the manifest
-    // row. On a machine whose OWN registry never granted the origin, the reconcile must refuse
-    // toward the add gate and dial nothing — store contents are a checkout fact, never consent.
-    let victim = Rig::new("redteam-victim");
-    let attacker = Rig::new("redteam-attacker");
-    let proj = project("proj-redteam", "[bundles]\n\"github.com/o/r\" = \"*\"\n");
-    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
-    let plane = FakePlane::new(log);
-    let dir = FakeDirectory::new(Vec::new(), Vec::new());
     let git = FakeGit::new(build_repo_targz(
         "o-r-aaaaaaaaaaaa1",
         &[("skills/alpha/SKILL.md", b"# alpha v1\n")],
     ));
+    update_now(&ctx, &plane, &dir, &git);
 
-    // The attacker's machine populates the checkout's own store through a REAL consented add —
-    // exactly the bytes a hostile repo could commit.
-    let attacker_ctx = attacker.ctx_at(Some(&proj.0));
-    match ops::add_reference(
-        &attacker_ctx,
-        &connect(&plane, &dir),
-        Some(&git as &dyn crate::git_source::GitTarballSource),
-        "github.com/o/r",
-        false,
-        true,
-    )
-    .unwrap()
-    {
-        ops::AddRefOutcome::Applied(_) => {}
-        ops::AddRefOutcome::Described { .. } => panic!("--yes applies"),
-    }
-    assert!(
-        crate::sidecar::existing_project_store(&victim.fs, &proj.0).is_some(),
-        "the checkout carries a real project store"
-    );
-    let fetches_before = git.fetches();
+    let status = ops::status_snapshot(&ctx, ops::ScopeView::All).unwrap();
+    let row = status
+        .forge
+        .iter()
+        .find(|f| f.source == "github.com/o/r")
+        .unwrap_or_else(|| panic!("status shows the source: {:?}", status.forge));
+    assert_eq!(row.checked_at, rig_now(&rig));
+    assert_eq!(row.answered_at, Some(rig_now(&rig)));
+    assert_eq!(row.commit.as_deref(), Some("aaaaaaaaaaaa1"));
+    assert!(row.error.is_none(), "{row:?}");
 
-    // The VICTIM machine opens the checkout: its registry holds nothing — the store must not
-    // vouch, however valid its documents look.
-    git.serve(build_repo_targz(
-        "o-r-bbbbbbbbbbbb2",
-        &[("skills/alpha/SKILL.md", b"# alpha EVIL\n")],
-    ));
-    let victim_ctx = victim.ctx_at(Some(&proj.0));
-    let out = ops::manifest_update(
-        &victim_ctx,
-        &connect(&plane, &dir),
-        Some(&git as &dyn crate::git_source::GitTarballSource),
-        &ops::ManifestUpdateOpts::default(),
+    // A failure is visible in exactly the same place, rather than only in a receipt nobody kept.
+    git.fail_with(FetchFault::Unreachable);
+    forge_interval_elapsed(&rig);
+    quiet_sweep(&ctx, &plane, &dir, &git);
+    let listed = crate::ops::list_with(
+        &ctx,
+        &ops::ListRequest::default(),
+        None,
+        None,
+        crate::ops::RowPage::unlimited(),
     )
     .unwrap();
-    let w = out
-        .warnings
+    let row = listed
+        .data
+        .forge
         .iter()
-        .find(|w| w.starts_with("FIRST_TRUST"))
-        .unwrap_or_else(|| panic!("the gate refuses: {:?}", out.warnings));
-    assert!(w.contains("topos add github.com/o/r --yes"), "{w}");
+        .find(|f| f.source == "github.com/o/r")
+        .unwrap_or_else(|| panic!("list shows the source: {:?}", listed.data.forge));
+    assert!(row.error.is_some(), "{row:?}");
     assert_eq!(
-        git.fetches(),
-        fetches_before,
-        "nothing is fetched on the untrusting machine"
-    );
-    assert_eq!(
-        std::fs::read_to_string(proj.0.join(".claude/skills/alpha/SKILL.md")).unwrap(),
-        "# alpha v1\n",
-        "no forge content installs without this machine's own consent"
+        row.answered_at,
+        Some(rig_now(&rig)),
+        "the last ANSWER survives a later failure"
     );
 }
 
@@ -1824,29 +2264,12 @@ fn a_granted_origin_flows_in_both_scopes() {
         &[("skills/alpha/SKILL.md", b"# alpha v1\n")],
     ));
     gate_add(&ctx, &plane, &dir, &git, "github.com/o/r");
-    // The consent is durably in the registry.
-    let trust: crate::forge_trust::ForgeTrust =
-        crate::doc::read_doc(&rig.fs, &rig.layout().forge_trust_path())
-            .unwrap()
-            .expect("the registry doc");
-    assert!(trust.origins.contains("github.com/o/r"), "{trust:?}");
 
-    // A fresh checkout spells the same repo row: the explicit update installs into the PROJECT's
-    // own store with no first-trust refusal (the grant is machine-wide).
+    // A fresh checkout spells the same repo row: the update installs into the PROJECT's own store.
+    // Scopes are unblended, so the machine's landing neither helps nor hinders the checkout's.
     let proj = project("proj-granted", "[bundles]\n\"github.com/o/r\" = \"*\"\n");
     let pctx = rig.ctx_at(Some(&proj.0));
-    let out = ops::manifest_update(
-        &pctx,
-        &connect(&plane, &dir),
-        Some(&git as &dyn crate::git_source::GitTarballSource),
-        &ops::ManifestUpdateOpts::default(),
-    )
-    .unwrap();
-    assert!(
-        !out.warnings.iter().any(|w| w.starts_with("FIRST_TRUST")),
-        "{:?}",
-        out.warnings
-    );
+    let out = update_now(&pctx, &plane, &dir, &git);
     assert!(
         proj.0.join(".claude/skills/alpha/SKILL.md").exists(),
         "the granted origin's member lands in the checkout: {:?}",
@@ -1855,71 +2278,6 @@ fn a_granted_origin_flows_in_both_scopes() {
     assert!(
         crate::sidecar::existing_project_store(&rig.fs, &proj.0).is_some(),
         "installed through the project's own store"
-    );
-}
-
-#[test]
-fn home_store_imports_seed_the_registry_once() {
-    // Legacy machines: origins already imported in the HOME store passed the add gate
-    // historically — the first consult seeds them into the registry, once; afterwards the
-    // registry alone is the authority (the store evidence may go, the grant stands).
-    let rig = Rig::new("trust-seed");
-    rig.write_global("[bundles]\n\"github.com/o/r\" = \"*\"\n");
-    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
-    let plane = FakePlane::new(log);
-    let dir = FakeDirectory::new(Vec::new(), Vec::new());
-    let ctx = rig.ctx_at(Some(&rig.work.0));
-    let git = FakeGit::new(build_repo_targz(
-        "o-r-aaaaaaaaaaaa1",
-        &[("skills/alpha/SKILL.md", b"# alpha v1\n")],
-    ));
-    // A pre-registry machine: real home-store imports, NO registry doc.
-    gate_add(&ctx, &plane, &dir, &git, "github.com/o/r");
-    std::fs::remove_file(rig.layout().forge_trust_path()).unwrap();
-
-    // The consult seeds: the update flows with no first-trust refusal, and the written registry
-    // carries the origin with the durable seed marker.
-    let out = ops::manifest_update(
-        &ctx,
-        &connect(&plane, &dir),
-        Some(&git as &dyn crate::git_source::GitTarballSource),
-        &ops::ManifestUpdateOpts::default(),
-    )
-    .unwrap();
-    assert!(
-        !out.warnings.iter().any(|w| w.starts_with("FIRST_TRUST")),
-        "{:?}",
-        out.warnings
-    );
-    let trust: crate::forge_trust::ForgeTrust =
-        crate::doc::read_doc(&rig.fs, &rig.layout().forge_trust_path())
-            .unwrap()
-            .expect("the seeded registry doc");
-    assert!(trust.seeded, "{trust:?}");
-    assert!(trust.origins.contains("github.com/o/r"), "{trust:?}");
-
-    // ONCE: the registry now speaks alone — with the home-store evidence gone, the origin stays
-    // granted and the explicit update converges the landing afresh.
-    for entry in rig.fs.read_dir(&rig.layout().skills_dir()).unwrap() {
-        std::fs::remove_dir_all(&entry).unwrap();
-    }
-    std::fs::remove_dir_all(rig.home.0.join(".claude/skills/alpha")).unwrap();
-    let out = ops::manifest_update(
-        &ctx,
-        &connect(&plane, &dir),
-        Some(&git as &dyn crate::git_source::GitTarballSource),
-        &ops::ManifestUpdateOpts::default(),
-    )
-    .unwrap();
-    assert!(
-        !out.warnings.iter().any(|w| w.starts_with("FIRST_TRUST")),
-        "the registry is the authority once seeded: {:?}",
-        out.warnings
-    );
-    assert!(
-        rig.home.0.join(".claude/skills/alpha/SKILL.md").exists(),
-        "the trusted row converges its landing: {:?}",
-        out.warnings
     );
 }
 
@@ -2465,7 +2823,7 @@ fn a_targeted_update_narrows_the_sweep_and_names_a_miss() {
 // =================================================================================================
 
 #[test]
-fn a_repo_row_flows_after_the_add_gate_and_the_quiet_sweep_still_never_dials() {
+fn a_repo_row_converges_in_place_inside_the_forge_interval() {
     let rig = Rig::new("repo-postgate");
     rig.write_global("[bundles]\n\"github.com/o/r\" = \"*\"\n");
     let log: CallLog = Arc::new(Mutex::new(Vec::new()));
@@ -2478,11 +2836,19 @@ fn a_repo_row_flows_after_the_add_gate_and_the_quiet_sweep_still_never_dials() {
     ));
     gate_add(&ctx, &plane, &dir, &git, "github.com/o/r");
     assert!(rig.home.0.join(".claude/skills/alpha/SKILL.md").exists());
+    // An `add` is not a lane round — it schedules nothing. The first sweep after it therefore
+    // still checks; this one is what starts the clock.
+    quiet_sweep(&ctx, &plane, &dir, &git);
 
-    // Tracked now: the quiet sweep converges in place without dialing; the explicit update flows.
-    let fetches = git.fetches();
-    let quiet = sweep(&ctx, &plane, &dir);
-    assert_eq!(git.fetches(), fetches, "quiet never dials");
+    // Tracked now: inside its interval the silent sweep converges in place without dialing, and
+    // the hand-run update answers the same way because nothing upstream moved.
+    let dialed = git.probes() + git.fetches();
+    let quiet = quiet_sweep(&ctx, &plane, &dir, &git);
+    assert_eq!(
+        git.probes() + git.fetches(),
+        dialed,
+        "inside the interval, nothing is asked"
+    );
     assert!(
         quiet
             .data
@@ -2492,18 +2858,7 @@ fn a_repo_row_flows_after_the_add_gate_and_the_quiet_sweep_still_never_dials() {
         "{:?}",
         quiet.data.skills
     );
-    assert!(
-        !quiet.warnings.iter().any(|w| w.starts_with("FIRST_TRUST")),
-        "{:?}",
-        quiet.warnings
-    );
-    let out = ops::manifest_update(
-        &ctx,
-        &connect(&plane, &dir),
-        Some(&git as &dyn crate::git_source::GitTarballSource),
-        &ops::ManifestUpdateOpts::default(),
-    )
-    .unwrap();
+    let out = update_now(&ctx, &plane, &dir, &git);
     assert!(
         out.data
             .skills
@@ -4095,11 +4450,11 @@ fn a_delivered_bundle_shipping_a_non_self_ignoring_gitignore_warns_on_the_sweep(
 }
 
 #[test]
-fn a_manifest_row_alone_never_trusts_the_origin() {
-    // Trust in a forge origin is a STORE fact. A VCS-delivered manifest row is demand, never
-    // consent: a bare `add` of that exact reference still gets the member-listing describe
-    // (noting the row exists), `--yes` is the consent, and only then — with the origin tracked
-    // in the scope's store — do further adds flow ungated.
+fn an_interactive_add_of_a_git_source_always_describes_first() {
+    // The describe is a property of the VERB, not of the origin. `add` is where a person is
+    // present to read what a repo holds and where it would land, so every interactive add says it
+    // — including a re-add of a source already tracked here, and including one whose row is
+    // already standing in the file.
     let rig = Rig::new("row-no-trust");
     let proj = project("proj-rowtrust", "[bundles]\n\"github.com/o/r\" = \"*\"\n");
     let log: CallLog = Arc::new(Mutex::new(Vec::new()));
@@ -4133,7 +4488,7 @@ fn a_manifest_row_alone_never_trusts_the_origin() {
             assert!(yes_argv.contains(&"--yes".to_owned()));
         }
         ops::AddRefOutcome::Applied(_) => {
-            panic!("a manifest row must never skip the first-trust describe")
+            panic!("an interactive add of a git source always describes first")
         }
     }
     assert!(
@@ -4141,7 +4496,7 @@ fn a_manifest_row_alone_never_trusts_the_origin() {
         "the describe installs nothing"
     );
 
-    // `--yes` is the consent: the origin becomes a store fact.
+    // `--yes` applies.
     match ops::add_reference(
         &ctx,
         &connect(&plane, &dir),
@@ -4157,7 +4512,9 @@ fn a_manifest_row_alone_never_trusts_the_origin() {
     }
     assert!(proj.0.join(".claude/skills/alpha/SKILL.md").exists());
 
-    // Tracked now: a further BARE add of the same origin flows ungated.
+    // Tracked now — and a further BARE add of the SAME origin still describes. That is the
+    // deliberate cost of making the shape a property of the verb: an answer a person asked for is
+    // never skipped because the machine happens to have seen the source before.
     match ops::add_reference(
         &ctx,
         &connect(&plane, &dir),
@@ -4168,22 +4525,22 @@ fn a_manifest_row_alone_never_trusts_the_origin() {
     )
     .unwrap()
     {
-        ops::AddRefOutcome::Applied(_) => {}
-        ops::AddRefOutcome::Described { .. } => {
-            panic!("a tracked origin's adds apply immediately")
+        ops::AddRefOutcome::Described { .. } => {}
+        ops::AddRefOutcome::Applied(_) => {
+            panic!("a repeat add describes too — the shape belongs to the verb")
         }
     }
 }
 
 // =================================================================================================
-// The SELECTOR import (`-s`/`-a`) — the same first-trust gate, the same per-scope store.
+// The SELECTOR import (`-s`/`-a`) — the same describe-first shape, the same per-scope store.
 // =================================================================================================
 
 #[test]
-fn a_selector_import_describes_first_then_grants_and_installs() {
-    // A selector narrows WHICH members land and WHERE; it is not a way around whose bytes these
-    // are. So `add owner/repo -s alpha` on an origin this machine has never granted DESCRIBES,
-    // fetches nothing into place, and applies only under `--yes` — which grants the origin.
+fn a_selector_import_describes_first_then_installs() {
+    // A selector narrows WHICH members land and WHERE; it is not a way around reading what a
+    // source holds. So `add owner/repo -s alpha` DESCRIBES, puts nothing in place, and applies
+    // only under `--yes` — exactly like the bare reference arm.
     let rig = Rig::new("sel-gate");
     let log: CallLog = Arc::new(Mutex::new(Vec::new()));
     let plane = FakePlane::new(log);
@@ -4244,7 +4601,8 @@ fn a_selector_import_describes_first_then_grants_and_installs() {
         !rig.home.0.join(".claude/skills/beta").exists(),
         "the selector narrowed the landing"
     );
-    // The grant is a MACHINE fact now: a later bare reference add of the same origin is ungated.
+    // A later bare reference add of the same origin describes too — the two-phase shape belongs
+    // to the verb, so it never depends on what the machine happens to have seen before.
     match ops::add_reference(
         &ctx,
         &connect(&plane, &dir),
@@ -4255,8 +4613,8 @@ fn a_selector_import_describes_first_then_grants_and_installs() {
     )
     .unwrap()
     {
-        ops::AddRefOutcome::Applied(_) => {}
-        ops::AddRefOutcome::Described { .. } => panic!("the origin is granted"),
+        ops::AddRefOutcome::Described { .. } => {}
+        ops::AddRefOutcome::Applied(_) => panic!("an interactive add describes first"),
     }
 }
 
@@ -4300,15 +4658,11 @@ fn a_project_scope_selector_import_converges_on_a_later_update() {
         "the project store tracks the import"
     );
     let fetches_before = git.fetches();
+    let probes_before = git.probes();
 
-    // The explicit update therefore CONVERGES it — no second fetch, no re-install.
-    let out = ops::manifest_update(
-        &ctx,
-        &connect(&plane, &dir),
-        Some(&git as &dyn crate::git_source::GitTarballSource),
-        &ops::ManifestUpdateOpts::default(),
-    )
-    .unwrap();
+    // The update therefore CONVERGES it — and the comparison is the cheap probe, so no archive
+    // moves at all.
+    let out = update_now(&ctx, &plane, &dir, &git);
     assert!(
         out.data
             .skills
@@ -4320,9 +4674,10 @@ fn a_project_scope_selector_import_converges_on_a_later_update() {
     );
     assert_eq!(
         git.fetches(),
-        fetches_before + 1,
-        "one fetch to compare the commit, and nothing re-installed"
+        fetches_before,
+        "nothing re-installed, and nothing downloaded to find that out"
     );
+    assert_eq!(git.probes(), probes_before + 1, "one probe to compare");
 }
 
 /// The store-routing helper the reconcile uses, reachable from the suite.
@@ -4711,31 +5066,6 @@ fn write_newer_schema_doc(layout: &Layout, path: &std::path::Path, body: &str) -
     let bytes = body.as_bytes().to_vec();
     std::fs::write(path, &bytes).unwrap();
     bytes
-}
-
-#[test]
-fn a_newer_forge_registry_grants_nothing_and_is_never_written_over() {
-    let rig = Rig::new("trust-newer");
-    let ctx = rig.ctx_at(Some(&rig.work.0));
-    let path = rig.layout().forge_trust_path();
-    let bytes = write_newer_schema_doc(
-        &rig.layout(),
-        &path,
-        "{\n  \"schema_version\": 9999,\n  \"seeded\": true,\n  \"origins\": [\"github.com/o/r\"]\n}\n",
-    );
-    // (a) A trust question over an undecipherable registry answers NO — never "empty, so re-seed".
-    assert!(
-        !crate::forge_trust::is_trusted(&ctx, "github.com/o/r"),
-        "an unreadable registry grants nothing"
-    );
-    // (b) …and the write REFUSES rather than replacing a document it could not read.
-    let err = crate::forge_trust::grant(&ctx, "github.com/o/r").unwrap_err();
-    assert_eq!(err.code(), "UPGRADE_REQUIRED", "{err:?}");
-    assert_eq!(
-        std::fs::read(&path).unwrap(),
-        bytes,
-        "the newer document is byte-untouched"
-    );
 }
 
 #[test]
@@ -5624,9 +5954,9 @@ fn a_subtree_url_records_a_skill_row_carrying_the_literal_path() {
 }
 
 #[test]
-fn a_subtree_url_naming_several_skills_grants_nothing() {
-    // The row is PROVEN before the consent is recorded: a subtree that names no single skill
-    // refuses with the names, and the machine is not left trusting a source whose row never landed.
+fn a_subtree_url_naming_several_skills_writes_nothing() {
+    // The row is PROVEN before anything lands: a subtree that names no single skill refuses with
+    // the names, and no manifest file is born for a row that cannot legally exist.
     let rig = Rig::new("tree-url-many");
     let log: CallLog = Arc::new(Mutex::new(Vec::new()));
     let plane = FakePlane::new(log);
@@ -5651,10 +5981,6 @@ fn a_subtree_url_naming_several_skills_grants_nothing() {
         Ok(_) => panic!("a subtree naming several skills names none of them"),
     };
     assert_eq!(err.code(), "AMBIGUOUS_SKILL", "{err:?}");
-    assert!(
-        !crate::forge_trust::is_trusted(&ctx, "github.com/o/r"),
-        "nothing was granted"
-    );
     assert!(
         !rig.layout()
             .home()

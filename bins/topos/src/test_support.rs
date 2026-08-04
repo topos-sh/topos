@@ -271,8 +271,9 @@ impl SessionInstall {
     // ---- manifests + reconcile ----------------------------------------------------------------
 
     /// `topos add <reference> --yes` (a workspace/catalog/channel/feed reference; `global` =
-    /// `-g`). The suites drive the APPLIED arm; a first-trust describe surfacing here is a
-    /// failure (workspace references never gate). A project-scoped add records into a file that
+    /// `-g`). The suites drive the APPLIED arm; a describe surfacing here is a failure (only a
+    /// git source describes, and these are workspace references). A project-scoped add records
+    /// into a file that
     /// already exists (none in reach refuses), so the rig runs the idempotent `topos init` first,
     /// exactly as a person would.
     pub fn add_reference(
@@ -291,7 +292,7 @@ impl SessionInstall {
             {
                 ops::AddRefOutcome::Applied(data) => Ok(*data),
                 ops::AddRefOutcome::Described { data, .. } => {
-                    Err(format!("unexpected first-trust describe: {data:?}"))
+                    Err(format!("unexpected describe: {data:?}"))
                 }
             }
         })
@@ -358,6 +359,9 @@ impl SessionInstall {
                     // A hand-run `topos update`: the scope rule applies, so `cwd` inside a
                     // checkout converges that project and a `cwd`-less call converges the machine.
                     scope: ops::UpdateScope::Here,
+                    // No forge lane is wired in these composed fixtures (`git` is `None` above),
+                    // so the cadence never comes into play; the hand-run posture is the honest one.
+                    forge: ops::ForgeCadence::Now,
                 },
             )
             // The lines a sweep emits, merged exactly as the `--json` envelope merges them:

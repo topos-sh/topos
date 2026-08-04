@@ -547,8 +547,8 @@ fn run_command(
         } => {
             // The `-s`/`-a` SELECTORS (single, multiple, or the `*` fan-outs) narrow a REMOTE
             // import — which members land, into which agent dirs. They pass through the SAME
-            // first-trust gate and the SAME per-scope store as a bare `add owner/repo`: a selector
-            // is a narrowing of what lands, never a way around whose bytes these are. `-s *`
+            // describe-first shape and the SAME per-scope store as a bare `add owner/repo`: a
+            // selector narrows what lands, never what a person gets to read first. `-s *`
             // expands to every skill in the repo; `-a *` to every harness DETECTED on this machine.
             let no_selectors = skill.is_empty() && agent.is_empty();
             let looks_remote = matches!(
@@ -610,8 +610,8 @@ fn run_command(
             // REFERENCES first, read by SHAPE (the joined-key grammar): a workspace bundle
             // (`@ws/name`, the canonical `host/ws/name`), a channel (`@ws/channels/x`), a
             // workspace FEED (`@ws`, `-g`), or a git source (`owner/repo[/skill]`, a github URL).
-            // Each records ONE manifest row; a first-trust git source describes before it
-            // installs. The `-s`/`-a` selectors stay with the multi-import path below, which
+            // Each records ONE manifest row; a git source describes before it installs. The
+            // `-s`/`-a` selectors stay with the multi-import path below, which
             // places per (skill × harness).
             // A `/`-containing token that names a REAL directory here is a local adopt, whatever
             // the grammar would read it as — the bytes in front of you win over a shorthand.
@@ -1241,12 +1241,12 @@ fn run_command(
                         .into(),
                 ))
             } else {
-                // The background sweep NEVER contacts a forge: `--quiet` passes no git source
-                // (git rows move only on an explicit update), and the reconcile's forge arms
-                // degrade honestly without one.
-                let git = (!quiet).then(|| {
-                    crate::plane_http::UreqGitSource::new().with_progress(Rc::clone(&progress))
-                });
+                // The background sweep DOES contact a forge — a row pointing at a repository is
+                // kept current like everything else. It just runs on the git lane's own, much
+                // slower clock rather than this sweep's: the cadence decision belongs to the
+                // reconcile, which is where the clock is read and advanced.
+                let git =
+                    crate::plane_http::UreqGitSource::new().with_progress(Rc::clone(&progress));
                 // The scope rule: a hand-run update converges where the invocation stands (or the
                 // machine, with `-g`), and the hook sweep covers BOTH — silent delivery is the
                 // promise, so `--quiet` wins over `-g` rather than narrowing what auto-update
@@ -1261,13 +1261,19 @@ fn run_command(
                 ops::manifest_update(
                     &ctx,
                     &connect_session_transports,
-                    git.as_ref()
-                        .map(|g| g as &dyn crate::git_source::GitTarballSource),
+                    Some(&git as &dyn crate::git_source::GitTarballSource),
                     &ops::ManifestUpdateOpts {
                         targets,
                         ack_notices: !quiet,
                         rebuild,
                         scope,
+                        // A person who typed the command gets an answer now; the hook sweep waits
+                        // for the interval.
+                        forge: if quiet {
+                            ops::ForgeCadence::Scheduled
+                        } else {
+                            ops::ForgeCadence::Now
+                        },
                     },
                 )
             };
@@ -1897,8 +1903,8 @@ fn finish_keep_as_yours(
     }
 }
 
-/// `add <reference>`'s finisher — the applied row receipt, or the FIRST-TRUST describe of a git
-/// source this machine has never used (with its `--yes` argv).
+/// `add <reference>`'s finisher — the applied row receipt, or a git source's describe (with its
+/// `--yes` argv).
 fn finish_add_reference(
     json: bool,
     command: &str,
@@ -1940,8 +1946,8 @@ fn finish_add_many(
     diag: &Diag<'_>,
 ) -> ExitCode {
     match result {
-        // A first-trust git source describes before it installs — the same two-phase receipt the
-        // bare reference arm prints, selectors and all.
+        // A git source describes before it installs — the same two-phase receipt the bare
+        // reference arm prints, selectors and all.
         Ok(ops::AddManyOutcome::Described { data, yes_argv }) => {
             if json {
                 let value = serde_json::json!({ "describe": data });

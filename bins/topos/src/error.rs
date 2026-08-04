@@ -6,6 +6,40 @@ use topos_types::TerminalOutcome;
 
 use topos_core::digest::RejectReason;
 
+/// How a remote-source read failed — the ONE classification the retry hint, the update sweep's
+/// per-round circuit breaker, and the auto-update clock all read.
+///
+/// It widens the old permanent/transient bit by ONE distinction the sweep genuinely needs: whether
+/// the host answered at all. A sweep over N sources behind a dead network must cost ONE connect
+/// timeout, not N — but a 500 about a single repo says nothing about the next one, so only the
+/// never-reached case may short-circuit the rest. This mirrors [`crate::plane::PlaneError`]'s
+/// `Unreachable` / `Unavailable` split, so both lanes classify a fault the same way.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FetchFault {
+    /// Connect-level: the host was never reached (DNS, connect, TLS, timeout).
+    Unreachable,
+    /// The host answered, but not usefully — a failure status, a rate-limit refusal, or a body
+    /// that never fully arrived. Retry later; nothing here is about this source's existence.
+    Unavailable,
+    /// The host answered ABOUT this source, permanently: gone, invisible, or not a repo at all.
+    /// Retrying the same reference gets the same answer.
+    Gone,
+}
+
+impl FetchFault {
+    /// Whether retrying the same reference can never help — what the terminal outcome and the
+    /// envelope's `retryable` bit derive from.
+    pub(crate) fn permanent(self) -> bool {
+        matches!(self, Self::Gone)
+    }
+
+    /// Whether the host answered at all. `false` is the ONLY thing that may trip a round's
+    /// circuit breaker.
+    pub(crate) fn reached(self) -> bool {
+        !matches!(self, Self::Unreachable)
+    }
+}
+
 /// The same-name disclosure a local-ambiguity refusal carries when the name the user typed is ALSO
 /// published in a connected workspace: the canonical references to subscribe to, and whether the
 /// local copies are provably the same bytes as the one version those references serve.
@@ -432,14 +466,14 @@ pub(crate) enum ClientError {
     /// asset name + a non-secret reason), so it is safe to show verbatim.
     #[error("the release signature for {asset} {reason} — refusing to install")]
     SignatureInvalid { asset: String, reason: String },
-    /// `add <owner/repo>` (a remote import) could not fetch the source. `permanent` separates the
-    /// causes retrying can never fix (a not-found repo/ref, a malformed reference) from the
-    /// transport faults a retry may clear (unreachable host, a cut-short download, a server
-    /// error) — the outcome and the envelope's `retryable` both derive from it, so a 404 never
-    /// invites a retry loop. The message is all-public (the source + a humanized reason), so it is
-    /// shown VERBATIM.
+    /// A remote source (an `add <owner/repo>` import, or an auto-update check of a tracked one)
+    /// could not be read. `fault` separates the causes retrying can never fix (a not-found
+    /// repo/ref, a malformed reference) from the transport faults a retry may clear — the outcome
+    /// and the envelope's `retryable` both derive from it, so a 404 never invites a retry loop —
+    /// and, within the retryable half, whether the host was reached at all. The message is
+    /// all-public (the source + a humanized reason), so it is shown VERBATIM.
     #[error("could not fetch {msg}")]
-    RemoteFetch { msg: String, permanent: bool },
+    RemoteFetch { msg: String, fault: FetchFault },
     /// A fetched remote source (a repo, or the `#<ref>`/`/tree/` subtree named) contained no `SKILL.md` —
     /// there is no skill to adopt. Usage guidance shown VERBATIM (the source is the user's own token).
     /// (`src`, not `source` — `thiserror` reserves a field named `source` for an error cause.)
@@ -682,9 +716,10 @@ impl ClientError {
             | ClientError::AmbiguousSkillInRepo { .. }
             | ClientError::DuplicateSkillName { .. }
             | ClientError::AmbiguousTarget { .. } => TerminalOutcome::AmbiguousName,
-            // A network fetch fault is transient — the agent may retry the same import.
-            ClientError::RemoteFetch { permanent, .. } => {
-                if *permanent {
+            // A network fetch fault is transient — the agent may retry the same import. Only the
+            // forge's answer ABOUT the source (gone / invisible) is permanent.
+            ClientError::RemoteFetch { fault, .. } => {
+                if fault.permanent() {
                     TerminalOutcome::PermanentFailure
                 } else {
                     TerminalOutcome::RetryableFailure

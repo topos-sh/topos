@@ -1459,6 +1459,16 @@ fn fixtures() -> Vec<(&'static str, String)> {
                 }],
                 command: "topos status -g".to_owned(),
             }),
+            // An external source's last auto-update check — recorded whatever its outcome, so
+            // "is this still being kept current?" has a local answer.
+            forge: vec![topos_types::results::ForgeSource {
+                source: "github.com/vercel-labs/skills".to_owned(),
+                checked_at: 1_750_000_000_000,
+                answered_at: Some(1_750_000_000_000),
+                commit: Some("1164afa5f0e21ebd01e6fc11249759353f494ad1".to_owned()),
+                error: None,
+                gone: false,
+            }],
         })
         .expect("StatusData serializes"),
         warnings: vec![],

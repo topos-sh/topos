@@ -10,6 +10,14 @@ pub(crate) trait IdSource {
     /// op signs. The signing frame binds these bytes; the wire carries their canonical hyphenated form (the
     /// plane parses it back to the SAME 16 bytes), so a lost-ack retry replays the deterministic receipt.
     fn new_op_id(&self) -> [u8; 16];
+
+    /// A spread in `0..span_ms` for scheduling the next automatic check. A FIXED interval makes a
+    /// fleet drift into lockstep and hit one host in waves, so every scheduled check is pushed out
+    /// by an independent draw — the same reason mainstream auto-updaters jitter.
+    ///
+    /// Seamed rather than ambient so a test's cadence is exact: the deterministic source draws
+    /// zero, and the interval alone decides.
+    fn jitter_below(&self, span_ms: u64) -> u64;
 }
 
 /// A monotonic-ish wall clock for local log events. Returns Unix milliseconds (the local `log.jsonl`
@@ -28,6 +36,16 @@ impl IdSource for RealIds {
     }
     fn new_op_id(&self) -> [u8; 16] {
         uuid::Uuid::new_v4().into_bytes()
+    }
+    fn jitter_below(&self, span_ms: u64) -> u64 {
+        if span_ms == 0 {
+            return 0;
+        }
+        // A v4 UUID's bytes are the randomness this binary already carries; a scheduling spread
+        // needs no cryptographic quality and no new dependency for it.
+        let mut raw = [0u8; 8];
+        raw.copy_from_slice(&uuid::Uuid::new_v4().into_bytes()[..8]);
+        u64::from_le_bytes(raw) % span_ms
     }
 }
 
@@ -78,6 +96,11 @@ pub(crate) mod test_sources {
             let mut bytes = [0u8; 16];
             bytes[..8].copy_from_slice(&n.to_be_bytes());
             bytes
+        }
+        fn jitter_below(&self, _span_ms: u64) -> u64 {
+            // No spread under test: a scheduled check's due time is then the interval alone, so a
+            // cadence assertion states an exact instant instead of a range.
+            0
         }
     }
 
