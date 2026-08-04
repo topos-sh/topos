@@ -14,9 +14,9 @@ own MCP config.
 
 One file, `server.json`, in the format the
 [official MCP registry](https://registry.modelcontextprotocol.io) serves — the same document that
-registry hands out, unchanged. (A `README.md` and the reserved `topos-mcp.toml` may sit beside it;
-nothing else may — any other file refuses at publish, and every file's bytes run the same
-credential scan the document does.) Two constraints decide everything else on this page:
+registry hands out, unchanged. (A `README.md` may sit beside it; nothing else may — any other file
+refuses at publish, and both files' bytes run the same credential scan.) Two constraints decide
+everything else on this page:
 
 - **Remote.** The document offers a `streamable-http` endpoint over `https`. Nothing is installed
   and nothing runs locally, so the same bytes work from every machine on the team.

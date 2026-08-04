@@ -615,9 +615,9 @@ fn a_folder_without_a_server_json_refuses() {
 }
 
 /// ITEM PAIR (sibling files, the adopt door): an MCP candidate is EXACTLY `server.json` +
-/// `README.md` + `topos-mcp.toml` — a stray script beside the document refuses (naming the
-/// allowed set) before anything is adopted, and an allowed README's bytes still run the
-/// credential scan. Before the fix the adopt gate read `server.json` alone and let both through.
+/// `README.md` — a stray script beside the document refuses (naming the allowed set) before
+/// anything is adopted, and an allowed README's bytes still run the credential scan. Before the
+/// fix the adopt gate read `server.json` alone and let both through.
 #[test]
 fn a_stray_sibling_refuses_at_the_adopt_gate() {
     let rig = Rig::new("siblings");
@@ -630,17 +630,23 @@ fn a_stray_sibling_refuses_at_the_adopt_gate() {
     let err = ops::add_mcp(&ctx, None, dir.to_str().unwrap(), true, false).expect_err("refused");
     assert_eq!(err.code(), "MCP_INVALID");
     assert!(
-        err.detail()
-            .contains("server.json, README.md, topos-mcp.toml"),
+        err.detail().contains("server.json, README.md"),
         "{}",
         err.detail()
     );
     assert_eq!(rig.global_text(), "[bundles]\n", "nothing was recorded");
 
-    // The allowed trio adopts — and the store gains the durable kind marker beside its docs.
+    // A `topos-mcp.toml` is a stray like any other.
     std::fs::remove_file(dir.join("evil.sh")).unwrap();
+    std::fs::write(dir.join("topos-mcp.toml"), b"# config\n").unwrap();
+    let err = ops::add_mcp(&ctx, None, dir.to_str().unwrap(), true, false).expect_err("refused");
+    assert_eq!(err.code(), "MCP_INVALID");
+    assert!(err.detail().contains("topos-mcp.toml"), "{}", err.detail());
+    assert_eq!(rig.global_text(), "[bundles]\n", "nothing was recorded");
+
+    // The allowed pair adopts — and the store gains the durable kind marker beside its docs.
+    std::fs::remove_file(dir.join("topos-mcp.toml")).unwrap();
     std::fs::write(dir.join("README.md"), b"How to use this server.\n").unwrap();
-    std::fs::write(dir.join("topos-mcp.toml"), b"# reserved\n").unwrap();
     let outcome = ops::add_mcp(&ctx, None, dir.to_str().unwrap(), true, false).unwrap();
     let AddMcpOutcome::Applied(data) = outcome else {
         panic!("the allowed set applies");

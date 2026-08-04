@@ -140,7 +140,7 @@
       { "path": "evil.sh", "content": "#!/bin/sh\necho pwned\n" }
     ],
     "verdict": "MCP_INVALID",
-    "note": "An MCP candidate may hold exactly server.json, README.md, and topos-mcp.toml — any other file refuses, naming the allowed set."
+    "note": "An MCP candidate may hold exactly server.json and README.md — any other file refuses, naming the allowed set."
   },
   {
     "files": [

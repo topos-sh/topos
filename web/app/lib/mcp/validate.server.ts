@@ -40,12 +40,11 @@ const VERSION_MAX = 255;
 export const MAX_SERVER_JSON_BYTES = 256 * 1024;
 
 /**
- * The WHOLE file set an MCP candidate may carry: the document (required, at the root), an
- * optional README, and the reserved `topos-mcp.toml`. Anything else is refused by name — a
- * bundle whose behavior is one JSON document must not smuggle scripts or extra payloads beside
- * it.
+ * The WHOLE file set an MCP candidate may carry: the document (required, at the root) and an
+ * optional README. Anything else is refused by name — a bundle whose behavior is one JSON
+ * document must not smuggle scripts or extra payloads beside it.
  */
-export const MCP_ALLOWED_FILES = ["server.json", "README.md", "topos-mcp.toml"] as const;
+export const MCP_ALLOWED_FILES = ["server.json", "README.md"] as const;
 
 /**
  * Header NAMES that carry a credential by definition — refused case-insensitively, independent
@@ -459,11 +458,11 @@ export interface McpCandidateFile {
 
 /**
  * Validate a WHOLE MCP candidate: the exact file set ([`MCP_ALLOWED_FILES`] — `server.json`
- * required, `README.md` and the reserved `topos-mcp.toml` optional), a credential scan over
- * EVERY allowed file's bytes (raw for the siblings; raw + decoded strings for the JSON document,
- * inside [`validateServerJson`]), and then the full document gate. The one function both publish
- * doors and the local-adopt gate answer to — a bundle whose behavior is one JSON document must
- * not smuggle scripts or extra payloads beside it.
+ * required, `README.md` optional), a credential scan over EVERY allowed file's bytes (raw for
+ * the sibling; raw + decoded strings for the JSON document, inside [`validateServerJson`]), and
+ * then the full document gate. The one function both publish doors and the local-adopt gate
+ * answer to — a bundle whose behavior is one JSON document must not smuggle scripts or extra
+ * payloads beside it.
  */
 export function validateCandidateFiles(files: McpCandidateFile[]): McpValidation {
   const server = files.find((f) => f.path === "server.json");

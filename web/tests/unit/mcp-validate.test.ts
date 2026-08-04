@@ -269,13 +269,22 @@ describe("what the raw text alone would miss", () => {
       },
     ]);
     expect(readme.ok === false && readme.code).toBe("MCP_SECRET_REFUSED");
-    // The allowed set is a ceiling, not a demand: the exact trio, all clean, passes.
-    const trio = validateCandidateFiles([
+    // A `topos-mcp.toml` is a stray like any other.
+    const toml = validateCandidateFiles([
+      server,
+      { path: "topos-mcp.toml", bytes: Buffer.from("# config\n", "utf8") },
+    ]);
+    expect(toml.ok === false && toml.code).toBe("MCP_INVALID");
+    for (const allowed of MCP_ALLOWED_FILES) {
+      expect(toml.ok === false && toml.message).toContain(allowed);
+    }
+    expect(toml.ok === false && toml.message).toContain("topos-mcp.toml");
+    // The allowed set is a ceiling, not a demand: the exact pair, both clean, passes.
+    const pair = validateCandidateFiles([
       server,
       { path: "README.md", bytes: Buffer.from("What this server does.\n", "utf8") },
-      { path: "topos-mcp.toml", bytes: Buffer.from("# reserved\n", "utf8") },
     ]);
-    expect(trio.ok).toBe(true);
+    expect(pair.ok).toBe(true);
   });
 });
 

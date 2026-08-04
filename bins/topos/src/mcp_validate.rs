@@ -36,11 +36,11 @@ pub(crate) const MAX_SERVER_JSON_BYTES: usize = 256 * 1024;
 /// The one transport a shared bundle can promise: the same URL works from every machine.
 pub(crate) const STREAMABLE_HTTP: &str = "streamable-http";
 
-/// The WHOLE file set an MCP candidate may carry: the document (required, at the root), an
-/// optional README, and the reserved `topos-mcp.toml`. Anything else is refused by name — a
-/// bundle whose behavior is one JSON document must not smuggle scripts or extra payloads beside
-/// it. Mirrors the web tier's `MCP_ALLOWED_FILES`.
-pub(crate) const MCP_ALLOWED_FILES: &[&str] = &["server.json", "README.md", "topos-mcp.toml"];
+/// The WHOLE file set an MCP candidate may carry: the document (required, at the root) and an
+/// optional README. Anything else is refused by name — a bundle whose behavior is one JSON
+/// document must not smuggle scripts or extra payloads beside it. Mirrors the web tier's
+/// `MCP_ALLOWED_FILES`.
+pub(crate) const MCP_ALLOWED_FILES: &[&str] = &["server.json", "README.md"];
 
 /// Header NAMES that carry a credential by definition — refused case-insensitively, independent
 /// of `isSecret`, value shape, or entropy. A literal `Authorization: Basic …` is somebody's
@@ -764,11 +764,10 @@ fn parse_endpoint_url(url: &str) -> EndpointUrl {
 }
 
 /// Validate a WHOLE MCP candidate: the exact file set ([`MCP_ALLOWED_FILES`] — `server.json`
-/// required, `README.md` and the reserved `topos-mcp.toml` optional), a credential scan over
-/// EVERY allowed file's bytes (raw for the siblings; raw + decoded strings for the JSON
-/// document, inside [`validate_server_json`]), and then the full document gate. The one gate the
-/// publish preflight and the `add --mcp` local adopt answer to — the exact mirror of the web
-/// tier's `validateCandidateFiles`.
+/// required, `README.md` optional), a credential scan over EVERY allowed file's bytes (raw for
+/// the sibling; raw + decoded strings for the JSON document, inside [`validate_server_json`]),
+/// and then the full document gate. The one gate the publish preflight and the `add --mcp` local
+/// adopt answer to — the exact mirror of the web tier's `validateCandidateFiles`.
 ///
 /// # Errors
 /// One [`McpRefusal`]; the check order is the web tier's, exactly.
@@ -1371,21 +1370,19 @@ mod tests {
         assert!(e.message.contains("UTF-8"), "{}", e.message);
     }
 
-    /// ITEM PAIR (sibling files): the candidate gate refuses any file outside the allowed trio
+    /// ITEM PAIR (sibling files): the candidate gate refuses any file outside the allowed pair
     /// (naming the set) and runs the credential scan over every allowed sibling's bytes. The
     /// pre-fix gates read server.json alone and let both candidates through.
     #[test]
     fn the_candidate_allowlist_refuses_strays_and_scans_sibling_bytes() {
         let server =
             std::fs::read(fixtures_root().join("valid/remote-no-auth.json")).expect("fixture");
-        // The exact allowed trio passes.
+        // The exact allowed pair passes.
         let readme = b"How to use this server.\n".to_vec();
-        let toml = b"# reserved\n".to_vec();
         assert!(
             validate_candidate_files(&[
                 ("server.json", server.as_slice()),
                 ("README.md", readme.as_slice()),
-                ("topos-mcp.toml", toml.as_slice()),
             ])
             .is_ok()
         );
@@ -1397,11 +1394,24 @@ mod tests {
         .expect_err("refused");
         assert_eq!(e.code, McpRefusalCode::Invalid);
         assert!(
-            e.message.contains("server.json, README.md, topos-mcp.toml"),
+            e.message.contains("server.json, README.md"),
             "{}",
             e.message
         );
         assert!(e.message.contains("evil.sh"), "{}", e.message);
+        // A `topos-mcp.toml` is a stray like any other.
+        let e = validate_candidate_files(&[
+            ("server.json", server.as_slice()),
+            ("topos-mcp.toml", b"# config\n".as_slice()),
+        ])
+        .expect_err("refused");
+        assert_eq!(e.code, McpRefusalCode::Invalid);
+        assert!(
+            e.message.contains("server.json, README.md"),
+            "{}",
+            e.message
+        );
+        assert!(e.message.contains("topos-mcp.toml"), "{}", e.message);
         // A README carrying a token refuses exactly like the document would.
         let hot = format!("Set GITHUB_TOKEN to ghp_{}.\n", "A1b2C3d4E5".repeat(4));
         let e = validate_candidate_files(&[
