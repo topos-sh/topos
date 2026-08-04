@@ -49,15 +49,16 @@ pub(crate) const MAX_BACKOFF_MS: i64 = 24 * 60 * 60 * 1000;
 /// the window the workspace lane's own staleness warning uses.
 pub(crate) const STALE_AFTER_MS: i64 = 7 * 24 * 60 * 60 * 1000;
 
-/// The whole document: when the next scheduled check is due, and the last outcome per source.
+/// The whole document: a host-requested floor, and the last outcome per question.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct ForgeCheck {
     #[serde(default)]
     pub schema_version: u32,
-    /// Epoch millis: the earliest a SCHEDULED check may dial a forge again. Written after every
-    /// round that dialed, whatever its outcome.
+    /// Epoch millis: the earliest ANY forge may be dialed, set only when a host asks to be left
+    /// alone for a while. A backoff is a fact about the HOST, so it holds across every question
+    /// aimed at it — unlike the cadence, which each question keeps for itself.
     #[serde(default)]
-    pub next_check_at_ms: i64,
+    pub backoff_until_ms: i64,
     /// Per QUESTION — `<host>/<owner>/<repo>#<ref>`, the ref empty for a floating row — how its
     /// last check went. Keyed by the question rather than the source because one repository can be
     /// named at two refs, and those are two different facts: a floating row that works says nothing
@@ -92,8 +93,19 @@ pub(crate) struct SourceCheck {
     /// The last check's failure; absent when it answered.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub failure: Option<CheckFailure>,
-    /// Per SCOPE label, the head this question was last FULLY reconciled at — the archive was
-    /// fetched, every member it holds is tracked, and nothing was left to converge.
+    /// Per SCOPE label, when that scope next asks this question.
+    ///
+    /// Per question AND per scope, because both halves are load-bearing. A sweep only ever visits
+    /// the checkout it starts in plus the machine manifest, so one clock for the whole lane lets
+    /// the first checkout active after each due moment spend the turn while a second project is
+    /// never checked at all. And a scope that has never asked has never had a turn: a freshly
+    /// cloned project must fetch its rows now, not sit empty until an interval another checkout
+    /// started runs out. A scope that HAS asked waits, whatever the answer was — a failed check
+    /// has still had its turn, which is what stops one dead network becoming a request per session.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub next_check_at: BTreeMap<String, i64>,
+    /// Per SCOPE label, the convergence this question last reached there — the archive was
+    /// fetched, every member it holds is tracked at that head, and nothing was left to converge.
     ///
     /// It exists because "what is installed" cannot always answer "is there anything to do". A
     /// repository that drops its last skill leaves retained custody records still naming the OLD
@@ -102,7 +114,25 @@ pub(crate) struct SourceCheck {
     /// every cadence to rediscover that there is nothing in it. Per scope, because scopes converge
     /// independently and one having finished says nothing about the other.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub settled_at: BTreeMap<String, String>,
+    pub settled_at: BTreeMap<String, Settled>,
+}
+
+/// What one scope's completed convergence consisted of: the head it reached, and the members that
+/// head holds.
+///
+/// The MEMBERS are what make the mark re-provable. It lives in machine state, which outlives any
+/// one checkout — delete a project's store, or reclone at the same path, and the mark is still
+/// there while the bytes it vouches for are not. So it is never trusted on its own: honoring it
+/// means checking that this scope's store still tracks every member it names, at that head. A head
+/// that holds NO members needs nothing proved, which is exactly the case the mark exists for.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct Settled {
+    /// The commit the scope converged to.
+    pub head: String,
+    /// The members that commit holds — every one of which must still be tracked here for the mark
+    /// to mean anything.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub members: Vec<String>,
 }
 
 /// A failed check, kept in enough detail to decide whether to ask again.
@@ -149,6 +179,9 @@ impl SourceCheck {
 /// Best-effort: a machine that cannot record the forgetting simply asks again later, which is the
 /// safe direction.
 pub(crate) fn forget(fs: &dyn FsOps, layout: &Layout, source: &str) {
+    let Ok(_guard) = lock(fs, layout) else {
+        return;
+    };
     let mut doc = read(fs, layout);
     let before = doc.sources.len();
     doc.sources
@@ -178,25 +211,42 @@ pub(crate) fn read(fs: &dyn FsOps, layout: &Layout) -> ForgeCheck {
     doc
 }
 
-/// Whether a SCHEDULED round may dial now.
+/// Whether a SCHEDULED round may dial this QUESTION, from this SCOPE, now.
 ///
-/// A due time absurdly far ahead is treated as due rather than obeyed: a backwards clock step (or
-/// a corrupted value) must not suspend auto-updates until wall time catches up. The ceiling admits
-/// everything [`next_due`] can legitimately produce — the interval, its spread, AND a host's own
-/// backoff — because a due time this code really wrote must never be mistaken for corruption and
-/// dialed through.
-pub(crate) fn due(doc: &ForgeCheck, now_ms: i64) -> bool {
-    let ceiling = now_ms.saturating_add(CHECK_INTERVAL_MS + CHECK_JITTER_MS + MAX_BACKOFF_MS);
-    now_ms >= doc.next_check_at_ms || doc.next_check_at_ms > ceiling
+/// A turn this scope has never taken is due immediately — a row somebody just committed should not wait
+/// out an interval belonging to somebody else's row. A due time absurdly far ahead is treated as
+/// due rather than obeyed: a backwards clock step (or a corrupted value) must not suspend
+/// auto-updates until wall time catches up. The ceiling admits everything [`next_due`] can
+/// legitimately produce, so a due time this code really wrote is never mistaken for corruption.
+pub(crate) fn due(doc: &ForgeCheck, key: &str, scope: &str, now_ms: i64) -> bool {
+    // A host that asked for time gets it, whatever any single question's own clock says.
+    if now_ms < doc.backoff_until_ms && doc.backoff_until_ms <= host_floor_ceiling(now_ms) {
+        return false;
+    }
+    let Some(at) = doc
+        .sources
+        .get(key)
+        .and_then(|c| c.next_check_at.get(scope))
+    else {
+        return true;
+    };
+    let ceiling = host_floor_ceiling(now_ms);
+    now_ms >= *at || *at > ceiling
 }
 
-/// When the next scheduled check falls due: one interval from now, pushed out by an independent
-/// spread, and never earlier than a backoff the host itself asked for.
-pub(crate) fn next_due(now_ms: i64, jitter_ms: i64, host_backoff_ms: Option<i64>) -> i64 {
-    let own = now_ms.saturating_add(CHECK_INTERVAL_MS.saturating_add(jitter_ms.max(0)));
-    // A host's backoff only ever DELAYS: obeying one that fell earlier than our own interval would
-    // let a server talk topos into checking more often than it decided to.
-    own.max(host_backoff_ms.unwrap_or(i64::MIN))
+/// The furthest ahead a due time this code wrote can legitimately sit.
+fn host_floor_ceiling(now_ms: i64) -> i64 {
+    now_ms.saturating_add(CHECK_INTERVAL_MS + CHECK_JITTER_MS + MAX_BACKOFF_MS)
+}
+
+/// When a question next falls due: one interval from now, pushed out by an independent spread.
+///
+/// A host's own backoff is NOT folded in here — it is a fact about the host, so it is kept as the
+/// document's machine-wide floor and applied to every question aimed at that host. Folding it into
+/// one question's clock would let a rate limit expire for one row and still be in force for
+/// another, which is not what the host said.
+pub(crate) fn next_due(now_ms: i64, jitter_ms: i64) -> i64 {
+    now_ms.saturating_add(CHECK_INTERVAL_MS.saturating_add(jitter_ms.max(0)))
 }
 
 /// Whether a source has gone unchecked long enough to be worth interrupting a session over. A
@@ -209,26 +259,47 @@ pub(crate) fn is_stale(answered_at_ms: Option<i64>, now_ms: i64) -> bool {
     now_ms.saturating_sub(last) > STALE_AFTER_MS
 }
 
-/// Persist the round: the new due time and the per-source outcomes it produced, merged over what
-/// was already recorded (a source no row named this run keeps its history).
+/// Persist the round: the outcomes it produced (each already carrying its own next due time),
+/// merged over what was already recorded — a question no row named this run keeps its history.
+///
+/// `host_backoff_ms` raises the machine-wide floor when a host asked for one; it only ever moves
+/// FORWARD, so a quiet round can never talk a standing backoff down.
+///
+/// The whole read-modify-write runs under [`lock`]. This document is machine-wide and every write
+/// merges over the last one, so two updates racing — two targeted runs, or one beside a sweep —
+/// would otherwise each write a document missing the other's outcomes, and the loser's scheduling,
+/// verdicts and settlement marks would vanish.
 ///
 /// # Errors
-/// The filesystem failure writing the document. The caller treats it as a disclosure, never as a
-/// reason to fail a sweep that otherwise worked.
+/// The filesystem failure taking the lock or writing the document. The caller treats it as a
+/// disclosure, never as a reason to fail a sweep that otherwise worked.
 pub(crate) fn record_round(
     fs: &dyn FsOps,
     layout: &Layout,
-    next_check_at_ms: i64,
+    host_backoff_ms: Option<i64>,
     outcomes: &[(String, SourceCheck)],
 ) -> Result<(), ClientError> {
+    let _guard = lock(fs, layout)?;
     let mut doc = read(fs, layout);
     doc.schema_version = PERSISTED_SCHEMA_VERSION;
-    doc.next_check_at_ms = next_check_at_ms;
-    for (source, check) in outcomes {
-        doc.sources.insert(source.clone(), check.clone());
+    if let Some(at) = host_backoff_ms {
+        doc.backoff_until_ms = doc.backoff_until_ms.max(at);
+    }
+    for (key, check) in outcomes {
+        doc.sources.insert(key.clone(), check.clone());
     }
     fs.create_dir_all(&layout.state_dir())?;
     crate::doc::write_doc(fs, &layout.forge_check_path(), &doc)
+}
+
+/// The exclusive lock every mutation of this document holds. Machine-wide state merged on each
+/// write needs one writer at a time, or the merges race and one of them is simply lost.
+///
+/// # Errors
+/// The filesystem failure creating or taking the lock.
+fn lock(fs: &dyn FsOps, layout: &Layout) -> Result<crate::fs_seam::LockGuard, ClientError> {
+    fs.create_dir_all(&layout.locks_dir())?;
+    Ok(fs.lock_exclusive(&layout.forge_check_lock_file())?)
 }
 
 #[cfg(test)]
@@ -259,74 +330,125 @@ mod tests {
         }
     }
 
+    const Q: &str = "github.com/o/r#";
+    const Q2: &str = "github.com/o/other#";
+
+    const SCOPE: &str = "person";
+
+    fn answered(at: i64, due_at: i64) -> SourceCheck {
+        SourceCheck {
+            checked_at_ms: at,
+            answered_at_ms: Some(at),
+            commit: Some("aaa".to_owned()),
+            failure: None,
+            next_check_at: [(SCOPE.to_owned(), due_at)].into_iter().collect(),
+            settled_at: BTreeMap::new(),
+        }
+    }
+
     #[test]
-    fn a_fresh_machine_is_due_and_a_recorded_round_is_not() {
+    fn a_question_never_asked_is_due_and_a_recorded_one_waits_its_own_interval() {
         let home = TempHome::new();
         let (fs, layout) = (RealFs, home.layout());
         let now = 1_700_000_000_000;
 
-        // Nothing recorded → check now.
-        assert!(due(&read(&fs, &layout), now), "a fresh machine checks");
-
-        record_round(&fs, &layout, next_due(now, 0, None), &[]).unwrap();
-        let doc = read(&fs, &layout);
-        assert_eq!(doc.next_check_at_ms, now + CHECK_INTERVAL_MS);
-        assert!(!due(&doc, now), "inside the interval nothing dials");
+        // Nothing recorded → ask now. A row somebody just committed does not wait out an interval
+        // that belongs to somebody else's row.
         assert!(
-            !due(&doc, now + CHECK_INTERVAL_MS - 1),
-            "one millisecond short is still inside"
+            due(&read(&fs, &layout), Q, SCOPE, now),
+            "a fresh question asks"
         );
-        assert!(due(&doc, now + CHECK_INTERVAL_MS), "the interval elapses");
+
+        record_round(
+            &fs,
+            &layout,
+            None,
+            &[(Q.to_owned(), answered(now, next_due(now, 0)))],
+        )
+        .unwrap();
+        let doc = read(&fs, &layout);
+        assert!(!due(&doc, Q, SCOPE, now), "inside its interval it does not");
+        assert!(
+            !due(&doc, Q, SCOPE, now + CHECK_INTERVAL_MS - 1),
+            "one ms short"
+        );
+        assert!(
+            due(&doc, Q, SCOPE, now + CHECK_INTERVAL_MS),
+            "the interval elapses"
+        );
+
+        // THE POINT: another question is untouched by it. A sweep only ever visits the checkout it
+        // starts in, so one clock for the whole lane would let this question's turn be spent by a
+        // row in a project the sweep never looked at.
+        assert!(
+            due(&doc, Q2, SCOPE, now),
+            "a different question keeps its own schedule"
+        );
     }
 
     #[test]
     fn the_spread_only_ever_delays_and_stays_inside_one_hour() {
         let now = 1_700_000_000_000;
-        assert_eq!(next_due(now, 0, None), now + CHECK_INTERVAL_MS);
+        assert_eq!(next_due(now, 0), now + CHECK_INTERVAL_MS);
         assert_eq!(
-            next_due(now, CHECK_JITTER_MS, None),
+            next_due(now, CHECK_JITTER_MS),
             now + CHECK_INTERVAL_MS + CHECK_JITTER_MS
         );
         // A negative draw can never pull the next check earlier than the plain interval.
-        assert_eq!(next_due(now, -5_000, None), now + CHECK_INTERVAL_MS);
+        assert_eq!(next_due(now, -5_000), now + CHECK_INTERVAL_MS);
     }
 
     #[test]
-    fn a_hosts_backoff_may_delay_the_next_check_but_never_hasten_it() {
+    fn a_hosts_backoff_holds_every_question_aimed_at_it() {
+        // A backoff is a fact about the HOST, so it is the document's floor rather than one
+        // question's clock: a rate limit that expired for one row but not another is not what the
+        // host said.
+        let home = TempHome::new();
+        let (fs, layout) = (RealFs, home.layout());
         let now = 1_700_000_000_000;
-        let far = now + CHECK_INTERVAL_MS * 3;
-        assert_eq!(
-            next_due(now, 0, Some(far)),
-            far,
-            "a longer backoff is obeyed"
+        let far = now + 3 * CHECK_INTERVAL_MS;
+        record_round(
+            &fs,
+            &layout,
+            Some(far),
+            &[(Q.to_owned(), answered(now, next_due(now, 0)))],
+        )
+        .unwrap();
+        let doc = read(&fs, &layout);
+        assert!(
+            !due(&doc, Q, SCOPE, now + CHECK_INTERVAL_MS),
+            "the floor holds it"
         );
-        assert_eq!(
-            next_due(now, 0, Some(now + 60_000)),
-            now + CHECK_INTERVAL_MS,
-            "a shorter one never talks topos into checking sooner"
+        assert!(
+            !due(&doc, Q2, SCOPE, now),
+            "and holds a question never asked too"
         );
+        assert!(due(&doc, Q, SCOPE, far), "until the host said to come back");
+
+        // It only ever moves FORWARD: a later quiet round cannot talk a standing backoff down.
+        record_round(&fs, &layout, Some(now + 1_000), &[]).unwrap();
+        assert_eq!(read(&fs, &layout).backoff_until_ms, far);
     }
 
     #[test]
-    fn a_far_future_due_time_never_suspends_the_lane() {
+    fn a_far_future_due_time_never_suspends_a_question() {
         // A backwards clock step (or a corrupt value) must not stop auto-updates until wall time
         // catches up — the same fail-open rule the sweep's own throttle keeps.
         let now = 1_700_000_000_000;
-        let doc = ForgeCheck {
-            next_check_at_ms: now + 400 * 24 * 60 * 60 * 1000,
-            ..ForgeCheck::default()
-        };
-        assert!(due(&doc, now));
+        let mut doc = ForgeCheck::default();
+        doc.sources
+            .insert(Q.to_owned(), answered(now, now + 400 * 24 * 60 * 60 * 1000));
+        assert!(due(&doc, Q, SCOPE, now));
 
-        // But a due time this code really wrote is OBEYED, however far out — a host that asked
-        // for a day must get a day, not be dialed through as if the file were corrupt.
-        let honored = ForgeCheck {
-            next_check_at_ms: next_due(now, CHECK_JITTER_MS, Some(now + MAX_BACKOFF_MS)),
-            ..ForgeCheck::default()
-        };
+        // But a due time this code really wrote is OBEYED, however far out.
+        let mut honored = ForgeCheck::default();
+        honored
+            .sources
+            .insert(Q.to_owned(), answered(now, next_due(now, CHECK_JITTER_MS)));
+        honored.backoff_until_ms = now + MAX_BACKOFF_MS;
         assert!(
-            !due(&honored, now),
-            "a host's longest legitimate backoff holds"
+            !due(&honored, Q, SCOPE, now),
+            "a host's longest backoff holds"
         );
     }
 
@@ -337,7 +459,7 @@ mod tests {
         std::fs::create_dir_all(layout.state_dir()).unwrap();
 
         std::fs::write(layout.forge_check_path(), b"{ not json ").unwrap();
-        assert!(due(&read(&fs, &layout), 0), "garbage means check");
+        assert!(due(&read(&fs, &layout), Q, SCOPE, 0), "garbage means check");
 
         let foreign = format!(
             "{{\"schema_version\": {}, \"next_check_at_ms\": 9999999999999}}",
@@ -346,7 +468,7 @@ mod tests {
         std::fs::write(layout.forge_check_path(), foreign).unwrap();
         let doc = read(&fs, &layout);
         assert_eq!(doc, ForgeCheck::default(), "a newer build's doc is foreign");
-        assert!(due(&doc, 0));
+        assert!(due(&doc, Q, SCOPE, 0));
     }
 
     fn gone(git_ref: &str) -> SourceCheck {
@@ -402,11 +524,10 @@ mod tests {
         // switched off for that source forever.
         let home = TempHome::new();
         let (fs, layout) = (RealFs, home.layout());
-        let now = 1_700_000_000_000;
         record_round(
             &fs,
             &layout,
-            next_due(now, 0, None),
+            None,
             &[
                 (question("github.com/o/r", ""), gone("")),
                 (question("github.com/o/r", "abc1234"), gone("abc1234")),
@@ -435,9 +556,8 @@ mod tests {
             doc.sources
         );
         assert_eq!(
-            doc.next_check_at_ms,
-            now + CHECK_INTERVAL_MS,
-            "forgetting is not a round; the clock is untouched"
+            doc.backoff_until_ms, 0,
+            "forgetting is not a round; no schedule is touched"
         );
     }
 
@@ -463,12 +583,13 @@ mod tests {
             answered_at_ms: Some(at),
             commit: Some(commit.to_owned()),
             failure: None,
+            next_check_at: [(SCOPE.to_owned(), next_due(at, 0))].into_iter().collect(),
             settled_at: BTreeMap::new(),
         };
         record_round(
             &fs,
             &layout,
-            next_due(now, 0, None),
+            None,
             &[
                 ("github.com/o/a".to_owned(), ok(now, "aaa")),
                 ("github.com/o/b".to_owned(), ok(now, "bbb")),
@@ -480,12 +601,15 @@ mod tests {
         record_round(
             &fs,
             &layout,
-            next_due(later, 0, None),
+            None,
             &[("github.com/o/a".to_owned(), ok(later, "ccc"))],
         )
         .unwrap();
         let doc = read(&fs, &layout);
-        assert_eq!(doc.next_check_at_ms, later + CHECK_INTERVAL_MS);
+        assert_eq!(
+            doc.sources["github.com/o/a"].next_check_at[SCOPE],
+            later + CHECK_INTERVAL_MS
+        );
         assert_eq!(doc.sources["github.com/o/a"].commit.as_deref(), Some("ccc"));
         assert_eq!(doc.sources["github.com/o/b"].commit.as_deref(), Some("bbb"));
         assert_eq!(doc.sources["github.com/o/b"].checked_at_ms, now);

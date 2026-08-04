@@ -219,6 +219,12 @@ impl Layout {
         self.state_dir().join("builtin.json")
     }
 
+    /// `locks/forge_check.lock` — the one writer at a time for `state/forge_check.json`. Every
+    /// write of that document merges over the last, so concurrent runs must not interleave.
+    pub(crate) fn forge_check_lock_file(&self) -> PathBuf {
+        self.locks_dir().join("forge_check.lock")
+    }
+
     /// `state/forge_check.json` — the MACHINE's forge auto-update clock and per-source check log
     /// (see `crate::forge_check`): when the next scheduled check is due, and how each tracked
     /// source's last one went. Home store only: the clock governs THIS machine's outbound traffic,
