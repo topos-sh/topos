@@ -68,6 +68,33 @@ directly — there is nothing to compare it against yet.
 
 The other half of the loop: [Review, protect, roll back](/docs/review).
 
+## Publishing an MCP server
+
+```bash
+topos add --mcp ./tools/weather
+topos publish weather --yes
+```
+
+A folder whose one file is a `server.json` publishes exactly like a skill — same preview, same
+`--to`, same review gate. The receipt says the workspace recorded it as an `mcp` bundle, which is
+what tells every receiving machine to place it as a server entry in each agent's own config rather
+than as a skill folder.
+
+The document is re-checked against the same gate the browser import runs, **before** anything is
+sent: no local `packages[]`, one `streamable-http` endpoint over `https`, no `{placeholder}` in the
+URL, and no credential in any form — including a header with no literal value, or a literal that
+merely has the shape of a token. A refusal names its own code and lands nothing.
+[The full list](/docs/mcp#what-topos-refuses-and-why). One extra check belongs to the workspace: the
+document's own registry name must be free here, since that is the name the workspace's registry lane
+resolves by.
+
+<Note>
+  Governance transfers, the entry name does not. The config entry on the machine that authored the
+  folder keeps the key it was minted under, because several agents file an OAuth sign-in against
+  that name — a rename would strand it. Teammates, meeting the server for the first time through
+  the workspace, get `topos-<workspace>-<name>`.
+</Note>
+
 ## If it refuses
 
 | Refusal | Fix |

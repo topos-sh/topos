@@ -112,6 +112,42 @@ itself whole. Nothing under `.git/` is written, and an ignore file you committed
 A directory is only chosen when it's free or already Topos-managed: a byte-identical occupant is
 adopted in place, never duplicated.
 
+## MCP servers
+
+A skill is files; an [MCP server](/docs/mcp) is an address. Six agents have an MCP config surface,
+and for those Topos writes **one entry per agent** — under a stable `topos-`-prefixed key — instead
+of placing a directory. Everything else here still applies: Topos writes only its own entries, an
+agent it can't detect gets nothing, and a file whose shape can't be proven safe is left alone.
+
+| Agent | User-scope config | Project-scope config | Picked up | Sign-in |
+|---|---|---|---|---|
+| Claude Code | `~/.claude/skills/topos-mcp/` † (a Topos-owned plugin directory) | `.mcp.json` | next session; `/reload-plugins` reloads live | `/mcp` |
+| Codex | `~/.codex/config.toml` † | `.codex/config.toml` ‡ | restart `codex` | `codex mcp login <name>` |
+| Cursor | `~/.cursor/mcp.json` | `.cursor/mcp.json` | restart Cursor | Cursor's own, on first use |
+| OpenCode | `~/.opencode/opencode.json` | `.opencode/opencode.json` | restart `opencode` | automatic on the first `401` |
+| OpenClaw | `~/.openclaw/openclaw.json` | — (none) | automatically | `openclaw mcp login <name>` |
+| Hermes Agent | `~/.hermes/config.yaml` † | — (none) | `/reload-mcp` in a session, or next session | the entry declares `auth: oauth` |
+
+† `$CLAUDE_CONFIG_DIR`, `$CODEX_HOME`, and `$HERMES_HOME` move these roots, exactly as they move
+the skills directories above.
+
+‡ Codex reads a project config only once you have trusted that repository inside Codex.
+
+Each file is written in its own dialect and nothing else in it is disturbed: JSON stays JSON,
+OpenClaw's JSONC keeps its comments and trailing commas, Codex gets a `[mcp_servers.…]` table,
+Hermes gets a one-line entry under `mcp_servers:`. The Claude Code user surface is the exception —
+a plugin directory Topos owns whole and rewrites rather than patches.
+
+OpenClaw and Hermes Agent have **no project-level MCP config**, so a project row reports
+`not placed — no project-level config` for them rather than falling back to your home config. Those
+two receive the same server through your machine-wide scope.
+
+<Note>
+  Signing in is the agent's own act, on your own machine. A shared MCP bundle carries no credential
+  and no slot for one — Topos refuses documents that do — so a server behind OAuth is authorized
+  once per person, per machine, in whichever agent is calling it.
+</Note>
+
 ## The current state, honestly
 
 - **Placement** reaches every detected agent in the table below — that tier is broad.

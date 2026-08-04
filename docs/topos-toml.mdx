@@ -98,6 +98,7 @@ The table form carries the same version alongside a few placement fields:
 "topos.sh/acme/code-review" = { version = "*", path = ".agents/skills" }
 "topos.sh/acme/db-migrations" = { version = "*", name = "acme-db-migrations" }
 "github.com/acme/monorepo/deploy" = { version = "*", subdir = "tools/skills/deploy" }
+"./tools/weather" = { kind = "mcp" }
 
 [defaults.skill]
 path = { default = ".agents/skills", claude-code = ".claude/skills" }
@@ -110,6 +111,7 @@ path = { default = ".agents/skills", claude-code = ".claude/skills" }
 | `name` | a workspace skill, a GitHub skill, a local folder | renames the delivered folder |
 | `subdir` | a GitHub skill | the literal directory inside the repo |
 | `harness` | every shape except a whole-workspace line | which agents get the copy, by slug |
+| `kind` | a local folder, a GitHub skill | what the bundle *is* when nothing else can say — `"mcp"` marks a folder holding a `server.json` |
 
 `path` is a directory string, or a table keyed by agent slug with an optional `default`. It applies
 to project delivery only, must be relative, and must stay inside the checkout — a committed file
@@ -122,6 +124,32 @@ agent's folder stays there across updates.
 Anything a shape does not accept refuses by naming what it does accept, so a typo cannot silently
 drop a skill you thought you had.
 
+## Rows that name an MCP server
+
+A row's `kind` is only ever written where nothing else could answer the question. A folder on disk
+is just a folder, so a row pointing at one holding a `server.json` says what it is:
+
+```toml
+[bundles]
+"./tools/weather" = { kind = "mcp" }
+
+[defaults.mcp]
+harness = ["cursor", "claude-code"]
+```
+
+`topos add --mcp ./tools/weather` writes that line; the folder's `server.json` is the whole bundle,
+and it lands as an entry in each agent's MCP config rather than as a skill folder — see
+[MCP servers](/docs/mcp).
+
+**A workspace row never spells a kind.** `"topos.sh/acme/weather" = "*"` is the same line whether
+the bundle is a skill or a server: the catalog already records what it is, and a publish of the
+local folder above rewrites the row to exactly that spelling, kind field and all dropped. A GitHub
+row tagged `kind = "mcp"` parses but is not delivered — the update warns and moves on.
+
+`[defaults.mcp]` narrows which agents get every MCP row in the file, by slug; a row's own `harness`
+list beats it. Only the six agents with an MCP config surface count here, and a slug outside that
+set is ignored with one warning naming the ones that qualify.
+
 ## Which commands write which lines
 
 | Command | What it does to the file |
@@ -129,6 +157,7 @@ drop a skill you thought you had.
 | `topos add <ref>` | adds one line to the nearest `topos.toml` at or above this folder — with none covering it, refuses |
 | `topos add <ref> -g` | adds one line to `~/.topos/topos.toml` |
 | `topos add ./folder` | adds `"./folder" = "*"` — relative when the folder sits under the file's own folder, absolute when it doesn't |
+| `topos add --mcp <source>` | adds one line carrying `{ kind = "mcp" }` — for a fetched server, after writing its `server.json` out as a folder |
 | `topos add -g @acme` | adds `"topos.sh/acme" = "*"` |
 | `topos add -g <skill>` when an `"off"` line stands | deletes the `"off"` line |
 | `topos remove <skill>` | drops that line — or splits the channel/repo line carrying it |

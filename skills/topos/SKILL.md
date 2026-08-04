@@ -147,6 +147,41 @@ Two spellings are the GLOBAL file's alone (a project manifest is a repo fact): a
 `"<ref>" = "off"`, the one negative a file can state. Whatever the parser refuses, it refuses by
 naming what that reference accepts — never guess, read the message.
 
+## MCP servers (the other kind of bundle)
+
+A bundle whose one file is a `server.json` is a REMOTE MCP server — reach for `add --mcp` when the
+user wants a tool endpoint (not instructions) on this machine or in this repo, or wants the team to
+have one:
+
+```
+topos add --mcp io.github.acme/weather      # an official-registry name — describes, then --yes
+topos add --mcp https://…/server.json       # a link to the document — same two-phase
+topos add --mcp ./tools/weather             # a folder holding one — applies immediately
+topos publish weather                       # share it: same verb, same consent bar as a skill
+```
+
+A workspace reference needs no `--mcp` (`topos add @<ws>/weather` gets it with its kind intact);
+the flag is for a server the workspace does not have yet. Placement is SILENT and per-agent: no
+skill folder is written — each detected agent gets ONE entry in its own MCP config under an
+immutable `topos-…` key, so never hand-edit those entries or rename them (a rename strands the
+agent's OAuth sign-in). An entry a human edited reads `drifted` and is left byte-identical forever.
+
+The gate is the same client-side and server-side, and refuses BEFORE anything is written:
+`MCP_LOCAL_REFUSED` (a local `packages[]`), `MCP_NO_STREAMABLE_REMOTE`, `MCP_INSECURE_URL`,
+`MCP_URL_TEMPLATE` (a `{placeholder}` endpoint), `MCP_SECRET_REFUSED` (a credential in ANY form —
+`isSecret`, a value-less header, per-installation variables, or a literal that merely looks like a
+token), `MCP_INVALID`, `MCP_NAME_TAKEN` (publish only). Never work around one by editing the
+document to hide the shape — a shared bundle carries no credential, and the sign-in belongs to the
+agent on the machine.
+
+RELAY the receipt's per-agent lines to the human, because the last step is theirs: Claude Code
+loads next session (`/reload-plugins` reloads live, sign in with `/mcp`) · Codex needs a restart
+and `codex mcp login <name>` · Cursor a restart · OpenCode a restart (it signs in on the first
+401) · OpenClaw picks it up automatically (`openclaw mcp login <name>`) · Hermes takes
+`/reload-mcp`. In a PROJECT scope only project-level configs are written — openclaw and
+hermes-agent have none and report `not placed`, receiving the server through the machine scope
+instead.
+
 ## Sharing an improvement back (do this — it is the point)
 
 An edit to a team-managed skill is a DRAFT ahead of the published version. Offer to share it:

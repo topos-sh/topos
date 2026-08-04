@@ -201,6 +201,23 @@ Publish an imported skill to your workspace and the workspace starts watching th
 new upstream commits arrive as review proposals, never as silent changes. There is also a browser
 import with a preview at `<origin>/skills/import`.
 
+## Add an MCP server
+
+```bash
+topos add --mcp io.github.acme/weather -g
+topos add --mcp https://weather.acme.example/.well-known/mcp/server.json -g
+topos add --mcp ./tools/weather
+```
+
+With `--mcp` the source is a **remote MCP server** rather than a skill: an official-registry name,
+an https link to its `server.json`, or a folder holding one. It records the same one line, but your
+agents get it as a tool endpoint in their own MCP config instead of as a skill folder.
+
+A registry name or a URL is bytes this machine has never read, so a bare run shows what the server
+is — its endpoint, whether a sign-in is coming, which agents it would reach — and changes nothing;
+apply with `--yes`. A folder already on your disk is adopted immediately, with the usual undo. What
+Topos refuses to place, and why: [MCP servers](/docs/mcp).
+
 ## Stop receiving
 
 ```bash

@@ -91,6 +91,10 @@ topos add @acme/channels/backend -g
 Into this repo's `topos.toml` for everyone working in it — `topos init` creates that file if the
 repo has none — or, with `-g`, onto this one machine.
 
+A channel holds whatever the workspace publishes, skills and [MCP servers](/docs/mcp) alike — the
+backend channel can carry the review skill and the ticketing server together, and both reach a
+person the same way.
+
 Channels reference, they don't own: a skill in three channels is one skill, delivered once. Any
 member may curate an open channel; make one curated (reviewers and owners only) with `topos protect
 backend --yes`, using the plain channel name.

@@ -1,0 +1,251 @@
+---
+title: MCP servers
+description: Share a remote MCP server the way you share a skill — one server.json, delivered into every agent's own MCP config.
+sidebar_label: MCP servers
+---
+
+A workspace shares two kinds of bundle. A **skill** is a folder of instructions your agent reads;
+an **MCP server** is one file naming a remote endpoint your agents can call as tools. Both are
+published once, given to people the same way, and updated the same way — what differs is where the
+bytes land. A skill lands in a skills directory; an MCP server lands as one entry in each agent's
+own MCP config.
+
+## What an MCP bundle is
+
+One file, `server.json`, in the format the
+[official MCP registry](https://registry.modelcontextprotocol.io) serves — the same document that
+registry hands out, unchanged. Two constraints decide everything else on this page:
+
+- **Remote.** The document offers a `streamable-http` endpoint over `https`. Nothing is installed
+  and nothing runs locally, so the same bytes work from every machine on the team.
+- **Secretless.** The document carries no credential and no slot for one. Where a server needs a
+  sign-in, that sign-in is your agent's own OAuth dance on your own machine — Topos never sees it,
+  never stores it, and never moves it between machines.
+
+```json title="server.json — the whole bundle"
+{
+  "name": "io.github.acme/weather",
+  "description": "Current conditions and forecasts for a named place.",
+  "version": "1.4.0",
+  "remotes": [
+    {
+      "type": "streamable-http",
+      "url": "https://weather.acme.example/mcp",
+      "headers": [{ "name": "X-Region", "value": "eu-west-1" }]
+    }
+  ],
+  "_meta": { "sh.topos/auth": "oauth" }
+}
+```
+
+Headers are allowed when their values are **literal** — every machine sends the same bytes, so
+nothing is filled in per person. `_meta."sh.topos/auth"` is optional and says what someone is
+signing up for: `oauth` (an agent will be asked to authorize on first use) or `none` (the publisher
+states no credential is needed). Saying nothing is not a claim that none is needed, and Topos never
+reads silence as one.
+
+## Three ways in
+
+<Tabs>
+  <Tab title="The browser">
+    From your workspace dashboard, **Add MCP server** (`<origin>/<workspace>/mcp/import`). Pick a
+    source — the MCP registry by name, a URL to a `server.json`, or the document pasted in —
+    preview what it promises, then publish it under a name and into a channel.
+
+    <Note>
+      A URL is fetched by the server your workspace runs on: `https` only, redirects refused, and
+      only addresses on the public internet. Pasting is the one path that makes no outbound
+      request at all — use it for a server that lives inside your own network.
+    </Note>
+  </Tab>
+  <Tab title="The CLI">
+    ```bash
+    topos add --mcp io.github.acme/weather -g
+    topos add --mcp https://weather.acme.example/.well-known/mcp/server.json -g
+    topos add --mcp ./tools/weather
+    ```
+
+    A registry name or a URL is bytes from a source this machine has never read, so a bare run
+    **describes** — what the server is, the endpoint it points at, whether a sign-in is coming,
+    which agents it would reach — and writes nothing. Apply with `--yes`. A folder already on your
+    disk is your own bytes, so it is adopted immediately with an undo-led receipt.
+  </Tab>
+  <Tab title="Publish a folder">
+    ```bash
+    topos add --mcp ./tools/weather
+    topos publish weather --yes
+    ```
+
+    Author the document in a folder, add it, then publish — the same two steps as a skill.
+    Publishing transfers governance: the `./tools/weather` line becomes the workspace reference,
+    and from then on everyone (including you) gets the workspace's current version.
+  </Tab>
+</Tabs>
+
+Each `add --mcp` records **one line** in the nearest [`topos.toml`](/docs/topos-toml) at or above
+this folder — or your machine's own file with `-g` — and converges your agents' configs in the same
+command. A fetched document is written out as a real folder first: `~/.topos/mcp/<name>/server.json`
+for a `-g` import, or `./<name>/server.json` beside you inside a checkout, so the row points at
+bytes you can read and commit.
+
+`--mcp` names a *source*, never a workspace bundle. `topos add @acme/weather` already gets the
+server with its kind intact, because the workspace records what each bundle is.
+
+## How delivery works
+
+Exactly like a skill. An MCP server sits in the catalog, goes into the `everyone` channel or a
+narrower one, is assigned to people or picked by them, and reaches every machine they log in — no
+per-machine setup, no second step. What is different is the destination:
+
+- **No skill folder.** An MCP bundle is never placed in a skills directory. Its bytes stay in
+  Topos's own store; what your agents see is one config entry each.
+- **One entry per detected agent**, under a stable key: `topos-<workspace>-<name>` for a workspace
+  bundle, `topos-local-<name>` for a row naming a folder.
+
+```json title="~/.cursor/mcp.json — what lands"
+{
+  "mcpServers": {
+    "topos-acme-weather": {
+      "headers": { "X-Region": "eu-west-1" },
+      "url": "https://weather.acme.example/mcp"
+    }
+  }
+}
+```
+
+The key is minted once and **never changes**, because several agents file an OAuth sign-in under
+the server's name and a rename would strand it. That is also why publishing a local folder does not
+re-key anything: the entry keeps the name it was born with on the machine that authored it, while a
+teammate's machine — meeting the bundle for the first time through the workspace — mints
+`topos-<workspace>-<name>`.
+
+### When each agent picks it up
+
+Six agents have an MCP config surface. Topos writes into the ones it detects on the machine (and
+into a config file that already exists, so removals still reach it), and says nothing about how you
+sign in — that stays the agent's own business:
+
+| Agent | Picking up the change | Signing in |
+|---|---|---|
+| Claude Code | loads next session; `/reload-plugins` reloads live | `/mcp` |
+| Codex | restart `codex` | `codex mcp login <name>` |
+| Cursor | restart Cursor | Cursor's own, on first use |
+| OpenCode | restart `opencode` | automatic on the first `401` |
+| OpenClaw | picked up automatically | `openclaw mcp login <name>` |
+| Hermes Agent | `/reload-mcp` in a session, or next session | the entry declares `auth: oauth` |
+
+Each agent's exact config file — and the environment variables that move it — is in
+[Supported agents](/docs/harnesses#mcp-servers).
+
+## Machine scope and project scope
+
+The two scopes work as they do for skills: your own `~/.topos/topos.toml` (or, with no such file,
+what your workspaces give you) follows you, and a repo's committed `topos.toml` governs that
+checkout. An MCP row in a project file lands **only in project-level config** — `.mcp.json`,
+`.cursor/mcp.json`, `.codex/config.toml`, `.opencode/opencode.json` — and never falls back to your
+home config, so a committed file can't quietly reconfigure a contributor's machine.
+
+Two agents have no project-level MCP config at all, and a project row says so instead of pretending:
+
+```
+openclaw: not placed — no project-level config
+hermes-agent: not placed — no project-level config
+```
+
+Those two receive the same server through your machine-wide scope. A project config path that
+resolves outside the checkout is refused and named, never redirected.
+
+<Note>
+  Codex reads a project `.codex/config.toml` only once you have trusted that repo inside Codex.
+  Topos writes the file either way; the trust step is yours.
+</Note>
+
+## What Topos refuses, and why
+
+Every refusal is typed, and each one refuses a specific temptation rather than folding into
+"invalid". The same rules run in the browser and in the CLI, from the same test vectors.
+
+| Code | Refused | Why |
+|---|---|---|
+| `MCP_LOCAL_REFUSED` | a non-empty `packages[]` | the server installs and runs locally; a shared bundle is an address every machine can reach |
+| `MCP_NO_STREAMABLE_REMOTE` | no `streamable-http` remote (`sse`-only, or none) | there is no endpoint to hand an agent |
+| `MCP_INSECURE_URL` | a plain `http://` endpoint | every call and every reply would go over the wire in the clear |
+| `MCP_URL_TEMPLATE` | a `{placeholder}` in the URL | a template is not an address — someone has to fill it in per machine |
+| `MCP_SECRET_REFUSED` | a credential in any form | see below |
+| `MCP_INVALID` | not JSON; a missing or malformed `name`, `description`, or `version`; an endpoint that isn't a URL | there is nothing here to publish or point an agent at |
+| `MCP_NAME_TAKEN` | a `name` another bundle here already publishes | the registry lane resolves by that name; two claims would make a lookup a coin flip |
+
+`MCP_SECRET_REFUSED` is the widest of them, deliberately. It covers a header marked `isSecret`, a
+header with no literal value, a header or endpoint assembled from per-installation `variables`, and
+a literal value anywhere in the document that simply *has the shape* of a token — an API key, a
+`Bearer` string, a long random-looking run. The scan reads the raw document **before** any field is
+read out of it, so a document carrying somebody's token is refused whole, and the message names the
+shape it matched, never the value:
+
+```
+error: the header X-Api-Key is declared secret — a shared bundle never carries a credential
+```
+
+<Warning>
+  A refusal is the whole outcome: nothing is written, nothing is stored, and nothing lands
+  half-trusted. If your server genuinely needs a per-person credential, that credential belongs in
+  the agent's own sign-in, not in a file the whole team receives.
+</Warning>
+
+Two more are reported as warnings rather than refusals, because the rest of the run is still good:
+a row narrowed to an agent slug that isn't MCP-capable (`MCP_HARNESS_UNKNOWN` — the slug is
+ignored), and a GitHub-sourced row tagged as an MCP server (`MCP_GITHUB_UNSUPPORTED`).
+
+## A hand-edited entry is never overwritten
+
+Topos knows exactly which entries it wrote, and it proves it two ways: the key looks managed
+(`topos-…`) *and* the entry's contents still match what Topos last wrote there. Edit one of those
+entries by hand and it is yours from that moment on:
+
+| What Topos reports | What it means |
+|---|---|
+| `current` | placed, updated, or already correct |
+| `drifted` | you edited it since Topos wrote it — left byte-identical, never touched again |
+| `conflicting` | that config key is held by an entry Topos does not own |
+| `not-supported` | withheld: no config surface for that agent at this scope |
+| `unprovable` | the config file's shape can't be proven safe to edit, so nothing was written |
+
+An update prints the drift next to the skill it belongs to (`cursor: hand-edited — left in
+place`), and your workspace's **Settings → Sessions** page carries the same per-agent state as a
+chip on every reported machine — so you can see that a rollout landed, and where it didn't.
+
+Everything else about the write is conservative: comments and formatting in a config file you own
+are preserved, an unrelated server entry is never disturbed, and applying the same set twice leaves
+the file byte-identical.
+
+## Removing one
+
+```bash
+topos remove weather
+topos remove weather -g
+```
+
+The same inverse as a skill, and the receipt names every config file it touched. Entries you
+hand-edited are left in place and disclosed rather than removed. A config file that Topos created
+and still wholly owns is deleted when its last entry leaves; a file with anything else in it keeps
+everything else.
+
+When a workspace stops giving you an MCP server — unassigned, a channel dropped, access removed —
+the entries leave at that machine's next update, the same way a skill's folder does.
+
+## Pointing a registry-aware tool at your workspace
+
+A workspace serves its own MCP servers in the registry's read format, so a tool that already speaks
+to a registry can be pointed at Topos instead and get the servers your team curates:
+
+```
+GET <origin>/<workspace>/registry/v0.1/servers
+GET <origin>/<workspace>/registry/v0.1/servers/<name>/versions
+GET <origin>/<workspace>/registry/v0.1/servers/<name>/versions/latest
+```
+
+`<name>` is the document's own registry name (`io.github.acme/weather`), so its slash is
+percent-encoded into one path segment. The lane answers for **members only** — a browser session or
+a machine session's bearer token — and everything else, including a workspace you hold no seat in,
+gets the same plain 404. The versions list is deliberately one entry: a workspace publishes a moving
+`current`, not a history to pin against. What the team runs is what it serves.

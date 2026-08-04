@@ -835,6 +835,13 @@ export interface components {
              */
             invite_line?: string | null;
             /**
+             * @description The BUNDLE KIND this publish shipped, when it is not the ordinary skill: `"mcp"` for a
+             *     server document. It rides the write to the catalog, so the workspace records what the
+             *     bundle IS and every receiving machine places it the right way. Absent = a skill.
+             *     **INFERRED** (additive-only).
+             */
+            kind?: string | null;
+            /**
              * @description The GOVERNANCE-TRANSFER receipt half: the manifest whose local-path line this publish
              *     rewrote to the governed workspace reference. Absent when no manifest referenced the bundle
              *     by path (an already-governed republish). **INFERRED** (additive-only).
