@@ -675,6 +675,17 @@ pub(crate) fn add_tty(data: &AddData) -> String {
                 "Added the '{}' repository — its skills deliver with `topos update`.",
                 data.name
             ),
+            // The closing line must never point at agents "named above" when none were: a scope
+            // with no MCP-capable agent gets the describe's honest sentence instead.
+            Some(crate::manifest::keys::KeyShape::LocalPath { .. })
+                if data.mcp.as_ref().is_some_and(|m| m.agents.is_empty()) =>
+            {
+                format!(
+                    "Added the '{}' MCP server — no MCP-capable agent is set up here yet, so the \
+                     row waits for one; `topos update` places its entry when one appears.",
+                    data.name
+                )
+            }
             Some(crate::manifest::keys::KeyShape::LocalPath { .. }) => format!(
                 "Added the '{}' MCP server — its entry lands in each agent's own MCP config \
                  (named above) and stays current with `topos update`.",

@@ -307,6 +307,50 @@ fn the_add_converge_honors_the_defaults_narrowing() {
     assert!(!note.contains("openclaw"), "{note}");
 }
 
+/// ITEM PAIR (the add-time receipt's honesty): a fresh placement's line carries the harness's
+/// reload note — how the change goes LIVE ("restart Cursor") — exactly as the update path's
+/// receipt does; and when NO MCP-capable agent is set up, the receipt says the row waits for one
+/// instead of closing with "each agent's own MCP config (named above)" over nothing named.
+#[test]
+fn the_add_receipt_carries_the_reload_note_and_says_when_nobody_is_reached() {
+    // Arm 1: an agent is set up — its placement line names the reload step.
+    let rig = Rig::new("reload-note");
+    rig.write_global("[bundles]\n");
+    std::fs::create_dir_all(rig.home.0.join(".cursor")).unwrap();
+    let docs = FakeDocs::serving(&good_server());
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    let data = ops::add_mcp(&ctx, Some(&docs), "io.github.acme/weather", true).unwrap();
+    let note = data.note.clone().unwrap_or_default();
+    assert!(
+        note.contains("server entry in") && note.contains("restart Cursor"),
+        "{note}"
+    );
+
+    // Arm 2: NO agent is set up — the receipt (typed note AND the TTY closing line) says the row
+    // waits, never "named above" with nothing named.
+    let rig = Rig::new("nobody");
+    rig.write_global("[bundles]\n");
+    let docs = FakeDocs::serving(&good_server());
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    let data = ops::add_mcp(&ctx, Some(&docs), "io.github.acme/weather", true).unwrap();
+    assert!(
+        data.mcp.as_ref().is_some_and(|m| m.agents.is_empty()),
+        "{:?}",
+        data.mcp
+    );
+    let note = data.note.clone().unwrap_or_default();
+    assert!(
+        note.contains("No MCP-capable agent is set up here yet"),
+        "{note}"
+    );
+    let tty = crate::render::add_tty(&data);
+    assert!(
+        tty.contains("no MCP-capable agent is set up here yet"),
+        "{tty}"
+    );
+    assert!(!tty.contains("named above"), "{tty}");
+}
+
 /// What lands: the canonical document (pretty-printed, trailing newline) plus ONE row whose
 /// value is the inline table that records what the folder IS.
 #[test]

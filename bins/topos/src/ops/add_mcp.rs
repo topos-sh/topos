@@ -633,7 +633,13 @@ fn converge_one(
         for state in &bundle.states {
             let where_ = state.file.as_deref().unwrap_or("its config");
             lines.push(match state.state.as_str() {
-                "current" => format!("{}: server entry in {where_}", state.agent),
+                // A fresh/updated placement carries the harness's reload note (how the change
+                // goes live — "restart Cursor", "sign in with /mcp"), exactly as the update
+                // path's receipt does; an already-current entry carries none.
+                "current" => match &state.note {
+                    Some(note) => format!("{}: server entry in {where_} — {note}", state.agent),
+                    None => format!("{}: server entry in {where_}", state.agent),
+                },
                 "drifted" => format!(
                     "{}: hand-edited entry left in place ({where_})",
                     state.agent
@@ -771,7 +777,8 @@ fn summarize(summary: &McpSummary, bundle_dir: &Path, agents: Vec<String>) -> Mc
 
 /// Fold what landed into the add receipt: the typed `mcp` block (the same derived facts the
 /// two-phase describe used to carry), then the prose note — the server this row now points at
-/// and the per-agent outcomes of the converge that just ran.
+/// and the per-agent outcomes of the converge that just ran. A converge that engaged NO agent
+/// says so honestly instead of leaving a receipt that names nothing.
 fn fold_receipt(
     data: &mut AddData,
     summary: &McpSummary,
@@ -779,6 +786,7 @@ fn fold_receipt(
     agents: Vec<String>,
     lines: &[String],
 ) {
+    let nobody = agents.is_empty();
     data.mcp = Some(summarize(summary, bundle_dir, agents));
     let auth = match summary.auth_hint {
         Some(hint) => format!(", auth {}", hint.as_str()),
@@ -793,6 +801,12 @@ fn fold_receipt(
     );
     if !lines.is_empty() {
         medit::push_note(data, lines.join(" · "));
+    }
+    if nobody {
+        medit::push_note(
+            data,
+            "No MCP-capable agent is set up here yet — the row waits for one",
+        );
     }
 }
 
