@@ -116,6 +116,11 @@ interface Refusal {
   error: string;
   /** The typed refusal code, when the gate produced one — shown as a quiet chip. */
   code?: string;
+  /**
+   * The in-workspace path the refusal points at — the server already holding the name. Carried
+   * so the note can render it as a real link instead of a path to retype.
+   */
+  at?: string;
   /** The picked row a `pick` refusal answers about. */
   server?: string;
   /**
@@ -216,13 +221,14 @@ export async function action({ request, params }: ActionFunctionArgs) {
     let staged: PreviewData | undefined;
     // A refusal from this arm goes back where the act was: into the dialog for a picked row,
     // onto the page for the custom arm's preview card.
-    const refuseHere = (message: string, code?: string, status = 400) =>
+    const refuseHere = (message: string, code?: string, status = 400, at?: string) =>
       picked.length === 0
         ? data<Refusal>(
             {
               form: "publish",
               error: message,
               ...(code === undefined ? {} : { code }),
+              ...(at === undefined ? {} : { at }),
               ...(staged === undefined ? {} : { preview: staged }),
             },
             { status },
@@ -233,9 +239,12 @@ export async function action({ request, params }: ActionFunctionArgs) {
               error: message,
               server: picked,
               ...(code === undefined ? {} : { code }),
+              ...(at === undefined ? {} : { at }),
             },
             { status },
           );
+    /** A gate answer, whole — its pointer home included, wherever the refusal renders. */
+    const refuseGate = (r: McpGateRefusal) => refuseHere(r.message, r.code, 400, r.at);
 
     let document: string;
     if (picked.length > 0) {
@@ -280,7 +289,7 @@ export async function action({ request, params }: ActionFunctionArgs) {
     // embedded-name uniqueness rule.
     const gate = await mcpCandidateRefusal(actor, files, null);
     if (gate.refusal !== null) {
-      return refuseHere(gate.refusal.message, gate.refusal.code);
+      return refuseGate(gate.refusal);
     }
     const validated = validateServerJson(document);
     if (!validated.ok) {
@@ -335,7 +344,7 @@ export async function action({ request, params }: ActionFunctionArgs) {
       return { refused: null, name: registration.name, placement: registration.placement };
     });
     if (landed.refused !== null) {
-      return refuseHere(landed.refused.message, landed.refused.code);
+      return refuseGate(landed.refused);
     }
     // WHAT ACTUALLY HAPPENED TO THE REACH. The publish landed; the PLACEMENT is a separate
     // outcome and may have been withheld (a curated channel takes a member's placement — the
@@ -400,7 +409,9 @@ export default function McpNew() {
         />
       )}
       <CustomSource busy={busy} flying={flying} />
-      {pageError !== undefined && <RefusalNote error={pageError.error} code={pageError.code} />}
+      {pageError !== undefined && (
+        <RefusalNote error={pageError.error} code={pageError.code} at={pageError.at} />
+      )}
       {preview !== undefined && <PreviewCard preview={preview} />}
     </div>
   );
@@ -521,7 +532,7 @@ function AddServerDialog({
   onClose,
 }: {
   server: CuratedMcpRow;
-  error?: { error: string; code?: string; server?: string };
+  error?: { error: string; code?: string; server?: string; at?: string };
   onClose: () => void;
 }) {
   const flying = useSubmittingIntent();
@@ -599,7 +610,7 @@ function AddServerDialog({
               </label>
               <ChannelField />
             </div>
-            {mine !== undefined && <RefusalNote error={mine.error} code={mine.code} />}
+            {mine !== undefined && <RefusalNote error={mine.error} code={mine.code} at={mine.at} />}
             <div className="flex flex-wrap items-center gap-2">
               <button
                 type="submit"
@@ -767,10 +778,24 @@ function SourceForm({ busy, flying }: { busy: boolean; flying: string | null }) 
   );
 }
 
-function RefusalNote({ error, code }: { error: string; code?: string }) {
+/**
+ * One refusal, said where the act was. When the answer POINTS somewhere — the server already
+ * holding a name is the live case — the path it names is rendered as a real link, rooted for
+ * this deployment's grammar: the message's own spelling is workspace-relative (it also travels
+ * the wire, where no tenancy is known), so the tail is replaced rather than repeated.
+ */
+function RefusalNote({ error, code, at }: { error: string; code?: string; at?: string }) {
+  const wsPath = useWsPath();
+  const tail = at === undefined ? undefined : `/${at}`;
+  const points = tail !== undefined && error.endsWith(tail);
   return (
     <p role="alert" data-testid="mcp-refusal" className="max-w-2xl text-red-700 text-sm">
-      {error}
+      {points && tail !== undefined ? error.slice(0, -tail.length) : error}
+      {points && at !== undefined && (
+        <Link to={wsPath(at)} className="underline underline-offset-2" data-testid="mcp-refusal-at">
+          {wsPath(at)}
+        </Link>
+      )}
       {code !== undefined && (
         <>
           {" "}

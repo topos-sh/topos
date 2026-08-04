@@ -308,6 +308,10 @@ describe("the publish", () => {
     });
     expect(status).toBe(400);
     expect(body.code).toBe("MCP_NAME_TAKEN");
+    // And it points home: the page of the bundle already holding the name, as an in-workspace
+    // path the note renders as a link rather than a name to go find.
+    expect(body.at).toBe("mcp/tides");
+    expect(body.error).toContain("/mcp/tides");
     expect(vault.published).toEqual([]);
   });
 
@@ -431,6 +435,8 @@ describe("publishing a picked row", () => {
     expect(body.code).toBe("MCP_NAME_TAKEN");
     expect(body.form).toBe("pick");
     expect(body.server).toBe(name);
+    // The pointer home rides into the dialog too — same answer, same link, wherever it renders.
+    expect(body.at).toBe("mcp/already-here");
     expect(vault.published).toEqual([]);
   });
 });

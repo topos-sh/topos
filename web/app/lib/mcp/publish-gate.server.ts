@@ -1,5 +1,6 @@
 import { Buffer } from "node:buffer";
 import type { MemberActor, SessionActor } from "@/lib/auth/guards.server";
+import { bundlePath } from "@/lib/bundle-base";
 import { type McpNameCheck, mcpNameTaken } from "@/lib/mcp/catalog.server";
 import { validateCandidateFiles } from "@/lib/mcp/validate.server";
 
@@ -34,6 +35,13 @@ export const SERVER_JSON = "server.json";
 export interface McpGateRefusal {
   code: string;
   message: string;
+  /**
+   * WHERE THE ANSWER LIVES — the in-workspace path of the bundle already holding the name
+   * (`mcp/<name>`, the shape `wsHref`/`useWsPath` roots), set only when a collision was PROVEN.
+   * A refusal that names a bundle should be one click from it; a tier that could not read the
+   * catalog has nothing to point at and sets nothing.
+   */
+  at?: string;
 }
 
 /**
@@ -51,19 +59,27 @@ export interface CandidateFile {
 
 /**
  * How a non-free name is worded — one place, so the pre-check and every caller's locked
- * re-check refuse in the same words. A proven collision names the bundle holding it; a catalog
- * that could not be read end to end says exactly that rather than dressing itself as one.
+ * re-check refuse in the same words. A proven collision names the bundle holding it AND points
+ * at it: the next thing anyone does with this answer is go look at that server, so the path
+ * rides the message (for a machine reading the wire) and the `at` field (for a surface that can
+ * render a real link). A catalog that could not be read end to end says exactly that rather than
+ * dressing itself as a collision, and points nowhere.
  */
 export function mcpNameTakenRefusal(
   serverName: string,
   taken: Exclude<McpNameCheck, { kind: "free" }>,
 ): McpGateRefusal {
+  if (taken.kind !== "taken") {
+    return {
+      code: "MCP_NAME_TAKEN",
+      message: `this workspace's MCP catalog could not be read end to end, so ${serverName} cannot be confirmed free`,
+    };
+  }
+  const at = bundlePath("mcp", taken.by.name);
   return {
     code: "MCP_NAME_TAKEN",
-    message:
-      taken.kind === "taken"
-        ? `${serverName} is already published in this workspace as ${taken.by.name}`
-        : `this workspace's MCP catalog could not be read end to end, so ${serverName} cannot be confirmed free`,
+    message: `${serverName} is already published in this workspace as ${taken.by.name} — view /${at}`,
+    at,
   };
 }
 

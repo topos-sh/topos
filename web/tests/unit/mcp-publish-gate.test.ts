@@ -246,8 +246,10 @@ describe("the embedded name is unique per workspace", () => {
       files: [serverJsonFile(WEATHER)],
     });
     expect(errorOf(envelope)?.code).toBe("MCP_NAME_TAKEN");
-    // The refusal names the bundle that holds it, so the author can go look at it.
-    expect(errorOf(envelope)?.context.message).toContain("weather");
+    // The refusal names the bundle that holds it AND says where it lives, so the answer is one
+    // step from the thing it is about rather than a name to go hunting for.
+    expect(errorOf(envelope)?.context.message).toContain("weather-held");
+    expect(errorOf(envelope)?.context.message).toContain("/mcp/weather-held");
     expect(vault.calls).toEqual([]);
   });
 
