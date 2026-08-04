@@ -458,6 +458,15 @@ jobs:
             cat <<'EOF'
           printf 'TOPOS_WEB_AUTH_SECRET=%s\nTOPOS_INTERNAL_TOKEN=%s\n' \
             "$(openssl rand -hex 32)" "$(openssl rand -hex 32)" > .env
+          EOF
+            # A pre-release checkout's compose defaults deliberately stay on the last stable
+            # release (the pins gate exempts -rc.N tags), so the candidate's own quickstart must
+            # pin the candidate images explicitly — without this line it would stand up the prior
+            # stable while claiming otherwise.
+            case "${GITHUB_REF_NAME#v}" in
+              *-*) echo "echo 'TOPOS_VERSION=${GITHUB_REF_NAME}' >> .env" ;;
+            esac
+            cat <<'EOF'
           docker compose up -d
           ```
 

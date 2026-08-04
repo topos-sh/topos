@@ -20,11 +20,11 @@ let SERVER_RELEASE_VERSION: string;
 const CARGO_VERSION = (() => {
   const manifest = readFileSync(resolve(__dirname, "..", "..", "..", "Cargo.toml"), "utf8");
   const section = manifest.split("[workspace.package]")[1] ?? "";
-  const hit = section.match(/^\s*version\s*=\s*"([^"]+)"/m);
-  if (hit === null) {
+  const version = section.match(/^\s*version\s*=\s*"([^"]+)"/m)?.[1];
+  if (version === undefined) {
     throw new Error("no [workspace.package] version in Cargo.toml");
   }
-  return hit[1];
+  return version;
 })();
 
 beforeAll(async () => {
@@ -123,9 +123,12 @@ describe("day-one quiet — the shipped constants, asserted", () => {
   });
 
   it("passes the CLI this repo currently builds", () => {
+    // The parsed version is the re-rendered semver CORE: a release-candidate build's `-rc.N`
+    // suffix never survives into the decision, so the expectation strips it the same way — this
+    // must hold on an rc tag too, where the release gates run this suite.
     expect(decide(`topos/${CARGO_VERSION}`)).toEqual({
       refused: false,
-      clientVersion: CARGO_VERSION,
+      clientVersion: CARGO_VERSION.split(/[-+]/)[0],
     });
   });
 });

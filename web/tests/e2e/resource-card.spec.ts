@@ -70,8 +70,9 @@ test.describe("anonymous — the constant protocol card + teaser (no existence o
     // The API base the card teaches a client to re-root onto: this origin's own /api mount.
     expect(card.api_base_url).toBe(`${BASE_URL}/api`);
     // The version declaration a client reads BEFORE it commits to this server: what this build
-    // is, and the oldest topos it still speaks to. Both are bare semver cores, no leading `v`.
-    expect(card.server_version).toMatch(/^\d+\.\d+\.\d+$/);
+    // is, and the oldest topos it still speaks to. No leading `v`; the build's version may carry
+    // a candidate's `-rc.N` suffix (this suite runs on rc tags too), the floor is always a core.
+    expect(card.server_version).toMatch(/^\d+\.\d+\.\d+(-[0-9A-Za-z.]+)?$/);
     expect(card.min_cli_version).toMatch(/^\d+\.\d+\.\d+$/);
 
     // Card headers: never cached keyed on path, varies on Accept, never indexed.

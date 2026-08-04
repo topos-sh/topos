@@ -260,6 +260,17 @@ boot, before binding a port — no migration command to run by hand, and a broke
 loudly rather than serving an unmigrated database.
 
 <Note>
+  **Upgrading an install that was fetched, not cloned?** A deployment stood up from the served
+  `compose.yml`/`compose-init-db.sh` pair has no checkout to `git fetch` in. Either stay on the
+  fetched shape — re-fetch the two files, or move the `TOPOS_VERSION` pin in your `.env` to the new
+  tag — or adopt the clone in place: clone the tag into a fresh directory, copy your `.env` across,
+  and **delete any `TOPOS_VERSION` line an older release's quickstart wrote into it** — left
+  behind, it overrides the checkout's own pins and keeps pulling the release it names. Your data is
+  safe either way: the volumes belong to the compose project name (`topos`), not the directory, so
+  the moved checkout finds them (see the next note for installs that predate the pinned name).
+</Note>
+
+<Note>
   **Upgrading an install older than the pinned project name?** The compose file now sets
   `name: topos` rather than taking the project name from the directory. If your checkout lives in a
   directory named something else, compose will look for `topos_*` volumes and find none — it starts
