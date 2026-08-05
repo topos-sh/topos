@@ -18,6 +18,7 @@ import { channelsOf } from "@/lib/db/queries.channels.server";
 import {
   type GenesisRegistration,
   inFinalTx,
+  NO_CHANNEL,
   registerGenesisBundleInTx,
 } from "@/lib/db/queries.custody.server";
 import { lockMcpNamesInTx } from "@/lib/db/queries.mcp.server";
@@ -321,12 +322,17 @@ export async function action({ request, params }: ActionFunctionArgs) {
       }
       // The birth name folds from the document's tail segment (or whatever the member typed
       // over it) through the catalog's own mint — same rules, same collision suffixes.
+      //
+      // AN EMPTY DESTINATION IS A DESTINATION. Importing a server is not the same act as
+      // handing it to people: the field rests on "no channel", and nothing arriving without one
+      // may be read as consent to reach the whole workspace. So the empty value maps to
+      // `NO_CHANNEL` — catalog only — and never to the default-channel `null`.
       const registration = await registerGenesisBundleInTx(
         tx,
         actor,
         bundleId,
         name.length > 0 ? name : suggestedNameFor(validated.summary.name),
-        channel.length > 0 ? channel : null,
+        channel.length > 0 ? channel : NO_CHANNEL,
         "mcp",
       );
       await auditInTx(tx, {
@@ -347,19 +353,17 @@ export async function action({ request, params }: ActionFunctionArgs) {
       return refuseGate(landed.refused);
     }
     // WHAT ACTUALLY HAPPENED TO THE REACH. The publish landed; the PLACEMENT is a separate
-    // outcome and may have been withheld (a curated channel takes a member's placement — the
-    // default `everyone` included) or found nothing to place into. The dialog promised "every
-    // agent the channel reaches gets that address", so a withheld placement must be said out
-    // loud on the page the redirect lands on rather than read as a silent success.
+    // outcome and may have been withheld (a curated channel takes a member's placement) or found
+    // nothing to place into. The dialog promised that a chosen channel's agents get that address,
+    // so a withheld placement must be said out loud on the page the redirect lands on rather than
+    // read as a silent success. Choosing NO channel produces no outcome at all — nothing was
+    // promised, and the server's own page already says it is in no channel.
     const path = wsPathServer(workspace.name, bundlePath("mcp", landed.name));
     if (landed.placement === undefined || landed.placement === "placed") {
       throw redirect(path);
     }
-    const named =
-      channel.length > 0
-        ? channel
-        : ((await channelsOf(actor)).find((c) => c.isDefault)?.name ?? "");
-    const query = new URLSearchParams({ placement: landed.placement, channel: named });
+    // Only a NAMED channel can be withheld now, so the note's subject is the one on the form.
+    const query = new URLSearchParams({ placement: landed.placement, channel });
     throw redirect(`${path}?${query.toString()}`);
   }
 
@@ -562,8 +566,9 @@ function AddServerDialog({
         <DialogHeader>
           <DialogTitle>Add {server.title} to this workspace?</DialogTitle>
           <DialogDescription>
-            It lands as one bundle holding one file — the document below — and every agent the
-            channel reaches gets that address.
+            It lands as one bundle holding one file — the document below — in this workspace and
+            nowhere else. Share it into a channel and every agent that channel reaches gets the
+            address; leave that empty and it waits here until someone does.
           </DialogDescription>
         </DialogHeader>
         <div className="space-y-2 rounded-md border border-line-soft bg-panel2 px-3 py-2.5">
@@ -605,7 +610,7 @@ function AddServerDialog({
           <input type="hidden" name="intent" value="publish" />
           <input type="hidden" name="server" value={server.name} />
           <BusyFields busy={busy} className="space-y-3">
-            <div className="flex flex-wrap items-end gap-2">
+            <div className="flex flex-wrap items-start gap-2">
               <label className="block min-w-40 flex-1">
                 <span className="mb-1 block font-medium text-dim text-sm">Publish as</span>
                 <input
@@ -661,16 +666,24 @@ export function channelOptionLabel(
     : label;
 }
 
-/** The destination channel, label and all — written once for both publishing surfaces. */
+/**
+ * THE DESTINATION — written once for both publishing surfaces, and RESTING ON NOTHING. Adding a
+ * server to the workspace and handing it to people are two different acts, so the field opens on
+ * "no channel": the import lands in the catalog, reaches nobody, and stays there until someone
+ * chooses to share it. A channel is the opt-in, taken here or on the channel's own page later.
+ *
+ * Every real channel is an ordinary option carrying its own NAME, the default `everyone`
+ * included — there is no empty value standing in for a channel, so the one thing an untouched
+ * form can mean is the one thing it says.
+ */
 function ChannelField() {
   const { channels, role } = useLoaderData<typeof loader>();
   const id = useId();
-  const fallback = { name: "", mode: "open" };
-  const everyone = channels.find((channel) => channel.isDefault) ?? fallback;
+  const everyone = channels.find((channel) => channel.isDefault);
   return (
     <div className="min-w-40 flex-1">
       <label htmlFor={id} className="mb-1 block font-medium text-dim text-sm">
-        Into
+        Share into
       </label>
       <select
         id={id}
@@ -678,9 +691,15 @@ function ChannelField() {
         defaultValue=""
         className="block h-11 w-full rounded-md border border-line bg-panel px-3 text-ink text-sm focus:border-accent focus:outline-none"
       >
-        <option value="">
-          {channelOptionLabel(everyone, "Everyone (the default channel)", role)}
-        </option>
+        {/* Short on purpose: a closed select is narrow, and a label clipped to "No channel —
+            just add it to the works…" says less than two plain words do. The sentence that
+            explains it lives under the field, where there is room for it. */}
+        <option value="">No channel</option>
+        {everyone !== undefined && (
+          <option value={everyone.name}>
+            {channelOptionLabel(everyone, `${everyone.name} (everyone here)`, role)}
+          </option>
+        )}
         {channels
           .filter((channel) => !channel.isDefault)
           .map((channel) => (
@@ -689,6 +708,7 @@ function ChannelField() {
             </option>
           ))}
       </select>
+      <p className="mt-1 text-faint text-xs">Optional — a channel is how it reaches people.</p>
     </div>
   );
 }
@@ -874,7 +894,7 @@ export function PreviewCard({ preview }: { preview: PreviewData }) {
               all, instead of costing the person the bytes they staged. */}
           <input type="hidden" name="origin" value={preview.origin} />
           <BusyFields busy={busy} className="space-y-3">
-            <div className="flex flex-wrap items-end gap-2">
+            <div className="flex flex-wrap items-start gap-2">
               <label className="block min-w-48 flex-1">
                 <span className="mb-1 block font-medium text-dim text-sm">Publish as</span>
                 <input

@@ -174,15 +174,28 @@ export interface GenesisRegistration {
 }
 
 /**
+ * NO CHANNEL AT ALL — the third thing a genesis destination can say. `toChannel` reads three
+ * ways: a channel NAME places into that channel, `null` takes the workspace default, and this
+ * places NOWHERE — the bundle lands in the catalog and reaches nobody until someone puts it in a
+ * channel later. A symbol rather than a reserved word, so no name typed into a form or sent over
+ * a wire can ever spell it.
+ */
+export const NO_CHANNEL: unique symbol = Symbol("no-channel");
+
+/** Where a genesis publish's REACH goes: a named channel · the default · nowhere. */
+export type GenesisDestination = string | null | typeof NO_CHANNEL;
+
+/**
  * Register a NEW bundle at its genesis publish, inside the caller's final transaction: the
  * bundle row (name minted from the display name with suffix-on-collision — `name`, `name-2`,
  * `name-3`…; `kind` is the catalog tag the publish declared, 'skill' when it declared none —
  * birth-only, never rewritten), an EXCLUSIVE placement, and the author's self-follow stance.
  * Placement is exclusive because `--to` is the targeting mechanism: with NO `--to` the bundle
  * lands in the default `everyone` channel; with a `--to` channel named (`everyone` included — no
- * string-match bypass) it lands in THAT channel alone. EVERY placement is gated by the
- * channel's mode (custody is never curation-blocked; REACH is — including the default channel,
- * including genesis): a curated channel withholds a member's placement with
+ * string-match bypass) it lands in THAT channel alone; with `NO_CHANNEL` it lands in none, which
+ * is a destination a caller ASKS for and never a fallback this function picks. EVERY placement is
+ * gated by the channel's mode (custody is never curation-blocked; REACH is — including the default
+ * channel, including genesis): a curated channel withholds a member's placement with
  * `curated_role_required`, riding the receipt details independent of the version gate. A
  * withheld placement leaves the bundle in NO channel (catalog-only) — the disclosure rides the
  * receipt and the author's self-follow still stands.
@@ -202,7 +215,7 @@ export async function registerGenesisBundleInTx(
   actor: PublishActor,
   bundleId: string,
   displayName: string | null,
-  toChannel: string | null,
+  toChannel: GenesisDestination,
   kind: string | null = null,
 ): Promise<GenesisRegistration> {
   const ws = actor.workspaceId;
@@ -271,8 +284,10 @@ export async function registerGenesisBundleInTx(
     }
   }
   // A named `--to` — `everyone` included — rides the ONE gated path every channel placement
-  // runs (the old `everyone` string-match bypassed the mode gate).
-  if (toChannel !== null) {
+  // runs (the old `everyone` string-match bypassed the mode gate). `NO_CHANNEL` falls through
+  // both arms with nothing written and nothing to report: no reach was asked for, so there is
+  // no outcome to disclose.
+  if (typeof toChannel === "string") {
     placement = await placeIntoChannelInTx(tx, actor, bundleId, toChannel);
   }
   await auditInTx(tx, {
