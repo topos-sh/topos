@@ -334,6 +334,21 @@ pub(crate) enum ClientError {
         references: Vec<String>,
         global: bool,
     },
+    /// `add --mcp <name>` found the EMBEDDED server name in MORE than one connected workspace's
+    /// catalog — the machine cannot pick between two teams' copies, so it names the workspaces
+    /// and refuses. The names are shown VERBATIM (a workspace address name is a path-safe
+    /// identifier, never a secret); each also rides one `next_actions` entry as the
+    /// `--workspace`-narrowed re-run, and `global` preserves the refused invocation's `-g`.
+    #[error(
+        "`{server}` is published by {} of the workspaces this machine is connected to ({}) — say \
+         which you mean (`topos add --mcp {server} --workspace <workspace>`)",
+        workspaces.len(), workspaces.join(", ")
+    )]
+    AmbiguousMcpWorkspace {
+        server: String,
+        workspaces: Vec<String>,
+        global: bool,
+    },
     /// `add <skill>@<harness>` named a harness that holds no untracked skill of that name. The message
     /// names where the skill IS found (if anywhere), all shown VERBATIM (slugs + the user's own tokens).
     #[error("{0}")]
@@ -703,6 +718,9 @@ impl ClientError {
             ClientError::AmbiguousHarness { .. } => "AMBIGUOUS_HARNESS",
             ClientError::AmbiguousScope { .. } => "AMBIGUOUS_SCOPE",
             ClientError::AmbiguousWorkspace { .. } => "AMBIGUOUS_WORKSPACE",
+            // The `--mcp` twin shares the code — an agent branches the same on either; the
+            // `--workspace` re-runs additionally ride the envelope's `next_actions`.
+            ClientError::AmbiguousMcpWorkspace { .. } => "AMBIGUOUS_WORKSPACE",
             ClientError::HarnessNotFound(_) => "HARNESS_NOT_FOUND",
             ClientError::PathNotName { .. } => "PATH_NOT_NAME",
             ClientError::PlacementUnsupported { .. } => "PLACEMENT_UNSUPPORTED",
@@ -778,6 +796,8 @@ impl ClientError {
             | ClientError::AmbiguousScope { .. }
             // A name several connected workspaces publish is the same class — pick a spelling, retry.
             | ClientError::AmbiguousWorkspace { .. }
+            // An embedded MCP server name several workspaces publish is the same class too.
+            | ClientError::AmbiguousMcpWorkspace { .. }
             // A repo holding several skills (or several dirs of one name) is the same "disambiguate and
             // retry" class — as is a workspace-resource name matching across workspaces or kinds.
             | ClientError::AmbiguousSkillInRepo { .. }

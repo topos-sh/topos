@@ -1824,6 +1824,59 @@ fn a_workspace_mcp_bundle_lands_in_configs_reports_harnesses_and_caches_kind() {
     assert!(detail.placements.is_empty());
 }
 
+/// ITEM (the subscribe receipt's typed block): `topos add` of a workspace mcp bundle — the same
+/// act the workspace-first `--mcp` resolution rides — delivers in the same invocation and folds
+/// the typed `mcp` block from the document that LANDED: the embedded identity, the endpoint,
+/// the narrowed agents — and NO `bundle` folder, because a workspace bundle's bytes live in the
+/// store.
+#[test]
+fn a_workspace_mcp_subscribe_receipt_carries_the_typed_block() {
+    let rig = Rig::new("sub-receipt");
+    rig.seed_session();
+    seed_harness_dirs(&rig.home.0);
+    let v = mk_version(&[(
+        "server.json",
+        server_json("https://mcp.example/linear").as_bytes(),
+    )]);
+    let plane = FakePlane::new().with_version("s_linear", &v);
+    plane.serves(vec![delivered_mcp("s_linear", "linear", &v)]);
+    let dir = FakeDirectory {
+        skills: vec![mcp_catalog_entry("s_linear", "linear", &v)],
+        channels: Vec::new(),
+    };
+    // No feed row — the subscribe writes its own; `[defaults.mcp]` narrows to the hermetic slugs.
+    rig.write_global(&format!("[bundles]\n\n[defaults.mcp]\n{SAFE}\n"));
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+
+    let outcome = ops::add_reference(
+        &ctx,
+        &connect(&plane, &dir),
+        None,
+        &format!("{HOST}/{WS_NAME}/linear"),
+        true,
+        false,
+    )
+    .unwrap();
+    let ops::AddRefOutcome::Applied(data) = outcome else {
+        panic!("a workspace subscribe applies");
+    };
+    let mcp = data.mcp.expect("the receipt carries the typed block");
+    assert_eq!(
+        mcp.server, "io.test/x",
+        "the EMBEDDED identity, not the catalog name"
+    );
+    assert_eq!(mcp.url, "https://mcp.example/linear");
+    assert_eq!(mcp.bundle, None, "no folder — the bytes live in the store");
+    assert_eq!(
+        mcp.agents.len(),
+        2,
+        "the narrowed breadth line: {:?}",
+        mcp.agents
+    );
+    let note = data.note.clone().unwrap_or_default();
+    assert!(note.contains("MCP server io.test/x"), "{note}");
+}
+
 #[test]
 fn offline_sweeps_still_heal_configs_from_the_store() {
     let rig = Rig::new("offline");
@@ -2198,8 +2251,11 @@ fn dual_scope_adoption_keeps_each_scopes_config_key_stable() {
     let ctx = rig.ctx_at(Some(&proj.0));
     // Adopt at PROJECT scope (the checkout's store tracks the dir under the project id), then
     // the SAME folder with `-g` (the home store tracks it under its own id).
-    ops::add_mcp(&ctx, None, dir.to_str().unwrap(), false).expect("project adopt");
-    ops::add_mcp(&ctx, None, dir.to_str().unwrap(), true).expect("global adopt");
+    let never = |_s: &Session| -> ops::SessionTransports {
+        unreachable!("the path door never dials a session")
+    };
+    ops::add_mcp(&ctx, &never, None, dir.to_str().unwrap(), false, None).expect("project adopt");
+    ops::add_mcp(&ctx, &never, None, dir.to_str().unwrap(), true, None).expect("global adopt");
     let playout = crate::sidecar::existing_project_store(&rig.fs, &proj.0)
         .expect("the project adopt minted the checkout's store");
     let before = mcp_ledger::read(&rig.fs, &playout).unwrap();

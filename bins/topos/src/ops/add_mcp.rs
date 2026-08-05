@@ -6,12 +6,18 @@
 //! - a **local folder** holding a `server.json` at its root — the dir IS the bundle. The gate
 //!   runs, the folder is adopted exactly as `topos add ./dir` adopts one, and the row it records
 //!   gains `kind = "mcp"`.
-//! - an **official-registry name** (`io.github.<owner>/<server>`) or an **https URL** to a
+//! - a **registry-shaped name** (`io.github.<owner>/<server>`) — resolved WORKSPACE-FIRST: the
+//!   catalogs of the workspaces this machine is connected to are consulted before the official
+//!   registry, on each bundle's EMBEDDED server name. Exactly one workspace publishing it
+//!   subscribes to that bundle by its catalog name — the same act as `topos add <catalog-name>`
+//!   on a workspace mcp bundle, ungated, with the source disclosed on the receipt; several
+//!   refuse toward `--workspace`; none falls through to the registry.
+//! - an **official-registry name** no workspace publishes, or an **https URL** to a
 //!   `server.json` — fetched, gated, and APPLIED immediately: the canonical document is written
 //!   out as a bundle folder, the row is recorded, the scope's configs converge, and the receipt
 //!   LEADS with the undo (`topos remove <ref>`), which restores the whole prior state — row,
 //!   config entries, and the folder this import itself wrote (see [`McpImports`]). `--yes` stays
-//!   an accepted no-op on both doors.
+//!   an accepted no-op on every door.
 //!
 //! Everything both doors accept comes from [`crate::mcp_validate`] — the same rules, refusal
 //! codes, and credential shapes the web tier enforces, from the same vectors at
@@ -36,10 +42,14 @@ use topos_types::results::{AddData, McpServerSummary};
 
 use crate::ctx::Ctx;
 use crate::error::ClientError;
+use crate::manifest::document::ManifestScope;
 use crate::mcp_validate::{self, McpSummary};
 use crate::sidecar::Layout;
 
+use super::add::PublishedName;
 use super::manifest_edit::{self as medit, EditTarget};
+use super::reconcile::SessionConnect;
+use super::reference::{AddRefOutcome, add_reference};
 
 /// The official registry the named arm reads a server's latest version from.
 const REGISTRY_BASE: &str = "https://registry.modelcontextprotocol.io";
@@ -199,26 +209,50 @@ fn canonical_server_json(document: &serde_json::Value) -> Vec<u8> {
 // =================================================================================================
 
 /// `topos add --mcp <name|url|path> [-g]`. Every door applies immediately with an undo-led
-/// receipt; `--yes` is parsed by the CLI and changes nothing here.
+/// receipt; `--yes` is parsed by the CLI and changes nothing here. A registry-shaped name
+/// resolves workspace-first (see the module docs); `workspace` is the invocation's global
+/// `--workspace` selector (an id), narrowing that probe to one workspace.
 ///
 /// # Errors
 /// [`ClientError::McpRefused`] when the gate refuses the document (the shared, typed vocabulary);
 /// [`ClientError::InvalidArgument`] for a source shape `--mcp` cannot read, or a bundle folder
 /// name already taken; [`ClientError::NoManifest`] when no `topos.toml` covers this folder and
-/// `-g` was not asked for; [`ClientError::RemoteFetch`] from the registry/URL read; the
-/// `add`-family errors from the local adopt; a filesystem failure.
+/// `-g` was not asked for; [`ClientError::AmbiguousMcpWorkspace`] when several connected
+/// workspaces publish the embedded name; [`ClientError::RemoteFetch`] from the registry/URL
+/// read; the `add`-family errors from the local adopt; a filesystem failure.
 pub(crate) fn add_mcp(
     ctx: &Ctx<'_>,
+    connect: &SessionConnect<'_>,
     docs: Option<&dyn McpDocSource>,
     source: &str,
     global: bool,
+    workspace: Option<&str>,
 ) -> Result<Box<AddData>, ClientError> {
     let host = medit::manifest_host(ctx);
     let exists = |p: &Path| ctx.fs.exists(p);
     match classify_mcp_source(source, host.as_deref(), &exists) {
         McpSourceShape::Path(dir) => adopt_local(ctx, &dir, global),
         McpSourceShape::Registry(name) => {
-            fetch_arm(ctx, docs, source, &registry_url(&name), global)
+            // The scope resolves BEFORE any network dial — the same rule the fetch arm enforces
+            // internally — so a folder with no `topos.toml` refuses without consulting a
+            // catalog or the registry.
+            if medit::edit_target(ctx, global)?.is_none() {
+                return Err(ClientError::NoManifest);
+            }
+            // WORKSPACE-FIRST, absolutely: a workspace hit wins and the registry is never
+            // dialed after one — the team's copy is governed, delivered, and kept current,
+            // which is everything the raw registry pointer is not.
+            let hits = workspace_server_matches(ctx, connect, &name, workspace);
+            match hits.as_slice() {
+                [] => fetch_arm(ctx, docs, source, &registry_url(&name), global)
+                    .map_err(|e| miss_both_sources(e, &name)),
+                [one] => subscribe_workspace_hit(ctx, connect, one, global),
+                several => Err(ClientError::AmbiguousMcpWorkspace {
+                    server: name.clone(),
+                    workspaces: several.iter().map(|p| p.workspace.clone()).collect(),
+                    global,
+                }),
+            }
         }
         McpSourceShape::Url(url) => fetch_arm(ctx, docs, source, &url.clone(), global),
         McpSourceShape::DirShadowsRegistry(token) => Err(ClientError::InvalidArgument(format!(
@@ -240,6 +274,136 @@ pub(crate) fn add_mcp(
              add {source}` gets it with its kind intact"
         ))),
     }
+}
+
+// -------------------------------------------------------------------------------------------------
+// The WORKSPACE-FIRST resolution of a registry-shaped name
+// -------------------------------------------------------------------------------------------------
+
+/// Every connected workspace whose catalog holds an ACTIVE `kind = "mcp"` bundle EMBEDDING
+/// `server` — resolved live (the offline delivery cache knows catalog names, never embedded
+/// ones). A session that does not answer is SKIPPED, silently — the same hint-source doctrine as
+/// the bare-name probe: folding a transport fault into "no workspace has it" would turn an
+/// unreachable server into a not-found, and the registry arm still answers honestly.
+/// `workspace` is the invocation's `--workspace` selector (an id): set, only that session's
+/// catalog is asked.
+fn workspace_server_matches(
+    ctx: &Ctx<'_>,
+    connect: &SessionConnect<'_>,
+    server: &str,
+    workspace: Option<&str>,
+) -> Vec<PublishedName> {
+    let mut found = Vec::new();
+    for s in super::add::active_sessions(ctx, workspace) {
+        let transports = connect(&s);
+        let Ok(index) = transports.directory.skills_index(&s.workspace_id) else {
+            continue;
+        };
+        for e in index.skills {
+            // The KIND guard: only an `mcp` bundle participates — a skill whose catalog name
+            // happens to look registry-shaped never matches (and a well-behaved server never
+            // stamps the embedded field on one; both ends hold the line).
+            if e.kind != "mcp"
+                || e.status != "active"
+                || e.mcp_server_name.as_deref() != Some(server)
+            {
+                continue;
+            }
+            if let Some(p) = PublishedName::spelled(
+                &s.host,
+                &s.workspace_name,
+                &e.name,
+                Some(e.bundle_digest.clone()),
+            ) {
+                found.push(p);
+            }
+        }
+    }
+    // Sorted by the spelling the refusal prints, so it reads the same on every machine.
+    found.sort_by(|a, b| a.reference.cmp(&b.reference));
+    found
+}
+
+/// ONE workspace publishes the embedded name: subscribe to that bundle by its catalog name —
+/// exactly the act `topos add <catalog-name>` performs on a workspace mcp bundle (the canonical
+/// reference row, the kind from the catalog, the delivery + converge in the same invocation,
+/// ungated) — and LEAD the receipt's note with the source, so the workspace-over-registry
+/// precedence is disclosed rather than silent.
+fn subscribe_workspace_hit(
+    ctx: &Ctx<'_>,
+    connect: &SessionConnect<'_>,
+    hit: &PublishedName,
+    global: bool,
+) -> Result<Box<AddData>, ClientError> {
+    match add_reference(ctx, connect, None, &hit.reference, global, true)? {
+        AddRefOutcome::Applied(mut data) => {
+            let disclosure = format!("from {}'s catalog as '{}'", hit.workspace, hit.name);
+            data.note = Some(match data.note.take() {
+                Some(rest) => format!("{disclosure} · {rest}"),
+                None => disclosure,
+            });
+            Ok(data)
+        }
+        // A workspace-bundle reference always applies (only a git source describes) — reaching
+        // here means the reference arm changed shape under this caller.
+        AddRefOutcome::Described { .. } => Err(ClientError::Corrupt(
+            "a workspace bundle reference described instead of applying".into(),
+        )),
+    }
+}
+
+/// The registry's 404 with the OTHER consulted source folded in — one honest sentence: the
+/// workspace catalogs were asked first and held nothing, so the miss says both. Every other
+/// fetch fault passes through untouched (a transport error is not a consultation).
+fn miss_both_sources(e: ClientError, server: &str) -> ClientError {
+    match e {
+        ClientError::RemoteFetch { msg, fault } if msg.ends_with("(HTTP 404)") => {
+            ClientError::RemoteFetch {
+                msg: format!(
+                    "{msg}, and no workspace you are connected to publishes a server named \
+                     {server}"
+                ),
+                fault,
+            }
+        }
+        other => other,
+    }
+}
+
+/// Fold the typed MCP block onto a WORKSPACE-DELIVERED bundle's add receipt — read back from the
+/// scope store the subscribe just delivered into, so the receipt states the document that
+/// actually landed. Best-effort by construction: the delivery itself is (the row is the durable
+/// demand), so a store the bytes have not reached yet just leaves the receipt block-less and the
+/// next `update` lands them. No `bundle` folder is named — a workspace bundle's bytes live in
+/// the store, not in a folder of their own.
+pub(crate) fn fold_workspace_mcp(
+    ctx: &Ctx<'_>,
+    target: &EditTarget,
+    global: bool,
+    data: &mut AddData,
+) {
+    let Some(sid) = data
+        .skill_id
+        .as_deref()
+        .and_then(|s| crate::id::SkillId::parse(s).ok())
+    else {
+        return;
+    };
+    let layout = match target.scope {
+        ManifestScope::Global => Some(ctx.layout.clone()),
+        ManifestScope::Project => crate::sidecar::existing_project_store(ctx.fs, &target.dir),
+    };
+    let Some(layout) = layout else { return };
+    let sctx = super::ctx_with_layout(ctx, &layout);
+    let Ok(Some((_version, bytes))) = crate::mcp_engine::stored_server_json(&sctx, &sid) else {
+        return;
+    };
+    let Ok(summary) = mcp_validate::validate_server_json(&bytes) else {
+        return;
+    };
+    let (filter, _) = row_narrowing(ctx, target, &data.name);
+    let agents = engaged_agents(ctx, target, global, &filter);
+    fold_receipt(data, &summary, None, agents, &[]);
 }
 
 // -------------------------------------------------------------------------------------------------
@@ -285,7 +449,7 @@ fn adopt_local(ctx: &Ctx<'_>, dir: &Path, global: bool) -> Result<Box<AddData>, 
     let agents = engaged_agents(ctx, &scope.target, global, &filter);
     let bundle_id = data.skill_id.clone().unwrap_or_default();
     let lines = converge_one(ctx, &scope.target, global, &bundle_id, &data.name);
-    fold_receipt(&mut data, &summary, dir, agents, &lines);
+    fold_receipt(&mut data, &summary, Some(dir), agents, &lines);
     Ok(Box::new(data))
 }
 
@@ -381,7 +545,7 @@ fn fetch_arm(
     medit::note_added_path_kind_in(ctx, &mut data, &scope.target, &bundle_dir, Some("mcp"))?;
     let bundle_id = format!("local:{slug}");
     let lines = converge_one(ctx, &scope.target, global, &bundle_id, &slug);
-    fold_receipt(&mut data, &summary, &bundle_dir, agents, &lines);
+    fold_receipt(&mut data, &summary, Some(&bundle_dir), agents, &lines);
     Ok(Box::new(data))
 }
 
@@ -842,7 +1006,13 @@ fn engaged_agents(
 }
 
 /// The typed receipt payload — derived facts only; the document is never echoed whole.
-fn summarize(summary: &McpSummary, bundle_dir: &Path, agents: Vec<String>) -> McpServerSummary {
+/// `bundle_dir` is the folder the import wrote or adopted; `None` for a workspace-delivered
+/// bundle, whose bytes live in the scope store rather than a folder here.
+fn summarize(
+    summary: &McpSummary,
+    bundle_dir: Option<&Path>,
+    agents: Vec<String>,
+) -> McpServerSummary {
     McpServerSummary {
         server: summary.name.clone(),
         description: summary.description.clone(),
@@ -851,7 +1021,7 @@ fn summarize(summary: &McpSummary, bundle_dir: &Path, agents: Vec<String>) -> Mc
         transport: summary.transport.to_owned(),
         auth: summary.auth_hint.map(|a| a.as_str().to_owned()),
         headers: summary.headers.iter().map(|h| h.name.clone()).collect(),
-        bundle: bundle_dir.display().to_string(),
+        bundle: bundle_dir.map(|d| d.display().to_string()),
         agents,
     }
 }
@@ -863,7 +1033,7 @@ fn summarize(summary: &McpSummary, bundle_dir: &Path, agents: Vec<String>) -> Mc
 fn fold_receipt(
     data: &mut AddData,
     summary: &McpSummary,
-    bundle_dir: &Path,
+    bundle_dir: Option<&Path>,
     agents: Vec<String>,
     lines: &[String],
 ) {

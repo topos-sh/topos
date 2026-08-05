@@ -640,7 +640,8 @@ fn fixtures() -> Vec<(&'static str, String)> {
                 // Only LITERAL headers reach a receipt — a credential-shaped one refuses the
                 // whole document instead.
                 headers: vec!["X-Region".to_owned()],
-                bundle: "/home/ada/.topos/mcp/weather".to_owned(),
+                // ABSENT on a workspace-subscribed server, whose bytes live in the scope store.
+                bundle: Some("/home/ada/.topos/mcp/weather".to_owned()),
                 agents: vec!["Claude Code".to_owned(), "Cursor".to_owned()],
             }),
         })

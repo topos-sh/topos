@@ -9,6 +9,10 @@
 //!   wrote leaves with the row when its bytes still match; anything else is kept, disclosed);
 //! - the LOCAL door applies immediately, and its row is `add`/`remove`'s exact file inverse even
 //!   carrying `{ kind = "mcp" }` — an adopted folder is never deleted;
+//! - a registry-shaped name resolves WORKSPACE-FIRST: a connected catalog EMBEDDING it
+//!   subscribes to that bundle by its catalog name (source disclosed, registry never dialed),
+//!   several embedding it refuse toward `--workspace`, and a miss falls through to the
+//!   registry — whose 404 then names both consulted sources;
 //! - the registry name goes to the versions/latest endpoint as ONE encoded path segment, and its
 //!   `{server, _meta}` envelope is unwrapped before a byte is stored;
 //! - a document carrying a credential is REFUSED at every door, with the shared typed code, before
@@ -178,6 +182,25 @@ impl Rig {
         )
         .unwrap();
     }
+    /// A SECOND live workspace on the same server — the ambiguity tests' other team.
+    fn seed_session_in(&self, ws_id: &str, ws_name: &str) {
+        sessions::upsert_session(
+            &self.fs,
+            &self.layout(),
+            Session {
+                host: HOST.into(),
+                base_url: format!("https://{HOST}/api"),
+                workspace_id: ws_id.into(),
+                workspace_name: ws_name.into(),
+                display_name: ws_name.into(),
+                session_id: format!("sn_{ws_id}"),
+                credential: format!("cred-{ws_id}"),
+                status: SESSION_ACTIVE.into(),
+                logged_in_at: 1,
+            },
+        )
+        .unwrap();
+    }
 }
 
 /// A document source that answers ONE canned body and records every URL it was asked for — no test
@@ -202,6 +225,29 @@ impl McpDocSource for FakeDocs {
     fn fetch(&self, url: &str) -> Result<Vec<u8>, ClientError> {
         self.asked.lock().unwrap().push(url.to_owned());
         Ok(self.body.clone())
+    }
+}
+
+/// A document source that answers the registry's own 404 for every ask — the miss shape the
+/// both-sources-consulted message decorates.
+struct Docs404;
+impl McpDocSource for Docs404 {
+    fn fetch(&self, url: &str) -> Result<Vec<u8>, ClientError> {
+        Err(ClientError::RemoteFetch {
+            msg: format!("{url} — no server document there (HTTP 404)"),
+            fault: crate::error::FetchFault::Gone,
+        })
+    }
+}
+
+/// The session-connect the arms that never probe a workspace ride: an inert transport set (the
+/// workspace-first tests build their own, serving a catalog).
+fn empty_connect(_s: &Session) -> ops::SessionTransports {
+    ops::SessionTransports {
+        plane: Box::new(NoDelivery),
+        directory: Box::new(FakeDirectory::new(Vec::new(), Vec::new())),
+        contribute: Box::new(RecordingPublish::default()),
+        governance: Box::new(NoGovernance),
     }
 }
 
@@ -243,7 +289,15 @@ fn a_fetched_server_applies_immediately_with_an_undo_led_receipt() {
     let docs = FakeDocs::serving(&good_server());
     let ctx = rig.ctx_at(Some(&rig.work.0));
 
-    let data = ops::add_mcp(&ctx, Some(&docs), "io.github.acme/weather", true).unwrap();
+    let data = ops::add_mcp(
+        &ctx,
+        &empty_connect,
+        Some(&docs),
+        "io.github.acme/weather",
+        true,
+        None,
+    )
+    .unwrap();
     let bundle = rig.layout().home().join("mcp").join("weather");
     assert!(bundle.join("server.json").exists(), "the document landed");
     assert_eq!(
@@ -266,7 +320,13 @@ fn a_fetched_server_applies_immediately_with_an_undo_led_receipt() {
     assert_eq!(mcp.headers, vec!["X-Region".to_owned()]);
     // The document declared no auth word, so the receipt claims none.
     assert_eq!(mcp.auth, None);
-    assert!(mcp.bundle.ends_with("weather"), "{}", mcp.bundle);
+    assert!(
+        mcp.bundle
+            .as_deref()
+            .is_some_and(|b| b.ends_with("weather")),
+        "{:?}",
+        mcp.bundle
+    );
 }
 
 /// ITEM PAIR (add honors the narrowing): with `[defaults.mcp] harness = ["cursor"]` standing and
@@ -284,7 +344,15 @@ fn the_add_converge_honors_the_defaults_narrowing() {
     let docs = FakeDocs::serving(&good_server());
     let ctx = rig.ctx_at(Some(&rig.work.0));
 
-    let data = ops::add_mcp(&ctx, Some(&docs), "io.github.acme/weather", true).unwrap();
+    let data = ops::add_mcp(
+        &ctx,
+        &empty_connect,
+        Some(&docs),
+        "io.github.acme/weather",
+        true,
+        None,
+    )
+    .unwrap();
     let cursor = rig.home.0.join(".cursor/mcp.json");
     let openclaw = rig.home.0.join(".openclaw/openclaw.json");
     assert!(
@@ -319,7 +387,15 @@ fn the_add_receipt_carries_the_reload_note_and_says_when_nobody_is_reached() {
     std::fs::create_dir_all(rig.home.0.join(".cursor")).unwrap();
     let docs = FakeDocs::serving(&good_server());
     let ctx = rig.ctx_at(Some(&rig.work.0));
-    let data = ops::add_mcp(&ctx, Some(&docs), "io.github.acme/weather", true).unwrap();
+    let data = ops::add_mcp(
+        &ctx,
+        &empty_connect,
+        Some(&docs),
+        "io.github.acme/weather",
+        true,
+        None,
+    )
+    .unwrap();
     let note = data.note.clone().unwrap_or_default();
     assert!(
         note.contains("server entry in") && note.contains("restart Cursor"),
@@ -332,7 +408,15 @@ fn the_add_receipt_carries_the_reload_note_and_says_when_nobody_is_reached() {
     rig.write_global("[bundles]\n");
     let docs = FakeDocs::serving(&good_server());
     let ctx = rig.ctx_at(Some(&rig.work.0));
-    let data = ops::add_mcp(&ctx, Some(&docs), "io.github.acme/weather", true).unwrap();
+    let data = ops::add_mcp(
+        &ctx,
+        &empty_connect,
+        Some(&docs),
+        "io.github.acme/weather",
+        true,
+        None,
+    )
+    .unwrap();
     assert!(
         data.mcp.as_ref().is_some_and(|m| m.agents.is_empty()),
         "{:?}",
@@ -360,7 +444,15 @@ fn the_fetched_document_lands_canonical_with_the_kind_row() {
     let docs = FakeDocs::serving(&good_server());
     let ctx = rig.ctx_at(Some(&rig.work.0));
 
-    let data = ops::add_mcp(&ctx, Some(&docs), "io.github.acme/weather", true).unwrap();
+    let data = ops::add_mcp(
+        &ctx,
+        &empty_connect,
+        Some(&docs),
+        "io.github.acme/weather",
+        true,
+        None,
+    )
+    .unwrap();
     assert_eq!(data.name, "weather");
 
     let bundle = rig.layout().home().join("mcp").join("weather");
@@ -397,7 +489,15 @@ fn a_registry_name_reads_versions_latest_and_unwraps_the_envelope() {
     let docs = FakeDocs::serving(&enveloped);
     let ctx = rig.ctx_at(Some(&rig.work.0));
 
-    ops::add_mcp(&ctx, Some(&docs), "io.github.acme/weather", true).unwrap();
+    ops::add_mcp(
+        &ctx,
+        &empty_connect,
+        Some(&docs),
+        "io.github.acme/weather",
+        true,
+        None,
+    )
+    .unwrap();
     assert_eq!(
         docs.urls(),
         vec![
@@ -429,7 +529,7 @@ fn an_https_url_is_fetched_as_given() {
     let ctx = rig.ctx_at(Some(&rig.work.0));
     let url = "https://weather.acme.example/.well-known/server.json";
 
-    ops::add_mcp(&ctx, Some(&docs), url, true).unwrap();
+    ops::add_mcp(&ctx, &empty_connect, Some(&docs), url, true, None).unwrap();
     assert_eq!(docs.urls(), vec![url.to_owned()]);
 }
 
@@ -443,7 +543,15 @@ fn a_fetched_secret_is_refused_before_anything_is_written() {
     let docs = FakeDocs::serving(&server_with_secret());
     let ctx = rig.ctx_at(Some(&rig.work.0));
 
-    let err = ops::add_mcp(&ctx, Some(&docs), "io.github.acme/weather", true).expect_err("refused");
+    let err = ops::add_mcp(
+        &ctx,
+        &empty_connect,
+        Some(&docs),
+        "io.github.acme/weather",
+        true,
+        None,
+    )
+    .expect_err("refused");
     assert_eq!(err.code(), "MCP_SECRET_REFUSED");
     assert!(matches!(
         err,
@@ -470,7 +578,15 @@ fn an_occupied_destination_refuses_by_name() {
     let docs = FakeDocs::serving(&good_server());
     let ctx = rig.ctx_at(Some(&rig.work.0));
 
-    let err = ops::add_mcp(&ctx, Some(&docs), "io.github.acme/weather", true).expect_err("refused");
+    let err = ops::add_mcp(
+        &ctx,
+        &empty_connect,
+        Some(&docs),
+        "io.github.acme/weather",
+        true,
+        None,
+    )
+    .expect_err("refused");
     assert!(
         err.detail().contains(&taken.display().to_string()),
         "{}",
@@ -501,8 +617,15 @@ fn an_interrupted_import_resumes_when_the_leftover_matches() {
     let docs = FakeDocs::serving(&good_server());
     let ctx = rig.ctx_at(Some(&rig.work.0));
 
-    let data =
-        ops::add_mcp(&ctx, Some(&docs), "io.github.acme/weather", true).expect("the retry resumes");
+    let data = ops::add_mcp(
+        &ctx,
+        &empty_connect,
+        Some(&docs),
+        "io.github.acme/weather",
+        true,
+        None,
+    )
+    .expect("the retry resumes");
     assert_eq!(data.name, "weather");
     let text = rig.global_text();
     assert!(
@@ -531,13 +654,37 @@ fn a_resume_refuses_foreign_bytes_and_a_registered_row() {
     let ctx = rig.ctx_at(Some(&rig.work.0));
 
     // Foreign bytes: refused, untouched.
-    let err = ops::add_mcp(&ctx, Some(&docs), "io.github.acme/weather", true).expect_err("refused");
+    let err = ops::add_mcp(
+        &ctx,
+        &empty_connect,
+        Some(&docs),
+        "io.github.acme/weather",
+        true,
+        None,
+    )
+    .expect_err("refused");
     assert!(err.detail().contains("already exists"), "{}", err.detail());
 
     // A registered row: the full import lands once, then a second run refuses the same way.
     std::fs::write(dir.join("server.json"), canonical(&good_server())).unwrap();
-    ops::add_mcp(&ctx, Some(&docs), "io.github.acme/weather", true).expect("resumes");
-    let err = ops::add_mcp(&ctx, Some(&docs), "io.github.acme/weather", true).expect_err("refused");
+    ops::add_mcp(
+        &ctx,
+        &empty_connect,
+        Some(&docs),
+        "io.github.acme/weather",
+        true,
+        None,
+    )
+    .expect("resumes");
+    let err = ops::add_mcp(
+        &ctx,
+        &empty_connect,
+        Some(&docs),
+        "io.github.acme/weather",
+        true,
+        None,
+    )
+    .expect_err("refused");
     assert!(err.detail().contains("already exists"), "{}", err.detail());
 }
 
@@ -557,7 +704,15 @@ fn a_resume_with_a_stray_sibling_refuses_naming_the_file() {
     let docs = FakeDocs::serving(&good_server());
     let ctx = rig.ctx_at(Some(&rig.work.0));
 
-    let err = ops::add_mcp(&ctx, Some(&docs), "io.github.acme/weather", true).expect_err("refused");
+    let err = ops::add_mcp(
+        &ctx,
+        &empty_connect,
+        Some(&docs),
+        "io.github.acme/weather",
+        true,
+        None,
+    )
+    .expect_err("refused");
     assert_eq!(err.code(), "MCP_INVALID");
     assert!(err.detail().contains("evil.sh"), "{}", err.detail());
     assert_eq!(rig.global_text(), "[bundles]\n", "no row was registered");
@@ -586,11 +741,310 @@ fn a_resume_with_a_credential_readme_refuses() {
     let docs = FakeDocs::serving(&good_server());
     let ctx = rig.ctx_at(Some(&rig.work.0));
 
-    let err = ops::add_mcp(&ctx, Some(&docs), "io.github.acme/weather", true).expect_err("refused");
+    let err = ops::add_mcp(
+        &ctx,
+        &empty_connect,
+        Some(&docs),
+        "io.github.acme/weather",
+        true,
+        None,
+    )
+    .expect_err("refused");
     assert_eq!(err.code(), "MCP_SECRET_REFUSED");
     assert!(err.detail().contains("README.md"), "{}", err.detail());
     assert!(!err.detail().contains("ghp_"), "{}", err.detail());
     assert_eq!(rig.global_text(), "[bundles]\n", "no row was registered");
+}
+
+// =================================================================================================
+// The WORKSPACE-FIRST resolution of a registry-shaped name
+// =================================================================================================
+
+/// One workspace-catalog entry an ACTIVE mcp bundle contributes, embedding `server` — what the
+/// session lane's additive `mcp_server_name` field carries.
+fn mcp_entry(name: &str, server: &str) -> topos_types::requests::WireSkillIndexEntry {
+    topos_types::requests::WireSkillIndexEntry {
+        skill_id: format!("s_{name}"),
+        name: name.to_owned(),
+        kind: "mcp".to_owned(),
+        status: "active".to_owned(),
+        version_id: "a".repeat(64),
+        bundle_digest: "b".repeat(64),
+        generation: 1,
+        display_name: None,
+        updated_at: 0,
+        open_proposals: 0,
+        upstream_host: None,
+        upstream_repo: None,
+        upstream_path: None,
+        mcp_server_name: Some(server.to_owned()),
+    }
+}
+
+/// A session-connect serving ONE catalog per workspace id (every other lane inert).
+fn catalog_connect(
+    per_ws: Vec<(String, Vec<topos_types::requests::WireSkillIndexEntry>)>,
+) -> impl Fn(&Session) -> ops::SessionTransports {
+    move |s: &Session| {
+        let skills = per_ws
+            .iter()
+            .find(|(ws, _)| ws == &s.workspace_id)
+            .map(|(_, entries)| entries.clone())
+            .unwrap_or_default();
+        ops::SessionTransports {
+            plane: Box::new(NoDelivery),
+            directory: Box::new(FakeDirectory::new(skills, Vec::new())),
+            contribute: Box::new(RecordingPublish::default()),
+            governance: Box::new(NoGovernance),
+        }
+    }
+}
+
+/// ITEM (workspace-first): a registry-shaped name a connected workspace's catalog EMBEDS
+/// resolves to THAT bundle — subscribed by its catalog name through the ordinary reference arm,
+/// the source disclosed at the head of the note — and the official registry is never dialed
+/// after the hit.
+#[test]
+fn a_workspace_hit_wins_over_the_registry_and_discloses_its_source() {
+    let rig = Rig::new("ws-first");
+    rig.seed_session();
+    rig.write_global("[bundles]\n");
+    let docs = FakeDocs::serving(&good_server());
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    let connect = catalog_connect(vec![(
+        WS.to_owned(),
+        vec![mcp_entry("weather", "io.github.acme/weather")],
+    )]);
+
+    let data = ops::add_mcp(
+        &ctx,
+        &connect,
+        Some(&docs),
+        "io.github.acme/weather",
+        true,
+        None,
+    )
+    .unwrap();
+    assert!(
+        docs.urls().is_empty(),
+        "a workspace hit must never dial the registry: {:?}",
+        docs.urls()
+    );
+    // The subscribe is the ordinary workspace-reference act: the canonical row, kind-less (the
+    // catalog is the authority), with the catalog identity on the receipt.
+    assert_eq!(data.name, "weather");
+    assert_eq!(
+        data.reference.as_deref(),
+        Some(&*format!("{HOST}/{WS_NAME}/weather"))
+    );
+    assert_eq!(data.skill_id.as_deref(), Some("s_weather"));
+    let text = rig.global_text();
+    assert!(
+        text.contains(&format!("\"{HOST}/{WS_NAME}/weather\" = \"*\"")),
+        "{text}"
+    );
+    assert!(
+        !text.contains("kind"),
+        "a workspace row carries no kind: {text}"
+    );
+    let note = data.note.clone().unwrap_or_default();
+    assert!(
+        note.starts_with("from eng's catalog as 'weather'"),
+        "the receipt leads with the source: {note}"
+    );
+}
+
+/// ITEM (ambiguity refuses): SEVERAL connected workspaces embedding the same server name refuse
+/// with the typed shape — naming every workspace — and the envelope's ways out are the
+/// `--workspace`-narrowed re-runs of the user's own invocation. The registry is not consulted.
+#[test]
+fn several_workspaces_embedding_the_name_refuse_toward_workspace() {
+    let rig = Rig::new("ws-ambig");
+    rig.seed_session();
+    rig.seed_session_in("w_ops", "ops");
+    rig.write_global("[bundles]\n");
+    let docs = FakeDocs::serving(&good_server());
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    let connect = catalog_connect(vec![
+        (
+            WS.to_owned(),
+            vec![mcp_entry("weather", "io.github.acme/weather")],
+        ),
+        (
+            "w_ops".to_owned(),
+            vec![mcp_entry("wx", "io.github.acme/weather")],
+        ),
+    ]);
+
+    let err = ops::add_mcp(
+        &ctx,
+        &connect,
+        Some(&docs),
+        "io.github.acme/weather",
+        true,
+        None,
+    )
+    .expect_err("refused");
+    assert!(docs.urls().is_empty(), "{:?}", docs.urls());
+    assert_eq!(err.code(), "AMBIGUOUS_WORKSPACE");
+    let ClientError::AmbiguousMcpWorkspace { ref workspaces, .. } = err else {
+        panic!("the typed ambiguity shape: {err:?}");
+    };
+    assert_eq!(workspaces, &["eng".to_owned(), "ops".to_owned()]);
+    assert!(err.detail().contains("--workspace"), "{}", err.detail());
+    // The envelope's ways out: one `--workspace`-narrowed re-run per workspace, `-g` preserved.
+    let envelope = crate::render::err_envelope(
+        "add",
+        &[
+            "add".into(),
+            "--mcp".into(),
+            "io.github.acme/weather".into(),
+            "-g".into(),
+        ],
+        &err,
+    );
+    let argvs: Vec<Vec<String>> = envelope
+        .next_actions
+        .iter()
+        .map(|a| a.argv.clone())
+        .collect();
+    assert_eq!(
+        argvs,
+        vec![
+            vec![
+                "topos".to_owned(),
+                "add".to_owned(),
+                "--mcp".to_owned(),
+                "io.github.acme/weather".to_owned(),
+                "--workspace".to_owned(),
+                "eng".to_owned(),
+                "-g".to_owned(),
+                "--json".to_owned(),
+            ],
+            vec![
+                "topos".to_owned(),
+                "add".to_owned(),
+                "--mcp".to_owned(),
+                "io.github.acme/weather".to_owned(),
+                "--workspace".to_owned(),
+                "ops".to_owned(),
+                "-g".to_owned(),
+                "--json".to_owned(),
+            ],
+        ]
+    );
+}
+
+/// ITEM (`--workspace` narrows): the global selector picks WHICH workspace the probe means —
+/// two teams embedding the name resolve cleanly to the selected one.
+#[test]
+fn the_workspace_selector_narrows_the_probe_to_one_team() {
+    let rig = Rig::new("ws-narrow");
+    rig.seed_session();
+    rig.seed_session_in("w_ops", "ops");
+    rig.write_global("[bundles]\n");
+    let docs = FakeDocs::serving(&good_server());
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    let connect = catalog_connect(vec![
+        (
+            WS.to_owned(),
+            vec![mcp_entry("weather", "io.github.acme/weather")],
+        ),
+        (
+            "w_ops".to_owned(),
+            vec![mcp_entry("wx", "io.github.acme/weather")],
+        ),
+    ]);
+
+    let data = ops::add_mcp(
+        &ctx,
+        &connect,
+        Some(&docs),
+        "io.github.acme/weather",
+        true,
+        Some("w_ops"),
+    )
+    .unwrap();
+    assert!(docs.urls().is_empty(), "{:?}", docs.urls());
+    assert_eq!(data.name, "wx");
+    assert_eq!(data.reference.as_deref(), Some(&*format!("{HOST}/ops/wx")));
+}
+
+/// ITEM (miss falls through): no connected workspace embeds the name — the registry answers
+/// exactly as before, and a catalog that holds the name under a DIFFERENT embedded identity
+/// (or as a `kind = "skill"` bundle) never matches.
+#[test]
+fn a_workspace_miss_falls_through_to_the_registry() {
+    let rig = Rig::new("ws-miss");
+    rig.seed_session();
+    rig.write_global("[bundles]\n");
+    let docs = FakeDocs::serving(&good_server());
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    // A different embedded name, and a SKILL wearing the exact token as its embedded field (a
+    // shape a well-behaved server never emits) — neither participates.
+    let mut skill_wearing_it = mcp_entry("weather-skill", "io.github.acme/weather");
+    skill_wearing_it.kind = "skill".to_owned();
+    let connect = catalog_connect(vec![(
+        WS.to_owned(),
+        vec![mcp_entry("wx", "io.github.acme/other"), skill_wearing_it],
+    )]);
+
+    ops::add_mcp(
+        &ctx,
+        &connect,
+        Some(&docs),
+        "io.github.acme/weather",
+        true,
+        None,
+    )
+    .expect("the registry arm lands it");
+    assert_eq!(
+        docs.urls(),
+        vec![
+            "https://registry.modelcontextprotocol.io/v0.1/servers/io.github.acme%2Fweather/versions/latest"
+                .to_owned()
+        ]
+    );
+    let text = rig.global_text();
+    assert!(
+        text.contains("kind = \"mcp\""),
+        "the fetched row landed: {text}"
+    );
+}
+
+/// ITEM (the miss message names both sources): the registry's 404 now says the workspace
+/// catalogs were consulted too — one honest sentence — while every other fetch fault passes
+/// through untouched.
+#[test]
+fn a_miss_everywhere_says_both_sources_were_consulted() {
+    let rig = Rig::new("ws-404");
+    rig.seed_session();
+    rig.write_global("[bundles]\n");
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    let connect = catalog_connect(vec![(WS.to_owned(), Vec::new())]);
+
+    let err = ops::add_mcp(
+        &ctx,
+        &connect,
+        Some(&Docs404),
+        "io.github.acme/weather",
+        true,
+        None,
+    )
+    .expect_err("a miss everywhere refuses");
+    assert_eq!(err.code(), "REMOTE_FETCH");
+    let detail = err.detail();
+    assert!(
+        detail.contains("no server document there (HTTP 404)"),
+        "{detail}"
+    );
+    assert!(
+        detail.contains(
+            "and no workspace you are connected to publishes a server named \
+             io.github.acme/weather"
+        ),
+        "{detail}"
+    );
 }
 
 // =================================================================================================
@@ -607,7 +1061,15 @@ fn a_local_folder_applies_immediately_with_a_kind_row() {
     write_bundle(&dir, &good_server());
     let ctx = rig.ctx_at(Some(&rig.work.0));
 
-    let data = ops::add_mcp(&ctx, None, dir.to_str().unwrap(), true).unwrap();
+    let data = ops::add_mcp(
+        &ctx,
+        &empty_connect,
+        None,
+        dir.to_str().unwrap(),
+        true,
+        None,
+    )
+    .unwrap();
     // It went through the ordinary adopt: a real record with a real version identity.
     assert!(data.skill_id.is_some(), "the folder was adopted");
     assert!(data.version_id.is_some(), "the adopt minted a version");
@@ -630,7 +1092,15 @@ fn add_mcp_and_remove_are_exact_file_inverses() {
     write_bundle(&dir, &good_server());
     let ctx = rig.ctx_at(Some(&rig.work.0));
 
-    ops::add_mcp(&ctx, None, dir.to_str().unwrap(), true).unwrap();
+    ops::add_mcp(
+        &ctx,
+        &empty_connect,
+        None,
+        dir.to_str().unwrap(),
+        true,
+        None,
+    )
+    .unwrap();
     assert_ne!(rig.global_text(), before, "the add changed the file");
 
     let session_connect = |_s: &Session| ops::SessionTransports {
@@ -676,7 +1146,15 @@ fn a_tilde_spelled_adopted_row_converges_its_config_entries_out_on_remove() {
     let dir = rig.home.0.join("weather");
     write_bundle(&dir, &good_server());
     let ctx = rig.ctx_at(Some(&rig.work.0));
-    ops::add_mcp(&ctx, None, dir.to_str().unwrap(), true).unwrap();
+    ops::add_mcp(
+        &ctx,
+        &empty_connect,
+        None,
+        dir.to_str().unwrap(),
+        true,
+        None,
+    )
+    .unwrap();
     let cursor = rig.home.0.join(".cursor/mcp.json");
     assert!(
         std::fs::read_to_string(&cursor)
@@ -733,7 +1211,15 @@ fn remove_deletes_the_folder_a_fetched_import_wrote() {
     rig.write_global("[bundles]\n");
     let docs = FakeDocs::serving(&good_server());
     let ctx = rig.ctx_at(Some(&rig.work.0));
-    let data = ops::add_mcp(&ctx, Some(&docs), "io.github.acme/weather", true).unwrap();
+    let data = ops::add_mcp(
+        &ctx,
+        &empty_connect,
+        Some(&docs),
+        "io.github.acme/weather",
+        true,
+        None,
+    )
+    .unwrap();
     let bundle = rig.layout().home().join("mcp").join("weather");
     assert!(bundle.join("server.json").exists());
 
@@ -772,7 +1258,15 @@ fn a_fetched_import_reports_the_digest_of_what_it_wrote() {
     rig.write_global("[bundles]\n");
     let docs = FakeDocs::serving(&good_server());
     let ctx = rig.ctx_at(Some(&rig.work.0));
-    let data = ops::add_mcp(&ctx, Some(&docs), "io.github.acme/weather", true).unwrap();
+    let data = ops::add_mcp(
+        &ctx,
+        &empty_connect,
+        Some(&docs),
+        "io.github.acme/weather",
+        true,
+        None,
+    )
+    .unwrap();
 
     assert!(
         data.skill_id.is_none() && data.version_id.is_none(),
@@ -801,7 +1295,15 @@ fn removing_a_fetched_import_leaves_no_empty_husks() {
     // Deliberately NOT seeded: the add itself brings the manifest into existence.
     let docs = FakeDocs::serving(&good_server());
     let ctx = rig.ctx_at(Some(&rig.work.0));
-    ops::add_mcp(&ctx, Some(&docs), "io.github.acme/weather", true).unwrap();
+    ops::add_mcp(
+        &ctx,
+        &empty_connect,
+        Some(&docs),
+        "io.github.acme/weather",
+        true,
+        None,
+    )
+    .unwrap();
     let mcp_dir = rig.layout().home().join("mcp");
     assert!(mcp_dir.join("weather").join("server.json").exists());
     assert!(rig.manifest().exists(), "the add birthed the manifest");
@@ -840,7 +1342,15 @@ fn a_manifest_the_import_found_survives_the_removal() {
     rig.write_global("[bundles]\n");
     let docs = FakeDocs::serving(&good_server());
     let ctx = rig.ctx_at(Some(&rig.work.0));
-    ops::add_mcp(&ctx, Some(&docs), "io.github.acme/weather", true).unwrap();
+    ops::add_mcp(
+        &ctx,
+        &empty_connect,
+        Some(&docs),
+        "io.github.acme/weather",
+        true,
+        None,
+    )
+    .unwrap();
 
     let session_connect = |_s: &Session| ops::SessionTransports {
         plane: Box::new(NoDelivery),
@@ -873,7 +1383,15 @@ fn remove_keeps_an_edited_import_folder_and_says_so() {
     rig.write_global("[bundles]\n");
     let docs = FakeDocs::serving(&good_server());
     let ctx = rig.ctx_at(Some(&rig.work.0));
-    ops::add_mcp(&ctx, Some(&docs), "io.github.acme/weather", true).unwrap();
+    ops::add_mcp(
+        &ctx,
+        &empty_connect,
+        Some(&docs),
+        "io.github.acme/weather",
+        true,
+        None,
+    )
+    .unwrap();
     let bundle = rig.layout().home().join("mcp").join("weather");
     // The person's own edit after the import: the folder is no longer provably ours.
     std::fs::write(bundle.join("NOTES.md"), b"my own notes\n").unwrap();
@@ -933,7 +1451,15 @@ fn a_server_bundle_at_a_skill_door_refuses_toward_the_mcp_flag() {
     assert_eq!(err.code(), "MCP_FLAG_REQUIRED");
 
     // The `--mcp` door still adopts that exact folder.
-    ops::add_mcp(&ctx, None, dir.to_str().unwrap(), true).expect("the flagged door adopts");
+    ops::add_mcp(
+        &ctx,
+        &empty_connect,
+        None,
+        dir.to_str().unwrap(),
+        true,
+        None,
+    )
+    .expect("the flagged door adopts");
 
     // A SKILL.md beside a server.json reads as a skill — the guard never fires on it.
     let skill = rig.work.0.join("notes");
@@ -954,7 +1480,15 @@ fn a_folder_without_a_server_json_refuses() {
     std::fs::write(dir.join("SKILL.md"), b"# not a server\n").unwrap();
     let ctx = rig.ctx_at(Some(&rig.work.0));
 
-    let err = ops::add_mcp(&ctx, None, dir.to_str().unwrap(), true).expect_err("refused");
+    let err = ops::add_mcp(
+        &ctx,
+        &empty_connect,
+        None,
+        dir.to_str().unwrap(),
+        true,
+        None,
+    )
+    .expect_err("refused");
     assert!(err.detail().contains("server.json"), "{}", err.detail());
     assert_eq!(rig.global_text(), "[bundles]\n", "nothing was recorded");
 }
@@ -972,7 +1506,15 @@ fn a_stray_sibling_refuses_at_the_adopt_gate() {
     std::fs::write(dir.join("evil.sh"), b"#!/bin/sh\necho pwned\n").unwrap();
     let ctx = rig.ctx_at(Some(&rig.work.0));
 
-    let err = ops::add_mcp(&ctx, None, dir.to_str().unwrap(), true).expect_err("refused");
+    let err = ops::add_mcp(
+        &ctx,
+        &empty_connect,
+        None,
+        dir.to_str().unwrap(),
+        true,
+        None,
+    )
+    .expect_err("refused");
     assert_eq!(err.code(), "MCP_INVALID");
     assert!(
         err.detail().contains("server.json, README.md"),
@@ -984,7 +1526,15 @@ fn a_stray_sibling_refuses_at_the_adopt_gate() {
     // A `topos-mcp.toml` is a stray like any other.
     std::fs::remove_file(dir.join("evil.sh")).unwrap();
     std::fs::write(dir.join("topos-mcp.toml"), b"# config\n").unwrap();
-    let err = ops::add_mcp(&ctx, None, dir.to_str().unwrap(), true).expect_err("refused");
+    let err = ops::add_mcp(
+        &ctx,
+        &empty_connect,
+        None,
+        dir.to_str().unwrap(),
+        true,
+        None,
+    )
+    .expect_err("refused");
     assert_eq!(err.code(), "MCP_INVALID");
     assert!(err.detail().contains("topos-mcp.toml"), "{}", err.detail());
     assert_eq!(rig.global_text(), "[bundles]\n", "nothing was recorded");
@@ -992,7 +1542,15 @@ fn a_stray_sibling_refuses_at_the_adopt_gate() {
     // The allowed pair adopts — and the store gains the durable kind marker beside its docs.
     std::fs::remove_file(dir.join("topos-mcp.toml")).unwrap();
     std::fs::write(dir.join("README.md"), b"How to use this server.\n").unwrap();
-    let data = ops::add_mcp(&ctx, None, dir.to_str().unwrap(), true).unwrap();
+    let data = ops::add_mcp(
+        &ctx,
+        &empty_connect,
+        None,
+        dir.to_str().unwrap(),
+        true,
+        None,
+    )
+    .unwrap();
     let sid = crate::id::SkillId::parse(data.skill_id.as_deref().unwrap()).unwrap();
     let marker = std::fs::read_to_string(rig.layout().published(&sid).kind).expect("kind.json");
     assert!(marker.contains("\"mcp\""), "{marker}");
@@ -1013,7 +1571,15 @@ fn an_allowed_readme_with_a_credential_refuses_at_the_adopt_gate() {
     .unwrap();
     let ctx = rig.ctx_at(Some(&rig.work.0));
 
-    let err = ops::add_mcp(&ctx, None, dir.to_str().unwrap(), true).expect_err("refused");
+    let err = ops::add_mcp(
+        &ctx,
+        &empty_connect,
+        None,
+        dir.to_str().unwrap(),
+        true,
+        None,
+    )
+    .expect_err("refused");
     assert_eq!(err.code(), "MCP_SECRET_REFUSED");
     assert!(err.detail().contains("README.md"), "{}", err.detail());
     assert_eq!(rig.global_text(), "[bundles]\n", "nothing was recorded");
@@ -1028,7 +1594,15 @@ fn a_local_secret_is_refused_before_the_adopt() {
     write_bundle(&dir, &server_with_secret());
     let ctx = rig.ctx_at(Some(&rig.work.0));
 
-    let err = ops::add_mcp(&ctx, None, dir.to_str().unwrap(), true).expect_err("refused");
+    let err = ops::add_mcp(
+        &ctx,
+        &empty_connect,
+        None,
+        dir.to_str().unwrap(),
+        true,
+        None,
+    )
+    .expect_err("refused");
     assert_eq!(err.code(), "MCP_SECRET_REFUSED");
     assert_eq!(rig.global_text(), "[bundles]\n");
     assert!(
@@ -1044,7 +1618,8 @@ fn a_workspace_reference_refuses_toward_the_plain_add() {
     let rig = Rig::new("wsref");
     rig.write_global("[bundles]\n");
     let ctx = rig.ctx_at(Some(&rig.work.0));
-    let err = ops::add_mcp(&ctx, None, "@eng/weather", true).expect_err("refused");
+    let err =
+        ops::add_mcp(&ctx, &empty_connect, None, "@eng/weather", true, None).expect_err("refused");
     assert_eq!(err.code(), "INVALID_ARGUMENT");
     assert!(
         err.detail().contains("topos add @eng/weather"),
@@ -1221,7 +1796,15 @@ fn a_secret_bearing_mcp_bundle_never_reaches_the_wal() {
     // author's own edit, which is exactly the moment the gate has to fire.
     write_bundle(&dir, &good_server());
     let ctx = rig.ctx_at(Some(&rig.work.0));
-    ops::add_mcp(&ctx, None, dir.to_str().unwrap(), true).unwrap();
+    ops::add_mcp(
+        &ctx,
+        &empty_connect,
+        None,
+        dir.to_str().unwrap(),
+        true,
+        None,
+    )
+    .unwrap();
     std::fs::write(dir.join("server.json"), server_with_secret()).unwrap();
 
     let recorder = RecordingPublish::default();
@@ -1251,7 +1834,15 @@ fn a_stray_sibling_never_reaches_the_wal() {
     // the gate has to fire.
     write_bundle(&dir, &good_server());
     let ctx = rig.ctx_at(Some(&rig.work.0));
-    ops::add_mcp(&ctx, None, dir.to_str().unwrap(), true).unwrap();
+    ops::add_mcp(
+        &ctx,
+        &empty_connect,
+        None,
+        dir.to_str().unwrap(),
+        true,
+        None,
+    )
+    .unwrap();
     std::fs::write(dir.join("evil.sh"), b"#!/bin/sh\necho pwned\n").unwrap();
 
     let recorder = RecordingPublish::default();
@@ -1323,7 +1914,15 @@ fn an_mcp_publish_to_a_pre_mcp_server_refuses_before_the_wal() {
     let dir = rig.work.0.join("weather");
     write_bundle(&dir, &good_server());
     let ctx = rig.ctx_at(Some(&rig.work.0));
-    ops::add_mcp(&ctx, None, dir.to_str().unwrap(), true).unwrap();
+    ops::add_mcp(
+        &ctx,
+        &empty_connect,
+        None,
+        dir.to_str().unwrap(),
+        true,
+        None,
+    )
+    .unwrap();
 
     let recorder = OldServerPublish::default();
     let rec = recorder.clone();
@@ -1373,7 +1972,15 @@ fn the_bundle_kind_rides_the_wal_onto_the_wire_and_the_receipt() {
     let dir = rig.work.0.join("weather");
     write_bundle(&dir, &good_server());
     let ctx = rig.ctx_at(Some(&rig.work.0));
-    ops::add_mcp(&ctx, None, dir.to_str().unwrap(), true).unwrap();
+    ops::add_mcp(
+        &ctx,
+        &empty_connect,
+        None,
+        dir.to_str().unwrap(),
+        true,
+        None,
+    )
+    .unwrap();
 
     let recorder = RecordingPublish::default();
     let outcome = publish_through(&ctx, &recorder, "weather").unwrap();

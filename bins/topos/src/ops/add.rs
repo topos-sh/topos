@@ -1409,7 +1409,7 @@ impl PublishedName {
     /// match that cannot be SPELLED cannot be subscribed, hinted, or acted on: offering it would
     /// hand the user a command that refuses. Unspellable stays unlisted, which is exactly the
     /// answer the ladder gave before the workspace half of the namespace existed.
-    fn spelled(
+    pub(crate) fn spelled(
         host: &str,
         workspace: &str,
         name: &str,
@@ -1508,7 +1508,10 @@ pub(crate) fn published_matches(
 /// as empty: nothing subscribable, local-only resolution. `workspace` is the invocation's global
 /// `--workspace` selector (already canonicalized to an id): the flag exists to pick WHICH
 /// workspace an ambient verb means, so a bare name probes only that one — never silently another.
-fn active_sessions(ctx: &Ctx<'_>, workspace: Option<&str>) -> Vec<crate::sessions::Session> {
+pub(crate) fn active_sessions(
+    ctx: &Ctx<'_>,
+    workspace: Option<&str>,
+) -> Vec<crate::sessions::Session> {
     let Ok(sessions) = crate::sessions::read_sessions(ctx.fs, &ctx.layout) else {
         return Vec::new();
     };

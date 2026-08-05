@@ -51,6 +51,11 @@ pub(crate) fn err_envelope(command: &str, argv: &[String], err: &ClientError) ->
         ClientError::AmbiguousWorkspace { references, .. } => {
             serde_json::json!({ "references": references })
         }
+        // The `--mcp` twin names WORKSPACES (the `--workspace` selector's own vocabulary) rather
+        // than references — the re-run keeps the embedded server name the user typed.
+        ClientError::AmbiguousMcpWorkspace { workspaces, .. } => {
+            serde_json::json!({ "workspaces": workspaces })
+        }
         _ => serde_json::json!({}),
     };
     JsonEnvelope {
@@ -108,6 +113,17 @@ fn next_actions(command: &str, argv: &[String], err: &ClientError) -> Vec<NextAc
         } => references
             .iter()
             .map(|reference| subscribe_action(reference, *global))
+            .collect(),
+        // Several workspaces publish the embedded server name: one executable re-run per
+        // workspace, each the user's own `--mcp` invocation narrowed by `--workspace` — so the
+        // agent picks a team instead of re-parsing the sentence that listed them.
+        ClientError::AmbiguousMcpWorkspace {
+            server,
+            workspaces,
+            global,
+        } => workspaces
+            .iter()
+            .map(|workspace| mcp_workspace_action(server, workspace, *global))
             .collect(),
         // Every "look at the discovered inventory to resolve this" error points the agent at `list` — the
         // ambiguity shapes plus the not-found cases from `add <skill>` name resolution.
@@ -407,6 +423,25 @@ fn subscribe_action(reference: &str, global: bool) -> NextAction {
         argv.push("-g".to_owned());
     }
     argv.push(reference.to_owned());
+    argv.push("--json".to_owned());
+    crate::actions::next_action(ActionCode::from("RUN_COMMAND".to_owned()), argv)
+}
+
+/// One runnable re-run for the `--mcp` workspace-disambiguation refusal: the user's own embedded
+/// server name, narrowed to ONE workspace with `--workspace` — carrying the refused invocation's
+/// `-g` for the same reason [`subscribe_action`] does.
+fn mcp_workspace_action(server: &str, workspace: &str, global: bool) -> NextAction {
+    let mut argv = vec![
+        "topos".to_owned(),
+        "add".to_owned(),
+        "--mcp".to_owned(),
+        server.to_owned(),
+        "--workspace".to_owned(),
+        workspace.to_owned(),
+    ];
+    if global {
+        argv.push("-g".to_owned());
+    }
     argv.push("--json".to_owned());
     crate::actions::next_action(ActionCode::from("RUN_COMMAND".to_owned()), argv)
 }
@@ -2963,7 +2998,7 @@ mod tests {
                 transport: "streamable-http".to_owned(),
                 auth: None,
                 headers: vec!["X-Region".to_owned()],
-                bundle: "/home/u/.topos/mcp/weather".to_owned(),
+                bundle: Some("/home/u/.topos/mcp/weather".to_owned()),
                 agents: vec!["Cursor".to_owned()],
             }),
         };

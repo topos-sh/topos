@@ -60,7 +60,7 @@
       ]
     },
     "mcp": {
-      "description": "The MCP SERVER this add landed (`add --mcp`): what the gated document says it is, the\nendpoint every agent will call, and the agents the converge reached — typed, so a JSON\nconsumer never parses the prose note. Absent for every other add. **INFERRED**\n(additive-only).",
+      "description": "The MCP SERVER this add landed (`add --mcp`, or a subscribe to a workspace `mcp`\nbundle): what the gated document says it is, the endpoint every agent will call, and the\nagents the converge reached — typed, so a JSON consumer never parses the prose note.\nAbsent for every other add, and for a workspace subscribe whose delivery has not landed\nthe document yet. **INFERRED** (additive-only).",
       "anyOf": [
         {
           "$ref": "#/$defs/McpServerSummary"
@@ -243,7 +243,7 @@
       ]
     },
     "McpServerSummary": {
-      "description": "What a fetched MCP `server.json` says, after the gate accepted it — the facts the applied\nreceipt carries beside the undo. DERIVED from the document; the document itself is never\nechoed whole. **INFERRED** (additive-only).",
+      "description": "What an MCP `server.json` says, after the gate accepted it — the facts an applied `add`\nreceipt carries beside the undo, whether the document was fetched, adopted, or delivered by\na workspace subscribe. DERIVED from the document; the document itself is never echoed whole.\n**INFERRED** (additive-only).",
       "type": "object",
       "properties": {
         "agents": {
@@ -261,8 +261,11 @@
           ]
         },
         "bundle": {
-          "description": "The folder holding the document (the bundle IS its directory).",
-          "type": "string"
+          "description": "The folder holding the document (the bundle IS its directory). Absent for a\nworkspace-subscribed server, whose bytes live in the scope's store rather than in a\nfolder of their own here.",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "description": {
           "description": "The publisher's one-line summary (the registry caps it at 100 characters).",
@@ -297,8 +300,7 @@
         "description",
         "version",
         "url",
-        "transport",
-        "bundle"
+        "transport"
       ]
     },
     "PublishedMatch": {

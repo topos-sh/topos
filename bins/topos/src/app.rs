@@ -556,8 +556,17 @@ fn run_command(
                 let docs =
                     crate::plane_http::UreqMcpSource::new().with_progress(Rc::clone(&progress));
                 // Every `--mcp` door applies immediately with an undo-led receipt; `--yes` stays
-                // parsed and changes nothing here (the flag's own help says so).
-                let result = ops::add_mcp(&ctx, Some(&docs), &source, global);
+                // parsed and changes nothing here (the flag's own help says so). A
+                // registry-shaped name resolves against the connected workspaces' catalogs
+                // FIRST (their embedded server names), then the official registry.
+                let result = ops::add_mcp(
+                    &ctx,
+                    &connect_session_transports,
+                    Some(&docs),
+                    &source,
+                    global,
+                    workspace.as_deref(),
+                );
                 // The arming sweep + the built-in ride an APPLIED import exactly as they ride any
                 // other adopt receipt (the same trigger-arming moment).
                 let result = result.map(|mut data| {

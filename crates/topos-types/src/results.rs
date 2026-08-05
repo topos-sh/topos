@@ -772,10 +772,11 @@ pub struct AddData {
     /// **Additive.**
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
-    /// The MCP SERVER this add landed (`add --mcp`): what the gated document says it is, the
-    /// endpoint every agent will call, and the agents the converge reached — typed, so a JSON
-    /// consumer never parses the prose note. Absent for every other add. **INFERRED**
-    /// (additive-only).
+    /// The MCP SERVER this add landed (`add --mcp`, or a subscribe to a workspace `mcp`
+    /// bundle): what the gated document says it is, the endpoint every agent will call, and the
+    /// agents the converge reached — typed, so a JSON consumer never parses the prose note.
+    /// Absent for every other add, and for a workspace subscribe whose delivery has not landed
+    /// the document yet. **INFERRED** (additive-only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mcp: Option<McpServerSummary>,
 }
@@ -805,9 +806,10 @@ pub struct AddDescribeData {
     pub note: Option<String>,
 }
 
-/// What a fetched MCP `server.json` says, after the gate accepted it — the facts the applied
-/// receipt carries beside the undo. DERIVED from the document; the document itself is never
-/// echoed whole. **INFERRED** (additive-only).
+/// What an MCP `server.json` says, after the gate accepted it — the facts an applied `add`
+/// receipt carries beside the undo, whether the document was fetched, adopted, or delivered by
+/// a workspace subscribe. DERIVED from the document; the document itself is never echoed whole.
+/// **INFERRED** (additive-only).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
 pub struct McpServerSummary {
@@ -830,8 +832,11 @@ pub struct McpServerSummary {
     /// reaches here — the gate refuses the whole document instead.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub headers: Vec<String>,
-    /// The folder holding the document (the bundle IS its directory).
-    pub bundle: String,
+    /// The folder holding the document (the bundle IS its directory). Absent for a
+    /// workspace-subscribed server, whose bytes live in the scope's store rather than in a
+    /// folder of their own here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bundle: Option<String>,
     /// The agents set up here that the row reaches, after any `harness` narrowing — the honest
     /// breadth line, so nobody has to reverse-engineer which config files changed.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

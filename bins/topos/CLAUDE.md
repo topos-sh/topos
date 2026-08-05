@@ -79,7 +79,12 @@ generated `docs/cli.md` (`cargo xtask gen-cli-ref`).
   raw text; the named shapes are compiled-in matcher fns — no regex engine ships — and a
   dev-dependency `regex` referees them against the JSON's own sources in test). `ops/add_mcp` is
   `add --mcp`: a local folder is gated then adopted in place with `kind = "mcp"` on its row; a
-  registry name or https URL is fetched, gated, and applied immediately with an undo-led receipt
+  registry-shaped name resolves WORKSPACE-FIRST against the connected catalogs' embedded server
+  names (the listing's additive `mcp_server_name` field) — exactly one hit subscribes to that
+  bundle by catalog name through the ordinary reference arm, source-disclosed; several refuse
+  toward `--workspace`; a miss falls through to the official registry, whose 404 then names both
+  consulted sources; a registry name or https URL is fetched, gated, and applied immediately with
+  an undo-led receipt
   (the canonical document written, the row recorded, the scope's config converged; the per-scope
   `state/mcp_imports.json` record is what lets `remove` delete the written folder only when its
   bytes still match). `publish` reads the kind

@@ -78,6 +78,13 @@ reads silence as one.
     topos add --mcp ./tools/weather
     ```
 
+    A name is looked for in your workspaces' catalogs first, then the official registry: when
+    exactly one workspace you are connected to publishes a server by that embedded name, you get
+    the workspace's copy — subscribed by its catalog name, governed and kept current — and the
+    receipt says which catalog it came from. Several workspaces publishing it ask you to say
+    which with `--workspace <name>`; a name none of them publishes is fetched from the registry
+    as ever.
+
     Every spelling applies immediately, and the receipt **leads with the undo**: what the server
     is, the endpoint it points at, whether a sign-in is coming, which agents it reached — and the
     one `topos remove` that takes it all back. For a fetched import that remove is the full

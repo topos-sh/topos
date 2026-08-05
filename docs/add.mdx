@@ -209,9 +209,12 @@ topos add --mcp https://weather.acme.example/.well-known/mcp/server.json -g
 topos add --mcp ./tools/weather
 ```
 
-With `--mcp` the source is a **remote MCP server** rather than a skill: an official-registry name,
-an https link to its `server.json`, or a folder holding one. It records the same one line, but your
-agents get it as a tool endpoint in their own MCP config instead of as a skill folder.
+With `--mcp` the source is a **remote MCP server** rather than a skill: a registry name, an https
+link to its `server.json`, or a folder holding one. It records the same one line, but your agents
+get it as a tool endpoint in their own MCP config instead of as a skill folder. A name is looked
+for in your workspaces' catalogs first (on each server's own embedded name), then the official
+registry — when exactly one workspace publishes it, you get the workspace's governed copy and the
+receipt names the catalog it came from.
 
 Every spelling applies immediately, and the receipt leads with the undo: what the server is, its
 endpoint, whether a sign-in is coming, which agents it reached, and the one `topos remove` that

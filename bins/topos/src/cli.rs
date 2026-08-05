@@ -177,9 +177,10 @@ pub(crate) enum Command {
     /// what you get. A GitHub source shows what it found and waits for `--yes`, every time — a
     /// skill is instructions your agent will follow, and that listing is there to be read.
     /// `add topos` restores the built-in topos skill. With `--mcp` the source is an MCP
-    /// SERVER instead — an official-registry name, an https link to its server.json, or a folder
+    /// SERVER instead — a registry name, an https link to its server.json, or a folder
     /// holding one — and your agents get it as a tool endpoint in their own MCP config rather than
-    /// as a skill folder; every `--mcp` source applies immediately, and the receipt leads with
+    /// as a skill folder; a name is looked for in your workspaces' catalogs first, then the
+    /// official registry; every `--mcp` source applies immediately, and the receipt leads with
     /// the undo (`topos remove <name>`).
     Add {
         /// What to add: a workspace skill, channel, or feed; a local folder; or a GitHub repo.
