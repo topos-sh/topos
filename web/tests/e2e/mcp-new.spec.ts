@@ -203,6 +203,54 @@ test("paste a server.json, preview what it promises, publish it into the catalog
 });
 
 /**
+ * ADDING IS NOT SHARING. The destination field rests on no channel, so an untouched form leaves
+ * the server in the catalog and nowhere else — the server's own page says "In no channel." and
+ * the placement table agrees. Choosing a channel is the separate, deliberate act, and it works
+ * from the same field.
+ */
+test("an added server rests in no channel until a channel is chosen", async ({ page }) => {
+  const placements = () =>
+    adminQuery(
+      `select 1 from web.channel_bundle cb join web.bundle b on b.id = cb.bundle_id
+       where b.name = $1`,
+      [CATALOG_NAME],
+    );
+
+  await gotoSettled(page, "/mcp/new");
+  await page.getByText("Custom server", { exact: true }).click();
+  await page.getByLabel("Where it comes from").selectOption("paste");
+  await page.getByTestId("mcp-paste").fill(DOCUMENT);
+  await page.getByRole("button", { name: "Preview" }).click();
+  await expect(page.getByTestId("mcp-preview")).toBeVisible();
+
+  // Untouched. Whatever the workspace's channels are, the resting answer is none of them.
+  await expect(page.getByLabel("Share into")).toHaveValue("");
+  await page.getByTestId("mcp-publish").click();
+  await page.waitForURL(`**/mcp/${CATALOG_NAME}`);
+
+  // The landing page is plain — no withheld-placement note, because nothing was withheld — and
+  // the delivery section says where it stands.
+  await expect(page.getByTestId("placement-note")).toHaveCount(0);
+  await expect(page.getByTestId("skill-channels")).toContainText("In no channel.");
+  expect(await placements()).toHaveLength(0);
+
+  // Now the deliberate act, on a second server, through the same field.
+  await adminQuery(`delete from web.bundle where name = $1`, [CATALOG_NAME]);
+  await gotoSettled(page, "/mcp/new");
+  await page.getByText("Custom server", { exact: true }).click();
+  await page.getByLabel("Where it comes from").selectOption("paste");
+  await page.getByTestId("mcp-paste").fill(DOCUMENT);
+  await page.getByRole("button", { name: "Preview" }).click();
+  await expect(page.getByTestId("mcp-preview")).toBeVisible();
+  await page.getByLabel("Share into").selectOption("everyone");
+  await page.getByTestId("mcp-publish").click();
+  await page.waitForURL(`**/mcp/${CATALOG_NAME}`);
+
+  await expect(page.getByTestId("skill-channels")).toContainText("everyone");
+  expect(await placements()).toHaveLength(1);
+});
+
+/**
  * WHERE A SERVER LIVES. The founder's rule, asserted end to end: an MCP server is its own
  * section with its own way in and its own address — never a row under Skills. The two seeded
  * bundles differ ONLY in kind, so anything that mixes them shows up here.
@@ -259,11 +307,14 @@ test("a member publishing into a curated channel is told the placement was withh
     await page.getByRole("button", { name: "Preview" }).click();
     await expect(page.getByTestId("mcp-preview")).toBeVisible();
 
-    // On the way IN: the destination says what it will do with a member's placement, beside the
-    // button that would do it.
-    await expect(page.getByLabel("Into")).toContainText(
-      "Everyone (the default channel) — curated; placement needs a reviewer",
+    // On the way IN: the field rests on no channel at all, and the destination that WOULD reach
+    // people says what it will do with a member's placement, beside the button that would do it.
+    const into = page.getByLabel("Share into");
+    await expect(into).toHaveValue("");
+    await expect(into).toContainText(
+      "everyone (everyone here) — curated; placement needs a reviewer",
     );
+    await into.selectOption("everyone");
 
     await page.getByTestId("mcp-publish").click();
 

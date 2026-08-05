@@ -259,14 +259,13 @@ describe("the publish", () => {
       `SELECT id, kind, name FROM web.bundle WHERE name = 'weather'`,
     );
     expect(rows[0]?.kind).toBe("mcp");
-    // The default placement still applies — an import is an ordinary genesis publish.
+    // AND IT REACHES NOBODY. An empty destination means no channel, not the default one:
+    // importing a server is not the same act as handing it to the workspace.
     const placed = await db.q<{ n: string }>(
-      `SELECT count(*)::int AS n FROM web.channel_bundle cb
-       JOIN web.channel c ON c.id = cb.channel_id AND c.is_default
-       WHERE cb.bundle_id = $1`,
+      `SELECT count(*)::int AS n FROM web.channel_bundle WHERE bundle_id = $1`,
       [rows[0]?.id],
     );
-    expect(Number(placed[0]?.n)).toBe(1);
+    expect(Number(placed[0]?.n)).toBe(0);
     // And the act is on the record.
     const audit = await db.q<{ kind: string; details: Record<string, unknown> }>(
       `SELECT kind, details FROM web.audit_event WHERE kind = 'mcp_imported'`,
@@ -275,6 +274,29 @@ describe("the publish", () => {
       server: "io.github.acme/weather",
       version: "1.4.0",
     });
+  });
+
+  /**
+   * THE OTHER HALF OF THE SAME RULE. Not choosing is the default, but choosing still works — and
+   * the default channel is chosen the way every other channel is, BY NAME, so there is no empty
+   * value doing double duty and nothing that lands in `everyone` without being asked for.
+   */
+  it("places into the channel the form names, the default one included", async () => {
+    const { status, location } = await post({
+      intent: "publish",
+      document: JSON.stringify({ ...WEATHER, name: "io.github.acme/named" }, null, 2),
+      name: "named-dest",
+      channel: "everyone",
+    });
+    expect(status).toBe(302);
+    expect(location).toBe("/mcp/named-dest");
+    const placed = await db.q<{ n: string }>(
+      `SELECT count(*)::int AS n FROM web.channel_bundle cb
+       JOIN web.channel c ON c.id = cb.channel_id AND c.is_default
+       JOIN web.bundle b ON b.id = cb.bundle_id
+       WHERE b.name = 'named-dest'`,
+    );
+    expect(Number(placed[0]?.n)).toBe(1);
   });
 
   it("re-runs the gate on the posted bytes — a doctored form is refused, nothing published", async () => {
@@ -452,8 +474,11 @@ describe("publishing a picked row", () => {
 /**
  * WHAT THE PUBLISH DID TO THE REACH. A curated channel withholds a MEMBER's placement — the
  * default `everyone` included — so the bundle lands in the catalog and reaches nobody. The dialog
- * promises "every agent the channel reaches gets that address", so the outcome has to survive the
+ * promises that a chosen channel's agents get the address, so the outcome has to survive the
  * redirect and be said on the page it lands on; before this it was dropped on the floor.
+ *
+ * Every case here NAMES its destination: with no channel chosen there is no reach to withhold and
+ * nothing to disclose.
  */
 describe("a withheld placement is disclosed", () => {
   async function defaultChannelMode(mode: "open" | "curated"): Promise<void> {
@@ -470,7 +495,7 @@ describe("a withheld placement is disclosed", () => {
         intent: "publish",
         document: JSON.stringify({ ...WEATHER, name: "io.github.acme/withheld" }, null, 2),
         name: "withheld",
-        channel: "",
+        channel: "everyone",
       });
       expect(status).toBe(302);
       expect(location).toBe("/mcp/withheld?placement=curated_role_required&channel=everyone");
@@ -495,10 +520,31 @@ describe("a withheld placement is disclosed", () => {
       intent: "publish",
       document: JSON.stringify({ ...WEATHER, name: "io.github.acme/placed" }, null, 2),
       name: "placed-here",
-      channel: "",
+      channel: "everyone",
     });
     expect(status).toBe(302);
     expect(location).toBe("/mcp/placed-here");
+  });
+
+  /**
+   * A CURATED DEFAULT CHANNEL WITHHOLDS NOTHING FROM AN IMPORT THAT ASKED FOR NO CHANNEL. The
+   * bundle lands in the catalog either way, but the redirect must be plain: a note about a
+   * placement nobody requested would read as a failure where there was none.
+   */
+  it("says nothing when no channel was chosen, curated default or not", async () => {
+    await defaultChannelMode("curated");
+    try {
+      const { status, location } = await post({
+        intent: "publish",
+        document: JSON.stringify({ ...WEATHER, name: "io.github.acme/unplaced" }, null, 2),
+        name: "unplaced",
+        channel: "",
+      });
+      expect(status).toBe(302);
+      expect(location).toBe("/mcp/unplaced");
+    } finally {
+      await defaultChannelMode("open");
+    }
   });
 
   it("names the withheld channel on the page the redirect lands on", async () => {
@@ -709,5 +755,19 @@ describe("the preview card's auth chip", () => {
     expect(html).not.toContain(">oauth<");
     // Still a preview: the transport is the chip that never depended on the declaration.
     expect(html).toContain("streamable-http");
+  });
+
+  /**
+   * THE RESTING DESTINATION. What an untouched form posts is the whole question here: it must be
+   * the empty value, and the empty value must be spelled on the page as no channel — otherwise
+   * the field looks optional while quietly handing the server to the workspace.
+   */
+  it("rests on no channel, with the default one an ordinary named option", async () => {
+    const html = await renderPreview(null);
+    // The SELECTED option is the empty one — what an untouched form posts, and what the page
+    // says it means.
+    expect(html).toContain('<option value="" selected="">No channel</option>');
+    expect(html).toContain('<option value="everyone">everyone (everyone here)</option>');
+    expect(html).toContain("Optional — a channel is how it reaches people.");
   });
 });

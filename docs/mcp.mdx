@@ -55,8 +55,12 @@ reads silence as one.
     a searchable grid of popular servers — Linear, Notion, GitHub, Sentry, Figma and the rest —
     each showing what it connects to and whether a sign-in is coming. Click one and it asks,
     there and then, whether to add it: the endpoint, the auth, the exact `server.json` bytes,
-    the name it will take and the channel it goes into. Cancel or press Escape and nothing has
-    happened; confirm and it publishes.
+    and the name it will take. Cancel or press Escape and nothing has happened; confirm and it
+    publishes.
+
+    Adding a server puts it in the workspace and nowhere else — it reaches no machines until it
+    is in a channel. **Share into** offers that on the way in, and it rests on *no channel*;
+    a channel can just as well be chosen later, on the channel's own page.
 
     Anything not on that list goes in under **Custom server**, which is the same three typed
     sources as ever: the MCP registry by name, a URL to a `server.json`, or the document pasted

@@ -118,9 +118,12 @@ caller.
   sources keep their server-side preview. The embedded name is re-claimed under one per-workspace
   lock by every door that MOVES a pointer onto an mcp version — publish, re-publish, unarchive,
   review approve, revert; the wire doors word that refusal once (`mcpNameTakenRefusal`), pointing
-  at the bundle already holding the name. `mcp/new` mints a NEW bundle per import and discloses
-  what the publish did to the REACH: a curated channel withholds a member's placement, and the
-  bundle face says so.
+  at the bundle already holding the name. `mcp/new` mints a NEW bundle per import and its
+  destination field RESTS ON NO CHANNEL — an import lands catalog-only and reaches nobody until a
+  channel is chosen, here or later (`NO_CHANNEL`, the genesis destination distinct from the
+  default-channel `null`; every channel INCLUDING the default is an ordinary named option, so no
+  empty value stands in for one). When a channel IS chosen the page discloses what the publish did
+  to the REACH: a curated channel withholds a member's placement, and the bundle face says so.
   `…/registry/v0.1/servers[/{name}/versions[/latest]]` serves the workspace's catalog in the
   official read-API shape, member-gated by cookie OR bearer, uniform-404 otherwise.
 - **Signed-in:** dashboard (skills and MCP servers as separate sections) · bundle browser +
