@@ -2020,6 +2020,7 @@ fn remove_imported_mcp_dirs(
     let Some(layout) = layout else {
         return;
     };
+    let mut born_here = false;
     for (arm, item) in arms.iter().zip(items.iter_mut()) {
         let Arm::RowDrop { row, .. } = arm else {
             continue;
@@ -2031,14 +2032,47 @@ fn remove_imported_mcp_dirs(
             continue;
         }
         let dir = row_dir(ctx, target, raw);
-        let Some(line) = super::add_mcp::remove_imported_bundle(ctx, &layout, &dir) else {
+        let Some(removal) = super::add_mcp::remove_imported_bundle(ctx, &layout, &dir) else {
             continue;
         };
+        born_here |= removal.manifest_born;
+        if let Some(line) = removal.note {
+            item.note = Some(match item.note.take() {
+                Some(prev) => format!("{prev} · {line}"),
+                None => line,
+            });
+        }
+    }
+    if born_here
+        && let Some(line) = prune_born_manifest(ctx, target)
+        && let Some(item) = items.first_mut()
+    {
         item.note = Some(match item.note.take() {
             Some(prev) => format!("{prev} · {line}"),
             None => line,
         });
     }
+}
+
+/// Take back a manifest file an `add --mcp` import BROUGHT INTO EXISTENCE, now that its row is
+/// gone — the other half of an inverse that already restores the row, the config entries, and the
+/// folder. Byte-proof, like every other thing this CLI deletes: the file goes only while it still
+/// holds EXACTLY what a birth writes and nothing else (an empty `[bundles]` under topos's own
+/// header). A feed row, a `[defaults]` block, a hand-written line or comment — anything at all
+/// that is not the seed — and the file stays, unread and untouched.
+fn prune_born_manifest(ctx: &Ctx<'_>, target: &EditTarget) -> Option<String> {
+    if target.scope != ManifestScope::Global {
+        return None;
+    }
+    let text = read_text(ctx, &target.path).ok().flatten()?;
+    if text != crate::manifest::document::materialized_global(&[]) {
+        return None;
+    }
+    ctx.fs.remove_file(&target.path).ok()?;
+    Some(format!(
+        "removed {} — this import created it, and nothing else was ever written there",
+        target.path.display()
+    ))
 }
 
 /// The mcp bundle one removal arm drops, when it drops one: a `kind = "mcp"` local path row (its

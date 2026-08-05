@@ -270,8 +270,8 @@ impl Rig {
         let inert_f = InertFollow;
         let ctx = self.ctx(&inert_p, &inert_f);
         let data = ops::add(&ctx, &dir).unwrap();
-        let genesis = ops::parse_hex32(&data.version_id).unwrap();
-        (data.skill_id, data.name, genesis)
+        let genesis = ops::parse_hex32(data.version_id.as_deref().unwrap()).unwrap();
+        (data.skill_id.unwrap(), data.name, genesis)
     }
     fn placement(&self) -> PathBuf {
         self.work.0.join("pr-describe")

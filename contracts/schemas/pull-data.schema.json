@@ -345,6 +345,13 @@
             "$ref": "#/$defs/McpAgentState"
           }
         },
+        "kind": {
+          "description": "The catalog bundle kind (`\"mcp\"` for a config-placed MCP-server bundle). Absent ⇒ an\nordinary skill. Carried so a receipt can name what it reconciled instead of calling every\nrow a skill — a state a row with no engaged agent could not otherwise report. **INFERRED**\n(additive).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "merge": {
           "description": "Present for the author-merge outcomes (`merged` / `conflicted`) — the resolution disclosure.",
           "anyOf": [

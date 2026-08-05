@@ -3,7 +3,7 @@
   "command": "add",
   "ok": true,
   "data": {
-    "bundle_digest": "0000000000000000000000000000000000000000000000000000000000000000",
+    "bundle_digest": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
     "manifest": "/home/ada/.topos/topos.toml",
     "mcp": {
       "agents": [
@@ -24,15 +24,13 @@
     "name": "weather",
     "note": "MCP server io.github.acme/weather v1.4.0 — https://weather.acme.example/mcp over streamable-http, auth oauth · cursor: server entry in /home/ada/.cursor/mcp.json — restart Cursor",
     "reference": "/home/ada/.topos/mcp/weather",
-    "skill_id": "",
     "tracked": true,
     "undo": [
       "topos",
       "remove",
       "-g",
       "/home/ada/.topos/mcp/weather"
-    ],
-    "version_id": "0000000000000000000000000000000000000000000000000000000000000000"
+    ]
   },
   "warnings": [],
   "next_actions": [
@@ -45,7 +43,7 @@
         "/home/ada/.topos/mcp/weather"
       ],
       "mutates": true,
-      "risk_note": "removes the skill from this machine (a team-managed skill keeps its canonical bytes)"
+      "risk_note": "removes the MCP server from this machine (a workspace-published server keeps its canonical bytes)"
     }
   ]
 }

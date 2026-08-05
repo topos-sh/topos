@@ -645,6 +645,19 @@ fn push_state(states: &mut BTreeMap<usize, Vec<McpAgentState>>, i: usize, s: Mcp
     states.entry(i).or_default().push(s);
 }
 
+/// ONE state vocabulary. The tokens are this engine's (see the module docs); the phrases are the
+/// words a person reads for them — and every receipt that shows a per-agent outcome comes through
+/// here, so `add` and `update` can never name the same state two different ways. The vocabulary
+/// is OPEN: a token with no phrase of its own reads verbatim rather than being folded into a
+/// wrong one.
+pub(crate) fn state_phrase(state: &str) -> &str {
+    match state {
+        "current" => "placed",
+        "not-supported" => "not placed",
+        other => other,
+    }
+}
+
 // =================================================================================================
 // One FILE surface (every dialect but the plugin dir): driver apply + the intent journal.
 // =================================================================================================

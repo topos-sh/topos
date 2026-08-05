@@ -332,7 +332,7 @@ fn add_remote_imports_a_repo_skill_places_bytes_and_records_origin() {
     );
 
     // origin.json is persisted in the sidecar for a later re-sync to build on.
-    let skill_id = sid(&data.skill_id);
+    let skill_id = sid(data.skill_id.as_deref().unwrap());
     let origin_doc = h
         .home
         .0
@@ -403,7 +403,7 @@ fn add_remote_lands_and_adopts_through_a_symlinked_user_scope_skills_root() {
     );
     // The recorded placement is the CANONICAL spelling — the pre-existing convention (`add`
     // canonicalizes the adopted source before recording it).
-    let sp = Layout::new(&h.home.0).published(&sid(&data.skill_id));
+    let sp = Layout::new(&h.home.0).published(&sid(data.skill_id.as_deref().unwrap()));
     let map = doc::read_map(&h.fs, &sp.map)
         .expect("map reads")
         .expect("map exists");
@@ -738,7 +738,7 @@ fn a_losing_concurrent_identical_import_leaves_the_winner_whole_and_consistent()
             &opts,
         )
         .expect("the concurrent import lands first and wins");
-        *winner_id.borrow_mut() = Some(data.skill_id.clone());
+        *winner_id.borrow_mut() = data.skill_id.clone();
     });
     let ctx = Ctx {
         fs: &racer,
@@ -960,7 +960,11 @@ fn add_minting_is_deterministic_and_names_from_frontmatter() {
         a1.name, "pr-describe",
         "name comes from SKILL.md frontmatter"
     );
-    assert_eq!(a1.skill_id, "topos_t00", "deterministic injected id");
+    assert_eq!(
+        a1.skill_id.as_deref(),
+        Some("topos_t00"),
+        "deterministic injected id"
+    );
     assert!(a1.tracked);
     assert_ne!(
         a1.version_id, a1.bundle_digest,
@@ -1083,14 +1087,17 @@ fn add_pins_the_lock_shape() {
     // The lock.json on-disk instance shape (sorted files: path, mode, sha256, size + base_commit).
     let lock: Lock = doc::read_doc(
         h.ctx().fs,
-        &h.ctx().layout.published(&sid(&add.skill_id)).lock,
+        &h.ctx()
+            .layout
+            .published(&sid(add.skill_id.as_deref().unwrap()))
+            .lock,
     )
     .unwrap()
     .unwrap();
     assert_eq!(lock.schema_version, 1);
     assert_eq!(lock.name, "pr-describe");
-    assert_eq!(lock.base_commit, add.version_id);
-    assert_eq!(lock.bundle_digest, add.bundle_digest);
+    assert_eq!(Some(lock.base_commit), add.version_id);
+    assert_eq!(Some(lock.bundle_digest), add.bundle_digest);
     let paths: Vec<&str> = lock.files.iter().map(|f| f.path.as_str()).collect();
     assert_eq!(
         paths,
@@ -1475,11 +1482,12 @@ fn diff_reports_the_draft_digest_not_the_base() {
     );
     // …and differs from the base/current version's digest (the value publish would have rejected).
     assert_ne!(
-        edited.bundle_digest, add.bundle_digest,
+        Some(edited.bundle_digest.clone()),
+        add.bundle_digest,
         "the draft digest is not the base digest"
     );
     // The diffed endpoint (version_id) stays the base commit — only the consent digest moved.
-    assert_eq!(edited.version_id, add.version_id);
+    assert_eq!(Some(edited.version_id), add.version_id);
 }
 
 #[test]

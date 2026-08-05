@@ -835,8 +835,8 @@ fn run_command(
                                 ops::note_added_path_in(&ctx, &mut d, &scope.target, &path)?;
                                 // The bytes that just landed are what the disclosure judges
                                 // against the team's current version.
-                                d.published_match =
-                                    published.map(|p| p.suggestion(&d.bundle_digest));
+                                let adopted = d.bundle_digest.clone().unwrap_or_default();
+                                d.published_match = published.map(|p| p.suggestion(&adopted));
                                 Ok(d)
                             }),
                             Err(e) => Err(e),
@@ -1942,7 +1942,8 @@ fn finish_add_reference(
             if json {
                 let value = serde_json::to_value(&data).unwrap_or_default();
                 let mut envelope = render::ok_envelope(command, value);
-                envelope.next_actions = render::undo_next_actions(&data.undo);
+                envelope.next_actions =
+                    render::undo_next_actions(&data.undo, crate::actions::Subject::Skill);
                 println!("{}", render::to_json(&envelope));
             } else {
                 println!("{}", render::add_tty(&data));
@@ -1977,7 +1978,10 @@ fn finish_add_mcp(
             if json {
                 let value = serde_json::to_value(&data).unwrap_or_default();
                 let mut envelope = render::ok_envelope(command, value);
-                envelope.next_actions = render::undo_next_actions(&data.undo);
+                // The receipt is a SERVER's: its undo takes a server off this machine, and the
+                // caution has to say so rather than borrowing a skill's sentence.
+                envelope.next_actions =
+                    render::undo_next_actions(&data.undo, crate::actions::Subject::McpServer);
                 println!("{}", render::to_json(&envelope));
             } else {
                 println!("{}", render::add_tty(&data));
@@ -2050,7 +2054,8 @@ fn finish_remove(
             if json {
                 let value = serde_json::to_value(&data).unwrap_or_default();
                 let mut envelope = render::ok_envelope(command, value);
-                envelope.next_actions = render::undo_next_actions(&data.undo);
+                envelope.next_actions =
+                    render::undo_next_actions(&data.undo, crate::actions::Subject::Skill);
                 println!("{}", render::to_json(&envelope));
             } else {
                 println!("{}", render::remove_applied_tty(&data));

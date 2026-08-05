@@ -447,10 +447,10 @@ fn fixtures() -> Vec<(&'static str, String)> {
         command: "add".to_owned(),
         ok: true,
         data: serde_json::to_value(AddData {
-            skill_id: "topos_t00".to_owned(),
+            skill_id: Some("topos_t00".to_owned()),
             name: "pr-describe".to_owned(),
-            version_id: fx_version.to_owned(),
-            bundle_digest: fx_digest.to_owned(),
+            version_id: Some(fx_version.to_owned()),
+            bundle_digest: Some(fx_digest.to_owned()),
             tracked: true,
             // The fixture skill is adopted from a plain dir (not under ~/.claude), so it is recognized as
             // no harness and arms no auto-update trigger — all three omit from the envelope.
@@ -486,10 +486,10 @@ fn fixtures() -> Vec<(&'static str, String)> {
         command: "add".to_owned(),
         ok: true,
         data: serde_json::to_value(AddData {
-            skill_id: "s_codereview".to_owned(),
+            skill_id: Some("s_codereview".to_owned()),
             name: "code-review".to_owned(),
-            version_id: fx_version.to_owned(),
-            bundle_digest: fx_digest.to_owned(),
+            version_id: Some(fx_version.to_owned()),
+            bundle_digest: Some(fx_digest.to_owned()),
             tracked: true,
             harness: None,
             harness_slug: None,
@@ -526,10 +526,10 @@ fn fixtures() -> Vec<(&'static str, String)> {
         command: "add".to_owned(),
         ok: true,
         data: serde_json::to_value(AddData {
-            skill_id: "topos_t00".to_owned(),
+            skill_id: Some("topos_t00".to_owned()),
             name: "pr-describe".to_owned(),
-            version_id: fx_version.to_owned(),
-            bundle_digest: fx_digest.to_owned(),
+            version_id: Some(fx_version.to_owned()),
+            bundle_digest: Some(fx_digest.to_owned()),
             tracked: true,
             harness: None,
             harness_slug: None,
@@ -599,17 +599,20 @@ fn fixtures() -> Vec<(&'static str, String)> {
     // `add --mcp <registry-name>` — the fetched arm APPLIES immediately: an undo-led APPLY
     // RECEIPT (the `UNDO` next action is the full inverse — the row, the config entries, and the
     // bundle folder this import itself wrote), with the typed `mcp` block carrying the server
-    // facts a JSON consumer reads. The fetched arm mints no version history, so the identity
-    // fields hold the row-only sentinels.
+    // facts a JSON consumer reads. The fetched arm mints no version history, so the id and the
+    // version are ABSENT — but the bundle digest is real: the kernel digest of the document
+    // bytes the import wrote, recomputable by anyone holding that folder.
     let add_mcp_applied = JsonEnvelope {
         schema_version: 1,
         command: "add".to_owned(),
         ok: true,
         data: serde_json::to_value(AddData {
-            skill_id: String::new(),
+            skill_id: None,
             name: "weather".to_owned(),
-            version_id: "0".repeat(64),
-            bundle_digest: "0".repeat(64),
+            version_id: None,
+            // A stand-in digest of the right SHAPE: the real one is the kernel digest of the
+            // one-file bundle the import wrote, which the client computes from those bytes.
+            bundle_digest: Some("f".repeat(64)),
             tracked: true,
             harness: None,
             harness_slug: None,
@@ -643,9 +646,10 @@ fn fixtures() -> Vec<(&'static str, String)> {
         })
         .expect("AddData serializes"),
         warnings: vec![],
-        next_actions: vec![topos::actions::next_action(
+        next_actions: vec![topos::actions::next_action_about(
             ActionCode::from("UNDO".to_owned()),
             argv(&["topos", "remove", "-g", "/home/ada/.topos/mcp/weather"]),
+            topos::actions::Subject::McpServer,
         )],
         receipt: None,
         error: None,
@@ -713,6 +717,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
                 synced_placements: None,
                 scope: Some("person".to_owned()),
                 harnesses: Vec::new(),
+                kind: None,
             }],
             proposals_awaiting: 0,
         })
@@ -754,6 +759,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
                 synced_placements: None,
                 scope: Some("person".to_owned()),
                 harnesses: Vec::new(),
+                kind: None,
             }],
             proposals_awaiting: 0,
         })
@@ -797,6 +803,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
                 synced_placements: None,
                 scope: Some("person".to_owned()),
                 harnesses: Vec::new(),
+                kind: None,
             }],
             proposals_awaiting: 0,
         })
@@ -1321,6 +1328,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
                 synced_placements: None,
                 scope: Some("person".to_owned()),
                 harnesses: Vec::new(),
+                kind: None,
             }],
             proposals_awaiting: 1,
             notices: vec![WireNotice {
@@ -1377,6 +1385,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
                 synced_placements: None,
                 scope: Some("person".to_owned()),
                 harnesses: Vec::new(),
+                kind: None,
             }],
             proposals_awaiting: 0,
             notices: Vec::new(),

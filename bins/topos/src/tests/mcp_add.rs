@@ -609,8 +609,8 @@ fn a_local_folder_applies_immediately_with_a_kind_row() {
 
     let data = ops::add_mcp(&ctx, None, dir.to_str().unwrap(), true).unwrap();
     // It went through the ordinary adopt: a real record with a real version identity.
-    assert!(!data.skill_id.is_empty(), "the folder was adopted");
-    assert_ne!(data.version_id, "0".repeat(64));
+    assert!(data.skill_id.is_some(), "the folder was adopted");
+    assert!(data.version_id.is_some(), "the adopt minted a version");
 
     let text = rig.global_text();
     assert!(
@@ -762,6 +762,109 @@ fn remove_deletes_the_folder_a_fetched_import_wrote() {
     assert_eq!(rig.global_text(), "[bundles]\n", "the row is gone");
 }
 
+/// A fetched import's receipt names WHAT LANDED with an identity a machine consumer can check:
+/// the kernel digest of the bytes written, recomputable from the folder itself. The two fields a
+/// pointer row cannot honestly fill — the sidecar id and the version — are ABSENT rather than
+/// zeroed, so nobody reads a history that was never minted.
+#[test]
+fn a_fetched_import_reports_the_digest_of_what_it_wrote() {
+    let rig = Rig::new("fetched-identity");
+    rig.write_global("[bundles]\n");
+    let docs = FakeDocs::serving(&good_server());
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    let data = ops::add_mcp(&ctx, Some(&docs), "io.github.acme/weather", true).unwrap();
+
+    assert!(
+        data.skill_id.is_none() && data.version_id.is_none(),
+        "a pointer row mints no record and no version: {data:?}"
+    );
+    let bundle = rig.layout().home().join("mcp").join("weather");
+    let recomputed = topos_core::digest::to_hex(&crate::scan::scan(&bundle).unwrap().bundle_digest);
+    assert_eq!(
+        data.bundle_digest.as_deref(),
+        Some(recomputed.as_str()),
+        "the receipt's digest is the one the written folder hashes to"
+    );
+    assert!(
+        !recomputed.bytes().all(|b| b == b'0'),
+        "a real digest, not the all-zero sentinel"
+    );
+}
+
+/// ITEM PAIR (the undo leaves NOTHING behind): an import into a home with no `topos.toml` at all
+/// births that file and the sidecar's `mcp/` folder — and its `remove` takes both back, because a
+/// birth this act caused is a birth its inverse owns. Everything the import touched is gone;
+/// nothing it merely found is.
+#[test]
+fn removing_a_fetched_import_leaves_no_empty_husks() {
+    let rig = Rig::new("undo-husks");
+    // Deliberately NOT seeded: the add itself brings the manifest into existence.
+    let docs = FakeDocs::serving(&good_server());
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    ops::add_mcp(&ctx, Some(&docs), "io.github.acme/weather", true).unwrap();
+    let mcp_dir = rig.layout().home().join("mcp");
+    assert!(mcp_dir.join("weather").join("server.json").exists());
+    assert!(rig.manifest().exists(), "the add birthed the manifest");
+
+    let session_connect = |_s: &Session| ops::SessionTransports {
+        plane: Box::new(NoDelivery),
+        directory: Box::new(FakeDirectory::new(Vec::new(), Vec::new())),
+        contribute: Box::new(RecordingPublish::default()),
+        governance: Box::new(NoGovernance),
+    };
+    let outcome = ops::remove_global(
+        &ctx,
+        &session_connect,
+        &[mcp_dir.join("weather").display().to_string()],
+        None,
+        false,
+    )
+    .unwrap();
+    let ops::RemoveOutcome::Applied(removed) = outcome else {
+        panic!("a clean fetched import removes without a gate");
+    };
+    assert!(!mcp_dir.exists(), "the emptied mcp/ folder is pruned too");
+    assert!(
+        !rig.manifest().exists(),
+        "the manifest this import created goes back with it"
+    );
+    let note = removed.items[0].note.clone().unwrap_or_default();
+    assert!(note.contains("this import created it"), "{note}");
+}
+
+/// A manifest the import merely FOUND is never taken away — not even when the removal empties it.
+/// The birth record is what licenses the delete, and this file has no such record.
+#[test]
+fn a_manifest_the_import_found_survives_the_removal() {
+    let rig = Rig::new("undo-found-manifest");
+    rig.write_global("[bundles]\n");
+    let docs = FakeDocs::serving(&good_server());
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    ops::add_mcp(&ctx, Some(&docs), "io.github.acme/weather", true).unwrap();
+
+    let session_connect = |_s: &Session| ops::SessionTransports {
+        plane: Box::new(NoDelivery),
+        directory: Box::new(FakeDirectory::new(Vec::new(), Vec::new())),
+        contribute: Box::new(RecordingPublish::default()),
+        governance: Box::new(NoGovernance),
+    };
+    ops::remove_global(
+        &ctx,
+        &session_connect,
+        &[rig
+            .layout()
+            .home()
+            .join("mcp")
+            .join("weather")
+            .display()
+            .to_string()],
+        None,
+        false,
+    )
+    .unwrap();
+    assert_eq!(rig.global_text(), "[bundles]\n", "the file stands, emptied");
+}
+
 /// ITEM PAIR (no undo beats a wrong one): a fetched import's folder whose bytes have moved since
 /// the import — an edited document, a sibling file — is KEPT on remove, and the receipt says so.
 #[test]
@@ -890,7 +993,7 @@ fn a_stray_sibling_refuses_at_the_adopt_gate() {
     std::fs::remove_file(dir.join("topos-mcp.toml")).unwrap();
     std::fs::write(dir.join("README.md"), b"How to use this server.\n").unwrap();
     let data = ops::add_mcp(&ctx, None, dir.to_str().unwrap(), true).unwrap();
-    let sid = crate::id::SkillId::parse(&data.skill_id).unwrap();
+    let sid = crate::id::SkillId::parse(data.skill_id.as_deref().unwrap()).unwrap();
     let marker = std::fs::read_to_string(rig.layout().published(&sid).kind).expect("kind.json");
     assert!(marker.contains("\"mcp\""), "{marker}");
 }

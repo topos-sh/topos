@@ -269,6 +269,7 @@ mod tests {
             synced_placements: None,
             scope: None,
             harnesses: Vec::new(),
+            kind: None,
         }
     }
 

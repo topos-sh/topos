@@ -384,6 +384,7 @@ pub(crate) fn sync_one_planned(
             heal_forward(ctx, &sp, &map, &managed, &lock, &sync, &t)?;
             let mut row = applied_row(&name, &sync, target_commit);
             row.harnesses = converge_explicit_mcp(ctx, mcp_record && explicit, skill_id, &name);
+            row.kind = mcp_record.then(|| "mcp".to_owned());
             Ok(row)
         }
         ApplyClass::CleanForward => {
@@ -395,6 +396,7 @@ pub(crate) fn sync_one_planned(
                 apply_forward(ctx, &sp, &map, &managed, &lock, &sync, skill_id, &t)?;
                 let mut row = applied_row(&name, &sync, target_commit);
                 row.harnesses = converge_explicit_mcp(ctx, mcp_record && explicit, skill_id, &name);
+                row.kind = mcp_record.then(|| "mcp".to_owned());
                 Ok(row)
             } else {
                 // confirm-each / first-receive TOFU: re-disclose the digest as a one-tap offer; nothing
@@ -650,6 +652,9 @@ pub(crate) fn go_back(
         synced_placements: None,
         scope: None,
         harnesses,
+        // The go-back's own row: a config-placed bundle says so, so the receipt that follows
+        // names what it moved rather than calling every row a skill.
+        kind: mcp_record.then(|| "mcp".to_owned()),
     })
 }
 
@@ -1636,6 +1641,7 @@ fn state_row(name: &str, sync: &SyncState, action: PullAction) -> PullSkill {
         synced_placements: None,
         scope: None,
         harnesses: Vec::new(),
+        kind: None,
     }
 }
 
@@ -1654,6 +1660,7 @@ fn applied_row(name: &str, sync: &SyncState, _target: [u8; 32]) -> PullSkill {
         synced_placements: None,
         scope: None,
         harnesses: Vec::new(),
+        kind: None,
     }
 }
 
@@ -1672,6 +1679,7 @@ fn synced_row(name: &str, sync: &SyncState, n: u32) -> PullSkill {
         synced_placements: Some(n),
         scope: None,
         harnesses: Vec::new(),
+        kind: None,
     }
 }
 
@@ -1692,6 +1700,7 @@ fn offer_row(name: &str, sync: &SyncState, target: [u8; 32], target_digest_hex: 
         synced_placements: None,
         scope: None,
         harnesses: Vec::new(),
+        kind: None,
     }
 }
 
@@ -1718,5 +1727,6 @@ fn diverged_row(
         synced_placements: None,
         scope: None,
         harnesses: Vec::new(),
+        kind: None,
     }
 }

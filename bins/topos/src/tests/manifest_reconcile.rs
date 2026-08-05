@@ -4828,7 +4828,11 @@ fn a_landed_publish_survives_a_failed_rewrite_and_the_next_update_converges_it()
     // The catalog serves the governed copy (for the later converge).
     let v = one_file(b"# deploy\n");
     let dir = FakeDirectory::new(
-        vec![catalog_entry(&added.skill_id, "deploy", &v)],
+        vec![catalog_entry(
+            added.skill_id.as_deref().unwrap_or_default(),
+            "deploy",
+            &v,
+        )],
         Vec::new(),
     );
 
@@ -4947,7 +4951,11 @@ fn a_project_scope_pending_rewrite_converges_from_the_projects_own_store() {
     // The catalog serves the governed copy (for the later converge).
     let v = one_file(b"# deploy\n");
     let dir = FakeDirectory::new(
-        vec![catalog_entry(&added.skill_id, "deploy", &v)],
+        vec![catalog_entry(
+            added.skill_id.as_deref().unwrap_or_default(),
+            "deploy",
+            &v,
+        )],
         Vec::new(),
     );
 
@@ -5038,7 +5046,11 @@ fn a_removal_that_lands_mid_publish_is_never_silently_undone() {
     let added = ops::add(&ctx, &src).unwrap();
     let v = one_file(b"# deploy\n");
     let dir = FakeDirectory::new(
-        vec![catalog_entry(&added.skill_id, "deploy", &v)],
+        vec![catalog_entry(
+            added.skill_id.as_deref().unwrap_or_default(),
+            "deploy",
+            &v,
+        )],
         Vec::new(),
     );
     let canonical_src = src.canonicalize().unwrap();
@@ -5177,7 +5189,11 @@ fn a_genesis_propose_pending_rewrite_still_converges() {
     // The catalog holds the proposal's entry (the server-side half of the landed propose).
     let v = one_file(b"# deploy\n");
     let dir = FakeDirectory::new(
-        vec![catalog_entry(&added.skill_id, "deploy", &v)],
+        vec![catalog_entry(
+            added.skill_id.as_deref().unwrap_or_default(),
+            "deploy",
+            &v,
+        )],
         Vec::new(),
     );
 
@@ -7595,7 +7611,7 @@ fn a_local_directory_wins_and_the_receipt_names_the_workspace_spelling() {
     // The receipt judges the workspace's current version against the bytes that just landed —
     // the ONE confirming catalog read carried the digest.
     let data = ops::add_with_name(&ctx, &path, Some(BARE), true).unwrap();
-    let same = published.suggestion(&data.bundle_digest);
+    let same = published.suggestion(data.bundle_digest.as_deref().unwrap_or_default());
     assert_eq!(same.reference, format!("{HOST}/{WS_NAME}/{BARE}"));
     assert_eq!(same.workspace, WS_NAME);
     assert!(same.identical, "byte-identical to what the catalog serves");
@@ -7612,7 +7628,11 @@ fn a_local_directory_wins_and_the_receipt_names_the_workspace_spelling() {
         other => panic!("a local copy adopts in place: {other:?}"),
     };
     let data2 = ops::add_with_name(&ctx2, &drifted, Some(BARE), true).unwrap();
-    assert!(!published2.suggestion(&data2.bundle_digest).identical);
+    assert!(
+        !published2
+            .suggestion(data2.bundle_digest.as_deref().unwrap_or_default())
+            .identical
+    );
 
     // A name the workspace publishes but never delivered HERE adopts with no disclosure at all —
     // the local act does not go asking every catalog for one.
@@ -7809,7 +7829,11 @@ fn a_cache_only_match_subscribes_and_an_unanswering_session_is_skipped() {
         other => panic!("a local copy adopts in place: {other:?}"),
     };
     let data = ops::add_with_name(&ctx, &path, Some(BARE), true).unwrap();
-    assert!(!published.suggestion(&data.bundle_digest).identical);
+    assert!(
+        !published
+            .suggestion(data.bundle_digest.as_deref().unwrap_or_default())
+            .identical
+    );
 }
 
 #[test]
@@ -8341,7 +8365,7 @@ fn a_project_add_keeps_its_history_in_the_checkouts_own_store() {
     let src = proj.0.join("zq-custody-src");
     skill_source(&src, b"# zq-custody\n");
     let added = scoped_path_add(&ctx, &src, false).unwrap();
-    let sid = crate::id::SkillId::parse(&added.skill_id).unwrap();
+    let sid = crate::id::SkillId::parse(added.skill_id.as_deref().unwrap_or_default()).unwrap();
 
     // Custody follows the SCOPE: the checkout's own store holds the history, the home store none.
     let project_store = crate::sidecar::project_store_layout(&proj.0);
@@ -8408,7 +8432,7 @@ fn a_dropped_rows_record_is_re_linked_while_a_standing_row_still_refuses() {
     let src = proj.0.join("zq-relink-src");
     skill_source(&src, b"# zq-relink\n");
     let added = scoped_path_add(&ctx, &src, false).unwrap();
-    let sid = crate::id::SkillId::parse(&added.skill_id).unwrap();
+    let sid = crate::id::SkillId::parse(added.skill_id.as_deref().unwrap_or_default()).unwrap();
     let store = crate::sidecar::project_store_layout(&proj.0);
     let lock_before = std::fs::read(store.skill_dir(&sid).join("lock.json")).unwrap();
 

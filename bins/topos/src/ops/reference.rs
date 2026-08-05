@@ -172,10 +172,10 @@ fn add_workspace(
     let resolved = resolve_workspace(ctx, connect, &parsed.shape)?;
     let mut data = match &resolved.entry {
         Some(e) => AddData {
-            skill_id: e.skill_id.clone(),
+            skill_id: Some(e.skill_id.clone()),
             name: e.name.clone(),
-            version_id: e.version_id.clone(),
-            bundle_digest: e.bundle_digest.clone(),
+            version_id: Some(e.version_id.clone()),
+            bundle_digest: Some(e.bundle_digest.clone()),
             ..set_data(&resolved.name)
         },
         None => set_data(&resolved.name),
@@ -191,8 +191,8 @@ fn add_workspace(
     // every non-bundle arm already carries) says "not stated here" rather than stating the wrong
     // one.
     if let Some(p) = &pin {
-        data.version_id = p.clone();
-        data.bundle_digest = String::new();
+        data.version_id = Some(p.clone());
+        data.bundle_digest = None;
     }
 
     if global {
@@ -412,10 +412,10 @@ fn unread_catalog(session: &Session, name: &str, e: &ClientError) -> ClientError
 /// row, not a version.
 fn set_data(name: &str) -> AddData {
     AddData {
-        skill_id: String::new(),
+        skill_id: None,
         name: name.to_owned(),
-        version_id: "0".repeat(64),
-        bundle_digest: "0".repeat(64),
+        version_id: None,
+        bundle_digest: None,
         tracked: true,
         harness: None,
         harness_slug: None,

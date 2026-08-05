@@ -494,6 +494,12 @@ impl Sweep {
         if let Some(index) = index {
             self.mcp_rows
                 .insert((label.to_owned(), bundle_id.to_owned()), index);
+            // The row is a config-placed bundle's, and says so on the receipt — a fact that
+            // survives a scope where NO agent was engaged and the per-agent states came back
+            // empty, so a summary counting these rows never calls a server a skill.
+            if let Some(row) = self.rows.get_mut(index) {
+                row.kind = Some("mcp".to_owned());
+            }
         }
     }
 
@@ -4665,6 +4671,7 @@ fn plain_row(
         synced_placements: None,
         scope: Some(scope.to_owned()),
         harnesses: Vec::new(),
+        kind: None,
     }
 }
 

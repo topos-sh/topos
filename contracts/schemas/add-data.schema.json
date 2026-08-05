@@ -5,7 +5,11 @@
   "type": "object",
   "properties": {
     "bundle_digest": {
-      "type": "string",
+      "description": "The kernel digest of the bytes this add landed. Present whenever bytes landed — including\nthe MCP import, whose folder IS the bundle even though no version history is minted — and\nabsent for a row that points at somebody else's bytes.",
+      "type": [
+        "string",
+        "null"
+      ],
       "pattern": "^[0-9a-f]{64}$"
     },
     "currency": {
@@ -106,7 +110,11 @@
       ]
     },
     "skill_id": {
-      "type": "string"
+      "description": "The local sidecar record this add minted, when it minted one. ABSENT for a row that has no\nbytes of its own here (a feed, a channel, a whole repo) and for an imported MCP server\npointer — a row-only add mints no version history, and a zeroed id would claim one.",
+      "type": [
+        "string",
+        "null"
+      ]
     },
     "tracked": {
       "type": "boolean"
@@ -126,16 +134,16 @@
       }
     },
     "version_id": {
-      "description": "The base commit the local sidecar starts from.",
-      "type": "string",
+      "description": "The base commit the local sidecar starts from. Absent wherever `skill_id` is.",
+      "type": [
+        "string",
+        "null"
+      ],
       "pattern": "^[0-9a-f]{64}$"
     }
   },
   "required": [
-    "skill_id",
     "name",
-    "version_id",
-    "bundle_digest",
     "tracked"
   ],
   "$defs": {

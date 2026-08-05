@@ -278,12 +278,13 @@ fn adopt_local(ctx: &Ctx<'_>, dir: &Path, global: bool) -> Result<Box<AddData>, 
     medit::note_added_path_kind_in(ctx, &mut data, &scope.target, dir, Some("mcp"))?;
     // The durable kind marker, beside the adopted store's docs — what keeps this record
     // classifying as config-placed even if the scope's ledger is ever lost.
-    if let Ok(sid) = crate::id::SkillId::parse(&data.skill_id) {
+    if let Some(Ok(sid)) = data.skill_id.as_deref().map(crate::id::SkillId::parse) {
         crate::mcp_engine::write_kind_marker(&sctx, &sid);
     }
     let (filter, _) = row_narrowing(ctx, &scope.target, &data.name);
     let agents = engaged_agents(ctx, &scope.target, global, &filter);
-    let lines = converge_one(ctx, &scope.target, global, &data.skill_id, &data.name);
+    let bundle_id = data.skill_id.clone().unwrap_or_default();
+    let lines = converge_one(ctx, &scope.target, global, &bundle_id, &data.name);
     fold_receipt(&mut data, &summary, dir, agents, &lines);
     Ok(Box::new(data))
 }
@@ -361,12 +362,22 @@ fn fetch_arm(
     // record (what lets `remove` prove the folder is still ours), then the row, then the converge
     // — each step convergent on its own, so a failure part-way leaves a state the next retry or
     // `update` finishes rather than a half-trusted one.
+    // Whether the row write below is what BRINGS the manifest into existence — read before a
+    // byte moves, so the record states the world this add found, not the one it made.
+    let manifest_born = !ctx.fs.exists(&target.path);
     let scope = medit::add_scope(ctx, global)?;
     ctx.fs.create_dir_all(&bundle_dir)?;
     crate::atomic::atomic_write(ctx.fs, &bundle_dir.join("server.json"), &document)?;
-    record_import(ctx, &scope.layout, &bundle_dir, &document)?;
+    record_import(ctx, &scope.layout, &bundle_dir, &document, manifest_born)?;
 
-    let mut data = row_only_receipt(&slug);
+    // The digest of what LANDED, over the bytes on disk — the same kernel function the adopt
+    // door runs, so a consumer holding the folder can recompute it and get this answer back. A
+    // scan that cannot read the folder it just wrote leaves the field absent; the add still
+    // stands, and an absent digest claims nothing.
+    let bundle_digest = crate::scan::scan(&bundle_dir)
+        .ok()
+        .map(|scanned| topos_core::digest::to_hex(&scanned.bundle_digest));
+    let mut data = row_only_receipt(&slug, bundle_digest);
     medit::note_added_path_kind_in(ctx, &mut data, &scope.target, &bundle_dir, Some("mcp"))?;
     let bundle_id = format!("local:{slug}");
     let lines = converge_one(ctx, &scope.target, global, &bundle_id, &slug);
@@ -431,13 +442,16 @@ fn bundle_destination(ctx: &Ctx<'_>, target: &EditTarget, global: bool, slug: &s
 }
 
 /// The receipt shape a row-only add returns (the fetched arm mints no version history — see the
-/// module docs). Same fields the reference arms fill for a feed or channel row.
-fn row_only_receipt(name: &str) -> AddData {
+/// module docs), carrying the ONE identity such an import can honestly state: `bundle_digest`,
+/// the kernel digest of the bytes it just wrote. The sidecar id and the version stay ABSENT
+/// rather than zeroed — no store here holds either, and a receipt that stated them would be
+/// naming a history nothing can be asked for.
+fn row_only_receipt(name: &str, bundle_digest: Option<String>) -> AddData {
     AddData {
-        skill_id: String::new(),
+        skill_id: None,
         name: name.to_owned(),
-        version_id: "0".repeat(64),
-        bundle_digest: "0".repeat(64),
+        version_id: None,
+        bundle_digest,
         tracked: true,
         harness: None,
         harness_slug: None,
@@ -472,6 +486,12 @@ pub(crate) struct McpImports {
     /// Canonical bundle-dir path → sha256 hex of the written `server.json` bytes.
     #[serde(default)]
     pub imports: BTreeMap<String, String>,
+    /// The imports whose add ALSO brought this scope's `topos.toml` into existence — the file was
+    /// not there when the add started. It is the other half of "the add left nothing behind": a
+    /// birth this import caused is a birth its inverse may take back (only while the file still
+    /// holds exactly what it was born with — see [`remove_imported_bundle`]'s caller).
+    #[serde(default)]
+    pub manifest_born: BTreeSet<String>,
 }
 
 /// The record's path in one scope's store.
@@ -480,61 +500,107 @@ fn imports_path(layout: &Layout) -> PathBuf {
 }
 
 /// Record the document this import just wrote at `dir` (read-modify-write; an unreadable document
-/// starts fresh — the worst outcome of a lost record is a KEPT folder, disclosed).
+/// starts fresh — the worst outcome of a lost record is a KEPT folder, disclosed). `manifest_born`
+/// says whether this same add is what brought the scope's manifest file into existence.
 fn record_import(
     ctx: &Ctx<'_>,
     layout: &Layout,
     dir: &Path,
     document: &[u8],
+    manifest_born: bool,
 ) -> Result<(), ClientError> {
     ctx.fs.create_dir_all(&layout.state_dir())?;
     let path = imports_path(layout);
     let mut doc: McpImports = crate::doc::read_doc(ctx.fs, &path)?.unwrap_or_default();
     doc.schema_version = topos_types::PERSISTED_SCHEMA_VERSION;
     let canon = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
+    let key = canon.display().to_string();
     doc.imports.insert(
-        canon.display().to_string(),
+        key.clone(),
         topos_core::digest::to_hex(&topos_core::digest::sha256(document)),
     );
+    if manifest_born {
+        doc.manifest_born.insert(key);
+    }
     crate::doc::write_doc(ctx.fs, &path, &doc)
 }
 
+/// What one dropped `kind = "mcp"` row's folder half came to.
+pub(crate) struct ImportRemoval {
+    /// The disclosure line for the removal receipt, when the folder had something to say.
+    pub note: Option<String>,
+    /// This import's add is what brought the scope's manifest file into existence — so its
+    /// inverse may take that file back, if nothing else has since been written into it.
+    pub manifest_born: bool,
+}
+
 /// The `remove` path's half of the inverse: delete the folder a fetched import wrote at `dir` —
-/// IF this scope's record proves it, and IF the folder still holds exactly the recorded bytes.
-/// Returns the disclosure line for the removal receipt; `None` when the folder was never a
-/// recorded import (an adopted folder — untouched, nothing to say).
+/// IF this scope's record proves it, and IF the folder still holds exactly the recorded bytes —
+/// and prune the sidecar's own `mcp/` parent once the last import leaves it. `None` when the
+/// folder was never a recorded import (an adopted folder — untouched, nothing to say).
 ///
 /// Fail toward KEEPING: an unreadable record, extra files, different bytes — every indeterminate
 /// answer keeps the folder and says so. The record row is dropped either way (the manifest row is
 /// gone, so the custody question is closed).
-pub(crate) fn remove_imported_bundle(ctx: &Ctx<'_>, layout: &Layout, dir: &Path) -> Option<String> {
+pub(crate) fn remove_imported_bundle(
+    ctx: &Ctx<'_>,
+    layout: &Layout,
+    dir: &Path,
+) -> Option<ImportRemoval> {
     let path = imports_path(layout);
     let mut doc: McpImports = crate::doc::read_doc(ctx.fs, &path).ok().flatten()?;
     let canon = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
     let key = canon.display().to_string();
     let recorded = doc.imports.remove(&key)?;
+    let manifest_born = doc.manifest_born.remove(&key);
     let _ = crate::doc::write_doc(ctx.fs, &path, &doc);
+    let removal = |note: Option<String>| {
+        Some(ImportRemoval {
+            note,
+            manifest_born,
+        })
+    };
     if !ctx.fs.exists(&canon) {
-        return None; // already gone — nothing to delete, nothing to keep
+        return removal(None); // already gone — nothing to delete, nothing to keep
     }
     if import_still_pristine(ctx, &canon, &recorded) {
         return match ctx.fs.remove_dir_all(&canon) {
-            Ok(()) => Some(format!(
-                "the folder this import wrote ({}) still held exactly the fetched document and \
-                 was removed with the row",
-                canon.display()
-            )),
-            Err(e) => Some(format!(
+            Ok(()) => {
+                prune_person_mcp_dir(ctx, layout, &canon);
+                removal(Some(format!(
+                    "the folder this import wrote ({}) still held exactly the fetched document \
+                     and was removed with the row",
+                    canon.display()
+                )))
+            }
+            Err(e) => removal(Some(format!(
                 "the folder this import wrote ({}) could not be removed ({e}) — it is left in \
                  place",
                 canon.display()
-            )),
+            ))),
         };
     }
-    Some(format!(
+    removal(Some(format!(
         "kept {} — its bytes no longer match what this import wrote, so nothing there is deleted",
         canon.display()
-    ))
+    )))
+}
+
+/// Take away the sidecar's own `mcp/` folder once the last import has left it. Narrow on purpose:
+/// only the dir THIS binary creates for person-scope imports (`<home>/mcp`), and only while it is
+/// empty. A project import writes beside the person, where the parent is their own checkout —
+/// nothing there is topos's to prune.
+fn prune_person_mcp_dir(ctx: &Ctx<'_>, layout: &Layout, removed: &Path) {
+    let ours = layout.home().join(PERSON_MCP_DIR);
+    let ours_canon = ours.canonicalize().unwrap_or_else(|_| ours.clone());
+    if removed.parent() != Some(ours_canon.as_path()) {
+        return;
+    }
+    // `read_dir` cannot tell an empty dir from an absent one, so existence is asked separately —
+    // and a read that fails at all leaves the dir standing.
+    if ctx.fs.exists(&ours) && ctx.fs.read_dir(&ours).is_ok_and(|e| e.is_empty()) {
+        let _ = ctx.fs.remove_dir_all(&ours);
+    }
 }
 
 /// Whether `dir` still holds EXACTLY what the import wrote: one entry, `server.json`, whose bytes
@@ -630,33 +696,48 @@ fn converge_one(
     );
     let mut lines: Vec<String> = filter_warnings;
     for bundle in &outcome.bundles {
-        for state in &bundle.states {
-            let where_ = state.file.as_deref().unwrap_or("its config");
-            lines.push(match state.state.as_str() {
-                // A fresh/updated placement carries the harness's reload note (how the change
-                // goes live — "restart Cursor", "sign in with /mcp"), exactly as the update
-                // path's receipt does; an already-current entry carries none.
-                "current" => match &state.note {
-                    Some(note) => format!("{}: server entry in {where_} — {note}", state.agent),
-                    None => format!("{}: server entry in {where_}", state.agent),
-                },
-                "drifted" => format!(
-                    "{}: hand-edited entry left in place ({where_})",
-                    state.agent
-                ),
-                "conflicting" => format!(
-                    "{}: an entry topos does not own already holds that name ({where_})",
-                    state.agent
-                ),
-                other => match &state.note {
-                    Some(note) => format!("{}: {other} — {note}", state.agent),
-                    None => format!("{}: {other}", state.agent),
-                },
-            });
-        }
+        lines.extend(bundle.states.iter().map(agent_line));
     }
     lines.extend(outcome.warnings.iter().cloned());
     lines
+}
+
+/// One agent's outcome as an add-receipt line. The three states that LANDED somewhere name the
+/// file they landed in — the fact an add is uniquely placed to give. Every other state has no
+/// file to name, so it reads through the ONE shared vocabulary
+/// ([`crate::mcp_engine::state_phrase`]) — the same words `update` prints, letter for letter, so
+/// a person meets one name per state and not two.
+fn agent_line(state: &topos_types::results::McpAgentState) -> String {
+    let where_ = state.file.as_deref().unwrap_or("its config");
+    match state.state.as_str() {
+        // A fresh/updated placement carries the harness's reload note (how the change goes live —
+        // "restart Cursor", "sign in with /mcp"), exactly as the update path's receipt does; an
+        // already-current entry carries none.
+        "current" => match &state.note {
+            Some(note) => format!("{}: server entry in {where_} — {note}", state.agent),
+            None => format!("{}: server entry in {where_}", state.agent),
+        },
+        "drifted" => format!(
+            "{}: hand-edited entry left in place ({where_})",
+            state.agent
+        ),
+        "conflicting" => format!(
+            "{}: an entry topos does not own already holds that name ({where_})",
+            state.agent
+        ),
+        other => match &state.note {
+            Some(note) => format!(
+                "{}: {} — {note}",
+                state.agent,
+                crate::mcp_engine::state_phrase(other)
+            ),
+            None => format!(
+                "{}: {}",
+                state.agent,
+                crate::mcp_engine::state_phrase(other)
+            ),
+        },
+    }
 }
 
 /// The folder the row just written points at. The adopt arm knows it from the tracked record; the
@@ -983,6 +1064,39 @@ mod tests {
     fn unparseable_bytes_reach_the_gate_verbatim() {
         let raw = b"name: not json\n";
         assert_eq!(unwrap_server_document(raw), raw.to_vec());
+    }
+
+    /// ONE STATE VOCABULARY. A state that landed nowhere has no file to name, so `add` says about
+    /// it exactly what `update` says — the same sentence, not a second spelling of it. The raw
+    /// engine token (`not-supported`) is never what a person is handed.
+    #[test]
+    fn add_and_update_name_a_withheld_state_identically() {
+        let withheld = topos_types::results::McpAgentState {
+            agent: "openclaw".to_owned(),
+            state: "not-supported".to_owned(),
+            note: Some("no project-level config".to_owned()),
+            file: None,
+        };
+        assert_eq!(
+            agent_line(&withheld),
+            crate::render::mcp_agent_line(&withheld)
+        );
+        assert_eq!(
+            agent_line(&withheld),
+            "openclaw: not placed — no project-level config"
+        );
+
+        // Noteless, and an OPEN token this client has no phrase for: still one spelling on both
+        // receipts, and an unknown state still says what it was told.
+        for state in ["not-supported", "some-future-state"] {
+            let s = topos_types::results::McpAgentState {
+                agent: "openclaw".to_owned(),
+                state: state.to_owned(),
+                note: None,
+                file: None,
+            };
+            assert_eq!(agent_line(&s), crate::render::mcp_agent_line(&s), "{state}");
+        }
     }
 
     /// A `server` key that is not an object is not an envelope — the whole document stands.

@@ -13,15 +13,35 @@
 
 use topos_types::{ActionCode, NextAction};
 
+/// WHAT an action's caution is about, when the argv cannot say it. A `remove` argv names a row by
+/// its reference, which tells nobody whether the thing leaving this machine is a skill folder or
+/// an entry in every agent's MCP config — so the caller states the FACT and the table below still
+/// owns every word.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Subject {
+    /// A skill bundle — what every verb names unless it says otherwise.
+    #[default]
+    Skill,
+    /// A `kind = "mcp"` bundle: a server address placed into each agent's own config.
+    McpServer,
+}
+
+/// Build a [`NextAction`] about a skill — the ordinary case. See [`next_action_about`] for the
+/// one that has to say which kind it is talking about.
+#[must_use]
+pub fn next_action(code: ActionCode, argv: Vec<String>) -> NextAction {
+    next_action_about(code, argv, Subject::Skill)
+}
+
 /// Build a [`NextAction`], filling the safety metadata from the one rules table and the `needs`
 /// placeholder list from the argv itself.
 #[must_use]
-pub fn next_action(code: ActionCode, argv: Vec<String>) -> NextAction {
+pub fn next_action_about(code: ActionCode, argv: Vec<String>, subject: Subject) -> NextAction {
     let Safety {
         mutates,
         needs_network,
         risk_note,
-    } = safety(&code, &argv);
+    } = safety(&code, &argv, subject);
     let needs = needs_of(&argv);
     NextAction {
         code,
@@ -73,7 +93,7 @@ impl Safety {
 
 /// The rules table. Total over the KNOWN vocabulary (`topos_types::KNOWN_ACTION_CODES`) plus the
 /// open codes this binary emits; anything else stays fully unknown (all three fields absent).
-fn safety(code: &ActionCode, argv: &[String]) -> Safety {
+fn safety(code: &ActionCode, argv: &[String], subject: Subject) -> Safety {
     match code.as_str() {
         // A read that helps resolve a name — no writes, no plane.
         "DISAMBIGUATE_NAME" => Safety::new(Some(false), Some(false), None),
@@ -130,11 +150,11 @@ fn safety(code: &ActionCode, argv: &[String]) -> Safety {
         ),
         // The paste-ready `--yes` of a two-phase describe: applying ALWAYS mutates (that is its
         // point); whether it dials — and what deserves a caution — is the verb's.
-        "APPLY_DESCRIBED" => apply_described(argv),
+        "APPLY_DESCRIBED" => apply_described(argv, subject),
         // The undo-led receipt's literal inverse: an executable mutation exactly like an apply
         // argv (it IS a follow/unfollow/remove invocation) — the same per-verb refinement decides
         // the network story and any caution.
-        "UNDO" => apply_described(argv),
+        "UNDO" => apply_described(argv, subject),
         // The no-session dead-ends' join pointer (`topos login <workspace-address>` — a concrete
         // address, or a template whose `needs` names it): logging in dials, and a session
         // credential is stored once the browser approval lands.
@@ -246,7 +266,7 @@ fn page_dials_plane(argv: &[String]) -> Option<bool> {
 
 /// The per-verb refinement for `APPLY_DESCRIBED` — the argv IS the executable, so the verb decides
 /// the network story and the caution. Every apply mutates.
-fn apply_described(argv: &[String]) -> Safety {
+fn apply_described(argv: &[String], subject: Subject) -> Safety {
     let (needs_network, risk_note): (Option<bool>, Option<&str>) = match verb(argv) {
         // Team-visible writes.
         Some("publish") => (
@@ -285,10 +305,18 @@ fn apply_described(argv: &[String]) -> Safety {
         // read the feed. The argv cannot tell them apart → network unknown.
         Some("remove") => (
             None,
-            Some(
-                "removes the skill from this machine (a team-managed skill keeps its canonical \
-                 bytes)",
-            ),
+            Some(match subject {
+                Subject::Skill => {
+                    "removes the skill from this machine (a team-managed skill keeps its \
+                     canonical bytes)"
+                }
+                // A server does not live in a folder here: what leaves is its entry in each
+                // agent's own MCP config, and the workspace's copy is untouched.
+                Subject::McpServer => {
+                    "removes the MCP server from this machine (a workspace-published server keeps \
+                     its canonical bytes)"
+                }
+            }),
         ),
         // `add -g` may resolve a workspace reference over the wire whatever the target. Otherwise
         // the FIRST non-flag token decides by shape: a WORKSPACE reference (`@ws/name`) resolves

@@ -100,6 +100,12 @@ pub struct PullSkill {
     /// (additive).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub harnesses: Vec<McpAgentState>,
+    /// The catalog bundle kind (`"mcp"` for a config-placed MCP-server bundle). Absent ⇒ an
+    /// ordinary skill. Carried so a receipt can name what it reconciled instead of calling every
+    /// row a skill — a state a row with no engaged agent could not otherwise report. **INFERRED**
+    /// (additive).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
 }
 
 /// One agent's (harness's) state for a config-placed (`mcp`) bundle on this installation.
@@ -700,13 +706,22 @@ pub struct SkillOrigin {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
 pub struct AddData {
-    pub skill_id: String,
+    /// The local sidecar record this add minted, when it minted one. ABSENT for a row that has no
+    /// bytes of its own here (a feed, a channel, a whole repo) and for an imported MCP server
+    /// pointer — a row-only add mints no version history, and a zeroed id would claim one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skill_id: Option<String>,
     pub name: String,
-    /// The base commit the local sidecar starts from.
+    /// The base commit the local sidecar starts from. Absent wherever `skill_id` is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "contract-derives", schemars(extend("pattern" = "^[0-9a-f]{64}$")))]
-    pub version_id: String,
+    pub version_id: Option<String>,
+    /// The kernel digest of the bytes this add landed. Present whenever bytes landed — including
+    /// the MCP import, whose folder IS the bundle even though no version history is minted — and
+    /// absent for a row that points at somebody else's bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "contract-derives", schemars(extend("pattern" = "^[0-9a-f]{64}$")))]
-    pub bundle_digest: String,
+    pub bundle_digest: Option<String>,
     pub tracked: bool,
     /// The harness topos recognized the adopted directory as (e.g. Claude Code), or `None` for a plain
     /// directory tracked in place. Disclosed so the agent can see whether auto-update was armed.
@@ -1778,6 +1793,7 @@ mod tests {
                 synced_placements: None,
                 scope: None,
                 harnesses: Vec::new(),
+                kind: None,
             }],
             proposals_awaiting: 0,
             notices: Vec::new(),

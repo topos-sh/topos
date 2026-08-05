@@ -158,10 +158,10 @@ fn unclaimed_record(
     )?;
 
     Ok(Some(AddData {
-        skill_id: skill_id.into_string(),
+        skill_id: Some(skill_id.into_string()),
         name: lock.name.clone(),
-        version_id: lock.base_commit,
-        bundle_digest: lock.bundle_digest,
+        version_id: Some(lock.base_commit),
+        bundle_digest: Some(lock.bundle_digest),
         tracked: true,
         harness: map.as_ref().and_then(|m| m.harness),
         harness_slug: map.as_ref().and_then(|m| m.harness_slug.clone()),
@@ -408,10 +408,10 @@ pub(crate) fn add_with_name(
         .map(|_| ctx.harness.install_currency_trigger());
 
     Ok(AddData {
-        skill_id: skill_id.into_string(),
+        skill_id: Some(skill_id.into_string()),
         name,
-        version_id: version_hex,
-        bundle_digest: digest_hex,
+        version_id: Some(version_hex),
+        bundle_digest: Some(digest_hex),
         tracked: true,
         harness,
         harness_slug,
@@ -709,7 +709,7 @@ pub(crate) fn add_remote_fetched(
         subdir: selected.subdir.clone(),
         license: selected.license.clone(),
     };
-    if let Ok(id) = crate::id::SkillId::parse(&data.skill_id) {
+    if let Some(Ok(id)) = data.skill_id.as_deref().map(crate::id::SkillId::parse) {
         let doc = OriginDoc {
             schema_version: PERSISTED_SCHEMA_VERSION,
             origin: origin.clone(),

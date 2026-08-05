@@ -661,7 +661,7 @@ pub(crate) fn add_tty(data: &AddData) -> String {
     // <version>" line would be a fabrication, so the receipt states what the row expands to. A
     // LOCAL-PATH reference with no record is the fetched `add --mcp` arm (a pointer row, no
     // version history minted): the receipt names the server recorded, never a channel.
-    if data.skill_id.is_empty() {
+    if data.skill_id.is_none() {
         let sentence = match data
             .reference
             .as_deref()
@@ -703,7 +703,7 @@ pub(crate) fn add_tty(data: &AddData) -> String {
     out.push_str(&format!(
         "Adopted '{}' @ {}",
         data.name,
-        short(&data.version_id)
+        data.version_id.as_deref().map_or("?", short)
     ));
     // Provenance of a remote import (honest, never a trust claim) — where the bytes came from + license.
     if let Some(o) = &data.origin {
@@ -1487,14 +1487,19 @@ pub(crate) fn describe_next_actions(argvs: Vec<Vec<String>>) -> Vec<NextAction> 
 }
 
 /// The next-actions for an UNDO-led apply receipt: the literal inverse command, when one exists
-/// (an immediate self-scoped apply always discloses its way back).
-pub(crate) fn undo_next_actions(undo: &[String]) -> Vec<NextAction> {
+/// (an immediate self-scoped apply always discloses its way back). `about` is the one thing the
+/// inverse argv cannot say for itself — what leaves this machine when it runs.
+pub(crate) fn undo_next_actions(
+    undo: &[String],
+    about: crate::actions::Subject,
+) -> Vec<NextAction> {
     if undo.is_empty() {
         return Vec::new();
     }
-    vec![crate::actions::next_action(
+    vec![crate::actions::next_action_about(
         ActionCode::from("UNDO".to_owned()),
         undo.to_vec(),
+        about,
     )]
 }
 
@@ -2541,11 +2546,14 @@ pub(crate) fn pull_tty(data: &PullData, warnings: &[String], disclosures: &[Stri
         out.push_str(&format!("{}\n", notice_line(n)));
     }
 
-    // The summary counts every skill the sweep attempted — including the failed ones above.
+    // The summary counts every row the sweep attempted — including the failed ones above — and
+    // names them by what they ARE: a sweep that reconciled an MCP server counts bundles, because
+    // calling that row a skill is simply false. All-skills stays the ordinary word.
     let total = data.skills.len() + warnings.len();
+    let noun = managed_noun(&data.skills);
     if rows.is_empty() && warnings.is_empty() {
         out.push_str(&format!(
-            "Checked {total} managed skill(s) — all up to date."
+            "Checked {total} managed {noun}(s) — all up to date."
         ));
     } else {
         let mut parts = Vec::new();
@@ -2555,13 +2563,24 @@ pub(crate) fn pull_tty(data: &PullData, warnings: &[String], disclosures: &[Stri
         if !warnings.is_empty() {
             parts.push(format!("{} failed", warnings.len()));
         }
-        out.push_str(&format!("Checked {total} managed skill(s)"));
+        out.push_str(&format!("Checked {total} managed {noun}(s)"));
         if !parts.is_empty() {
             out.push_str(&format!(": {}", parts.join(", ")));
         }
         out.push('.');
     }
     append_proposals_trailer(out, data.proposals_awaiting)
+}
+
+/// The noun a receipt counts its rows in. `skill` while every row IS one — the word a person
+/// reads most and the one the rest of the CLI uses — and the generic `bundle` the moment a row of
+/// another kind rode along, because one summary cannot call a server a skill and stay true.
+fn managed_noun(skills: &[PullSkill]) -> &'static str {
+    if skills.iter().any(|s| s.kind.is_some()) {
+        "bundle"
+    } else {
+        "skill"
+    }
 }
 
 /// A one-line human rendering of a delivered notice — the verdict (with its reason), a proposal
@@ -2604,16 +2623,21 @@ fn notice_line(n: &topos_types::requests::WireNotice) -> String {
 
 /// One non-up-to-date skill's line (after the padded name) + any indented detail lines.
 /// One agent's MCP config outcome as a receipt sub-line (`agent: placed — restart Cursor`). The
-/// state vocabulary is open; an unrecognized state renders verbatim with its note.
-fn mcp_agent_line(h: &topos_types::results::McpAgentState) -> String {
+/// phrase for every state comes from the ONE shared vocabulary
+/// ([`crate::mcp_engine::state_phrase`]), which `add`'s own receipt reads too; an unrecognized
+/// state renders verbatim with its note.
+pub(crate) fn mcp_agent_line(h: &topos_types::results::McpAgentState) -> String {
     match (h.state.as_str(), h.note.as_deref()) {
-        ("current", Some(note)) => format!("{}: placed — {note}", h.agent),
         ("current", None) => format!("{}: current", h.agent),
-        ("not-supported", Some(note)) => format!("{}: not placed — {note}", h.agent),
-        ("not-supported", None) => format!("{}: not placed", h.agent),
         ("drifted", _) => format!("{}: hand-edited — left in place", h.agent),
-        (state, Some(note)) => format!("{}: {state} — {note}", h.agent),
-        (state, None) => format!("{}: {state}", h.agent),
+        (state, Some(note)) => {
+            format!(
+                "{}: {} — {note}",
+                h.agent,
+                crate::mcp_engine::state_phrase(state)
+            )
+        }
+        (state, None) => format!("{}: {}", h.agent, crate::mcp_engine::state_phrase(state)),
     }
 }
 
@@ -2906,10 +2930,10 @@ mod tests {
     #[test]
     fn a_fetched_mcp_add_receipt_names_the_server_not_a_channel() {
         let data = topos_types::results::AddData {
-            skill_id: String::new(),
+            skill_id: None,
             name: "weather".to_owned(),
-            version_id: "0".repeat(64),
-            bundle_digest: "0".repeat(64),
+            version_id: None,
+            bundle_digest: Some("d".repeat(64)),
             tracked: true,
             harness: None,
             harness_slug: None,
@@ -2972,6 +2996,7 @@ mod tests {
             synced_placements: None,
             scope: None,
             harnesses: Vec::new(),
+            kind: None,
         }
     }
 
@@ -3208,6 +3233,66 @@ mod tests {
             out.contains("`topos review <skill>@<hash> --approve`"),
             "{out}"
         );
+    }
+
+    /// ONE SUMMARY, TRUE FOR EVERY ROW IT COUNTS. A sweep whose rows are all skills says so —
+    /// the ordinary word. The moment a bundle of another kind rides along, the count switches to
+    /// the generic noun, because "1 managed skill" is simply false about an MCP server.
+    #[test]
+    fn the_summary_stops_calling_a_server_a_skill() {
+        let server = |name: &str| {
+            let mut r = row(name, PullAction::UpToDate);
+            r.kind = Some("mcp".to_owned());
+            r
+        };
+        let only_a_server = PullData {
+            skills: vec![server("weather")],
+            proposals_awaiting: 0,
+            notices: Vec::new(),
+            sync: Vec::new(),
+            scope: None,
+        };
+        assert_eq!(
+            pull_tty(&only_a_server, &[], &[]),
+            "Checked 1 managed bundle(s) — all up to date."
+        );
+
+        // Mixed: one word has to cover both, and the generic one does.
+        let mixed = PullData {
+            skills: vec![row("deploy", PullAction::UpToDate), server("weather")],
+            proposals_awaiting: 0,
+            notices: Vec::new(),
+            sync: Vec::new(),
+            scope: None,
+        };
+        assert_eq!(
+            pull_tty(&mixed, &[], &[]),
+            "Checked 2 managed bundle(s) — all up to date."
+        );
+
+        // A row with a per-agent state to show takes the same noun into the counted summary.
+        let mut noteworthy = server("weather");
+        noteworthy.harnesses = vec![topos_types::results::McpAgentState {
+            agent: "openclaw".to_owned(),
+            state: "not-supported".to_owned(),
+            note: Some("no project-level config".to_owned()),
+            file: None,
+        }];
+        let surfaced = PullData {
+            skills: vec![noteworthy],
+            proposals_awaiting: 0,
+            notices: Vec::new(),
+            sync: Vec::new(),
+            scope: None,
+        };
+        let out = pull_tty(&surfaced, &[], &[]);
+        assert!(out.contains("Checked 1 managed bundle(s)."), "{out}");
+        // …and the per-agent line reads in the shared vocabulary, never the raw engine token.
+        assert!(
+            out.contains("openclaw: not placed — no project-level config"),
+            "{out}"
+        );
+        assert!(!out.contains("not-supported"), "{out}");
     }
 
     #[test]
