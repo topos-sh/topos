@@ -428,8 +428,17 @@ function matches(server: CuratedMcpRow, query: string): boolean {
     .includes(needle);
 }
 
-/** The auth chip — the one thing about a server worth knowing before choosing it. */
-function AuthChip({ auth }: { auth: "oauth" | "none" }) {
+/**
+ * The auth chip — the one thing about a server worth knowing before choosing it. ONE component
+ * for both doors: a picked row and a previewed document say how a person gets in with the same
+ * two words, because they are answering the same question about the same field
+ * (`_meta["sh.topos/auth"]`). A document that DECLARES nothing gets no chip: silence is the
+ * honest answer there, not "no sign-in".
+ */
+export function AuthChip({ auth }: { auth: "oauth" | "none" | null }) {
+  if (auth === null) {
+    return null;
+  }
   return auth === "oauth" ? (
     <Chip tone="accent">oauth</Chip>
   ) : (
@@ -806,7 +815,7 @@ function RefusalNote({ error, code, at }: { error: string; code?: string; at?: s
   );
 }
 
-function PreviewCard({ preview }: { preview: PreviewData }) {
+export function PreviewCard({ preview }: { preview: PreviewData }) {
   const flying = useSubmittingIntent();
   const busy = flying !== null;
   const { summary } = preview;
@@ -826,7 +835,7 @@ function PreviewCard({ preview }: { preview: PreviewData }) {
           <span className="font-mono text-[13px] text-ink">{summary.name}</span>
           <span className="text-faint text-xs">{summary.version}</span>
           <Chip tone="neutral">{summary.transport}</Chip>
-          {summary.authHint === "oauth" && <Chip tone="accent">oauth</Chip>}
+          <AuthChip auth={summary.authHint} />
         </div>
         <p className="text-dim text-sm">{summary.description}</p>
         <p className="break-all font-mono text-[13px] text-dim" data-testid="mcp-preview-url">

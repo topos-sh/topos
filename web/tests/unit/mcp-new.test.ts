@@ -1,3 +1,11 @@
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
+import {
+  createStaticHandler,
+  createStaticRouter,
+  type RouteObject,
+  StaticRouterProvider,
+} from "react-router";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   bootWorkspace,
@@ -632,5 +640,74 @@ describe("the SSRF guard", () => {
       { address: "93.184.216.34", family: 4 },
       { address: "2606:2800:220:1:248:1893:25c8:1946", family: 6 },
     ]);
+  });
+});
+
+/**
+ * WHAT THE PREVIEW SHOWS. The picker's rows and the custom arm's preview answer the same
+ * question about the same field — how a person gets in once the server lands — so they must
+ * answer it the same way. The preview card is rendered for real (through a static router, since
+ * it carries the publish form) and read for the chip.
+ */
+describe("the preview card's auth chip", () => {
+  /** The card as the custom arm renders it, for a document declaring `auth`. */
+  async function renderPreview(authHint: "oauth" | "none" | null): Promise<string> {
+    const { PreviewCard } = await import("@/routes/mcp-new");
+    type Preview = Parameters<typeof PreviewCard>[0]["preview"];
+    const preview: Preview = {
+      form: "preview",
+      origin: "https://weather.acme.example/server.json",
+      suggestedName: "weather",
+      document: JSON.stringify(WEATHER, null, 2),
+      summary: {
+        name: WEATHER.name,
+        description: WEATHER.description,
+        version: WEATHER.version,
+        url: WEATHER.remotes[0]?.url ?? "",
+        transport: "streamable-http",
+        headers: [],
+        authHint,
+      },
+    };
+    const routes: RouteObject[] = [
+      {
+        path: "/",
+        // `ChannelField` reads the page's own loader data; nothing else on the card does.
+        loader: () => ({
+          channels: [{ name: "everyone", isDefault: true, mode: "open" }],
+          role: "owner",
+        }),
+        Component: () => createElement(PreviewCard, { preview }),
+      },
+    ];
+    const handler = createStaticHandler(routes);
+    const context = await handler.query(new Request("http://localhost/"));
+    if (context instanceof Response) {
+      throw new Error("expected a rendered context, got a Response");
+    }
+    const router = createStaticRouter(handler.dataRoutes, context);
+    return renderToStaticMarkup(createElement(StaticRouterProvider, { router, context }));
+  }
+
+  it("says a server signs in, the same word the picker's rows use", async () => {
+    const html = await renderPreview("oauth");
+    expect(html).toContain("oauth");
+    expect(html).not.toContain("no sign-in");
+  });
+
+  it("says a server needs no sign-in rather than saying nothing at all", async () => {
+    // The regression: a declared `none` used to render only the transport, so the one fact a
+    // person weighs before publishing was missing from exactly the arm that pasted the bytes.
+    const html = await renderPreview("none");
+    expect(html).toContain("no sign-in");
+    expect(html).not.toContain(">oauth<");
+  });
+
+  it("stays quiet about a document that declares neither", async () => {
+    const html = await renderPreview(null);
+    expect(html).not.toContain("no sign-in");
+    expect(html).not.toContain(">oauth<");
+    // Still a preview: the transport is the chip that never depended on the declaration.
+    expect(html).toContain("streamable-http");
   });
 });
