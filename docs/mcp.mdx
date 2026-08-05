@@ -220,15 +220,16 @@ Every refusal is typed, and each one refuses a specific temptation rather than f
 | `MCP_INVALID` | not JSON; a missing or malformed `name`, `description`, or `version`; an endpoint that isn't a URL | there is nothing here to publish or point an agent at |
 | `MCP_NAME_TAKEN` | a `name` another bundle here already publishes | the registry lane resolves by that name; two claims would make a lookup a coin flip |
 
-`MCP_SECRET_REFUSED` is the widest of them, deliberately. It covers a header marked `isSecret`, a
-header with no literal value, a header or endpoint assembled from per-installation `variables`, and
-a literal value anywhere in the document that simply *has the shape* of a token — an API key, a
-`Bearer` string, a long random-looking run. The scan reads the raw document **before** any field is
-read out of it, so a document carrying somebody's token is refused whole, and the message names the
-shape it matched, never the value:
+`MCP_SECRET_REFUSED` is the widest of them, deliberately. It covers a header whose *name* carries a
+credential by definition (`Authorization`, `Cookie`, `X-Api-Key` and their kin), a header marked
+`isSecret`, a header with no literal value, a header or endpoint assembled from per-installation
+`variables`, and a literal value anywhere in the document that simply *has the shape* of a token —
+an API key, a `Bearer` string, a long random-looking run. The scan reads the raw document **before**
+any field is read out of it, so a document carrying somebody's token is refused whole, and the
+message names the shape it matched, never the value:
 
 ```
-error: the header X-Api-Key is declared secret — a shared bundle never carries a credential
+error: the header X-Api-Key carries a credential by definition — a shared bundle never holds one
 ```
 
 <Warning>
