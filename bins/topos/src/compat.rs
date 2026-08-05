@@ -32,7 +32,7 @@ pub(crate) const MIN_SERVER_VERSION: &str = "0.1.15";
 /// RELEASE THAT INTRODUCES MCP KINDS: it must equal the workspace version that release ships as,
 /// so the release's version-bump change moves it too (and never again after — later servers all
 /// know the kind).
-pub(crate) const MCP_MIN_SERVER_VERSION: &str = "0.1.22";
+pub(crate) const MCP_MIN_SERVER_VERSION: &str = "0.1.23";
 
 /// A minimal semver-core `>` : compare (major, minor, patch), ignoring any pre-release/build suffix. Tags
 /// come from our own release pipeline (`vX.Y.Z`), so the core triple is sufficient; a malformed side is
