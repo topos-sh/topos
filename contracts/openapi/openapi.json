@@ -4309,6 +4309,13 @@
             "type": "string",
             "description": "The catalog's bundle kind — `\"skill\"` for everything that exists today. Display metadata\nonly: clients render it and never branch on it (an OPEN vocabulary, like `status`).\nAdditive: an older producer that omits it is serving skills."
           },
+          "mcp_server_name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The EMBEDDED server name (`server.name`) the bundle's `current` document declares — the\nidentity the MCP read API keys on, distinct from the catalog `name` above. Present only\nfor an active `kind = \"mcp\"` entry whose document could be read; lets a client resolve a\nregistry-shaped name against the workspaces it is connected to before the official\nregistry. **Additive.**"
+          },
           "name": {
             "type": "string",
             "description": "The catalog's user-facing name (a pre-catalog seeded pointer falls back to the skill id)."

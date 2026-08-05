@@ -1555,6 +1555,14 @@ export interface components {
              *     Additive: an older producer that omits it is serving skills.
              */
             kind?: string;
+            /**
+             * @description The EMBEDDED server name (`server.name`) the bundle's `current` document declares — the
+             *     identity the MCP read API keys on, distinct from the catalog `name` above. Present only
+             *     for an active `kind = "mcp"` entry whose document could be read; lets a client resolve a
+             *     registry-shaped name against the workspaces it is connected to before the official
+             *     registry. **Additive.**
+             */
+            mcp_server_name?: string | null;
             /** @description The catalog's user-facing name (a pre-catalog seeded pointer falls back to the skill id). */
             name: string;
             /**

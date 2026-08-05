@@ -3,10 +3,13 @@ import { laneGate } from "@/lib/api/compat.server";
 import { NO_STORE, uniformNotFound } from "@/lib/api/wire.server";
 import { requireSessionActor } from "@/lib/auth/guards.server";
 import { laneSkillsIndex } from "@/lib/db/queries.lane.server";
+import { withMcpServerNames } from "@/lib/mcp/catalog.server";
 
 /**
  * `GET /api/v1/workspaces/{ws}/skills` — the workspace catalog (every bundle holding a
  * `current`), authorized by workspace membership. Metadata only, no bytes; ordered by id.
+ * Active `kind: 'mcp'` entries additionally carry their EMBEDDED server name (additive,
+ * best-effort) — what lets a CLI resolve `add --mcp <name>` workspace-first.
  */
 export async function loader({ request, params }: LoaderFunctionArgs): Promise<Response> {
   const gated = laneGate(request);
@@ -14,7 +17,7 @@ export async function loader({ request, params }: LoaderFunctionArgs): Promise<R
     return gated;
   }
   const actor = await requireSessionActor(request, params.ws ?? "");
-  const skills = await laneSkillsIndex(actor);
+  const skills = await withMcpServerNames(actor.workspaceId, await laneSkillsIndex(actor));
   return Response.json({ skills }, { headers: NO_STORE });
 }
 

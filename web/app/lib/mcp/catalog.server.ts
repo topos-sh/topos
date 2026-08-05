@@ -138,6 +138,37 @@ export async function scanMcpCatalog(
   return { entries, incomplete };
 }
 
+/**
+ * Decorate the session-lane catalog listing with each ACTIVE `kind: 'mcp'` entry's EMBEDDED
+ * server name (`server.name` from the CURRENT version's document — the same source the registry
+ * lane serves, never recomputed elsewhere). This is what lets the CLI resolve a registry-shaped
+ * `add --mcp <name>` against the workspaces a machine is connected to before the official
+ * registry. Best-effort and additive by design: a document this tier cannot read right now just
+ * leaves its entry undecorated (the wire field is optional), and the pass reads at most
+ * [`MAX_MCP_BUNDLES_SCANNED`] documents — each warmed by the immutable per-version cache, so a
+ * steady-state listing costs no vault round-trips.
+ */
+export async function withMcpServerNames<
+  T extends { skill_id: string; kind: string; status: string; version_id: string },
+>(ws: string, entries: T[]): Promise<(T & { mcp_server_name?: string })[]> {
+  let budget = MAX_MCP_BUNDLES_SCANNED;
+  const out: (T & { mcp_server_name?: string })[] = [];
+  for (const entry of entries) {
+    if (entry.kind !== "mcp" || entry.status !== "active" || budget <= 0) {
+      out.push(entry);
+      continue;
+    }
+    budget -= 1;
+    const document = await serverDocumentOf(ws, entry.skill_id, entry.version_id);
+    out.push(
+      document !== null && typeof document.name === "string"
+        ? { ...entry, mcp_server_name: document.name }
+        : entry,
+    );
+  }
+  return out;
+}
+
 export type McpNameCheck =
   | { kind: "free" }
   | { kind: "taken"; by: McpBundleRow }
