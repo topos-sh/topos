@@ -10147,13 +10147,24 @@ fn a_ghost_remove_falls_through_and_a_still_claimed_name_keeps_the_refusal() {
     );
 }
 
+/// What the plane answers an audience probe with.
+#[derive(Clone)]
+enum FakeReach {
+    /// A live-shaped payload.
+    Persons(u64),
+    /// A body that fails to parse — the typed transport failure.
+    Malformed(String),
+    /// The uniform NOT-FOUND, echoing back the OPAQUE bundle id the client sent, exactly as the
+    /// real transport's 404 arm does. This is what a bundle with no catalog row always meets.
+    NotFound,
+}
+
 /// [`FakeDirectory`] that answers `me` (the resolver universe's read) AND `reach` — the audience
-/// read the publish/protect describes make. `Ok(persons)` is a live-shaped payload; `Err` is the
-/// typed transport failure (a body that fails to parse surfaces exactly this way).
+/// read the publish/protect describes make.
 #[derive(Clone)]
 struct ReachDirectory {
     inner: NamedDirectory,
-    reach: Result<u64, String>,
+    reach: FakeReach,
 }
 impl DirectorySource for ReachDirectory {
     fn me(&self, ws: &str) -> Result<WireMe, ClientError> {
@@ -10171,13 +10182,16 @@ impl DirectorySource for ReachDirectory {
     fn skill_log(&self, ws: &str, s: &str) -> Result<WireSkillLog, ClientError> {
         self.inner.skill_log(ws, s)
     }
-    fn reach(&self, _ws: &str, _s: &str) -> Result<WireReach, ClientError> {
+    fn reach(&self, _ws: &str, s: &str) -> Result<WireReach, ClientError> {
         match &self.reach {
-            Ok(p) => Ok(WireReach {
+            FakeReach::Persons(p) => Ok(WireReach {
                 persons: *p,
                 sessions: p + 1,
             }),
-            Err(m) => Err(ClientError::WireInvalid(m.clone())),
+            FakeReach::Malformed(m) => Err(ClientError::WireInvalid(m.clone())),
+            FakeReach::NotFound => Err(ClientError::TargetNotFound {
+                target: s.to_owned(),
+            }),
         }
     }
     fn channel_place(&self, ws: &str, c: &str, s: &str) -> Result<(), ClientError> {
@@ -10197,9 +10211,78 @@ impl DirectorySource for ReachDirectory {
     }
 }
 
+/// The FIRST publish of a brand-new skill asks the plane NOTHING about its audience: the bundle
+/// has no catalog row yet, so the only answer the probe can get is the uniform not-found — which
+/// echoes back the opaque bundle id the client sent. Asking it opened the happy genesis path with
+/// a warning quoting an internal `topos_…` id nobody typed, and advising the person to check an
+/// address that was never wrong.
+#[test]
+fn a_genesis_publish_describe_never_asks_for_an_audience_that_cannot_exist() {
+    let rig = Rig::new("zq-genreach");
+    rig.seed_session();
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let plane = FakePlane::new(log);
+    plane.serves(Vec::new());
+    let src = rig.work.0.join("deploy");
+    skill_source(&src, b"# deploy\n");
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    ops::add(&ctx, &src).unwrap();
+
+    let fake = FakeDirectory::new(Vec::new(), Vec::new());
+    let dc = |_: &str| -> Box<dyn DirectorySource> {
+        Box::new(FakeDirectory::new(Vec::new(), Vec::new()))
+    };
+    let del = |_: &str| -> Box<dyn crate::plane::ReconcileTransport> {
+        let p = FakePlane::new(Arc::new(Mutex::new(Vec::new())));
+        p.serves(Vec::new());
+        Box::new(p)
+    };
+    let connectors = ops::PublishDescribeConnectors {
+        directory: &dc,
+        delivery: &del,
+    };
+    let rd = ReachDirectory {
+        inner: NamedDirectory(fake.clone()),
+        reach: FakeReach::NotFound,
+    };
+    let session_connect = |_s: &Session| ops::SessionTransports {
+        plane: Box::new(plane.clone()),
+        directory: Box::new(rd.clone()),
+        contribute: Box::new(NoContribute),
+        governance: Box::new(NoGovernance),
+    };
+    let (data, warnings) = ops::publish_describe(
+        &ctx,
+        &connectors,
+        Some(&session_connect),
+        None,
+        "deploy",
+        false,
+        None,
+        None,
+    )
+    .unwrap();
+    assert_eq!(data.reach, None, "no audience is claimed");
+    assert!(
+        warnings.is_empty(),
+        "a first publish is the happy path — it warns about nothing: {warnings:?}"
+    );
+    let argv = vec!["topos".to_owned(), "publish".to_owned(), "--yes".to_owned()];
+    let tty = crate::render::publish_describe_tty(&data, &argv);
+    assert!(!tty.contains("reaches"), "{tty}");
+    assert!(
+        !tty.contains(&data.skill_id),
+        "the internal bundle id never reaches a human line: {tty}"
+    );
+    // What the describe DOES say about where these bytes go — the placement line, unchanged.
+    assert_eq!(data.placements, vec!["everyone".to_owned()]);
+}
+
 /// The audience line prints against a live-shaped reach payload — and a reach that FAILS surfaces
 /// as a visible warning, never as a wordlessly missing line (the swallow that hid the wire
-/// mismatch for a week is gone).
+/// mismatch for a week is gone). All of it on a SECOND publish: an audience is a question only a
+/// bundle the plane already holds a row for can answer. The failure reason names the SKILL, never
+/// the internal id the plane's 404 echoes back, and one person is `1 person`.
 #[test]
 fn the_publish_describe_audience_line_prints_and_a_failed_reach_warns() {
     let rig = Rig::new("zq-reach");
@@ -10226,56 +10309,81 @@ fn the_publish_describe_audience_line_prints_and_a_failed_reach_warns() {
         delivery: &del,
     };
 
-    // A LIVE-shaped payload: the line prints.
-    let good = ReachDirectory {
-        inner: NamedDirectory(fake.clone()),
-        reach: Ok(4),
-    };
-    let session_connect = |_s: &Session| ops::SessionTransports {
+    // The first publish LANDS (`observed` advances past GENESIS, read-your-writes) and the draft
+    // moves on — every describe below is a republish of a bundle the plane knows. The apply's own
+    // directory answers no reach at all (`FakeDirectory::reach` is `unreachable!`): the audience
+    // is a describe-only read.
+    let named = NamedDirectory(fake.clone());
+    let session_apply = |_s: &Session| ops::SessionTransports {
         plane: Box::new(plane.clone()),
-        directory: Box::new(good.clone()),
-        contribute: Box::new(NoContribute),
+        directory: Box::new(named.clone()),
+        contribute: Box::new(OkPublish),
         governance: Box::new(NoGovernance),
     };
-    let (data, warnings) = ops::publish_describe(
+    let cc = |_base: &str, _tok: Option<&str>| -> Box<dyn crate::plane::ContributeSource> {
+        Box::new(NoContribute)
+    };
+    let outcome = ops::publish(
         &ctx,
-        &connectors,
-        Some(&session_connect),
+        &cc,
+        None,
+        Some(&session_apply),
         None,
         "deploy",
         false,
         None,
         None,
+        None,
     )
     .unwrap();
+    assert!(
+        matches!(outcome, ops::PublishOutcome::Published(_)),
+        "the first publish lands: {outcome:?}"
+    );
+    skill_source(&src, b"# deploy v2\n");
+
+    let argv = vec!["topos".to_owned(), "publish".to_owned(), "--yes".to_owned()];
+    let describe = |reach: FakeReach| {
+        let rd = ReachDirectory {
+            inner: NamedDirectory(fake.clone()),
+            reach,
+        };
+        let session_connect = |_s: &Session| ops::SessionTransports {
+            plane: Box::new(plane.clone()),
+            directory: Box::new(rd.clone()),
+            contribute: Box::new(NoContribute),
+            governance: Box::new(NoGovernance),
+        };
+        ops::publish_describe(
+            &ctx,
+            &connectors,
+            Some(&session_connect),
+            None,
+            "deploy",
+            false,
+            None,
+            None,
+        )
+        .unwrap()
+    };
+
+    // A LIVE-shaped payload: the line prints.
+    let (data, warnings) = describe(FakeReach::Persons(4));
     assert_eq!(data.reach, Some(4));
     assert!(warnings.is_empty(), "{warnings:?}");
-    let argv = vec!["topos".to_owned(), "publish".to_owned(), "--yes".to_owned()];
     let tty = crate::render::publish_describe_tty(&data, &argv);
     assert!(tty.contains("reaches 4 people"), "{tty}");
 
+    // An audience of ONE is a person, not "1 people" — the number a solo workspace always sees.
+    let (data, warnings) = describe(FakeReach::Persons(1));
+    assert_eq!(data.reach, Some(1));
+    assert!(warnings.is_empty(), "{warnings:?}");
+    let tty = crate::render::publish_describe_tty(&data, &argv);
+    assert!(tty.contains("reaches 1 person"), "{tty}");
+    assert!(!tty.contains("1 people"), "{tty}");
+
     // A reach that fails to parse: the line is absent AND a warning says why.
-    let bad = ReachDirectory {
-        inner: NamedDirectory(fake.clone()),
-        reach: Err("missing field `sessions`".to_owned()),
-    };
-    let session_connect = |_s: &Session| ops::SessionTransports {
-        plane: Box::new(plane.clone()),
-        directory: Box::new(bad.clone()),
-        contribute: Box::new(NoContribute),
-        governance: Box::new(NoGovernance),
-    };
-    let (data, warnings) = ops::publish_describe(
-        &ctx,
-        &connectors,
-        Some(&session_connect),
-        None,
-        "deploy",
-        false,
-        None,
-        None,
-    )
-    .unwrap();
+    let (data, warnings) = describe(FakeReach::Malformed("missing field `sessions`".to_owned()));
     assert_eq!(data.reach, None);
     assert_eq!(warnings.len(), 1, "{warnings:?}");
     assert!(
@@ -10288,6 +10396,20 @@ fn the_publish_describe_audience_line_prints_and_a_failed_reach_warns() {
     );
     let tty = crate::render::publish_describe_tty(&data, &argv);
     assert!(!tty.contains("reaches"), "{tty}");
+
+    // A real not-found on a bundle the plane SHOULD know (access lost, catalog row archived): the
+    // warning stands — worded around the name the person typed, never the id the 404 echoed.
+    let (data, warnings) = describe(FakeReach::NotFound);
+    assert_eq!(data.reach, None);
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert!(
+        warnings[0].starts_with("REACH_UNAVAILABLE deploy: 'deploy' was not found"),
+        "{warnings:?}"
+    );
+    assert!(
+        !warnings[0].contains(&data.skill_id),
+        "the internal bundle id never reaches a human line: {warnings:?}"
+    );
 }
 
 /// The `protect` describe holds the same rule: a failed reach is a visible warning on the
@@ -10300,7 +10422,7 @@ fn a_protect_describe_reach_failure_warns_instead_of_vanishing() {
     let fake = FakeDirectory::new(vec![catalog_entry("s_deploy", "deploy", &v)], Vec::new());
     let ctx = rig.ctx_at(Some(&rig.work.0));
 
-    let run = |reach: Result<u64, String>| {
+    let run = |reach: FakeReach| {
         let rd = ReachDirectory {
             inner: NamedDirectory(fake.clone()),
             reach,
@@ -10323,14 +10445,27 @@ fn a_protect_describe_reach_failure_warns_instead_of_vanishing() {
         ops::protect(&ctx, &connectors, "deploy", None, None, false).unwrap()
     };
 
-    match run(Ok(9)) {
+    let argv = vec!["topos".to_owned(), "protect".to_owned(), "--yes".to_owned()];
+    match run(FakeReach::Persons(9)) {
         ops::ProtectOutcome::Described { data, warnings, .. } => {
             assert_eq!(data.audience, Some(9));
             assert!(warnings.is_empty(), "{warnings:?}");
+            let tty = crate::render::protect_describe_tty(&data, &argv);
+            assert!(tty.contains("reaches 9 people"), "{tty}");
         }
         other => panic!("a bare protect describes: {other:?}"),
     }
-    match run(Err("missing field `sessions`".to_owned())) {
+    // The same irregular noun rule the publish describe holds: one person, never "1 people".
+    match run(FakeReach::Persons(1)) {
+        ops::ProtectOutcome::Described { data, warnings, .. } => {
+            assert_eq!(data.audience, Some(1));
+            assert!(warnings.is_empty(), "{warnings:?}");
+            let tty = crate::render::protect_describe_tty(&data, &argv);
+            assert!(tty.contains("reaches 1 person"), "{tty}");
+        }
+        other => panic!("a bare protect describes: {other:?}"),
+    }
+    match run(FakeReach::Malformed("missing field `sessions`".to_owned())) {
         ops::ProtectOutcome::Described { data, warnings, .. } => {
             assert_eq!(data.audience, None);
             assert_eq!(warnings.len(), 1, "{warnings:?}");
@@ -10338,6 +10473,19 @@ fn a_protect_describe_reach_failure_warns_instead_of_vanishing() {
                 warnings[0].starts_with("REACH_UNAVAILABLE deploy:"),
                 "{warnings:?}"
             );
+        }
+        other => panic!("a bare protect describes: {other:?}"),
+    }
+    // A protect whose reach 404s: the id the plane echoed back never reaches the warning.
+    match run(FakeReach::NotFound) {
+        ops::ProtectOutcome::Described { data, warnings, .. } => {
+            assert_eq!(data.audience, None);
+            assert_eq!(warnings.len(), 1, "{warnings:?}");
+            assert!(
+                warnings[0].starts_with("REACH_UNAVAILABLE deploy: 'deploy' was not found"),
+                "{warnings:?}"
+            );
+            assert!(!warnings[0].contains("s_deploy"), "{warnings:?}");
         }
         other => panic!("a bare protect describes: {other:?}"),
     }
@@ -11451,6 +11599,58 @@ fn a_selection_over_a_feed_refuses_whole() {
     assert!(tty.ends_with("nothing changed"), "{tty}");
 }
 
+/// A feed add states its one fact ONCE. The receipt's closing sentence is where "this machine now
+/// takes whatever <ws> gives you" belongs, so the row write adds no `note:` line saying the same
+/// thing one line above it. The IDEMPOTENT re-add keeps its own note — "already adopting …" is a
+/// fact that sentence does not carry.
+#[test]
+fn a_feed_add_states_what_this_machine_now_takes_exactly_once() {
+    let (rig, plane, dir, _v) = add_rig("feed-once");
+    rig.write_global("[bundles]\n");
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    let add = || match ops::add_reference(
+        &ctx,
+        &connect(&plane, &dir),
+        None,
+        &format!("@{WS_NAME}"),
+        true,
+        false,
+        &Default::default(),
+    )
+    .unwrap()
+    {
+        ops::AddRefOutcome::Applied(d) => *d,
+        other => panic!("a feed row applies immediately: {other:?}"),
+    };
+
+    let data = add();
+    assert!(
+        data.note.is_none(),
+        "the closing sentence is the ONE place this fact is stated: {:?}",
+        data.note
+    );
+    let tty = crate::render::add_tty(&data);
+    assert_eq!(
+        tty.matches("takes whatever").count(),
+        1,
+        "the same fact, twice: {tty}"
+    );
+    assert!(
+        tty.contains(&format!(
+            "This machine now takes whatever {WS_NAME} gives you"
+        )),
+        "{tty}"
+    );
+
+    // The re-add rewrites nothing — and says so; the closing sentence still prints once.
+    let data = add();
+    let note = data.note.as_deref().expect("the no-op discloses itself");
+    assert!(note.contains("already adopting"), "{note}");
+    assert!(note.contains("nothing changed"), "{note}");
+    let tty = crate::render::add_tty(&data);
+    assert_eq!(tty.matches("takes whatever").count(), 1, "{tty}");
+}
+
 /// The shared-copy refusal, byte for byte: subtraction cannot narrow one shared folder, and the
 /// two ways out print as aligned command lines (the `-a` list = the covered agents that read the
 /// shared copy, minus the one being removed).
@@ -12073,4 +12273,137 @@ fn removing_a_row_names_the_feed_that_actually_delivers_it() {
     );
     assert!(placed.exists(), "the copies stay in place");
     assert!(data.uninstalled.is_empty(), "{:?}", data.uninstalled);
+}
+
+// =================================================================================================
+// Placement-heal honesty: an update that CREATES a placement (a folder materialized where none
+// was) says `installed` — and "all up to date" may only claim itself when nothing changed on disk.
+// =================================================================================================
+
+/// Delete a delivered skill's placement folder and run `update`: the files come back — and the
+/// receipt MUST say so (`+ … installed (…)`), never `all up to date`. Around the heal, a genuinely
+/// untouched update keeps the exact all-up-to-date summary, byte for byte.
+#[test]
+fn healing_a_deleted_placement_reads_installed_never_all_up_to_date() {
+    let rig = Rig::new("healrcpt");
+    rig.seed_session();
+    rig.seed_feed();
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let v = one_file(b"# deploy\n");
+    let plane = FakePlane::new(log).with_version("s_deploy", &v);
+    plane.serves(vec![delivered("s_deploy", "deploy", &v)]);
+    let dir = FakeDirectory::new(vec![catalog_entry("s_deploy", "deploy", &v)], Vec::new());
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+
+    // First sweep installs; the second is genuinely untouched and pins the exact summary.
+    sweep(&ctx, &plane, &dir);
+    let placed = rig.work.0.join("skills/deploy");
+    assert!(placed.join("SKILL.md").exists());
+    let clean = sweep(&ctx, &plane, &dir);
+    assert_eq!(
+        crate::render::pull_tty(
+            &clean.data,
+            &clean.warnings,
+            &clean.advisories,
+            &clean.disclosures
+        ),
+        "updated machine-wide\nChecked 1 managed skill(s) — all up to date."
+    );
+
+    // The placement folder vanishes (a hand-delete, an agent cleanup). The next update re-creates
+    // it — files materialized where none were is an INSTALL, not "up to date".
+    std::fs::remove_dir_all(&placed).unwrap();
+    let healed = sweep(&ctx, &plane, &dir);
+    assert!(
+        placed.join("SKILL.md").exists(),
+        "the heal restores the files"
+    );
+    let row = healed
+        .data
+        .skills
+        .iter()
+        .find(|s| s.skill == "deploy")
+        .unwrap();
+    assert_eq!(
+        row.action,
+        PullAction::Installed,
+        "a created placement is an install: {row:?}"
+    );
+    assert_eq!(row.destinations.len(), 1, "{:?}", row.destinations);
+    let out = crate::render::pull_tty(
+        &healed.data,
+        &healed.warnings,
+        &healed.advisories,
+        &healed.disclosures,
+    );
+    assert!(out.contains(&format!("+ @{WS_NAME}/deploy")), "{out}");
+    assert!(out.contains("installed ("), "{out}");
+    assert!(
+        !out.contains("all up to date"),
+        "a run that created a placement may not claim it: {out}"
+    );
+
+    // Healed and untouched again → exactly the all-up-to-date summary again.
+    let again = sweep(&ctx, &plane, &dir);
+    assert_eq!(
+        crate::render::pull_tty(
+            &again.data,
+            &again.warnings,
+            &again.advisories,
+            &again.disclosures
+        ),
+        "updated machine-wide\nChecked 1 managed skill(s) — all up to date."
+    );
+}
+
+/// Drop the feed line (copies retire), re-add it, update: the bytes come back — the receipt says
+/// `installed`, with the destination, even though the served version never moved.
+#[test]
+fn re_adding_the_feed_line_reinstalls_with_a_receipt_line() {
+    let rig = Rig::new("readdline");
+    rig.seed_session();
+    rig.seed_feed();
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let v = one_file(b"# deploy\n");
+    let plane = FakePlane::new(log).with_version("s_deploy", &v);
+    plane.serves(vec![delivered("s_deploy", "deploy", &v)]);
+    let dir = FakeDirectory::new(vec![catalog_entry("s_deploy", "deploy", &v)], Vec::new());
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    sweep(&ctx, &plane, &dir);
+    let placed = rig.work.0.join("skills/deploy");
+    assert!(placed.join("SKILL.md").exists());
+
+    // The feed line is removed: the next update retires the copies.
+    rig.write_global("[bundles]\n");
+    let retired = sweep(&ctx, &plane, &dir);
+    assert!(
+        !placed.exists(),
+        "the dropped line retires the copies: {:?}",
+        retired.data.skills
+    );
+
+    // The line comes back: the next update re-places the bytes — an install, said as one.
+    rig.seed_feed();
+    let back = sweep(&ctx, &plane, &dir);
+    assert!(placed.join("SKILL.md").exists());
+    let row = back
+        .data
+        .skills
+        .iter()
+        .find(|s| s.skill == "deploy")
+        .unwrap();
+    assert_eq!(
+        row.action,
+        PullAction::Installed,
+        "re-placed bytes are an install: {row:?}"
+    );
+    assert!(!row.destinations.is_empty(), "{row:?}");
+    let out = crate::render::pull_tty(
+        &back.data,
+        &back.warnings,
+        &back.advisories,
+        &back.disclosures,
+    );
+    assert!(out.contains("installed ("), "{out}");
+    assert!(!out.contains("all up to date"), "{out}");
 }

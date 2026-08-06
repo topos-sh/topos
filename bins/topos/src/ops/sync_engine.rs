@@ -273,7 +273,9 @@ pub(crate) fn sync_one_planned(
             // The converge COMMITS an updated map — every later committing step this run must see
             // it (a stale map handed to the fan-out's materialize would erase the baselines the
             // converge just recorded, and the next scan would read the installed dir as foreign).
-            let map = converge_placements(ctx, &sp, skill_id, &lock, &sync, &map, &managed, &work)?;
+            let converged =
+                converge_placements(ctx, &sp, skill_id, &lock, &sync, &map, &managed, &work)?;
+            let map = converged.map;
             // The SETTLED-DRAFT fan-out: a draft whose content is unchanged since the previous
             // run's observation is copied onto the bundle's other placements in this scope (their
             // baselines advance with it); an unsettled draft only updates the observation — a
@@ -290,6 +292,13 @@ pub(crate) fn sync_one_planned(
                         u32::try_from(synced.len()).unwrap_or(u32::MAX),
                     );
                     row.destinations = synced;
+                    // A folder the converge CREATED in the SAME run (a hand-deleted dir healed
+                    // from the local store) stood absent when the fan-out chose its targets, so
+                    // the fan-out skipped it and the `synced` column cannot name it. The row
+                    // states it as its second fact — nothing this run wrote goes unnamed.
+                    if !converged.created.is_empty() {
+                        row.note = Some(also_line("installed", &converged.created));
+                    }
                     return Ok(row);
                 }
             } else if sync.draft_observed.is_some() {
@@ -300,6 +309,27 @@ pub(crate) fn sync_one_planned(
                     ..sync.clone()
                 };
                 doc::write_doc(ctx.fs, &sp.sync, &cleared)?;
+            }
+            // A placement the converge CREATED (a folder materialized where none stood — a
+            // hand-deleted dir healed, a re-added row re-placed) is an INSTALL and the row says
+            // so; a stale copy it REWROTE to the version this machine holds is a REFRESH, which
+            // is not a first materialization and never borrows that word. Both are bytes that
+            // moved: "up to date" may only claim itself when nothing changed on disk.
+            if !converged.created.is_empty() {
+                let mut row = state_row(&name, &sync, PullAction::Installed);
+                row.destinations = converged.created;
+                // A refresh alongside a creation rides the same row: the install leads (a folder
+                // appeared), the refreshed copies are named as the second fact rather than
+                // relabelled `installed` or dropped.
+                if !converged.refreshed.is_empty() {
+                    row.note = Some(also_line("refreshed", &converged.refreshed));
+                }
+                return Ok(row);
+            }
+            if !converged.refreshed.is_empty() {
+                let mut row = state_row(&name, &sync, PullAction::Refreshed);
+                row.destinations = converged.refreshed;
+                return Ok(row);
             }
             return Ok(state_row(&name, &sync, PullAction::UpToDate));
         }
@@ -891,7 +921,7 @@ fn apply_forward(
 /// Returns the COMMITTED map — the caller must thread it into any later committing step this run
 /// (the settled-draft fan-out): handing a later materialize the pre-converge map would commit it
 /// wholesale and erase the baselines just recorded here, leaving an installed dir that the next
-/// scan classifies as foreign.
+/// scan classifies as foreign — plus the placements this converge CREATED (see [`LocalConverge`]).
 #[allow(clippy::too_many_arguments)]
 fn converge_placements(
     ctx: &Ctx<'_>,
@@ -902,32 +932,43 @@ fn converge_placements(
     map: &PlacementMap,
     managed: &[usize],
     work: &WorkTree,
-) -> Result<PlacementMap, ClientError> {
+) -> Result<LocalConverge, ClientError> {
     if is_zero_commit(&lock.base_commit) {
-        return Ok(map.clone()); // never received — nothing local to place yet
+        // Never received — nothing local to place yet.
+        return Ok(LocalConverge::unchanged(map));
     }
-    let missing: Vec<usize> = managed
-        .iter()
-        .copied()
-        .filter(|&i| {
-            work.scans.get(i).is_some_and(|s| match &s.status {
-                ScanStatus::Absent => true,
-                // A clean REPLICA at a different version than the lock's base is stale — refreshed
-                // ONLY when the work tree itself is at base (never toward or over a live draft:
-                // a recorded draft-on-current keeps every copy untouched until it resolves).
-                ScanStatus::Clean { digest } => {
-                    matches!(work.state, WorkState::CleanAtBase)
-                        && to_hex(digest) != lock.bundle_digest
-                }
-                // Edited, foreign, or unreadable dirs are never converge targets.
-                ScanStatus::Modified { .. } | ScanStatus::Foreign | ScanStatus::Unscannable => {
-                    false
-                }
-            })
-        })
-        .collect();
+    // The converge's two target classes, told apart because the receipt speaks differently about
+    // them: an ABSENT dir filled is a placement CREATED (a folder materialized where none was);
+    // a STALE clean replica rewritten is a REFRESH (a copy caught up to the applied version).
+    let mut absent: Vec<usize> = Vec::new();
+    let mut stale: Vec<usize> = Vec::new();
+    let mut missing: Vec<usize> = Vec::new();
+    for &i in managed {
+        let Some(s) = work.scans.get(i) else { continue };
+        match &s.status {
+            ScanStatus::Absent => {
+                absent.push(i);
+                missing.push(i);
+            }
+            // A clean REPLICA at a different version than the lock's base is stale — refreshed
+            // ONLY when the work tree itself is at base (never toward or over a live draft:
+            // a recorded draft-on-current keeps every copy untouched until it resolves).
+            ScanStatus::Clean { digest }
+                if matches!(work.state, WorkState::CleanAtBase)
+                    && to_hex(digest) != lock.bundle_digest =>
+            {
+                stale.push(i);
+                missing.push(i);
+            }
+            // Edited, foreign, or unreadable dirs are never converge targets.
+            ScanStatus::Clean { .. }
+            | ScanStatus::Modified { .. }
+            | ScanStatus::Foreign
+            | ScanStatus::Unscannable => {}
+        }
+    }
     if missing.is_empty() {
-        return Ok(map.clone());
+        return Ok(LocalConverge::unchanged(map));
     }
     let base = super::parse_hex32(&lock.base_commit)?;
     let base_digest = super::parse_hex32(&lock.bundle_digest)?;
@@ -956,7 +997,63 @@ fn converge_placements(
     log_apply(ctx, skill_id, "converge", base, &report);
     // The materializer committed the map (per-target skips included) — re-read it so the caller
     // holds exactly what is on disk, never the pre-converge picture.
-    read_map_required(ctx, sp)
+    let after = read_map_required(ctx, sp)?;
+    // What this run CREATED: an Absent target whose dir now stands. Existence, not intent, is
+    // the receipt's fact — a target the materializer skipped stays absent and claims nothing.
+    let created = absent
+        .iter()
+        .filter_map(|&i| after.placements.get(i))
+        .filter(|p| ctx.fs.exists(Path::new(p)))
+        .map(|p| super::inventory::pretty(ctx, Path::new(p)))
+        .collect();
+    // What this run REFRESHED: a stale target whose recorded baseline NOW names the applied
+    // version — the same existence-over-intent rule (a target the materializer re-stat-skipped
+    // keeps its old baseline and claims nothing).
+    let refreshed = stale
+        .iter()
+        .filter(|&&i| {
+            after
+                .placement_state
+                .get(i)
+                .is_some_and(|st| st.materialized_sha.as_deref() == Some(&lock.bundle_digest))
+        })
+        .filter_map(|&i| after.placements.get(i))
+        .map(|p| super::inventory::pretty(ctx, Path::new(p)))
+        .collect();
+    Ok(LocalConverge {
+        map: after,
+        created,
+        refreshed,
+    })
+}
+
+/// A local placement converge's outcome: the COMMITTED map, plus the two disk facts a receipt
+/// speaks differently about (display paths, receipt-ready) — the placements it CREATED (dirs
+/// materialized where nothing stood) and the stale copies it REFRESHED (dirs that existed but
+/// held bytes behind the applied version). Creations flip the row to `installed`, refreshes to
+/// `refreshed`: "up to date" may only claim itself when nothing changed on disk.
+struct LocalConverge {
+    map: PlacementMap,
+    created: Vec<String>,
+    refreshed: Vec<String>,
+}
+
+impl LocalConverge {
+    /// The no-op outcome: the map as it stands, nothing written.
+    fn unchanged(map: &PlacementMap) -> Self {
+        Self {
+            map: map.clone(),
+            created: Vec::new(),
+            refreshed: Vec::new(),
+        }
+    }
+}
+
+/// The SECOND fact a receipt row carries when this run wrote folders its action does not name —
+/// `also installed <path>` / `also refreshed <path>` (several join with ", "). It rides the row's
+/// `note`, which the renderer prints as an indented line under the row.
+pub(crate) fn also_line(verb: &str, dirs: &[String]) -> String {
+    format!("also {verb} {}", dirs.join(", "))
 }
 
 /// The settled-draft fan-out. Compares the draft's digest against the durable observation

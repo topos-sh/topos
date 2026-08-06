@@ -153,13 +153,11 @@ fn add_feed(
         );
         return Ok(AddRefOutcome::Applied(Box::new(data)));
     }
+    // NO note here: the receipt's own closing sentence for a feed row already says this machine
+    // now takes whatever the workspace gives it (`render::add_tty`, off the reference SHAPE). A
+    // note repeating it printed the same fact twice, one line apart. The no-op arm above keeps
+    // its note — "already adopting …" is a fact that sentence does not carry.
     medit::write_row(ctx, &mut data, &target, &reference, &EntryValue::Star)?;
-    medit::push_note(
-        &mut data,
-        format!(
-            "this machine now takes whatever {workspace} gives you; `topos update` delivers it"
-        ),
-    );
     Ok(AddRefOutcome::Applied(Box::new(data)))
 }
 
@@ -424,14 +422,16 @@ fn finish_workspace(
                     None => true,
                 }
         };
-        // Bytes provably PRESENT: installed / current / fast-forwarded — and the draft outcomes
-        // (merged; a settled draft synced across folders), where the person's bytes stand placed.
+        // Bytes provably PRESENT: installed / current / fast-forwarded / refreshed — and the draft
+        // outcomes (merged; a settled draft synced across folders), where the person's bytes stand
+        // placed.
         let bytes_present = |a: PullAction| {
             matches!(
                 a,
                 PullAction::Installed
                     | PullAction::UpToDate
                     | PullAction::FastForwarded
+                    | PullAction::Refreshed
                     | PullAction::Merged
                     | PullAction::DraftSynced
             )

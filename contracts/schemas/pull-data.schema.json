@@ -274,6 +274,11 @@
           "const": "installed"
         },
         {
+          "description": "A managed copy that stood BEHIND the version this machine already holds was rewritten to it\n— no version moved (`observed`/`applied` are unchanged), only bytes on disk caught up (a\ncrash-window residue, a copy left at an older version). `destinations` names the folders. A\nrefresh is not a first materialization, so it never reads `installed`. **Additive.**",
+          "type": "string",
+          "const": "refreshed"
+        },
+        {
           "description": "This machine's OWN recipe choice ended delivery here (a dropped feed line, an `\"off\"`\nswitch, a dropped row) and the placed copies were uninstalled now — `destinations` names\nwhat left, `kept` any edited copy left in place. Distinct from `withdrawn`, which is\nupstream's act. **Additive.**",
           "type": "string",
           "const": "removed"
@@ -406,7 +411,7 @@
           ]
         },
         "note": {
-          "description": "The one-line fact a `released` row states — why the record resolved and where its files\nstand now. Absent on every other action. **INFERRED** (additive).",
+          "description": "The one-line fact a row states BESIDE its action: the whole line a `released` row prints\n(why the record resolved and where its files stand now), or — on any other action — the\nfolders this run also wrote that the action's own column does not name (a healed folder\nthat rode along with a settled-draft fan-out, a stale copy refreshed beside a fresh\ninstall). Absent when the action says everything. **INFERRED** (additive).",
           "type": [
             "string",
             "null"

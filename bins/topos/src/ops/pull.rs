@@ -85,6 +85,11 @@ pub(crate) struct PullOutcome {
     /// Isolated per-skill FAILURES — what the receipt counts and calls failed. Only
     /// [`note_skill_failure`] and its reconcile twin write here.
     pub warnings: Vec<String>,
+    /// ADVISORIES — `warning:` lines about a row that still DELIVERED (an unknown MCP dest entry
+    /// dropped from a bundle's narrowing). They join `warnings` in the `--json` envelope's one
+    /// stable array and print beside them, but the summary never counts them: the bundle they
+    /// annotate has its own row, and counting the line too would invent a second, failed bundle.
+    pub advisories: Vec<String>,
     /// Facts about what WORKED that are still worth stating (the settled-draft fan-out, a
     /// cross-scope version split). They join `warnings` in the `--json` envelope's one stable
     /// array, but a successful run must never report itself as having failed anything.
@@ -209,6 +214,7 @@ impl PullOutcome {
         Self {
             data,
             warnings,
+            advisories: Vec::new(),
             disclosures: Vec::new(),
             access_gone: Vec::new(),
             unreachable: Vec::new(),

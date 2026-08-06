@@ -2709,6 +2709,27 @@ fn add_replica(rig: &Rig, id: &str, dir: &Path, files: &[(&str, FileMode, &[u8])
     doc::write_map(&rig.fs, &sp.map, &map).unwrap();
 }
 
+/// Append a STALE-CLEAN replica: the dir holds `files` and its recorded baseline names EXACTLY
+/// those bytes, so it scans CLEAN (no local edit to protect) — but at an older version than the
+/// lock's base. That is the crash-window residue a local converge REFRESHES.
+fn add_stale_replica(rig: &Rig, id: &str, dir: &Path, files: &[(&str, FileMode, &[u8])]) {
+    use topos_types::persisted::{PlacementKind, PlacementState, SwapCapability};
+    write_tree(dir, files);
+    let own = to_hex(&crate::scan::scan(dir).unwrap().bundle_digest);
+    let sp = rig.layout().published(&sid(id));
+    let mut map = doc::read_map(&rig.fs, &sp.map).unwrap().unwrap();
+    map.placements.push(dir.display().to_string());
+    map.placement_state.push(PlacementState {
+        kind: PlacementKind::Native,
+        agent: None,
+        materialized_sha: Some(own),
+        pre_existing_sha: None,
+        swap_capability: SwapCapability::Unsupported,
+        adopted_source: false,
+    });
+    doc::write_map(&rig.fs, &sp.map, &map).unwrap();
+}
+
 /// The standard fan-out rig: a followed skill fast-forwarded to v1 with a byte-identical replica
 /// folder beside the primary placement.
 fn fanout_rig(tag: &str) -> (Rig, String, FixturePlane, FixtureFollow, PathBuf) {
@@ -2892,6 +2913,128 @@ fn a_converge_landing_survives_the_same_runs_settled_fanout() {
         "{:?}",
         out.warnings
     );
+}
+
+#[test]
+fn a_refreshed_stale_replica_never_reads_all_up_to_date() {
+    // The crash-window residue: a managed copy whose bytes AND recorded baseline sit at an OLDER
+    // version than the one this machine holds. The converge rewrites it — bytes moved on disk, so
+    // the run may not claim "all up to date". A refresh is not a first install, so the row says
+    // `refreshed` and names the folder, and the quiet hook's changed-bytes signal fires.
+    let (rig, id, plane, foll, _replica) = fanout_rig("stale-refresh");
+    let stale = rig.work.0.join("stale");
+    add_stale_replica(&rig, &id, &stale, BASE);
+    let ctx = rig.ctx(&plane, &foll);
+
+    let out = ops::pull(&ctx, ops::PullScope::AllFollowed).unwrap();
+    let row = only(&out.data);
+    assert_eq!(
+        row.action,
+        PullAction::Refreshed,
+        "a rewritten stale copy is a refresh, never up-to-date: {row:?}"
+    );
+    assert_eq!(
+        row.destinations,
+        vec![stale.display().to_string()],
+        "the refreshed folder is named — the destination convention"
+    );
+    assert_eq!(row.note, None, "nothing else was written this run");
+    assert_eq!(
+        snapshot(&stale),
+        Some(expect(V1)),
+        "the stale copy now holds the version this machine applied"
+    );
+    // No version moved: the refresh is purely a local catch-up.
+    assert_eq!(row.observed, row.applied);
+    assert!(
+        ops::sweep_changed_bytes(&out.data),
+        "the quiet hook must hear about bytes that moved"
+    );
+    let tty = crate::render::pull_tty(&out.data, &out.warnings, &out.advisories, &out.disclosures);
+    assert!(
+        tty.contains(&format!("refreshed ({})", stale.display())),
+        "{tty}"
+    );
+    assert!(
+        !tty.contains("all up to date"),
+        "a run that rewrote a folder may not claim it: {tty}"
+    );
+    assert!(
+        !tty.contains("installed"),
+        "a refresh is not an install: {tty}"
+    );
+
+    // Refreshed and untouched again → the honest all-up-to-date summary is back.
+    let again = ops::pull(&ctx, ops::PullScope::AllFollowed).unwrap();
+    assert_eq!(only(&again.data).action, PullAction::UpToDate);
+    assert!(!ops::sweep_changed_bytes(&again.data));
+    assert!(
+        crate::render::pull_tty(
+            &again.data,
+            &again.warnings,
+            &again.advisories,
+            &again.disclosures
+        )
+        .contains("all up to date")
+    );
+}
+
+#[test]
+fn a_heal_riding_along_with_a_settled_fanout_is_named_on_the_row() {
+    // ONE run both HEALS an absent placement (the converge first-installs it from the local
+    // store) and spreads a settled draft onto a sibling. The fan-out chose its targets from the
+    // pre-converge scan, so it SKIPS the just-healed dir — and the `synced` column cannot name it.
+    // The row states it as its second fact: nothing this run wrote goes unnamed until the next
+    // sweep.
+    use topos_types::persisted::{PlacementKind, PlacementState, SwapCapability};
+    let (rig, id, plane, foll, replica) = fanout_rig("heal-fanout");
+    let ctx = rig.ctx(&plane, &foll);
+
+    // THE draft, observed once (sweep 1) — the next sweep's fan-out sees it settled.
+    std::fs::write(rig.placement().join("SKILL.md"), b"# my draft\n").unwrap();
+    pull_data(&ctx, ops::PullScope::AllFollowed).unwrap();
+
+    // A recorded placement whose dir is absent (a hand-deleted folder, a fresh target).
+    let extra = rig.work.0.join("extra");
+    let sp = rig.layout().published(&sid(&id));
+    let mut map = doc::read_map(&rig.fs, &sp.map).unwrap().unwrap();
+    map.placements.push(extra.display().to_string());
+    map.placement_state.push(PlacementState {
+        kind: PlacementKind::Native,
+        agent: Some("extra".to_owned()),
+        materialized_sha: None,
+        pre_existing_sha: None,
+        swap_capability: SwapCapability::Unsupported,
+        adopted_source: false,
+    });
+    doc::write_map(&rig.fs, &sp.map, &map).unwrap();
+
+    let out = ops::pull(&ctx, ops::PullScope::AllFollowed).unwrap();
+    let row = only(&out.data);
+    assert_eq!(row.action, PullAction::DraftSynced, "{:?}", out.warnings);
+    assert_eq!(
+        row.destinations,
+        vec![replica.display().to_string()],
+        "the fan-out's own column names only what took the draft"
+    );
+    assert_eq!(
+        row.note.as_deref(),
+        Some(format!("also installed {}", extra.display()).as_str()),
+        "the healed folder is named on the row: {row:?}"
+    );
+    assert_eq!(
+        snapshot(&extra),
+        Some(expect(V1)),
+        "the heal landed the pristine version from the local store"
+    );
+    let tty = crate::render::pull_tty(&out.data, &out.warnings, &out.advisories, &out.disclosures);
+    assert!(tty.contains("synced your edits to"), "{tty}");
+    assert!(
+        tty.contains(&format!("also installed {}", extra.display())),
+        "{tty}"
+    );
+    assert!(!tty.contains("all up to date"), "{tty}");
+    assert!(ops::sweep_changed_bytes(&out.data));
 }
 
 #[test]

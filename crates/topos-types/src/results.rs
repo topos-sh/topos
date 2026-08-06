@@ -111,8 +111,11 @@ pub struct PullSkill {
     /// sources, which read by their plain `skill` name. **INFERRED** (additive).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display: Option<String>,
-    /// The one-line fact a `released` row states — why the record resolved and where its files
-    /// stand now. Absent on every other action. **INFERRED** (additive).
+    /// The one-line fact a row states BESIDE its action: the whole line a `released` row prints
+    /// (why the record resolved and where its files stand now), or — on any other action — the
+    /// folders this run also wrote that the action's own column does not name (a healed folder
+    /// that rode along with a settled-draft fan-out, a stale copy refreshed beside a fresh
+    /// install). Absent when the action says everything. **INFERRED** (additive).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
     /// Per-agent applied states for a config-placed (`mcp`) bundle: which detected agents hold
@@ -188,6 +191,11 @@ pub enum PullAction {
     /// first bytes and they landed (skill folders, or — for a config-placed bundle — config
     /// entries). `destinations` names where. **Additive.**
     Installed,
+    /// A managed copy that stood BEHIND the version this machine already holds was rewritten to it
+    /// — no version moved (`observed`/`applied` are unchanged), only bytes on disk caught up (a
+    /// crash-window residue, a copy left at an older version). `destinations` names the folders. A
+    /// refresh is not a first materialization, so it never reads `installed`. **Additive.**
+    Refreshed,
     /// This machine's OWN recipe choice ended delivery here (a dropped feed line, an `"off"`
     /// switch, a dropped row) and the placed copies were uninstalled now — `destinations` names
     /// what left, `kept` any edited copy left in place. Distinct from `withdrawn`, which is

@@ -2153,8 +2153,15 @@ fn a_rows_dest_files_narrow_the_placement_and_unknown_files_warn_once() {
         !rig.home.0.join(".openclaw/openclaw.json").exists(),
         "a dest row is frozen to the files it names — detection adds nothing"
     );
+    // The line is an ADVISORY — the bundle itself delivered, so it must never join the counted
+    // failure channel.
+    assert!(
+        !out.warnings.iter().any(|w| w.contains("MCP_DEST_UNKNOWN")),
+        "an advisory about a delivered bundle is not a counted failure: {:?}",
+        out.warnings
+    );
     let unknown: Vec<&String> = out
-        .warnings
+        .advisories
         .iter()
         .filter(|w| w.contains("MCP_DEST_UNKNOWN"))
         .collect();
@@ -2170,6 +2177,88 @@ fn a_rows_dest_files_narrow_the_placement_and_unknown_files_warn_once() {
     assert!(
         unknown[0].contains("~/.codex/config.toml"),
         "the refusal lists the known files: {unknown:?}"
+    );
+    // The warning's subject is the BUNDLE the row delivers — never the bare scope label standing
+    // where the name belongs.
+    assert!(
+        unknown[0].contains("\"alpha\""),
+        "the warning names the bundle: {unknown:?}"
+    );
+    // And the counts reconcile: ONE bundle was checked. A delivered bundle with a config nit is
+    // not a second, failed bundle — the warning still prints, uncounted.
+    let clean = sweep(&ctx, &plane, &dir);
+    let receipt = crate::render::pull_tty(
+        &clean.data,
+        &clean.warnings,
+        &clean.advisories,
+        &clean.disclosures,
+    );
+    assert!(
+        receipt.contains("MCP_DEST_UNKNOWN"),
+        "still warned: {receipt}"
+    );
+    assert!(receipt.contains("Checked 1 managed bundle(s)"), "{receipt}");
+    assert!(
+        !receipt.contains("failed"),
+        "a delivered bundle is not a failure: {receipt}"
+    );
+}
+
+/// A workspace SKILL row whose `dest` names a skills FOLDER — exactly what
+/// `add -g @ws/skill -a codex` writes (`dest = ["~/.codex/skills"]`) — is not an MCP demand:
+/// no MCP_DEST_UNKNOWN warning, no failure count, and the untouched update reads exactly clean.
+#[test]
+fn a_skill_rows_folder_dest_never_warns_mcp_dest_unknown() {
+    let rig = Rig::new("skilldest");
+    rig.seed_session();
+    seed_harness_dirs(&rig.home.0);
+    let v = mk_version(&[("SKILL.md", b"# deploy\n")]);
+    let plane = FakePlane::new().with_version("s_dep", &v);
+    let mut entry = mcp_catalog_entry("s_dep", "deploy", &v);
+    entry.kind = "skill".into();
+    let dir = FakeDirectory {
+        skills: vec![entry],
+        channels: Vec::new(),
+    };
+    rig.write_global(&format!(
+        "[bundles]\n\"{HOST}/{WS_NAME}/deploy\" = {{ version = \"*\", dest = [\"~/.codex/skills\"] }}\n"
+    ));
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    let first = sweep(&ctx, &plane, &dir);
+    assert!(
+        !first
+            .warnings
+            .iter()
+            .chain(&first.advisories)
+            .any(|w| w.contains("MCP_DEST_UNKNOWN")),
+        "a skill row's folder dest is not an MCP config file: {:?} / {:?}",
+        first.warnings,
+        first.advisories
+    );
+    assert!(
+        rig.home.0.join(".codex/skills/deploy/SKILL.md").exists(),
+        "delivery itself lands"
+    );
+    // The second sweep is untouched — and wholly clean: one skill, up to date, nothing failed.
+    let clean = sweep(&ctx, &plane, &dir);
+    assert!(
+        !clean
+            .warnings
+            .iter()
+            .chain(&clean.advisories)
+            .any(|w| w.contains("MCP_DEST_UNKNOWN")),
+        "{:?} / {:?}",
+        clean.warnings,
+        clean.advisories
+    );
+    assert_eq!(
+        crate::render::pull_tty(
+            &clean.data,
+            &clean.warnings,
+            &clean.advisories,
+            &clean.disclosures
+        ),
+        "updated machine-wide\nChecked 1 managed skill(s) — all up to date."
     );
 }
 

@@ -1015,6 +1015,17 @@ fn counted(n: u64, noun: &str) -> String {
     }
 }
 
+/// An AUDIENCE count with its irregular noun (`1 person`, `4 people`) — the `s`-suffix rule
+/// [`counted`] applies never reaches this pair, and "reaches 1 people" is the line a person sees
+/// on the very first publish of a one-person workspace.
+fn persons(n: u64) -> String {
+    if n == 1 {
+        "1 person".to_owned()
+    } else {
+        format!("{n} people")
+    }
+}
+
 /// The scope section header — it leads with the governing FILE, so "why is this here" starts at
 /// the line that asked for it. The machine scope with no file says so honestly: no file, nothing
 /// demanded machine-wide.
@@ -2205,12 +2216,12 @@ pub(crate) fn protect_describe_tty(
         data.kind, data.target, data.level
     );
     if let Some(n) = data.audience {
-        let noun = if data.kind == "channel" {
-            "members"
+        let audience = if data.kind == "channel" {
+            counted(n, "member")
         } else {
-            "people"
+            persons(n)
         };
-        s.push_str(&format!(" — reaches {n} {noun}"));
+        s.push_str(&format!(" — reaches {audience}"));
     }
     if data.loosening {
         s.push_str(" (an owner act)");
@@ -2336,7 +2347,7 @@ pub(crate) fn publish_describe_tty(
         }
     }
     if let Some(reach) = data.reach {
-        s.push_str(&format!("\n  reaches {reach} people"));
+        s.push_str(&format!("\n  reaches {}", persons(reach)));
     }
     // The behind-copy conflict prediction: this publish would be refused (rebase first), and the
     // in-memory dry run says how that rebase's merge would go.
@@ -2666,13 +2677,25 @@ impl PullReceiptScope {
 /// rendered visibly, and the awaiting-review trailer. The `--quiet` hook path never reaches this
 /// renderer (it stays byte-silent).
 ///
-/// `disclosures` are the OTHER half of that stable line channel: facts about what WORKED (a
-/// settled-draft fan-out, a cross-scope version split). They print as `note:` — the same word
+/// `advisories` print as `warning:` beside the failures but are counted by NEITHER half of the
+/// summary: each annotates a bundle that DELIVERED and has its own row (an unknown MCP dest
+/// entry dropped from its narrowing), so counting the line too would invent a second, failed
+/// bundle. `disclosures` are the OTHER half of that stable line channel: facts about what WORKED
+/// (a settled-draft fan-out, a cross-scope version split). They print as `note:` — the same word
 /// every other receipt in this CLI uses for a disclosure — and they are counted separately,
 /// because the summary below says "failed" and a successful run must never claim one.
-pub(crate) fn pull_tty(data: &PullData, warnings: &[String], disclosures: &[String]) -> String {
+pub(crate) fn pull_tty(
+    data: &PullData,
+    warnings: &[String],
+    advisories: &[String],
+    disclosures: &[String],
+) -> String {
     let scope = PullReceiptScope::read(data.scope.as_deref());
-    if data.skills.is_empty() && warnings.is_empty() && disclosures.is_empty() {
+    if data.skills.is_empty()
+        && warnings.is_empty()
+        && advisories.is_empty()
+        && disclosures.is_empty()
+    {
         // The line most easily MISREAD: someone standing in a project must not take an untouched
         // machine-wide set for an emptied one, so the empty receipt names the scope it emptied.
         let line = match &scope {
@@ -2742,7 +2765,7 @@ pub(crate) fn pull_tty(data: &PullData, warnings: &[String], disclosures: &[Stri
     for k in &kept_lines {
         out.push_str(&format!("{k}\n"));
     }
-    for w in warnings {
+    for w in warnings.iter().chain(advisories) {
         out.push_str(&format!("warning: {w}\n"));
     }
     for d in disclosures {
@@ -2850,8 +2873,22 @@ pub(crate) fn mcp_agent_line(h: &topos_types::results::McpAgentState) -> String 
     }
 }
 
-/// One non-up-to-date skill's line (after the padded name) + any indented detail lines.
+/// One non-up-to-date skill's line (after the padded name) + any indented detail lines — the
+/// action's own line, plus the row's SECOND fact when it carries one (`also installed …` for a
+/// folder healed beside a draft fan-out, `also refreshed …` for a stale copy caught up beside a
+/// fresh install). A `released` row states its whole line in `note` and never doubles it.
 fn pull_row(s: &PullSkill) -> (String, Vec<String>) {
+    let (line, mut extra) = pull_action_row(s);
+    if s.action != topos_types::results::PullAction::Released
+        && let Some(note) = &s.note
+    {
+        extra.push(note.clone());
+    }
+    (line, extra)
+}
+
+/// The action's own line + its detail lines (see [`pull_row`], which adds the row's second fact).
+fn pull_action_row(s: &PullSkill) -> (String, Vec<String>) {
     use topos_types::results::PullAction;
     let name = &s.skill;
     match s.action {
@@ -2862,6 +2899,9 @@ fn pull_row(s: &PullSkill) -> (String, Vec<String>) {
         // count in the bundle's own noun (folders for a skill, config files for an MCP server).
         // Never an agent name, never an agent count.
         PullAction::Installed => (destination_column("installed", s), Vec::new()),
+        // A copy that stood behind the version this machine holds was rewritten to it — the
+        // folder was already there, so the word is never `installed`.
+        PullAction::Refreshed => (destination_column("refreshed", s), Vec::new()),
         PullAction::Removed => (destination_column("removed", s), Vec::new()),
         PullAction::Offered => {
             let v = s
@@ -3617,7 +3657,7 @@ mod tests {
             sync: Vec::new(),
             scope: None,
         };
-        let out = pull_tty(&data, &[], &[]);
+        let out = pull_tty(&data, &[], &[], &[]);
 
         // Offered: the short hash + the accept command.
         assert!(out.contains("docs"), "{out}");
@@ -3691,7 +3731,7 @@ mod tests {
             sync: Vec::new(),
             scope: None,
         };
-        let out = pull_tty(&data, &[], &[]);
+        let out = pull_tty(&data, &[], &[], &[]);
         assert!(
             out.contains("+ @acme/deploy-checklist   installed (2 folders)\n"),
             "{out}"
@@ -3749,7 +3789,7 @@ mod tests {
             sync: Vec::new(),
             scope: None,
         };
-        let out = pull_tty(&data, &[], &[]);
+        let out = pull_tty(&data, &[], &[], &[]);
         assert!(
             out.contains("- @acme/deploy-checklist   removed (2 folders)\n"),
             "{out}"
@@ -3851,7 +3891,7 @@ mod tests {
             scope: None,
         };
         assert_eq!(
-            pull_tty(&only_a_server, &[], &[]),
+            pull_tty(&only_a_server, &[], &[], &[]),
             "Checked 1 managed bundle(s) — all up to date."
         );
 
@@ -3864,7 +3904,7 @@ mod tests {
             scope: None,
         };
         assert_eq!(
-            pull_tty(&mixed, &[], &[]),
+            pull_tty(&mixed, &[], &[], &[]),
             "Checked 2 managed bundle(s) — all up to date."
         );
 
@@ -3883,7 +3923,7 @@ mod tests {
             sync: Vec::new(),
             scope: None,
         };
-        let out = pull_tty(&surfaced, &[], &[]);
+        let out = pull_tty(&surfaced, &[], &[], &[]);
         assert!(out.contains("Checked 1 managed bundle(s)."), "{out}");
         // …and the per-agent line reads in the shared vocabulary, never the raw engine token.
         assert!(
@@ -3907,7 +3947,7 @@ mod tests {
             scope: None,
         };
         assert_eq!(
-            pull_tty(&clean, &[], &[]),
+            pull_tty(&clean, &[], &[], &[]),
             "Checked 2 managed skill(s) — all up to date."
         );
         // Nothing followed at all.
@@ -3919,12 +3959,12 @@ mod tests {
             scope: None,
         };
         assert_eq!(
-            pull_tty(&empty, &[], &[]),
+            pull_tty(&empty, &[], &[], &[]),
             "Nothing to update here — no manifest or profile demands anything in this directory."
         );
         // A failed skill renders visibly and is counted (even when every synced row was current).
         let warnings = vec!["IO_ERROR s_docs: a filesystem operation failed".to_owned()];
-        let out = pull_tty(&clean, &warnings, &[]);
+        let out = pull_tty(&clean, &warnings, &[], &[]);
         assert!(
             out.contains("warning: IO_ERROR s_docs: a filesystem operation failed"),
             "{out}"
@@ -3938,7 +3978,7 @@ mod tests {
         let disclosures = vec![
             "NOTHING_ASSIGNED topos.sh/acme: exchanged — nothing assigned to you yet".to_owned(),
         ];
-        let out = pull_tty(&empty, &[], &disclosures);
+        let out = pull_tty(&empty, &[], &[], &disclosures);
         assert!(
             out.contains(
                 "note: NOTHING_ASSIGNED topos.sh/acme: exchanged — nothing assigned to you yet"
@@ -3947,6 +3987,21 @@ mod tests {
         );
         assert!(!out.contains("failed"), "{out}");
         assert!(!out.contains("warning:"), "{out}");
+        // An ADVISORY prints as a warning but is counted by NEITHER half of the summary: the
+        // bundle it annotates DELIVERED and has its own row — counting the line too would
+        // invent a second, failed bundle.
+        let advisories = vec![
+            "MCP_DEST_UNKNOWN person: \"linear\" — dest entry `~/.x` is not a known MCP config \
+             file"
+                .to_owned(),
+        ];
+        let out = pull_tty(&clean, &[], &advisories, &[]);
+        assert!(out.contains("warning: MCP_DEST_UNKNOWN"), "{out}");
+        assert!(
+            out.contains("Checked 2 managed skill(s) — all up to date."),
+            "{out}"
+        );
+        assert!(!out.contains("failed"), "{out}");
     }
 
     #[test]
@@ -3977,7 +4032,7 @@ mod tests {
             sync: Vec::new(),
             scope: None,
         };
-        let out = pull_tty(&data, &[], &[]);
+        let out = pull_tty(&data, &[], &[], &[]);
         // The verdict shows its outcome + reason, and sorts before the closure.
         let v = out.find("was rejected").expect("the verdict is shown");
         assert!(
@@ -4356,7 +4411,7 @@ mod tests {
             sync: Vec::new(),
             scope: Some("machine".to_owned()),
         };
-        let out = pull_tty(&data, &[], &[]);
+        let out = pull_tty(&data, &[], &[], &[]);
         assert!(
             out.contains(
                 "- @acme/frontend-design   acme no longer delivers this; files in 6 folders are \

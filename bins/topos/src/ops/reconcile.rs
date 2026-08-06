@@ -407,6 +407,11 @@ struct Sweep {
     /// They ride the same `--json` `warnings` array (one stable machine channel) but are never
     /// counted as failures.
     disclosures: Vec<String>,
+    /// ADVISORIES — real `warning:` lines about a row that still DELIVERED (an unknown MCP dest
+    /// entry dropped from a bundle's narrowing). They ride the same `--json` `warnings` array and
+    /// print with the warnings, but the summary never counts them: the bundle they annotate has
+    /// its own row, and counting the line too would invent a second, failed bundle.
+    advisories: Vec<String>,
     /// `(scope label, bundle identity)` already reconciled — the ONE dedupe key. Scopes are
     /// unblended, so the same identity may appear once per scope.
     synced: HashSet<(String, String)>,
@@ -1661,6 +1666,7 @@ pub(crate) fn manifest_update(
             scope: Some(scope_label),
         },
         warnings: sweep.warnings,
+        advisories: sweep.advisories,
         disclosures: sweep.disclosures,
         access_gone,
         unreachable,
@@ -1833,12 +1839,16 @@ fn reconcile_thing<'a>(
                 },
             ));
             let st = SyncTarget {
+                // `warn_unknown` rides the row's KIND: a SKILL row's dest entries are placement
+                // FOLDERS (`~/.codex/skills`), not MCP config files — only an mcp row's dest can
+                // mean config files, so only it may warn about an unknown one.
                 mcp_dest_filter: mcp_filter(
                     sc,
                     Some(row),
-                    true,
+                    &display,
+                    mcp,
                     &mut sweep.mcp_warned_dests,
-                    &mut sweep.warnings,
+                    &mut sweep.advisories,
                 ),
                 target,
                 pin: row.pin(),
@@ -1913,23 +1923,26 @@ fn reconcile_thing<'a>(
 /// The MCP config-file narrowing one demand carries: the row's `dest` entries mapped back to
 /// the harnesses whose config files they name. `None` = the row has no `dest` (every
 /// MCP-capable agent, now and later); `Some` = exactly the named files' agents — possibly
-/// empty, because a dest row is FROZEN to what it names. `warn_unknown` is true for rows whose
-/// dest can only mean config files (an explicit bundle row, a local mcp row); a CHANNEL's dest
-/// may name skill folders for its skill members, so its unmapped entries stay silent.
+/// empty, because a dest row is FROZEN to what it names. `warn_unknown` is true only for rows
+/// whose dest can ONLY mean config files (an mcp bundle row, a local mcp row); a SKILL row's
+/// dest names placement folders and a CHANNEL's dest may name folders for its skill members, so
+/// their unmapped entries stay silent. `bundle` is the display name the warning leads with.
 fn mcp_filter(
     sc: &ScopeCtx<'_>,
     row: Option<&PlanRow>,
+    bundle: &str,
     warn_unknown: bool,
     warned: &mut HashSet<String>,
-    warnings: &mut Vec<String>,
+    advisories: &mut Vec<String>,
 ) -> Option<Vec<String>> {
     mcp_dest_narrowing(
         row.and_then(|r| r.fields().dest),
         manifest_scope_of(sc),
         &sc.label,
+        bundle,
         warn_unknown,
         warned,
-        warnings,
+        advisories,
     )
 }
 
@@ -1946,11 +1959,12 @@ fn manifest_scope_of(sc: &ScopeCtx<'_>) -> crate::manifest::document::ManifestSc
 /// the next sweep would keep. Each entry is matched against the descriptor table's config-file
 /// spellings for the scope (default spelling, or the resolved env-override path); an entry no
 /// harness claims is dropped, warned ONCE per run with the same message shape the load refusal
-/// uses (when `warn_unknown`).
+/// uses (when `warn_unknown`), the line naming the BUNDLE the row delivers.
 pub(crate) fn mcp_dest_narrowing(
     row_dest: Option<Vec<String>>,
     scope: crate::manifest::document::ManifestScope,
     label: &str,
+    bundle: &str,
     warn_unknown: bool,
     warned: &mut HashSet<String>,
     warnings: &mut Vec<String>,
@@ -1967,7 +1981,7 @@ pub(crate) fn mcp_dest_narrowing(
             None => {
                 if warn_unknown && warned.insert(entry.clone()) {
                     warnings.push(format!(
-                        "MCP_DEST_UNKNOWN {label}: {}",
+                        "MCP_DEST_UNKNOWN {label}: \"{bundle}\" — {}",
                         crate::manifest::dest::unknown_mcp_file(entry, scope)
                     ));
                 }
@@ -2021,9 +2035,10 @@ fn local_mcp_demand(
             let filter = mcp_filter(
                 sc,
                 Some(row),
+                display,
                 true,
                 &mut sweep.mcp_warned_dests,
-                &mut sweep.warnings,
+                &mut sweep.advisories,
             );
             sweep.note_mcp_row(&sc.label, &bundle_id, row_index);
             sweep.mcp_demands.entry(sc.label.clone()).or_default().push(
@@ -2172,9 +2187,10 @@ fn reconcile_set<'a>(
                     mcp_dest_filter: mcp_filter(
                         sc,
                         Some(row),
+                        &display,
                         false,
                         &mut sweep.mcp_warned_dests,
-                        &mut sweep.warnings,
+                        &mut sweep.advisories,
                     ),
                     target,
                     pin: None,
@@ -2802,7 +2818,9 @@ fn converge_dest_freeze(
         Some(&map),
         None,
     );
-    // GROW: a dir this run first materialized is an install — say so with its destination.
+    // GROW: a dir this run first materialized is an install — say so with its destination. A row
+    // the engine's own converge already flipped (a healed placement) keeps what it named; the
+    // grown destinations JOIN it rather than silently replacing or being withheld.
     let grown: Vec<String> = map
         .placements
         .iter()
@@ -2812,11 +2830,25 @@ fn converge_dest_freeze(
         .collect();
     if !grown.is_empty()
         && let Some(row) = row_index.and_then(|i| sweep.rows.get_mut(i))
-        && row.action == PullAction::UpToDate
+        && matches!(
+            row.action,
+            PullAction::UpToDate | PullAction::Installed | PullAction::Refreshed
+        )
     {
+        // A row the engine flipped to `refreshed` (a stale copy caught up) that ALSO grew leads
+        // with the install — a folder appeared — and moves the refreshed copies to its second
+        // fact, so neither set of folders is renamed or dropped.
+        if row.action == PullAction::Refreshed {
+            row.note = Some(sync_engine::also_line("refreshed", &row.destinations));
+            row.destinations.clear();
+        }
         row.action = PullAction::Installed;
         row.display = Some(env.qualified(&run.session.host, &run.session.workspace_name, display));
-        row.destinations = grown;
+        for g in grown {
+            if !row.destinations.contains(&g) {
+                row.destinations.push(g);
+            }
+        }
     }
     // SHRINK: recorded, topos-materialized copies outside the frozen set retire; the adopted
     // source dir is the person's own and never leaves.

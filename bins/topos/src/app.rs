@@ -1794,14 +1794,17 @@ fn finish_pull(
                 }
                 let value = serde_json::to_value(&out.data).unwrap_or_default();
                 let mut envelope = render::ok_envelope(command, value);
-                // ONE stable machine channel: failures first, then the disclosures. The split is
-                // the receipt's (a disclosure must not be counted as a failure), not the wire's.
+                // ONE stable machine channel: failures first, then the advisories, then the
+                // disclosures. The split is the receipt's (an advisory or disclosure must not be
+                // counted as a failure), not the wire's.
                 envelope.warnings = out.warnings;
+                envelope.warnings.extend(out.advisories.iter().cloned());
                 envelope.warnings.extend(out.disclosures.iter().cloned());
                 envelope.next_actions = next_actions;
                 println!("{}", render::to_json(&envelope));
             } else {
-                let mut text = render::pull_tty(&out.data, &out.warnings, &out.disclosures);
+                let mut text =
+                    render::pull_tty(&out.data, &out.warnings, &out.advisories, &out.disclosures);
                 if !out.access_gone.is_empty() {
                     text.push_str(&format!(
                         "\nnote: the session{} for {} ended — every skill it delivered stays in \

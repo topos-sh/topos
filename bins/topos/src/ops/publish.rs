@@ -209,6 +209,23 @@ pub(crate) fn check_channel_exists(
     Ok(())
 }
 
+/// The `REACH_UNAVAILABLE` warning every audience reader raises — worded ONCE, and never carrying
+/// the internal bundle id. The plane's uniform not-found echoes the opaque `topos_…` handle the
+/// client sent, so a raw error message hands a person an identifier they never typed and cannot
+/// act on; the skill's own NAME replaces it wherever it appears in the reason.
+pub(crate) fn reach_unavailable(name: &str, skill_id: &str, e: &ClientError) -> String {
+    let reason = crate::render::safe_message(e);
+    let reason = if skill_id.is_empty() {
+        reason
+    } else {
+        reason.replace(skill_id, name)
+    };
+    format!(
+        "REACH_UNAVAILABLE {name}: {reason} — how many people this reaches could not be read; the \
+         audience line is omitted"
+    )
+}
+
 /// The seams `publish`'s describe needs, both read only AFTER the local scan: the directory connector
 /// reads the audience (reach) + the workspace address (the share line); the delivery connector reads the
 /// FRESH per-skill protection the gate turns on — the one server fact the sidecar's cached follow-state
@@ -375,6 +392,12 @@ pub(crate) fn publish_describe(
         PublishGate::Lands
     };
 
+    // GENESIS = no published `current` exists — the same signal the NO_CHANGES guard above keys
+    // on (never followed AND never published from here). Read HERE, before the network block: it
+    // decides which questions the plane can even be asked (a bundle it has no row for cannot have
+    // an audience), as well as the default placement below.
+    let genesis = !followed && sync.observed == GENESIS;
+
     // Network reads AFTER the local scan: the audience (reach) + the workspace address (the share line).
     let legacy_dir;
     let directory: &dyn crate::plane::DirectorySource = match &lane {
@@ -392,26 +415,28 @@ pub(crate) fn publish_describe(
     // The audience read is best-effort, but NEVER a silent one: a reach that fails to arrive (or
     // to parse) surfaces as a visible warning — a wordlessly missing line is how a wire mismatch
     // once hid for a week.
+    //
+    // A GENESIS publish is not asked at all. Its bundle has no catalog row yet, so the plane's
+    // only possible answer is the uniform not-found — a question whose answer cannot exist. Asking
+    // it opened every FIRST publish with a warning about a bundle id nobody typed, on the one path
+    // where nothing is wrong; the placement line below already says where these bytes go.
     let mut warnings: Vec<String> = Vec::new();
-    let reach = match directory.reach(&workspace_id, id.as_str()) {
-        Ok(r) => Some(r.persons),
-        Err(e) => {
-            warnings.push(format!(
-                "REACH_UNAVAILABLE {skill_name}: {} — how many people this reaches could not be \
-                 read; the audience line is omitted",
-                crate::render::safe_message(&e)
-            ));
-            None
+    let reach = if genesis {
+        None
+    } else {
+        match directory.reach(&workspace_id, id.as_str()) {
+            Ok(r) => Some(r.persons),
+            Err(e) => {
+                warnings.push(reach_unavailable(&skill_name, id.as_str(), &e));
+                None
+            }
         }
     };
     let me = directory.me(&workspace_id).ok();
 
-    // GENESIS = no published `current` exists — the same signal the NO_CHANGES guard above keys
-    // on (never followed AND never published from here). Only a genesis apply creates the DEFAULT
-    // `everyone` placement server-side; a bare NON-genesis republish (a locally-authored skill's
-    // second publish — also `!followed`) moves `current` and alters no placement, so the describe
-    // must not claim one.
-    let genesis = !followed && sync.observed == GENESIS;
+    // Only a genesis apply creates the DEFAULT `everyone` placement server-side; a bare
+    // NON-genesis republish (a locally-authored skill's second publish — also `!followed`) moves
+    // `current` and alters no placement, so the describe must not claim one.
     // The placement TARGET this apply would touch: an explicit `--to <channel>` places on EVERY
     // publish; without one, only a genesis lands the default `everyone` reference.
     let placement_target = match channel {

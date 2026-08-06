@@ -206,14 +206,9 @@ fn read_audience(
             };
             match directory.reach(workspace_id, id) {
                 Ok(r) => (Some(r.persons), Vec::new()),
-                Err(e) => (
-                    None,
-                    vec![format!(
-                        "REACH_UNAVAILABLE {name}: {} — how many people this reaches could not \
-                         be read; the audience line is omitted",
-                        crate::render::safe_message(&e)
-                    )],
-                ),
+                // Worded by publish's ONE producer — same sentence, same discipline: the reason
+                // names the skill, never the internal bundle id the 404 echoes back.
+                Err(e) => (None, vec![super::publish::reach_unavailable(name, id, &e)]),
             }
         }
         ResourceKind::Channel => (None, Vec::new()),

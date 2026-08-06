@@ -127,15 +127,17 @@ pub(crate) fn stamp_sweep(fs: &dyn FsOps, layout: &Layout, now_ms: i64) {
 }
 
 /// Whether the sweep CHANGED placement bytes in some agent dir — installed new bytes (a first
-/// install, or a fast-forward), landed a merge or a conflict tree, cleaned a withdrawn or
-/// by-choice-removed skill's dirs, or copied a settled draft onto sibling folders. Offers, holds,
-/// freezes, and up-to-date rows change nothing on disk.
+/// install, or a fast-forward), rewrote a copy that stood behind the applied version, landed a
+/// merge or a conflict tree, cleaned a withdrawn or by-choice-removed skill's dirs, or copied a
+/// settled draft onto sibling folders. Offers, holds, freezes, and up-to-date rows change nothing
+/// on disk.
 pub(crate) fn sweep_changed_bytes(data: &PullData) -> bool {
     data.skills.iter().any(|s| {
         matches!(
             s.action,
             PullAction::FastForwarded
                 | PullAction::Installed
+                | PullAction::Refreshed
                 | PullAction::Removed
                 | PullAction::Merged
                 | PullAction::Conflicted
@@ -393,6 +395,8 @@ mod tests {
             (PullAction::UpToDate, false),
             (PullAction::FastForwarded, true),
             (PullAction::Installed, true),
+            // A refresh rewrote a folder that had fallen behind — bytes moved on disk.
+            (PullAction::Refreshed, true),
             (PullAction::Removed, true),
             (PullAction::Offered, false),
             (PullAction::Diverged, false),
