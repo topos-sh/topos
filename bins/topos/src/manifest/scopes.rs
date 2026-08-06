@@ -226,8 +226,9 @@ pub(crate) fn person_plan(
     let path = layout.home().join(MANIFEST_FILE);
     match fs.read_opt(&path)? {
         Some(bytes) => {
-            let text = String::from_utf8(bytes)
-                .map_err(|_| ClientError::Corrupt(format!("{}: not UTF-8", path.display())))?;
+            let text = String::from_utf8(bytes).map_err(|_| {
+                ClientError::ManifestInvalid(format!("{}: not UTF-8", path.display()))
+            })?;
             let doc = parse_manifest(&text, ManifestScope::Global)
                 .map_err(|e| grammar_refusal(&path, &e))?;
             Ok(ScopePlan::from_doc(&doc, Some(path)))
@@ -236,14 +237,15 @@ pub(crate) fn person_plan(
     }
 }
 
-/// The typed refusal a manifest the grammar rejects earns: a RETIRED spelling surfaces as the
-/// migration teaching (whose TTY closes with `nothing changed`); everything else as the ordinary
-/// corrupt-state refusal.
+/// The typed refusal a manifest the grammar rejects earns — always the MANIFEST family, never
+/// corrupt-state (a `topos.toml` is a user-authored file, and its faults are the file's, not
+/// topos's own state): a RETIRED spelling surfaces as the migration teaching, everything else as
+/// the grammar refusal, and BOTH close the TTY with `nothing changed`.
 fn grammar_refusal(path: &Path, e: &crate::manifest::document::ManifestError) -> ClientError {
     if e.migration {
         return ClientError::ManifestMigration(format!("{}: {e}", path.display()));
     }
-    ClientError::Corrupt(format!("{}: {e}", path.display()))
+    ClientError::ManifestInvalid(format!("{}: {e}", path.display()))
 }
 
 /// The NEAREST project manifest covering `cwd` — the file wins WHOLE; the walk stops at the
@@ -265,7 +267,7 @@ pub(crate) fn nearest_project_plan(
         return Ok(None);
     };
     let text = String::from_utf8(bytes)
-        .map_err(|_| ClientError::Corrupt(format!("{}: not UTF-8", path.display())))?;
+        .map_err(|_| ClientError::ManifestInvalid(format!("{}: not UTF-8", path.display())))?;
     let doc =
         parse_manifest(&text, ManifestScope::Project).map_err(|e| grammar_refusal(&path, &e))?;
     Ok(Some((dir, ScopePlan::from_doc(&doc, Some(path)))))

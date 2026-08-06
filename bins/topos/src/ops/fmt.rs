@@ -20,7 +20,8 @@ use crate::manifest::scopes;
 ///
 /// # Errors
 /// [`ClientError::InvalidArgument`] when no manifest covers the directory (naming the verb that
-/// creates one); [`ClientError::Corrupt`] when the file does not parse (refused exactly as the
+/// creates one); the typed manifest refusal ([`ClientError::ManifestInvalid`] /
+/// [`ClientError::ManifestMigration`]) when the file does not parse (refused exactly as the
 /// reader refuses it); an io failure.
 pub(crate) fn fmt_manifest(ctx: &Ctx<'_>, global: bool) -> Result<FmtData, ClientError> {
     let (path, scope) = if global {
@@ -60,9 +61,17 @@ pub(crate) fn fmt_manifest(ctx: &Ctx<'_>, global: bool) -> Result<FmtData, Clien
         }));
     };
     let text = String::from_utf8(bytes)
-        .map_err(|_| ClientError::Corrupt(format!("{}: not UTF-8", path.display())))?;
-    let formatted = fmt_normal(&text, scope)
-        .map_err(|e| ClientError::Corrupt(format!("{}: {e}", path.display())))?;
+        .map_err(|_| ClientError::ManifestInvalid(format!("{}: not UTF-8", path.display())))?;
+    // The same MANIFEST-family classification every reader uses: a retired spelling keeps its
+    // migration teaching, every other grammar fault is the file's own refusal — never
+    // corrupt-state, which blames topos for a hand-edit.
+    let formatted = fmt_normal(&text, scope).map_err(|e| {
+        if e.migration {
+            ClientError::ManifestMigration(format!("{}: {e}", path.display()))
+        } else {
+            ClientError::ManifestInvalid(format!("{}: {e}", path.display()))
+        }
+    })?;
     let changed = formatted != text;
     if changed {
         // The same compare-and-swap every editor write rides: the lock fences topos's own
@@ -170,15 +179,34 @@ mod tests {
             let err = fmt_manifest(ctx, true).unwrap_err();
             assert!(err.to_string().contains("topos init -g"), "{err}");
         });
-        // A file that does not parse refuses AS ITSELF — never silently rewritten.
+        // A file that does not parse refuses AS ITSELF — never silently rewritten, and never
+        // blamed on topos's own state: the grammar refusal is the MANIFEST family, verbatim.
         let home = scratch("bad");
         let repo = home.join("repo");
         std::fs::create_dir_all(&repo).unwrap();
         std::fs::write(repo.join(MANIFEST_FILE), "[stray]\nx = 1\n").unwrap();
         with_ctx(&home, Some(&repo), |ctx| {
             let err = fmt_manifest(ctx, false).unwrap_err();
-            assert_eq!(err.code(), "CORRUPT_STATE");
+            assert_eq!(err.code(), "MANIFEST_INVALID");
             assert!(err.to_string().contains("unknown top-level"), "{err}");
+            assert!(
+                crate::render::safe_message(&err).contains("unknown top-level"),
+                "the teaching reaches the user surfaces verbatim: {err}"
+            );
+        });
+        // A RETIRED spelling keeps its own migration teaching through `fmt` too.
+        let home = scratch("retired");
+        let repo = home.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        std::fs::write(
+            repo.join(MANIFEST_FILE),
+            "[bundles]\n\"./tools/x\" = { path = \".claude/skills\" }\n",
+        )
+        .unwrap();
+        with_ctx(&home, Some(&repo), |ctx| {
+            let err = fmt_manifest(ctx, false).unwrap_err();
+            assert_eq!(err.code(), "MANIFEST_FIELD_RETIRED");
+            assert!(err.to_string().contains("is now written as dest"), "{err}");
         });
     }
 

@@ -1039,7 +1039,10 @@ impl Targets {
 /// since only the first is the network's doing.
 ///
 /// # Errors
-/// A session-file read failure, or an unmatched `update <target>` (the typed refusal names the fix).
+/// A session-file read failure; a manifest this run would DRIVE that fails to load (the typed
+/// manifest refusal, naming the file and the fix — the run refuses whole rather than print a
+/// success-claiming receipt over a recipe it never read); or an unmatched `update <target>` (the
+/// typed refusal names the fix).
 pub(crate) fn manifest_update(
     ctx: &Ctx<'_>,
     connect: &SessionConnect<'_>,
@@ -1064,7 +1067,62 @@ pub(crate) fn manifest_update(
         }
     };
 
-    // ---- 1. Dial each live session's delivery. ----
+    // ---- 1. Build the two scope plans, FIRST. A manifest this run would DRIVE that fails to
+    // load REFUSES the run whole — before any session is dialed, any state is touched, or any
+    // receipt could claim a sweep over a recipe it never read. A scope this run does NOT drive
+    // never blocks it: its failure degrades to a warning and its plan is simply absent, which
+    // freezes it exactly like a scope that was not driven (the failure mode of a mistake must be
+    // keeping bytes, never a success-claiming no-op). ----
+    let person_load = scopes::person_plan(ctx.fs, &ctx.layout);
+    let cwd = ctx.roots.as_ref().and_then(|r| r.cwd.clone());
+    let home = ctx.roots.as_ref().map(|r| r.home.clone());
+    let mut project: Option<(PathBuf, ScopePlan)> = None;
+    let mut project_err: Option<ClientError> = None;
+    if let Some(cwd) = &cwd {
+        match scopes::nearest_project_plan(ctx.fs, cwd, home.as_deref()) {
+            Ok(found) => project = found,
+            Err(e) => project_err = Some(e),
+        }
+    }
+    let project_frozen = project_err.is_some();
+    // Which scope(s) this run DRIVES. Both plans above are read either way — the read is what
+    // makes the freeze warnings and the cross-scope bookkeeping honest; the selector below decides
+    // only which of them converges, cleans, and discloses. A frozen project file still COVERS the
+    // cwd, so `Here` stays on it (its dir comes from the walk, since the failed parse produced no
+    // plan to carry one).
+    let project_dir: Option<PathBuf> = match (&project, project_frozen) {
+        (Some((dir, _)), _) => Some(dir.clone()),
+        (None, true) => cwd
+            .as_deref()
+            .and_then(|c| scopes::nearest_manifest_dir(ctx.fs, c, home.as_deref())),
+        (None, false) => None,
+    };
+    let driven = Driven::resolve(opts.scope, project_dir.is_some());
+    if driven.project
+        && let Some(e) = project_err.take()
+    {
+        return Err(e);
+    }
+    let person: Option<ScopePlan> = match person_load {
+        Ok(p) => Some(p),
+        Err(e) => {
+            if driven.person {
+                return Err(e);
+            }
+            sweep
+                .warnings
+                .push(format!("MANIFEST_INVALID {}", e.detail()));
+            None
+        }
+    };
+    if let Some(e) = &project_err {
+        sweep
+            .warnings
+            .push(format!("MANIFEST_INVALID {}", e.detail()));
+    }
+    let scope_label = driven.label(project_dir.as_deref());
+
+    // ---- 2. Dial each live session's delivery. ----
     let all_sessions = sessions::read_sessions(ctx.fs, &ctx.layout)?;
     let mut runs: Vec<SessionRun> = Vec::new();
     for s in &all_sessions.sessions {
@@ -1178,46 +1236,6 @@ pub(crate) fn manifest_update(
             .warnings
             .push(format!("SYNC_STATUS_WRITE_FAILED: {}", e.detail()));
     }
-
-    // ---- 2. Build the two scope plans. A file the grammar refuses freezes its scope WHOLE. ----
-    let person: Option<ScopePlan> = match scopes::person_plan(ctx.fs, &ctx.layout) {
-        Ok(p) => Some(p),
-        Err(e) => {
-            sweep
-                .warnings
-                .push(format!("MANIFEST_INVALID {}", e.detail()));
-            None
-        }
-    };
-    let cwd = ctx.roots.as_ref().and_then(|r| r.cwd.clone());
-    let home = ctx.roots.as_ref().map(|r| r.home.clone());
-    let mut project: Option<(PathBuf, ScopePlan)> = None;
-    let mut project_frozen = false;
-    if let Some(cwd) = &cwd {
-        match scopes::nearest_project_plan(ctx.fs, cwd, home.as_deref()) {
-            Ok(found) => project = found,
-            Err(e) => {
-                sweep
-                    .warnings
-                    .push(format!("MANIFEST_INVALID {}", e.detail()));
-                project_frozen = true;
-            }
-        }
-    }
-    // Which scope(s) this run DRIVES. Both plans above are read either way — the read is what
-    // makes the freeze warnings and the cross-scope bookkeeping honest; the selector below decides
-    // only which of them converges, cleans, and discloses. A frozen project file still COVERS the
-    // cwd, so `Here` stays on it (its dir comes from the walk, since the failed parse produced no
-    // plan to carry one).
-    let project_dir: Option<PathBuf> = match (&project, project_frozen) {
-        (Some((dir, _)), _) => Some(dir.clone()),
-        (None, true) => cwd
-            .as_deref()
-            .and_then(|c| scopes::nearest_manifest_dir(ctx.fs, c, home.as_deref())),
-        (None, false) => None,
-    };
-    let driven = Driven::resolve(opts.scope, project_dir.is_some());
-    let scope_label = driven.label(project_dir.as_deref());
 
     // Every manifest dir up the chain — NOT a resolution input (nearest wins whole); the store
     // surfaces (lazy recovery, the pre-1.0 handover) still visit each one.

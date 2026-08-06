@@ -306,11 +306,15 @@ fn canonical_or(p: &Path) -> PathBuf {
 // Reading + birthing a manifest
 // ---------------------------------------------------------------------------------------------
 
+/// The typed refusal a manifest the grammar rejects earns — always the MANIFEST family, never
+/// corrupt-state (a `topos.toml` is a user-authored file, and its faults are the file's, not
+/// topos's own state): a RETIRED spelling surfaces as the migration teaching, everything else as
+/// the grammar refusal, and BOTH close the TTY with `nothing changed`.
 fn corrupt(path: &Path, e: &ManifestError) -> ClientError {
     if e.migration {
         return ClientError::ManifestMigration(format!("{}: {e}", path.display()));
     }
-    ClientError::Corrupt(format!("{}: {e}", path.display()))
+    ClientError::ManifestInvalid(format!("{}: {e}", path.display()))
 }
 
 /// The file's text, or `None` when it does not exist.
@@ -320,7 +324,7 @@ fn corrupt(path: &Path, e: &ManifestError) -> ClientError {
 pub(super) fn read_text(ctx: &Ctx<'_>, path: &Path) -> Result<Option<String>, ClientError> {
     match ctx.fs.read_opt(path)? {
         Some(bytes) => Ok(Some(String::from_utf8(bytes).map_err(|_| {
-            ClientError::Corrupt(format!("{}: not UTF-8", path.display()))
+            ClientError::ManifestInvalid(format!("{}: not UTF-8", path.display()))
         })?)),
         None => Ok(None),
     }
@@ -340,7 +344,8 @@ pub(super) struct Opened {
 /// template. The birth is a real, committed write before the requested edit runs.
 ///
 /// # Errors
-/// A filesystem failure, or [`ClientError::Corrupt`] when the existing file does not parse.
+/// A filesystem failure, or the typed manifest refusal ([`ClientError::ManifestInvalid`] /
+/// [`ClientError::ManifestMigration`]) when the existing file does not parse.
 pub(super) fn open_for_edit(ctx: &Ctx<'_>, target: &EditTarget) -> Result<Opened, ClientError> {
     if let Some(text) = read_text(ctx, &target.path)? {
         let editor =
@@ -2556,6 +2561,10 @@ struct EagerBundle {
     name: String,
     display: String,
     mcp: bool,
+    /// `(host, workspace)` for a workspace bundle's row — what lets the copies-stay disclosure
+    /// name the feed that still delivers it. `None` for a local/forge row (and for a narrow,
+    /// which keeps its row).
+    workspace: Option<(String, String)>,
     /// A NARROWED bundle: the subtracted dest entries + how many destinations remain.
     narrow: Option<(Vec<String>, u64)>,
     /// The MACHINE scope store's record for a whole-row edit, resolved BEFORE the apply — the
@@ -2596,6 +2605,7 @@ fn eager_plan(ctx: &Ctx<'_>, target: &EditTarget, arms: &[Arm]) -> EagerPlan {
                     record: record_for(name, mcp),
                     name: name.clone(),
                     narrow: None,
+                    workspace: ws,
                 });
             }
             Arm::OffWrite {
@@ -2614,6 +2624,7 @@ fn eager_plan(ctx: &Ctx<'_>, target: &EditTarget, arms: &[Arm]) -> EagerPlan {
                     record: record_for(name, mcp),
                     name: name.clone(),
                     narrow: None,
+                    workspace: ws,
                 });
             }
             Arm::DestNarrow {
@@ -2630,6 +2641,7 @@ fn eager_plan(ctx: &Ctx<'_>, target: &EditTarget, arms: &[Arm]) -> EagerPlan {
                     name: name.clone(),
                     narrow: Some((subtract.clone(), *remaining as u64)),
                     record: None,
+                    workspace: None,
                 });
             }
             // A split re-homes its survivors to their own rows — nothing leaves.
@@ -2693,10 +2705,12 @@ fn eager_cleanup(
     let mut out: Vec<UninstalledBundle> = Vec::new();
     // What the MACHINE recipe still delivers AFTER the edit (and this run's cache refresh) —
     // the fallback rail's freeze: a name a surviving row or the cached feed still claims must
-    // not lose its copies to the retire below. Resolved lazily (offline by construction), once;
-    // an unreadable resolution reads as "everything still demanded" — failing toward the gate.
+    // not lose its copies to the retire below. Resolved lazily (offline by construction), once.
+    // `Some(true)` = still demanded (the copies stay, and the receipt may say why);
+    // `Some(false)` = provably undemanded; `None` = the resolution could not be read — the
+    // caller fails TOWARD the gate (copies stay) while claiming nothing it did not prove.
     let mut demanded: Option<Option<std::collections::HashSet<String>>> = None;
-    let mut still_demanded = |ctx: &Ctx<'_>, name: &str| -> bool {
+    let mut still_demanded = |ctx: &Ctx<'_>, name: &str| -> Option<bool> {
         let set = demanded.get_or_insert_with(|| {
             let (all, cache) = super::inventory::read_sources(ctx).ok()?;
             let resolved = super::inventory::resolve(ctx, &all, &cache).ok()?;
@@ -2710,10 +2724,7 @@ fn eager_cleanup(
                     .collect(),
             )
         });
-        match set {
-            Some(names) => names.contains(name),
-            None => true,
-        }
+        set.as_ref().map(|names| names.contains(name))
     };
     // The dropped feeds' bundles (attributed by workspace id, exactly as before).
     for r in removed.iter().filter(|r| {
@@ -2796,23 +2807,34 @@ fn eager_cleanup(
             }
             None => {
                 if destinations.is_empty() && kept.is_empty() {
-                    // The reconcile moved nothing for this whole-row edit. Its cleaner walks the
-                    // delivery cache and the forge imports — a record neither enumerates (a
-                    // local-path row's, a workspace row's while the plane is dark or its cache
-                    // entry is gone) would keep every placed copy while the receipt claims
-                    // otherwise. The verb witnessed the intent, so the copies leave HERE,
-                    // through the same by-choice rail the sweep runs (park-then-verify; edited
-                    // and unreadable copies kept in place; adopted sources and in-checkout
-                    // placements never touched) — unless the machine set still delivers the
-                    // name (a surviving row, the cached feed), in which case nothing may move.
-                    // The record was resolved BEFORE the apply: the same reconcile's orphan
-                    // pass may have retired it just now, which hides the name, not the record.
+                    // The reconcile moved nothing for this whole-row edit. FIRST: does the
+                    // machine set STILL deliver the bundle (the standing feed row, a surviving
+                    // line)? Then the copies CORRECTLY stay — the item's own line says so,
+                    // naming the feed and the off switch, so the receipt's stock copies-leave
+                    // sentence can never lie about them — and nothing below may move. An
+                    // unreadable resolution keeps the copies too, claiming nothing.
+                    if target.scope == ManifestScope::Global {
+                        match still_demanded(ctx, &b.name) {
+                            Some(true) => {
+                                note_still_delivered(ctx, target, b, items);
+                                continue;
+                            }
+                            None => continue,
+                            Some(false) => {}
+                        }
+                    }
+                    // Otherwise the sweep's cleaner walks the delivery cache and the forge
+                    // imports — a record neither enumerates (a local-path row's, a workspace
+                    // row's while the plane is dark or its cache entry is gone) would keep
+                    // every placed copy while the receipt claims otherwise. The verb witnessed
+                    // the intent, so the copies leave HERE, through the same by-choice rail the
+                    // sweep runs (park-then-verify; edited and unreadable copies kept in place;
+                    // adopted sources and in-checkout placements never touched). The record was
+                    // resolved BEFORE the apply: the same reconcile's orphan pass may have
+                    // retired it just now, which hides the name, not the record.
                     let Some(sid) = b.record.as_ref().filter(|_| !b.mcp) else {
                         continue;
                     };
-                    if still_demanded(ctx, &b.name) {
-                        continue;
-                    }
                     let Some(sctx) = scope_store_ctx(ctx, target) else {
                         continue;
                     };
@@ -2849,6 +2871,46 @@ fn eager_cleanup(
         }
     }
     out
+}
+
+/// The copies-stay disclosure for a WHOLE-ROW removal whose bundle the machine set STILL
+/// delivers: the row edit landed, but a standing line — the workspace's feed row, most often —
+/// keeps demanding the bundle, so its copies deliberately stay in place. Said on the item's own
+/// line (the note wins over the stock sentence), with the off switch when the feed is the line
+/// that still delivers: `topos remove -g <name>` IS the off write for a feed-delivered bundle.
+fn note_still_delivered(
+    ctx: &Ctx<'_>,
+    target: &EditTarget,
+    b: &EagerBundle,
+    items: &mut [RemoveItem],
+) {
+    let Some(item) = items
+        .iter_mut()
+        .find(|it| it.kind == RemoveKind::ManifestRemoved && it.name == b.name)
+    else {
+        return;
+    };
+    // The POST-EDIT plan: the row is gone, so what still delivers is a line that survives it.
+    let fed_by = b
+        .workspace
+        .as_ref()
+        .filter(|(host, ws)| plan_for(ctx, target).is_ok_and(|plan| plan.has_feed(host, ws)));
+    let note = match fed_by {
+        Some((_, ws)) => format!(
+            "the row is gone, but {ws}'s feed still delivers it here; the copies stay in place \
+             (`topos remove -g {}` switches it off)",
+            b.name
+        ),
+        None => format!(
+            "the row is gone, but another line of {} still delivers it here; the copies stay \
+             in place",
+            target.path.display()
+        ),
+    };
+    item.note = Some(match item.note.take() {
+        Some(prev) => format!("{prev} · {note}"),
+        None => note,
+    });
 }
 
 /// The inline MCP removal convergence a `remove` apply runs (see the call site): for each dropped

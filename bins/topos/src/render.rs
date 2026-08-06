@@ -2030,11 +2030,20 @@ fn remove_item_line(item: &RemoveItem, applied: bool) -> String {
     match item.kind {
         RemoveKind::ManifestRemoved => {
             let manifest = item.manifest.as_deref().unwrap_or("topos.toml");
-            format!(
-                "{manifest}: removed '{}' — the copies it placed leave this machine now (an \
-                 edited copy stays in place).",
-                item.name
-            )
+            // The copies-leave claim is made only where copies verifiably left: the describe
+            // states the plan, and an APPLIED row's movements ride the uninstall block (or this
+            // item's own cleaned dirs). An applied row whose uninstall moved nothing states the
+            // row removal ALONE — the feed-still-delivers shape carries its own note, which wins
+            // above, and everything else must not claim a departure that never happened.
+            if applied && item.agent_dirs.is_empty() {
+                format!("{manifest}: removed '{}'.", item.name)
+            } else {
+                format!(
+                    "{manifest}: removed '{}' — the copies it placed leave this machine now (an \
+                     edited copy stays in place).",
+                    item.name
+                )
+            }
         }
         RemoveKind::ManifestNarrowed => {
             let manifest = item.manifest.as_deref().unwrap_or("topos.toml");
@@ -3017,11 +3026,13 @@ fn append_proposals_trailer(mut out: String, awaiting: u32) -> String {
 }
 
 pub(crate) fn err_tty(err: &ClientError) -> String {
-    // A retired-manifest-spelling refusal closes with the one line that says the load stopped
-    // BEFORE anything moved — the file was only read (the `--json` envelope is untouched: its
-    // `message` stays the single-sentence teaching). A refused `-a`/`--dest` selection closes
-    // the same way, for the same reason: nothing was read past the argv.
+    // A manifest refusal (a retired spelling, or any grammar fault in a user-authored file)
+    // closes with the one line that says the load stopped BEFORE anything moved — the file was
+    // only read (the `--json` envelope is untouched: its `message` stays the single-sentence
+    // teaching). A refused `-a`/`--dest` selection closes the same way, for the same reason:
+    // nothing was read past the argv.
     if let ClientError::ManifestMigration(_)
+    | ClientError::ManifestInvalid(_)
     | ClientError::UnknownAgent { .. }
     | ClientError::SelectionRefused(_) = err
     {
@@ -3202,9 +3213,73 @@ mod tests {
         );
         // The envelope's message stays the single-sentence teaching (no closing line).
         assert!(!safe_message(&err).contains("nothing changed"));
+        // The GRAMMAR refusal family closes the same way, verbatim: a dialect fault names the
+        // file, the entry, and the rule on both surfaces (never the corrupt-state fixed line).
+        let err = crate::error::ClientError::ManifestInvalid(
+            "~/.topos/topos.toml: dest entry `skills` is relative — the machine-wide file names \
+             machine paths: `~/`-prefixed or absolute"
+                .to_owned(),
+        );
+        assert_eq!(err.code(), "MANIFEST_INVALID");
+        assert!(safe_message(&err).contains("dest entry `skills` is relative"));
+        let tty = super::err_tty(&err);
+        assert_eq!(tty.lines().last(), Some("nothing changed"), "{tty}");
+        assert!(tty.contains("~/.topos/topos.toml"), "{tty}");
         // The ordinary corrupt refusal is untouched.
         let plain = super::err_tty(&crate::error::ClientError::Corrupt("x".into()));
         assert!(!plain.contains("nothing changed"), "{plain}");
+    }
+
+    /// An APPLIED whole-row removal whose uninstall moved nothing must not claim the copies
+    /// leave — the line states the row removal alone. The describe (a plan, not a claim) and an
+    /// item with verifiably cleaned dirs keep the full sentence.
+    #[test]
+    fn an_applied_row_removal_with_no_uninstall_drops_the_copies_leave_claim() {
+        let item = |agent_dirs: Vec<String>| RemoveItem {
+            name: "deploy".to_owned(),
+            kind: RemoveKind::ManifestRemoved,
+            manifest: Some("~/.topos/topos.toml".to_owned()),
+            workspace_id: None,
+            agent_dirs,
+            bytes_kept: true,
+            note: None,
+        };
+        let data = |items: Vec<RemoveItem>| RemoveData {
+            items,
+            applied: true,
+            undo: Vec::new(),
+            uninstalled: Vec::new(),
+        };
+        // Applied, nothing uninstalled: the row removal alone.
+        assert_eq!(
+            remove_applied_tty(&data(vec![item(Vec::new())])),
+            "~/.topos/topos.toml: removed 'deploy'."
+        );
+        // Applied with cleaned dirs on the item itself: the full sentence stands.
+        let with_dirs = remove_applied_tty(&data(vec![item(vec!["~/.claude/skills".into()])]));
+        assert!(
+            with_dirs.contains("the copies it placed leave this machine now"),
+            "{with_dirs}"
+        );
+        // The describe keeps the plan's sentence.
+        let describe = super::remove_describe_tty(
+            &RemoveData {
+                items: vec![item(Vec::new())],
+                applied: false,
+                undo: Vec::new(),
+                uninstalled: Vec::new(),
+            },
+            &[
+                "topos".into(),
+                "remove".into(),
+                "deploy".into(),
+                "--yes".into(),
+            ],
+        );
+        assert!(
+            describe.contains("the copies it placed leave this machine now"),
+            "{describe}"
+        );
     }
 
     /// The fetched `add --mcp` arm's receipt (a local-path row, no version minted) names the MCP

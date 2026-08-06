@@ -79,6 +79,7 @@ pub(crate) enum TargetMode {
 /// instead of stderr-only. `access_gone` / `unreachable` are the STRUCTURED workspace-level signals the
 /// hook's quiet posture reads (a freeze line; the staleness warning) — the warnings carry the same facts
 /// as prose, but the hook must not parse prose.
+#[derive(Debug)]
 pub(crate) struct PullOutcome {
     pub data: PullData,
     /// Isolated per-skill FAILURES — what the receipt counts and calls failed. Only
@@ -135,6 +136,7 @@ pub(crate) struct StaleForge {
 /// while the warning line a person reads must name the workspace the way they know it. Keeping only
 /// the name made the staleness lookup miss every time — and a miss reads as "not stale", so the line
 /// never printed.
+#[derive(Debug)]
 pub(crate) struct UnreachableWorkspace {
     /// The cache key — what `sync_status` records a workspace's last delivery under.
     pub workspace_id: String,

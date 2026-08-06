@@ -1330,8 +1330,12 @@ fn a_workspace_row_without_a_session_is_an_honest_local_line() {
     assert!(w.contains("topos login elsewhere.dev/ops"), "{w}");
 }
 
+/// A manifest the run would DRIVE that fails to load refuses the run WHOLE — never a
+/// success-claiming receipt over a no-op. The refusal is the MANIFEST family (verbatim message
+/// naming the file; the TTY closes with `nothing changed`), and the bytes stay: the failure mode
+/// of a mistake must be keeping bytes.
 #[test]
-fn an_unparsable_manifest_freezes_its_scope() {
+fn a_driven_manifest_that_fails_to_load_refuses_the_run_whole() {
     let rig = Rig::new("badfile");
     rig.seed_session();
     rig.seed_feed();
@@ -1345,16 +1349,76 @@ fn an_unparsable_manifest_freezes_its_scope() {
     let placed = rig.work.0.join("skills/deploy");
     assert!(placed.exists());
 
-    // A typo the grammar refuses: the scope delivers nothing AND cleans nothing — the failure mode
-    // of a mistake must be keeping bytes.
+    // A typo the grammar refuses: the driven scope's recipe is unreadable, so the run refuses —
+    // no receipt, no partial sweep claims, and nothing cleaned.
     rig.write_global("[bundles]\n\"not a reference\" = \"*\"\n");
-    let out = sweep(&ctx, &plane, &dir);
+    let err = ops::manifest_update(
+        &ctx,
+        &connect(&plane, &dir),
+        None,
+        &ops::ManifestUpdateOpts::default(),
+    )
+    .unwrap_err();
+    assert_eq!(err.code(), "MANIFEST_INVALID");
+    let msg = crate::render::safe_message(&err);
+    assert!(
+        msg.contains("topos.toml"),
+        "the refusal names the file: {msg}"
+    );
+    let tty = crate::render::err_tty(&err);
+    assert_eq!(tty.lines().last(), Some("nothing changed"), "{tty}");
+    assert!(
+        !tty.contains("updated machine-wide"),
+        "a refusal never claims a sweep: {tty}"
+    );
+    assert!(placed.exists(), "a refused run never cleans");
+}
+
+/// A broken manifest in a scope the run does NOT drive never blocks it: the failure degrades to
+/// the freeze warning, the driven scope still converges, and the frozen scope's bytes stay.
+#[test]
+fn a_broken_manifest_in_an_undriven_scope_warns_and_freezes_it() {
+    let rig = Rig::new("badfile-undriven");
+    rig.seed_session();
+    rig.seed_feed();
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let v = one_file(b"# deploy\n");
+    let api = one_file(b"# api\n");
+    let plane = FakePlane::new(log)
+        .with_version("s_deploy", &v)
+        .with_version("s_api", &api);
+    plane.serves(vec![delivered("s_deploy", "deploy", &v)]);
+    let dir = FakeDirectory::new(
+        vec![
+            catalog_entry("s_deploy", "deploy", &v),
+            catalog_entry("s_api", "api", &api),
+        ],
+        Vec::new(),
+    );
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    sweep(&ctx, &plane, &dir);
+    let placed = rig.work.0.join("skills/deploy");
+    assert!(placed.exists());
+
+    // Break the GLOBAL file, then drive the PROJECT scope only: the machine scope is not this
+    // run's to claim, so its fault is a warning and its bytes freeze in place.
+    rig.write_global("[bundles]\n\"not a reference\" = \"*\"\n");
+    let proj = project(
+        "badfile-undriven-proj",
+        &format!("[bundles]\n\"{HOST}/{WS_NAME}/api\" = \"*\"\n"),
+    );
+    let pctx = rig.ctx_at(Some(&proj.0));
+    let out = sweep(&pctx, &plane, &dir);
     assert!(
         out.warnings
             .iter()
             .any(|w| w.starts_with("MANIFEST_INVALID")),
         "{:?}",
         out.warnings
+    );
+    assert!(
+        proj.0.join(".claude/skills/api/SKILL.md").exists(),
+        "the driven project scope still converged"
     );
     assert!(placed.exists(), "a frozen scope never cleans");
 }
@@ -1503,11 +1567,12 @@ fn the_hook_sweep_converges_both_scopes_from_inside_a_project() {
     );
 }
 
-/// A project file the grammar REFUSES still covers the folder. Falling back to the machine would
-/// answer a typo by converging a tree nobody asked about — and would land bytes the person is at
-/// that moment being told their manifest is broken.
+/// A project file the grammar REFUSES still covers the folder — so a bare `update` standing in
+/// it DRIVES that scope, and the broken file refuses the run whole. Falling back to the machine
+/// would answer a typo by converging a tree nobody asked about — and would land bytes the person
+/// is at that moment being told their manifest is broken.
 #[test]
-fn a_frozen_project_manifest_never_falls_back_to_the_machine() {
+fn a_frozen_project_manifest_refuses_and_never_falls_back_to_the_machine() {
     let rig = Rig::new("scope-frozen");
     rig.seed_session();
     let log: CallLog = Arc::new(Mutex::new(Vec::new()));
@@ -1523,24 +1588,157 @@ fn a_frozen_project_manifest_never_falls_back_to_the_machine() {
         "[bundles]\n\"not a reference\" = \"*\"\n",
     );
     let ctx = rig.ctx_at(Some(&proj.0));
-    let out = sweep(&ctx, &plane, &dir);
+    let err = ops::manifest_update(
+        &ctx,
+        &connect(&plane, &dir),
+        None,
+        &ops::ManifestUpdateOpts::default(),
+    )
+    .unwrap_err();
 
+    assert_eq!(err.code(), "MANIFEST_INVALID");
+    let msg = crate::render::safe_message(&err);
     assert!(
-        out.warnings
-            .iter()
-            .any(|w| w.starts_with("MANIFEST_INVALID")),
-        "{:?}",
-        out.warnings
+        msg.contains(&proj.0.display().to_string()),
+        "the refusal names the file this run stood under: {msg}"
     );
     assert_eq!(
-        out.data.scope,
-        Some(format!("project {}", proj.0.display())),
-        "the frozen file still names the scope this run stood in"
+        crate::render::err_tty(&err).lines().last(),
+        Some("nothing changed")
     );
     assert!(
         !rig.work.0.join("skills").exists(),
-        "a broken project file never hands the run to the machine: {:?}",
-        out.data.skills
+        "a broken project file never hands the run to the machine"
+    );
+}
+
+/// `update -g` over a global file spelling a RETIRED placement field refuses with the exact
+/// rewrite teaching — nonzero, `nothing changed`, and NO success-claiming receipt — instead of
+/// the old downgrade (a `MANIFEST_INVALID` warning under an "updated machine-wide" summary that
+/// claimed a sweep which never read the file).
+#[test]
+fn update_g_over_a_retired_spelling_file_refuses_with_the_rewrite() {
+    let rig = Rig::new("retired-refuses");
+    rig.seed_session();
+    rig.write_global(&format!(
+        "[bundles]\n\"{HOST}/{WS_NAME}/deploy\" = {{ path = \"~/.claude/skills\" }}\n"
+    ));
+    let plane = FakePlane::new(Arc::new(Mutex::new(Vec::new())));
+    let dir = FakeDirectory::new(Vec::new(), Vec::new());
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    let err = ops::manifest_update(
+        &ctx,
+        &connect(&plane, &dir),
+        None,
+        &ops::ManifestUpdateOpts {
+            scope: ops::UpdateScope::Machine,
+            ..ops::ManifestUpdateOpts::default()
+        },
+    )
+    .unwrap_err();
+    assert_eq!(err.code(), "MANIFEST_FIELD_RETIRED");
+    let msg = crate::render::safe_message(&err);
+    assert!(
+        msg.contains("is now written as dest — use dest = [\"~/.claude/skills\"]"),
+        "the exact rewrite teaching reaches the surfaces verbatim: {msg}"
+    );
+    assert!(msg.contains("topos.toml"), "the file is named: {msg}");
+    let tty = crate::render::err_tty(&err);
+    assert_eq!(tty.lines().last(), Some("nothing changed"), "{tty}");
+    assert!(!tty.contains("updated machine-wide"), "{tty}");
+}
+
+/// The dest DIALECT faults refuse as MANIFEST refusals in both directions — never as
+/// CORRUPT_STATE, whose fixed TTY line blames topos's own state for a hand-edit and buries the
+/// real teaching in the log. The message names the file, the offending entry, and the rule, and
+/// the run they would drive refuses whole.
+#[test]
+fn a_dest_dialect_fault_refuses_as_a_manifest_refusal_not_corrupt_state() {
+    // Machine direction: a bare-relative entry in the machine-wide file.
+    let rig = Rig::new("dialect-machine");
+    rig.seed_session();
+    rig.write_global(&format!(
+        "[bundles]\n\"{HOST}/{WS_NAME}/deploy\" = {{ dest = [\"skills\"] }}\n"
+    ));
+    let plane = FakePlane::new(Arc::new(Mutex::new(Vec::new())));
+    let dir = FakeDirectory::new(Vec::new(), Vec::new());
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    let err = ops::manifest_update(
+        &ctx,
+        &connect(&plane, &dir),
+        None,
+        &ops::ManifestUpdateOpts {
+            scope: ops::UpdateScope::Machine,
+            ..ops::ManifestUpdateOpts::default()
+        },
+    )
+    .unwrap_err();
+    assert_eq!(err.code(), "MANIFEST_INVALID");
+    let msg = crate::render::safe_message(&err);
+    assert!(
+        msg.contains("dest entry `skills` is relative — the machine-wide file names machine"),
+        "the rule reaches the surfaces verbatim, not just log.jsonl: {msg}"
+    );
+    assert!(msg.contains("topos.toml"), "the file is named: {msg}");
+    assert_eq!(
+        crate::render::err_tty(&err).lines().last(),
+        Some("nothing changed")
+    );
+
+    // Project direction: an absolute (checkout-escaping) entry in a project file.
+    let rig = Rig::new("dialect-project");
+    rig.seed_session();
+    let proj = project(
+        "dialect-project-proj",
+        &format!("[bundles]\n\"{HOST}/{WS_NAME}/api\" = {{ dest = [\"/abs\"] }}\n"),
+    );
+    let ctx = rig.ctx_at(Some(&proj.0));
+    let err = ops::manifest_update(
+        &ctx,
+        &connect(&plane, &dir),
+        None,
+        &ops::ManifestUpdateOpts::default(),
+    )
+    .unwrap_err();
+    assert_eq!(err.code(), "MANIFEST_INVALID");
+    let msg = crate::render::safe_message(&err);
+    assert!(
+        msg.contains("dest entry `/abs` leaves the checkout"),
+        "{msg}"
+    );
+    assert!(
+        msg.contains(&proj.0.display().to_string()),
+        "the project file is named: {msg}"
+    );
+}
+
+/// The QUIET sweep must not claim success over a manifest it could not read either: the refusal
+/// is a HARD failure (never the auth/transport soft-skip that exits 0), so the hook surfaces a
+/// nonzero exit instead of a silent success stamp.
+#[test]
+fn the_quiet_sweep_refuses_a_broken_manifest_hard() {
+    let rig = Rig::new("quiet-refuses");
+    rig.seed_session();
+    rig.write_global(&format!(
+        "[bundles]\n\"{HOST}/{WS_NAME}/deploy\" = {{ path = \"~/.claude/skills\" }}\n"
+    ));
+    let plane = FakePlane::new(Arc::new(Mutex::new(Vec::new())));
+    let dir = FakeDirectory::new(Vec::new(), Vec::new());
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    let err = ops::manifest_update(
+        &ctx,
+        &connect(&plane, &dir),
+        None,
+        &ops::ManifestUpdateOpts {
+            scope: ops::UpdateScope::Both,
+            ..ops::ManifestUpdateOpts::default()
+        },
+    )
+    .unwrap_err();
+    assert_eq!(err.code(), "MANIFEST_FIELD_RETIRED");
+    assert!(
+        !ops::quiet_soft_failure(&err),
+        "a broken manifest is a local fault — the hook path must exit nonzero, not warn-and-0"
     );
 }
 
@@ -11113,6 +11311,65 @@ fn narrowing_a_no_dest_row_freezes_the_remainder() {
     assert!(note.contains("named no destinations"), "{note}");
     let u = &data.uninstalled[0];
     assert_eq!(u.destinations, vec!["~/.codex/skills".to_owned()]);
+}
+
+/// Dropping an explicit row whose bundle the FEED still delivers: the row edit lands, the copies
+/// CORRECTLY stay (the feed still demands them) — and the receipt says exactly that, with the off
+/// switch, instead of the stock "the copies it placed leave this machine now" lie.
+#[test]
+fn removing_a_row_the_feed_still_delivers_says_the_copies_stay() {
+    let rig = Rig::new("row-feed-stays");
+    rig.seed_session();
+    // BOTH the feed line and an explicit row for the same bundle.
+    rig.write_global(&format!(
+        "[bundles]\n\"{HOST}/{WS_NAME}\" = \"*\"\n\"{HOST}/{WS_NAME}/deploy\" = \"*\"\n"
+    ));
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let v = one_file(b"# deploy\n");
+    let plane = FakePlane::new(log).with_version("s_deploy", &v);
+    plane.serves(vec![delivered("s_deploy", "deploy", &v)]);
+    let dir = FakeDirectory::new(vec![catalog_entry("s_deploy", "deploy", &v)], Vec::new());
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    sweep_scoped(&ctx, &plane, &dir, ops::UpdateScope::Machine);
+    let placed = rig.work.0.join("skills/deploy/SKILL.md");
+    assert!(placed.exists());
+
+    let data = match ops::remove_global(
+        &ctx,
+        &connect(&plane, &dir),
+        &["deploy".into()],
+        None,
+        false,
+        &Default::default(),
+    )
+    .unwrap()
+    {
+        ops::RemoveOutcome::Applied(data) => data,
+        other => panic!("a clean row drop applies immediately: {other:?}"),
+    };
+    // The row is gone; the feed line survives; the copy stays because the feed still demands it.
+    let text =
+        std::fs::read_to_string(rig.layout().home().join(crate::manifest::MANIFEST_FILE)).unwrap();
+    assert!(!text.contains("/deploy\""), "the row left: {text}");
+    assert!(
+        text.contains(&format!("\"{HOST}/{WS_NAME}\"")),
+        "the feed line stands: {text}"
+    );
+    assert!(placed.exists(), "the feed-demanded copy stays in place");
+    assert!(data.uninstalled.is_empty(), "{:?}", data.uninstalled);
+    // The receipt: the honest copies-stay line with the off switch — never the copies-leave claim.
+    let note = data.items[0].note.clone().unwrap_or_default();
+    assert!(
+        note.contains(&format!("{WS_NAME}'s feed still delivers it here")),
+        "{note}"
+    );
+    assert!(
+        note.contains("`topos remove -g deploy` switches it off"),
+        "{note}"
+    );
+    let tty = crate::render::remove_applied_tty(&data);
+    assert!(tty.contains("the copies stay in place"), "{tty}");
+    assert!(!tty.contains("leave this machine now"), "{tty}");
 }
 
 /// The unknown-agent refusal: the FINAL copy shape — real registry slugs, alphabetical, ellipsis

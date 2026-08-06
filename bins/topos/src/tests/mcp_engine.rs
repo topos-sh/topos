@@ -2835,7 +2835,10 @@ fn a_scoped_out_skill_with_an_empty_map_is_not_reported_held() {
         skills: vec![entry],
         channels: Vec::new(),
     };
-    // Person scope demands nothing; the PROJECT manifest carries the feed row.
+    // Person scope demands nothing; the PROJECT manifest carries a feed row — illegal in a
+    // project file, so that scope is FROZEN. The run drives the MACHINE scope (driving the
+    // frozen project would refuse the run whole now), which syncs nothing: the delivered skill
+    // has NO placement map anywhere, and the report must not claim it held.
     rig.write_global("[bundles]\n");
     std::fs::write(
         rig.work.0.join("topos.toml"),
@@ -2843,7 +2846,16 @@ fn a_scoped_out_skill_with_an_empty_map_is_not_reported_held() {
     )
     .unwrap();
     let ctx = rig.ctx_at(Some(&rig.work.0));
-    sweep(&ctx, &plane, &dir);
+    ops::manifest_update(
+        &ctx,
+        &connect(&plane, &dir),
+        None,
+        &ops::ManifestUpdateOpts {
+            scope: ops::UpdateScope::Machine,
+            ..ops::ManifestUpdateOpts::default()
+        },
+    )
+    .unwrap();
 
     let reported = plane.reported.lock().unwrap().clone();
     assert!(
