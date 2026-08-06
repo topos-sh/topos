@@ -145,9 +145,37 @@ divides the requests you can act on from the ones you hand back to the human.
 |---|---|
 | "get us the team's code-review skill here" | `topos add code-review` — a line in this repo's `topos.toml`. With no such file covering the folder the add refuses; `topos init` creates one here (ask first — it is a file the repo will commit) |
 | "keep that on my laptop wherever I work" | `topos add code-review -g` — a line in `~/.topos/topos.toml` |
-| "stop that one on this box" | `topos remove code-review -g` — writes an `off` line here only |
+| "stop that one on this box" | `topos remove code-review -g` — writes an `off` line here only, and uninstalls the copies it placed in the same command (a copy the user edited stays where it is, named in the receipt) |
 | "turn that off for me everywhere" | Not a CLI act. Point them at **Your skills** in the browser, where the off switch covers every machine they log in |
 | "give this to the team" / "give it to Dana" | Not a CLI act either — assigning is a browser act. `topos publish` shares the bytes; `topos invite --skill`/`--channel` is the one exception, and only for someone being invited |
+
+## Aiming at one agent, or one folder
+
+`add` and `remove` both take `-a <agent>` (a registry slug like `codex`, repeatable, `'*'` = every
+detected agent) and `--dest <folder>` (an exact folder — a known config file when the source is an
+MCP server). Combined, their union is the destination set.
+
+```bash
+topos add code-review -a codex --json      # freeze this row to Codex's skills folder
+topos add code-review --dest ./.agents/skills --json
+topos remove code-review -a codex --json   # subtract that one destination; the row keeps the rest
+```
+
+On `add` they are recorded on the manifest line, so every later `update` keeps the copy exactly
+there instead of following agents as they come and go; the receipt's `dest` echoes the line as the
+file now spells it. On `remove` they **subtract**: only the named destinations are uninstalled,
+the row survives with the others (`kind: "manifest-narrowed"`, and `uninstalled[].remaining` counts
+what the row still names), and subtracting the last one removes the row.
+
+Three receipt fields say where bytes actually moved, so nothing has to be read out of prose:
+
+- `destinations` — the folders an install landed in or a removal emptied (config files for an MCP
+  bundle), `~`-abbreviated.
+- `kept` — locally-edited copies left in place instead of being deleted. Ending delivery never
+  deletes the user's own work.
+- `uninstalled` — on `remove`, one entry per bundle whose copies left, each with its own
+  `destinations` and `kept`. A row edit uninstalls **eagerly**, in that same invocation, not on the
+  next `update`.
 
 ## Budgets and pagination
 

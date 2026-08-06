@@ -11,9 +11,11 @@
 //!
 //! UNDECIPHERABLE IS NOT EMPTY. A corrupt document — or one written by a NEWER build, which
 //! [`crate::doc::read_doc`] refuses rather than guesses at — is never written over, and the login
-//! treats it as holding EVERY workspace ([`first_connection`] answers `false`): re-adding a
-//! deliberately deleted feed line is the one wrong this document exists to prevent, so an
-//! unreadable witness fails toward writing nothing.
+//! treats it as holding EVERY workspace ([`first_connection`] answers [`Witness::Unreadable`],
+//! which the caller acts on exactly like [`Witness::Held`]): re-adding a deliberately deleted feed
+//! line is the one wrong this document exists to prevent, so an unreadable witness fails toward
+//! writing nothing. That standstill is DISCLOSED — the login's receipt names this file and says no
+//! feed line will be written until it is removed — but the document's CONTENT never surfaces.
 //!
 //! THE WHOLE READ-UNION-WRITE IS SERIALIZED. Two logins can land concurrently (an agent per
 //! terminal), and each union is built from the bytes it read — so without a lock the second
@@ -61,21 +63,45 @@ pub(crate) fn read(
     crate::doc::read_doc(fs, &layout.connected_path())
 }
 
+/// What the witness says about one `(host, workspace)` — [`first_connection`]'s three answers.
+/// The two non-`First` arms both mean "write no feed line"; they differ only in what the caller
+/// may honestly say about WHY.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Witness {
+    /// No record of this workspace — the machine's first connection to it, so the feed line may
+    /// be written.
+    First,
+    /// The witness holds it: this machine connected before, and a line someone deleted since is a
+    /// deliberate statement login never argues with.
+    Held,
+    /// The document could not be read (corrupt, or a newer build's). Acted on exactly like
+    /// [`Witness::Held`] — the module note's one wrong — but the standstill is disclosable: no
+    /// feed line is written on any login until the file is removed.
+    Unreadable,
+}
+
 /// Whether this is the machine's FIRST connection to `(host, workspace)`: the document is
-/// readable and does not hold the key. An UNREADABLE document answers `false` — failing toward
-/// never re-adding a feed line (the module note's one wrong).
+/// readable and does not hold the key. An UNREADABLE document answers [`Witness::Unreadable`] —
+/// failing toward never re-adding a feed line (the module note's one wrong).
 pub(crate) fn first_connection(
     fs: &dyn FsOps,
     layout: &Layout,
     host: &str,
     workspace: &str,
-) -> bool {
+) -> Witness {
     match read(fs, layout) {
-        Ok(doc) => !doc
-            .unwrap_or_default()
-            .workspaces
-            .contains(&key(host, workspace)),
-        Err(_) => false,
+        Ok(doc) => {
+            if doc
+                .unwrap_or_default()
+                .workspaces
+                .contains(&key(host, workspace))
+            {
+                Witness::Held
+            } else {
+                Witness::First
+            }
+        }
+        Err(_) => Witness::Unreadable,
     }
 }
 
@@ -137,11 +163,20 @@ mod tests {
         let layout = Layout::new(&home.join(".topos"));
         let fs = RealFs;
         // A missing document holds nothing: every workspace is a first connection.
-        assert!(first_connection(&fs, &layout, "topos.sh", "acme"));
+        assert_eq!(
+            first_connection(&fs, &layout, "topos.sh", "acme"),
+            Witness::First
+        );
         record(&fs, &layout, "topos.sh", "acme").unwrap();
-        assert!(!first_connection(&fs, &layout, "topos.sh", "acme"));
+        assert_eq!(
+            first_connection(&fs, &layout, "topos.sh", "acme"),
+            Witness::Held
+        );
         // Keys carry the HOST half too — the same name on another server is its own first.
-        assert!(first_connection(&fs, &layout, "topos.example.com", "acme"));
+        assert_eq!(
+            first_connection(&fs, &layout, "topos.example.com", "acme"),
+            Witness::First
+        );
         record(&fs, &layout, "topos.example.com", "acme").unwrap();
         let doc = read(&fs, &layout).unwrap().unwrap();
         assert_eq!(doc.workspaces.len(), 2);
@@ -156,8 +191,12 @@ mod tests {
         let fs = RealFs;
         std::fs::create_dir_all(layout.state_dir()).unwrap();
         std::fs::write(layout.connected_path(), b"not json").unwrap();
-        // Fail toward never re-adding: unreadable reads as "held".
-        assert!(!first_connection(&fs, &layout, "topos.sh", "acme"));
+        // Fail toward never re-adding: unreadable reads as "held", and says so (the caller
+        // discloses the standstill; the bytes themselves never surface).
+        assert_eq!(
+            first_connection(&fs, &layout, "topos.sh", "acme"),
+            Witness::Unreadable
+        );
         // …and the write-back is refused, the standing bytes untouched.
         assert!(record(&fs, &layout, "topos.sh", "acme").is_err());
         assert_eq!(std::fs::read(layout.connected_path()).unwrap(), b"not json");

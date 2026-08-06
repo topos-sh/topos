@@ -704,8 +704,8 @@ fn agent_view(
         }
     }
     // The placed BUILT-IN meta-skill is topos-managed with no manifest row (force-synced
-    // custody), so its recorded dirs are seeded by hand — labeled the way the inventory's ghost
-    // row names it. An unreadable record marks nothing (the view stays a best-effort read).
+    // custody), so its recorded dirs are seeded by hand — carrying the same `built-in` label the
+    // inventory row does. An unreadable record marks nothing (the view stays a best-effort read).
     for dir in super::builtin::placement_dirs(ctx).unwrap_or_default() {
         if let Ok(canon) = Path::new(&dir).canonicalize() {
             managed.push((canon, "built-in".to_owned()));
@@ -1348,7 +1348,7 @@ mod tests {
             "{managed}"
         );
         assert_eq!(entry("stray-helper").managed, None);
-        // The built-in carries its own honest marker — the inventory's ghost-row label.
+        // The built-in carries its own honest marker — the inventory's `built-in` label.
         assert_eq!(entry("topos").managed.as_deref(), Some("built-in"));
         // The view spans both scopes: a project dir rides along.
         assert!(

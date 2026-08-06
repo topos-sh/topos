@@ -836,9 +836,10 @@ fn fixtures() -> Vec<(&'static str, String)> {
     };
 
     // `list` over one workspace session with one assigned-and-applied skill: the machine scope is
-    // the here-scope (no covering project file), governed by the implicit feed recipe (`manifest`
-    // omits). Byte-equal to the real op's output in the `list_golden_matches...` test — path-free
-    // by construction, so the bytes are stable across machines.
+    // the here-scope (no covering project file), governed by the machine's own
+    // `~/.topos/topos.toml` and its feed line. Byte-equal to the real op's output in the
+    // `list_golden_matches...` test — path-free by construction, so the bytes are stable across
+    // machines.
     let list_ok = JsonEnvelope {
         schema_version: 1,
         command: "list".to_owned(),

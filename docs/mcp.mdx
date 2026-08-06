@@ -169,6 +169,14 @@ sign in — that stays the agent's own business:
 Each agent's exact config file — and the environment variables that move it — is in
 [Supported agents](/docs/harnesses#mcp-servers).
 
+By default the entry reaches every one of those agents this machine has. On `topos add --mcp`,
+`-a <agent>` (a slug like `cursor`, repeatable) or `--dest <file>` (a config file from that same
+set) narrows the row to exactly the files named, recorded as `dest` on the line — so an agent set
+up later changes nothing until the line does. The same two flags on `topos remove` subtract one
+file at a time: that entry leaves, the row survives with the rest, and subtracting the last file
+removes the row. A file outside the known set refuses, because its format has to be known to edit
+it.
+
 ## Updating a server
 
 ```bash

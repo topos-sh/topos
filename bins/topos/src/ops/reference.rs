@@ -350,8 +350,8 @@ fn shape_dest_receipt(
         return;
     }
     data.dest = dest_entries.to_vec();
-    data.display = Some(qualified_display(
-        ctx,
+    data.display = Some(medit::qualify_display(
+        medit::default_host(ctx).as_deref(),
         &resolved.session.host,
         &resolved.session.workspace_name,
         &resolved.name,
@@ -368,23 +368,14 @@ fn shape_dest_receipt(
     }
 }
 
-/// The workspace-QUALIFIED display name a destination receipt leads with — `@<ws>/<name>` at the
-/// machine's ONE connected host, the full `<host>/<ws>/<name>` everywhere else (the same rule the
-/// update receipt's rows use).
-pub(crate) fn qualified_display(ctx: &Ctx<'_>, host: &str, workspace: &str, name: &str) -> String {
-    if medit::default_host(ctx).as_deref() == Some(host) {
-        format!("@{workspace}/{name}")
-    } else {
-        format!("{host}/{workspace}/{name}")
-    }
-}
-
 /// Deliver what the new row asks for, in the same invocation — the SAME reconcile the sweep runs,
 /// narrowed to this name AND to the scope the row was just written in (`-g` delivers the machine
 /// set even from inside a project; a project row delivers the project). Best-effort by contract:
 /// the demand is durably recorded, so a transport hiccup just moves the byte landing to the next
-/// sweep. An `mcp` bundle's receipt then folds the typed server block from what that delivery
-/// landed (best-effort too — see [`super::add_mcp::fold_workspace_mcp`]).
+/// sweep — but the DESTINATION receipt is not: `installed (…)` prints only when this reconcile's
+/// own rows prove the bytes present, and anything less keeps the row-recorded receipt with the
+/// next-sweep path disclosed. An `mcp` bundle's receipt then folds the typed server block from
+/// what that delivery landed (best-effort too — see [`super::add_mcp::fold_workspace_mcp`]).
 fn finish_workspace(
     ctx: &Ctx<'_>,
     connect: &SessionConnect<'_>,
@@ -398,7 +389,7 @@ fn finish_workspace(
         None => Vec::new(),
         Some(_) => vec![resolved.name.clone()],
     };
-    let _ = super::reconcile::manifest_update(
+    let outcome = super::reconcile::manifest_update(
         ctx,
         connect,
         None,
@@ -413,6 +404,86 @@ fn finish_workspace(
             ..Default::default()
         },
     );
+    // The destination receipt's honesty gate (see [`shape_dest_receipt`]): the `installed (…)`
+    // claim stands only when the reconcile REPORTED this bundle's bytes present — a row for the
+    // bundle (for a channel: any of its workspace's rows, and only when the channel's own
+    // expansion succeeded). A transport drop, a plane failure, or a failed materialize clears
+    // the destination shape instead, so the ordinary row-recorded receipt prints with the honest
+    // note — the row is the durable demand either way, and the next sweep lands the copies.
+    if !data.dest.is_empty() {
+        use topos_types::results::{PullAction, PullSkill};
+        let out = outcome.as_ref().ok();
+        // A row proves THIS reference's bytes only when the reconcile stamped it with the
+        // session's workspace id — a same-named local or forge row reconciled in the same scope
+        // says nothing about the workspace delivery.
+        let owned = |r: &PullSkill| {
+            r.workspace_id.as_deref() == Some(resolved.session.workspace_id.as_str())
+                && match &resolved.entry {
+                    Some(_) => r.skill == resolved.name,
+                    // A channel's members carry their own names.
+                    None => true,
+                }
+        };
+        // Bytes provably PRESENT: installed / current / fast-forwarded — and the draft outcomes
+        // (merged; a settled draft synced across folders), where the person's bytes stand placed.
+        let bytes_present = |a: PullAction| {
+            matches!(
+                a,
+                PullAction::Installed
+                    | PullAction::UpToDate
+                    | PullAction::FastForwarded
+                    | PullAction::Merged
+                    | PullAction::DraftSynced
+            )
+        };
+        // A channel whose expansion FAILED proved nothing, whatever else this sweep's scope
+        // happened to reconcile for the same workspace (its feed's bundles ride along).
+        let channel_failed = resolved.entry.is_none()
+            && out.is_some_and(|o| {
+                o.failed_channels
+                    .contains(&(resolved.session.workspace_id.clone(), resolved.name.clone()))
+            });
+        let present = !channel_failed
+            && out.is_some_and(|o| {
+                o.data
+                    .skills
+                    .iter()
+                    .any(|r| owned(r) && bytes_present(r.action))
+            });
+        if !present {
+            data.dest = Vec::new();
+            data.display = None;
+            // The bundle's own row may report a STANDING state a bare re-update will not change
+            // (diverged / conflicted / held) — then the note says what the row reports; the
+            // next-update promise belongs to the run that produced no row at all.
+            let standing = match &resolved.entry {
+                Some(_) => out
+                    .and_then(|o| o.data.skills.iter().find(|r| owned(r)))
+                    .and_then(|r| match r.action {
+                        PullAction::Diverged => Some("diverged"),
+                        PullAction::Conflicted => Some("conflicted"),
+                        PullAction::Held => Some("held"),
+                        _ => None,
+                    }),
+                None => None,
+            };
+            match standing {
+                Some(state) => medit::push_note(
+                    &mut data,
+                    format!(
+                        "the row is recorded — '{name}' reports {state} here; `topos list \
+                         {name}` has the detail",
+                        name = resolved.name
+                    ),
+                ),
+                None => medit::push_note(
+                    &mut data,
+                    "the row is recorded, but its copies could not be placed this run — they \
+                     land on the next `topos update`",
+                ),
+            }
+        }
+    }
     if resolved.entry.as_deref().is_some_and(|e| e.kind == "mcp") {
         super::add_mcp::fold_workspace_mcp(ctx, target, global, &mut data);
     }

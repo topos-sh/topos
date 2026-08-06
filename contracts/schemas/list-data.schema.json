@@ -347,11 +347,11 @@
       ]
     },
     "ListScope": {
-      "description": "One scope section of a [`ListData`] — the rows one manifest (or the implicit feed recipe)\ndelivers. **PINNED.**",
+      "description": "One scope section of a [`ListData`] — the rows one manifest delivers. **PINNED.**",
       "type": "object",
       "properties": {
         "manifest": {
-          "description": "The governing manifest file; `None` = the implicit feed recipe (no machine-wide file — one\nfeed row per connected workspace).",
+          "description": "The governing manifest file; `None` = no machine-wide file — nothing is demanded\nmachine-wide (`topos login` writes a feed row on this machine's first connection to a\nworkspace).",
           "type": [
             "string",
             "null"

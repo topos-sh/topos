@@ -170,7 +170,7 @@
           }
         },
         "manifest": {
-          "description": "The governing manifest file; `None` = the implicit feed recipe (no machine-wide file).",
+          "description": "The governing manifest file; `None` = no machine-wide file — nothing is demanded\nmachine-wide (`topos login` writes a feed row on this machine's first connection to a\nworkspace).",
           "type": [
             "string",
             "null"

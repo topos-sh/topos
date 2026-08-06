@@ -11,9 +11,10 @@
 //! A skill a workspace delivers is refused toward the DEMAND — but only while a row actually
 //! claims the name: what a folder takes is its `topos.toml` row, what this machine takes is the
 //! global file's, and what a workspace gives you is managed on the web. A retained copy whose
-//! demand already ended (a GHOST awaiting the next sweep's retire) is nobody's demand, so it
-//! falls through to the describe-first permanent delete with an honest note. Multi-skill
-//! positional; resolve ALL-OR-NONE (a batch either resolves every target or applies nothing).
+//! demand already ended (an ORPHANED record — the next `topos update` resolves it once and
+//! retires it) is nobody's demand, so it falls through to the describe-first permanent delete
+//! with an honest note. Multi-skill positional; resolve ALL-OR-NONE (a batch either resolves
+//! every target or applies nothing).
 
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -50,14 +51,15 @@ pub(crate) enum RemoveOutcome {
 
 /// One resolved removal, pre-apply.
 enum Removal {
-    /// A tracked local skill no row demands → a permanent delete (sidecar entry included). For a
-    /// GHOST — a retained workspace-delivered copy whose demand already ended — the notes carry
-    /// the honest disclosure (describe-tense and applied-tense; receipts must stay true in both).
+    /// A tracked local skill no row demands → a permanent delete (sidecar entry included). For an
+    /// ORPHAN — a retained workspace-delivered copy whose demand already ended, which the next
+    /// `topos update` resolves once — the notes carry the honest disclosure (describe-tense and
+    /// applied-tense; receipts must stay true in both).
     TrackedLocal {
         skill_id: String,
         name: String,
         dirs: Vec<PathBuf>,
-        note: Option<GhostNote>,
+        note: Option<OrphanNote>,
     },
     /// An untracked copy in an agent dir → a permanent delete of that directory.
     Untracked { name: String, dir: PathBuf },
@@ -170,7 +172,7 @@ pub(crate) fn remove(
     // received here) is likewise ineligible: after this exclusion the delivery reports it
     // excluded, not detached, so the advertised `follow` would answer a first-trust DESCRIBE
     // instead of the immediate re-attach only a local marker routes to.
-    // The APPLIED items re-derive so a ghost's note speaks in the right tense (the describe's
+    // The APPLIED items re-derive so an orphan's note speaks in the right tense (the describe's
     // "doing nothing also resolves this" would be false on a receipt for an act just performed).
     let items: Vec<RemoveItem> = removals.iter().map(|r| describe_item(r, true)).collect();
     for removal in &removals {
@@ -233,7 +235,7 @@ fn delivered_refusal(name: &str) -> ClientError {
 /// Every name (and reference) the MACHINE scope still demands — the rows (bundle or `"off"`) of
 /// the same offline resolution `list` and `status` render. This is the demand-guard's key: the
 /// classic ladder only ever deletes HOME-store records, and a workspace-provenance record whose
-/// name none of these rows claim is a GHOST — its demand already ended, so refusing toward a row
+/// name none of these rows claim is an ORPHAN — its demand already ended, so refusing toward a row
 /// that does not exist would be false. Offline by construction (no dial).
 fn machine_demand(ctx: &Ctx<'_>) -> Result<HashSet<String>, ClientError> {
     let (all, cache) = super::inventory::read_sources(ctx)?;
@@ -308,16 +310,16 @@ fn classify(
     }
 }
 
-/// The tense-matched disclosure a GHOST removal carries (describe vs receipt — both must be true
+/// The tense-matched disclosure an ORPHAN removal carries (describe vs receipt — both must be true
 /// when printed).
-struct GhostNote {
+struct OrphanNote {
     describe: String,
     applied: String,
 }
 
 /// A locally-tracked skill resolved by name. With workspace provenance (the delivery cache still
 /// names a workspace) the DEMAND decides: a row still claiming the name keeps the refusal toward
-/// the demand; no claiming row means the demand already ended — a GHOST — and the token falls
+/// the demand; no claiming row means the demand already ended — an ORPHAN — and the token falls
 /// through to the same describe-first permanent delete untracked copies ride, disclosed honestly.
 /// A never-followed one is a plain permanent local delete.
 fn tracked_or_followed(
@@ -338,15 +340,15 @@ fn tracked_or_followed(
         .as_ref()
         .map(|m| m.placements.iter().map(PathBuf::from).collect())
         .unwrap_or_default();
-    // The ghost's honest note. When the sweep would retire the copy anyway, the describe says so
-    // (doing nothing also resolves it); an adopted-in-place source dir is exactly what no sweep
-    // deletes, so that claim is withheld and the explicit-remove boundary named instead.
+    // The orphan's honest note. When the next update would retire the copy anyway, the describe
+    // says so (doing nothing also resolves it); an adopted-in-place source dir is exactly what no
+    // update deletes, so that claim is withheld and the explicit-remove boundary named instead.
     let note = followed.then(|| {
         let adopted = map
             .as_ref()
             .is_some_and(|m| m.placement_state.iter().any(|s| s.adopted_source));
         if adopted {
-            GhostNote {
+            OrphanNote {
                 describe: "a retained copy of an ended workspace delivery; its dir was adopted \
                            in place, so no sweep deletes it — only an explicit remove does \
                            (record included)"
@@ -356,7 +358,7 @@ fn tracked_or_followed(
                     .to_owned(),
             }
         } else {
-            GhostNote {
+            OrphanNote {
                 describe: "a retained copy of an ended workspace delivery; the next `topos \
                            update` retires it anyway, so doing nothing also resolves this — \
                            applying deletes it now (record included)"
@@ -411,7 +413,7 @@ fn untracked(
 }
 
 /// The describe/apply row for one removal (the boundary a followed removal keeps vs a permanent
-/// delete). `applied` picks the tense a ghost's note speaks in — each printed only when true.
+/// delete). `applied` picks the tense an orphan's note speaks in — each printed only when true.
 fn describe_item(removal: &Removal, applied: bool) -> RemoveItem {
     match removal {
         Removal::TrackedLocal {

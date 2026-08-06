@@ -535,13 +535,10 @@ struct Env<'a> {
 }
 
 impl Env<'_> {
-    /// The workspace-QUALIFIED display name a receipt row leads with.
+    /// The workspace-QUALIFIED display name a receipt row leads with — the ONE shared rule
+    /// ([`super::manifest_edit::qualify_display`]).
     fn qualified(&self, host: &str, workspace: &str, name: &str) -> String {
-        if self.default_host.as_deref() == Some(host) {
-            format!("@{workspace}/{name}")
-        } else {
-            format!("{host}/{workspace}/{name}")
-        }
+        super::manifest_edit::qualify_display(self.default_host.as_deref(), host, workspace, name)
     }
 }
 
@@ -1651,6 +1648,7 @@ pub(crate) fn manifest_update(
         unreachable,
         stale_forge,
         forge_gone,
+        failed_channels: sweep.failed_channels,
     })
 }
 

@@ -7,9 +7,11 @@ generated `docs/cli.md` (`cargo xtask gen-cli-ref`).
 
 ## The model
 
-- **Manifests, two UNBLENDED scopes.** PERSON = the machine's own `~/.topos/topos.toml` when it
-  exists, else the implicit FEED (one row per connected workspace — assignments minus declines,
-  computed server-side and served whole). PROJECT = the NEAREST `topos.toml` covering the cwd,
+- **Manifests, two UNBLENDED scopes.** PERSON = the machine's own `~/.topos/topos.toml`, the WHOLE
+  machine-wide recipe: no file (or no row) means nothing is demanded machine-wide. `topos login`
+  writes the workspace's FEED row (`"<host>/<ws>" = "*"` — assignments minus declines, computed
+  server-side and served whole) on this machine's FIRST connection to it and never again, so a row
+  someone deleted stays deleted. PROJECT = the NEAREST `topos.toml` covering the cwd,
   taken whole (walk up only to find it; no ancestor merging, no cross-scope shadowing). A
   manifest's `[bundles]` keys ARE references, classified by shape: local paths ·
   `github.com/<owner>/<repo>[/<skill>]` · `<host>/<ws>` (the feed) · `<host>/<ws>/<bundle>` ·

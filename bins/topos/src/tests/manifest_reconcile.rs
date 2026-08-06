@@ -7849,7 +7849,7 @@ fn a_pinned_set_with_no_recorded_members_converges_on_the_next_update() {
 
 #[test]
 fn a_pinned_whole_repo_row_keeps_its_pin_and_says_the_selection_did_not_fit() {
-    // The one shape that cannot carry both: a whole-repo row takes `harness` and nothing else, so a
+    // The one shape that cannot carry both: a whole-repo row takes `dest` and nothing else, so a
     // PINNED repo-root import has no legal spelling for the `-a` choice. The pin wins — it decides
     // which bytes, the selection only decides where they sit — and the receipt says so, rather than
     // writing a row the file would refuse or dropping the pin in silence.
@@ -10467,6 +10467,359 @@ fn an_agent_selected_add_freezes_the_row_and_prints_the_destination_receipt() {
     );
 }
 
+/// The same `-a` add when the plane cannot DELIVER (the delivery lane down, no bytes servable):
+/// the row lands (the durable demand), but no copy does — so the receipt must NOT claim
+/// `installed (…)`; the row-recorded receipt prints instead, with the next-sweep path disclosed.
+#[test]
+fn an_agent_selected_add_whose_delivery_fails_does_not_claim_installed() {
+    let rig = Rig::new("dest-add-offline");
+    rig.seed_session();
+    let v = one_file(b"# deploy\n");
+    // The catalog answers (the add resolves the name), but the plane serves NOTHING — no
+    // delivery, no version bytes.
+    let plane = FakePlane::new(Arc::new(Mutex::new(Vec::new())));
+    plane.serve_unreachable();
+    let dir = FakeDirectory::new(vec![catalog_entry("s_deploy", "deploy", &v)], Vec::new());
+    rig.write_global("[bundles]\n");
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    let data = match ops::add_reference(
+        &ctx,
+        &connect(&plane, &dir),
+        None,
+        &format!("@{WS_NAME}/deploy"),
+        true,
+        false,
+        &sel(&["codex"], &[]),
+    )
+    .unwrap()
+    {
+        ops::AddRefOutcome::Applied(d) => *d,
+        ops::AddRefOutcome::Described { .. } => panic!("a workspace reference applies"),
+    };
+    // The row froze to the destination regardless — the demand is durably recorded.
+    let text =
+        std::fs::read_to_string(rig.layout().home().join(crate::manifest::MANIFEST_FILE)).unwrap();
+    assert!(
+        text.contains(r#""acme.test/eng/deploy" = { dest = ["~/.codex/skills"] }"#),
+        "{text}"
+    );
+    // No copy landed — and the receipt does not claim one did.
+    assert!(!rig.home.0.join(".codex/skills/deploy").exists());
+    assert!(data.dest.is_empty(), "{:?}", data.dest);
+    assert_eq!(data.display, None);
+    let tty = crate::render::add_tty(&data);
+    assert!(!tty.contains("installed"), "{tty}");
+    assert!(
+        tty.contains("land on the next `topos update`"),
+        "the next-sweep path is stated: {tty}"
+    );
+}
+
+/// A same-named LOCAL row's clean report must not prove a workspace bundle's bytes: the adopted
+/// `deploy` reconciles up-to-date in the same scope, but the workspace delivery failed — so the
+/// receipt must NOT claim `installed (…)` on the strength of the other row.
+#[test]
+fn a_same_named_local_rows_report_does_not_prove_the_workspace_add() {
+    let rig = Rig::new("dest-add-foreign-proof");
+    rig.seed_session();
+    let v = one_file(b"# deploy\n");
+    // The catalog answers (the add resolves the name), but the plane serves NOTHING — no
+    // delivery, no version bytes.
+    let plane = FakePlane::new(Arc::new(Mutex::new(Vec::new())));
+    plane.serve_unreachable();
+    let dir = FakeDirectory::new(vec![catalog_entry("s_deploy", "deploy", &v)], Vec::new());
+    // A same-named ADOPTED folder already stands in the machine recipe.
+    let local = rig.home.0.join("src/deploy");
+    std::fs::create_dir_all(&local).unwrap();
+    std::fs::write(local.join("SKILL.md"), b"# mine\n").unwrap();
+    rig.write_global(&format!("[bundles]\n\"{}\" = \"*\"\n", local.display()));
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    let data = match ops::add_reference(
+        &ctx,
+        &connect(&plane, &dir),
+        None,
+        &format!("@{WS_NAME}/deploy"),
+        true,
+        false,
+        &sel(&["codex"], &[]),
+    )
+    .unwrap()
+    {
+        ops::AddRefOutcome::Applied(d) => *d,
+        ops::AddRefOutcome::Described { .. } => panic!("a workspace reference applies"),
+    };
+    // No workspace copy landed — the local row's up-to-date report is not this bundle's proof.
+    assert!(!rig.home.0.join(".codex/skills/deploy").exists());
+    assert!(data.dest.is_empty(), "{:?}", data.dest);
+    assert_eq!(data.display, None);
+    let tty = crate::render::add_tty(&data);
+    assert!(!tty.contains("installed"), "{tty}");
+    assert!(
+        tty.contains("land on the next `topos update`"),
+        "the next-sweep path is stated: {tty}"
+    );
+}
+
+/// A directory whose channel index answers ONCE (the add's resolve) and then fails — the
+/// transport dropping between the resolve and the SAME invocation's delivering reconcile.
+#[derive(Clone)]
+struct ChannelsDropAfterFirst {
+    inner: FakeDirectory,
+    answered: Arc<Mutex<u32>>,
+}
+impl DirectorySource for ChannelsDropAfterFirst {
+    fn me(&self, ws: &str) -> Result<WireMe, ClientError> {
+        self.inner.me(ws)
+    }
+    fn channels_index(&self, ws: &str) -> Result<WireChannelIndex, ClientError> {
+        let mut n = self.answered.lock().unwrap();
+        *n += 1;
+        if *n > 1 {
+            return Err(ClientError::Plane("directory unreachable".into()));
+        }
+        self.inner.channels_index(ws)
+    }
+    fn skills_index(&self, ws: &str) -> Result<WireSkillIndex, ClientError> {
+        self.inner.skills_index(ws)
+    }
+    fn proposals_index(&self, ws: &str) -> Result<WireProposalIndex, ClientError> {
+        self.inner.proposals_index(ws)
+    }
+    fn skill_log(&self, ws: &str, s: &str) -> Result<WireSkillLog, ClientError> {
+        self.inner.skill_log(ws, s)
+    }
+    fn reach(&self, ws: &str, s: &str) -> Result<WireReach, ClientError> {
+        self.inner.reach(ws, s)
+    }
+    fn channel_place(&self, ws: &str, c: &str, s: &str) -> Result<(), ClientError> {
+        self.inner.channel_place(ws, c, s)
+    }
+    fn channel_unplace(&self, ws: &str, c: &str, s: &str) -> Result<(), ClientError> {
+        self.inner.channel_unplace(ws, c, s)
+    }
+    fn protect_skill(&self, ws: &str, s: &str, l: &str) -> Result<(), ClientError> {
+        self.inner.protect_skill(ws, s, l)
+    }
+    fn protect_channel(&self, ws: &str, c: &str, l: &str) -> Result<(), ClientError> {
+        self.inner.protect_channel(ws, c, l)
+    }
+    fn ack_notices(&self, ws: &str, ids: &[String]) -> Result<(), ClientError> {
+        self.inner.ack_notices(ws, ids)
+    }
+}
+
+/// A channel add with `-a` whose expansion FAILS in the delivering reconcile must not borrow an
+/// unrelated feed bundle's clean row as its proof: the same untargeted sweep reconciles the
+/// feed's `other` up-to-date, but THIS channel proved nothing — the row lands (the durable
+/// demand), the receipt does not claim `installed (…)`, and the next-sweep path prints.
+#[test]
+fn a_channel_add_whose_expansion_fails_does_not_borrow_the_feeds_proof() {
+    let rig = Rig::new("dest-add-channel-fail");
+    rig.seed_session();
+    let v = one_file(b"# other\n");
+    let plane = FakePlane::new(Arc::new(Mutex::new(Vec::new()))).with_version("s_other", &v);
+    plane.serves(vec![delivered("s_other", "other", &v)]);
+    let inner = FakeDirectory::new(
+        vec![catalog_entry("s_other", "other", &v)],
+        vec![WireChannelEntry {
+            name: "backend".into(),
+            mode: "open".into(),
+            builtin: false,
+            included: true,
+            skills: vec![WireChannelSkill {
+                skill_id: "s_other".into(),
+                name: "other".into(),
+            }],
+        }],
+    );
+    rig.seed_feed();
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    // The feed bundle stands CURRENT before the add — the unrelated up-to-date row the gate
+    // must not borrow.
+    let primed = sweep_scoped(&ctx, &plane, &inner, ops::UpdateScope::Machine);
+    assert!(
+        primed
+            .data
+            .skills
+            .iter()
+            .any(|s| s.skill == "other" && s.action == PullAction::Installed),
+        "the fixture needs the feed delivering: {:?}",
+        primed.data.skills
+    );
+    let wrapper = ChannelsDropAfterFirst {
+        inner: inner.clone(),
+        answered: Arc::new(Mutex::new(0)),
+    };
+    let session_connect = move |_s: &Session| ops::SessionTransports {
+        plane: Box::new(plane.clone()),
+        directory: Box::new(wrapper.clone()),
+        contribute: Box::new(NoContribute),
+        governance: Box::new(NoGovernance),
+    };
+    let data = match ops::add_reference(
+        &ctx,
+        &session_connect,
+        None,
+        &format!("@{WS_NAME}/channels/backend"),
+        true,
+        false,
+        &sel(&["codex"], &[]),
+    )
+    .unwrap()
+    {
+        ops::AddRefOutcome::Applied(d) => *d,
+        ops::AddRefOutcome::Described { .. } => panic!("a workspace reference applies"),
+    };
+    // The row froze to the destination regardless — the demand is durably recorded.
+    let text =
+        std::fs::read_to_string(rig.layout().home().join(crate::manifest::MANIFEST_FILE)).unwrap();
+    assert!(
+        text.contains(r#""acme.test/eng/channels/backend" = { dest = ["~/.codex/skills"] }"#),
+        "{text}"
+    );
+    // The channel expansion failed — nothing of ITS proved, whatever the feed reconciled.
+    assert!(data.dest.is_empty(), "{:?}", data.dest);
+    assert_eq!(data.display, None);
+    let tty = crate::render::add_tty(&data);
+    assert!(!tty.contains("installed"), "{tty}");
+    assert!(
+        tty.contains("land on the next `topos update`"),
+        "the next-sweep path is stated: {tty}"
+    );
+}
+
+/// A re-add whose own reconcile MERGES a local draft onto the new current landed bytes — the
+/// merged draft stands placed at the destination, so the receipt's `installed (…)` claim stands
+/// (a merged row is not a failed placement).
+#[test]
+fn an_agent_selected_add_whose_reconcile_merges_keeps_the_destination_receipt() {
+    let rig = Rig::new("dest-add-merged");
+    rig.seed_session();
+    let v1 = mk_version(&[("SKILL.md", FileMode::Regular, b"# deploy\n\nsteps\n")]);
+    let v2 = mk_version(&[("SKILL.md", FileMode::Regular, b"# deploy v2\n\nsteps\n")]);
+    let plane = FakePlane::new(Arc::new(Mutex::new(Vec::new())))
+        .with_version("s_deploy", &v1)
+        .with_version("s_deploy", &v2);
+    plane.serves(vec![delivered("s_deploy", "deploy", &v1)]);
+    let dir1 = FakeDirectory::new(vec![catalog_entry("s_deploy", "deploy", &v1)], Vec::new());
+    rig.write_global("[bundles]\n");
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    let data = match ops::add_reference(
+        &ctx,
+        &connect(&plane, &dir1),
+        None,
+        &format!("@{WS_NAME}/deploy"),
+        true,
+        false,
+        &sel(&["codex"], &[]),
+    )
+    .unwrap()
+    {
+        ops::AddRefOutcome::Applied(d) => *d,
+        ops::AddRefOutcome::Described { .. } => panic!("a workspace reference applies"),
+    };
+    assert_eq!(data.dest, vec!["~/.codex/skills".to_owned()]);
+    let placed = rig.home.0.join(".codex/skills/deploy/SKILL.md");
+    // The person edits their copy (a draft), and the team moves current — a real pointer move.
+    std::fs::write(&placed, b"# deploy\n\nsteps\nmine\n").unwrap();
+    let mut moved = delivered("s_deploy", "deploy", &v2);
+    moved.generation = 2;
+    plane.serves(vec![moved]);
+    let mut moved_cat = catalog_entry("s_deploy", "deploy", &v2);
+    moved_cat.generation = 2;
+    let dir2 = FakeDirectory::new(vec![moved_cat], Vec::new());
+    let data = match ops::add_reference(
+        &ctx,
+        &connect(&plane, &dir2),
+        None,
+        &format!("@{WS_NAME}/deploy"),
+        true,
+        false,
+        &sel(&["codex"], &[]),
+    )
+    .unwrap()
+    {
+        ops::AddRefOutcome::Applied(d) => *d,
+        ops::AddRefOutcome::Described { .. } => panic!("a workspace reference applies"),
+    };
+    // The merge landed BOTH edits at the destination — the receipt may say so.
+    let text = std::fs::read_to_string(&placed).unwrap();
+    assert!(
+        text.contains("# deploy v2") && text.contains("mine"),
+        "the merged draft stands placed: {text}"
+    );
+    assert_eq!(data.dest, vec!["~/.codex/skills".to_owned()]);
+    let tty = crate::render::add_tty(&data);
+    assert!(tty.contains("installed (~/.codex/skills)"), "{tty}");
+    assert!(!tty.contains("could not be placed"), "{tty}");
+}
+
+/// A re-add whose own reconcile ends in a merge CONFLICT clears the destination claim — but the
+/// note must not promise the next update (a standing conflict is not a transient miss): it says
+/// what the row reports and where the detail lives.
+#[test]
+fn an_agent_selected_add_whose_reconcile_conflicts_names_the_standing_state() {
+    let rig = Rig::new("dest-add-conflicted");
+    rig.seed_session();
+    let v1 = mk_version(&[("SKILL.md", FileMode::Regular, b"# deploy\n\nsteps\n")]);
+    let v2 = mk_version(&[("SKILL.md", FileMode::Regular, b"# deploy THEIRS\n\nsteps\n")]);
+    let plane = FakePlane::new(Arc::new(Mutex::new(Vec::new())))
+        .with_version("s_deploy", &v1)
+        .with_version("s_deploy", &v2);
+    plane.serves(vec![delivered("s_deploy", "deploy", &v1)]);
+    let dir1 = FakeDirectory::new(vec![catalog_entry("s_deploy", "deploy", &v1)], Vec::new());
+    rig.write_global("[bundles]\n");
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    match ops::add_reference(
+        &ctx,
+        &connect(&plane, &dir1),
+        None,
+        &format!("@{WS_NAME}/deploy"),
+        true,
+        false,
+        &sel(&["codex"], &[]),
+    )
+    .unwrap()
+    {
+        ops::AddRefOutcome::Applied(_) => {}
+        ops::AddRefOutcome::Described { .. } => panic!("a workspace reference applies"),
+    }
+    let placed = rig.home.0.join(".codex/skills/deploy/SKILL.md");
+    // BOTH sides edit the same line — the three-way merge cannot resolve it.
+    std::fs::write(&placed, b"# deploy MINE\n\nsteps\n").unwrap();
+    let mut moved = delivered("s_deploy", "deploy", &v2);
+    moved.generation = 2;
+    plane.serves(vec![moved]);
+    let mut moved_cat = catalog_entry("s_deploy", "deploy", &v2);
+    moved_cat.generation = 2;
+    let dir2 = FakeDirectory::new(vec![moved_cat], Vec::new());
+    let data = match ops::add_reference(
+        &ctx,
+        &connect(&plane, &dir2),
+        None,
+        &format!("@{WS_NAME}/deploy"),
+        true,
+        false,
+        &sel(&["codex"], &[]),
+    )
+    .unwrap()
+    {
+        ops::AddRefOutcome::Applied(d) => *d,
+        ops::AddRefOutcome::Described { .. } => panic!("a workspace reference applies"),
+    };
+    // The conflicted state is not a placed install — the destination claim clears …
+    assert!(data.dest.is_empty(), "{:?}", data.dest);
+    assert_eq!(data.display, None);
+    // … and the note names the STANDING state instead of promising the next update.
+    let note = data.note.clone().unwrap_or_default();
+    assert!(note.contains("'deploy' reports conflicted here"), "{note}");
+    assert!(
+        note.contains("`topos list deploy` has the detail"),
+        "{note}"
+    );
+    assert!(!note.contains("land on the next"), "{note}");
+}
+
 /// `topos remove -g <skill> -a codex` over a three-destination row: the codex folder is
 /// subtracted and its copy leaves; the row keeps the rest; the receipt is the FINAL narrow
 /// shape, byte for byte, and its undo re-adds exactly what left.
@@ -10523,6 +10876,121 @@ fn a_narrowed_remove_subtracts_one_destination_and_prints_the_final_receipt() {
         "- @eng/deploy   removed (~/.codex/skills) — 2 folders remain\n(undo: topos add -g \
          @eng/deploy -a codex)"
     );
+}
+
+/// The narrow when the reconcile cannot move the copy (a hand-written dest row on a machine the
+/// plane never delivered to, the plane unreachable): the row's subtraction lands (the durable
+/// edit), but NOTHING was uninstalled — so the receipt must NOT claim `removed (…)`; the row-edit
+/// line prints with the next-sweep path instead.
+#[test]
+fn an_offline_narrow_does_not_claim_the_copy_left() {
+    let rig = Rig::new("dest-narrow-offline");
+    rig.seed_session();
+    // The plane serves nothing at all — no delivery snapshot, no version bytes, empty catalog.
+    let plane = FakePlane::new(Arc::new(Mutex::new(Vec::new())));
+    plane.serve_unreachable();
+    let dir = FakeDirectory::new(Vec::new(), Vec::new());
+    rig.write_global(&format!(
+        "[bundles]\n\"{HOST}/{WS_NAME}/deploy\" = {{ dest = [\"~/.claude/skills\", \
+         \"~/.codex/skills\", \"~/.cursor/skills\"] }}\n"
+    ));
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    let data = match ops::remove_global(
+        &ctx,
+        &connect(&plane, &dir),
+        &["deploy".into()],
+        None,
+        false,
+        &sel(&["codex"], &[]),
+    )
+    .unwrap()
+    {
+        ops::RemoveOutcome::Applied(data) => data,
+        other => panic!("a narrow applies immediately: {other:?}"),
+    };
+    // The row edit landed: the manifest keeps the remaining two destinations.
+    let text =
+        std::fs::read_to_string(rig.layout().home().join(crate::manifest::MANIFEST_FILE)).unwrap();
+    assert!(
+        text.contains(r#"dest = ["~/.claude/skills", "~/.cursor/skills"]"#),
+        "{text}"
+    );
+    // Nothing was uninstalled — and the receipt does not claim anything was.
+    assert!(data.uninstalled.is_empty(), "{:?}", data.uninstalled);
+    let tty = crate::render::remove_applied_tty(&data);
+    assert!(!tty.contains("removed ("), "{tty}");
+    assert!(
+        tty.contains("leaves on the next `topos update`"),
+        "the next-sweep path is stated: {tty}"
+    );
+    assert!(
+        tty.contains("the row keeps 2 folders"),
+        "the remaining count survives the fallback: {tty}"
+    );
+}
+
+/// Narrowing a dest-less row with NO recorded copies refuses with the honest zero-state — never
+/// the old trailing-off "its destinations here are " with nothing after it.
+#[test]
+fn narrowing_a_row_with_no_recorded_copies_refuses_with_the_zero_state() {
+    let (rig, plane, dir, _v) = add_rig("dest-narrow-zero");
+    rig.write_global(&format!("[bundles]\n\"{HOST}/{WS_NAME}/deploy\" = \"*\"\n"));
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    let err = ops::remove_global(
+        &ctx,
+        &connect(&plane, &dir),
+        &["deploy".into()],
+        None,
+        false,
+        &sel(&["codex"], &[]),
+    )
+    .unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("'deploy' has no recorded copies in this scope yet"),
+        "{msg}"
+    );
+    assert!(msg.contains("run `topos update` first"), "{msg}");
+    assert!(msg.contains("topos remove -g deploy"), "{msg}");
+    // The manifest row is untouched — the refusal changed nothing.
+    let text =
+        std::fs::read_to_string(rig.layout().home().join(crate::manifest::MANIFEST_FILE)).unwrap();
+    assert!(text.contains("deploy"), "{text}");
+}
+
+/// The same zero-state over a FEED-delivered skill (no row anywhere): "its row was added" would
+/// be a fabrication — there is no row to remove. The honest variant names what stands (the feed
+/// delivers it) and the whole-machine end that actually exists (the `"off"` switch).
+#[test]
+fn narrowing_a_feed_delivered_skill_with_no_copies_names_the_off_switch() {
+    let (rig, plane, dir, v) = add_rig("dest-narrow-feed-zero");
+    plane.serves(vec![delivered("s_deploy", "deploy", &v)]);
+    rig.seed_feed();
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    let err = ops::remove_global(
+        &ctx,
+        &connect(&plane, &dir),
+        &["deploy".into()],
+        None,
+        false,
+        &sel(&["codex"], &[]),
+    )
+    .unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("'deploy' is feed-delivered and has no recorded copies in this scope yet"),
+        "{msg}"
+    );
+    assert!(msg.contains("run `topos update` first"), "{msg}");
+    assert!(
+        msg.contains("`topos remove -g deploy` to switch it off entirely"),
+        "{msg}"
+    );
+    assert!(!msg.contains("its row was added"), "{msg}");
+    // The manifest is untouched — no `"off"` switch was written by the refusal.
+    let text =
+        std::fs::read_to_string(rig.layout().home().join(crate::manifest::MANIFEST_FILE)).unwrap();
+    assert!(!text.contains("off"), "{text}");
 }
 
 /// Removing the LAST destination removes the whole row — a row is never left bare by

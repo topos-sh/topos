@@ -661,15 +661,23 @@ fn me_display(connectors: &LoginConnectors<'_>, session: &Session, status: &str)
         .filter(|p| !p.is_empty())
 }
 
-/// The feed line's paste-ready inverse (argv tokens, `topos`-less): the `@ws` sugar when this
-/// machine's ONE connected host resolves it — the same default-host rule every verb's sugar
-/// uses — else the full `<host>/<ws>` spelling.
-fn feed_undo(ctx: &Ctx<'_>, host: &str, workspace: &str) -> Vec<String> {
-    let reference = match super::manifest_edit::manifest_host(ctx) {
+/// The feed reference a RECEIPT spells: the `@ws` sugar when this machine's ONE connected host
+/// resolves it — the same default-host rule every verb's sugar uses — else the full `<host>/<ws>`
+/// spelling. (The manifest KEY is always the full spelling; this is display only.)
+fn feed_display_ref(ctx: &Ctx<'_>, host: &str, workspace: &str) -> String {
+    match super::manifest_edit::manifest_host(ctx) {
         Some(h) if h == host => format!("@{workspace}"),
         _ => format!("{host}/{workspace}"),
-    };
-    vec!["remove".to_owned(), "-g".to_owned(), reference]
+    }
+}
+
+/// The feed line's paste-ready inverse (argv tokens, `topos`-less).
+fn feed_undo(ctx: &Ctx<'_>, host: &str, workspace: &str) -> Vec<String> {
+    vec![
+        "remove".to_owned(),
+        "-g".to_owned(),
+        feed_display_ref(ctx, host, workspace),
+    ]
 }
 
 /// Write THIS workspace's feed line into the machine's own `topos.toml` — on this machine's
@@ -679,19 +687,44 @@ fn feed_undo(ctx: &Ctx<'_>, host: &str, workspace: &str) -> Vec<String> {
 /// deliberate statement. The file is CREATED when it does not exist (header only — login is the
 /// only automatic feed-line author); a line already standing counts as success (recorded, never
 /// rewritten); and the witness records the workspace only once the line provably stands, so a
-/// failed write retries on the next login. Best-effort: a refusal is DISCLOSED on the receipt,
+/// failed write retries on the next login. Best-effort: EVERY refusal is DISCLOSED on the receipt,
 /// never a failed login. Answers `(written_this_login, disclosure)`.
 fn record_feed_row(ctx: &Ctx<'_>, host: &str, workspace: &str) -> (bool, Option<String>) {
-    // The witness gate — an unreadable witness reads as "held" (never re-add on a guess), and
-    // is never surfaced.
-    if !crate::connected::first_connection(ctx.fs, &ctx.layout, host, workspace) {
-        return (false, None);
+    // The witness gate — a held witness is silent (nothing went wrong: this machine connected
+    // before). An UNREADABLE one reads as held too (never re-add on a guess), but that standstill
+    // outlives this login, so it is disclosed by NAME and effect; the document's content never is.
+    // (The by-hand way back is spelled only where a note is actually emitted — the silent arms
+    // must not pay for a sessions read.)
+    let add_back = || format!("topos add -g {}", feed_display_ref(ctx, host, workspace));
+    match crate::connected::first_connection(ctx.fs, &ctx.layout, host, workspace) {
+        crate::connected::Witness::First => {}
+        crate::connected::Witness::Held => return (false, None),
+        crate::connected::Witness::Unreadable => {
+            return (
+                false,
+                Some(format!(
+                    "{} could not be read — no feed line is written automatically until that \
+                     file is removed; run `{}` to take {workspace}'s whole feed",
+                    ctx.layout.connected_path().display(),
+                    add_back()
+                )),
+            );
+        }
     }
     let reference = format!("{host}/{workspace}");
     let target = super::manifest_edit::global_target(ctx);
     // The same writer lock every manifest mutation takes — this append is a read-modify-write too.
+    // Any lock failure lands here — a concurrent writer holding it, but also a lock that cannot
+    // be TAKEN at all (the locks dir unwritable) — so the line names the class, not one cause.
     let Ok(_guard) = super::manifest_edit::lock_manifest(ctx, &target.path) else {
-        return (false, None);
+        return (
+            false,
+            Some(format!(
+                "{} could not be locked — the feed line was not written; run `{}` to add it",
+                target.path.display(),
+                add_back()
+            )),
+        );
     };
     let mut editor = match super::manifest_edit::open_for_edit(ctx, &target) {
         Ok(opened) => opened.editor,
@@ -1779,12 +1812,15 @@ mod tests {
                 let text = std::fs::read_to_string(global_manifest(ctx)).unwrap();
                 assert!(text.contains("\"topos.example.com/eng\" = \"*\""), "{text}");
                 // The witness holds the workspace, keyed host + NAME — never on any receipt.
-                assert!(!crate::connected::first_connection(
-                    ctx.fs,
-                    &ctx.layout,
-                    "topos.example.com",
-                    "eng"
-                ));
+                assert_eq!(
+                    crate::connected::first_connection(
+                        ctx.fs,
+                        &ctx.layout,
+                        "topos.example.com",
+                        "eng"
+                    ),
+                    crate::connected::Witness::Held
+                );
                 // The receipt: the first-connection copy, byte-exact.
                 assert_eq!(
                     crate::render::session_login_tty(&done),
@@ -1793,6 +1829,63 @@ mod tests {
                      (undo: topos remove -g @eng)"
                 );
             });
+        });
+    }
+
+    #[test]
+    fn a_manifest_lock_that_cannot_be_taken_is_disclosed_not_silent() {
+        let home = scratch("feed-busy");
+        with_ctx(&home, |ctx| {
+            // The locks directory occupied by a FILE — the writer lock cannot be acquired at all.
+            std::fs::create_dir_all(ctx.layout.home()).unwrap();
+            std::fs::write(ctx.layout.locks_dir(), b"not a directory").unwrap();
+            let (written, note) = record_feed_row(ctx, "topos.example.com", "eng");
+            assert!(!written);
+            let note =
+                note.expect("every refusal is disclosed — a silent one is a lie of omission");
+            assert!(note.contains("topos.toml could not be locked"), "{note}");
+            assert!(
+                note.contains("run `topos add -g topos.example.com/eng`"),
+                "{note}"
+            );
+            // Nothing was written, and the witness stays unrecorded so the next login retries.
+            assert!(!ctx.fs.exists(&global_manifest(ctx)));
+            assert_eq!(
+                crate::connected::first_connection(ctx.fs, &ctx.layout, "topos.example.com", "eng"),
+                crate::connected::Witness::First
+            );
+        });
+    }
+
+    #[test]
+    fn an_unreadable_witness_discloses_the_standstill_and_never_its_content() {
+        let home = scratch("feed-witness");
+        with_ctx(&home, |ctx| {
+            // An undecipherable witness: login writes no line (it cannot tell a first connection
+            // from a deliberate deletion), and that standstill outlives this login — so it is
+            // named, with the effect and the way out.
+            std::fs::create_dir_all(ctx.layout.state_dir()).unwrap();
+            std::fs::write(
+                ctx.layout.connected_path(),
+                b"not json {\"workspaces\":[\"topos.example.com/secretteam\"]}",
+            )
+            .unwrap();
+            let (written, note) = record_feed_row(ctx, "topos.example.com", "eng");
+            assert!(!written);
+            let note = note.expect("the standstill is disclosed");
+            assert!(note.contains("connected.json could not be read"), "{note}");
+            assert!(
+                note.contains("no feed line is written automatically until that file is removed"),
+                "{note}"
+            );
+            assert!(
+                note.contains("run `topos add -g topos.example.com/eng`"),
+                "{note}"
+            );
+            // The witness's CONTENT never surfaces — only its path and the effect.
+            assert!(!note.contains("secretteam"), "{note}");
+            // And nothing was written on a guess.
+            assert!(!ctx.fs.exists(&global_manifest(ctx)));
         });
     }
 

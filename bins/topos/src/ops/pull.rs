@@ -103,6 +103,10 @@ pub(crate) struct PullOutcome {
     /// Forges that answered nothing about one or more rows THIS run — the git lane's twin of
     /// `unreachable`, and gated the same way. One entry per HOST, never per row.
     pub stale_forge: Vec<StaleForge>,
+    /// `(workspace id, channel name)` expansions that FAILED this run — the destination-receipt
+    /// gate reads it: a channel whose member list could not be read proved nothing, whatever
+    /// else the same sweep happened to reconcile.
+    pub failed_channels: HashSet<(String, String)>,
 }
 
 /// One forge host that went quiet this run, and how long its rows have gone unanswered.
@@ -208,6 +212,7 @@ impl PullOutcome {
             unreachable: Vec::new(),
             stale_forge: Vec::new(),
             forge_gone: Vec::new(),
+            failed_channels: HashSet::new(),
         }
     }
 }
@@ -539,7 +544,7 @@ pub(super) fn applied_snapshot(
             // A CONFIG-PLACED (mcp) record legitimately has NO placement dirs — its applied
             // version is the store's held current, reported whenever the delivered set names it
             // (the per-agent config states ride the same report row). That no-dirs claim is
-            // gated on the DURABLE kind marker: a skill whose harness narrowing matched no
+            // gated on the DURABLE kind marker: a skill whose `dest` narrowing matched no
             // detected agent also records an empty map, and reporting IT as held would tell the
             // fleet page this device serves bytes it placed nowhere.
             if map.placements.is_empty() {

@@ -1377,7 +1377,7 @@ pub(crate) fn record_kind(
 /// move already landed, and the next sweep reaches the same configs — failures come back as
 /// warning lines beside the per-agent states.
 ///
-/// OWNED-ONLY CONVERGENCE: the targeted run does not re-derive the row's harness narrowing (that
+/// OWNED-ONLY CONVERGENCE: the targeted run does not re-derive the row's `dest` narrowing (that
 /// lives in the scope plan the sweep resolves), so it must not fan out past what the narrowing
 /// last admitted. Two rails hold that line:
 ///

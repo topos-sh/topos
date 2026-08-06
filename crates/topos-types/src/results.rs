@@ -335,15 +335,15 @@ pub struct ListData {
     pub forge: Vec<ForgeSource>,
 }
 
-/// One scope section of a [`ListData`] — the rows one manifest (or the implicit feed recipe)
-/// delivers. **PINNED.**
+/// One scope section of a [`ListData`] — the rows one manifest delivers. **PINNED.**
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
 pub struct ListScope {
     /// `"project"` (the nearest `topos.toml` covering the working directory) or `"machine"`.
     pub scope: String,
-    /// The governing manifest file; `None` = the implicit feed recipe (no machine-wide file — one
-    /// feed row per connected workspace).
+    /// The governing manifest file; `None` = no machine-wide file — nothing is demanded
+    /// machine-wide (`topos login` writes a feed row on this machine's first connection to a
+    /// workspace).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub manifest: Option<String>,
     /// The scope's inventory rows.
@@ -883,7 +883,7 @@ pub struct McpServerSummary {
     /// folder of their own here.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bundle: Option<String>,
-    /// The agents set up here that the row reaches, after any `harness` narrowing — the honest
+    /// The agents set up here that the row reaches, after any `dest` narrowing — the honest
     /// breadth line, so nobody has to reverse-engineer which config files changed.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub agents: Vec<String>,
@@ -1748,7 +1748,9 @@ pub struct StatusData {
 pub struct StatusScope {
     /// `"project"` or `"machine"`.
     pub scope: String,
-    /// The governing manifest file; `None` = the implicit feed recipe (no machine-wide file).
+    /// The governing manifest file; `None` = no machine-wide file — nothing is demanded
+    /// machine-wide (`topos login` writes a feed row on this machine's first connection to a
+    /// workspace).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub manifest: Option<String>,
     /// Each connected workspace's REGIME on this machine (machine scope only): adopting its whole

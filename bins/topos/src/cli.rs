@@ -154,9 +154,9 @@ pub(crate) enum Command {
     },
     /// Create a `topos.toml` in this folder. The file lists the skills everyone working in this
     /// project should have — commit it, and teammates' agents pick up the same set by
-    /// themselves. With `-g`, writes your machine's own `~/.topos/topos.toml` instead, spelling
-    /// out what each connected workspace already delivers so you can edit it line by line. If
-    /// the file already exists, nothing changes.
+    /// themselves. With `-g`, creates your machine's own `~/.topos/topos.toml` instead, header
+    /// only — `topos login` writes a workspace's feed line on this machine's first connection
+    /// to it, and `topos add -g` records the rest. If the file already exists, nothing changes.
     Init {
         /// Write the machine-wide file (`~/.topos/topos.toml`) instead of this folder's.
         #[arg(long, short = 'g')]

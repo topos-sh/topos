@@ -73,8 +73,8 @@ topos list <name> --json          # ONE skill in depth: the exact row (or feed) 
 
 Rows arrive per scope (`scopes[]`, the one you stand in first) and carry source (workspace
 address = team-managed, `built-in`, an origin host, `local`) and status (`current` / `behind` /
-`draft`, plus a cause where one applies). Check before treating a skill dir as hand-authored —
-editing a team-managed skill creates a draft, not a private fork. What a view does not show is
+`draft` / `off`). Check before treating a skill dir as hand-authored — editing a team-managed
+skill creates a draft, not a private fork. What a view does not show is
 never invisible and never dumped: it rides as ONE summary carrying the exact command that
 expands it (`machine_summary` → `topos list -g`, `untracked_summary` → `topos list --untracked`,
 the skills in the agents' dirs topos does not manage yet). `topos list --remote` adds the

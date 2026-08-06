@@ -261,7 +261,7 @@
       "type": "object",
       "properties": {
         "agents": {
-          "description": "The agents set up here that the row reaches, after any `harness` narrowing — the honest\nbreadth line, so nobody has to reverse-engineer which config files changed.",
+          "description": "The agents set up here that the row reaches, after any `dest` narrowing — the honest\nbreadth line, so nobody has to reverse-engineer which config files changed.",
           "type": "array",
           "items": {
             "type": "string"

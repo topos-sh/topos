@@ -170,7 +170,7 @@ too). A file outside that set refuses, because its format must be known to edit 
 | `topos remove -g @acme` | drops the whole-workspace line and uninstalls what its feed delivered, in the same command — an edited copy stays in place, disclosed |
 | `topos publish ./folder --yes` | rewrites the `./folder` line to the workspace reference |
 | `topos init` | creates the file in this folder, from a comment-only template — the one way a project file is born |
-| `topos init -g` | writes `~/.topos/topos.toml` out in full: one feed line per workspace you are connected to |
+| `topos init -g` | creates `~/.topos/topos.toml`, header only — `topos login` writes the feed lines |
 | `topos fmt` | rewrites the layout; never the meaning |
 | `topos update` | nothing — except finishing a landed publish's rewrite, below |
 

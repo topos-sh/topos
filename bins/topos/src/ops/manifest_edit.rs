@@ -138,6 +138,23 @@ pub(crate) fn manifest_host(ctx: &Ctx<'_>) -> Option<String> {
     default_host(ctx)
 }
 
+/// The ONE workspace-QUALIFIED display rule every receipt speaks: `@<workspace>/<name>` at the
+/// machine's one connected host ([`default_host`]), the full `<host>/<workspace>/<name>`
+/// everywhere else. Written once — the add/remove receipts and the update receipt's rows all call
+/// this, so their spellings can never drift apart.
+pub(super) fn qualify_display(
+    default_host: Option<&str>,
+    host: &str,
+    workspace: &str,
+    name: &str,
+) -> String {
+    if default_host == Some(host) {
+        format!("@{workspace}/{name}")
+    } else {
+        format!("{host}/{workspace}/{name}")
+    }
+}
+
 /// Whether a token is REFERENCE-SHAPED — a `@`-led workspace sugar, or a `/`-joined key. Such a
 /// token that the grammar refuses surfaces ITS refusal; it is never retried as a filesystem path
 /// or a discovered name, whose answers would name the wrong fix.
@@ -1082,8 +1099,14 @@ pub(crate) fn remove_global(
     // hiccup just moves the byte landing to the next sweep.
     drop(guard);
     if let RemoveOutcome::Applied(data) = &mut outcome {
-        data.uninstalled =
-            eager_cleanup(ctx, connect, super::reconcile::UpdateScope::Machine, &eager);
+        data.uninstalled = eager_cleanup(
+            ctx,
+            connect,
+            &target,
+            super::reconcile::UpdateScope::Machine,
+            &eager,
+            &mut data.items,
+        );
     }
     Ok(outcome)
 }
@@ -1182,7 +1205,14 @@ pub(crate) fn remove_project(
     // The eager uninstall, after the writer lock releases — see [`remove_global`].
     drop(guard);
     if let RemoveOutcome::Applied(data) = &mut outcome {
-        data.uninstalled = eager_cleanup(ctx, connect, super::reconcile::UpdateScope::Here, &eager);
+        data.uninstalled = eager_cleanup(
+            ctx,
+            connect,
+            &target,
+            super::reconcile::UpdateScope::Here,
+            &eager,
+            &mut data.items,
+        );
     }
     Ok(Some(outcome))
 }
@@ -1610,6 +1640,18 @@ fn narrow_one(
                 selection.skill_entries(target.scope)?
             };
             let current = current_dest_roots(ctx, target, &name, mcp)?;
+            // NO recorded copies at all: nothing to subtract FROM. This arm is FEED-delivered —
+            // no row exists, so `split_dest`'s "its row was added" zero-state would be a
+            // fabrication here; the honest variant names what stands (the feed delivers it) and
+            // the whole-machine end that exists (`topos remove -g <name>` writes the `"off"`
+            // switch).
+            if current.is_empty() {
+                return Err(ClientError::SelectionRefused(format!(
+                    "'{name}' is feed-delivered and has no recorded copies in this scope yet — \
+                     run `topos update` first, or `topos remove -g {name}` to switch it off \
+                     entirely"
+                )));
+            }
             let (subtract, remaining) = split_dest(
                 ctx,
                 target,
@@ -1661,6 +1703,18 @@ fn split_dest(
     entries: &[String],
 ) -> Result<(Vec<String>, Vec<String>), ClientError> {
     let global = target.scope == ManifestScope::Global;
+    // NO recorded copies at all: there is nothing to subtract FROM, and the ordinary refusal
+    // below would trail off into an empty list. The honest zero-state names both ways out.
+    // (Reachable only from the ROW arm — the feed-delivered arm pre-checks with its own
+    // wording, since "its row was added" would be a fabrication there.)
+    if dest.is_empty() {
+        return Err(ClientError::SelectionRefused(format!(
+            "'{name}' has no recorded copies in this scope yet — its row was added but nothing \
+             has synced; run `topos update` first, or remove the whole row (`topos remove{} \
+             {name}`)",
+            if global { " -g" } else { "" },
+        )));
+    }
     for entry in entries {
         if dest.contains(entry) {
             continue;
@@ -1773,22 +1827,16 @@ fn shared_copy_dir(ctx: &Ctx<'_>, target: &EditTarget, name: &str) -> Option<Str
 /// The `@ws/<name>` sugar at the machine's one connected host, else the canonical spelling, else
 /// the bare name (a non-workspace bundle).
 fn sugar_reference(ctx: &Ctx<'_>, ws: Option<&(String, String)>, name: &str) -> String {
-    match ws {
-        Some((host, workspace)) if default_host(ctx).as_deref() == Some(host.as_str()) => {
-            format!("@{workspace}/{name}")
-        }
-        Some((host, workspace)) => format!("{host}/{workspace}/{name}"),
-        None => name.to_owned(),
-    }
+    qualified_name(ctx, ws, name)
 }
 
-/// The workspace-QUALIFIED display a destination receipt leads with.
+/// The workspace-QUALIFIED display a destination receipt leads with — [`qualify_display`], with
+/// the bare name for a non-workspace bundle.
 fn qualified_name(ctx: &Ctx<'_>, ws: Option<&(String, String)>, name: &str) -> String {
     match ws {
-        Some((host, workspace)) if default_host(ctx).as_deref() == Some(host.as_str()) => {
-            format!("@{workspace}/{name}")
+        Some((host, workspace)) => {
+            qualify_display(default_host(ctx).as_deref(), host, workspace, name)
         }
-        Some((host, workspace)) => format!("{host}/{workspace}/{name}"),
         None => name.to_owned(),
     }
 }
@@ -2576,12 +2624,16 @@ fn eager_plan(ctx: &Ctx<'_>, arms: &[Arm]) -> EagerPlan {
 /// read back off its rows: what left which destinations, and which edited copies stayed. Filtered
 /// to the dropped feeds' and edited bundles' rows, so a receipt never claims another source's
 /// movement. A NARROWED bundle's entry speaks in the subtracted dest entries and carries the
-/// remaining count, whatever the reconcile reported.
+/// remaining count — kept only when the reconcile actually reported the copies moving; when it
+/// did not (offline, a failed converge), the matching item's own line discloses the next-sweep
+/// path instead of claiming a removal that never ran.
 fn eager_cleanup(
     ctx: &Ctx<'_>,
     connect: &SessionConnect<'_>,
+    target: &EditTarget,
     scope: super::reconcile::UpdateScope,
     plan: &EagerPlan,
+    items: &mut [RemoveItem],
 ) -> Vec<topos_types::results::UninstalledBundle> {
     use topos_types::results::{PullAction, UninstalledBundle};
     if plan.feeds.is_empty() && plan.bundles.is_empty() {
@@ -2627,10 +2679,21 @@ fn eager_cleanup(
             remaining: None,
         });
     }
-    // The row-edited bundles, by name.
+    // The row-edited bundles, by name — and by the scope store's identity for the same bundle
+    // (a config-placed bundle's removal row can carry the tracked id when no delivery ever
+    // named it).
     for b in &plan.bundles {
-        let rows: Vec<&topos_types::results::PullSkill> =
-            removed.iter().filter(|r| r.skill == b.name).collect();
+        let store_id: Option<String> = scope_store_ctx(ctx, target)
+            .and_then(|sctx| super::resolve_skill(&sctx, &b.name).ok())
+            .map(|(sid, _)| sid.as_str().to_owned());
+        let rows: Vec<&topos_types::results::PullSkill> = removed
+            .iter()
+            .filter(|r| {
+                r.skill == b.name
+                    || store_id.as_deref() == Some(r.skill.as_str())
+                    || r.skill == format!("local:{}", b.name)
+            })
+            .collect();
         let mut destinations: Vec<String> = Vec::new();
         let mut kept: Vec<String> = Vec::new();
         for r in &rows {
@@ -2641,14 +2704,46 @@ fn eager_cleanup(
         kept.dedup();
         match &b.narrow {
             // The narrow's receipt speaks in the SUBTRACTED dest entries — the row's own
-            // spellings — plus what remains.
-            Some((subtract, remaining)) => out.push(UninstalledBundle {
-                name: b.display.clone(),
-                destinations: subtract.clone(),
-                kind: b.mcp.then(|| "mcp".to_owned()),
-                kept,
-                remaining: Some(*remaining),
-            }),
+            // spellings — plus what remains. GATED on the reconcile reporting this bundle's
+            // copies actually moving (a matching `Removed` row), like the whole-row arm below:
+            // offline, the shrink never ran, and `- … removed (…)` would claim a copy left that
+            // is still on disk — the row edit stays the receipt, with the next-sweep path on its
+            // own line.
+            Some((subtract, remaining)) => {
+                if rows.is_empty() {
+                    let (noun_one, noun_many) = if b.mcp {
+                        ("config file", "config files")
+                    } else {
+                        ("folder", "folders")
+                    };
+                    let keeps = if *remaining == 1 {
+                        format!("1 {noun_one}")
+                    } else {
+                        format!("{remaining} {noun_many}")
+                    };
+                    let note = format!(
+                        "the destination left its row, but its copy could not be uninstalled \
+                         this run — it leaves on the next `topos update`; the row keeps {keeps}"
+                    );
+                    if let Some(item) = items
+                        .iter_mut()
+                        .find(|it| it.kind == RemoveKind::ManifestNarrowed && it.name == b.name)
+                    {
+                        item.note = Some(match item.note.take() {
+                            Some(prev) => format!("{prev} · {note}"),
+                            None => note,
+                        });
+                    }
+                    continue;
+                }
+                out.push(UninstalledBundle {
+                    name: b.display.clone(),
+                    destinations: subtract.clone(),
+                    kind: b.mcp.then(|| "mcp".to_owned()),
+                    kept,
+                    remaining: Some(*remaining),
+                });
+            }
             None => {
                 if destinations.is_empty() && kept.is_empty() {
                     continue; // nothing moved this run — the row edit alone is the receipt
