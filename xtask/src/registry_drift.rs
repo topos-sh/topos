@@ -157,6 +157,7 @@ fn classify_global(rhs: &str) -> GlobalDir {
         Some("vibeHome") => "vibeHome",
         Some("hermesHome") => "hermesHome",
         Some("autohandHome") => "autohandHome",
+        Some("grokHome") => "grokHome",
         _ => return GlobalDir::Opaque,
     };
     let mut segments = Vec::new();

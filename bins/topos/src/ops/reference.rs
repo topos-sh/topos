@@ -37,6 +37,7 @@ use super::manifest_edit::{self as medit, EditTarget};
 use super::reconcile::{SessionConnect, SessionTransports};
 
 /// What `add <reference>` did — or, for a git source, what it WOULD do.
+#[derive(Debug)]
 pub(crate) enum AddRefOutcome {
     /// The row is written (and, where it delivers bytes, they landed). Boxed: `AddData` dwarfs
     /// the describe variant.
@@ -49,13 +50,14 @@ pub(crate) enum AddRefOutcome {
     },
 }
 
-/// `topos add <reference> [-g] [--yes]`.
+/// `topos add <reference> [-g] [-a <agent>]… [--dest <folder>]… [--yes]`.
 ///
 /// # Errors
 /// [`ClientError::SessionRequired`] for a workspace this installation is not logged into;
 /// [`ClientError::InvalidArgument`] for a reference the grammar (or the target file) refuses;
-/// [`ClientError::NotAvailable`] / [`ClientError::Plane`] from the catalog read; the remote-import
-/// family from a git source; a filesystem failure.
+/// [`ClientError::UnknownAgent`] / [`ClientError::SelectionRefused`] from the `-a`/`--dest`
+/// selection; [`ClientError::NotAvailable`] / [`ClientError::Plane`] from the catalog read; the
+/// remote-import family from a git source; a filesystem failure.
 pub(crate) fn add_reference(
     ctx: &Ctx<'_>,
     connect: &SessionConnect<'_>,
@@ -63,6 +65,7 @@ pub(crate) fn add_reference(
     raw: &str,
     global: bool,
     yes: bool,
+    selection: &super::dest_select::Selection,
 ) -> Result<AddRefOutcome, ClientError> {
     let host = medit::default_host(ctx);
     let parsed = match keys::parse_input(raw, host.as_deref()) {
@@ -79,12 +82,22 @@ pub(crate) fn add_reference(
         }
     };
     match parsed.shape.clone() {
-        KeyShape::Feed { host, workspace } => add_feed(ctx, &host, &workspace, global),
+        KeyShape::Feed { host, workspace } => {
+            // A feed row reaches every agent by nature (its value is exactly `"*"`) — a
+            // selection over it refuses whole, teaching the row that CAN carry one.
+            if !selection.is_empty() {
+                return Err(ClientError::SelectionRefused(format!(
+                    "`{raw}` is a whole feed and reaches every agent — narrow a single skill or \
+                     channel instead (`topos add -g {raw}/<skill> -a <agent>`)"
+                )));
+            }
+            add_feed(ctx, &host, &workspace, global)
+        }
         KeyShape::WorkspaceBundle { .. } | KeyShape::Channel { .. } => {
-            add_workspace(ctx, connect, &parsed, global)
+            add_workspace(ctx, connect, &parsed, global, selection)
         }
         KeyShape::RepoSet { .. } | KeyShape::RepoSkill { .. } => {
-            add_forge(ctx, git, &parsed, raw, global, yes)
+            add_forge(ctx, git, &parsed, raw, global, yes, selection)
         }
         KeyShape::LocalPath { .. } => Err(ClientError::InvalidArgument(format!(
             "`{raw}` is a folder — `topos add {raw}` adopts it in place; there is no reference to \
@@ -168,8 +181,24 @@ fn add_workspace(
     connect: &SessionConnect<'_>,
     parsed: &InputRef,
     global: bool,
+    selection: &super::dest_select::Selection,
 ) -> Result<AddRefOutcome, ClientError> {
     let resolved = resolve_workspace(ctx, connect, &parsed.shape)?;
+    // The `-a`/`--dest` selection, resolved at the scope the row lands in — config FILES for an
+    // `mcp` bundle, skills folders for everything else — BEFORE any write.
+    let scope = if global {
+        ManifestScope::Global
+    } else {
+        ManifestScope::Project
+    };
+    let mcp_kind = resolved.entry.as_deref().is_some_and(|e| e.kind == "mcp");
+    let dest_entries = if selection.is_empty() {
+        Vec::new()
+    } else if mcp_kind {
+        selection.mcp_entries(scope)?
+    } else {
+        selection.skill_entries(scope)?
+    };
     let mut data = match &resolved.entry {
         Some(e) => AddData {
             skill_id: Some(e.skill_id.clone()),
@@ -181,10 +210,20 @@ fn add_workspace(
         None => set_data(&resolved.name),
     };
     let pin = parsed.pin.clone();
-    let value = match &pin {
-        Some(p) => EntryValue::Pin(p.clone()),
-        None => EntryValue::Star,
+    let value = match (&pin, dest_entries.is_empty()) {
+        (Some(p), true) => EntryValue::Pin(p.clone()),
+        (None, true) => EntryValue::Star,
+        // A selection rides the row as its `dest` — a standing fact the reconcile plans against.
+        (pin, false) => EntryValue::Fields(EntryFields {
+            version: pin.clone(),
+            dest: Some(dest_entries.clone()),
+            ..EntryFields::default()
+        }),
     };
+    // Prove the row BEFORE anything lands (a channel cannot carry `version`; a dest entry must
+    // fit the scope's dialect).
+    crate::manifest::document::check_row(&resolved.canonical, scope, &value)
+        .map_err(|e| ClientError::InvalidArgument(e.message))?;
     // A PINNED reference does not land `current` — the catalog entry above describes the version
     // this row deliberately is NOT taking, so the receipt must not name it. The pin IS the version
     // that lands; its digest is not knowable from the index read, and an empty digest (the shape
@@ -199,9 +238,12 @@ fn add_workspace(
         let target = medit::global_target(ctx);
         // A standing `"off"` switch is the row's own inverse: adding it back DELETES the switch
         // (never a second, redundant positive row beside it). The delete is a read-modify-write,
-        // so it holds the manifest writer lock exactly as `write_row` does.
+        // so it holds the manifest writer lock exactly as `write_row` does. A dest-carrying add
+        // skips this arm — its row REPLACES the switch through the ordinary write below, which
+        // names the replaced prior honestly.
         let off_guard = medit::lock_manifest(ctx, &target.path)?;
-        if let Some(text) = medit::read_text(ctx, &target.path)?
+        if dest_entries.is_empty()
+            && let Some(text) = medit::read_text(ctx, &target.path)?
             && let Ok(mut editor) =
                 crate::manifest::document::ManifestEditor::open(&text, ManifestScope::Global)
             && editor
@@ -277,6 +319,7 @@ fn add_workspace(
                 "the feed already delivers it — this row pins what this machine takes".to_owned(),
             );
         }
+        shape_dest_receipt(ctx, &mut data, &resolved, &dest_entries, true);
         return Ok(finish_workspace(
             ctx, connect, data, &resolved, &target, true,
         ));
@@ -286,9 +329,54 @@ fn add_workspace(
         return Err(ClientError::NoManifest);
     };
     medit::write_row(ctx, &mut data, &target, &resolved.canonical, &value)?;
+    shape_dest_receipt(ctx, &mut data, &resolved, &dest_entries, false);
     Ok(finish_workspace(
         ctx, connect, data, &resolved, &target, false,
     ))
+}
+
+/// The destination-receipt shaping a `-a`/`--dest` add carries: the row's dest entries (what the
+/// receipt's `installed (…)` column speaks in), the workspace-QUALIFIED display name, and the
+/// bare-name undo — `topos remove [-g] <name>` drops the whole row, which is a fresh row's exact
+/// inverse. A replaced row keeps `write_row`'s own undo story (a wrong undo is worse than none).
+fn shape_dest_receipt(
+    ctx: &Ctx<'_>,
+    data: &mut AddData,
+    resolved: &Resolved,
+    dest_entries: &[String],
+    global: bool,
+) {
+    if dest_entries.is_empty() {
+        return;
+    }
+    data.dest = dest_entries.to_vec();
+    data.display = Some(qualified_display(
+        ctx,
+        &resolved.session.host,
+        &resolved.session.workspace_name,
+        &resolved.name,
+    ));
+    // The fresh-row undo (`remove <canonical reference>`) re-spells as the bare name — the
+    // receipt's promised inverse, byte for byte.
+    if data.undo == medit::undo_add(&resolved.canonical, global) {
+        let mut undo = vec!["topos".to_owned(), "remove".to_owned()];
+        if global {
+            undo.push("-g".to_owned());
+        }
+        undo.push(resolved.name.clone());
+        data.undo = undo;
+    }
+}
+
+/// The workspace-QUALIFIED display name a destination receipt leads with — `@<ws>/<name>` at the
+/// machine's ONE connected host, the full `<host>/<ws>/<name>` everywhere else (the same rule the
+/// update receipt's rows use).
+pub(crate) fn qualified_display(ctx: &Ctx<'_>, host: &str, workspace: &str, name: &str) -> String {
+    if medit::default_host(ctx).as_deref() == Some(host) {
+        format!("@{workspace}/{name}")
+    } else {
+        format!("{host}/{workspace}/{name}")
+    }
 }
 
 /// Deliver what the new row asks for, in the same invocation — the SAME reconcile the sweep runs,
@@ -440,6 +528,8 @@ fn set_data(name: &str) -> AddData {
         published_match: None,
         note: None,
         mcp: None,
+        dest: Vec::new(),
+        display: None,
     }
 }
 
@@ -454,6 +544,7 @@ fn add_forge(
     raw: &str,
     global: bool,
     yes: bool,
+    selection: &super::dest_select::Selection,
 ) -> Result<AddRefOutcome, ClientError> {
     let (host, owner, repo, want_skill) = match &parsed.shape {
         KeyShape::RepoSet { host, owner, repo } => {
@@ -557,21 +648,39 @@ fn add_forge(
     };
 
     // The row's VALUE: `"*"` tracks the default branch; a hex ref pins straight through; a NAMED
-    // ref is a deliberate freeze, so the RESOLVED commit is what the row records.
+    // ref is a deliberate freeze, so the RESOLVED commit is what the row records. A `-a`/`--dest`
+    // selection rides the row as its `dest` field — except on a PINNED whole-repo row, whose
+    // shape cannot legally carry both (the pin wins; the withheld selection is disclosed below).
+    let dest_entries = if selection.is_empty() {
+        Vec::new()
+    } else {
+        selection.skill_entries(target.scope)?
+    };
     let pin = match (&parsed.pin, &parsed.ref_hint) {
         (Some(p), _) => Some(p.clone()),
         (None, Some(r)) if medit::is_commit(r) => Some(r.clone()),
         (None, Some(_)) => extracted.commit.clone().filter(|c| medit::is_commit(c)),
         (None, None) => None,
     };
-    let value = match (&pin, &parsed.subdir_hint) {
-        (_, Some(sub)) => EntryValue::Fields(EntryFields {
+    let shape = crate::manifest::keys::classify_key(&reference)
+        .map_err(|e| ClientError::InvalidArgument(e.message))?;
+    let version_legal = crate::manifest::document::legal_fields(&shape).contains(&"version");
+    let dest_withheld = !dest_entries.is_empty() && pin.is_some() && !version_legal;
+    let row_dest = (!dest_entries.is_empty() && !dest_withheld).then(|| dest_entries.clone());
+    let value = match (&pin, &parsed.subdir_hint, &row_dest) {
+        (_, Some(sub), dest) => EntryValue::Fields(EntryFields {
             version: pin.clone(),
             subdir: Some(sub.clone()),
+            dest: dest.clone(),
             ..EntryFields::default()
         }),
-        (Some(p), None) => EntryValue::Pin(p.clone()),
-        (None, None) => EntryValue::Star,
+        (pin, None, Some(dest)) => EntryValue::Fields(EntryFields {
+            version: pin.clone().filter(|_| version_legal),
+            dest: Some(dest.clone()),
+            ..EntryFields::default()
+        }),
+        (Some(p), None, None) => EntryValue::Pin(p.clone()),
+        (None, None, None) => EntryValue::Star,
     };
     // PROVE THE ROW BEFORE ANYTHING LANDS: a value the file would refuse is caught here, while
     // nothing has happened yet.
@@ -584,6 +693,7 @@ fn add_forge(
     // came for, and this verb is the one place a person is present to read it.
     if !yes {
         let mut yes_argv = vec!["topos".to_owned(), "add".to_owned(), raw.to_owned()];
+        yes_argv.extend(selection.argv_tail());
         if global {
             yes_argv.push("-g".to_owned());
         }
@@ -638,21 +748,33 @@ fn add_forge(
     let mut landed: Vec<AddData> = Vec::new();
     let mut skipped: Vec<String> = Vec::new();
     let mut failed: Vec<(String, String)> = Vec::new();
+    // One landing per (member × destination slot): a `-a` slug lands through the registry's own
+    // root resolution, a literal `--dest` through its resolved root; no selection = the one
+    // default slot (exactly the old behavior).
+    let slots = selection_slots(selection, &target, &roots);
     for member in &members {
-        let opts = super::AddRemoteOpts {
-            skill: Some(member.clone()),
-            harness: None,
-            global,
-        };
-        match super::add::add_remote_fetched(&sctx, &targz, &spec, &roots, &opts) {
-            Ok(d) => landed.push(d),
-            // Already here: the row still records the demand; the receipt names what was skipped.
-            Err(ClientError::AlreadyTracked { .. } | ClientError::AlreadyTrackedName { .. }) => {
-                skipped.push(member.clone());
+        for (slot_agent, slot_root) in &slots {
+            let opts = super::AddRemoteOpts {
+                skill: Some(member.clone()),
+                harness: slot_agent.clone(),
+                dest_root: slot_root.clone(),
+                global,
+            };
+            match super::add::add_remote_fetched(&sctx, &targz, &spec, &roots, &opts) {
+                Ok(d) => landed.push(d),
+                // Already here: the row still records the demand; the receipt names what was
+                // skipped.
+                Err(
+                    ClientError::AlreadyTracked { .. } | ClientError::AlreadyTrackedName { .. },
+                ) => {
+                    if !skipped.contains(member) {
+                        skipped.push(member.clone());
+                    }
+                }
+                // A per-member failure never unwinds the batch: the receipt names the partial
+                // landing, and the recorded row is what converges it.
+                Err(e) => failed.push((member.clone(), crate::render::safe_message(&e))),
             }
-            // A per-member failure never unwinds the batch: the receipt names the partial
-            // landing, and the recorded row is what converges it.
-            Err(e) => failed.push((member.clone(), crate::render::safe_message(&e))),
         }
     }
     let mut data = match landed.first() {
@@ -700,7 +822,49 @@ fn add_forge(
             "pinned to that commit — it stays there until you change the line".to_owned(),
         );
     }
+    if dest_withheld {
+        medit::push_note(
+            &mut data,
+            format!(
+                "the `-a`/`--dest` selection is not recorded on `{reference}` — a whole-repo row \
+                 cannot carry both a commit pin and a dest list; name the skill \
+                 (`{reference}/<skill>`) to keep it"
+            ),
+        );
+    } else if !dest_entries.is_empty() {
+        data.dest = dest_entries.clone();
+    }
     Ok(AddRefOutcome::Applied(Box::new(data)))
+}
+
+/// The landing slots a `-a`/`--dest` selection fans each member over: one per `-a` slug (the
+/// registry's own root resolution inside [`super::add::add_remote_fetched`]) and one per literal
+/// `--dest` root (resolved here — `~/`/absolute in the machine scope, project-relative against
+/// the checkout, where the import's containment rail re-proves it). Empty selection = the one
+/// default slot.
+fn selection_slots(
+    selection: &super::dest_select::Selection,
+    target: &EditTarget,
+    roots: &super::DiscoveryRoots,
+) -> Vec<(Option<String>, Option<std::path::PathBuf>)> {
+    if selection.is_empty() {
+        return vec![(None, None)];
+    }
+    let mut out: Vec<(Option<String>, Option<std::path::PathBuf>)> = Vec::new();
+    for slug in &selection.agents {
+        out.push((Some(slug.clone()), None));
+    }
+    for entry in &selection.dests {
+        let root = match target.scope {
+            ManifestScope::Project => target.dir.join(entry.trim_start_matches("./")),
+            ManifestScope::Global => match entry.strip_prefix("~/") {
+                Some(rest) => roots.home.join(rest),
+                None => std::path::PathBuf::from(entry),
+            },
+        };
+        out.push((None, Some(root)));
+    }
+    out
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -739,6 +903,7 @@ pub(crate) fn add_forge_selected(
     source: &str,
     skills: &[String],
     agents: &[String],
+    dests: &[String],
     global: bool,
     yes: bool,
 ) -> Result<AddManyOutcome, ClientError> {
@@ -788,7 +953,13 @@ pub(crate) fn add_forge_selected(
     } else {
         skills.iter().cloned().map(Some).collect()
     };
-    // `-a '*'` → every harness DETECTED here with a skills dir at the chosen scope.
+    // `-a '*'` → every harness DETECTED here with a skills dir at the chosen scope. Named slugs
+    // (and the literal `--dest` folders) validate UP FRONT — an unknown agent refuses before a
+    // byte moves, with the registry's own list.
+    let named: Vec<String> = agents.iter().filter(|a| *a != "*").cloned().collect();
+    super::dest_select::Selection::new(&named, dests).skill_entries(target.scope)?;
+    let literal_entries =
+        super::dest_select::Selection::new(&[], dests).skill_entries(target.scope)?;
     let agent_opts: Vec<Option<String>> = if agents.iter().any(|a| a == "*") {
         let detected = detected_harness_slugs(&roots, global);
         if detected.is_empty() {
@@ -804,6 +975,25 @@ pub(crate) fn add_forge_selected(
     } else {
         agents.iter().cloned().map(Some).collect()
     };
+    // The DESTINATION slots each selected member lands through: the agent slots (the default one
+    // when nothing narrows the agents and no literal folder does either), plus one per literal
+    // `--dest` root.
+    let mut slot_opts: Vec<(Option<String>, Option<std::path::PathBuf>)> = Vec::new();
+    if agents.is_empty() && !dests.is_empty() {
+        // Only literal folders were named — no default-agent slot rides along.
+    } else {
+        slot_opts.extend(agent_opts.iter().cloned().map(|a| (a, None)));
+    }
+    for entry in dests {
+        let root = match target.scope {
+            ManifestScope::Project => target.dir.join(entry.trim_start_matches("./")),
+            ManifestScope::Global => match entry.strip_prefix("~/") {
+                Some(rest) => roots.home.join(rest),
+                None => std::path::PathBuf::from(entry),
+            },
+        };
+        slot_opts.push((None, Some(root)));
+    }
 
     // DESCRIBE FIRST — identical to the bare reference arm's, selectors and all: what the source
     // holds, and the exact file the rows land in.
@@ -821,17 +1011,22 @@ pub(crate) fn add_forge_selected(
             yes_argv.push("-a".to_owned());
             yes_argv.push(a.clone());
         }
+        for d in dests {
+            yes_argv.push("--dest".to_owned());
+            yes_argv.push(d.clone());
+        }
         if global {
             yes_argv.push("-g".to_owned());
         }
         yes_argv.push("--yes".to_owned());
-        let placed: Vec<String> = agent_opts
-            .iter()
-            .map(|a| {
+        let mut placed: Vec<String> = Vec::new();
+        if !agents.is_empty() || dests.is_empty() {
+            placed.extend(agent_opts.iter().map(|a| {
                 a.clone()
                     .unwrap_or_else(|| "the default agent dir".to_owned())
-            })
-            .collect();
+            }));
+        }
+        placed.extend(literal_entries.iter().cloned());
         return Ok(AddManyOutcome::Described {
             data: Box::new(AddDescribeData {
                 source: origin_label,
@@ -853,23 +1048,38 @@ pub(crate) fn add_forge_selected(
     if target.scope == ManifestScope::Project {
         crate::sidecar::ensure_project_store(ctx.fs, &target.dir)?;
     }
-    // The harness SELECTION the rows carry: the slugs this invocation aimed at (a `*` fan-out is
-    // the detected set, spelled out — a row must say what it means, not re-resolve `*` later).
+    // The SELECTION the rows carry: the slugs this invocation aimed at (a `*` fan-out is the
+    // detected set, spelled out — a row must say what it means, not re-resolve `*` later),
+    // recorded as their scope-correct dest dirs, plus the literal `--dest` folders.
     let chosen: Vec<String> = agent_opts.iter().flatten().cloned().collect();
-    let mut out = Vec::with_capacity(skill_opts.len() * agent_opts.len());
+    let mut dest = medit::dest_for_selected_agents(&chosen, target.scope);
+    if agents.is_empty() && !dests.is_empty() {
+        // Only literal folders were named — the row freezes to exactly those.
+        dest.clear();
+    }
+    for entry in &literal_entries {
+        if !dest.contains(entry) {
+            dest.push(entry.clone());
+        }
+    }
+    let mut out = Vec::with_capacity(skill_opts.len() * slot_opts.len());
     for s in &skill_opts {
-        for a in &agent_opts {
+        for (slot_agent, slot_root) in &slot_opts {
             let opts = super::AddRemoteOpts {
                 skill: s.clone(),
-                harness: a.clone(),
+                harness: slot_agent.clone(),
+                dest_root: slot_root.clone(),
                 global,
             };
             let mut data = super::add::add_remote_fetched(&sctx, &targz, &spec, &roots, &opts)?;
-            // Each landed (skill × harness) records its manifest line like the single-select
-            // path — carrying the WHOLE harness selection (so the second combination of one
-            // skill rewrites the identical row rather than narrowing it) and the same dedup
-            // courtesy, judged against ITS resolved subdir.
-            medit::note_added_remote(ctx, &mut data, &target, &chosen)?;
+            // Each landed (skill × destination) records its manifest line like the single-select
+            // path — carrying the WHOLE selection (so the second combination of one skill
+            // rewrites the identical row rather than narrowing it) and the same dedup courtesy,
+            // judged against ITS resolved subdir.
+            medit::note_added_remote(ctx, &mut data, &target, &dest)?;
+            if !dest.is_empty() {
+                data.dest = dest.clone();
+            }
             let imported_subdir = data.origin.as_ref().and_then(|o| o.subdir.clone());
             data.governed_copy = super::add::governed_copy_suggestion(
                 ctx,

@@ -92,19 +92,17 @@ copy per detected agent that doesn't.
 project directory otherwise (`.claude/skills`, `.factory/skills`, …), and
 `<project>/.claude/skills` as the default when nothing is detected.
 
-A committed `topos.toml` can override that with one project-relative directory instead — per entry
-or for every skill the file asks for:
+A committed `topos.toml` can freeze that per entry instead — `dest` names the exact
+project-relative folders a line delivers into, and detection stops mattering for it:
 
 ```toml title="topos.toml"
 [bundles]
-"topos.sh/acme/code-review" = { version = "*", path = "prompts/skills" }
-
-[defaults.skill]
-path = ".agents/skills"
+"topos.sh/acme/code-review" = { version = "*", dest = ["prompts/skills"] }
 ```
 
-The value must stay inside the checkout: a file everyone commits can never aim managed bytes
-somewhere else on a contributor's disk, and one that tries is ignored with a warning.
+Each entry must stay inside the checkout — relative, no `..`, not absolute — because a file
+everyone commits can never aim managed bytes somewhere else on a contributor's disk; one that
+tries refuses at load, naming the entry and the rule.
 
 Delivered project folders keep **themselves** out of commits — each carries a one-line
 `.gitignore`, the way `node_modules` does — and Topos's bookkeeping in `<project>/.topos/` ignores
@@ -201,18 +199,21 @@ resolve under `$HOME`; project-scope directories are relative to the directory y
 | Dexto | `dexto` | `~/.agents/skills` | `.agents/skills` | delivery |
 | Firebender | `firebender` | `~/.firebender/skills` | `.agents/skills` | delivery |
 | ForgeCode | `forgecode` | `~/.forge/skills` | `.forge/skills` | delivery |
+| Grok Build | `grok` | `~/.grok/skills` † | `.grok/skills` | delivery |
 | IBM Bob | `bob` | `~/.bob/skills` | `.bob/skills` | delivery |
 | iFlow CLI | `iflow-cli` | `~/.iflow/skills` | `.iflow/skills` | delivery |
 | inference.sh | `inference-sh` | `~/.inferencesh/skills` | `.inferencesh/skills` | delivery |
 | Jazz | `jazz` | `~/.jazz/skills` | `.jazz/skills` | delivery |
 | Junie | `junie` | `~/.junie/skills` | `.junie/skills` | delivery |
 | Kilo Code | `kilo` | `~/.kilocode/skills` | `.kilocode/skills` | delivery |
+| Kimchi | `kimchi` | `~/.config/kimchi/harness/skills` | `.kimchi/skills` | delivery |
 | Kimi Code CLI | `kimi-code-cli` | `~/.agents/skills` | `.agents/skills` | delivery |
 | Kiro CLI | `kiro-cli` | `~/.kiro/skills` | `.kiro/skills` | delivery |
 | Kode | `kode` | `~/.kode/skills` | `.kode/skills` | delivery |
 | Lingma | `lingma` | `~/.lingma/skills` | `.lingma/skills` | delivery |
 | Loaf | `loaf` | `~/.agents/skills` | `.agents/skills` | delivery |
 | MCPJam | `mcpjam` | `~/.mcpjam/skills` | `.mcpjam/skills` | delivery |
+| MiniMax Code | `minimax-code` | `~/.minimax/skills` | `.minimax/skills` | delivery |
 | Mistral Vibe | `mistral-vibe` | `~/.vibe/skills` † | `.vibe/skills` | delivery |
 | Moxby | `moxby` | `~/.moxby/skills` | `.moxby/skills` | delivery |
 | Mux | `mux` | `~/.mux/skills` | `.mux/skills` | delivery |
@@ -246,7 +247,7 @@ resolve under `$HOME`; project-scope directories are relative to the directory y
 † The directory's root is overridable by environment variable (the default shown applies
 when it is unset): `$CLAUDE_CONFIG_DIR` (Claude Code), `$HERMES_HOME` (Hermes Agent),
 `$CODEX_HOME` (Codex), `$VIBE_HOME` (Mistral Vibe), `$AUTOHAND_HOME` (Autohand Code CLI),
-and `$XDG_CONFIG_HOME` for the `~/.config`-based agents.
+`$GROK_HOME` (Grok Build), and `$XDG_CONFIG_HOME` for the `~/.config`-based agents.
 
 ‡ OpenClaw also probes `~/.clawdbot/skills` and `~/.moltbot/skills`.
 

@@ -289,6 +289,9 @@ fn canonical_or(p: &Path) -> PathBuf {
 // ---------------------------------------------------------------------------------------------
 
 fn corrupt(path: &Path, e: &ManifestError) -> ClientError {
+    if e.migration {
+        return ClientError::ManifestMigration(format!("{}: {e}", path.display()));
+    }
     ClientError::Corrupt(format!("{}: {e}", path.display()))
 }
 
@@ -588,6 +591,22 @@ pub(crate) fn note_added_path_in(
     note_added_path_kind_in(ctx, data, target, source, None)
 }
 
+/// [`note_added_path_in`] carrying a `-a`/`--dest` SELECTION: the row becomes
+/// `{ dest = [...] }`, so the adopted folder's copies are frozen to exactly those destinations —
+/// the adopted source dir itself stays the user's own and is never retired by the freeze.
+///
+/// # Errors
+/// As [`write_row`].
+pub(crate) fn note_added_path_dest_in(
+    ctx: &Ctx<'_>,
+    data: &mut AddData,
+    target: &EditTarget,
+    source: &Path,
+    dest: &[String],
+) -> Result<(), ClientError> {
+    note_added_path_row_in(ctx, data, target, source, None, Some(dest))
+}
+
 /// [`note_added_path_in`] carrying a BUNDLE KIND. `kind` is `None` for the ordinary skill adopt
 /// (the row's value stays the bare `"*"`, exactly as before) and `Some("mcp")` for an MCP server
 /// folder, whose row becomes the inline table `{ kind = "mcp" }` — the one place the manifest
@@ -604,6 +623,38 @@ pub(crate) fn note_added_path_kind_in(
     target: &EditTarget,
     source: &Path,
     kind: Option<&str>,
+) -> Result<(), ClientError> {
+    note_added_path_row_in(ctx, data, target, source, kind, None)
+}
+
+/// [`note_added_path_kind_in`] carrying a `-a`/`--dest` selection too — the MCP door's row write
+/// (`{ kind = "mcp", dest = [...] }`), so the converge narrows to exactly the named config files.
+///
+/// # Errors
+/// As [`write_row`].
+pub(crate) fn note_added_path_kind_dest_in(
+    ctx: &Ctx<'_>,
+    data: &mut AddData,
+    target: &EditTarget,
+    source: &Path,
+    kind: Option<&str>,
+    dest: &[String],
+) -> Result<(), ClientError> {
+    let dest = (!dest.is_empty()).then_some(dest);
+    note_added_path_row_in(ctx, data, target, source, kind, dest)
+}
+
+/// The shared core of the path-row writers: kind and/or dest onto ONE row at ONE key.
+///
+/// # Errors
+/// As [`write_row`].
+fn note_added_path_row_in(
+    ctx: &Ctx<'_>,
+    data: &mut AddData,
+    target: &EditTarget,
+    source: &Path,
+    kind: Option<&str>,
+    dest: Option<&[String]>,
 ) -> Result<(), ClientError> {
     // Canonicalize best-effort (symlinks resolve; a vanished dir keeps the typed spelling).
     let source_abs = source.canonicalize().unwrap_or_else(|_| {
@@ -626,10 +677,11 @@ pub(crate) fn note_added_path_kind_in(
     } else {
         source_abs.display().to_string()
     };
-    let value = match kind {
-        None => EntryValue::Star,
-        Some(k) => EntryValue::Fields(crate::manifest::document::EntryFields {
-            kind: Some(k.to_owned()),
+    let value = match (kind, dest) {
+        (None, None) => EntryValue::Star,
+        (kind, dest) => EntryValue::Fields(crate::manifest::document::EntryFields {
+            kind: kind.map(str::to_owned),
+            dest: dest.map(<[String]>::to_vec),
             ..crate::manifest::document::EntryFields::default()
         }),
     };
@@ -711,11 +763,11 @@ pub(super) fn is_commit(s: &str) -> bool {
 /// DEFAULT BRANCH unless the input carried an explicit ref: only a deliberately-referenced
 /// commit pins (a freeze the person asked for).
 ///
-/// `harness` carries the import's `-a` SELECTION onto the row. A selector decides where the bytes
-/// land, and a decision only this invocation remembers is not a decision at all — the next
-/// `update` would re-land the copy in the default agent dir. Written as the `harness` field (legal
-/// on every forge shape), it is a standing fact the reconcile's forge arms plan against; an empty
-/// slice records the plain value exactly as before.
+/// `dest` carries the import's `-a` SELECTION onto the row, as destination dirs. A selector
+/// decides where the bytes land, and a decision only this invocation remembers is not a
+/// decision at all — the next `update` would re-land the copy in the default agent dir. Written
+/// as the `dest` field (legal on every forge shape), it is a standing fact the reconcile's
+/// forge arms plan against; an empty slice records the plain value exactly as before.
 ///
 /// # Errors
 /// As [`write_row`].
@@ -723,7 +775,7 @@ pub(crate) fn note_added_remote(
     ctx: &Ctx<'_>,
     data: &mut AddData,
     target: &EditTarget,
-    harness: &[String],
+    dest: &[String],
 ) -> Result<(), ClientError> {
     let Some(origin) = data.origin.clone() else {
         return Ok(());
@@ -743,10 +795,10 @@ pub(crate) fn note_added_remote(
         (Some(_), Some(c)) if is_commit(c) => Some(c.as_str()),
         _ => None,
     };
-    if harness.is_empty() {
+    if dest.is_empty() {
         return note_added_in(ctx, data, target, &reference, pin);
     }
-    // The fields must be LEGAL for the reference's own shape — a whole-repo row takes `harness`
+    // The fields must be LEGAL for the reference's own shape — a whole-repo row takes `dest`
     // and nothing else, so a pinned repo-root import has no spelling that carries both. The PIN
     // wins there (it decides which bytes; the selection only decides where they sit) and the
     // receipt says the selection could not be recorded, rather than a row the file would refuse
@@ -760,7 +812,7 @@ pub(crate) fn note_added_remote(
             data,
             format!(
                 "the `-a` selection is not recorded on `{reference}` — a whole-repo row cannot \
-                 carry both a commit pin and a harness list; name the skill (`{reference}/<skill>`) \
+                 carry both a commit pin and a dest list; name the skill (`{reference}/<skill>`) \
                  to keep it"
             ),
         );
@@ -768,10 +820,26 @@ pub(crate) fn note_added_remote(
     }
     let value = EntryValue::Fields(crate::manifest::document::EntryFields {
         version: pin.filter(|_| version_legal).map(str::to_owned),
-        harness: Some(harness.to_vec()),
+        dest: Some(dest.to_vec()),
         ..Default::default()
     });
     write_row(ctx, data, target, &reference, &value)
+}
+
+/// The `dest` spellings a `-a` selection records for its slugs — the scope-correct skills-root
+/// DEFAULT spelling per slug (`~/`-abbreviated in the global file, the relative project dir in
+/// a project file), deduped in selection order. A slug with no dir at this scope contributes
+/// nothing (the import itself already refused or resolved it).
+pub(crate) fn dest_for_selected_agents(slugs: &[String], scope: ManifestScope) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for slug in slugs {
+        if let Some(d) = crate::manifest::dest::skills_dest_spelling(slug, scope)
+            && !out.contains(&d)
+        {
+            out.push(d);
+        }
+    }
+    out
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -882,12 +950,37 @@ enum Arm {
         /// so the split leaves those rows untouched and writes new rows only for the rest.
         keeps_own: Vec<String>,
     },
+    /// A `-a`/`--dest` NARROWING: subtract the named destination(s) from the row's `dest` and
+    /// retire that copy — the row survives with the rest. A row that named NO destinations first
+    /// materializes its CURRENT resolved set (the only reading under which subtraction means
+    /// anything), so the result is a frozen row of the remaining destinations.
+    DestNarrow {
+        /// The standing row (`None` = a feed-delivered bundle with no row — the narrow writes a
+        /// fresh dest-frozen row).
+        row: Option<PlanRow>,
+        reference: String,
+        name: String,
+        /// `(host, workspace)` for a workspace bundle — the receipt's qualification + the undo's
+        /// `@ws` sugar.
+        workspace: Option<(String, String)>,
+        /// The row's value AFTER the subtraction.
+        value: EntryValue,
+        /// The destination entries leaving (dest spellings — what the receipt names).
+        subtract: Vec<String>,
+        /// How many destinations the row still names.
+        remaining: usize,
+        /// Whether the row named no `dest` before (the materialize disclosure).
+        materialized: bool,
+        mcp: bool,
+    },
 }
 
 impl Arm {
     fn name(&self) -> String {
         match self {
-            Arm::RowDrop { name, .. } | Arm::OffWrite { name, .. } => name.clone(),
+            Arm::RowDrop { name, .. }
+            | Arm::OffWrite { name, .. }
+            | Arm::DestNarrow { name, .. } => name.clone(),
             Arm::FeedDrop { workspace, .. } => workspace.clone(),
             Arm::SetSplit { names, .. } => names.join(", "),
         }
@@ -944,18 +1037,21 @@ fn coalesce_set_splits(arms: Vec<Arm>) -> Vec<Arm> {
 }
 
 /// `topos remove -g <token>…` — edit THIS MACHINE's global file: drop a row, drop a feed row, or
-/// write the `"off"` switch for something the feed delivers. Never touches the server: what a
-/// workspace gives a person is managed on the web.
+/// write the `"off"` switch for something the feed delivers — or, with `-a`/`--dest`, subtract
+/// just those destinations from a row. Never touches the server: what a workspace gives a person
+/// is managed on the web.
 ///
 /// # Errors
 /// [`ClientError::InvalidArgument`] for a token the file (and the feed) do not carry — with the
-/// cross-scope hint when the project manifest does; a filesystem failure.
+/// cross-scope hint when the project manifest does; the narrowing refusals
+/// ([`ClientError::SharedCopyOnly`] / [`ClientError::SelectionRefused`]); a filesystem failure.
 pub(crate) fn remove_global(
     ctx: &Ctx<'_>,
     connect: &SessionConnect<'_>,
     tokens: &[String],
     via: Option<&str>,
     yes: bool,
+    selection: &super::dest_select::Selection,
 ) -> Result<RemoveOutcome, ClientError> {
     let target = global_target(ctx);
     // THE LOCK COMES FIRST — before the read that decides the edit, not just around the write.
@@ -972,25 +1068,22 @@ pub(crate) fn remove_global(
             None => return Err(miss(ctx, token, true)?),
         }
     }
-    let mut outcome = apply_arms(ctx, &target, tokens, resolved, via, yes, true)?;
-    // A FEED-LINE drop uninstalls EAGERLY: with the row durably gone, the same machine-scope
-    // update/cleanup the sweep runs converges NOW, so the copies the feed delivered leave in this
-    // invocation (edited copies kept in place) and the receipt says what actually moved. AFTER
-    // the writer lock releases — the reconcile is a reader of this file and may itself take the
-    // manifest lock (the pending-governance converge), which would deadlock a still-held guard.
-    // Best-effort by contract: the row edit already landed, so a transport hiccup just moves the
-    // byte landing to the next sweep.
+    if !selection.is_empty() {
+        resolved = narrow_arms(ctx, &target, resolved, selection)?;
+    }
+    let eager = eager_plan(ctx, &resolved);
+    let mut outcome = apply_arms(ctx, &target, tokens, resolved, via, selection, yes, true)?;
+    // Row edits uninstall EAGERLY: with the row durably changed, the same machine-scope
+    // update/cleanup the sweep runs converges NOW, so the copies the edit no longer demands
+    // leave in this invocation (edited copies kept in place) and the receipt says what actually
+    // moved. AFTER the writer lock releases — the reconcile is a reader of this file and may
+    // itself take the manifest lock (the pending-governance converge), which would deadlock a
+    // still-held guard. Best-effort by contract: the row edit already landed, so a transport
+    // hiccup just moves the byte landing to the next sweep.
     drop(guard);
     if let RemoveOutcome::Applied(data) = &mut outcome {
-        let feed_workspaces: Vec<String> = data
-            .items
-            .iter()
-            .filter(|i| i.kind == RemoveKind::FeedRemoved)
-            .map(|i| i.name.clone())
-            .collect();
-        if !feed_workspaces.is_empty() {
-            data.uninstalled = eager_feed_cleanup(ctx, connect, &feed_workspaces);
-        }
+        data.uninstalled =
+            eager_cleanup(ctx, connect, super::reconcile::UpdateScope::Machine, &eager);
     }
     Ok(outcome)
 }
@@ -1048,6 +1141,7 @@ pub(crate) fn remove_project(
     tokens: &[String],
     via: Option<&str>,
     yes: bool,
+    selection: &super::dest_select::Selection,
 ) -> Result<Option<RemoveOutcome>, ClientError> {
     let Some(target) = project_target(ctx)? else {
         // No file here to edit. A ROW-SPELLED token (a reference, or a path) only ever means a
@@ -1060,7 +1154,7 @@ pub(crate) fn remove_project(
         return Ok(None);
     };
     // Held across the resolve AND the apply — see [`remove_global`].
-    let _guard = lock_manifest(ctx, &target.path)?;
+    let guard = lock_manifest(ctx, &target.path)?;
     let arms = resolve_arms(ctx, connect, &target, tokens, via)?;
     if arms.iter().all(Option::is_none) {
         // Nothing here claims any token — but a GLOBAL row of that name is a near-miss worth
@@ -1079,8 +1173,18 @@ pub(crate) fn remove_project(
                 .into(),
         ));
     }
-    let resolved: Vec<Arm> = arms.into_iter().flatten().collect();
-    apply_arms(ctx, &target, tokens, resolved, via, yes, false).map(Some)
+    let mut resolved: Vec<Arm> = arms.into_iter().flatten().collect();
+    if !selection.is_empty() {
+        resolved = narrow_arms(ctx, &target, resolved, selection)?;
+    }
+    let eager = eager_plan(ctx, &resolved);
+    let mut outcome = apply_arms(ctx, &target, tokens, resolved, via, selection, yes, false)?;
+    // The eager uninstall, after the writer lock releases — see [`remove_global`].
+    drop(guard);
+    if let RemoveOutcome::Applied(data) = &mut outcome {
+        data.uninstalled = eager_cleanup(ctx, connect, super::reconcile::UpdateScope::Here, &eager);
+    }
+    Ok(Some(outcome))
 }
 
 /// Resolve every token against the target scope (all-or-none is the caller's discipline).
@@ -1379,6 +1483,439 @@ fn resolve_via(
     }))
 }
 
+// ---------------------------------------------------------------------------------------------
+// The `-a`/`--dest` NARROWING — subtraction over a row's destination set
+// ---------------------------------------------------------------------------------------------
+
+/// Rewrite each resolved arm into its NARROWED form (see [`Arm::DestNarrow`]): the selection's
+/// entries are subtracted from the row's `dest` — materialized first from the CURRENT resolved
+/// destination set when the row names none. Removing the last destination keeps the arm's
+/// whole-removal shape (a row is never left bare by subtraction — bare means default and would
+/// resurrect copies).
+///
+/// # Errors
+/// [`ClientError::SharedCopyOnly`] when the only copy is a shared folder several agents read;
+/// [`ClientError::SelectionRefused`] for an arm subtraction cannot narrow (a feed line, a
+/// channel/repo member) or a destination the bundle has no copy at; the selection's own
+/// resolution errors.
+fn narrow_arms(
+    ctx: &Ctx<'_>,
+    target: &EditTarget,
+    arms: Vec<Arm>,
+    selection: &super::dest_select::Selection,
+) -> Result<Vec<Arm>, ClientError> {
+    let mut out = Vec::with_capacity(arms.len());
+    for arm in arms {
+        out.push(narrow_one(ctx, target, arm, selection)?);
+    }
+    Ok(out)
+}
+
+fn narrow_one(
+    ctx: &Ctx<'_>,
+    target: &EditTarget,
+    arm: Arm,
+    selection: &super::dest_select::Selection,
+) -> Result<Arm, ClientError> {
+    let global = target.scope == ManifestScope::Global;
+    match arm {
+        Arm::FeedDrop { reference, .. } => Err(ClientError::SelectionRefused(format!(
+            "`{reference}` is a whole feed and reaches every agent — narrow a single skill \
+             instead (`topos remove -g <skill> -a <agent>`)"
+        ))),
+        Arm::SetSplit { set, names, .. } => Err(ClientError::SelectionRefused(format!(
+            "'{}' comes from the {} line `{}` — a line's members cannot be narrowed per-agent; \
+             give the member its own row first (`topos add{} <member-reference> -a <agent>`)",
+            names.join("', '"),
+            set.shape.noun(),
+            set.reference,
+            if global { " -g" } else { "" },
+        ))),
+        Arm::RowDrop { row, name } => {
+            let ws = match &row.shape {
+                KeyShape::WorkspaceBundle {
+                    host, workspace, ..
+                } => Some((host.clone(), workspace.clone())),
+                _ => None,
+            };
+            let mcp = row_is_mcp(ctx, &row, ws.as_ref(), &name);
+            let entries = if mcp {
+                selection.mcp_entries(target.scope)?
+            } else {
+                selection.skill_entries(target.scope)?
+            };
+            let (row_dest, materialized) = match row.fields().dest {
+                Some(d) => (d, false),
+                None => (current_dest_roots(ctx, target, &name, mcp)?, true),
+            };
+            let (subtract, remaining) = split_dest(
+                ctx,
+                target,
+                selection,
+                &name,
+                ws.as_ref(),
+                &row_dest,
+                &entries,
+            )?;
+            if remaining.is_empty() {
+                // The last destination: the whole row goes (never a bare row).
+                return Ok(Arm::RowDrop { row, name });
+            }
+            let mut fields = row.fields();
+            fields.dest = Some(remaining.clone());
+            // A value-level pin survives the narrow as the `version` field where its shape
+            // carries one; a whole-repo pin cannot ride beside `dest` and is dropped, disclosed
+            // by the ordinary write path refusing — kept simple: the pin is preserved only where
+            // legal.
+            if let EntryValue::Pin(p) = &row.value
+                && crate::manifest::document::legal_fields(&row.shape).contains(&"version")
+            {
+                fields.version = Some(p.clone());
+            }
+            let value = EntryValue::Fields(fields);
+            crate::manifest::document::check_row(&row.reference, target.scope, &value)
+                .map_err(|e| ClientError::InvalidArgument(e.message))?;
+            Ok(Arm::DestNarrow {
+                reference: row.reference.clone(),
+                row: Some(row),
+                name,
+                workspace: ws,
+                value,
+                subtract,
+                remaining: remaining.len(),
+                materialized,
+                mcp,
+            })
+        }
+        Arm::OffWrite {
+            reference,
+            name,
+            workspace,
+        } => {
+            // Feed-delivered, no row: the narrow MATERIALIZES the current resolved set into a
+            // fresh dest-frozen row minus the subtracted one. Subtracting the only destination
+            // keeps the `"off"` switch — the honest whole-machine end.
+            let host = keys::classify_key(&reference)
+                .ok()
+                .and_then(|s| match s {
+                    KeyShape::WorkspaceBundle { host, .. } => Some(host),
+                    _ => None,
+                })
+                .unwrap_or_default();
+            let ws = Some((host, workspace.clone()));
+            let mcp = cached_kind_is_mcp(ctx, ws.as_ref(), &name);
+            let entries = if mcp {
+                selection.mcp_entries(target.scope)?
+            } else {
+                selection.skill_entries(target.scope)?
+            };
+            let current = current_dest_roots(ctx, target, &name, mcp)?;
+            let (subtract, remaining) = split_dest(
+                ctx,
+                target,
+                selection,
+                &name,
+                ws.as_ref(),
+                &current,
+                &entries,
+            )?;
+            if remaining.is_empty() {
+                return Ok(Arm::OffWrite {
+                    reference,
+                    name,
+                    workspace,
+                });
+            }
+            let value = EntryValue::Fields(crate::manifest::document::EntryFields {
+                dest: Some(remaining.clone()),
+                ..Default::default()
+            });
+            crate::manifest::document::check_row(&reference, target.scope, &value)
+                .map_err(|e| ClientError::InvalidArgument(e.message))?;
+            Ok(Arm::DestNarrow {
+                row: None,
+                reference,
+                name,
+                workspace: ws,
+                value,
+                subtract,
+                remaining: remaining.len(),
+                materialized: true,
+                mcp,
+            })
+        }
+        narrowed @ Arm::DestNarrow { .. } => Ok(narrowed),
+    }
+}
+
+/// Split a destination set into `(subtract, remaining)` against the selection's entries — every
+/// selected entry must name a destination the set holds, or the refusal says why (the
+/// shared-copy answer when the coverage table explains the miss).
+fn split_dest(
+    ctx: &Ctx<'_>,
+    target: &EditTarget,
+    selection: &super::dest_select::Selection,
+    name: &str,
+    ws: Option<&(String, String)>,
+    dest: &[String],
+    entries: &[String],
+) -> Result<(Vec<String>, Vec<String>), ClientError> {
+    let global = target.scope == ManifestScope::Global;
+    for entry in entries {
+        if dest.contains(entry) {
+            continue;
+        }
+        // The miss: a shared folder several agents read may be the reason — the honest refusal
+        // names it and the two ways out.
+        let shared_root = match target.scope {
+            ManifestScope::Global => "~/.agents/skills".to_owned(),
+            ManifestScope::Project => ".agents/skills".to_owned(),
+        };
+        let removed_slug = selection
+            .agents
+            .iter()
+            .find(|slug| {
+                crate::manifest::dest::skills_dest_spelling(slug, target.scope).as_deref()
+                    == Some(entry.as_str())
+            })
+            .cloned();
+        if dest.contains(&shared_root)
+            && let Some(slug) = &removed_slug
+            && topos_harness::coverage::shared_dir_support(slug).covered()
+        {
+            return Err(shared_copy_refusal(ctx, target, name, slug, ws, global));
+        }
+        return Err(ClientError::SelectionRefused(format!(
+            "'{name}' has no copy at {entry} — its destinations here are {}",
+            crate::manifest::dest::quoted_list(dest)
+        )));
+    }
+    let subtract: Vec<String> = dest
+        .iter()
+        .filter(|d| entries.contains(d))
+        .cloned()
+        .collect();
+    let remaining: Vec<String> = dest
+        .iter()
+        .filter(|d| !entries.contains(d))
+        .cloned()
+        .collect();
+    Ok((subtract, remaining))
+}
+
+/// The [`ClientError::SharedCopyOnly`] refusal, fully spelled: the one shared copy, the
+/// whole-removal command, and the per-agent re-add for the OTHER covered agents.
+fn shared_copy_refusal(
+    ctx: &Ctx<'_>,
+    target: &EditTarget,
+    name: &str,
+    removed_slug: &str,
+    ws: Option<&(String, String)>,
+    global: bool,
+) -> ClientError {
+    // The shared COPY dir (the placement itself, not its root), best-effort from the record.
+    let copy = shared_copy_dir(ctx, target, name).unwrap_or_else(|| match target.scope {
+        ManifestScope::Global => format!("~/.agents/skills/{name}"),
+        ManifestScope::Project => format!(".agents/skills/{name}"),
+    });
+    let mut remove_argv = vec!["topos".to_owned(), "remove".to_owned()];
+    if global {
+        remove_argv.push("-g".to_owned());
+    }
+    remove_argv.push(name.to_owned());
+    let mut readd_argv = vec!["topos".to_owned(), "add".to_owned()];
+    if global {
+        readd_argv.push("-g".to_owned());
+    }
+    readd_argv.push(sugar_reference(ctx, ws, name));
+    // The agents that read the shared copy per the coverage table, minus the one being removed —
+    // detected here, alphabetical.
+    let mut others: Vec<String> = ctx
+        .roots
+        .as_ref()
+        .map(|roots| {
+            topos_harness::registry::detected_harnesses(&roots.home, roots.cwd.as_deref())
+                .iter()
+                .map(|h| h.slug.to_owned())
+                .filter(|slug| slug != removed_slug)
+                .filter(|slug| topos_harness::coverage::shared_dir_support(slug).covered())
+                .collect()
+        })
+        .unwrap_or_default();
+    others.sort();
+    others.dedup();
+    for slug in &others {
+        readd_argv.push("-a".to_owned());
+        readd_argv.push(slug.clone());
+    }
+    ClientError::SharedCopyOnly {
+        name: name.to_owned(),
+        agent: removed_slug.to_owned(),
+        copy,
+        remove_argv,
+        readd_argv,
+    }
+}
+
+/// The recorded SHARED placement dir for `name` in this scope's store (pretty-spelled), when one
+/// stands.
+fn shared_copy_dir(ctx: &Ctx<'_>, target: &EditTarget, name: &str) -> Option<String> {
+    let sctx = scope_store_ctx(ctx, target)?;
+    let (sid, _lock) = super::resolve_skill(&sctx, name).ok()?;
+    let map = crate::doc::read_map(sctx.fs, &sctx.layout.published(&sid).map).ok()??;
+    map.placements
+        .iter()
+        .zip(&map.placement_state)
+        .find(|(_, st)| st.kind == topos_types::persisted::PlacementKind::Shared)
+        .map(|(p, _)| dest_display(ctx, target, Path::new(p)))
+}
+
+/// The `@ws/<name>` sugar at the machine's one connected host, else the canonical spelling, else
+/// the bare name (a non-workspace bundle).
+fn sugar_reference(ctx: &Ctx<'_>, ws: Option<&(String, String)>, name: &str) -> String {
+    match ws {
+        Some((host, workspace)) if default_host(ctx).as_deref() == Some(host.as_str()) => {
+            format!("@{workspace}/{name}")
+        }
+        Some((host, workspace)) => format!("{host}/{workspace}/{name}"),
+        None => name.to_owned(),
+    }
+}
+
+/// The workspace-QUALIFIED display a destination receipt leads with.
+fn qualified_name(ctx: &Ctx<'_>, ws: Option<&(String, String)>, name: &str) -> String {
+    match ws {
+        Some((host, workspace)) if default_host(ctx).as_deref() == Some(host.as_str()) => {
+            format!("@{workspace}/{name}")
+        }
+        Some((host, workspace)) => format!("{host}/{workspace}/{name}"),
+        None => name.to_owned(),
+    }
+}
+
+/// The CURRENT resolved destination set of a bundle in this scope — each recorded placement's
+/// PARENT root (the adopted-in-place source dir excluded: it is the person's own and no freeze
+/// manages it), spelled in the scope's dest dialect. For an MCP bundle: the config FILES its
+/// per-agent entries live in.
+fn current_dest_roots(
+    ctx: &Ctx<'_>,
+    target: &EditTarget,
+    name: &str,
+    mcp: bool,
+) -> Result<Vec<String>, ClientError> {
+    if mcp {
+        // The scope's ledger names the config files THIS bundle's entries live in — filtered by
+        // every identity the bundle may be filed under (its cached skill id, the scope store's
+        // tracked id, the name-keyed local identity).
+        let layout = match target.scope {
+            ManifestScope::Global => Some(ctx.layout.clone()),
+            ManifestScope::Project => crate::sidecar::existing_project_store(ctx.fs, &target.dir),
+        };
+        let Some(ledger) = layout
+            .filter(|l| ctx.fs.exists(&l.mcp_ledger_path()))
+            .and_then(|l| crate::mcp_ledger::read(ctx.fs, &l).ok())
+        else {
+            return Ok(Vec::new());
+        };
+        let mut ids: Vec<String> = Vec::new();
+        let cache = crate::sync_status::read(ctx.fs, &ctx.layout).unwrap_or_default();
+        for entry in cache.workspaces.values() {
+            for (sid, d) in &entry.delivered {
+                if d.name == name && !ids.contains(sid) {
+                    ids.push(sid.clone());
+                }
+            }
+        }
+        if let Some(sctx) = scope_store_ctx(ctx, target)
+            && let Ok((sid, _)) = super::resolve_skill(&sctx, name)
+        {
+            ids.push(sid.as_str().to_owned());
+        }
+        ids.push(format!("local:{name}"));
+        let mut files: Vec<String> = ledger
+            .entries
+            .values()
+            .filter(|e| ids.contains(&e.bundle_id))
+            .map(|e| dest_display(ctx, target, Path::new(&e.file)))
+            .collect();
+        files.sort();
+        files.dedup();
+        return Ok(files);
+    }
+    let Some(sctx) = scope_store_ctx(ctx, target) else {
+        return Ok(Vec::new());
+    };
+    let Ok((sid, _lock)) = super::resolve_skill(&sctx, name) else {
+        return Ok(Vec::new());
+    };
+    let Some(map) = crate::doc::read_map(sctx.fs, &sctx.layout.published(&sid).map)? else {
+        return Ok(Vec::new());
+    };
+    let mut out: Vec<String> = Vec::new();
+    for (p, st) in map.placements.iter().zip(&map.placement_state) {
+        if st.adopted_source {
+            continue;
+        }
+        let Some(parent) = Path::new(p).parent() else {
+            continue;
+        };
+        let spelled = dest_display(ctx, target, parent);
+        if !out.contains(&spelled) {
+            out.push(spelled);
+        }
+    }
+    Ok(out)
+}
+
+/// A path in the scope's dest dialect: `~/`-abbreviated under the machine home for the global
+/// file, checkout-relative for a project file, verbatim otherwise.
+fn dest_display(ctx: &Ctx<'_>, target: &EditTarget, path: &Path) -> String {
+    if target.scope == ManifestScope::Project
+        && let Ok(rel) = path.strip_prefix(&target.dir)
+    {
+        return rel.display().to_string();
+    }
+    if let Some(roots) = &ctx.roots
+        && let Ok(rest) = path.strip_prefix(&roots.home)
+    {
+        return format!("~/{}", rest.display());
+    }
+    path.display().to_string()
+}
+
+/// A per-skill store ctx for the scope this edit acts in (`None` when a project scope has no
+/// store yet — then nothing was ever placed, and the current set is honestly empty).
+fn scope_store_ctx<'a>(ctx: &'a Ctx<'a>, target: &EditTarget) -> Option<Ctx<'a>> {
+    match target.scope {
+        ManifestScope::Global => Some(super::pull::ctx_with_layout(ctx, &ctx.layout.clone())),
+        ManifestScope::Project => crate::sidecar::existing_project_store(ctx.fs, &target.dir)
+            .map(|layout| super::pull::ctx_with_layout(ctx, &layout)),
+    }
+}
+
+/// Whether a ROW's bundle is an MCP one: the row's own `kind` field, else the delivery cache's.
+fn row_is_mcp(ctx: &Ctx<'_>, row: &PlanRow, ws: Option<&(String, String)>, name: &str) -> bool {
+    if row.fields().kind.as_deref() == Some("mcp") {
+        return true;
+    }
+    cached_kind_is_mcp(ctx, ws, name)
+}
+
+/// Whether the delivery cache knows this workspace bundle as `kind = "mcp"`.
+fn cached_kind_is_mcp(ctx: &Ctx<'_>, ws: Option<&(String, String)>, name: &str) -> bool {
+    let Some((host, workspace)) = ws else {
+        return false;
+    };
+    let cache = crate::sync_status::read(ctx.fs, &ctx.layout).unwrap_or_default();
+    cache.workspaces.values().any(|e| {
+        e.host.as_deref() == Some(host)
+            && e.workspace_name.as_deref() == Some(workspace)
+            && e.delivered
+                .values()
+                .any(|d| d.name == *name && d.kind.as_deref() == Some("mcp"))
+    })
+}
+
 /// The typed refusal for a token this file answers more than once — the paste-ready qualified
 /// references ride the error, so the caller re-spells one instead of guessing which was meant.
 /// Deduped + sorted, so the same ambiguity always reads the same way.
@@ -1639,12 +2176,14 @@ fn draft_state(ctx: &Ctx<'_>, name: &str) -> DraftState {
 /// THE CALLER HOLDS THE FILE'S WRITER LOCK across the resolve that produced `arms` and this apply
 /// — the arms are decisions about a document, and they are only true of the document they were
 /// read from.
+#[allow(clippy::too_many_arguments)]
 fn apply_arms(
     ctx: &Ctx<'_>,
     target: &EditTarget,
     tokens: &[String],
     arms: Vec<Arm>,
     via: Option<&str>,
+    selection: &super::dest_select::Selection,
     yes: bool,
     global: bool,
 ) -> Result<RemoveOutcome, ClientError> {
@@ -1657,11 +2196,10 @@ fn apply_arms(
     // Several targets inside ONE set line are ONE split, resolved against that line once.
     let arms = coalesce_set_splits(arms);
     // The gate: a file edit is reversible, so it applies immediately — EXCEPT where local work
-    // could be lost (an affected bundle's draft, or a copy that cannot be classified) or where
-    // the edit rewrites a curated line into its members (a set split changes what future
-    // curation reaches this file). EVERY arm that retires placements runs the loss-guard —
-    // the explicit row drop, the feed-row drop (all of that feed's bundles leave), and the
-    // `"off"` switch alike — and a scan that cannot classify fails TOWARD the gate.
+    // could be lost (a copy that cannot be classified fails TOWARD the gate) or where the edit
+    // rewrites a curated line into its members (a set split changes what future curation reaches
+    // this file). An EDITED copy is no longer a gate on the row drops: the eager uninstall keeps
+    // every edited copy in place (disclosed with a kept line), so nothing is lost by applying.
     let mut gated = false;
     let mut notes: Vec<Option<String>> = Vec::with_capacity(arms.len());
     for arm in &arms {
@@ -1675,17 +2213,13 @@ fn apply_arms(
                     _ => None,
                 };
                 match draft_state(ctx, name) {
-                    DraftState::Draft => {
-                        gated = true;
-                        Some(join_notes(
-                            format!(
-                                "'{name}' has local edits that are not shared — this removal \
-                                 ends its delivery here; the edited copy stays in place \
-                                 (`topos list {name}` shows it)"
-                            ),
-                            removal_note,
-                        ))
-                    }
+                    DraftState::Draft => Some(join_notes(
+                        format!(
+                            "'{name}' has local edits that are not shared — the edited copy \
+                             stays in place (`topos list {name}` shows it)"
+                        ),
+                        removal_note,
+                    )),
                     DraftState::Indeterminate => {
                         gated = true;
                         Some(join_notes(
@@ -1697,6 +2231,34 @@ fn apply_arms(
                         ))
                     }
                     DraftState::Clean => removal_note,
+                }
+            }
+            Arm::DestNarrow {
+                name,
+                subtract,
+                remaining,
+                materialized,
+                ..
+            } => {
+                let materialize_note = materialized.then(|| {
+                    format!(
+                        "the row named no destinations, so its current set was written out \
+                         minus {} — {remaining} remain",
+                        crate::manifest::dest::quoted_list(subtract)
+                    )
+                });
+                match draft_state(ctx, name) {
+                    DraftState::Indeterminate => {
+                        gated = true;
+                        Some(join_notes(
+                            format!(
+                                "'{name}''s files could not be read to check for local edits — \
+                                 describing first rather than assuming there are none"
+                            ),
+                            materialize_note,
+                        ))
+                    }
+                    _ => materialize_note,
                 }
             }
             Arm::SetSplit {
@@ -1793,6 +2355,7 @@ fn apply_arms(
             kind: match arm {
                 Arm::OffWrite { .. } => RemoveKind::ManifestExcluded,
                 Arm::FeedDrop { .. } => RemoveKind::FeedRemoved,
+                Arm::DestNarrow { .. } => RemoveKind::ManifestNarrowed,
                 _ => RemoveKind::ManifestRemoved,
             },
             manifest: Some(target.path.display().to_string()),
@@ -1809,6 +2372,7 @@ fn apply_arms(
             yes_argv.push("-g".to_owned());
         }
         yes_argv.extend(tokens.iter().cloned());
+        yes_argv.extend(selection.argv_tail());
         if let Some(v) = via {
             yes_argv.push("--via".to_owned());
             yes_argv.push(v.to_owned());
@@ -1863,6 +2427,13 @@ fn apply_arms(
             Arm::OffWrite { reference, .. } => {
                 editor
                     .set_row(reference, &EntryValue::Off)
+                    .map_err(|e| ClientError::InvalidArgument(e.message))?;
+            }
+            Arm::DestNarrow {
+                reference, value, ..
+            } => {
+                editor
+                    .set_row(reference, value)
                     .map_err(|e| ClientError::InvalidArgument(e.message))?;
             }
             Arm::SetSplit {
@@ -1923,48 +2494,176 @@ fn apply_arms(
     }))
 }
 
-/// The in-invocation cleanup a feed-line drop drives: ONE machine-scope reconcile (the exact
+/// The eager-uninstall plan, read off the resolved arms BEFORE the apply consumes them: which
+/// dropped FEEDS (their whole delivery leaves), which row-edited BUNDLES (a dropped/off/narrowed
+/// row's copies leave), and whether the follow-up reconcile can run TARGETED (bundle names) or
+/// must sweep the scope whole (a feed drop).
+struct EagerPlan {
+    feeds: Vec<String>,
+    bundles: Vec<EagerBundle>,
+}
+
+struct EagerBundle {
+    name: String,
+    display: String,
+    mcp: bool,
+    /// A NARROWED bundle: the subtracted dest entries + how many destinations remain.
+    narrow: Option<(Vec<String>, u64)>,
+}
+
+fn eager_plan(ctx: &Ctx<'_>, arms: &[Arm]) -> EagerPlan {
+    let mut plan = EagerPlan {
+        feeds: Vec::new(),
+        bundles: Vec::new(),
+    };
+    for arm in arms {
+        match arm {
+            Arm::FeedDrop { workspace, .. } => plan.feeds.push(workspace.clone()),
+            Arm::RowDrop { row, name } => {
+                let ws = match &row.shape {
+                    KeyShape::WorkspaceBundle {
+                        host, workspace, ..
+                    } => Some((host.clone(), workspace.clone())),
+                    _ => None,
+                };
+                plan.bundles.push(EagerBundle {
+                    display: qualified_name(ctx, ws.as_ref(), name),
+                    mcp: row_is_mcp(ctx, row, ws.as_ref(), name),
+                    name: name.clone(),
+                    narrow: None,
+                });
+            }
+            Arm::OffWrite {
+                reference, name, ..
+            } => {
+                let ws = match keys::classify_key(reference) {
+                    Ok(KeyShape::WorkspaceBundle {
+                        host, workspace, ..
+                    }) => Some((host, workspace)),
+                    _ => None,
+                };
+                plan.bundles.push(EagerBundle {
+                    display: qualified_name(ctx, ws.as_ref(), name),
+                    mcp: cached_kind_is_mcp(ctx, ws.as_ref(), name),
+                    name: name.clone(),
+                    narrow: None,
+                });
+            }
+            Arm::DestNarrow {
+                name,
+                workspace,
+                subtract,
+                remaining,
+                mcp,
+                ..
+            } => {
+                plan.bundles.push(EagerBundle {
+                    display: qualified_name(ctx, workspace.as_ref(), name),
+                    mcp: *mcp,
+                    name: name.clone(),
+                    narrow: Some((subtract.clone(), *remaining as u64)),
+                });
+            }
+            // A split re-homes its survivors to their own rows — nothing leaves.
+            Arm::SetSplit { .. } => {}
+        }
+    }
+    plan
+}
+
+/// The in-invocation cleanup a row edit drives: ONE reconcile of the edited scope (the exact
 /// machinery the background sweep runs — nothing bespoke), then the receipt's uninstall facts are
 /// read back off its rows: what left which destinations, and which edited copies stayed. Filtered
-/// to the dropped workspaces' rows, so a receipt never claims another source's movement.
-fn eager_feed_cleanup(
+/// to the dropped feeds' and edited bundles' rows, so a receipt never claims another source's
+/// movement. A NARROWED bundle's entry speaks in the subtracted dest entries and carries the
+/// remaining count, whatever the reconcile reported.
+fn eager_cleanup(
     ctx: &Ctx<'_>,
     connect: &SessionConnect<'_>,
-    workspaces: &[String],
+    scope: super::reconcile::UpdateScope,
+    plan: &EagerPlan,
 ) -> Vec<topos_types::results::UninstalledBundle> {
+    use topos_types::results::{PullAction, UninstalledBundle};
+    if plan.feeds.is_empty() && plan.bundles.is_empty() {
+        return Vec::new();
+    }
     let ids: Vec<String> = live_sessions(ctx)
         .unwrap_or_default()
         .into_iter()
-        .filter(|s| workspaces.contains(&s.workspace_name))
+        .filter(|s| plan.feeds.contains(&s.workspace_name))
         .map(|s| s.workspace_id)
         .collect();
-    let Ok(out) = super::reconcile::manifest_update(
+    let removed: Vec<topos_types::results::PullSkill> = super::reconcile::manifest_update(
         ctx,
         connect,
         None,
+        // UNTARGETED: a dropped row's undemanded clean (and a dropped feed's whole delivery)
+        // is only seen by the full scope sweep — the same machinery the background sweep runs.
         &super::reconcile::ManifestUpdateOpts {
-            scope: super::reconcile::UpdateScope::Machine,
+            scope,
             ..Default::default()
         },
-    ) else {
-        return Vec::new();
-    };
-    out.data
-        .skills
-        .into_iter()
-        .filter(|r| r.action == topos_types::results::PullAction::Removed)
-        .filter(|r| {
-            r.workspace_id
-                .as_deref()
-                .is_some_and(|w| ids.iter().any(|i| i == w))
-        })
-        .map(|r| topos_types::results::UninstalledBundle {
-            name: r.display.unwrap_or(r.skill),
-            destinations: r.destinations,
-            kind: r.kind,
-            kept: r.kept,
-        })
-        .collect()
+    )
+    .map(|out| {
+        out.data
+            .skills
+            .into_iter()
+            .filter(|r| r.action == PullAction::Removed)
+            .collect()
+    })
+    .unwrap_or_default();
+    let mut out: Vec<UninstalledBundle> = Vec::new();
+    // The dropped feeds' bundles (attributed by workspace id, exactly as before).
+    for r in removed.iter().filter(|r| {
+        r.workspace_id
+            .as_deref()
+            .is_some_and(|w| ids.iter().any(|i| i == w))
+    }) {
+        out.push(UninstalledBundle {
+            name: r.display.clone().unwrap_or_else(|| r.skill.clone()),
+            destinations: r.destinations.clone(),
+            kind: r.kind.clone(),
+            kept: r.kept.clone(),
+            remaining: None,
+        });
+    }
+    // The row-edited bundles, by name.
+    for b in &plan.bundles {
+        let rows: Vec<&topos_types::results::PullSkill> =
+            removed.iter().filter(|r| r.skill == b.name).collect();
+        let mut destinations: Vec<String> = Vec::new();
+        let mut kept: Vec<String> = Vec::new();
+        for r in &rows {
+            destinations.extend(r.destinations.iter().cloned());
+            kept.extend(r.kept.iter().cloned());
+        }
+        destinations.dedup();
+        kept.dedup();
+        match &b.narrow {
+            // The narrow's receipt speaks in the SUBTRACTED dest entries — the row's own
+            // spellings — plus what remains.
+            Some((subtract, remaining)) => out.push(UninstalledBundle {
+                name: b.display.clone(),
+                destinations: subtract.clone(),
+                kind: b.mcp.then(|| "mcp".to_owned()),
+                kept,
+                remaining: Some(*remaining),
+            }),
+            None => {
+                if destinations.is_empty() && kept.is_empty() {
+                    continue; // nothing moved this run — the row edit alone is the receipt
+                }
+                out.push(UninstalledBundle {
+                    name: b.display.clone(),
+                    destinations,
+                    kind: b.mcp.then(|| "mcp".to_owned()),
+                    kept,
+                    remaining: None,
+                });
+            }
+        }
+    }
+    out
 }
 
 /// The inline MCP removal convergence a `remove` apply runs (see the call site): for each dropped
@@ -2191,7 +2890,7 @@ fn mcp_bundle_of_arm(
             }) => ws_bundle(&host, &workspace, &bundle),
             _ => None,
         },
-        Arm::FeedDrop { .. } | Arm::SetSplit { .. } => None,
+        Arm::FeedDrop { .. } | Arm::SetSplit { .. } | Arm::DestNarrow { .. } => None,
     }
 }
 
@@ -2234,6 +2933,14 @@ fn prove_unchanged(
             // The switch is written BECAUSE no row claims the bundle; a row that appeared since
             // would have to be dropped instead.
             Arm::OffWrite { reference, .. } => !rows.iter().any(|r| r.reference == *reference),
+            // A narrow is a decision about the row's exact value (or its absence, for the
+            // feed-materialized form) — any drift refuses toward a re-read.
+            Arm::DestNarrow { row, reference, .. } => match row {
+                Some(row) => rows
+                    .iter()
+                    .any(|r| r.reference == row.reference && r.value == row.value),
+                None => !rows.iter().any(|r| r.reference == *reference),
+            },
             Arm::SetSplit {
                 set,
                 names,
@@ -2280,7 +2987,7 @@ fn join_notes(lead: String, tail: Option<String>) -> String {
 /// What a set split writes on each surviving member row, and how the describe words it: the set
 /// line's pin/fields filtered to what the member's shape legally carries —
 /// `(member value, carried field names, dropped field names)`. Today every set-legal field
-/// (`path`, `harness`, a repo set's commit pin) is member-legal too, so `dropped` stays empty;
+/// (`dest`, a repo set's commit pin) is member-legal too, so `dropped` stays empty;
 /// the filter is still real, so a future set-only field is DISCLOSED rather than silently lost.
 fn split_carriage(set: &PlanRow) -> (EntryValue, Vec<&'static str>, Vec<&'static str>) {
     use crate::manifest::document::{EntryFields, legal_fields};
@@ -2331,10 +3038,7 @@ fn split_carriage(set: &PlanRow) -> (EntryValue, Vec<&'static str>, Vec<&'static
             take("version", f.version.is_some(), &mut || {
                 out.version = f.version.clone();
             });
-            take("path", f.path.is_some(), &mut || out.path = f.path.clone());
-            take("harness", f.harness.is_some(), &mut || {
-                out.harness = f.harness.clone();
-            });
+            take("dest", f.dest.is_some(), &mut || out.dest = f.dest.clone());
             take("name", f.name.is_some(), &mut || out.name = f.name.clone());
             take("subdir", f.subdir.is_some(), &mut || {
                 out.subdir = f.subdir.clone();
@@ -2362,21 +3066,44 @@ fn member_reference(set: &PlanRow, member: &str) -> Option<String> {
 }
 
 /// The literal inverse — offered ONLY when it restores the whole prior state. A batch of one
-/// whose row carried nothing but a version pin re-adds exactly what left; a set split, a fields
-/// row the `add` grammar cannot respell, or a multi-target batch offers none (no undo beats a
-/// wrong one). A FEED line's inverse spells the `@ws` sugar when `sugar_host` (this machine's
-/// one connected host) resolves it — the same default-host rule every verb's sugar uses.
+/// whose row carried nothing but a version pin re-adds exactly what left; a fields row carrying
+/// ONLY destinations (and a pin) re-adds with its `-a`/`--dest` reconstruction (`-a` where a
+/// folder maps back to the registry table, `--dest` otherwise); a set split, a fields row the
+/// `add` grammar cannot respell (a name override, a subdir, a kind), or a multi-target batch
+/// offers none (no undo beats a wrong one). A FEED line's inverse spells the `@ws` sugar when
+/// `sugar_host` (this machine's one connected host) resolves it — the same default-host rule
+/// every verb's sugar uses; a dest reconstruction sugars a workspace bundle the same way.
 fn undo_for(arms: &[Arm], global: bool, sugar_host: Option<&str>) -> Vec<String> {
     let [arm] = arms else {
         return Vec::new();
     };
+    let scope = if global {
+        ManifestScope::Global
+    } else {
+        ManifestScope::Project
+    };
+    let mut tail: Vec<String> = Vec::new();
     let spelling = match arm {
         Arm::RowDrop { row, .. } => match &row.value {
             EntryValue::Star => row.reference.clone(),
             EntryValue::Pin(p) => format!("{}@{p}", row.reference),
-            // Fields the `add` grammar cannot respell (a path, a harness list, a name override):
-            // the re-add would silently drop them.
-            EntryValue::Fields(_) | EntryValue::Off => return Vec::new(),
+            // A fields row carrying ONLY destinations (and a pin) is respellable — the `-a`/
+            // `--dest` flags reconstruct exactly the set that left. Anything else the `add`
+            // grammar cannot respell (a name override, a subdir, a kind), so no undo.
+            EntryValue::Fields(f) => {
+                let respellable = f.name.is_none() && f.subdir.is_none() && f.kind.is_none();
+                let Some(dest) = f.dest.as_ref().filter(|_| respellable) else {
+                    return Vec::new();
+                };
+                tail = super::dest_select::undo_tail(dest, scope, false);
+                let base = sugar_row_reference(&row.shape, sugar_host)
+                    .unwrap_or_else(|| row.reference.clone());
+                match &f.version {
+                    Some(v) => format!("{base}@{v}"),
+                    None => base,
+                }
+            }
+            EntryValue::Off => return Vec::new(),
         },
         Arm::FeedDrop {
             reference,
@@ -2389,6 +3116,21 @@ fn undo_for(arms: &[Arm], global: bool, sugar_host: Option<&str>) -> Vec<String>
             _ => reference.clone(),
         },
         Arm::OffWrite { reference, .. } => reference.clone(),
+        Arm::DestNarrow {
+            reference,
+            name,
+            workspace,
+            subtract,
+            mcp,
+            ..
+        } => {
+            // The narrow's inverse: re-add exactly the subtracted destination(s).
+            tail = super::dest_select::undo_tail(subtract, scope, *mcp);
+            match workspace {
+                Some((host, ws)) if sugar_host == Some(host.as_str()) => format!("@{ws}/{name}"),
+                _ => reference.clone(),
+            }
+        }
         Arm::SetSplit { .. } => return Vec::new(),
     };
     let mut argv = vec!["topos".to_owned(), "add".to_owned()];
@@ -2396,7 +3138,20 @@ fn undo_for(arms: &[Arm], global: bool, sugar_host: Option<&str>) -> Vec<String>
         argv.push("-g".to_owned());
     }
     argv.push(spelling);
+    argv.extend(tail);
     argv
+}
+
+/// The `@ws/<bundle>` sugar for a workspace-bundle row at the machine's one connected host.
+fn sugar_row_reference(shape: &KeyShape, sugar_host: Option<&str>) -> Option<String> {
+    match shape {
+        KeyShape::WorkspaceBundle {
+            host,
+            workspace,
+            bundle,
+        } if sugar_host == Some(host.as_str()) => Some(format!("@{workspace}/{bundle}")),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -2453,15 +3208,29 @@ mod tests {
             undo_for(std::slice::from_ref(&pinned), false, None),
             vec!["topos", "add", &format!("topos.sh/acme/deploy@{digest}")]
         );
-        // A fields row cannot be respelled by `add` — no undo at all.
+        // A fields row carrying ONLY destinations is respellable now — the undo reconstructs
+        // the set as `-a` sugar where the folder maps back to the registry table.
         let fields = Arm::RowDrop {
             row: row(EntryValue::Fields(crate::manifest::document::EntryFields {
-                harness: Some(vec!["claude-code".into()]),
+                dest: Some(vec!["~/.claude/skills".into()]),
                 ..Default::default()
             })),
             name: "deploy".into(),
         };
-        assert!(undo_for(&[fields], false, None).is_empty());
+        assert_eq!(
+            undo_for(&[fields], true, Some("topos.sh")),
+            vec!["topos", "add", "-g", "@acme/deploy", "-a", "claude-code"]
+        );
+        // A fields row with a NAME OVERRIDE has no single restoring command — no undo at all.
+        let named = Arm::RowDrop {
+            row: row(EntryValue::Fields(crate::manifest::document::EntryFields {
+                dest: Some(vec!["~/.claude/skills".into()]),
+                name: Some("other".into()),
+                ..Default::default()
+            })),
+            name: "other".into(),
+        };
+        assert!(undo_for(&[named], false, None).is_empty());
         // A batch of several offers none (a partial inverse would misstate what it restores).
         assert!(
             undo_for(
@@ -2516,7 +3285,7 @@ mod tests {
 
     #[test]
     fn a_set_split_carries_what_the_member_shape_legally_takes() {
-        use crate::manifest::document::{EntryFields, PathSpec};
+        use crate::manifest::document::EntryFields;
         // A repo set's commit PIN rides each member row verbatim.
         let repo_pinned = PlanRow {
             reference: "github.com/o/r".into(),
@@ -2528,25 +3297,23 @@ mod tests {
         assert_eq!(carried, vec!["version"]);
         assert!(dropped.is_empty());
 
-        // A channel line's fields (`path`, `harness`) carry onto its workspace-bundle members.
+        // A channel line's `dest` carries onto its workspace-bundle members.
         let channel_fields = PlanRow {
             reference: "topos.sh/acme/channels/backend".into(),
             shape: keys::classify_key("topos.sh/acme/channels/backend").unwrap(),
             value: EntryValue::Fields(EntryFields {
-                path: Some(PathSpec::One(".agents/skills".into())),
-                harness: Some(vec!["codex".into()]),
+                dest: Some(vec![".agents/skills".into()]),
                 ..Default::default()
             }),
         };
         let (value, carried, dropped) = split_carriage(&channel_fields);
         match value {
             EntryValue::Fields(f) => {
-                assert_eq!(f.path, Some(PathSpec::One(".agents/skills".into())));
-                assert_eq!(f.harness.as_deref(), Some(&["codex".to_owned()][..]));
+                assert_eq!(f.dest.as_deref(), Some(&[".agents/skills".to_owned()][..]));
             }
             other => panic!("fields carry: {other:?}"),
         }
-        assert_eq!(carried, vec!["path", "harness"]);
+        assert_eq!(carried, vec!["dest"]);
         assert!(dropped.is_empty());
 
         // A bare `"*"` set stays a `"*"` member.

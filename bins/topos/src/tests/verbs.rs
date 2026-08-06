@@ -304,6 +304,7 @@ fn add_remote_imports_a_repo_skill_places_bytes_and_records_origin() {
     let opts = ops::AddRemoteOpts {
         skill: Some("web-design-guidelines".into()),
         harness: None, // default = the active harness (claude-code) → project `.claude/skills`
+        dest_root: None,
         global: false,
     };
 
@@ -378,6 +379,7 @@ fn add_remote_lands_and_adopts_through_a_symlinked_user_scope_skills_root() {
     let opts = ops::AddRemoteOpts {
         skill: Some("alpha".into()),
         harness: None,
+        dest_root: None,
         global: true, // user scope → the symlinked ~/.claude/skills
     };
     let data = ops::add_remote(&h.ctx(), &git, &spec, &roots, &opts)
@@ -454,6 +456,7 @@ fn add_remote_refuses_a_destination_that_gained_content_during_staging() {
     let opts = ops::AddRemoteOpts {
         skill: Some("alpha".into()),
         harness: None,
+        dest_root: None,
         global: false,
     };
     let err = ops::add_remote(&ctx, &git, &spec, &roots, &opts).unwrap_err();
@@ -507,6 +510,7 @@ fn add_remote_refuses_a_destination_filled_in_the_instant_before_the_park() {
     let opts = ops::AddRemoteOpts {
         skill: Some("alpha".into()),
         harness: None,
+        dest_root: None,
         global: false,
     };
     let err = ops::add_remote(&ctx, &git, &spec, &roots, &opts).unwrap_err();
@@ -568,6 +572,7 @@ fn add_remote_a_stage_swapped_for_a_symlink_mid_write_cannot_aim_bytes_outside()
     let opts = ops::AddRemoteOpts {
         skill: Some("alpha".into()),
         harness: None,
+        dest_root: None,
         global: false,
     };
     let err = ops::add_remote(&ctx, &git, &spec, &roots, &opts);
@@ -621,6 +626,7 @@ fn add_remote_refuses_a_stage_substituted_at_its_leaf_before_the_landing_rename(
     let opts = ops::AddRemoteOpts {
         skill: Some("alpha".into()),
         harness: None,
+        dest_root: None,
         global: false,
     };
     let err = ops::add_remote(&ctx, &git, &spec, &roots, &opts);
@@ -672,6 +678,7 @@ fn a_failed_adopt_preserves_an_edit_that_landed_after_the_rename() {
     let opts = ops::AddRemoteOpts {
         skill: Some("topos".into()),
         harness: None,
+        dest_root: None,
         global: false,
     };
     let err = ops::add_remote(&ctx, &git, &spec, &roots, &opts).unwrap_err();
@@ -728,6 +735,7 @@ fn a_losing_concurrent_identical_import_leaves_the_winner_whole_and_consistent()
         let opts = ops::AddRemoteOpts {
             skill: Some("alpha".into()),
             harness: None,
+            dest_root: None,
             global: false,
         };
         let data = ops::add_remote(
@@ -751,6 +759,7 @@ fn a_losing_concurrent_identical_import_leaves_the_winner_whole_and_consistent()
     let opts = ops::AddRemoteOpts {
         skill: Some("alpha".into()),
         harness: None,
+        dest_root: None,
         global: false,
     };
     let err = ops::add_remote(&ctx, &git, &spec, &roots, &opts).unwrap_err();
@@ -818,6 +827,7 @@ fn a_droppable_pre_landing_park_survives_the_adopt_and_settles_on_success() {
     let opts = ops::AddRemoteOpts {
         skill: Some("alpha".into()),
         harness: None,
+        dest_root: None,
         global: false,
     };
     ops::add_remote(&ctx, &git, &spec, &roots, &opts).expect("the import lands");
@@ -859,6 +869,7 @@ fn a_failed_adopt_with_an_untouched_destination_cleans_without_residue() {
     let opts = ops::AddRemoteOpts {
         skill: Some("topos".into()),
         harness: None,
+        dest_root: None,
         global: false,
     };
     let err = ops::add_remote(&h.ctx(), &git, &spec, &roots, &opts).unwrap_err();
@@ -902,6 +913,7 @@ fn add_remote_refuses_a_project_destination_that_escapes_the_checkout() {
     let opts = ops::AddRemoteOpts {
         skill: Some("alpha".into()),
         harness: None,
+        dest_root: None,
         global: false,
     };
     let err = ops::add_remote(&h.ctx(), &git, &spec, &roots, &opts).unwrap_err();
@@ -935,6 +947,7 @@ fn add_remote_ambiguous_multi_skill_repo_lists_choices() {
     let opts = ops::AddRemoteOpts {
         skill: None,
         harness: None,
+        dest_root: None,
         global: false,
     };
     let err = ops::add_remote(&h.ctx(), &git, &spec, &roots, &opts).unwrap_err();

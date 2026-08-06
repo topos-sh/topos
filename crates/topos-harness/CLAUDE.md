@@ -60,7 +60,7 @@ trust/consent state.
   planning an edit when the input does not re-serialize byte-identical through its own dialect
   (a BOM, unusual line endings): the round-trip precondition is the dispatcher's, not each
   driver's discretion.
-- **`registry`** — the baked ~73-harness table (detection + skills-root resolution;
+- **`registry`** — the baked ~76-harness table (detection + skills-root resolution;
   `detected_harnesses`), plus `choose_skill_dir`, the ONE placement-naming discipline every
   target dir follows (`topos` is `RESERVED_SKILL_DIR`, the built-in's name).
 

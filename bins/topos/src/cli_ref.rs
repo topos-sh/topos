@@ -16,6 +16,12 @@ const SELF_SCOPED: [&str; 11] = [
 const TEAM_SCOPED: [&str; 5] = ["publish", "review", "revert", "protect", "invite"];
 const MAINTENANCE: [&str; 3] = ["self-update", "auth", "uninstall"];
 
+/// The cross-agent MACHINE folders — several agents read the same one, so the agent section names
+/// each ONCE with its readers instead of repeating it down a column.
+const SHARED_MACHINE_FOLDERS: [&str; 2] = ["~/.agents/skills", "~/.config/agents/skills"];
+/// The one cross-agent PROJECT folder — a `shared` cell in the agent table means this.
+const SHARED_PROJECT_FOLDER: &str = ".agents/skills";
+
 /// One markdown table cell: collapse internal whitespace to single spaces and escape the `|` that would
 /// otherwise split the row.
 fn cell(s: &str) -> String {
@@ -165,6 +171,126 @@ fn render_command(out: &mut String, path: &str, cmd: &clap::Command, level: usiz
     }
 }
 
+/// The agent → folder tables, BUILT FROM the baked registry (skills folders) and the MCP
+/// descriptor table (config files) at render time — so what the reference teaches about `-a` can
+/// never drift from what `-a` actually writes. The `--check` gate turns any registry change into a
+/// failing build until the committed copies are regenerated.
+fn render_agents(out: &mut String) {
+    use crate::manifest::dest::{mcp_dest_spelling, skills_dest_spelling, spec_default_spelling};
+    use crate::manifest::document::ManifestScope;
+
+    // Per agent: its DEFAULT machine folders (the first is the one `-a` writes) + its project folder.
+    // Sorted by slug — the reference is a lookup table, and row order carries no meaning here.
+    let mut rows: Vec<(&str, Vec<String>, Option<String>)> =
+        topos_harness::registry::known_harnesses()
+            .iter()
+            .map(|h| {
+                let machine: Vec<String> = h
+                    .user_dir_specs()
+                    .iter()
+                    .filter_map(|spec| spec_default_spelling(spec))
+                    .collect();
+                (
+                    h.slug,
+                    machine,
+                    skills_dest_spelling(h.slug, ManifestScope::Project),
+                )
+            })
+            .collect();
+    rows.sort_unstable_by_key(|(slug, _, _)| *slug);
+
+    out.push_str("## Agents (`-a`) and where files land\n\n");
+    out.push_str(
+        "`-a <slug>` places a bundle in that agent's folder from the table below — the machine \
+         folder when you work machine-wide, the project folder when you work in a project. \
+         `--dest <folder>` names a folder literally instead. Where a row lists more than one \
+         machine folder, `-a` writes the first.\n\n\
+         Some folders are cross-agent conventions that several agents read, so each is named here \
+         once rather than repeated on every row:\n\n",
+    );
+    for folder in SHARED_MACHINE_FOLDERS {
+        let readers: Vec<&str> = rows
+            .iter()
+            .filter(|(_, machine, _)| machine.iter().any(|m| m == folder))
+            .map(|(slug, _, _)| *slug)
+            .collect();
+        if !readers.is_empty() {
+            out.push_str(&format!(
+                "- `{folder}` — the machine folder read by {}.\n",
+                readers.join(", ")
+            ));
+        }
+    }
+    let project_readers: Vec<&str> = rows
+        .iter()
+        .filter(|(_, _, project)| project.as_deref() == Some(SHARED_PROJECT_FOLDER))
+        .map(|(slug, _, _)| *slug)
+        .collect();
+    if !project_readers.is_empty() {
+        out.push_str(&format!(
+            "- `{SHARED_PROJECT_FOLDER}` — the project folder read by {}. A `shared` cell below \
+             means this folder.\n",
+            project_readers.join(", ")
+        ));
+    }
+    out.push('\n');
+
+    // One row per agent that has a folder of its OWN somewhere; an agent whose folders are all
+    // shared is already fully described by the list above.
+    out.push_str("| Agent | Machine folder | Project folder |\n|---|---|---|\n");
+    for (slug, machine, project) in &rows {
+        let own_machine = machine
+            .iter()
+            .any(|m| !SHARED_MACHINE_FOLDERS.contains(&m.as_str()));
+        let own_project = project
+            .as_deref()
+            .is_some_and(|p| p != SHARED_PROJECT_FOLDER);
+        if !own_machine && !own_project {
+            continue;
+        }
+        let machine_cell = if machine.is_empty() {
+            "—".to_owned()
+        } else {
+            machine
+                .iter()
+                .map(|m| format!("`{m}`"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        let project_cell = match project.as_deref() {
+            None => "—".to_owned(),
+            Some(p) if p == SHARED_PROJECT_FOLDER => "shared".to_owned(),
+            Some(p) => format!("`{p}`"),
+        };
+        out.push_str(&format!("| `{slug}` | {machine_cell} | {project_cell} |\n"));
+    }
+    out.push_str(
+        "\nA `—` means the agent has no folder at that scope. An agent absent from the table reads \
+         only the shared folders named above.\n\n",
+    );
+
+    // MCP servers land in the agent's own config file, never in a skills folder.
+    out.push_str("### MCP server config files\n\n");
+    out.push_str(
+        "An MCP-server bundle arrives as an entry in the agent's own MCP config rather than a \
+         skills folder. `-a <slug>` picks the file below; `--dest <file>` names one literally. \
+         Claude Code's machine entry is a topos-owned plugin folder, not a single file.\n\n",
+    );
+    out.push_str("| Agent | Machine config file | Project config file |\n|---|---|---|\n");
+    for h in topos_harness::mcp::descriptor::mcp_harnesses() {
+        let cell_or_dash = |spelling: Option<String>| {
+            spelling.map_or_else(|| "—".to_owned(), |s| format!("`{s}`"))
+        };
+        out.push_str(&format!(
+            "| `{}` | {} | {} |\n",
+            h.slug,
+            cell_or_dash(mcp_dest_spelling(h.slug, ManifestScope::Global)),
+            cell_or_dash(mcp_dest_spelling(h.slug, ManifestScope::Project)),
+        ));
+    }
+    out.push('\n');
+}
+
 /// Render the full CLI reference markdown from the real clap command tree.
 #[must_use]
 pub fn cli_ref_md() -> String {
@@ -203,6 +329,9 @@ pub fn cli_ref_md() -> String {
          `contracts/fixtures/json/`; the agents guide (topos.sh/docs/agents) shows worked \
          examples.\n\n",
     );
+
+    // The agent → folder tables, generated from the baked registry + the MCP descriptor table.
+    render_agents(&mut out);
 
     // Global options — rendered from the root command's own args (the `--json` + `--workspace` flags).
     let globals: Vec<&clap::Arg> = root

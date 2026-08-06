@@ -96,31 +96,34 @@ The table form carries the same version alongside a few placement fields:
 
 ```toml
 [bundles]
-"topos.sh/acme/code-review" = { version = "*", path = ".agents/skills" }
+"topos.sh/acme/code-review" = { version = "*", dest = [".agents/skills"] }
 "topos.sh/acme/db-migrations" = { version = "*", name = "acme-db-migrations" }
 "github.com/acme/monorepo/deploy" = { version = "*", subdir = "tools/skills/deploy" }
 "./tools/weather" = { kind = "mcp" }
-
-[defaults.skill]
-path = { default = ".agents/skills", claude-code = ".claude/skills" }
 ```
 
 | Field | Legal on | Effect |
 |---|---|---|
-| `version` | a workspace skill, a GitHub skill, a local folder | exactly the plain-string form |
-| `path` | those three, and a channel | where the files land in this checkout |
+| `version` | a workspace skill, a GitHub skill | exactly the plain-string form |
+| `dest` | every shape except a whole-workspace line | the destinations this line is frozen to |
 | `name` | a workspace skill, a GitHub skill, a local folder | renames the delivered folder |
 | `subdir` | a GitHub skill | the literal directory inside the repo |
-| `harness` | every shape except a whole-workspace line | which agents get the copy, by slug |
 | `kind` | a local folder, a GitHub skill | what the bundle *is* when nothing else can say — `"mcp"` marks a folder holding a `server.json` |
 
-`path` is a directory string, or a table keyed by agent slug with an optional `default`. It applies
-to project delivery only, must be relative, and must stay inside the checkout — a committed file
-can never aim managed bytes elsewhere on a contributor's disk. A value that breaks that is ignored
-with a warning and the default placement runs. `[defaults.skill]` sets the same thing for every
-skill the file asks for; a line's own `path` beats it, and within each the agent-named key beats
-`default`. `harness` is what `topos add -a <slug>` records on a GitHub line, so a copy aimed at one
-agent's folder stays there across updates.
+`dest` is ONE idea: an array of destinations, and it replaces detection. A line **without** it
+reaches every agent this machine has — now and later, as they come and go; a line **with** it is
+frozen to exactly the destinations it names, and a newly appearing agent changes nothing until the
+line does. Each file speaks its own path dialect: your machine's file names machine paths
+(`~/`-prefixed or absolute), a committed file names relative paths that stay inside the checkout —
+no `..`, no `~`, not absolute — so a repo can never aim managed bytes elsewhere on a contributor's
+disk. For a skill line the entries are folders (any dialect-legal folder works); for an MCP line
+they are the agents' own config files, from the known set below. Edit the array by hand and the
+next `topos update` converges it: a new entry installs there, a dropped entry's copy is
+uninstalled — with an edited copy kept in place, disclosed. `dest` is also what
+`topos add … -a <agent>` (and `--dest <folder>`) records on any line, spelled as that agent's
+skills folder, so a copy aimed at one agent stays there across updates — and what
+`topos remove … -a <agent>` subtracts from, one destination at a time, the row surviving with the
+rest.
 
 Anything a shape does not accept refuses by naming what it does accept, so a typo cannot silently
 drop a skill you thought you had.
@@ -133,13 +136,11 @@ is just a folder, so a row pointing at one holding a `server.json` says what it 
 ```toml
 [bundles]
 "./tools/weather" = { kind = "mcp" }
-
-[defaults.mcp]
-harness = ["cursor", "claude-code"]
+"~/servers/linear" = { kind = "mcp", dest = ["~/.cursor/mcp.json", "~/.codex/config.toml"] }
 ```
 
-`topos add --mcp ./tools/weather` writes that line; the folder's `server.json` is the whole bundle,
-and it lands as an entry in each agent's MCP config rather than as a skill folder — see
+`topos add --mcp ./tools/weather` writes the first line; the folder's `server.json` is the whole
+bundle, and it lands as an entry in each agent's MCP config rather than as a skill folder — see
 [MCP servers](/docs/mcp).
 
 **A workspace row never spells a kind.** `"topos.sh/acme/weather" = "*"` is the same line whether
@@ -147,9 +148,12 @@ the bundle is a skill or a server: the catalog already records what it is, and a
 local folder above rewrites the row to exactly that spelling, kind field and all dropped. A GitHub
 row tagged `kind = "mcp"` parses but is not delivered — the update warns and moves on.
 
-`[defaults.mcp]` narrows which agents get every MCP row in the file, by slug; a row's own `harness`
-list beats it. Only the six agents with an MCP config surface count here, and a slug outside that
-set is ignored with one warning naming the ones that qualify.
+An MCP line's `dest` entries are config FILES, and they must come from the set topos knows how to
+edit — `~/.claude/skills/topos-mcp`, `~/.codex/config.toml`, `~/.cursor/mcp.json`,
+`~/.config/opencode/opencode.json`, `~/.openclaw/openclaw.json`, `~/.hermes/config.yaml` in your
+machine's file; `.mcp.json`, `.codex/config.toml`, `.cursor/mcp.json`, `opencode.json` in a
+committed one (an agent whose env override moves its file still counts — the resolved path matches
+too). A file outside that set refuses, because its format must be known to edit it.
 
 ## Which commands write which lines
 
@@ -204,10 +208,10 @@ time, a later `topos update` finishes it — the only line `update` ever writes.
 
 Hand-edits are supported — the file is plain TOML, and comments are yours to keep. `topos fmt`
 (or `topos fmt -g`) rewrites a file into the standard layout: whole-workspace lines, then local
-folders, then GitHub lines, then one `[bundles."topos.sh/acme"]` section per workspace, then
-`[defaults.<kind>]`. Each group sorted, empty sections pruned, comments carried with what they
-annotate. It validates the whole file first, so it can never tidy a broken one into a clean one,
-and it leaves an already-normal file untouched.
+folders, then GitHub lines, then one `[bundles."topos.sh/acme"]` section per workspace. Each
+group sorted, empty sections pruned, comments carried with what they annotate. It validates the
+whole file first, so it can never tidy a broken one into a clean one, and it leaves an
+already-normal file untouched.
 
 <Note>
   One layout carve-out comes from TOML itself: a value and a section cannot share a key path, so a

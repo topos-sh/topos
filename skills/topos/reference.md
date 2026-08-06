@@ -12,6 +12,100 @@ Exit codes: `0` — success. `1` — the operation was refused or failed (with `
 
 Every `--json` run prints one object on stdout: `schema_version` (1), `command`, `ok`, a per-command `data` payload, `warnings`, `next_actions`, and — on `ok: false` — an `error` (`code`, `outcome`, `retryable`, plus its own `next_actions`). Each `next_actions` entry is a ready-to-run step: `argv` is a complete command; `needs` lists any `<placeholder>` tokens you must substitute first; `mutates`, `needs_network`, and `risk_note` are safety metadata (absent means unknown). Treat `code` as an open vocabulary — run an unfamiliar action by its `argv` rather than rejecting it. The full JSON-Schemas live under `contracts/schemas/` in the repository, with golden examples under `contracts/fixtures/json/`; the agents guide (topos.sh/docs/agents) shows worked examples.
 
+## Agents (`-a`) and where files land
+
+`-a <slug>` places a bundle in that agent's folder from the table below — the machine folder when you work machine-wide, the project folder when you work in a project. `--dest <folder>` names a folder literally instead. Where a row lists more than one machine folder, `-a` writes the first.
+
+Some folders are cross-agent conventions that several agents read, so each is named here once rather than repeated on every row:
+
+- `~/.agents/skills` — the machine folder read by cline, dexto, kimi-code-cli, loaf, warp, zed.
+- `~/.config/agents/skills` — the machine folder read by amp, replit, universal.
+- `.agents/skills` — the project folder read by amp, antigravity, antigravity-cli, cline, codex, cursor, deepagents, dexto, firebender, gemini-cli, github-copilot, kimi-code-cli, loaf, opencode, promptscript, replit, universal, warp, zed. A `shared` cell below means this folder.
+
+| Agent | Machine folder | Project folder |
+|---|---|---|
+| `adal` | `~/.adal/skills` | `.adal/skills` |
+| `aider-desk` | `~/.aider-desk/skills` | `.aider-desk/skills` |
+| `antigravity` | `~/.gemini/antigravity/skills` | shared |
+| `antigravity-cli` | `~/.gemini/antigravity-cli/skills` | shared |
+| `astrbot` | `~/.astrbot/data/skills` | `data/skills` |
+| `augment` | `~/.augment/skills` | `.augment/skills` |
+| `autohand-code` | `~/.autohand/skills` | `.autohand/skills` |
+| `bob` | `~/.bob/skills` | `.bob/skills` |
+| `claude-code` | `~/.claude/skills` | `.claude/skills` |
+| `codearts-agent` | `~/.codeartsdoer/skills` | `.codeartsdoer/skills` |
+| `codebuddy` | `~/.codebuddy/skills` | `.codebuddy/skills` |
+| `codemaker` | `~/.codemaker/skills` | `.codemaker/skills` |
+| `codestudio` | `~/.codestudio/skills` | `.codestudio/skills` |
+| `codex` | `~/.codex/skills` | shared |
+| `command-code` | `~/.commandcode/skills` | `.commandcode/skills` |
+| `continue` | `~/.continue/skills` | `.continue/skills` |
+| `cortex` | `~/.snowflake/cortex/skills` | `.cortex/skills` |
+| `crush` | `~/.config/crush/skills` | `.crush/skills` |
+| `cursor` | `~/.cursor/skills` | shared |
+| `deepagents` | `~/.deepagents/agent/skills` | shared |
+| `devin` | `~/.config/devin/skills` | `.devin/skills` |
+| `droid` | `~/.factory/skills` | `.factory/skills` |
+| `eve` | — | `agent/skills` |
+| `firebender` | `~/.firebender/skills` | shared |
+| `forgecode` | `~/.forge/skills` | `.forge/skills` |
+| `gemini-cli` | `~/.gemini/skills` | shared |
+| `github-copilot` | `~/.copilot/skills` | shared |
+| `goose` | `~/.config/goose/skills` | `.goose/skills` |
+| `grok` | `~/.grok/skills` | `.grok/skills` |
+| `hermes-agent` | `~/.hermes/skills` | `.hermes/skills` |
+| `iflow-cli` | `~/.iflow/skills` | `.iflow/skills` |
+| `inference-sh` | `~/.inferencesh/skills` | `.inferencesh/skills` |
+| `jazz` | `~/.jazz/skills` | `.jazz/skills` |
+| `junie` | `~/.junie/skills` | `.junie/skills` |
+| `kilo` | `~/.kilocode/skills` | `.kilocode/skills` |
+| `kimchi` | `~/.config/kimchi/harness/skills` | `.kimchi/skills` |
+| `kiro-cli` | `~/.kiro/skills` | `.kiro/skills` |
+| `kode` | `~/.kode/skills` | `.kode/skills` |
+| `lingma` | `~/.lingma/skills` | `.lingma/skills` |
+| `mcpjam` | `~/.mcpjam/skills` | `.mcpjam/skills` |
+| `minimax-code` | `~/.minimax/skills` | `.minimax/skills` |
+| `mistral-vibe` | `~/.vibe/skills` | `.vibe/skills` |
+| `moxby` | `~/.moxby/skills` | `.moxby/skills` |
+| `mux` | `~/.mux/skills` | `.mux/skills` |
+| `neovate` | `~/.neovate/skills` | `.neovate/skills` |
+| `ona` | `~/.ona/skills` | `.ona/skills` |
+| `openclaw` | `~/.openclaw/skills`, `~/.clawdbot/skills`, `~/.moltbot/skills` | `skills` |
+| `opencode` | `~/.config/opencode/skills` | shared |
+| `openhands` | `~/.openhands/skills` | `.openhands/skills` |
+| `pi` | `~/.pi/agent/skills` | `.pi/skills` |
+| `pochi` | `~/.pochi/skills` | `.pochi/skills` |
+| `qoder` | `~/.qoder/skills` | `.qoder/skills` |
+| `qoder-cn` | `~/.qoder-cn/skills` | `.qoder/skills` |
+| `qwen-code` | `~/.qwen/skills` | `.qwen/skills` |
+| `reasonix` | `~/.reasonix/skills` | `.reasonix/skills` |
+| `roo` | `~/.roo/skills` | `.roo/skills` |
+| `rovodev` | `~/.rovodev/skills` | `.rovodev/skills` |
+| `tabnine-cli` | `~/.tabnine/agent/skills` | `.tabnine/agent/skills` |
+| `terramind` | `~/.terramind/skills` | `.terramind/skills` |
+| `tinycloud` | `~/.tinycloud/skills` | `.tinycloud/skills` |
+| `trae` | `~/.trae/skills` | `.trae/skills` |
+| `trae-cn` | `~/.trae-cn/skills` | `.trae/skills` |
+| `windsurf` | `~/.codeium/windsurf/skills` | `.windsurf/skills` |
+| `zcode` | `~/.zcode/skills` | `.zcode/skills` |
+| `zencoder` | `~/.zencoder/skills` | `.zencoder/skills` |
+| `zenflow` | `~/.zencoder/skills` | `.zencoder/skills` |
+
+A `—` means the agent has no folder at that scope. An agent absent from the table reads only the shared folders named above.
+
+### MCP server config files
+
+An MCP-server bundle arrives as an entry in the agent's own MCP config rather than a skills folder. `-a <slug>` picks the file below; `--dest <file>` names one literally. Claude Code's machine entry is a topos-owned plugin folder, not a single file.
+
+| Agent | Machine config file | Project config file |
+|---|---|---|
+| `claude-code` | `~/.claude/skills/topos-mcp` | `.mcp.json` |
+| `codex` | `~/.codex/config.toml` | `.codex/config.toml` |
+| `cursor` | `~/.cursor/mcp.json` | `.cursor/mcp.json` |
+| `opencode` | `~/.config/opencode/opencode.json` | `opencode.json` |
+| `openclaw` | `~/.openclaw/openclaw.json` | — |
+| `hermes-agent` | `~/.hermes/config.yaml` | — |
+
 ## Global options
 
 These work before or after any command.
@@ -94,7 +188,7 @@ topos fmt [OPTIONS]
 
 ### `topos add`
 
-Get skills and keep them updated. The source can be a skill or channel from your workspace (`code-review`, `@acme/code-review`, `@acme/channels/backend`), a whole workspace's feed (`@acme`, with `-g`), a local folder (`./tools/my-skill`), or a public GitHub repo (`owner/repo` for every skill in it, `owner/repo/name` for one). Records one line in the nearest `topos.toml` at or above this folder — or in your machine-wide file (`~/.topos/topos.toml`) with `-g` — and installs right away. With no `topos.toml` covering this folder it stops and says so: `topos init` creates one here, or add `-g`. A plain name is looked for both in the skills already sitting in your agents' folders and in the catalogs of the workspaces you are connected to — when only a workspace has it, that is what you get. A GitHub source shows what it found and waits for `--yes`, every time — a skill is instructions your agent will follow, and that listing is there to be read. `add topos` restores the built-in topos skill. With `--mcp` the source is an MCP SERVER instead — a registry name, an https link to its server.json, or a folder holding one — and your agents get it as a tool endpoint in their own MCP config rather than as a skill folder; a name is looked for in your workspaces' catalogs first, then the official registry; every `--mcp` source applies immediately, and the receipt leads with the undo (`topos remove <name>`)
+Get skills and keep them updated. The source can be a skill or channel from your workspace (`code-review`, `@acme/code-review`, `@acme/channels/backend`), a whole workspace's feed (`@acme`, with `-g`), a local folder (`./tools/my-skill`), or a public GitHub repo (`owner/repo` for every skill in it, `owner/repo/name` for one). Records one line in the nearest `topos.toml` at or above this folder — or in your machine-wide file (`~/.topos/topos.toml`) with `-g` — and installs right away. With no `topos.toml` covering this folder it stops and says so: `topos init` creates one here, or add `-g`. A plain name is looked for both in the skills already sitting in your agents' folders and in the catalogs of the workspaces you are connected to — when only a workspace has it, that is what you get. A GitHub source shows what it found and waits for `--yes`, every time — a skill is instructions your agent will follow, and that listing is there to be read. `add topos` restores the built-in topos skill. With `--mcp` the source is an MCP SERVER instead — a registry name, an https link to its server.json, or a folder holding one — and your agents get it as a tool endpoint in their own MCP config rather than as a skill folder; a name is looked for in your workspaces' catalogs first, then the official registry; every `--mcp` source applies immediately, and the receipt leads with the undo (`topos remove <name>`). By default a skill reaches every agent on the machine; `-a <agent>` (repeatable) installs it for just those agents, and `--dest <folder>` (repeatable) installs into an exact folder — together they freeze the row to exactly those destinations, recorded in the file so updates keep landing there. For an MCP source `-a` picks whose config file gets the entry. Re-adding a source with `-a`/`--dest` replaces its recorded destinations with the new set
 
 ```
 topos add [OPTIONS] <SOURCE>
@@ -104,7 +198,8 @@ topos add [OPTIONS] <SOURCE>
 |---|---|
 | `<SOURCE>` | What to add: a workspace skill, channel, or feed; a local folder; or a GitHub repo |
 | `-s, --skill <NAME>` | When a GitHub repo holds several skills, pick which one(s) (repeatable; `'*'` = all) |
-| `-a, --agent <SLUG>` | Which agent to install a GitHub import for (a slug like `cursor`; repeatable; `'*'` = all). Default: the agent detected here |
+| `-a, --agent <SLUG>` | Install for this agent only (a slug like `codex`; repeatable; `'*'` = all detected). Recorded on the row, so updates keep the copy where you asked |
+| `--dest <FOLDER>` | Install into this exact folder (repeatable; combined with `-a` the union is the destination set). An MCP source takes a known config file instead |
 | `--mcp` | Import an MCP server: an official-registry name (io.github.x/y), an https URL to its server.json, or a local folder holding one |
 | `-g, --global` | Add it machine-wide (your `~/.topos/topos.toml`) instead of to this folder's file |
 | `--yes` | Confirm adding from a GitHub source, after reading what it found (everything else applies immediately, and `--yes` changes nothing there) |
@@ -112,7 +207,7 @@ topos add [OPTIONS] <SOURCE>
 
 ### `topos remove`
 
-Stop getting skills here — the inverse of `add`. Edits the same file `add` would: the nearest `topos.toml` at or above this folder, or your machine-wide file with `-g` (dropping a line, or switching one feed-delivered skill "off" on this machine). It never reaches across that line — a skill your machine-wide file delivers is refused here, pointing at `-g`. `remove -g @<workspace>` drops that feed line and uninstalls what it delivered in the same command — a copy you edited stays in place, disclosed. Prints exactly what changed and how to undo it; asks first only when removing would lose local work or rewrite a whole channel/repo line
+Stop getting skills here — the inverse of `add`. Edits the same file `add` would: the nearest `topos.toml` at or above this folder, or your machine-wide file with `-g` (dropping a line, or switching one feed-delivered skill "off" on this machine). It never reaches across that line — a skill your machine-wide file delivers is refused here, pointing at `-g`. Removing a line also uninstalls the copies it placed, in the same command — a copy you edited stays in place, disclosed. With `-a <agent>` or `--dest <folder>` only THAT destination is removed: the row keeps the rest, and removing the last one removes the row. Prints exactly what changed and how to undo it; asks first only when removing would lose local work or rewrite a whole channel/repo line
 
 ```
 topos remove [OPTIONS] [SKILL]...
@@ -121,6 +216,8 @@ topos remove [OPTIONS] [SKILL]...
 | Argument / flag | What it does |
 |---|---|
 | `[SKILL]...` | The skill(s) to remove — or `@<workspace>` with `-g` to stop adopting its feed here |
+| `-a, --agent <SLUG>` | Remove only this agent's copy (a slug like `codex`; repeatable) — the skill stays for every other agent |
+| `--dest <FOLDER>` | Remove only the copy in this exact folder (repeatable; combined with `-a` the union is removed). An MCP source takes a config file |
 | `-g, --global` | Edit your machine-wide file (`~/.topos/topos.toml`) instead of this folder's |
 | `--via <REF>` | When more than one channel/repo line carries the skill, name WHICH line's rewrite you mean (its reference, e.g. `@acme/channels/backend`) — the ambiguity refusal lists the exact `--via` invocations |
 | `--yes` | Confirm a removal that loses local work (unshared edits, or a local-only skill whose delete is permanent) |

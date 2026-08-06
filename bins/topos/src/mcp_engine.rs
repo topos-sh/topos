@@ -67,9 +67,10 @@ pub(crate) struct McpDemand {
     /// The bundle's `server.json` bytes, read from the scope store's current tree (or the local
     /// row's dir).
     pub server_json: Vec<u8>,
-    /// Registry slugs this demand is narrowed to (row `harness = [...]` beating
-    /// `[defaults.mcp]`); empty = every MCP-capable harness.
-    pub harness_filter: Vec<String>,
+    /// Registry slugs this demand is narrowed to — the harnesses whose config files the row's
+    /// `dest` names. `None` = no dest (every MCP-capable harness); `Some` = exactly these,
+    /// possibly none at all (a dest row is frozen to what it names).
+    pub harness_filter: Option<Vec<String>>,
 }
 
 /// The scope's I/O: the fs seam, the scope store (the ledger's home), and the machine roots the
@@ -626,9 +627,12 @@ fn converge_lock(io: &ScopeIo<'_>) -> Result<crate::fs_seam::LockGuard, String> 
     })
 }
 
-/// Whether a demand's harness narrowing admits `slug` (empty = all).
+/// Whether a demand's dest narrowing admits `slug` (`None` = every MCP-capable harness; a dest
+/// row admits exactly the harnesses its config files name — possibly none).
 fn filter_admits(d: &McpDemand, slug: &str) -> bool {
-    d.harness_filter.is_empty() || d.harness_filter.iter().any(|s| s == slug)
+    d.harness_filter
+        .as_ref()
+        .is_none_or(|f| f.iter().any(|s| s == slug))
 }
 
 fn agent_state(slug: &str, state: &str, note: Option<&str>, file: Option<&Path>) -> McpAgentState {
@@ -1451,7 +1455,7 @@ pub(crate) fn converge_bundle_now(
         workspace_slug: None,
         version_id,
         server_json,
-        harness_filter: owned,
+        harness_filter: Some(owned),
     };
     let outcome = converge(
         &io,

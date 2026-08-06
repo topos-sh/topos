@@ -469,6 +469,8 @@ fn fixtures() -> Vec<(&'static str, String)> {
             published_match: None,
             note: None,
             mcp: None,
+            dest: Vec::new(),
+            display: None,
         })
         .expect("AddData serializes"),
         warnings: vec![],
@@ -508,6 +510,8 @@ fn fixtures() -> Vec<(&'static str, String)> {
                     .to_owned(),
             ),
             mcp: None,
+            dest: Vec::new(),
+            display: None,
         })
         .expect("AddData serializes"),
         warnings: vec![],
@@ -549,6 +553,8 @@ fn fixtures() -> Vec<(&'static str, String)> {
             }),
             note: None,
             mcp: None,
+            dest: Vec::new(),
+            display: None,
         })
         .expect("AddData serializes"),
         warnings: vec![],
@@ -630,6 +636,8 @@ fn fixtures() -> Vec<(&'static str, String)> {
                  /home/ada/.cursor/mcp.json — restart Cursor"
                     .to_owned(),
             ),
+            dest: Vec::new(),
+            display: None,
             mcp: Some(McpServerSummary {
                 server: "io.github.acme/weather".to_owned(),
                 description: "Current conditions and forecasts for a named place.".to_owned(),

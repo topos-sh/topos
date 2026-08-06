@@ -677,6 +677,37 @@ pub(crate) enum ClientError {
          `topos add --mcp {dir}` adds it as one"
     )]
     McpFlagRequired { dir: String },
+    /// A manifest spells a RETIRED placement field (`path` / `harness` / a `[defaults.<kind>]`
+    /// table) — the load refuses and the message teaches the exact per-row `dest` rewrite. Shown
+    /// VERBATIM (the message is this code's own teaching over the user's own file content, like
+    /// `InvalidArgument`); the TTY rendering closes with `nothing changed`, because the file was
+    /// only read.
+    #[error("{0}")]
+    ManifestMigration(String),
+    /// A `-a` selector naming no known agent. `known` is the real registry's slugs, alphabetical,
+    /// an ellipsis past a handful — so the fix is a copy-paste. Nothing was read past the argv;
+    /// the TTY closes with `nothing changed`.
+    #[error("unknown agent: {agent} — known: {known}")]
+    UnknownAgent { agent: String, known: String },
+    /// A `-a`/`--dest` selection an arm refuses whole (a feed reaches every agent by nature; the
+    /// built-in manages its own placement) — one teaching sentence, shown VERBATIM; the TTY
+    /// closes with `nothing changed`, because nothing was read past the argv.
+    #[error("{0}")]
+    SelectionRefused(String),
+    /// A per-agent removal whose only copy is a SHARED folder several agents read — subtracting
+    /// one agent cannot narrow one copy. The two ways out ride as structured `next_actions`
+    /// (and the TTY renders them as aligned command lines): remove the copy for every agent, or
+    /// re-add per-agent for the others and re-run.
+    #[error("{name} has no {agent}-only copy — its one copy is {copy}, which several agents read")]
+    SharedCopyOnly {
+        name: String,
+        agent: String,
+        copy: String,
+        /// `topos remove [-g] <name>` — remove it for every agent.
+        remove_argv: Vec<String>,
+        /// `topos add [-g] <ref> -a <slug>…` — keep it per-agent instead, then re-run.
+        readd_argv: Vec<String>,
+    },
 }
 
 impl From<crate::mcp_validate::McpRefusal> for ClientError {
@@ -783,6 +814,14 @@ impl ClientError {
             ClientError::McpRefused { code, .. } => code.as_str(),
             // A server bundle at a skill door: the fix is the `--mcp` spelling, machine-runnable.
             ClientError::McpFlagRequired { .. } => "MCP_FLAG_REQUIRED",
+            // A retired manifest spelling: the fix is the row's `dest` rewrite in the message.
+            ClientError::ManifestMigration(_) => "MANIFEST_FIELD_RETIRED",
+            // A `-a` slug the registry does not know: the fix is a listed slug.
+            ClientError::UnknownAgent { .. } => "UNKNOWN_AGENT",
+            // A selection the arm refuses whole shares the argument-shaped code.
+            ClientError::SelectionRefused(_) => "INVALID_ARGUMENT",
+            // The shared-copy narrowing refusal: the ways out ride as next_actions.
+            ClientError::SharedCopyOnly { .. } => "SHARED_COPY_ONLY",
         }
     }
 

@@ -814,6 +814,17 @@ pub struct AddData {
     /// the document yet. **INFERRED** (additive-only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mcp: Option<McpServerSummary>,
+    /// The destinations the row was frozen to (`-a`/`--dest`): skills folders as the manifest
+    /// spells them (`~/`-abbreviated in the machine file, project-relative in a project file),
+    /// or a config-placed bundle's config files. Empty when the add named no destination.
+    /// **INFERRED** (additive-only).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dest: Vec<String>,
+    /// The workspace-qualified display name the receipt leads with (`@<ws>/<name>` at the
+    /// machine's one connected host, else `<host>/<ws>/<name>`). Absent for a non-workspace
+    /// source. **INFERRED** (additive-only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display: Option<String>,
 }
 
 /// The describe a bare `add` of a git source returns: the source, what was discovered in it, and
@@ -1424,6 +1435,11 @@ pub struct UninstalledBundle {
     /// `~`-abbreviated.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub kept: Vec<String>,
+    /// A NARROWED removal (`-a`/`--dest`): how many destinations the row still names after the
+    /// subtraction — the receipt's `— N folders remain` clause (config files for an MCP
+    /// bundle). Absent on a whole-row removal. **INFERRED** (additive).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remaining: Option<u64>,
 }
 
 /// One skill in a [`RemoveData`]. **INFERRED.**
@@ -1466,6 +1482,9 @@ pub enum RemoveKind {
     /// A broader layer still provides the item, so an EXCLUDE line was recorded in the nearest
     /// manifest (the one negative state). **Additive.**
     ManifestExcluded,
+    /// A NARROWED removal (`-a`/`--dest`): the named destination(s) were subtracted from the
+    /// row's `dest` and that copy uninstalled; the row survives with the rest. **Additive.**
+    ManifestNarrowed,
     /// An untracked local copy in an agent dir → permanent delete (no other copy exists).
     UntrackedLocal,
     /// A tracked, never-published local skill → permanent delete (the sidecar entry drops too).

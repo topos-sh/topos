@@ -23,6 +23,7 @@ mod auth;
 mod builtin;
 mod connect;
 mod contribute;
+pub(crate) mod dest_select;
 mod diff;
 mod feed_migration;
 mod fmt;
@@ -51,7 +52,7 @@ mod uninstall;
 mod version_check;
 
 pub(crate) use add::{
-    AddRemoteOpts, BareAddPlan, KeepAsYoursOutcome, add, add_remote, add_remote_fetched,
+    AddRemoteOpts, BareAddPlan, KeepAsYoursOutcome, OriginDoc, add, add_remote, add_remote_fetched,
     add_with_name, adopt_path, adopt_path_any_kind, governed_copy_suggestion, keep_as_yours,
     plan_bare_add, resolve_add_target, split_target, tracked_skill_at,
 };
@@ -59,6 +60,7 @@ pub(crate) use add_mcp::{McpDocSource, add_mcp};
 pub(crate) use arm::{arm_detected, probe_detected, scrub_all};
 pub(crate) use builtin::{ensure_builtin, is_builtin, restore_builtin};
 pub(crate) use connect::device_challenge;
+pub(crate) use dest_select::Selection;
 // The RFC-3339 emitter round-trips against the render parser's test.
 #[cfg(test)]
 pub(crate) use connect::fmt_rfc3339_millis;
@@ -77,8 +79,9 @@ pub(crate) use invite::{InviteConnectors, InviteOutcome, invite};
 pub(crate) use list::{DiscoveryRoots, ListOutcome, ListRequest, list_with};
 pub(crate) use login::{LoginConnectors, login as session_login, logout as session_logout};
 pub(crate) use manifest_edit::{
-    add_scope, manifest_host, note_added_path_in, note_added_remote, off_row_for, push_note,
-    reference_shaped, remove_global, remove_project,
+    add_scope, dest_for_selected_agents, manifest_host, note_added_path_dest_in,
+    note_added_path_in, note_added_remote, off_row_for, push_note, reference_shaped, remove_global,
+    remove_project,
 };
 // The scope-flag form of the path row-write: the composition root always resolves the target
 // itself (see `add_scope`), so this backstop exists for the fixture rig and its own tests.

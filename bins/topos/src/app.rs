@@ -557,15 +557,19 @@ fn run_command(
             source,
             skill,
             agent,
+            dest,
             mcp,
             global,
             yes,
         } => {
+            // The `-a`/`--dest` SELECTION, verbatim — resolved per arm below (a skill source
+            // freezes skills folders, an MCP source config files).
+            let selection = ops::Selection::new(&agent, &dest);
             // `--mcp` declares WHAT is being imported, so it is read before every resolution
             // ladder below: an MCP server is a tool endpoint, not a skill folder, and none of the
             // ladder's answers (untracked discovery, the keep-as-yours fork, the workspace
-            // catalogs) mean anything for one. The `-s`/`-a` selectors are forge-import
-            // narrowings and clap already refuses them alongside it.
+            // catalogs) mean anything for one. `-s` is a repo-member selector and clap refuses
+            // it alongside; `-a`/`--dest` narrow WHICH config files get the entry.
             if mcp {
                 let docs =
                     crate::plane_http::UreqMcpSource::new().with_progress(Rc::clone(&progress));
@@ -580,6 +584,7 @@ fn run_command(
                     &source,
                     global,
                     workspace.as_deref(),
+                    &selection,
                 );
                 // The arming sweep + the built-in ride an APPLIED import exactly as they ride any
                 // other adopt receipt (the same trigger-arming moment).
@@ -594,17 +599,17 @@ fn run_command(
                 });
                 return finish_add_mcp(json, cmd_name, result, &diag);
             }
-            // The `-s`/`-a` SELECTORS (single, multiple, or the `*` fan-outs) narrow a REMOTE
-            // import — which members land, into which agent dirs. They pass through the SAME
-            // describe-first shape and the SAME per-scope store as a bare `add owner/repo`: a
-            // selector narrows what lands, never what a person gets to read first. `-s *`
+            // The `-s`/`-a`/`--dest` SELECTORS (single, multiple, or the `*` fan-outs) narrow a
+            // REMOTE import — which members land, into which destinations. They pass through the
+            // SAME describe-first shape and the SAME per-scope store as a bare `add owner/repo`:
+            // a selector narrows what lands, never what a person gets to read first. `-s *`
             // expands to every skill in the repo; `-a *` to every harness DETECTED on this machine.
-            let no_selectors = skill.is_empty() && agent.is_empty();
+            let has_selectors = !skill.is_empty() || !selection.is_empty();
             let looks_remote = matches!(
                 crate::source::classify(&source),
                 crate::source::SourceSpec::Remote(_)
             );
-            if !no_selectors && looks_remote {
+            if has_selectors && looks_remote {
                 let git =
                     crate::plane_http::UreqGitSource::new().with_progress(Rc::clone(&progress));
                 let result = ops::add_forge_selected(
@@ -614,6 +619,7 @@ fn run_command(
                     &source,
                     &skill,
                     &agent,
+                    &dest,
                     global,
                     yes,
                 );
@@ -637,10 +643,23 @@ fn run_command(
                 return finish_add_many(json, cmd_name, result, &diag);
             }
             let single_skill = skill.into_iter().next();
-            let single_agent = agent.into_iter().next();
+            let single_agent = agent.first().cloned();
             // The BUILT-IN's restore: `add topos` clears the durable `remove topos` opt-out and
             // re-places (adopting a marker-carrying downloaded copy snapshot-first). Intercepted
-            // ahead of every resolution ladder — the name is reserved end-to-end.
+            // ahead of every resolution ladder — the name is reserved end-to-end. It manages its
+            // own placement, so a selection over it refuses whole.
+            if ops::is_builtin(&source) && !selection.is_empty() {
+                return finish(
+                    json,
+                    cmd_name,
+                    Err(ClientError::SelectionRefused(
+                        "the built-in topos skill manages its own placement — drop `-a`/`--dest`"
+                            .into(),
+                    )),
+                    render::add_tty,
+                    &diag,
+                );
+            }
             if ops::is_builtin(&source) {
                 let result = ops::restore_builtin(&ctx)
                     .map(|sync| serde_json::json!({ "restored": true, "changed": sync.changed }));
@@ -659,16 +678,17 @@ fn run_command(
             // REFERENCES first, read by SHAPE (the joined-key grammar): a workspace bundle
             // (`@ws/name`, the canonical `host/ws/name`), a channel (`@ws/channels/x`), a
             // workspace FEED (`@ws`, `-g`), or a git source (`owner/repo[/skill]`, a github URL).
-            // Each records ONE manifest row; a git source describes before it installs. The
-            // `-s`/`-a` selectors stay with the multi-import path below, which
-            // places per (skill × harness).
+            // Each records ONE manifest row; a git source describes before it installs. A
+            // `-a`/`--dest` selection rides the arm and lands in the row's `dest` (the `-s`
+            // member selector stays with the multi-import path above, which places per
+            // (skill × destination)).
             // A `/`-containing token that names a REAL directory here is a local adopt, whatever
             // the grammar would read it as — the bytes in front of you win over a shorthand.
             let looks_local = matches!(
                 crate::source::classify(&source),
                 crate::source::SourceSpec::LocalPath(ref p) if p.exists()
             );
-            let reference_arm = no_selectors && !looks_local;
+            let reference_arm = !looks_local;
             // The `"off"` switch's EXACT INVERSE, at the spelling that wrote it. `remove -g
             // <name>` takes a bare name and writes the switch under the canonical reference; the
             // reference grammar does not own bare names, so a bare `add -g <name>` would fall past
@@ -702,6 +722,7 @@ fn run_command(
                         &source,
                         global,
                         yes,
+                        &selection,
                     );
                     let result = result.map(|outcome| match outcome {
                         // The breadth arming sweep + the built-in ride an APPLIED add exactly as
@@ -757,8 +778,12 @@ fn run_command(
             }
             // keep-as-yours: a bare NAME that resolves to a RETAINED withdrawn/detached copy re-forks it
             // into a new LOCAL skill, two-phase (bare describes the fork; `--yes` applies). A non-retained
-            // name falls through to the ordinary adopt below.
-            if let crate::source::SourceSpec::LocalName(name) = crate::source::classify(&source) {
+            // name falls through to the ordinary adopt below. A `-a`/`--dest` selection skips the
+            // fork question entirely — it is about where a row's copies live, which the adopt and
+            // subscribe arms below both answer.
+            if selection.is_empty()
+                && let crate::source::SourceSpec::LocalName(name) = crate::source::classify(&source)
+            {
                 match ops::keep_as_yours(&ctx, &name, yes) {
                     Ok(Some(outcome)) => {
                         return finish_keep_as_yours(json, cmd_name, outcome, &diag);
@@ -785,8 +810,38 @@ fn run_command(
                 crate::source::SourceSpec::LocalPath(p) => {
                     ops::add_scope(&ctx, global).and_then(|scope| {
                         let sctx = ops::ctx_with_layout(&ctx, &scope.layout);
+                        // The selection resolves (and refuses) BEFORE the adopt, so an unknown
+                        // agent leaves nothing half-landed.
+                        let entries = selection.skill_entries(scope.target.scope)?;
                         let mut d = ops::adopt_path(&sctx, &scope.target, &p)?;
-                        ops::note_added_path_in(&ctx, &mut d, &scope.target, &p)?;
+                        if entries.is_empty() {
+                            ops::note_added_path_in(&ctx, &mut d, &scope.target, &p)?;
+                        } else {
+                            ops::note_added_path_dest_in(
+                                &ctx,
+                                &mut d,
+                                &scope.target,
+                                &p,
+                                &entries,
+                            )?;
+                            // The dest copies land NOW through the same narrowed update the
+                            // workspace arm runs (best-effort; the row is durable demand).
+                            let _ = ops::manifest_update(
+                                &ctx,
+                                &connect_session_transports,
+                                None,
+                                &ops::ManifestUpdateOpts {
+                                    targets: vec![d.name.clone()],
+                                    scope: if global {
+                                        ops::UpdateScope::Machine
+                                    } else {
+                                        ops::UpdateScope::Here
+                                    },
+                                    ..Default::default()
+                                },
+                            );
+                            d.dest = entries;
+                        }
                         Ok(d)
                     })
                 }
@@ -795,12 +850,15 @@ fn run_command(
                 // dead end, and a name both carry says so on the receipt.
                 crate::source::SourceSpec::LocalName(name) => match list_discovery() {
                     Some(roots) => {
+                        // The `-a`/`--dest` selection does NOT suppress the subscribe arm — the
+                        // reference arm records it on the row; only a `-s` member pick (which is
+                        // about a repo) does.
                         match ops::plan_bare_add(
                             &ctx,
                             &connect_session_transports,
                             &roots,
                             &name,
-                            no_selectors,
+                            single_skill.is_none(),
                             global,
                             workspace.as_deref(),
                         ) {
@@ -819,6 +877,7 @@ fn run_command(
                                     &reference,
                                     global,
                                     yes,
+                                    &selection,
                                 );
                                 let result = result.map(|outcome| match outcome {
                                     ops::AddRefOutcome::Applied(mut data) => {
@@ -854,8 +913,34 @@ fn run_command(
                                 published,
                             }) => ops::add_scope(&ctx, global).and_then(|scope| {
                                 let sctx = ops::ctx_with_layout(&ctx, &scope.layout);
+                                let entries = selection.skill_entries(scope.target.scope)?;
                                 let mut d = ops::add_with_name(&sctx, &path, Some(&name), true)?;
-                                ops::note_added_path_in(&ctx, &mut d, &scope.target, &path)?;
+                                if entries.is_empty() {
+                                    ops::note_added_path_in(&ctx, &mut d, &scope.target, &path)?;
+                                } else {
+                                    ops::note_added_path_dest_in(
+                                        &ctx,
+                                        &mut d,
+                                        &scope.target,
+                                        &path,
+                                        &entries,
+                                    )?;
+                                    let _ = ops::manifest_update(
+                                        &ctx,
+                                        &connect_session_transports,
+                                        None,
+                                        &ops::ManifestUpdateOpts {
+                                            targets: vec![d.name.clone()],
+                                            scope: if global {
+                                                ops::UpdateScope::Machine
+                                            } else {
+                                                ops::UpdateScope::Here
+                                            },
+                                            ..Default::default()
+                                        },
+                                    );
+                                    d.dest = entries;
+                                }
                                 // The bytes that just landed are what the disclosure judges
                                 // against the team's current version.
                                 let adopted = d.bundle_digest.clone().unwrap_or_default();
@@ -876,7 +961,8 @@ fn run_command(
                         let git = crate::plane_http::UreqGitSource::new()
                             .with_progress(Rc::clone(&progress));
                         // The `-a` selection is a standing fact, not a one-run choice: it rides
-                        // the row so the next update keeps the copy where it was asked for.
+                        // the row — as the selected agents' dest dirs — so the next update keeps
+                        // the copy where it was asked for.
                         let chosen: Vec<String> = single_agent.iter().cloned().collect();
                         ops::add_scope(&ctx, global).and_then(|scope| {
                             let sctx = ops::ctx_with_layout(&ctx, &scope.layout);
@@ -888,10 +974,12 @@ fn run_command(
                                 &ops::AddRemoteOpts {
                                     skill: single_skill,
                                     harness: single_agent.clone(),
+                                    dest_root: None,
                                     global,
                                 },
                             )?;
-                            ops::note_added_remote(&ctx, &mut d, &scope.target, &chosen)?;
+                            let dest = ops::dest_for_selected_agents(&chosen, scope.target.scope);
+                            ops::note_added_remote(&ctx, &mut d, &scope.target, &dest)?;
                             // The DEDUP courtesy: when a connected workspace already governs this
                             // source (its catalog's upstream provenance matches), the receipt
                             // SUGGESTS the governed reference — visible, never blocking (the
@@ -1387,10 +1475,13 @@ fn run_command(
         }
         Command::Remove {
             skill,
+            agent,
+            dest,
             global,
             via,
             yes,
         } => {
+            let selection = ops::Selection::new(&agent, &dest);
             // A REFERENCE-SHAPED token the grammar refuses surfaces its typed refusal here too —
             // never retried through the tracked/untracked ladder (whose answers name the wrong fix).
             for t in &skill {
@@ -1407,8 +1498,9 @@ fn run_command(
                 }
             }
             // `remove -g` edits THIS MACHINE's own file: drop a row, stop adopting a workspace's
-            // feed, or switch one feed-delivered bundle off here. It never touches the server —
-            // what a workspace assigns you is managed on the web.
+            // feed, or switch one feed-delivered bundle off here — or, with `-a`/`--dest`,
+            // subtract just those destinations from a row. It never touches the server — what a
+            // workspace assigns you is managed on the web.
             if global {
                 let result = ops::remove_global(
                     &ctx,
@@ -1416,6 +1508,7 @@ fn run_command(
                     &skill,
                     via.as_deref(),
                     yes,
+                    &selection,
                 );
                 return finish_remove(json, cmd_name, result, &diag);
             }
@@ -1428,6 +1521,7 @@ fn run_command(
                 &skill,
                 via.as_deref(),
                 yes,
+                &selection,
             ) {
                 Ok(Some(outcome)) => {
                     return finish_remove(json, cmd_name, Ok(outcome), &diag);
@@ -1450,12 +1544,26 @@ fn run_command(
                     &diag,
                 );
             }
+            // `--dest` names a manifest row's destination; a token no manifest arm claimed has
+            // no row to narrow — refuse rather than routing the flag into the classic removal.
+            if !dest.is_empty() {
+                return emit_err(
+                    json,
+                    cmd_name,
+                    &ClientError::SelectionRefused(
+                        "--dest narrows a manifest row's destinations, and no manifest line here \
+                         carries the named target — `topos list` shows what each scope delivers"
+                            .into(),
+                    ),
+                    &diag,
+                );
+            }
             let connectors = ops::RemoveConnectors {
                 directory: &connect_directory,
                 session: &connect_session_transports,
             };
             let roots = list_discovery();
-            let result = ops::remove(&ctx, &connectors, &skill, &[], roots.as_ref(), yes);
+            let result = ops::remove(&ctx, &connectors, &skill, &agent, roots.as_ref(), yes);
             finish_remove(json, cmd_name, result, &diag)
         }
         // `channel add|remove <channel> <skill>...` dispatches to the two-phase op; a bare `channel` (or an

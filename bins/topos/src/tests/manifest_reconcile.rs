@@ -1711,6 +1711,7 @@ fn gate_add(ctx: &Ctx<'_>, plane: &FakePlane, dir: &FakeDirectory, git: &FakeGit
         raw,
         true,
         true,
+        &Default::default(),
     )
     .unwrap()
     {
@@ -2048,6 +2049,7 @@ fn a_machine_with_no_prior_grant_auto_updates_a_cloned_projects_row() {
         "github.com/o/r",
         false,
         false,
+        &Default::default(),
     )
     .unwrap();
     match outcome {
@@ -4229,6 +4231,7 @@ fn project_checkouts_keep_their_own_forge_stores() {
         "github.com/o/r",
         false,
         true,
+        &Default::default(),
     )
     .unwrap()
     {
@@ -4250,6 +4253,7 @@ fn project_checkouts_keep_their_own_forge_stores() {
         "github.com/o/r",
         false,
         true,
+        &Default::default(),
     )
     .unwrap()
     {
@@ -4618,6 +4622,7 @@ fn a_failed_member_install_leaves_the_row_and_the_next_update_converges() {
         "github.com/o/r",
         false,
         true,
+        &Default::default(),
     )
     .unwrap()
     {
@@ -4679,7 +4684,17 @@ fn applied_add(
     dir: &FakeDirectory,
     raw: &str,
 ) -> topos_types::results::AddData {
-    match ops::add_reference(ctx, &connect(plane, dir), None, raw, true, false).unwrap() {
+    match ops::add_reference(
+        ctx,
+        &connect(plane, dir),
+        None,
+        raw,
+        true,
+        false,
+        &Default::default(),
+    )
+    .unwrap()
+    {
         ops::AddRefOutcome::Applied(d) => *d,
         ops::AddRefOutcome::Described { .. } => panic!("a workspace reference applies"),
     }
@@ -4746,7 +4761,7 @@ fn a_replaced_row_value_offers_only_the_exact_inverse() {
 
     // A prior FIELDS value: no single command restores it — no undo, and the note says why.
     rig.write_global(&format!(
-        "[bundles]\n\"{HOST}/{WS_NAME}/deploy\" = {{ harness = [\"codex\"] }}\n"
+        "[bundles]\n\"{HOST}/{WS_NAME}/deploy\" = {{ dest = [\"~/.codex/skills\"] }}\n"
     ));
     let data = applied_add(&ctx, &plane, &dir, &format!("@{WS_NAME}/deploy@{digest}"));
     assert!(
@@ -4775,7 +4790,7 @@ fn install_feed_deploy(rig: &Rig, plane: &FakePlane, dir: &FakeDirectory) -> Pat
 }
 
 #[test]
-fn an_off_switch_over_a_draft_is_describe_first() {
+fn an_off_switch_over_a_draft_applies_with_the_kept_disclosure() {
     let rig = Rig::new("off-gate");
     rig.seed_session();
     let log: CallLog = Arc::new(Mutex::new(Vec::new()));
@@ -4794,6 +4809,7 @@ fn an_off_switch_over_a_draft_is_describe_first() {
         &["deploy".into()],
         None,
         false,
+        &Default::default(),
     )
     .unwrap();
     match out {
@@ -4810,7 +4826,8 @@ fn an_off_switch_over_a_draft_is_describe_first() {
     rig.write_global(&format!("[bundles]\n\"{HOST}/{WS_NAME}\" = \"*\"\n"));
     sweep(&ctx, &plane, &dir);
 
-    // DRAFTED: local edits make the same act loss-shaped — describe-first, applied under --yes.
+    // DRAFTED: the edited copy is KEPT IN PLACE by the eager uninstall, so nothing is
+    // loss-shaped — the switch applies immediately, the note disclosing the kept copy.
     std::fs::write(placed.join("SKILL.md"), b"# my edit\n").unwrap();
     let out = ops::remove_global(
         &ctx,
@@ -4818,22 +4835,23 @@ fn an_off_switch_over_a_draft_is_describe_first() {
         &["deploy".into()],
         None,
         false,
+        &Default::default(),
     )
     .unwrap();
     match out {
-        ops::RemoveOutcome::Described { data, yes_argv } => {
+        ops::RemoveOutcome::Applied(data) => {
+            assert!(data.applied);
             let note = data.items[0].note.clone().unwrap_or_default();
             assert!(note.contains("local edits"), "{note}");
-            assert!(yes_argv.contains(&"--yes".to_owned()), "{yes_argv:?}");
+            assert!(note.contains("stays in place"), "{note}");
+            // The edited copy really is still on disk.
+            assert_eq!(
+                std::fs::read(placed.join("SKILL.md")).unwrap(),
+                b"# my edit\n"
+            );
         }
-        other => panic!("a drafted off switch describes first: {other:?}"),
+        other => panic!("a drafted off switch applies with the kept disclosure: {other:?}"),
     }
-    let out =
-        ops::remove_global(&ctx, &connect(&plane, &dir), &["deploy".into()], None, true).unwrap();
-    assert!(
-        matches!(out, ops::RemoveOutcome::Applied(_)),
-        "--yes applies the described act"
-    );
 }
 
 #[test]
@@ -4860,6 +4878,7 @@ fn a_feed_drop_applies_immediately_and_uninstalls_in_the_same_invocation() {
         std::slice::from_ref(&token),
         None,
         false,
+        &Default::default(),
     )
     .unwrap();
     let data = match out {
@@ -4893,7 +4912,15 @@ fn a_feed_drop_applies_immediately_and_uninstalls_in_the_same_invocation() {
     rig.write_global(&format!("[bundles]\n\"{HOST}/{WS_NAME}\" = \"*\"\n"));
     sweep(&ctx, &plane, &dir);
     assert!(placed.join("SKILL.md").exists());
-    let out = ops::remove_global(&ctx, &connect(&plane, &dir), &[token], None, false).unwrap();
+    let out = ops::remove_global(
+        &ctx,
+        &connect(&plane, &dir),
+        &[token],
+        None,
+        false,
+        &Default::default(),
+    )
+    .unwrap();
     let data = match out {
         ops::RemoveOutcome::Applied(data) => data,
         other => panic!("a clean feed drop applies immediately: {other:?}"),
@@ -4946,7 +4973,7 @@ fn a_set_split_carries_the_lines_fields_onto_survivors() {
         }],
     );
     rig.write_global(&format!(
-        "[bundles]\n\"{HOST}/{WS_NAME}/channels/backend\" = {{ harness = [\"codex\"] }}\n"
+        "[bundles]\n\"{HOST}/{WS_NAME}/channels/backend\" = {{ dest = [\"~/.codex/skills\"] }}\n"
     ));
     let ctx = rig.ctx_at(Some(&rig.work.0));
 
@@ -4957,17 +4984,25 @@ fn a_set_split_carries_the_lines_fields_onto_survivors() {
         &["deploy".into()],
         None,
         false,
+        &Default::default(),
     )
     .unwrap();
     match out {
         ops::RemoveOutcome::Described { data, .. } => {
             let note = data.items[0].note.clone().unwrap_or_default();
-            assert!(note.contains("harness settings carry"), "{note}");
+            assert!(note.contains("dest settings carry"), "{note}");
         }
         other => panic!("a set split describes first: {other:?}"),
     }
-    let out =
-        ops::remove_global(&ctx, &connect(&plane, &dir), &["deploy".into()], None, true).unwrap();
+    let out = ops::remove_global(
+        &ctx,
+        &connect(&plane, &dir),
+        &["deploy".into()],
+        None,
+        true,
+        &Default::default(),
+    )
+    .unwrap();
     assert!(matches!(out, ops::RemoveOutcome::Applied(_)));
     let text =
         std::fs::read_to_string(rig.layout().home().join(crate::manifest::MANIFEST_FILE)).unwrap();
@@ -4984,8 +5019,8 @@ fn a_set_split_carries_the_lines_fields_onto_survivors() {
     match &survivor.value {
         crate::manifest::document::EntryValue::Fields(f) => {
             assert_eq!(
-                f.harness.as_deref(),
-                Some(&["codex".to_owned()][..]),
+                f.dest.as_deref(),
+                Some(&["~/.codex/skills".to_owned()][..]),
                 "{text}"
             );
         }
@@ -5049,7 +5084,7 @@ fn a_set_split_never_overwrites_a_survivors_explicit_row() {
     );
     let pin = topos_core::digest::to_hex(&p.id);
     rig.write_global(&format!(
-        "[bundles]\n\"{HOST}/{WS_NAME}/channels/backend\" = {{ harness = [\"codex\"] }}\n\
+        "[bundles]\n\"{HOST}/{WS_NAME}/channels/backend\" = {{ dest = [\"~/.codex/skills\"] }}\n\
          \"{HOST}/{WS_NAME}/pinned\" = \"{pin}\"\n"
     ));
     let ctx = rig.ctx_at(Some(&rig.work.0));
@@ -5061,6 +5096,7 @@ fn a_set_split_never_overwrites_a_survivors_explicit_row() {
         &["deploy".into()],
         None,
         false,
+        &Default::default(),
     )
     .unwrap();
     match out {
@@ -5074,8 +5110,15 @@ fn a_set_split_never_overwrites_a_survivors_explicit_row() {
         }
         other => panic!("a set split describes first: {other:?}"),
     }
-    let out =
-        ops::remove_global(&ctx, &connect(&plane, &dir), &["deploy".into()], None, true).unwrap();
+    let out = ops::remove_global(
+        &ctx,
+        &connect(&plane, &dir),
+        &["deploy".into()],
+        None,
+        true,
+        &Default::default(),
+    )
+    .unwrap();
     assert!(matches!(out, ops::RemoveOutcome::Applied(_)));
     let text =
         std::fs::read_to_string(rig.layout().home().join(crate::manifest::MANIFEST_FILE)).unwrap();
@@ -5103,7 +5146,7 @@ fn a_set_split_never_overwrites_a_survivors_explicit_row() {
         .unwrap_or_else(|| panic!("the row-less survivor gets a new row: {text}"));
     assert!(
         matches!(&fresh.value, crate::manifest::document::EntryValue::Fields(f)
-            if f.harness.as_deref() == Some(&["codex".to_owned()][..])),
+            if f.dest.as_deref() == Some(&["~/.codex/skills".to_owned()][..])),
         "{text}"
     );
     assert!(
@@ -5720,6 +5763,7 @@ fn a_project_import_stages_the_sentinel_and_a_shipped_ignore_discloses() {
         &ops::AddRemoteOpts {
             skill: Some("alpha".into()),
             harness: None,
+            dest_root: None,
             global: false,
         },
     )
@@ -5759,6 +5803,7 @@ fn a_project_import_stages_the_sentinel_and_a_shipped_ignore_discloses() {
         &ops::AddRemoteOpts {
             skill: Some("beta".into()),
             harness: None,
+            dest_root: None,
             global: false,
         },
     )
@@ -5843,6 +5888,7 @@ fn an_interactive_add_of_a_git_source_always_describes_first() {
         "github.com/o/r",
         false,
         false,
+        &Default::default(),
     )
     .unwrap();
     match outcome {
@@ -5870,6 +5916,7 @@ fn an_interactive_add_of_a_git_source_always_describes_first() {
         "github.com/o/r",
         false,
         true,
+        &Default::default(),
     )
     .unwrap()
     {
@@ -5888,6 +5935,7 @@ fn an_interactive_add_of_a_git_source_always_describes_first() {
         "github.com/o/r/beta",
         false,
         false,
+        &Default::default(),
     )
     .unwrap()
     {
@@ -5928,6 +5976,7 @@ fn a_selector_import_describes_first_then_installs() {
         "o/r",
         &skills,
         &[],
+        &[],
         true,
         false,
     )
@@ -5954,6 +6003,7 @@ fn a_selector_import_describes_first_then_installs() {
         "o/r",
         &skills,
         &[],
+        &[],
         true,
         true,
     )
@@ -5976,6 +6026,7 @@ fn a_selector_import_describes_first_then_installs() {
         "github.com/o/r/beta",
         true,
         false,
+        &Default::default(),
     )
     .unwrap()
     {
@@ -6005,6 +6056,7 @@ fn a_project_scope_selector_import_converges_on_a_later_update() {
         &git,
         "o/r",
         &["alpha".to_owned()],
+        &[],
         &[],
         false,
         true,
@@ -6087,6 +6139,7 @@ fn a_partially_landed_pinned_repo_set_converges_on_the_next_update() {
         &git,
         "o/r",
         &["alpha".to_owned()],
+        &[],
         &[],
         true,
         true,
@@ -6173,7 +6226,16 @@ fn removing_two_members_of_one_set_leaves_neither() {
     let targets = vec!["alpha".to_owned(), "beta".to_owned()];
 
     // The describe reflects the COMBINED split: one line, both names, one survivor.
-    match ops::remove_global(&ctx, &connect(&plane, &dir), &targets, None, false).unwrap() {
+    match ops::remove_global(
+        &ctx,
+        &connect(&plane, &dir),
+        &targets,
+        None,
+        false,
+        &Default::default(),
+    )
+    .unwrap()
+    {
         ops::RemoveOutcome::Described { data, .. } => {
             assert_eq!(data.items.len(), 1, "one line split once: {:?}", data.items);
             let note = data.items[0].note.clone().unwrap_or_default();
@@ -6183,7 +6245,15 @@ fn removing_two_members_of_one_set_leaves_neither() {
         other => panic!("a set split describes first: {other:?}"),
     }
     assert!(matches!(
-        ops::remove_global(&ctx, &connect(&plane, &dir), &targets, None, true).unwrap(),
+        ops::remove_global(
+            &ctx,
+            &connect(&plane, &dir),
+            &targets,
+            None,
+            true,
+            &Default::default()
+        )
+        .unwrap(),
         ops::RemoveOutcome::Applied(_)
     ));
     let text =
@@ -6239,6 +6309,7 @@ fn a_bare_name_two_rows_answer_to_is_refused_not_guessed() {
         &["deploy".into()],
         None,
         false,
+        &Default::default(),
     )
     .unwrap_err();
     assert_eq!(err.code(), "AMBIGUOUS_NAME", "{err:?}");
@@ -6253,7 +6324,15 @@ fn a_bare_name_two_rows_answer_to_is_refused_not_guessed() {
     // Spelled in full, exactly one row answers — and it applies.
     let one = format!("{HOST}/{WS_NAME}/deploy");
     assert!(matches!(
-        ops::remove_global(&ctx, &connect(&plane, &dir), &[one], None, true).unwrap(),
+        ops::remove_global(
+            &ctx,
+            &connect(&plane, &dir),
+            &[one],
+            None,
+            true,
+            &Default::default()
+        )
+        .unwrap(),
         ops::RemoveOutcome::Applied(_)
     ));
     let text =
@@ -6320,7 +6399,6 @@ fn a_committed_skills_symlink_is_refused_as_a_placement_root() {
         },
         None,
         None,
-        None,
     );
     assert!(
         plan.refused
@@ -6346,7 +6424,6 @@ fn a_committed_skills_symlink_is_refused_as_a_placement_root() {
             name: Some("deploy"),
             workspace_slug: Some(WS_NAME),
         },
-        None,
         None,
         None,
     );
@@ -6487,6 +6564,7 @@ fn two_manifest_edits_through_the_locked_path_both_land() {
             &format!("@{WS_NAME}/{name}"),
             true,
             false,
+            &Default::default(),
         )
         .unwrap()
         {
@@ -6681,8 +6759,15 @@ fn a_bare_name_a_row_and_a_set_both_answer_to_is_refused_not_guessed() {
     ));
     let ctx = rig.ctx_at(Some(&rig.work.0));
 
-    let err = ops::remove_global(&ctx, &connect(&plane, &dir), &["deploy".into()], None, true)
-        .unwrap_err();
+    let err = ops::remove_global(
+        &ctx,
+        &connect(&plane, &dir),
+        &["deploy".into()],
+        None,
+        true,
+        &Default::default(),
+    )
+    .unwrap_err();
     assert_eq!(err.code(), "AMBIGUOUS_NAME", "{err:?}");
     let msg = ways_out(&err);
     assert!(msg.contains("github.com/o/r/deploy"), "{msg}");
@@ -6692,7 +6777,15 @@ fn a_bare_name_a_row_and_a_set_both_answer_to_is_refused_not_guessed() {
     // end (a set member has no spelling of its own).
     let one = "github.com/o/r/deploy".to_owned();
     assert!(matches!(
-        ops::remove_global(&ctx, &connect(&plane, &dir), &[one], None, true).unwrap(),
+        ops::remove_global(
+            &ctx,
+            &connect(&plane, &dir),
+            &[one],
+            None,
+            true,
+            &Default::default()
+        )
+        .unwrap(),
         ops::RemoveOutcome::Applied(_)
     ));
     let text =
@@ -6726,8 +6819,15 @@ fn a_bare_name_two_sets_carry_is_refused_not_split_at_random() {
          \"{HOST}/{WS_NAME}/channels/platform\" = \"*\"\n"
     ));
     let ctx = rig.ctx_at(Some(&rig.work.0));
-    let err = ops::remove_global(&ctx, &connect(&plane, &dir), &["deploy".into()], None, true)
-        .unwrap_err();
+    let err = ops::remove_global(
+        &ctx,
+        &connect(&plane, &dir),
+        &["deploy".into()],
+        None,
+        true,
+        &Default::default(),
+    )
+    .unwrap_err();
     assert_eq!(err.code(), "AMBIGUOUS_NAME", "{err:?}");
     let msg = ways_out(&err);
     assert!(msg.contains("channels/backend"), "{msg}");
@@ -6807,6 +6907,7 @@ fn a_via_reference_splits_exactly_the_line_it_names() {
         &["deploy".into()],
         Some(&via),
         false,
+        &Default::default(),
     )
     .unwrap();
     match out {
@@ -6827,6 +6928,7 @@ fn a_via_reference_splits_exactly_the_line_it_names() {
         &["deploy".into()],
         Some(&via),
         true,
+        &Default::default(),
     )
     .unwrap();
     assert!(matches!(out, ops::RemoveOutcome::Applied(_)), "{out:?}");
@@ -6903,6 +7005,7 @@ fn a_via_that_names_no_line_or_no_member_refuses_typed() {
         &["deploy".into()],
         Some(&absent),
         true,
+        &Default::default(),
     )
     .unwrap_err();
     assert_eq!(err.code(), "INVALID_ARGUMENT", "{err:?}");
@@ -6917,6 +7020,7 @@ fn a_via_that_names_no_line_or_no_member_refuses_typed() {
         &["other".into()],
         Some(&backend),
         true,
+        &Default::default(),
     )
     .unwrap_err();
     assert_eq!(err.code(), "INVALID_ARGUMENT", "{err:?}");
@@ -6957,8 +7061,15 @@ fn a_bare_name_the_feed_and_a_repo_set_both_deliver_is_refused() {
         "[bundles]\n\"{HOST}/{WS_NAME}\" = \"*\"\n\"github.com/o/r\" = \"*\"\n"
     ));
 
-    let err = ops::remove_global(&ctx, &connect(&plane, &dir), &["deploy".into()], None, true)
-        .unwrap_err();
+    let err = ops::remove_global(
+        &ctx,
+        &connect(&plane, &dir),
+        &["deploy".into()],
+        None,
+        true,
+        &Default::default(),
+    )
+    .unwrap_err();
     assert_eq!(err.code(), "AMBIGUOUS_NAME", "{err:?}");
     let msg = ways_out(&err);
     assert!(msg.contains(&format!("{HOST}/{WS_NAME}/deploy")), "{msg}");
@@ -7010,8 +7121,15 @@ fn a_manifest_edited_between_the_decision_and_the_write_refuses() {
         fs: &fs,
         ..rig.ctx_at(Some(&rig.work.0))
     };
-    let err = ops::remove_global(&ctx, &connect(&plane, &dir), &["alpha".into()], None, true)
-        .unwrap_err();
+    let err = ops::remove_global(
+        &ctx,
+        &connect(&plane, &dir),
+        &["alpha".into()],
+        None,
+        true,
+        &Default::default(),
+    )
+    .unwrap_err();
     assert_eq!(err.code(), "MANIFEST_CHANGED", "{err:?}");
 
     // NOTHING was written: the racer's row stands, the set line stands, no split landed.
@@ -7026,7 +7144,15 @@ fn a_manifest_edited_between_the_decision_and_the_write_refuses() {
     // Re-run against the file as it now is: the split honours beta's own row and applies.
     let ctx = rig.ctx_at(Some(&rig.work.0));
     assert!(matches!(
-        ops::remove_global(&ctx, &connect(&plane, &dir), &["alpha".into()], None, true).unwrap(),
+        ops::remove_global(
+            &ctx,
+            &connect(&plane, &dir),
+            &["alpha".into()],
+            None,
+            true,
+            &Default::default()
+        )
+        .unwrap(),
         ops::RemoveOutcome::Applied(_)
     ));
     let text = std::fs::read_to_string(&manifest).unwrap();
@@ -7074,8 +7200,15 @@ fn the_reproof_and_the_editor_read_one_document() {
         fs: &fs,
         ..rig.ctx_at(Some(&rig.work.0))
     };
-    let out =
-        ops::remove_global(&ctx, &connect(&plane, &dir), &["alpha".into()], None, true).unwrap();
+    let out = ops::remove_global(
+        &ctx,
+        &connect(&plane, &dir),
+        &["alpha".into()],
+        None,
+        true,
+        &Default::default(),
+    )
+    .unwrap();
     assert!(matches!(out, ops::RemoveOutcome::Applied(_)), "{out:?}");
     assert!(
         !fired.load(Ordering::Relaxed),
@@ -7133,8 +7266,15 @@ fn an_edit_landing_at_the_write_rename_boundary_is_refused_by_the_compare_and_sw
         fs: &fs,
         ..rig.ctx_at(Some(&rig.work.0))
     };
-    let err = ops::remove_global(&ctx, &connect(&plane, &dir), &["alpha".into()], None, true)
-        .unwrap_err();
+    let err = ops::remove_global(
+        &ctx,
+        &connect(&plane, &dir),
+        &["alpha".into()],
+        None,
+        true,
+        &Default::default(),
+    )
+    .unwrap_err();
     assert_eq!(err.code(), "MANIFEST_CHANGED", "{err:?}");
     assert!(
         staged_when_fired.load(Ordering::Relaxed),
@@ -7152,7 +7292,15 @@ fn an_edit_landing_at_the_write_rename_boundary_is_refused_by_the_compare_and_sw
     // The re-run reads the file as it now is and applies (honouring beta's own row).
     let ctx = rig.ctx_at(Some(&rig.work.0));
     assert!(matches!(
-        ops::remove_global(&ctx, &connect(&plane, &dir), &["alpha".into()], None, true).unwrap(),
+        ops::remove_global(
+            &ctx,
+            &connect(&plane, &dir),
+            &["alpha".into()],
+            None,
+            true,
+            &Default::default()
+        )
+        .unwrap(),
         ops::RemoveOutcome::Applied(_)
     ));
 }
@@ -7191,6 +7339,7 @@ fn a_manifest_birth_racing_an_outside_writer_refuses_manifest_exists() {
         &format!("@{WS_NAME}/deploy"),
         true,
         false,
+        &Default::default(),
     ) {
         Err(e) => e,
         Ok(_) => panic!("the racing birth must refuse, never land over the outside file"),
@@ -7287,6 +7436,7 @@ fn a_subtree_url_records_a_skill_row_carrying_the_literal_path() {
         url,
         true,
         true,
+        &Default::default(),
     )
     .unwrap()
     {
@@ -7343,6 +7493,7 @@ fn a_subtree_url_naming_several_skills_writes_nothing() {
         "https://github.com/o/r/tree/main/skills",
         true,
         true,
+        &Default::default(),
     ) {
         Err(e) => e,
         Ok(_) => panic!("a subtree naming several skills names none of them"),
@@ -7402,7 +7553,6 @@ fn a_prior_placement_that_no_longer_resolves_inside_the_checkout_is_refused() {
             name: Some("deploy"),
             workspace_slug: Some(WS_NAME),
         },
-        None,
         Some(&prior),
         None,
     );
@@ -7538,6 +7688,7 @@ fn a_selector_imports_harness_choice_rides_the_row_into_the_next_update() {
         "o/r",
         &["deploy".to_owned()],
         &["codestudio".to_owned()],
+        &[],
         true,
         true,
     )
@@ -7563,12 +7714,14 @@ fn a_selector_imports_harness_choice_rides_the_row_into_the_next_update() {
         .find(|r| r.reference == "github.com/o/r/deploy")
         .unwrap_or_else(|| panic!("the import records its row: {text}"));
     match &row.value {
+        // The `-a` selection is recorded as the agent's DEST DIR (default spelling) — the row
+        // says where the copy lives, not which slug once resolved it.
         crate::manifest::document::EntryValue::Fields(f) => assert_eq!(
-            f.harness.as_deref(),
-            Some(&["codestudio".to_owned()][..]),
+            f.dest.as_deref(),
+            Some(&["~/.codestudio/skills".to_owned()][..]),
             "{text}"
         ),
-        other => panic!("the harness selection rides the row, got {other:?}: {text}"),
+        other => panic!("the dest selection rides the row, got {other:?}: {text}"),
     }
 
     // The source moves: the copy converges WHERE IT WAS ASKED FOR, and no default-dir copy appears.
@@ -7632,6 +7785,7 @@ fn a_pinned_set_with_no_recorded_members_converges_on_the_next_update() {
         &git,
         "o/r",
         &["alpha".to_owned()],
+        &[],
         &[],
         true,
         true,
@@ -7716,6 +7870,7 @@ fn a_pinned_whole_repo_row_keeps_its_pin_and_says_the_selection_did_not_fit() {
         "o/r#aaaaaaaaaaaa1",
         &[],
         &["codestudio".to_owned()],
+        &[],
         true,
         true,
     )
@@ -8260,7 +8415,15 @@ fn a_bare_name_subscribe_records_the_canonical_row_and_its_inverse() {
 
     // With NO manifest covering this folder the subscribe refuses toward the two scopes — it
     // never invents a file. `topos init` is what creates one.
-    match ops::add_reference(&ctx, &connect(&plane, &dir), None, &reference, false, false) {
+    match ops::add_reference(
+        &ctx,
+        &connect(&plane, &dir),
+        None,
+        &reference,
+        false,
+        false,
+        &Default::default(),
+    ) {
         Err(e) => assert_eq!(e.code(), "NO_MANIFEST"),
         Ok(_) => panic!("no topos.toml covers this folder — the subscribe must refuse"),
     }
@@ -8268,15 +8431,22 @@ fn a_bare_name_subscribe_records_the_canonical_row_and_its_inverse() {
 
     // The composition root's own hand-off: the resolved reference goes through the ORDINARY
     // reference arm, so the row, the delivery, and the receipt shape are the spelled-out ones.
-    let mut data =
-        match ops::add_reference(&ctx, &connect(&plane, &dir), None, &reference, false, false)
-            .unwrap()
-        {
-            ops::AddRefOutcome::Applied(d) => *d,
-            ops::AddRefOutcome::Described { .. } => {
-                panic!("a workspace reference applies immediately")
-            }
-        };
+    let mut data = match ops::add_reference(
+        &ctx,
+        &connect(&plane, &dir),
+        None,
+        &reference,
+        false,
+        false,
+        &Default::default(),
+    )
+    .unwrap()
+    {
+        ops::AddRefOutcome::Applied(d) => *d,
+        ops::AddRefOutcome::Described { .. } => {
+            panic!("a workspace reference applies immediately")
+        }
+    };
     ops::push_note(
         &mut data,
         format!("resolved '{BARE}' to {reference} — {workspace} publishes it"),
@@ -8576,6 +8746,7 @@ fn a_bare_edit_never_writes_the_machine_file_and_a_g_edit_never_a_project_one() 
         &["./zq-inside-src".to_owned()],
         None,
         true,
+        &Default::default(),
     )
     .unwrap()
     .expect("the project row is a manifest arm");
@@ -8598,6 +8769,7 @@ fn a_bare_edit_never_writes_the_machine_file_and_a_g_edit_never_a_project_one() 
         &[outside.to_str().unwrap().to_owned()],
         None,
         true,
+        &Default::default(),
     )
     .unwrap();
     assert!(
@@ -8701,6 +8873,7 @@ fn a_reference_verb_with_no_manifest_refuses_while_a_bare_name_falls_through() {
         &format!("@{WS_NAME}/{BARE}"),
         false,
         false,
+        &Default::default(),
     ) {
         Err(e) => assert_eq!(e.code(), "NO_MANIFEST"),
         Ok(_) => panic!("no topos.toml covers this folder"),
@@ -8713,6 +8886,7 @@ fn a_reference_verb_with_no_manifest_refuses_while_a_bare_name_falls_through() {
         &format!("@{WS_NAME}/{BARE}"),
         true,
         false,
+        &Default::default(),
     ) {
         Ok(ops::AddRefOutcome::Applied(d)) => {
             assert_eq!(
@@ -8738,6 +8912,7 @@ fn a_reference_verb_with_no_manifest_refuses_while_a_bare_name_falls_through() {
             std::slice::from_ref(&token),
             None,
             true,
+            &Default::default(),
         )
         .expect_err("a row spelling with no file to hold it");
         assert_eq!(err.code(), "NO_MANIFEST", "token={token}");
@@ -8758,7 +8933,8 @@ fn a_reference_verb_with_no_manifest_refuses_while_a_bare_name_falls_through() {
             &session_connect,
             &["zq-plain-name".to_owned()],
             None,
-            true
+            true,
+            &Default::default()
         )
         .unwrap()
         .is_none(),
@@ -8852,6 +9028,7 @@ fn a_dropped_rows_record_is_re_linked_while_a_standing_row_still_refuses() {
         &["./zq-relink-src".to_owned()],
         None,
         true,
+        &Default::default(),
     )
     .unwrap()
     .expect("the path row is a manifest arm");
@@ -8904,8 +9081,15 @@ fn a_project_remove_of_a_machine_delivered_skill_refuses_toward_g() {
     let ctx = rig.ctx_at(Some(&proj.0));
     let session_connect = connect(&plane, &dir);
 
-    let err = ops::remove_project(&ctx, &session_connect, &["deploy".to_owned()], None, true)
-        .expect_err("this folder's file does not carry it");
+    let err = ops::remove_project(
+        &ctx,
+        &session_connect,
+        &["deploy".to_owned()],
+        None,
+        true,
+        &Default::default(),
+    )
+    .expect_err("this folder's file does not carry it");
     let message = crate::render::safe_message(&err);
     assert!(
         message.contains("topos remove -g deploy"),
@@ -8937,9 +9121,16 @@ fn a_project_remove_of_a_machine_delivered_skill_refuses_toward_g() {
     let ctx = rig.ctx_at(Some(&proj.0));
     let session_connect = connect(&plane, &dir);
     assert!(
-        ops::remove_project(&ctx, &session_connect, &["deploy".to_owned()], None, true)
-            .unwrap()
-            .is_none(),
+        ops::remove_project(
+            &ctx,
+            &session_connect,
+            &["deploy".to_owned()],
+            None,
+            true,
+            &Default::default()
+        )
+        .unwrap()
+        .is_none(),
         "no manifest arm claims a feed-delivered name"
     );
     // The classic path resolves against the workspace's own names, so this fake answers `me`.
@@ -9582,6 +9773,7 @@ fn remove_then_update_never_touches_an_adopted_source_dir() {
         &["quaggamap".to_owned()],
         None,
         true,
+        &Default::default(),
     )
     .unwrap()
     .expect("the row-drop arm claims the adopted name");
@@ -9978,8 +10170,8 @@ fn two_same_named_mcp_bundles_in_one_scope_each_keep_their_own_states() {
     )
     .unwrap();
     rig.write_global(&format!(
-        "[bundles]\n\"{HOST}/{WS_NAME}\" = \"*\"\n\"{}\" = {{ kind = \"mcp\" }}\n\n\
-         [defaults.mcp]\nharness = [\"cursor\", \"openclaw\"]\n",
+        "[bundles]\n\"{HOST}/{WS_NAME}/linear\" = {{ dest = [\"~/.cursor/mcp.json\", \"~/.openclaw/openclaw.json\"] }}\n\
+         \"{}\" = {{ kind = \"mcp\", dest = [\"~/.cursor/mcp.json\", \"~/.openclaw/openclaw.json\"] }}\n",
         local.display()
     ));
     let ctx = rig.ctx_at(Some(&rig.work.0));
@@ -10005,5 +10197,668 @@ fn two_same_named_mcp_bundles_in_one_scope_each_keep_their_own_states() {
             && text.contains("https://mcp.example/workspace")
             && text.contains("https://mcp.example/local"),
         "{text}"
+    );
+}
+
+// =================================================================================================
+// The `dest` field: a row's frozen destinations — placement, grow, shrink, both scopes.
+// =================================================================================================
+
+/// A PERSON-scope workspace row with `dest` places EXACTLY the named folders — the active
+/// adapter's default dir gets nothing (detection is ignored for a dest row) — and a hand-edited
+/// dest change converges on the next update: a NEW entry installs there (disclosed as the
+/// install it is), a REMOVED entry's copy retires through the park-then-verify rail.
+#[test]
+fn a_dest_row_freezes_placement_and_grows_and_shrinks_on_the_next_update() {
+    let rig = Rig::new("dest-freeze");
+    rig.seed_session();
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let v = one_file(b"# deploy\n");
+    let plane = FakePlane::new(log).with_version("s_deploy", &v);
+    let dir = FakeDirectory::new(vec![catalog_entry("s_deploy", "deploy", &v)], Vec::new());
+    rig.write_global(&format!(
+        "[bundles]\n\"{HOST}/{WS_NAME}/deploy\" = {{ dest = [\"~/dest-a\"] }}\n"
+    ));
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    let out = sweep(&ctx, &plane, &dir);
+    let a = rig.home.0.join("dest-a/deploy");
+    assert!(a.join("SKILL.md").exists(), "{:?}", out.data.skills);
+    assert!(
+        !rig.work.0.join("skills/deploy").exists(),
+        "the default adapter dir gets nothing — the row froze its destinations"
+    );
+    let row = out
+        .data
+        .skills
+        .iter()
+        .find(|s| s.skill == "deploy")
+        .unwrap();
+    assert_eq!(row.action, PullAction::Installed, "{row:?}");
+    assert!(
+        row.destinations
+            .iter()
+            .any(|d| d.ends_with("dest-a/deploy")),
+        "{row:?}"
+    );
+
+    // GROW: a hand-added entry installs there on the next update, said as an install.
+    rig.write_global(&format!(
+        "[bundles]\n\"{HOST}/{WS_NAME}/deploy\" = {{ dest = [\"~/dest-a\", \"~/dest-b\"] }}\n"
+    ));
+    let out = sweep(&ctx, &plane, &dir);
+    let b = rig.home.0.join("dest-b/deploy");
+    assert!(b.join("SKILL.md").exists(), "{:?}", out.data.skills);
+    let row = out
+        .data
+        .skills
+        .iter()
+        .find(|s| s.skill == "deploy")
+        .unwrap();
+    assert_eq!(row.action, PullAction::Installed, "{row:?}");
+    assert!(
+        row.destinations
+            .iter()
+            .any(|d| d.ends_with("dest-b/deploy")),
+        "the grown destination is the one named: {row:?}"
+    );
+
+    // SHRINK: the dropped entry's copy retires (park-then-verify); the kept entry stands.
+    rig.write_global(&format!(
+        "[bundles]\n\"{HOST}/{WS_NAME}/deploy\" = {{ dest = [\"~/dest-b\"] }}\n"
+    ));
+    let out = sweep(&ctx, &plane, &dir);
+    assert!(!a.exists(), "the un-named copy left: {:?}", out.data.skills);
+    assert!(b.join("SKILL.md").exists(), "the named copy stands");
+    let removed = out
+        .data
+        .skills
+        .iter()
+        .find(|s| s.skill == "deploy" && s.action == PullAction::Removed)
+        .unwrap_or_else(|| panic!("{:?}", out.data.skills));
+    assert!(
+        removed
+            .destinations
+            .iter()
+            .any(|d| d.ends_with("dest-a/deploy")),
+        "{removed:?}"
+    );
+}
+
+/// A dest SHRINK meets the keep-edited-in-place discipline: an EDITED copy at the dropped
+/// destination is snapshotted and KEPT on disk (its record released), never swept up — exactly
+/// like the feed-drop receipts.
+#[test]
+fn a_dest_shrink_keeps_an_edited_copy_in_place() {
+    let rig = Rig::new("dest-keep");
+    rig.seed_session();
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let v = one_file(b"# deploy\n");
+    let plane = FakePlane::new(log).with_version("s_deploy", &v);
+    let dir = FakeDirectory::new(vec![catalog_entry("s_deploy", "deploy", &v)], Vec::new());
+    rig.write_global(&format!(
+        "[bundles]\n\"{HOST}/{WS_NAME}/deploy\" = {{ dest = [\"~/dest-a\", \"~/dest-b\"] }}\n"
+    ));
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    sweep(&ctx, &plane, &dir);
+    let a = rig.home.0.join("dest-a/deploy");
+    let b = rig.home.0.join("dest-b/deploy");
+    assert!(a.join("SKILL.md").exists() && b.join("SKILL.md").exists());
+
+    // The person edits the copy the shrink is about to drop.
+    std::fs::write(a.join("SKILL.md"), b"# my edit\n").unwrap();
+    rig.write_global(&format!(
+        "[bundles]\n\"{HOST}/{WS_NAME}/deploy\" = {{ dest = [\"~/dest-b\"] }}\n"
+    ));
+    let out = sweep(&ctx, &plane, &dir);
+    assert_eq!(
+        std::fs::read(a.join("SKILL.md")).unwrap(),
+        b"# my edit\n",
+        "the edited copy is the person's own — kept in place"
+    );
+    let removed = out
+        .data
+        .skills
+        .iter()
+        .find(|s| s.skill == "deploy" && s.action == PullAction::Removed)
+        .unwrap_or_else(|| panic!("{:?}", out.data.skills));
+    assert!(
+        removed.kept.iter().any(|d| d.ends_with("dest-a/deploy")),
+        "the kept copy is named: {removed:?}"
+    );
+}
+
+/// A PROJECT-scope dest row places inside the checkout at the named relative folder — the same
+/// dest mechanism that replaced the old path-override seam.
+#[test]
+fn a_project_dest_row_places_inside_the_checkout_at_the_named_folder() {
+    let rig = Rig::new("dest-proj");
+    rig.seed_session();
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let v = one_file(b"# deploy\n");
+    let plane = FakePlane::new(log).with_version("s_deploy", &v);
+    let dir = FakeDirectory::new(vec![catalog_entry("s_deploy", "deploy", &v)], Vec::new());
+    let proj = project(
+        "dest-proj-co",
+        &format!("[bundles]\n\"{HOST}/{WS_NAME}/deploy\" = {{ dest = [\"tools/ai\"] }}\n"),
+    );
+    rig.write_global("[bundles]\n");
+    let ctx = rig.ctx_at(Some(&proj.0));
+    let out = sweep(&ctx, &plane, &dir);
+    assert!(
+        proj.0.join("tools/ai/deploy/SKILL.md").exists(),
+        "{:?} / {:?}",
+        out.data.skills,
+        out.warnings
+    );
+    assert!(
+        !proj.0.join(".claude/skills/deploy").exists(),
+        "the default project dirs get nothing — the row froze its destination"
+    );
+}
+
+/// A REPO-SET row's dest aims every member's converge slot at the named folder — the dest-keyed
+/// generalization of the old per-slug slots.
+#[test]
+fn a_repo_set_rows_dest_aims_its_members_at_the_named_folder() {
+    let rig = Rig::new("dest-set");
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let plane = FakePlane::new(log);
+    let dir = FakeDirectory::new(Vec::new(), Vec::new());
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    let git = FakeGit::new(build_repo_targz(
+        "o-r-aaaaaaaaaaaa1",
+        &[
+            ("skills/alpha/SKILL.md", b"# alpha\n"),
+            ("skills/beta/SKILL.md", b"# beta\n"),
+        ],
+    ));
+    // The row is written by hand (demand is the row); the sweep converges it.
+    match ops::add_reference(
+        &ctx,
+        &connect(&plane, &dir),
+        Some(&git as &dyn crate::git_source::GitTarballSource),
+        "o/r",
+        true,
+        true,
+        &Default::default(),
+    )
+    .unwrap()
+    {
+        ops::AddRefOutcome::Applied(_) => {}
+        ops::AddRefOutcome::Described { .. } => panic!("--yes applies"),
+    }
+    // Re-aim the whole set: the row's dest replaces the default dir for every member.
+    rig.write_global("[bundles]\n\"github.com/o/r\" = { dest = [\"~/team-skills\"] }\n");
+    git.serve(build_repo_targz(
+        "o-r-bbbbbbbbbbbb2",
+        &[
+            ("skills/alpha/SKILL.md", b"# alpha v2\n"),
+            ("skills/beta/SKILL.md", b"# beta v2\n"),
+        ],
+    ));
+    let out = ops::manifest_update(
+        &ctx,
+        &connect(&plane, &dir),
+        Some(&git as &dyn crate::git_source::GitTarballSource),
+        &ops::ManifestUpdateOpts::default(),
+    )
+    .unwrap();
+    for name in ["alpha", "beta"] {
+        assert_eq!(
+            std::fs::read(rig.home.0.join("team-skills").join(name).join("SKILL.md")).unwrap(),
+            format!("# {name} v2\n").into_bytes(),
+            "{name}: {:?} / {:?}",
+            out.data.skills,
+            out.warnings
+        );
+    }
+}
+
+// =================================================================================================
+// `-a <agent>` / `--dest <folder>` — destinations on add and remove (the dest selectors).
+// =================================================================================================
+
+fn sel(agents: &[&str], dests: &[&str]) -> ops::Selection {
+    ops::Selection {
+        agents: agents.iter().map(|s| (*s).to_owned()).collect(),
+        dests: dests.iter().map(|s| (*s).to_owned()).collect(),
+    }
+}
+
+/// `topos add -g @ws/skill -a codex`: the row freezes to codex's folder, the copy lands there in
+/// the same invocation, and the receipt is the FINAL destination shape, byte for byte.
+#[test]
+fn an_agent_selected_add_freezes_the_row_and_prints_the_destination_receipt() {
+    let (rig, plane, dir, v) = add_rig("dest-add");
+    plane.serves(vec![delivered("s_deploy", "deploy", &v)]);
+    rig.write_global("[bundles]\n");
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    let data = match ops::add_reference(
+        &ctx,
+        &connect(&plane, &dir),
+        None,
+        &format!("@{WS_NAME}/deploy"),
+        true,
+        false,
+        &sel(&["codex"], &[]),
+    )
+    .unwrap()
+    {
+        ops::AddRefOutcome::Applied(d) => *d,
+        ops::AddRefOutcome::Described { .. } => panic!("a workspace reference applies"),
+    };
+    // The row is frozen to exactly the selected destination.
+    let text =
+        std::fs::read_to_string(rig.layout().home().join(crate::manifest::MANIFEST_FILE)).unwrap();
+    assert!(
+        text.contains(r#""acme.test/eng/deploy" = { dest = ["~/.codex/skills"] }"#),
+        "{text}"
+    );
+    // The copy landed there in this invocation.
+    assert!(
+        rig.home.0.join(".codex/skills/deploy/SKILL.md").exists(),
+        "the narrowed update lands the copy at the selected folder"
+    );
+    assert_eq!(data.dest, vec!["~/.codex/skills".to_owned()]);
+    // The FINAL receipt copy, byte for byte.
+    assert_eq!(
+        crate::render::add_tty(&data),
+        "+ @eng/deploy   installed (~/.codex/skills)\n(undo: topos remove -g deploy)"
+    );
+}
+
+/// `topos remove -g <skill> -a codex` over a three-destination row: the codex folder is
+/// subtracted and its copy leaves; the row keeps the rest; the receipt is the FINAL narrow
+/// shape, byte for byte, and its undo re-adds exactly what left.
+#[test]
+fn a_narrowed_remove_subtracts_one_destination_and_prints_the_final_receipt() {
+    let (rig, plane, dir, v) = add_rig("dest-narrow");
+    plane.serves(vec![delivered("s_deploy", "deploy", &v)]);
+    rig.write_global(&format!(
+        "[bundles]\n\"{HOST}/{WS_NAME}/deploy\" = {{ dest = [\"~/.claude/skills\", \
+         \"~/.codex/skills\", \"~/.cursor/skills\"] }}\n"
+    ));
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    sweep_scoped(&ctx, &plane, &dir, ops::UpdateScope::Machine);
+    for agent in [".claude", ".codex", ".cursor"] {
+        assert!(
+            rig.home
+                .0
+                .join(agent)
+                .join("skills/deploy/SKILL.md")
+                .exists(),
+            "{agent}: the dest row installed everywhere it names"
+        );
+    }
+    let data = match ops::remove_global(
+        &ctx,
+        &connect(&plane, &dir),
+        &["deploy".into()],
+        None,
+        false,
+        &sel(&["codex"], &[]),
+    )
+    .unwrap()
+    {
+        ops::RemoveOutcome::Applied(data) => data,
+        other => panic!("a narrow applies immediately: {other:?}"),
+    };
+    // The row keeps the remaining two destinations; the codex copy is gone, the others stay.
+    let text =
+        std::fs::read_to_string(rig.layout().home().join(crate::manifest::MANIFEST_FILE)).unwrap();
+    assert!(
+        text.contains(r#"dest = ["~/.claude/skills", "~/.cursor/skills"]"#),
+        "{text}"
+    );
+    assert!(!rig.home.0.join(".codex/skills/deploy").exists());
+    assert!(rig.home.0.join(".claude/skills/deploy/SKILL.md").exists());
+    // The receipt facts, typed.
+    let u = &data.uninstalled[0];
+    assert_eq!(u.name, format!("@{WS_NAME}/deploy"));
+    assert_eq!(u.destinations, vec!["~/.codex/skills".to_owned()]);
+    assert_eq!(u.remaining, Some(2));
+    // The FINAL receipt copy, byte for byte.
+    assert_eq!(
+        crate::render::remove_applied_tty(&data),
+        "- @eng/deploy   removed (~/.codex/skills) — 2 folders remain\n(undo: topos add -g \
+         @eng/deploy -a codex)"
+    );
+}
+
+/// Removing the LAST destination removes the whole row — a row is never left bare by
+/// subtraction (bare means default reach and would resurrect copies).
+#[test]
+fn removing_the_last_destination_removes_the_row_entirely() {
+    let (rig, plane, dir, v) = add_rig("dest-last");
+    plane.serves(vec![delivered("s_deploy", "deploy", &v)]);
+    rig.write_global(&format!(
+        "[bundles]\n\"{HOST}/{WS_NAME}/deploy\" = {{ dest = [\"~/.codex/skills\"] }}\n"
+    ));
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    sweep_scoped(&ctx, &plane, &dir, ops::UpdateScope::Machine);
+    assert!(rig.home.0.join(".codex/skills/deploy/SKILL.md").exists());
+    let data = match ops::remove_global(
+        &ctx,
+        &connect(&plane, &dir),
+        &["deploy".into()],
+        None,
+        false,
+        &sel(&["codex"], &[]),
+    )
+    .unwrap()
+    {
+        ops::RemoveOutcome::Applied(data) => data,
+        other => panic!("{other:?}"),
+    };
+    let text =
+        std::fs::read_to_string(rig.layout().home().join(crate::manifest::MANIFEST_FILE)).unwrap();
+    assert!(!text.contains("deploy"), "the whole row is gone: {text}");
+    assert!(!rig.home.0.join(".codex/skills/deploy").exists());
+    // The whole-row undo reconstructs the destination that left.
+    assert_eq!(
+        data.undo,
+        vec!["topos", "add", "-g", "@eng/deploy", "-a", "codex"]
+    );
+}
+
+/// A bare `remove -g <skill>` of a dest row removes the row AND every copy it placed, in the
+/// same invocation — the FINAL whole-row receipt, byte for byte, with the `-a` reconstruction.
+#[test]
+fn a_whole_row_remove_uninstalls_eagerly_and_reconstructs_the_undo() {
+    let (rig, plane, dir, v) = add_rig("dest-whole");
+    plane.serves(vec![delivered("s_deploy", "deploy", &v)]);
+    rig.write_global(&format!(
+        "[bundles]\n\"{HOST}/{WS_NAME}/deploy\" = {{ dest = [\"~/.claude/skills\", \
+         \"~/.codex/skills\"] }}\n"
+    ));
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    sweep_scoped(&ctx, &plane, &dir, ops::UpdateScope::Machine);
+    let data = match ops::remove_global(
+        &ctx,
+        &connect(&plane, &dir),
+        &["deploy".into()],
+        None,
+        false,
+        &Default::default(),
+    )
+    .unwrap()
+    {
+        ops::RemoveOutcome::Applied(data) => data,
+        other => panic!("{other:?}"),
+    };
+    assert!(!rig.home.0.join(".claude/skills/deploy").exists());
+    assert!(!rig.home.0.join(".codex/skills/deploy").exists());
+    assert_eq!(
+        data.undo,
+        vec![
+            "topos",
+            "add",
+            "-g",
+            "@eng/deploy",
+            "-a",
+            "claude-code",
+            "-a",
+            "codex"
+        ]
+    );
+    // The FINAL receipt copy, byte for byte.
+    assert_eq!(
+        crate::render::remove_applied_tty(&data),
+        "- @eng/deploy   removed (2 folders)\n(undo: topos add -g @eng/deploy -a claude-code -a \
+         codex)"
+    );
+}
+
+/// Narrowing a row that names NO destinations first materializes the CURRENT resolved set —
+/// the result is a frozen row of the remaining destinations.
+#[test]
+fn narrowing_a_no_dest_row_freezes_the_remainder() {
+    let (rig, plane, dir, v) = add_rig("dest-materialize");
+    plane.serves(vec![delivered("s_deploy", "deploy", &v)]);
+    // codex DETECTED (its home dir exists) so the default plan includes its native folder.
+    std::fs::create_dir_all(rig.home.0.join(".codex")).unwrap();
+    rig.write_global(&format!("[bundles]\n\"{HOST}/{WS_NAME}/deploy\" = \"*\"\n"));
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    sweep_scoped(&ctx, &plane, &dir, ops::UpdateScope::Machine);
+    assert!(rig.home.0.join(".codex/skills/deploy/SKILL.md").exists());
+    let data = match ops::remove_global(
+        &ctx,
+        &connect(&plane, &dir),
+        &["deploy".into()],
+        None,
+        false,
+        &sel(&["codex"], &[]),
+    )
+    .unwrap()
+    {
+        ops::RemoveOutcome::Applied(data) => data,
+        other => panic!("{other:?}"),
+    };
+    // The codex copy left; the row is now FROZEN to the remaining destination(s).
+    assert!(!rig.home.0.join(".codex/skills/deploy").exists());
+    let text =
+        std::fs::read_to_string(rig.layout().home().join(crate::manifest::MANIFEST_FILE)).unwrap();
+    assert!(text.contains("dest = ["), "the remainder is frozen: {text}");
+    assert!(!text.contains("~/.codex/skills"), "{text}");
+    // The materialize disclosure rides the receipt.
+    let note = data.items[0].note.clone().unwrap_or_default();
+    assert!(note.contains("named no destinations"), "{note}");
+    let u = &data.uninstalled[0];
+    assert_eq!(u.destinations, vec!["~/.codex/skills".to_owned()]);
+}
+
+/// The unknown-agent refusal: the FINAL copy shape — real registry slugs, alphabetical, ellipsis
+/// past the handful — and the TTY closes with `nothing changed`.
+#[test]
+fn an_unknown_agent_refuses_with_the_registry_list_and_nothing_changed() {
+    let (rig, plane, dir, _v) = add_rig("dest-unknown");
+    rig.write_global("[bundles]\n");
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    let err = ops::add_reference(
+        &ctx,
+        &connect(&plane, &dir),
+        None,
+        &format!("@{WS_NAME}/deploy"),
+        true,
+        false,
+        &sel(&["codx"], &[]),
+    )
+    .unwrap_err();
+    assert_eq!(err.code(), "UNKNOWN_AGENT");
+    let mut slugs: Vec<&str> = topos_harness::registry::known_harnesses()
+        .iter()
+        .map(|h| h.slug)
+        .collect();
+    slugs.sort_unstable();
+    assert_eq!(
+        crate::render::err_tty(&err),
+        format!(
+            "error: unknown agent: codx — known: {}, …\nnothing changed",
+            slugs[..4].join(", ")
+        )
+    );
+    // Nothing was written.
+    let text =
+        std::fs::read_to_string(rig.layout().home().join(crate::manifest::MANIFEST_FILE)).unwrap();
+    assert_eq!(text, "[bundles]\n");
+}
+
+/// A selection over a whole FEED refuses (a feed reaches every agent by nature), teaching the
+/// narrower row — and the TTY closes with `nothing changed`.
+#[test]
+fn a_selection_over_a_feed_refuses_whole() {
+    let (rig, plane, dir, _v) = add_rig("dest-feed");
+    rig.seed_feed();
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    let err = ops::add_reference(
+        &ctx,
+        &connect(&plane, &dir),
+        None,
+        &format!("@{WS_NAME}"),
+        true,
+        false,
+        &sel(&["codex"], &[]),
+    )
+    .unwrap_err();
+    assert_eq!(err.code(), "INVALID_ARGUMENT");
+    let tty = crate::render::err_tty(&err);
+    assert!(tty.contains("whole feed"), "{tty}");
+    assert!(tty.ends_with("nothing changed"), "{tty}");
+}
+
+/// The shared-copy refusal, byte for byte: subtraction cannot narrow one shared folder, and the
+/// two ways out print as aligned command lines (the `-a` list = the covered agents that read the
+/// shared copy, minus the one being removed).
+#[test]
+fn a_shared_only_copy_refuses_per_agent_removal_with_both_ways_out() {
+    let (rig, plane, _dir, v) = add_rig("dest-shared");
+    let v2 = one_file(b"# coolify\n");
+    let plane = plane.with_version("s_cool", &v2);
+    plane.serves(vec![
+        delivered("s_deploy", "deploy", &v),
+        delivered("s_cool", "coolify-deploy", &v2),
+    ]);
+    let dir = FakeDirectory::new(
+        vec![
+            catalog_entry("s_deploy", "deploy", &v),
+            catalog_entry("s_cool", "coolify-deploy", &v2),
+        ],
+        Vec::new(),
+    );
+    // amp + cline DETECTED — both read the shared `~/.agents/skills` dir per the coverage table,
+    // so the machine plan places ONE shared copy.
+    std::fs::create_dir_all(rig.home.0.join(".config/amp")).unwrap();
+    std::fs::create_dir_all(rig.home.0.join(".cline")).unwrap();
+    rig.write_global(&format!(
+        "[bundles]\n\"{HOST}/{WS_NAME}/coolify-deploy\" = \"*\"\n"
+    ));
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    sweep_scoped(&ctx, &plane, &dir, ops::UpdateScope::Machine);
+    assert!(
+        rig.home
+            .0
+            .join(".agents/skills/coolify-deploy/SKILL.md")
+            .exists(),
+        "the covered agents share one copy"
+    );
+    let err = ops::remove_global(
+        &ctx,
+        &connect(&plane, &dir),
+        &["coolify-deploy".into()],
+        None,
+        false,
+        &sel(&["amp"], &[]),
+    )
+    .unwrap_err();
+    assert_eq!(err.code(), "SHARED_COPY_ONLY");
+    // The FINAL copy shape, byte for byte: the statement, then the two aligned ways out.
+    assert_eq!(
+        crate::render::err_tty(&err),
+        "coolify-deploy has no amp-only copy — its one copy is \
+         ~/.agents/skills/coolify-deploy, which several agents read\n  topos remove -g \
+         coolify-deploy              remove it for every agent\n  topos add -g \
+         @eng/coolify-deploy -a cline   keep it per-agent instead, then re-run"
+    );
+    // No hint block repeats the two commands (they are the copy) — but the agent surface gets
+    // BOTH ways out as structured next actions, byte-identical argvs.
+    assert!(crate::render::err_hint_tty("remove", &[], &err).is_none());
+    let actions = crate::render::next_actions("remove", &[], &err);
+    assert_eq!(actions.len(), 2, "{actions:?}");
+    assert_eq!(
+        actions[0].argv,
+        vec!["topos", "remove", "-g", "coolify-deploy"]
+    );
+    assert_eq!(
+        actions[1].argv,
+        vec!["topos", "add", "-g", "@eng/coolify-deploy", "-a", "cline"]
+    );
+}
+
+/// A forge import unions `-a` and `--dest`: the row records BOTH destinations, and the member
+/// lands at each in the same apply.
+#[test]
+fn a_forge_import_unions_agent_and_dest_selectors() {
+    let (rig, plane, dir, _v) = add_rig("dest-forge-union");
+    rig.write_global("[bundles]\n");
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    let git = FakeGit::new(build_repo_targz(
+        "o-r-aaaaaaaaaaaa1",
+        &[("skills/deploy/SKILL.md", b"# deploy v1\n")],
+    ));
+    match ops::add_forge_selected(
+        &ctx,
+        &connect(&plane, &dir),
+        &git,
+        "o/r",
+        &["deploy".to_owned()],
+        &["codex".to_owned()],
+        &["~/team-skills".to_owned()],
+        true,
+        true,
+    )
+    .unwrap()
+    {
+        ops::AddManyOutcome::Applied(items) => {
+            assert_eq!(items.len(), 2, "one landing per destination slot");
+            assert_eq!(
+                items[0].dest,
+                vec!["~/.codex/skills".to_owned(), "~/team-skills".to_owned()]
+            );
+        }
+        ops::AddManyOutcome::Described { .. } => panic!("--yes applies"),
+    }
+    assert!(
+        rig.home.0.join(".codex/skills/deploy/SKILL.md").exists(),
+        "the agent slot landed"
+    );
+    assert!(
+        rig.home.0.join("team-skills/deploy/SKILL.md").exists(),
+        "the literal folder landed"
+    );
+    let text =
+        std::fs::read_to_string(rig.layout().home().join(crate::manifest::MANIFEST_FILE)).unwrap();
+    assert!(
+        text.contains(r#"dest = ["~/.codex/skills", "~/team-skills"]"#),
+        "the union rides the row: {text}"
+    );
+}
+
+/// A LOCAL adopt with a selection: the adopted folder stays the working copy, and the row's
+/// `dest` places a managed COPY at the selected folder through the ordinary sweep.
+#[test]
+fn a_local_adopt_with_dest_places_a_copy_at_the_selected_folder() {
+    let (rig, plane, dir, _v) = add_rig("dest-local-adopt");
+    rig.write_global("[bundles]\n");
+    let src = rig.work.0.join("my-skill");
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::write(src.join("SKILL.md"), b"# mine\n").unwrap();
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    let scope = ops::add_scope(&ctx, true).unwrap();
+    let sctx = ops::ctx_with_layout(&ctx, &scope.layout);
+    let mut d = ops::adopt_path(&sctx, &scope.target, &src).unwrap();
+    ops::note_added_path_dest_in(
+        &ctx,
+        &mut d,
+        &scope.target,
+        &src,
+        &["~/.codex/skills".to_owned()],
+    )
+    .unwrap();
+    sweep_scoped(&ctx, &plane, &dir, ops::UpdateScope::Machine);
+    // The managed copy landed at the selected folder; the source is untouched.
+    assert_eq!(
+        std::fs::read(rig.home.0.join(".codex/skills/my-skill/SKILL.md")).unwrap(),
+        b"# mine\n"
+    );
+    assert_eq!(std::fs::read(src.join("SKILL.md")).unwrap(), b"# mine\n");
+    // The sweep is idempotent — a second run moves nothing new.
+    let out = sweep_scoped(&ctx, &plane, &dir, ops::UpdateScope::Machine);
+    assert!(
+        out.data
+            .skills
+            .iter()
+            .all(|r| r.action != PullAction::Installed),
+        "{:?}",
+        out.data.skills
     );
 }

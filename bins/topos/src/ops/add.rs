@@ -181,6 +181,8 @@ fn unclaimed_record(
         governed_copy: None,
         published_match: None,
         mcp: None,
+        dest: Vec::new(),
+        display: None,
         // The receipt would otherwise read as a fresh adopt while carrying a version older than
         // this run: say what actually happened.
         note: Some(format!(
@@ -435,6 +437,9 @@ pub(crate) fn add_with_name(
         note: None,
         // Set by `add --mcp`'s receipt fold; a plain adopt is not a server.
         mcp: None,
+        // Set by the `-a`/`--dest` arms at the composition root (the row's frozen destinations).
+        dest: Vec::new(),
+        display: None,
     })
 }
 
@@ -445,6 +450,9 @@ pub(crate) struct AddRemoteOpts {
     pub skill: Option<String>,
     /// Land into this harness's skills dir (a registry slug); `None` = the active harness.
     pub harness: Option<String>,
+    /// A LITERAL destination root the copy lands under (a manifest row's resolved `dest` entry)
+    /// — wins over `harness`; the project containment proof still runs on it.
+    pub dest_root: Option<std::path::PathBuf>,
     /// Land in the harness's user/global skills dir instead of the project (cwd) dir.
     pub global: bool,
 }
@@ -502,29 +510,35 @@ pub(crate) fn add_remote_fetched(
 ) -> Result<AddData, ClientError> {
     ctx.fs.create_dir_all(ctx.layout.home())?;
 
-    // 1. Destination harness + scope. Default: the active harness (the one topos drives + can arm auto-updates
-    //    for). An explicit `--harness` must name a known registry slug.
-    let slug = opts
-        .harness
-        .clone()
-        .unwrap_or_else(|| ctx.harness.id().slug().to_owned());
-    if !topos_harness::registry::known_harnesses()
-        .iter()
-        .any(|h| h.slug == slug)
-    {
-        return Err(ClientError::HarnessNotFound(format!(
-            "unknown harness '{slug}' — omit `--harness` to use the default, or run `topos list` to see \
-             the harness slugs"
-        )));
-    }
+    // 1. Destination root + scope. A LITERAL `dest_root` (a manifest row's resolved dest entry)
+    //    wins whole; else the named harness's skills dir (default: the active harness — the one
+    //    topos drives + can arm auto-updates for). An explicit `--harness` must name a known
+    //    registry slug.
     let scope = if opts.global {
         SkillScope::User
     } else {
         SkillScope::Project
     };
-    let dest_root =
-        topos_harness::registry::skills_root(&slug, scope, &roots.home, roots.cwd.as_deref())
-            .ok_or_else(|| ClientError::InvalidArgument(destination_hint(&slug, opts.global)))?;
+    let dest_root = match &opts.dest_root {
+        Some(root) => root.clone(),
+        None => {
+            let slug = opts
+                .harness
+                .clone()
+                .unwrap_or_else(|| ctx.harness.id().slug().to_owned());
+            if !topos_harness::registry::known_harnesses()
+                .iter()
+                .any(|h| h.slug == slug)
+            {
+                return Err(ClientError::HarnessNotFound(format!(
+                    "unknown harness '{slug}' — omit `--harness` to use the default, or run `topos list` to see \
+                     the harness slugs"
+                )));
+            }
+            topos_harness::registry::skills_root(&slug, scope, &roots.home, roots.cwd.as_deref())
+                .ok_or_else(|| ClientError::InvalidArgument(destination_hint(&slug, opts.global)))?
+        }
+    };
     // PROJECT containment, proven at the WRITE boundary (and re-proven immediately before the
     // landing rename below): the registry hands back a path, but a pre-existing `.claude/skills`
     // symlink aims that path exactly like a committed `path = "../.."` override — the same rail

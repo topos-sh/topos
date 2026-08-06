@@ -105,7 +105,10 @@ topos add @<workspace>/channels/<name>   # a whole channel
 topos add owner/repo              # every skill in a GitHub repo, tracking its default branch
 topos add owner/repo/<name>       # one skill from a repo; @<commit> pins
 topos add ./dir                   # adopt a local folder in place
-topos remove <name>               # the inverse — drops the same row
+topos add <src> -a codex          # install for ONE agent (repeatable; recorded on the row)
+topos add <src> --dest <folder>   # install into an exact folder (repeatable; unions with -a)
+topos remove <name>               # the inverse — drops the row AND uninstalls its copies now
+topos remove <name> -a codex      # subtract one agent's copy; the row keeps the rest
 topos fmt                         # tidy the file (grouped, sorted, comments kept)
 ```
 
@@ -115,7 +118,12 @@ this folder") and hands back both ways out as next actions — `topos init` here
 invocation with `-g`. It never crosses that line by itself either: removing a machine-delivered
 skill from a project refuses toward `-g`. `-g` edits `~/.topos/topos.toml` instead:
 `add -g @<workspace>` adopts that whole feed, `remove -g <name>` writes the machine-local `off`
-row (and `add -g <name>` deletes it again). `~/.topos/topos.toml` is always the machine's whole
+row (and `add -g <name>` deletes it again). By default a skill reaches every agent on the
+machine; `-a <agent>` / `--dest <folder>` freeze the row to exactly those destinations (recorded
+as `dest = [...]`, so updates keep landing there), and the same flags on `remove` SUBTRACT a
+destination — the row keeps the rest, and removing the last one removes the row. Removing a row
+also uninstalls the copies it placed, in the same command (an edited copy stays in place,
+disclosed). `~/.topos/topos.toml` is always the machine's whole
 truth: a workspace's feed flows only while its `"<host>/<workspace>" = "*"` line is in the file.
 `topos login` writes that line automatically the first time this machine connects to a workspace
 and never again — a line you delete stays deleted (`remove -g @<workspace>` is the spelled
@@ -143,11 +151,15 @@ and a grouped section spell the same row:
 "topos.sh/acme/channels/backend" = "*"                     # a whole channel
 "github.com/vercel-labs/skills/find-skills" = "e173b8c"    # a commit (7-40 hex)
 "./tools/my-skill" = "*"                                   # a folder in this repo
-"topos.sh/acme/big-skill" = { version = "*", path = ".agents/skills" }
-
-[defaults.skill]
-path = ".agents/skills"                                    # where this file's skills land
+"topos.sh/acme/big-skill" = { version = "*", dest = [".agents/skills"] }
 ```
+
+Placement is ONE field: `dest`, an array of destinations. A row without it reaches every agent
+this machine has, now and later; a row with it is FROZEN to exactly what it names (skill rows:
+folders; MCP rows: the agents' config files). The global file spells machine paths (`~/…` or
+absolute), a project file spells relative paths inside the checkout. Hand-edit the array and the
+next `topos update` converges it — a new entry installs, a dropped entry uninstalls (edited
+copies kept, disclosed).
 
 Two spellings are the GLOBAL file's alone (a project manifest is a repo fact): a two-segment
 `"topos.sh/acme" = "*"` row — everything that workspace currently gives you; `topos login` writes

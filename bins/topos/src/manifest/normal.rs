@@ -3,7 +3,7 @@
 //! Normal form: `[bundles]` first, holding feed rows (sorted), then local-path rows, then forge
 //! rows (each group sorted); then one `[bundles."<host>/<ws>"]` section per workspace (sorted)
 //! holding that workspace's explicit rows under workspace-relative keys (sorted; channels
-//! spelled `"channels/<name>"`); then `[defaults.<kind>]` sections (sorted). Empty grouping
+//! spelled `"channels/<name>"`). Empty grouping
 //! sections are pruned. ONE carve-out, forced by TOML itself: a value and a table cannot share
 //! a key path, so a workspace that carries its FEED row keeps its explicit rows FLAT under
 //! `[bundles]` instead of a grouping section.
@@ -11,18 +11,17 @@
 //! Comments survive: the file's leading comment block stays at the top, a standalone comment
 //! above an entry travels with the entry, an inline comment AFTER a value (`"x" = "*"  # why`)
 //! stays on its line — through regrouping and through the version-table collapse alike — and a
-//! comment above a section header (or above/behind a `[defaults.<kind>]` field) stays with it.
+//! comment above a section header stays with it.
 //! Values normalize too — a fields table carrying ONLY `version` collapses to the plain version
-//! string, and inline tables render single-line in canonical field order (version, path,
-//! harness, name, subdir, kind).
+//! string, and inline tables render single-line in canonical field order (version, dest, name,
+//! subdir, kind).
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use toml_edit::{Array, Decor, DocumentMut, Item, Table, Value};
+use toml_edit::{Decor, DocumentMut, Item, Table};
 
 use crate::manifest::document::{
-    BundleRow, EntryValue, KindDefaults, ManifestError, ManifestScope, parse_document, path_value,
-    value_item,
+    BundleRow, EntryValue, ManifestError, ManifestScope, parse_document, value_item,
 };
 use crate::manifest::keys::KeyShape;
 
@@ -35,6 +34,7 @@ pub(crate) fn fmt_normal(text: &str, scope: ManifestScope) -> Result<String, Man
     let doc: DocumentMut = text.parse().map_err(|e| ManifestError {
         message: format!("not valid TOML: {e}"),
         key: None,
+        migration: false,
     })?;
     let parsed = parse_document(&doc, scope)?;
 
@@ -51,34 +51,7 @@ pub(crate) fn fmt_normal(text: &str, scope: ManifestScope) -> Result<String, Man
             &mut group_comments,
         );
     }
-    let mut defaults_comments: HashMap<String, String> = HashMap::new();
-    // Per-FIELD comments inside a `[defaults.<kind>]` section — `(kind, field) → (above, inline)`.
-    let mut defaults_field_comments: HashMap<(String, String), (String, String)> = HashMap::new();
-    if let Some(Item::Table(d)) = doc.get("defaults") {
-        for (k, item) in d.iter() {
-            if let Item::Table(t) = item {
-                let c = decor_comment(t.decor());
-                if !c.is_empty() {
-                    defaults_comments.insert(k.to_string(), c);
-                }
-                for (fk, fitem) in t.iter() {
-                    let above = t
-                        .key(fk)
-                        .map(|key| comment_block(raw_prefix(key.leaf_decor())))
-                        .unwrap_or_default();
-                    let inline = match fitem {
-                        Item::Value(v) => suffix_comment(v.decor()),
-                        _ => String::new(),
-                    };
-                    if !above.is_empty() || !inline.is_empty() {
-                        defaults_field_comments
-                            .insert((k.to_string(), fk.to_string()), (above, inline));
-                    }
-                }
-            }
-        }
-    }
-    let header = extract_header(&doc, &mut group_comments, &mut defaults_comments);
+    let header = extract_header(&doc, &mut group_comments);
 
     // Partition the rows: feeds / local paths / forge rows flat, workspace rows per workspace —
     // except workspaces whose FEED row is present, whose rows must stay flat (the carve-out).
@@ -161,40 +134,6 @@ pub(crate) fn fmt_normal(text: &str, scope: ManifestScope) -> Result<String, Man
         out.insert("bundles", Item::Table(bundles));
     }
 
-    if !parsed.defaults.is_empty() {
-        let mut defaults = Table::new();
-        defaults.set_implicit(true);
-        let mut kinds: Vec<&(String, KindDefaults)> = parsed.defaults.iter().collect();
-        kinds.sort_by(|a, b| a.0.cmp(&b.0));
-        for (kind, kd) in kinds {
-            let mut kt = Table::new();
-            kt.set_implicit(false);
-            let mut comment = String::new();
-            if first_block {
-                comment.push_str(&header);
-            }
-            if let Some(c) = defaults_comments.get(kind) {
-                comment.push_str(c);
-            }
-            set_block_prefix(&mut kt, first_block, &comment);
-            first_block = false;
-            if let Some(h) = &kd.harness {
-                let mut a = Array::new();
-                for x in h {
-                    a.push(x.as_str());
-                }
-                kt.insert("harness", Item::Value(Value::Array(a)));
-                attach_field_comments(&mut kt, "harness", kind, &defaults_field_comments);
-            }
-            if let Some(p) = &kd.path {
-                kt.insert("path", Item::Value(path_value(p)));
-                attach_field_comments(&mut kt, "path", kind, &defaults_field_comments);
-            }
-            defaults.insert(kind, Item::Table(kt));
-        }
-        out.insert("defaults", Item::Table(defaults));
-    }
-
     if out.as_table().is_empty() {
         // Nothing but comments: the header IS the file.
         return Ok(header);
@@ -235,36 +174,12 @@ fn push_row(
     }
 }
 
-/// Re-attach a `[defaults.<kind>]` field's harvested comments (above-line + inline) to the
-/// rebuilt field.
-fn attach_field_comments(
-    table: &mut Table,
-    field: &str,
-    kind: &str,
-    harvested: &HashMap<(String, String), (String, String)>,
-) {
-    let Some((above, inline)) = harvested.get(&(kind.to_string(), field.to_string())) else {
-        return;
-    };
-    if !above.is_empty()
-        && let Some(mut km) = table.key_mut(field)
-    {
-        km.leaf_decor_mut().set_prefix(above.clone());
-    }
-    if !inline.is_empty()
-        && let Some(Item::Value(v)) = table.get_mut(field)
-    {
-        v.decor_mut().set_suffix(inline.clone());
-    }
-}
-
 /// The value in normal spelling: a fields table carrying ONLY `version` collapses to the plain
 /// version string (an empty fields table means track-current); everything else renders through
 /// the one deterministic renderer.
 fn normal_value_item(v: &EntryValue) -> Item {
     if let EntryValue::Fields(f) = v
-        && f.path.is_none()
-        && f.harness.is_none()
+        && f.dest.is_none()
         && f.name.is_none()
         && f.subdir.is_none()
         && f.kind.is_none()
@@ -319,27 +234,14 @@ fn collect_comments(
 
 /// The file's leading comment block: the first rendered table header's comment (an implicit
 /// `[bundles]` hands the honor to its first child section), or a table-less file's trailing
-/// decor. Taken OUT of the group/defaults comment maps so it is emitted once, at the top.
-fn extract_header(
-    doc: &DocumentMut,
-    group_comments: &mut HashMap<String, String>,
-    defaults_comments: &mut HashMap<String, String>,
-) -> String {
+/// decor. Taken OUT of the group comment map so it is emitted once, at the top.
+fn extract_header(doc: &DocumentMut, group_comments: &mut HashMap<String, String>) -> String {
     if let Some(Item::Table(b)) = doc.get("bundles") {
         if !b.is_implicit() {
             return decor_comment(b.decor());
         }
         if let Some((k, _)) = b.iter().find(|(_, i)| i.is_table()) {
             return group_comments.remove(k).unwrap_or_default();
-        }
-        return String::new();
-    }
-    if let Some(Item::Table(d)) = doc.get("defaults") {
-        if !d.is_implicit() {
-            return decor_comment(d.decor());
-        }
-        if let Some((k, _)) = d.iter().find(|(_, i)| i.is_table()) {
-            return defaults_comments.remove(k).unwrap_or_default();
         }
         return String::new();
     }
@@ -385,10 +287,7 @@ mod tests {
 
     #[test]
     fn normal_form_orders_and_groups() {
-        let scrambled = r#"[defaults.skill]
-path = ".agents/skills"
-
-[bundles."topos.sh/acme"]
+        let scrambled = r#"[bundles."topos.sh/acme"]
 deploy = "*"
 "channels/frontend" = "*"
 
@@ -405,9 +304,6 @@ deploy = "*"
 [bundles."topos.sh/acme"]
 "channels/frontend" = "*"
 deploy = "*"
-
-[defaults.skill]
-path = ".agents/skills"
 "#;
         assert_eq!(fmt_global(scrambled), expected);
     }
@@ -418,7 +314,7 @@ path = ".agents/skills"
             "[bundles]\n\"topos.sh/acme\" = \"*\"\n",
             "# header\n\n[bundles]\n# entry note\n\"github.com/o/r\" = \"*\"\n\n[bundles.\"topos.sh/acme\"]\ndeploy = \"*\"\n",
             "[bundles.\"topos.sh\"]\n\"acme/code-review\" = \"*\"\n",
-            "[defaults.knowledge]\npath = { default = \"docs/ai/\" }\n",
+            "[bundles]\n\"topos.sh/acme/x\" = { dest = [\"~/.claude/skills\"] }\n",
             "# only a comment\n",
         ];
         for input in inputs {
@@ -509,20 +405,6 @@ deploy = "*"
     }
 
     #[test]
-    fn defaults_field_comments_survive_the_rebuild() {
-        let input = "[defaults.knowledge]\n\
-                     # where knowledge lands\n\
-                     path = { default = \"docs/ai/\" } # per-kind\n";
-        let once = fmt_global(input);
-        assert!(once.contains("# where knowledge lands"), "{once}");
-        assert!(
-            once.contains("path = { default = \"docs/ai/\" } # per-kind"),
-            "{once}"
-        );
-        assert_eq!(fmt_global(&once), once, "defaults comments are idempotent");
-    }
-
-    #[test]
     fn single_field_version_tables_collapse_to_plain_strings() {
         let digest = "0123456789abcdef".repeat(4);
         let text = fmt_global(&format!(
@@ -534,12 +416,12 @@ deploy = "*"
         );
         // A table with MORE than a version keeps the table (canonical field order).
         let text = fmt_global(&format!(
-            "[bundles]\n\"topos.sh/acme/a\" = {{ harness = [\"codex\"], version = \"{digest}\" }}\n",
+            "[bundles]\n\"topos.sh/acme/a\" = {{ dest = [\"~/.codex/skills\"], version = \"{digest}\" }}\n",
         ));
         assert_eq!(
             text,
             format!(
-                "[bundles.\"topos.sh/acme\"]\na = {{ version = \"{digest}\", harness = [\"codex\"] }}\n"
+                "[bundles.\"topos.sh/acme\"]\na = {{ version = \"{digest}\", dest = [\"~/.codex/skills\"] }}\n"
             )
         );
     }

@@ -206,7 +206,7 @@ mod tests {
                 crate::manifest::document::ManifestScope::Project,
             )
             .unwrap();
-            assert!(doc.rows.is_empty() && doc.defaults.is_empty());
+            assert!(doc.rows.is_empty());
             // Idempotent — the second run is a no-op receipt, never an overwrite.
             std::fs::write(
                 &first.manifest,

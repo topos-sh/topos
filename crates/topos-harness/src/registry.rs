@@ -14,7 +14,8 @@
 //! (topos can *place + follow* those); every other row is discover-and-`add` only.
 //!
 //! Per-harness home overrides (`$CLAUDE_CONFIG_DIR`, `$CODEX_HOME`, `$HERMES_HOME`, `$VIBE_HOME`,
-//! `$AUTOHAND_HOME`, `$XDG_CONFIG_HOME`, plus `$APPDATA` / `$FLATPAK_XDG_CONFIG_HOME` for Zed) are read
+//! `$AUTOHAND_HOME`, `$GROK_HOME`, `$XDG_CONFIG_HOME`, plus `$APPDATA` / `$FLATPAK_XDG_CONFIG_HOME` for
+//! Zed) are read
 //! from the real environment; where an override is unset the directory resolves relative to the passed
 //! `home`, so the whole surface is testable against a temp dir without touching a developer's real config.
 
@@ -100,6 +101,8 @@ enum Root {
     HermesHome,
     /// `$AUTOHAND_HOME`, else `home/.autohand`.
     AutohandHome,
+    /// `$GROK_HOME`, else `home/.grok`.
+    GrokHome,
     /// The project dir (`None` when no `cwd` is supplied).
     Cwd,
     /// An absolute path (the suffix is joined onto the filesystem root — e.g. `/etc/codex`).
@@ -158,6 +161,12 @@ const fn hermes_home(suffix: &'static str) -> DirSpec {
 const fn autohand_home(suffix: &'static str) -> DirSpec {
     DirSpec {
         root: Root::AutohandHome,
+        suffix,
+    }
+}
+const fn grok_home(suffix: &'static str) -> DirSpec {
+    DirSpec {
+        root: Root::GrokHome,
         suffix,
     }
 }
@@ -454,6 +463,14 @@ static HARNESSES: &[KnownHarness] = &[
         &[cfg("goose")],
     ),
     kh(
+        "grok",
+        "Grok Build",
+        false,
+        &[grok_home("skills")],
+        ".grok/skills",
+        &[grok_home("")],
+    ),
+    kh(
         "hermes-agent",
         "Hermes Agent",
         true,
@@ -502,6 +519,16 @@ static HARNESSES: &[KnownHarness] = &[
         &[home(".kilocode")],
     ),
     kh(
+        "kimchi",
+        "Kimchi",
+        false,
+        // A literal `~/.config` dir, NOT the XDG-overridable config home (`crush` is the precedent) —
+        // upstream joins it onto `home`, so `$XDG_CONFIG_HOME` does not move it.
+        &[home(".config/kimchi/harness/skills")],
+        ".kimchi/skills",
+        &[home(".config/kimchi")],
+    ),
+    kh(
         "kimi-code-cli",
         "Kimi Code CLI",
         false,
@@ -548,6 +575,16 @@ static HARNESSES: &[KnownHarness] = &[
         &[home(".mcpjam/skills")],
         ".mcpjam/skills",
         &[home(".mcpjam")],
+    ),
+    kh(
+        "minimax-code",
+        "MiniMax Code",
+        false,
+        &[home(".minimax/skills")],
+        ".minimax/skills",
+        // Present when either the home config dir OR the macOS app bundle exists — the `.app` path is
+        // joined onto the filesystem root, like `zcode`'s.
+        &[home(".minimax"), abs("Applications/MiniMax Code.app")],
     ),
     kh(
         "mistral-vibe",
@@ -839,6 +876,7 @@ fn spec_display(spec: &DirSpec) -> String {
         Root::VibeHome => "vibeHome",
         Root::HermesHome => "hermesHome",
         Root::AutohandHome => "autohandHome",
+        Root::GrokHome => "grokHome",
         Root::Cwd => "cwd",
         Root::Abs => "", // an absolute path — renders `/`-rooted below
         Root::Appdata => "APPDATA",
@@ -977,6 +1015,7 @@ fn resolve_root(root: Root, home: &Path, cwd: Option<&Path>) -> Option<PathBuf> 
         Root::AutohandHome => {
             Some(env_override("AUTOHAND_HOME").unwrap_or_else(|| home.join(".autohand")))
         }
+        Root::GrokHome => Some(env_override("GROK_HOME").unwrap_or_else(|| home.join(".grok"))),
         Root::Cwd => cwd.map(Path::to_path_buf),
         Root::Abs => Some(PathBuf::from(std::path::MAIN_SEPARATOR_STR)),
         Root::Appdata => env_override("APPDATA"),
@@ -1155,7 +1194,7 @@ mod tests {
     #[test]
     fn table_shape_is_the_ported_registry() {
         let all = known_harnesses();
-        assert_eq!(all.len(), 73, "every vercel-labs/skills agent is ported");
+        assert_eq!(all.len(), 76, "every vercel-labs/skills agent is ported");
 
         // Slugs are unique.
         let mut slugs: Vec<&str> = all.iter().map(|h| h.slug).collect();
@@ -1193,6 +1232,61 @@ mod tests {
             vec![
                 "home/.zcode".to_owned(),
                 "/Applications/ZCode.app".to_owned(),
+            ]
+        );
+
+        // The same neighbour discipline for the three rows added after the first port: each sits exactly
+        // where upstream's file puts it, so the shared-dir tie-break stays the reference table's.
+        let goose = pos("goose").expect("goose present");
+        let grok = pos("grok").expect("grok present");
+        let hermes = pos("hermes-agent").expect("hermes-agent present");
+        assert_eq!(grok, goose + 1, "grok follows goose");
+        assert_eq!(hermes, grok + 1, "grok precedes hermes-agent");
+
+        let kilo = pos("kilo").expect("kilo present");
+        let kimchi = pos("kimchi").expect("kimchi present");
+        let kimi = pos("kimi-code-cli").expect("kimi-code-cli present");
+        assert_eq!(kimchi, kilo + 1, "kimchi follows kilo");
+        assert_eq!(kimi, kimchi + 1, "kimchi precedes kimi-code-cli");
+
+        let mcpjam = pos("mcpjam").expect("mcpjam present");
+        let minimax = pos("minimax-code").expect("minimax-code present");
+        let mistral = pos("mistral-vibe").expect("mistral-vibe present");
+        assert_eq!(minimax, mcpjam + 1, "minimax-code follows mcpjam");
+        assert_eq!(mistral, minimax + 1, "minimax-code precedes mistral-vibe");
+
+        // `grok` carries its own env-overridable root (`$GROK_HOME`), so its specs render `grokHome`.
+        let gr = &all[grok];
+        assert_eq!(gr.display_name, "Grok Build");
+        assert!(!gr.adapter_supported);
+        assert_eq!(gr.project_dir(), ".grok/skills");
+        assert_eq!(gr.user_dir_specs(), vec!["grokHome/skills".to_owned()]);
+        assert_eq!(gr.detect_dir_specs(), vec!["grokHome".to_owned()]);
+
+        // `kimchi`'s dir is a LITERAL `~/.config` path, not the XDG-overridable config home.
+        let km = &all[kimchi];
+        assert_eq!(km.display_name, "Kimchi");
+        assert_eq!(km.project_dir(), ".kimchi/skills");
+        assert_eq!(
+            km.user_dir_specs(),
+            vec!["home/.config/kimchi/harness/skills".to_owned()]
+        );
+        assert_eq!(
+            km.detect_dir_specs(),
+            vec!["home/.config/kimchi".to_owned()]
+        );
+
+        // `minimax-code` probes the home dir OR the macOS app bundle (a space in the suffix is fine —
+        // suffixes split on `/` only).
+        let mm = &all[minimax];
+        assert_eq!(mm.display_name, "MiniMax Code");
+        assert_eq!(mm.project_dir(), ".minimax/skills");
+        assert_eq!(mm.user_dir_specs(), vec!["home/.minimax/skills".to_owned()]);
+        assert_eq!(
+            mm.detect_dir_specs(),
+            vec![
+                "home/.minimax".to_owned(),
+                "/Applications/MiniMax Code.app".to_owned(),
             ]
         );
     }

@@ -431,8 +431,9 @@ struct Sweep {
     /// Per scope label: mcp bundle ids whose demand state is UNKNOWABLE this run (a row whose
     /// resolution failed, a store not yet holding bytes) — the engine holds their config entries.
     mcp_hold: BTreeMap<String, HashSet<String>>,
-    /// `harness = [...]` slugs already warned about as not MCP-capable (one line per slug per run).
-    mcp_warned_slugs: HashSet<String>,
+    /// `dest` entries already warned about as unknown MCP config files (one line per entry per
+    /// run).
+    mcp_warned_dests: HashSet<String>,
     /// The delivery cache was unreadable this run: the mcp hold computation is blind, so removal
     /// convergence is withheld entirely (freeze, never guess).
     mcp_blind: bool,
@@ -1793,13 +1794,9 @@ fn reconcile_thing<'a>(
             };
             let mcp = entry.kind == "mcp";
             let target = CatalogTarget::from_entry(entry);
-            // A config-placed bundle has no placement dirs, so a path override has nothing to
-            // aim; the row's `harness` narrowing rides the demand instead.
-            let override_dir = if mcp {
-                None
-            } else {
-                row_override(sc, row, entry.kind.as_str(), env, sweep)
-            };
+            // A config-placed bundle has no placement dirs — its dest entries are config FILES
+            // and ride the demand's narrowing; a skill row's dest is its frozen placement plan.
+            let dest = if mcp { None } else { row.fields().dest };
             sweep.explicit.insert(target.skill_id.clone());
             // A manifest-row delivery records its provenance in the cache too (marked
             // `via_manifest`), so the offline surfaces know which workspace governs the name.
@@ -1820,16 +1817,17 @@ fn reconcile_thing<'a>(
                 },
             ));
             let st = SyncTarget {
-                mcp_harness_filter: mcp_filter(
+                mcp_dest_filter: mcp_filter(
                     sc,
                     Some(row),
-                    &mut sweep.mcp_warned_slugs,
+                    true,
+                    &mut sweep.mcp_warned_dests,
                     &mut sweep.warnings,
                 ),
                 target,
                 pin: row.pin(),
                 display: display.clone(),
-                override_dir,
+                dest,
                 step: None,
             };
             sync_workspace_skill(env, sc, run, &st, sweep);
@@ -1868,6 +1866,12 @@ fn reconcile_thing<'a>(
                 // MCP converge with `workspace_slug: None`.
                 if row.fields().kind.as_deref() == Some("mcp") {
                     local_mcp_demand(env, sc, row, &dir, &display, row_index, sweep);
+                } else if let Some(dest) = row.fields().dest.filter(|d| !d.is_empty()) {
+                    // A SKILL path row with `dest = [...]`: the adopted folder stays the
+                    // person's own working copy, and a managed COPY is kept at each named
+                    // destination — the same dest planner (and grow/shrink discipline) the
+                    // workspace rows ride.
+                    converge_local_dest(env, sc, &dir, &display, &dest, sweep);
                 }
             } else {
                 sweep.warnings.push(format!(
@@ -1890,61 +1894,71 @@ fn reconcile_thing<'a>(
     }
 }
 
-/// The MCP harness narrowing one demand carries: the row's own `harness = [...]` beats
-/// `[defaults.mcp]`'s; empty = every MCP-capable harness. A spelled slug that is not one of the
-/// MCP-capable harnesses is dropped with ONE warning per run (never silently ignored).
+/// The MCP config-file narrowing one demand carries: the row's `dest` entries mapped back to
+/// the harnesses whose config files they name. `None` = the row has no `dest` (every
+/// MCP-capable agent, now and later); `Some` = exactly the named files' agents — possibly
+/// empty, because a dest row is FROZEN to what it names. `warn_unknown` is true for rows whose
+/// dest can only mean config files (an explicit bundle row, a local mcp row); a CHANNEL's dest
+/// may name skill folders for its skill members, so its unmapped entries stay silent.
 fn mcp_filter(
     sc: &ScopeCtx<'_>,
     row: Option<&PlanRow>,
+    warn_unknown: bool,
     warned: &mut HashSet<String>,
     warnings: &mut Vec<String>,
-) -> Vec<String> {
-    mcp_harness_narrowing(
-        row.and_then(|r| r.fields().harness),
-        &sc.plan.defaults,
+) -> Option<Vec<String>> {
+    mcp_dest_narrowing(
+        row.and_then(|r| r.fields().dest),
+        manifest_scope_of(sc),
+        &sc.label,
+        warn_unknown,
         warned,
         warnings,
     )
 }
 
-/// The ONE resolution of an MCP demand's harness narrowing — shared by the sweep (through
-/// [`mcp_filter`]) and `add --mcp`'s inline converge, so the add can never fan out past what the
-/// next sweep would keep. `row_harness` is the row's own `harness = [...]` (beats the defaults);
-/// `defaults` the scope's `[defaults.<kind>]` sections.
-pub(crate) fn mcp_harness_narrowing(
-    row_harness: Option<Vec<String>>,
-    defaults: &[(String, crate::manifest::document::KindDefaults)],
+/// The grammar scope a resolved scope reads/writes in.
+fn manifest_scope_of(sc: &ScopeCtx<'_>) -> crate::manifest::document::ManifestScope {
+    match sc.scope {
+        ResolvedScope::Person => crate::manifest::document::ManifestScope::Global,
+        ResolvedScope::Project { .. } => crate::manifest::document::ManifestScope::Project,
+    }
+}
+
+/// The ONE resolution of an MCP demand's dest-file narrowing — shared by the sweep (through
+/// [`mcp_filter`]) and `add --mcp`'s inline converge, so the add can never fan out past what
+/// the next sweep would keep. Each entry is matched against the descriptor table's config-file
+/// spellings for the scope (default spelling, or the resolved env-override path); an entry no
+/// harness claims is dropped, warned ONCE per run with the same message shape the load refusal
+/// uses (when `warn_unknown`).
+pub(crate) fn mcp_dest_narrowing(
+    row_dest: Option<Vec<String>>,
+    scope: crate::manifest::document::ManifestScope,
+    label: &str,
+    warn_unknown: bool,
     warned: &mut HashSet<String>,
     warnings: &mut Vec<String>,
-) -> Vec<String> {
-    let raw: Vec<String> = row_harness
-        .or_else(|| {
-            defaults
-                .iter()
-                .find(|(k, _)| k == "mcp")
-                .and_then(|(_, kd)| kd.harness.clone())
-        })
-        .unwrap_or_default();
-    let known: Vec<&str> = topos_harness::mcp::descriptor::mcp_harnesses()
-        .iter()
-        .map(|h| h.slug)
-        .collect();
-    raw.into_iter()
-        .filter(|slug| {
-            if known.contains(&slug.as_str()) {
-                true
-            } else {
-                if warned.insert(slug.clone()) {
+) -> Option<Vec<String>> {
+    let dest = row_dest?;
+    let mut mapped: Vec<String> = Vec::new();
+    for entry in &dest {
+        match crate::manifest::dest::mcp_slug_for_dest(entry, scope) {
+            Some(slug) => {
+                if !mapped.iter().any(|s| s == slug) {
+                    mapped.push(slug.to_owned());
+                }
+            }
+            None => {
+                if warn_unknown && warned.insert(entry.clone()) {
                     warnings.push(format!(
-                        "MCP_HARNESS_UNKNOWN: \"{slug}\" is not an MCP-capable agent here \
-                         (known: {}) — the slug is ignored",
-                        known.join(", ")
+                        "MCP_DEST_UNKNOWN {label}: {}",
+                        crate::manifest::dest::unknown_mcp_file(entry, scope)
                     ));
                 }
-                false
             }
-        })
-        .collect()
+        }
+    }
+    Some(mapped)
 }
 
 /// The ledger identity of a LOCAL `kind = "mcp"` row: the tracked skill id when THIS SCOPE'S
@@ -1991,7 +2005,8 @@ fn local_mcp_demand(
             let filter = mcp_filter(
                 sc,
                 Some(row),
-                &mut sweep.mcp_warned_slugs,
+                true,
+                &mut sweep.mcp_warned_dests,
                 &mut sweep.warnings,
             );
             sweep.note_mcp_row(&sc.label, &bundle_id, row_index);
@@ -2133,22 +2148,22 @@ fn reconcile_set<'a>(
                     },
                 ));
                 let display = target.name.clone();
-                let override_dir = if mcp {
-                    None
-                } else {
-                    row_override(sc, row, entry.kind.as_str(), env, sweep)
-                };
+                // The channel row's dest governs every member — config files narrow its mcp
+                // members, folders freeze its skill members' placement (a folder entry is not
+                // an unknown FILE on a channel, so no warning fires for it).
+                let dest = if mcp { None } else { row.fields().dest };
                 let st = SyncTarget {
-                    mcp_harness_filter: mcp_filter(
+                    mcp_dest_filter: mcp_filter(
                         sc,
                         Some(row),
-                        &mut sweep.mcp_warned_slugs,
+                        false,
+                        &mut sweep.mcp_warned_dests,
                         &mut sweep.warnings,
                     ),
                     target,
                     pin: None,
                     display,
-                    override_dir,
+                    dest,
                     step: Some(Step {
                         index: position + 1,
                         total,
@@ -2243,12 +2258,8 @@ fn reconcile_feed<'a>(
             let total = batch.len();
             for (position, ds) in batch.into_iter().enumerate() {
                 let st = SyncTarget {
-                    mcp_harness_filter: mcp_filter(
-                        sc,
-                        None,
-                        &mut sweep.mcp_warned_slugs,
-                        &mut sweep.warnings,
-                    ),
+                    // A feed item has no row — no dest, no narrowing: the default placement.
+                    mcp_dest_filter: None,
                     target: CatalogTarget {
                         skill_id: ds.skill_id.clone(),
                         name: ds.name.clone(),
@@ -2260,7 +2271,7 @@ fn reconcile_feed<'a>(
                     },
                     pin: None,
                     display: ds.name.clone(),
-                    override_dir: None,
+                    dest: None,
                     step: Some(Step {
                         index: position + 1,
                         total,
@@ -2366,7 +2377,7 @@ fn reconcile_feed<'a>(
                         &sid,
                         &ds.name,
                         Some(&run.session.workspace_name),
-                        mcp_filter(sc, None, &mut sweep.mcp_warned_slugs, &mut sweep.warnings),
+                        None,
                         row_index,
                         sweep,
                     );
@@ -2414,11 +2425,12 @@ struct SyncTarget {
     pin: Option<String>,
     /// The placement directory's display name (the row's `name` field, else the catalog name).
     display: String,
-    /// The project-relative placement override the row (or its kind default) resolved to.
-    override_dir: Option<String>,
-    /// For an `"mcp"` target: the harness slugs the row (or `[defaults.mcp]`) narrows placement
-    /// to — carried onto the scope's [`mcp_engine::McpDemand`]. Empty = every MCP harness.
-    mcp_harness_filter: Vec<String>,
+    /// The row's `dest` — the FROZEN destination set a skill bundle's plan becomes (one target
+    /// per entry, detection ignored). `None` = no dest: today's default placement, every agent.
+    dest: Option<Vec<String>>,
+    /// For an `"mcp"` target: the harnesses whose config files the row's `dest` names —
+    /// carried onto the scope's [`mcp_engine::McpDemand`]. `None` = every MCP harness.
+    mcp_dest_filter: Option<Vec<String>>,
     /// Where this bundle sits in the BATCH its source is converging — what turns the activity line
     /// into "updating docs (2 of 7)". `None` for a lone explicit row, which is a batch of one and
     /// says so by not counting.
@@ -2517,7 +2529,7 @@ fn sync_workspace_skill<'a>(
     };
     let naming_slug = run.session.workspace_name.clone();
     let display = st.display.clone();
-    let override_dir = st.override_dir.clone();
+    let dest = st.dest.clone();
     // The incoming version's digest arms adopt-in-place: a by-name dir already holding a
     // byte-identical copy (a handed-over old-world placement, a teammate's committed copy) BECOMES
     // the placement instead of a namespaced sibling.
@@ -2540,20 +2552,30 @@ fn sync_workspace_skill<'a>(
         // its catalog identity.
         let mut named = lock.clone();
         named.name = display.clone();
+        let naming = topos_harness::PlacementNaming {
+            name: Some(&named.name),
+            workspace_slug: Some(&naming_slug),
+        };
+        // A row WITH `dest` is FROZEN to exactly those destinations — one target per entry,
+        // detection ignored, in BOTH scopes (project entries pass the containment rail; a
+        // refused root is disclosed, never redirected).
+        if let Some(dest) = &dest {
+            let plan = placement::dest_plan(
+                ctx,
+                skill_id,
+                naming,
+                dest,
+                project_dir.as_deref(),
+                Some(map),
+                adopt_digest,
+            );
+            escapes.borrow_mut().extend(plan.refused.iter().cloned());
+            return plan;
+        }
         match &project_dir {
             Some(dir) => {
-                let plan = placement::project_plan(
-                    ctx,
-                    dir,
-                    skill_id,
-                    topos_harness::PlacementNaming {
-                        name: Some(&named.name),
-                        workspace_slug: Some(&naming_slug),
-                    },
-                    override_dir.as_deref(),
-                    Some(map),
-                    adopt_digest,
-                );
+                let plan =
+                    placement::project_plan(ctx, dir, skill_id, naming, Some(map), adopt_digest);
                 escapes.borrow_mut().extend(plan.refused.iter().cloned());
                 plan
             }
@@ -2611,6 +2633,21 @@ fn sync_workspace_skill<'a>(
         .plane
         .as_delivery()
         .bind_skill(&run.session.workspace_id, &target.skill_id);
+    // The dest-freeze convergence below tells GROWTH apart from what already stood: the dirs
+    // that were materialized BEFORE this sync ran.
+    let pre_materialized: HashSet<String> =
+        doc::read_map(run_ctx.fs, &run_ctx.layout.published(&sid).map)
+            .ok()
+            .flatten()
+            .map(|m| {
+                m.placements
+                    .iter()
+                    .zip(&m.placement_state)
+                    .filter(|(_, pst)| pst.materialized_sha.is_some())
+                    .map(|(p, _)| p.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
     let outcome = sync_engine::sync_one_planned(
         &run_ctx,
         &sid,
@@ -2663,6 +2700,27 @@ fn sync_workspace_skill<'a>(
         }
         Err(e) => note_item_failure(ctx, &mut sweep.warnings, &target.name, &e),
     }
+    // DEST-FROZEN convergence (skill rows with `dest` only): a hand-edited dest change converges
+    // on this update. GROW already landed through the plan above — disclose it as the install it
+    // is; SHRINK retires the recorded copies the row no longer names, through the ordinary
+    // park-then-verify rail with the keep-edited-in-place discipline. The no-dest default keeps
+    // the never-drop behavior untouched.
+    if !mcp && row_index.is_some() && dest.is_some() {
+        converge_dest_freeze(
+            env,
+            sc,
+            &run_ctx,
+            &sid,
+            &display,
+            &naming_slug,
+            dest.as_deref().unwrap_or_default(),
+            project_dir.as_deref(),
+            &pre_materialized,
+            run,
+            row_index,
+            sweep,
+        );
+    }
     // The demand feeds the config converge from the STORE's held bytes — whatever the sync above
     // decided, as long as a received version is on disk (an update that failed this run still
     // heals config entries from the last held version; a store with nothing yet HOLDS the
@@ -2675,11 +2733,260 @@ fn sync_workspace_skill<'a>(
             &sid,
             &target.name,
             Some(&run.session.workspace_name),
-            st.mcp_harness_filter.clone(),
+            st.mcp_dest_filter.clone(),
             row_index,
             sweep,
         );
     }
+}
+
+/// The dest-frozen row's post-sync convergence: the GROW disclosure (a destination this run
+/// first materialized reads as the install it is) and the SHRINK retire (a recorded,
+/// topos-materialized copy outside the frozen target set leaves through [`retire_split`] — an
+/// edited copy stays in place with a `kept` line; the adopted-in-place source is never touched).
+#[allow(clippy::too_many_arguments)]
+fn converge_dest_freeze(
+    env: &Env<'_>,
+    sc: &ScopeCtx<'_>,
+    run_ctx: &Ctx<'_>,
+    sid: &SkillId,
+    display: &str,
+    naming_slug: &str,
+    dest: &[String],
+    project_dir: Option<&Path>,
+    pre_materialized: &HashSet<String>,
+    run: &SessionRun,
+    row_index: Option<usize>,
+    sweep: &mut Sweep,
+) {
+    let guard = match crate::sidecar::lock_skill(run_ctx.fs, &run_ctx.layout, sid) {
+        Ok(g) => g,
+        Err(e) => {
+            note_item_failure(env.ctx, &mut sweep.warnings, display, &e);
+            return;
+        }
+    };
+    let sp = run_ctx.layout.published(sid);
+    let (Ok(Some(lock)), Ok(Some(map))) = (
+        doc::read_doc::<Lock>(run_ctx.fs, &sp.lock),
+        doc::read_map(run_ctx.fs, &sp.map),
+    ) else {
+        return;
+    };
+    // The frozen target set, recomputed by the ONE dest planner (same fn, same answer).
+    let plan = placement::dest_plan(
+        run_ctx,
+        sid.as_str(),
+        topos_harness::PlacementNaming {
+            name: Some(display),
+            workspace_slug: Some(naming_slug),
+        },
+        dest,
+        project_dir,
+        Some(&map),
+        None,
+    );
+    // GROW: a dir this run first materialized is an install — say so with its destination.
+    let grown: Vec<String> = map
+        .placements
+        .iter()
+        .zip(&map.placement_state)
+        .filter(|(p, pst)| pst.materialized_sha.is_some() && !pre_materialized.contains(*p))
+        .map(|(p, _)| super::inventory::pretty(run_ctx, Path::new(p)))
+        .collect();
+    if !grown.is_empty()
+        && let Some(row) = row_index.and_then(|i| sweep.rows.get_mut(i))
+        && row.action == PullAction::UpToDate
+    {
+        row.action = PullAction::Installed;
+        row.display = Some(env.qualified(&run.session.host, &run.session.workspace_name, display));
+        row.destinations = grown;
+    }
+    // SHRINK: recorded, topos-materialized copies outside the frozen set retire; the adopted
+    // source dir is the person's own and never leaves.
+    let stale: Vec<usize> = map
+        .placements
+        .iter()
+        .zip(&map.placement_state)
+        .enumerate()
+        .filter(|(_, (p, pst))| {
+            pst.materialized_sha.is_some()
+                && !pst.adopted_source
+                && !plan.targets.iter().any(|t| t.dir == Path::new(p))
+        })
+        .map(|(i, _)| i)
+        .collect();
+    if stale.is_empty() {
+        return;
+    }
+    match retire_split(run_ctx, sid, &lock, &map, &stale) {
+        Ok(Some(clean)) => {
+            let mut row = plain_row(
+                &clean.name,
+                PullAction::Removed,
+                Some(run.session.workspace_id.clone()),
+                &sc.label,
+            );
+            row.destinations = clean.removed;
+            row.kept = clean.kept;
+            sweep.push(row);
+        }
+        Ok(None) => {}
+        Err(e) => note_item_failure(env.ctx, &mut sweep.warnings, display, &e),
+    }
+    drop(guard);
+}
+
+/// A LOCAL path row's `dest = [...]` made operational: the adopted folder is the person's own
+/// working copy (never touched); each named destination keeps a managed COPY of the row's
+/// applied version, projected from the scope store — GROW lands missing copies through the
+/// ordinary materialize rail (snapshot-first over anything edited), SHRINK retires copies the
+/// row no longer names (park-then-verify, edited copies kept in place). A dir the scope's store
+/// does not track yet contributes nothing (adopting it is `add`'s act, not the sweep's).
+fn converge_local_dest(
+    env: &Env<'_>,
+    sc: &ScopeCtx<'_>,
+    dir: &Path,
+    display: &str,
+    dest: &[String],
+    sweep: &mut Sweep,
+) {
+    let store_layout = match &sc.scope {
+        ResolvedScope::Project { dir } => {
+            match sidecar::existing_project_store(env.ctx.fs, dir) {
+                Some(l) => l,
+                None => return, // nothing was ever adopted in this scope
+            }
+        }
+        ResolvedScope::Person => env.ctx.layout.clone(),
+    };
+    let sctx = super::pull::ctx_with_layout(env.ctx, &store_layout);
+    let Some(id) = dir
+        .canonicalize()
+        .ok()
+        .and_then(|c| super::add::tracked_skill_at(&sctx, &c).ok().flatten())
+    else {
+        return;
+    };
+    let Ok(sid) = crate::id::SkillId::parse(&id) else {
+        return;
+    };
+    if let Err(e) = local_dest_apply(&sctx, sc, &sid, display, dest, sweep) {
+        note_item_failure(env.ctx, &mut sweep.warnings, display, &e);
+    }
+}
+
+fn local_dest_apply(
+    ctx: &Ctx<'_>,
+    sc: &ScopeCtx<'_>,
+    sid: &SkillId,
+    display: &str,
+    dest: &[String],
+    sweep: &mut Sweep,
+) -> Result<(), ClientError> {
+    let _guard = sidecar::lock_skill(ctx.fs, &ctx.layout, sid)?;
+    let sp = ctx.layout.published(sid);
+    let (Some(lock), Some(map), Some(sync)) = (
+        doc::read_doc::<Lock>(ctx.fs, &sp.lock)?,
+        doc::read_map(ctx.fs, &sp.map)?,
+        doc::read_doc::<SyncState>(ctx.fs, &sp.sync)?,
+    ) else {
+        return Ok(());
+    };
+    let project_dir = match &sc.scope {
+        ResolvedScope::Project { dir } => Some(dir.as_path()),
+        ResolvedScope::Person => None,
+    };
+    let plan = placement::dest_plan(
+        ctx,
+        sid.as_str(),
+        topos_harness::PlacementNaming {
+            name: Some(display),
+            workspace_slug: None,
+        },
+        dest,
+        project_dir,
+        Some(&map),
+        None,
+    );
+    for line in &plan.refused {
+        if !sweep.warnings.contains(line) {
+            sweep.warnings.push(line.clone());
+        }
+    }
+    let planned = placement::reconcile_map(&map, &plan);
+    // GROW: the planned destinations whose copy is missing — the adopted source dir is NEVER a
+    // managed target here, and a recorded copy that still stands (edited or not) is left to the
+    // ordinary sync flows.
+    let grow: Vec<usize> = placement::managed_indices(&planned, &plan)
+        .into_iter()
+        .filter(|&i| !planned.placement_state[i].adopted_source)
+        .filter(|&i| {
+            planned.placement_state[i].materialized_sha.is_none()
+                || !ctx.fs.exists(Path::new(&planned.placements[i]))
+        })
+        .collect();
+    if !grow.is_empty() {
+        let base = super::parse_hex32(&lock.base_commit)?;
+        let digest = super::parse_hex32(&lock.bundle_digest)?;
+        let store = Store::open(&sp.store)?;
+        let bundle = store.render_verified(base, digest)?;
+        sync_engine::fsync_batch(ctx, &store.version_durability(&base)?)?;
+        crate::materialize::materialize(
+            ctx.fs,
+            &crate::materialize::MaterializeReq {
+                skill_id: sid.as_str(),
+                target_indices: &grow,
+                bundle: &bundle,
+                next_map: sync_engine::next_map(&planned, base, &lock.bundle_digest),
+                next_lock: &lock,
+                next_sync: &sync,
+                sp: &sp,
+                snapshot: Some(&|scanned| {
+                    sync_engine::snapshot_draft(ctx, &sp, &lock, scanned).map(|_| ())
+                }),
+                takeover: None,
+                self_ignore: ctx.layout.is_project_scope(),
+                expected: None,
+                project_root: ctx.layout.project_root(),
+            },
+        )?;
+        let dirs: Vec<String> = grow
+            .iter()
+            .map(|&i| super::inventory::pretty(ctx, Path::new(&planned.placements[i])))
+            .collect();
+        let mut row = plain_row(display, PullAction::Installed, None, &sc.label);
+        row.destinations = dirs;
+        sweep.push(row);
+    }
+    // SHRINK: recorded, topos-materialized copies outside the frozen set retire — the adopted
+    // source dir is the person's own and never leaves.
+    let map_now = doc::read_map(ctx.fs, &sp.map)?.unwrap_or(planned);
+    let stale: Vec<usize> = map_now
+        .placements
+        .iter()
+        .zip(&map_now.placement_state)
+        .enumerate()
+        .filter(|(_, (p, st))| {
+            st.materialized_sha.is_some()
+                && !st.adopted_source
+                && !plan.targets.iter().any(|t| t.dir == Path::new(p))
+        })
+        .map(|(i, _)| i)
+        .collect();
+    if !stale.is_empty() {
+        match retire_split(ctx, sid, &lock, &map_now, &stale) {
+            Ok(Some(clean)) => {
+                let mut row = plain_row(&clean.name, PullAction::Removed, None, &sc.label);
+                row.destinations = clean.removed;
+                row.kept = clean.kept;
+                sweep.push(row);
+            }
+            Ok(None) => {}
+            Err(e) => note_item_failure(ctx, &mut sweep.warnings, display, &e),
+        }
+    }
+    Ok(())
 }
 
 /// Feed one scope's MCP demand list from the scope store's CURRENT tree (see
@@ -2694,7 +3001,7 @@ fn push_stored_mcp_demand(
     sid: &SkillId,
     name: &str,
     workspace_slug: Option<&str>,
-    harness_filter: Vec<String>,
+    harness_filter: Option<Vec<String>>,
     row_index: Option<usize>,
     sweep: &mut Sweep,
 ) {
@@ -2727,39 +3034,6 @@ fn push_stored_mcp_demand(
                 .or_default()
                 .insert(sid.as_str().to_owned());
         }
-    }
-}
-
-/// The project-relative placement override a row resolves to: the row's own `path` beats the
-/// `[defaults.<kind>]` path beats nothing (the registry mapping), and within each level the
-/// harness-named key beats that level's `default`. PROJECT scope only — a person-scope delivery
-/// lands through the home placement engine, which has no override seam.
-///
-/// The value must be a RELATIVE path that stays inside the project: a committed manifest must never
-/// be able to aim managed bytes outside its own checkout, so a hostile/mistaken value is ignored with
-/// a warning and the default placement engages.
-fn row_override(
-    sc: &ScopeCtx<'_>,
-    row: &PlanRow,
-    kind: &str,
-    env: &Env<'_>,
-    sweep: &mut Sweep,
-) -> Option<String> {
-    if !matches!(sc.scope, ResolvedScope::Project { .. }) {
-        return None;
-    }
-    let fields = row.fields();
-    let slug = env.ctx.harness.id().slug();
-    let raw = scopes::path_override(fields.path.as_ref(), &sc.plan.defaults, kind, slug)?;
-    if placement::safe_project_rel(&raw) {
-        Some(raw)
-    } else {
-        sweep.warnings.push(format!(
-            "PLACEMENT_OVERRIDE_IGNORED {}: the `path` value {raw:?} must be a relative path inside \
-             the project (no `..`, not absolute) — using the default placement",
-            row.display_name()
-        ));
-        None
     }
 }
 
@@ -2986,14 +3260,15 @@ fn reconcile_repo_set(
         sweep.mention(&sc.label, &import.lock.name);
     }
     let pin = row.pin();
-    // The row's own placement decision (`harness = [...]`, written by a `-a` selector import):
-    // one converge SLOT per named agent, so a refresh keeps each copy where it was asked for
-    // instead of re-landing it in the default dir. No field = one default slot = the old behavior.
-    let row_harness = row.fields().harness.unwrap_or_default();
+    // The row's own placement decision (`dest = [...]`, written by a `-a` selector import): one
+    // converge SLOT per named destination dir, so a refresh keeps each copy where it was asked
+    // for instead of re-landing it in the default dir. No field = one default slot = the old
+    // behavior.
+    let row_dest = row.fields().dest.unwrap_or_default();
     let roots = discovery_roots(env.ctx, &sc.scope);
     let global = matches!(sc.scope, ResolvedScope::Person);
-    let slots_for = |name: &str| -> Vec<HarnessSlot<'_>> {
-        harness_slots(&sctx, roots.as_ref(), global, &row_harness, &tracked, name)
+    let slots_for = |name: &str| -> Vec<DestSlot<'_>> {
+        dest_slots(&sctx, roots.as_ref(), global, &row_dest, &tracked, name)
     };
     let is_tracked_name = |name: &str| slots_for(name).iter().all(|s| s.import.is_some());
     // Tracked, AT a given commit, and its BYTES STILL ON DISK — the one predicate every
@@ -3243,7 +3518,7 @@ fn reconcile_repo_set(
     let converged = {
         let landed = tracked_repo_members(&sctx, &origin);
         let at_head = |name: &str| {
-            let slots = harness_slots(&sctx, roots.as_ref(), global, &row_harness, &landed, name);
+            let slots = dest_slots(&sctx, roots.as_ref(), global, &row_dest, &landed, name);
             !slots.is_empty()
                 && slots.iter().all(|s| {
                     s.import.is_some_and(|i| {
@@ -3277,12 +3552,12 @@ fn reconcile_repo_skill(
     let store_layout = forge_store_layout(env.ctx, &sc.scope);
     let sctx = super::pull::ctx_with_layout(env.ctx, &store_layout);
     let members = tracked_repo_members(&sctx, &origin);
-    // Same placement decision as the set arm: the row's `harness` list is one converge slot per
-    // agent (no field = the one default slot).
-    let row_harness = fields.harness.clone().unwrap_or_default();
+    // Same placement decision as the set arm: the row's `dest` list is one converge slot per
+    // destination dir (no field = the one default slot).
+    let row_dest = fields.dest.clone().unwrap_or_default();
     let roots = discovery_roots(env.ctx, &sc.scope);
     let global = matches!(sc.scope, ResolvedScope::Person);
-    let slots = harness_slots(&sctx, roots.as_ref(), global, &row_harness, &members, skill);
+    let slots = dest_slots(&sctx, roots.as_ref(), global, &row_dest, &members, skill);
     let tracked = slots.first().and_then(|s| s.import);
     let pin = row.pin();
     let pin_satisfied = pin.as_ref().is_some_and(|p| {
@@ -3418,71 +3693,81 @@ fn reconcile_repo_skill(
     install_or_refresh_repo_skill(env, sc, &sctx, &spec, &targz, skill, &slots, sweep);
 }
 
-/// ONE converge slot of a forge row's member: the harness the row aimed this copy at (`None` =
-/// the row named none, so the default agent dir answers) and the tracked import already sitting
-/// there.
-struct HarnessSlot<'a> {
-    slug: Option<String>,
+/// ONE converge slot of a forge row's member: the destination root the row aimed this copy at
+/// (`None` = the row named none, so the default agent dir answers) and the tracked import
+/// already sitting there.
+struct DestSlot<'a> {
+    root: Option<PathBuf>,
     import: Option<&'a ForgeImport>,
 }
 
-/// The slots one member of a forge row converges through — the row's `harness` field made
+/// The slots one member of a forge row converges through — the row's `dest` field made
 /// operational.
 ///
-/// A `-a` selector import wrote that field precisely so the copy would keep living in the agent
-/// dir it was aimed at; without reading it back, the refresh below re-lands the copy through the
-/// DEFAULT root and the selection silently evaporates on the first commit move. One slot per named
-/// slug (paired with the import whose recorded placements sit under that slug's skills root), and
-/// with a single slot the by-name import answers even when its placement predates the field — the
-/// row says where that copy belongs, and the refresh is what takes it there.
+/// A `-a` selector import wrote that field precisely so the copy would keep living in the dir
+/// it was aimed at; without reading it back, the refresh below re-lands the copy through the
+/// DEFAULT root and the selection silently evaporates on the first commit move. One slot per
+/// dest entry (its resolved root, paired with the import whose recorded placements sit under
+/// it), and with a single slot the by-name import answers even when its placement predates the
+/// field — the row says where that copy belongs, and the refresh is what takes it there.
 ///
 /// No field at all → exactly one default slot holding the by-name import: today's behavior,
 /// unchanged.
-fn harness_slots<'a>(
+fn dest_slots<'a>(
     sctx: &Ctx<'_>,
     roots: Option<&super::DiscoveryRoots>,
     global: bool,
-    harness: &[String],
+    dest: &[String],
     tracked: &'a [ForgeImport],
     name: &str,
-) -> Vec<HarnessSlot<'a>> {
+) -> Vec<DestSlot<'a>> {
     let candidates: Vec<&ForgeImport> = tracked
         .iter()
         .filter(|i| i.lock.name == name || subdir_leaf(&i.origin).as_deref() == Some(name))
         .collect();
-    let (Some(roots), false) = (roots, harness.is_empty()) else {
-        return vec![HarnessSlot {
-            slug: None,
+    let (Some(roots), false) = (roots, dest.is_empty()) else {
+        return vec![DestSlot {
+            root: None,
             import: candidates.first().copied(),
         }];
     };
-    let scope = if global {
-        topos_harness::registry::SkillScope::User
-    } else {
-        topos_harness::registry::SkillScope::Project
-    };
-    let single = harness.len() == 1;
-    harness
-        .iter()
-        .map(|slug| {
-            let root = topos_harness::registry::skills_root(
-                slug,
-                scope,
-                &roots.home,
-                roots.cwd.as_deref(),
-            );
-            let placed = root.and_then(|root| {
+    let single = dest.len() == 1;
+    dest.iter()
+        .map(|entry| {
+            let root = resolve_dest_root(entry, roots, global);
+            let placed = root.as_ref().and_then(|root| {
                 candidates
                     .iter()
                     .copied()
-                    .find(|i| placed_under(sctx, i, &root))
+                    .find(|i| placed_under(sctx, i, root))
             });
-            HarnessSlot {
-                slug: Some(slug.clone()),
+            DestSlot {
+                root,
                 import: placed.or_else(|| single.then(|| candidates.first().copied()).flatten()),
             }
         })
         .collect()
+}
+
+/// Resolve one `dest` entry to its root dir: `~/` against the machine home and absolute paths
+/// verbatim in the global file; a project entry against the project dir (the discovery cwd —
+/// containment was proven at load, and the import's write-boundary belt re-proves it).
+fn resolve_dest_root(entry: &str, roots: &super::DiscoveryRoots, global: bool) -> Option<PathBuf> {
+    if let Some(rest) = entry.strip_prefix("~/") {
+        return Some(roots.home.join(rest));
+    }
+    if Path::new(entry).is_absolute() {
+        return Some(PathBuf::from(entry));
+    }
+    if global {
+        // A relative entry cannot resolve in the machine file (the grammar refuses it at load;
+        // an older record meeting this stays unplanned rather than guessed at).
+        return None;
+    }
+    roots
+        .cwd
+        .as_deref()
+        .map(|cwd| cwd.join(entry.trim_start_matches("./")))
 }
 
 /// Whether any recorded placement of `import` sits under `root` — how a tracked copy is matched to
@@ -3558,7 +3843,7 @@ fn install_or_refresh_repo_skill(
     spec: &crate::source::RemoteSpec,
     targz: &[u8],
     name: &str,
-    slots: &[HarnessSlot<'_>],
+    slots: &[DestSlot<'_>],
     sweep: &mut Sweep,
 ) {
     let Some(roots) = discovery_roots(env.ctx, &sc.scope) else {
@@ -3579,8 +3864,9 @@ fn install_or_refresh_repo_skill(
             // A row that spells a literal `subdir` has already narrowed the archive; otherwise the
             // leaf name picks the skill out of a multi-skill repo.
             skill: spec.subdir.is_none().then(|| name.to_owned()),
-            // The row's own destination for THIS copy (`None` = the default agent dir).
-            harness: slot.slug.clone(),
+            harness: None,
+            // The row's own destination root for THIS copy (`None` = the default agent dir).
+            dest_root: slot.root.clone(),
             global: matches!(sc.scope, ResolvedScope::Person),
         };
         let outcome = match slot.import {

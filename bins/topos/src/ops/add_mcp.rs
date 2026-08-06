@@ -227,11 +227,12 @@ pub(crate) fn add_mcp(
     source: &str,
     global: bool,
     workspace: Option<&str>,
+    selection: &super::dest_select::Selection,
 ) -> Result<Box<AddData>, ClientError> {
     let host = medit::manifest_host(ctx);
     let exists = |p: &Path| ctx.fs.exists(p);
     match classify_mcp_source(source, host.as_deref(), &exists) {
-        McpSourceShape::Path(dir) => adopt_local(ctx, &dir, global),
+        McpSourceShape::Path(dir) => adopt_local(ctx, &dir, global, selection),
         McpSourceShape::Registry(name) => {
             // The scope resolves BEFORE any network dial — the same rule the fetch arm enforces
             // internally — so a folder with no `topos.toml` refuses without consulting a
@@ -244,9 +245,9 @@ pub(crate) fn add_mcp(
             // which is everything the raw registry pointer is not.
             let hits = workspace_server_matches(ctx, connect, &name, workspace);
             match hits.as_slice() {
-                [] => fetch_arm(ctx, docs, source, &registry_url(&name), global)
+                [] => fetch_arm(ctx, docs, source, &registry_url(&name), global, selection)
                     .map_err(|e| miss_both_sources(e, &name)),
-                [one] => subscribe_workspace_hit(ctx, connect, one, global),
+                [one] => subscribe_workspace_hit(ctx, connect, one, global, selection),
                 several => Err(ClientError::AmbiguousMcpWorkspace {
                     server: name.clone(),
                     workspaces: several.iter().map(|p| p.workspace.clone()).collect(),
@@ -254,7 +255,7 @@ pub(crate) fn add_mcp(
                 }),
             }
         }
-        McpSourceShape::Url(url) => fetch_arm(ctx, docs, source, &url.clone(), global),
+        McpSourceShape::Url(url) => fetch_arm(ctx, docs, source, &url.clone(), global, selection),
         McpSourceShape::DirShadowsRegistry(token) => Err(ClientError::InvalidArgument(format!(
             "`{token}` is both a folder here and an official-registry server name — say which: \
              `topos add --mcp ./{token}` imports the folder; the bare `{token}` is the registry \
@@ -334,8 +335,9 @@ fn subscribe_workspace_hit(
     connect: &SessionConnect<'_>,
     hit: &PublishedName,
     global: bool,
+    selection: &super::dest_select::Selection,
 ) -> Result<Box<AddData>, ClientError> {
-    match add_reference(ctx, connect, None, &hit.reference, global, true)? {
+    match add_reference(ctx, connect, None, &hit.reference, global, true, selection)? {
         AddRefOutcome::Applied(mut data) => {
             let disclosure = format!("from {}'s catalog as '{}'", hit.workspace, hit.name);
             data.note = Some(match data.note.take() {
@@ -402,7 +404,7 @@ pub(crate) fn fold_workspace_mcp(
         return;
     };
     let (filter, _) = row_narrowing(ctx, target, &data.name);
-    let agents = engaged_agents(ctx, target, global, &filter);
+    let agents = engaged_agents(ctx, target, global, filter.as_deref());
     fold_receipt(data, &summary, None, agents, &[]);
 }
 
@@ -416,7 +418,12 @@ pub(crate) fn fold_workspace_mcp(
 /// scan over every file's bytes — a stray script beside `server.json` refuses before anything is
 /// adopted. Applies immediately — an on-disk folder is the person's own material, and the row is
 /// its exact inverse away.
-fn adopt_local(ctx: &Ctx<'_>, dir: &Path, global: bool) -> Result<Box<AddData>, ClientError> {
+fn adopt_local(
+    ctx: &Ctx<'_>,
+    dir: &Path,
+    global: bool,
+    selection: &super::dest_select::Selection,
+) -> Result<Box<AddData>, ClientError> {
     let server = dir.join("server.json");
     if ctx.fs.read_opt(&server)?.is_none() {
         return Err(ClientError::InvalidArgument(format!(
@@ -437,16 +444,29 @@ fn adopt_local(ctx: &Ctx<'_>, dir: &Path, global: bool) -> Result<Box<AddData>, 
     let summary = mcp_validate::validate_candidate_files(&files)?;
 
     let scope = medit::add_scope(ctx, global)?;
+    // The `-a`/`--dest` selection resolves to config FILES at this scope — refused whole before
+    // the adopt when an entry names no known file.
+    let dest_entries = selection.mcp_entries(scope.target.scope)?;
     let sctx = super::ctx_with_layout(ctx, &scope.layout);
     let mut data = super::adopt_path_any_kind(&sctx, &scope.target, dir)?;
-    medit::note_added_path_kind_in(ctx, &mut data, &scope.target, dir, Some("mcp"))?;
+    medit::note_added_path_kind_dest_in(
+        ctx,
+        &mut data,
+        &scope.target,
+        dir,
+        Some("mcp"),
+        &dest_entries,
+    )?;
+    if !dest_entries.is_empty() {
+        data.dest = dest_entries;
+    }
     // The durable kind marker, beside the adopted store's docs — what keeps this record
     // classifying as config-placed even if the scope's ledger is ever lost.
     if let Some(Ok(sid)) = data.skill_id.as_deref().map(crate::id::SkillId::parse) {
         crate::mcp_engine::write_kind_marker(&sctx, &sid);
     }
     let (filter, _) = row_narrowing(ctx, &scope.target, &data.name);
-    let agents = engaged_agents(ctx, &scope.target, global, &filter);
+    let agents = engaged_agents(ctx, &scope.target, global, filter.as_deref());
     let bundle_id = data.skill_id.clone().unwrap_or_default();
     let lines = converge_one(ctx, &scope.target, global, &bundle_id, &data.name);
     fold_receipt(&mut data, &summary, Some(dir), agents, &lines);
@@ -465,6 +485,7 @@ fn fetch_arm(
     source: &str,
     url: &str,
     global: bool,
+    selection: &super::dest_select::Selection,
 ) -> Result<Box<AddData>, ClientError> {
     let Some(docs) = docs else {
         return Err(ClientError::InvalidArgument(
@@ -476,6 +497,8 @@ fn fetch_arm(
     let Some(target) = medit::edit_target(ctx, global)? else {
         return Err(ClientError::NoManifest);
     };
+    // The selection resolves (and refuses) before the dial too.
+    let dest_entries = selection.mcp_entries(target.scope)?;
 
     let _phase = crate::progress::phase(ctx.progress, &format!("fetching {source}"));
     let raw = docs.fetch(url)?;
@@ -515,11 +538,24 @@ fn fetch_arm(
         mcp_validate::validate_candidate_files(&files)?;
     }
 
-    // The breadth line honors the scope's narrowing exactly as the converge below will (the row
-    // is not written yet, so only `[defaults.mcp]` can narrow here — a fresh row spells no
-    // `harness` of its own).
-    let (filter, _) = row_narrowing(ctx, &target, &slug);
-    let agents = engaged_agents(ctx, &target, global, &filter);
+    // The breadth line honors the scope's narrowing exactly as the converge below will. The row
+    // is not written yet, so the selection (which the row will spell as `dest`) narrows here
+    // directly; without one, a fresh row spells no `dest` and the reach is every MCP-capable
+    // agent.
+    let filter = if dest_entries.is_empty() {
+        row_narrowing(ctx, &target, &slug).0
+    } else {
+        let mut warned = std::collections::HashSet::new();
+        super::reconcile::mcp_dest_narrowing(
+            Some(dest_entries.clone()),
+            target.scope,
+            "add",
+            false,
+            &mut warned,
+            &mut Vec::new(),
+        )
+    };
+    let agents = engaged_agents(ctx, &target, global, filter.as_deref());
 
     // ---- APPLY ----
     // The BYTES first (the row must never point at a folder that is not there), then the import
@@ -542,7 +578,17 @@ fn fetch_arm(
         .ok()
         .map(|scanned| topos_core::digest::to_hex(&scanned.bundle_digest));
     let mut data = row_only_receipt(&slug, bundle_digest);
-    medit::note_added_path_kind_in(ctx, &mut data, &scope.target, &bundle_dir, Some("mcp"))?;
+    medit::note_added_path_kind_dest_in(
+        ctx,
+        &mut data,
+        &scope.target,
+        &bundle_dir,
+        Some("mcp"),
+        &dest_entries,
+    )?;
+    if !dest_entries.is_empty() {
+        data.dest = dest_entries.clone();
+    }
     let bundle_id = format!("local:{slug}");
     let lines = converge_one(ctx, &scope.target, global, &bundle_id, &slug);
     fold_receipt(&mut data, &summary, Some(&bundle_dir), agents, &lines);
@@ -629,6 +675,8 @@ fn row_only_receipt(name: &str, bundle_digest: Option<String>) -> AddData {
         published_match: None,
         note: None,
         mcp: None,
+        dest: Vec::new(),
+        display: None,
     }
 }
 
@@ -838,9 +886,9 @@ fn converge_one(
         home: roots.home.clone(),
         project_root,
     };
-    // The SAME narrowing the sweep resolves for this row (`harness = [...]` beating
-    // `[defaults.mcp]`) — one shared resolution, so the add can never place into a harness the
-    // next sweep would claw back.
+    // The SAME narrowing the sweep resolves for this row (its `dest` entries mapped to the
+    // config files they name) — one shared resolution, so the add can never place into a
+    // harness the next sweep would claw back.
     let (filter, filter_warnings) = row_narrowing(ctx, target, name);
     let demand = crate::mcp_engine::McpDemand {
         bundle_id: bundle_id.to_owned(),
@@ -928,34 +976,40 @@ fn row_dir_of(ctx: &Ctx<'_>, target: &EditTarget, bundle_id: &str, name: &str) -
     best
 }
 
-/// The SAME harness narrowing the sweep would resolve for this scope's row named `name`: the
-/// row's own `harness = [...]` (when the row is already written) beating `[defaults.mcp]` —
-/// through the one shared resolution ([`super::reconcile::mcp_harness_narrowing`]), warnings and
-/// all. A manifest that cannot be read narrows nothing (the converge still runs; the next sweep
-/// re-resolves).
-fn row_narrowing(ctx: &Ctx<'_>, target: &EditTarget, name: &str) -> (Vec<String>, Vec<String>) {
+/// The SAME dest-file narrowing the sweep would resolve for this scope's row named `name`: the
+/// row's own `dest = [...]` (when the row is already written), each entry mapped to the harness
+/// whose config file it names — through the one shared resolution
+/// ([`super::reconcile::mcp_dest_narrowing`]), warnings and all. A manifest that cannot be read
+/// narrows nothing (the converge still runs; the next sweep re-resolves).
+fn row_narrowing(
+    ctx: &Ctx<'_>,
+    target: &EditTarget,
+    name: &str,
+) -> (Option<Vec<String>>, Vec<String>) {
     let Ok(Some(text)) = medit::read_text(ctx, &target.path) else {
-        return (Vec::new(), Vec::new());
+        return (None, Vec::new());
     };
     let Ok(doc) = crate::manifest::document::parse_manifest(&text, target.scope) else {
-        return (Vec::new(), Vec::new());
+        return (None, Vec::new());
     };
-    let row_harness = doc.rows.iter().find_map(|row| {
+    let row_dest = doc.rows.iter().find_map(|row| {
         let crate::manifest::keys::KeyShape::LocalPath { raw } = &row.shape else {
             return None;
         };
         (Path::new(raw).file_name().is_some_and(|n| n == name))
             .then(|| match &row.value {
-                crate::manifest::document::EntryValue::Fields(f) => f.harness.clone(),
+                crate::manifest::document::EntryValue::Fields(f) => f.dest.clone(),
                 _ => None,
             })
             .flatten()
     });
     let mut warned = HashSet::new();
     let mut warnings = Vec::new();
-    let filter = super::reconcile::mcp_harness_narrowing(
-        row_harness,
-        &doc.defaults,
+    let filter = super::reconcile::mcp_dest_narrowing(
+        row_dest,
+        target.scope,
+        &target.path.display().to_string(),
+        true,
         &mut warned,
         &mut warnings,
     );
@@ -969,7 +1023,7 @@ fn engaged_agents(
     ctx: &Ctx<'_>,
     target: &EditTarget,
     global: bool,
-    filter: &[String],
+    filter: Option<&[String]>,
 ) -> Vec<String> {
     let Some(roots) = ctx.roots.clone() else {
         return Vec::new();
@@ -984,7 +1038,7 @@ fn engaged_agents(
     .collect();
     let mut out = Vec::new();
     for h in topos_harness::mcp::descriptor::mcp_harnesses() {
-        if !filter.is_empty() && !filter.iter().any(|s| s == h.slug) {
+        if filter.is_some_and(|f| !f.iter().any(|s| s == h.slug)) {
             continue;
         }
         let surface = match &project_root {

@@ -269,32 +269,21 @@ enum PriorProjectDir {
     Escaped(PathBuf),
 }
 
-impl PriorProjectDir {
-    /// The reusable dir, if this key has one.
-    fn reuse(self) -> Option<PathBuf> {
-        match self {
-            PriorProjectDir::Reuse(dir) => Some(dir),
-            _ => None,
-        }
-    }
-}
-
 /// The PROJECT-scope placement plan — where a project manifest's bundles land INSIDE the checkout
 /// (a project-scope bundle materializes in the project itself, so every agent visiting the
 /// checkout reads the same bytes): its harness dirs, never committed (each landed dir carries the
 /// self-ignore sentinel — see [`crate::scan::IGNORE_SENTINEL`]). Mirrors the shared-dir-first
 /// policy ROOTED AT THE PROJECT: one `<project>/.agents/skills` copy for the covered detected
 /// agents, plus a native project dir per detected-but-uncovered harness that has one; with nothing
-/// detected, the active adapter's project dir (else `<project>/.claude/skills`). An explicit
-/// manifest `[placement]` override pins ONE project-relative dir instead (harness-independent —
-/// one location every agent reads). Prior-dir stability considers ONLY placements under the
-/// project root, so a same-skill person-scope record never leaks into the project plan.
+/// detected, the active adapter's project dir (else `<project>/.claude/skills`). A row that pins
+/// its own destinations instead goes through [`dest_plan`]. Prior-dir stability considers ONLY
+/// placements under the project root, so a same-skill person-scope record never leaks into the
+/// project plan.
 pub(crate) fn project_plan(
     ctx: &Ctx<'_>,
     project_dir: &Path,
     skill_id: &str,
     naming: PlacementNaming<'_>,
-    override_dir: Option<&str>,
     prior: Option<&PlacementMap>,
     adopt: Option<[u8; 32]>,
 ) -> PlacementPlan {
@@ -342,27 +331,6 @@ pub(crate) fn project_plan(
         )
     };
     let mut plan = PlacementPlan::default();
-
-    // An explicit override is the WHOLE plan: one dir, every agent reads it. The belt half of
-    // the escape guard (the reconcile validates + warns first): a value that is absolute, climbs
-    // out of the checkout, or RESOLVES outside it through a committed symlink is IGNORED — a
-    // committed manifest must never place outside its own checkout.
-    if let Some(root) = override_dir
-        .filter(|r| safe_project_rel(r))
-        .and_then(|rel| override_root_within(project_dir, rel))
-    {
-        match prior_in(PlacementKind::Native, None) {
-            PriorProjectDir::Escaped(dir) => {
-                plan.refused.push(escape_line("the recorded dir", &dir));
-            }
-            prior => plan.targets.push(PlannedTarget {
-                dir: prior.reuse().unwrap_or_else(|| choose(&root)),
-                kind: PlacementKind::Native,
-                agent: None,
-            }),
-        }
-        return plan;
-    }
 
     let home = ctx.roots.as_ref().map(|r| r.home.clone());
     let detected: Vec<&'static registry::KnownHarness> = match &ctx.roots {
@@ -477,6 +445,91 @@ pub(crate) fn project_plan(
                 agent: Some(active.to_owned()),
             }),
         }
+    }
+    plan
+}
+
+/// The DEST-FROZEN placement plan — a manifest row carrying `dest = [...]`: exactly one target
+/// per dest entry, DETECTION IGNORED (the row froze its destinations; a newly appearing agent
+/// changes nothing until the row does). `~/` entries resolve against the machine home, absolute
+/// entries stand as-is; `project_dir` = the PROJECT scope, whose entries resolve against the
+/// checkout behind the [`within_project`] containment rail (refused + disclosed, never
+/// redirected). Prior-dir stability: a recorded placement directly under an entry's root keeps
+/// its dir verbatim; a fresh entry chooses through the ONE naming discipline with the usual
+/// adopt-in-place override. Applies to both scopes — the person scope gains the override seam
+/// it never had.
+pub(crate) fn dest_plan(
+    ctx: &Ctx<'_>,
+    skill_id: &str,
+    naming: PlacementNaming<'_>,
+    dest: &[String],
+    project_dir: Option<&Path>,
+    prior: Option<&PlacementMap>,
+    adopt: Option<[u8; 32]>,
+) -> PlacementPlan {
+    let owned = owned_predicate(prior);
+    let taken =
+        |p: &Path| topos_harness::dir_taken(p) || recorded_by_another_skill(ctx, skill_id, p);
+    let mut plan = PlacementPlan::default();
+    for entry in dest {
+        let root: PathBuf = match project_dir {
+            Some(dir) => {
+                if !safe_project_rel(entry) {
+                    plan.refused
+                        .push(escape_line("the dest entry", Path::new(entry)));
+                    continue;
+                }
+                let root = dir.join(entry.trim_start_matches("./"));
+                if !within_project(dir, &root) {
+                    plan.refused.push(escape_line("the dest entry", &root));
+                    continue;
+                }
+                root
+            }
+            None => {
+                if let Some(rest) = entry.strip_prefix("~/") {
+                    let Some(roots) = &ctx.roots else {
+                        continue; // no home known — the entry cannot resolve this run
+                    };
+                    roots.home.join(rest)
+                } else {
+                    PathBuf::from(entry)
+                }
+            }
+        };
+        // Prior stability: the recorded placement under THIS root keeps its dir (the record,
+        // not re-derivation, is what holds a dest copy still). The same reusability rule as
+        // every other prior probe: materialized, or an unoccupied/still-valid reservation.
+        let dir = prior
+            .and_then(|map| {
+                map.placements
+                    .iter()
+                    .zip(&map.placement_state)
+                    .find(|(d, st)| {
+                        Path::new(d).parent() == Some(root.as_path())
+                            && (st.materialized_sha.is_some()
+                                || !topos_harness::dir_taken(Path::new(d))
+                                || adoption_reservation_holds(d, st, adopt))
+                    })
+                    .map(|(d, _)| PathBuf::from(d))
+            })
+            .unwrap_or_else(|| {
+                adopt_override(
+                    ctx,
+                    topos_harness::choose_skill_dir(&root, skill_id, naming, &taken, &owned),
+                    skill_id,
+                    naming,
+                    adopt,
+                )
+            });
+        if plan.targets.iter().any(|t| t.dir == dir) {
+            continue;
+        }
+        plan.targets.push(PlannedTarget {
+            dir,
+            kind: PlacementKind::Native,
+            agent: None,
+        });
     }
     plan
 }
@@ -632,17 +685,6 @@ fn prior_dir(
                     || adoption_reservation_holds(dir, st, adopt))
         })
         .map(|(dir, _)| PathBuf::from(dir))
-}
-
-/// Resolve a lexically-safe override to its root, PROVING resolved containment two ways:
-/// (a) NO component of the override path below the project dir may be a symlink (lstat-walked —
-/// a committed `tools -> /outside` link is rejected outright, not merely resolved), and
-/// (b) the deepest EXISTING ancestor of the joined path must canonicalize inside the
-/// canonicalized project dir (the belt under the braces — covers a link above a not-yet-existing
-/// tail). `None` (override ignored) when containment cannot be proven.
-fn override_root_within(project_dir: &Path, rel: &str) -> Option<PathBuf> {
-    let root = project_dir.join(rel.trim_start_matches("./"));
-    within_project(project_dir, &root).then_some(root)
 }
 
 /// **The containment rail every PROJECT-scope path passes** — the override's proof, generalized to
@@ -864,15 +906,18 @@ pub(crate) fn reconcile_map(prior: &PlacementMap, plan: &PlacementPlan) -> Place
         // re-chosen because its dir got occupied — is REPLACED in place (a reservation holds no
         // bytes, so nothing freezes); everything else appends. The slot's state resets with the
         // dir: the old reservation's `pre_existing_sha` described the OLD dir's occupant and must
-        // never migrate to the new one.
+        // never migrate to the new one. A reservation whose dir the plan STILL wants is not
+        // stale — a dest plan holds several (Native, agent-less) targets at once, and replacing
+        // a sibling's live slot would cannibalize it.
         if let Some(i) = next
             .placements
             .iter()
             .zip(&next.placement_state)
-            .position(|(_, st)| {
+            .position(|(d, st)| {
                 st.kind == t.kind
                     && st.agent.as_deref() == t.agent.as_deref()
                     && st.materialized_sha.is_none()
+                    && !plan.targets.iter().any(|pt| pt.dir == Path::new(d))
             })
         {
             next.placements[i] = dir;
@@ -1284,6 +1329,24 @@ pub(crate) fn plan_for_skill(
     prior: &PlacementMap,
 ) -> PlacementPlan {
     let ws = crate::ops::followed_workspace(ctx, skill_id);
+    let slug = workspace_slug(ctx, ws.as_deref());
+    // A manifest row that FROZE this bundle's destinations governs the targeted verbs exactly as
+    // it governs the reconcile: the same dest planner, never detection — so an `update <name>`,
+    // a go-back, or a reset re-plans onto the row's own destinations.
+    if let Some(dest) = row_dest_for(ctx, skill_id, lock, ws.as_deref(), prior) {
+        return dest_plan(
+            ctx,
+            skill_id,
+            PlacementNaming {
+                name: Some(&lock.name),
+                workspace_slug: slug.as_deref(),
+            },
+            &dest,
+            ctx.layout.project_root(),
+            Some(prior),
+            None,
+        );
+    }
     if ws.is_none() {
         return classic_plan(
             ctx,
@@ -1303,15 +1366,13 @@ pub(crate) fn plan_for_skill(
             skill_id,
             PlacementNaming {
                 name: Some(&lock.name),
-                workspace_slug: workspace_slug(ctx, ws.as_deref()).as_deref(),
+                workspace_slug: slug.as_deref(),
             },
-            None,
             Some(prior),
             None,
         );
     }
     let (agents, excluded) = scope_of(ctx, skill_id);
-    let slug = workspace_slug(ctx, ws.as_deref());
     // No adopt probe here: a tracked skill's adoption continuity rides the record — the baseline's
     // adoption reservation (`pre_existing_sha`) keeps [`prior_dir`] answering the adopted dir.
     plan_targets(
@@ -1327,6 +1388,148 @@ pub(crate) fn plan_for_skill(
         },
         Some(prior),
         None,
+    )
+}
+
+/// The `dest` field of the manifest row that DEMANDS this bundle in the scope this ctx's layout
+/// represents (the project's own `topos.toml` for a project store, the machine's global file
+/// otherwise) — the row context every targeted verb already resolved by name. `None` when no row
+/// carries one (the detection planners stand), and for an `mcp` bundle (its dest entries are
+/// config FILES — the config converge's business, never a dir plan).
+fn row_dest_for(
+    ctx: &Ctx<'_>,
+    skill_id: &str,
+    lock: &Lock,
+    ws: Option<&str>,
+    prior: &PlacementMap,
+) -> Option<Vec<String>> {
+    use crate::manifest::keys::KeyShape;
+    let doc = {
+        let (path, scope) = match ctx.layout.project_root() {
+            Some(root) => (
+                root.join(crate::manifest::MANIFEST_FILE),
+                crate::manifest::document::ManifestScope::Project,
+            ),
+            None => (
+                ctx.layout.home().join(crate::manifest::MANIFEST_FILE),
+                crate::manifest::document::ManifestScope::Global,
+            ),
+        };
+        let bytes = ctx.fs.read_opt(&path).ok().flatten()?;
+        let text = String::from_utf8(bytes).ok()?;
+        crate::manifest::document::parse_manifest(&text, scope).ok()?
+    };
+    // A workspace-delivered bundle: its explicit row, else the channel line that delivers it.
+    if let Some(ws_id) = ws {
+        // The machine-wide delivery cache (one per machine, in the HOME sidecar — a project ctx's
+        // layout is the project store, so resolve the home store from the roots).
+        let home_layout = match ctx.layout.project_root() {
+            None => ctx.layout.clone(),
+            Some(_) => crate::sidecar::Layout::new(&ctx.roots.as_ref()?.home.join(".topos")),
+        };
+        let cache = crate::sync_status::read(ctx.fs, &home_layout).ok()?;
+        let entry = cache.workspaces.get(ws_id)?;
+        let (host, workspace) = (entry.host.clone()?, entry.workspace_name.clone()?);
+        let ds = entry.delivered.get(skill_id)?;
+        if ds.kind.as_deref() == Some("mcp") {
+            return None;
+        }
+        let canonical = format!("{host}/{workspace}/{}", ds.name);
+        for row in &doc.rows {
+            if row.shape.canonical() == canonical {
+                return value_dest(&row.value);
+            }
+        }
+        for row in &doc.rows {
+            if let KeyShape::Channel {
+                host: h,
+                workspace: w,
+                channel,
+            } = &row.shape
+                && *h == host
+                && *w == workspace
+                && ds.via_channels.iter().any(|c| c == channel)
+            {
+                return value_dest(&row.value);
+            }
+        }
+        return None;
+    }
+    // A forge import: its own 4-segment row, else the whole-repo line.
+    if let Ok(sid) = crate::id::SkillId::parse(skill_id)
+        && let Ok(Some(origin)) = crate::doc::read_doc::<crate::ops::OriginDoc>(
+            ctx.fs,
+            &ctx.layout.published(&sid).origin,
+        )
+    {
+        let member = format!("{}/{}", origin.origin.source, lock.name);
+        for row in &doc.rows {
+            if row.shape.canonical() == member {
+                if value_kind_is_mcp(&row.value) {
+                    return None;
+                }
+                return value_dest(&row.value);
+            }
+        }
+        for row in &doc.rows {
+            if row.shape.canonical() == origin.origin.source {
+                return value_dest(&row.value);
+            }
+        }
+        return None;
+    }
+    // A local adopted bundle: the path row whose folder is one of the RECORDED placements.
+    for row in &doc.rows {
+        let KeyShape::LocalPath { raw } = &row.shape else {
+            continue;
+        };
+        if value_kind_is_mcp(&row.value) {
+            continue;
+        }
+        let base = match ctx.layout.project_root() {
+            Some(root) => root.to_path_buf(),
+            None => match &ctx.roots {
+                Some(roots) => roots.home.clone(),
+                None => continue,
+            },
+        };
+        let dir = if let Some(rest) = raw.strip_prefix("~/") {
+            match &ctx.roots {
+                Some(roots) => roots.home.join(rest),
+                None => continue,
+            }
+        } else if Path::new(raw).is_absolute() {
+            PathBuf::from(raw)
+        } else {
+            base.join(raw.trim_start_matches("./"))
+        };
+        let dir = dir.canonicalize().unwrap_or(dir);
+        let hit = prior.placements.iter().any(|p| {
+            let p = Path::new(p);
+            p.canonicalize().unwrap_or_else(|_| p.to_path_buf()) == dir
+        });
+        if hit {
+            return value_dest(&row.value);
+        }
+    }
+    None
+}
+
+/// A parsed row value's `dest`, when it names one (non-empty).
+fn value_dest(value: &crate::manifest::document::EntryValue) -> Option<Vec<String>> {
+    match value {
+        crate::manifest::document::EntryValue::Fields(f) => {
+            f.dest.clone().filter(|d| !d.is_empty())
+        }
+        _ => None,
+    }
+}
+
+/// Whether a parsed row value declares `kind = "mcp"`.
+fn value_kind_is_mcp(value: &crate::manifest::document::EntryValue) -> bool {
+    matches!(
+        value,
+        crate::manifest::document::EntryValue::Fields(f) if f.kind.as_deref() == Some("mcp")
     )
 }
 

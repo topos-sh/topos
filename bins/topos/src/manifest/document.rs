@@ -1,4 +1,4 @@
-//! The NEW `topos.toml` document — one `[bundles]` namespace plus `[defaults.<kind>]` sections.
+//! The NEW `topos.toml` document — one `[bundles]` namespace.
 //!
 //! THE JOIN RULE: an entry's reference is its TOML key path under `[bundles]`, segments joined
 //! with `/`. A quoted key may carry slashes — opaque to TOML, transparent to the join — so these
@@ -21,7 +21,7 @@
 //! inline table of fields (multiline inline tables included; TOML 1.1). A `[bundles.…]` section
 //! header is always GROUPING, never an entry: a section opened per bundle (holding `version =`)
 //! joins into a path no reference shape matches and refuses with the way back. Two spellings
-//! joining to one reference are a parse error; a top-level table other than `bundles`/`defaults`
+//! joining to one reference are a parse error; a top-level table other than `bundles`
 //! refuses too — this file is a complete recipe, and a typo must not silently drop demand.
 //!
 //! Values are validated BY SHAPE ([`KeyShape`]): things take a version (`"*"`, a 64-hex digest
@@ -29,6 +29,13 @@
 //! `version`; a repo set takes `"*"`/a commit; the feed takes exactly `"*"`. `"off"` — the
 //! per-bundle switch — is legal only on a workspace bundle row in the GLOBAL file, and feed rows
 //! are global-only too (a project manifest is a repo fact, identical for every contributor).
+//!
+//! PLACEMENT is ONE field: `dest`, an array of destinations. A row without `dest` reaches every
+//! agent this machine has, now and later (detection decides); a row with `dest` is FROZEN to
+//! exactly those destinations. The machine file spells machine paths (`~/`-prefixed or
+//! absolute); a project file spells relative paths inside the checkout. The RETIRED spellings —
+//! `path`, `harness`, any `[defaults.<kind>]` table — refuse at load with the exact per-row
+//! `dest` rewrite ([`ManifestError::migration`] errors close the TTY with `nothing changed`).
 //!
 //! [`ManifestEditor`] edits format-preserving over `toml_edit` with a hard INVERSE property:
 //! adding a row and removing it restores the input byte-for-byte, and vice versa — see
@@ -54,23 +61,13 @@ pub(crate) enum ManifestScope {
     Project,
 }
 
-/// A `path` field: one directory for every harness, or a per-harness table with an optional
-/// `default` directory.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum PathSpec {
-    One(String),
-    PerHarness {
-        default: Option<String>,
-        per: Vec<(String, String)>,
-    },
-}
-
 /// The inline-table form of an entry value — every field optional, legality decided per shape.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct EntryFields {
     pub version: Option<String>,
-    pub path: Option<PathSpec>,
-    pub harness: Option<Vec<String>>,
+    /// The row's destinations — dialect-legal directory strings (config FILES for an MCP row).
+    /// `Some` freezes placement to exactly these; absent means every agent, now and later.
+    pub dest: Option<Vec<String>>,
     pub name: Option<String>,
     pub subdir: Option<String>,
     pub kind: Option<String>,
@@ -101,19 +98,10 @@ pub(crate) struct BundleRow {
     pub value: EntryValue,
 }
 
-/// One `[defaults.<kind>]` section — kind-level defaults carry ONLY `harness` and `path`
-/// (a version, name, or subdir is incoherent kind-wide).
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub(crate) struct KindDefaults {
-    pub harness: Option<Vec<String>>,
-    pub path: Option<PathSpec>,
-}
-
-/// A parsed manifest: rows in file order, then the kind defaults in file order.
+/// A parsed manifest: rows in file order.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct ManifestDoc {
     pub rows: Vec<BundleRow>,
-    pub defaults: Vec<(String, KindDefaults)>,
 }
 
 /// A typed manifest refusal — names the specific fault AND the specific fix.
@@ -122,6 +110,10 @@ pub(crate) struct ManifestError {
     pub message: String,
     /// The offending joined reference / key, when one exists.
     pub key: Option<String>,
+    /// A RETIRED-spelling refusal (`path` / `harness` / `[defaults.<kind>]`) teaching the `dest`
+    /// rewrite — surfaced as [`crate::error::ClientError::ManifestMigration`], whose TTY closes
+    /// with `nothing changed`.
+    pub migration: bool,
 }
 
 impl fmt::Display for ManifestError {
@@ -134,6 +126,7 @@ fn plain(message: impl Into<String>) -> ManifestError {
     ManifestError {
         message: message.into(),
         key: None,
+        migration: false,
     }
 }
 
@@ -141,21 +134,33 @@ fn at(key: &str, message: impl Into<String>) -> ManifestError {
     ManifestError {
         message: message.into(),
         key: Some(key.to_string()),
+        migration: false,
+    }
+}
+
+fn migrate(key: Option<&str>, message: impl Into<String>) -> ManifestError {
+    ManifestError {
+        message: message.into(),
+        key: key.map(str::to_string),
+        migration: true,
     }
 }
 
 /// The complete field vocabulary — what a key must be to count as a mis-shelved FIELD (the
 /// section-as-entry teaching) rather than an unknown word.
-const FIELD_NAMES: [&str; 6] = ["version", "path", "harness", "name", "subdir", "kind"];
+const FIELD_NAMES: [&str; 5] = ["version", "dest", "name", "subdir", "kind"];
+
+/// The RETIRED field spellings — met at load, each refuses with its exact `dest` rewrite.
+const RETIRED_FIELDS: [&str; 2] = ["path", "harness"];
 
 /// The fields legal on each shape. The feed takes none (its value is exactly `"*"`).
 pub(crate) fn legal_fields(shape: &KeyShape) -> &'static [&'static str] {
     match shape {
-        KeyShape::WorkspaceBundle { .. } => &["version", "path", "harness", "name"],
-        KeyShape::RepoSkill { .. } => &["version", "path", "harness", "name", "subdir", "kind"],
-        KeyShape::LocalPath { .. } => &["version", "path", "harness", "name", "kind"],
-        KeyShape::RepoSet { .. } => &["harness"],
-        KeyShape::Channel { .. } => &["path", "harness"],
+        KeyShape::WorkspaceBundle { .. } => &["version", "dest", "name"],
+        KeyShape::RepoSkill { .. } => &["version", "dest", "name", "subdir", "kind"],
+        KeyShape::LocalPath { .. } => &["dest", "name", "kind"],
+        KeyShape::RepoSet { .. } => &["dest"],
+        KeyShape::Channel { .. } => &["dest"],
         KeyShape::Feed { .. } => &[],
     }
 }
@@ -308,17 +313,25 @@ fn check_value(
         EntryValue::Star => Ok(()),
         EntryValue::Off => off_check(reference, shape, scope),
         EntryValue::Pin(p) => pin_check(reference, shape, p),
-        EntryValue::Fields(f) => fields_check(reference, shape, f),
+        EntryValue::Fields(f) => fields_check(reference, shape, scope, f),
     }
 }
 
-/// The field-legality half, on an already-typed [`EntryFields`].
-fn fields_check(reference: &str, shape: &KeyShape, f: &EntryFields) -> Result<(), ManifestError> {
+/// The field-legality half, on an already-typed [`EntryFields`] — including the `dest` rules the
+/// scope decides: the machine file names machine paths (`~/`-prefixed or absolute), a project
+/// file names relative paths contained inside the checkout, and a local MCP row's dest entries
+/// must be config files the harness descriptor table knows (their format must be known to edit
+/// them).
+fn fields_check(
+    reference: &str,
+    shape: &KeyShape,
+    scope: ManifestScope,
+    f: &EntryFields,
+) -> Result<(), ManifestError> {
     let legal = legal_fields(shape);
-    let present: [(&str, bool); 6] = [
+    let present: [(&str, bool); 5] = [
         ("version", f.version.is_some()),
-        ("path", f.path.is_some()),
-        ("harness", f.harness.is_some()),
+        ("dest", f.dest.is_some()),
         ("name", f.name.is_some()),
         ("subdir", f.subdir.is_some()),
         ("kind", f.kind.is_some()),
@@ -336,10 +349,77 @@ fn fields_check(reference: &str, shape: &KeyShape, f: &EntryFields) -> Result<()
             pin_check(reference, shape, v)?;
         }
     }
-    if let Some(h) = &f.harness
-        && h.iter().any(|x| x == "default")
-    {
-        return Err(default_in_harness(reference));
+    if let Some(dest) = &f.dest {
+        if dest.is_empty() {
+            return Err(at(
+                reference,
+                "a dest names at least one destination; drop the field to reach every agent",
+            ));
+        }
+        for entry in dest {
+            dest_entry_check(reference, scope, entry)?;
+        }
+        // A local MCP row's kind is knowable at load — its dest entries are config FILES and
+        // must come from the descriptor table (an unknown file's format cannot be edited).
+        // Workspace rows learn their kind at delivery; the reconcile enforces the same rule.
+        if matches!(shape, KeyShape::LocalPath { .. }) && f.kind.as_deref() == Some("mcp") {
+            for entry in dest {
+                if super::dest::mcp_slug_for_dest(entry, scope).is_none() {
+                    return Err(at(reference, super::dest::unknown_mcp_file(entry, scope)));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The per-scope `dest` path dialect (the two-sided rule, enforced at load like feed/`"off"`):
+/// the machine file names machine paths, a project file names checkout-contained relative paths.
+/// The dialect check for ONE dest entry, reference-free — the `--dest` literal's validation (the
+/// same rules [`check_row`] runs over a whole row, so a selector can refuse before any side
+/// effect with the grammar's own words).
+///
+/// # Errors
+/// As the grammar's per-entry rule: machine files name machine paths, project files relative
+/// contained ones.
+pub(crate) fn check_dest_entry(entry: &str, scope: ManifestScope) -> Result<(), ManifestError> {
+    dest_entry_check("dest", scope, entry)
+}
+
+fn dest_entry_check(
+    reference: &str,
+    scope: ManifestScope,
+    entry: &str,
+) -> Result<(), ManifestError> {
+    if entry.trim().is_empty() {
+        return Err(at(
+            reference,
+            "`dest` entries are non-empty directory strings",
+        ));
+    }
+    match scope {
+        ManifestScope::Global => {
+            if !(entry.starts_with("~/") || Path::new(entry).is_absolute()) {
+                return Err(at(
+                    reference,
+                    format!(
+                        "dest entry `{entry}` is relative — the machine-wide file names machine \
+                         paths: `~/`-prefixed or absolute",
+                    ),
+                ));
+            }
+        }
+        ManifestScope::Project => {
+            if !super::dest::safe_project_rel(entry) || entry.starts_with('~') {
+                return Err(at(
+                    reference,
+                    format!(
+                        "dest entry `{entry}` leaves the checkout — a project file names \
+                         relative paths inside it (no `..`, no `~`, not absolute)",
+                    ),
+                ));
+            }
+        }
     }
     Ok(())
 }
@@ -366,20 +446,12 @@ fn off_in_table(reference: &str) -> ManifestError {
     )
 }
 
-fn default_in_harness(reference: &str) -> ManifestError {
-    at(
-        reference,
-        "`default` is reserved — in a `path` table it names the default directory; it is never \
-         a harness",
-    )
-}
-
 // ---------------------------------------------------------------------------
 // Parsing
 // ---------------------------------------------------------------------------
 
 /// A uniform view over the two TOML table spellings (a section [`Table`], an inline table) and
-/// plain values — so `path`/`harness`/defaults read identically however they were written.
+/// plain values — so a retired `[defaults.<kind>]` table reads identically however written.
 enum Node<'a> {
     Item(&'a Item),
     Value(&'a Value),
@@ -432,9 +504,8 @@ pub(crate) fn parse_document(
     for (key, _) in doc.iter() {
         if key != "bundles" && key != "defaults" {
             return Err(plain(format!(
-                "unknown top-level `{key}` — a manifest holds `[bundles]` and \
-                 `[defaults.<kind>]` only; a typo here would silently drop what it names, so it \
-                 refuses instead",
+                "unknown top-level `{key}` — a manifest holds `[bundles]` only; a typo here \
+                 would silently drop what it names, so it refuses instead",
             )));
         }
     }
@@ -449,11 +520,104 @@ pub(crate) fn parse_document(
         let mut seen = HashSet::new();
         collect_rows(t, &mut prefix, scope, &mut seen, &mut rows)?;
     }
-    let defaults = match doc.get("defaults") {
-        Some(item) => parse_defaults(item)?,
-        None => Vec::new(),
+    // `[defaults.<kind>]` is a RETIRED spelling: refuse with the per-row rewrite (the rows above
+    // parsed first, so an mcp defaults table can name every row the file marks as mcp).
+    if let Some(item) = doc.get("defaults") {
+        return Err(defaults_migration(item, scope, &rows));
+    }
+    Ok(ManifestDoc { rows })
+}
+
+/// The refusal a present `[defaults.<kind>]` table earns. Kind `mcp` carrying `harness` prints
+/// the per-row rewrite for every row the file marks as mcp (local rows with `kind = "mcp"`), or
+/// the general teaching with the descriptor file for each slug when none exist; every other kind
+/// teaches "set dest on each row".
+fn defaults_migration(item: &Item, scope: ManifestScope, rows: &[BundleRow]) -> ManifestError {
+    let Some(pairs) = Node::Item(item).pairs() else {
+        return migrate(
+            None,
+            "`[defaults]` is no longer read — placement is the `dest` field, set on each row",
+        );
     };
-    Ok(ManifestDoc { rows, defaults })
+    // ONE refusal at a time: the first kind the table spells carries the teaching.
+    if let Some((kind, node)) = pairs.into_iter().next() {
+        let key = format!("defaults.{kind}");
+        if kind == "mcp"
+            && let Some(kpairs) = node.pairs()
+            && let Some((_, hv)) = kpairs.into_iter().find(|(k, _)| *k == "harness")
+        {
+            let slugs: Vec<String> = hv
+                .as_array()
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_str().map(str::to_owned))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let (rewrite, unmapped) =
+                super::dest::rewrite_slugs(&slugs, |s| super::dest::mcp_dest_spelling(s, scope));
+            let mcp_rows: Vec<&str> = rows
+                .iter()
+                .filter(|r| {
+                    matches!(r.shape, KeyShape::LocalPath { .. })
+                        && matches!(&r.value, EntryValue::Fields(f) if f.kind.as_deref() == Some("mcp"))
+                })
+                .map(|r| r.reference.as_str())
+                .collect();
+            let spelled = old_spelling("harness", &hv);
+            let mut message = if mcp_rows.is_empty() {
+                match &rewrite {
+                    Some(list) => format!(
+                        "`{spelled}` in [defaults.mcp] is now written as dest on each mcp row — \
+                         use dest = [{list}]",
+                    ),
+                    None => format!(
+                        "`{spelled}` in [defaults.mcp] is now written as dest on each mcp row — \
+                         name each config file directly",
+                    ),
+                }
+            } else {
+                let per_row: Vec<String> = mcp_rows
+                    .iter()
+                    .map(|r| match &rewrite {
+                        Some(list) => format!("on \"{r}\" use dest = [{list}]"),
+                        None => format!("on \"{r}\" name each config file directly"),
+                    })
+                    .collect();
+                format!(
+                    "`{spelled}` in [defaults.mcp] is now written as dest — {}",
+                    per_row.join("; ")
+                )
+            };
+            if !unmapped.is_empty() {
+                message.push_str(&format!(
+                    "; {} to no destination here",
+                    super::dest::maps_clause(&unmapped)
+                ));
+            }
+            return migrate(Some(&key), message);
+        }
+        return migrate(
+            Some(&key),
+            format!("`[{key}]` is no longer read — placement is the `dest` field, set on each row"),
+        );
+    }
+    migrate(
+        None,
+        "`[defaults]` is no longer read — placement is the `dest` field, set on each row",
+    )
+}
+
+/// A retired field's refusal half: the field in its ORIGINAL value spelling (decor trimmed).
+fn old_spelling(field: &str, v: &Node<'_>) -> String {
+    let raw = match v {
+        Node::Item(i) => i
+            .as_value()
+            .map(|val| val.to_string())
+            .unwrap_or_else(|| "…".to_owned()),
+        Node::Value(val) => val.to_string(),
+    };
+    format!("{field} = {}", raw.trim())
 }
 
 fn collect_rows(
@@ -512,7 +676,7 @@ fn classify_entry(reference: &str) -> Result<KeyShape, ManifestError> {
     classify_key(reference).map_err(|e| {
         let leaf = reference.rsplit('/').next().unwrap_or(reference);
         if leaf != reference
-            && FIELD_NAMES.contains(&leaf)
+            && (FIELD_NAMES.contains(&leaf) || RETIRED_FIELDS.contains(&leaf))
             && classify_key(&reference[..reference.len() - leaf.len() - 1]).is_ok()
         {
             let parent = &reference[..reference.len() - leaf.len() - 1];
@@ -550,8 +714,8 @@ fn value_of(
     match v {
         Value::String(s) => string_value(reference, shape, scope, s.value()),
         Value::InlineTable(t) => {
-            let fields = fields_of(reference, shape, t)?;
-            fields_check(reference, shape, &fields)?;
+            let fields = fields_of(reference, shape, scope, t)?;
+            fields_check(reference, shape, scope, &fields)?;
             Ok(EntryValue::Fields(fields))
         }
         Value::Array(_) => Err(at(
@@ -590,19 +754,27 @@ fn string_value(
     }
 }
 
-/// Read an inline table's fields, refusing unknown keys and per-field type faults; the
-/// per-shape legality runs after, in [`fields_check`].
+/// Read an inline table's fields, refusing unknown keys, per-field type faults, and the RETIRED
+/// spellings (`path` / `harness` — each refused with its exact `dest` rewrite); the per-shape
+/// legality runs after, in [`fields_check`].
 fn fields_of(
     reference: &str,
     shape: &KeyShape,
+    scope: ManifestScope,
     t: &InlineTable,
 ) -> Result<EntryFields, ManifestError> {
     if matches!(shape, KeyShape::Feed { .. }) {
         return Err(feed_exact_star(reference));
     }
     let legal = legal_fields(shape);
+    // The row's own `kind` decides which rewrite table a retired `harness` maps through — read
+    // it FIRST so field order in the file cannot change the teaching.
+    let row_kind = t.get("kind").and_then(Value::as_str);
     let mut f = EntryFields::default();
     for (k, v) in t.iter() {
+        if RETIRED_FIELDS.contains(&k) {
+            return Err(retired_field(reference, shape, scope, row_kind, k, v));
+        }
         if !legal.contains(&k) {
             return Err(if FIELD_NAMES.contains(&k) {
                 illegal_field(reference, shape, k)
@@ -627,8 +799,7 @@ fn fields_of(
                 }
                 f.version = Some(s.to_string());
             }
-            "path" => f.path = Some(path_spec_of(reference, &Node::Value(v))?),
-            "harness" => f.harness = Some(harness_of(reference, &Node::Value(v))?),
+            "dest" => f.dest = Some(dest_of(reference, v)?),
             "name" => {
                 f.name = Some(
                     v.as_str()
@@ -656,89 +827,111 @@ fn fields_of(
     Ok(f)
 }
 
-fn path_spec_of(reference: &str, node: &Node<'_>) -> Result<PathSpec, ManifestError> {
-    if let Some(s) = node.as_str() {
-        return Ok(PathSpec::One(s.to_string()));
-    }
-    if let Some(pairs) = node.pairs() {
-        let mut default = None;
-        let mut per = Vec::new();
-        for (k, v) in pairs {
-            let s = v
-                .as_str()
-                .ok_or_else(|| at(reference, "`path` directories are strings"))?;
-            if k == "default" {
-                default = Some(s.to_string());
-            } else {
-                per.push((k.to_string(), s.to_string()));
-            }
-        }
-        return Ok(PathSpec::PerHarness { default, per });
-    }
-    Err(at(
-        reference,
-        "`path` is a directory string, or a table `{ default = \"…\", <harness> = \"…\" }`",
-    ))
-}
-
-fn harness_of(reference: &str, node: &Node<'_>) -> Result<Vec<String>, ManifestError> {
-    let arr = node.as_array().ok_or_else(|| {
+/// Parse a `dest` value: an array of destination strings (emptiness and dialect are
+/// [`fields_check`]'s judgment — this is only the type gate).
+fn dest_of(reference: &str, v: &Value) -> Result<Vec<String>, ManifestError> {
+    let type_err = || {
         at(
             reference,
-            "`harness` is an array of harness names (e.g. `[\"claude-code\"]`)",
+            "`dest` is an array of destination paths (e.g. `[\"~/.claude/skills\"]`)",
         )
-    })?;
+    };
+    let arr = v.as_array().ok_or_else(type_err)?;
     let mut out = Vec::new();
-    for v in arr.iter() {
-        let s = v.as_str().ok_or_else(|| {
-            at(
-                reference,
-                "`harness` is an array of harness names (e.g. `[\"claude-code\"]`)",
-            )
-        })?;
-        if s == "default" {
-            return Err(default_in_harness(reference));
-        }
-        out.push(s.to_string());
+    for item in arr.iter() {
+        out.push(item.as_str().ok_or_else(type_err)?.to_string());
     }
     Ok(out)
 }
 
-fn parse_defaults(item: &Item) -> Result<Vec<(String, KindDefaults)>, ManifestError> {
-    let pairs = Node::Item(item).pairs().ok_or_else(|| {
-        plain("`[defaults]` holds `[defaults.<kind>]` sections, each carrying `harness` and `path`")
-    })?;
-    let mut out = Vec::new();
-    for (kind, node) in pairs {
-        let context = format!("defaults.{kind}");
-        let kpairs = node.pairs().ok_or_else(|| {
-            plain(format!(
-                "`defaults.{kind}` is a section — spell it `[defaults.{kind}]` with `harness` \
-                 and `path` inside",
-            ))
-        })?;
-        let mut kd = KindDefaults::default();
-        for (k, v) in kpairs {
-            match k {
-                "harness" => kd.harness = Some(harness_of(&context, &v)?),
-                "path" => kd.path = Some(path_spec_of(&context, &v)?),
-                "version" | "name" | "subdir" => {
-                    return Err(plain(format!(
-                        "a kind-wide default cannot carry `{k}` — `{k}` is a per-bundle fact; \
-                         set it on the bundle's own row (`[defaults.{kind}]` takes `harness` \
-                         and `path`)",
-                    )));
-                }
-                _ => {
-                    return Err(plain(format!(
-                        "unknown default `{k}` — `[defaults.<kind>]` takes `harness` and `path`",
-                    )));
-                }
+/// The refusal a RETIRED field earns — the exact per-row `dest` rewrite, scope-correct:
+///
+/// - `harness` on an MCP-shaped row (a local row with `kind = "mcp"`, a workspace bundle, a
+///   channel — where it only ever drove MCP narrowing) maps each slug through the MCP
+///   descriptor table's config-file paths; on a forge row (repo skill / repo set) through the
+///   harness registry's skills roots. A slug that maps nowhere is named as unmapped.
+/// - `path` carries its directory value(s) over verbatim.
+fn retired_field(
+    reference: &str,
+    shape: &KeyShape,
+    scope: ManifestScope,
+    row_kind: Option<&str>,
+    field: &str,
+    v: &Value,
+) -> ManifestError {
+    let spelled = old_spelling(field, &Node::Value(v));
+    if field == "path" {
+        let dirs: Vec<String> = match (v.as_str(), v.as_inline_table()) {
+            (Some(s), _) => vec![s.to_owned()],
+            // The per-harness table form: each directory it names, `default` first.
+            (None, Some(t)) => {
+                let mut out: Vec<String> = t
+                    .get("default")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+                    .into_iter()
+                    .collect();
+                out.extend(t.iter().filter_map(|(k, pv)| {
+                    (k != "default")
+                        .then(|| pv.as_str().map(str::to_owned))
+                        .flatten()
+                }));
+                out
             }
-        }
-        out.push((kind.to_string(), kd));
+            (None, None) => Vec::new(),
+        };
+        let message = if dirs.is_empty() {
+            format!("`{spelled}` on \"{reference}\" is now written as dest — name each destination")
+        } else {
+            format!(
+                "`{spelled}` on \"{reference}\" is now written as dest — use dest = [{}]",
+                super::dest::quoted_list(&dirs)
+            )
+        };
+        return migrate(Some(reference), message);
     }
-    Ok(out)
+    // `harness`: map each named slug through the STATIC tables, default spellings.
+    let slugs: Vec<String> = v
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|x| x.as_str().map(str::to_owned))
+                .collect()
+        })
+        .unwrap_or_default();
+    let forge = matches!(shape, KeyShape::RepoSet { .. } | KeyShape::RepoSkill { .. });
+    let mcp_shaped = matches!(
+        shape,
+        KeyShape::WorkspaceBundle { .. } | KeyShape::Channel { .. }
+    ) || (matches!(shape, KeyShape::LocalPath { .. }) && row_kind == Some("mcp"));
+    let map_slug = |s: &str| -> Option<String> {
+        if forge {
+            super::dest::skills_dest_spelling(s, scope)
+        } else if mcp_shaped {
+            super::dest::mcp_dest_spelling(s, scope)
+        } else {
+            // A local skill row's harness never did placement work; the skills root is still
+            // the honest destination for the slug it names.
+            super::dest::skills_dest_spelling(s, scope)
+        }
+    };
+    let (rewrite, unmapped) = super::dest::rewrite_slugs(&slugs, map_slug);
+    let mut message = match &rewrite {
+        Some(list) => {
+            format!("`{spelled}` on \"{reference}\" is now written as dest — use dest = [{list}]")
+        }
+        None => format!(
+            "`{spelled}` on \"{reference}\" is now written as dest — name each destination \
+             directly"
+        ),
+    };
+    if !unmapped.is_empty() {
+        message.push_str(&format!(
+            "; {} to no destination here",
+            super::dest::maps_clause(&unmapped)
+        ));
+    }
+    migrate(Some(reference), message)
 }
 
 // ---------------------------------------------------------------------------
@@ -1085,7 +1278,7 @@ fn append_trailing(doc: &mut DocumentMut, extra: &str) {
 }
 
 /// Render a value deterministically: version strings plain, fields as a single-line inline
-/// table in canonical order (version, path, harness, name, subdir, kind).
+/// table in canonical order (version, dest, name, subdir, kind).
 pub(crate) fn value_item(v: &EntryValue) -> Item {
     match v {
         EntryValue::Star => toml_edit::value("*"),
@@ -1096,15 +1289,12 @@ pub(crate) fn value_item(v: &EntryValue) -> Item {
             if let Some(v) = &f.version {
                 t.insert("version", v.as_str().into());
             }
-            if let Some(p) = &f.path {
-                t.insert("path", path_value(p));
-            }
-            if let Some(h) = &f.harness {
+            if let Some(d) = &f.dest {
                 let mut a = Array::new();
-                for x in h {
+                for x in d {
                     a.push(x.as_str());
                 }
-                t.insert("harness", Value::Array(a));
+                t.insert("dest", Value::Array(a));
             }
             if let Some(s) = &f.name {
                 t.insert("name", s.as_str().into());
@@ -1116,22 +1306,6 @@ pub(crate) fn value_item(v: &EntryValue) -> Item {
                 t.insert("kind", s.as_str().into());
             }
             Item::Value(Value::InlineTable(t))
-        }
-    }
-}
-
-pub(crate) fn path_value(p: &PathSpec) -> Value {
-    match p {
-        PathSpec::One(s) => s.as_str().into(),
-        PathSpec::PerHarness { default, per } => {
-            let mut t = InlineTable::new();
-            if let Some(d) = default {
-                t.insert("default", d.as_str().into());
-            }
-            for (k, v) in per {
-                t.insert(k, v.as_str().into());
-            }
-            Value::InlineTable(t)
         }
     }
 }
@@ -1173,7 +1347,7 @@ pub(crate) fn project_template() -> String {
      #   [bundles]\n\
      #   \"topos.sh/<workspace>/channels/<name>\" = \"*\"    # a workspace channel\n\
      #   \"github.com/<owner>/<repo>\" = \"*\"               # every skill in a repo\n\
-     #   \"./tools/<dir>\" = { harness = [\"claude-code\"] }  # a folder in this repo\n"
+     #   \"./tools/<dir>\" = { dest = [\".claude/skills\"] }  # a folder in this repo\n"
         .to_string()
 }
 
@@ -1211,12 +1385,9 @@ perf-review = "*"
 noisy-skill = "off"
 deploy-guide = {
 version = "DIGEST",
-harness = ["claude-code"],
+dest = ["~/.claude/skills"],
 }
-db-conventions = { path = { default = "docs/ai/", claude-code = ".claude/knowledge/" } }
-
-[defaults.knowledge]
-path = { default = "docs/ai/" }
+db-conventions = { dest = ["~/.agents/skills", "~/.claude/knowledge"] }
 "#
         .replace("DIGEST", &digest())
     }
@@ -1279,34 +1450,20 @@ path = { default = "docs/ai/" }
             doc.rows[8].value,
             EntryValue::Fields(EntryFields {
                 version: Some(digest()),
-                harness: Some(vec!["claude-code".into()]),
+                dest: Some(vec!["~/.claude/skills".into()]),
                 ..EntryFields::default()
             })
         );
-        // The per-harness path table.
+        // A several-destination dest row.
         assert_eq!(
             doc.rows[9].value,
             EntryValue::Fields(EntryFields {
-                path: Some(PathSpec::PerHarness {
-                    default: Some("docs/ai/".into()),
-                    per: vec![("claude-code".into(), ".claude/knowledge/".into())],
-                }),
+                dest: Some(vec![
+                    "~/.agents/skills".into(),
+                    "~/.claude/knowledge".into()
+                ]),
                 ..EntryFields::default()
             })
-        );
-        // The kind defaults.
-        assert_eq!(
-            doc.defaults,
-            vec![(
-                "knowledge".to_string(),
-                KindDefaults {
-                    harness: None,
-                    path: Some(PathSpec::PerHarness {
-                        default: Some("docs/ai/".into()),
-                        per: vec![],
-                    }),
-                }
-            )]
         );
     }
 
@@ -1317,10 +1474,7 @@ path = { default = "docs/ai/" }
 "topos.sh/acme/code-review" = "DIGEST"
 "github.com/vercel-labs/skills" = "*"
 "github.com/mattpocock/skills/grill-me" = "*"
-"./tools/release-checklist" = { harness = ["claude-code", "codex"] }
-
-[defaults.skill]
-path = { default = ".agents/skills", claude-code = ".claude/skills" }
+"./tools/release-checklist" = { dest = [".claude/skills", ".agents/skills"] }
 "#
         .replace("DIGEST", &digest());
         let doc = parse_manifest(&text, ManifestScope::Project).unwrap();
@@ -1332,16 +1486,8 @@ path = { default = ".agents/skills", claude-code = ".claude/skills" }
         assert_eq!(
             doc.rows[4].value,
             EntryValue::Fields(EntryFields {
-                harness: Some(vec!["claude-code".into(), "codex".into()]),
+                dest: Some(vec![".claude/skills".into(), ".agents/skills".into()]),
                 ..EntryFields::default()
-            })
-        );
-        assert_eq!(doc.defaults[0].0, "skill");
-        assert_eq!(
-            doc.defaults[0].1.path,
-            Some(PathSpec::PerHarness {
-                default: Some(".agents/skills".into()),
-                per: vec![("claude-code".into(), ".claude/skills".into())],
             })
         );
     }
@@ -1523,15 +1669,12 @@ path = { default = ".agents/skills", claude-code = ".claude/skills" }
     fn unknown_and_illegal_fields_refuse_typed() {
         // An unknown field names itself and the legal set for the shape.
         let e = parse_manifest(
-            "[bundles]\n\"topos.sh/acme/x\" = { pathh = \"y\" }\n",
+            "[bundles]\n\"topos.sh/acme/x\" = { destt = \"y\" }\n",
             ManifestScope::Global,
         )
         .unwrap_err();
-        assert!(e.message.contains("unknown field `pathh`"), "{e}");
-        assert!(
-            e.message.contains("`version`, `path`, `harness`, `name`"),
-            "{e}"
-        );
+        assert!(e.message.contains("unknown field `destt`"), "{e}");
+        assert!(e.message.contains("`version`, `dest`, `name`"), "{e}");
         // A known field on the wrong shape is its own refusal (subdir fits git things only).
         let e = parse_manifest(
             "[bundles]\n\"topos.sh/acme/x\" = { subdir = \"y\" }\n",
@@ -1539,58 +1682,233 @@ path = { default = ".agents/skills", claude-code = ".claude/skills" }
         )
         .unwrap_err();
         assert!(e.message.contains("`subdir` does not fit"), "{e}");
-        // A repo set takes `harness` only.
+        // A repo set takes `dest` only.
         let e = parse_manifest(
             "[bundles]\n\"github.com/o/r\" = { name = \"y\" }\n",
             ManifestScope::Global,
         )
         .unwrap_err();
         assert!(e.message.contains("`name` does not fit a repo set"), "{e}");
-        // `default` is never a harness.
+        // A local row no longer takes a version — its folder has no versions to pin.
         let e = parse_manifest(
-            "[bundles]\n\"topos.sh/acme/x\" = { harness = [\"default\"] }\n",
+            "[bundles]\n\"./tools/x\" = { version = \"*\" }\n",
             ManifestScope::Global,
         )
         .unwrap_err();
-        assert!(e.message.contains("`default` is reserved"), "{e}");
+        assert!(e.message.contains("`version` does not fit"), "{e}");
         // A feed row takes no fields at all.
         let e = parse_manifest(
-            "[bundles]\n\"topos.sh/acme\" = { harness = [\"x\"] }\n",
+            "[bundles]\n\"topos.sh/acme\" = { dest = [\"~/x\"] }\n",
             ManifestScope::Global,
         )
         .unwrap_err();
         assert!(e.message.contains("exactly `\"*\"`"), "{e}");
     }
 
+    // -- the dest grammar ---------------------------------------------------
+
     #[test]
-    fn kind_defaults_take_harness_and_path_only() {
-        // version / name / subdir are incoherent kind-wide.
-        for field in ["version", "name", "subdir"] {
+    fn an_empty_dest_refuses_toward_the_field_drop() {
+        let e = parse_manifest(
+            "[bundles]\n\"topos.sh/acme/x\" = { dest = [] }\n",
+            ManifestScope::Global,
+        )
+        .unwrap_err();
+        assert!(
+            e.message.contains(
+                "a dest names at least one destination; drop the field to reach every agent"
+            ),
+            "{e}"
+        );
+        assert!(!e.migration, "an empty dest is not a retired spelling");
+    }
+
+    #[test]
+    fn dest_entries_speak_the_scope_dialect() {
+        // Machine file: `~/`-prefixed or absolute; a relative entry names itself and the rule.
+        let e = parse_manifest(
+            "[bundles]\n\"topos.sh/acme/x\" = { dest = [\"skills\"] }\n",
+            ManifestScope::Global,
+        )
+        .unwrap_err();
+        assert!(e.message.contains("dest entry `skills` is relative"), "{e}");
+        assert!(e.message.contains("`~/`-prefixed or absolute"), "{e}");
+        // Project file: relative and contained — absolute, `~`, and `..` all refuse.
+        for entry in ["/abs/skills", "~/skills", "../out"] {
             let e = parse_manifest(
-                &format!("[defaults.skill]\n{field} = \"x\"\n"),
-                ManifestScope::Global,
+                &format!("[bundles]\n\"topos.sh/acme/x\" = {{ dest = [\"{entry}\"] }}\n"),
+                ManifestScope::Project,
             )
             .unwrap_err();
-            assert!(e.message.contains("kind-wide default"), "{field}: {e}");
+            assert!(
+                e.message
+                    .contains(&format!("dest entry `{entry}` leaves the checkout")),
+                "{entry}: {e}"
+            );
         }
-        // Anything else is unknown.
-        let e =
-            parse_manifest("[defaults.skill]\npin = \"x\"\n", ManifestScope::Global).unwrap_err();
-        assert!(e.message.contains("unknown default `pin`"), "{e}");
-        // The two legal keys parse.
-        let doc = parse_global(
-            "[defaults.skill]\nharness = [\"claude-code\"]\npath = \".agents/skills\"\n",
+        // The legal spellings parse.
+        parse_global("[bundles]\n\"topos.sh/acme/x\" = { dest = [\"~/.claude/skills\"] }\n");
+        parse_manifest(
+            "[bundles]\n\"topos.sh/acme/x\" = { dest = [\".codex/skills\"] }\n",
+            ManifestScope::Project,
+        )
+        .unwrap();
+        // An empty string is not a destination.
+        let e = parse_manifest(
+            "[bundles]\n\"topos.sh/acme/x\" = { dest = [\"\"] }\n",
+            ManifestScope::Global,
+        )
+        .unwrap_err();
+        assert!(e.message.contains("non-empty"), "{e}");
+    }
+
+    #[test]
+    fn a_local_mcp_rows_dest_must_name_a_known_config_file() {
+        // Load-time: the row's kind is knowable, so an unknown file refuses with the list.
+        let e = parse_manifest(
+            "[bundles]\n\"./tools/linear\" = { dest = [\"~/.codex/config.yaml\"], kind = \"mcp\" }\n",
+            ManifestScope::Global,
+        )
+        .unwrap_err();
+        assert!(
+            e.message
+                .contains("dest entry `~/.codex/config.yaml` is not a known MCP config file"),
+            "{e}"
         );
+        assert!(e.message.contains("~/.codex/config.toml"), "{e}");
+        // The known file parses — in both scopes, against the scope's own table.
+        parse_global(
+            "[bundles]\n\"./tools/linear\" = { dest = [\"~/.codex/config.toml\"], kind = \"mcp\" }\n",
+        );
+        parse_manifest(
+            "[bundles]\n\"./tools/linear\" = { dest = [\".codex/config.toml\"], kind = \"mcp\" }\n",
+            ManifestScope::Project,
+        )
+        .unwrap();
+        // A skill folder is fine on a NON-mcp local row (free-form folders are legal).
+        parse_global("[bundles]\n\"./tools/notes\" = { dest = [\"~/anywhere/at/all\"] }\n");
+    }
+
+    // -- the retired spellings ----------------------------------------------
+
+    #[test]
+    fn a_retired_harness_field_teaches_the_exact_dest_rewrite() {
+        // The GLOBAL file pairs the machine-scope config file (byte-exact).
+        let e = parse_manifest(
+            "[bundles]\n\"topos.sh/acme/linear\" = { harness = [\"codex\"] }\n",
+            ManifestScope::Global,
+        )
+        .unwrap_err();
+        assert!(e.migration);
         assert_eq!(
-            doc.defaults,
-            vec![(
-                "skill".to_string(),
-                KindDefaults {
-                    harness: Some(vec!["claude-code".into()]),
-                    path: Some(PathSpec::One(".agents/skills".into())),
-                }
-            )]
+            e.message,
+            "`harness = [\"codex\"]` on \"topos.sh/acme/linear\" is now written as dest — use \
+             dest = [\"~/.codex/config.toml\"]"
         );
+        // The PROJECT file pairs the project surface (scope-correct, byte-exact).
+        let e = parse_manifest(
+            "[bundles]\n\"topos.sh/acme/linear\" = { harness = [\"codex\"] }\n",
+            ManifestScope::Project,
+        )
+        .unwrap_err();
+        assert!(e.migration);
+        assert_eq!(
+            e.message,
+            "`harness = [\"codex\"]` on \"topos.sh/acme/linear\" is now written as dest — use \
+             dest = [\".codex/config.toml\"]"
+        );
+        // A forge row maps through the registry's skills roots instead.
+        let e = parse_manifest(
+            "[bundles]\n\"github.com/o/r\" = { harness = [\"codex\"] }\n",
+            ManifestScope::Global,
+        )
+        .unwrap_err();
+        assert!(e.migration);
+        assert_eq!(
+            e.message,
+            "`harness = [\"codex\"]` on \"github.com/o/r\" is now written as dest — use \
+             dest = [\"~/.codex/skills\"]"
+        );
+        // An unknown slug: rewrite what maps, name what doesn't.
+        let e = parse_manifest(
+            "[bundles]\n\"topos.sh/acme/linear\" = { harness = [\"codex\", \"acme-cli\"] }\n",
+            ManifestScope::Global,
+        )
+        .unwrap_err();
+        assert!(e.migration);
+        assert!(
+            e.message.contains("use dest = [\"~/.codex/config.toml\"]"),
+            "{e}"
+        );
+        assert!(
+            e.message
+                .contains("\"acme-cli\" maps to no destination here"),
+            "{e}"
+        );
+    }
+
+    #[test]
+    fn a_retired_path_field_carries_its_value_into_dest() {
+        let e = parse_manifest(
+            "[bundles]\n\"topos.sh/acme/x\" = { path = \"x\" }\n",
+            ManifestScope::Project,
+        )
+        .unwrap_err();
+        assert!(e.migration);
+        assert_eq!(
+            e.message,
+            "`path = \"x\"` on \"topos.sh/acme/x\" is now written as dest — use dest = [\"x\"]"
+        );
+        // A per-harness path table lists each directory.
+        let e = parse_manifest(
+            "[bundles]\n\"topos.sh/acme/x\" = { path = { default = \"docs/ai/\", claude-code = \".claude/knowledge/\" } }\n",
+            ManifestScope::Project,
+        )
+        .unwrap_err();
+        assert!(e.migration);
+        assert!(
+            e.message
+                .contains("use dest = [\"docs/ai/\", \".claude/knowledge/\"]"),
+            "{e}"
+        );
+    }
+
+    #[test]
+    fn a_defaults_table_refuses_with_the_per_row_rewrite() {
+        // `[defaults.mcp]` with `harness` and a local mcp row: the per-row rewrite.
+        let e = parse_manifest(
+            "[bundles]\n\"./tools/linear\" = { kind = \"mcp\" }\n\n\
+             [defaults.mcp]\nharness = [\"codex\"]\n",
+            ManifestScope::Global,
+        )
+        .unwrap_err();
+        assert!(e.migration);
+        assert!(
+            e.message
+                .contains("on \"./tools/linear\" use dest = [\"~/.codex/config.toml\"]"),
+            "{e}"
+        );
+        // No mcp rows: the general teaching with the descriptor file for each slug.
+        let e = parse_manifest(
+            "[defaults.mcp]\nharness = [\"cursor\"]\n",
+            ManifestScope::Global,
+        )
+        .unwrap_err();
+        assert!(e.migration);
+        assert!(e.message.contains("on each mcp row"), "{e}");
+        assert!(e.message.contains("\"~/.cursor/mcp.json\""), "{e}");
+        // Every other kind teaches dest-on-each-row, naming the table.
+        let e = parse_manifest(
+            "[defaults.skill]\npath = \".agents/skills\"\n",
+            ManifestScope::Global,
+        )
+        .unwrap_err();
+        assert!(e.migration);
+        assert!(
+            e.message.contains("`[defaults.skill]` is no longer read"),
+            "{e}"
+        );
+        assert!(e.message.contains("set on each row"), "{e}");
     }
 
     #[test]
@@ -1613,7 +1931,7 @@ path = { default = ".agents/skills", claude-code = ".claude/skills" }
             "# header\n\n[bundles]\n# why this repo set matters\n\"github.com/o/r\" = \"*\"\n"
                 .to_string(),
             "[bundles.\"topos.sh/acme\"]\ndeploy = \"*\"\n".to_string(),
-            "[bundles]\n\"topos.sh/beta\" = \"*\"\n\n[defaults.skill]\npath = \".agents/skills\"\n"
+            "[bundles]\n\"topos.sh/beta\" = \"*\"\n\"topos.sh/beta/x\" = { dest = [\"~/.claude/skills\"] }\n"
                 .to_string(),
         ];
         let values = [
@@ -1623,7 +1941,7 @@ path = { default = ".agents/skills", claude-code = ".claude/skills" }
             (
                 "./tools/x",
                 EntryValue::Fields(EntryFields {
-                    harness: Some(vec!["claude-code".into()]),
+                    dest: Some(vec!["~/.claude/skills".into()]),
                     ..EntryFields::default()
                 }),
             ),
@@ -1682,27 +2000,25 @@ path = { default = ".agents/skills", claude-code = ".claude/skills" }
 
     #[test]
     fn the_editor_spells_values_canonically() {
-        // The deterministic spelling the inverse property is defined against.
+        // The deterministic spelling the inverse property is defined against — canonical field
+        // order: version, dest, name, subdir, kind.
         let mut ed = ManifestEditor::open_or_new(ManifestScope::Global);
         ed.set_row(
-            "./tools/x",
+            "github.com/o/r/tools",
             &EntryValue::Fields(EntryFields {
-                version: Some("*".into()),
-                path: Some(PathSpec::PerHarness {
-                    default: Some("docs/ai/".into()),
-                    per: vec![("claude-code".into(), ".claude/knowledge/".into())],
-                }),
-                harness: Some(vec!["claude-code".into()]),
-                kind: Some("knowledge".into()),
-                ..EntryFields::default()
+                version: Some("8c1f0a2".into()),
+                dest: Some(vec!["~/.claude/skills".into(), "~/.codex/skills".into()]),
+                name: Some("tooling".into()),
+                subdir: Some("skills/tools".into()),
+                kind: Some("skill".into()),
             }),
         )
         .unwrap();
         assert_eq!(
             ed.rendered(),
-            "[bundles]\n\"./tools/x\" = { version = \"*\", path = { default = \"docs/ai/\", \
-             claude-code = \".claude/knowledge/\" }, harness = [\"claude-code\"], kind = \
-             \"knowledge\" }\n"
+            "[bundles]\n\"github.com/o/r/tools\" = { version = \"8c1f0a2\", dest = \
+             [\"~/.claude/skills\", \"~/.codex/skills\"], name = \"tooling\", subdir = \
+             \"skills/tools\", kind = \"skill\" }\n"
         );
     }
 
@@ -1872,7 +2188,6 @@ path = { default = ".agents/skills", claude-code = ".claude/skills" }
         let text = project_template();
         let doc = parse_manifest(&text, ManifestScope::Project).unwrap();
         assert!(doc.rows.is_empty());
-        assert!(doc.defaults.is_empty());
         assert!(text.starts_with("# topos.toml"), "{text}");
     }
 }

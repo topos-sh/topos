@@ -26,8 +26,7 @@ use crate::error::ClientError;
 use crate::fs_seam::FsOps;
 use crate::manifest::MANIFEST_FILE;
 use crate::manifest::document::{
-    BundleRow, EntryFields, EntryValue, KindDefaults, ManifestDoc, ManifestScope, PathSpec,
-    parse_manifest,
+    BundleRow, EntryFields, EntryValue, ManifestDoc, ManifestScope, parse_manifest,
 };
 use crate::manifest::keys::KeyShape;
 
@@ -113,8 +112,6 @@ pub(crate) struct ScopePlan {
     /// SET rows (channels, repo sets) — expanded by the reconcile; an explicit thing of the
     /// same identity beats a set's delivery.
     pub sets: Vec<PlanRow>,
-    /// The `[defaults.<kind>]` sections, file order.
-    pub defaults: Vec<(String, KindDefaults)>,
 }
 
 impl ScopePlan {
@@ -122,7 +119,6 @@ impl ScopePlan {
     pub(crate) fn from_doc(doc: &ManifestDoc, file: Option<PathBuf>) -> Self {
         let mut plan = ScopePlan {
             file,
-            defaults: doc.defaults.clone(),
             ..ScopePlan::default()
         };
         for row in &doc.rows {
@@ -233,11 +229,21 @@ pub(crate) fn person_plan(
             let text = String::from_utf8(bytes)
                 .map_err(|_| ClientError::Corrupt(format!("{}: not UTF-8", path.display())))?;
             let doc = parse_manifest(&text, ManifestScope::Global)
-                .map_err(|e| ClientError::Corrupt(format!("{}: {e}", path.display())))?;
+                .map_err(|e| grammar_refusal(&path, &e))?;
             Ok(ScopePlan::from_doc(&doc, Some(path)))
         }
         None => Ok(ScopePlan::default()),
     }
+}
+
+/// The typed refusal a manifest the grammar rejects earns: a RETIRED spelling surfaces as the
+/// migration teaching (whose TTY closes with `nothing changed`); everything else as the ordinary
+/// corrupt-state refusal.
+fn grammar_refusal(path: &Path, e: &crate::manifest::document::ManifestError) -> ClientError {
+    if e.migration {
+        return ClientError::ManifestMigration(format!("{}: {e}", path.display()));
+    }
+    ClientError::Corrupt(format!("{}: {e}", path.display()))
 }
 
 /// The NEAREST project manifest covering `cwd` — the file wins WHOLE; the walk stops at the
@@ -260,8 +266,8 @@ pub(crate) fn nearest_project_plan(
     };
     let text = String::from_utf8(bytes)
         .map_err(|_| ClientError::Corrupt(format!("{}: not UTF-8", path.display())))?;
-    let doc = parse_manifest(&text, ManifestScope::Project)
-        .map_err(|e| ClientError::Corrupt(format!("{}: {e}", path.display())))?;
+    let doc =
+        parse_manifest(&text, ManifestScope::Project).map_err(|e| grammar_refusal(&path, &e))?;
     Ok(Some((dir, ScopePlan::from_doc(&doc, Some(path)))))
 }
 
@@ -301,37 +307,6 @@ pub(crate) fn manifest_dirs_up(fs: &dyn FsOps, cwd: &Path, home: Option<&Path>) 
         dir = d.parent().map(Path::to_path_buf);
     }
     out
-}
-
-/// The resolved placement override for one row's delivery into one harness: the row's own
-/// `path` beats the `[defaults.<kind>]` path beats nothing (the registry mapping) — and within
-/// each level the harness-named key beats that level's `default`.
-pub(crate) fn path_override(
-    row_path: Option<&PathSpec>,
-    defaults: &[(String, KindDefaults)],
-    kind: &str,
-    harness_slug: &str,
-) -> Option<String> {
-    let level = |spec: &PathSpec| -> Option<String> {
-        match spec {
-            PathSpec::One(dir) => Some(dir.clone()),
-            PathSpec::PerHarness { default, per } => per
-                .iter()
-                .find(|(h, _)| h == harness_slug)
-                .map(|(_, d)| d.clone())
-                .or_else(|| default.clone()),
-        }
-    };
-    if let Some(spec) = row_path
-        && let Some(dir) = level(spec)
-    {
-        return Some(dir);
-    }
-    defaults
-        .iter()
-        .find(|(k, _)| k == kind)
-        .and_then(|(_, kd)| kd.path.as_ref())
-        .and_then(level)
 }
 
 #[cfg(test)]
@@ -436,42 +411,21 @@ mod tests {
     }
 
     #[test]
-    fn path_override_levels_merge_per_key() {
-        let defaults = vec![(
-            "skill".to_owned(),
-            KindDefaults {
-                harness: None,
-                path: Some(PathSpec::PerHarness {
-                    default: Some(".agents/skills".into()),
-                    per: vec![("claude-code".into(), ".claude/skills".into())],
-                }),
-            },
-        )];
-        // The entry's own path wins whole for its keys.
-        let row = PathSpec::One("custom/".into());
-        assert_eq!(
-            path_override(Some(&row), &defaults, "skill", "claude-code").as_deref(),
-            Some("custom/")
-        );
-        // No entry path: the kind default's harness key, else its default.
-        assert_eq!(
-            path_override(None, &defaults, "skill", "claude-code").as_deref(),
-            Some(".claude/skills")
+    fn dest_rows_partition_like_any_fields_row() {
+        // A dest row is an ordinary fields row to the partitioner — the reconcile reads the
+        // field; the plan only carries it.
+        let plan = global_plan(
+            "[bundles]\n\
+             \"topos.sh/acme/deploy\" = { dest = [\"~/.codex/skills\", \"~/.claude/skills\"] }\n\
+             \"topos.sh/acme/channels/eng\" = { dest = [\"~/.agents/skills\"] }\n",
         );
         assert_eq!(
-            path_override(None, &defaults, "skill", "codex").as_deref(),
-            Some(".agents/skills")
+            plan.things[0].fields().dest,
+            Some(vec!["~/.codex/skills".into(), "~/.claude/skills".into()])
         );
-        // An unknown kind falls through to the registry (None).
-        assert_eq!(path_override(None, &defaults, "knowledge", "codex"), None);
-        // A per-harness entry table without the key and without a default falls to the kind level.
-        let row = PathSpec::PerHarness {
-            default: None,
-            per: vec![("cursor".into(), "x/".into())],
-        };
         assert_eq!(
-            path_override(Some(&row), &defaults, "skill", "codex").as_deref(),
-            Some(".agents/skills")
+            plan.sets[0].fields().dest,
+            Some(vec!["~/.agents/skills".into()])
         );
     }
 

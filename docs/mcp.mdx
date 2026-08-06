@@ -250,8 +250,9 @@ error: the header X-Api-Key carries a credential by definition — a shared bund
 </Warning>
 
 Two more are reported as warnings rather than refusals, because the rest of the run is still good:
-a row narrowed to an agent slug that isn't MCP-capable (`MCP_HARNESS_UNKNOWN` — the slug is
-ignored), and a GitHub-sourced row tagged as an MCP server (`MCP_GITHUB_UNSUPPORTED`).
+a workspace row whose `dest` names a config file no agent here claims (`MCP_DEST_UNKNOWN` — the
+entry is skipped and the known files are listed), and a GitHub-sourced row tagged as an MCP server
+(`MCP_GITHUB_UNSUPPORTED`).
 
 ## A hand-edited entry is never overwritten
 

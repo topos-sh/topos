@@ -296,6 +296,7 @@ fn a_fetched_server_applies_immediately_with_an_undo_led_receipt() {
         "io.github.acme/weather",
         true,
         None,
+        &Default::default(),
     )
     .unwrap();
     let bundle = rig.layout().home().join("mcp").join("weather");
@@ -329,50 +330,54 @@ fn a_fetched_server_applies_immediately_with_an_undo_led_receipt() {
     );
 }
 
-/// ITEM PAIR (add honors the narrowing): with `[defaults.mcp] harness = ["cursor"]` standing and
-/// TWO MCP-capable agents set up, `add --mcp` places into cursor ALONE — the same narrowing the
-/// sweep resolves, so the next sweep has nothing to claw back — and the receipt's breadth line
-/// lists only the narrowed agent. Before the fix the inline converge carried an EMPTY filter,
-/// which the engine reads as ALL harnesses.
+/// ITEM PAIR (add matches the sweep's reach): a fresh `add --mcp` row spells no `dest`, so the
+/// inline converge fans out to exactly the engaged agents — the same set the next sweep keeps
+/// (narrowing now rides the row's own `dest`, which a fresh import does not have). Run at
+/// PROJECT scope, where every surface is checkout-relative and hermetic by construction: the
+/// four project-capable agents engage deterministically, and the breadth line names them all.
 #[test]
-fn the_add_converge_honors_the_defaults_narrowing() {
+fn the_add_converge_matches_the_sweeps_unnarrowed_reach() {
     let rig = Rig::new("narrow");
-    rig.write_global("[bundles]\n\n[defaults.mcp]\nharness = [\"cursor\"]\n");
-    // Both hermetic agents are set up in the fake home; the narrowing admits one.
+    rig.write_global("[bundles]\n");
+    // claude-code + cursor detect off the fake home; codex + opencode engage through their
+    // seeded project files.
+    std::fs::create_dir_all(rig.home.0.join(".claude")).unwrap();
     std::fs::create_dir_all(rig.home.0.join(".cursor")).unwrap();
-    std::fs::create_dir_all(rig.home.0.join(".openclaw")).unwrap();
+    let proj = Scratch::new("narrow-co");
+    std::fs::create_dir_all(proj.0.join(".git")).unwrap();
+    std::fs::create_dir_all(proj.0.join(".codex")).unwrap();
+    std::fs::write(proj.0.join(".codex/config.toml"), b"").unwrap();
+    std::fs::write(proj.0.join("opencode.json"), b"").unwrap();
+    std::fs::write(proj.0.join(crate::manifest::MANIFEST_FILE), "[bundles]\n").unwrap();
     let docs = FakeDocs::serving(&good_server());
-    let ctx = rig.ctx_at(Some(&rig.work.0));
+    let ctx = rig.ctx_at(Some(&proj.0));
 
     let data = ops::add_mcp(
         &ctx,
         &empty_connect,
         Some(&docs),
         "io.github.acme/weather",
-        true,
+        false,
         None,
+        &Default::default(),
     )
     .unwrap();
-    let cursor = rig.home.0.join(".cursor/mcp.json");
-    let openclaw = rig.home.0.join(".openclaw/openclaw.json");
-    assert!(
-        cursor.exists(),
-        "the narrowed harness gets the entry: {data:?}"
-    );
-    let placed = std::fs::read_to_string(&cursor).unwrap();
-    assert!(
-        placed.contains("https://weather.acme.example/mcp"),
-        "{placed}"
-    );
-    assert!(
-        !openclaw.exists(),
-        "a narrowing-excluded harness must not gain an entry on add"
-    );
-    // The breadth line is the narrowed one — never every engaged agent.
+    for rel in [
+        ".mcp.json",
+        ".codex/config.toml",
+        ".cursor/mcp.json",
+        "opencode.json",
+    ] {
+        let placed = std::fs::read_to_string(proj.0.join(rel))
+            .unwrap_or_else(|e| panic!("{rel}: {e} ({data:?})"));
+        assert!(
+            placed.contains("https://weather.acme.example/mcp"),
+            "{rel}: {placed}"
+        );
+    }
+    // The breadth line is the whole engaged set — a row without dest reaches every agent.
     let mcp = data.mcp.expect("the typed block");
-    assert_eq!(mcp.agents, vec!["Cursor".to_owned()], "{:?}", mcp.agents);
-    let note = data.note.clone().unwrap_or_default();
-    assert!(!note.contains("openclaw"), "{note}");
+    assert_eq!(mcp.agents.len(), 4, "{:?}", mcp.agents);
 }
 
 /// ITEM PAIR (the add-time receipt's honesty): a fresh placement's line carries the harness's
@@ -394,6 +399,7 @@ fn the_add_receipt_carries_the_reload_note_and_says_when_nobody_is_reached() {
         "io.github.acme/weather",
         true,
         None,
+        &Default::default(),
     )
     .unwrap();
     let note = data.note.clone().unwrap_or_default();
@@ -415,6 +421,7 @@ fn the_add_receipt_carries_the_reload_note_and_says_when_nobody_is_reached() {
         "io.github.acme/weather",
         true,
         None,
+        &Default::default(),
     )
     .unwrap();
     assert!(
@@ -451,6 +458,7 @@ fn the_fetched_document_lands_canonical_with_the_kind_row() {
         "io.github.acme/weather",
         true,
         None,
+        &Default::default(),
     )
     .unwrap();
     assert_eq!(data.name, "weather");
@@ -496,6 +504,7 @@ fn a_registry_name_reads_versions_latest_and_unwraps_the_envelope() {
         "io.github.acme/weather",
         true,
         None,
+        &Default::default(),
     )
     .unwrap();
     assert_eq!(
@@ -529,7 +538,16 @@ fn an_https_url_is_fetched_as_given() {
     let ctx = rig.ctx_at(Some(&rig.work.0));
     let url = "https://weather.acme.example/.well-known/server.json";
 
-    ops::add_mcp(&ctx, &empty_connect, Some(&docs), url, true, None).unwrap();
+    ops::add_mcp(
+        &ctx,
+        &empty_connect,
+        Some(&docs),
+        url,
+        true,
+        None,
+        &Default::default(),
+    )
+    .unwrap();
     assert_eq!(docs.urls(), vec![url.to_owned()]);
 }
 
@@ -550,6 +568,7 @@ fn a_fetched_secret_is_refused_before_anything_is_written() {
         "io.github.acme/weather",
         true,
         None,
+        &Default::default(),
     )
     .expect_err("refused");
     assert_eq!(err.code(), "MCP_SECRET_REFUSED");
@@ -585,6 +604,7 @@ fn an_occupied_destination_refuses_by_name() {
         "io.github.acme/weather",
         true,
         None,
+        &Default::default(),
     )
     .expect_err("refused");
     assert!(
@@ -624,6 +644,7 @@ fn an_interrupted_import_resumes_when_the_leftover_matches() {
         "io.github.acme/weather",
         true,
         None,
+        &Default::default(),
     )
     .expect("the retry resumes");
     assert_eq!(data.name, "weather");
@@ -661,6 +682,7 @@ fn a_resume_refuses_foreign_bytes_and_a_registered_row() {
         "io.github.acme/weather",
         true,
         None,
+        &Default::default(),
     )
     .expect_err("refused");
     assert!(err.detail().contains("already exists"), "{}", err.detail());
@@ -674,6 +696,7 @@ fn a_resume_refuses_foreign_bytes_and_a_registered_row() {
         "io.github.acme/weather",
         true,
         None,
+        &Default::default(),
     )
     .expect("resumes");
     let err = ops::add_mcp(
@@ -683,6 +706,7 @@ fn a_resume_refuses_foreign_bytes_and_a_registered_row() {
         "io.github.acme/weather",
         true,
         None,
+        &Default::default(),
     )
     .expect_err("refused");
     assert!(err.detail().contains("already exists"), "{}", err.detail());
@@ -711,6 +735,7 @@ fn a_resume_with_a_stray_sibling_refuses_naming_the_file() {
         "io.github.acme/weather",
         true,
         None,
+        &Default::default(),
     )
     .expect_err("refused");
     assert_eq!(err.code(), "MCP_INVALID");
@@ -748,6 +773,7 @@ fn a_resume_with_a_credential_readme_refuses() {
         "io.github.acme/weather",
         true,
         None,
+        &Default::default(),
     )
     .expect_err("refused");
     assert_eq!(err.code(), "MCP_SECRET_REFUSED");
@@ -823,6 +849,7 @@ fn a_workspace_hit_wins_over_the_registry_and_discloses_its_source() {
         "io.github.acme/weather",
         true,
         None,
+        &Default::default(),
     )
     .unwrap();
     assert!(
@@ -883,6 +910,7 @@ fn several_workspaces_embedding_the_name_refuse_toward_workspace() {
         "io.github.acme/weather",
         true,
         None,
+        &Default::default(),
     )
     .expect_err("refused");
     assert!(docs.urls().is_empty(), "{:?}", docs.urls());
@@ -963,6 +991,7 @@ fn the_workspace_selector_narrows_the_probe_to_one_team() {
         "io.github.acme/weather",
         true,
         Some("w_ops"),
+        &Default::default(),
     )
     .unwrap();
     assert!(docs.urls().is_empty(), "{:?}", docs.urls());
@@ -996,6 +1025,7 @@ fn a_workspace_miss_falls_through_to_the_registry() {
         "io.github.acme/weather",
         true,
         None,
+        &Default::default(),
     )
     .expect("the registry arm lands it");
     assert_eq!(
@@ -1030,6 +1060,7 @@ fn a_miss_everywhere_says_both_sources_were_consulted() {
         "io.github.acme/weather",
         true,
         None,
+        &Default::default(),
     )
     .expect_err("a miss everywhere refuses");
     assert_eq!(err.code(), "REMOTE_FETCH");
@@ -1068,6 +1099,7 @@ fn a_local_folder_applies_immediately_with_a_kind_row() {
         dir.to_str().unwrap(),
         true,
         None,
+        &Default::default(),
     )
     .unwrap();
     // It went through the ordinary adopt: a real record with a real version identity.
@@ -1099,6 +1131,7 @@ fn add_mcp_and_remove_are_exact_file_inverses() {
         dir.to_str().unwrap(),
         true,
         None,
+        &Default::default(),
     )
     .unwrap();
     assert_ne!(rig.global_text(), before, "the add changed the file");
@@ -1115,6 +1148,7 @@ fn add_mcp_and_remove_are_exact_file_inverses() {
         &[dir.display().to_string()],
         None,
         true,
+        &Default::default(),
     )
     .unwrap();
     assert!(
@@ -1153,6 +1187,7 @@ fn a_tilde_spelled_adopted_row_converges_its_config_entries_out_on_remove() {
         dir.to_str().unwrap(),
         true,
         None,
+        &Default::default(),
     )
     .unwrap();
     let cursor = rig.home.0.join(".cursor/mcp.json");
@@ -1182,6 +1217,7 @@ fn a_tilde_spelled_adopted_row_converges_its_config_entries_out_on_remove() {
         &["~/weather".to_owned()],
         None,
         true,
+        &Default::default(),
     )
     .unwrap();
     let ops::RemoveOutcome::Applied(removed) = outcome else {
@@ -1218,6 +1254,7 @@ fn remove_deletes_the_folder_a_fetched_import_wrote() {
         "io.github.acme/weather",
         true,
         None,
+        &Default::default(),
     )
     .unwrap();
     let bundle = rig.layout().home().join("mcp").join("weather");
@@ -1237,6 +1274,7 @@ fn remove_deletes_the_folder_a_fetched_import_wrote() {
         &[bundle.display().to_string()],
         None,
         false,
+        &Default::default(),
     )
     .unwrap();
     let ops::RemoveOutcome::Applied(removed) = outcome else {
@@ -1265,6 +1303,7 @@ fn a_fetched_import_reports_the_digest_of_what_it_wrote() {
         "io.github.acme/weather",
         true,
         None,
+        &Default::default(),
     )
     .unwrap();
 
@@ -1302,6 +1341,7 @@ fn removing_a_fetched_import_leaves_no_empty_husks() {
         "io.github.acme/weather",
         true,
         None,
+        &Default::default(),
     )
     .unwrap();
     let mcp_dir = rig.layout().home().join("mcp");
@@ -1320,6 +1360,7 @@ fn removing_a_fetched_import_leaves_no_empty_husks() {
         &[mcp_dir.join("weather").display().to_string()],
         None,
         false,
+        &Default::default(),
     )
     .unwrap();
     let ops::RemoveOutcome::Applied(removed) = outcome else {
@@ -1349,6 +1390,7 @@ fn a_manifest_the_import_found_survives_the_removal() {
         "io.github.acme/weather",
         true,
         None,
+        &Default::default(),
     )
     .unwrap();
 
@@ -1370,6 +1412,7 @@ fn a_manifest_the_import_found_survives_the_removal() {
             .to_string()],
         None,
         false,
+        &Default::default(),
     )
     .unwrap();
     assert_eq!(rig.global_text(), "[bundles]\n", "the file stands, emptied");
@@ -1390,6 +1433,7 @@ fn remove_keeps_an_edited_import_folder_and_says_so() {
         "io.github.acme/weather",
         true,
         None,
+        &Default::default(),
     )
     .unwrap();
     let bundle = rig.layout().home().join("mcp").join("weather");
@@ -1408,6 +1452,7 @@ fn remove_keeps_an_edited_import_folder_and_says_so() {
         &[bundle.display().to_string()],
         None,
         false,
+        &Default::default(),
     )
     .unwrap();
     let ops::RemoveOutcome::Applied(removed) = outcome else {
@@ -1458,6 +1503,7 @@ fn a_server_bundle_at_a_skill_door_refuses_toward_the_mcp_flag() {
         dir.to_str().unwrap(),
         true,
         None,
+        &Default::default(),
     )
     .expect("the flagged door adopts");
 
@@ -1487,6 +1533,7 @@ fn a_folder_without_a_server_json_refuses() {
         dir.to_str().unwrap(),
         true,
         None,
+        &Default::default(),
     )
     .expect_err("refused");
     assert!(err.detail().contains("server.json"), "{}", err.detail());
@@ -1513,6 +1560,7 @@ fn a_stray_sibling_refuses_at_the_adopt_gate() {
         dir.to_str().unwrap(),
         true,
         None,
+        &Default::default(),
     )
     .expect_err("refused");
     assert_eq!(err.code(), "MCP_INVALID");
@@ -1533,6 +1581,7 @@ fn a_stray_sibling_refuses_at_the_adopt_gate() {
         dir.to_str().unwrap(),
         true,
         None,
+        &Default::default(),
     )
     .expect_err("refused");
     assert_eq!(err.code(), "MCP_INVALID");
@@ -1549,6 +1598,7 @@ fn a_stray_sibling_refuses_at_the_adopt_gate() {
         dir.to_str().unwrap(),
         true,
         None,
+        &Default::default(),
     )
     .unwrap();
     let sid = crate::id::SkillId::parse(data.skill_id.as_deref().unwrap()).unwrap();
@@ -1578,6 +1628,7 @@ fn an_allowed_readme_with_a_credential_refuses_at_the_adopt_gate() {
         dir.to_str().unwrap(),
         true,
         None,
+        &Default::default(),
     )
     .expect_err("refused");
     assert_eq!(err.code(), "MCP_SECRET_REFUSED");
@@ -1601,6 +1652,7 @@ fn a_local_secret_is_refused_before_the_adopt() {
         dir.to_str().unwrap(),
         true,
         None,
+        &Default::default(),
     )
     .expect_err("refused");
     assert_eq!(err.code(), "MCP_SECRET_REFUSED");
@@ -1618,8 +1670,16 @@ fn a_workspace_reference_refuses_toward_the_plain_add() {
     let rig = Rig::new("wsref");
     rig.write_global("[bundles]\n");
     let ctx = rig.ctx_at(Some(&rig.work.0));
-    let err =
-        ops::add_mcp(&ctx, &empty_connect, None, "@eng/weather", true, None).expect_err("refused");
+    let err = ops::add_mcp(
+        &ctx,
+        &empty_connect,
+        None,
+        "@eng/weather",
+        true,
+        None,
+        &Default::default(),
+    )
+    .expect_err("refused");
     assert_eq!(err.code(), "INVALID_ARGUMENT");
     assert!(
         err.detail().contains("topos add @eng/weather"),
@@ -1803,6 +1863,7 @@ fn a_secret_bearing_mcp_bundle_never_reaches_the_wal() {
         dir.to_str().unwrap(),
         true,
         None,
+        &Default::default(),
     )
     .unwrap();
     std::fs::write(dir.join("server.json"), server_with_secret()).unwrap();
@@ -1841,6 +1902,7 @@ fn a_stray_sibling_never_reaches_the_wal() {
         dir.to_str().unwrap(),
         true,
         None,
+        &Default::default(),
     )
     .unwrap();
     std::fs::write(dir.join("evil.sh"), b"#!/bin/sh\necho pwned\n").unwrap();
@@ -1921,6 +1983,7 @@ fn an_mcp_publish_to_a_pre_mcp_server_refuses_before_the_wal() {
         dir.to_str().unwrap(),
         true,
         None,
+        &Default::default(),
     )
     .unwrap();
 
@@ -1979,6 +2042,7 @@ fn the_bundle_kind_rides_the_wal_onto_the_wire_and_the_receipt() {
         dir.to_str().unwrap(),
         true,
         None,
+        &Default::default(),
     )
     .unwrap();
 
@@ -2039,4 +2103,111 @@ fn an_ordinary_skill_publish_carries_no_kind() {
     };
     assert_eq!(pd.kind, None);
     assert_eq!(recorder.seen.lock().unwrap()[0].kind, None);
+}
+
+/// `-a` on `add --mcp` narrows the row to the named agents' config FILES, and `remove <name> -a`
+/// SUBTRACTS one file: its entry leaves that config in the same invocation, the other agent's
+/// entry stays, and the row keeps the rest — receipts counting config files.
+#[test]
+fn mcp_selection_narrows_add_and_remove_by_config_file() {
+    let rig = Rig::new("mcp-dest");
+    rig.write_global("[bundles]\n");
+    // Two MCP-capable agents set up in the fake home.
+    std::fs::create_dir_all(rig.home.0.join(".cursor")).unwrap();
+    std::fs::create_dir_all(rig.home.0.join(".codex")).unwrap();
+    let dir = rig.work.0.join("weather");
+    write_bundle(&dir, &good_server());
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    let sel = ops::Selection {
+        agents: vec!["cursor".to_owned(), "codex".to_owned()],
+        dests: Vec::new(),
+    };
+    let data = ops::add_mcp(
+        &ctx,
+        &empty_connect,
+        None,
+        dir.to_str().unwrap(),
+        true,
+        None,
+        &sel,
+    )
+    .unwrap();
+    assert_eq!(
+        data.dest,
+        vec![
+            "~/.cursor/mcp.json".to_owned(),
+            "~/.codex/config.toml".to_owned()
+        ]
+    );
+    let text = rig.global_text();
+    assert!(
+        text.contains(r#"dest = ["~/.cursor/mcp.json", "~/.codex/config.toml"]"#),
+        "{text}"
+    );
+    let cursor = rig.home.0.join(".cursor/mcp.json");
+    let codex = rig.home.0.join(".codex/config.toml");
+    assert!(
+        std::fs::read_to_string(&cursor)
+            .unwrap()
+            .contains("weather.acme.example"),
+        "cursor's file got the entry"
+    );
+    assert!(
+        std::fs::read_to_string(&codex)
+            .unwrap()
+            .contains("weather.acme.example"),
+        "codex's file got the entry"
+    );
+
+    // Narrow remove: subtract codex's config file — its entry leaves NOW, cursor's stays, and
+    // the row keeps the remaining file.
+    let session_connect = |_s: &Session| ops::SessionTransports {
+        plane: Box::new(NoDelivery),
+        directory: Box::new(FakeDirectory::new(Vec::new(), Vec::new())),
+        contribute: Box::new(RecordingPublish::default()),
+        governance: Box::new(NoGovernance),
+    };
+    let narrow = ops::Selection {
+        agents: vec!["codex".to_owned()],
+        dests: Vec::new(),
+    };
+    let outcome = ops::remove_global(
+        &ctx,
+        &session_connect,
+        &["weather".to_owned()],
+        None,
+        false,
+        &narrow,
+    )
+    .unwrap();
+    let ops::RemoveOutcome::Applied(removed) = outcome else {
+        panic!("a narrow applies immediately");
+    };
+    let text = rig.global_text();
+    assert!(
+        text.contains(r#"dest = ["~/.cursor/mcp.json"]"#),
+        "the row keeps the remaining file: {text}"
+    );
+    assert!(
+        std::fs::read_to_string(&codex)
+            .map(|t| !t.contains("weather.acme.example"))
+            .unwrap_or(true),
+        "the codex entry left with the subtraction"
+    );
+    assert!(
+        std::fs::read_to_string(&cursor)
+            .unwrap()
+            .contains("weather.acme.example"),
+        "cursor's entry stays"
+    );
+    // The receipt counts config files and names what remains.
+    let u = &removed.uninstalled[0];
+    assert_eq!(u.destinations, vec!["~/.codex/config.toml".to_owned()]);
+    assert_eq!(u.kind.as_deref(), Some("mcp"));
+    assert_eq!(u.remaining, Some(1));
+    let tty = crate::render::remove_applied_tty(&removed);
+    assert!(
+        tty.contains("removed (~/.codex/config.toml) — 1 config file remains"),
+        "{tty}"
+    );
 }

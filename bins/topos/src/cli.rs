@@ -8,10 +8,12 @@
 //! `publish`/`review`/`revert`/`protect`/`invite` are the workspace governance verbs; the utility
 //! verbs (`diff`, `log`, `self-update`, `uninstall`, `auth status`) persist. Two-phase
 //! describe/`--yes` gates the acts with REACH or LOSS (`publish`'s describe, `review`'s verdicts,
-//! `revert`, `protect`, `invite`, `update --reset`, `uninstall`; a `remove` over local edits, a
-//! permanent delete, or a set-splitting row rewrite) — plus a bare `add` of a git source, where
-//! the two phases are what let a person read what a repo holds before it lands; every other
-//! manifest edit applies immediately with an undo-led receipt (`--yes` an accepted no-op).
+//! `revert`, `protect`, `invite`, `update --reset`, `uninstall`; a permanent delete, a
+//! set-splitting row rewrite, or a removal whose edit scan cannot be read) — plus a bare `add`
+//! of a git source, where the two phases are what let a person read what a repo holds before it
+//! lands; every other manifest edit applies immediately with an undo-led receipt (`--yes` an
+//! accepted no-op) — a row removal uninstalling its copies in the same invocation, edited copies
+//! kept in place.
 //!
 //! The doc comments on the verbs below are USER-FACING twice over: they are `--help`, and
 //! `cli_ref.rs` renders them into `docs/cli.md` + the built-in skill's `reference.md`. Write them
@@ -184,20 +186,29 @@ pub(crate) enum Command {
     /// holding one — and your agents get it as a tool endpoint in their own MCP config rather than
     /// as a skill folder; a name is looked for in your workspaces' catalogs first, then the
     /// official registry; every `--mcp` source applies immediately, and the receipt leads with
-    /// the undo (`topos remove <name>`).
+    /// the undo (`topos remove <name>`). By default a skill reaches every agent on the machine;
+    /// `-a <agent>` (repeatable) installs it for just those agents, and `--dest <folder>`
+    /// (repeatable) installs into an exact folder — together they freeze the row to exactly
+    /// those destinations, recorded in the file so updates keep landing there. For an MCP
+    /// source `-a` picks whose config file gets the entry. Re-adding a source with `-a`/`--dest`
+    /// replaces its recorded destinations with the new set.
     Add {
         /// What to add: a workspace skill, channel, or feed; a local folder; or a GitHub repo.
         source: String,
         /// When a GitHub repo holds several skills, pick which one(s) (repeatable; `'*'` = all).
         #[arg(long, short = 's', value_name = "NAME")]
         skill: Vec<String>,
-        /// Which agent to install a GitHub import for (a slug like `cursor`; repeatable;
-        /// `'*'` = all). Default: the agent detected here.
+        /// Install for this agent only (a slug like `codex`; repeatable; `'*'` = all detected).
+        /// Recorded on the row, so updates keep the copy where you asked.
         #[arg(long, short = 'a', value_name = "SLUG")]
         agent: Vec<String>,
+        /// Install into this exact folder (repeatable; combined with `-a` the union is the
+        /// destination set). An MCP source takes a known config file instead.
+        #[arg(long, value_name = "FOLDER")]
+        dest: Vec<String>,
         /// Import an MCP server: an official-registry name (io.github.x/y), an https URL to its
         /// server.json, or a local folder holding one.
-        #[arg(long, conflicts_with_all = ["skill", "agent"])]
+        #[arg(long, conflicts_with = "skill")]
         mcp: bool,
         /// Add it machine-wide (your `~/.topos/topos.toml`) instead of to this folder's file.
         #[arg(long, short = 'g')]
@@ -211,13 +222,22 @@ pub(crate) enum Command {
     /// nearest `topos.toml` at or above this folder, or your machine-wide file with `-g`
     /// (dropping a line, or switching one feed-delivered skill "off" on this machine). It never
     /// reaches across that line — a skill your machine-wide file delivers is refused here,
-    /// pointing at `-g`. `remove -g @<workspace>` drops that feed line and uninstalls what it
-    /// delivered in the same command — a copy you edited stays in place, disclosed. Prints
-    /// exactly what changed and how to undo it; asks first only when removing would lose local
-    /// work or rewrite a whole channel/repo line.
+    /// pointing at `-g`. Removing a line also uninstalls the copies it placed, in the same
+    /// command — a copy you edited stays in place, disclosed. With `-a <agent>` or
+    /// `--dest <folder>` only THAT destination is removed: the row keeps the rest, and removing
+    /// the last one removes the row. Prints exactly what changed and how to undo it; asks first
+    /// only when removing would lose local work or rewrite a whole channel/repo line.
     Remove {
         /// The skill(s) to remove — or `@<workspace>` with `-g` to stop adopting its feed here.
         skill: Vec<String>,
+        /// Remove only this agent's copy (a slug like `codex`; repeatable) — the skill stays for
+        /// every other agent.
+        #[arg(long, short = 'a', value_name = "SLUG")]
+        agent: Vec<String>,
+        /// Remove only the copy in this exact folder (repeatable; combined with `-a` the union
+        /// is removed). An MCP source takes a config file.
+        #[arg(long, value_name = "FOLDER")]
+        dest: Vec<String>,
         /// Edit your machine-wide file (`~/.topos/topos.toml`) instead of this folder's.
         #[arg(long, short = 'g')]
         global: bool,
@@ -699,11 +719,53 @@ mod tests {
         }
         assert!(Cli::try_parse_from(["topos", "protect", "docs", "reviewed"]).is_ok());
         assert!(Cli::try_parse_from(["topos", "auth", "status"]).is_ok());
-        // The device-local `--agent` scope flags died with the machine-level content state.
-        let removed = Cli::try_parse_from(["topos", "remove", "docs", "-a", "cursor"]).unwrap_err();
-        assert_eq!(removed.kind(), ErrorKind::UnknownArgument);
+        // `remove -a <agent>` narrows the removal to that agent's destination (repeatable).
+        assert!(matches!(
+            Cli::try_parse_from(["topos", "remove", "docs", "-a", "cursor"])
+                .unwrap()
+                .command,
+            Some(Command::Remove { agent, .. }) if agent == ["cursor"]
+        ));
         // `remove -g` edits this machine's own `~/.topos/topos.toml`.
         assert!(Cli::try_parse_from(["topos", "remove", "-g", "@acme/docs"]).is_ok());
+    }
+
+    #[test]
+    fn add_and_remove_take_agent_and_dest_selectors() {
+        // Both flags are repeatable and combine — the union is the destination set.
+        let out = Cli::try_parse_from([
+            "topos",
+            "add",
+            "-g",
+            "@acme/deploy",
+            "-a",
+            "codex",
+            "--dest",
+            "~/.claude/skills",
+        ])
+        .unwrap();
+        assert!(matches!(
+            out.command,
+            Some(Command::Add { agent, dest, .. })
+                if agent == ["codex"] && dest == ["~/.claude/skills"]
+        ));
+        let out = Cli::try_parse_from([
+            "topos", "remove", "-g", "deploy", "-a", "codex", "-a", "cursor", "--dest", "~/x",
+        ])
+        .unwrap();
+        assert!(matches!(
+            out.command,
+            Some(Command::Remove { agent, dest, .. })
+                if agent == ["codex", "cursor"] && dest == ["~/x"]
+        ));
+        // `--mcp` now combines with `-a` (the agent picks whose config file gets the entry);
+        // `-s` stays a repo-member selector and still refuses beside it.
+        assert!(
+            Cli::try_parse_from(["topos", "add", "--mcp", "io.github.a/b", "-a", "codex"]).is_ok()
+        );
+        assert!(
+            Cli::try_parse_from(["topos", "add", "--mcp", "io.github.a/b", "-s", "x"]).is_err()
+        );
     }
 
     #[test]

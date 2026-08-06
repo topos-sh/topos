@@ -103,6 +103,11 @@
           "const": "manifest-excluded"
         },
         {
+          "description": "A NARROWED removal (`-a`/`--dest`): the named destination(s) were subtracted from the\nrow's `dest` and that copy uninstalled; the row survives with the rest. **Additive.**",
+          "type": "string",
+          "const": "manifest-narrowed"
+        },
+        {
           "description": "An untracked local copy in an agent dir → permanent delete (no other copy exists).",
           "type": "string",
           "const": "untracked-local"
@@ -142,6 +147,15 @@
         "name": {
           "description": "The workspace-qualified display name (`@<ws>/<name>` at the machine's one connected host,\nelse `<host>/<ws>/<name>`); a non-workspace bundle's plain name.",
           "type": "string"
+        },
+        "remaining": {
+          "description": "A NARROWED removal (`-a`/`--dest`): how many destinations the row still names after the\nsubtraction — the receipt's `— N folders remain` clause (config files for an MCP\nbundle). Absent on a whole-row removal. **INFERRED** (additive).",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
         }
       },
       "required": [

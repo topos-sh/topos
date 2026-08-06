@@ -192,9 +192,17 @@ fn json_envelope_apply_receipt_on_ungated_arms_describe_on_gated() {
         "the inverse re-adds the same row: {v}"
     );
 
-    // GATED (a local-only `remove` — the permanent delete of the only copy): the bare run answers
-    // the DESCRIBE envelope, `applied: false`, the `--yes` apply next action; nothing is deleted.
-    let (ok, v) = run(&home, &["--json", "remove", "pr-describe"]);
+    // The row remove's eager reconcile settled the leftover record too, but the ADOPTED source
+    // dir is the person's own and never leaves with it.
+    assert!(
+        skill.join("SKILL.md").exists(),
+        "an adopted source dir is never deleted by a row remove"
+    );
+
+    // GATED (the built-in's durable opt-out — a permanent, whole-machine act): the bare run
+    // answers the DESCRIBE envelope, `applied: false`, the `--yes` apply next action; nothing is
+    // deleted.
+    let (ok, v) = run(&home, &["--json", "remove", "topos"]);
     assert!(ok, "the gated describe exits 0: {v}");
     assert_eq!(v["command"], "remove");
     assert_eq!(v["data"]["describe"]["applied"], false);
@@ -205,13 +213,6 @@ fn json_envelope_apply_receipt_on_ungated_arms_describe_on_gated() {
     assert_eq!(v["next_actions"][0]["code"], "APPLY_DESCRIBED");
     let argv = v["next_actions"][0]["argv"].as_array().expect("argv");
     assert_eq!(argv.last().and_then(|t| t.as_str()), Some("--yes"));
-    // The describe deleted nothing: the sidecar custody still holds the skill's record (the
-    // earlier row-remove kept the bytes, so no manifest row lists it any more — the store is the
-    // honest oracle here).
-    let kept = std::fs::read_dir(home.join("skills"))
-        .map(|d| d.count())
-        .unwrap_or(0);
-    assert!(kept >= 1, "the sidecar custody must still hold the skill");
 
     let _ = std::fs::remove_dir_all(&src);
     let _ = std::fs::remove_dir_all(&home);

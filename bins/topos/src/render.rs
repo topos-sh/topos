@@ -84,7 +84,7 @@ pub(crate) fn err_envelope(command: &str, argv: &[String], err: &ClientError) ->
 /// alongside it: `command`, the canonical VERB that refused (the same name the envelope carries),
 /// and `argv`, the user's own invocation past the binary name. An ambiguity needs both — the verb
 /// to rebuild with, and the whole invocation to judge whether rebuilding can be FAITHFUL at all.
-fn next_actions(command: &str, argv: &[String], err: &ClientError) -> Vec<NextAction> {
+pub(crate) fn next_actions(command: &str, argv: &[String], err: &ClientError) -> Vec<NextAction> {
     match err {
         // A LOCAL ambiguity whose name a connected workspace ALSO publishes has more than one
         // real way out, so it carries them all: the inventory read that resolves the local pick,
@@ -261,6 +261,23 @@ fn next_actions(command: &str, argv: &[String], err: &ClientError) -> Vec<NextAc
                 "--json".into(),
             ],
         )],
+        // The shared-copy narrowing refusal: BOTH ways out, structurally — the whole-row remove
+        // and the per-agent re-add — each argv straight from the error's own fields (the TTY
+        // prints the same two lines, annotated).
+        ClientError::SharedCopyOnly {
+            remove_argv,
+            readd_argv,
+            ..
+        } => vec![
+            crate::actions::next_action(
+                ActionCode::from("RUN_COMMAND".to_owned()),
+                remove_argv.clone(),
+            ),
+            crate::actions::next_action(
+                ActionCode::from("RUN_COMMAND".to_owned()),
+                readd_argv.clone(),
+            ),
+        ],
         // A server bundle at a skill door: the fix is the `--mcp` spelling, runnable as-is.
         ClientError::McpFlagRequired { dir } => vec![crate::actions::next_action(
             ActionCode::from("RUN_COMMAND".to_owned()),
@@ -652,6 +669,11 @@ pub(crate) fn init_tty(data: &topos_types::results::InitData) -> String {
 }
 
 pub(crate) fn add_tty(data: &AddData) -> String {
+    // A `-a`/`--dest` add of a workspace bundle prints the DESTINATION receipt: the qualified
+    // `+` row with where it landed, then the undo-led inverse (the bare name drops the row).
+    if !data.dest.is_empty() && data.display.is_some() {
+        return add_dest_receipt(data);
+    }
     let mut out = String::new();
     // The MANIFEST edited comes FIRST (the trust rail's first half: which file's line asked for
     // it), with the paste-ready inverse.
@@ -801,6 +823,41 @@ pub(crate) fn add_tty(data: &AddData) -> String {
         ));
     }
     out
+}
+
+/// The destination receipt a `-a`/`--dest` workspace add prints — the same column convention the
+/// update receipt's `+` rows use, speaking in the row's recorded destinations: one entry prints
+/// its spelling, several print a count in the bundle's own noun.
+fn add_dest_receipt(data: &AddData) -> String {
+    let name = data.display.as_deref().unwrap_or(&data.name);
+    let noun = if data.dest.iter().all(|e| {
+        crate::manifest::dest::mcp_slug_for_dest(
+            e,
+            crate::manifest::document::ManifestScope::Global,
+        )
+        .is_some()
+            || crate::manifest::dest::mcp_slug_for_dest(
+                e,
+                crate::manifest::document::ManifestScope::Project,
+            )
+            .is_some()
+    }) {
+        "config files"
+    } else {
+        "folders"
+    };
+    let column = match data.dest.as_slice() {
+        [one] => format!("installed ({one})"),
+        many => format!("installed ({} {noun})", many.len()),
+    };
+    let mut s = format!("+ {name}   {column}");
+    if !data.undo.is_empty() {
+        s.push_str(&format!("\n(undo: {})", argv_line(&data.undo)));
+    }
+    if let Some(note) = &data.note {
+        s.push_str(&format!("\nnote: {note}"));
+    }
+    s
 }
 
 /// The describe an `add` of a git source always returns: what the source holds, what would be
@@ -1949,8 +2006,16 @@ fn remove_item_line(item: &RemoveItem, applied: bool) -> String {
         RemoveKind::ManifestRemoved => {
             let manifest = item.manifest.as_deref().unwrap_or("topos.toml");
             format!(
-                "{manifest}: removed '{}' — delivery to this scope ends at the next `topos \
-                 update`; bytes already placed stay until then.",
+                "{manifest}: removed '{}' — the copies it placed leave this machine now (an \
+                 edited copy stays in place).",
+                item.name
+            )
+        }
+        RemoveKind::ManifestNarrowed => {
+            let manifest = item.manifest.as_deref().unwrap_or("topos.toml");
+            format!(
+                "{manifest}: narrowed '{}' — the named destination's copy leaves this machine \
+                 now (an edited copy stays in place); the row keeps the rest.",
                 item.name
             )
         }
@@ -2009,10 +2074,25 @@ pub(crate) fn remove_describe_tty(data: &RemoveData, yes_argv: &[String]) -> Str
 /// `(undo: …)` — the same lines the update receipt prints for the hand-edited equivalent.
 pub(crate) fn remove_applied_tty(data: &RemoveData) -> String {
     let mut lines: Vec<String> = Vec::new();
+    let mut notes: Vec<String> = Vec::new();
     for item in &data.items {
-        // The uninstall block below says what the feed drop did, concretely — the item's own
-        // summary line would only restate it vaguely.
-        if item.kind == RemoveKind::FeedRemoved && !data.uninstalled.is_empty() {
+        // The uninstall block below says what a feed drop / row drop / narrow did, concretely —
+        // the item's own summary line would only restate it vaguely. A carried note survives as
+        // its own line (the off-switch's standing disclosure, the materialize note).
+        let covered = match item.kind {
+            RemoveKind::FeedRemoved => !data.uninstalled.is_empty(),
+            RemoveKind::ManifestRemoved
+            | RemoveKind::ManifestExcluded
+            | RemoveKind::ManifestNarrowed => data
+                .uninstalled
+                .iter()
+                .any(|u| u.name == item.name || u.name.rsplit('/').next() == Some(&item.name)),
+            _ => false,
+        };
+        if covered {
+            if let Some(note) = &item.note {
+                notes.push(format!("note: {note}"));
+            }
             continue;
         }
         lines.push(remove_item_line(item, true));
@@ -2033,6 +2113,7 @@ pub(crate) fn remove_applied_tty(data: &RemoveData) -> String {
             lines.push(kept_line(plain, &u.kept));
         }
     }
+    lines.extend(notes);
     let mut s = lines.join("\n");
     if !data.undo.is_empty() {
         if data.uninstalled.is_empty() {
@@ -2045,18 +2126,27 @@ pub(crate) fn remove_applied_tty(data: &RemoveData) -> String {
 }
 
 /// The destination column of one uninstalled bundle — the same count/path rule the update
-/// receipt's removed rows use.
+/// receipt's removed rows use. A NARROWED removal appends what the row still names
+/// (`— 2 folders remain` / `— 1 config file remains`).
 fn uninstalled_column(u: &topos_types::results::UninstalledBundle) -> String {
-    let noun = if u.kind.as_deref() == Some("mcp") {
-        "config files"
+    let (noun_one, noun_many) = if u.kind.as_deref() == Some("mcp") {
+        ("config file", "config files")
     } else {
-        "folders"
+        ("folder", "folders")
     };
-    match u.destinations.as_slice() {
+    let mut out = match u.destinations.as_slice() {
         [] => "removed".to_owned(),
         [one] => format!("removed ({one})"),
-        many => format!("removed ({} {noun})", many.len()),
+        many => format!("removed ({} {noun_many})", many.len()),
+    };
+    if let Some(n) = u.remaining {
+        if n == 1 {
+            out.push_str(&format!(" — 1 {noun_one} remains"));
+        } else {
+            out.push_str(&format!(" — {n} {noun_many} remain"));
+        }
     }
+    out
 }
 
 /// The `protect` DESCRIBE's TTY — the level being set, the audience it governs, and the standing note.
@@ -2902,6 +2992,34 @@ fn append_proposals_trailer(mut out: String, awaiting: u32) -> String {
 }
 
 pub(crate) fn err_tty(err: &ClientError) -> String {
+    // A retired-manifest-spelling refusal closes with the one line that says the load stopped
+    // BEFORE anything moved — the file was only read (the `--json` envelope is untouched: its
+    // `message` stays the single-sentence teaching). A refused `-a`/`--dest` selection closes
+    // the same way, for the same reason: nothing was read past the argv.
+    if let ClientError::ManifestMigration(_)
+    | ClientError::UnknownAgent { .. }
+    | ClientError::SelectionRefused(_) = err
+    {
+        return format!("error: {}\nnothing changed", safe_message(err));
+    }
+    // The shared-copy narrowing refusal renders its ways out as ALIGNED command lines under the
+    // statement — the copy is the answer, so it carries no `error:` prefix (the `--json`
+    // envelope keeps the single-sentence message; the same two commands ride `next_actions`).
+    if let ClientError::SharedCopyOnly {
+        remove_argv,
+        readd_argv,
+        ..
+    } = err
+    {
+        let remove_line = argv_line(remove_argv);
+        let readd_line = argv_line(readd_argv);
+        let pad = remove_line.len().max(readd_line.len());
+        return format!(
+            "{}\n  {remove_line:<pad$}   remove it for every agent\n  {readd_line:<pad$}   keep \
+             it per-agent instead, then re-run",
+            safe_message(err)
+        );
+    }
     format!("error: {}", safe_message(err))
 }
 
@@ -2927,6 +3045,11 @@ pub(crate) fn err_tty(err: &ClientError) -> String {
 /// [`next_actions`] — the surfaces stay one computation, so a human and an agent are offered the
 /// same commands, and withheld the same ones.
 pub(crate) fn err_hint_tty(command: &str, argv: &[String], err: &ClientError) -> Option<String> {
+    // The shared-copy refusal's TTY already prints its two ways out as aligned, annotated
+    // command lines (see [`err_tty`]) — a `try:` block underneath would repeat them bare.
+    if matches!(err, ClientError::SharedCopyOnly { .. }) {
+        return None;
+    }
     let retryable = matches!(
         err.outcome(),
         TerminalOutcome::RetryableFailure | TerminalOutcome::Unavailable
@@ -3036,12 +3159,37 @@ mod tests {
         tokens.iter().map(|t| (*t).to_owned()).collect()
     }
 
+    /// A retired-manifest-spelling refusal's TTY shows the teaching VERBATIM and closes with the
+    /// one line that says the load stopped before anything moved — while an ordinary corrupt
+    /// state keeps its redacted single line.
+    #[test]
+    fn a_manifest_migration_refusal_closes_the_tty_with_nothing_changed() {
+        let err = crate::error::ClientError::ManifestMigration(
+            "./topos.toml: `harness = [\"codex\"]` on \"topos.sh/acme/linear\" is now written \
+             as dest — use dest = [\"~/.codex/config.toml\"]"
+                .to_owned(),
+        );
+        let tty = super::err_tty(&err);
+        assert_eq!(tty.lines().last(), Some("nothing changed"), "{tty}");
+        assert!(
+            tty.contains("use dest = [\"~/.codex/config.toml\"]"),
+            "{tty}"
+        );
+        // The envelope's message stays the single-sentence teaching (no closing line).
+        assert!(!safe_message(&err).contains("nothing changed"));
+        // The ordinary corrupt refusal is untouched.
+        let plain = super::err_tty(&crate::error::ClientError::Corrupt("x".into()));
+        assert!(!plain.contains("nothing changed"), "{plain}");
+    }
+
     /// The fetched `add --mcp` arm's receipt (a local-path row, no version minted) names the MCP
     /// server that was recorded — with the row, the per-agent note, and the undo — never a
     /// channel.
     #[test]
     fn a_fetched_mcp_add_receipt_names_the_server_not_a_channel() {
         let data = topos_types::results::AddData {
+            dest: Vec::new(),
+            display: None,
             skill_id: None,
             name: "weather".to_owned(),
             version_id: None,
@@ -3481,6 +3629,7 @@ mod tests {
             ],
             uninstalled: vec![
                 UninstalledBundle {
+                    remaining: None,
                     name: "@acme/deploy-checklist".to_owned(),
                     destinations: vec![
                         "~/.claude/skills/deploy-checklist".to_owned(),
@@ -3490,6 +3639,7 @@ mod tests {
                     kept: Vec::new(),
                 },
                 UninstalledBundle {
+                    remaining: None,
                     name: "@acme/linear".to_owned(),
                     destinations: vec![
                         "~/.claude.json".to_owned(),
@@ -3499,6 +3649,7 @@ mod tests {
                     kept: Vec::new(),
                 },
                 UninstalledBundle {
+                    remaining: None,
                     name: "@acme/coolify-deploy".to_owned(),
                     destinations: Vec::new(),
                     kind: None,

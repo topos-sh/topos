@@ -23,6 +23,20 @@
         }
       ]
     },
+    "dest": {
+      "description": "The destinations the row was frozen to (`-a`/`--dest`): skills folders as the manifest\nspells them (`~/`-abbreviated in the machine file, project-relative in a project file),\nor a config-placed bundle's config files. Empty when the add named no destination.\n**INFERRED** (additive-only).",
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "display": {
+      "description": "The workspace-qualified display name the receipt leads with (`@<ws>/<name>` at the\nmachine's one connected host, else `<host>/<ws>/<name>`). Absent for a non-workspace\nsource. **INFERRED** (additive-only).",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "governed_copy": {
       "description": "A GOVERNED COPY of the same upstream source already living in a connected workspace — the\ndedup suggestion on a remote import (\"acme already has this as `@acme/deploy`\"). Disclosed,\nnever blocking: the import proceeded as asked; the reference is the governed alternative.\n**Additive.**",
       "anyOf": [

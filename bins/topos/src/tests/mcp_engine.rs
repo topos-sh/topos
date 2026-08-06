@@ -562,7 +562,7 @@ fn demand(bundle_id: &str, name: &str, ws: Option<&str>, server: &str) -> McpDem
         workspace_slug: ws.map(str::to_owned),
         version_id: "v1".to_owned(),
         server_json: server.as_bytes().to_vec(),
-        harness_filter: Vec::new(),
+        harness_filter: None,
     }
 }
 
@@ -788,7 +788,7 @@ fn a_hand_edited_entry_is_drift_never_clobbered_and_survives_removal_disclosed()
     );
     let cursor_only = |d: &McpDemand| {
         let mut d = d.clone();
-        d.harness_filter = vec!["cursor".into()];
+        d.harness_filter = Some(vec!["cursor".into()]);
         d
     };
     let io = person_io(&fs, &layout, &home.0);
@@ -853,7 +853,7 @@ fn a_foreign_topos_prefixed_entry_is_never_touched_or_claimed() {
         Some("eng"),
         &server_json("https://mcp.example/a"),
     );
-    d.harness_filter = vec!["cursor".into()];
+    d.harness_filter = Some(vec!["cursor".into()]);
     let io = person_io(&fs, &layout, &home.0);
     let out = mcp_engine::converge(&io, &[d], SYNTHETIC, &all_slugs(), &no_hold(), true);
     assert_eq!(state_of(&out, "s_a", "cursor").state, "conflicting");
@@ -928,7 +928,7 @@ fn a_suspect_header_fails_the_demand_closed_with_a_warning() {
     let io = person_io(&fs, &layout, &home.0);
     let mut d = demand("s_a", "alpha", Some("eng"), "");
     d.server_json = br#"{"name":"io.test/a","description":"A.","version":"1.0.0","remotes":[{"type":"streamable-http","url":"https://a.example","headers":[{"name":"Authorization","isSecret":true}]}]}"#.to_vec();
-    d.harness_filter = vec!["cursor".into()];
+    d.harness_filter = Some(vec!["cursor".into()]);
     let out = mcp_engine::converge(&io, &[d], SYNTHETIC, &all_slugs(), &no_hold(), true);
     assert!(
         out.warnings
@@ -955,7 +955,7 @@ fn a_sibling_key_in_the_plugin_mcp_json_backs_the_surface_off_and_survives() {
     let io = person_io(&fs, &layout, &home.0);
     let claude_only = |d: &McpDemand| {
         let mut d = d.clone();
-        d.harness_filter = vec!["claude-code".into()];
+        d.harness_filter = Some(vec!["claude-code".into()]);
         d
     };
     let v1 = demand(
@@ -1024,7 +1024,7 @@ fn a_hand_edited_plugin_manifest_survives_update_and_removal_disclosed() {
     let io = person_io(&fs, &layout, &home.0);
     let claude_only = |d: &McpDemand| {
         let mut d = d.clone();
-        d.harness_filter = vec!["claude-code".into()];
+        d.harness_filter = Some(vec!["claude-code".into()]);
         d
     };
     let v1 = demand(
@@ -1121,7 +1121,7 @@ fn a_hand_deleted_plugin_manifest_heals_back_beside_remaining_entries() {
         Some("eng"),
         &server_json("https://mcp.example/a"),
     );
-    d.harness_filter = vec!["claude-code".into()];
+    d.harness_filter = Some(vec!["claude-code".into()]);
     mcp_engine::converge(
         &io,
         std::slice::from_ref(&d),
@@ -1174,7 +1174,7 @@ fn converges_serialize_on_the_per_scope_mcp_lock() {
             Some("eng"),
             &server_json("https://mcp.example/a"),
         );
-        d.harness_filter = vec!["cursor".into()];
+        d.harness_filter = Some(vec!["cursor".into()]);
         let out = mcp_engine::converge(&io, &[d], SYNTHETIC, &all_slugs(), &no_hold(), true);
         tx.send(out).unwrap();
     });
@@ -1214,7 +1214,7 @@ fn a_moved_surface_path_discloses_the_stale_row_and_never_drops_it() {
         Some("eng"),
         &server_json("https://mcp.example/a"),
     );
-    d.harness_filter = vec!["cursor".into()];
+    d.harness_filter = Some(vec!["cursor".into()]);
     mcp_engine::converge(
         &io,
         std::slice::from_ref(&d),
@@ -1281,7 +1281,7 @@ fn a_hand_deleted_plugin_dir_sheds_its_ledger_entries_on_the_next_converge() {
         Some("eng"),
         &server_json("https://mcp.example/a"),
     );
-    d.harness_filter = vec!["claude-code".into()];
+    d.harness_filter = Some(vec!["claude-code".into()]);
     mcp_engine::converge(
         &io,
         std::slice::from_ref(&d),
@@ -1379,7 +1379,7 @@ fn a_user_entry_added_to_a_topos_created_file_survives_last_entry_removal() {
             Some("eng"),
             &server_json("https://mcp.example/a"),
         );
-        d.harness_filter = vec![slug.to_owned()];
+        d.harness_filter = Some(vec![slug.to_owned()]);
         mcp_engine::converge(
             &io,
             std::slice::from_ref(&d),
@@ -1426,7 +1426,7 @@ fn a_converge_that_sees_user_content_flips_owns_file_false() {
         Some("eng"),
         &server_json("https://mcp.example/a"),
     );
-    d.harness_filter = vec!["cursor".into()];
+    d.harness_filter = Some(vec!["cursor".into()]);
     mcp_engine::converge(
         &io,
         std::slice::from_ref(&d),
@@ -1476,7 +1476,7 @@ fn the_engine_places_the_remote_the_gate_approved_not_the_first_typed_one() {
     let io = person_io(&fs, &layout, &home.0);
     let mut d = demand("s_two", "two", Some("eng"), "");
     d.server_json = br#"{"name":"io.test/two","description":"Two remotes.","version":"1.0.0","remotes":[{"type":"streamable-http"},{"type":"streamable-http","url":"https://second.example/mcp"}]}"#.to_vec();
-    d.harness_filter = vec!["cursor".into()];
+    d.harness_filter = Some(vec!["cursor".into()]);
     let out = mcp_engine::converge(&io, &[d], SYNTHETIC, &all_slugs(), &no_hold(), true);
     assert!(out.warnings.is_empty(), "{:?}", out.warnings);
     assert_eq!(state_of(&out, "s_two", "cursor").state, "current");
@@ -1496,7 +1496,7 @@ fn holds_and_targeted_runs_never_remove_standing_entries() {
         Some("eng"),
         &server_json("https://mcp.example/a"),
     );
-    d.harness_filter = vec!["cursor".into()];
+    d.harness_filter = Some(vec!["cursor".into()]);
     mcp_engine::converge(
         &io,
         std::slice::from_ref(&d),
@@ -1540,7 +1540,7 @@ fn intent_journal_recovery_heals_both_crash_orders_through_the_engine() {
         Some("eng"),
         &server_json("https://mcp.example/a"),
     );
-    d.harness_filter = vec!["cursor".into()];
+    d.harness_filter = Some(vec!["cursor".into()]);
     mcp_engine::converge(
         &io,
         std::slice::from_ref(&d),
@@ -1646,7 +1646,7 @@ fn a_fault_at_any_write_never_tears_state_and_the_next_converge_heals() {
             Some("eng"),
             &server_json("https://mcp.example/a"),
         );
-        d.harness_filter = vec!["cursor".into()];
+        d.harness_filter = Some(vec!["cursor".into()]);
         mcp_engine::converge(&io, &[d], SYNTHETIC, &all_slugs(), &no_hold(), true);
         fault.ops_attempted()
     };
@@ -1660,7 +1660,7 @@ fn a_fault_at_any_write_never_tears_state_and_the_next_converge_heals() {
             Some("eng"),
             &server_json("https://mcp.example/a"),
         );
-        d.harness_filter = vec!["cursor".into()];
+        d.harness_filter = Some(vec!["cursor".into()]);
         {
             let fault = FaultFs::new(fail_at);
             let io = ScopeIo {
@@ -1717,8 +1717,9 @@ fn a_fault_at_any_write_never_tears_state_and_the_next_converge_heals() {
 // surface is checkout-relative and hermetic by construction).
 // =================================================================================================
 
-/// The wave-1 slugs whose REAL user surfaces are Home-rooted (hermetic under a fake `$HOME`).
-const SAFE: &str = "harness = [\"cursor\", \"openclaw\"]";
+/// The wave-1 config files whose REAL user surfaces are Home-rooted (hermetic under a fake
+/// `$HOME`) — the dest narrowing every machine-scope fixture rides.
+const SAFE: &str = "dest = [\"~/.cursor/mcp.json\", \"~/.openclaw/openclaw.json\"]";
 
 /// Seed the fake home so cursor + openclaw detect (their detect dirs exist).
 fn seed_harness_dirs(home: &Path) {
@@ -1741,9 +1742,9 @@ fn a_workspace_mcp_bundle_lands_in_configs_reports_harnesses_and_caches_kind() {
         skills: vec![mcp_catalog_entry("s_linear", "linear", &v)],
         channels: Vec::new(),
     };
-    // The feed delivers; `[defaults.mcp]` narrows to the hermetic slugs.
+    // The explicit row delivers; its `dest` names the hermetic config files.
     rig.write_global(&format!(
-        "[bundles]\n\"{HOST}/{WS_NAME}\" = \"*\"\n\n[defaults.mcp]\n{SAFE}\n"
+        "[bundles]\n\"{HOST}/{WS_NAME}/linear\" = {{ {SAFE} }}\n"
     ));
     let ctx = rig.ctx_at(Some(&rig.work.0));
     let out = sweep(&ctx, &plane, &dir);
@@ -1831,9 +1832,20 @@ fn a_workspace_mcp_bundle_lands_in_configs_reports_harnesses_and_caches_kind() {
 /// store.
 #[test]
 fn a_workspace_mcp_subscribe_receipt_carries_the_typed_block() {
+    // PROJECT scope, so the breadth is hermetic without narrowing (a fresh subscribe row spells
+    // no `dest`, and project surfaces are checkout-relative whatever the dev env sets): the four
+    // project-capable agents engage deterministically — claude-code + cursor via detection under
+    // the fake home, codex + opencode via their seeded project files.
     let rig = Rig::new("sub-receipt");
     rig.seed_session();
     seed_harness_dirs(&rig.home.0);
+    std::fs::create_dir_all(rig.home.0.join(".claude")).unwrap();
+    let proj = Scratch::new("sub-receipt-co");
+    std::fs::create_dir_all(proj.0.join(".git")).unwrap();
+    std::fs::create_dir_all(proj.0.join(".codex")).unwrap();
+    std::fs::write(proj.0.join(".codex/config.toml"), b"").unwrap();
+    std::fs::write(proj.0.join("opencode.json"), b"").unwrap();
+    std::fs::write(proj.0.join(crate::manifest::MANIFEST_FILE), "[bundles]\n").unwrap();
     let v = mk_version(&[(
         "server.json",
         server_json("https://mcp.example/linear").as_bytes(),
@@ -1844,17 +1856,17 @@ fn a_workspace_mcp_subscribe_receipt_carries_the_typed_block() {
         skills: vec![mcp_catalog_entry("s_linear", "linear", &v)],
         channels: Vec::new(),
     };
-    // No feed row — the subscribe writes its own; `[defaults.mcp]` narrows to the hermetic slugs.
-    rig.write_global(&format!("[bundles]\n\n[defaults.mcp]\n{SAFE}\n"));
-    let ctx = rig.ctx_at(Some(&rig.work.0));
+    rig.write_global("[bundles]\n");
+    let ctx = rig.ctx_at(Some(&proj.0));
 
     let outcome = ops::add_reference(
         &ctx,
         &connect(&plane, &dir),
         None,
         &format!("{HOST}/{WS_NAME}/linear"),
-        true,
         false,
+        false,
+        &Default::default(),
     )
     .unwrap();
     let ops::AddRefOutcome::Applied(data) = outcome else {
@@ -1869,8 +1881,8 @@ fn a_workspace_mcp_subscribe_receipt_carries_the_typed_block() {
     assert_eq!(mcp.bundle, None, "no folder — the bytes live in the store");
     assert_eq!(
         mcp.agents.len(),
-        2,
-        "the narrowed breadth line: {:?}",
+        4,
+        "the project-scope breadth line: {:?}",
         mcp.agents
     );
     let note = data.note.clone().unwrap_or_default();
@@ -1893,7 +1905,7 @@ fn offline_sweeps_still_heal_configs_from_the_store() {
         channels: Vec::new(),
     };
     rig.write_global(&format!(
-        "[bundles]\n\"{HOST}/{WS_NAME}\" = \"*\"\n\n[defaults.mcp]\n{SAFE}\n"
+        "[bundles]\n\"{HOST}/{WS_NAME}/alpha\" = {{ {SAFE} }}\n"
     ));
     let ctx = rig.ctx_at(Some(&rig.work.0));
     sweep(&ctx, &plane, &dir);
@@ -2076,7 +2088,7 @@ fn a_project_config_symlink_escaping_the_checkout_is_refused_and_disclosed() {
     std::os::unix::fs::symlink(&outside.0, proj.0.join(".cursor")).unwrap();
     std::fs::write(
         proj.0.join(crate::manifest::MANIFEST_FILE),
-        format!("[bundles]\n\"{HOST}/{WS_NAME}/linear\" = {{ version = \"*\", harness = [\"cursor\"] }}\n"),
+        format!("[bundles]\n\"{HOST}/{WS_NAME}/linear\" = {{ version = \"*\", dest = [\".cursor/mcp.json\"] }}\n"),
     )
     .unwrap();
     let v = mk_version(&[(
@@ -2116,7 +2128,7 @@ fn a_project_config_symlink_escaping_the_checkout_is_refused_and_disclosed() {
 }
 
 #[test]
-fn row_harness_narrowing_beats_defaults_and_unknown_slugs_warn_once() {
+fn a_rows_dest_files_narrow_the_placement_and_unknown_files_warn_once() {
     let rig = Rig::new("narrow");
     rig.seed_session();
     seed_harness_dirs(&rig.home.0);
@@ -2129,27 +2141,35 @@ fn row_harness_narrowing_beats_defaults_and_unknown_slugs_warn_once() {
         skills: vec![mcp_catalog_entry("s_a", "alpha", &v)],
         channels: Vec::new(),
     };
-    // The default says cursor+openclaw; the ROW narrows to cursor alone and adds a bogus slug.
+    // BOTH hermetic agents are detected; the row's dest names cursor's file alone, plus a file
+    // no harness claims.
     rig.write_global(&format!(
-        "[bundles]\n\"{HOST}/{WS_NAME}/alpha\" = {{ version = \"*\", harness = [\"cursor\", \"notepad\"] }}\n\
-         \n[defaults.mcp]\nharness = [\"cursor\", \"openclaw\"]\n"
+        "[bundles]\n\"{HOST}/{WS_NAME}/alpha\" = {{ version = \"*\", dest = [\"~/.cursor/mcp.json\", \"~/.notepad/mcp.json\"] }}\n"
     ));
     let ctx = rig.ctx_at(Some(&rig.work.0));
     let out = sweep(&ctx, &plane, &dir);
     assert!(rig.home.0.join(".cursor/mcp.json").exists());
     assert!(
         !rig.home.0.join(".openclaw/openclaw.json").exists(),
-        "the row narrows PAST the default"
+        "a dest row is frozen to the files it names — detection adds nothing"
     );
     let unknown: Vec<&String> = out
         .warnings
         .iter()
-        .filter(|w| w.contains("MCP_HARNESS_UNKNOWN"))
+        .filter(|w| w.contains("MCP_DEST_UNKNOWN"))
         .collect();
     assert_eq!(
         unknown.len(),
         1,
-        "one warning per unknown slug: {unknown:?}"
+        "one warning per unknown file: {unknown:?}"
+    );
+    assert!(
+        unknown[0].contains("`~/.notepad/mcp.json` is not a known MCP config file"),
+        "{unknown:?}"
+    );
+    assert!(
+        unknown[0].contains("~/.codex/config.toml"),
+        "the refusal lists the known files: {unknown:?}"
     );
 }
 
@@ -2172,7 +2192,7 @@ fn a_tampered_local_row_is_held_with_the_typed_refusal_and_prior_entries_stay() 
     };
     std::fs::write(dir.join("server.json"), good("https://w.example/mcp", "eu")).unwrap();
     rig.write_global(&format!(
-        "[bundles]\n\"{}\" = {{ kind = \"mcp\", harness = [\"cursor\"] }}\n",
+        "[bundles]\n\"{}\" = {{ kind = \"mcp\", dest = [\"~/.cursor/mcp.json\"] }}\n",
         dir.display()
     ));
     let plane = FakePlane::new();
@@ -2265,8 +2285,26 @@ fn dual_scope_adoption_keeps_each_scopes_config_key_stable() {
     let never = |_s: &Session| -> ops::SessionTransports {
         unreachable!("the path door never dials a session")
     };
-    ops::add_mcp(&ctx, &never, None, dir.to_str().unwrap(), false, None).expect("project adopt");
-    ops::add_mcp(&ctx, &never, None, dir.to_str().unwrap(), true, None).expect("global adopt");
+    ops::add_mcp(
+        &ctx,
+        &never,
+        None,
+        dir.to_str().unwrap(),
+        false,
+        None,
+        &Default::default(),
+    )
+    .expect("project adopt");
+    ops::add_mcp(
+        &ctx,
+        &never,
+        None,
+        dir.to_str().unwrap(),
+        true,
+        None,
+        &Default::default(),
+    )
+    .expect("global adopt");
     let playout = crate::sidecar::existing_project_store(&rig.fs, &proj.0)
         .expect("the project adopt minted the checkout's store");
     let before = mcp_ledger::read(&rig.fs, &playout).unwrap();
@@ -2334,6 +2372,7 @@ fn remove_of_an_mcp_row_converges_inline_and_the_receipt_names_the_removals() {
         &[format!("{HOST}/{WS_NAME}/alpha")],
         None,
         true,
+        &Default::default(),
     )
     .unwrap();
     let ops::RemoveOutcome::Applied(data) = outcome else {
@@ -2374,7 +2413,7 @@ fn deliver_linear(rig: &Rig, v: &Version) -> (FakePlane, FakeDirectory) {
         channels: Vec::new(),
     };
     rig.write_global(&format!(
-        "[bundles]\n\"{HOST}/{WS_NAME}\" = \"*\"\n\n[defaults.mcp]\n{SAFE}\n"
+        "[bundles]\n\"{HOST}/{WS_NAME}/linear\" = {{ {SAFE} }}\n"
     ));
     (plane, dir)
 }
@@ -2491,7 +2530,7 @@ fn a_targeted_go_back_converges_the_configs_to_the_restored_document() {
         channels: Vec::new(),
     };
     rig.write_global(&format!(
-        "[bundles]\n\"{HOST}/{WS_NAME}\" = \"*\"\n\n[defaults.mcp]\n{SAFE}\n"
+        "[bundles]\n\"{HOST}/{WS_NAME}/linear\" = {{ {SAFE} }}\n"
     ));
     let ctx = rig.ctx_at(Some(&rig.work.0));
     sweep(&ctx, &plane, &dir);
@@ -2571,7 +2610,7 @@ fn a_targeted_go_back_never_reaches_a_narrowing_excluded_harness() {
         channels: Vec::new(),
     };
     rig.write_global(&format!(
-        "[bundles]\n\"{HOST}/{WS_NAME}\" = \"*\"\n\n[defaults.mcp]\nharness = [\"cursor\"]\n"
+        "[bundles]\n\"{HOST}/{WS_NAME}/linear\" = {{ dest = [\"~/.cursor/mcp.json\"] }}\n"
     ));
     let ctx = rig.ctx_at(Some(&rig.work.0));
     sweep(&ctx, &plane, &dir);

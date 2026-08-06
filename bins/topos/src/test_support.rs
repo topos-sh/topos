@@ -295,8 +295,16 @@ impl SessionInstall {
                 ops::init(ctx, false).map_err(err_str)?;
             }
             let connect = connect_session();
-            match ops::add_reference(ctx, &connect, None, reference, global, true)
-                .map_err(err_str)?
+            match ops::add_reference(
+                ctx,
+                &connect,
+                None,
+                reference,
+                global,
+                true,
+                &Default::default(),
+            )
+            .map_err(err_str)?
             {
                 ops::AddRefOutcome::Applied(data) => Ok(*data),
                 ops::AddRefOutcome::Described { data, .. } => {
@@ -324,7 +332,7 @@ impl SessionInstall {
         self.with_ctx(cwd, |ctx| {
             let connect = connect_session();
             let owned: Vec<String> = targets.iter().map(|t| (*t).to_owned()).collect();
-            ops::remove_project(ctx, &connect, &owned, None, true)
+            ops::remove_project(ctx, &connect, &owned, None, true, &Default::default())
                 .map(|r| r.is_some())
                 .map_err(err_str)
         })
@@ -334,8 +342,15 @@ impl SessionInstall {
     pub fn remove_global(&self, reference: &str) -> Result<(String, Option<String>), String> {
         self.with_ctx(None, |ctx| {
             let connect = connect_session();
-            match ops::remove_global(ctx, &connect, &[reference.to_owned()], None, true)
-                .map_err(err_str)?
+            match ops::remove_global(
+                ctx,
+                &connect,
+                &[reference.to_owned()],
+                None,
+                true,
+                &Default::default(),
+            )
+            .map_err(err_str)?
             {
                 ops::RemoveOutcome::Applied(d) => {
                     let item = d.items.into_iter().next().expect("one item");

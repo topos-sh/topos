@@ -37,10 +37,18 @@ generated `docs/cli.md` (`cargo xtask gen-cli-ref`).
   (workspace refs, a path adopted in place, a forge import, `add topos` for the built-in); a BARE
   NAME resolves against both the untracked local inventory and the connected workspaces' catalogs
   — one local dir adopts in place, a name only a workspace publishes subscribes to its canonical
-  reference, and either side ambiguous refuses naming every way out;
-  `remove` drops the row / writes `"off"` / rewrites a set line minus its members. Two-phase
-  (describe → `--yes`) for loss, a set split, and every git source (the listing is the point of
-  the command); everything else applies immediately with an undo-led receipt.
+  reference, and either side ambiguous refuses naming every way out. `-a <agent>`/`--dest
+  <folder>` on `add` freeze the row's `dest` (the `ops/dest_select` resolution: `-a` is registry/
+  descriptor sugar for the scope-correct folder or config file; unknown slugs refuse with the
+  registry list, closing `nothing changed`);
+  `remove` drops the row / writes `"off"` / rewrites a set line minus its members — a row edit
+  uninstalls its copies EAGERLY (one scope reconcile in the same invocation; edited copies kept
+  in place) — and `-a`/`--dest` on `remove` SUBTRACT destinations from the row's `dest`
+  (materialized first from the current resolved set on a no-dest row; the last subtraction drops
+  the row; a shared-folder-only copy refuses with both ways out). Two-phase
+  (describe → `--yes`) for an indeterminate edit scan, a set split, and every git source (the
+  listing is the point of the command); everything else applies immediately with an undo-led
+  receipt (a dest row's undo reconstructs `-a`/`--dest`).
 - **Contribute:** `publish` (a landed publish of a path-ref item transfers governance — catalog
   entry + the manifest line rewritten to the workspace reference), `review`, `revert`, `protect`,
   `invite` — op-WAL idempotent retry over each skill's session lane.
@@ -55,10 +63,12 @@ generated `docs/cli.md` (`cargo xtask gen-cli-ref`).
   recovery sweep, and the machine-local state documents (the forge auto-update clock + per-source
   check log, visited project stores, the offline delivery cache that keeps `status`/`list`
   honest).
-- `manifest/` (`keys`, `document`, `normal`, `scopes`) — the reference grammar, the
-  format-preserving `toml_edit` editor (property-tested exact inverse), the normal form, scope
-  discovery. `ops/manifest_edit` picks the file a verb edits and owns file birth + the
-  writer-lock + compare-and-swap discipline every manifest mutation rides.
+- `manifest/` (`keys`, `document`, `dest`, `normal`, `scopes`) — the reference grammar, the
+  format-preserving `toml_edit` editor (property-tested exact inverse), the `dest` vocabulary
+  (default destination spellings, the retired-`path`/`harness`/`[defaults]` rewrites, the
+  known-MCP-file table), the normal form, scope discovery. `ops/manifest_edit` picks the file a
+  verb edits and owns file birth + the writer-lock + compare-and-swap discipline every manifest
+  mutation rides.
 - `ops/` — the verbs: `add`, `remove`, `reconcile` (update), `sync_engine`, `publish`, `review`,
   `revert`, `protect`, `invite`, `login`/`loopback`, `status`, `auth`, `list`, `diff`, `log`,
   `init`, `fmt`, `uninstall`, `builtin` (the embedded meta-skill from `skills/topos/`),
@@ -96,9 +106,9 @@ generated `docs/cli.md` (`cargo xtask gen-cli-ref`).
   → ledger, failing CLOSED over an empty placement map) feeds a per-scope config CONVERGE over
   `topos-harness::mcp`'s pure drivers — server.json parsed fail-closed, per-harness surfaces
   joined onto detection (project surfaces containment-proven) and narrowed by ONE shared
-  resolution (the row's own `harness = [...]`, else `[defaults.mcp]`) so an add never places
-  where the next sweep would claw it back, removal via prior-matched keys with drift left in
-  place. ONE converge path serves every surface, the wholly-topos-owned Claude plugin dir
+  resolution (the row's `dest` config-file entries mapped to the harnesses that claim them;
+  no dest = every MCP-capable agent) so an add never places where the next sweep would claw it
+  back, removal via prior-matched keys with drift left in place. ONE converge path serves every surface, the wholly-topos-owned Claude plugin dir
   included (its `.mcp.json` is an ordinary driver surface; content topos did not write backs the
   whole surface off), and every entry point — the sweep, add's inline converge, a targeted
   accept/go-back, `remove` — serializes on the per-scope `locks/mcp.lock` (unavailable = a

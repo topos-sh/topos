@@ -17,9 +17,11 @@
 //!
 //! The submodules: [`keys`] — the joined-key reference grammar (`[bundles]` key shapes + the
 //! CLI input sugar); [`document`] — the `topos.toml` parse + the format-preserving editor +
-//! file birth; [`normal`] — the `fmt` normal form; [`scopes`] — scope discovery + the
-//! partitioned plans the reconcile drives.
+//! file birth; [`dest`] — the `dest` field's vocabulary (default destination spellings, the
+//! retired-spelling rewrites, the known-MCP-file table); [`normal`] — the `fmt` normal form;
+//! [`scopes`] — scope discovery + the partitioned plans the reconcile drives.
 
+pub(crate) mod dest;
 pub(crate) mod document;
 pub(crate) mod keys;
 pub(crate) mod normal;

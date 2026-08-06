@@ -139,6 +139,27 @@ Skills go into the folders your agents actually read — `~/.claude/skills/<name
 `~/.agents/skills/<name>`, or a project's own agent directories. The full table:
 [Supported agents](/docs/harnesses).
 
+## Pick which agents get it
+
+```bash
+topos add @acme/deploy-checklist -a codex -g
+topos add @acme/deploy-checklist --dest ~/team-skills -g
+topos remove deploy-checklist -a codex -g
+```
+
+By default a skill reaches every agent on the machine. `-a <agent>` (repeatable) installs it for
+just those agents — the flag is sugar for that agent's own skills folder — and `--dest <folder>`
+names an exact folder; together the union is the destination set. The choice is recorded on the
+line itself (`dest = ["~/.codex/skills"]`), so every later update keeps the copy where you asked.
+For an MCP server, `-a` picks whose config file gets the entry.
+
+The same flags on `remove` **subtract**: only that agent's copy leaves, the line keeps the rest,
+and the receipt says what remains (`removed (~/.codex/skills) — 2 folders remain`). Removing the
+last destination removes the line. On a line that named no destinations, a subtraction first
+writes out the line's current set minus the removed one — the receipt disclosing exactly that.
+When several agents share one copy (the shared `~/.agents/skills` folder), a per-agent removal
+refuses and offers both ways out: remove it for every agent, or re-add per-agent and re-run.
+
 Inside a repo, delivered folders keep **themselves** out of commits: each carries a one-line
 `.gitignore`, the way `node_modules` does. Topos writes nothing under `.git/` and never touches an
 ignore file you wrote. Its bookkeeping for that checkout lives in `<project>/.topos/`, which also
@@ -231,11 +252,11 @@ topos remove code-review -g
 
 From this project, or from your own machine-wide list. `remove` edits the same file `add` did and
 prints the undo — they are exact inverses, and neither reaches across: a skill your machine-wide
-file delivers is refused here, pointing at `-g`. Two cases describe first instead of applying:
+file delivers is refused here, pointing at `-g`. Removing a line also uninstalls the copies it
+placed, in the same command; an edited copy is never swept up with the removal — it stays on disk
+where you made it, and the receipt says so (`kept <name> — <path> is edited`). One case describes
+first instead of applying:
 
-- **Local work is involved.** A skill you've edited but not shared is described first, so you see
-  the draft before you decide. An edited copy is never swept up with the removal: it stays on disk
-  where you made it, and the receipt says so (`kept <name> — <path> is edited`).
 - **The line covers a set.** Removing one skill out of a channel or a whole-repo entry means
   replacing that one line with its current members — after which later additions by whoever curates
   it stop arriving through this file.
