@@ -2561,17 +2561,17 @@ struct EagerBundle {
     name: String,
     display: String,
     mcp: bool,
-    /// `(host, workspace)` for a workspace bundle's row — what lets the copies-stay disclosure
-    /// name the feed that still delivers it. `None` for a local/forge row (and for a narrow,
-    /// which keeps its row).
+    /// `(host, workspace)` for a workspace bundle's row — the identity every record lookup for
+    /// this bundle is cross-checked against (see [`scope_record`]). `None` for a local/forge row
+    /// (and for a narrow, which keeps its row).
     workspace: Option<(String, String)>,
     /// A NARROWED bundle: the subtracted dest entries + how many destinations remain.
     narrow: Option<(Vec<String>, u64)>,
     /// The MACHINE scope store's record for a whole-row edit, resolved BEFORE the apply — the
     /// verb's own retire rail needs it when the reconcile's cache/forge walks miss the record
     /// (and the same reconcile's orphan pass may retire it mid-run, after which the name no
-    /// longer resolves). `None` for a narrow, an mcp bundle, a project edit, or an unresolvable
-    /// name (an ambiguity fails toward not deleting).
+    /// longer resolves). `None` for a narrow, an mcp bundle, a project edit, an unresolvable
+    /// name (an ambiguity fails toward not deleting), or a record another workspace delivered.
     record: Option<SkillId>,
 }
 
@@ -2581,12 +2581,12 @@ fn eager_plan(ctx: &Ctx<'_>, target: &EditTarget, arms: &[Arm]) -> EagerPlan {
         bundles: Vec::new(),
     };
     // The pre-apply record lookup for a MACHINE whole-row edit (see [`EagerBundle::record`]).
-    let record_for = |name: &str, mcp: bool| -> Option<SkillId> {
+    let record_for = |name: &str, mcp: bool, ws: Option<&(String, String)>| -> Option<SkillId> {
         if mcp || target.scope != ManifestScope::Global {
             return None;
         }
         let sctx = scope_store_ctx(ctx, target)?;
-        super::resolve_skill(&sctx, name).ok().map(|(sid, _)| sid)
+        scope_record(&sctx, ws, name)
     };
     for arm in arms {
         match arm {
@@ -2602,7 +2602,7 @@ fn eager_plan(ctx: &Ctx<'_>, target: &EditTarget, arms: &[Arm]) -> EagerPlan {
                 plan.bundles.push(EagerBundle {
                     display: qualified_name(ctx, ws.as_ref(), name),
                     mcp,
-                    record: record_for(name, mcp),
+                    record: record_for(name, mcp, ws.as_ref()),
                     name: name.clone(),
                     narrow: None,
                     workspace: ws,
@@ -2621,7 +2621,7 @@ fn eager_plan(ctx: &Ctx<'_>, target: &EditTarget, arms: &[Arm]) -> EagerPlan {
                 plan.bundles.push(EagerBundle {
                     display: qualified_name(ctx, ws.as_ref(), name),
                     mcp,
-                    record: record_for(name, mcp),
+                    record: record_for(name, mcp, ws.as_ref()),
                     name: name.clone(),
                     narrow: None,
                     workspace: ws,
@@ -2649,6 +2649,35 @@ fn eager_plan(ctx: &Ctx<'_>, target: &EditTarget, arms: &[Arm]) -> EagerPlan {
         }
     }
     plan
+}
+
+/// The scope store's record for `name`, CROSS-CHECKED against the row's workspace identity. The
+/// store resolves a BARE NAME, so a workspace row whose own bundle has no record here would
+/// otherwise answer with a same-named record ANOTHER workspace delivered — and the eager rails
+/// would retire that record's placements and put them on this row's receipt. A recorded origin
+/// that disagrees resolves to nothing: no deletion, no claim (the fallback fails TOWARD keeping).
+/// An UNRECORDED origin (a local adopt, a forge import, a cache entry that is gone) is exactly the
+/// case the fallback exists for and still resolves, as does every local/forge row (`ws = None`).
+fn scope_record(sctx: &Ctx<'_>, ws: Option<&(String, String)>, name: &str) -> Option<SkillId> {
+    let (sid, _) = super::resolve_skill(sctx, name).ok()?;
+    if let Some((host, workspace)) = ws
+        && let Some((rec_host, rec_ws)) = record_origin(sctx, &sid)
+        && (&rec_host != host || &rec_ws != workspace)
+    {
+        return None;
+    }
+    Some(sid)
+}
+
+/// The `(host, workspace)` a stored record was delivered by, as this scope's delivery cache
+/// records it — `None` when nothing local names an origin for it.
+fn record_origin(sctx: &Ctx<'_>, sid: &SkillId) -> Option<(String, String)> {
+    let cache = crate::sync_status::read(sctx.fs, &sctx.layout).ok()?;
+    cache.workspaces.values().find_map(|e| {
+        (e.delivered.contains_key(sid.as_str()))
+            .then(|| Some((e.host.clone()?, e.workspace_name.clone()?)))
+            .flatten()
+    })
 }
 
 /// The in-invocation cleanup a row edit drives: ONE reconcile of the edited scope (the exact
@@ -2705,26 +2734,31 @@ fn eager_cleanup(
     let mut out: Vec<UninstalledBundle> = Vec::new();
     // What the MACHINE recipe still delivers AFTER the edit (and this run's cache refresh) —
     // the fallback rail's freeze: a name a surviving row or the cached feed still claims must
-    // not lose its copies to the retire below. Resolved lazily (offline by construction), once.
-    // `Some(true)` = still demanded (the copies stay, and the receipt may say why);
-    // `Some(false)` = provably undemanded; `None` = the resolution could not be read — the
-    // caller fails TOWARD the gate (copies stay) while claiming nothing it did not prove.
-    let mut demanded: Option<Option<std::collections::HashSet<String>>> = None;
-    let mut still_demanded = |ctx: &Ctx<'_>, name: &str| -> Option<bool> {
-        let set = demanded.get_or_insert_with(|| {
+    // not lose its copies to the retire below. Resolved lazily (offline by construction), once,
+    // and keyed name-and-reference → THE LINE that delivers it (the feed address when a
+    // workspace feed row does, `None` for any other line), so the copies-stay note names the
+    // real deliverer instead of assuming the dropped row's own workspace fed it.
+    let mut lines: Option<Option<std::collections::HashMap<String, Option<String>>>> = None;
+    let mut demand = |ctx: &Ctx<'_>, name: &str| -> Demand {
+        let resolved = lines.get_or_insert_with(|| {
             let (all, cache) = super::inventory::read_sources(ctx).ok()?;
             let resolved = super::inventory::resolve(ctx, &all, &cache).ok()?;
-            Some(
-                resolved
-                    .machine()
-                    .rows
-                    .iter()
-                    .filter(|r| r.bundle)
-                    .flat_map(|r| [r.name.clone(), r.reference.clone()])
-                    .collect(),
-            )
+            let mut map: std::collections::HashMap<String, Option<String>> =
+                std::collections::HashMap::new();
+            for row in resolved.machine().rows.iter().filter(|r| r.bundle) {
+                for key in [row.name.clone(), row.reference.clone()] {
+                    map.entry(key).or_insert_with(|| row.feed.clone());
+                }
+            }
+            Some(map)
         });
-        set.as_ref().map(|names| names.contains(name))
+        match resolved.as_ref() {
+            None => Demand::Unreadable,
+            Some(map) => match map.get(name) {
+                Some(feed) => Demand::Still(feed.clone()),
+                None => Demand::Gone,
+            },
+        }
     };
     // The dropped feeds' bundles (attributed by workspace id, exactly as before).
     for r in removed.iter().filter(|r| {
@@ -2744,9 +2778,11 @@ fn eager_cleanup(
     // (a config-placed bundle's removal row can carry the tracked id when no delivery ever
     // named it).
     for b in &plan.bundles {
+        // Cross-checked like the retire rail's own record: a same-named record another workspace
+        // delivered must not put ITS reconcile movements on this row's receipt.
         let store_id: Option<String> = scope_store_ctx(ctx, target)
-            .and_then(|sctx| super::resolve_skill(&sctx, &b.name).ok())
-            .map(|(sid, _)| sid.as_str().to_owned());
+            .and_then(|sctx| scope_record(&sctx, b.workspace.as_ref(), &b.name))
+            .map(|sid| sid.as_str().to_owned());
         let rows: Vec<&topos_types::results::PullSkill> = removed
             .iter()
             .filter(|r| {
@@ -2814,13 +2850,13 @@ fn eager_cleanup(
                     // sentence can never lie about them — and nothing below may move. An
                     // unreadable resolution keeps the copies too, claiming nothing.
                     if target.scope == ManifestScope::Global {
-                        match still_demanded(ctx, &b.name) {
-                            Some(true) => {
-                                note_still_delivered(ctx, target, b, items);
+                        match demand(ctx, &b.name) {
+                            Demand::Still(feed) => {
+                                note_still_delivered(b, feed.as_deref(), items);
                                 continue;
                             }
-                            None => continue,
-                            Some(false) => {}
+                            Demand::Unreadable => continue,
+                            Demand::Gone => {}
                         }
                     }
                     // Otherwise the sweep's cleaner walks the delivery cache and the forge
@@ -2873,38 +2909,46 @@ fn eager_cleanup(
     out
 }
 
+/// What the POST-EDIT machine resolution says about a bundle whose row just left (see the
+/// fallback rail in [`eager_cleanup`]).
+enum Demand {
+    /// A surviving line still delivers it, so the copies stay: the `<host>/<workspace>` address
+    /// when a workspace FEED row is that line, `None` for any other (a channel set, another
+    /// workspace's row, a local line).
+    Still(Option<String>),
+    /// Provably nothing in the machine recipe demands it any more.
+    Gone,
+    /// The resolution could not be read — nothing is claimed and nothing moves.
+    Unreadable,
+}
+
 /// The copies-stay disclosure for a WHOLE-ROW removal whose bundle the machine set STILL
-/// delivers: the row edit landed, but a standing line — the workspace's feed row, most often —
-/// keeps demanding the bundle, so its copies deliberately stay in place. Said on the item's own
-/// line (the note wins over the stock sentence), with the off switch when the feed is the line
-/// that still delivers: `topos remove -g <name>` IS the off write for a feed-delivered bundle.
-fn note_still_delivered(
-    ctx: &Ctx<'_>,
-    target: &EditTarget,
-    b: &EagerBundle,
-    items: &mut [RemoveItem],
-) {
+/// delivers: the row edit landed, but a standing line keeps demanding the bundle, so its copies
+/// deliberately stay in place. Said on the item's own line (the note wins over the stock
+/// sentence).
+///
+/// `feed` is the delivering line AS THE RESOLUTION REPORTS IT, never as the dropped row's shape
+/// suggests: a workspace feed address earns the named-feed wording plus the off switch (`topos
+/// remove -g <name>` IS the off write for a feed-delivered bundle), and every other line gets the
+/// honest generic sentence — naming a feed that does not carry this bundle would point the reader
+/// at a switch that does not reach it, so the deep read is what the note offers instead.
+fn note_still_delivered(b: &EagerBundle, feed: Option<&str>, items: &mut [RemoveItem]) {
     let Some(item) = items
         .iter_mut()
         .find(|it| it.kind == RemoveKind::ManifestRemoved && it.name == b.name)
     else {
         return;
     };
-    // The POST-EDIT plan: the row is gone, so what still delivers is a line that survives it.
-    let fed_by = b
-        .workspace
-        .as_ref()
-        .filter(|(host, ws)| plan_for(ctx, target).is_ok_and(|plan| plan.has_feed(host, ws)));
-    let note = match fed_by {
-        Some((_, ws)) => format!(
+    let note = match feed.and_then(|f| f.rsplit('/').next()) {
+        Some(ws) => format!(
             "the row is gone, but {ws}'s feed still delivers it here; the copies stay in place \
              (`topos remove -g {}` switches it off)",
             b.name
         ),
         None => format!(
-            "the row is gone, but another line of {} still delivers it here; the copies stay \
-             in place",
-            target.path.display()
+            "the row is gone, but another line here still delivers it; the copies stay in place \
+             (`topos list {}` shows which)",
+            b.name
         ),
     };
     item.note = Some(match item.note.take() {

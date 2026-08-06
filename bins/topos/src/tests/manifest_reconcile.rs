@@ -11834,3 +11834,223 @@ fn a_whole_row_remove_of_an_mcp_row_takes_its_config_entries_out() {
     let note = data.items[0].note.clone().unwrap_or_default();
     assert!(note.contains("server entry removed"), "{note}");
 }
+
+/// Two teams publish a `deploy` and only the OTHER team's copy is on this machine. Dropping the
+/// row of the workspace that has NO record here must move nothing: the scope store answers BARE
+/// names, so the fallback's clean would otherwise retire a stranger's record — deleting its files
+/// and putting them on this row's receipt.
+#[test]
+fn a_whole_row_remove_spares_another_workspaces_same_named_record() {
+    let rig = Rig::new("whole-cross-ws");
+    // The OTHER workspace's copy lands first — it is the only connection while it does.
+    seed_second_session(&rig);
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let v = one_file(b"# deploy\n");
+    let plane = FakePlane::new(log).with_version("s_ops_deploy", &v);
+    plane.serves(vec![delivered("s_ops_deploy", "deploy", &v)]);
+    let dir = FakeDirectory::new(
+        vec![catalog_entry("s_ops_deploy", "deploy", &v)],
+        Vec::new(),
+    );
+    rig.write_global("[bundles]\n\"beta.test/ops/deploy\" = { dest = [\"~/.codex/skills\"] }\n");
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    sweep_scoped(&ctx, &plane, &dir, ops::UpdateScope::Machine);
+    let placed = rig.home.0.join(".codex/skills/deploy/SKILL.md");
+    assert!(placed.exists());
+
+    // This machine's recipe now carries the FIRST team's same-named bundle instead — a row with
+    // no record of its own here. The plane is dark, so only the verb's own rail could move
+    // anything at all.
+    rig.seed_session();
+    rig.write_global(&format!("[bundles]\n\"{HOST}/{WS_NAME}/deploy\" = \"*\"\n"));
+    plane.serve_unreachable();
+    let data = match ops::remove_global(
+        &ctx,
+        &connect(&plane, &dir),
+        &[format!("{HOST}/{WS_NAME}/deploy")],
+        None,
+        false,
+        &Default::default(),
+    )
+    .unwrap()
+    {
+        ops::RemoveOutcome::Applied(data) => data,
+        other => panic!("a clean row drop applies immediately: {other:?}"),
+    };
+    // The other workspace's bytes AND its record are untouched.
+    assert_eq!(
+        std::fs::read(&placed).unwrap(),
+        b"# deploy\n",
+        "another workspace's copy is not this row's to delete"
+    );
+    let sid = crate::id::SkillId::parse("s_ops_deploy").unwrap();
+    assert!(
+        !rig.layout().published(&sid).retired.exists(),
+        "the other workspace's record is not retired"
+    );
+    // And the receipt claims nothing: no uninstall block, no cleaned dirs, no copies-leave line.
+    assert!(data.uninstalled.is_empty(), "{:?}", data.uninstalled);
+    assert!(
+        data.items[0].agent_dirs.is_empty(),
+        "{:?}",
+        data.items[0].agent_dirs
+    );
+    let tty = crate::render::remove_applied_tty(&data);
+    assert!(!tty.contains("leave this machine now"), "{tty}");
+}
+
+/// The copies-stay disclosure when a CHANNEL line is what still delivers the bundle: there is no
+/// feed carrying it, so the note may not name one — and `topos remove -g <name>`, which is the off
+/// write for a FEED-delivered bundle, gives way to the deep read that names the real line.
+#[test]
+fn removing_a_row_a_channel_line_still_delivers_names_no_feed() {
+    let rig = Rig::new("row-channel-stays");
+    rig.seed_session();
+    // The login's feed line (which assigns this person nothing), a channel line, and an explicit
+    // row for the same bundle — explicit beats set while the row stands.
+    rig.write_global(&format!(
+        "[bundles]\n\"{HOST}/{WS_NAME}\" = \"*\"\n\"{HOST}/{WS_NAME}/channels/backend\" = \"*\"\n\
+         \"{HOST}/{WS_NAME}/deploy\" = \"*\"\n"
+    ));
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let v = one_file(b"# deploy\n");
+    let plane = FakePlane::new(log).with_version("s_deploy", &v);
+    // The workspace's own feed assigns nothing — the channel line is the only other demand.
+    plane.serves(Vec::new());
+    let dir = FakeDirectory::new(
+        vec![catalog_entry("s_deploy", "deploy", &v)],
+        vec![WireChannelEntry {
+            name: "backend".into(),
+            mode: "open".into(),
+            builtin: false,
+            included: true,
+            skills: vec![WireChannelSkill {
+                skill_id: "s_deploy".into(),
+                name: "deploy".into(),
+            }],
+        }],
+    );
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    sweep_scoped(&ctx, &plane, &dir, ops::UpdateScope::Machine);
+    let placed = rig.work.0.join("skills/deploy/SKILL.md");
+    assert!(placed.exists());
+
+    let data = match ops::remove_global(
+        &ctx,
+        &connect(&plane, &dir),
+        &[format!("{HOST}/{WS_NAME}/deploy")],
+        None,
+        false,
+        &Default::default(),
+    )
+    .unwrap()
+    {
+        ops::RemoveOutcome::Applied(data) => data,
+        other => panic!("a clean row drop applies immediately: {other:?}"),
+    };
+    let text =
+        std::fs::read_to_string(rig.layout().home().join(crate::manifest::MANIFEST_FILE)).unwrap();
+    assert!(!text.contains("/deploy\""), "the row left: {text}");
+    assert!(
+        text.contains("channels/backend"),
+        "the set line stands: {text}"
+    );
+    assert!(
+        text.contains(&format!("\"{HOST}/{WS_NAME}\"")),
+        "the feed line stands too — and carries nothing of this name: {text}"
+    );
+    assert!(placed.exists(), "the channel-demanded copy stays in place");
+    assert!(data.uninstalled.is_empty(), "{:?}", data.uninstalled);
+    let note = data.items[0].note.clone().unwrap_or_default();
+    assert!(
+        note.contains("another line here still delivers it"),
+        "{note}"
+    );
+    assert!(note.contains("`topos list deploy` shows which"), "{note}");
+    assert!(
+        !note.contains("feed still delivers"),
+        "no feed carries this bundle: {note}"
+    );
+    let tty = crate::render::remove_applied_tty(&data);
+    assert!(tty.contains("the copies stay in place"), "{tty}");
+    assert!(!tty.contains("leave this machine now"), "{tty}");
+}
+
+/// The same disclosure over a CROSS-WORKSPACE same-name collision: this workspace's feed line
+/// stands but does not carry the bundle (its row was the only demand) — ANOTHER workspace's feed
+/// delivers the name. The note names the workspace whose feed actually delivers it, so the off
+/// switch it offers is the one that reaches the copies.
+#[test]
+fn removing_a_row_names_the_feed_that_actually_delivers_it() {
+    let rig = Rig::new("row-cross-feed");
+    rig.seed_session();
+    seed_second_session(&rig);
+    // This workspace's feed line + its explicit row; the feed itself assigns nothing.
+    rig.write_global(&format!(
+        "[bundles]\n\"{HOST}/{WS_NAME}\" = \"*\"\n\"{HOST}/{WS_NAME}/deploy\" = \"*\"\n"
+    ));
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let v = one_file(b"# deploy\n");
+    let plane = FakePlane::new(log).with_version("s_deploy", &v);
+    plane.serves(Vec::new());
+    let dir = FakeDirectory::new(vec![catalog_entry("s_deploy", "deploy", &v)], Vec::new());
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    sweep_scoped(&ctx, &plane, &dir, ops::UpdateScope::Machine);
+    let placed = rig.work.0.join("skills/deploy/SKILL.md");
+    assert!(placed.exists());
+
+    // The OTHER workspace's feed carries a bundle of the same name, and this machine adopts it.
+    sync_status::record(
+        &rig.fs,
+        &rig.layout(),
+        &[(
+            "w_ops".to_owned(),
+            sync_status::WorkspaceSync {
+                host: Some("beta.test".to_owned()),
+                workspace_name: Some("ops".to_owned()),
+                last_delivery_at: Some(1),
+                delivered: [(
+                    "s_ops_deploy".to_owned(),
+                    sync_status::DeliveredSkill {
+                        name: "deploy".to_owned(),
+                        ..Default::default()
+                    },
+                )]
+                .into_iter()
+                .collect(),
+                ..Default::default()
+            },
+        )],
+    )
+    .unwrap();
+    rig.write_global(&format!(
+        "[bundles]\n\"{HOST}/{WS_NAME}\" = \"*\"\n\"{HOST}/{WS_NAME}/deploy\" = \"*\"\n\
+         \"beta.test/ops\" = \"*\"\n"
+    ));
+    // Dark, so the frozen sweep moves nothing and the cached provenance stands.
+    plane.serve_unreachable();
+    let data = match ops::remove_global(
+        &ctx,
+        &connect(&plane, &dir),
+        &[format!("{HOST}/{WS_NAME}/deploy")],
+        None,
+        false,
+        &Default::default(),
+    )
+    .unwrap()
+    {
+        ops::RemoveOutcome::Applied(data) => data,
+        other => panic!("a clean row drop applies immediately: {other:?}"),
+    };
+    let note = data.items[0].note.clone().unwrap_or_default();
+    assert!(
+        note.contains("ops's feed still delivers it here"),
+        "the feed that DELIVERS it is named, not the row's own workspace: {note}"
+    );
+    assert!(
+        !note.contains(&format!("{WS_NAME}'s feed still delivers it here")),
+        "this workspace's feed line carries nothing of the kind: {note}"
+    );
+    assert!(placed.exists(), "the copies stay in place");
+    assert!(data.uninstalled.is_empty(), "{:?}", data.uninstalled);
+}
