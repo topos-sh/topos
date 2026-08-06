@@ -283,8 +283,14 @@ pub(crate) fn sync_one_planned(
                 let synced = settle_or_spread(
                     ctx, &sp, skill_id, &lock, &sync, &map, &managed, &work, scanned,
                 )?;
-                if synced > 0 {
-                    return Ok(synced_row(&name, &sync, synced));
+                if !synced.is_empty() {
+                    let mut row = synced_row(
+                        &name,
+                        &sync,
+                        u32::try_from(synced.len()).unwrap_or(u32::MAX),
+                    );
+                    row.destinations = synced;
+                    return Ok(row);
                 }
             } else if sync.draft_observed.is_some() {
                 // The draft resolved outside an apply (reverted by hand): the stale observation
@@ -385,6 +391,7 @@ pub(crate) fn sync_one_planned(
             let mut row = applied_row(&name, &sync, target_commit);
             row.harnesses = converge_explicit_mcp(ctx, mcp_record && explicit, skill_id, &name);
             row.kind = mcp_record.then(|| "mcp".to_owned());
+            mark_installed(ctx, &mut row, first_receive, &map, &managed);
             Ok(row)
         }
         ApplyClass::CleanForward => {
@@ -397,6 +404,7 @@ pub(crate) fn sync_one_planned(
                 let mut row = applied_row(&name, &sync, target_commit);
                 row.harnesses = converge_explicit_mcp(ctx, mcp_record && explicit, skill_id, &name);
                 row.kind = mcp_record.then(|| "mcp".to_owned());
+                mark_installed(ctx, &mut row, first_receive, &map, &managed);
                 Ok(row)
             } else {
                 // confirm-each / first-receive TOFU: re-disclose the digest as a one-tap offer; nothing
@@ -489,11 +497,25 @@ fn converge_explicit_mcp(
     let Ok(sid) = crate::id::SkillId::parse(skill_id) else {
         return Vec::new();
     };
-    let (states, warnings) = crate::mcp_engine::converge_bundle_now(ctx, &sid, name);
+    let (mut states, warnings) = crate::mcp_engine::converge_bundle_now(ctx, &sid, name);
     for w in warnings {
         eprintln!("topos update: {w}");
     }
+    prettify_state_files(ctx, &mut states);
     states
+}
+
+/// Abbreviate the config-file paths a receipt row's per-agent states carry (`~` under the home) —
+/// receipt rows only; the wire report and the delivery cache keep the absolute paths.
+pub(crate) fn prettify_state_files(
+    ctx: &Ctx<'_>,
+    states: &mut [topos_types::results::McpAgentState],
+) {
+    for s in states {
+        if let Some(f) = s.file.take() {
+            s.file = Some(super::inventory::pretty(ctx, Path::new(&f)));
+        }
+    }
 }
 
 /// The typed refusal every empty-map + unknowable-kind path answers: the record may be a
@@ -629,10 +651,11 @@ pub(crate) fn go_back(
     // best-effort sweep fact uses.
     let harnesses = if mcp_record {
         let sid = crate::id::SkillId::parse(skill_id)?;
-        let (states, warnings) = crate::mcp_engine::converge_bundle_now(ctx, &sid, &name);
+        let (mut states, warnings) = crate::mcp_engine::converge_bundle_now(ctx, &sid, &name);
         for w in warnings {
             eprintln!("topos update: {w}");
         }
+        prettify_state_files(ctx, &mut states);
         states
     } else {
         Vec::new()
@@ -650,6 +673,9 @@ pub(crate) fn go_back(
         merge: None,
         merge_preview: None,
         synced_placements: None,
+        destinations: Vec::new(),
+        kept: Vec::new(),
+        display: None,
         scope: None,
         harnesses,
         // The go-back's own row: a config-placed bundle says so, so the receipt that follows
@@ -956,7 +982,7 @@ fn settle_or_spread(
     managed: &[usize],
     work: &WorkTree,
     scanned: &ScannedBundle,
-) -> Result<u32, ClientError> {
+) -> Result<Vec<String>, ClientError> {
     let d_hex = to_hex(&scanned.bundle_digest);
     if sync.draft_observed.as_deref() != Some(d_hex.as_str()) {
         let observed = SyncState {
@@ -964,7 +990,7 @@ fn settle_or_spread(
             ..sync.clone()
         };
         doc::write_doc(ctx.fs, &sp.sync, &observed)?;
-        return Ok(0);
+        return Ok(Vec::new());
     }
     // Settled. The targets: every OTHER managed placement that is a sync target — a clean copy at
     // any other content, an edited copy the classifier proved STALE BEHIND this draft (or a
@@ -997,7 +1023,7 @@ fn settle_or_spread(
         }
     }
     if targets.is_empty() {
-        return Ok(0);
+        return Ok(Vec::new());
     }
     // The draft's bytes get a store identity FIRST (idempotent), so the recorded baselines below
     // always name recoverable content.
@@ -1026,8 +1052,9 @@ fn settle_or_spread(
             project_root: ctx.layout.project_root(),
         },
     )?;
-    // Count what actually landed (the skip arm may have left some targets put): a target whose
-    // recorded baseline NOW names the draft and did not before.
+    // Collect what actually landed (the skip arm may have left some targets put): a target whose
+    // recorded baseline NOW names the draft and did not before — as display paths, the receipt's
+    // destination column.
     let after = read_map_required(ctx, sp)?;
     let landed = targets
         .iter()
@@ -1041,8 +1068,10 @@ fn settle_or_spread(
                     .get(i)
                     .is_none_or(|st| st.materialized_sha.as_deref() != Some(d_hex.as_str()))
         })
-        .count();
-    Ok(u32::try_from(landed).unwrap_or(u32::MAX))
+        .filter_map(|&i| after.placements.get(i))
+        .map(|p| super::inventory::pretty(ctx, Path::new(p)))
+        .collect();
+    Ok(landed)
 }
 
 /// A scanned working tree as a [`topos_gitstore::RenderedBundle`] (the spread stages the draft's
@@ -1625,6 +1654,52 @@ fn read_required<T: serde::de::DeserializeOwned>(
 
 // ---- PullSkill row builders ----
 
+/// Flip an applied row to `installed` when this apply landed the bundle's FIRST bytes in this
+/// scope (the never-received baseline), and name the DESTINATIONS the receipt speaks in: the
+/// managed placement dirs for a file bundle, or — for a config-placed bundle, whose managed set
+/// is empty — the config files an inline converge just filled (`row.harnesses`).
+fn mark_installed(
+    ctx: &Ctx<'_>,
+    row: &mut PullSkill,
+    first_receive: bool,
+    map: &PlacementMap,
+    managed: &[usize],
+) {
+    if !first_receive {
+        return;
+    }
+    row.action = PullAction::Installed;
+    row.destinations = destination_paths(ctx, map, managed);
+    if row.destinations.is_empty() {
+        row.destinations = config_destinations(ctx, &row.harnesses);
+    }
+}
+
+/// The display destinations `indices` name in `map` — `~`-abbreviated, receipt-ready.
+fn destination_paths(ctx: &Ctx<'_>, map: &PlacementMap, indices: &[usize]) -> Vec<String> {
+    indices
+        .iter()
+        .filter_map(|&i| map.placements.get(i))
+        .map(|p| super::inventory::pretty(ctx, Path::new(p)))
+        .collect()
+}
+
+/// The config FILES a converge's per-agent states landed in (`current` entries only), deduped —
+/// what a config-placed bundle's `installed (…)` column counts. `~`-abbreviated.
+pub(crate) fn config_destinations(
+    ctx: &Ctx<'_>,
+    states: &[topos_types::results::McpAgentState],
+) -> Vec<String> {
+    let mut out: Vec<String> = states
+        .iter()
+        .filter(|s| s.state == "current")
+        .filter_map(|s| s.file.as_deref())
+        .map(|f| super::inventory::pretty(ctx, Path::new(f)))
+        .collect();
+    out.dedup();
+    out
+}
+
 fn state_row(name: &str, sync: &SyncState, action: PullAction) -> PullSkill {
     // `workspace_id` is stamped by the pull aggregator (`pull.rs`), which holds the follow-state; every row
     // builder here leaves it `None`.
@@ -1639,6 +1714,9 @@ fn state_row(name: &str, sync: &SyncState, action: PullAction) -> PullSkill {
         merge: None,
         merge_preview: None,
         synced_placements: None,
+        destinations: Vec::new(),
+        kept: Vec::new(),
+        display: None,
         scope: None,
         harnesses: Vec::new(),
         kind: None,
@@ -1658,6 +1736,9 @@ fn applied_row(name: &str, sync: &SyncState, _target: [u8; 32]) -> PullSkill {
         merge: None,
         merge_preview: None,
         synced_placements: None,
+        destinations: Vec::new(),
+        kept: Vec::new(),
+        display: None,
         scope: None,
         harnesses: Vec::new(),
         kind: None,
@@ -1677,6 +1758,9 @@ fn synced_row(name: &str, sync: &SyncState, n: u32) -> PullSkill {
         merge: None,
         merge_preview: None,
         synced_placements: Some(n),
+        destinations: Vec::new(),
+        kept: Vec::new(),
+        display: None,
         scope: None,
         harnesses: Vec::new(),
         kind: None,
@@ -1698,6 +1782,9 @@ fn offer_row(name: &str, sync: &SyncState, target: [u8; 32], target_digest_hex: 
         merge: None,
         merge_preview: None,
         synced_placements: None,
+        destinations: Vec::new(),
+        kept: Vec::new(),
+        display: None,
         scope: None,
         harnesses: Vec::new(),
         kind: None,
@@ -1725,6 +1812,9 @@ fn diverged_row(
         merge: None,
         merge_preview,
         synced_placements: None,
+        destinations: Vec::new(),
+        kept: Vec::new(),
+        display: None,
         scope: None,
         harnesses: Vec::new(),
         kind: None,

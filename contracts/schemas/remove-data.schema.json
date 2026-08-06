@@ -20,6 +20,13 @@
       "items": {
         "type": "string"
       }
+    },
+    "uninstalled": {
+      "description": "APPLY receipts of a feed-line drop: the bundles whose placed copies left this machine IN\nTHIS INVOCATION (the row edit uninstalls eagerly), one entry per bundle — with any edited\ncopy kept in place. Empty everywhere else. **INFERRED** (additive).",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/UninstalledBundle"
+      }
     }
   },
   "required": [
@@ -86,6 +93,11 @@
           "const": "manifest-removed"
         },
         {
+          "description": "The machine-wide FEED line was deleted: the workspace's feed stops delivering here, and the\ncopies it delivered were uninstalled in the same invocation ([`RemoveData::uninstalled`] —\nedited copies kept in place). **Additive.**",
+          "type": "string",
+          "const": "feed-removed"
+        },
+        {
           "description": "A broader layer still provides the item, so an EXCLUDE line was recorded in the nearest\nmanifest (the one negative state). **Additive.**",
           "type": "string",
           "const": "manifest-excluded"
@@ -100,6 +112,40 @@
           "type": "string",
           "const": "tracked-local-permanent"
         }
+      ]
+    },
+    "UninstalledBundle": {
+      "description": "One bundle an APPLIED removal uninstalled (or would have, had its copies not been edited).\n**INFERRED** (additive).",
+      "type": "object",
+      "properties": {
+        "destinations": {
+          "description": "The destinations the copies left — skill folders, or a config-placed bundle's config\nfiles. Display paths, `~`-abbreviated. Empty when every copy was edited and kept.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "kept": {
+          "description": "Locally-edited copies kept in place instead of uninstalled — display paths,\n`~`-abbreviated.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "kind": {
+          "description": "The catalog bundle kind (`\"mcp\"` for a config-placed bundle). Absent ⇒ an ordinary skill.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "description": "The workspace-qualified display name (`@<ws>/<name>` at the machine's one connected host,\nelse `<host>/<ws>/<name>`); a non-workspace bundle's plain name.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name"
       ]
     }
   }

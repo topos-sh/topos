@@ -24,6 +24,7 @@ mod builtin;
 mod connect;
 mod contribute;
 mod diff;
+mod feed_migration;
 mod fmt;
 mod init;
 pub(crate) mod inventory;
@@ -68,6 +69,7 @@ pub(crate) use builtin::{
     ensure_with as builtin_ensure_with, marker_in_frontmatter as builtin_marker_in_frontmatter,
 };
 pub(crate) use diff::{DiffBudget, diff, diff_resolved};
+pub(crate) use feed_migration::ensure_feed_migration;
 pub(crate) use fmt::fmt_manifest;
 pub(crate) use init::init;
 pub(crate) use inventory::ScopeView;

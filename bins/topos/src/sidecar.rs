@@ -255,6 +255,21 @@ impl Layout {
         self.state_dir().join("visited_stores.json")
     }
 
+    /// `state/connected.json` — the machine-local record of every workspace this machine has EVER
+    /// connected to (see `crate::connected`): the witness that lets `login` write a workspace's
+    /// feed line into the global manifest on the FIRST connection only, and never re-add a line
+    /// someone deleted. Engine-internal — it never surfaces on any receipt or `--json` field. A
+    /// plain doc — addresses, never a secret.
+    pub(crate) fn connected_path(&self) -> PathBuf {
+        self.state_dir().join("connected.json")
+    }
+
+    /// `locks/connected.lock` — the one writer at a time for `state/connected.json`. Every write
+    /// of that document unions over the last, so concurrent logins must not interleave.
+    pub(crate) fn connected_lock_file(&self) -> PathBuf {
+        self.locks_dir().join("connected.lock")
+    }
+
     /// `state/quiet_sweep.json` — when the last bare update sweep completed (epoch millis). The
     /// quiet hook's TTL self-throttle reads it; every completed bare sweep (quiet or explicit)
     /// refreshes it. A plain doc — one timestamp, never a secret.

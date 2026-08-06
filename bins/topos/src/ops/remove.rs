@@ -147,6 +147,7 @@ pub(crate) fn remove(
                 items,
                 applied: false,
                 undo: Vec::new(),
+                uninstalled: Vec::new(),
             },
             yes_argv,
         });
@@ -214,6 +215,7 @@ pub(crate) fn remove(
         items,
         applied: true,
         undo,
+        uninstalled: Vec::new(),
     }))
 }
 

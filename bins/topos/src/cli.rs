@@ -123,10 +123,13 @@ pub(crate) enum Command {
         rebuild: bool,
     },
     /// Log this machine in to topos. Opens your browser for a one-click approval, where you
-    /// choose (or create) the workspace to join; from then on, that workspace's skills arrive
-    /// and stay updated by themselves. Bare `topos login` uses topos.sh; name your own server
-    /// when self-hosting, a workspace to go straight to it, or paste an invitation link. To join
-    /// another workspace, log in again — already logged in to that server, it takes no browser.
+    /// choose (or create) the workspace to join. The first login to a workspace records its feed
+    /// line (`"<host>/<workspace>" = "*"`) in `~/.topos/topos.toml` — from then on, whatever that
+    /// workspace delivers to you installs here and stays updated by itself; delete the line
+    /// (`topos remove -g @<workspace>`) and it stays deleted — login never re-adds it. Bare
+    /// `topos login` uses topos.sh; name your own server when self-hosting, a workspace to go
+    /// straight to it, or paste an invitation link. To join another workspace, log in again —
+    /// already logged in to that server, it takes no browser.
     Login {
         /// The server, workspace, or invitation link. Omitted, uses the default server (or
         /// resumes a login already awaiting approval).
@@ -208,8 +211,10 @@ pub(crate) enum Command {
     /// nearest `topos.toml` at or above this folder, or your machine-wide file with `-g`
     /// (dropping a line, or switching one feed-delivered skill "off" on this machine). It never
     /// reaches across that line — a skill your machine-wide file delivers is refused here,
-    /// pointing at `-g`. Prints exactly what changed and how to undo it; asks first only when
-    /// removing would lose local work or rewrite a whole channel/repo line.
+    /// pointing at `-g`. `remove -g @<workspace>` drops that feed line and uninstalls what it
+    /// delivered in the same command — a copy you edited stays in place, disclosed. Prints
+    /// exactly what changed and how to undo it; asks first only when removing would lose local
+    /// work or rewrite a whole channel/repo line.
     Remove {
         /// The skill(s) to remove — or `@<workspace>` with `-g` to stop adopting its feed here.
         skill: Vec<String>,

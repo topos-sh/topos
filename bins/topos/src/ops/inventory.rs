@@ -5,11 +5,10 @@
 //!
 //! SCOPES ARE UNBLENDED, so the resolution is SECTIONED, never merged: the NEAREST project
 //! manifest (taken whole) when one covers the working directory, then the MACHINE scope — the
-//! global manifest when it exists (a COMPLETE recipe: only its rows deliver, and a workspace's
-//! feed flows iff a feed row says so), else the implicit recipe of one feed row per connected
-//! workspace. Within a scope the delivered set is the union of the rows (or the implicit feeds)
-//! minus the `"off"` switches, deduped by bundle identity — an explicit row beats any set's or
-//! any feed's delivery of the same bundle.
+//! global manifest, a COMPLETE recipe: only its rows deliver, and a workspace's feed flows iff a
+//! feed row says so; with no file nothing is demanded machine-wide. Within a scope the delivered
+//! set is the union of the rows minus the `"off"` switches, deduped by bundle identity — an
+//! explicit row beats any set's or any feed's delivery of the same bundle.
 //!
 //! Per line: the winning reference, ONE source (which manifest row — or which workspace's feed —
 //! asked), the delivery attribution (`assigned by <name>` / `picked by you`), and an honest state
@@ -97,7 +96,8 @@ pub(crate) struct Row {
 pub(crate) struct ScopeResolution {
     /// `"project"` or `"machine"`.
     pub scope: &'static str,
-    /// The governing manifest file (pretty-printed); `None` = the implicit feed recipe.
+    /// The governing manifest file (pretty-printed); `None` = no file (nothing demanded
+    /// machine-wide).
     pub manifest: Option<String>,
     pub rows: Vec<Row>,
     pub notes: Vec<String>,
@@ -201,7 +201,7 @@ pub(crate) fn resolve(
         .live()
         .map(|s| (s.host.clone(), s.workspace_name.clone()))
         .collect();
-    let person_plan = scopes::person_plan(ctx.fs, &ctx.layout, &connected)?;
+    let person_plan = scopes::person_plan(ctx.fs, &ctx.layout)?;
     let project = match ctx.roots.as_ref().and_then(|r| {
         r.cwd
             .as_deref()
@@ -593,7 +593,7 @@ fn scope_rows(
         }
     }
 
-    // 3. The FEEDS that flow here (the global file's feed rows, or the implicit recipe's).
+    // 3. The FEEDS that flow here (the global file's feed rows).
     for (host, workspace) in &plan.feeds {
         let feed = format!("{host}/{workspace}");
         let entry = ws_entry(cache, host, workspace);
@@ -841,8 +841,8 @@ pub(crate) fn awaiting_first_sync(
             if d.withdrawn || d.via_manifest {
                 continue;
             }
-            // The demand test: the workspace's feed flows here (the implicit recipe feeds every
-            // connected workspace, so it passes this too) and no `"off"` row covers the bundle —
+            // The demand test: the workspace's feed flows here (a feed row spells it — with no
+            // global file nothing is demanded machine-wide) and no `"off"` row covers the bundle —
             // or an explicit row claims the bundle outright, which delivers it whatever the feed
             // does.
             let demanded = plan.explicit_claims(host, workspace, &d.name)
@@ -1626,10 +1626,10 @@ mod tests {
         })
     }
 
-    /// NO global file: the machine behaves exactly as if one feed row per connected workspace
-    /// were written — the cached assignments itemize, attributed, sourced to the feed itself.
+    /// NO global file: nothing is demanded machine-wide — no rows, no counts, no regime. The
+    /// feed flows only when a feed row says so (login writes it on first connection).
     #[test]
-    fn the_implicit_recipe_itemizes_each_workspace_feed() {
+    fn no_global_file_demands_nothing_machine_wide() {
         let home = TempHome::new();
         let cwd = home.0.join("plain");
         std::fs::create_dir_all(&cwd).unwrap();
@@ -1649,7 +1649,47 @@ mod tests {
 
         let r = resolve_at(&home, &cwd);
         let m = r.machine();
-        assert!(m.manifest.is_none(), "the implicit recipe has no file");
+        assert!(m.manifest.is_none(), "no file to name");
+        assert!(
+            m.rows.is_empty(),
+            "{:?}",
+            m.rows.iter().map(|r| r.name.clone()).collect::<Vec<_>>()
+        );
+        assert_eq!(awaiting_at(&home, &cwd), Some(0));
+        assert!(r.regimes.is_empty(), "{:?}", r.regimes);
+    }
+
+    /// The workspace's FEED ROW itemizes the cached assignments — attributed, sourced to the
+    /// feed itself.
+    #[test]
+    fn a_feed_row_itemizes_the_workspace_feed() {
+        let home = TempHome::new();
+        let cwd = home.0.join("plain");
+        std::fs::create_dir_all(&cwd).unwrap();
+        home.session(
+            "topos.sh",
+            "w_acme",
+            "acme",
+            crate::sessions::SESSION_ACTIVE,
+        );
+        home.cache(
+            "w_acme",
+            "topos.sh",
+            "acme",
+            vec![assigned("deploy", Some("Dana")), assigned("notes", None)],
+            Vec::new(),
+        );
+        home.global("[bundles]\n\"topos.sh/acme\" = \"*\"\n");
+
+        let r = resolve_at(&home, &cwd);
+        let m = r.machine();
+        assert!(
+            m.manifest
+                .as_deref()
+                .is_some_and(|f| f.ends_with("topos.toml")),
+            "{:?}",
+            m.manifest
+        );
         let row = |n: &str| m.rows.iter().find(|i| i.name == n).expect("a row");
         assert_eq!(row("deploy").source, "the topos.sh/acme feed");
         assert_eq!(row("deploy").reference, "topos.sh/acme/deploy");
@@ -1666,7 +1706,7 @@ mod tests {
         // Never applied here (no store): the honest not-applied-yet state, no false claim.
         assert!(matches!(row("deploy").state, StatusItemState::Unknown));
         assert_eq!(awaiting_at(&home, &cwd), Some(2));
-        // The implicit recipe adopts everything the workspace assigns; nothing to disclose.
+        // The feed row adopts everything the workspace assigns; nothing to disclose.
         assert_eq!(r.regimes.len(), 1);
         assert_eq!(r.regimes[0].regime, "adopting all assigned");
         assert!(m.notes.is_empty(), "{:?}", m.notes);
@@ -1694,13 +1734,11 @@ mod tests {
             vec![assigned("ghost", Some("Dana"))],
             Vec::new(),
         );
+        // BOTH feed rows stand — a row outlives its session exactly as the cache does, so the
+        // COUNT is what must stay session-scoped.
+        home.global("[bundles]\n\"topos.sh/acme\" = \"*\"\n\"topos.sh/gone\" = \"*\"\n");
 
-        let r = resolve_at(&home, &cwd);
         assert_eq!(awaiting_at(&home, &cwd), Some(0));
-        assert!(
-            !r.machine().rows.iter().any(|i| i.name == "ghost"),
-            "a workspace with no session itemizes nothing"
-        );
 
         // A session for it — however it is minted — makes the same rows count again.
         home.session(
@@ -1733,6 +1771,7 @@ mod tests {
                 vec![assigned("deploy", None)],
                 Vec::new(),
             );
+            home.global("[bundles]\n\"topos.sh/acme\" = \"*\"\n");
             assert_eq!(awaiting_at(&home, &cwd), expected, "status {status}");
         }
     }
@@ -1761,8 +1800,11 @@ mod tests {
             Vec::new(),
         );
 
-        // No global file at all — the implicit recipe feeds every connected workspace, so both
-        // assignments are demanded and both count.
+        // No global file at all — nothing is demanded machine-wide, so nothing counts.
+        assert_eq!(awaiting_at(&home, &cwd), Some(0));
+
+        // The feed row demands the whole feed: both assignments count.
+        home.global("[bundles]\n\"topos.sh/acme\" = \"*\"\n");
         assert_eq!(awaiting_at(&home, &cwd), Some(2));
 
         // A global file with NO feed row for acme: the whole feed is withheld.
@@ -1815,10 +1857,10 @@ mod tests {
             vec![assigned("ghost", Some("Dana"))],
             Vec::new(),
         );
+        // The file demands BOTH addresses; the COUNT is what must stay live-session-scoped.
+        home.global("[bundles]\n\"topos.sh/acme\" = \"*\"\n\"other.test/acme\" = \"*\"\n");
 
-        let r = resolve_at(&home, &cwd);
         assert_eq!(awaiting_at(&home, &cwd), Some(0));
-        assert!(!r.machine().rows.iter().any(|i| i.name == "ghost"));
 
         // The HOST is what decides: a session on the server that cached it counts the same rows.
         home.session(
@@ -1865,6 +1907,7 @@ mod tests {
             "acme",
             crate::sessions::SESSION_ACTIVE,
         );
+        home.global("[bundles]\n\"topos.sh/acme\" = \"*\"\n");
 
         let r = resolve_at(&home, &cwd);
         assert!(
@@ -1906,6 +1949,7 @@ mod tests {
             "acme",
             crate::sessions::SESSION_ACTIVE,
         );
+        home.global("[bundles]\n\"topos.sh/acme\" = \"*\"\n");
         crate::sync_status::merge_delivered(
             &RealFs,
             &home.layout(),
@@ -1958,6 +2002,7 @@ mod tests {
             crate::sessions::SESSION_ACTIVE,
         );
         home.cache("w_acme", "topos.sh", "acme", Vec::new(), Vec::new());
+        home.global("[bundles]\n\"topos.sh/acme\" = \"*\"\n");
 
         let r = resolve_at(&home, &cwd);
         assert_eq!(

@@ -530,10 +530,12 @@ pub(crate) fn to_json(envelope: &JsonEnvelope) -> String {
     serde_json::to_string(envelope).unwrap_or_else(|_| "{\"ok\":false}".to_owned())
 }
 
-/// The `login` receipt — pending (the approval instructions) or the connected session, led by the
-/// acceptance disclosure (what connecting adopts; silent from here). ONE renderer for all three
-/// connected arms: the browser grant, the browser-free lane connect, and a workspace this machine
-/// already reaches.
+/// The `login` receipt — pending (the approval instructions) or the signed-in session. ONE
+/// renderer for all three connected arms: the browser grant, the browser-free lane connect, and a
+/// workspace this machine already reaches. The signed-in receipt leads with who and where; on
+/// this machine's FIRST connection to the workspace it states what the feed line it just wrote
+/// means, undo-led — a re-login prints the first line alone (the line's absence from the file is
+/// deliberate, and login never re-adds it).
 pub(crate) fn session_login_tty(data: &topos_types::results::LoginData) -> String {
     let server = if data.host.is_empty() {
         data.server.clone().unwrap_or_default()
@@ -554,13 +556,14 @@ pub(crate) fn session_login_tty(data: &topos_types::results::LoginData) -> Strin
             p.verification_uri, p.user_code
         );
     }
-    let label = data
-        .display_name
-        .clone()
-        .filter(|d| !d.is_empty())
-        .unwrap_or_else(|| data.name.clone());
-    let mut s = if data.session_status == "pending" {
-        format!(
+    if data.session_status == "pending" {
+        // The owner-approval hold: nothing flows yet, so the receipt promises nothing.
+        let label = data
+            .display_name
+            .clone()
+            .filter(|d| !d.is_empty())
+            .unwrap_or_else(|| data.name.clone());
+        let mut s = format!(
             "Connected to {} — the session awaits an owner's approval; nothing arrives until \
              then.",
             if data.name.is_empty() {
@@ -568,65 +571,40 @@ pub(crate) fn session_login_tty(data: &topos_types::results::LoginData) -> Strin
             } else {
                 &data.name
             }
-        )
-    } else {
-        // The standing promise, stated once: a session adopts whatever the workspace assigns you.
-        // The parenthetical is what that means RIGHT NOW — omitted entirely when the count could
-        // not be read, never guessed at.
-        let mut line = format!(
-            "Connected to {label} ({}) — adopts everything assigned to you{}",
-            address_of(data, &server),
-            match data.delivered {
-                Some(0) => " (currently none).".to_owned(),
-                Some(n) => format!(" (currently {n} bundle{}).", if n == 1 { "" } else { "s" }),
-                None => ".".to_owned(),
-            }
         );
-        // Name what the acceptance brings (a long list stays readable: first five + a remainder
-        // count). FUTURE TENSE, deliberately: login persists the session and arms the trigger, but
-        // it moves NO bytes — the delivery snapshot it just read is the count, not a landing.
-        // Saying "delivered here" sent an agent looking for files the next sweep had not written.
-        if data.delivered.is_some_and(|n| n > 0) {
-            let names = if data.delivered_names.len() > 5 {
-                format!(
-                    "{}, and {} more",
-                    data.delivered_names[..5].join(", "),
-                    data.delivered_names.len() - 5
-                )
-            } else {
-                data.delivered_names.join(", ")
-            };
-            let them = if data.delivered == Some(1) {
-                "it"
-            } else {
-                "them"
-            };
-            line.push('\n');
-            if names.is_empty() {
-                line.push_str(&format!(
-                    "`topos update` delivers {them} here, and updates arrive silently from then on."
-                ));
-            } else {
-                line.push_str(&format!(
-                    "{names} — `topos update` delivers {them} here, and updates arrive silently \
-                     from then on."
-                ));
-            }
+        if let Some(note) = &data.manifest_note {
+            s.push_str(&format!("\nmanifest: {note}"));
         }
-        line
-    };
-    // What the login did to this machine's own recipe (only when a file exists to change).
+        s.push_str(&format!(
+            "\nUndo: topos logout{}",
+            if data.name.is_empty() {
+                String::new()
+            } else {
+                format!(" {}", data.name)
+            }
+        ));
+        return s;
+    }
+    let mut s = format!("signed in to {}", address_of(data, &server));
+    if let Some(user) = data.user.as_deref().filter(|u| !u.is_empty()) {
+        s.push_str(&format!(" as {user}"));
+    }
+    if data.feed_row_added {
+        // The feed line this login wrote (only ever on the machine's first connection): what it
+        // means, then the paste-ready inverse.
+        s.push_str(&format!(
+            "\nwhat {} delivers to you installs on this machine",
+            data.name
+        ));
+        if !data.undo.is_empty() {
+            s.push_str(&format!("\n(undo: topos {})", data.undo.join(" ")));
+        }
+    }
+    // The honest disclosure when the feed line could NOT be recorded (an unreadable or
+    // unwritable file) — never a failed login.
     if let Some(note) = &data.manifest_note {
         s.push_str(&format!("\nmanifest: {note}"));
     }
-    s.push_str(&format!(
-        "\nUndo: topos logout{}",
-        if data.name.is_empty() {
-            String::new()
-        } else {
-            format!(" {}", data.name)
-        }
-    ));
     s
 }
 
@@ -956,13 +934,14 @@ fn counted(n: u64, noun: &str) -> String {
 }
 
 /// The scope section header — it leads with the governing FILE, so "why is this here" starts at
-/// the line that asked for it. The machine scope with no file names the implicit recipe honestly.
+/// the line that asked for it. The machine scope with no file says so honestly: no file, nothing
+/// demanded machine-wide.
 fn scope_header(scope: &str, manifest: Option<&str>) -> String {
     match (scope, manifest) {
         ("project", Some(f)) => format!("This folder — {f}"),
         ("project", None) => "This folder".to_owned(),
         (_, Some(f)) => format!("Machine-wide — {f}"),
-        (_, None) => "Machine-wide — your connected workspaces' feeds".to_owned(),
+        (_, None) => "Machine-wide — no global manifest; nothing demanded machine-wide".to_owned(),
     }
 }
 
@@ -1986,6 +1965,15 @@ fn remove_item_line(item: &RemoveItem, applied: bool) -> String {
                 item.name
             )
         }
+        RemoveKind::FeedRemoved => {
+            let manifest = item.manifest.as_deref().unwrap_or("topos.toml");
+            let verb = if applied { "removed" } else { "would remove" };
+            format!(
+                "{manifest}: {verb} the {} feed line — the copies it delivered leave this \
+                 machine now (an edited copy stays in place).",
+                item.name
+            )
+        }
         RemoveKind::ManifestExcluded => {
             let manifest = item.manifest.as_deref().unwrap_or("topos.toml");
             format!(
@@ -2026,16 +2014,60 @@ pub(crate) fn remove_describe_tty(data: &RemoveData, yes_argv: &[String]) -> Str
     s
 }
 
-/// The `remove` APPLY's TTY — undo-led on the reversible shape (the followed exclusion).
+/// The `remove` APPLY's TTY — undo-led on the reversible shape (the followed exclusion). A
+/// feed-line drop's receipt speaks in what MOVED: one aligned `- <name>   removed (<dest>)` line
+/// per bundle that lost copies, a kept line per edited copy left in place, then the paste-ready
+/// `(undo: …)` — the same lines the update receipt prints for the hand-edited equivalent.
 pub(crate) fn remove_applied_tty(data: &RemoveData) -> String {
-    let mut s = String::new();
+    let mut lines: Vec<String> = Vec::new();
     for item in &data.items {
-        s.push_str(&remove_item_line(item, true));
-        s.push('\n');
+        // The uninstall block below says what the feed drop did, concretely — the item's own
+        // summary line would only restate it vaguely.
+        if item.kind == RemoveKind::FeedRemoved && !data.uninstalled.is_empty() {
+            continue;
+        }
+        lines.push(remove_item_line(item, true));
     }
-    let mut s = s.trim_end().to_owned();
-    s.push_str(&undo_line(&data.undo));
+    let rows: Vec<(String, String)> = data
+        .uninstalled
+        .iter()
+        .filter(|u| !u.destinations.is_empty())
+        .map(|u| (format!("- {}", u.name), uninstalled_column(u)))
+        .collect();
+    let pad = rows.iter().map(|(n, _)| n.len()).max().unwrap_or(0);
+    for (name, column) in &rows {
+        lines.push(format!("{name:<pad$}   {column}"));
+    }
+    for u in &data.uninstalled {
+        if !u.kept.is_empty() {
+            let plain = u.name.rsplit('/').next().unwrap_or(&u.name);
+            lines.push(kept_line(plain, &u.kept));
+        }
+    }
+    let mut s = lines.join("\n");
+    if !data.undo.is_empty() {
+        if data.uninstalled.is_empty() {
+            s.push_str(&undo_line(&data.undo));
+        } else {
+            s.push_str(&format!("\n(undo: {})", argv_line(&data.undo)));
+        }
+    }
     s
+}
+
+/// The destination column of one uninstalled bundle — the same count/path rule the update
+/// receipt's removed rows use.
+fn uninstalled_column(u: &topos_types::results::UninstalledBundle) -> String {
+    let noun = if u.kind.as_deref() == Some("mcp") {
+        "config files"
+    } else {
+        "folders"
+    };
+    match u.destinations.as_slice() {
+        [] => "removed".to_owned(),
+        [one] => format!("removed ({one})"),
+        many => format!("removed ({} {noun})", many.len()),
+    }
 }
 
 /// The `protect` DESCRIBE's TTY — the level being set, the audience it governs, and the standing note.
@@ -2535,22 +2567,40 @@ pub(crate) fn pull_tty(data: &PullData, warnings: &[String], disclosures: &[Stri
         };
         return append_proposals_trailer(line, data.proposals_awaiting);
     }
+    use topos_types::results::PullAction;
     let mut up_to_date = 0usize;
-    let rows: Vec<(&str, String, Vec<String>)> = data
+    let mut kept_lines: Vec<String> = Vec::new();
+    let rows: Vec<(String, String, Vec<String>)> = data
         .skills
         .iter()
         .filter_map(|s| {
+            // The name a receipt row leads with: the workspace-qualified display where one is
+            // recorded, `+`/`-`-led for the rows that moved bytes in or out.
+            let shown = s.display.as_deref().unwrap_or(&s.skill);
+            if !s.kept.is_empty() {
+                kept_lines.push(kept_line(&s.skill, &s.kept));
+            }
             // An up-to-date row stays out of the table — UNLESS it is an mcp bundle with a
             // per-agent state that needs eyes (drift, a conflict, an unprovable surface): a
             // compact receipt must not swallow those.
             let noteworthy = s.harnesses.iter().any(|h| h.state != "current");
-            if matches!(s.action, topos_types::results::PullAction::UpToDate) && !noteworthy {
+            if matches!(s.action, PullAction::UpToDate) && !noteworthy {
                 up_to_date += 1;
                 return None;
             }
+            // A removal that uninstalled nothing (every copy edited, all kept) says so through
+            // its kept line alone — a `- … removed` row naming no destination would be false.
+            if s.action == PullAction::Removed && s.destinations.is_empty() && !s.kept.is_empty() {
+                return None;
+            }
+            let lead = match s.action {
+                PullAction::Installed => format!("+ {shown}"),
+                PullAction::Removed => format!("- {shown}"),
+                _ => s.skill.clone(),
+            };
             let (line, mut extra) = pull_row(s);
             extra.extend(s.harnesses.iter().map(mcp_agent_line));
-            Some((s.skill.as_str(), line, extra))
+            Some((lead, line, extra))
         })
         .collect();
 
@@ -2560,10 +2610,13 @@ pub(crate) fn pull_tty(data: &PullData, warnings: &[String], disclosures: &[Stri
     }
     let pad = rows.iter().map(|(n, ..)| n.len()).max().unwrap_or(0);
     for (name, line, extra) in &rows {
-        out.push_str(&format!("{name:<pad$}  {line}\n"));
+        out.push_str(&format!("{name:<pad$}   {line}\n"));
         for x in extra {
             out.push_str(&format!("    {x}\n"));
         }
+    }
+    for k in &kept_lines {
+        out.push_str(&format!("{k}\n"));
     }
     for w in warnings {
         out.push_str(&format!("warning: {w}\n"));
@@ -2586,7 +2639,7 @@ pub(crate) fn pull_tty(data: &PullData, warnings: &[String], disclosures: &[Stri
     // calling that row a skill is simply false. All-skills stays the ordinary word.
     let total = data.skills.len() + warnings.len();
     let noun = managed_noun(&data.skills);
-    if rows.is_empty() && warnings.is_empty() {
+    if rows.is_empty() && warnings.is_empty() && kept_lines.is_empty() {
         out.push_str(&format!(
             "Checked {total} managed {noun}(s) — all up to date."
         ));
@@ -2656,26 +2709,24 @@ fn notice_line(n: &topos_types::requests::WireNotice) -> String {
     }
 }
 
-/// One non-up-to-date skill's line (after the padded name) + any indented detail lines.
-/// One agent's MCP config outcome as a receipt sub-line (`agent: placed — restart Cursor`). The
-/// phrase for every state comes from the ONE shared vocabulary
-/// ([`crate::mcp_engine::state_phrase`]), which `add`'s own receipt reads too; an unrecognized
-/// state renders verbatim with its note.
+/// One MCP config outcome as a receipt sub-line, KEYED BY THE CONFIG FILE the entry lives in
+/// (receipts speak in destinations, never agents) — the agent slug keys only a state that landed
+/// in no file at all (not supported, unprovable). The phrase for every state comes from the ONE
+/// shared vocabulary ([`crate::mcp_engine::state_phrase`]), which `add`'s own receipt reads too;
+/// an unrecognized state renders verbatim with its note.
 pub(crate) fn mcp_agent_line(h: &topos_types::results::McpAgentState) -> String {
+    let key = h.file.as_deref().unwrap_or(&h.agent);
     match (h.state.as_str(), h.note.as_deref()) {
-        ("current", None) => format!("{}: current", h.agent),
-        ("drifted", _) => format!("{}: hand-edited — left in place", h.agent),
+        ("current", None) => format!("{key}: current"),
+        ("drifted", _) => format!("{key}: hand-edited — left in place"),
         (state, Some(note)) => {
-            format!(
-                "{}: {} — {note}",
-                h.agent,
-                crate::mcp_engine::state_phrase(state)
-            )
+            format!("{key}: {} — {note}", crate::mcp_engine::state_phrase(state))
         }
-        (state, None) => format!("{}: {}", h.agent, crate::mcp_engine::state_phrase(state)),
+        (state, None) => format!("{key}: {}", crate::mcp_engine::state_phrase(state)),
     }
 }
 
+/// One non-up-to-date skill's line (after the padded name) + any indented detail lines.
 fn pull_row(s: &PullSkill) -> (String, Vec<String>) {
     use topos_types::results::PullAction;
     let name = &s.skill;
@@ -2683,6 +2734,11 @@ fn pull_row(s: &PullSkill) -> (String, Vec<String>) {
         // Handled by the caller's compact summary.
         PullAction::UpToDate => (String::from("up to date"), Vec::new()),
         PullAction::FastForwarded => (String::from("fast-forwarded"), Vec::new()),
+        // The destination column: exactly one destination prints its path; several print a
+        // count in the bundle's own noun (folders for a skill, config files for an MCP server).
+        // Never an agent name, never an agent count.
+        PullAction::Installed => (destination_column("installed", s), Vec::new()),
+        PullAction::Removed => (destination_column("removed", s), Vec::new()),
         PullAction::Offered => {
             let v = s
                 .offer
@@ -2769,12 +2825,13 @@ fn pull_row(s: &PullSkill) -> (String, Vec<String>) {
         }
         PullAction::DraftSynced => {
             let n = s.synced_placements.unwrap_or(0);
-            let folders = if n == 1 {
-                "1 other agent folder".to_owned()
-            } else {
-                format!("{n} other agent folders")
+            let line = match s.destinations.as_slice() {
+                // One landing names its path — the destination convention.
+                [one] if n <= 1 => format!("synced your edits to {one}"),
+                _ if n == 1 => "synced your edits to 1 other folder".to_owned(),
+                _ => format!("synced your edits to {n} other folders"),
             };
-            (format!("synced your edits to {folders}"), Vec::new())
+            (line, Vec::new())
         }
         PullAction::Held => (
             format!(
@@ -2783,6 +2840,37 @@ fn pull_row(s: &PullSkill) -> (String, Vec<String>) {
             Vec::new(),
         ),
     }
+}
+
+/// The destination column of an installed/removed row: exactly ONE destination prints its path
+/// (`installed (~/.codex/skills)`), several print a count in the bundle's own noun (`installed
+/// (2 folders)` / `(2 config files)`), none prints the bare verb.
+fn destination_column(verb: &str, s: &PullSkill) -> String {
+    let noun = if s.kind.as_deref() == Some("mcp") {
+        "config files"
+    } else {
+        "folders"
+    };
+    match s.destinations.as_slice() {
+        [] => verb.to_owned(),
+        [one] => format!("{verb} ({one})"),
+        many => format!("{verb} ({} {noun})", many.len()),
+    }
+}
+
+/// The kept-line a removal prints for each locally-edited copy left in place — one line per
+/// bundle, byte-stable, leading with the PLAIN name (`topos list` takes it back): `kept <name> —
+/// <path> is edited (topos list <name>)` (several paths join with ", " and read "are edited").
+fn kept_line(name: &str, kept: &[String]) -> String {
+    let verb = if kept.len() == 1 {
+        "is edited"
+    } else {
+        "are edited"
+    };
+    format!(
+        "kept {name} — {} {verb} (topos list {name})",
+        kept.join(", ")
+    )
 }
 
 /// One human line for a merge PREVIEW (the in-memory dry run — a prediction, never a promise).
@@ -2944,14 +3032,15 @@ mod tests {
     use topos_types::persisted::ConflictPathKind;
     use topos_types::results::{
         AgentView, Conflict, ConflictPathReport, ListData, LogData, MergeReport, Offer,
-        PublishData, PullAction, PullData, PullSkill, RemoteSkill, SkillEntry, UntrackedEntry,
+        PublishData, PullAction, PullData, PullSkill, RemoteSkill, RemoveData, RemoveItem,
+        RemoveKind, SkillEntry, UntrackedEntry,
     };
 
     use crate::ops::ListOutcome;
 
     use super::{
         add_tty, auth_status_next_actions, auth_status_tty, list_tty, log_tty, publish_tty,
-        pull_tty, safe_message, status_tty, welcome_tty,
+        pull_row, pull_tty, remove_applied_tty, safe_message, status_tty, welcome_tty,
     };
 
     /// A synthetic invocation for the render tests: what a user typed past the binary name.
@@ -3029,6 +3118,9 @@ mod tests {
             merge: None,
             merge_preview: None,
             synced_placements: None,
+            destinations: Vec::new(),
+            kept: Vec::new(),
+            display: None,
             scope: None,
             harnesses: Vec::new(),
             kind: None,
@@ -3267,6 +3359,171 @@ mod tests {
         assert!(
             out.contains("`topos review <skill>@<hash> --approve`"),
             "{out}"
+        );
+    }
+
+    /// The receipt convention, byte for byte: destinations, never agents. A first
+    /// materialization's `+` rows lead with the workspace-qualified name, align on a three-space
+    /// gap, and count destinations in the bundle's own noun — folders for a skill, config files
+    /// for an MCP server.
+    #[test]
+    fn installed_rows_read_plus_name_and_destination_counts() {
+        let mut deploy = row("deploy-checklist", PullAction::Installed);
+        deploy.display = Some("@acme/deploy-checklist".to_owned());
+        deploy.destinations = vec![
+            "~/.claude/skills/deploy-checklist".to_owned(),
+            "~/.codex/skills/deploy-checklist".to_owned(),
+        ];
+        let mut linear = row("linear", PullAction::Installed);
+        linear.display = Some("@acme/linear".to_owned());
+        linear.kind = Some("mcp".to_owned());
+        linear.destinations = vec![
+            "~/.claude.json".to_owned(),
+            "~/.codex/config.toml".to_owned(),
+        ];
+        let data = PullData {
+            skills: vec![deploy, linear],
+            proposals_awaiting: 0,
+            notices: Vec::new(),
+            sync: Vec::new(),
+            scope: None,
+        };
+        let out = pull_tty(&data, &[], &[]);
+        assert!(
+            out.contains("+ @acme/deploy-checklist   installed (2 folders)\n"),
+            "{out}"
+        );
+        assert!(
+            out.contains("+ @acme/linear             installed (2 config files)\n"),
+            "{out}"
+        );
+        assert!(!out.contains("agent"), "never an agent: {out}");
+    }
+
+    /// Exactly ONE destination prints its path instead of a count — for a skill folder and for a
+    /// config file alike.
+    #[test]
+    fn a_single_destination_prints_its_path() {
+        let mut one_folder = row("deploy", PullAction::Installed);
+        one_folder.destinations = vec!["~/.codex/skills".to_owned()];
+        assert_eq!(pull_row(&one_folder).0, "installed (~/.codex/skills)");
+
+        let mut one_file = row("linear", PullAction::Installed);
+        one_file.kind = Some("mcp".to_owned());
+        one_file.destinations = vec!["~/.codex/config.toml".to_owned()];
+        assert_eq!(pull_row(&one_file).0, "installed (~/.codex/config.toml)");
+
+        let mut gone = row("x", PullAction::Removed);
+        gone.destinations = vec!["~/.claude/skills/x".to_owned()];
+        assert_eq!(pull_row(&gone).0, "removed (~/.claude/skills/x)");
+    }
+
+    /// A by-choice removal's `-` rows, kept line, and idempotent shape — the update receipt's
+    /// half of the hand-edit ≡ `remove -g` equivalence.
+    #[test]
+    fn removed_rows_read_minus_name_kept_lines_and_counts() {
+        let mut deploy = row("deploy-checklist", PullAction::Removed);
+        deploy.display = Some("@acme/deploy-checklist".to_owned());
+        deploy.destinations = vec![
+            "~/.claude/skills/deploy-checklist".to_owned(),
+            "~/.codex/skills/deploy-checklist".to_owned(),
+        ];
+        let mut linear = row("linear", PullAction::Removed);
+        linear.display = Some("@acme/linear".to_owned());
+        linear.kind = Some("mcp".to_owned());
+        linear.destinations = vec![
+            "~/.claude.json".to_owned(),
+            "~/.codex/config.toml".to_owned(),
+        ];
+        // Every copy edited: NO `-` row (nothing was uninstalled) — the kept line says it all.
+        let mut kept_only = row("coolify-deploy", PullAction::Removed);
+        kept_only.display = Some("@acme/coolify-deploy".to_owned());
+        kept_only.kept = vec!["~/.claude/skills/coolify-deploy".to_owned()];
+        let data = PullData {
+            skills: vec![deploy, linear, kept_only],
+            proposals_awaiting: 0,
+            notices: Vec::new(),
+            sync: Vec::new(),
+            scope: None,
+        };
+        let out = pull_tty(&data, &[], &[]);
+        assert!(
+            out.contains("- @acme/deploy-checklist   removed (2 folders)\n"),
+            "{out}"
+        );
+        assert!(
+            out.contains("- @acme/linear             removed (2 config files)\n"),
+            "{out}"
+        );
+        assert!(
+            out.contains(
+                "kept coolify-deploy — ~/.claude/skills/coolify-deploy is edited (topos list \
+                 coolify-deploy)\n"
+            ),
+            "{out}"
+        );
+        assert!(
+            !out.contains("- @acme/coolify-deploy"),
+            "an all-kept bundle earns no `-` row: {out}"
+        );
+    }
+
+    /// The eager feed-drop receipt, byte for byte — the final copy: aligned `-` rows, the kept
+    /// line, and the sugared `(undo: …)` trailer.
+    #[test]
+    fn the_feed_drop_receipt_prints_the_final_copy() {
+        use topos_types::results::UninstalledBundle;
+        let data = RemoveData {
+            items: vec![RemoveItem {
+                name: "acme".to_owned(),
+                kind: RemoveKind::FeedRemoved,
+                manifest: Some("~/.topos/topos.toml".to_owned()),
+                workspace_id: None,
+                agent_dirs: Vec::new(),
+                bytes_kept: true,
+                note: None,
+            }],
+            applied: true,
+            undo: vec![
+                "topos".to_owned(),
+                "add".to_owned(),
+                "-g".to_owned(),
+                "@acme".to_owned(),
+            ],
+            uninstalled: vec![
+                UninstalledBundle {
+                    name: "@acme/deploy-checklist".to_owned(),
+                    destinations: vec![
+                        "~/.claude/skills/deploy-checklist".to_owned(),
+                        "~/.codex/skills/deploy-checklist".to_owned(),
+                    ],
+                    kind: None,
+                    kept: Vec::new(),
+                },
+                UninstalledBundle {
+                    name: "@acme/linear".to_owned(),
+                    destinations: vec![
+                        "~/.claude.json".to_owned(),
+                        "~/.codex/config.toml".to_owned(),
+                    ],
+                    kind: Some("mcp".to_owned()),
+                    kept: Vec::new(),
+                },
+                UninstalledBundle {
+                    name: "@acme/coolify-deploy".to_owned(),
+                    destinations: Vec::new(),
+                    kind: None,
+                    kept: vec!["~/.claude/skills/coolify-deploy".to_owned()],
+                },
+            ],
+        };
+        assert_eq!(
+            remove_applied_tty(&data),
+            "- @acme/deploy-checklist   removed (2 folders)\n\
+             - @acme/linear             removed (2 config files)\n\
+             kept coolify-deploy — ~/.claude/skills/coolify-deploy is edited (topos list \
+             coolify-deploy)\n\
+             (undo: topos add -g @acme)"
         );
     }
 
@@ -3517,7 +3774,7 @@ mod tests {
         };
         let text = list_tty(&out);
         assert!(
-            text.starts_with("Machine-wide — your connected workspaces' feeds"),
+            text.starts_with("Machine-wide — no global manifest; nothing demanded machine-wide"),
             "{text}"
         );
         assert!(text.contains("(nothing installed in this scope)"), "{text}");
@@ -4182,7 +4439,7 @@ mod tests {
         };
         let text = status_tty(&quiet);
         assert!(
-            text.contains("Machine-wide — your connected workspaces' feeds"),
+            text.contains("Machine-wide — no global manifest; nothing demanded machine-wide"),
             "{text}"
         );
         assert!(
@@ -4720,61 +4977,73 @@ mod tests {
     }
 
     #[test]
-    fn the_login_receipt_states_the_standing_promise_and_its_count() {
+    fn the_login_receipt_is_signed_in_led_and_first_connection_disclosed() {
         use super::session_login_tty;
         use topos_types::results::{EnrollmentPending, LoginData};
 
-        let connected = |delivered: Option<u64>, names: &[&str]| LoginData {
-            workspace_id: "w_eng".to_owned(),
-            host: "topos.example.com".to_owned(),
-            name: "eng".to_owned(),
-            display_name: Some("Engineering".to_owned()),
-            server: Some("https://topos.example.com/api".to_owned()),
+        let connected = |feed_row_added: bool| LoginData {
+            workspace_id: "w_acme".to_owned(),
+            host: "topos.sh".to_owned(),
+            name: "acme".to_owned(),
+            display_name: Some("Acme".to_owned()),
+            server: Some("https://topos.sh/api".to_owned()),
             session_id: Some("sn_1".to_owned()),
             session_status: "active".to_owned(),
-            delivered,
-            delivered_names: names.iter().map(|n| (*n).to_owned()).collect(),
+            delivered: Some(2),
+            delivered_names: vec!["deploy".to_owned(), "code-review".to_owned()],
             pending: None,
             currency: None,
             triggers: Vec::new(),
             manifest_note: None,
+            user: Some("robert".to_owned()),
+            feed_row_added,
+            undo: if feed_row_added {
+                vec!["remove".to_owned(), "-g".to_owned(), "@acme".to_owned()]
+            } else {
+                Vec::new()
+            },
         };
 
-        // The standing promise leads, the live count is the parenthetical, and the undo is the
-        // tail — the ONE shape for a browser grant, a lane connect, and an already-connected run.
-        let text = session_login_tty(&connected(Some(2), &["deploy", "code-review"]));
-        assert!(
-            text.starts_with(
-                "Connected to Engineering (topos.example.com/eng) — adopts everything assigned \
-                 to you (currently 2 bundles)."
-            ),
-            "{text}"
-        );
-        assert!(
-            text.contains("\ndeploy, code-review — `topos update` delivers them here"),
-            "{text}"
-        );
-        assert!(text.ends_with("\nUndo: topos logout eng"), "{text}");
-
-        // Nothing assigned yet says so; an UNREADABLE count omits the parenthetical rather than
-        // guess a number (and never names skills it could not read).
-        let none = session_login_tty(&connected(Some(0), &[]));
-        assert!(none.contains("(currently none)."), "{none}");
-        assert!(!none.contains("topos update"), "{none}");
-        let unknown = session_login_tty(&connected(None, &[]));
-        assert!(
-            unknown.contains("adopts everything assigned to you.\nUndo:"),
-            "{unknown}"
+        // The FIRST connection: who + where, what the feed line means, the paste-ready inverse —
+        // byte-exact, the ONE shape for a browser grant and a lane connect alike.
+        assert_eq!(
+            session_login_tty(&connected(true)),
+            "signed in to topos.sh/acme as robert\n\
+             what acme delivers to you installs on this machine\n\
+             (undo: topos remove -g @acme)"
         );
 
-        // A pending session promises nothing until an owner acts.
-        let mut waiting = connected(None, &[]);
+        // A RE-LOGIN prints the first line alone: the feed line's absence from the file is
+        // deliberate, and no count or skill list dresses the receipt up.
+        assert_eq!(
+            session_login_tty(&connected(false)),
+            "signed in to topos.sh/acme as robert"
+        );
+
+        // Without the identity read the suffix is omitted — never guessed.
+        let mut nameless = connected(false);
+        nameless.user = None;
+        assert_eq!(session_login_tty(&nameless), "signed in to topos.sh/acme");
+
+        // A failed feed-line write is disclosed, never a failed login.
+        let mut refused = connected(false);
+        refused.manifest_note = Some("~/.topos/topos.toml could not be written".to_owned());
+        assert_eq!(
+            session_login_tty(&refused),
+            "signed in to topos.sh/acme as robert\n\
+             manifest: ~/.topos/topos.toml could not be written"
+        );
+
+        // A pending session promises nothing until an owner acts (unchanged copy).
+        let mut waiting = connected(false);
+        waiting.name = "eng".to_owned();
         waiting.session_status = "pending".to_owned();
         let text = session_login_tty(&waiting);
         assert!(
             text.starts_with("Connected to eng — the session awaits an owner's approval"),
             "{text}"
         );
+        assert!(text.ends_with("\nUndo: topos logout eng"), "{text}");
 
         // The awaiting-browser half: a BARE login has no workspace to name, so it leads with the
         // server and says where the choice happens; a named one spells the address.
@@ -4797,6 +5066,9 @@ mod tests {
             currency: None,
             triggers: Vec::new(),
             manifest_note: None,
+            user: None,
+            feed_row_added: false,
+            undo: Vec::new(),
         };
         let bare = session_login_tty(&pending(""));
         assert!(

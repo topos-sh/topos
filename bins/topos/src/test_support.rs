@@ -243,10 +243,18 @@ impl SessionInstall {
                         Some(cred.to_owned()),
                     ))
                 };
+            let directory_connect =
+                |base: &str, cred: &str| -> Box<dyn crate::plane::DirectorySource> {
+                    Box::new(UreqDeviceClient::new(
+                        base.to_owned(),
+                        Some(cred.to_owned()),
+                    ))
+                };
             let connectors = ops::LoginConnectors {
                 enroll: &enroll_connect,
                 delivery: &delivery_connect,
                 lane: &lane_connect,
+                directory: &directory_connect,
                 web_origin: "https://topos.sh".to_owned(),
             };
             ops::session_login(ctx, &connectors, address, false).map_err(err_str)

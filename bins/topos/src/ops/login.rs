@@ -8,9 +8,13 @@
 //! `login <workspace>` shortcut only PRESELECTS one for that chooser; the CLI never resolves a
 //! workspace itself and this unauthenticated flow is never an existence oracle.
 //!
-//! **Login is the acceptance event.** The receipt states what connecting adopts (the delivered
-//! count); from then on delivery is silent, npm-style — no consent layer, no per-bundle
-//! first-trust asks for workspace content. The flow is the RFC-8628 shape: card fetch at the
+//! **Login is the acceptance event.** On this machine's FIRST connection to a workspace the
+//! login writes that workspace's feed line (`"<host>/<ws>" = "*"`) into `~/.topos/topos.toml`
+//! (creating the file if needed) — automatic, undo-led on the receipt — and from then on
+//! delivery is silent, npm-style: no consent layer, no per-bundle first-trust asks for
+//! workspace content. First-and-never-again is a machine fact (`state/connected.json`, the
+//! engine-internal witness that survives logout): a feed line someone deleted stays deleted,
+//! and login does not argue with it. The flow is the RFC-8628 shape: card fetch at the
 //! address origin → re-root onto the declared API base → `POST /v1/login/authorize` → a `0600`
 //! WAL carrying the flow code → poll `POST /v1/login/token`; the granted poll carries the
 //! SESSION's credential (the promoted flow code) and the login persists it as one session row.
@@ -24,7 +28,7 @@ use topos_types::results::{EnrollmentPending, LoginData, LogoutData};
 use crate::ctx::Ctx;
 use crate::enroll;
 use crate::error::ClientError;
-use crate::manifest::document::{EntryValue, ManifestScope};
+use crate::manifest::document::EntryValue;
 use crate::plane::{DeliverySnapshot, DeliverySource, DeviceAuthPoll, LinkStatus, PlaneError};
 use crate::sessions::{self, SESSION_ACTIVE, SESSION_ENDED, SESSION_PENDING, Session};
 
@@ -41,12 +45,20 @@ pub(crate) type SessionDeliveryConnect<'a> =
 pub(crate) type SessionLaneConnect<'a> =
     dyn Fn(&str, &str) -> Box<dyn crate::plane::GovernanceSource> + 'a;
 
+/// Builds a CREDENTIALED directory transport for `(base_url, credential)` — the receipt's one
+/// identity read (`me`), naming who signed in.
+pub(crate) type SessionDirectoryConnect<'a> =
+    dyn Fn(&str, &str) -> Box<dyn crate::plane::DirectorySource> + 'a;
+
 /// The network seams `login` needs.
 pub(crate) struct LoginConnectors<'a> {
     pub enroll: &'a EnrollConnect<'a>,
     pub delivery: &'a SessionDeliveryConnect<'a>,
     /// The lane a machine already logged into this server connects the next workspace over.
     pub lane: &'a SessionLaneConnect<'a>,
+    /// The session's own directory lane — the best-effort `me` read the receipt's "as <user>"
+    /// rides.
+    pub directory: &'a SessionDirectoryConnect<'a>,
     /// The default WEB origin a bare `login` (and a bare workspace name) dials
     /// (`TOPOS_PLANE_URL`, else the hosted default).
     pub web_origin: String,
@@ -307,6 +319,9 @@ fn pending_data(wal: &enroll::PendingEnrollment) -> LoginData {
         currency: None,
         triggers: Vec::new(),
         manifest_note: None,
+        user: None,
+        feed_row_added: false,
+        undo: Vec::new(),
     }
 }
 
@@ -365,7 +380,10 @@ fn report_or_forget_connected(
         status,
         snapshot.as_ref(),
         None,
-        None,
+        ReceiptExtras {
+            user: me_display(connectors, &session, status),
+            ..ReceiptExtras::default()
+        },
     )))
 }
 
@@ -539,9 +557,10 @@ fn settle_abandoned(
 }
 
 /// The shared tail of a login that just MINTED a session (the browser grant and the lane-side
-/// connect alike): arm the auto-update trigger, read the acceptance disclosure, join this
-/// workspace's feed row, and build the receipt. Every step is best-effort — a login is never
-/// rolled back because a follow-up read failed; the receipt says so instead.
+/// connect alike): arm the auto-update trigger, read the acceptance disclosure, write this
+/// workspace's feed line on the machine's first connection, and build the receipt. Every step is
+/// best-effort — a login is never rolled back because a follow-up read failed; the receipt says
+/// so instead.
 fn connected_receipt(
     ctx: &Ctx<'_>,
     connectors: &LoginConnectors<'_>,
@@ -562,29 +581,49 @@ fn connected_receipt(
     } else {
         None
     };
-    // The machine's own recipe, when it exists: this workspace's feed row joins it, so the file
-    // keeps saying the whole truth about what lands here. No file = nothing to do (an absent file
-    // already behaves as one feed row per connected workspace), and no other workspace's rows are
-    // ever touched — a feed row someone deleted stays deleted.
-    let manifest_note = record_feed_row(ctx, &session.host, &session.workspace_name);
+    // The feed line: written into the machine's own recipe on this machine's FIRST connection to
+    // the workspace (creating the file if needed), and never again — a line someone deleted stays
+    // deleted. No other workspace's rows are ever touched.
+    let (feed_row_added, manifest_note) =
+        record_feed_row(ctx, &session.host, &session.workspace_name);
+    let undo = if feed_row_added {
+        feed_undo(ctx, &session.host, &session.workspace_name)
+    } else {
+        Vec::new()
+    };
     connected_data(
         session,
         &session.status,
         snapshot.as_ref(),
         currency,
-        manifest_note,
+        ReceiptExtras {
+            user: me_display(connectors, session, &session.status),
+            feed_row_added,
+            undo,
+            manifest_note,
+        },
     )
 }
 
+/// What only the receipt carries beyond the session row: the signed-in identity, the
+/// feed-line-written fact + its undo, and the honest note when the line could not be recorded.
+#[derive(Default)]
+struct ReceiptExtras {
+    user: Option<String>,
+    feed_row_added: bool,
+    undo: Vec<String>,
+    manifest_note: Option<String>,
+}
+
 /// The ONE connected-session payload — the browser grant, the lane-side connect, and the
-/// already-connected report all render from this shape (`currency`/`manifest_note` are the two
-/// things only a fresh mint has done).
+/// already-connected report all render from this shape (`currency` and the feed-line half of
+/// `extras` are things only a fresh mint can have done).
 fn connected_data(
     session: &Session,
     status: &str,
     snapshot: Option<&DeliverySnapshot>,
     currency: Option<topos_types::TriggerReport>,
-    manifest_note: Option<String>,
+    extras: ReceiptExtras,
 ) -> LoginData {
     LoginData {
         workspace_id: session.workspace_id.clone(),
@@ -601,58 +640,104 @@ fn connected_data(
         pending: None,
         currency,
         triggers: Vec::new(),
-        manifest_note,
+        manifest_note: extras.manifest_note,
+        user: extras.user,
+        feed_row_added: extras.feed_row_added,
+        undo: extras.undo,
     }
 }
 
-/// Append THIS workspace's feed row to the machine's own `topos.toml` — when one exists. A file
-/// that is absent is left absent (it already behaves exactly as one feed row per connected
-/// workspace, and login is not the moment to take over a person's file); an existing file gets
-/// exactly one row added, and nothing else in it is read as an instruction — a feed row someone
-/// deleted for another workspace stays deleted. Best-effort: a refusal is DISCLOSED on the
-/// receipt, never a failed login.
-fn record_feed_row(ctx: &Ctx<'_>, host: &str, workspace: &str) -> Option<String> {
-    let path = ctx.layout.home().join(crate::manifest::MANIFEST_FILE);
-    // The same writer lock every manifest mutation takes — this append is a read-modify-write too.
-    let _guard = super::manifest_edit::lock_manifest(ctx, &path).ok()?;
-    let bytes = ctx.fs.read_opt(&path).ok()??;
-    let text = String::from_utf8(bytes).ok()?;
+/// The signed-in person's display identity, read over the session's own directory lane —
+/// best-effort (the receipt goes out without the name rather than fail a login on it), and only
+/// for an ACTIVE session.
+fn me_display(connectors: &LoginConnectors<'_>, session: &Session, status: &str) -> Option<String> {
+    if status != SESSION_ACTIVE {
+        return None;
+    }
+    (connectors.directory)(&session.base_url, &session.credential)
+        .me(&session.workspace_id)
+        .ok()
+        .map(|m| m.principal)
+        .filter(|p| !p.is_empty())
+}
+
+/// The feed line's paste-ready inverse (argv tokens, `topos`-less): the `@ws` sugar when this
+/// machine's ONE connected host resolves it — the same default-host rule every verb's sugar
+/// uses — else the full `<host>/<ws>` spelling.
+fn feed_undo(ctx: &Ctx<'_>, host: &str, workspace: &str) -> Vec<String> {
+    let reference = match super::manifest_edit::manifest_host(ctx) {
+        Some(h) if h == host => format!("@{workspace}"),
+        _ => format!("{host}/{workspace}"),
+    };
+    vec!["remove".to_owned(), "-g".to_owned(), reference]
+}
+
+/// Write THIS workspace's feed line into the machine's own `topos.toml` — on this machine's
+/// FIRST connection to the workspace, and never again. The witness (`state/connected.json`)
+/// decides "first", and it survives logout: a feed line someone deleted stays deleted through
+/// any number of re-logins, because absence of the line on a machine that connected before is a
+/// deliberate statement. The file is CREATED when it does not exist (header only — login is the
+/// only automatic feed-line author); a line already standing counts as success (recorded, never
+/// rewritten); and the witness records the workspace only once the line provably stands, so a
+/// failed write retries on the next login. Best-effort: a refusal is DISCLOSED on the receipt,
+/// never a failed login. Answers `(written_this_login, disclosure)`.
+fn record_feed_row(ctx: &Ctx<'_>, host: &str, workspace: &str) -> (bool, Option<String>) {
+    // The witness gate — an unreadable witness reads as "held" (never re-add on a guess), and
+    // is never surfaced.
+    if !crate::connected::first_connection(ctx.fs, &ctx.layout, host, workspace) {
+        return (false, None);
+    }
     let reference = format!("{host}/{workspace}");
-    let mut editor =
-        match crate::manifest::document::ManifestEditor::open(&text, ManifestScope::Global) {
-            Ok(e) => e,
-            Err(e) => {
-                return Some(format!(
-                    "{} could not be read ({e}) — it was left untouched; fix it and add \
-                     `\"{reference}\" = \"*\"` to take {workspace}'s whole feed",
-                    path.display()
-                ));
-            }
-        };
+    let target = super::manifest_edit::global_target(ctx);
+    // The same writer lock every manifest mutation takes — this append is a read-modify-write too.
+    let Ok(_guard) = super::manifest_edit::lock_manifest(ctx, &target.path) else {
+        return (false, None);
+    };
+    let mut editor = match super::manifest_edit::open_for_edit(ctx, &target) {
+        Ok(opened) => opened.editor,
+        Err(e) => {
+            return (
+                false,
+                Some(format!(
+                    "{} could not be opened ({}) — it was left untouched; add \
+                     `\"{reference}\" = \"*\"` there to take {workspace}'s whole feed",
+                    target.path.display(),
+                    e.detail()
+                )),
+            );
+        }
+    };
     if editor.row(&reference).is_some() {
-        return Some(format!(
-            "{} already takes {workspace}'s feed — unchanged",
-            path.display()
-        ));
+        // The line already stands (written by hand, or an earlier login whose witness write was
+        // lost): success — record the witness, rewrite nothing.
+        let _ = crate::connected::record(ctx.fs, &ctx.layout, host, workspace);
+        return (false, None);
     }
     if let Err(e) = editor.set_row(&reference, &EntryValue::Star) {
-        return Some(format!(
-            "{} was left untouched ({e}) — add `\"{reference}\" = \"*\"` there to take \
-             {workspace}'s whole feed",
-            path.display()
-        ));
+        return (
+            false,
+            Some(format!(
+                "{} was left untouched ({e}) — add `\"{reference}\" = \"*\"` there to take \
+                 {workspace}'s whole feed",
+                target.path.display()
+            )),
+        );
     }
-    match editor.write(ctx.fs, &path) {
-        Ok(()) => Some(format!(
-            "added `\"{reference}\" = \"*\"` to {} — this machine takes whatever {workspace} \
-             gives you; delete that line to take it bundle by bundle",
-            path.display()
-        )),
-        Err(e) => Some(format!(
-            "{} could not be written ({}) — it was left untouched",
-            path.display(),
-            e.detail()
-        )),
+    match editor.write(ctx.fs, &target.path) {
+        Ok(()) => {
+            // The line stands: only now does the witness remember the workspace (a failed write
+            // above leaves it unrecorded, so the next login retries).
+            let _ = crate::connected::record(ctx.fs, &ctx.layout, host, workspace);
+            (true, None)
+        }
+        Err(e) => (
+            false,
+            Some(format!(
+                "{} could not be written ({}) — it was left untouched",
+                target.path.display(),
+                e.detail()
+            )),
+        ),
     }
 }
 
@@ -847,12 +932,12 @@ mod tests {
     use crate::fs_seam::RealFs;
     use crate::ids::{RealClock, RealIds};
     use crate::plane::{
-        ConnectedSession, DeliverySkill, DeviceAuthStart, EnrollSource, EnrolledGrant,
-        EnrolledWorkspace, GovernanceSource,
+        ConnectedSession, DeliverySkill, DeviceAuthStart, DirectorySource, EnrollSource,
+        EnrolledGrant, EnrolledWorkspace, GovernanceSource,
     };
     use crate::sidecar::Layout;
     use topos_harness::ClaudeCode;
-    use topos_types::requests::WireProtocolCard;
+    use topos_types::requests::{WireMe, WireProtocolCard};
 
     fn scratch(tag: &str) -> PathBuf {
         use std::sync::atomic::{AtomicU32, Ordering};
@@ -1040,6 +1125,88 @@ mod tests {
         }
     }
 
+    /// A fake directory lane answering ONLY `me` — the receipt's identity read. `principal:
+    /// None` scripts the fault arm (the receipt goes out nameless, never fails).
+    #[derive(Clone)]
+    struct FakeMe {
+        principal: Option<String>,
+        calls: Rc<RefCell<usize>>,
+    }
+    impl Default for FakeMe {
+        fn default() -> Self {
+            Self {
+                principal: Some("robert".to_owned()),
+                calls: Rc::default(),
+            }
+        }
+    }
+    impl DirectorySource for FakeMe {
+        fn me(&self, workspace_id: &str) -> Result<WireMe, ClientError> {
+            *self.calls.borrow_mut() += 1;
+            match &self.principal {
+                Some(p) => Ok(WireMe {
+                    workspace_id: workspace_id.to_owned(),
+                    name: "eng".to_owned(),
+                    display_name: "Engineering".to_owned(),
+                    address: "https://topos.example.com/eng".to_owned(),
+                    principal: p.clone(),
+                    role: "member".to_owned(),
+                    invited_by: None,
+                    session_status: Some("active".to_owned()),
+                    link_status: "active".to_owned(),
+                }),
+                None => Err(ClientError::Plane("unreachable".to_owned())),
+            }
+        }
+        fn channels_index(
+            &self,
+            _w: &str,
+        ) -> Result<topos_types::requests::WireChannelIndex, ClientError> {
+            unreachable!()
+        }
+        fn skills_index(
+            &self,
+            _w: &str,
+        ) -> Result<topos_types::requests::WireSkillIndex, ClientError> {
+            unreachable!()
+        }
+        fn proposals_index(
+            &self,
+            _w: &str,
+        ) -> Result<topos_types::requests::WireProposalIndex, ClientError> {
+            unreachable!()
+        }
+        fn skill_log(
+            &self,
+            _w: &str,
+            _s: &str,
+        ) -> Result<topos_types::requests::WireSkillLog, ClientError> {
+            unreachable!()
+        }
+        fn reach(
+            &self,
+            _w: &str,
+            _s: &str,
+        ) -> Result<topos_types::requests::WireReach, ClientError> {
+            unreachable!()
+        }
+        fn channel_place(&self, _w: &str, _c: &str, _s: &str) -> Result<(), ClientError> {
+            unreachable!()
+        }
+        fn channel_unplace(&self, _w: &str, _c: &str, _s: &str) -> Result<(), ClientError> {
+            unreachable!()
+        }
+        fn protect_skill(&self, _w: &str, _s: &str, _l: &str) -> Result<(), ClientError> {
+            unreachable!()
+        }
+        fn protect_channel(&self, _w: &str, _c: &str, _l: &str) -> Result<(), ClientError> {
+            unreachable!()
+        }
+        fn ack_notices(&self, _w: &str, _ids: &[String]) -> Result<(), ClientError> {
+            unreachable!()
+        }
+    }
+
     fn granted(status: LinkStatus) -> DeviceAuthPoll {
         DeviceAuthPoll::Granted(EnrolledGrant {
             credential: "sess-secret".to_owned(),
@@ -1055,10 +1222,12 @@ mod tests {
     }
 
     /// The whole connector set over one script: the enrollment fake, one delivery answer for
-    /// every dial, and a lane that panics unless a test scripts it.
+    /// every dial, a lane that panics unless a test scripts it, and the `me` identity read
+    /// (answering "robert" unless a test scripts the fault).
     struct Rig {
         enroll: FakeEnroll,
         delivery: FakeDelivery,
+        me: FakeMe,
         lane_answer: Rc<RefCell<Option<Result<ConnectedSession, ClientError>>>>,
         lane_calls: Rc<RefCell<Vec<(String, String)>>>,
     }
@@ -1068,6 +1237,7 @@ mod tests {
             Self {
                 enroll: FakeEnroll::scripted(polls),
                 delivery: FakeDelivery::default(),
+                me: FakeMe::default(),
                 lane_answer: Rc::default(),
                 lane_calls: Rc::default(),
             }
@@ -1106,10 +1276,15 @@ mod tests {
                     })
                 }
             };
+            let directory = {
+                let fake = self.me.clone();
+                move |_b: &str, _c: &str| -> Box<dyn DirectorySource> { Box::new(fake.clone()) }
+            };
             f(&LoginConnectors {
                 enroll: &enroll,
                 delivery: &delivery,
                 lane: &lane,
+                directory: &directory,
                 web_origin: "https://topos.sh".to_owned(),
             })
         }
@@ -1452,6 +1627,9 @@ mod tests {
                 assert_eq!(out.session_status, "active");
                 assert_eq!(out.delivered, Some(1));
                 assert!(out.currency.is_some(), "a fresh session arms the trigger");
+                // The lane connect is a landing too: the first connection writes ops's line.
+                assert!(out.feed_row_added);
+                assert_eq!(out.undo, vec!["remove", "-g", "@ops"]);
                 assert!(rig.enroll.starts.borrow().is_empty(), "no flow was started");
                 // The ACTING credential is the live session's own — seat standing, not a secret
                 // this machine invented.
@@ -1576,6 +1754,163 @@ mod tests {
             });
             let all = sessions::read_sessions(ctx.fs, &ctx.layout).unwrap();
             assert_eq!(all.sessions[0].status, SESSION_PENDING);
+        });
+    }
+
+    // ---- The feed line (the manifest demand a first connection writes). ----
+
+    fn global_manifest(ctx: &Ctx<'_>) -> PathBuf {
+        ctx.layout.home().join(crate::manifest::MANIFEST_FILE)
+    }
+
+    #[test]
+    fn the_first_connection_writes_the_feed_line_and_the_witness_remembers() {
+        let home = scratch("feedline");
+        with_ctx(&home, |ctx| {
+            let rig = Rig::new(vec![granted(LinkStatus::Active)]);
+            rig.with(|connectors| {
+                login(ctx, connectors, Some("topos.example.com/eng"), false).unwrap();
+                let done = login(ctx, connectors, None, false).unwrap();
+                assert!(done.feed_row_added, "the first connection writes the line");
+                assert_eq!(done.undo, vec!["remove", "-g", "@eng"]);
+                assert_eq!(done.user.as_deref(), Some("robert"));
+                assert!(done.manifest_note.is_none());
+                // The file was CREATED (header only) and holds exactly this feed line.
+                let text = std::fs::read_to_string(global_manifest(ctx)).unwrap();
+                assert!(text.contains("\"topos.example.com/eng\" = \"*\""), "{text}");
+                // The witness holds the workspace, keyed host + NAME — never on any receipt.
+                assert!(!crate::connected::first_connection(
+                    ctx.fs,
+                    &ctx.layout,
+                    "topos.example.com",
+                    "eng"
+                ));
+                // The receipt: the first-connection copy, byte-exact.
+                assert_eq!(
+                    crate::render::session_login_tty(&done),
+                    "signed in to topos.example.com/eng as robert\n\
+                     what eng delivers to you installs on this machine\n\
+                     (undo: topos remove -g @eng)"
+                );
+            });
+        });
+    }
+
+    #[test]
+    fn a_relogin_never_readds_a_hand_deleted_line() {
+        let home = scratch("no-readd");
+        with_ctx(&home, |ctx| {
+            let rig = Rig::new(vec![granted(LinkStatus::Active)]);
+            rig.with(|connectors| {
+                login(ctx, connectors, Some("topos.example.com/eng"), false).unwrap();
+                login(ctx, connectors, None, false).unwrap();
+                // The person deletes the line — a deliberate act login must not argue with.
+                std::fs::write(global_manifest(ctx), "[bundles]\n").unwrap();
+                let again = login(ctx, connectors, Some("topos.example.com/eng"), false).unwrap();
+                assert!(again.pending.is_none(), "already connected — no ceremony");
+                assert!(!again.feed_row_added);
+                assert!(again.undo.is_empty());
+                assert_eq!(
+                    std::fs::read_to_string(global_manifest(ctx)).unwrap(),
+                    "[bundles]\n",
+                    "login never re-adds"
+                );
+                // The re-login receipt is the one line, byte-exact.
+                assert_eq!(
+                    crate::render::session_login_tty(&again),
+                    "signed in to topos.example.com/eng as robert"
+                );
+            });
+        });
+    }
+
+    #[test]
+    fn the_witness_survives_logout_so_a_fresh_login_readds_nothing() {
+        let home = scratch("witness-logout");
+        with_ctx(&home, |ctx| {
+            let rig = Rig::new(vec![
+                granted(LinkStatus::Active),
+                granted(LinkStatus::Active),
+            ]);
+            rig.with(|connectors| {
+                login(ctx, connectors, Some("topos.example.com/eng"), false).unwrap();
+                login(ctx, connectors, None, false).unwrap();
+                std::fs::write(global_manifest(ctx), "[bundles]\n").unwrap();
+                // End the session entirely. The witness is NOT a session record: it must stay.
+                let revoke = |_b: &str, _c: &str| -> Box<dyn GovernanceSource> {
+                    Box::new(FakeRevoke {
+                        calls: Rc::new(RefCell::new(Vec::new())),
+                        fail: false,
+                    })
+                };
+                logout(ctx, &revoke, None, false).unwrap();
+                assert!(
+                    sessions::read_sessions(ctx.fs, &ctx.layout)
+                        .unwrap()
+                        .sessions
+                        .is_empty()
+                );
+                // A whole fresh browser flow toward the same workspace…
+                login(ctx, connectors, Some("topos.example.com/eng"), false).unwrap();
+                let done = login(ctx, connectors, None, false).unwrap();
+                assert_eq!(done.session_status, "active");
+                // …and the deleted line stays deleted: absence is deliberate.
+                assert!(!done.feed_row_added);
+                assert_eq!(
+                    std::fs::read_to_string(global_manifest(ctx)).unwrap(),
+                    "[bundles]\n"
+                );
+            });
+        });
+    }
+
+    #[test]
+    fn a_renamed_workspace_writes_its_new_line_and_destroys_nothing() {
+        // The witness keys on host + NAME, so a workspace renamed server-side (same id, new
+        // slug) reads as a first connection under the new name: its line lands, and the old
+        // line — now inert — is left alone. Login adds; it never deletes.
+        let home = scratch("renamed");
+        with_ctx(&home, |ctx| {
+            std::fs::create_dir_all(ctx.layout.home()).unwrap();
+            std::fs::write(
+                global_manifest(ctx),
+                "[bundles]\n\"topos.example.com/eng\" = \"*\"\n",
+            )
+            .unwrap();
+            crate::connected::record(ctx.fs, &ctx.layout, "topos.example.com", "eng").unwrap();
+            let rig = Rig::new(vec![DeviceAuthPoll::Granted(EnrolledGrant {
+                credential: "sess-secret".to_owned(),
+                session_id: "sn_1".to_owned(),
+                workspace: EnrolledWorkspace {
+                    // The SAME workspace id…
+                    workspace_id: "w_eng".to_owned(),
+                    // …under its new name.
+                    name: "engineering".to_owned(),
+                    display_name: "Engineering".to_owned(),
+                },
+                hint: None,
+                link_status: LinkStatus::Active,
+            })]);
+            rig.with(|connectors| {
+                login(
+                    ctx,
+                    connectors,
+                    Some("topos.example.com/engineering"),
+                    false,
+                )
+                .unwrap();
+                let done = login(ctx, connectors, None, false).unwrap();
+                assert!(done.feed_row_added, "the new name is a first connection");
+                let text = std::fs::read_to_string(global_manifest(ctx)).unwrap();
+                assert!(
+                    text.contains("\"topos.example.com/engineering\" = \"*\""),
+                    "{text}"
+                );
+                assert!(
+                    text.contains("\"topos.example.com/eng\" = \"*\""),
+                    "the old line is not this login's to delete: {text}"
+                );
+            });
         });
     }
 

@@ -264,7 +264,7 @@ pub(crate) fn pull(ctx: &Ctx<'_>, scope: PullScope) -> Result<PullOutcome, Clien
                             let n = row.synced_placements.unwrap_or(0);
                             disclosures.push(format!(
                                 "DRAFT_SYNCED {skill}: synced your edits of {skill} to {n} other \
-                                 agent folder{s}",
+                                 folder{s}",
                                 skill = row.skill,
                                 s = if n == 1 { "" } else { "s" }
                             ));

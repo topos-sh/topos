@@ -1043,6 +1043,7 @@ mod tests {
             vec![assigned("notes", None), assigned("triage", None)],
             Vec::new(),
         );
+        home.global("[bundles]\n\"topos.sh/acme\" = \"*\"\n");
         // One machine row BEHIND: applied at an older version than served.
         home.store_applied(&skill_id_of("notes"), "notes", &"c".repeat(64), &[]);
 
@@ -1094,11 +1095,18 @@ mod tests {
             vec![assigned("notes", None)],
             Vec::new(),
         );
+        home.global("[bundles]\n\"topos.sh/acme\" = \"*\"\n");
 
         let out = run(&home, &cwd, &request()).unwrap();
         assert_eq!(out.data.scopes.len(), 1);
         let machine = scope(&out, "machine");
-        assert!(machine.manifest.is_none(), "the implicit feed recipe");
+        assert!(
+            machine
+                .manifest
+                .as_deref()
+                .is_some_and(|m| m.ends_with("topos.toml")),
+            "the feed row's file governs"
+        );
         assert_eq!(machine.rows.len(), 1);
         assert_eq!(machine.rows[0].skill, "notes");
         // Never applied: the all-zero baseline, no false version claim, no status claim.
@@ -1125,6 +1133,7 @@ mod tests {
             vec![assigned("notes", None)],
             Vec::new(),
         );
+        home.global("[bundles]\n\"topos.sh/acme\" = \"*\"\n");
 
         let out = run(
             &home,
@@ -1662,6 +1671,7 @@ mod tests {
             vec![assigned("notes", None)],
             Vec::new(),
         );
+        home.global("[bundles]\n\"topos.sh/acme\" = \"*\"\n");
 
         let deep = |name: &str, view: ScopeView| {
             run(

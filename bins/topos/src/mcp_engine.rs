@@ -95,9 +95,8 @@ pub(crate) struct BundleStates {
 /// One removed placement (removal convergence / the `remove` verb's inline converge).
 #[derive(Debug)]
 pub(crate) struct RemovedEntry {
-    /// The bundle whose entry left — the `remove` verb matches its receipts by it; the sweep's
-    /// disclosure lines carry the file + agent instead (the id is opaque to a person).
-    #[allow(dead_code)]
+    /// The bundle whose entry left — the `remove` verb matches its receipts by it, and the
+    /// sweep's `removed` receipt rows group their config files under it.
     pub bundle_id: String,
     pub state: McpAgentState,
 }

@@ -5,6 +5,7 @@
   "data": {
     "scopes": [
       {
+        "manifest": "~/.topos/topos.toml",
         "rows": [
           {
             "bundle_digest": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",

@@ -115,9 +115,16 @@ this folder") and hands back both ways out as next actions — `topos init` here
 invocation with `-g`. It never crosses that line by itself either: removing a machine-delivered
 skill from a project refuses toward `-g`. `-g` edits `~/.topos/topos.toml` instead:
 `add -g @<workspace>` adopts that whole feed, `remove -g <name>` writes the machine-local `off`
-row (and `add -g <name>` deletes it again). Most people have no global file at all — while it is absent the machine behaves
-exactly as if it listed every connected workspace, and the first `-g` edit writes that out in full
-before applying the change. A bare `add -g` of something already given writes nothing and says so.
+row (and `add -g <name>` deletes it again). `~/.topos/topos.toml` is always the machine's whole
+truth: a workspace's feed flows only while its `"<host>/<workspace>" = "*"` line is in the file.
+`topos login` writes that line automatically the first time this machine connects to a workspace
+and never again — a line you delete stays deleted (`remove -g @<workspace>` is the spelled
+inverse), and with no file nothing is demanded machine-wide. `remove -g @<workspace>` applies
+immediately AND uninstalls what the feed delivered in the same command — a copy with local edits
+stays in place, disclosed on the receipt (`kept <name> — <path> is edited`), and `(undo: topos
+add -g @<workspace>)` closes the receipt. Hand-deleting the line does the same thing at the next
+`topos update`. A bare `add -g` of something a standing feed line already gives writes nothing
+and says so.
 In a checkout, managed copies land in the project's own agent dirs and keep themselves out of
 commits (each placed dir carries its own ignore file; the version history of a project row lives in
 that checkout's own `.topos/`, so the machine store and home agent dirs never mention it). COMMIT
@@ -143,9 +150,10 @@ path = ".agents/skills"                                    # where this file's s
 ```
 
 Two spellings are the GLOBAL file's alone (a project manifest is a repo fact): a two-segment
-`"topos.sh/acme" = "*"` row, meaning everything that workspace currently gives you, and
-`"<ref>" = "off"`, the one negative a file can state. Whatever the parser refuses, it refuses by
-naming what that reference accepts — never guess, read the message.
+`"topos.sh/acme" = "*"` row — everything that workspace currently gives you; `topos login` writes
+it on the machine's first connection, and a deleted one stays deleted — and `"<ref>" = "off"`,
+the one negative a file can state. Whatever the parser refuses, it refuses by naming what that
+reference accepts — never guess, read the message.
 
 ## MCP servers (the other kind of bundle)
 
@@ -236,12 +244,14 @@ topos logout [<workspace>|--all]  # end it — skills, drafts, and manifests sta
 ```
 
 The workspace is chosen — or created — in the browser approval, where the human's workspaces
-are known; one click connects. Login IS the acceptance: from then on everything that workspace
-gives this person arrives silently, and the receipt names what landed. Further workspaces are
-further logins — and once this machine is logged in to a server, `topos login <workspace>`
-toward another workspace they already belong to connects immediately, no browser. People ops
-(roster, roles, assigning, leaving) live in the workspace web app; `topos invite <email>` is
-the one roster verb here.
+are known; one click connects. Login IS the acceptance: on this machine's first connection to a
+workspace it writes the feed line (`"<host>/<workspace>" = "*"`) into `~/.topos/topos.toml`, and
+from then on everything that workspace gives this person arrives silently — the receipt leads
+with the undo (`topos remove -g @<workspace>`), and a line the human deleted is never re-added
+by a later login. Further workspaces are further logins — and once this machine is logged in to
+a server, `topos login <workspace>` toward another workspace they already belong to connects
+immediately, no browser. People ops (roster, roles, assigning, leaving) live in the workspace
+web app; `topos invite <email>` is the one roster verb here.
 
 ## Setting up topos for a team (no workspace yet)
 

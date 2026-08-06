@@ -95,6 +95,22 @@ pub struct PullSkill {
     /// rows predating the field. **INFERRED** (additive).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scope: Option<String>,
+    /// The DESTINATIONS this row's action touched: the skill folders an `installed` row landed in
+    /// (or a `removed` row uninstalled), or the config files a config-placed (`mcp`) bundle's
+    /// entries live in. Display paths — abbreviated to `~` under the user's home. Empty (and
+    /// omitted) for actions that moved no destination. **INFERRED** (additive).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub destinations: Vec<String>,
+    /// Locally-EDITED copies a `removed` row kept in place instead of uninstalling (the person's
+    /// own work is never deleted by ending delivery) — their display paths, `~`-abbreviated.
+    /// **INFERRED** (additive).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub kept: Vec<String>,
+    /// The workspace-QUALIFIED display name a receipt leads with (`@<ws>/<name>` when the host is
+    /// this machine's one connected host, else `<host>/<ws>/<name>`). Absent for non-workspace
+    /// sources, which read by their plain `skill` name. **INFERRED** (additive).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display: Option<String>,
     /// Per-agent applied states for a config-placed (`mcp`) bundle: which detected agents hold
     /// the server entry and how. Empty (and omitted) for file-bundle skills. **INFERRED**
     /// (additive).
@@ -164,6 +180,15 @@ pub enum PullAction {
     UpToDate,
     /// State ② clean — auto fast-forwarded to the new bytes.
     FastForwarded,
+    /// The bundle's FIRST materialization in this scope: the never-received baseline received its
+    /// first bytes and they landed (skill folders, or — for a config-placed bundle — config
+    /// entries). `destinations` names where. **Additive.**
+    Installed,
+    /// This machine's OWN recipe choice ended delivery here (a dropped feed line, an `"off"`
+    /// switch, a dropped row) and the placed copies were uninstalled now — `destinations` names
+    /// what left, `kept` any edited copy left in place. Distinct from `withdrawn`, which is
+    /// upstream's act. **Additive.**
+    Removed,
     /// State ② confirm-each / first-receive — a one-tap offer is waiting.
     Offered,
     /// State ④ — a local draft conflicts with a newer remote (surfaced, not yet resolved — e.g. a
@@ -1022,12 +1047,25 @@ pub struct LoginData {
     /// The breadth arming sweep's outcomes (one row per other detected agent).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub triggers: Vec<BreadthTriggerReport>,
-    /// What the login did to this machine's own `topos.toml`, when one exists: the workspace's
-    /// feed row was appended (a file that is absent already behaves as if it held one), or the
-    /// honest reason it was left alone. Absent when there is no machine-wide file at all.
-    /// **Additive.**
+    /// The honest reason this machine's own `topos.toml` was left alone when the login could not
+    /// record the workspace's feed row there (an unreadable or unwritable file). Absent on every
+    /// clean login. **Additive.**
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub manifest_note: Option<String>,
+    /// The signed-in person's display identity (the workspace membership describe's `principal`),
+    /// read best-effort once the session stands — absent when the read failed or the session is
+    /// still pending. **Additive.**
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user: Option<String>,
+    /// Whether THIS login wrote the workspace's feed row into the machine's own `topos.toml` —
+    /// true only on this machine's first connection to the workspace (login never re-adds a row
+    /// someone deleted). **Additive.**
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub feed_row_added: bool,
+    /// The paste-ready inverse of the feed row this login wrote (argv tokens, `topos`-less) —
+    /// present iff `feed_row_added`. **Additive.**
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub undo: Vec<String>,
 }
 
 /// `logout [<workspace>|--all]` — end this installation's session(s). **INFERRED** (additive-only).
@@ -1350,6 +1388,32 @@ pub struct RemoveData {
     /// permanent delete) or on a describe. **INFERRED** (additive).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub undo: Vec<String>,
+    /// APPLY receipts of a feed-line drop: the bundles whose placed copies left this machine IN
+    /// THIS INVOCATION (the row edit uninstalls eagerly), one entry per bundle — with any edited
+    /// copy kept in place. Empty everywhere else. **INFERRED** (additive).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub uninstalled: Vec<UninstalledBundle>,
+}
+
+/// One bundle an APPLIED removal uninstalled (or would have, had its copies not been edited).
+/// **INFERRED** (additive).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
+pub struct UninstalledBundle {
+    /// The workspace-qualified display name (`@<ws>/<name>` at the machine's one connected host,
+    /// else `<host>/<ws>/<name>`); a non-workspace bundle's plain name.
+    pub name: String,
+    /// The destinations the copies left — skill folders, or a config-placed bundle's config
+    /// files. Display paths, `~`-abbreviated. Empty when every copy was edited and kept.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub destinations: Vec<String>,
+    /// The catalog bundle kind (`"mcp"` for a config-placed bundle). Absent ⇒ an ordinary skill.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    /// Locally-edited copies kept in place instead of uninstalled — display paths,
+    /// `~`-abbreviated.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub kept: Vec<String>,
 }
 
 /// One skill in a [`RemoveData`]. **INFERRED.**
@@ -1385,6 +1449,10 @@ pub struct RemoveItem {
 pub enum RemoveKind {
     /// The manifest's own include line was deleted — delivery to this scope just ends. **Additive.**
     ManifestRemoved,
+    /// The machine-wide FEED line was deleted: the workspace's feed stops delivering here, and the
+    /// copies it delivered were uninstalled in the same invocation ([`RemoveData::uninstalled`] —
+    /// edited copies kept in place). **Additive.**
+    FeedRemoved,
     /// A broader layer still provides the item, so an EXCLUDE line was recorded in the nearest
     /// manifest (the one negative state). **Additive.**
     ManifestExcluded,
@@ -1797,6 +1865,9 @@ mod tests {
                 merge_preview: None,
                 synced_placements: None,
                 scope: None,
+                destinations: Vec::new(),
+                kept: Vec::new(),
+                display: None,
                 harnesses: Vec::new(),
                 kind: None,
             }],

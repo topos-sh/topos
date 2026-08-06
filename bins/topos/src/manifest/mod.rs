@@ -3,9 +3,10 @@
 //! The server knows what a person is GIVEN (their feed: assignments minus declines, computed
 //! server-side and served whole by the delivery route). A file knows what a folder TAKES:
 //!
-//! - the GLOBAL manifest (`~/.topos/topos.toml`) is the machine's personal recipe. Absent, the
-//!   machine behaves exactly as if the file held one feed row per connected workspace; present,
-//!   it is COMPLETE — only its rows deliver, and the feed flows iff a feed row says so.
+//! - the GLOBAL manifest (`~/.topos/topos.toml`) is the machine's personal recipe, and it is
+//!   COMPLETE — only its rows deliver, and a workspace's feed flows iff a feed row says so.
+//!   `topos login` writes that row on this machine's FIRST connection to a workspace; a row
+//!   someone deleted stays deleted. Absent, nothing is demanded machine-wide.
 //! - a PROJECT manifest (`<dir>/topos.toml`) is a repo fact, identical for every contributor.
 //!   The NEAREST file covering the working directory wins WHOLE (walking up like git; no
 //!   merging across ancestors).

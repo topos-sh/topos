@@ -541,16 +541,20 @@ fn the_mcp_bundle_loop_across_six_agents() {
         removed["items"][0]["kind"], "manifest-excluded",
         "the off row is the one negative: {removed}"
     );
-    // The receipt names EVERY surface the entry left, by agent and by file.
+    // The receipt names EVERY surface the entry left, keyed by the config FILE it lived in
+    // (`~`-abbreviated) — destinations, never agents.
     let note = removed["items"][0]["note"]
         .as_str()
         .unwrap_or_else(|| panic!("the removal discloses what it did: {removed}"));
-    for agent in SIX {
-        assert!(
-            note.contains(&format!("{agent}: server entry removed from")),
-            "{agent} is named in the removal receipt: {note}"
-        );
-    }
+    assert_eq!(
+        note.matches(": server entry removed").count(),
+        SIX.len(),
+        "one line per config file the entry left: {note}"
+    );
+    assert!(
+        note.contains("~/.cursor/mcp.json: server entry removed"),
+        "file-keyed, `~`-abbreviated: {note}"
+    );
     let swept = dev
         .run(dev.root(), &["update", "--json"])
         .data("update after remove");

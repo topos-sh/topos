@@ -1,9 +1,10 @@
 //! The RECONCILE — what `update` runs. Two UNBLENDED scopes, each converged on its own recipe:
 //!
-//! - the **person scope** — the global manifest (`~/.topos/topos.toml`) when the file exists, else
-//!   the implicit recipe (one feed row per connected workspace). A file is COMPLETE: only its rows
-//!   deliver, and a workspace's feed flows iff a feed row says so. Bytes land in the home harness
-//!   dirs, state in `~/.topos/`.
+//! - the **person scope** — the global manifest (`~/.topos/topos.toml`), the machine's COMPLETE
+//!   recipe: only its rows deliver, and a workspace's feed flows iff a feed row says so (`topos
+//!   login` writes that row on this machine's first connection; a deleted row stays deleted).
+//!   With no file nothing is demanded machine-wide. Bytes land in the home harness dirs, state
+//!   in `~/.topos/`.
 //! - the **project scope** — the NEAREST `topos.toml` walking up from the working directory, taken
 //!   WHOLE (no ancestor merging). Bytes land inside the checkout (each dir self-ignoring), state in
 //!   the project's own store.
@@ -527,6 +528,20 @@ struct Env<'a> {
     /// inside its interval — and the arms then converge tracked bytes in place, unchanged.
     forge: Option<&'a ForgeLane<'a>>,
     prior: &'a sync_status::SyncStatus,
+    /// The ONE connected host the `@ws` sugar resolves at — how installed/removed receipt rows
+    /// qualify their names (`@ws/name` there, the full `host/ws/name` everywhere else).
+    default_host: Option<String>,
+}
+
+impl Env<'_> {
+    /// The workspace-QUALIFIED display name a receipt row leads with.
+    fn qualified(&self, host: &str, workspace: &str, name: &str) -> String {
+        if self.default_host.as_deref() == Some(host) {
+            format!("@{workspace}/{name}")
+        } else {
+            format!("{host}/{workspace}/{name}")
+        }
+    }
 }
 
 // =================================================================================================
@@ -1167,11 +1182,7 @@ pub(crate) fn manifest_update(
     }
 
     // ---- 2. Build the two scope plans. A file the grammar refuses freezes its scope WHOLE. ----
-    let connected: Vec<(String, String)> = runs
-        .iter()
-        .map(|r| (r.session.host.clone(), r.session.workspace_name.clone()))
-        .collect();
-    let person: Option<ScopePlan> = match scopes::person_plan(ctx.fs, &ctx.layout, &connected) {
+    let person: Option<ScopePlan> = match scopes::person_plan(ctx.fs, &ctx.layout) {
         Ok(p) => Some(p),
         Err(e) => {
             sweep
@@ -1276,6 +1287,7 @@ pub(crate) fn manifest_update(
         follow: &follow,
         forge: lane.as_ref(),
         prior: &prior_sync,
+        default_host: super::manifest_edit::default_host(ctx),
     };
 
     // ---- 3. `--rebuild`, BEFORE the fan-out: absorb, then drop, then let the sweep re-project.
@@ -2311,6 +2323,13 @@ fn reconcile_feed<'a>(
                     Ok(mut row) => {
                         row.workspace_id = Some(run.session.workspace_id.clone());
                         row.scope = Some(sc.label.clone());
+                        if row.action == PullAction::Installed {
+                            row.display = Some(env.qualified(
+                                &run.session.host,
+                                &run.session.workspace_name,
+                                &ds.name,
+                            ));
+                        }
                         if row.action == PullAction::DraftSynced {
                             sweep
                                 .disclosures
@@ -2598,6 +2617,15 @@ fn sync_workspace_skill<'a>(
         Ok(mut row) => {
             row.workspace_id = Some(run.session.workspace_id.clone());
             row.scope = Some(sc.label.clone());
+            // An installed row leads with the workspace-QUALIFIED name — where the bundle came
+            // from is the fact a first materialization discloses.
+            if row.action == PullAction::Installed {
+                row.display = Some(env.qualified(
+                    &run.session.host,
+                    &run.session.workspace_name,
+                    &target.name,
+                ));
+            }
             // The settled-draft fan-out's receipt line is a DISCLOSURE — the fan-out succeeded, so
             // it must never land in the channel the summary counts as failures.
             if row.action == PullAction::DraftSynced {
@@ -2816,9 +2844,9 @@ fn local_dir(ctx: &Ctx<'_>, sc: &ScopeCtx<'_>, raw: &str) -> PathBuf {
 fn draft_synced_line(name: &str, synced: Option<u32>) -> String {
     let n = synced.unwrap_or(0);
     let folders = if n == 1 {
-        "1 other agent folder".to_owned()
+        "1 other folder".to_owned()
     } else {
-        format!("{n} other agent folders")
+        format!("{n} other folders")
     };
     format!("DRAFT_SYNCED {name}: synced your edits of {name} to {folders}")
 }
@@ -4072,22 +4100,80 @@ fn run_mcp_converge(
             allow_removals,
         );
         sweep.warnings.extend(outcome.warnings);
+        // Config entries that LEFT this run ride the receipt as `removed` rows — one per bundle,
+        // counted in the config files the entries lived in; a hand-edited entry stays in place
+        // and rides the same row's `kept` list. Named from the delivery cache (the entry's
+        // demand is gone, so the cache is the one place its name survives), qualified where the
+        // cache still knows the workspace. A STANDING drifted survivor whose sweep removed
+        // nothing is a fact, not a byte change: it stays a disclosure line, so the quiet hook
+        // never reads a survivor as fresh movement.
+        let mut left: BTreeMap<String, (Vec<String>, Vec<String>)> = BTreeMap::new();
         for removed in &outcome.removed {
-            let line = match removed.state.state.as_str() {
-                "drifted" => format!(
-                    "MCP_DRIFTED {}: a hand-edited entry in {} is left in place",
-                    removed.state.agent,
-                    removed.state.file.as_deref().unwrap_or("its config"),
-                ),
-                _ => format!(
-                    "MCP_REMOVED {}: server entry removed from {}",
-                    removed.state.agent,
-                    removed.state.file.as_deref().unwrap_or("its config"),
-                ),
+            let entry = left.entry(removed.bundle_id.clone()).or_default();
+            let file = removed
+                .state
+                .file
+                .as_deref()
+                .map(|f| super::inventory::pretty(env.ctx, Path::new(f)));
+            let list = if removed.state.state == "drifted" {
+                &mut entry.1
+            } else {
+                &mut entry.0
             };
+            if let Some(file) = file
+                && !list.contains(&file)
+            {
+                list.push(file);
+            }
+        }
+        for removed in &outcome.removed {
+            if removed.state.state != "drifted" {
+                continue;
+            }
+            if left
+                .get(&removed.bundle_id)
+                .is_some_and(|(files, _)| !files.is_empty())
+            {
+                continue; // the bundle's own `removed` row carries it as a kept file
+            }
+            let line = format!(
+                "MCP_DRIFTED {}: a hand-edited entry in {} is left in place",
+                removed.state.agent,
+                removed.state.file.as_deref().unwrap_or("its config"),
+            );
             if !sweep.disclosures.contains(&line) {
                 sweep.disclosures.push(line);
             }
+        }
+        for (bundle_id, (files, kept)) in left {
+            if files.is_empty() {
+                continue; // nothing left this run — the drifted survivor was disclosed above
+            }
+            let named = env.prior.workspaces.iter().find_map(|(ws_id, e)| {
+                let ds = e.delivered.get(&bundle_id)?;
+                let display = match (e.host.as_deref(), e.workspace_name.as_deref()) {
+                    (Some(h), Some(w)) => Some(env.qualified(h, w, &ds.name)),
+                    _ => None,
+                };
+                Some((ds.name.clone(), ws_id.clone(), display))
+            });
+            let (name, ws_id, display) = match named {
+                Some((n, w, d)) => (n, Some(w), d),
+                None => (
+                    bundle_id
+                        .strip_prefix("local:")
+                        .unwrap_or(&bundle_id)
+                        .to_owned(),
+                    None,
+                    None,
+                ),
+            };
+            let mut row = plain_row(&name, PullAction::Removed, ws_id, &label);
+            row.kind = Some("mcp".to_owned());
+            row.display = display;
+            row.destinations = files;
+            row.kept = kept;
+            sweep.push(row);
         }
         for bundle in outcome.bundles {
             // The receipt row for this bundle in this scope carries the per-agent outcomes — found
@@ -4098,7 +4184,14 @@ fn run_mcp_converge(
                 .get(&(label.clone(), bundle.bundle_id.clone()))
                 .copied();
             if let Some(row) = at.and_then(|i| sweep.rows.get_mut(i)) {
-                row.harnesses = bundle.states.clone();
+                let mut states = bundle.states.clone();
+                sync_engine::prettify_state_files(env.ctx, &mut states);
+                // A first-install row counts the config FILES its entries landed in — the
+                // destination column a config-placed bundle speaks in.
+                if row.action == PullAction::Installed {
+                    row.destinations = sync_engine::config_destinations(env.ctx, &states);
+                }
+                row.harnesses = states;
             }
             // The merged map (the applied report + the delivery cache): person wins per slug,
             // the project fills slugs the person scope did not touch.
@@ -4191,41 +4284,61 @@ fn clean_undemanded(
                 if !ctx.fs.exists(&ctx.layout.skill_dir(&sid)) {
                     continue;
                 }
-                // WHY it left decides how much goes: this machine's own choice keeps the bytes; a
-                // feed withdrawal resets, so a re-delivery installs afresh instead of reading as
-                // already-current.
+                // WHY it left decides how much goes: this machine's own choice keeps the bytes
+                // AND every locally-edited copy in place (removing a line is first-class — the
+                // person's work is not swept up with it); a feed withdrawal resets to
+                // never-received, so a re-delivery installs afresh instead of reading as
+                // already-current. No feed row, no feed — file or no file: a machine with no
+                // global file demands nothing, so cleanup never depends on the file's existence.
                 let switched_off = plan.off_for(&host, &ws, &cached.name).is_some();
-                let withheld = plan.file_backed() && !plan.has_feed(&host, &ws);
+                let withheld = !plan.has_feed(&host, &ws);
                 let by_choice = switched_off || withheld || cached.via_manifest;
-                let cleaned = if by_choice {
-                    clean_written_placements(ctx, &sid, true)
+                if by_choice {
+                    match clean_by_choice(ctx, &sid, true) {
+                        Ok(Some(clean)) => {
+                            let mut row = plain_row(
+                                &clean.name,
+                                PullAction::Removed,
+                                Some(run.session.workspace_id.clone()),
+                                &label,
+                            );
+                            row.display = Some(env.qualified(&host, &ws, &cached.name));
+                            row.destinations = clean.removed;
+                            row.kept = clean.kept;
+                            sweep.push(row);
+                        }
+                        Ok(None) => {}
+                        Err(e) => note_item_failure(ctx, &mut sweep.warnings, skill_id, &e),
+                    }
                 } else {
-                    withdraw_person_scope(ctx, &sid).map(Some)
-                };
-                match cleaned {
-                    Ok(Some(name)) => sweep.push(plain_row(
-                        &name,
-                        PullAction::Withdrawn,
-                        Some(run.session.workspace_id.clone()),
-                        &label,
-                    )),
-                    Ok(None) => {}
-                    Err(e) => note_item_failure(ctx, &mut sweep.warnings, skill_id, &e),
+                    match withdraw_person_scope(ctx, &sid) {
+                        Ok(name) => sweep.push(plain_row(
+                            &name,
+                            PullAction::Withdrawn,
+                            Some(run.session.workspace_id.clone()),
+                            &label,
+                        )),
+                        Err(e) => note_item_failure(ctx, &mut sweep.warnings, skill_id, &e),
+                    }
                 }
             }
         }
         // Forge imports the person recipe no longer names ride the SAME undemanded clean: a
-        // dropped repo row's members retire exactly like a dropped workspace row's placements —
-        // snapshot-first, the sidecar bytes kept, in-checkout placements untouched (they are a
-        // project scope's business). A row that still names the origin mentioned every tracked
-        // member above, so a transient forge failure can never read as a drop.
+        // dropped repo row is this machine's own choice, so its members retire exactly like a
+        // dropped workspace row's placements — unedited copies uninstalled, edited copies kept in
+        // place, the sidecar bytes kept, in-checkout placements untouched (they are a project
+        // scope's business). A row that still names the origin mentioned every tracked member
+        // above, so a transient forge failure can never read as a drop.
         for import in forge_imports(ctx) {
             if mentioned.contains(&import.lock.name) || adopted.contains(import.sid.as_str()) {
                 continue;
             }
-            match clean_written_placements(ctx, &import.sid, true) {
-                Ok(Some(name)) => {
-                    sweep.push(plain_row(&name, PullAction::Withdrawn, None, &label));
+            match clean_by_choice(ctx, &import.sid, true) {
+                Ok(Some(clean)) => {
+                    let mut row = plain_row(&clean.name, PullAction::Removed, None, &label);
+                    row.destinations = clean.removed;
+                    row.kept = clean.kept;
+                    sweep.push(row);
                 }
                 Ok(None) => {}
                 Err(e) => note_item_failure(ctx, &mut sweep.warnings, &import.lock.name, &e),
@@ -4299,10 +4412,23 @@ fn clean_undemanded(
         if stale.is_empty() {
             continue;
         }
+        // A dropped project row is this scope's own choice too: unedited copies leave, edited (or
+        // unreadable) copies stay in place — the same keep rule the person clean applies.
         let cleaned = crate::sidecar::lock_skill(pctx.fs, &pctx.layout, &sid)
-            .and_then(|_guard| clean_placements(&pctx, &sid, &lock, &map, &stale));
-        if let Err(e) = cleaned {
-            note_item_failure(ctx, &mut sweep.warnings, &lock.name, &e);
+            .and_then(|_guard| retire_split(&pctx, &sid, &lock, &map, &stale));
+        match cleaned {
+            Ok(Some(clean)) => {
+                let mut row = plain_row(&clean.name, PullAction::Removed, None, &label);
+                row.display = env.prior.workspaces.iter().find_map(|(_, e)| {
+                    let ds = e.delivered.get(sid.as_str())?;
+                    Some(env.qualified(e.host.as_deref()?, e.workspace_name.as_deref()?, &ds.name))
+                });
+                row.destinations = clean.removed;
+                row.kept = clean.kept;
+                sweep.push(row);
+            }
+            Ok(None) => {}
+            Err(e) => note_item_failure(ctx, &mut sweep.warnings, &lock.name, &e),
         }
     }
 }
@@ -4343,6 +4469,125 @@ fn clean_written_placements(
     }
     clean_placements(ctx, sid, &lock, &map, &targets)?;
     Ok(Some(lock.name))
+}
+
+/// What one BY-CHOICE clean concluded: the bundle's name, the destinations actually uninstalled,
+/// and the edited (or unreadable) copies kept in place — display paths, `~`-abbreviated.
+struct ByChoiceClean {
+    name: String,
+    removed: Vec<String>,
+    kept: Vec<String>,
+}
+
+/// [`clean_written_placements`]'s BY-CHOICE twin — the clean a person's own manifest choice (a
+/// dropped feed line, an `"off"` switch, a dropped row) drives: the same written-placement target
+/// set, split by [`retire_split`] so an EDITED copy stays in place instead of being
+/// snapshotted-and-removed. `Ok(None)` when the bundle has nothing recorded to retire.
+fn clean_by_choice(
+    ctx: &Ctx<'_>,
+    sid: &SkillId,
+    exclude_project: bool,
+) -> Result<Option<ByChoiceClean>, ClientError> {
+    let sp = ctx.layout.published(sid);
+    let _guard = crate::sidecar::lock_skill(ctx.fs, &ctx.layout, sid)?;
+    let lock: Option<Lock> = doc::read_doc(ctx.fs, &sp.lock)?;
+    let map: Option<PlacementMap> = doc::read_map(ctx.fs, &sp.map)?;
+    let (Some(lock), Some(map)) = (lock, map) else {
+        return Ok(None);
+    };
+    let targets: Vec<usize> = map
+        .placements
+        .iter()
+        .zip(&map.placement_state)
+        .enumerate()
+        .filter(|(_, (p, st))| {
+            st.materialized_sha.is_some()
+                && !st.adopted_source
+                && (!exclude_project || !is_project_placement(ctx, Path::new(p)))
+        })
+        .map(|(i, _)| i)
+        .collect();
+    if targets.is_empty() {
+        return Ok(None);
+    }
+    retire_split(ctx, sid, &lock, &map, &targets)
+}
+
+/// Retire exactly `indices` of one bundle's placements BY CHOICE: an UNEDITED copy leaves through
+/// the ordinary park-then-verify rail; a copy whose bytes differ from its recorded baseline — or
+/// one that cannot be read at all, which fails toward keeping — is KEPT IN PLACE (an edited copy
+/// is the person's own work; ending delivery must never sweep it up). A kept edited copy is
+/// snapshotted into the store first (its bytes stay reachable through `topos log`), then its
+/// RECORD is released: the map no longer manages the dir, so a later sweep neither re-reports it
+/// nor ever overwrites it — the file is the person's own from here on. Foreign dirs stay exactly
+/// as they are, record and all. `Ok(None)` = nothing removed and nothing kept.
+///
+/// THE CALLER HOLDS THE SKILL's writer flock.
+fn retire_split(
+    ctx: &Ctx<'_>,
+    sid: &SkillId,
+    lock: &Lock,
+    map: &PlacementMap,
+    indices: &[usize],
+) -> Result<Option<ByChoiceClean>, ClientError> {
+    let scans = placement::scan_placements(ctx, map)?;
+    let mut removable: Vec<usize> = Vec::new();
+    let mut removed: Vec<String> = Vec::new();
+    let mut kept: Vec<usize> = Vec::new();
+    for &i in indices {
+        match &scans[i].status {
+            placement::ScanStatus::Clean { .. } => {
+                removable.push(i);
+                removed.push(super::inventory::pretty(ctx, &scans[i].dir));
+            }
+            // No dir on disk: the record simply retires, nothing to name on the receipt.
+            placement::ScanStatus::Absent => removable.push(i),
+            placement::ScanStatus::Modified { .. } | placement::ScanStatus::Unscannable => {
+                kept.push(i);
+            }
+            placement::ScanStatus::Foreign => {}
+        }
+    }
+    for &i in &kept {
+        if let placement::ScanStatus::Modified { scanned } = &scans[i].status {
+            sync_engine::snapshot_draft(ctx, &ctx.layout.published(sid), lock, scanned)?;
+        }
+    }
+    if !removable.is_empty() {
+        clean_placements(ctx, sid, lock, map, &removable)?;
+    }
+    if !kept.is_empty() {
+        let raw: Vec<String> = kept.iter().map(|&i| map.placements[i].clone()).collect();
+        release_records(ctx, sid, &raw)?;
+    }
+    let kept: Vec<String> = kept
+        .iter()
+        .map(|&i| super::inventory::pretty(ctx, Path::new(&map.placements[i])))
+        .collect();
+    if removed.is_empty() && kept.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(ByChoiceClean {
+        name: lock.name.clone(),
+        removed,
+        kept,
+    }))
+}
+
+/// Release the RECORDS of kept copies (by their recorded raw paths): the bytes stay on disk,
+/// untouched; the map just stops managing those dirs. Runs under the caller's skill flock, over
+/// the map AS IT IS NOW (a preceding [`clean_placements`] already rewrote it).
+fn release_records(ctx: &Ctx<'_>, sid: &SkillId, paths: &[String]) -> Result<(), ClientError> {
+    let sp = ctx.layout.published(sid);
+    let Some(mut map) = doc::read_map(ctx.fs, &sp.map)? else {
+        return Ok(());
+    };
+    let keep: Vec<bool> = map.placements.iter().map(|p| !paths.contains(p)).collect();
+    let mut it = keep.iter();
+    map.placements.retain(|_| *it.next().unwrap_or(&true));
+    let mut it = keep.iter();
+    map.placement_state.retain(|_| *it.next().unwrap_or(&true));
+    doc::write_map(ctx.fs, &sp.map, &map)
 }
 
 /// ONE forge-imported skill a store tracks: its id, its lock, the recorded provenance, and the
@@ -4669,6 +4914,9 @@ fn plain_row(
         merge: None,
         merge_preview: None,
         synced_placements: None,
+        destinations: Vec::new(),
+        kept: Vec::new(),
+        display: None,
         scope: Some(scope.to_owned()),
         harnesses: Vec::new(),
         kind: None,

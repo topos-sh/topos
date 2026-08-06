@@ -3,20 +3,21 @@
 //!
 //! Two scopes, unblended, and no verb crosses the line on its own: an edit acts on WHERE YOU
 //! STAND, `-g` means the machine. The GLOBAL file (`~/.topos/topos.toml`, the `-g` arm) is this
-//! machine's personal recipe: absent, it behaves exactly as if it held one feed row per connected
-//! workspace; present, it is the COMPLETE recipe. A PROJECT file is a repo fact — the NEAREST
+//! machine's COMPLETE personal recipe: only its rows deliver, and with no file nothing is
+//! demanded machine-wide (`topos login` writes a workspace's feed row on this machine's first
+//! connection; a row someone deleted stays deleted). A PROJECT file is a repo fact — the NEAREST
 //! `topos.toml` covering the working directory, and nothing else. With none in reach a
 //! project-scoped edit REFUSES ([`ClientError::NoManifest`]): creating the file is `topos init`'s
 //! job (the cargo/pnpm/git precedent), and rerouting the edit to the other scope would write in a
 //! file nobody named.
 //!
 //! FILE BIRTH is one rule, everywhere: any path topos brings into existence is written
-//! MATERIALIZED first — the global file gets the header plus one feed row per connected
-//! workspace (spelling out what an absent file already means), a project file the commented
-//! template — and only THEN does the requested edit run. A file a person wrote by hand is never
-//! materialized. A born file STAYS even when a consent gate refuses the act that birthed it, and
-//! the receipt says so. Only `-g` births a file this way now: the project scope has nothing to
-//! birth, because it refuses when there is nothing to edit.
+//! MATERIALIZED first — the global file gets its header alone (no feed rows: login is the only
+//! automatic feed-row author, so a deleted row can never come back through a birth), a project
+//! file the commented template — and only THEN does the requested edit run. A file a person
+//! wrote by hand is never materialized. A born file STAYS even when a consent gate refuses the
+//! act that birthed it, and the receipt says so. Only `-g` births a file this way now: the
+//! project scope has nothing to birth, because it refuses when there is nothing to edit.
 //!
 //! `remove` is the strict inverse: it edits FILES ONLY (machine facts). What a workspace GIVES a
 //! person is a server fact, managed on the web — the CLI's one machine-local negative is the
@@ -106,7 +107,7 @@ pub(super) fn live_sessions(ctx: &Ctx<'_>) -> Result<Vec<Session>, ClientError> 
         .collect())
 }
 
-/// Every connected `(host, workspace)` — the feed rows a global file is born with.
+/// Every connected `(host, workspace)` — what the live sessions name.
 pub(crate) fn connected_workspaces(ctx: &Ctx<'_>) -> Vec<(String, String)> {
     live_sessions(ctx)
         .unwrap_or_default()
@@ -313,9 +314,9 @@ pub(super) struct Opened {
 }
 
 /// Open the target for editing, BIRTHING the file first when it does not exist: the global file
-/// is born MATERIALIZED (the header + one feed row per connected workspace — exactly what an
-/// absent file already meant), a project file from the commented template. The birth is a real,
-/// committed write before the requested edit runs.
+/// is born with its header alone (NO feed rows — login is the only automatic feed-row author,
+/// so a birth can never resurrect a row someone deleted), a project file from the commented
+/// template. The birth is a real, committed write before the requested edit runs.
 ///
 /// # Errors
 /// A filesystem failure, or [`ClientError::Corrupt`] when the existing file does not parse.
@@ -326,26 +327,14 @@ pub(super) fn open_for_edit(ctx: &Ctx<'_>, target: &EditTarget) -> Result<Opened
         return Ok(Opened { editor, born: None });
     }
     let (seed, note) = match target.scope {
-        ManifestScope::Global => {
-            let connected = connected_workspaces(ctx);
-            let note = if connected.is_empty() {
-                format!(
-                    "created {} — no workspace is connected yet, so it starts with just its header",
-                    target.path.display()
-                )
-            } else {
-                format!(
-                    "created {} — materialized with one feed row per connected workspace ({})",
-                    target.path.display(),
-                    connected
-                        .iter()
-                        .map(|(_, w)| w.as_str())
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                )
-            };
-            (materialized_global(&connected), note)
-        }
+        ManifestScope::Global => (
+            materialized_global(&[]),
+            format!(
+                "created {} — it starts with just its header; `topos login` adds a workspace's \
+                 feed row on its first connection",
+                target.path.display()
+            ),
+        ),
         ManifestScope::Project => (
             project_template(),
             format!("created {}", target.path.display()),
@@ -374,17 +363,15 @@ pub(super) fn open_for_edit(ctx: &Ctx<'_>, target: &EditTarget) -> Result<Opened
     })
 }
 
-/// The scope PLAN behind a target (what its rows currently demand). The global scope falls back
-/// to the IMPLICIT recipe when no file exists — one feed row per connected workspace — so a
-/// classification made before a file birth matches the file the birth writes.
+/// The scope PLAN behind a target (what its rows currently demand). With no global file the plan
+/// is the empty default — exactly what a header-only birth writes, so a classification made
+/// before a file birth matches the file the birth writes.
 ///
 /// # Errors
 /// As [`scopes::person_plan`] / [`scopes::nearest_project_plan`].
 pub(super) fn plan_for(ctx: &Ctx<'_>, target: &EditTarget) -> Result<ScopePlan, ClientError> {
     match target.scope {
-        ManifestScope::Global => {
-            scopes::person_plan(ctx.fs, &ctx.layout, &connected_workspaces(ctx))
-        }
+        ManifestScope::Global => scopes::person_plan(ctx.fs, &ctx.layout),
         ManifestScope::Project => {
             let Some(text) = read_text(ctx, &target.path)? else {
                 return Ok(ScopePlan::default());
@@ -976,7 +963,7 @@ pub(crate) fn remove_global(
     // already have their own row), so a read outside the lock and a write inside it are two
     // different documents: the second writer would rebuild the set line from members the first
     // writer had already re-homed, and silently drop that row.
-    let _guard = lock_manifest(ctx, &target.path)?;
+    let guard = lock_manifest(ctx, &target.path)?;
     let arms = resolve_arms(ctx, connect, &target, tokens, via)?;
     let mut resolved = Vec::with_capacity(tokens.len());
     for (token, arm) in tokens.iter().zip(arms) {
@@ -985,7 +972,27 @@ pub(crate) fn remove_global(
             None => return Err(miss(ctx, token, true)?),
         }
     }
-    apply_arms(ctx, &target, tokens, resolved, via, yes, true)
+    let mut outcome = apply_arms(ctx, &target, tokens, resolved, via, yes, true)?;
+    // A FEED-LINE drop uninstalls EAGERLY: with the row durably gone, the same machine-scope
+    // update/cleanup the sweep runs converges NOW, so the copies the feed delivered leave in this
+    // invocation (edited copies kept in place) and the receipt says what actually moved. AFTER
+    // the writer lock releases — the reconcile is a reader of this file and may itself take the
+    // manifest lock (the pending-governance converge), which would deadlock a still-held guard.
+    // Best-effort by contract: the row edit already landed, so a transport hiccup just moves the
+    // byte landing to the next sweep.
+    drop(guard);
+    if let RemoveOutcome::Applied(data) = &mut outcome {
+        let feed_workspaces: Vec<String> = data
+            .items
+            .iter()
+            .filter(|i| i.kind == RemoveKind::FeedRemoved)
+            .map(|i| i.name.clone())
+            .collect();
+        if !feed_workspaces.is_empty() {
+            data.uninstalled = eager_feed_cleanup(ctx, connect, &feed_workspaces);
+        }
+    }
+    Ok(outcome)
 }
 
 /// The canonical reference of a standing `"off"` row in the GLOBAL file that `token` names —
@@ -1673,8 +1680,8 @@ fn apply_arms(
                         Some(join_notes(
                             format!(
                                 "'{name}' has local edits that are not shared — this removal \
-                                 takes it out of this scope's agent dirs (the edits are \
-                                 snapshotted first, never deleted)"
+                                 ends its delivery here; the edited copy stays in place \
+                                 (`topos list {name}` shows it)"
                             ),
                             removal_note,
                         ))
@@ -1752,32 +1759,23 @@ fn apply_arms(
                 workspace, bundles, ..
             } => {
                 let removal_note = format!(
-                    "{workspace}'s feed no longer delivers here; its skills leave this machine \
-                     at the next update, and the rows you spelled yourself survive"
+                    "{workspace}'s feed no longer delivers here; the copies it placed leave this \
+                     machine now — an edited copy stays in place — and the rows you spelled \
+                     yourself survive"
                 );
-                let mut drafted: Vec<&str> = Vec::new();
-                let mut unreadable = false;
-                for bundle in bundles {
-                    match draft_state(ctx, bundle) {
-                        DraftState::Draft => drafted.push(bundle),
-                        DraftState::Indeterminate => unreadable = true,
-                        DraftState::Clean => {}
-                    }
-                }
-                if !drafted.is_empty() {
-                    gated = true;
-                    Some(format!(
-                        "{} of its skills carry local edits that are not shared ({}) — dropping \
-                         the feed row takes them out of this scope's agent dirs (the edits are \
-                         snapshotted first, never deleted) · {removal_note}",
-                        drafted.len(),
-                        drafted.join(", ")
-                    ))
-                } else if unreadable {
+                // An EDITED copy is kept in place (disclosed on the receipt), so a draft is no
+                // loss and no gate. A copy that cannot be READ is the one indeterminate state:
+                // the whole remove fails toward the gate, and `--yes` then applies with it
+                // treated as edited (kept).
+                let unreadable = bundles
+                    .iter()
+                    .any(|b| draft_state(ctx, b) == DraftState::Indeterminate);
+                if unreadable {
                     gated = true;
                     Some(format!(
                         "some of its skills' files could not be read to check for local edits — \
-                         describing first rather than assuming there are none · {removal_note}"
+                         describing first rather than assuming there are none (an edited copy is \
+                         kept in place) · {removal_note}"
                     ))
                 } else {
                     Some(removal_note)
@@ -1794,6 +1792,7 @@ fn apply_arms(
             name: arm.name(),
             kind: match arm {
                 Arm::OffWrite { .. } => RemoveKind::ManifestExcluded,
+                Arm::FeedDrop { .. } => RemoveKind::FeedRemoved,
                 _ => RemoveKind::ManifestRemoved,
             },
             manifest: Some(target.path.display().to_string()),
@@ -1820,6 +1819,7 @@ fn apply_arms(
                 items,
                 applied: false,
                 undo: Vec::new(),
+                uninstalled: Vec::new(),
             },
             yes_argv,
         });
@@ -1913,11 +1913,58 @@ fn apply_arms(
             None => note,
         });
     }
+    // A feed-line drop's EAGER uninstall runs in [`remove_global`], after the writer lock
+    // releases — the receipt's `uninstalled` block is filled there.
     Ok(RemoveOutcome::Applied(RemoveData {
-        undo: undo_for(&arms, global),
+        undo: undo_for(&arms, global, manifest_host(ctx).as_deref()),
         items,
         applied: true,
+        uninstalled: Vec::new(),
     }))
+}
+
+/// The in-invocation cleanup a feed-line drop drives: ONE machine-scope reconcile (the exact
+/// machinery the background sweep runs — nothing bespoke), then the receipt's uninstall facts are
+/// read back off its rows: what left which destinations, and which edited copies stayed. Filtered
+/// to the dropped workspaces' rows, so a receipt never claims another source's movement.
+fn eager_feed_cleanup(
+    ctx: &Ctx<'_>,
+    connect: &SessionConnect<'_>,
+    workspaces: &[String],
+) -> Vec<topos_types::results::UninstalledBundle> {
+    let ids: Vec<String> = live_sessions(ctx)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|s| workspaces.contains(&s.workspace_name))
+        .map(|s| s.workspace_id)
+        .collect();
+    let Ok(out) = super::reconcile::manifest_update(
+        ctx,
+        connect,
+        None,
+        &super::reconcile::ManifestUpdateOpts {
+            scope: super::reconcile::UpdateScope::Machine,
+            ..Default::default()
+        },
+    ) else {
+        return Vec::new();
+    };
+    out.data
+        .skills
+        .into_iter()
+        .filter(|r| r.action == topos_types::results::PullAction::Removed)
+        .filter(|r| {
+            r.workspace_id
+                .as_deref()
+                .is_some_and(|w| ids.iter().any(|i| i == w))
+        })
+        .map(|r| topos_types::results::UninstalledBundle {
+            name: r.display.unwrap_or(r.skill),
+            destinations: r.destinations,
+            kind: r.kind,
+            kept: r.kept,
+        })
+        .collect()
 }
 
 /// The inline MCP removal convergence a `remove` apply runs (see the call site): for each dropped
@@ -1976,13 +2023,16 @@ fn converge_removed_mcp(
         );
         let mut lines: Vec<String> = Vec::new();
         for removed in &outcome.removed {
-            let file = removed.state.file.as_deref().unwrap_or("its config");
+            // Keyed by the config FILE the entry lived in — receipts speak in destinations,
+            // never agents.
+            let file = removed
+                .state
+                .file
+                .as_deref()
+                .map_or_else(|| "its config".to_owned(), |f| pretty_path(ctx, f));
             lines.push(match removed.state.state.as_str() {
-                "drifted" => format!(
-                    "{}: hand-edited entry left in place ({file})",
-                    removed.state.agent
-                ),
-                _ => format!("{}: server entry removed from {file}", removed.state.agent),
+                "drifted" => format!("{file}: hand-edited entry left in place"),
+                _ => format!("{file}: server entry removed"),
             });
         }
         for w in &outcome.warnings {
@@ -2214,6 +2264,11 @@ fn prove_unchanged(
     })
 }
 
+/// A path as a person reads it — `~`-abbreviated under the machine home.
+fn pretty_path(ctx: &Ctx<'_>, path: &str) -> String {
+    super::inventory::pretty(ctx, Path::new(path))
+}
+
 /// Join a loss-guard line with an arm's own removal note (` · `-separated when both exist).
 fn join_notes(lead: String, tail: Option<String>) -> String {
     match tail {
@@ -2309,8 +2364,9 @@ fn member_reference(set: &PlanRow, member: &str) -> Option<String> {
 /// The literal inverse — offered ONLY when it restores the whole prior state. A batch of one
 /// whose row carried nothing but a version pin re-adds exactly what left; a set split, a fields
 /// row the `add` grammar cannot respell, or a multi-target batch offers none (no undo beats a
-/// wrong one).
-fn undo_for(arms: &[Arm], global: bool) -> Vec<String> {
+/// wrong one). A FEED line's inverse spells the `@ws` sugar when `sugar_host` (this machine's
+/// one connected host) resolves it — the same default-host rule every verb's sugar uses.
+fn undo_for(arms: &[Arm], global: bool, sugar_host: Option<&str>) -> Vec<String> {
     let [arm] = arms else {
         return Vec::new();
     };
@@ -2322,7 +2378,17 @@ fn undo_for(arms: &[Arm], global: bool) -> Vec<String> {
             // the re-add would silently drop them.
             EntryValue::Fields(_) | EntryValue::Off => return Vec::new(),
         },
-        Arm::FeedDrop { reference, .. } | Arm::OffWrite { reference, .. } => reference.clone(),
+        Arm::FeedDrop {
+            reference,
+            workspace,
+            ..
+        } => match keys::classify_key(reference) {
+            Ok(KeyShape::Feed { host, .. }) if sugar_host == Some(host.as_str()) => {
+                format!("@{workspace}")
+            }
+            _ => reference.clone(),
+        },
+        Arm::OffWrite { reference, .. } => reference.clone(),
         Arm::SetSplit { .. } => return Vec::new(),
     };
     let mut argv = vec!["topos".to_owned(), "add".to_owned()];
@@ -2371,11 +2437,11 @@ mod tests {
             name: "deploy".into(),
         };
         assert_eq!(
-            undo_for(std::slice::from_ref(&star), false),
+            undo_for(std::slice::from_ref(&star), false, None),
             vec!["topos", "add", "topos.sh/acme/deploy"]
         );
         assert_eq!(
-            undo_for(std::slice::from_ref(&star), true),
+            undo_for(std::slice::from_ref(&star), true, None),
             vec!["topos", "add", "-g", "topos.sh/acme/deploy"]
         );
         let digest = "0123456789abcdef".repeat(4);
@@ -2384,7 +2450,7 @@ mod tests {
             name: "deploy".into(),
         };
         assert_eq!(
-            undo_for(std::slice::from_ref(&pinned), false),
+            undo_for(std::slice::from_ref(&pinned), false, None),
             vec!["topos", "add", &format!("topos.sh/acme/deploy@{digest}")]
         );
         // A fields row cannot be respelled by `add` — no undo at all.
@@ -2395,7 +2461,7 @@ mod tests {
             })),
             name: "deploy".into(),
         };
-        assert!(undo_for(&[fields], false).is_empty());
+        assert!(undo_for(&[fields], false, None).is_empty());
         // A batch of several offers none (a partial inverse would misstate what it restores).
         assert!(
             undo_for(
@@ -2409,9 +2475,42 @@ mod tests {
                         name: "b".into()
                     },
                 ],
-                false
+                false,
+                None
             )
             .is_empty()
+        );
+    }
+
+    #[test]
+    fn a_feed_drops_undo_spells_the_sugar_at_the_default_host() {
+        let feed = |host: &str| Arm::FeedDrop {
+            reference: format!("{host}/acme"),
+            workspace: "acme".into(),
+            bundles: Vec::new(),
+        };
+        // The machine's ONE connected host resolves the `@ws` sugar — the undo the final receipt
+        // prints, byte for byte.
+        assert_eq!(
+            undo_for(
+                std::slice::from_ref(&feed("topos.sh")),
+                true,
+                Some("topos.sh")
+            ),
+            vec!["topos", "add", "-g", "@acme"]
+        );
+        // Another host (or no resolvable sugar) keeps the full spelling.
+        assert_eq!(
+            undo_for(
+                std::slice::from_ref(&feed("other.example")),
+                true,
+                Some("topos.sh")
+            ),
+            vec!["topos", "add", "-g", "other.example/acme"]
+        );
+        assert_eq!(
+            undo_for(std::slice::from_ref(&feed("topos.sh")), true, None),
+            vec!["topos", "add", "-g", "topos.sh/acme"]
         );
     }
 

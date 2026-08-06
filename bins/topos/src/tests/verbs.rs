@@ -1113,7 +1113,8 @@ fn add_pins_the_lock_shape() {
 
 /// The committed `list.ok` golden equals the REAL op's output over a deterministic machine
 /// scope: one workspace session, one assigned-and-applied skill (fixed version + digest), the
-/// implicit feed recipe. Path-free by construction, so the bytes are stable across machines.
+/// feed row login writes on the first connection. Path-free by construction (the manifest
+/// renders `~`-relative), so the bytes are stable across machines.
 #[test]
 fn list_golden_matches_the_real_machine_scope_output() {
     use crate::ops::inventory::testkit::{TempHome, assigned, skill_id_of, with_ctx};
@@ -1126,6 +1127,7 @@ fn list_golden_matches_the_real_machine_scope_output() {
         "acme",
         crate::sessions::SESSION_ACTIVE,
     );
+    home.global("[bundles]\n\"topos.sh/acme\" = \"*\"\n");
     home.cache(
         "w_acme",
         "topos.sh",

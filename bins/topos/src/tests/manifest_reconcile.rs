@@ -1,11 +1,12 @@
 //! The RECONCILE over fakes (no HTTP): two UNBLENDED scopes, each converged on its own recipe.
 //!
-//! The implicit person recipe adopts every connected workspace's feed; a global FILE is complete
-//! (only its rows deliver, and it says so loudly when a workspace's feed is left out); an `"off"`
-//! row withholds exactly its bundle; an explicit row's pin beats the feed's and a set's version of
-//! the same identity; the NEAREST project file governs whole; the same bundle at both scopes lands
-//! twice with two stores; git rows move only on an explicit update; a dropped row cleans
-//! snapshot-first; and `--rebuild` absorbs before it drops.
+//! The global FILE is the machine's complete recipe (only its rows deliver — a feed row, written
+//! by login on the first connection, is what makes a workspace's feed flow; with no file nothing
+//! is demanded machine-wide, and it says so loudly when a workspace's feed is left out); an
+//! `"off"` row withholds exactly its bundle; an explicit row's pin beats the feed's and a set's
+//! version of the same identity; the NEAREST project file governs whole; the same bundle at both
+//! scopes lands twice with two stores; git rows move only on an explicit update; a dropped row
+//! cleans snapshot-first; and `--rebuild` absorbs before it drops.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -183,6 +184,11 @@ impl Rig {
         let home = self.layout().home().to_path_buf();
         std::fs::create_dir_all(&home).unwrap();
         std::fs::write(home.join(crate::manifest::MANIFEST_FILE), body).unwrap();
+    }
+    /// The ordinary machine recipe after a login: the seeded session's feed row — exactly the
+    /// line `topos login` writes on this machine's first connection to the workspace.
+    fn seed_feed(&self) {
+        self.write_global(&format!("[bundles]\n\"{HOST}/{WS_NAME}\" = \"*\"\n"));
     }
 }
 
@@ -663,13 +669,14 @@ fn forge_next_due(rig: &Rig, source: &str, git_ref: &str, scope: &str) -> i64 {
 }
 
 // =================================================================================================
-// The person scope: the implicit recipe, and the complete file.
+// The person scope: the complete file (and the nothing an absent file demands).
 // =================================================================================================
 
 #[test]
-fn the_implicit_recipe_adopts_every_connected_feed() {
-    let rig = Rig::new("implicit");
+fn the_feed_row_adopts_the_workspaces_feed() {
+    let rig = Rig::new("feedrow");
     rig.seed_session();
+    rig.seed_feed();
     let log: CallLog = Arc::new(Mutex::new(Vec::new()));
     let v = one_file(b"# deploy\n");
     let plane = FakePlane::new(log.clone()).with_version("s_deploy", &v);
@@ -684,16 +691,23 @@ fn the_implicit_recipe_adopts_every_connected_feed() {
     let ctx = rig.ctx_at(Some(&rig.work.0));
     let out = sweep(&ctx, &plane, &dir);
 
-    // No global file: the machine behaves exactly as if it held one feed row per connected
-    // workspace — installed silently (the login was the acceptance), into the home dirs.
+    // The feed row (the line login wrote on the first connection) takes the workspace's whole
+    // feed — installed silently (the login was the acceptance), into the home dirs.
     let row = out
         .data
         .skills
         .iter()
         .find(|s| s.skill == "deploy")
         .unwrap();
-    assert_eq!(row.action, PullAction::FastForwarded, "{:?}", out.warnings);
+    // The FIRST materialization reads `installed`, leads with the workspace-qualified name, and
+    // names its destinations — never an agent.
+    assert_eq!(row.action, PullAction::Installed, "{:?}", out.warnings);
     assert_eq!(row.scope.as_deref(), Some("person"));
+    assert_eq!(
+        row.display.as_deref(),
+        Some(&format!("@{WS_NAME}/deploy")[..])
+    );
+    assert_eq!(row.destinations.len(), 1, "{:?}", row.destinations);
     assert!(rig.work.0.join("skills/deploy/SKILL.md").exists());
     // The applied report went out; the offline cache carries the identity, the attribution, and
     // the caller's declines.
@@ -709,13 +723,76 @@ fn the_implicit_recipe_adopts_every_connected_feed() {
         ws.declined.get("s_old").map(String::as_str),
         Some("retired")
     );
-    // Nothing is loud: the implicit recipe adopts everything, so there is nothing to disclose.
+    // Nothing is loud: the feed row adopts everything, so there is nothing to disclose.
     assert!(
         !out.warnings
             .iter()
             .any(|w| w.starts_with("GLOBAL_MANIFEST")),
         "{:?}",
         out.warnings
+    );
+}
+
+#[test]
+fn no_global_file_delivers_nothing_and_cleans_what_was_delivered() {
+    // The old contract ("no file behaves as one feed row per connected workspace") is DEAD: with
+    // no file nothing is demanded machine-wide — nothing lands, and a copy an earlier recipe
+    // placed retires exactly as a deleted feed row's would (bytes kept: the absence is this
+    // machine's own choice, not a feed withdrawal).
+    let rig = Rig::new("nofile");
+    rig.seed_session();
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let v = one_file(b"# deploy\n");
+    let plane = FakePlane::new(log).with_version("s_deploy", &v);
+    plane.serves(vec![delivered("s_deploy", "deploy", &v)]);
+    let dir = FakeDirectory::new(vec![catalog_entry("s_deploy", "deploy", &v)], Vec::new());
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+
+    // Delivered while the feed row stood…
+    rig.seed_feed();
+    sweep(&ctx, &plane, &dir);
+    let placed = rig.work.0.join("skills/deploy");
+    assert!(placed.exists());
+
+    // …then the whole file is deleted. The next sweep delivers nothing and RETIRES the
+    // placement — cleanup semantics do not depend on the file's existence.
+    std::fs::remove_file(rig.layout().home().join(crate::manifest::MANIFEST_FILE)).unwrap();
+    let out = sweep(&ctx, &plane, &dir);
+    assert!(
+        !out.data
+            .skills
+            .iter()
+            .any(|s| s.skill == "deploy" && !matches!(s.action, PullAction::Removed)),
+        "nothing is delivered person-scope with no file: {:?}",
+        out.data.skills
+    );
+    assert!(
+        !placed.exists(),
+        "the placement retired: {:?}",
+        out.warnings
+    );
+    // The bytes stay — this machine's own choice keeps them, like an `"off"` row's clean.
+    let sid = crate::id::SkillId::parse("s_deploy").unwrap();
+    assert!(rig.layout().skill_dir(&sid).exists());
+
+    // A machine that never had the file delivers nothing at all.
+    let fresh = Rig::new("nofile-fresh");
+    fresh.seed_session();
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let plane = FakePlane::new(log).with_version("s_deploy", &v);
+    plane.serves(vec![delivered("s_deploy", "deploy", &v)]);
+    let dir = FakeDirectory::new(vec![catalog_entry("s_deploy", "deploy", &v)], Vec::new());
+    let ctx = fresh.ctx_at(Some(&fresh.work.0));
+    let out = sweep(&ctx, &plane, &dir);
+    assert!(
+        !fresh.work.0.join("skills/deploy").exists(),
+        "{:?}",
+        out.data.skills
+    );
+    assert!(
+        out.data.skills.is_empty(),
+        "nothing demanded, nothing moved: {:?}",
+        out.data.skills
     );
 }
 
@@ -776,6 +853,7 @@ fn a_global_file_withholds_the_feed_and_says_so_loudly() {
 fn an_exchange_that_serves_nothing_says_so_without_counting_as_a_failure() {
     let rig = Rig::new("emptyserve");
     rig.seed_session();
+    rig.seed_feed();
     let log: CallLog = Arc::new(Mutex::new(Vec::new()));
     let plane = FakePlane::new(log);
     plane.serves(Vec::new());
@@ -796,13 +874,14 @@ fn an_exchange_that_serves_nothing_says_so_without_counting_as_a_failure() {
 }
 
 /// The line is the WORKSPACE's fact, said ONCE however many times a recipe adopts the address.
-/// The implicit person recipe holds one feed row per live SESSION, so a workspace whose id was
-/// re-minted (the old session row surviving beside the new one) adopts the same address twice and
-/// drives the feed reconcile twice — the receipt must still carry exactly one line.
+/// One feed row names an ADDRESS, and a workspace whose id was re-minted (the old session row
+/// surviving beside the new one) has two live sessions on that address — the row drives the feed
+/// reconcile once per session, and the receipt must still carry exactly one line.
 #[test]
 fn one_address_adopted_twice_earns_one_empty_exchange_line() {
     let rig = Rig::new("emptytwice");
     rig.seed_session();
+    rig.seed_feed();
     sessions::upsert_session(
         &rig.fs,
         &rig.layout(),
@@ -1001,7 +1080,7 @@ fn a_project_manifest_lands_in_the_checkout_self_ignoring() {
         .iter()
         .find(|s| s.skill == "deploy")
         .unwrap();
-    assert_eq!(row.action, PullAction::FastForwarded, "{:?}", out.warnings);
+    assert_eq!(row.action, PullAction::Installed, "{:?}", out.warnings);
     assert_eq!(row.scope.as_deref(), Some(&*proj.0.display().to_string()));
     // The bytes live INSIDE the checkout, not the home-scope dirs.
     let placed = proj.0.join(".claude/skills/deploy");
@@ -1093,6 +1172,7 @@ fn the_nearest_project_file_governs_whole() {
 fn the_same_bundle_at_both_scopes_lands_twice() {
     let rig = Rig::new("unblended");
     rig.seed_session();
+    rig.seed_feed();
     let proj = project(
         "proj-two",
         &format!("[bundles]\n\"{HOST}/{WS_NAME}/deploy\" = \"*\"\n"),
@@ -1254,6 +1334,7 @@ fn a_workspace_row_without_a_session_is_an_honest_local_line() {
 fn an_unparsable_manifest_freezes_its_scope() {
     let rig = Rig::new("badfile");
     rig.seed_session();
+    rig.seed_feed();
     let log: CallLog = Arc::new(Mutex::new(Vec::new()));
     let v = one_file(b"# deploy\n");
     let plane = FakePlane::new(log).with_version("s_deploy", &v);
@@ -1318,6 +1399,7 @@ fn two_scopes(tag: &str) -> TwoScopes {
 fn a_bare_update_inside_a_project_converges_only_that_project() {
     let rig = Rig::new("scope-here-proj");
     rig.seed_session();
+    rig.seed_feed();
     let t = two_scopes("scope-here-proj");
     let ctx = rig.ctx_at(Some(&t.proj.0));
     let out = sweep(&ctx, &t.plane, &t.dir);
@@ -1357,6 +1439,7 @@ fn a_bare_update_inside_a_project_converges_only_that_project() {
 fn a_bare_update_outside_a_project_converges_the_machine() {
     let rig = Rig::new("scope-here-machine");
     rig.seed_session();
+    rig.seed_feed();
     let t = two_scopes("scope-here-machine");
     // Standing in the plain work dir — no `topos.toml` covers it, so the machine is where you are.
     let ctx = rig.ctx_at(Some(&rig.work.0));
@@ -1374,6 +1457,7 @@ fn a_bare_update_outside_a_project_converges_the_machine() {
 fn update_g_inside_a_project_converges_only_the_machine() {
     let rig = Rig::new("scope-global");
     rig.seed_session();
+    rig.seed_feed();
     let t = two_scopes("scope-global");
     let ctx = rig.ctx_at(Some(&t.proj.0));
     let out = sweep_scoped(&ctx, &t.plane, &t.dir, ops::UpdateScope::Machine);
@@ -1402,6 +1486,7 @@ fn update_g_inside_a_project_converges_only_the_machine() {
 fn the_hook_sweep_converges_both_scopes_from_inside_a_project() {
     let rig = Rig::new("scope-both");
     rig.seed_session();
+    rig.seed_feed();
     let t = two_scopes("scope-both");
     let ctx = rig.ctx_at(Some(&t.proj.0));
     let out = sweep_both(&ctx, &t.plane, &t.dir);
@@ -3228,7 +3313,7 @@ fn a_granted_origin_flows_in_both_scopes() {
 // =================================================================================================
 
 #[test]
-fn a_dropped_feed_row_cleans_the_person_placements_snapshot_first() {
+fn a_dropped_feed_row_uninstalls_clean_copies_and_keeps_edited_ones() {
     let rig = Rig::new("feeddrop");
     rig.seed_session();
     let log: CallLog = Arc::new(Mutex::new(Vec::new()));
@@ -3241,48 +3326,78 @@ fn a_dropped_feed_row_cleans_the_person_placements_snapshot_first() {
     sweep(&ctx, &plane, &dir);
     let placed = rig.work.0.join("skills/deploy");
     assert!(placed.join("SKILL.md").exists());
-    let before = store_versions(&rig.layout(), "s_deploy");
 
-    // An edit rides along, then the feed row goes: the edit is ABSORBED before the dir is removed.
-    std::fs::write(placed.join("SKILL.md"), b"# my edit\n").unwrap();
+    // A CLEAN copy: dropping the feed row uninstalls it now, and the receipt row speaks in
+    // destinations — the removed dir, the qualified name — never an agent.
     rig.write_global("[bundles]\n");
     let out = sweep(&ctx, &plane, &dir);
-    assert!(
-        out.data
-            .skills
-            .iter()
-            .any(|s| s.skill == "deploy" && s.action == PullAction::Withdrawn),
-        "{:?}",
-        out.data.skills
+    let row = out
+        .data
+        .skills
+        .iter()
+        .find(|s| s.skill == "deploy" && s.action == PullAction::Removed)
+        .unwrap_or_else(|| panic!("{:?}", out.data.skills));
+    assert_eq!(
+        row.display.as_deref(),
+        Some(&format!("@{WS_NAME}/deploy")[..])
     );
-    assert!(!placed.exists(), "the person-scope copy is retired");
-    assert!(
-        store_versions(&rig.layout(), "s_deploy") > before,
-        "the edit was snapshotted into the store first"
-    );
+    assert_eq!(row.destinations, vec![placed.display().to_string()]);
+    assert!(row.kept.is_empty(), "{:?}", row.kept);
+    assert!(!placed.exists(), "the clean person-scope copy is retired");
     let sid = crate::id::SkillId::parse("s_deploy").unwrap();
     assert!(
         rig.layout().skill_dir(&sid).exists(),
         "every sidecar byte stays"
     );
 
-    // Idempotent: the sweep after has nothing left to retire.
+    // An EDITED copy: re-adopt, edit, drop again — the edit is the person's own work, so the
+    // copy STAYS IN PLACE (disclosed on the row), with a snapshot in the store behind it.
+    rig.write_global(&format!("[bundles]\n\"{HOST}/{WS_NAME}\" = \"*\"\n"));
+    sweep(&ctx, &plane, &dir);
+    assert!(placed.join("SKILL.md").exists());
+    let before = store_versions(&rig.layout(), "s_deploy");
+    std::fs::write(placed.join("SKILL.md"), b"# my edit\n").unwrap();
+    rig.write_global("[bundles]\n");
+    let out = sweep(&ctx, &plane, &dir);
+    let row = out
+        .data
+        .skills
+        .iter()
+        .find(|s| s.skill == "deploy" && s.action == PullAction::Removed)
+        .unwrap_or_else(|| panic!("{:?}", out.data.skills));
+    assert!(row.destinations.is_empty(), "{:?}", row.destinations);
+    assert_eq!(row.kept, vec![placed.display().to_string()]);
+    assert!(placed.join("SKILL.md").exists(), "the edited copy stays");
+    assert_eq!(
+        std::fs::read(placed.join("SKILL.md")).unwrap(),
+        b"# my edit\n",
+        "byte-for-byte the person's edit"
+    );
+    assert!(
+        store_versions(&rig.layout(), "s_deploy") > before,
+        "the kept edit is snapshotted into the store too"
+    );
+
+    // Idempotent: the sweep after has nothing left to retire — the kept copy is the person's own
+    // file now, not something to re-announce every session start.
     let out2 = sweep(&ctx, &plane, &dir);
     assert!(
         !out2
             .data
             .skills
             .iter()
-            .any(|s| s.action == PullAction::Withdrawn),
+            .any(|s| matches!(s.action, PullAction::Removed | PullAction::Withdrawn)),
         "{:?}",
         out2.data.skills
     );
+    assert!(placed.join("SKILL.md").exists());
 }
 
 #[test]
 fn a_new_off_row_cleans_its_bundles_placements_and_keeps_the_bytes() {
     let rig = Rig::new("offclean");
     rig.seed_session();
+    rig.seed_feed();
     let log: CallLog = Arc::new(Mutex::new(Vec::new()));
     let v = one_file(b"# noisy\n");
     let plane = FakePlane::new(log).with_version("s_noisy", &v);
@@ -3403,6 +3518,7 @@ fn an_offline_sweep_freezes_and_never_cleans() {
 fn rebuild_absorbs_the_edit_before_it_re_projects() {
     let rig = Rig::new("rebuild");
     rig.seed_session();
+    rig.seed_feed();
     let log: CallLog = Arc::new(Mutex::new(Vec::new()));
     let v = one_file(b"# deploy\n");
     let plane = FakePlane::new(log).with_version("s_deploy", &v);
@@ -3703,6 +3819,7 @@ fn a_zero_staleness_window_never_warns() {
 fn a_targeted_update_narrows_the_sweep_and_names_a_miss() {
     let rig = Rig::new("targeted");
     rig.seed_session();
+    rig.seed_feed();
     let log: CallLog = Arc::new(Mutex::new(Vec::new()));
     let deploy = one_file(b"# deploy\n");
     let other = one_file(b"# other\n");
@@ -4000,14 +4117,15 @@ fn a_dropped_repo_row_cleans_its_members_like_any_undemanded_item() {
         "a dropped repo row's member is undemanded: {:?}",
         out.warnings
     );
-    assert!(
-        out.data
-            .skills
-            .iter()
-            .any(|s| s.skill == "alpha" && s.action == PullAction::Withdrawn),
-        "{:?}",
-        out.data.skills
-    );
+    // The person's OWN choice ended it, so the row reads `removed` (with the destination that
+    // left, `~`-abbreviated), never "withdrawn upstream".
+    let row = out
+        .data
+        .skills
+        .iter()
+        .find(|s| s.skill == "alpha" && s.action == PullAction::Removed)
+        .unwrap_or_else(|| panic!("{:?}", out.data.skills));
+    assert_eq!(row.destinations, vec!["~/.claude/skills/alpha".to_owned()]);
     // Idempotent: nothing left to retire on the sweep after.
     let out2 = sweep(&ctx, &plane, &dir);
     assert!(
@@ -4015,7 +4133,7 @@ fn a_dropped_repo_row_cleans_its_members_like_any_undemanded_item() {
             .data
             .skills
             .iter()
-            .any(|s| s.action == PullAction::Withdrawn),
+            .any(|s| matches!(s.action, PullAction::Removed | PullAction::Withdrawn)),
         "{:?}",
         out2.data.skills
     );
@@ -4031,6 +4149,7 @@ fn a_dropped_repo_row_cleans_its_members_like_any_undemanded_item() {
 fn a_project_mention_never_shields_a_person_scope_clean() {
     let rig = Rig::new("scope-mention");
     rig.seed_session();
+    rig.seed_feed();
     let log: CallLog = Arc::new(Mutex::new(Vec::new()));
     let v = one_file(b"# deploy\n");
     let plane = FakePlane::new(log).with_version("s_deploy", &v);
@@ -4441,7 +4560,7 @@ fn an_off_switch_over_a_draft_is_describe_first() {
 }
 
 #[test]
-fn a_feed_drop_over_a_draft_is_describe_first() {
+fn a_feed_drop_applies_immediately_and_uninstalls_in_the_same_invocation() {
     let rig = Rig::new("feeddrop-gate");
     rig.seed_session();
     let log: CallLog = Arc::new(Mutex::new(Vec::new()));
@@ -4453,8 +4572,9 @@ fn a_feed_drop_over_a_draft_is_describe_first() {
     let placed = install_feed_deploy(&rig, &plane, &dir);
     let ctx = rig.ctx_at(Some(&rig.work.0));
 
-    // DRAFTED: dropping the feed row retires ALL its bundles' placements — with a draft among
-    // them the act is loss-shaped and describes first, naming the drafted bundle.
+    // DRAFTED: the edited copy is KEPT IN PLACE, so nothing is loss-shaped — a bare drop applies
+    // immediately, uninstalls in the SAME invocation, and the receipt carries the kept copy and
+    // the sugared undo.
     std::fs::write(placed.join("SKILL.md"), b"# my edit\n").unwrap();
     let token = format!("@{WS_NAME}");
     let out = ops::remove_global(
@@ -4465,39 +4585,50 @@ fn a_feed_drop_over_a_draft_is_describe_first() {
         false,
     )
     .unwrap();
-    match out {
-        ops::RemoveOutcome::Described { data, yes_argv } => {
-            let note = data.items[0].note.clone().unwrap_or_default();
-            assert!(note.contains("local edits"), "{note}");
-            assert!(note.contains("deploy"), "names the drafted bundle: {note}");
-            assert!(yes_argv.contains(&"--yes".to_owned()));
-        }
-        other => panic!("a drafted feed drop describes first: {other:?}"),
-    }
-    // --yes applies: the row goes.
-    let out = ops::remove_global(
-        &ctx,
-        &connect(&plane, &dir),
-        std::slice::from_ref(&token),
-        None,
-        true,
-    )
-    .unwrap();
-    assert!(matches!(out, ops::RemoveOutcome::Applied(_)));
+    let data = match out {
+        ops::RemoveOutcome::Applied(data) => data,
+        other => panic!("a bare feed drop applies immediately: {other:?}"),
+    };
+    assert_eq!(
+        data.undo,
+        vec!["topos", "add", "-g", &format!("@{WS_NAME}")],
+        "the undo line spells the sugar at the machine's one host"
+    );
+    let u = data
+        .uninstalled
+        .iter()
+        .find(|u| u.name == format!("@{WS_NAME}/deploy"))
+        .unwrap_or_else(|| panic!("{:?}", data.uninstalled));
+    assert!(u.destinations.is_empty(), "{:?}", u.destinations);
+    assert_eq!(u.kept, vec![placed.display().to_string()]);
+    assert!(
+        placed.join("SKILL.md").exists(),
+        "the edited copy stays in place"
+    );
     let text =
         std::fs::read_to_string(rig.layout().home().join(crate::manifest::MANIFEST_FILE)).unwrap();
     assert!(!text.contains(&format!("{HOST}/{WS_NAME}")), "{text}");
 
-    // CLEAN: with no draft the same drop applies immediately. (The edited copy survived the
-    // drop — restore its bytes to the served version so nothing is loss-shaped.)
+    // CLEAN: a fresh unedited install leaves in the SAME invocation — the receipt names the
+    // destination that went, and the dir is gone before the command returns. (The kept copy is
+    // the person's own file now; they delete it themselves before re-adopting the feed.)
+    std::fs::remove_dir_all(&placed).unwrap();
     rig.write_global(&format!("[bundles]\n\"{HOST}/{WS_NAME}\" = \"*\"\n"));
     sweep(&ctx, &plane, &dir);
-    std::fs::write(placed.join("SKILL.md"), b"# deploy\n").unwrap();
+    assert!(placed.join("SKILL.md").exists());
     let out = ops::remove_global(&ctx, &connect(&plane, &dir), &[token], None, false).unwrap();
-    assert!(
-        matches!(out, ops::RemoveOutcome::Applied(_)),
-        "a clean feed drop applies immediately"
-    );
+    let data = match out {
+        ops::RemoveOutcome::Applied(data) => data,
+        other => panic!("a clean feed drop applies immediately: {other:?}"),
+    };
+    let u = data
+        .uninstalled
+        .iter()
+        .find(|u| u.name == format!("@{WS_NAME}/deploy"))
+        .unwrap_or_else(|| panic!("{:?}", data.uninstalled));
+    assert_eq!(u.destinations, vec![placed.display().to_string()]);
+    assert!(u.kept.is_empty(), "{:?}", u.kept);
+    assert!(!placed.exists(), "the copies left in this invocation");
 }
 
 // =================================================================================================
@@ -5962,6 +6093,7 @@ fn a_bundle_held_at_two_versions_reports_the_person_copy_and_discloses_the_split
     // The split only EXISTS once both scopes have converged, so this rides the background sweep.
     let rig = Rig::new("split-report");
     rig.seed_session();
+    rig.seed_feed();
     let v1 = one_file(b"# deploy v1\n");
     let v2 = one_file(b"# deploy v2\n");
     let v1_hex = topos_core::digest::to_hex(&v1.id);
@@ -8510,28 +8642,23 @@ fn a_project_remove_of_a_machine_delivered_skill_refuses_toward_g() {
         "the refusal wrote nothing"
     );
 
-    // (b) NO machine-wide file at all (the implicit feed delivers it): the manifest arm claims
-    // nothing, and the CLASSIC removal refuses toward the same `-g` spelling.
+    // (b) The machine-wide file holds only the FEED row (no explicit line spells the bundle):
+    // the manifest arm claims nothing, and the CLASSIC removal refuses toward the same `-g`
+    // spelling.
     let rig = Rig::new("zq-crossscope-feed");
     rig.seed_session();
+    rig.seed_feed();
     let log: CallLog = Arc::new(Mutex::new(Vec::new()));
     let plane = FakePlane::new(log).with_version("s_deploy", &v);
     plane.serves(vec![delivered("s_deploy", "deploy", &v)]);
     let dir = FakeDirectory::new(vec![catalog_entry("s_deploy", "deploy", &v)], Vec::new());
     let proj = project("zq-crossscope-feed-proj", "[bundles]\n");
     // The feed has actually DELIVERED here (the machine sweep records it) — the delivered set is
-    // what makes the name the implicit recipe's claim; a workspace merely publishing a name is
-    // not a demand, and would fall through to the classic not-found instead.
+    // what makes the name the feed row's claim; a workspace merely publishing a name is not a
+    // demand, and would fall through to the classic not-found instead.
     sweep(&rig.ctx_at(Some(&rig.work.0)), &plane, &dir);
     let ctx = rig.ctx_at(Some(&proj.0));
     let session_connect = connect(&plane, &dir);
-    assert!(
-        !rig.layout()
-            .home()
-            .join(crate::manifest::MANIFEST_FILE)
-            .exists(),
-        "the implicit recipe: no machine-wide file"
-    );
     assert!(
         ops::remove_project(&ctx, &session_connect, &["deploy".to_owned()], None, true)
             .unwrap()
@@ -8750,6 +8877,7 @@ fn both_scopes_hold_deploy(
 fn reads_from_inside_a_project_answer_the_project_copy() {
     let rig = Rig::new("scope-reads");
     rig.seed_session();
+    rig.seed_feed();
     let log: CallLog = Arc::new(Mutex::new(Vec::new()));
     let v1 = one_file(b"# deploy v1\n");
     let v2 = one_file(b"# deploy v2\n");
@@ -8908,6 +9036,7 @@ fn a_project_copys_log_names_the_workspace_whose_last_exchange_failed() {
 fn a_g_reset_inside_a_project_never_reaches_the_checkouts_copy() {
     let rig = Rig::new("scope-greset");
     rig.seed_session();
+    rig.seed_feed();
     let log: CallLog = Arc::new(Mutex::new(Vec::new()));
     let v = one_file(b"# deploy\n");
     let plane = FakePlane::new(log).with_version("s_deploy", &v);

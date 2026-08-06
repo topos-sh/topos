@@ -269,6 +269,16 @@
           "const": "fast_forwarded"
         },
         {
+          "description": "The bundle's FIRST materialization in this scope: the never-received baseline received its\nfirst bytes and they landed (skill folders, or — for a config-placed bundle — config\nentries). `destinations` names where. **Additive.**",
+          "type": "string",
+          "const": "installed"
+        },
+        {
+          "description": "This machine's OWN recipe choice ended delivery here (a dropped feed line, an `\"off\"`\nswitch, a dropped row) and the placed copies were uninstalled now — `destinations` names\nwhat left, `kept` any edited copy left in place. Distinct from `withdrawn`, which is\nupstream's act. **Additive.**",
+          "type": "string",
+          "const": "removed"
+        },
+        {
           "description": "State ② confirm-each / first-receive — a one-tap offer is waiting.",
           "type": "string",
           "const": "offered"
@@ -338,11 +348,32 @@
             }
           ]
         },
+        "destinations": {
+          "description": "The DESTINATIONS this row's action touched: the skill folders an `installed` row landed in\n(or a `removed` row uninstalled), or the config files a config-placed (`mcp`) bundle's\nentries live in. Display paths — abbreviated to `~` under the user's home. Empty (and\nomitted) for actions that moved no destination. **INFERRED** (additive).",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "display": {
+          "description": "The workspace-QUALIFIED display name a receipt leads with (`@<ws>/<name>` when the host is\nthis machine's one connected host, else `<host>/<ws>/<name>`). Absent for non-workspace\nsources, which read by their plain `skill` name. **INFERRED** (additive).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "harnesses": {
           "description": "Per-agent applied states for a config-placed (`mcp`) bundle: which detected agents hold\nthe server entry and how. Empty (and omitted) for file-bundle skills. **INFERRED**\n(additive).",
           "type": "array",
           "items": {
             "$ref": "#/$defs/McpAgentState"
+          }
+        },
+        "kept": {
+          "description": "Locally-EDITED copies a `removed` row kept in place instead of uninstalling (the person's\nown work is never deleted by ending delivery) — their display paths, `~`-abbreviated.\n**INFERRED** (additive).",
+          "type": "array",
+          "items": {
+            "type": "string"
           }
         },
         "kind": {

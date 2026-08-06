@@ -199,6 +199,7 @@ mod tests {
             vec![assigned("deploy", Some("Dana"))],
             Vec::new(),
         );
+        home.global("[bundles]\n\"topos.sh/acme\" = \"*\"\n");
 
         let d = snapshot(&home, &repo, ScopeView::Here);
         assert_eq!(d.scopes.len(), 1, "{:?}", d.scopes);
@@ -254,6 +255,7 @@ mod tests {
             vec![assigned("deploy", None)],
             Vec::new(),
         );
+        home.global("[bundles]\n\"topos.sh/acme\" = \"*\"\n");
 
         let d = snapshot(&home, &repo, ScopeView::Machine);
         assert_eq!(d.scopes.len(), 1);
@@ -312,6 +314,7 @@ mod tests {
             vec![assigned("deploy", None)],
             Vec::new(),
         );
+        home.global("[bundles]\n\"topos.sh/acme\" = \"*\"\n");
 
         let d = snapshot(&home, &cwd, ScopeView::Here);
         assert_eq!(d.scopes.len(), 1);
@@ -343,6 +346,7 @@ mod tests {
             vec![assigned("deploy", None), assigned("notes", None)],
             Vec::new(),
         );
+        home.global("[bundles]\n\"topos.sh/acme\" = \"*\"\n");
         // deploy: applied at an OLDER version than served — behind.
         home.store_applied(
             "topos_dddddddddddddddddddddddddddddddd",

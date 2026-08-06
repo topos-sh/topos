@@ -104,12 +104,12 @@ quietly writes to the other one.
 topos add code-review -g
 ```
 
-`-g` edits `~/.topos/topos.toml` — this machine's own list — instead of the project's. Most people
-never have that file and don't need one: while it is absent, the machine behaves exactly as if it
-said "everything each connected workspace gives me". The first `-g` command writes it out in full
-before making your edit, one line per workspace you're connected to, so you can see what you
-already had. From then on that file is the **complete** list for this machine: what it names is
-what you get.
+`-g` edits `~/.topos/topos.toml` — this machine's own list — instead of the project's. That file
+is the **complete** list for this machine: what it names is what you get. Most of it writes
+itself — `topos login` records a workspace's feed line (`"topos.sh/acme" = "*"`) the first time
+this machine connects, so everything the workspace gives you flows with no editing. Delete a feed
+line and it stays deleted (login never re-adds it); a `-g` add then records exactly the lines you
+choose.
 
 <Tip>
   A `-g` add of something the team already gives you writes nothing and says so. There is no
@@ -233,9 +233,9 @@ From this project, or from your own machine-wide list. `remove` edits the same f
 prints the undo — they are exact inverses, and neither reaches across: a skill your machine-wide
 file delivers is refused here, pointing at `-g`. Two cases describe first instead of applying:
 
-- **Local work would be lost.** A skill you've edited but not shared is described first, so you can
-  see the draft before the copy leaves your agent directories. (Your edits are snapshotted, never
-  deleted.)
+- **Local work is involved.** A skill you've edited but not shared is described first, so you see
+  the draft before you decide. An edited copy is never swept up with the removal: it stays on disk
+  where you made it, and the receipt says so (`kept <name> — <path> is edited`).
 - **The line covers a set.** Removing one skill out of a channel or a whole-repo entry means
   replacing that one line with its current members — after which later additions by whoever curates
   it stop arriving through this file.

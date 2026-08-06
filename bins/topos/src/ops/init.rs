@@ -3,10 +3,10 @@
 //! Without `-g` it creates THIS folder's project manifest from the commented template (the folder
 //! IS the scope — `init` never walks up). It is the ONE way a project manifest is born: `add`
 //! records rows in a file that already exists and refuses when none covers the folder, so the
-//! file always lands where a person put it. With `-g` it MATERIALIZES the machine-wide file: the
-//! header plus one feed row per connected workspace, spelling out what an absent file already
-//! means, so the next edit is a line-by-line one. Idempotent either way — an existing file is a
-//! clean no-op receipt (`created: false`), never an overwrite.
+//! file always lands where a person put it. With `-g` it creates the machine-wide file with its
+//! header alone — no feed rows (`topos login` writes a workspace's row on this machine's first
+//! connection, and a row someone deleted must never come back through a birth). Idempotent either
+//! way — an existing file is a clean no-op receipt (`created: false`), never an overwrite.
 
 use std::path::Path;
 
@@ -92,7 +92,7 @@ pub(crate) fn init(ctx: &Ctx<'_>, global: bool) -> Result<InitData, ClientError>
     })
 }
 
-/// The `-g` arm: materialize this machine's own recipe from what it is connected to.
+/// The `-g` arm: create this machine's own recipe, header only (login writes the feed rows).
 fn init_global(ctx: &Ctx<'_>) -> Result<InitData, ClientError> {
     let path = ctx.layout.home().join(MANIFEST_FILE);
     ctx.fs.create_dir_all(ctx.layout.home())?;
@@ -108,32 +108,15 @@ fn init_global(ctx: &Ctx<'_>) -> Result<InitData, ClientError> {
             ),
         });
     }
-    let connected = medit::connected_workspaces(ctx);
-    let note = if connected.is_empty() {
-        Some(
-            "no workspace is connected yet, so the file starts with just its header — \
-             `topos login <workspace-address>` connects one, and its feed row lands here"
-                .to_owned(),
-        )
-    } else {
-        Some(format!(
-            "materialized: one feed row per connected workspace ({}) — each tracks whatever that \
-             workspace serves you; delete a row to take that workspace line by line",
-            connected
-                .iter()
-                .map(|(_, w)| w.as_str())
-                .collect::<Vec<_>>()
-                .join(", ")
-        ))
-    };
+    let note = Some(
+        "the file starts with just its header — `topos login` adds a workspace's feed row on \
+         its first connection, and `topos add -g` records lines by hand"
+            .to_owned(),
+    );
     ctx.fs.create_dir_all(ctx.layout.home())?;
     // Same discipline as the project arm: the exclusive create meets a file an outside writer
     // landed after the check as an EXISTING file — the no-op receipt, never an overwrite.
-    match crate::atomic::atomic_write_new(
-        ctx.fs,
-        &path,
-        materialized_global(&connected).as_bytes(),
-    )? {
+    match crate::atomic::atomic_write_new(ctx.fs, &path, materialized_global(&[]).as_bytes())? {
         crate::atomic::NewOutcome::Written => Ok(InitData {
             manifest: path.display().to_string(),
             created: true,

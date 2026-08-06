@@ -35,10 +35,11 @@ topos add @acme/code-review@<version>
 "github.com/vercel-labs/skills" = "*"  # every skill that repo holds
 ```
 
-Most people never have this file. While it is absent, the machine behaves exactly as if it held one
-`"<host>/<workspace>" = "*"` line per workspace you are logged into. The first `-g` command writes
-those lines out in full before making your edit, so you can see what you already had. From then on
-the file is the complete list: what it names is what you get.
+This file is always the complete list: what it names is what you get, and with no line for a
+workspace nothing of its feed lands here. You rarely write the feed lines yourself — `topos login`
+adds `"<host>/<workspace>" = "*"` the first time this machine connects to a workspace (the receipt
+shows the undo). Delete a line and it stays deleted: login never re-adds it, so taking a workspace
+skill by skill is one deletion away.
 
 Two spellings are legal only here. `"topos.sh/acme"` — a two-segment key — is the whole
 workspace, live, so a skill assigned to you tomorrow arrives with no file edit. `"off"` subtracts
@@ -162,7 +163,7 @@ set is ignored with one warning naming the ones that qualify.
 | `topos add -g <skill>` when an `"off"` line stands | deletes the `"off"` line |
 | `topos remove <skill>` | drops that line — or splits the channel/repo line carrying it |
 | `topos remove -g <skill>` | drops the line, or writes `"off"` when the workspace delivers it |
-| `topos remove -g @acme` | drops the whole-workspace line |
+| `topos remove -g @acme` | drops the whole-workspace line and uninstalls what its feed delivered, in the same command — an edited copy stays in place, disclosed |
 | `topos publish ./folder --yes` | rewrites the `./folder` line to the workspace reference |
 | `topos init` | creates the file in this folder, from a comment-only template — the one way a project file is born |
 | `topos init -g` | writes `~/.topos/topos.toml` out in full: one feed line per workspace you are connected to |

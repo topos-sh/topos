@@ -859,18 +859,21 @@ fn converge_one(
         false,
     );
     let mut lines: Vec<String> = filter_warnings;
-    for bundle in &outcome.bundles {
-        lines.extend(bundle.states.iter().map(agent_line));
+    for bundle in outcome.bundles {
+        let mut states = bundle.states;
+        super::sync_engine::prettify_state_files(ctx, &mut states);
+        lines.extend(states.iter().map(agent_line));
     }
     lines.extend(outcome.warnings.iter().cloned());
     lines
 }
 
-/// One agent's outcome as an add-receipt line. The three states that LANDED somewhere name the
-/// file they landed in — the fact an add is uniquely placed to give. Every other state has no
-/// file to name, so it reads through the ONE shared vocabulary
-/// ([`crate::mcp_engine::state_phrase`]) — the same words `update` prints, letter for letter, so
-/// a person meets one name per state and not two.
+/// One config outcome as an add-receipt line, KEYED BY THE CONFIG FILE the entry landed in —
+/// receipts speak in destinations, never agents; a state with no file to name (not supported,
+/// unprovable) keys by the agent slug, the only place it exists. The reload/sign-in note stays —
+/// teaching text about how the change goes live in that harness. Phrases come from the ONE
+/// shared vocabulary ([`crate::mcp_engine::state_phrase`]) — the same words `update` prints,
+/// letter for letter, so a person meets one name per state and not two.
 fn agent_line(state: &topos_types::results::McpAgentState) -> String {
     let where_ = state.file.as_deref().unwrap_or("its config");
     match state.state.as_str() {
@@ -878,26 +881,20 @@ fn agent_line(state: &topos_types::results::McpAgentState) -> String {
         // "restart Cursor", "sign in with /mcp"), exactly as the update path's receipt does; an
         // already-current entry carries none.
         "current" => match &state.note {
-            Some(note) => format!("{}: server entry in {where_} — {note}", state.agent),
-            None => format!("{}: server entry in {where_}", state.agent),
+            Some(note) => format!("{where_}: server entry — {note}"),
+            None => format!("{where_}: server entry"),
         },
-        "drifted" => format!(
-            "{}: hand-edited entry left in place ({where_})",
-            state.agent
-        ),
-        "conflicting" => format!(
-            "{}: an entry topos does not own already holds that name ({where_})",
-            state.agent
-        ),
+        "drifted" => format!("{where_}: hand-edited entry left in place"),
+        "conflicting" => format!("{where_}: an entry topos does not own already holds that name"),
         other => match &state.note {
             Some(note) => format!(
                 "{}: {} — {note}",
-                state.agent,
+                state.file.as_deref().unwrap_or(&state.agent),
                 crate::mcp_engine::state_phrase(other)
             ),
             None => format!(
                 "{}: {}",
-                state.agent,
+                state.file.as_deref().unwrap_or(&state.agent),
                 crate::mcp_engine::state_phrase(other)
             ),
         },

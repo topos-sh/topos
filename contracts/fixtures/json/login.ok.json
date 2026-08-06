@@ -10,11 +10,18 @@
       "release-notes"
     ],
     "display_name": "Acme",
+    "feed_row_added": true,
     "host": "topos.sh",
     "name": "acme",
     "server": "https://topos.sh/api",
     "session_id": "sn_01hzy3",
     "session_status": "active",
+    "undo": [
+      "remove",
+      "-g",
+      "@acme"
+    ],
+    "user": "robert",
     "workspace_id": "w_acme"
   },
   "warnings": [],

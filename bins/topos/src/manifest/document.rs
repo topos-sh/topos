@@ -1141,17 +1141,21 @@ pub(crate) fn path_value(p: &PathSpec) -> Value {
 // ---------------------------------------------------------------------------
 
 /// The GLOBAL file's birth content: the header states the contract, then one feed row per
-/// connected `(host, workspace)`. Parses clean as [`ManifestScope::Global`].
+/// `(host, workspace)` given. Ordinary birth passes NO rows — the file is the machine's complete
+/// recipe, and `topos login` is the only automatic feed-row author (it writes a workspace's row
+/// on this machine's first connection; a row someone deleted stays deleted). The one caller that
+/// passes rows is the upgrade migration, which spells out what the machine already received.
+/// Parses clean as [`ManifestScope::Global`].
 pub(crate) fn materialized_global(workspaces: &[(String, String)]) -> String {
     let mut doc = DocumentMut::new();
     let mut t = Table::new();
     t.set_implicit(false);
     t.decor_mut().set_prefix(
         "# topos.toml — the complete recipe for what lands on this machine's personal scope.\n\
-         # Managed by the topos CLI; hand-edits are welcome. Each feed row below tracks whatever\n\
-         # that workspace currently serves you — with no file here at all, these feed rows are\n\
-         # exactly what happens anyway. Delete a feed row to take explicit, line-by-line control\n\
-         # of that workspace.\n",
+         # Managed by the topos CLI; hand-edits are welcome. A feed row\n\
+         # (\"<host>/<workspace>\" = \"*\") tracks whatever that workspace currently serves you;\n\
+         # `topos login` adds one the first time this machine connects to a workspace, and never\n\
+         # re-adds one you delete — a deleted line stays deleted. Only the rows here deliver.\n",
     );
     for (host, workspace) in workspaces {
         t.insert(&format!("{host}/{workspace}"), toml_edit::value("*"));

@@ -2760,10 +2760,15 @@ fn a_settled_draft_spreads_and_advances_the_sibling_baselines() {
     let row = only(&out.data);
     assert_eq!(row.action, PullAction::DraftSynced);
     assert_eq!(row.synced_placements, Some(1));
+    assert_eq!(
+        row.destinations,
+        vec![replica.display().to_string()],
+        "the landed folder is named — the destination convention"
+    );
     assert!(
         out.disclosures
             .iter()
-            .any(|w| w.starts_with("DRAFT_SYNCED") && w.contains("1 other agent folder")),
+            .any(|w| w.starts_with("DRAFT_SYNCED") && w.contains("1 other folder")),
         "{:?}",
         out.disclosures
     );

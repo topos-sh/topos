@@ -250,10 +250,12 @@ fn the_session_manifest_hero_loop() {
         "the approved proposal landed"
     );
 
-    // ── the `-g` lane: the FEED delivers person-scope by itself; the global file takes control ──
-    // No file, no `-g` act: standing OUTSIDE any checkout, the bare update converges the machine
-    // and the feed lands the person-scope copy by itself (login was the acceptance — delivery is
-    // automatic). The project sweeps above converged the checkout alone, as the scope rule says.
+    // ── the `-g` lane: the login-written FEED LINE delivers person-scope; the file takes control ──
+    // No `-g` act so far: the login wrote acme's feed line into `~/.topos/topos.toml` on this
+    // machine's first connection (login was the acceptance — delivery is automatic), so standing
+    // OUTSIDE any checkout the bare update converges the machine and the feed lands the
+    // person-scope copy by itself. The project sweeps above converged the checkout alone, as the
+    // scope rule says.
     let (feed_pull, feed_warnings) = dev.update(&[], None).expect("the person-scope sweep");
     let person_dir = person_scope_dir(&dev).unwrap_or_else(|| {
         panic!(
@@ -275,9 +277,8 @@ fn the_session_manifest_hero_loop() {
         redundant.note.is_some(),
         "the no-op is disclosed: {redundant:?}"
     );
-    // `remove -g` of the feed-delivered skill writes the machine-local OFF switch — file birth
-    // materializes the global manifest first (header + this workspace's feed row), then the off
-    // row lands beside it; the receipt names the web decline as the everywhere-path.
+    // `remove -g` of the feed-delivered skill writes the machine-local OFF switch beside the
+    // feed line the login recorded; the receipt names the web decline as the everywhere-path.
     let (kind, note) = dev.remove_global("deploy").expect("the off switch");
     assert_eq!(kind, "ManifestExcluded", "the off row is the one negative");
     assert!(
@@ -286,11 +287,11 @@ fn the_session_manifest_hero_loop() {
         "the everywhere-path is named: {note:?}"
     );
     let global_manifest = dev.root().join(".topos").join("topos.toml");
-    let file = std::fs::read_to_string(&global_manifest).expect("the born global manifest");
+    let file = std::fs::read_to_string(&global_manifest).expect("the global manifest");
     assert!(file.contains("= \"off\""), "the off row is spelled: {file}");
     assert!(
         file.contains("/acme\" = \"*\""),
-        "file birth materialized the feed row: {file}"
+        "the login's first connection recorded the feed line: {file}"
     );
     // The next sweep cleans the person-scope placement; the checkout's copy is that scope's
     // business and stays.

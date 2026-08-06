@@ -425,8 +425,12 @@ fn a_login_completes_on_the_poll_when_no_redirect_ever_arrives() {
     );
     assert!(out.status.success(), "the login exits 0: {printed}");
     assert!(
-        printed.contains("Connected to Engineering"),
-        "the connected receipt prints: {printed}"
+        printed.contains("signed in to ") && printed.contains("/eng"),
+        "the signed-in receipt prints: {printed}"
+    );
+    assert!(
+        printed.contains("what eng delivers to you installs on this machine"),
+        "the first connection discloses the feed line: {printed}"
     );
     let sessions =
         std::fs::read_to_string(home.join("identity/sessions.json")).expect("the session doc");

@@ -11,9 +11,9 @@
 //! The two SCOPES are unblended: without `-g` the row lands in the NEAREST project `topos.toml`
 //! covering the working directory — and with none in reach the add REFUSES
 //! ([`ClientError::NoManifest`]: `topos init` creates one here, `-g` acts on the machine), never
-//! creating a file somewhere nobody named. With `-g` it lands in this machine's global file, whose
-//! absence means "one feed row per connected workspace" — so a bare `add -g X` of something the
-//! feed already delivers writes NOTHING and says so.
+//! creating a file somewhere nobody named. With `-g` it lands in this machine's global file, the
+//! complete machine recipe — so a bare `add -g X` of something a standing feed row already
+//! delivers writes NOTHING and says so.
 //!
 //! A git source is always DESCRIBED FIRST here: the repo is fetched read-only, what it holds and
 //! what would be written where is spelled out, and it lands only under `--yes`. That is a property

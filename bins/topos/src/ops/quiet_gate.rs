@@ -126,15 +126,17 @@ pub(crate) fn stamp_sweep(fs: &dyn FsOps, layout: &Layout, now_ms: i64) {
     let _ = crate::doc::write_doc(fs, &layout.quiet_sweep_path(), &stamp);
 }
 
-/// Whether the sweep CHANGED placement bytes in some agent dir — installed new bytes
-/// (fast-forward), landed a merge or a conflict tree, cleaned a withdrawn skill's dirs, or copied
-/// a settled draft onto sibling folders. Offers, holds, freezes, and up-to-date rows change
-/// nothing on disk.
+/// Whether the sweep CHANGED placement bytes in some agent dir — installed new bytes (a first
+/// install, or a fast-forward), landed a merge or a conflict tree, cleaned a withdrawn or
+/// by-choice-removed skill's dirs, or copied a settled draft onto sibling folders. Offers, holds,
+/// freezes, and up-to-date rows change nothing on disk.
 pub(crate) fn sweep_changed_bytes(data: &PullData) -> bool {
     data.skills.iter().any(|s| {
         matches!(
             s.action,
             PullAction::FastForwarded
+                | PullAction::Installed
+                | PullAction::Removed
                 | PullAction::Merged
                 | PullAction::Conflicted
                 | PullAction::Withdrawn
@@ -267,6 +269,9 @@ mod tests {
             merge: None,
             merge_preview: None,
             synced_placements: None,
+            destinations: Vec::new(),
+            kept: Vec::new(),
+            display: None,
             scope: None,
             harnesses: Vec::new(),
             kind: None,
@@ -386,6 +391,8 @@ mod tests {
         for (action, changed) in [
             (PullAction::UpToDate, false),
             (PullAction::FastForwarded, true),
+            (PullAction::Installed, true),
+            (PullAction::Removed, true),
             (PullAction::Offered, false),
             (PullAction::Diverged, false),
             (PullAction::Merged, true),

@@ -2,14 +2,16 @@
 //!
 //! Scopes are UNBLENDED. A machine has at most two in play from any working directory:
 //!
-//! - the PERSON scope — the global manifest (`~/.topos/topos.toml`) when it exists, else the
-//!   implicit recipe: one feed row per connected workspace. Delivers into the home harness dirs.
+//! - the PERSON scope — the global manifest (`~/.topos/topos.toml`), the machine's COMPLETE
+//!   recipe: only its rows deliver (`topos login` writes a workspace's feed row on this
+//!   machine's first connection; a deleted row stays deleted). No file, nothing demanded
+//!   machine-wide. Delivers into the home harness dirs.
 //! - the PROJECT scope — the NEAREST `topos.toml` walking up from the working directory, taken
 //!   WHOLE (no merging with ancestors; each file governs its subtree minus any deeper file's).
 //!   Delivers into the checkout's harness dirs.
 //!
 //! There is no cross-scope shadowing, subtraction, or layer arithmetic: each scope's delivered
-//! set is the union of its own rows' resolutions (or the implicit feed rows), minus its `"off"`
+//! set is the union of its own rows' resolutions, minus its `"off"`
 //! switches, deduped by bundle identity — an explicit row's version/fields beat any SET's
 //! delivery of the same identity, and sets deliver their curator's current truth. A row is
 //! meaningful or harmless, never harmful; `status` discloses the inert ones.
@@ -100,7 +102,7 @@ impl PlanRow {
 /// One scope's partitioned recipe — what the reconcile drives and `status` renders.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct ScopePlan {
-    /// The file this plan came from; `None` = the implicit person recipe (no global file).
+    /// The file this plan came from; `None` = no global file (nothing demanded machine-wide).
     pub file: Option<PathBuf>,
     /// Feed rows — `(host, workspace)` whose whole feed flows here (person scope only).
     pub feeds: Vec<(String, String)>,
@@ -138,17 +140,9 @@ impl ScopePlan {
         plan
     }
 
-    /// The IMPLICIT person recipe (no global file): one feed row per connected workspace —
-    /// behaviorally identical to a file holding exactly those rows.
-    pub(crate) fn implicit(workspaces: &[(String, String)]) -> Self {
-        ScopePlan {
-            feeds: workspaces.to_vec(),
-            ..ScopePlan::default()
-        }
-    }
-
-    /// Whether a FILE-backed plan is governing (only its rows deliver) — true whenever the
-    /// global file exists, including empty or feed-less files (loudly disclosed elsewhere).
+    /// Whether a FILE-backed plan is governing — true whenever the global file exists, including
+    /// empty or feed-less files. With no file the plan is empty either way; the flag only decides
+    /// which disclosures can name the file.
     pub(crate) fn file_backed(&self) -> bool {
         self.file.is_some()
     }
@@ -224,15 +218,14 @@ impl ScopePlan {
     }
 }
 
-/// The person scope's recipe: the global file (parsed whole) when it exists, else the implicit
-/// feed-per-workspace recipe built from the CONNECTED workspaces.
+/// The person scope's recipe: the global file, parsed whole, when it exists. With no file the
+/// plan is the empty default (`file: None`) — nothing is demanded machine-wide.
 ///
 /// # Errors
 /// A read failure, non-UTF-8 bytes, or a manifest the grammar refuses (typed, naming the fix).
 pub(crate) fn person_plan(
     fs: &dyn FsOps,
     layout: &crate::sidecar::Layout,
-    connected: &[(String, String)],
 ) -> Result<ScopePlan, ClientError> {
     let path = layout.home().join(MANIFEST_FILE);
     match fs.read_opt(&path)? {
@@ -243,7 +236,7 @@ pub(crate) fn person_plan(
                 .map_err(|e| ClientError::Corrupt(format!("{}: {e}", path.display())))?;
             Ok(ScopePlan::from_doc(&doc, Some(path)))
         }
-        None => Ok(ScopePlan::implicit(connected)),
+        None => Ok(ScopePlan::default()),
     }
 }
 
@@ -383,14 +376,22 @@ mod tests {
     }
 
     #[test]
-    fn the_implicit_recipe_is_one_feed_row_per_workspace() {
-        let plan = ScopePlan::implicit(&[
-            ("topos.sh".into(), "acme".into()),
-            ("topos.example.com".into(), "platform".into()),
-        ]);
+    fn no_global_file_means_an_empty_person_plan() {
+        use crate::fs_seam::RealFs;
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static N: AtomicU32 = AtomicU32::new(0);
+        let n = N.fetch_add(1, Ordering::Relaxed);
+        let home = std::env::temp_dir().join(format!("topos-noplan-{}-{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).unwrap();
+        let layout = crate::sidecar::Layout::new(&home.join(".topos"));
+        // No file: nothing is demanded machine-wide — connected workspaces do not feed by
+        // themselves (login writes the feed row on first connection; a deleted row stays gone).
+        let plan = person_plan(&RealFs, &layout).unwrap();
         assert!(!plan.file_backed());
-        assert_eq!(plan.feeds.len(), 2);
+        assert!(plan.feeds.is_empty());
         assert!(plan.things.is_empty() && plan.sets.is_empty() && plan.offs.is_empty());
+        assert!(!plan.has_feed("topos.sh", "acme"));
     }
 
     #[test]

@@ -398,8 +398,8 @@ fn the_add_receipt_carries_the_reload_note_and_says_when_nobody_is_reached() {
     .unwrap();
     let note = data.note.clone().unwrap_or_default();
     assert!(
-        note.contains("server entry in") && note.contains("restart Cursor"),
-        "{note}"
+        note.contains("~/.cursor/mcp.json: server entry — restart Cursor"),
+        "the sub-line keys by the config file, `~`-abbreviated: {note}"
     );
 
     // Arm 2: NO agent is set up — the receipt (typed note AND the TTY closing line) says the row

@@ -188,8 +188,8 @@ What a run does not show in full comes back as one summary object rather than no
 exact `command` that expands them — run that command instead of guessing.
 
 `list <skill>` fills `detail` and answers *why* a copy is there: `source_file` and `source_key` are
-the file and the line that asked for it, `feed` names the workspace whose set delivers it when no
-line does, plus the `scope` that answered (`project` / `machine` — machine answers spell their
+the file and the line that asked for it, `feed` names the workspace whose feed row delivers it when
+no line names the skill itself, plus the `scope` that answered (`project` / `machine` — machine answers spell their
 commands with `-g`), the applied `version`, any `pin`, and the `placements` on disk. `-a <agent>` fills
 `agent_view` instead — one harness's skills directories exactly as that agent reads them, spanning
 both scopes — and `--remote` fills `remote` with each connected workspace's channels and skills,

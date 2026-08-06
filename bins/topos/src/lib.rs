@@ -22,6 +22,7 @@ pub(crate) mod cli;
 mod cli_ref;
 pub(crate) mod compat;
 pub(crate) mod config_io;
+pub(crate) mod connected;
 pub(crate) mod ctx;
 pub(crate) mod doc;
 pub(crate) mod enroll;

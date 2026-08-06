@@ -1972,10 +1972,21 @@ fn a_channel_drop_removes_the_entries_everywhere() {
                 .contains("topos-eng-alpha"),
         "the entry left cursor's config"
     );
+    // The receipt says it as a `removed` ROW counting the config FILES the entries left —
+    // destinations, never agents.
+    let row = out
+        .data
+        .skills
+        .iter()
+        .find(|s| s.skill == "alpha" && s.action == topos_types::results::PullAction::Removed)
+        .unwrap_or_else(|| panic!("{:?}", out.data.skills));
+    assert_eq!(row.kind.as_deref(), Some("mcp"));
     assert!(
-        out.disclosures.iter().any(|d| d.contains("MCP_REMOVED")),
+        row.destinations
+            .iter()
+            .any(|d| d.ends_with(".cursor/mcp.json")),
         "{:?}",
-        out.disclosures
+        row.destinations
     );
     let ledger = mcp_ledger::read(&rig.fs, &rig.layout()).unwrap();
     assert!(!ledger.has_entries_for("s_a"));
