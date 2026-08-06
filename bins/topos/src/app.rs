@@ -1848,20 +1848,29 @@ fn finish_list(
                         .any(|b| (page.offset as u64).saturating_add(b.shown) < b.total),
                     page_argv,
                 );
-                // A NOT-MANAGED deep dive that found unmanaged copies points at the adopt, one
-                // paste-ready argv per folder — the exact way to change the answer.
-                if let Some(detail) = out.data.detail.as_ref().filter(|d| !d.managed) {
-                    next_actions.extend(detail.folders.iter().map(|folder| {
-                        crate::actions::next_action(
-                            topos_types::ActionCode::from("ADD_SKILL".to_owned()),
-                            vec![
-                                "topos".to_owned(),
-                                "add".to_owned(),
-                                folder.clone(),
-                                "--json".to_owned(),
-                            ],
-                        )
-                    }));
+                // A NOT-MANAGED deep dive that found unmanaged copies points at the adopt — the
+                // SAME single command the TTY prints, templated: the name is known, the
+                // destination is the person's choice (`<dest>` rides `needs`). One action, not
+                // one per folder: the folders are where copies WERE found, not a list of adopts
+                // to run, and the enumeration is unbounded while the recommendation is one.
+                if let Some(detail) = out
+                    .data
+                    .detail
+                    .as_ref()
+                    .filter(|d| !d.managed && !d.folders.is_empty())
+                {
+                    next_actions.push(crate::actions::next_action(
+                        topos_types::ActionCode::from("ADD_SKILL".to_owned()),
+                        vec![
+                            "topos".to_owned(),
+                            "add".to_owned(),
+                            "-g".to_owned(),
+                            detail.name.clone(),
+                            "--dest".to_owned(),
+                            "<dest>".to_owned(),
+                            "--json".to_owned(),
+                        ],
+                    ));
                 }
                 // The stable-shape truncation warnings — a belt for a consumer that ignores the new
                 // typed markers: a capped enumeration is never mistakable for a complete one.

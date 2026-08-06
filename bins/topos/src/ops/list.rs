@@ -1596,11 +1596,85 @@ mod tests {
         assert_eq!(
             crate::render::list_tty(&out),
             format!(
-                "deploy — not managed on this machine\n  {}\n  {}",
+                "deploy — not managed on this machine\n  {}\n  {}\nto manage: topos add -g deploy \
+                 --dest <dest>",
                 claude.display(),
                 cursor.display()
             )
         );
+    }
+
+    /// EVERY folder holding a copy is enumerated — no cap, no ellipsis, however many there are.
+    /// The answer's whole job is "where is it?"; a shortened list would hide a copy the person
+    /// then never learns about.
+    #[test]
+    fn the_not_managed_answer_enumerates_every_folder_holding_a_copy() {
+        let home = TempHome::new();
+        let cwd = home.0.join("plain");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let probe_home = TempHome::new();
+        // Seven harness skill dirs, each holding a copy of the same name.
+        let dirs = [
+            ".augment/skills",
+            ".bob/skills",
+            ".claude/skills",
+            ".continue/skills",
+            ".cursor/skills",
+            ".factory/skills",
+            ".gemini/skills",
+        ];
+        for dir in dirs {
+            let d = probe_home.0.join(dir).join("deploy");
+            std::fs::create_dir_all(&d).unwrap();
+            std::fs::write(d.join("SKILL.md"), b"# d\n").unwrap();
+        }
+        let out = run_discovering(
+            &home,
+            &cwd,
+            &ListRequest {
+                name: Some("deploy".to_owned()),
+                ..request()
+            },
+            Some(DiscoveryRoots {
+                home: probe_home.0.clone(),
+                cwd: None,
+            }),
+        )
+        .unwrap();
+        let detail = out.data.detail.as_ref().expect("a detail");
+        assert!(!detail.managed);
+        // The established order — folder first, then name — over every discovered copy.
+        let mut expected: Vec<String> = dirs
+            .iter()
+            .map(|d| {
+                probe_home
+                    .0
+                    .join(d)
+                    .join("deploy")
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        expected.sort();
+        assert_eq!(detail.folders, expected, "every copy, none dropped");
+        assert!(detail.folders.len() >= 6, "{:?}", detail.folders);
+        let text = crate::render::list_tty(&out);
+        let mut lines = text.lines();
+        assert_eq!(
+            lines.next(),
+            Some("deploy — not managed on this machine"),
+            "{text}"
+        );
+        for folder in &expected {
+            assert_eq!(lines.next(), Some(format!("  {folder}").as_str()), "{text}");
+        }
+        assert_eq!(
+            lines.next(),
+            Some("to manage: topos add -g deploy --dest <dest>"),
+            "{text}"
+        );
+        assert_eq!(lines.next(), None, "{text}");
+        assert!(!text.contains("..."), "no ellipsis, ever: {text}");
     }
 
     /// The `--untracked` listing sorts by (folder, name): each folder's entries arrive

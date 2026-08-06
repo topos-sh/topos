@@ -1858,8 +1858,19 @@ fn list_detail_tty(detail: &topos_types::results::ListDetail) -> String {
     use topos_types::results::StatusItemState;
     if !detail.managed {
         let mut s = format!("{} — not managed on this machine", detail.name);
+        // EVERY folder holding a copy, never a sample: the question this answer exists for is
+        // "where is it?", and a capped list would leave a copy the person never learns about.
         for folder in &detail.folders {
             s.push_str(&format!("\n  {folder}"));
+        }
+        // Copies exist, so there is something to bring under management — the one command that
+        // does it, with the destination left as the choice only the person can make. Nothing
+        // found means nothing to adopt: the bare headline stays bare.
+        if !detail.folders.is_empty() {
+            s.push_str(&format!(
+                "\nto manage: topos add -g {} --dest <dest>",
+                detail.name
+            ));
         }
         return s;
     }
@@ -4179,8 +4190,9 @@ mod tests {
         );
     }
 
-    /// The NOT-MANAGED deep dive is the headline plus the unmanaged folders, one per line — and
-    /// nothing else: no source line, no state sentence, no store mention.
+    /// The NOT-MANAGED deep dive is the headline, the unmanaged folders one per line, and — when
+    /// copies exist — the one command that brings them under management. Nothing else: no source
+    /// line, no state sentence, no store mention.
     #[test]
     fn the_deep_dive_renders_the_not_managed_headline_and_folders() {
         use topos_types::results::{ListDetail, StatusItemState};
@@ -4211,6 +4223,7 @@ mod tests {
                 untracked_view: false,
             })
         };
+        // No copies: nothing to adopt, so the headline stays bare — no `to manage:` line.
         assert_eq!(
             render(detail(Vec::new())),
             "deploy — not managed on this machine"
@@ -4221,7 +4234,44 @@ mod tests {
                 "/home/u/.cursor/skills/deploy".to_owned(),
             ])),
             "deploy — not managed on this machine\n  /home/u/.claude/skills/deploy\n  \
-             /home/u/.cursor/skills/deploy"
+             /home/u/.cursor/skills/deploy\nto manage: topos add -g deploy --dest <dest>"
+        );
+    }
+
+    /// The `to manage:` line carries THIS bundle's name and leaves the destination a literal
+    /// placeholder — the one choice the answer cannot make for the person.
+    #[test]
+    fn the_not_managed_answer_offers_the_adopt_with_a_dest_placeholder() {
+        use topos_types::results::{ListDetail, StatusItemState};
+        let out = ListOutcome {
+            data: ListData {
+                detail: Some(ListDetail {
+                    name: "frontend-design".to_owned(),
+                    scope: None,
+                    source_file: None,
+                    source_key: None,
+                    feed: None,
+                    attribution: None,
+                    version: None,
+                    pin: None,
+                    placements: Vec::new(),
+                    state: StatusItemState::Unknown,
+                    kind: None,
+                    harnesses: Vec::new(),
+                    managed: false,
+                    folders: vec!["/home/u/.claude/skills/frontend-design".to_owned()],
+                }),
+                signed_in: false,
+                ..ListData::default()
+            },
+            warnings: Vec::new(),
+            untracked_view: false,
+        };
+        assert_eq!(
+            list_tty(&out),
+            "frontend-design — not managed on this machine\n  \
+             /home/u/.claude/skills/frontend-design\nto manage: topos add -g frontend-design \
+             --dest <dest>"
         );
     }
 
@@ -4293,7 +4343,7 @@ mod tests {
                 released(
                     None,
                     "deploy",
-                    "no files remain (last copy was /private/tmp/deploy)",
+                    "its only copy, /private/tmp/deploy, no longer exists — nothing left to manage",
                 ),
                 released(
                     None,
@@ -4316,7 +4366,8 @@ mod tests {
         );
         assert!(
             out.contains(
-                "- deploy                  no files remain (last copy was /private/tmp/deploy)\n"
+                "- deploy                  its only copy, /private/tmp/deploy, no longer exists — \
+                 nothing left to manage\n"
             ),
             "{out}"
         );

@@ -2990,7 +2990,7 @@ fn an_unreached_workspace_freezes_its_records_and_a_withdrawal_resolves_later() 
         "a record that earned a receipt row this run is not retired under it"
     );
 
-    // The NEXT full sweep resolves the leftover once: no files remain (the withdrawal cleaned
+    // The NEXT full sweep resolves the leftover once: no copies remain (the withdrawal cleaned
     // them), the record retires, and a further sweep says nothing.
     let out = sweep(&ctx, &plane, &dir);
     let row = out
@@ -2999,7 +2999,10 @@ fn an_unreached_workspace_freezes_its_records_and_a_withdrawal_resolves_later() 
         .iter()
         .find(|s| s.skill == "alpha" && s.action == PullAction::Released)
         .unwrap_or_else(|| panic!("the one-time resolution: {:?}", out.data.skills));
-    assert_eq!(row.note.as_deref(), Some("no files remain"));
+    assert_eq!(
+        row.note.as_deref(),
+        Some("no copies remain — nothing left to manage")
+    );
     assert!(rig.fs.exists(&rig.layout().published(&sid).retired));
     let out = sweep(&ctx, &plane, &dir);
     assert!(
@@ -3072,36 +3075,53 @@ fn a_targeted_update_never_resolves_orphans() {
 
 #[test]
 fn the_released_fact_shapes_are_byte_exact() {
-    // The four final-copy shapes, pinned at the composer (the renderer prints the fact verbatim).
+    // Every final-copy shape, pinned at the composer (the renderer prints the fact verbatim).
     let folders = |n: usize| -> Vec<String> { (0..n).map(|i| format!("/tmp/f{i}")).collect() };
     assert_eq!(
-        ops::orphan_fact(
-            Some("acme"),
-            &folders(6),
-            Some("/tmp/f5"),
-            "frontend-design"
-        ),
+        ops::orphan_fact(Some("acme"), &folders(6), &folders(6), "frontend-design"),
         "acme no longer delivers this; files in 6 folders are yours now (topos list frontend-design)"
     );
+    // Nothing left on disk: the fact states the DISCOVERY (the copies were already gone), never an
+    // act this run performed. One recorded copy names it; several name the last of them.
     assert_eq!(
-        ops::orphan_fact(None, &folders(0), Some("/private/tmp/deploy"), "deploy"),
-        "no files remain (last copy was /private/tmp/deploy)"
+        ops::orphan_fact(
+            None,
+            &folders(0),
+            &["/private/tmp/deploy".to_owned()],
+            "deploy"
+        ),
+        "its only copy, /private/tmp/deploy, no longer exists — nothing left to manage"
+    );
+    assert_eq!(
+        ops::orphan_fact(
+            None,
+            &folders(0),
+            &[
+                "~/.claude/skills/deploy".to_owned(),
+                "~/.cursor/skills/deploy".to_owned(),
+                "/private/tmp/deploy".to_owned(),
+            ],
+            "deploy"
+        ),
+        "its 3 copies, last at /private/tmp/deploy, no longer exist — nothing left to manage"
     );
     assert_eq!(
         ops::orphan_fact(
             None,
             &["~/.claude/skills/runbook".to_owned()],
-            None,
+            &["~/.claude/skills/runbook".to_owned()],
             "runbook"
         ),
         "~/.claude/skills/runbook is yours now (topos list runbook)"
     );
+    // Nothing on disk AND nothing recorded (the withdrawal already cleaned the map): the same
+    // consequence, minimally stated.
     assert_eq!(
-        ops::orphan_fact(None, &folders(0), None, "gone"),
-        "no files remain"
+        ops::orphan_fact(None, &folders(0), &folders(0), "gone"),
+        "no copies remain — nothing left to manage"
     );
     assert_eq!(
-        ops::orphan_fact(Some("acme"), &folders(2), None, "notes"),
+        ops::orphan_fact(Some("acme"), &folders(2), &folders(2), "notes"),
         "acme no longer delivers this; files in 2 folders are yours now (topos list notes)"
     );
 }

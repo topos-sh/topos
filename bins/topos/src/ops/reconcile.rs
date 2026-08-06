@@ -4941,13 +4941,11 @@ fn resolve_orphans(
                 note_item_failure(ctx, &mut sweep.warnings, &lock.name, &e);
                 continue;
             }
+            let (recorded, present) = orphan_placements(ctx, &map);
             let fact = orphan_fact(
                 ws_known.as_ref().map(|(_, _, w)| w.as_str()),
-                &orphan_files(ctx, &map),
-                map.placements
-                    .last()
-                    .map(|p| super::inventory::pretty(ctx, Path::new(p)))
-                    .as_deref(),
+                &present,
+                &recorded,
                 &lock.name,
             );
             let mut row = plain_row(
@@ -4965,25 +4963,38 @@ fn resolve_orphans(
     }
 }
 
-/// The recorded placements that still EXIST on disk, as display paths — the "files" half of the
-/// released line.
-fn orphan_files(ctx: &Ctx<'_>, map: &PlacementMap) -> Vec<String> {
-    map.placements
-        .iter()
-        .filter(|p| ctx.fs.exists(Path::new(p)))
-        .map(|p| super::inventory::pretty(ctx, Path::new(p)))
-        .collect()
+/// The record's placements as display paths, in two readings: EVERY placement it listed, and the
+/// subset that still EXISTS on disk — the two halves the released line speaks from ("what was
+/// recorded" and "what is still there").
+fn orphan_placements(ctx: &Ctx<'_>, map: &PlacementMap) -> (Vec<String>, Vec<String>) {
+    let mut recorded = Vec::with_capacity(map.placements.len());
+    let mut present = Vec::new();
+    for p in &map.placements {
+        let path = Path::new(p);
+        let shown = super::inventory::pretty(ctx, path);
+        if ctx.fs.exists(path) {
+            present.push(shown.clone());
+        }
+        recorded.push(shown);
+    }
+    (recorded, present)
 }
 
 /// The ONE concrete fact a released row states. `workspace` is the delivering workspace's address
 /// name when the delivery cache knows it (`<ws> no longer delivers this; …`); `present` the
 /// still-existing placement dirs (display paths — exactly one prints its path, several count in
-/// folders, per the destination convention); `last` the last recorded placement path for the
-/// no-files shape.
+/// folders, per the destination convention); `recorded` EVERY placement the record listed (display
+/// paths, `present` among them).
+///
+/// With nothing left on disk the fact states the DISCOVERY, never an act: the copies were already
+/// gone when the sweep looked, and this run deleted nothing. So it names what the record knew of
+/// (the one copy, or the last of several), says it no longer exists, and closes on the only
+/// consequence that matters — nothing left to manage. A phrasing that reads as a removal would
+/// claim a deletion nobody performed.
 pub(crate) fn orphan_fact(
     workspace: Option<&str>,
     present: &[String],
-    last: Option<&str>,
+    recorded: &[String],
     name: &str,
 ) -> String {
     let files = match present {
@@ -4997,9 +5008,13 @@ pub(crate) fn orphan_fact(
     match (workspace, files) {
         (Some(ws), Some(f)) => format!("{ws} no longer delivers this; {f}"),
         (None, Some(f)) => f,
-        (_, None) => match last {
-            Some(p) => format!("no files remain (last copy was {p})"),
-            None => "no files remain".to_owned(),
+        (_, None) => match recorded {
+            [] => "no copies remain — nothing left to manage".to_owned(),
+            [one] => format!("its only copy, {one}, no longer exists — nothing left to manage"),
+            [.., last] => format!(
+                "its {} copies, last at {last}, no longer exist — nothing left to manage",
+                recorded.len()
+            ),
         },
     }
 }
