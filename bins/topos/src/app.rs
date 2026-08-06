@@ -1732,7 +1732,7 @@ fn finish_list(
     match result {
         Ok(out) => {
             if json {
-                let next_actions = next_page_action(
+                let mut next_actions = next_page_action(
                     &page,
                     out.data
                         .truncated
@@ -1740,6 +1740,21 @@ fn finish_list(
                         .any(|b| (page.offset as u64).saturating_add(b.shown) < b.total),
                     page_argv,
                 );
+                // A NOT-MANAGED deep dive that found unmanaged copies points at the adopt, one
+                // paste-ready argv per folder — the exact way to change the answer.
+                if let Some(detail) = out.data.detail.as_ref().filter(|d| !d.managed) {
+                    next_actions.extend(detail.folders.iter().map(|folder| {
+                        crate::actions::next_action(
+                            topos_types::ActionCode::from("ADD_SKILL".to_owned()),
+                            vec![
+                                "topos".to_owned(),
+                                "add".to_owned(),
+                                folder.clone(),
+                                "--json".to_owned(),
+                            ],
+                        )
+                    }));
+                }
                 // The stable-shape truncation warnings — a belt for a consumer that ignores the new
                 // typed markers: a capped enumeration is never mistakable for a complete one.
                 let mut warnings = out.warnings.clone();

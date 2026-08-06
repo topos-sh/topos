@@ -111,6 +111,10 @@ pub struct PullSkill {
     /// sources, which read by their plain `skill` name. **INFERRED** (additive).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display: Option<String>,
+    /// The one-line fact a `released` row states — why the record resolved and where its files
+    /// stand now. Absent on every other action. **INFERRED** (additive).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
     /// Per-agent applied states for a config-placed (`mcp`) bundle: which detected agents hold
     /// the server entry and how. Empty (and omitted) for file-bundle skills. **INFERRED**
     /// (additive).
@@ -209,12 +213,13 @@ pub enum PullAction {
     /// dirs were cleaned; the sidecar keeps the bytes + any draft delta ("keep it as yours" is a
     /// narration away).
     Withdrawn,
-    /// The PERSON detached the skill (an unfollow, or a channel leave that lapsed it) on some
-    /// device: this copy froze in place — bytes untouched, delivery ended.
-    Detached,
     /// THIS DEVICE excludes the skill ("not on this device"): the agent dirs are clear here, the
     /// person keeps receiving it everywhere else, and following it here lifts the exclusion.
     Excluded,
+    /// A store record no row claims and nothing delivers RESOLVED, once: the record retires from
+    /// every surface; nothing on disk was deleted — placed files belong to the person now, and
+    /// `note` carries the one-line fact. **Additive.**
+    Released,
 }
 
 /// The re-disclosed bytes a `pull` offers (confirm-each / first-receive). **INFERRED fields** — the
@@ -514,6 +519,29 @@ pub struct ListDetail {
     /// state), shown instead of placement dirs. **INFERRED** (additive).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub harnesses: Vec<McpAgentState>,
+    /// `false` = NO row in any visible scope manages this name (and it is not the built-in): the
+    /// answer is the not-managed headline plus `folders`, and every managed-only field above is
+    /// absent/at its baseline. Omits when `true` (the pre-existing managed shape). **INFERRED**
+    /// (additive).
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub managed: bool,
+    /// For a NOT-managed answer: the folders of unmanaged copies discovered on disk (the known
+    /// agents' skill dirs, matched by name) — `topos add <folder>` manages one. **INFERRED**
+    /// (additive).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub folders: Vec<String>,
+}
+
+/// serde helper — [`ListDetail::managed`] defaults `true` and omits when `true`, so every managed
+/// answer keeps its pre-existing byte shape.
+fn default_true() -> bool {
+    true
+}
+
+/// serde helper — see [`default_true`].
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn is_true(b: &bool) -> bool {
+    *b
 }
 
 /// One external source's last auto-update check — the answer to "is this even working?", computed
@@ -601,14 +629,11 @@ pub struct SkillEntry {
     /// host, or `local` for a purely local `add`. **INFERRED** (additive).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
-    /// The update status of the local copy: `current` / `behind` / `draft` / `detached`.
-    /// **INFERRED** (additive).
+    /// The update status of the local copy: `current` / `behind` / `draft` / `off`. Absent when
+    /// no status is honestly claimable (never applied, pending, no delivery yet). **INFERRED**
+    /// (additive).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status: Option<SkillStatus>,
-    /// Why a `detached` row is no longer live: `unfollowed` / `excluded-here` / `removed-upstream` /
-    /// `signed-out`. Absent when the row is live. **INFERRED** (additive).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cause: Option<DetachCause>,
     /// The catalog bundle kind (`"mcp"` for a config-placed MCP-server bundle). Absent ⇒
     /// `"skill"`. **Additive.**
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -626,24 +651,9 @@ pub enum SkillStatus {
     Behind,
     /// Local edits ahead of the version this copy is on.
     Draft,
-    /// No longer live here (see [`SkillEntry::cause`]) — the bytes are a frozen copy.
-    Detached,
-}
-
-/// Why a tracked skill is `detached` in [`SkillEntry`]. **INFERRED** (additive value set).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
-#[serde(rename_all = "kebab-case")]
-pub enum DetachCause {
-    /// The skill left this scope's skill list (its manifest or feed row is gone — removed here,
-    /// or the feed no longer carries it); the retained record is a deliberate leftover.
-    Unfollowed,
-    /// `topos remove` excluded the skill on THIS device (other devices still receive it).
-    ExcludedHere,
-    /// Upstream withdrew the skill (archived, or its last delivering channel dropped it).
-    RemovedUpstream,
-    /// No stored workspace credential — signed out of the workspace this skill lives in.
-    SignedOut,
+    /// A machine-local `"off"` row withholds this bundle here — a standing statement of the file,
+    /// never a delivery. **Additive.**
+    Off,
 }
 
 // =================================================================================================
@@ -1822,9 +1832,6 @@ pub enum StatusItemState {
     /// the first exchange. What that exchange brings — including nothing — is not knowable here,
     /// so the line promises an exchange, never an apply.
     NoDeliveryYet,
-    /// A retained store copy delivery no longer claims here (the built-in aside: unfollowed,
-    /// excluded, or withdrawn upstream) — the bytes are a frozen local copy.
-    Detached,
     /// Not applied here yet — `topos update` applies it (or the state is not determinable
     /// offline).
     Unknown,
@@ -1868,6 +1875,7 @@ mod tests {
                 destinations: Vec::new(),
                 kept: Vec::new(),
                 display: None,
+                note: None,
                 harnesses: Vec::new(),
                 kind: None,
             }],

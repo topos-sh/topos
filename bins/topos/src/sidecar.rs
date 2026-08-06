@@ -50,6 +50,11 @@ pub(crate) struct SkillPaths {
     /// classification survives a lost config ledger (`crate::mcp_engine::record_kind`). Absent for
     /// every ordinary skill and for stores written before the marker existed.
     pub kind: PathBuf,
+    /// The durable RETIREMENT marker — written once when the one-time orphan resolution retires a
+    /// record no row claims and nothing delivers. The record's bytes stay on disk forever, but
+    /// every store walker skips a marked record: it is never listed, resolved, rebuilt, cleaned,
+    /// or reported again. A later re-demand (a row claims the identity again) removes the marker.
+    pub retired: PathBuf,
 }
 
 impl SkillPaths {
@@ -62,7 +67,49 @@ impl SkillPaths {
             conflict: base.join("conflict.json"),
             origin: base.join("origin.json"),
             kind: base.join("kind.json"),
+            retired: base.join("retired.json"),
         }
+    }
+}
+
+/// The retirement marker document (see [`SkillPaths::retired`]). Existence is the gate — the
+/// walkers probe the path, never the body — so a torn or newer-schema marker still marks.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub(crate) struct RetiredRecord {
+    pub schema_version: u32,
+    /// When the one-time resolution retired the record (epoch millis).
+    pub retired_at_ms: i64,
+}
+
+/// Whether a record carries the retirement marker — the one probe every store walker gates on.
+pub(crate) fn record_retired(fs: &dyn FsOps, layout: &Layout, id: &SkillId) -> bool {
+    fs.exists(&layout.published(id).retired)
+}
+
+/// Write the retirement marker (idempotent). Written BEFORE the receipt line is emitted, so a
+/// crash between the two loses the line rather than doubling it.
+pub(crate) fn retire_record(
+    fs: &dyn FsOps,
+    layout: &Layout,
+    id: &SkillId,
+    now_ms: i64,
+) -> Result<(), ClientError> {
+    crate::doc::write_doc(
+        fs,
+        &layout.published(id).retired,
+        &RetiredRecord {
+            schema_version: topos_types::PERSISTED_SCHEMA_VERSION,
+            retired_at_ms: now_ms,
+        },
+    )
+}
+
+/// Remove the retirement marker — a re-demanded identity's custody record returns to every
+/// surface. Best-effort: reviving is a courtesy of the claim that just happened, never its gate.
+pub(crate) fn revive_record(fs: &dyn FsOps, layout: &Layout, id: &SkillId) {
+    let marker = layout.published(id).retired;
+    if fs.exists(&marker) {
+        let _ = fs.remove_file(&marker);
     }
 }
 

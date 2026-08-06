@@ -1362,6 +1362,11 @@ pub(crate) fn manifest_update(
         ));
     }
 
+    // A re-demanded identity REVIVES a retired record: something claimed it again this run (a
+    // row, a feed, a targeted update), so the custody record returns to every surface it
+    // describes. Runs whatever the targets — reviving rides the claim, not the sweep shape.
+    revive_reclaimed(&env, &driven, project.as_ref(), &sweep);
+
     // ---- 5. Disclosures the table cannot carry per row. The person plan's own note (a global
     // file withholding a feed) belongs to a run that drove that scope; a project-scoped run has
     // no business narrating what the machine set is or is not adopting. ----
@@ -1373,6 +1378,19 @@ pub(crate) fn manifest_update(
             &env,
             &driven,
             person.as_ref(),
+            project.as_ref(),
+            project_frozen,
+            &mut sweep,
+        );
+        // ---- 6.1 The ONE-TIME ORPHAN RESOLUTION: each store record no row claims and nothing
+        // delivers resolves once — said on this receipt, then retired from every surface. Only a
+        // full sweep may resolve (a targeted update cannot know the whole demand set), under the
+        // same freeze discipline the cleaner keeps.
+        resolve_orphans(
+            &env,
+            &driven,
+            &all_sessions,
+            person.is_some(),
             project.as_ref(),
             project_frozen,
             &mut sweep,
@@ -3861,6 +3879,11 @@ fn held_skill_ids(ctx: &Ctx<'_>, visited: &[sidecar::Layout]) -> HashSet<String>
             let Ok(sid) = SkillId::parse(id) else {
                 continue;
             };
+            // A RETIRED record holds nothing the machine still reports: its kept files are the
+            // person's own now, so its cache rows drop out exactly like a gone placement's.
+            if sidecar::record_retired(ctx.fs, layout, &sid) {
+                continue;
+            }
             let Ok(Some(map)) = doc::read_map(ctx.fs, &layout.published(&sid).map) else {
                 continue;
             };
@@ -4281,7 +4304,9 @@ fn clean_undemanded(
                 let Ok(sid) = SkillId::parse(skill_id) else {
                     continue;
                 };
-                if !ctx.fs.exists(&ctx.layout.skill_dir(&sid)) {
+                if !ctx.fs.exists(&ctx.layout.skill_dir(&sid))
+                    || sidecar::record_retired(ctx.fs, &ctx.layout, &sid)
+                {
                     continue;
                 }
                 // WHY it left decides how much goes: this machine's own choice keeps the bytes
@@ -4376,6 +4401,9 @@ fn clean_undemanded(
         let Ok(sid) = SkillId::parse(id) else {
             continue;
         };
+        if sidecar::record_retired(pctx.fs, &playout, &sid) {
+            continue; // a retired record's kept files are the person's own — never swept
+        }
         let sp = playout.published(&sid);
         let Ok(Some(lock)) = doc::read_doc::<Lock>(pctx.fs, &sp.lock) else {
             continue;
@@ -4430,6 +4458,247 @@ fn clean_undemanded(
             Ok(None) => {}
             Err(e) => note_item_failure(ctx, &mut sweep.warnings, &lock.name, &e),
         }
+    }
+}
+
+/// Remove the retirement marker of every record an identity claim touched this run — the
+/// re-demand is the explicit act that returns a released record to the surfaces. Driven scopes
+/// only (an undriven scope claimed nothing); best-effort, like the revive itself.
+fn revive_reclaimed(
+    env: &Env<'_>,
+    driven: &Driven,
+    project: Option<&(PathBuf, ScopePlan)>,
+    sweep: &Sweep,
+) {
+    let mut layouts: Vec<(String, sidecar::Layout)> = Vec::new();
+    if driven.person {
+        layouts.push((ResolvedScope::Person.label(), env.ctx.layout.clone()));
+    }
+    if driven.project
+        && let Some((dir, _)) = project
+        && let Some(playout) = sidecar::existing_project_store(env.ctx.fs, dir)
+    {
+        layouts.push((ResolvedScope::Project { dir: dir.clone() }.label(), playout));
+    }
+    for (label, id) in &sweep.synced {
+        let Some((_, layout)) = layouts.iter().find(|(l, _)| l == label) else {
+            continue;
+        };
+        let Ok(sid) = SkillId::parse(id) else {
+            continue;
+        };
+        sidecar::revive_record(env.ctx.fs, layout, &sid);
+    }
+}
+
+/// The ONE-TIME ORPHAN RESOLUTION — records may describe rows, never create them, so a store
+/// record that is claimed by NO row and delivered by NOTHING gets one closing statement on this
+/// receipt and then RETIRES: the marker written first (a crash between marker and line loses the
+/// line, never doubles it), the saved copy kept in the store forever, silently, and every walker
+/// skipping the record from here on. Nothing on disk is deleted — placed files stay where they
+/// are and belong to the person now; the line says so and where.
+///
+/// FREEZE DISCIPLINE — resolve only when this sweep can actually KNOW nothing demands the record:
+/// the run is untargeted (the caller gates), the scope was driven and its manifest parsed, the
+/// delivery cache was readable, and for a record whose cached workspace still holds a LIVE
+/// session that workspace produced a fresh snapshot this run — an unreachable workspace freezes
+/// its records (an outage must never read as an orphan). A workspace with NO live session at all
+/// is no freeze: signed-out is a deliberate state, and its leftovers are exactly what this pass
+/// resolves. Failed channel expansions and unexpanded project sets freeze theirs; an MCP record
+/// with live ledger entries waits for the converge to conclude; a record that already earned a
+/// receipt row this run (the cleaner's removed/withdrawn) is fresh news, not a standing orphan.
+fn resolve_orphans(
+    env: &Env<'_>,
+    driven: &Driven,
+    all: &sessions::Sessions,
+    person_parsed: bool,
+    project: Option<&(PathBuf, ScopePlan)>,
+    project_frozen: bool,
+    sweep: &mut Sweep,
+) {
+    if sweep.mcp_blind {
+        return; // the delivery cache was unreadable: every "nothing delivers it" would be a guess
+    }
+    let ctx = env.ctx;
+    let mut scopes: Vec<(String, sidecar::Layout)> = Vec::new();
+    if driven.person && person_parsed {
+        scopes.push((ResolvedScope::Person.label(), ctx.layout.clone()));
+    }
+    if driven.project
+        && !project_frozen
+        && let Some((dir, _)) = project
+        && let Some(playout) = sidecar::existing_project_store(ctx.fs, dir)
+    {
+        scopes.push((ResolvedScope::Project { dir: dir.clone() }.label(), playout));
+    }
+    let live: HashSet<&str> = all.live().map(|s| s.workspace_id.as_str()).collect();
+    let now_ms = i64::try_from(ctx.clock.now_unix_millis()).unwrap_or(i64::MAX);
+    for (label, layout) in scopes {
+        let mentioned = sweep.mentioned.get(&label).cloned().unwrap_or_default();
+        let synced: HashSet<String> = sweep
+            .synced_in(&label)
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+        let reported: HashSet<String> = sweep
+            .rows
+            .iter()
+            .filter(|r| r.scope.as_deref() == Some(label.as_str()))
+            .map(|r| r.skill.clone())
+            .collect();
+        let ledger = crate::mcp_ledger::read(ctx.fs, &layout).unwrap_or_default();
+        let Ok(entries) = ctx.fs.read_dir(&layout.skills_dir()) else {
+            continue;
+        };
+        for entry in entries {
+            let Some(id) = entry.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+            let Ok(sid) = SkillId::parse(id) else {
+                continue;
+            };
+            if super::builtin::is_builtin(id)
+                || sidecar::record_retired(ctx.fs, &layout, &sid)
+                || ledger.has_entries_for(id)
+            {
+                continue;
+            }
+            let sp = layout.published(&sid);
+            let Ok(Some(lock)) = doc::read_doc::<Lock>(ctx.fs, &sp.lock) else {
+                continue; // an unreadable record is frozen, never judged
+            };
+            if mentioned.contains(&lock.name)
+                || synced.contains(id)
+                || reported.contains(&lock.name)
+            {
+                continue;
+            }
+            // The delivery answer, workspace by workspace, over the cache: a live-session
+            // workspace must have answered fresh THIS run (else freeze), and a fresh answer that
+            // still delivers the id keeps the record out of here entirely.
+            let mut frozen = false;
+            let mut delivered = false;
+            let mut ws_known: Option<(String, String, String)> = None;
+            for (ws_id, e) in &env.prior.workspaces {
+                let Some(ds) = e.delivered.get(id) else {
+                    continue;
+                };
+                if let (Some(h), Some(w)) = (e.host.as_deref(), e.workspace_name.as_deref())
+                    && ws_known.is_none()
+                {
+                    ws_known = Some((ws_id.clone(), h.to_owned(), w.to_owned()));
+                }
+                if live.contains(ws_id.as_str()) {
+                    match env
+                        .runs
+                        .iter()
+                        .find(|r| r.session.workspace_id == *ws_id)
+                        .and_then(|r| r.snapshot.as_ref())
+                    {
+                        None => frozen = true,
+                        Some(snap) => {
+                            if snap.skills.iter().any(|s| s.skill_id == *id) {
+                                delivered = true;
+                            }
+                        }
+                    }
+                    if ds
+                        .via_channels
+                        .iter()
+                        .any(|c| sweep.failed_channels.contains(&(ws_id.clone(), c.clone())))
+                    {
+                        frozen = true;
+                    }
+                }
+            }
+            // A fresh snapshot delivering the id keeps it even without a cache row.
+            delivered = delivered
+                || env.runs.iter().any(|r| {
+                    r.snapshot
+                        .as_ref()
+                        .is_some_and(|s| s.skills.iter().any(|d| d.skill_id == *id))
+                });
+            if frozen || delivered {
+                continue;
+            }
+            let map: PlacementMap = match doc::read_map(ctx.fs, &sp.map) {
+                Ok(Some(m)) => m,
+                _ => continue, // no/unreadable map: frozen, never judged
+            };
+            // A failed set expansion froze everything under its project dir.
+            if map.placements.iter().any(|p| {
+                sweep
+                    .unexpanded
+                    .iter()
+                    .any(|sd| Path::new(p).starts_with(sd))
+            }) {
+                continue;
+            }
+            // RETIRE FIRST, then say it — at-most-once presentation.
+            if let Err(e) = sidecar::retire_record(ctx.fs, &layout, &sid, now_ms) {
+                note_item_failure(ctx, &mut sweep.warnings, &lock.name, &e);
+                continue;
+            }
+            let fact = orphan_fact(
+                ws_known.as_ref().map(|(_, _, w)| w.as_str()),
+                &orphan_files(ctx, &map),
+                map.placements
+                    .last()
+                    .map(|p| super::inventory::pretty(ctx, Path::new(p)))
+                    .as_deref(),
+                &lock.name,
+            );
+            let mut row = plain_row(
+                &lock.name,
+                PullAction::Released,
+                ws_known.as_ref().map(|(ws_id, _, _)| ws_id.clone()),
+                &label,
+            );
+            row.display = ws_known
+                .as_ref()
+                .map(|(_, h, w)| env.qualified(h, w, &lock.name));
+            row.note = Some(fact);
+            sweep.push(row);
+        }
+    }
+}
+
+/// The recorded placements that still EXIST on disk, as display paths — the "files" half of the
+/// released line.
+fn orphan_files(ctx: &Ctx<'_>, map: &PlacementMap) -> Vec<String> {
+    map.placements
+        .iter()
+        .filter(|p| ctx.fs.exists(Path::new(p)))
+        .map(|p| super::inventory::pretty(ctx, Path::new(p)))
+        .collect()
+}
+
+/// The ONE concrete fact a released row states. `workspace` is the delivering workspace's address
+/// name when the delivery cache knows it (`<ws> no longer delivers this; …`); `present` the
+/// still-existing placement dirs (display paths — exactly one prints its path, several count in
+/// folders, per the destination convention); `last` the last recorded placement path for the
+/// no-files shape.
+pub(crate) fn orphan_fact(
+    workspace: Option<&str>,
+    present: &[String],
+    last: Option<&str>,
+    name: &str,
+) -> String {
+    let files = match present {
+        [] => None,
+        [one] => Some(format!("{one} is yours now (topos list {name})")),
+        many => Some(format!(
+            "files in {} folders are yours now (topos list {name})",
+            many.len()
+        )),
+    };
+    match (workspace, files) {
+        (Some(ws), Some(f)) => format!("{ws} no longer delivers this; {f}"),
+        (None, Some(f)) => f,
+        (_, None) => match last {
+            Some(p) => format!("no files remain (last copy was {p})"),
+            None => "no files remain".to_owned(),
+        },
     }
 }
 
@@ -4614,6 +4883,10 @@ pub(crate) fn forge_imports(ctx: &Ctx<'_>) -> Vec<ForgeImport> {
         let Ok(sid) = SkillId::parse(id) else {
             continue;
         };
+        // A RETIRED record is no import any more — nothing enumerates, updates, or cleans it.
+        if sidecar::record_retired(ctx.fs, &ctx.layout, &sid) {
+            continue;
+        }
         let sp = ctx.layout.published(&sid);
         let Ok(Some(origin)) = doc::read_doc::<super::add::OriginDoc>(ctx.fs, &sp.origin) else {
             continue;
@@ -4862,6 +5135,11 @@ fn rebuild_store(ctx: &Ctx<'_>, layout: &crate::sidecar::Layout, warnings: &mut 
         let Ok(sid) = SkillId::parse(id) else {
             continue;
         };
+        // A RETIRED record is never re-projected: the sweep would not write it back, so a rebuild
+        // that dropped its kept files would be a plain delete of the person's own copies.
+        if sidecar::record_retired(ctx.fs, layout, &sid) {
+            continue;
+        }
         if let Err(e) = rebuild_skill(ctx, &sid) {
             warnings.push(format!(
                 "REBUILD_SKIPPED {id}: {}",
@@ -4917,6 +5195,7 @@ fn plain_row(
         destinations: Vec::new(),
         kept: Vec::new(),
         display: None,
+        note: None,
         scope: Some(scope.to_owned()),
         harnesses: Vec::new(),
         kind: None,
@@ -5005,6 +5284,9 @@ pub(crate) fn handover_legacy_project_rows(
         let Ok(sid) = SkillId::parse(id) else {
             continue;
         };
+        if sidecar::record_retired(ctx.fs, &ctx.layout, &sid) {
+            continue; // a retired record left every surface — never handed over
+        }
         let sp = ctx.layout.published(&sid);
         if matches!(ctx.fs.read_opt(&sp.origin), Ok(Some(_))) {
             continue; // an external import keeps its home custody

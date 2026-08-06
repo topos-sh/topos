@@ -202,31 +202,6 @@
         "total"
       ]
     },
-    "DetachCause": {
-      "description": "Why a tracked skill is `detached` in [`SkillEntry`]. **INFERRED** (additive value set).",
-      "oneOf": [
-        {
-          "description": "The skill left this scope's skill list (its manifest or feed row is gone — removed here,\nor the feed no longer carries it); the retained record is a deliberate leftover.",
-          "type": "string",
-          "const": "unfollowed"
-        },
-        {
-          "description": "`topos remove` excluded the skill on THIS device (other devices still receive it).",
-          "type": "string",
-          "const": "excluded-here"
-        },
-        {
-          "description": "Upstream withdrew the skill (archived, or its last delivering channel dropped it).",
-          "type": "string",
-          "const": "removed-upstream"
-        },
-        {
-          "description": "No stored workspace credential — signed out of the workspace this skill lives in.",
-          "type": "string",
-          "const": "signed-out"
-        }
-      ]
-    },
     "ForgeSource": {
       "description": "One external source's last auto-update check — the answer to \"is this even working?\", computed\nentirely from local state. Every check is recorded whatever its outcome, so a source that has\ngone quiet is visible here long before the silent sweep is willing to interrupt a session over\nit. **INFERRED** (additive).",
       "type": "object",
@@ -290,6 +265,13 @@
             "null"
           ]
         },
+        "folders": {
+          "description": "For a NOT-managed answer: the folders of unmanaged copies discovered on disk (the known\nagents' skill dirs, matched by name) — `topos add <folder>` manages one. **INFERRED**\n(additive).",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
         "harnesses": {
           "description": "For an `mcp` bundle: the per-agent config entries this machine records (the placed file +\nstate), shown instead of placement dirs. **INFERRED** (additive).",
           "type": "array",
@@ -303,6 +285,10 @@
             "string",
             "null"
           ]
+        },
+        "managed": {
+          "description": "`false` = NO row in any visible scope manages this name (and it is not the built-in): the\nanswer is the not-managed headline plus `folders`, and every managed-only field above is\nabsent/at its baseline. Omits when `true` (the pre-existing managed shape). **INFERRED**\n(additive).",
+          "type": "boolean"
         },
         "name": {
           "description": "The bundle's name.",
@@ -583,17 +569,6 @@
           "type": "string",
           "pattern": "^[0-9a-f]{64}$"
         },
-        "cause": {
-          "description": "Why a `detached` row is no longer live: `unfollowed` / `excluded-here` / `removed-upstream` /\n`signed-out`. Absent when the row is live. **INFERRED** (additive).",
-          "anyOf": [
-            {
-              "$ref": "#/$defs/DetachCause"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
         "draft": {
           "description": "Local edits ahead of the version this entry is on.",
           "type": "boolean"
@@ -623,7 +598,7 @@
           ]
         },
         "status": {
-          "description": "The update status of the local copy: `current` / `behind` / `draft` / `detached`.\n**INFERRED** (additive).",
+          "description": "The update status of the local copy: `current` / `behind` / `draft` / `off`. Absent when\nno status is honestly claimable (never applied, pending, no delivery yet). **INFERRED**\n(additive).",
           "anyOf": [
             {
               "$ref": "#/$defs/SkillStatus"
@@ -672,9 +647,9 @@
           "const": "draft"
         },
         {
-          "description": "No longer live here (see [`SkillEntry::cause`]) — the bytes are a frozen copy.",
+          "description": "A machine-local `\"off\"` row withholds this bundle here — a standing statement of the file,\nnever a delivery. **Additive.**",
           "type": "string",
-          "const": "detached"
+          "const": "off"
         }
       ]
     },
@@ -720,11 +695,6 @@
           "description": "An adopted feed this installation has never had a delivery from: the next `update` performs\nthe first exchange. What that exchange brings — including nothing — is not knowable here,\nso the line promises an exchange, never an apply.",
           "type": "string",
           "const": "no-delivery-yet"
-        },
-        {
-          "description": "A retained store copy delivery no longer claims here (the built-in aside: unfollowed,\nexcluded, or withdrawn upstream) — the bytes are a frozen local copy.",
-          "type": "string",
-          "const": "detached"
         },
         {
           "description": "Not applied here yet — `topos update` applies it (or the state is not determinable\noffline).",

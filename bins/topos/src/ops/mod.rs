@@ -98,6 +98,11 @@ pub(crate) use reconcile::{
     CacheFollow, ForgeCadence, ManifestUpdateOpts, SessionRoutedPlane, SessionTransports,
     UpdateScope, forge_imports, manifest_update,
 };
+// The one-time orphan resolution's fact composer — re-exported so the receipt-copy tests pin its
+// exact shapes.
+#[cfg(test)]
+#[allow(unused_imports)]
+pub(crate) use reconcile::orphan_fact;
 // The handover is driven by the reconcile; the direct re-export serves the custody-first
 // regression tests (retire only after verifiable project adoption; park, never delete).
 #[cfg(test)]
@@ -409,6 +414,12 @@ fn resolve_skill_scoped(
         let Ok(id) = SkillId::parse(id) else {
             continue;
         };
+        // A RETIRED record resolves for nothing — it left every surface when the one-time orphan
+        // resolution released it, so a bare name must not silently re-point at its stale copy
+        // (a fresh add mints a new identity; a re-demanded row revives the record explicitly).
+        if crate::sidecar::record_retired(ctx.fs, &ctx.layout, &id) {
+            continue;
+        }
         if let Some(lock) = doc::read_doc::<Lock>(ctx.fs, &ctx.layout.published(&id).lock)?
             && lock.name == name
         {

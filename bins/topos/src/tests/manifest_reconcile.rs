@@ -2281,19 +2281,10 @@ fn a_repo_set_member_reads_as_current_in_list_not_detached() {
             .iter()
             .find(|r| r.skill == name)
             .unwrap_or_else(|| panic!("list itemizes {name}: {rows:?}"));
-        assert_ne!(
-            row.status,
-            Some(topos_types::results::SkillStatus::Detached),
-            "{name} is managed by update, so list must not call it detached: {row:?}"
-        );
-        assert!(
-            row.cause.is_none(),
-            "a live member has no detach cause: {row:?}"
-        );
         assert_eq!(
             row.status,
             Some(topos_types::results::SkillStatus::Current),
-            "{row:?}"
+            "{name} is managed by update, so list must call it current: {row:?}"
         );
         // The source column names WHO ASKED — the manifest row, exactly as for every other kind
         // of line. That is the whole point: the member is an ordinary delivered row now.
@@ -2553,11 +2544,12 @@ fn an_unreadable_archive_is_a_failed_check_not_a_passed_one() {
 }
 
 #[test]
-fn a_member_the_repo_dropped_reads_detached_not_current() {
+fn a_member_the_repo_dropped_leaves_the_list_entirely() {
     // The mirror image of the bug the set-member enumeration exists to fix, and just as much a lie.
     // When upstream drops a member, the reconcile retires its placements but KEEPS its origin and
-    // lock — custody outlives delivery. Enumerating every retained record would make `list` call a
-    // withdrawn member live, so only records that still hold placed bytes are claimed.
+    // lock — custody outlives delivery. The retained record mints NO list row (records may
+    // describe rows, never create them): only members that still hold placed bytes are itemized,
+    // and the leftover's one-time resolution belongs to a later `update`.
     let rig = Rig::new("repo-dropped-member");
     rig.write_global("[bundles]\n\"github.com/o/r\" = \"*\"\n");
     let log: CallLog = Arc::new(Mutex::new(Vec::new()));
@@ -2596,7 +2588,7 @@ fn a_member_the_repo_dropped_reads_detached_not_current() {
         "and its custody record is deliberately kept"
     );
 
-    // What `list` must say about it: NOT that the repo row still delivers it.
+    // What `list` must say about it: NOTHING — no row demands it, so no line originates from it.
     let listed = crate::ops::list_with(
         &ctx,
         &ops::ListRequest::default(),
@@ -2611,14 +2603,9 @@ fn a_member_the_repo_dropped_reads_detached_not_current() {
         .iter()
         .flat_map(|sc| sc.rows.iter())
         .collect();
-    let beta = rows
-        .iter()
-        .find(|r| r.skill == "beta")
-        .unwrap_or_else(|| panic!("the kept copy is still shown: {rows:?}"));
-    assert_eq!(
-        beta.status,
-        Some(topos_types::results::SkillStatus::Detached),
-        "a member the repo no longer holds is a leftover, not a delivery: {beta:?}"
+    assert!(
+        !rows.iter().any(|r| r.skill == "beta"),
+        "a member the repo no longer holds mints no row: {rows:?}"
     );
     // …while the member that IS still delivered reads exactly as it did before.
     let alpha = rows.iter().find(|r| r.skill == "alpha").expect("alpha");
@@ -2626,6 +2613,296 @@ fn a_member_the_repo_dropped_reads_detached_not_current() {
         alpha.status,
         Some(topos_types::results::SkillStatus::Current),
         "{alpha:?}"
+    );
+}
+
+#[test]
+fn a_signed_out_workspaces_leftover_resolves_once_then_retires() {
+    // The one-time orphan resolution: a store record no row claims and nothing delivers gets ONE
+    // closing statement — workspace-named, files-led — and then leaves every surface. Nothing on
+    // disk is deleted: the placed copy stays, and belongs to the person now.
+    let rig = Rig::new("orphan-signed-out");
+    rig.seed_session();
+    rig.seed_feed();
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let v1 = one_file(b"# alpha v1\n");
+    let plane = FakePlane::new(log).with_version("s_alpha", &v1);
+    plane.serves(vec![delivered("s_alpha", "alpha", &v1)]);
+    let dir = FakeDirectory::new(Vec::new(), Vec::new());
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    sweep(&ctx, &plane, &dir);
+    let placed = rig.work.0.join("skills/alpha");
+    assert!(placed.join("SKILL.md").exists(), "alpha's bytes are placed");
+
+    // Sign out (the session ends; a deliberate state) and drop the feed line: nothing claims the
+    // record and nothing can deliver it. BEFORE the resolution, the record still owns its name.
+    sessions::set_session_status(&rig.fs, &rig.layout(), HOST, WS, SESSION_ENDED).unwrap();
+    rig.write_global("[bundles]\n");
+    let roots = ops::DiscoveryRoots {
+        home: rig.home.0.clone(),
+        cwd: None,
+    };
+    assert!(
+        matches!(
+            ops::plan_bare_add(
+                &ctx,
+                &connect(&plane, &dir),
+                &roots,
+                "alpha",
+                false,
+                false,
+                None
+            ),
+            Err(ClientError::AlreadyTrackedName { .. })
+        ),
+        "before the resolution the record still resolves the bare name"
+    );
+
+    let out = sweep(&ctx, &plane, &dir);
+    let row = out
+        .data
+        .skills
+        .iter()
+        .find(|s| s.skill == "alpha")
+        .unwrap_or_else(|| {
+            panic!(
+                "the one-time resolution rides the receipt: {:?}",
+                out.data.skills
+            )
+        });
+    assert_eq!(row.action, PullAction::Released);
+    // Byte-exact: the workspace-named, single-folder path form of the released fact.
+    assert_eq!(
+        row.note.as_deref(),
+        Some(
+            format!(
+                "{WS_NAME} no longer delivers this; {} is yours now (topos list alpha)",
+                placed.display()
+            )
+            .as_str()
+        )
+    );
+    assert_eq!(
+        row.display.as_deref(),
+        Some(format!("{HOST}/{WS_NAME}/alpha").as_str()),
+        "no live host, so the full spelling qualifies the name"
+    );
+    // The marker is durable; the files and the store bytes stay untouched.
+    let sid = crate::id::SkillId::parse("s_alpha").unwrap();
+    assert!(rig.fs.exists(&rig.layout().published(&sid).retired));
+    assert!(
+        placed.join("SKILL.md").exists(),
+        "the resolution deletes nothing"
+    );
+    assert!(
+        rig.fs.exists(&rig.layout().skill_dir(&sid)),
+        "the record's bytes stay on disk forever"
+    );
+
+    // RETIREMENT DURABILITY: the next sweep says nothing; `list` shows nothing; the record no
+    // longer resolves a bare name (the kept folder is adoptable again instead).
+    let out = sweep(&ctx, &plane, &dir);
+    assert!(
+        !out.data.skills.iter().any(|s| s.skill == "alpha"),
+        "a retired record is never mentioned again: {:?}",
+        out.data.skills
+    );
+    let listed = crate::ops::list_with(
+        &ctx,
+        &ops::ListRequest::default(),
+        None,
+        None,
+        crate::ops::RowPage::unlimited(),
+    )
+    .unwrap();
+    assert!(
+        !listed
+            .data
+            .scopes
+            .iter()
+            .flat_map(|sc| sc.rows.iter())
+            .any(|r| r.skill == "alpha"),
+        "no row claims it, so no line originates from it"
+    );
+    // The retired record no longer answers for the name at all (this rig's placement dir sits
+    // outside the registry discovery roots, so the honest answer is the ordinary no-such-name —
+    // never the record's "already tracked").
+    assert!(
+        matches!(
+            ops::plan_bare_add(
+                &ctx,
+                &connect(&plane, &dir),
+                &roots,
+                "alpha",
+                false,
+                false,
+                None
+            ),
+            Err(ClientError::NoUntrackedSkill { .. })
+        ),
+        "a retired record must not resolve the bare name"
+    );
+}
+
+#[test]
+fn an_unreached_workspace_freezes_its_records_and_a_withdrawal_resolves_later() {
+    // The freeze gates, end to end: a live session with NO fresh snapshot this run freezes its
+    // records (an outage never reads as an orphan); the run a withdrawal actually lands in speaks
+    // through the withdraw row alone; and only the NEXT full sweep resolves the leftover — once.
+    let rig = Rig::new("orphan-freeze");
+    rig.seed_session();
+    rig.seed_feed();
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let v1 = one_file(b"# alpha v1\n");
+    let plane = FakePlane::new(log).with_version("s_alpha", &v1);
+    plane.serves(vec![delivered("s_alpha", "alpha", &v1)]);
+    let dir = FakeDirectory::new(Vec::new(), Vec::new());
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    sweep(&ctx, &plane, &dir);
+    let sid = crate::id::SkillId::parse("s_alpha").unwrap();
+
+    // The workspace is unreachable: everything freezes — no withdrawal, no resolution.
+    plane.serve_unreachable();
+    let out = sweep(&ctx, &plane, &dir);
+    assert!(
+        !out.data.skills.iter().any(|s| {
+            s.skill == "alpha" && matches!(s.action, PullAction::Withdrawn | PullAction::Released)
+        }),
+        "an outage must never read as an orphan: {:?}",
+        out.data.skills
+    );
+    assert!(!rig.fs.exists(&rig.layout().published(&sid).retired));
+
+    // The workspace answers fresh and no longer serves alpha: the withdraw arm speaks this run,
+    // and the record is fresh news — not yet a standing orphan.
+    plane.serves(Vec::new());
+    let out = sweep(&ctx, &plane, &dir);
+    assert!(
+        out.data
+            .skills
+            .iter()
+            .any(|s| s.skill == "alpha" && s.action == PullAction::Withdrawn),
+        "{:?}",
+        out.data.skills
+    );
+    assert!(
+        !rig.fs.exists(&rig.layout().published(&sid).retired),
+        "a record that earned a receipt row this run is not retired under it"
+    );
+
+    // The NEXT full sweep resolves the leftover once: no files remain (the withdrawal cleaned
+    // them), the record retires, and a further sweep says nothing.
+    let out = sweep(&ctx, &plane, &dir);
+    let row = out
+        .data
+        .skills
+        .iter()
+        .find(|s| s.skill == "alpha" && s.action == PullAction::Released)
+        .unwrap_or_else(|| panic!("the one-time resolution: {:?}", out.data.skills));
+    assert_eq!(row.note.as_deref(), Some("no files remain"));
+    assert!(rig.fs.exists(&rig.layout().published(&sid).retired));
+    let out = sweep(&ctx, &plane, &dir);
+    assert!(
+        !out.data.skills.iter().any(|s| s.skill == "alpha"),
+        "{:?}",
+        out.data.skills
+    );
+}
+
+#[test]
+fn a_targeted_update_never_resolves_orphans() {
+    // A targeted update narrows within the driven scope: it cannot know the whole demand set, so
+    // the orphan pass never runs under it.
+    let rig = Rig::new("orphan-targeted");
+    rig.seed_session();
+    rig.seed_feed();
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let v1 = one_file(b"# alpha v1\n");
+    let v2 = one_file(b"# beta v1\n");
+    let plane = FakePlane::new(log)
+        .with_version("s_alpha", &v1)
+        .with_version("s_beta", &v2);
+    plane.serves(vec![
+        delivered("s_alpha", "alpha", &v1),
+        delivered("s_beta", "beta", &v2),
+    ]);
+    let dir = FakeDirectory::new(Vec::new(), Vec::new());
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    sweep(&ctx, &plane, &dir);
+
+    // Upstream withdraws alpha; a full sweep lands the withdrawal (fresh news, not yet an
+    // orphan). From here alpha's record is orphan-eligible.
+    plane.serves(vec![delivered("s_beta", "beta", &v2)]);
+    sweep(&ctx, &plane, &dir);
+
+    // The targeted form: converge beta alone — the eligible record is left exactly as it is.
+    let out = ops::manifest_update(
+        &ctx,
+        &connect(&plane, &dir),
+        None,
+        &ops::ManifestUpdateOpts {
+            targets: vec!["beta".to_owned()],
+            ..ops::ManifestUpdateOpts::default()
+        },
+    )
+    .unwrap();
+    assert!(
+        !out.data.skills.iter().any(|s| s.skill == "alpha"),
+        "{:?}",
+        out.data.skills
+    );
+    let sid = crate::id::SkillId::parse("s_alpha").unwrap();
+    assert!(
+        !rig.fs.exists(&rig.layout().published(&sid).retired),
+        "a targeted update never resolves orphans"
+    );
+
+    // The full sweep still owns the resolution.
+    let out = sweep(&ctx, &plane, &dir);
+    assert!(
+        out.data
+            .skills
+            .iter()
+            .any(|s| s.skill == "alpha" && s.action == PullAction::Released),
+        "{:?}",
+        out.data.skills
+    );
+    assert!(rig.fs.exists(&rig.layout().published(&sid).retired));
+}
+
+#[test]
+fn the_released_fact_shapes_are_byte_exact() {
+    // The four final-copy shapes, pinned at the composer (the renderer prints the fact verbatim).
+    let folders = |n: usize| -> Vec<String> { (0..n).map(|i| format!("/tmp/f{i}")).collect() };
+    assert_eq!(
+        ops::orphan_fact(
+            Some("acme"),
+            &folders(6),
+            Some("/tmp/f5"),
+            "frontend-design"
+        ),
+        "acme no longer delivers this; files in 6 folders are yours now (topos list frontend-design)"
+    );
+    assert_eq!(
+        ops::orphan_fact(None, &folders(0), Some("/private/tmp/deploy"), "deploy"),
+        "no files remain (last copy was /private/tmp/deploy)"
+    );
+    assert_eq!(
+        ops::orphan_fact(
+            None,
+            &["~/.claude/skills/runbook".to_owned()],
+            None,
+            "runbook"
+        ),
+        "~/.claude/skills/runbook is yours now (topos list runbook)"
+    );
+    assert_eq!(
+        ops::orphan_fact(None, &folders(0), None, "gone"),
+        "no files remain"
+    );
+    assert_eq!(
+        ops::orphan_fact(Some("acme"), &folders(2), None, "notes"),
+        "acme no longer delivers this; files in 2 folders are yours now (topos list notes)"
     );
 }
 

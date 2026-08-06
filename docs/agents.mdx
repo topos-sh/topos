@@ -179,7 +179,9 @@ topos list <skill> --json
 `list` returns its rows per scope in `scopes[]` — the scope you are standing in first, each with the
 `manifest` that governs it — and every row carries a **source** (a workspace address means
 team-managed; `built-in`; an origin host; `local`) and a **status** (`current` / `behind` / `draft` /
-`detached`). Check before treating a skill directory as hand-authored. Editing a team-managed skill
+`off`). Every row originates from a manifest line (or the placed built-in); a copy no line manages
+any more resolves once on the next `update` — its receipt says so, and the files are yours from
+then on. Check before treating a skill directory as hand-authored. Editing a team-managed skill
 creates a draft, not a private fork, and drafts are safe: updates merge around them and never
 overwrite them.
 
@@ -190,7 +192,9 @@ exact `command` that expands them — run that command instead of guessing.
 `list <skill>` fills `detail` and answers *why* a copy is there: `source_file` and `source_key` are
 the file and the line that asked for it, `feed` names the workspace whose feed row delivers it when
 no line names the skill itself, plus the `scope` that answered (`project` / `machine` — machine answers spell their
-commands with `-g`), the applied `version`, any `pin`, and the `placements` on disk. `-a <agent>` fills
+commands with `-g`), the applied `version`, any `pin`, and the `placements` on disk. A name nothing
+manages answers with `managed: false` plus the `folders` of unmanaged copies found on disk (exit
+`0` — "not managed" is the answer, and `topos add <folder>` is the way to change it). `-a <agent>` fills
 `agent_view` instead — one harness's skills directories exactly as that agent reads them, spanning
 both scopes — and `--remote` fills `remote` with each connected workspace's channels and skills,
 annotated with this machine's adoption state. A skill can legitimately have two independent copies,

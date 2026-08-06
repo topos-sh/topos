@@ -272,6 +272,7 @@ mod tests {
             destinations: Vec::new(),
             kept: Vec::new(),
             display: None,
+            note: None,
             scope: None,
             harnesses: Vec::new(),
             kind: None,
@@ -399,8 +400,10 @@ mod tests {
             (PullAction::Conflicted, true),
             (PullAction::Held, false),
             (PullAction::Withdrawn, true),
-            (PullAction::Detached, false),
             (PullAction::Excluded, false),
+            // A released row writes a marker, never placement bytes — the resolution deletes
+            // nothing on disk.
+            (PullAction::Released, false),
             (PullAction::DraftSynced, true),
         ] {
             let data = PullData {

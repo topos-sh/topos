@@ -1192,10 +1192,10 @@ fn list_row(entry: &SkillEntry, scope: &str) -> String {
     )
 }
 
-/// The STATUS / SOURCE / CAUSE suffix for an inventory row (`  [behind]  from acme  (excluded
-/// here)`) — rendered only for the fields the resolution populated.
+/// The STATUS / SOURCE suffix for an inventory row (`  [behind]  from acme`) — rendered only for
+/// the fields the resolution populated.
 fn list_columns(entry: &SkillEntry) -> String {
-    use topos_types::results::{DetachCause, SkillStatus};
+    use topos_types::results::SkillStatus;
     let mut s = String::new();
     // The kind badge: a config-placed bundle reads differently from a skill (its "installed"
     // lives in agent config files, not skill dirs).
@@ -1209,7 +1209,7 @@ fn list_columns(entry: &SkillEntry) -> String {
         let label = match status {
             SkillStatus::Current => "current",
             SkillStatus::Behind => "behind",
-            SkillStatus::Detached => "detached",
+            SkillStatus::Off => "off",
             SkillStatus::Draft => "draft",
         };
         s.push_str(&format!("  [{label}]"));
@@ -1218,23 +1218,6 @@ fn list_columns(entry: &SkillEntry) -> String {
         && source != "local"
     {
         s.push_str(&format!("  from {source}"));
-    }
-    // The cause clause carries the quiet rule for a leftover row: why it is still shown (the
-    // bytes are deliberately kept) and what retires it — the exact command where one is always
-    // true, the resolving event otherwise.
-    if let Some(cause) = entry.cause {
-        let label = match cause {
-            DetachCause::Unfollowed => {
-                "removed from the skill list — bytes kept until you re-add it".to_owned()
-            }
-            DetachCause::ExcludedHere => "switched off here".to_owned(),
-            DetachCause::RemovedUpstream => format!(
-                "removed upstream — bytes kept; `topos add {} --yes` keeps it as yours",
-                entry.skill
-            ),
-            DetachCause::SignedOut => "signed out — `topos login` reconnects".to_owned(),
-        };
-        s.push_str(&format!("  ({label})"));
     }
     s
 }
@@ -1786,9 +1769,18 @@ fn attention_phrase(a: &topos_types::results::AttentionCount) -> String {
 /// `topos list <name>` — where this one skill comes from, spelled out: the row (file + key) or
 /// the feed (+ who aimed it), the version and any pin, where its bytes are, and its state. Every
 /// suggested command is SCOPE-EXACT (the same rule as [`list_row`]): an answer from the machine
-/// scope spells `topos update -g`, a project answer the bare form.
+/// scope spells `topos update -g`, a project answer the bare form. A name NOTHING manages is the
+/// headline plus any unmanaged folders found on disk — and nothing else: no store mentions, no
+/// workspace hints.
 fn list_detail_tty(detail: &topos_types::results::ListDetail) -> String {
     use topos_types::results::StatusItemState;
+    if !detail.managed {
+        let mut s = format!("{} — not managed on this machine", detail.name);
+        for folder in &detail.folders {
+            s.push_str(&format!("\n  {folder}"));
+        }
+        return s;
+    }
     let flag = if detail.scope.as_deref() == Some("machine") {
         " -g"
     } else {
@@ -1849,9 +1841,6 @@ fn list_detail_tty(detail: &topos_types::results::ListDetail) -> String {
         StatusItemState::PendingSession => "awaiting session approval".to_owned(),
         StatusItemState::NoDeliveryYet => {
             format!("no delivery yet (`topos update{flag}` performs the first exchange)")
-        }
-        StatusItemState::Detached => {
-            "detached — delivery ended; the bytes stay until the skill is added back".to_owned()
         }
         StatusItemState::Unknown => {
             format!("not applied here yet (`topos update{flag}` applies it)")
@@ -2595,7 +2584,7 @@ pub(crate) fn pull_tty(data: &PullData, warnings: &[String], disclosures: &[Stri
             }
             let lead = match s.action {
                 PullAction::Installed => format!("+ {shown}"),
-                PullAction::Removed => format!("- {shown}"),
+                PullAction::Removed | PullAction::Released => format!("- {shown}"),
                 _ => s.skill.clone(),
             };
             let (line, mut extra) = pull_row(s);
@@ -2757,10 +2746,9 @@ fn pull_row(s: &PullSkill) -> (String, Vec<String>) {
             ),
             Vec::new(),
         ),
-        PullAction::Detached => (
-            String::from("detached (you removed it) — frozen in place; `topos add` re-attaches"),
-            Vec::new(),
-        ),
+        // The one-time orphan resolution's closing statement — the whole line IS the carried
+        // fact (why the record resolved and where its files stand), composed by the sweep.
+        PullAction::Released => (s.note.clone().unwrap_or_default(), Vec::new()),
         PullAction::Excluded => (
             String::from(
                 "not on this device (you removed it here) — your other devices still receive it",
@@ -3121,6 +3109,7 @@ mod tests {
             destinations: Vec::new(),
             kept: Vec::new(),
             display: None,
+            note: None,
             scope: None,
             harnesses: Vec::new(),
             kind: None,
@@ -3695,7 +3684,6 @@ mod tests {
             pending_proposals: Vec::new(),
             source: Some("the topos.sh/acme feed".to_owned()),
             status,
-            cause: None,
             kind: None,
         };
         let out = ListOutcome {
@@ -3797,7 +3785,6 @@ mod tests {
             pending_proposals: Vec::new(),
             source: None,
             status: None,
-            cause: None,
             kind: None,
         };
         let out = ListOutcome {
@@ -3833,7 +3820,7 @@ mod tests {
 
     /// The deep dive's suggested command is scope-exact like the rows: a machine-scope answer
     /// spells `topos update -g` in every state that suggests an update, a project answer keeps
-    /// the bare form; the detached copy names the retiring event instead of a command.
+    /// the bare form.
     #[test]
     fn the_deep_dive_spells_its_own_scopes_update_command() {
         use topos_types::results::{ListDetail, StatusItemState as S};
@@ -3850,6 +3837,8 @@ mod tests {
             state,
             kind: None,
             harnesses: Vec::new(),
+            managed: true,
+            folders: Vec::new(),
         };
         let render = |d| {
             list_tty(&ListOutcome {
@@ -3882,44 +3871,75 @@ mod tests {
             text.contains("not applied here yet (`topos update -g` applies it)"),
             "{text}"
         );
-        let text = render(detail("machine", S::Detached));
-        assert!(
-            text.contains(
-                "detached — delivery ended; the bytes stay until the skill is added back"
-            ),
-            "{text}"
+    }
+
+    /// The NOT-MANAGED deep dive is the headline plus the unmanaged folders, one per line — and
+    /// nothing else: no source line, no state sentence, no store mention.
+    #[test]
+    fn the_deep_dive_renders_the_not_managed_headline_and_folders() {
+        use topos_types::results::{ListDetail, StatusItemState};
+        let detail = |folders: Vec<String>| ListDetail {
+            name: "deploy".to_owned(),
+            scope: None,
+            source_file: None,
+            source_key: None,
+            feed: None,
+            attribution: None,
+            version: None,
+            pin: None,
+            placements: Vec::new(),
+            state: StatusItemState::Unknown,
+            kind: None,
+            harnesses: Vec::new(),
+            managed: false,
+            folders,
+        };
+        let render = |d| {
+            list_tty(&ListOutcome {
+                data: ListData {
+                    detail: Some(d),
+                    signed_in: false,
+                    ..ListData::default()
+                },
+                warnings: Vec::new(),
+                untracked_view: false,
+            })
+        };
+        assert_eq!(
+            render(detail(Vec::new())),
+            "deploy — not managed on this machine"
+        );
+        assert_eq!(
+            render(detail(vec![
+                "/home/u/.claude/skills/deploy".to_owned(),
+                "/home/u/.cursor/skills/deploy".to_owned(),
+            ])),
+            "deploy — not managed on this machine\n  /home/u/.claude/skills/deploy\n  \
+             /home/u/.cursor/skills/deploy"
         );
     }
 
-    /// A lingering ghost row explains itself in ONE clause: why it is still shown (the bytes are
-    /// deliberately kept) and what retires it — the exact command where one is always true
-    /// (withdrawn: the keep-as-yours fork; signed out: `topos login`), the resolving event
-    /// otherwise (a removed row: re-adding it).
+    /// An `off` row is the file's own standing statement: the `[off]` badge, never the
+    /// "not applied here yet" note (an off row is exactly the row `update` will not apply).
     #[test]
-    fn ghost_rows_explain_why_they_linger_and_what_retires_them() {
-        use topos_types::results::{DetachCause, ListScope, SkillStatus};
-        let ghost = |name: &str, cause| SkillEntry {
-            skill: name.to_owned(),
-            workspace_id: Some("w_acme".to_owned()),
-            version_id: "ab".repeat(32),
-            bundle_digest: "cd".repeat(32),
-            draft: false,
-            pending_proposals: Vec::new(),
-            source: Some("acme".to_owned()),
-            status: Some(SkillStatus::Detached),
-            cause: Some(cause),
-            kind: None,
-        };
+    fn off_rows_read_off_not_not_applied() {
+        use topos_types::results::{ListScope, SkillStatus};
         let out = ListOutcome {
             data: ListData {
                 scopes: vec![ListScope {
                     scope: "machine".to_owned(),
-                    manifest: None,
-                    rows: vec![
-                        ghost("dropped", DetachCause::Unfollowed),
-                        ghost("gone-up", DetachCause::RemovedUpstream),
-                        ghost("outed", DetachCause::SignedOut),
-                    ],
+                    manifest: Some("/home/u/.topos/topos.toml".to_owned()),
+                    rows: vec![SkillEntry {
+                        skill: "deploy".to_owned(),
+                        workspace_id: None,
+                        version_id: "0".repeat(64),
+                        bundle_digest: "0".repeat(64),
+                        draft: false,
+                        pending_proposals: Vec::new(),
+                        source: Some("/home/u/.topos/topos.toml".to_owned()),
+                        status: Some(SkillStatus::Off),
+                        kind: None,
+                    }],
                 }],
                 signed_in: false,
                 ..ListData::default()
@@ -3928,22 +3948,77 @@ mod tests {
             untracked_view: false,
         };
         let text = list_tty(&out);
+        assert!(text.contains("deploy  [off]"), "{text}");
+        assert!(!text.contains("not applied here yet"), "{text}");
+    }
+
+    /// The one-time orphan resolution's receipt rows: `- `-led like every other row that ends
+    /// standing state, the name column aligned, the whole line the carried fact — byte-exact for
+    /// both final-copy shapes and the single-folder path form.
+    #[test]
+    fn released_rows_render_their_fact_byte_exact() {
+        let released = |display: Option<&str>, name: &str, note: &str| PullSkill {
+            skill: name.to_owned(),
+            workspace_id: None,
+            observed: 0,
+            applied: 0,
+            action: PullAction::Released,
+            offer: None,
+            conflict: None,
+            merge: None,
+            merge_preview: None,
+            synced_placements: None,
+            scope: Some("person".to_owned()),
+            destinations: Vec::new(),
+            kept: Vec::new(),
+            display: display.map(str::to_owned),
+            note: Some(note.to_owned()),
+            harnesses: Vec::new(),
+            kind: None,
+        };
+        let data = PullData {
+            skills: vec![
+                released(
+                    Some("@acme/frontend-design"),
+                    "frontend-design",
+                    "acme no longer delivers this; files in 6 folders are yours now (topos list \
+                     frontend-design)",
+                ),
+                released(
+                    None,
+                    "deploy",
+                    "no files remain (last copy was /private/tmp/deploy)",
+                ),
+                released(
+                    None,
+                    "runbook",
+                    "~/.claude/skills/runbook is yours now (topos list runbook)",
+                ),
+            ],
+            proposals_awaiting: 0,
+            notices: Vec::new(),
+            sync: Vec::new(),
+            scope: Some("machine".to_owned()),
+        };
+        let out = pull_tty(&data, &[], &[]);
         assert!(
-            text.contains(
-                "dropped  dropped@abababababab  [detached]  from acme  (removed from the skill \
-                 list — bytes kept until you re-add it)"
+            out.contains(
+                "- @acme/frontend-design   acme no longer delivers this; files in 6 folders are \
+                 yours now (topos list frontend-design)\n"
             ),
-            "{text}"
+            "{out}"
         );
         assert!(
-            text.contains(
-                "(removed upstream — bytes kept; `topos add gone-up --yes` keeps it as yours)"
+            out.contains(
+                "- deploy                  no files remain (last copy was /private/tmp/deploy)\n"
             ),
-            "{text}"
+            "{out}"
         );
         assert!(
-            text.contains("(signed out — `topos login` reconnects)"),
-            "{text}"
+            out.contains(
+                "- runbook                 ~/.claude/skills/runbook is yours now (topos list runbook)\n"
+            ),
+            "{out}"
         );
     }
 
@@ -4109,6 +4184,8 @@ mod tests {
                     state: S::Applied,
                     kind: None,
                     harnesses: Vec::new(),
+                    managed: true,
+                    folders: Vec::new(),
                 }),
                 signed_in: true,
                 ..ListData::default()

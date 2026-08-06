@@ -123,11 +123,13 @@ fn end_to_end_add_then_list_over_json() {
     assert_eq!(rows[0]["skill"], "pr-describe");
     assert_eq!(rows[0]["version_id"], version);
 
-    // An unknown deep-dive name fails closed with the uniform not-found (exit-nonzero, valid JSON).
+    // An unknown deep-dive name answers the NOT-MANAGED success (exit 0, `managed: false`) —
+    // "nothing manages it" is the whole answer, never an error.
     let (ok, v) = run(&home, &["--json", "list", "nope"]);
-    assert!(!ok, "an unknown name should exit nonzero");
-    assert_eq!(v["ok"], false);
-    assert_eq!(v["error"]["code"], "NOT_FOUND");
+    assert!(ok, "an unknown name answers not-managed, exit 0");
+    assert_eq!(v["ok"], true);
+    assert_eq!(v["data"]["detail"]["name"], "nope");
+    assert_eq!(v["data"]["detail"]["managed"], false);
 
     let _ = std::fs::remove_dir_all(&src);
     let _ = std::fs::remove_dir_all(&home);

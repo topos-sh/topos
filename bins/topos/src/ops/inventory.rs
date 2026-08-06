@@ -109,10 +109,6 @@ pub(crate) struct ScopeResolution {
     /// carrying them is what lets a scoped read answer about its OWN rows: two scopes can track one
     /// repository at different pins, and a hidden scope's newer answer is not this one's news.
     pub forge_questions: Vec<String>,
-    /// This scope's OWN store (the machine sidecar / the checkout's `.topos/state/<user>/`),
-    /// when one exists — the inventory's ghost walk reads it for records no row claims (the
-    /// built-in meta-skill, detached/frozen copies). Never cross-scope.
-    pub store: Option<Layout>,
 }
 
 impl ScopeResolution {
@@ -213,9 +209,8 @@ pub(crate) fn resolve(
 
     // The NEAREST project manifest, whole — over the project's OWN store (never minted here).
     let mut project_out = ScopeOut::default();
-    let mut project_store = None;
     if let Some((dir, plan)) = &project {
-        project_store = crate::sidecar::existing_project_store(ctx.fs, dir);
+        let project_store = crate::sidecar::existing_project_store(ctx.fs, dir);
         project_out = scope_rows(ctx, plan, project_store.as_ref(), cache, all);
     }
     let mut person_out = scope_rows(ctx, &person_plan, Some(&ctx.layout), cache, all);
@@ -346,7 +341,6 @@ pub(crate) fn resolve(
             notes: project_notes,
             sets: plan.sets.iter().map(|r| r.shape.canonical()).collect(),
             forge_questions: forge_questions(plan),
-            store: project_store,
         });
     }
     out.push(ScopeResolution {
@@ -360,7 +354,6 @@ pub(crate) fn resolve(
             .map(|r| r.shape.canonical())
             .collect(),
         forge_questions: forge_questions(&person_plan),
-        store: Some(ctx.layout.clone()),
     });
     Ok(Resolved {
         scopes: out,
@@ -491,9 +484,9 @@ fn scope_rows(
         let identity = row.shape.canonical();
         // A REPO set's expansion is not in the delivery cache (no workspace serves it) — it is
         // in this scope's own store, where every landed member records the origin it came from.
-        // Itemizing it here is what makes those members CLAIMED: without a resolved row naming
-        // them, the ghost walk below reads live, managed copies as leftovers nothing demands and
-        // reports them detached, flatly contradicting the `update` that is keeping them current.
+        // Itemizing it here is what makes those members ROWS of the set that delivers them: the
+        // inventory's lines all originate from a manifest row, so a member the set row does not
+        // itemize would simply be invisible — contradicting the `update` keeping it current.
         if let KeyShape::RepoSet { host, owner, repo } = &row.shape {
             let origin = format!("{host}/{owner}/{repo}");
             for member in repo_set_members(ctx, layout, &origin) {
@@ -749,7 +742,8 @@ fn quiet_set_line(reference: &str, state: StatusItemState) -> String {
 ///
 /// # Errors
 /// A token no shown scope delivers is the uniform [`ClientError::TargetNotFound`]; `list`'s caller
-/// then retries the same token against those scopes' store GHOSTS before surfacing it.
+/// then answers for the placed built-in, or with the not-managed headline — never an error for a
+/// local miss.
 pub(crate) fn detail_for(
     sections: &[&ScopeResolution],
     all: &Sessions,
@@ -790,6 +784,8 @@ pub(crate) fn detail_for(
         // For an mcp line: the cached per-agent config entries (placed file + state) — the deep
         // dive's answer instead of placement dirs.
         harnesses: row.harness_states.clone(),
+        managed: true,
+        folders: Vec::new(),
     })
 }
 
@@ -976,6 +972,11 @@ fn store_index(ctx: &Ctx<'_>, layout: &Layout) -> BTreeMap<String, String> {
         let Ok(sid) = crate::id::SkillId::parse(id) else {
             continue;
         };
+        // A RETIRED record answers for nothing: a row spelling its name reads honestly
+        // never-applied until the next `update` re-claims (and revives) the record.
+        if crate::sidecar::record_retired(ctx.fs, layout, &sid) {
+            continue;
+        }
         let Ok(Some(lock)) = doc::read_doc::<Lock>(ctx.fs, &layout.published(&sid).lock) else {
             continue;
         };
@@ -1131,10 +1132,10 @@ struct RepoSetMember {
 ///
 /// STILL HOLD is the load-bearing half. When an upstream repository drops a member, the reconcile
 /// retires its placements but deliberately KEEPS the origin and lock: the bytes are custody, and
-/// custody outlives delivery. A record whose placements are gone is therefore exactly what the
-/// ghost walk exists to describe — a retained leftover, detached — and claiming it here would make
-/// `list` assert a withdrawn member is live, which is the same lie as the one this enumeration was
-/// added to stop, told in the other direction.
+/// custody outlives delivery. A record whose placements are gone is a retained leftover, not a
+/// delivery — claiming it here would make `list` assert a withdrawn member is live, which is the
+/// same lie as the one this enumeration was added to stop, told in the other direction. (The
+/// leftover itself mints no line; the one-time orphan resolution on `update` retires it.)
 ///
 /// No served version is knowable offline, so a member never reads `behind` — only applied, edited,
 /// or unknown, exactly as any other stored-by-name resolution.

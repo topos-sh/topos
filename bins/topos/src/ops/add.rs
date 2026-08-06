@@ -124,6 +124,9 @@ fn unclaimed_record(
     let Some(lock) = doc::read_doc::<Lock>(ctx.fs, &sp.lock)? else {
         return Ok(None);
     };
+    // Naming the folder to `add` is the explicit re-demand: a RETIRED record (released by the
+    // one-time orphan resolution) returns to every surface, history and drafts intact.
+    crate::sidecar::revive_record(ctx.fs, &ctx.layout, &skill_id);
     // Re-stamp the never-deletable source marker on the dir's slot. A record written before the
     // marker existed lacks it, and this is the one moment the dir is PROVEN to be the user's own
     // adopted source — they just named it to `add`. Under the skill lock, read-modify-write.

@@ -1406,10 +1406,10 @@ fn error_envelope_is_coded_retryability_aware_and_leak_free() {
 }
 
 #[test]
-fn list_deep_dive_miss_is_the_uniform_not_found() {
+fn list_deep_dive_miss_answers_not_managed() {
     let h = Harness::new("ambig");
-    // A store record with NO manifest row resolves nowhere — the deep dive answers only what the
-    // scopes deliver, and a token nothing delivers is the uniform not-found.
+    // A token nothing delivers is a SUCCESS carrying the not-managed headline (no error, no
+    // store mention) — "nothing manages it" is the whole answer.
     let src_a = editable_source();
     ops::add(&h.ctx(), &src_a.0.join("pr-describe")).unwrap();
 
@@ -1425,10 +1425,9 @@ fn list_deep_dive_miss_is_the_uniform_not_found() {
             ops::RowPage::unlimited(),
         )
     };
-    assert!(matches!(
-        deep("nope").unwrap_err(),
-        crate::error::ClientError::TargetNotFound { .. }
-    ));
+    let detail = deep("nope").unwrap().data.detail.expect("a detail");
+    assert!(!detail.managed, "{detail:?}");
+    assert!(detail.folders.is_empty(), "{detail:?}");
 }
 
 #[test]

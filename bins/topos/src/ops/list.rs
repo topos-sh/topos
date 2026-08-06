@@ -6,8 +6,9 @@
 //! points at `list --remote` for what the workspaces offer.
 //!
 //! The optional views: `list <name>` is the one-skill deep dive (which file and line-key — or
-//! which feed — delivers it) over the SAME scopes the invocation selects, falling back to the
-//! store records no row claims, so it answers for exactly what the listing shows and no more;
+//! which feed — delivers it) over the SAME scopes the invocation selects; a name no row manages
+//! (the placed built-in aside) answers the NOT-MANAGED headline plus any unmanaged copies found
+//! on disk — a success, never an error, because "nothing manages it" is the whole answer;
 //! `-a <slug>` is the agent-eye view (each skills dir that harness
 //! reads from this folder, entries marked managed or untracked — deliberately spanning both
 //! scopes); `--untracked` is the full discovery listing; `--remote` (the one networked arm) reads
@@ -25,7 +26,7 @@ use topos_harness::coverage;
 use topos_harness::registry::{self, SkillScope};
 use topos_types::persisted::{Lock, PlacementMap};
 use topos_types::results::{
-    AgentView, AgentViewDir, AgentViewEntry, BucketTruncation, DetachCause, ListData, ListScope,
+    AgentView, AgentViewDir, AgentViewEntry, BucketTruncation, ListData, ListDetail, ListScope,
     ListScopeSummary, RemoteAdoption, RemoteChannel, RemoteSkill, RemoteWorkspace, SkillEntry,
     SkillStatus, StatusItemState, UntrackedEntry, UntrackedSummary,
 };
@@ -34,9 +35,8 @@ use crate::ctx::Ctx;
 use crate::doc;
 use crate::error::ClientError;
 use crate::plane::DirectorySource;
-use crate::sessions::{Session, Sessions};
+use crate::sessions::Session;
 use crate::sidecar;
-use crate::sync_status::{DeliveredSkill, SyncStatus};
 
 use super::inventory::{self, Resolved, Row, ScopeResolution, ScopeView, ZERO_HEX};
 
@@ -97,10 +97,10 @@ pub(crate) type SessionDirectory<'a> = &'a dyn Fn(&Session) -> Box<dyn Directory
 /// no view can answer with an unbounded row count.
 ///
 /// # Errors
-/// [`ClientError::TargetNotFound`] when a deep-dive name resolves nowhere;
 /// [`ClientError::InvalidArgument`] for an unknown `-a` slug; [`ClientError::SessionRequired`]
 /// for `--remote` with no live session; [`ClientError::NoSuchSkill`] / the uniform not-found for
-/// a filter selector matching nothing; otherwise a read failure.
+/// a filter selector matching nothing; otherwise a read failure. A deep-dive name resolving
+/// nowhere is a SUCCESS (the not-managed answer), never an error.
 pub(crate) fn list_with(
     ctx: &Ctx<'_>,
     req: &ListRequest,
@@ -223,20 +223,16 @@ pub(crate) fn list_with(
     // The one-skill deep dive, over the sections THIS INVOCATION SELECTS — the scope flags mean
     // the same thing here as on the listing, so `-g` answers from the machine scope alone even
     // inside a project (the default and `--all` read project-then-machine, precedence order).
-    // A name no resolved row claims falls back to those sections' GHOSTS: the built-in and every
-    // detached copy are shown by a plain `list`, so `list <name>` must answer for them too — a
-    // deep dive that says "not found" about a row the listing prints is just wrong.
+    // A name no resolved row claims has exactly two honest answers left: the placed BUILT-IN
+    // (engine-managed with no manifest row — its record and placements are the answer), and the
+    // NOT-MANAGED headline plus any unmanaged copies discovery finds on disk. A success either
+    // way — "nothing manages it" is the whole answer, never an error.
     if let Some(name) = &req.name {
         let dive = dive_sections(&resolved, req.view);
         data.detail = Some(match inventory::detail_for(&dive, &all, name) {
             Ok(detail) => detail,
-            Err(miss) => {
-                let dive_ghosts: Vec<Vec<Ghost>> = dive
-                    .iter()
-                    .map(|section| store_ghosts(ctx, section, &cache, &all, signed_in))
-                    .collect();
-                ghost_detail(&dive, &dive_ghosts, name).ok_or(miss)?
-            }
+            Err(_) => builtin_detail(ctx, name)
+                .unwrap_or_else(|| unmanaged_detail(ctx, name, discover.as_ref())),
         });
         return Ok(ListOutcome {
             data,
@@ -245,18 +241,18 @@ pub(crate) fn list_with(
         });
     }
 
-    // Each shown section's GHOST rows (store records no resolved row claims — the built-in
-    // meta-skill, detached/frozen copies): installed is installed, so they are never invisible.
-    let ghosts: Vec<Vec<Ghost>> = sections
-        .iter()
-        .map(|section| store_ghosts(ctx, section, &cache, &all, signed_in))
-        .collect();
+    // The placed BUILT-IN meta-skill's row — engine custody with no manifest row, re-sourced from
+    // its own record + on-disk placements (it originates from disk, so the inventory shows it;
+    // `remove topos`'s own target must be findable). Every OTHER unclaimed store record mints NO
+    // line: records may describe rows, never create them — a record nothing demands resolves once
+    // on the next `update` and its files become the person's own.
+    let builtin = builtin_entry(ctx);
 
-    // The `--channel`/`--skill` filters, ALL-OR-NONE across the SHOWN sections (ghosts count as
-    // matchable rows — a detached copy is still findable by its name or its cached channel).
+    // The `--channel`/`--skill` filters, ALL-OR-NONE across the SHOWN sections (the built-in row
+    // counts as a matchable row by its name).
     let narrowed = !(req.channels.is_empty() && req.skills.is_empty());
     if narrowed {
-        validate_filters(&sections, &ghosts, &req.skills, &req.channels)?;
+        validate_filters(&sections, builtin.as_ref(), &req.skills, &req.channels)?;
     }
     let keeps = |name: &str, via: &[String]| -> bool {
         if !narrowed {
@@ -265,18 +261,18 @@ pub(crate) fn list_with(
         req.skills.iter().any(|s| s == name)
             || req.channels.iter().any(|c| via.iter().any(|v| v == c))
     };
-    for (section, section_ghosts) in sections.iter().zip(&ghosts) {
+    for section in &sections {
         let mut rows: Vec<SkillEntry> = section
             .inventory_rows()
             .filter(|r| keeps(&r.name, &r.via_channels))
             .map(skill_entry)
             .collect();
-        rows.extend(
-            section_ghosts
-                .iter()
-                .filter(|g| keeps(&g.entry.skill, &g.via_channels))
-                .map(|g| g.entry.clone()),
-        );
+        if section.scope == "machine"
+            && let Some(b) = &builtin
+            && keeps(&b.skill, &[])
+        {
+            rows.push(b.clone());
+        }
         if page.is_active() {
             mark(section.scope, page.apply(&mut rows), &mut truncated);
         }
@@ -300,13 +296,13 @@ pub(crate) fn list_with(
         // the untracked discoveries (absent when nothing was found — nothing is being withheld).
         if in_project && matches!(req.view, ScopeView::Here) {
             let machine = resolved.machine();
-            // The ghost rows count into the summary's `skills` too — a summary that undercounts
-            // what `-g` would show breaks the summary's promise. Their pending state does NOT
-            // ride `updates_pending`: no manifest row means `topos update -g` has nothing to act
-            // on there, and the count's command must stay true.
-            let machine_ghosts = store_ghosts(ctx, machine, &cache, &all, signed_in);
+            // The built-in's row counts into the summary's `skills` — a summary that undercounts
+            // what `-g` would show breaks the summary's promise. Its pending state does NOT ride
+            // `updates_pending`: no manifest row means `topos update -g` has nothing to act on
+            // there, and the count's command must stay true. Nothing else off-row counts: an
+            // unclaimed store record mints no line, so it inflates no summary either.
             data.machine_summary = Some(ListScopeSummary {
-                skills: machine.skills() + machine_ghosts.len() as u64,
+                skills: machine.skills() + u64::from(builtin.is_some()),
                 updates_pending: machine.updates_pending(),
                 command: "topos list -g".to_owned(),
             });
@@ -337,18 +333,17 @@ pub(crate) fn list_with(
 
 /// One resolved row as the inventory prints it. A row never applied here carries the all-zero
 /// baseline as its identity (the system's own "never applied" sentinel — the honest reading of a
-/// required field with nothing to put in it); an `"off"` switch reads detached/excluded-here.
+/// required field with nothing to put in it); an `"off"` switch reads `off` — the file's own
+/// standing statement, never a delivery state.
 fn skill_entry(row: &Row) -> SkillEntry {
-    let (status, cause) = match row.state {
-        StatusItemState::Applied => (Some(SkillStatus::Current), None),
-        StatusItemState::Behind => (Some(SkillStatus::Behind), None),
-        StatusItemState::LocalEdits => (Some(SkillStatus::Draft), None),
-        StatusItemState::Off => (Some(SkillStatus::Detached), Some(DetachCause::ExcludedHere)),
-        StatusItemState::NotAvailable => {
-            (Some(SkillStatus::Detached), Some(DetachCause::SignedOut))
-        }
-        // Never applied / pending / no delivery yet: no update status is honestly claimable.
-        _ => (None, None),
+    let status = match row.state {
+        StatusItemState::Applied => Some(SkillStatus::Current),
+        StatusItemState::Behind => Some(SkillStatus::Behind),
+        StatusItemState::LocalEdits => Some(SkillStatus::Draft),
+        StatusItemState::Off => Some(SkillStatus::Off),
+        // Never applied / pending / not available / no delivery yet: no update status is honestly
+        // claimable.
+        _ => None,
     };
     SkillEntry {
         skill: row.name.clone(),
@@ -359,17 +354,16 @@ fn skill_entry(row: &Row) -> SkillEntry {
         pending_proposals: Vec::new(),
         source: (!row.source.is_empty()).then(|| row.source.clone()),
         status,
-        cause,
         kind: row.kind.clone(),
     }
 }
 
 /// The ALL-OR-NONE filter gate: every `--skill` selector must match at least one shown row's name
 /// (else the typed no-such-skill), every `--channel` selector at least one row's cached delivery
-/// channel (else the uniform not-found). Ghost rows count — a detached copy is still findable.
+/// channel (else the uniform not-found). The built-in's row counts by its name.
 fn validate_filters(
     sections: &[&ScopeResolution],
-    ghosts: &[Vec<Ghost>],
+    builtin: Option<&SkillEntry>,
     skills: &[String],
     channels: &[String],
 ) -> Result<(), ClientError> {
@@ -377,7 +371,7 @@ fn validate_filters(
         let hit = sections
             .iter()
             .any(|sec| sec.rows.iter().any(|r| r.name == *s))
-            || ghosts.iter().flatten().any(|g| g.entry.skill == *s);
+            || builtin.is_some_and(|b| b.skill == *s);
         if !hit {
             return Err(ClientError::NoSuchSkill { name: s.clone() });
         }
@@ -387,24 +381,12 @@ fn validate_filters(
             sec.rows
                 .iter()
                 .any(|r| r.via_channels.iter().any(|v| v == c))
-        }) || ghosts
-            .iter()
-            .flatten()
-            .any(|g| g.via_channels.iter().any(|v| v == c));
+        });
         if !hit {
             return Err(crate::resolve::not_found(c));
         }
     }
     Ok(())
-}
-
-/// One store record no resolved row claims, with the cached channels the `--channel` filter
-/// matches against and the placement dirs its store map records (what the deep dive answers with —
-/// read from the same map the draft scan already opened, so it costs nothing extra).
-struct Ghost {
-    entry: SkillEntry,
-    via_channels: Vec<String>,
-    placements: Vec<String>,
 }
 
 /// Which scope sections the DEEP DIVE (`list <name>`) resolves against, in precedence order: the
@@ -419,180 +401,71 @@ fn dive_sections(resolved: &Resolved, view: ScopeView) -> Vec<&ScopeResolution> 
     }
 }
 
-/// The deep answer for a name only a GHOST record carries (the built-in, a detached/frozen copy) —
-/// the store record IS the answer: no manifest row names it, so `source_file`/`source_key`/`feed`
-/// and the attribution are honestly absent, and the version, placements and state come from the
-/// scope store the ghost was read out of. `ghosts` is per `sections` entry in precedence order, so
-/// the first hit follows the same order the resolved rows do — and the section it came from is the
-/// answer's scope. `None` when no shown section holds such a record (the caller keeps its uniform
-/// not-found).
-fn ghost_detail(
-    sections: &[&ScopeResolution],
-    ghosts: &[Vec<Ghost>],
-    token: &str,
-) -> Option<topos_types::results::ListDetail> {
-    let (scope, ghost) = sections.iter().zip(ghosts).find_map(|(section, gs)| {
-        gs.iter()
-            .find(|g| g.entry.skill == token)
-            .map(|g| (section.scope, g))
-    })?;
-    let version = ghost.entry.version_id.clone();
-    Some(topos_types::results::ListDetail {
-        name: ghost.entry.skill.clone(),
-        scope: Some(scope.to_owned()),
+/// The placed BUILT-IN meta-skill's inventory row — read from its own record in the MACHINE store
+/// (engine custody: `ops::builtin` places and force-syncs it with no manifest row anywhere). It
+/// originates from disk, so the inventory shows it — hiding it would make `remove topos`'s own
+/// target invisible. `None` when the machine holds no built-in record (opted out, or never
+/// placed). A hand edit shows `draft` honestly until the next sweep overwrites it
+/// (snapshot-first).
+fn builtin_entry(ctx: &Ctx<'_>) -> Option<SkillEntry> {
+    let (lock, draft, _) = builtin_record(ctx)?;
+    Some(SkillEntry {
+        skill: lock.name.clone(),
+        workspace_id: None,
+        version_id: lock.base_commit.clone(),
+        bundle_digest: lock.bundle_digest.clone(),
+        draft,
+        pending_proposals: Vec::new(),
+        source: Some("built-in".to_owned()),
+        status: Some(if draft {
+            SkillStatus::Draft
+        } else {
+            SkillStatus::Current
+        }),
+        kind: None,
+    })
+}
+
+/// The deep answer for the placed built-in (`topos list topos`): the record IS the answer — no
+/// manifest row names it, so `source_file`/`source_key`/`feed` and the attribution are honestly
+/// absent, and the version, placements and state come from its machine-store record.
+fn builtin_detail(ctx: &Ctx<'_>, token: &str) -> Option<ListDetail> {
+    if token != super::builtin::BUILTIN_NAME {
+        return None;
+    }
+    let (lock, draft, placements) = builtin_record(ctx)?;
+    let version = lock.base_commit.clone();
+    Some(ListDetail {
+        name: lock.name,
+        scope: Some("machine".to_owned()),
         source_file: None,
         source_key: None,
         feed: None,
         attribution: None,
         version: (!version.bytes().all(|b| b == b'0')).then_some(version),
         pin: None,
-        placements: ghost.placements.clone(),
-        state: ghost_state(&ghost.entry),
-        kind: ghost.entry.kind.clone(),
+        placements,
+        state: if draft {
+            StatusItemState::LocalEdits
+        } else {
+            StatusItemState::Applied
+        },
+        kind: None,
         harnesses: Vec::new(),
+        managed: true,
+        folders: Vec::new(),
     })
 }
 
-/// A ghost's row status as the deep dive's state vocabulary: a copy delivery no longer claims is
-/// `detached` (the new state — the bytes stay, the delivery ended); everything else keeps what the
-/// row column says, so the built-in reads `applied` (or `local-edits` under a hand edit) exactly
-/// as its row does. A purely local record claims no status at all, and reads by its draft alone.
-fn ghost_state(entry: &SkillEntry) -> StatusItemState {
-    match entry.status {
-        Some(SkillStatus::Detached) => StatusItemState::Detached,
-        Some(SkillStatus::Draft) => StatusItemState::LocalEdits,
-        Some(SkillStatus::Behind) => StatusItemState::Behind,
-        Some(SkillStatus::Current) => StatusItemState::Applied,
-        None if entry.draft => StatusItemState::LocalEdits,
-        None => StatusItemState::Applied,
-    }
-}
-
-/// The scope's unclaimed STORE records — the built-in `topos` meta-skill and detached/frozen
-/// copies (an unfollowed skill's retained bytes, a removed row's kept custody). The inventory
-/// shows what is INSTALLED, and these are installed: the manifest resolution just does not claim
-/// them, and hiding them would make `remove topos`'s own target invisible. Read from THIS scope's
-/// own store only (never cross-scope), with the classic column semantics: `built-in` for the
-/// meta-skill; otherwise DETACHED (no row demands an unclaimed record, so the bytes are a kept
-/// leftover), with the cause from the delivery cache (withdrawn upstream / signed out / the row
-/// left this scope's list), the source from the recorded origin or the workspace label, and the
-/// draft flag from the lock + placements.
-fn store_ghosts(
-    ctx: &Ctx<'_>,
-    section: &ScopeResolution,
-    cache: &SyncStatus,
-    all: &Sessions,
-    signed_in: bool,
-) -> Vec<Ghost> {
-    let Some(layout) = &section.store else {
-        return Vec::new();
-    };
-    let claimed: HashSet<&str> = section.rows.iter().map(|r| r.name.as_str()).collect();
-    let Ok(entries) = ctx.fs.read_dir(&layout.skills_dir()) else {
-        return Vec::new();
-    };
-    let mut out: Vec<Ghost> = Vec::new();
-    for dir in entries {
-        let Some(id) = dir.file_name().and_then(|n| n.to_str()) else {
-            continue;
-        };
-        let Ok(sid) = crate::id::SkillId::parse(id) else {
-            continue;
-        };
-        let sp = layout.published(&sid);
-        let Ok(Some(lock)) = doc::read_doc::<Lock>(ctx.fs, &sp.lock) else {
-            continue;
-        };
-        if claimed.contains(lock.name.as_str()) {
-            continue;
-        }
-        let (draft, placements) = ghost_scan(ctx, &sp.map, &lock);
-        // The cached delivery for this id, across workspaces — withdrawn entries included (the
-        // withdrawal IS the cause).
-        let delivered: Option<(&String, &DeliveredSkill)> = cache
-            .workspaces
-            .iter()
-            .find_map(|(ws, e)| e.delivered.get(id).map(|d| (ws, d)));
-        let via_channels = delivered
-            .map(|(_, d)| d.via_channels.clone())
-            .unwrap_or_default();
-        let entry = if super::builtin::is_builtin(id) {
-            // The built-in: shipped by the CLI, force-synced to the binary. A hand edit shows
-            // `draft` honestly until the next sweep overwrites it (snapshot-first).
-            SkillEntry {
-                skill: lock.name.clone(),
-                workspace_id: None,
-                version_id: lock.base_commit.clone(),
-                bundle_digest: lock.bundle_digest.clone(),
-                draft,
-                pending_proposals: Vec::new(),
-                source: Some("built-in".to_owned()),
-                status: Some(if draft {
-                    SkillStatus::Draft
-                } else {
-                    SkillStatus::Current
-                }),
-                cause: None,
-                kind: None,
-            }
-        } else {
-            let origin = doc::read_doc::<super::add::OriginDoc>(ctx.fs, &sp.origin)
-                .ok()
-                .flatten()
-                .and_then(|o| origin_host(&o.origin.source));
-            // An unclaimed record is never live: no row demands it, so the bytes are a kept
-            // leftover whatever their drift, and the cause names which act ended the demand —
-            // withdrawn upstream, signed out, or (otherwise) the row left this scope's list.
-            let (source, cause) = if delivered.is_none() && origin.is_none() {
-                // A purely local record: its absent workspace already says "local".
-                (None, DetachCause::Unfollowed)
-            } else {
-                let label = delivered.and_then(|(ws, _)| {
-                    all.sessions
-                        .iter()
-                        .find(|s| s.workspace_id == *ws)
-                        .map(|s| s.display_name.clone())
-                });
-                let source = origin.or(label).unwrap_or_else(|| "local".to_owned());
-                let cause = match delivered {
-                    Some((_, d)) if d.withdrawn => DetachCause::RemovedUpstream,
-                    Some(_) if !signed_in => DetachCause::SignedOut,
-                    _ => DetachCause::Unfollowed,
-                };
-                (Some(source), cause)
-            };
-            let (status, cause) = (Some(SkillStatus::Detached), Some(cause));
-            SkillEntry {
-                skill: lock.name.clone(),
-                workspace_id: delivered.map(|(ws, _)| ws.clone()),
-                version_id: lock.base_commit.clone(),
-                bundle_digest: lock.bundle_digest.clone(),
-                draft,
-                pending_proposals: Vec::new(),
-                source,
-                status,
-                cause,
-                kind: delivered.and_then(|(_, d)| d.kind.clone()),
-            }
-        };
-        out.push(Ghost {
-            entry,
-            via_channels,
-            placements,
-        });
-    }
-    // Deterministic order: name (ids are opaque; names are the scope identity).
-    out.sort_by(|a, b| a.entry.skill.cmp(&b.entry.skill));
-    out
-}
-
-/// One ghost's `(draft, placements)` from its store map: a draft iff ANY placement holds bytes
-/// hashing to a different digest than the lock pins, and the recorded placement dirs (what the
-/// deep dive prints — the same set a resolved row reports). Both come off ONE map read. A
-/// missing/unscannable source is no-draft (nothing to compare) and no placements, never an error.
-fn ghost_scan(ctx: &Ctx<'_>, map_path: &Path, lock: &Lock) -> (bool, Vec<String>) {
-    let Ok(Some(map)) = doc::read_map(ctx.fs, map_path) else {
-        return (false, Vec::new());
+/// The built-in's `(lock, draft, placements)` off its machine-store record: a draft iff ANY
+/// recorded placement holds bytes hashing to a different digest than the lock pins. A missing
+/// record answers `None`; an unreadable map is no-draft, no placements — never an error.
+fn builtin_record(ctx: &Ctx<'_>) -> Option<(Lock, bool, Vec<String>)> {
+    let sid = crate::id::SkillId::parse(super::builtin::BUILTIN_NAME).ok()?;
+    let sp = ctx.layout.published(&sid);
+    let lock = doc::read_doc::<Lock>(ctx.fs, &sp.lock).ok().flatten()?;
+    let Ok(Some(map)) = doc::read_map(ctx.fs, &sp.map) else {
+        return Some((lock, false, Vec::new()));
     };
     let mut draft = false;
     for placement in &map.placements {
@@ -607,19 +480,40 @@ fn ghost_scan(ctx: &Ctx<'_>, map_path: &Path, lock: &Lock) -> (bool, Vec<String>
             break;
         }
     }
-    (draft, map.placements)
+    Some((lock, draft, map.placements))
 }
 
-/// The host of a recorded import source (`github.com/owner/repo` → `github.com`), or `None` for
-/// an empty source.
-fn origin_host(source: &str) -> Option<String> {
-    source
-        .trim_start_matches("https://")
-        .trim_start_matches("http://")
-        .split('/')
-        .next()
-        .filter(|h| !h.is_empty())
-        .map(str::to_owned)
+/// The deep answer for a name NOTHING manages — no row in any visible scope, not the built-in:
+/// the not-managed headline, plus the folders of unmanaged copies discovery finds on disk
+/// (matched by name). A SUCCESS, never an error — "nothing manages it" is the whole answer, and
+/// `topos add <folder>` is the way to change it.
+fn unmanaged_detail(ctx: &Ctx<'_>, token: &str, roots: Option<&DiscoveryRoots>) -> ListDetail {
+    let folders = roots
+        .and_then(|r| discover_untracked(ctx, r).ok())
+        .map(|found| {
+            found
+                .into_iter()
+                .filter(|u| u.name == token)
+                .map(|u| u.path)
+                .collect()
+        })
+        .unwrap_or_default();
+    ListDetail {
+        name: token.to_owned(),
+        scope: None,
+        source_file: None,
+        source_key: None,
+        feed: None,
+        attribution: None,
+        version: None,
+        pin: None,
+        placements: Vec::new(),
+        state: StatusItemState::Unknown,
+        kind: None,
+        harnesses: Vec::new(),
+        managed: false,
+        folders,
+    }
 }
 
 /// The `--remote` view: one channel-index + catalog read per live session (narrowed by the
@@ -896,14 +790,28 @@ pub(crate) fn discover_untracked(
             .to_owned(),
         });
     }
-    // Deterministic order: name, then path.
-    out.sort_by(|a, b| a.name.cmp(&b.name).then_with(|| a.path.cmp(&b.path)));
+    // Deterministic order: FOLDER first, then name — the TTY groups the listing by folder, so
+    // each folder's entries must arrive contiguous (name-first interleaved the folders and
+    // reprinted a folder header per row).
+    out.sort_by(|a, b| {
+        let folder = |p: &str| {
+            Path::new(p)
+                .parent()
+                .map(Path::to_path_buf)
+                .unwrap_or_default()
+        };
+        folder(&a.path)
+            .cmp(&folder(&b.path))
+            .then_with(|| a.name.cmp(&b.name))
+            .then_with(|| a.path.cmp(&b.path))
+    });
     Ok(out)
 }
 
 /// Every tracked skill's placement paths in the MACHINE store, canonicalized (a placement that no
 /// longer resolves on disk is dropped — it can't shadow a real discovery). The same dedup key
-/// `add`'s `reject_already_tracked` uses.
+/// `add`'s `reject_already_tracked` uses. A RETIRED record's paths are NOT tracked: its kept
+/// copies are the person's own now, so discovery must surface them as adoptable again.
 fn tracked_placement_paths(ctx: &Ctx<'_>) -> Result<Vec<PathBuf>, ClientError> {
     let mut paths = Vec::new();
     for entry in ctx.fs.read_dir(&ctx.layout.skills_dir())? {
@@ -916,6 +824,9 @@ fn tracked_placement_paths(ctx: &Ctx<'_>) -> Result<Vec<PathBuf>, ClientError> {
         let Ok(id) = crate::id::SkillId::parse(id) else {
             continue;
         };
+        if sidecar::record_retired(ctx.fs, &ctx.layout, &id) {
+            continue;
+        }
         let Some(map): Option<PlacementMap> =
             doc::read_map(ctx.fs, &ctx.layout.published(&id).map)?
         else {
@@ -1284,7 +1195,7 @@ mod tests {
     }
 
     /// `list <name>`: the deep dive — file + row-key for a manifest-delivered skill, the feed
-    /// spelling for a feed-delivered one, and the uniform not-found on a miss.
+    /// spelling for a feed-delivered one, and the not-managed success on a miss.
     #[test]
     fn the_deep_dive_names_the_file_or_the_feed() {
         let home = TempHome::new();
@@ -1342,8 +1253,10 @@ mod tests {
         assert_eq!(detail.source_file, None);
         assert_eq!(detail.feed.as_deref(), Some("topos.sh/acme"));
 
-        let err = deep("nowhere").unwrap_err();
-        assert!(matches!(err, ClientError::TargetNotFound { .. }), "{err:?}");
+        // A name nothing manages is a SUCCESS carrying the not-managed headline, not an error.
+        let detail = deep("nowhere").unwrap().data.detail.expect("a detail");
+        assert!(!detail.managed, "{detail:?}");
+        assert!(detail.folders.is_empty(), "{detail:?}");
     }
 
     /// `list -a <slug>`: the agent-eye view — the harness's dirs across home and project, each
@@ -1463,13 +1376,13 @@ mod tests {
         }
     }
 
-    /// Store records no resolved row claims stay IN the inventory: the built-in meta-skill
-    /// (source `built-in`) and detached/frozen copies ride their scope's section with the classic
-    /// column semantics — installed is installed, and `remove topos`'s own target must be
-    /// findable. The deep dive stays resolution-only (the old `status <bundle>` missed
-    /// store-only records the same way).
+    /// A store record no row claims MINTS NO ROW: records may describe rows, never create
+    /// them. The one exception is the placed BUILT-IN (engine custody, originates from disk) —
+    /// it stays listed with its own source column, because `remove topos`'s own target must be
+    /// findable. The leftovers (a withdrawn delivery's retained bytes, a removed row's kept
+    /// custody) are simply absent: their one-time resolution belongs to `update`, not here.
     #[test]
-    fn unclaimed_store_records_ride_their_scope_as_ghost_rows() {
+    fn unclaimed_store_records_mint_no_rows_and_the_builtin_stays_listed() {
         let home = TempHome::new();
         let cwd = home.0.join("plain");
         std::fs::create_dir_all(&cwd).unwrap();
@@ -1494,51 +1407,42 @@ mod tests {
         );
         // The built-in meta-skill's record (force-synced custody, never a manifest row).
         home.store_applied("topos", "topos", &"a".repeat(64), &[]);
-        // A purely local frozen copy (row removed, bytes kept): no cache entry, no origin.
+        // A purely local leftover (row removed, bytes kept): no cache entry, no origin.
         home.store_applied(&skill_id_of("frozen"), "frozen", &"b".repeat(64), &[]);
 
         let out = run(&home, &cwd, &request()).unwrap();
         let machine = scope(&out, "machine");
-        let row = |n: &str| {
-            machine
-                .rows
-                .iter()
-                .find(|r| r.skill == n)
-                .unwrap_or_else(|| panic!("no {n} in {:?}", machine.rows))
-        };
-        assert_eq!(row("topos").source.as_deref(), Some("built-in"));
-        assert_eq!(row("topos").status, Some(SkillStatus::Current));
-        assert_eq!(row("ghosty").status, Some(SkillStatus::Detached));
-        assert_eq!(row("ghosty").cause, Some(DetachCause::RemovedUpstream));
-        assert_eq!(row("ghosty").workspace_id.as_deref(), Some("w_acme"));
-        // The frozen local copy is a leftover like any other ghost: detached, its row gone — its
-        // absent workspace already says "local".
-        assert_eq!(row("frozen").status, Some(SkillStatus::Detached));
-        assert_eq!(row("frozen").cause, Some(DetachCause::Unfollowed));
-        assert_eq!(row("frozen").version_id, "b".repeat(64));
-
-        // A name only a ghost carries still answers — the deep dive falls back to the same store
-        // records the listing prints, so `list <name>` never denies a row `list` just showed.
-        let miss = run(
-            &home,
-            &cwd,
-            &ListRequest {
-                name: Some("nowhere".to_owned()),
-                ..request()
-            },
-        )
-        .unwrap_err();
+        let topos = machine
+            .rows
+            .iter()
+            .find(|r| r.skill == "topos")
+            .unwrap_or_else(|| {
+                panic!("the built-in rides the machine section: {:?}", machine.rows)
+            });
+        assert_eq!(topos.source.as_deref(), Some("built-in"));
+        assert_eq!(topos.status, Some(SkillStatus::Current));
+        assert_eq!(topos.version_id, "a".repeat(64));
+        // The unclaimed records mint NOTHING — no row, no rendered mention.
+        for name in ["ghosty", "frozen"] {
+            assert!(
+                !machine.rows.iter().any(|r| r.skill == name),
+                "{name} has no row and must not appear: {:?}",
+                machine.rows
+            );
+        }
+        let text = crate::render::list_tty(&out);
         assert!(
-            matches!(miss, ClientError::TargetNotFound { .. }),
-            "{miss:?}"
+            !text.contains("ghosty") && !text.contains("frozen"),
+            "{text}"
         );
+        assert!(!text.contains("detached"), "{text}");
     }
 
     /// A REMOVED row's retained record (the delivery cache still lists it, nothing withdrew it)
-    /// reads detached with the removed-from-the-list cause — never like a live row. This is the
-    /// remove-then-clean leftover: the bytes deliberately stay, and the row must say so.
+    /// is NOT listed: no row claims it, so the inventory says nothing about it — the remove
+    /// receipt already resolved it, and `update`'s one-time resolution owns whatever remains.
     #[test]
-    fn a_removed_rows_retained_record_reads_detached_not_current() {
+    fn a_removed_rows_retained_record_is_not_listed() {
         let home = TempHome::new();
         let cwd = home.0.join("plain");
         std::fs::create_dir_all(&cwd).unwrap();
@@ -1563,23 +1467,18 @@ mod tests {
 
         let out = run(&home, &cwd, &request()).unwrap();
         let machine = scope(&out, "machine");
-        let row = machine
-            .rows
-            .iter()
-            .find(|r| r.skill == "lingery")
-            .unwrap_or_else(|| panic!("no lingery in {:?}", machine.rows));
-        assert_eq!(row.status, Some(SkillStatus::Detached));
-        assert_eq!(row.cause, Some(DetachCause::Unfollowed));
-        // The source is the session's DISPLAY name (the testkit keeps it unequal to the slug).
-        assert_eq!(row.source.as_deref(), Some("ACME"));
+        assert!(
+            !machine.rows.iter().any(|r| r.skill == "lingery"),
+            "no row demands it, so no line originates from it: {:?}",
+            machine.rows
+        );
     }
 
-    /// `list <name>` answers for a GHOST too: the built-in (no manifest row anywhere) reports its
-    /// placements and reads `applied`, and a detached copy reads the `detached` state. Before
-    /// this, both answered NOT_FOUND while a plain `list` printed them — a deep dive that denies a
-    /// row the listing shows is simply wrong.
+    /// `list <name>` answers for the placed BUILT-IN (its record + placements ARE the answer),
+    /// and answers NOT-MANAGED for a leftover record no row claims — a success carrying the
+    /// headline, never a store mention and never an error.
     #[test]
-    fn the_deep_dive_answers_from_the_ghost_records_too() {
+    fn the_deep_dive_answers_the_builtin_and_not_managed_for_leftovers() {
         let home = TempHome::new();
         let cwd = home.0.join("plain");
         std::fs::create_dir_all(&cwd).unwrap();
@@ -1598,7 +1497,7 @@ mod tests {
             &"a".repeat(64),
             &[placed.to_string_lossy().as_ref()],
         );
-        // A withdrawn delivery whose bytes are retained — the detached ghost.
+        // A withdrawn delivery whose bytes are retained — the unclaimed leftover.
         let ghost_id = skill_id_of("ghosty");
         home.store_applied(&ghost_id, "ghosty", &"c".repeat(64), &[]);
         let mut withdrawn = assigned("ghosty", None).1;
@@ -1627,33 +1526,125 @@ mod tests {
         assert_eq!(
             detail.scope.as_deref(),
             Some("machine"),
-            "a ghost answer carries the scope of the store it was read out of"
+            "the built-in's answer carries the machine scope its record lives in"
         );
         assert_eq!(detail.version.as_deref(), Some(&*"a".repeat(64)));
         assert_eq!(
             detail.placements,
             vec![placed.to_string_lossy().into_owned()],
-            "the ghost answers with the placements its store map records"
+            "the built-in answers with the placements its store map records"
         );
         // No row names it, so no file, no key, no feed — the record IS the answer.
         assert_eq!(detail.source_file, None);
         assert_eq!(detail.source_key, None);
         assert_eq!(detail.feed, None);
+        assert!(detail.managed);
         assert!(
             matches!(detail.state, StatusItemState::Applied),
             "{detail:?}"
         );
 
-        let detail = deep("ghosty").unwrap().data.detail.expect("a detail");
-        assert!(
-            matches!(detail.state, StatusItemState::Detached),
-            "{detail:?}"
+        // The leftover record answers NOT-MANAGED: no store mention, no state claim, a success.
+        let out = deep("ghosty").unwrap();
+        let detail = out.data.detail.as_ref().expect("a detail");
+        assert!(!detail.managed, "{detail:?}");
+        assert!(detail.folders.is_empty(), "{detail:?}");
+        assert_eq!(detail.version, None);
+        assert_eq!(
+            crate::render::list_tty(&out),
+            "ghosty — not managed on this machine"
+        );
+    }
+
+    /// The NOT-MANAGED answer lists the folders of unmanaged copies discovery finds (matched by
+    /// name), one per line under the byte-exact headline — and nothing else.
+    #[test]
+    fn the_not_managed_answer_lists_unmanaged_folders() {
+        let home = TempHome::new();
+        let cwd = home.0.join("plain");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let probe_home = TempHome::new();
+        for dir in [".claude/skills/deploy", ".cursor/skills/deploy"] {
+            let d = probe_home.0.join(dir);
+            std::fs::create_dir_all(&d).unwrap();
+            std::fs::write(d.join("SKILL.md"), b"# d\n").unwrap();
+        }
+        let out = run_discovering(
+            &home,
+            &cwd,
+            &ListRequest {
+                name: Some("deploy".to_owned()),
+                ..request()
+            },
+            Some(DiscoveryRoots {
+                home: probe_home.0.clone(),
+                cwd: None,
+            }),
+        )
+        .unwrap();
+        let detail = out.data.detail.as_ref().expect("a detail");
+        assert!(!detail.managed);
+        let claude = probe_home.0.join(".claude/skills/deploy");
+        let cursor = probe_home.0.join(".cursor/skills/deploy");
+        assert_eq!(
+            detail.folders,
+            vec![
+                claude.to_string_lossy().into_owned(),
+                cursor.to_string_lossy().into_owned()
+            ]
+        );
+        assert_eq!(
+            crate::render::list_tty(&out),
+            format!(
+                "deploy — not managed on this machine\n  {}\n  {}",
+                claude.display(),
+                cursor.display()
+            )
+        );
+    }
+
+    /// The `--untracked` listing sorts by (folder, name): each folder's entries arrive
+    /// contiguous, so the TTY's per-folder grouping prints one header per folder.
+    #[test]
+    fn untracked_discoveries_sort_by_folder_then_name() {
+        let home = TempHome::new();
+        let cwd = home.0.join("plain");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let probe_home = TempHome::new();
+        for dir in [
+            ".claude/skills/zeta",
+            ".claude/skills/alpha",
+            ".cursor/skills/beta",
+        ] {
+            let d = probe_home.0.join(dir);
+            std::fs::create_dir_all(&d).unwrap();
+            std::fs::write(d.join("SKILL.md"), b"# s\n").unwrap();
+        }
+        let out = run_discovering(
+            &home,
+            &cwd,
+            &ListRequest {
+                untracked: true,
+                ..request()
+            },
+            Some(DiscoveryRoots {
+                home: probe_home.0.clone(),
+                cwd: None,
+            }),
+        )
+        .unwrap();
+        let names: Vec<&str> = out.data.untracked.iter().map(|u| u.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["alpha", "zeta", "beta"],
+            "folder first, then name: {:?}",
+            out.data.untracked
         );
     }
 
     /// `list <name> -g` inside a project answers from the MACHINE scope alone — the flag means the
-    /// same thing on the deep dive as on the listing. A name only the project delivers is a miss
-    /// under `-g` (it would otherwise silently answer with the project copy).
+    /// same thing on the deep dive as on the listing. A name only the project delivers answers
+    /// NOT-MANAGED under `-g` (it would otherwise silently answer with the project copy).
     #[test]
     fn the_deep_dive_honors_the_scope_view() {
         let home = TempHome::new();
@@ -1708,18 +1699,22 @@ mod tests {
             .expect("a detail");
         assert_eq!(detail.name, "notes");
         assert_eq!(detail.scope.as_deref(), Some("machine"));
-        let miss = deep("repo-helper", ScopeView::Machine).unwrap_err();
+        let detail = deep("repo-helper", ScopeView::Machine)
+            .unwrap()
+            .data
+            .detail
+            .expect("a detail");
         assert!(
-            matches!(miss, ClientError::TargetNotFound { .. }),
-            "the machine holds nothing of that name — {miss:?}"
+            !detail.managed,
+            "the machine manages nothing of that name — {detail:?}"
         );
     }
 
-    /// The machine summary's `skills` count includes the ghost rows — a summary that undercounts
-    /// what `-g` would show breaks the summary's promise. Their pending state deliberately stays
-    /// out of `updates pending`: no manifest row means `topos update -g` has nothing to act on.
+    /// The machine summary counts ROWS plus the listed built-in — never an unclaimed store
+    /// record (records may describe rows, not inflate summaries). The built-in's state stays out
+    /// of `updates pending`: no manifest row means `topos update -g` has nothing to act on.
     #[test]
-    fn the_machine_summary_counts_ghost_rows() {
+    fn the_machine_summary_counts_rows_and_the_builtin_only() {
         let home = TempHome::new();
         let repo = lay_project(&home);
         home.session(
@@ -1735,16 +1730,22 @@ mod tests {
             vec![assigned("notes", None)],
             Vec::new(),
         );
-        // One CLAIMED machine record (the feed delivers notes) + the built-in ghost.
+        home.global("[bundles]\n\"topos.sh/acme\" = \"*\"\n");
+        // One CLAIMED machine record (the feed delivers notes) + the built-in + an UNCLAIMED
+        // leftover the count must NOT include.
         home.store_applied(&skill_id_of("notes"), "notes", &"d".repeat(64), &[]);
         home.store_applied("topos", "topos", &"a".repeat(64), &[]);
+        home.store_applied(&skill_id_of("frozen"), "frozen", &"b".repeat(64), &[]);
 
         let out = run(&home, &repo, &request()).unwrap();
         let summary = out.data.machine_summary.expect("a machine summary");
-        assert_eq!(summary.skills, 2, "the delivered row + the built-in ghost");
+        assert_eq!(
+            summary.skills, 2,
+            "the delivered row + the built-in; never the leftover"
+        );
         assert_eq!(
             summary.updates_pending, 0,
-            "a ghost never claims `topos update -g`"
+            "the built-in never claims `topos update -g`"
         );
 
         // `-g` shows exactly what the summary counted.
@@ -2193,6 +2194,8 @@ mod tests {
                     state: StatusItemState::Applied,
                     kind: None,
                     harnesses: Vec::new(),
+                    managed: true,
+                    folders: Vec::new(),
                 }),
                 footprint: footprint.clone(),
                 ..ListData::default()
