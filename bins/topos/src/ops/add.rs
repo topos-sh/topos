@@ -20,7 +20,7 @@ use topos_types::persisted::{Lock, LockedFile, PlacementMap, SwapCapability, Syn
 use topos_types::results::{AddData, KeepAsYoursData, KeepReason, SkillOrigin, UntrackedEntry};
 
 use crate::ctx::Ctx;
-use crate::error::{ClientError, WorkspaceHint};
+use crate::error::{ClientError, TrackedBy, WorkspaceHint};
 use crate::git_source::{GitTarballSource, RepoFile, extract_tree};
 use crate::id::SkillId;
 use crate::scan::{self, ScannedBundle};
@@ -1110,7 +1110,7 @@ fn check_destination(ctx: &Ctx<'_>, dest: &Path) -> Result<(), ClientError> {
     if let Ok(canon) = dest.canonicalize()
         && let Some(skill_id) = tracked_skill_at(ctx, &canon)?
     {
-        return Err(ClientError::AlreadyTracked { skill_id });
+        return Err(already_tracked(ctx, &skill_id, &canon));
     }
     Err(ClientError::PlacementOccupied {
         path: dest.display().to_string(),
@@ -1929,9 +1929,61 @@ fn dir_basename(path: &Path) -> Option<String> {
 /// [`FsOps`](crate::fs_seam::FsOps) read failure.
 fn reject_already_tracked(ctx: &Ctx<'_>, canonical_source: &Path) -> Result<(), ClientError> {
     match tracked_skill_at(ctx, canonical_source)? {
-        Some(skill_id) => Err(ClientError::AlreadyTracked { skill_id }),
+        Some(skill_id) => Err(already_tracked(ctx, &skill_id, canonical_source)),
         None => Ok(()),
     }
+}
+
+/// The `ALREADY_TRACKED` refusal, spelled in things a person can act on. The store id that
+/// [`tracked_skill_at`] answers with is the LOOKUP key, never the answer: it is resolved here to
+/// the record's own name, the folder, and the manifest row that installs it.
+///
+/// Each part degrades on its own. An unreadable lock falls back to the folder's basename (still a
+/// name someone typed); no reachable manifest spelling the folder leaves `claim` empty and the
+/// sentence stops at the folder. Nothing in the chain reintroduces the id.
+fn already_tracked(ctx: &Ctx<'_>, skill_id: &str, canonical_dir: &Path) -> ClientError {
+    let name = tracked_name(ctx, skill_id)
+        .or_else(|| dir_basename(canonical_dir))
+        .unwrap_or_else(|| canonical_dir.display().to_string());
+    ClientError::AlreadyTracked {
+        name,
+        dir: canonical_dir.display().to_string(),
+        claim: claiming_row(ctx, canonical_dir),
+    }
+}
+
+/// A tracked record's own NAME, read from its lock — the one document that carries it. `None`
+/// when the id does not parse or the lock cannot be read.
+fn tracked_name(ctx: &Ctx<'_>, skill_id: &str) -> Option<String> {
+    let id = SkillId::parse(skill_id).ok()?;
+    let lock = doc::read_doc::<Lock>(ctx.fs, &ctx.layout.published(&id).lock).ok()??;
+    Some(lock.name)
+}
+
+/// The manifest file whose row already installs `canonical_dir`. The scope THIS store belongs to
+/// is consulted first — the add was routed to it, so its file is the one that made the folder
+/// tracked — and the other scope only as a fallback. A project store never claims to speak for
+/// the machine file (its layout home is the checkout's own store, not `~/.topos`).
+///
+/// Best-effort by contract: this runs on a refusal path, so an unreadable or unparseable manifest
+/// answers `None` and the refusal simply says less. It never turns a refusal into a different one.
+fn claiming_row(ctx: &Ctx<'_>, canonical_dir: &Path) -> Option<TrackedBy> {
+    let project = super::manifest_edit::project_target(ctx).ok().flatten();
+    let machine =
+        (!ctx.layout.is_project_scope()).then(|| super::manifest_edit::global_target(ctx));
+    let ordered = if ctx.layout.is_project_scope() {
+        [project, machine]
+    } else {
+        [machine, project]
+    };
+    ordered.into_iter().flatten().find_map(|target| {
+        super::manifest_edit::path_row_claims(ctx, &target, canonical_dir)
+            .ok()?
+            .then(|| TrackedBy {
+                manifest: target.path.display().to_string(),
+                global: target.scope == crate::manifest::document::ManifestScope::Global,
+            })
+    })
 }
 
 /// The id of the tracked skill whose placement resolves to `canonical_source` (canonical `Path` compare,

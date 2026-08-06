@@ -10,8 +10,11 @@
 //! An unknown slug refuses BEFORE anything is read past the argv (`unknown agent: … — known: …`,
 //! the TTY closing with `nothing changed`); the known list is the real registry's slugs,
 //! alphabetical, an ellipsis past a handful. The reverse map ([`undo_tail`]) is what receipts use
-//! to reconstruct a destination set as `-a` flags where a folder maps back to the registry table,
-//! `--dest` otherwise — so an undo is paste-ready in the spelling the person would have typed.
+//! to reconstruct a destination set as `-a` flags where a folder maps back to exactly ONE slug at
+//! that scope, `--dest` otherwise — so an undo is paste-ready in the spelling the person would
+//! have typed. The map is many-to-one (nineteen-odd agents default to `.agents/skills` in a
+//! project), and a slug picked out of a shared set names something the person never asked for, so
+//! the shared folder prints as itself.
 
 use crate::error::ClientError;
 use crate::manifest::document::ManifestScope;
@@ -172,21 +175,23 @@ fn truncated_list(slugs: &[&str]) -> String {
     }
 }
 
-/// The registry slug a recorded skills-folder entry maps BACK to at `scope` — alphabetically
-/// first when several slugs share the folder. `None` = no slug spells it (an undo then says
-/// `--dest`).
+/// The registry slug a recorded skills-folder entry maps BACK to at `scope` — ONLY when exactly
+/// ONE slug spells that folder here. `None` when no slug does, and equally when SEVERAL do (an
+/// undo then says `--dest <folder>`).
+///
+/// The map is many-to-one: at project scope `.agents/skills` is the default of some nineteen
+/// agents, so "the alphabetically first slug claiming it" would answer `amp` to a person who
+/// typed `-a codex` — a reconstruction that neither matches what they ran nor names anything they
+/// can check. The folder is the fact the row actually recorded; where the slug is not the row's
+/// unambiguous other spelling, the undo prints the folder and stays verifiable.
 pub(crate) fn slug_for_skill_entry(entry: &str, scope: ManifestScope) -> Option<String> {
-    let mut slugs: Vec<&str> = topos_harness::registry::known_harnesses()
+    let mut claimants = topos_harness::registry::known_harnesses()
         .iter()
-        .map(|h| h.slug)
-        .collect();
-    slugs.sort_unstable();
-    slugs
-        .into_iter()
-        .find(|slug| {
-            crate::manifest::dest::skills_dest_spelling(slug, scope).as_deref() == Some(entry)
-        })
-        .map(str::to_owned)
+        .filter(|h| {
+            crate::manifest::dest::skills_dest_spelling(h.slug, scope).as_deref() == Some(entry)
+        });
+    let only = claimants.next()?;
+    claimants.next().is_none().then(|| only.slug.to_owned())
 }
 
 /// The MCP slug a config-file entry maps back to (the descriptor match the engine itself uses).
@@ -195,8 +200,9 @@ pub(crate) fn slug_for_mcp_entry(entry: &str, scope: ManifestScope) -> Option<St
 }
 
 /// A destination set re-spelled as the argv tail that reconstructs it: `-a <slug>` where the
-/// entry maps back to the registry table for this scope, `--dest <entry>` otherwise — entry
-/// order preserved.
+/// entry maps back to EXACTLY ONE slug in the table for this scope, `--dest <entry>` otherwise —
+/// entry order preserved. An undo must name what the person can verify, so a folder several
+/// agents share is spelled as the folder rather than as one arbitrary slug of the set.
 pub(crate) fn undo_tail(entries: &[String], scope: ManifestScope, mcp: bool) -> Vec<String> {
     let mut out = Vec::new();
     for entry in entries {
@@ -327,5 +333,46 @@ mod tests {
             true,
         );
         assert_eq!(tail, vec!["-a", "codex"]);
+    }
+
+    /// A folder SEVERAL slugs share is reconstructed as the folder, never as one of them: the
+    /// project default `.agents/skills` is where most of the registry lands, so `-a codex` in a
+    /// project undoes as `--dest .agents/skills` — the fact the row recorded, and the one the
+    /// person can check. Its machine-scope twin `~/.agents/skills` is shared too and behaves the
+    /// same, while the single-claimant folders keep their slug.
+    #[test]
+    fn a_shared_folder_undoes_as_the_folder_not_one_of_its_slugs() {
+        // The premise: `-a codex` in a project resolves to the folder most of the registry shares.
+        let entries = sel(&["codex"], &[])
+            .skill_entries(ManifestScope::Project)
+            .unwrap();
+        assert_eq!(entries, vec![".agents/skills".to_owned()]);
+        let claimants = topos_harness::registry::known_harnesses()
+            .iter()
+            .filter(|h| h.project_dir() == ".agents/skills")
+            .count();
+        assert!(claimants > 1, "the premise: {claimants} slugs share it");
+
+        assert_eq!(
+            undo_tail(&entries, ManifestScope::Project, false),
+            vec!["--dest", ".agents/skills"]
+        );
+        assert_eq!(
+            undo_tail(
+                &["~/.agents/skills".to_owned()],
+                ManifestScope::Global,
+                false
+            ),
+            vec!["--dest", "~/.agents/skills"]
+        );
+        // A folder exactly one slug spells still reconstructs as the slug.
+        assert_eq!(
+            undo_tail(
+                &[".claude/skills".to_owned()],
+                ManifestScope::Project,
+                false
+            ),
+            vec!["-a", "claude-code"]
+        );
     }
 }

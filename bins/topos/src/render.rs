@@ -293,6 +293,25 @@ pub(crate) fn next_actions(command: &str, argv: &[String], err: &ClientError) ->
             ActionCode::from("RUN_COMMAND".to_owned()),
             vec!["topos".into(), "diff".into(), name.clone(), "--json".into()],
         )],
+        // A folder a row already installs: both exits ride structurally — the read that shows
+        // what the tracked copy holds, and the drop of the claiming row. The `-g` goes on ONLY
+        // where the claim PROVED the machine file; inventing it would aim the remove at the
+        // scope nobody asked about, and omitting it where it was proved would do the same.
+        ClientError::AlreadyTracked { name, claim, .. } => {
+            let mut remove = vec!["topos".to_owned(), "remove".to_owned()];
+            if claim.as_ref().is_some_and(|c| c.global) {
+                remove.push("-g".to_owned());
+            }
+            remove.push(name.clone());
+            remove.push("--json".to_owned());
+            vec![
+                crate::actions::next_action(
+                    ActionCode::from("RUN_COMMAND".to_owned()),
+                    vec!["topos".into(), "diff".into(), name.clone(), "--json".into()],
+                ),
+                crate::actions::next_action(ActionCode::from("RUN_COMMAND".to_owned()), remove),
+            ]
+        }
         ClientError::HarnessMismatch { name, .. } => vec![crate::actions::next_action(
             ActionCode::from("RUN_COMMAND".to_owned()),
             vec![
@@ -669,9 +688,13 @@ pub(crate) fn init_tty(data: &topos_types::results::InitData) -> String {
 }
 
 pub(crate) fn add_tty(data: &AddData) -> String {
-    // A `-a`/`--dest` add of a workspace bundle prints the DESTINATION receipt: the qualified
-    // `+` row with where it landed, then the undo-led inverse (the bare name drops the row).
-    if !data.dest.is_empty() && data.display.is_some() {
+    // A `-a`/`--dest` add prints the DESTINATION receipt whatever the SOURCE was: the person
+    // named where the copy should land, so where it landed is the receipt's first claim — the
+    // `+` row with the destination, then the undo-led inverse. A workspace bundle names itself
+    // by its qualified `display`; a local folder or a forge import has none, and the plain name
+    // is what the person typed anyway. The gate is the SELECTION, never the source kind: a
+    // silent "Adopted" line after `-a codex` answers a question nobody asked.
+    if !data.dest.is_empty() {
         return add_dest_receipt(data);
     }
     let mut out = String::new();
@@ -825,9 +848,11 @@ pub(crate) fn add_tty(data: &AddData) -> String {
     out
 }
 
-/// The destination receipt a `-a`/`--dest` workspace add prints — the same column convention the
+/// The destination receipt EVERY `-a`/`--dest` add prints — the same column convention the
 /// update receipt's `+` rows use, speaking in the row's recorded destinations: one entry prints
-/// its spelling, several print a count in the bundle's own noun.
+/// its spelling, several print a count in the bundle's own noun. The bundle is named by its
+/// workspace-qualified `display` where it has one (a workspace reference) and by its plain name
+/// where it does not (a local folder, a forge import).
 fn add_dest_receipt(data: &AddData) -> String {
     let name = data.display.as_deref().unwrap_or(&data.name);
     let noun = if data.dest.iter().all(|e| {
@@ -3240,6 +3265,61 @@ mod tests {
         );
         assert!(text.contains("cursor: server entry in"), "{text}");
         assert!(text.contains("'weather'"), "{text}");
+    }
+
+    /// A LOCAL folder adopted with `-a`/`--dest` states its destination like every other
+    /// selected add. The receipt used to be gated on the workspace-qualified `display`, which a
+    /// local source never has — so `topos add ./my-skill -a codex` answered with a bare
+    /// `Adopted 'my-skill' @ <hash>` and never said where the copy went, the one thing the
+    /// person had just asked for. The plain name carries the row; the column follows the same
+    /// convention as everywhere else (one destination prints its path, several a count).
+    #[test]
+    fn a_local_add_with_a_destination_says_where_the_copy_went() {
+        let local = |dest: Vec<String>| topos_types::results::AddData {
+            skill_id: Some("topos_a9b7ee2b".to_owned()),
+            name: "my-skill".to_owned(),
+            version_id: Some("a".repeat(64)),
+            bundle_digest: Some("b".repeat(64)),
+            tracked: true,
+            harness: None,
+            harness_slug: None,
+            currency: None,
+            triggers: Vec::new(),
+            origin: None,
+            manifest: Some("/home/u/.topos/topos.toml".to_owned()),
+            reference: Some("~/work/my-skill".to_owned()),
+            undo: vec![
+                "topos".to_owned(),
+                "remove".to_owned(),
+                "-g".to_owned(),
+                "my-skill".to_owned(),
+            ],
+            governed_copy: None,
+            published_match: None,
+            note: None,
+            mcp: None,
+            dest,
+            // The local source's tell: no workspace qualifies it.
+            display: None,
+        };
+        let one = add_tty(&local(vec!["~/.codex/skills".to_owned()]));
+        assert_eq!(
+            one,
+            "+ my-skill   installed (~/.codex/skills)\n(undo: topos remove -g my-skill)"
+        );
+        // Several destinations count, in the skill's own noun.
+        let many = add_tty(&local(vec![
+            "~/.codex/skills".to_owned(),
+            "~/.claude/skills".to_owned(),
+        ]));
+        assert!(
+            many.contains("+ my-skill   installed (2 folders)"),
+            "{many}"
+        );
+        // A selection-free adopt is untouched: it still leads with the manifest row it wrote.
+        let bare = add_tty(&local(Vec::new()));
+        assert!(bare.contains("Adopted 'my-skill' @"), "{bare}");
+        assert!(!bare.contains("installed ("), "{bare}");
     }
 
     fn row(name: &str, action: PullAction) -> PullSkill {

@@ -11330,3 +11330,250 @@ fn a_local_adopt_with_dest_places_a_copy_at_the_selected_folder() {
         out.data.skills
     );
 }
+
+// =================================================================================================
+// Whole-row `remove -g`: the row drop takes every copy the row placed out in the SAME invocation,
+// whatever enumerated the record — the delivery cache, a live session, or nothing at all. The
+// machine-scope cleaner walks the delivery cache and the forge imports; a record neither names (a
+// local-path row, a frozen sweep while the plane is dark) must still leave through the verb's own
+// retire rail, or the receipt's "the copies it placed leave this machine now" is a lie.
+// =================================================================================================
+
+/// The bare whole-row remove with the plane UNREACHABLE at remove time: the eager reconcile's
+/// cache walk freezes (no fresh snapshot), so the verb's own rail must retire the copies — both
+/// folders leave NOW, the receipt lists them, and the item's `agent_dirs` says what moved.
+#[test]
+fn an_offline_whole_row_remove_still_deletes_every_copy() {
+    let (rig, plane, dir, _v) = add_rig("whole-offline");
+    rig.write_global(&format!(
+        "[bundles]\n\"{HOST}/{WS_NAME}/deploy\" = {{ dest = [\"~/.claude/skills\", \
+         \"~/.codex/skills\"] }}\n"
+    ));
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    sweep_scoped(&ctx, &plane, &dir, ops::UpdateScope::Machine);
+    assert!(rig.home.0.join(".claude/skills/deploy/SKILL.md").exists());
+    assert!(rig.home.0.join(".codex/skills/deploy/SKILL.md").exists());
+    // The plane goes dark BEFORE the remove: every cache-walked clean is frozen this run.
+    plane.serve_unreachable();
+    let data = match ops::remove_global(
+        &ctx,
+        &connect(&plane, &dir),
+        &["deploy".into()],
+        None,
+        false,
+        &Default::default(),
+    )
+    .unwrap()
+    {
+        ops::RemoveOutcome::Applied(data) => data,
+        other => panic!("{other:?}"),
+    };
+    assert!(
+        !rig.home.0.join(".claude/skills/deploy").exists(),
+        "the claude copy leaves in-invocation; uninstalled={:?}",
+        data.uninstalled
+    );
+    assert!(
+        !rig.home.0.join(".codex/skills/deploy").exists(),
+        "the codex copy leaves in-invocation; uninstalled={:?}",
+        data.uninstalled
+    );
+    // The receipt speaks in what actually moved, and the item's agent_dirs carries it.
+    let u = &data.uninstalled[0];
+    assert_eq!(u.name, format!("@{WS_NAME}/deploy"));
+    let mut dests = u.destinations.clone();
+    dests.sort();
+    assert_eq!(
+        dests,
+        vec![
+            "~/.claude/skills/deploy".to_owned(),
+            "~/.codex/skills/deploy".to_owned()
+        ]
+    );
+    assert!(u.kept.is_empty(), "{:?}", u.kept);
+    let mut dirs = data.items[0].agent_dirs.clone();
+    dirs.sort();
+    assert_eq!(dirs, dests);
+}
+
+/// The same offline whole-row remove with ONE EDITED copy: the clean copy leaves, the edited one
+/// is KEPT IN PLACE (snapshotted into the store first) and the receipt's kept facts say so.
+#[test]
+fn an_offline_whole_row_remove_keeps_the_edited_copy_in_place() {
+    let (rig, plane, dir, _v) = add_rig("whole-offline-edit");
+    rig.write_global(&format!(
+        "[bundles]\n\"{HOST}/{WS_NAME}/deploy\" = {{ dest = [\"~/.claude/skills\", \
+         \"~/.codex/skills\"] }}\n"
+    ));
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    sweep_scoped(&ctx, &plane, &dir, ops::UpdateScope::Machine);
+    let edited = rig.home.0.join(".codex/skills/deploy/SKILL.md");
+    std::fs::write(&edited, b"# deploy\nlocal notes\n").unwrap();
+    plane.serve_unreachable();
+    let data = match ops::remove_global(
+        &ctx,
+        &connect(&plane, &dir),
+        &["deploy".into()],
+        None,
+        false,
+        &Default::default(),
+    )
+    .unwrap()
+    {
+        ops::RemoveOutcome::Applied(data) => data,
+        other => panic!("{other:?}"),
+    };
+    assert!(
+        !rig.home.0.join(".claude/skills/deploy").exists(),
+        "the clean copy leaves; uninstalled={:?}",
+        data.uninstalled
+    );
+    assert_eq!(
+        std::fs::read(&edited).unwrap(),
+        b"# deploy\nlocal notes\n",
+        "the edited copy stays in place, byte-identical"
+    );
+    let u = &data.uninstalled[0];
+    assert_eq!(u.destinations, vec!["~/.claude/skills/deploy".to_owned()]);
+    assert_eq!(u.kept, vec!["~/.codex/skills/deploy".to_owned()]);
+    // Snapshot-first: the store holds the base version AND the kept edit.
+    assert_eq!(store_versions(&rig.layout(), "s_deploy"), 2);
+}
+
+/// A `--dest` FREE-FORM folder row rides the same rail: the folder's copy leaves with the row.
+#[test]
+fn an_offline_whole_row_remove_cleans_a_free_form_dest_folder() {
+    let (rig, plane, dir, _v) = add_rig("whole-offline-folder");
+    rig.write_global(&format!(
+        "[bundles]\n\"{HOST}/{WS_NAME}/deploy\" = {{ dest = [\"~/team-skills\"] }}\n"
+    ));
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    sweep_scoped(&ctx, &plane, &dir, ops::UpdateScope::Machine);
+    assert!(rig.home.0.join("team-skills/deploy/SKILL.md").exists());
+    plane.serve_unreachable();
+    let data = match ops::remove_global(
+        &ctx,
+        &connect(&plane, &dir),
+        &["deploy".into()],
+        None,
+        false,
+        &Default::default(),
+    )
+    .unwrap()
+    {
+        ops::RemoveOutcome::Applied(data) => data,
+        other => panic!("{other:?}"),
+    };
+    assert!(
+        !rig.home.0.join("team-skills/deploy").exists(),
+        "the free-form folder's copy leaves; uninstalled={:?}",
+        data.uninstalled
+    );
+    let u = &data.uninstalled[0];
+    assert_eq!(u.destinations, vec!["~/team-skills/deploy".to_owned()]);
+}
+
+/// A MACHINE-scope LOCAL-PATH row: no delivery cache entry, no forge origin, no workspace names
+/// this record — only the verb's own rail can take its managed copies out. The adopted-in-place
+/// source dir is the person's own and is NEVER deleted.
+#[test]
+fn a_local_path_whole_row_remove_deletes_managed_copies_and_spares_the_source() {
+    let (rig, plane, dir, _v) = add_rig("whole-local");
+    rig.write_global("[bundles]\n");
+    let src = rig.work.0.join("my-skill");
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::write(src.join("SKILL.md"), b"# mine\n").unwrap();
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    let scope = ops::add_scope(&ctx, true).unwrap();
+    let sctx = ops::ctx_with_layout(&ctx, &scope.layout);
+    let mut d = ops::adopt_path(&sctx, &scope.target, &src).unwrap();
+    ops::note_added_path_dest_in(
+        &ctx,
+        &mut d,
+        &scope.target,
+        &src,
+        &["~/.codex/skills".to_owned()],
+    )
+    .unwrap();
+    sweep_scoped(&ctx, &plane, &dir, ops::UpdateScope::Machine);
+    assert!(rig.home.0.join(".codex/skills/my-skill/SKILL.md").exists());
+    let data = match ops::remove_global(
+        &ctx,
+        &connect(&plane, &dir),
+        &["my-skill".into()],
+        None,
+        false,
+        &Default::default(),
+    )
+    .unwrap()
+    {
+        ops::RemoveOutcome::Applied(data) => data,
+        other => panic!("{other:?}"),
+    };
+    assert!(
+        !rig.home.0.join(".codex/skills/my-skill").exists(),
+        "the managed copy leaves in-invocation; uninstalled={:?}",
+        data.uninstalled
+    );
+    // The adopted-in-place source is the person's own — never deleted.
+    assert_eq!(std::fs::read(src.join("SKILL.md")).unwrap(), b"# mine\n");
+    let u = &data.uninstalled[0];
+    assert_eq!(u.name, "my-skill");
+    assert_eq!(u.destinations, vec!["~/.codex/skills/my-skill".to_owned()]);
+    assert_eq!(data.items[0].agent_dirs, u.destinations);
+}
+
+/// A whole-row `remove -g` of an MCP row takes its server entries OUT of the config files in the
+/// same invocation (the inline converge) — no placement dirs are involved, and the item's note
+/// names the removal per config file.
+#[test]
+fn a_whole_row_remove_of_an_mcp_row_takes_its_config_entries_out() {
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let rig = Rig::new("whole-mcp");
+    rig.seed_session();
+    std::fs::create_dir_all(rig.home.0.join(".cursor")).unwrap();
+    let v = mk_version(&[(
+        "server.json",
+        FileMode::Regular,
+        mcp_server_json("https://mcp.example/linear").as_bytes(),
+    )]);
+    let plane = FakePlane::new(log).with_version("s_linear", &v);
+    plane.serves(Vec::new());
+    let mut entry = catalog_entry("s_linear", "linear", &v);
+    entry.kind = "mcp".into();
+    let dir = FakeDirectory::new(vec![entry], Vec::new());
+    rig.write_global(&format!(
+        "[bundles]\n\"{HOST}/{WS_NAME}/linear\" = {{ dest = [\"~/.cursor/mcp.json\"] }}\n"
+    ));
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    sweep_scoped(&ctx, &plane, &dir, ops::UpdateScope::Machine);
+    let cursor = rig.home.0.join(".cursor/mcp.json");
+    assert!(
+        std::fs::read_to_string(&cursor)
+            .unwrap()
+            .contains("topos-eng-linear"),
+        "the sweep placed the server entry"
+    );
+    let data = match ops::remove_global(
+        &ctx,
+        &connect(&plane, &dir),
+        &["linear".into()],
+        None,
+        false,
+        &Default::default(),
+    )
+    .unwrap()
+    {
+        ops::RemoveOutcome::Applied(data) => data,
+        other => panic!("{other:?}"),
+    };
+    assert!(
+        !cursor.exists()
+            || !std::fs::read_to_string(&cursor)
+                .unwrap()
+                .contains("topos-eng-linear"),
+        "the config entry leaves in-invocation"
+    );
+    let note = data.items[0].note.clone().unwrap_or_default();
+    assert!(note.contains("server entry removed"), "{note}");
+}

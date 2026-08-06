@@ -50,6 +50,7 @@ use topos_types::results::{AddData, RemoveData, RemoveItem, RemoveKind};
 
 use crate::ctx::Ctx;
 use crate::error::{ClientError, TargetCandidate};
+use crate::id::SkillId;
 use crate::manifest::MANIFEST_FILE;
 use crate::manifest::document::{
     EntryValue, ManifestEditor, ManifestError, ManifestScope, materialized_global, project_template,
@@ -1088,7 +1089,7 @@ pub(crate) fn remove_global(
     if !selection.is_empty() {
         resolved = narrow_arms(ctx, &target, resolved, selection)?;
     }
-    let eager = eager_plan(ctx, &resolved);
+    let eager = eager_plan(ctx, &target, &resolved);
     let mut outcome = apply_arms(ctx, &target, tokens, resolved, via, selection, yes, true)?;
     // Row edits uninstall EAGERLY: with the row durably changed, the same machine-scope
     // update/cleanup the sweep runs converges NOW, so the copies the edit no longer demands
@@ -1200,7 +1201,7 @@ pub(crate) fn remove_project(
     if !selection.is_empty() {
         resolved = narrow_arms(ctx, &target, resolved, selection)?;
     }
-    let eager = eager_plan(ctx, &resolved);
+    let eager = eager_plan(ctx, &target, &resolved);
     let mut outcome = apply_arms(ctx, &target, tokens, resolved, via, selection, yes, false)?;
     // The eager uninstall, after the writer lock releases — see [`remove_global`].
     drop(guard);
@@ -2557,12 +2558,26 @@ struct EagerBundle {
     mcp: bool,
     /// A NARROWED bundle: the subtracted dest entries + how many destinations remain.
     narrow: Option<(Vec<String>, u64)>,
+    /// The MACHINE scope store's record for a whole-row edit, resolved BEFORE the apply — the
+    /// verb's own retire rail needs it when the reconcile's cache/forge walks miss the record
+    /// (and the same reconcile's orphan pass may retire it mid-run, after which the name no
+    /// longer resolves). `None` for a narrow, an mcp bundle, a project edit, or an unresolvable
+    /// name (an ambiguity fails toward not deleting).
+    record: Option<SkillId>,
 }
 
-fn eager_plan(ctx: &Ctx<'_>, arms: &[Arm]) -> EagerPlan {
+fn eager_plan(ctx: &Ctx<'_>, target: &EditTarget, arms: &[Arm]) -> EagerPlan {
     let mut plan = EagerPlan {
         feeds: Vec::new(),
         bundles: Vec::new(),
+    };
+    // The pre-apply record lookup for a MACHINE whole-row edit (see [`EagerBundle::record`]).
+    let record_for = |name: &str, mcp: bool| -> Option<SkillId> {
+        if mcp || target.scope != ManifestScope::Global {
+            return None;
+        }
+        let sctx = scope_store_ctx(ctx, target)?;
+        super::resolve_skill(&sctx, name).ok().map(|(sid, _)| sid)
     };
     for arm in arms {
         match arm {
@@ -2574,9 +2589,11 @@ fn eager_plan(ctx: &Ctx<'_>, arms: &[Arm]) -> EagerPlan {
                     } => Some((host.clone(), workspace.clone())),
                     _ => None,
                 };
+                let mcp = row_is_mcp(ctx, row, ws.as_ref(), name);
                 plan.bundles.push(EagerBundle {
                     display: qualified_name(ctx, ws.as_ref(), name),
-                    mcp: row_is_mcp(ctx, row, ws.as_ref(), name),
+                    mcp,
+                    record: record_for(name, mcp),
                     name: name.clone(),
                     narrow: None,
                 });
@@ -2590,9 +2607,11 @@ fn eager_plan(ctx: &Ctx<'_>, arms: &[Arm]) -> EagerPlan {
                     }) => Some((host, workspace)),
                     _ => None,
                 };
+                let mcp = cached_kind_is_mcp(ctx, ws.as_ref(), name);
                 plan.bundles.push(EagerBundle {
                     display: qualified_name(ctx, ws.as_ref(), name),
-                    mcp: cached_kind_is_mcp(ctx, ws.as_ref(), name),
+                    mcp,
+                    record: record_for(name, mcp),
                     name: name.clone(),
                     narrow: None,
                 });
@@ -2610,6 +2629,7 @@ fn eager_plan(ctx: &Ctx<'_>, arms: &[Arm]) -> EagerPlan {
                     mcp: *mcp,
                     name: name.clone(),
                     narrow: Some((subtract.clone(), *remaining as u64)),
+                    record: None,
                 });
             }
             // A split re-homes its survivors to their own rows — nothing leaves.
@@ -2627,6 +2647,12 @@ fn eager_plan(ctx: &Ctx<'_>, arms: &[Arm]) -> EagerPlan {
 /// remaining count — kept only when the reconcile actually reported the copies moving; when it
 /// did not (offline, a failed converge), the matching item's own line discloses the next-sweep
 /// path instead of claiming a removal that never ran.
+///
+/// A WHOLE-ROW machine edit the reconcile moved nothing for gets one more rail: the sweep's
+/// cleaner discovers records through the delivery cache and the forge imports, so a record
+/// neither enumerates (a local-path row's; a workspace row's under a dark plane or a gone cache
+/// entry) is retired HERE, through the same by-choice rail — the verb witnessed the intent, and
+/// the machine set is re-resolved first so a name the feed still delivers moves nothing.
 fn eager_cleanup(
     ctx: &Ctx<'_>,
     connect: &SessionConnect<'_>,
@@ -2665,6 +2691,30 @@ fn eager_cleanup(
     })
     .unwrap_or_default();
     let mut out: Vec<UninstalledBundle> = Vec::new();
+    // What the MACHINE recipe still delivers AFTER the edit (and this run's cache refresh) —
+    // the fallback rail's freeze: a name a surviving row or the cached feed still claims must
+    // not lose its copies to the retire below. Resolved lazily (offline by construction), once;
+    // an unreadable resolution reads as "everything still demanded" — failing toward the gate.
+    let mut demanded: Option<Option<std::collections::HashSet<String>>> = None;
+    let mut still_demanded = |ctx: &Ctx<'_>, name: &str| -> bool {
+        let set = demanded.get_or_insert_with(|| {
+            let (all, cache) = super::inventory::read_sources(ctx).ok()?;
+            let resolved = super::inventory::resolve(ctx, &all, &cache).ok()?;
+            Some(
+                resolved
+                    .machine()
+                    .rows
+                    .iter()
+                    .filter(|r| r.bundle)
+                    .flat_map(|r| [r.name.clone(), r.reference.clone()])
+                    .collect(),
+            )
+        });
+        match set {
+            Some(names) => names.contains(name),
+            None => true,
+        }
+    };
     // The dropped feeds' bundles (attributed by workspace id, exactly as before).
     for r in removed.iter().filter(|r| {
         r.workspace_id
@@ -2746,7 +2796,47 @@ fn eager_cleanup(
             }
             None => {
                 if destinations.is_empty() && kept.is_empty() {
-                    continue; // nothing moved this run — the row edit alone is the receipt
+                    // The reconcile moved nothing for this whole-row edit. Its cleaner walks the
+                    // delivery cache and the forge imports — a record neither enumerates (a
+                    // local-path row's, a workspace row's while the plane is dark or its cache
+                    // entry is gone) would keep every placed copy while the receipt claims
+                    // otherwise. The verb witnessed the intent, so the copies leave HERE,
+                    // through the same by-choice rail the sweep runs (park-then-verify; edited
+                    // and unreadable copies kept in place; adopted sources and in-checkout
+                    // placements never touched) — unless the machine set still delivers the
+                    // name (a surviving row, the cached feed), in which case nothing may move.
+                    // The record was resolved BEFORE the apply: the same reconcile's orphan
+                    // pass may have retired it just now, which hides the name, not the record.
+                    let Some(sid) = b.record.as_ref().filter(|_| !b.mcp) else {
+                        continue;
+                    };
+                    if still_demanded(ctx, &b.name) {
+                        continue;
+                    }
+                    let Some(sctx) = scope_store_ctx(ctx, target) else {
+                        continue;
+                    };
+                    // Best-effort like the whole eager contract: a failed retire leaves the
+                    // copies for the sweep, claiming nothing.
+                    if let Ok(Some(clean)) = super::reconcile::clean_by_choice(&sctx, sid, true) {
+                        if let Some(item) = items.iter_mut().find(|it| {
+                            it.name == b.name
+                                && matches!(
+                                    it.kind,
+                                    RemoveKind::ManifestRemoved | RemoveKind::ManifestExcluded
+                                )
+                        }) {
+                            item.agent_dirs = clean.removed.clone();
+                        }
+                        out.push(UninstalledBundle {
+                            name: b.display.clone(),
+                            destinations: clean.removed,
+                            kind: None,
+                            kept: clean.kept,
+                            remaining: None,
+                        });
+                    }
+                    continue;
                 }
                 out.push(UninstalledBundle {
                     name: b.display.clone(),

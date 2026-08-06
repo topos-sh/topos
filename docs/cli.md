@@ -198,7 +198,7 @@ topos add [OPTIONS] <SOURCE>
 |---|---|
 | `<SOURCE>` | What to add: a workspace skill, channel, or feed; a local folder; or a GitHub repo |
 | `-s, --skill <NAME>` | When a GitHub repo holds several skills, pick which one(s) (repeatable; `'*'` = all) |
-| `-a, --agent <SLUG>` | Install for this agent only (a slug like `codex`; repeatable; `'*'` = all detected). Recorded on the row, so updates keep the copy where you asked |
+| `-a, --agent <SLUG>` | Install for this agent only (a slug like `codex`; repeatable). Recorded on the row, so updates keep the copy where you asked |
 | `--dest <FOLDER>` | Install into this exact folder (repeatable; combined with `-a` the union is the destination set). An MCP source takes a known config file instead |
 | `--mcp` | Import an MCP server: an official-registry name (io.github.x/y), an https URL to its server.json, or a local folder holding one |
 | `-g, --global` | Add it machine-wide (your `~/.topos/topos.toml`) instead of to this folder's file |

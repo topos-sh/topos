@@ -1710,14 +1710,83 @@ fn re_adding_the_same_dir_is_refused_as_already_tracked() {
     ops::add(&h.ctx(), &root).unwrap();
 
     let err = ops::add(&h.ctx(), &root).unwrap_err();
+    let crate::error::ClientError::AlreadyTracked { name, dir, claim } = &err else {
+        panic!("re-adding the same dir must be refused, got {err:?}");
+    };
+    // The refusal speaks in what a person can act on: the skill's own NAME and the folder.
+    assert_eq!(name, "pr-describe");
+    assert_eq!(*dir, root.canonicalize().unwrap().display().to_string());
+    // No manifest row claims it here (this rig writes none), so the claim is honestly absent
+    // and the sentence stops at the folder rather than naming a file that says nothing.
+    assert!(claim.is_none(), "{claim:?}");
+    let message = crate::render::safe_message(&err);
     assert!(
-        matches!(err, crate::error::ClientError::AlreadyTracked { .. }),
-        "re-adding the same dir must be refused, got {err:?}"
+        !message.contains("topos_"),
+        "the internal store id never reaches a user surface: {message}"
     );
+    assert!(
+        message.contains("'pr-describe' already tracks"),
+        "{message}"
+    );
+    assert!(message.contains("topos remove pr-describe"), "{message}");
     assert_eq!(
         store_records(&h.ctx()).len(),
         1,
         "no second record was minted"
+    );
+}
+
+/// The same refusal WITH the row in hand: a machine-file row already installs the folder, so the
+/// refusal names that file and spells the drop for its scope (`-g`) — the two exits it offers are
+/// both about the row, because the row is what made the folder tracked. Both ride the `--json`
+/// envelope as executable next actions.
+#[test]
+fn the_already_tracked_refusal_names_the_claiming_manifest_row() {
+    let src = editable_source();
+    let root = src.0.join("pr-describe");
+    let h = Harness::new("dup-claimed");
+    ops::add(&h.ctx(), &root).unwrap();
+    // The machine file the add's row would live in, spelled by absolute path (this rig has no
+    // `$HOME` roots to abbreviate against).
+    let manifest = h.home.0.join(crate::manifest::MANIFEST_FILE);
+    std::fs::write(
+        &manifest,
+        format!(
+            "[bundles]\n\"{}\" = \"*\"\n",
+            root.canonicalize().unwrap().display()
+        ),
+    )
+    .unwrap();
+
+    let err = ops::add(&h.ctx(), &root).unwrap_err();
+    let crate::error::ClientError::AlreadyTracked { claim, .. } = &err else {
+        panic!("expected AlreadyTracked, got {err:?}");
+    };
+    let claim = claim.as_ref().expect("the machine row claims the folder");
+    assert_eq!(claim.manifest, manifest.display().to_string());
+    assert!(claim.global, "the machine file is the global scope");
+
+    let message = crate::render::safe_message(&err);
+    assert!(
+        message.contains(&manifest.display().to_string()),
+        "{message}"
+    );
+    assert!(message.contains("topos remove -g pr-describe"), "{message}");
+    assert!(!message.contains("topos_"), "{message}");
+
+    // The agent surface gets the same two exits, each a runnable argv.
+    let argv: Vec<String> = ["topos", "add", "./pr-describe"]
+        .iter()
+        .map(|s| (*s).to_owned())
+        .collect();
+    let actions = crate::render::next_actions("add", &argv, &err);
+    let argvs: Vec<Vec<String>> = actions.into_iter().map(|a| a.argv).collect();
+    assert_eq!(
+        argvs,
+        vec![
+            vec!["topos", "diff", "pr-describe", "--json"],
+            vec!["topos", "remove", "-g", "pr-describe", "--json"],
+        ]
     );
 }
 

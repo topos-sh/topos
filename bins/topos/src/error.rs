@@ -181,6 +181,35 @@ fn required_version(min: Option<&str>) -> String {
     }
 }
 
+/// WHAT already claims a directory an `add` was asked to adopt: the manifest FILE holding the row
+/// that installs it, and whether that file is the machine one — which the drop command has to
+/// spell with `-g` or it would act on the other scope.
+#[derive(Debug, Clone)]
+pub(crate) struct TrackedBy {
+    /// The `topos.toml` whose row resolves to the folder.
+    pub manifest: String,
+    /// The row lives in the MACHINE file (`~/.topos/topos.toml`), so `remove` needs `-g`.
+    pub global: bool,
+}
+
+/// The [`ClientError::AlreadyTracked`] sentence. Two shapes, and the difference is honesty about
+/// what was found: with the claiming row in hand the refusal names the file and the exact drop
+/// command; without it (a retained record no reachable manifest spells) it names the folder and
+/// the exits that need no scope. Neither shape ever prints the store id.
+fn already_tracked_message(name: &str, dir: &str, claim: &Option<TrackedBy>) -> String {
+    match claim {
+        Some(TrackedBy { manifest, global }) => format!(
+            "'{name}' already tracks {dir} — the row in {manifest} is what installs it; `topos \
+             remove {}{name}` drops that row, or edit the row to change where it lands",
+            if *global { "-g " } else { "" }
+        ),
+        None => format!(
+            "'{name}' already tracks {dir} — edit it in place (`topos diff {name}` shows your \
+             changes), or drop it first with `topos remove {name}`"
+        ),
+    }
+}
+
 /// A local-core failure. `#[non_exhaustive]` so new verbs can add variants without breaking matches.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
@@ -253,10 +282,20 @@ pub(crate) enum ClientError {
     #[error("a skill with this id already exists")]
     SkillExists,
     /// The directory is already tracked in place (same canonical path) — re-adopting would mint a second
-    /// record for one mutable dir, so `add` refuses and points at the existing skill (edits already
+    /// record for one mutable dir, so `add` refuses and points at what already claims it (edits already
     /// surface as a draft via `diff`).
-    #[error("this directory is already tracked as skill '{skill_id}'")]
-    AlreadyTracked { skill_id: String },
+    ///
+    /// Everything the refusal shows is something a person can act on: the tracked skill's own NAME, the
+    /// FOLDER, and — when the producer could resolve it — the manifest FILE holding the row that installs
+    /// it, with the drop command spelled for that file's scope. The internal store id never appears here;
+    /// it names nothing anyone can type, and a refusal that ends in `topos_a9b7ee2b…` leaves the reader
+    /// with no next step at all.
+    #[error("{}", already_tracked_message(.name, .dir, .claim))]
+    AlreadyTracked {
+        name: String,
+        dir: String,
+        claim: Option<TrackedBy>,
+    },
     /// A name resolved to more than one tracked skill; the caller must disambiguate by id.
     #[error("the name '{name}' is ambiguous across {count} tracked skills")]
     AmbiguousName { name: String, count: usize },

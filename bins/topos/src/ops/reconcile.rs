@@ -5026,17 +5026,21 @@ fn clean_written_placements(
 
 /// What one BY-CHOICE clean concluded: the bundle's name, the destinations actually uninstalled,
 /// and the edited (or unreadable) copies kept in place — display paths, `~`-abbreviated.
-struct ByChoiceClean {
-    name: String,
-    removed: Vec<String>,
-    kept: Vec<String>,
+pub(super) struct ByChoiceClean {
+    pub(super) name: String,
+    pub(super) removed: Vec<String>,
+    pub(super) kept: Vec<String>,
 }
 
 /// [`clean_written_placements`]'s BY-CHOICE twin — the clean a person's own manifest choice (a
 /// dropped feed line, an `"off"` switch, a dropped row) drives: the same written-placement target
 /// set, split by [`retire_split`] so an EDITED copy stays in place instead of being
 /// snapshotted-and-removed. `Ok(None)` when the bundle has nothing recorded to retire.
-fn clean_by_choice(
+///
+/// `pub(super)` for ONE caller besides the sweep: a whole-row `remove -g`'s eager cleanup, whose
+/// dropped record the cache/forge walks may not enumerate (see [`super::manifest_edit`]) — it
+/// reads the record directly (a retired marker does not hide it: the placements are what retire).
+pub(super) fn clean_by_choice(
     ctx: &Ctx<'_>,
     sid: &SkillId,
     exclude_project: bool,

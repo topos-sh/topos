@@ -198,7 +198,7 @@ pub(crate) enum Command {
         /// When a GitHub repo holds several skills, pick which one(s) (repeatable; `'*'` = all).
         #[arg(long, short = 's', value_name = "NAME")]
         skill: Vec<String>,
-        /// Install for this agent only (a slug like `codex`; repeatable; `'*'` = all detected).
+        /// Install for this agent only (a slug like `codex`; repeatable).
         /// Recorded on the row, so updates keep the copy where you asked.
         #[arg(long, short = 'a', value_name = "SLUG")]
         agent: Vec<String>,
