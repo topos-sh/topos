@@ -3484,17 +3484,10 @@ pub(crate) fn err_tty(err: &ClientError) -> String {
                 c.display
             ));
         }
-        // With TWO copies, resolving one leaves exactly one draft and the freeze is over. With
-        // three or more it is not: dropping one still leaves copies that disagree, so the line
-        // says how many rounds are left rather than promising an end that will not come.
-        out.push_str(&match copies.len() {
-            n if n > 2 => format!(
-                "\nPublishing or dropping one leaves {} that still disagree — repeat until one is \
-                 left.",
-                n - 1
-            ),
-            _ => "\nPublishing or dropping one leaves the other as your single draft.".to_owned(),
-        });
+        // No sentence about what resolving one copy leaves behind: the menu's job is to name the
+        // copies and the three things you can do to each, and a reader who acts on one of them
+        // sees the result immediately. A line predicting the aftermath — for two copies or for
+        // ten — is one more thing to read that the next `list` would have said better.
         out.push_str(&format!(
             "\nto drop every copy's edits: topos update{flag} {skill} --reset"
         ));
@@ -3772,8 +3765,8 @@ mod tests {
              .agents/skills --reset\n  project/.claude/skills/coolify-deploy\n      to share:     \
              topos publish coolify-deploy --dest .claude/skills\n      to view diff: topos diff \
              coolify-deploy --dest .claude/skills\n      to drop:      topos update coolify-deploy \
-             --dest .claude/skills --reset\nPublishing or dropping one leaves the other as your \
-             single draft.\nto drop every copy's edits: topos update coolify-deploy --reset"
+             --dest .claude/skills --reset\nto drop every copy's edits: topos update \
+             coolify-deploy --reset"
         );
         // The menu IS the answer, so nothing is printed under it — a `try:` block would re-offer
         // the whole-bundle discard the last line already names, two lines apart.
@@ -3836,46 +3829,35 @@ mod tests {
         );
     }
 
-    /// THREE competing copies: the two-copy promise ("leaves the other as your single draft") is
-    /// false there — resolving one still leaves copies that disagree, and the freeze stands. The
-    /// line says how many are left instead of promising an end that has not arrived.
+    /// However many copies compete, the menu ends at the whole-bundle discard: it names the copies
+    /// and what can be done to each, and predicts nothing about the aftermath. A sentence about
+    /// what resolving one would leave has to be right for two copies AND for ten, and the next
+    /// `list` says it better than a prediction can.
     #[test]
-    fn three_competing_copies_are_not_promised_a_single_draft() {
+    fn the_menu_predicts_nothing_about_what_resolving_one_copy_leaves() {
         let copy = |n: &str| crate::error::DivergedCopy {
             display: format!("project/.{n}/skills/coolify-deploy"),
             dest: format!(".{n}/skills"),
         };
-        let err = crate::error::ClientError::PlacementsDiverged {
-            skill: "coolify-deploy".to_owned(),
-            copies: vec![copy("agents"), copy("claude"), copy("cursor")],
-            global: false,
-        };
-        let tty = super::err_tty(&err);
-        assert!(
-            tty.contains(
-                "Publishing or dropping one leaves 2 that still disagree — repeat until one is \
-                 left."
-            ),
-            "{tty}"
-        );
-        assert!(!tty.contains("as your single draft"), "{tty}");
-
-        // FOUR counts down honestly too.
-        let err = crate::error::ClientError::PlacementsDiverged {
-            skill: "coolify-deploy".to_owned(),
-            copies: vec![
-                copy("agents"),
-                copy("claude"),
-                copy("cursor"),
-                copy("gemini"),
-            ],
-            global: false,
-        };
-        assert!(
-            super::err_tty(&err).contains("leaves 3 that still disagree"),
-            "{}",
-            super::err_tty(&err)
-        );
+        for count in [2usize, 3, 4] {
+            let copies: Vec<_> = ["agents", "claude", "cursor", "gemini"][..count]
+                .iter()
+                .map(|n| copy(n))
+                .collect();
+            let err = crate::error::ClientError::PlacementsDiverged {
+                skill: "coolify-deploy".to_owned(),
+                copies,
+                global: false,
+            };
+            let tty = super::err_tty(&err);
+            assert!(!tty.contains("single draft"), "{count}: {tty}");
+            assert!(!tty.contains("still disagree"), "{count}: {tty}");
+            // The last line is the whole-bundle way out, immediately after the final copy block.
+            assert!(
+                tty.ends_with("to drop every copy's edits: topos update coolify-deploy --reset"),
+                "{count}: {tty}"
+            );
+        }
     }
 
     /// An APPLIED whole-row removal whose uninstall moved nothing must not claim the copies
