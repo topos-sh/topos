@@ -573,6 +573,22 @@
           "description": "Local edits ahead of the version this entry is on.",
           "type": "boolean"
         },
+        "draft_dir": {
+          "description": "The FOLDER holding this row's edited copy — the draft — as the row prints it: written\nagainst the folder its manifest governs (`project/.claude/skills/<name>`) for a project\nrow, `~`-abbreviated for a machine-wide one. Present only when exactly one copy is edited;\nabsent when several disagree (`draft_diverged` says so instead) and on every non-draft row.\n**INFERRED** (additive).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "draft_diverged": {
+          "description": "How many folders hold edits that DISAGREE — copies none of which explains another, so no\nsingle one is the draft. Always ≥ 2 when present, and present only on a draft row whose\ncopies compete; `draft_dir` is the one-copy case. **INFERRED** (additive).",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
         "kind": {
           "description": "The catalog bundle kind (`\"mcp\"` for a config-placed MCP-server bundle). Absent ⇒\n`\"skill\"`. **Additive.**",
           "type": [

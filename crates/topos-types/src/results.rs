@@ -674,6 +674,18 @@ pub struct SkillEntry {
     /// (additive).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_health: Option<SourceHealth>,
+    /// The FOLDER holding this row's edited copy — the draft — as the row prints it: written
+    /// against the folder its manifest governs (`project/.claude/skills/<name>`) for a project
+    /// row, `~`-abbreviated for a machine-wide one. Present only when exactly one copy is edited;
+    /// absent when several disagree (`draft_diverged` says so instead) and on every non-draft row.
+    /// **INFERRED** (additive).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub draft_dir: Option<String>,
+    /// How many folders hold edits that DISAGREE — copies none of which explains another, so no
+    /// single one is the draft. Always ≥ 2 when present, and present only on a draft row whose
+    /// copies compete; `draft_dir` is the one-copy case. **INFERRED** (additive).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub draft_diverged: Option<u32>,
 }
 
 /// A row's origin has STOPPED ANSWERING — the one fact about a bundle that no other column can

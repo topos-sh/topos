@@ -1304,13 +1304,42 @@ fn list_row(entry: &SkillEntry, scope: &str) -> String {
         return format!("  {}{note}\n", entry.skill);
     }
     format!(
-        "  {}  {}@{}{}{}\n",
+        "  {}  {}@{}{}{}\n{}",
         entry.skill,
         entry.skill,
         short(&entry.version_id),
         if entry.draft { "  (draft)" } else { "" },
         columns,
+        draft_sub_lines(entry, flag),
     )
+}
+
+/// What a DRAFT row says beneath itself. `(draft)` alone states that edits exist and leaves every
+/// question a person actually has — where are they, and what can I do about them — unanswered, so
+/// the row names the folder and then the three exits: share it, read it, drop it.
+///
+/// Copies that DISAGREE collapse to one line instead: no single folder is the draft, and a row that
+/// guessed one would send the reader to publish bytes they did not mean. The deep dive lists them.
+///
+/// Empty for every row that cannot name a folder — a clean row, and the rare edited one whose scan
+/// classified nothing. The commands are scope-exact through `flag`, exactly as the row's own are:
+/// `update` drives a scope, so a machine row spells `-g`; `publish` and `diff` take a name and no
+/// scope at all, so adding one there would print a command that does not parse.
+fn draft_sub_lines(entry: &SkillEntry, flag: &str) -> String {
+    let name = &entry.skill;
+    if let Some(dir) = &entry.draft_dir {
+        return format!(
+            "      draft in {dir} (not shared)\n      to share:     topos publish {name}\n      \
+             to view diff: topos diff {name}\n      to drop:      topos update {name}{flag} \
+             --reset\n"
+        );
+    }
+    match entry.draft_diverged {
+        Some(n) => {
+            format!("      draft in {n} folders that disagree (see: topos list {name}{flag})\n")
+        }
+        None => String::new(),
+    }
 }
 
 /// The STATUS / SOURCE suffix for an inventory row (`  [behind]  from topos.sh/acme`) — rendered
@@ -4614,6 +4643,8 @@ mod tests {
             status,
             kind: None,
             source_health: None,
+            draft_dir: None,
+            draft_diverged: None,
         };
         let out = ListOutcome {
             data: ListData {
@@ -4718,6 +4749,8 @@ mod tests {
             status: None,
             kind: None,
             source_health: None,
+            draft_dir: None,
+            draft_diverged: None,
         };
         let out = ListOutcome {
             data: ListData {
@@ -4746,6 +4779,126 @@ mod tests {
         );
         assert!(
             text.contains("machine-wide  (not applied here yet — `topos update -g` applies it)"),
+            "{text}"
+        );
+    }
+
+    /// A DRAFT row says where the edits are and the three things a person can do with them —
+    /// byte-exact, the labels padded so the commands line up. The commands are scope-exact the way
+    /// the row's own are: `update` drives a scope, so a machine row spells `-g`; `publish` and
+    /// `diff` take a name and no scope, so neither ever grows one. A clean row gains nothing.
+    #[test]
+    fn draft_rows_name_their_folder_and_the_ways_out() {
+        use topos_types::results::{ListScope, SkillStatus};
+        let row = |name: &str, status, dir: Option<&str>, diverged| SkillEntry {
+            skill: name.to_owned(),
+            workspace_id: Some("w_ideamotive".to_owned()),
+            version_id: format!("f154315d5fd9{}", "0".repeat(52)),
+            bundle_digest: "cd".repeat(32),
+            draft: matches!(status, Some(SkillStatus::Draft)),
+            pending_proposals: Vec::new(),
+            source: Some("topos.sh/ideamotive".to_owned()),
+            status,
+            kind: None,
+            draft_dir: dir.map(str::to_owned),
+            draft_diverged: diverged,
+        };
+        let render = |scope: &str, entry| {
+            list_tty(&ListOutcome {
+                data: ListData {
+                    scopes: vec![ListScope {
+                        scope: scope.to_owned(),
+                        manifest: Some("./topos.toml".to_owned()),
+                        rows: vec![entry],
+                    }],
+                    signed_in: false,
+                    ..ListData::default()
+                },
+                warnings: Vec::new(),
+                untracked_view: false,
+            })
+        };
+
+        let text = render(
+            "project",
+            row(
+                "coolify-deploy",
+                Some(SkillStatus::Draft),
+                Some("project/.agents/skills/coolify-deploy"),
+                None,
+            ),
+        );
+        assert!(
+            text.ends_with(
+                "  coolify-deploy  coolify-deploy@f154315d5fd9  (draft)  from topos.sh/ideamotive\n\
+                 \x20     draft in project/.agents/skills/coolify-deploy (not shared)\n\
+                 \x20     to share:     topos publish coolify-deploy\n\
+                 \x20     to view diff: topos diff coolify-deploy\n\
+                 \x20     to drop:      topos update coolify-deploy --reset"
+            ),
+            "{text}"
+        );
+
+        // The machine section: only the scope-driven verb takes the flag.
+        let text = render(
+            "machine",
+            row(
+                "coolify-deploy",
+                Some(SkillStatus::Draft),
+                Some("~/.agents/skills/coolify-deploy"),
+                None,
+            ),
+        );
+        assert!(
+            text.ends_with(
+                "\x20     draft in ~/.agents/skills/coolify-deploy (not shared)\n\
+                 \x20     to share:     topos publish coolify-deploy\n\
+                 \x20     to view diff: topos diff coolify-deploy\n\
+                 \x20     to drop:      topos update coolify-deploy -g --reset"
+            ),
+            "{text}"
+        );
+
+        // Copies that disagree: ONE line, no folder named, pointing at the deep dive.
+        let text = render(
+            "project",
+            row("coolify-deploy", Some(SkillStatus::Draft), None, Some(2)),
+        );
+        assert!(
+            text.ends_with(
+                "  coolify-deploy  coolify-deploy@f154315d5fd9  (draft)  from topos.sh/ideamotive\n\
+                 \x20     draft in 2 folders that disagree (see: topos list coolify-deploy)"
+            ),
+            "{text}"
+        );
+        let text = render(
+            "machine",
+            row("coolify-deploy", Some(SkillStatus::Draft), None, Some(3)),
+        );
+        assert!(
+            text.ends_with("draft in 3 folders that disagree (see: topos list coolify-deploy -g)"),
+            "{text}"
+        );
+
+        // Not a draft: the row stands alone, whatever else it carries.
+        let text = render(
+            "project",
+            row("coolify-deploy", Some(SkillStatus::Current), None, None),
+        );
+        assert!(
+            text.ends_with(
+                "  coolify-deploy  coolify-deploy@f154315d5fd9  [current]  from topos.sh/ideamotive"
+            ),
+            "{text}"
+        );
+        assert!(!text.contains("to share:"), "{text}");
+        // An edited copy the scan could not place names nothing rather than guessing a folder.
+        let text = render(
+            "project",
+            row("coolify-deploy", Some(SkillStatus::Draft), None, None),
+        );
+        assert!(
+            text.ends_with("(draft)  from topos.sh/ideamotive"),
             "{text}"
         );
     }
@@ -4984,6 +5137,8 @@ mod tests {
                         status: Some(SkillStatus::Off),
                         kind: None,
                         source_health: None,
+                        draft_dir: None,
+                        draft_diverged: None,
                     }],
                 }],
                 signed_in: false,

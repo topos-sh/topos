@@ -862,6 +862,9 @@ fn fixtures() -> Vec<(&'static str, String)> {
                     status: Some(SkillStatus::Current),
                     kind: None,
                     source_health: None,
+                    // A clean row names no draft folder — both fields omit from the envelope.
+                    draft_dir: None,
+                    draft_diverged: None,
                 }],
             }],
             signed_in: true,

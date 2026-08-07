@@ -46,7 +46,7 @@ use crate::plane::DirectorySource;
 use crate::sessions::Session;
 use crate::sidecar;
 
-use super::inventory::{self, Resolved, Row, ScopeResolution, ScopeView, ZERO_HEX};
+use super::inventory::{self, DraftCopies, Resolved, Row, ScopeResolution, ScopeView, ZERO_HEX};
 
 /// The filesystem roots `list` probes for **untracked** skills: the user home (every harness's
 /// global skill dir resolves under it) and, optionally, the current project dir (for repo-scoped
@@ -287,7 +287,7 @@ pub(crate) fn list_with(
         let mut rows: Vec<SkillEntry> = section
             .inventory_rows()
             .filter(|r| keeps(&r.name, &r.via_channels))
-            .map(skill_entry)
+            .map(|r| skill_entry(ctx, section, r))
             .map(|e| with_source_health(e, &data.forge))
             .collect();
         if section.scope == "machine"
@@ -358,7 +358,7 @@ pub(crate) fn list_with(
 /// baseline as its identity (the system's own "never applied" sentinel — the honest reading of a
 /// required field with nothing to put in it); an `"off"` switch reads `off` — the file's own
 /// standing statement, never a delivery state.
-fn skill_entry(row: &Row) -> SkillEntry {
+fn skill_entry(ctx: &Ctx<'_>, section: &ScopeResolution, row: &Row) -> SkillEntry {
     let status = match row.state {
         StatusItemState::Applied => Some(SkillStatus::Current),
         StatusItemState::Behind => Some(SkillStatus::Behind),
@@ -367,6 +367,14 @@ fn skill_entry(row: &Row) -> SkillEntry {
         // Never applied / pending / not available / no delivery yet: no update status is honestly
         // claimable.
         _ => None,
+    };
+    // Where the edits are, as this row will print it. A folder the row cannot name (a scan that
+    // could not classify one) leaves both absent — the row still reads `(draft)` and simply says
+    // nothing it cannot prove.
+    let (draft_dir, draft_diverged) = match &row.draft_in {
+        DraftCopies::None => (None, None),
+        DraftCopies::In(dir) => (Some(draft_folder(ctx, section, dir)), None),
+        DraftCopies::Diverged(n) => (None, Some(*n as u32)),
     };
     SkillEntry {
         skill: row.name.clone(),
@@ -379,6 +387,8 @@ fn skill_entry(row: &Row) -> SkillEntry {
         status,
         kind: row.kind.clone(),
         source_health: None,
+        draft_dir,
+        draft_diverged,
     }
 }
 
@@ -404,6 +414,23 @@ fn with_source_health(
         });
     }
     entry
+}
+
+/// A draft copy's folder as the row prints it: `project/<rest>` under the folder the section's
+/// manifest governs, `~`-abbreviated anywhere else. The project spelling is the same one the
+/// `update` receipt writes its paths in — the checkout is named once (the section header's
+/// manifest, the receipt's lead line) and every path below it reads as a place inside the thing you
+/// are standing in. A dir that is not under that folder (nothing plans one there, but the read is
+/// best-effort) falls back to the plain `~`-abbreviated path rather than a `project/` prefix that
+/// would not resolve.
+fn draft_folder(ctx: &Ctx<'_>, section: &ScopeResolution, dir: &Path) -> String {
+    if section.scope == "project"
+        && let Some(root) = section.manifest_path.as_deref().and_then(Path::parent)
+        && let Ok(rest) = dir.strip_prefix(root)
+    {
+        return format!("project/{}", rest.display());
+    }
+    inventory::pretty(ctx, dir)
 }
 
 /// Where a row's bytes COME FROM, as the inventory's `from` column names it: the workspace address
@@ -543,6 +570,12 @@ fn builtin_entry(ctx: &Ctx<'_>) -> Option<SkillEntry> {
         }),
         kind: None,
         source_health: None,
+        // No folder is named for an edited built-in, deliberately: the sub-lines a named folder
+        // earns offer `publish` / `update --reset`, and neither reaches engine custody — the name
+        // is reserved workspace-side and no manifest row demands it. The honest `(draft)` flag
+        // stands alone until the next sweep force-syncs the copy back.
+        draft_dir: None,
+        draft_diverged: None,
     })
 }
 
@@ -1194,6 +1227,163 @@ mod tests {
         assert_eq!(machine.rows[0].version_id, super::ZERO_HEX);
         assert_eq!(machine.rows[0].status, None);
         assert!(out.data.machine_summary.is_none());
+    }
+
+    /// Record placements for a skill in one scope's store, each with a recorded sha no real dir
+    /// bytes can match — so an existing placement dir scans as an EDITED copy (the same shape
+    /// [`TempHome::store_applied`] lays machine-side).
+    fn lay_placements(layout: &crate::sidecar::Layout, name: &str, dirs: &[&Path]) {
+        use topos_types::persisted::{PlacementKind, PlacementState, SwapCapability};
+        let sid = crate::id::SkillId::parse(&skill_id_of(name)).unwrap();
+        crate::doc::write_map(
+            &crate::fs_seam::RealFs,
+            &layout.published(&sid).map,
+            &PlacementMap {
+                schema_version: 2,
+                placements: dirs
+                    .iter()
+                    .map(|d| d.to_string_lossy().into_owned())
+                    .collect(),
+                applied_commit: "b".repeat(64),
+                materialized_sha: "e".repeat(64),
+                pre_existing_sha: None,
+                swap_capability: SwapCapability::Unsupported,
+                harness: None,
+                harness_layer: None,
+                harness_slug: None,
+                placement_state: dirs
+                    .iter()
+                    .map(|_| PlacementState {
+                        kind: PlacementKind::Native,
+                        agent: None,
+                        materialized_sha: Some("e".repeat(64)),
+                        pre_existing_sha: None,
+                        swap_capability: SwapCapability::Unsupported,
+                        adopted_source: false,
+                    })
+                    .collect(),
+            },
+        )
+        .unwrap();
+    }
+
+    /// A placed copy holding `body` — enough for the scanner to read it as a bundle.
+    fn lay_copy(dir: &Path, body: &str) {
+        std::fs::create_dir_all(dir).unwrap();
+        std::fs::write(dir.join("SKILL.md"), body.as_bytes()).unwrap();
+    }
+
+    fn row_named<'a>(scope: &'a ListScope, name: &str) -> &'a SkillEntry {
+        scope
+            .rows
+            .iter()
+            .find(|r| r.skill == name)
+            .unwrap_or_else(|| panic!("no {name} row in {:?}", scope.rows))
+    }
+
+    /// A draft row NAMES the folder its edits sit in — the one thing `(draft)` alone never said.
+    /// The folder is written against the project the section's manifest governs, and it comes off
+    /// the SAME scan that decides the row is edited at all (no second walk of the disk).
+    #[test]
+    fn a_project_draft_row_names_its_folder_against_the_project() {
+        let home = TempHome::new();
+        let repo = lay_project(&home);
+        let placed = repo.join(".claude/skills/repo-helper");
+        lay_copy(&placed, "# edited by hand\n");
+        lay_placements(
+            &crate::sidecar::project_store_layout(&repo),
+            "repo-helper",
+            &[&placed],
+        );
+
+        let out = run(&home, &repo, &request()).unwrap();
+        let row = row_named(scope(&out, "project"), "repo-helper");
+        assert!(row.draft, "{row:?}");
+        assert_eq!(
+            row.draft_dir.as_deref(),
+            Some("project/.claude/skills/repo-helper"),
+            "{row:?}"
+        );
+        assert_eq!(row.draft_diverged, None, "{row:?}");
+        // A row with no edits claims no folder.
+        let clean = row_named(scope(&out, "project"), "deploy");
+        assert!(!clean.draft, "{clean:?}");
+        assert_eq!(clean.draft_dir, None, "{clean:?}");
+        assert_eq!(clean.draft_diverged, None, "{clean:?}");
+        // Composed: the whole block as a person reads it, off a real scan.
+        let text = crate::render::list_tty(&out);
+        assert!(
+            text.contains(
+                "      draft in project/.claude/skills/repo-helper (not shared)\n\
+                 \x20     to share:     topos publish repo-helper\n\
+                 \x20     to view diff: topos diff repo-helper\n\
+                 \x20     to drop:      topos update repo-helper --reset\n"
+            ),
+            "{text}"
+        );
+    }
+
+    /// Copies whose edits DISAGREE name no folder — none of them is the draft — and report how
+    /// many disagree instead. The count is the freeze's own: one per distinct content.
+    #[test]
+    fn competing_copies_report_their_count_and_no_folder() {
+        let home = TempHome::new();
+        let repo = lay_project(&home);
+        let one = repo.join(".claude/skills/repo-helper");
+        let two = repo.join(".agents/skills/repo-helper");
+        lay_copy(&one, "# this way\n");
+        lay_copy(&two, "# that way\n");
+        lay_placements(
+            &crate::sidecar::project_store_layout(&repo),
+            "repo-helper",
+            &[&one, &two],
+        );
+
+        let out = run(&home, &repo, &request()).unwrap();
+        let row = row_named(scope(&out, "project"), "repo-helper");
+        assert!(row.draft, "{row:?}");
+        assert_eq!(row.draft_dir, None, "{row:?}");
+        assert_eq!(row.draft_diverged, Some(2), "{row:?}");
+    }
+
+    /// A MACHINE-scope draft keeps the `~/` spelling — the `project/` token means the checkout
+    /// you are standing in, and a machine copy is not in one.
+    #[test]
+    fn a_machine_draft_row_keeps_the_home_spelling() {
+        let home = TempHome::new();
+        let cwd = home.0.join("plain");
+        std::fs::create_dir_all(&cwd).unwrap();
+        home.session(
+            "topos.sh",
+            "w_acme",
+            "acme",
+            crate::sessions::SESSION_ACTIVE,
+        );
+        home.cache(
+            "w_acme",
+            "topos.sh",
+            "acme",
+            vec![assigned("notes", None)],
+            Vec::new(),
+        );
+        home.global("[bundles]\n\"topos.sh/acme\" = \"*\"\n");
+        let placed = home.0.join(".claude/skills/notes");
+        lay_copy(&placed, "# edited by hand\n");
+        home.store_applied(
+            &skill_id_of("notes"),
+            "notes",
+            &"d".repeat(64),
+            &[placed.to_string_lossy().as_ref()],
+        );
+
+        let out = run(&home, &cwd, &request()).unwrap();
+        let row = row_named(scope(&out, "machine"), "notes");
+        assert!(row.draft, "{row:?}");
+        assert_eq!(
+            row.draft_dir.as_deref(),
+            Some("~/.claude/skills/notes"),
+            "{row:?}"
+        );
     }
 
     /// `-g` inside a project: machine rows only — scope-blind like `update -g`.

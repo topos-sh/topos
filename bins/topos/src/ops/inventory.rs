@@ -51,6 +51,24 @@ pub(crate) enum ScopeView {
     All,
 }
 
+/// What a row's local edits amount to ON DISK — the draft classification's own verdict, kept so a
+/// listing can NAME the folder a person would open instead of only flagging that edits exist. It is
+/// the [`crate::placement::classify_draft`] answer verbatim (one edited copy is THE draft; copies
+/// that explain none of the others are the freeze), carried rather than recomputed: the scan that
+/// decides a row is edited at all is the one being classified.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) enum DraftCopies {
+    /// No edited copy — or a read that could not classify one (an unreadable map, a scan that
+    /// failed). A row with nothing provable to say about a folder says nothing.
+    #[default]
+    None,
+    /// Exactly one advanced edited copy — THE draft — in this folder.
+    In(PathBuf),
+    /// Several copies hold edits that disagree, in this many folders (always ≥ 2). No single one
+    /// is the draft, so none can be named.
+    Diverged(usize),
+}
+
 /// One resolved line plus the provenance the deep answer spells out.
 pub(crate) struct Row {
     /// The bundle's name (the dedupe key within a scope).
@@ -82,6 +100,8 @@ pub(crate) struct Row {
     pub pin: Option<String>,
     /// The placement dirs this machine holds for it.
     pub placements: Vec<String>,
+    /// Where this row's local EDITS sit, when it has any (see [`DraftCopies`]).
+    pub draft_in: DraftCopies,
     /// A BUNDLE line (not an `"off"` switch) — what the inventory counts as a delivered skill.
     pub bundle: bool,
     /// The cached bundle kind (`Some("mcp")` for a config-placed bundle; `None` = a skill).
@@ -476,6 +496,7 @@ fn scope_rows(
             feed: None,
             pin: row.pin(),
             placements: applied.placements,
+            draft_in: applied.draft_in,
             bundle: true,
             kind,
             harness_states,
@@ -519,6 +540,7 @@ fn scope_rows(
                     feed: None,
                     pin: row.pin(),
                     placements: member.applied.placements,
+                    draft_in: member.applied.draft_in,
                     bundle: true,
                     // A repo-set member is always a skill: `kind = "mcp"` on GitHub rows refuses.
                     kind: None,
@@ -575,6 +597,7 @@ fn scope_rows(
                 feed: None,
                 pin: None,
                 placements: applied.placements,
+                draft_in: applied.draft_in,
                 bundle: true,
                 kind: ds.kind.clone(),
                 harness_states: ds.harness_states.clone(),
@@ -632,6 +655,7 @@ fn scope_rows(
                 feed: Some(feed.clone()),
                 pin: None,
                 placements: applied.placements,
+                draft_in: applied.draft_in,
                 bundle: true,
                 kind: ds.kind.clone(),
                 harness_states: ds.harness_states.clone(),
@@ -697,6 +721,8 @@ fn scope_rows(
             feed: None,
             pin: None,
             placements: Vec::new(),
+            // An `"off"` switch is a statement of the file, never a placed copy — nothing to edit.
+            draft_in: DraftCopies::None,
             bundle: false,
             kind: None,
             harness_states: Vec::new(),
@@ -875,6 +901,7 @@ struct Applied {
     version: Option<String>,
     digest: Option<String>,
     placements: Vec<String>,
+    draft_in: DraftCopies,
 }
 
 impl Applied {
@@ -884,6 +911,7 @@ impl Applied {
             version: None,
             digest: None,
             placements: Vec::new(),
+            draft_in: DraftCopies::None,
         }
     }
 
@@ -925,13 +953,27 @@ fn applied_for_id(
     let digest = Some(lock.bundle_digest.clone());
     let mut placements = Vec::new();
     let mut edited = false;
+    let mut draft_in = DraftCopies::None;
     if let Ok(Some(map)) = doc::read_map(ctx.fs, &sp.map) {
         placements.clone_from(&map.placements);
         let scoped = super::pull::ctx_with_layout(ctx, layout);
         if let Ok(scans) = placement::scan_placements(&scoped, &map) {
-            edited = scans
-                .iter()
-                .any(|s| matches!(s.status, placement::ScanStatus::Modified { .. }));
+            // The ONE draft classification — the same verdict the sync engine reconciles with —
+            // read off the scan that was happening anyway. `edited` stays a separate flag so a
+            // verdict whose folder cannot be named still reports the state it always did.
+            match placement::classify_draft(&scans, &map) {
+                placement::DraftVerdict::NoDraft => {}
+                placement::DraftVerdict::One { idx, .. } => {
+                    edited = true;
+                    if let Some(scan) = scans.get(idx) {
+                        draft_in = DraftCopies::In(scan.dir.clone());
+                    }
+                }
+                placement::DraftVerdict::Competitors(indices) => {
+                    edited = true;
+                    draft_in = DraftCopies::Diverged(indices.len());
+                }
+            }
         }
     }
     if edited {
@@ -940,6 +982,7 @@ fn applied_for_id(
             version,
             digest,
             placements,
+            draft_in,
         };
     }
     if !served_version.is_empty() && served_version != lock.base_commit {
@@ -948,6 +991,7 @@ fn applied_for_id(
             version,
             digest,
             placements,
+            draft_in: DraftCopies::None,
         };
     }
     Applied {
@@ -955,6 +999,7 @@ fn applied_for_id(
         version,
         digest,
         placements,
+        draft_in: DraftCopies::None,
     }
 }
 
