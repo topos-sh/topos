@@ -1038,10 +1038,31 @@ fn scope_header(scope: &str, manifest: Option<&str>) -> String {
     }
 }
 
+/// The INVENTORY's own section header — the listing names what the section holds and which file
+/// governs it, once, so no row below has to repeat the file. `status` keeps its own heading
+/// ([`scope_header`]): a health panel answers where you stand, not what is installed.
+fn list_scope_header(scope: &str, manifest: Option<&str>) -> String {
+    let what = if scope == "project" {
+        "Project bundles"
+    } else {
+        "Machine-wide bundles"
+    };
+    match manifest {
+        Some(f) => format!("{what} ({f}):"),
+        None if scope == "project" => format!("{what}:"),
+        None => format!("{what} (no ~/.topos/topos.toml):"),
+    }
+}
+
 /// The `list` TTY — the inventory: the scope sections in full (or, under `--untracked`, one
 /// summary line each), then whatever the optional views carry, then the quiet-rule summary lines
 /// (each EXACTLY one line ending in the command that expands it), the paging markers, the
 /// isolated warnings, and the footprint.
+///
+/// ONE list of bundles: every managed line rides a scope section, and each one names its own
+/// origin in the `from` column. Nothing a row could say gets its own trailing block — an external
+/// repository is where a bundle comes from, not a second kind of thing to enumerate. What a row
+/// CANNOT say still rides the tail: a source that has stopped answering (see [`push_list_tail`]).
 pub(crate) fn list_tty(out: &ListOutcome) -> String {
     let data = &out.data;
     let mut s = String::new();
@@ -1088,7 +1109,7 @@ pub(crate) fn list_tty(out: &ListOutcome) -> String {
         }
     } else {
         for scope in &data.scopes {
-            s.push_str(&scope_header(&scope.scope, scope.manifest.as_deref()));
+            s.push_str(&list_scope_header(&scope.scope, scope.manifest.as_deref()));
             s.push('\n');
             if scope.rows.is_empty() {
                 s.push_str("  (nothing installed in this scope)\n");
@@ -1178,10 +1199,28 @@ pub(crate) fn list_tty(out: &ListOutcome) -> String {
 /// footprint in `--json`, so they print it here too.
 fn push_list_tail(s: &mut String, out: &ListOutcome) {
     let data = &out.data;
-    // The external sources' last check — the same block `status` shows, for the same reason.
-    let forge = forge_block(&data.forge);
-    if !forge.is_empty() {
-        s.push_str(forge.trim_start_matches('\n'));
+    // The external sources. The ONE-SKILL dive prints the source that delivers it whatever its
+    // state — the resolution narrowed the block to that one repository, so its last check reads as
+    // one more fact about the bundle on screen. Every other view prints only the sources in
+    // TROUBLE: a healthy source is already named on each row it delivers (the `from` column), so
+    // repeating it under the list is a block that says nothing new — while a source that has
+    // stopped answering is news, and an inventory that swallowed it would let a row read
+    // `[current]` for weeks with nobody told why it stopped moving.
+    let troubled: Vec<topos_types::results::ForgeSource>;
+    let forge = if data.detail.is_some() {
+        &data.forge[..]
+    } else {
+        troubled = data
+            .forge
+            .iter()
+            .filter(|f| f.error.is_some())
+            .cloned()
+            .collect();
+        &troubled[..]
+    };
+    let block = forge_block(forge);
+    if !block.is_empty() {
+        s.push_str(block.trim_start_matches('\n'));
         s.push('\n');
     }
     // An explicit `--limit`/`--offset` page on the TTY: one line per capped bucket.
@@ -1285,8 +1324,10 @@ fn list_row(entry: &SkillEntry, scope: &str) -> String {
     )
 }
 
-/// The STATUS / SOURCE suffix for an inventory row (`  [behind]  from acme`) — rendered only for
-/// the fields the resolution populated.
+/// The STATUS / SOURCE suffix for an inventory row (`  [behind]  from topos.sh/acme`) — rendered
+/// only for the fields the resolution populated. The source is the row's ORIGIN (the workspace
+/// address, the repository, the local folder), never the manifest file: the section header names
+/// that file once, and a column that repeats it per row says nothing the reader did not have.
 fn list_columns(entry: &SkillEntry) -> String {
     use topos_types::results::SkillStatus;
     let mut s = String::new();
@@ -1307,9 +1348,7 @@ fn list_columns(entry: &SkillEntry) -> String {
         };
         s.push_str(&format!("  [{label}]"));
     }
-    if let Some(source) = &entry.source
-        && source != "local"
-    {
+    if let Some(source) = &entry.source {
         s.push_str(&format!("  from {source}"));
     }
     s
@@ -1814,8 +1853,11 @@ pub(crate) fn status_tty(d: &topos_types::results::StatusData) -> String {
     s
 }
 
-/// The external sources' last auto-update check, as `status` and `list` both show it — the plain
-/// answer to "is this even working?". Empty when nothing external is tracked here.
+/// The external sources' last auto-update check — the plain answer to "is this even working?".
+/// Empty when nothing external is tracked here. `status` shows it over every source the shown
+/// scopes name; `list` shows it in full only on the one-skill deep dive (narrowed to that skill's
+/// own repository), and elsewhere only for the sources in trouble — the listing names each row's
+/// origin in its `from` column, so a healthy source needs no line of its own there.
 ///
 /// A failure is stated where a person can act on it, never counted as an emergency: the copies on
 /// disk keep working through every one of these, which is why the silent sweep stays quiet about
@@ -4061,7 +4103,7 @@ mod tests {
             bundle_digest: "cd".repeat(32),
             draft: false,
             pending_proposals: Vec::new(),
-            source: Some("the topos.sh/acme feed".to_owned()),
+            source: Some("topos.sh/acme".to_owned()),
             status,
             kind: None,
         };
@@ -4069,7 +4111,7 @@ mod tests {
             data: ListData {
                 scopes: vec![ListScope {
                     scope: "project".to_owned(),
-                    manifest: Some("/repo/topos.toml".to_owned()),
+                    manifest: Some("./topos.toml".to_owned()),
                     rows: vec![
                         entry("deploy", &"ab".repeat(32), Some(SkillStatus::Current)),
                         // Never applied here: the all-zero identity renders as the honest note.
@@ -4093,15 +4135,17 @@ mod tests {
             untracked_view: false,
         };
         let text = list_tty(&out);
-        // The section leads with the governing file.
+        // The section says what it holds and names the governing file ONCE.
         assert!(
-            text.starts_with("This folder — /repo/topos.toml\n"),
+            text.starts_with("Project bundles (./topos.toml):\n"),
             "{text}"
         );
+        // Every row names its ORIGIN, not the file the header already named.
         assert!(
-            text.contains("deploy  deploy@abababababab  [current]  from the topos.sh/acme feed"),
+            text.contains("deploy  deploy@abababababab  [current]  from topos.sh/acme"),
             "{text}"
         );
+        assert!(!text.contains("from ./topos.toml"), "{text}");
         assert!(
             text.contains("fresh  (not applied here yet — `topos update` applies it)"),
             "{text}"
@@ -4141,7 +4185,7 @@ mod tests {
         };
         let text = list_tty(&out);
         assert!(
-            text.starts_with("Machine-wide — no global manifest; nothing demanded machine-wide"),
+            text.starts_with("Machine-wide bundles (no ~/.topos/topos.toml):"),
             "{text}"
         );
         assert!(text.contains("(nothing installed in this scope)"), "{text}");
@@ -4346,7 +4390,7 @@ mod tests {
             data: ListData {
                 scopes: vec![ListScope {
                     scope: "machine".to_owned(),
-                    manifest: Some("/home/u/.topos/topos.toml".to_owned()),
+                    manifest: Some("~/.topos/topos.toml".to_owned()),
                     rows: vec![SkillEntry {
                         skill: "deploy".to_owned(),
                         workspace_id: None,
@@ -4354,7 +4398,7 @@ mod tests {
                         bundle_digest: "0".repeat(64),
                         draft: false,
                         pending_proposals: Vec::new(),
-                        source: Some("/home/u/.topos/topos.toml".to_owned()),
+                        source: Some("topos.sh/acme".to_owned()),
                         status: Some(SkillStatus::Off),
                         kind: None,
                     }],

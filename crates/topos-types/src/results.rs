@@ -349,9 +349,10 @@ pub struct ListData {
 pub struct ListScope {
     /// `"project"` (the nearest `topos.toml` covering the working directory) or `"machine"`.
     pub scope: String,
-    /// The governing manifest file; `None` = no machine-wide file — nothing is demanded
-    /// machine-wide (`topos login` writes a feed row on this machine's first connection to a
-    /// workspace).
+    /// The governing manifest file, spelled as a person standing here reads it: a project manifest
+    /// relative to the working directory (`./topos.toml`, `../topos.toml`), the machine file
+    /// `~`-abbreviated. `None` = no machine-wide file — nothing is demanded machine-wide (`topos
+    /// login` writes a feed row on this machine's first connection to a workspace).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub manifest: Option<String>,
     /// The scope's inventory rows.
@@ -633,8 +634,10 @@ pub struct SkillEntry {
     /// Open proposals, each as `<skill>@<version_id>`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pending_proposals: Vec<String>,
-    /// Where the bytes come from: the followed workspace's address name, an imported skill's origin
-    /// host, or `local` for a purely local `add`. **INFERRED** (additive).
+    /// Where the bytes come from — the ORIGIN, never the manifest that asked for it: the workspace
+    /// address (`topos.sh/acme`) for anything a workspace delivers, the repository
+    /// (`github.com/owner/repo`) for a forge row, the folder as the manifest spells it for a local
+    /// one, `built-in` for the CLI's own meta-skill. **INFERRED** (additive).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
     /// The update status of the local copy: `current` / `behind` / `draft` / `off`. Absent when
