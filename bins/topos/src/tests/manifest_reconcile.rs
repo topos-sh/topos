@@ -6749,15 +6749,17 @@ fn a_committed_skills_symlink_is_refused_as_a_placement_root() {
 }
 
 // =================================================================================================
-// The applied report's cross-store pick is deterministic, and a version split is disclosed.
+// The applied report's cross-store pick is deterministic; cross-scope STALENESS is disclosed and
+// a deliberate pin is not.
 // =================================================================================================
 
 #[test]
-fn a_bundle_held_at_two_versions_reports_the_person_copy_and_discloses_the_split() {
+fn a_bundle_held_at_two_versions_reports_the_person_copy_and_says_nothing_about_a_pin() {
     // The wire carries ONE row per (session, bundle). Which store answers must not depend on which
     // checkout the update happened to run from — the PERSON store answers whenever it holds the
-    // bundle — and the version the OTHER store holds must not simply vanish from the person's view.
-    // The split only EXISTS once both scopes have converged, so this rides the background sweep.
+    // bundle. The OTHER store's version is a DIFFERENCE, and here a deliberate one: the project
+    // row is pinned, so no line is earned. Difference is the design working; only staleness is
+    // news, and only when a command from here would fix it.
     let rig = Rig::new("split-report");
     rig.seed_session();
     rig.seed_feed();
@@ -6795,20 +6797,135 @@ fn a_bundle_held_at_two_versions_reports_the_person_copy_and_discloses_the_split
         .find(|(id, ..)| id == "s_deploy")
         .unwrap_or_else(|| panic!("the bundle is reported: {reported:?}"));
     assert_eq!(row.1, topos_core::digest::to_hex(&v2.id), "{reported:?}");
-    // And the split the single row cannot carry is said out loud.
-    let line = out
-        .disclosures
-        .iter()
-        .find(|w| w.starts_with("VERSION_SPLIT"))
-        .unwrap_or_else(|| panic!("the split is disclosed: {:?}", out.disclosures));
-    assert!(line.contains("s_deploy"), "{line}");
+    // The pin is a CHOICE, so the receipt says nothing about it: no staleness entry, no line, and
+    // above all no internal warning code on a run where everything went right.
     assert!(
-        line.contains(&v1_hex[..12]),
-        "names the other version: {line}"
+        out.data.behind_elsewhere.is_empty(),
+        "a pinned row is deliberate, never behind: {:?}",
+        out.data.behind_elsewhere
+    );
+    let tty = crate::render::pull_tty(&out.data, &out.warnings, &out.advisories, &out.disclosures);
+    assert!(!tty.contains("behind"), "{tty}");
+    assert!(!tty.contains("VERSION_SPLIT"), "{tty}");
+    assert!(!tty.contains(&v1_hex[..12]), "{tty}");
+}
+
+#[test]
+fn the_machine_copy_left_behind_by_a_project_update_earns_the_counted_trailer() {
+    // The other half of the rule: a copy that differs because it is simply OLD — no pin, no `off`,
+    // nothing deliberate — IS news, and the receipt closes with the count and the one command
+    // that fixes it. This run drives the PROJECT (the scope rule), so the machine-wide copy is
+    // exactly what nothing here touched.
+    let rig = Rig::new("behind-machine");
+    rig.seed_session();
+    rig.seed_feed();
+    let v1 = one_file(b"# deploy v1\n");
+    let v2 = one_file(b"# deploy v2\n");
+    let proj = project(
+        "proj-behind",
+        &format!("[bundles]\n\"{HOST}/{WS_NAME}/deploy\" = \"*\"\n"),
+    );
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let plane = FakePlane::new(log)
+        .with_version("s_deploy", &v1)
+        .with_version("s_deploy", &v2);
+    let dir = FakeDirectory::new(vec![catalog_entry("s_deploy", "deploy", &v1)], Vec::new());
+
+    // Both scopes land v1 (the background sweep drives both).
+    plane.serves(vec![delivered("s_deploy", "deploy", &v1)]);
+    let ctx = rig.ctx_at(Some(&proj.0));
+    sweep_both(&ctx, &plane, &dir);
+    assert_eq!(
+        std::fs::read(rig.work.0.join("skills/deploy/SKILL.md")).unwrap(),
+        b"# deploy v1\n"
+    );
+
+    // Current moves; a HAND-RUN update from inside the checkout drives the project alone.
+    let mut served = delivered("s_deploy", "deploy", &v2);
+    served.generation = 2;
+    plane.serves(vec![served]);
+    let mut listed = catalog_entry("s_deploy", "deploy", &v2);
+    listed.generation = 2;
+    let dir = FakeDirectory::new(vec![listed], Vec::new());
+    let out = sweep(&ctx, &plane, &dir);
+    assert_eq!(
+        std::fs::read(proj.0.join(".claude/skills/deploy/SKILL.md")).unwrap(),
+        b"# deploy v2\n",
+        "the scope you stand in is the one that moves"
+    );
+    assert_eq!(
+        std::fs::read(rig.work.0.join("skills/deploy/SKILL.md")).unwrap(),
+        b"# deploy v1\n",
+        "the machine-wide copy was never driven"
+    );
+    assert_eq!(
+        out.data.behind_elsewhere,
+        vec![topos_types::results::BehindElsewhere {
+            bundle: "deploy".to_owned(),
+            project_dir: None,
+        }],
+        "the machine's own copy is the one behind"
+    );
+    let tty = crate::render::pull_tty(&out.data, &out.warnings, &out.advisories, &out.disclosures);
+    assert!(
+        tty.ends_with("1 bundle behind machine-wide — `topos update -g` updates it."),
+        "{tty}"
+    );
+
+    // Run THAT command and the line is gone — a trailer nobody can clear is a nag, not a receipt.
+    let after = sweep_scoped(&ctx, &plane, &dir, ops::UpdateScope::Machine);
+    assert!(
+        after.data.behind_elsewhere.is_empty(),
+        "{:?}",
+        after.data.behind_elsewhere
+    );
+}
+
+#[test]
+fn an_off_row_is_never_reported_behind() {
+    // The `"off"` switch is the other deliberate spelling: the machine keeps its copy but stops
+    // taking the workspace's version of it. Nothing would ever bring it to current, so a line
+    // saying it is behind could never be cleared.
+    let rig = Rig::new("behind-off");
+    rig.seed_session();
+    let v1 = one_file(b"# deploy v1\n");
+    let v2 = one_file(b"# deploy v2\n");
+    let proj = project(
+        "proj-off",
+        &format!("[bundles]\n\"{HOST}/{WS_NAME}/deploy\" = \"*\"\n"),
+    );
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let plane = FakePlane::new(log)
+        .with_version("s_deploy", &v1)
+        .with_version("s_deploy", &v2);
+    let dir = FakeDirectory::new(vec![catalog_entry("s_deploy", "deploy", &v1)], Vec::new());
+    rig.seed_feed();
+    plane.serves(vec![delivered("s_deploy", "deploy", &v1)]);
+    let ctx = rig.ctx_at(Some(&proj.0));
+    sweep_both(&ctx, &plane, &dir);
+
+    // The machine switches the bundle off AFTER its copy landed, then current moves on. The `off`
+    // row is global-file-only, so the copy STAYS on disk at v1 — materially behind v2, and
+    // deliberately so.
+    rig.write_global(&format!(
+        "[bundles]\n\"{HOST}/{WS_NAME}\" = \"*\"\n\"{HOST}/{WS_NAME}/deploy\" = \"off\"\n"
+    ));
+    let mut served = delivered("s_deploy", "deploy", &v2);
+    served.generation = 2;
+    plane.serves(vec![served]);
+    let mut listed = catalog_entry("s_deploy", "deploy", &v2);
+    listed.generation = 2;
+    let dir = FakeDirectory::new(vec![listed], Vec::new());
+    let out = sweep(&ctx, &plane, &dir);
+    assert_eq!(
+        std::fs::read(rig.work.0.join("skills/deploy/SKILL.md")).unwrap(),
+        b"# deploy v1\n",
+        "the switched-off copy is left exactly where it was"
     );
     assert!(
-        line.contains(&proj.0.display().to_string()),
-        "names which store holds it: {line}"
+        out.data.behind_elsewhere.is_empty(),
+        "an `off` row is a choice: {:?}",
+        out.data.behind_elsewhere
     );
 }
 
@@ -12397,7 +12514,7 @@ fn healing_a_deleted_placement_reads_installed_never_all_up_to_date() {
             &clean.advisories,
             &clean.disclosures
         ),
-        "updated machine-wide\nChecked 1 managed skill(s) — all up to date."
+        "updated machine-wide\nChecked 1 skill: all up to date."
     );
 
     // The placement folder vanishes (a hand-delete, an agent cleanup). The next update re-creates
@@ -12442,7 +12559,7 @@ fn healing_a_deleted_placement_reads_installed_never_all_up_to_date() {
             &again.advisories,
             &again.disclosures
         ),
-        "updated machine-wide\nChecked 1 managed skill(s) — all up to date."
+        "updated machine-wide\nChecked 1 skill: all up to date."
     );
 }
 

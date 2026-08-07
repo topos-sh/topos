@@ -2197,7 +2197,10 @@ fn a_rows_dest_files_narrow_the_placement_and_unknown_files_warn_once() {
         receipt.contains("MCP_DEST_UNKNOWN"),
         "still warned: {receipt}"
     );
-    assert!(receipt.contains("Checked 1 managed bundle(s)"), "{receipt}");
+    assert!(
+        receipt.contains("Checked 1 bundle: all up to date."),
+        "{receipt}"
+    );
     assert!(
         !receipt.contains("failed"),
         "a delivered bundle is not a failure: {receipt}"
@@ -2258,7 +2261,7 @@ fn a_skill_rows_folder_dest_never_warns_mcp_dest_unknown() {
             &clean.advisories,
             &clean.disclosures
         ),
-        "updated machine-wide\nChecked 1 managed skill(s) — all up to date."
+        "updated machine-wide\nChecked 1 skill: all up to date."
     );
 }
 

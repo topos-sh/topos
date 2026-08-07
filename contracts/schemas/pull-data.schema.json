@@ -4,6 +4,13 @@
   "description": "`pull` result — per-skill update status plus the reviewer-queue count. **PINNED** (the original\nfields); `notices` + `sync` are ADDITIVE (the delivery-driven sweep's feed + freshness — absent\non a targeted pull and from an older producer).",
   "type": "object",
   "properties": {
+    "behind_elsewhere": {
+      "description": "Bundles this installation holds at an OLDER version in a scope this run did not reconcile\n— the cross-scope staleness the ONE applied row per bundle cannot carry. Empty (and\nomitted) whenever every other scope is current, and whenever the difference is DELIBERATE\n(a pinned or `\"off\"` row, a local go-back): a copy that is meant to differ is not behind.\n**INFERRED** (additive).",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/BehindElsewhere"
+      }
+    },
     "notices": {
       "description": "The unacked, person-scoped notices the delivery answered (verdicts first) — narrated by an\ninteractive `update`, which then acks exactly these ids; the quiet hook fetches without\nacking. **INFERRED** (additive).",
       "type": "array",
@@ -43,6 +50,26 @@
     "proposals_awaiting"
   ],
   "$defs": {
+    "BehindElsewhere": {
+      "description": "One bundle whose copy in ANOTHER scope stands behind the workspace's current. **INFERRED**\n(additive).",
+      "type": "object",
+      "properties": {
+        "bundle": {
+          "description": "The bundle's catalog name.",
+          "type": "string"
+        },
+        "project_dir": {
+          "description": "The project directory whose copy is behind (display path, `~`-abbreviated). Absent ⇒ the\nmachine-wide copy, which `topos update -g` brings current.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "bundle"
+      ]
+    },
     "Conflict": {
       "description": "The DIVERGED panel (local draft vs newer remote). **INFERRED fields.**",
       "type": "object",

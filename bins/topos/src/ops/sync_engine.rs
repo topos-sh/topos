@@ -319,16 +319,18 @@ pub(crate) fn sync_one_planned(
                 let mut row = state_row(&name, &sync, PullAction::Installed);
                 row.destinations = converged.created;
                 // A refresh alongside a creation rides the same row: the install leads (a folder
-                // appeared), the refreshed copies are named as the second fact rather than
+                // appeared), the caught-up copies are named as the second fact rather than
                 // relabelled `installed` or dropped.
                 if !converged.refreshed.is_empty() {
-                    row.note = Some(also_line("refreshed", &converged.refreshed));
+                    row.note = Some(also_line("updated", &converged.refreshed));
                 }
                 return Ok(row);
             }
             if !converged.refreshed.is_empty() {
                 let mut row = state_row(&name, &sync, PullAction::Refreshed);
-                row.destinations = converged.refreshed;
+                // Every folder holding the applied version, not only the ones rewritten — a
+                // bundle in two folders that needed one rewrite still lives in two folders.
+                row.destinations = converged.at_version;
                 return Ok(row);
             }
             return Ok(state_row(&name, &sync, PullAction::UpToDate));
@@ -943,6 +945,11 @@ fn converge_placements(
     let mut absent: Vec<usize> = Vec::new();
     let mut stale: Vec<usize> = Vec::new();
     let mut missing: Vec<usize> = Vec::new();
+    // Already holding the applied version before this run touched anything. Not a target — but
+    // the receipt's destination column counts it, because it IS one of the places the bundle is.
+    // An EDITED copy is deliberately excluded: it does not hold this version, and the removal
+    // receipt's `kept …` line is what speaks for it.
+    let mut settled: Vec<usize> = Vec::new();
     for &i in managed {
         let Some(s) = work.scans.get(i) else { continue };
         match &s.status {
@@ -959,6 +966,9 @@ fn converge_placements(
             {
                 stale.push(i);
                 missing.push(i);
+            }
+            ScanStatus::Clean { digest } if to_hex(digest) == lock.bundle_digest => {
+                settled.push(i);
             }
             // Edited, foreign, or unreadable dirs are never converge targets.
             ScanStatus::Clean { .. }
@@ -1009,33 +1019,53 @@ fn converge_placements(
     // What this run REFRESHED: a stale target whose recorded baseline NOW names the applied
     // version — the same existence-over-intent rule (a target the materializer re-stat-skipped
     // keeps its old baseline and claims nothing).
-    let refreshed = stale
+    let caught_up: Vec<usize> = stale
         .iter()
-        .filter(|&&i| {
+        .copied()
+        .filter(|&i| {
             after
                 .placement_state
                 .get(i)
                 .is_some_and(|st| st.materialized_sha.as_deref() == Some(&lock.bundle_digest))
         })
-        .filter_map(|&i| after.placements.get(i))
-        .map(|p| super::inventory::pretty(ctx, Path::new(p)))
         .collect();
+    let pretty = |i: &usize| {
+        after
+            .placements
+            .get(*i)
+            .map(|p| super::inventory::pretty(ctx, Path::new(p)))
+    };
+    let refreshed: Vec<String> = caught_up.iter().filter_map(pretty).collect();
+    // Where the bundle stands at the applied version now, in placement-map order: the copies that
+    // caught up, plus the ones that were already there. `created` is deliberately absent — a dir
+    // that appeared this run leads its own `installed` row, which names it.
+    let mut at_version: Vec<usize> = caught_up;
+    at_version.extend(settled);
+    at_version.sort_unstable();
+    let at_version = at_version.iter().filter_map(pretty).collect();
     Ok(LocalConverge {
         map: after,
         created,
         refreshed,
+        at_version,
     })
 }
 
-/// A local placement converge's outcome: the COMMITTED map, plus the two disk facts a receipt
-/// speaks differently about (display paths, receipt-ready) — the placements it CREATED (dirs
-/// materialized where nothing stood) and the stale copies it REFRESHED (dirs that existed but
-/// held bytes behind the applied version). Creations flip the row to `installed`, refreshes to
-/// `refreshed`: "up to date" may only claim itself when nothing changed on disk.
+/// A local placement converge's outcome: the COMMITTED map, plus the disk facts a receipt speaks
+/// differently about (display paths, receipt-ready) — the placements it CREATED (dirs materialized
+/// where nothing stood) and the stale copies it REFRESHED (dirs that existed but held bytes behind
+/// the applied version). Creations flip the row to `installed`, refreshes to `refreshed`: "up to
+/// date" may only claim itself when nothing changed on disk.
+///
+/// `at_version` is a different KIND of fact, and the one a person actually asked for: not what the
+/// disk did, but WHERE the bundle now stands at the applied version — the refreshed copies plus
+/// every sibling that already held those bytes. A row that names only what it rewrote reports one
+/// folder for a bundle that lives in two, which reads as a placement having gone missing.
 struct LocalConverge {
     map: PlacementMap,
     created: Vec<String>,
     refreshed: Vec<String>,
+    at_version: Vec<String>,
 }
 
 impl LocalConverge {
@@ -1045,12 +1075,13 @@ impl LocalConverge {
             map: map.clone(),
             created: Vec::new(),
             refreshed: Vec::new(),
+            at_version: Vec::new(),
         }
     }
 }
 
 /// The SECOND fact a receipt row carries when this run wrote folders its action does not name —
-/// `also installed <path>` / `also refreshed <path>` (several join with ", "). It rides the row's
+/// `also installed <path>` / `also updated <path>` (several join with ", "). It rides the row's
 /// `note`, which the renderer prints as an indented line under the row.
 pub(crate) fn also_line(verb: &str, dirs: &[String]) -> String {
     format!("also {verb} {}", dirs.join(", "))

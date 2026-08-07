@@ -153,14 +153,15 @@ impl Driven {
         }
     }
 
-    /// The receipt's scope name: `"project <dir>"`, `"machine"`, or `"both"`.
-    fn label(&self, project_dir: Option<&Path>) -> String {
+    /// The receipt's scope name: `"project <dir>"`, `"machine"`, or `"both"`. The directory comes
+    /// in DISPLAY spelling (`~`-abbreviated) — the receipt names it once and then writes every
+    /// path below it relative to it, which only works while both are spelled the same way.
+    fn label(&self, project_dir: Option<&str>) -> String {
         match (self.project, self.person) {
             (true, true) => "both".to_owned(),
-            (true, false) => project_dir.map_or_else(
-                || "project".to_owned(),
-                |d| format!("project {}", d.display()),
-            ),
+            (true, false) => {
+                project_dir.map_or_else(|| "project".to_owned(), |d| format!("project {d}"))
+            }
             _ => "machine".to_owned(),
         }
     }
@@ -1125,7 +1126,10 @@ pub(crate) fn manifest_update(
             .warnings
             .push(format!("MANIFEST_INVALID {}", e.detail()));
     }
-    let scope_label = driven.label(project_dir.as_deref());
+    let project_display = project_dir
+        .as_deref()
+        .map(|d| super::inventory::pretty(ctx, d));
+    let scope_label = driven.label(project_display.as_deref());
 
     // ---- 2. Dial each live session's delivery. ----
     let all_sessions = sessions::read_sessions(ctx.fs, &ctx.layout)?;
@@ -1450,6 +1454,8 @@ pub(crate) fn manifest_update(
     // filtered through it keep reporting until their placements really go (the natural drop).
     let held = held_skill_ids(ctx, &visited_stores);
     let mut sync_updates: Vec<(String, WorkspaceSync)> = Vec::new();
+    // The receipt's closing arithmetic about the scope this run left alone (see [`stale_scopes`]).
+    let mut behind_elsewhere: Vec<topos_types::results::BehindElsewhere> = Vec::new();
     for run in &runs {
         let Some(snap) = &run.snapshot else {
             continue; // unreachable this run: the prior cache entry stands
@@ -1475,13 +1481,29 @@ pub(crate) fn manifest_update(
             );
         }
         let delivered_ids: HashSet<&str> = reported.iter().map(String::as_str).collect();
+        // The workspace's CURRENT per bundle, straight from the delivery answer — the only thing
+        // that makes "behind" a fact rather than a difference. Manifest-row deliveries are absent
+        // on purpose: their served version may itself be a pin, which is not a current.
+        let current: HashMap<&str, [u8; 32]> = snap
+            .skills
+            .iter()
+            .map(|s| (s.skill_id.as_str(), s.version_id))
+            .collect();
         let mut report_ok = false;
-        match super::pull::applied_snapshot(ctx, &delivered_ids, &visited_stores) {
+        match super::pull::applied_snapshot(ctx, &delivered_ids, &visited_stores, &current) {
             Ok(snapshot) => {
-                // The wire carries ONE row per (session, bundle); a bundle held at different
-                // versions in different stores says so here, where the pick was made — a local
-                // fact, disclosed whether or not the report reaches the plane.
-                sweep.disclosures.extend(snapshot.splits.iter().cloned());
+                // The wire carries ONE row per (session, bundle); a store this run did not bring
+                // current says so on the receipt, where the pick was made — a local fact, stated
+                // whether or not the report reaches the plane.
+                behind_elsewhere.extend(stale_scopes(
+                    ctx,
+                    &snapshot.splits,
+                    snap,
+                    &run.session,
+                    &driven,
+                    person.as_ref(),
+                    project.as_ref(),
+                ));
                 // Each mcp row carries its per-agent states (the fleet page's truth); file
                 // bundles ride with an empty list, byte-identical to the prior wire shape.
                 let applied_rows: Vec<crate::plane::AppliedSkillReport> = snapshot
@@ -1657,6 +1679,9 @@ pub(crate) fn manifest_update(
         None => Vec::new(),
     };
 
+    behind_elsewhere.sort_by(|a, b| (&a.project_dir, &a.bundle).cmp(&(&b.project_dir, &b.bundle)));
+    behind_elsewhere.dedup();
+
     Ok(PullOutcome {
         data: PullData {
             skills: sweep.rows,
@@ -1664,6 +1689,7 @@ pub(crate) fn manifest_update(
             notices,
             sync,
             scope: Some(scope_label),
+            behind_elsewhere,
         },
         warnings: sweep.warnings,
         advisories: sweep.advisories,
@@ -1674,6 +1700,96 @@ pub(crate) fn manifest_update(
         forge_gone,
         failed_channels: sweep.failed_channels,
     })
+}
+
+/// The cross-scope STALENESS this run has standing to speak about — the receipt's closing line,
+/// as data (the renderer counts and phrases it).
+///
+/// **Staleness, not difference.** Two scopes holding different bytes is the design working: they
+/// never blend. What is worth a line is a copy that is accidentally OLD — behind the current the
+/// delivery answer just stated — and that a command from here would fix. Three filters get there,
+/// each one removing a way the line could nag forever with no cure:
+///
+/// - **A driven scope is never named.** Its outcome is on the receipt already, row by row; a
+///   second line about the same bundle would say it twice, and the suggested command is the one
+///   that was just run.
+/// - **Only a scope whose recipe this run READ** — the person plan, and the project plan covering
+///   the cwd. Another checkout's `topos.toml` was never opened, so its copy cannot be told apart
+///   from a deliberate pin, and guessing would be exactly the nagging this filter exists to stop.
+/// - **Only a row that is not deliberately fixed there** (see [`deliberately_fixed`]).
+fn stale_scopes(
+    ctx: &Ctx<'_>,
+    splits: &[super::pull::VersionSplit],
+    snap: &DeliverySnapshot,
+    session: &Session,
+    driven: &Driven,
+    person: Option<&ScopePlan>,
+    project: Option<&(PathBuf, ScopePlan)>,
+) -> Vec<topos_types::results::BehindElsewhere> {
+    let names: HashMap<&str, &str> = snap
+        .skills
+        .iter()
+        .map(|s| (s.skill_id.as_str(), s.name.as_str()))
+        .collect();
+    splits
+        .iter()
+        .filter(|s| s.behind)
+        .filter_map(|s| {
+            let bundle = *names.get(s.skill_id.as_str())?;
+            let (plan, dir) = match &s.project_dir {
+                // The machine's own store: read whenever this run got that far, and named by the
+                // absent `project_dir` (the renderer spells it `machine-wide`).
+                None => (person?, None),
+                // Exactly ONE project store has a plan here: the one covering the cwd.
+                Some(dir) => {
+                    let (pdir, plan) = project?;
+                    if pdir != dir {
+                        return None;
+                    }
+                    (plan, Some(dir.as_path()))
+                }
+            };
+            let this_scope_ran = if dir.is_none() {
+                driven.person
+            } else {
+                driven.project
+            };
+            if this_scope_ran
+                || deliberately_fixed(plan, &session.host, &session.workspace_name, bundle)
+            {
+                return None;
+            }
+            Some(topos_types::results::BehindElsewhere {
+                bundle: bundle.to_owned(),
+                project_dir: dir.map(|d| super::inventory::pretty(ctx, d)),
+            })
+        })
+        .collect()
+}
+
+/// Whether a scope's recipe deliberately holds `bundle` somewhere other than current — a version
+/// pin on its own row, an `"off"` switch, or a pinned SET that delivers it. Each is a choice a
+/// person wrote down, and no `topos update` would ever undo it: naming one as "behind" would be a
+/// line that can never be cleared.
+fn deliberately_fixed(plan: &ScopePlan, host: &str, workspace: &str, bundle: &str) -> bool {
+    let is_this_bundle = |r: &PlanRow| {
+        matches!(&r.shape, KeyShape::WorkspaceBundle { host: h, workspace: w, bundle: b }
+            if h == host && w == workspace && b == bundle)
+    };
+    if plan.off_for(host, workspace, bundle).is_some() {
+        return true;
+    }
+    if plan
+        .things
+        .iter()
+        .any(|r| is_this_bundle(r) && r.pin().is_some())
+    {
+        return true;
+    }
+    let key = format!("{host}/{workspace}");
+    plan.sets
+        .iter()
+        .any(|r| r.pin().is_some() && r.shape.workspace_key().as_deref() == Some(key.as_str()))
 }
 
 /// Persist what the forge round learned and hand back the per-HOST staleness signals the silent
@@ -2836,10 +2952,10 @@ fn converge_dest_freeze(
         )
     {
         // A row the engine flipped to `refreshed` (a stale copy caught up) that ALSO grew leads
-        // with the install — a folder appeared — and moves the refreshed copies to its second
+        // with the install — a folder appeared — and moves the caught-up copies to its second
         // fact, so neither set of folders is renamed or dropped.
         if row.action == PullAction::Refreshed {
-            row.note = Some(sync_engine::also_line("refreshed", &row.destinations));
+            row.note = Some(sync_engine::also_line("updated", &row.destinations));
             row.destinations.clear();
         }
         row.action = PullAction::Installed;

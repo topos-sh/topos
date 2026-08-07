@@ -2920,8 +2920,10 @@ fn a_refreshed_stale_replica_never_reads_all_up_to_date() {
     // The crash-window residue: a managed copy whose bytes AND recorded baseline sit at an OLDER
     // version than the one this machine holds. The converge rewrites it — bytes moved on disk, so
     // the run may not claim "all up to date". A refresh is not a first install, so the row says
-    // `refreshed` and names the folder, and the quiet hook's changed-bytes signal fires.
-    let (rig, id, plane, foll, _replica) = fanout_rig("stale-refresh");
+    // `updated` and names WHERE THE BUNDLE NOW STANDS — every copy at the applied version, not
+    // just the one the converge happened to rewrite — and the quiet hook's changed-bytes signal
+    // fires.
+    let (rig, id, plane, foll, replica) = fanout_rig("stale-refresh");
     let stale = rig.work.0.join("stale");
     add_stale_replica(&rig, &id, &stale, BASE);
     let ctx = rig.ctx(&plane, &foll);
@@ -2933,11 +2935,23 @@ fn a_refreshed_stale_replica_never_reads_all_up_to_date() {
         PullAction::Refreshed,
         "a rewritten stale copy is a refresh, never up-to-date: {row:?}"
     );
+    // THE anti-regression: three folders hold this bundle and only one needed rewriting. A row
+    // that named the rewritten one alone would read as if the other two had gone.
+    let sp = rig.layout().published(&sid(&id));
+    let placements = doc::read_map(&rig.fs, &sp.map).unwrap().unwrap().placements;
+    assert_eq!(placements.len(), 3, "{placements:?}");
     assert_eq!(
-        row.destinations,
-        vec![stale.display().to_string()],
-        "the refreshed folder is named — the destination convention"
+        row.destinations, placements,
+        "every copy now holding the applied version is named, in map order"
     );
+    for named in [&stale, &replica] {
+        assert!(
+            row.destinations.contains(&named.display().to_string()),
+            "{:?} names {}",
+            row.destinations,
+            named.display()
+        );
+    }
     assert_eq!(row.note, None, "nothing else was written this run");
     assert_eq!(
         snapshot(&stale),
@@ -2951,9 +2965,15 @@ fn a_refreshed_stale_replica_never_reads_all_up_to_date() {
         "the quiet hook must hear about bytes that moved"
     );
     let tty = crate::render::pull_tty(&out.data, &out.warnings, &out.advisories, &out.disclosures);
+    assert!(tty.contains("updated (3 folders)"), "{tty}");
+    // Counted rows spell their folders out — a number nobody can act on is not an answer.
     assert!(
-        tty.contains(&format!("refreshed ({})", stale.display())),
+        tty.contains(&format!("\n    {}\n", stale.display())),
         "{tty}"
+    );
+    assert!(
+        !tty.contains("refreshed"),
+        "the internal word never reaches a person: {tty}"
     );
     assert!(
         !tty.contains("all up to date"),

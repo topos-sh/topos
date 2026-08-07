@@ -415,6 +415,7 @@ mod tests {
                 proposals_awaiting: 0,
                 notices: Vec::new(),
                 sync: Vec::new(),
+                behind_elsewhere: Vec::new(),
                 scope: None,
             };
             assert_eq!(sweep_changed_bytes(&data), changed, "{action:?}");
@@ -424,6 +425,7 @@ mod tests {
             proposals_awaiting: 0,
             notices: Vec::new(),
             sync: Vec::new(),
+            behind_elsewhere: Vec::new(),
             scope: None,
         };
         assert!(!sweep_changed_bytes(&empty));

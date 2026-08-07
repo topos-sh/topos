@@ -713,6 +713,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
             scope: None,
             notices: Vec::new(),
             sync: Vec::new(),
+            behind_elsewhere: Vec::new(),
             skills: vec![PullSkill {
                 skill: "pr-describe".to_owned(),
                 workspace_id: Some("w_acme".to_owned()),
@@ -751,6 +752,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
             scope: None,
             notices: Vec::new(),
             sync: Vec::new(),
+            behind_elsewhere: Vec::new(),
             skills: vec![PullSkill {
                 skill: "pr-describe".to_owned(),
                 workspace_id: Some("w_acme".to_owned()),
@@ -796,6 +798,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
             scope: None,
             notices: Vec::new(),
             sync: Vec::new(),
+            behind_elsewhere: Vec::new(),
             skills: vec![PullSkill {
                 skill: "pr-describe".to_owned(),
                 workspace_id: Some("w_acme".to_owned()),
@@ -1384,6 +1387,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
                 last_report_at: Some(1_699_000_000_000),
                 staleness_window_ms: 604_800_000,
             }],
+            behind_elsewhere: vec![],
         })
         .expect("PullData serializes"),
         warnings: vec![],
@@ -1429,6 +1433,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
             proposals_awaiting: 0,
             notices: Vec::new(),
             sync: Vec::new(),
+            behind_elsewhere: Vec::new(),
         })
         .expect("PullData serializes"),
         warnings: vec![],
@@ -1732,6 +1737,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
             proposals_awaiting: 0,
             notices: vec![],
             sync: vec![],
+            behind_elsewhere: vec![],
         })
         .expect("PullData serializes"),
         warnings: vec![],

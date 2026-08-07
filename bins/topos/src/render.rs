@@ -2738,12 +2738,25 @@ impl PullReceiptScope {
         }
     }
 
-    /// The receipt's opening line, when there is one to say.
+    /// The receipt's opening line, when there is one to say. The project form NAMES the folder
+    /// once, and by doing so DEFINES the `project` token every path below it is written against
+    /// (see [`PullReceiptScope::relative`]).
     fn lead(&self) -> Option<String> {
         match self {
-            PullReceiptScope::Project(dir) => Some(format!("updated this folder ({dir})")),
+            PullReceiptScope::Project(dir) => Some(format!("updated project ({dir})")),
             PullReceiptScope::Machine => Some("updated machine-wide".to_owned()),
             PullReceiptScope::Unstated => None,
+        }
+    }
+
+    /// One body line with every in-project path rewritten against the folder the lead line named:
+    /// `~/Forward/labs/api/.claude/skills/deploy` → `project/.claude/skills/deploy`. The absolute
+    /// path is said ONCE, at the top, and the rows below read as what they are — places inside the
+    /// thing you are standing in. Machine-scope paths keep their `~/` spelling untouched.
+    fn relative(&self, line: &str) -> String {
+        match self {
+            PullReceiptScope::Project(dir) => line.replace(&format!("{dir}/"), "project/"),
+            PullReceiptScope::Machine | PullReceiptScope::Unstated => line.to_owned(),
         }
     }
 }
@@ -2792,12 +2805,13 @@ pub(crate) fn pull_tty(
         return append_proposals_trailer(line, data.proposals_awaiting);
     }
     use topos_types::results::PullAction;
-    let mut up_to_date = 0usize;
     let mut kept_lines: Vec<String> = Vec::new();
+    let mut tally = PullTally::default();
     let rows: Vec<(String, String, Vec<String>)> = data
         .skills
         .iter()
         .filter_map(|s| {
+            tally.count(s.action);
             // The name a receipt row leads with: the workspace-qualified display where one is
             // recorded, `+`/`-`-led for the rows that moved bytes in or out.
             let shown = s.display.as_deref().unwrap_or(&s.skill);
@@ -2809,7 +2823,6 @@ pub(crate) fn pull_tty(
             // compact receipt must not swallow those.
             let noteworthy = s.harnesses.iter().any(|h| h.state != "current");
             if matches!(s.action, PullAction::UpToDate) && !noteworthy {
-                up_to_date += 1;
                 return None;
             }
             // A removal that uninstalled nothing (every copy edited, all kept) says so through
@@ -2834,13 +2847,13 @@ pub(crate) fn pull_tty(
     }
     let pad = rows.iter().map(|(n, ..)| n.len()).max().unwrap_or(0);
     for (name, line, extra) in &rows {
-        out.push_str(&format!("{name:<pad$}   {line}\n"));
+        out.push_str(&scope.relative(&format!("{name:<pad$}   {line}\n")));
         for x in extra {
-            out.push_str(&format!("    {x}\n"));
+            out.push_str(&scope.relative(&format!("    {x}\n")));
         }
     }
     for k in &kept_lines {
-        out.push_str(&format!("{k}\n"));
+        out.push_str(&scope.relative(&format!("{k}\n")));
     }
     for w in warnings.iter().chain(advisories) {
         out.push_str(&format!("warning: {w}\n"));
@@ -2862,37 +2875,115 @@ pub(crate) fn pull_tty(
     // names them by what they ARE: a sweep that reconciled an MCP server counts bundles, because
     // calling that row a skill is simply false. All-skills stays the ordinary word.
     let total = data.skills.len() + warnings.len();
-    let noun = managed_noun(&data.skills);
+    let noun = managed_noun(&data.skills, total);
+    tally.failed = warnings.len();
     if rows.is_empty() && warnings.is_empty() && kept_lines.is_empty() {
-        out.push_str(&format!(
-            "Checked {total} managed {noun}(s) — all up to date."
-        ));
+        out.push_str(&format!("Checked {total} {noun}: all up to date."));
     } else {
-        let mut parts = Vec::new();
-        if up_to_date > 0 {
-            parts.push(format!("{up_to_date} up to date"));
-        }
-        if !warnings.is_empty() {
-            parts.push(format!("{} failed", warnings.len()));
-        }
-        out.push_str(&format!("Checked {total} managed {noun}(s)"));
+        out.push_str(&format!("Checked {total} {noun}"));
+        let parts = tally.parts();
         if !parts.is_empty() {
             out.push_str(&format!(": {}", parts.join(", ")));
         }
         out.push('.');
     }
+    for line in behind_trailer(&data.behind_elsewhere) {
+        out.push_str(&format!("\n{line}"));
+    }
     append_proposals_trailer(out, data.proposals_awaiting)
+}
+
+/// What an `update` receipt's summary counts, by name. Every action a person would call by one of
+/// these five words lands in its bucket; the states that are neither a landing nor a failure
+/// (an offer, a divergence, a hold, a withdrawal) are NOT summarized — each already prints its own
+/// row carrying the command that resolves it, and inventing a sixth word for them would summarize
+/// a decision as if it were an outcome.
+#[derive(Default)]
+struct PullTally {
+    installed: usize,
+    updated: usize,
+    removed: usize,
+    up_to_date: usize,
+    failed: usize,
+}
+
+impl PullTally {
+    fn count(&mut self, action: topos_types::results::PullAction) {
+        use topos_types::results::PullAction as A;
+        match action {
+            A::Installed => self.installed += 1,
+            // Three ways bytes catch up: a served version landed, a copy behind the version this
+            // machine holds was rewritten, a draft was rebased onto the new current.
+            A::FastForwarded | A::Refreshed | A::Merged => self.updated += 1,
+            // `released` is deliberately absent: nothing on disk was deleted (the record retired),
+            // and its row says exactly that.
+            A::Removed => self.removed += 1,
+            A::UpToDate => self.up_to_date += 1,
+            A::Offered
+            | A::Diverged
+            | A::Conflicted
+            | A::DraftSynced
+            | A::Held
+            | A::Withdrawn
+            | A::Excluded
+            | A::Released => {}
+        }
+    }
+
+    /// The counted clauses, in the order a person reads them: what arrived, what moved, what left,
+    /// what needed nothing, what broke.
+    fn parts(&self) -> Vec<String> {
+        [
+            (self.installed, "installed"),
+            (self.updated, "updated"),
+            (self.removed, "removed"),
+            (self.up_to_date, "already up to date"),
+            (self.failed, "failed"),
+        ]
+        .into_iter()
+        .filter(|(n, _)| *n > 0)
+        .map(|(n, what)| format!("{n} {what}"))
+        .collect()
+    }
 }
 
 /// The noun a receipt counts its rows in. `skill` while every row IS one — the word a person
 /// reads most and the one the rest of the CLI uses — and the generic `bundle` the moment a row of
 /// another kind rode along, because one summary cannot call a server a skill and stay true.
-fn managed_noun(skills: &[PullSkill]) -> &'static str {
-    if skills.iter().any(|s| s.kind.is_some()) {
-        "bundle"
-    } else {
-        "skill"
+fn managed_noun(skills: &[PullSkill], total: usize) -> &'static str {
+    match (skills.iter().any(|s| s.kind.is_some()), total == 1) {
+        (true, true) => "bundle",
+        (true, false) => "bundles",
+        (false, true) => "skill",
+        (false, false) => "skills",
     }
+}
+
+/// The receipt's closing arithmetic about the scope this run left alone: how many bundles stand
+/// behind there, and the ONE command that fixes it. Counted, never named — the list belongs to the
+/// scope that would print it, and a person reading this one wants the number and the way out.
+fn behind_trailer(entries: &[topos_types::results::BehindElsewhere]) -> Vec<String> {
+    let mut dirs: Vec<Option<&str>> = entries.iter().map(|e| e.project_dir.as_deref()).collect();
+    dirs.sort_unstable();
+    dirs.dedup();
+    dirs.into_iter()
+        .map(|dir| {
+            let n = entries
+                .iter()
+                .filter(|e| e.project_dir.as_deref() == dir)
+                .count();
+            let noun = if n == 1 { "bundle" } else { "bundles" };
+            match dir {
+                // The machine's own copies: one command from here brings them current.
+                None => {
+                    let it = if n == 1 { "it" } else { "them" };
+                    format!("{n} {noun} behind machine-wide — `topos update -g` updates {it}.")
+                }
+                // A checkout's copies: `update` acts where you stand, so the fix is run THERE.
+                Some(dir) => format!("{n} {noun} behind in {dir} — run `topos update` there."),
+            }
+        })
+        .collect()
 }
 
 /// A one-line human rendering of a delivered notice — the verdict (with its reason), a proposal
@@ -2952,7 +3043,7 @@ pub(crate) fn mcp_agent_line(h: &topos_types::results::McpAgentState) -> String 
 
 /// One non-up-to-date skill's line (after the padded name) + any indented detail lines — the
 /// action's own line, plus the row's SECOND fact when it carries one (`also installed …` for a
-/// folder healed beside a draft fan-out, `also refreshed …` for a stale copy caught up beside a
+/// folder healed beside a draft fan-out, `also updated …` for a stale copy caught up beside a
 /// fresh install). A `released` row states its whole line in `note` and never doubles it.
 fn pull_row(s: &PullSkill) -> (String, Vec<String>) {
     let (line, mut extra) = pull_action_row(s);
@@ -2976,9 +3067,12 @@ fn pull_action_row(s: &PullSkill) -> (String, Vec<String>) {
         // count in the bundle's own noun (folders for a skill, config files for an MCP server).
         // Never an agent name, never an agent count.
         PullAction::Installed => (destination_column("installed", s), Vec::new()),
-        // A copy that stood behind the version this machine holds was rewritten to it — the
-        // folder was already there, so the word is never `installed`.
-        PullAction::Refreshed => (destination_column("refreshed", s), Vec::new()),
+        // A copy that stood behind the version this machine holds was caught up — the folder was
+        // already there, so the word is never `installed`. Its destinations are every placement
+        // that NOW holds the applied version, not only the ones this run rewrote, so the count is
+        // an answer to "where is it?" rather than to "what did the disk do?"; two or more get a
+        // line each, because a bare `(2 folders)` is a number a person cannot act on.
+        PullAction::Refreshed => (destination_column("updated", s), sub_destinations(s)),
         PullAction::Removed => (destination_column("removed", s), Vec::new()),
         PullAction::Offered => {
             let v = s
@@ -3095,6 +3189,16 @@ fn destination_column(verb: &str, s: &PullSkill) -> String {
         [] => verb.to_owned(),
         [one] => format!("{verb} ({one})"),
         many => format!("{verb} ({} {noun})", many.len()),
+    }
+}
+
+/// The destinations a counted row spells out beneath itself — one per line, in the order the
+/// placement map holds them. Empty for a row whose column already named its single destination
+/// (saying it twice is noise) and for a row with none at all.
+fn sub_destinations(s: &PullSkill) -> Vec<String> {
+    match s.destinations.as_slice() {
+        [] | [_] => Vec::new(),
+        many => many.to_vec(),
     }
 }
 
@@ -3306,8 +3410,8 @@ fn short(hex: &str) -> &str {
 mod tests {
     use topos_types::persisted::ConflictPathKind;
     use topos_types::results::{
-        AgentView, Conflict, ConflictPathReport, ListData, LogData, MergeReport, Offer,
-        ProposeData, PublishData, PullAction, PullData, PullSkill, RemoteSkill, RemoveData,
+        AgentView, BehindElsewhere, Conflict, ConflictPathReport, ListData, LogData, MergeReport,
+        Offer, ProposeData, PublishData, PullAction, PullData, PullSkill, RemoteSkill, RemoveData,
         RemoveItem, RemoveKind, SkillEntry, UntrackedEntry,
     };
 
@@ -3865,6 +3969,7 @@ mod tests {
             proposals_awaiting: 2,
             notices: Vec::new(),
             sync: Vec::new(),
+            behind_elsewhere: Vec::new(),
             scope: None,
         };
         let out = pull_tty(&data, &[], &[], &[]);
@@ -3903,8 +4008,11 @@ mod tests {
         assert!(out.contains("`topos update pinned`"), "{out}");
         // Up-to-date rows stay compact: counted in the summary, no `style` action row.
         assert!(!out.contains("style  up to date"), "{out}");
+        // The summary does the arithmetic: a fast-forward and a merge both landed bytes, so both
+        // read `updated`. The states that are decisions rather than outcomes (offered, diverged,
+        // conflicted, held) print their own rows and are not summarized.
         assert!(
-            out.contains("Checked 7 managed skill(s): 1 up to date."),
+            out.contains("Checked 7 skills: 2 updated, 1 already up to date."),
             "{out}"
         );
         // The reviewer-queue trailer.
@@ -3939,6 +4047,7 @@ mod tests {
             proposals_awaiting: 0,
             notices: Vec::new(),
             sync: Vec::new(),
+            behind_elsewhere: Vec::new(),
             scope: None,
         };
         let out = pull_tty(&data, &[], &[], &[]);
@@ -3997,6 +4106,7 @@ mod tests {
             proposals_awaiting: 0,
             notices: Vec::new(),
             sync: Vec::new(),
+            behind_elsewhere: Vec::new(),
             scope: None,
         };
         let out = pull_tty(&data, &[], &[], &[]);
@@ -4098,11 +4208,12 @@ mod tests {
             proposals_awaiting: 0,
             notices: Vec::new(),
             sync: Vec::new(),
+            behind_elsewhere: Vec::new(),
             scope: None,
         };
         assert_eq!(
             pull_tty(&only_a_server, &[], &[], &[]),
-            "Checked 1 managed bundle(s) — all up to date."
+            "Checked 1 bundle: all up to date."
         );
 
         // Mixed: one word has to cover both, and the generic one does.
@@ -4111,11 +4222,12 @@ mod tests {
             proposals_awaiting: 0,
             notices: Vec::new(),
             sync: Vec::new(),
+            behind_elsewhere: Vec::new(),
             scope: None,
         };
         assert_eq!(
             pull_tty(&mixed, &[], &[], &[]),
-            "Checked 2 managed bundle(s) — all up to date."
+            "Checked 2 bundles: all up to date."
         );
 
         // A row with a per-agent state to show takes the same noun into the counted summary.
@@ -4131,10 +4243,14 @@ mod tests {
             proposals_awaiting: 0,
             notices: Vec::new(),
             sync: Vec::new(),
+            behind_elsewhere: Vec::new(),
             scope: None,
         };
         let out = pull_tty(&surfaced, &[], &[], &[]);
-        assert!(out.contains("Checked 1 managed bundle(s)."), "{out}");
+        assert!(
+            out.contains("Checked 1 bundle: 1 already up to date."),
+            "{out}"
+        );
         // …and the per-agent line reads in the shared vocabulary, never the raw engine token.
         assert!(
             out.contains("openclaw: not placed — no project-level config"),
@@ -4154,11 +4270,12 @@ mod tests {
             proposals_awaiting: 0,
             notices: Vec::new(),
             sync: Vec::new(),
+            behind_elsewhere: Vec::new(),
             scope: None,
         };
         assert_eq!(
             pull_tty(&clean, &[], &[], &[]),
-            "Checked 2 managed skill(s) — all up to date."
+            "Checked 2 skills: all up to date."
         );
         // Nothing followed at all.
         let empty = PullData {
@@ -4166,6 +4283,7 @@ mod tests {
             proposals_awaiting: 0,
             notices: Vec::new(),
             sync: Vec::new(),
+            behind_elsewhere: Vec::new(),
             scope: None,
         };
         assert_eq!(
@@ -4180,7 +4298,7 @@ mod tests {
             "{out}"
         );
         assert!(
-            out.contains("Checked 3 managed skill(s): 2 up to date, 1 failed."),
+            out.contains("Checked 3 skills: 2 already up to date, 1 failed."),
             "{out}"
         );
         // A DISCLOSURE prints beside them and is counted by neither half of the summary — an
@@ -4207,11 +4325,238 @@ mod tests {
         ];
         let out = pull_tty(&clean, &[], &advisories, &[]);
         assert!(out.contains("warning: MCP_DEST_UNKNOWN"), "{out}");
-        assert!(
-            out.contains("Checked 2 managed skill(s) — all up to date."),
-            "{out}"
-        );
+        assert!(out.contains("Checked 2 skills: all up to date."), "{out}");
         assert!(!out.contains("failed"), "{out}");
+    }
+
+    /// THE update receipt, byte for byte — the final copy. The lead line names the project folder
+    /// ONCE and every path below it is written against that name; the counted row spells its
+    /// folders out; the summary does the arithmetic; the trailer says what this run left alone and
+    /// the one command that fixes it.
+    #[test]
+    fn the_update_receipt_prints_the_final_copy() {
+        let mut updated = row("coolify-deploy", PullAction::Refreshed);
+        updated.destinations = vec![
+            "~/Forward/labs/topos_test/.agents/skills/coolify-deploy".to_owned(),
+            "~/Forward/labs/topos_test/.claude/skills/coolify-deploy".to_owned(),
+        ];
+        let data = PullData {
+            skills: vec![updated, row("style", PullAction::UpToDate)],
+            proposals_awaiting: 0,
+            notices: Vec::new(),
+            sync: Vec::new(),
+            behind_elsewhere: vec![BehindElsewhere {
+                bundle: "coolify-deploy".to_owned(),
+                project_dir: None,
+            }],
+            scope: Some("project ~/Forward/labs/topos_test".to_owned()),
+        };
+        assert_eq!(
+            pull_tty(&data, &[], &[], &[]),
+            "updated project (~/Forward/labs/topos_test)\n\
+             coolify-deploy   updated (2 folders)\n\
+             \x20   project/.agents/skills/coolify-deploy\n\
+             \x20   project/.claude/skills/coolify-deploy\n\
+             Checked 2 skills: 1 updated, 1 already up to date.\n\
+             1 bundle behind machine-wide — `topos update -g` updates it."
+        );
+    }
+
+    /// One destination stays INLINE — a path spelled twice is noise — and it is written against
+    /// the project the lead line named, exactly like the counted form's sub-lines.
+    #[test]
+    fn a_single_updated_folder_stays_on_the_row() {
+        let mut updated = row("coolify-deploy", PullAction::Refreshed);
+        updated.destinations =
+            vec!["~/Forward/labs/topos_test/.claude/skills/coolify-deploy".to_owned()];
+        let data = PullData {
+            skills: vec![updated],
+            proposals_awaiting: 0,
+            notices: Vec::new(),
+            sync: Vec::new(),
+            behind_elsewhere: Vec::new(),
+            scope: Some("project ~/Forward/labs/topos_test".to_owned()),
+        };
+        assert_eq!(
+            pull_tty(&data, &[], &[], &[]),
+            "updated project (~/Forward/labs/topos_test)\n\
+             coolify-deploy   updated (project/.claude/skills/coolify-deploy)\n\
+             Checked 1 skill: 1 updated."
+        );
+    }
+
+    /// Machine scope keeps the `~/` spelling: there is no project to be relative to, and rewriting
+    /// a home path as `project/…` would name a folder the person is not standing in.
+    #[test]
+    fn machine_scope_paths_keep_their_home_spelling() {
+        let mut updated = row("coolify-deploy", PullAction::Refreshed);
+        updated.destinations = vec![
+            "~/.agents/skills/coolify-deploy".to_owned(),
+            "~/.claude/skills/coolify-deploy".to_owned(),
+        ];
+        let data = PullData {
+            skills: vec![updated],
+            proposals_awaiting: 0,
+            notices: Vec::new(),
+            sync: Vec::new(),
+            behind_elsewhere: Vec::new(),
+            scope: Some("machine".to_owned()),
+        };
+        assert_eq!(
+            pull_tty(&data, &[], &[], &[]),
+            "updated machine-wide\n\
+             coolify-deploy   updated (2 folders)\n\
+             \x20   ~/.agents/skills/coolify-deploy\n\
+             \x20   ~/.claude/skills/coolify-deploy\n\
+             Checked 1 skill: 1 updated."
+        );
+    }
+
+    /// The row's SECOND fact is a body line like any other: written against the project the lead
+    /// named, and in the same vocabulary the action column uses.
+    #[test]
+    fn a_rows_second_fact_is_written_against_the_project_too() {
+        let mut healed = row("coolify-deploy", PullAction::Installed);
+        healed.destinations =
+            vec!["~/Forward/labs/topos_test/.claude/skills/coolify-deploy".to_owned()];
+        healed.note = Some(crate::ops::sync_engine::also_line(
+            "updated",
+            &["~/Forward/labs/topos_test/.agents/skills/coolify-deploy".to_owned()],
+        ));
+        let data = PullData {
+            skills: vec![healed],
+            proposals_awaiting: 0,
+            notices: Vec::new(),
+            sync: Vec::new(),
+            behind_elsewhere: Vec::new(),
+            scope: Some("project ~/Forward/labs/topos_test".to_owned()),
+        };
+        assert_eq!(
+            pull_tty(&data, &[], &[], &[]),
+            "updated project (~/Forward/labs/topos_test)\n\
+             + coolify-deploy   installed (project/.claude/skills/coolify-deploy)\n\
+             \x20   also updated project/.agents/skills/coolify-deploy\n\
+             Checked 1 skill: 1 installed."
+        );
+    }
+
+    /// EVERY summary variant, by name. The reader never subtracts one count from another to learn
+    /// what happened.
+    #[test]
+    fn the_summary_counts_every_action_by_name() {
+        let summary = |skills: Vec<PullSkill>, warnings: &[String]| {
+            let data = PullData {
+                skills,
+                proposals_awaiting: 0,
+                notices: Vec::new(),
+                sync: Vec::new(),
+                behind_elsewhere: Vec::new(),
+                scope: None,
+            };
+            let out = pull_tty(&data, warnings, &[], &[]);
+            out.lines().last().unwrap_or_default().to_owned()
+        };
+        let placed = |name: &str, action| {
+            let mut r = row(name, action);
+            r.destinations = vec![format!("~/.claude/skills/{name}")];
+            r
+        };
+        assert_eq!(
+            summary(
+                vec![
+                    placed("deploy", PullAction::Refreshed),
+                    row("style", PullAction::UpToDate),
+                ],
+                &[]
+            ),
+            "Checked 2 skills: 1 updated, 1 already up to date."
+        );
+        assert_eq!(
+            summary(
+                vec![
+                    placed("notes", PullAction::Installed),
+                    placed("deploy", PullAction::Refreshed),
+                    placed("gone", PullAction::Removed),
+                    row("style", PullAction::UpToDate),
+                ],
+                &[]
+            ),
+            "Checked 4 skills: 1 installed, 1 updated, 1 removed, 1 already up to date."
+        );
+        assert_eq!(
+            summary(
+                vec![
+                    placed("deploy", PullAction::Refreshed),
+                    row("style", PullAction::UpToDate),
+                ],
+                &["IO_ERROR s_docs: a filesystem operation failed".to_owned()]
+            ),
+            "Checked 3 skills: 1 updated, 1 already up to date, 1 failed."
+        );
+        assert_eq!(
+            summary(
+                vec![
+                    row("style", PullAction::UpToDate),
+                    row("deploy", PullAction::UpToDate),
+                ],
+                &[]
+            ),
+            "Checked 2 skills: all up to date."
+        );
+        // A non-skill kind riding along still switches the noun — and the counts stay explicit.
+        let mut server = row("weather", PullAction::UpToDate);
+        server.kind = Some("mcp".to_owned());
+        assert_eq!(
+            summary(vec![placed("deploy", PullAction::Refreshed), server], &[]),
+            "Checked 2 bundles: 1 updated, 1 already up to date."
+        );
+    }
+
+    /// The staleness trailer's every shape: singular vs plural machine-wide, and the mirror case
+    /// that names a folder because no command from here reaches it.
+    #[test]
+    fn the_staleness_trailer_counts_bundles_and_names_the_command() {
+        let trailer = |entries: Vec<BehindElsewhere>| {
+            let data = PullData {
+                skills: vec![row("style", PullAction::UpToDate)],
+                proposals_awaiting: 0,
+                notices: Vec::new(),
+                sync: Vec::new(),
+                behind_elsewhere: entries,
+                scope: None,
+            };
+            let out = pull_tty(&data, &[], &[], &[]);
+            out.lines().skip(1).collect::<Vec<_>>().join("\n")
+        };
+        let machine = |name: &str| BehindElsewhere {
+            bundle: name.to_owned(),
+            project_dir: None,
+        };
+        let in_dir = |name: &str, dir: &str| BehindElsewhere {
+            bundle: name.to_owned(),
+            project_dir: Some(dir.to_owned()),
+        };
+        assert_eq!(
+            trailer(vec![machine("deploy")]),
+            "1 bundle behind machine-wide — `topos update -g` updates it."
+        );
+        assert_eq!(
+            trailer(vec![
+                machine("deploy"),
+                machine("notes"),
+                machine("runbook")
+            ]),
+            "3 bundles behind machine-wide — `topos update -g` updates them."
+        );
+        assert_eq!(
+            trailer(vec![
+                in_dir("deploy", "~/Forward/labs/topos_test"),
+                in_dir("notes", "~/Forward/labs/topos_test"),
+            ]),
+            "2 bundles behind in ~/Forward/labs/topos_test — run `topos update` there."
+        );
+        // Nothing behind → nothing said. Silence is the healthy state.
+        assert_eq!(trailer(Vec::new()), "");
     }
 
     #[test]
@@ -4240,6 +4585,7 @@ mod tests {
                 notice("verdict", Some("reject"), Some("needs a test")),
             ],
             sync: Vec::new(),
+            behind_elsewhere: Vec::new(),
             scope: None,
         };
         let out = pull_tty(&data, &[], &[], &[]);
@@ -4697,6 +5043,7 @@ mod tests {
             proposals_awaiting: 0,
             notices: Vec::new(),
             sync: Vec::new(),
+            behind_elsewhere: Vec::new(),
             scope: Some("machine".to_owned()),
         };
         let out = pull_tty(&data, &[], &[], &[]);

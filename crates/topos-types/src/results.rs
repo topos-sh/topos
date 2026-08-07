@@ -40,6 +40,26 @@ pub struct PullData {
     /// (additive).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scope: Option<String>,
+    /// Bundles this installation holds at an OLDER version in a scope this run did not reconcile
+    /// — the cross-scope staleness the ONE applied row per bundle cannot carry. Empty (and
+    /// omitted) whenever every other scope is current, and whenever the difference is DELIBERATE
+    /// (a pinned or `"off"` row, a local go-back): a copy that is meant to differ is not behind.
+    /// **INFERRED** (additive).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub behind_elsewhere: Vec<BehindElsewhere>,
+}
+
+/// One bundle whose copy in ANOTHER scope stands behind the workspace's current. **INFERRED**
+/// (additive).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
+pub struct BehindElsewhere {
+    /// The bundle's catalog name.
+    pub bundle: String,
+    /// The project directory whose copy is behind (display path, `~`-abbreviated). Absent ⇒ the
+    /// machine-wide copy, which `topos update -g` brings current.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_dir: Option<String>,
 }
 
 /// One workspace's sync freshness in a [`PullData`]. **INFERRED** (additive-only).
@@ -1973,6 +1993,7 @@ mod tests {
             proposals_awaiting: 0,
             notices: Vec::new(),
             sync: Vec::new(),
+            behind_elsewhere: Vec::new(),
             scope: None,
         };
         let v = serde_json::to_value(&data).unwrap();

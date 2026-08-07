@@ -21,7 +21,6 @@ use std::cell::Cell;
 use std::collections::HashSet;
 use std::path::Path;
 
-use topos_core::digest::to_hex;
 use topos_types::persisted::SyncState;
 use topos_types::results::{ExchangeFault, PullData, ResetData};
 
@@ -303,6 +302,7 @@ pub(crate) fn pull(ctx: &Ctx<'_>, scope: PullScope) -> Result<PullOutcome, Clien
                     proposals_awaiting,
                     notices: Vec::new(),
                     sync: Vec::new(),
+                    behind_elsewhere: Vec::new(),
                     scope: None,
                 },
                 warnings,
@@ -366,6 +366,7 @@ pub(crate) fn pull(ctx: &Ctx<'_>, scope: PullScope) -> Result<PullOutcome, Clien
                     proposals_awaiting,
                     notices: Vec::new(),
                     sync: Vec::new(),
+                    behind_elsewhere: Vec::new(),
                     scope: None,
                 },
                 Vec::new(),
@@ -503,9 +504,27 @@ pub(crate) fn reset_to_never_received(
 pub(super) struct AppliedSnapshot {
     /// The wire rows — one `(skill_id, applied commit)` per held bundle.
     pub applied: Vec<(String, [u8; 32])>,
-    /// One line per bundle this installation holds at DIFFERENT versions in more than one store —
-    /// the cross-scope version split the reported row cannot carry.
-    pub splits: Vec<String>,
+    /// Every store holding a bundle at a version OTHER than the workspace's current — the
+    /// cross-scope split the ONE reported row cannot carry, as DATA: the caller decides which of
+    /// them a person is told about, and phrases it.
+    pub splits: Vec<VersionSplit>,
+}
+
+/// One store holding one bundle at a version that is not the workspace's current.
+///
+/// Deliberately not pre-formatted. Whether a split is worth a line depends on facts this function
+/// does not hold (which scope the run drove, whether the row is pinned there), and the line itself
+/// COUNTS bundles rather than naming them — both are the caller's business.
+pub(super) struct VersionSplit {
+    /// The bundle's opaque plane id — the key the caller resolves to a name.
+    pub skill_id: String,
+    /// Which store holds it: `None` = the machine's own (person) store, else the project dir.
+    pub project_dir: Option<std::path::PathBuf>,
+    /// Whether that copy is genuinely BEHIND the workspace's current. `false` when the delivery
+    /// answer named no current for the bundle (there is nothing to be behind of) — and `false`
+    /// for a copy the store's own sync state says is HELD, which is a deliberate local go-back:
+    /// no update command would move it, so nagging about it would nag forever.
+    pub behind: bool,
 }
 
 /// What this installation HOLDS after the reconcile, over the skills the workspace's deliveries
@@ -516,18 +535,22 @@ pub(super) struct AppliedSnapshot {
 /// THE PICK IS DETERMINISTIC AND STATED, because the wire carries exactly ONE row per
 /// `(session, bundle)`: the PERSON-scope store (the machine's own `~/.topos/`) answers whenever it
 /// holds the bundle, and otherwise the project stores answer in ascending order of their project
-/// directory path. Nothing depends on which checkout the sweep happened to run from. When more
-/// than one store holds the bundle at DIFFERENT versions the deterministic row still stands and
-/// [`AppliedSnapshot::splits`] names the split — the same fact `status`'s cross-scope note makes,
-/// said where the report is produced rather than swallowed by the first-store-wins loop.
+/// directory path. Nothing depends on which checkout the sweep happened to run from. The
+/// deterministic row still stands when the stores disagree, and [`AppliedSnapshot::splits`] carries
+/// every store's standing against `current` — the fact the one-row pick would otherwise swallow.
 ///
 /// Scoping to the delivered set is load-bearing: reporting a withdrawn or frozen skill would tell
 /// the fleet page this device still serves bytes it does not, and would revive the very detach
 /// record the plane wrote.
+///
+/// `current` is the delivery answer's version per bundle — the ONLY thing that makes "behind"
+/// mean anything. A bundle it does not name yields splits that are never `behind`: an unknown
+/// current cannot be stood behind.
 pub(super) fn applied_snapshot(
     ctx: &Ctx<'_>,
     delivered: &HashSet<&str>,
     project_stores: &[crate::sidecar::Layout],
+    current: &std::collections::HashMap<&str, [u8; 32]>,
 ) -> Result<AppliedSnapshot, ClientError> {
     // The stated order: the person store, then the project stores by path. `recall_and_record`
     // already yields a path-sorted set; sorting here makes the guarantee this function's own.
@@ -541,8 +564,9 @@ pub(super) fn applied_snapshot(
             continue;
         };
         // Every store that genuinely holds it, in the stated order — the first is the reported
-        // row, the rest exist only to disclose a version split.
-        let mut holdings: Vec<(String, [u8; 32])> = Vec::new();
+        // row; EVERY one of them (the first included) is measured against the workspace's current,
+        // because the store that answers the wire is just as able to be the stale one.
+        let mut holdings: Vec<(Option<std::path::PathBuf>, [u8; 32], bool)> = Vec::new();
         for layout in std::iter::once(&ctx.layout).chain(projects.iter().copied()) {
             let sp = layout.published(&sid);
             let Some(map) = doc::read_map(ctx.fs, &sp.map)? else {
@@ -565,41 +589,35 @@ pub(super) fn applied_snapshot(
             if let Ok(commit) = super::parse_hex32(&map.applied_commit)
                 && commit != [0u8; 32]
             {
-                let where_ = layout
-                    .project_root()
-                    .map_or_else(|| "this machine".to_owned(), |d| d.display().to_string());
-                holdings.push((where_, commit));
+                // Behind = not at the served current. A HELD store (a deliberate local go-back)
+                // is exempt: no update command would move it, so it is a choice, not staleness.
+                let behind = current.get(skill_id).is_some_and(|c| *c != commit)
+                    && !doc::read_doc::<SyncState>(ctx.fs, &sp.sync)?
+                        .is_some_and(|s: SyncState| s.held);
+                holdings.push((
+                    layout.project_root().map(std::path::Path::to_path_buf),
+                    commit,
+                    behind,
+                ));
             }
         }
-        let Some((first_where, first_commit)) = holdings.first().cloned() else {
+        let Some((_, first_commit, _)) = holdings.first().cloned() else {
             continue;
         };
         applied.push(((*skill_id).to_owned(), first_commit));
-        let mut differing: Vec<String> = holdings
-            .iter()
-            .skip(1)
-            .filter(|(_, c)| *c != first_commit)
-            .map(|(w, c)| format!("{w} holds {}", short_hex(c)))
-            .collect();
-        if !differing.is_empty() {
-            differing.sort();
-            differing.dedup();
-            splits.push(format!(
-                "VERSION_SPLIT {skill_id}: reported as {first_where}'s {} — {}; nothing blends, \
-                 so each scope keeps its own copy",
-                short_hex(&first_commit),
-                differing.join("; ")
-            ));
-        }
+        splits.extend(
+            holdings
+                .into_iter()
+                .map(|(project_dir, _, behind)| VersionSplit {
+                    skill_id: (*skill_id).to_owned(),
+                    project_dir,
+                    behind,
+                }),
+        );
     }
     applied.sort();
-    splits.sort();
+    splits.sort_by(|a, b| (&a.skill_id, &a.project_dir).cmp(&(&b.skill_id, &b.project_dir)));
     Ok(AppliedSnapshot { applied, splits })
-}
-
-/// A version as a disclosure line spells it.
-fn short_hex(commit: &[u8; 32]) -> String {
-    to_hex(commit).get(..12).unwrap_or_default().to_owned()
 }
 
 /// One isolated per-skill failure as a stable, machine-parseable envelope warning:
