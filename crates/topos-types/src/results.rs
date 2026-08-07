@@ -531,6 +531,26 @@ pub struct ListDetail {
     /// (additive).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub folders: Vec<String>,
+    /// The copies whose edits DISAGREE (always ≥ 2 when present) — the state the inventory row
+    /// reports as `draft in N folders that disagree` and sends the reader here to resolve. Each
+    /// carries the folder as a person reads it and the `--dest` value that names it back, so the
+    /// answer can offer the per-copy acts. Absent whenever at most one copy is edited.
+    /// **INFERRED** (additive).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub diverged: Vec<DivergedCopy>,
+}
+
+/// ONE copy of a bundle whose edits disagree with another copy's, in the two spellings every
+/// surface that names such a copy uses: the folder as a person reads it, and the `--dest` value
+/// that names it back on a command line. The same pair the placement freeze's refusal prints —
+/// one vocabulary, so the deep dive and the refusal never describe one state two ways.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
+pub struct DivergedCopy {
+    /// `project/.agents/skills/coolify-deploy` · `~/.claude/skills/coolify-deploy`.
+    pub display: String,
+    /// `.agents/skills` · `~/.claude/skills` — the `--dest` value naming this copy.
+    pub dest: String,
 }
 
 /// serde helper — [`ListDetail::managed`] defaults `true` and omits when `true`, so every managed

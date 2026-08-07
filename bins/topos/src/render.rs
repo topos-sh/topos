@@ -2090,6 +2090,14 @@ fn list_detail_tty(detail: &topos_types::results::ListDetail) -> String {
         StatusItemState::Behind => {
             format!("behind — `topos update{flag}` lands the newer version")
         }
+        // Copies that DISAGREE take over the state line the way a block does. `local edits ahead
+        // of the applied version` is true of each of them and answers neither question the row
+        // sent this reader here with — which folders disagree, and what can be done about them —
+        // so the copies are named, each with the three acts that apply to ONE of them, in the
+        // same vocabulary the placement freeze's own refusal prints.
+        StatusItemState::LocalEdits if !detail.diverged.is_empty() => {
+            diverged_copies_block(&detail.name, flag, &detail.diverged)
+        }
         StatusItemState::LocalEdits => "local edits ahead of the applied version".to_owned(),
         // The SAME two lines the inventory row prints, indented into the dive's own body: one
         // bundle, one answer, whichever command asked.
@@ -2112,6 +2120,37 @@ fn list_detail_tty(detail: &topos_types::results::ListDetail) -> String {
     };
     s.push_str(&format!("\n  {state}"));
     s
+}
+
+/// What the deep dive says about copies whose edits DISAGREE: the count, then one block per copy —
+/// share it, read it, drop it — then the whole-bundle discard, last.
+///
+/// The shape and the words are the placement freeze's refusal ([`err_tty`]'s
+/// [`ClientError::PlacementsDiverged`] arm), indented into the dive's body: one state, one
+/// vocabulary, whichever surface a person meets it on. What differs is only the lead-in — the dive
+/// has already printed the bundle's name as its headline, so the sentence does not repeat it.
+fn diverged_copies_block(
+    name: &str,
+    flag: &str,
+    copies: &[topos_types::results::DivergedCopy],
+) -> String {
+    let mut out = format!(
+        "different edits in {} folders — name the one to work with:",
+        copies.len()
+    );
+    for c in copies {
+        let dest = &c.dest;
+        out.push_str(&format!(
+            "\n    {}\n      to share:     topos publish {name} --dest {dest}\n      to view \
+             diff: topos diff {name} --dest {dest}\n      to drop:      topos update{flag} {name} \
+             --dest {dest} --reset",
+            c.display
+        ));
+    }
+    out.push_str(&format!(
+        "\n  to drop every copy's edits: topos update{flag} {name} --reset"
+    ));
+    out
 }
 
 /// The bare `topos` welcome on a fresh (unenrolled) machine — what topos is, in two lines, plus
@@ -5444,6 +5483,64 @@ mod tests {
         );
     }
 
+    /// The deep dive's diverged-copies block is scope-exact like everything else it prints: the
+    /// machine's answer spells the two `update`s with `-g`, while `publish` and `diff` — which take
+    /// a name and no scope — never grow one.
+    #[test]
+    fn the_diverged_copies_block_spells_the_machine_scope() {
+        use topos_types::results::{DivergedCopy, ListDetail, StatusItemState};
+        let copy = |display: &str, dest: &str| DivergedCopy {
+            display: display.to_owned(),
+            dest: dest.to_owned(),
+        };
+        let out = ListOutcome {
+            data: ListData {
+                detail: Some(ListDetail {
+                    name: "coolify-deploy".to_owned(),
+                    scope: Some("machine".to_owned()),
+                    source_file: None,
+                    source_key: None,
+                    feed: Some("topos.sh/acme".to_owned()),
+                    attribution: None,
+                    version: None,
+                    pin: None,
+                    placements: Vec::new(),
+                    state: StatusItemState::LocalEdits,
+                    kind: None,
+                    harnesses: Vec::new(),
+                    managed: true,
+                    folders: Vec::new(),
+                    diverged: vec![
+                        copy("~/.claude/skills/coolify-deploy", "~/.claude/skills"),
+                        copy("~/.agents/skills/coolify-deploy", "~/.agents/skills"),
+                    ],
+                }),
+                signed_in: false,
+                ..ListData::default()
+            },
+            warnings: Vec::new(),
+            untracked_view: false,
+        };
+        let text = list_tty(&out);
+        assert!(
+            text.ends_with(
+                "  different edits in 2 folders — name the one to work with:\n\
+                 \x20   ~/.claude/skills/coolify-deploy\n\
+                 \x20     to share:     topos publish coolify-deploy --dest ~/.claude/skills\n\
+                 \x20     to view diff: topos diff coolify-deploy --dest ~/.claude/skills\n\
+                 \x20     to drop:      topos update -g coolify-deploy --dest ~/.claude/skills \
+                 --reset\n\
+                 \x20   ~/.agents/skills/coolify-deploy\n\
+                 \x20     to share:     topos publish coolify-deploy --dest ~/.agents/skills\n\
+                 \x20     to view diff: topos diff coolify-deploy --dest ~/.agents/skills\n\
+                 \x20     to drop:      topos update -g coolify-deploy --dest ~/.agents/skills \
+                 --reset\n\
+                 \x20 to drop every copy's edits: topos update -g coolify-deploy --reset"
+            ),
+            "{text}"
+        );
+    }
+
     /// The deep dive's suggested command is scope-exact like the rows: a machine-scope answer
     /// spells `topos update -g` in every state that suggests an update, a project answer keeps
     /// the bare form.
@@ -5465,6 +5562,7 @@ mod tests {
             harnesses: Vec::new(),
             managed: true,
             folders: Vec::new(),
+            diverged: Vec::new(),
         };
         let render = |d| {
             list_tty(&ListOutcome {
@@ -5520,6 +5618,7 @@ mod tests {
             harnesses: Vec::new(),
             managed: false,
             folders,
+            diverged: Vec::new(),
         };
         let render = |d| {
             list_tty(&ListOutcome {
@@ -5569,6 +5668,7 @@ mod tests {
                     harnesses: Vec::new(),
                     managed: false,
                     folders: vec!["/home/u/.claude/skills/frontend-design".to_owned()],
+                    diverged: Vec::new(),
                 }),
                 signed_in: false,
                 ..ListData::default()
@@ -6082,6 +6182,7 @@ mod tests {
                     harnesses: Vec::new(),
                     managed: true,
                     folders: Vec::new(),
+                    diverged: Vec::new(),
                 }),
                 signed_in: true,
                 ..ListData::default()

@@ -397,7 +397,9 @@ fn skill_entry(ctx: &Ctx<'_>, section: &ScopeResolution, row: &Row) -> SkillEntr
     let (draft_dir, draft_diverged) = match &row.draft_in {
         DraftCopies::None => (None, None),
         DraftCopies::In(dir) => (Some(scoped_folder(ctx, section, dir)), None),
-        DraftCopies::Diverged(n) => (None, Some(*n as u32)),
+        // The ROW reports only how many disagree — naming one would send the reader to publish
+        // bytes they did not mean. The copies themselves are the deep dive's answer.
+        DraftCopies::Diverged(copies) => (None, Some(copies.len() as u32)),
     };
     SkillEntry {
         skill: row.name.clone(),
@@ -599,8 +601,10 @@ fn builtin_entry(ctx: &Ctx<'_>) -> Option<SkillEntry> {
         source_health: None,
         // No folder is named for an edited built-in, deliberately: the sub-lines a named folder
         // earns offer `publish` / `update --reset`, and neither reaches engine custody — the name
-        // is reserved workspace-side and no manifest row demands it. The honest `(draft)` flag
-        // stands alone until the next sweep force-syncs the copy back.
+        // is reserved workspace-side (nothing can publish it) and no manifest row demands it, so
+        // `update topos --reset` and `topos publish topos` would both print a command that cannot
+        // run. The honest `(draft)` flag stands alone until the next sweep force-syncs the copy
+        // back. Locked by `an_edited_builtin_row_offers_no_commands`.
         draft_dir: None,
         draft_diverged: None,
     })
@@ -634,6 +638,9 @@ fn builtin_detail(ctx: &Ctx<'_>, token: &str) -> Option<ListDetail> {
         harnesses: Vec::new(),
         managed: true,
         folders: Vec::new(),
+        // Engine custody re-syncs every copy to the binary on the next sweep, so copies never
+        // compete here — and the per-copy acts a competition offers reach nothing the built-in has.
+        diverged: Vec::new(),
     })
 }
 
@@ -693,6 +700,7 @@ fn unmanaged_detail(ctx: &Ctx<'_>, token: &str, roots: Option<&DiscoveryRoots>) 
         harnesses: Vec::new(),
         managed: false,
         folders,
+        diverged: Vec::new(),
     }
 }
 
@@ -1393,8 +1401,13 @@ mod tests {
 
     /// Copies whose edits DISAGREE name no folder — none of them is the draft — and report how
     /// many disagree instead. The count is the freeze's own: one per distinct content.
+    ///
+    /// And the DEEP DIVE the row sends the reader to answers with the copies themselves: each
+    /// named, each carrying the three acts that apply to ONE of them, in the same words the
+    /// placement freeze's refusal prints. `local edits ahead of the applied version` was true of
+    /// every one of them and answered neither question the reader arrived with.
     #[test]
-    fn competing_copies_report_their_count_and_no_folder() {
+    fn competing_copies_report_their_count_and_the_dive_names_them_all() {
         let home = TempHome::new();
         let repo = lay_project(&home);
         let one = repo.join(".claude/skills/repo-helper");
@@ -1412,6 +1425,99 @@ mod tests {
         assert!(row.draft, "{row:?}");
         assert_eq!(row.draft_dir, None, "{row:?}");
         assert_eq!(row.draft_diverged, Some(2), "{row:?}");
+        // The row's own line is the one that sends the reader on.
+        let listing = crate::render::list_tty(&out);
+        assert!(
+            listing
+                .contains("      draft in 2 folders that disagree (see: topos list repo-helper)\n"),
+            "{listing}"
+        );
+
+        let deep = run(
+            &home,
+            &repo,
+            &ListRequest {
+                name: Some("repo-helper".to_owned()),
+                ..request()
+            },
+        )
+        .unwrap();
+        let detail = deep.data.detail.as_ref().expect("a detail");
+        assert_eq!(
+            detail
+                .diverged
+                .iter()
+                .map(|c| (c.display.as_str(), c.dest.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("project/.claude/skills/repo-helper", ".claude/skills"),
+                ("project/.agents/skills/repo-helper", ".agents/skills"),
+            ],
+            "{detail:?}"
+        );
+        let text = crate::render::list_tty(&deep);
+        assert!(
+            text.ends_with(
+                "  different edits in 2 folders — name the one to work with:\n\
+                 \x20   project/.claude/skills/repo-helper\n\
+                 \x20     to share:     topos publish repo-helper --dest .claude/skills\n\
+                 \x20     to view diff: topos diff repo-helper --dest .claude/skills\n\
+                 \x20     to drop:      topos update repo-helper --dest .claude/skills --reset\n\
+                 \x20   project/.agents/skills/repo-helper\n\
+                 \x20     to share:     topos publish repo-helper --dest .agents/skills\n\
+                 \x20     to view diff: topos diff repo-helper --dest .agents/skills\n\
+                 \x20     to drop:      topos update repo-helper --dest .agents/skills --reset\n\
+                 \x20 to drop every copy's edits: topos update repo-helper --reset"
+            ),
+            "{text}"
+        );
+        // The vague line the block replaces is gone.
+        assert!(
+            !text.contains("local edits ahead of the applied version"),
+            "{text}"
+        );
+    }
+
+    /// The placed BUILT-IN's edited row stands ALONE: `(draft)` and nothing under it.
+    ///
+    /// A named folder earns the three sub-lines a draft row prints, and every one of them would be
+    /// a command that cannot run here — `topos publish topos` is refused by the reserved name, and
+    /// `topos update topos --reset` acts on a manifest row nothing has. The built-in is engine
+    /// custody force-synced to the binary, so a hand edit is overwritten on the next sweep; the
+    /// row says that edits exist and offers nothing it cannot honor.
+    #[test]
+    fn an_edited_builtin_row_offers_no_commands() {
+        let home = TempHome::new();
+        let cwd = home.0.join("plain");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let placed = home.0.join(".claude/skills/topos");
+        lay_copy(&placed, "# edited by hand\n");
+        home.store_applied(
+            "topos",
+            "topos",
+            &"a".repeat(64),
+            &[placed.to_string_lossy().as_ref()],
+        );
+
+        let out = run(&home, &cwd, &request()).unwrap();
+        let row = row_named(scope(&out, "machine"), "topos");
+        assert!(row.draft, "{row:?}");
+        assert_eq!(row.source.as_deref(), Some("built-in"), "{row:?}");
+        assert_eq!(row.draft_dir, None, "{row:?}");
+        assert_eq!(row.draft_diverged, None, "{row:?}");
+        let text = crate::render::list_tty(&out);
+        assert!(
+            text.ends_with("  topos  topos@aaaaaaaaaaaa  (draft)  from built-in"),
+            "{text}"
+        );
+        for offered in [
+            "to share:",
+            "to view diff:",
+            "to drop:",
+            "topos publish topos",
+        ] {
+            assert!(!text.contains(offered), "{offered}: {text}");
+        }
     }
 
     /// A BLOCKED bundle's row tells the truth about all three things it used to get wrong.
@@ -2820,6 +2926,7 @@ mod tests {
                     harnesses: Vec::new(),
                     managed: true,
                     folders: Vec::new(),
+                    diverged: Vec::new(),
                 }),
                 footprint: footprint.clone(),
                 ..ListData::default()

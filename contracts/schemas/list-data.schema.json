@@ -202,6 +202,24 @@
         "total"
       ]
     },
+    "DivergedCopy": {
+      "description": "ONE copy of a bundle whose edits disagree with another copy's, in the two spellings every\nsurface that names such a copy uses: the folder as a person reads it, and the `--dest` value\nthat names it back on a command line. The same pair the placement freeze's refusal prints —\none vocabulary, so the deep dive and the refusal never describe one state two ways.",
+      "type": "object",
+      "properties": {
+        "dest": {
+          "description": "`.agents/skills` · `~/.claude/skills` — the `--dest` value naming this copy.",
+          "type": "string"
+        },
+        "display": {
+          "description": "`project/.agents/skills/coolify-deploy` · `~/.claude/skills/coolify-deploy`.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "display",
+        "dest"
+      ]
+    },
     "ForgeSource": {
       "description": "One external source's last auto-update check — the answer to \"is this even working?\", computed\nentirely from local state. Every check is recorded whatever its outcome, so a source that has\ngone quiet is visible here long before the silent sweep is willing to interrupt a session over\nit. **INFERRED** (additive).",
       "type": "object",
@@ -257,6 +275,13 @@
             "string",
             "null"
           ]
+        },
+        "diverged": {
+          "description": "The copies whose edits DISAGREE (always ≥ 2 when present) — the state the inventory row\nreports as `draft in N folders that disagree` and sends the reader here to resolve. Each\ncarries the folder as a person reads it and the `--dest` value that names it back, so the\nanswer can offer the per-copy acts. Absent whenever at most one copy is edited.\n**INFERRED** (additive).",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/DivergedCopy"
+          }
         },
         "feed": {
           "description": "The feed origin, when no row names it (`<host>/<workspace>` — the workspace whose feed\ndelivers it).",

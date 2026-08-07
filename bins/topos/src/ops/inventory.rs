@@ -64,9 +64,14 @@ pub(crate) enum DraftCopies {
     None,
     /// Exactly one advanced edited copy — THE draft — in this folder.
     In(PathBuf),
-    /// Several copies hold edits that disagree, in this many folders (always ≥ 2). No single one
-    /// is the draft, so none can be named.
-    Diverged(usize),
+    /// Several copies hold edits that disagree (always ≥ 2). No single one is the draft, so a ROW
+    /// names none of them — it reports the count and sends the reader to the deep dive, which
+    /// answers with these: each copy in the two spellings every surface that names one uses (the
+    /// folder as a person reads it, and the `--dest` value that names it back). They are spelled
+    /// HERE, at the scope whose store was read, through the same
+    /// [`crate::ops::dest_select::copy_spellings`] the placement freeze's refusal uses — one
+    /// vocabulary for one state.
+    Diverged(Vec<crate::ops::dest_select::CopySpelling>),
 }
 
 /// One resolved line plus the provenance the deep answer spells out.
@@ -824,6 +829,18 @@ pub(crate) fn detail_for(
         harnesses: row.harness_states.clone(),
         managed: true,
         folders: Vec::new(),
+        // The competing copies, when the row's own classification found some — the question the
+        // row's `draft in N folders that disagree (see: topos list <name>)` line sends here.
+        diverged: match &row.draft_in {
+            DraftCopies::Diverged(copies) => copies
+                .iter()
+                .map(|c| topos_types::results::DivergedCopy {
+                    display: c.display.clone(),
+                    dest: c.dest.clone(),
+                })
+                .collect(),
+            DraftCopies::None | DraftCopies::In(_) => Vec::new(),
+        },
     })
 }
 
@@ -1000,7 +1017,16 @@ fn applied_for_id(
                 }
                 placement::DraftVerdict::Competitors(indices) => {
                     edited = true;
-                    draft_in = DraftCopies::Diverged(indices.len());
+                    // Spelled at the SCOPED ctx (the store that was just read), so the folders the
+                    // deep dive prints and the `--dest` values its commands take are the same
+                    // strings the freeze's own refusal would print for this bundle.
+                    draft_in = DraftCopies::Diverged(
+                        scans
+                            .iter()
+                            .filter(|s| indices.contains(&s.idx))
+                            .map(|s| super::dest_select::copy_spellings(&scoped, &s.dir))
+                            .collect(),
+                    );
                 }
             }
         }
