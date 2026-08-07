@@ -24,9 +24,9 @@
 use std::collections::BTreeMap;
 use std::io::Read as _;
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Once};
 use std::time::Duration;
 
 use plane_store::Authority;
@@ -1007,6 +1007,109 @@ impl Stack {
             .block_on(sqlx::query(sql).fetch_optional(&self.pool))
             .expect("text witness")
             .map(|row| row.get::<String, _>(0))
+    }
+}
+
+// ── the real CLI binary (the suites that drive a subprocess over a fake $HOME) ───────────────────────
+
+/// The `topos` binary a suite drives: the sibling of the test binary in the SAME cargo profile dir
+/// (`<target>/<profile>/topos`). Built on demand when absent, exactly as the suite's web-app half is
+/// built ahead of the run — the binary is a different package, so `CARGO_BIN_EXE_*` is not available
+/// here.
+pub(crate) fn cli_binary() -> PathBuf {
+    static BUILD: Once = Once::new();
+    let exe = std::env::current_exe().expect("the test binary's own path");
+    let profile_dir = exe
+        .parent()
+        .and_then(Path::parent)
+        .expect("<target>/<profile>/deps/<test binary>");
+    let bin = profile_dir.join("topos");
+    if !bin.exists() {
+        BUILD.call_once(|| {
+            let status = std::process::Command::new(
+                std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()),
+            )
+            .args(["build", "-p", "topos"])
+            .current_dir(repo_root())
+            .status()
+            .expect("build the topos binary");
+            assert!(status.success(), "`cargo build -p topos` failed");
+        });
+    }
+    assert!(
+        bin.exists(),
+        "this suite drives the real CLI — run `cargo build -p topos` first ({})",
+        bin.display()
+    );
+    bin
+}
+
+/// One CLI invocation's whole answer.
+#[derive(Debug)]
+pub(crate) struct CliOut {
+    pub(crate) code: i32,
+    pub(crate) stdout: String,
+    pub(crate) stderr: String,
+}
+
+impl CliOut {
+    /// The `--json` envelope, asserted successful.
+    pub(crate) fn envelope(&self, what: &str) -> serde_json::Value {
+        assert_eq!(self.code, 0, "{what} exited {}: {}", self.code, self.stderr);
+        let value: serde_json::Value = serde_json::from_str(&self.stdout)
+            .unwrap_or_else(|e| panic!("{what} printed a JSON envelope ({e}): {}", self.stdout));
+        assert_eq!(value["ok"], true, "{what}: {}", self.stdout);
+        value
+    }
+
+    /// The envelope's `data` object.
+    pub(crate) fn data(&self, what: &str) -> serde_json::Value {
+        self.envelope(what)["data"].clone()
+    }
+
+    /// The envelope of a REFUSAL: a non-zero exit carrying `ok: false` and the typed error.
+    pub(crate) fn refusal(&self, what: &str) -> serde_json::Value {
+        assert_ne!(
+            self.code, 0,
+            "{what} was expected to refuse: {}",
+            self.stdout
+        );
+        let value: serde_json::Value = serde_json::from_str(&self.stdout)
+            .unwrap_or_else(|e| panic!("{what} printed a JSON envelope ({e}): {}", self.stdout));
+        assert_eq!(value["ok"], false, "{what}: {}", self.stdout);
+        value
+    }
+}
+
+/// Run the real binary from `cwd` against one installation's roots. Every per-harness home override
+/// is REMOVED from the child environment (the developer's own `$CLAUDE_CONFIG_DIR` / `$CODEX_HOME` /
+/// `$XDG_CONFIG_HOME` would otherwise point the surfaces out of the fake home), and the passive
+/// version check is off (an offline suite never dials releases).
+pub(crate) fn run_cli(
+    bin: &Path,
+    home: &Path,
+    topos_home: &Path,
+    cwd: &Path,
+    args: &[&str],
+) -> CliOut {
+    let out = std::process::Command::new(bin)
+        .args(args)
+        .current_dir(cwd)
+        .env("HOME", home)
+        .env("TOPOS_HOME", topos_home)
+        .env("TOPOS_NO_UPDATE_CHECK", "1")
+        .env_remove("CLAUDE_CONFIG_DIR")
+        .env_remove("CODEX_HOME")
+        .env_remove("HERMES_HOME")
+        .env_remove("XDG_CONFIG_HOME")
+        .env_remove("VIBE_HOME")
+        .env_remove("AUTOHAND_HOME")
+        .output()
+        .expect("run the topos binary");
+    CliOut {
+        code: out.status.code().unwrap_or(-1),
+        stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
     }
 }
 
