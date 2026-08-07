@@ -4154,6 +4154,98 @@ fn rebuild_absorbs_the_edit_before_it_re_projects() {
     );
 }
 
+/// A rebuild of a bundle whose merge is still UNDECIDED leaves its folders exactly as they are.
+///
+/// The ordinary repair works by dropping every placement dir and letting the sweep re-project the
+/// bundle pristine — but a blocked bundle has no pristine version to project: the sweep stops at
+/// the block and writes no placement, so dropping the dirs would empty every agent folder and
+/// leave it empty until the merge is settled. Nothing is lost either way (the bytes are
+/// snapshotted), but "your agents have this skill" would stop being true because of a repair. So
+/// the rebuild stands aside and names the two exits — both of which rewrite every managed
+/// placement on their way out, which is the repair the person came for.
+#[test]
+fn rebuild_leaves_a_blocked_bundle_alone_and_names_both_exits() {
+    let rig = Rig::new("rebuild-blocked");
+    rig.seed_session();
+    rig.seed_feed();
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let v1 = one_file(b"# deploy\n");
+    let v2 = one_file(b"# deploy, theirs\n");
+    let plane = FakePlane::new(log)
+        .with_version("s_deploy", &v1)
+        .with_version("s_deploy", &v2);
+    plane.serves(vec![delivered("s_deploy", "deploy", &v1)]);
+    let dir = FakeDirectory::new(vec![catalog_entry("s_deploy", "deploy", &v1)], Vec::new());
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    sweep(&ctx, &plane, &dir);
+    let placed = rig.work.0.join("skills/deploy");
+    assert!(placed.join("SKILL.md").exists());
+
+    // My own edit to the same file the team is about to change → a conflict on the next sweep.
+    std::fs::write(placed.join("SKILL.md"), b"# deploy, mine\n").unwrap();
+    plane.serves(vec![DeliverySkill {
+        version_id: v2.id,
+        generation: 2,
+        bundle_digest: v2.digest,
+        ..delivered("s_deploy", "deploy", &v2)
+    }]);
+    let out = sweep(&ctx, &plane, &dir);
+    assert_eq!(
+        out.data.skills.iter().map(|s| s.action).collect::<Vec<_>>(),
+        vec![PullAction::Conflicted]
+    );
+    let sp = rig
+        .layout()
+        .published(&crate::id::SkillId::parse("s_deploy").unwrap());
+    assert!(sp.conflict.exists(), "the block is recorded");
+    let mine = snapshot_dir(&placed);
+    assert_eq!(
+        mine,
+        vec![("SKILL.md".to_owned(), b"# deploy, mine\n".to_vec())]
+    );
+
+    // THE POINT: `--rebuild` touches nothing here, and says why in the scope's own spelling.
+    let out = ops::manifest_update(
+        &ctx,
+        &connect(&plane, &dir),
+        None,
+        &ops::ManifestUpdateOpts {
+            rebuild: true,
+            ..ops::ManifestUpdateOpts::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        snapshot_dir(&placed),
+        mine,
+        "a rebuild must not empty the folders of a bundle it cannot re-project"
+    );
+    assert!(sp.conflict.exists(), "and the block still stands");
+    assert_eq!(
+        out.warnings,
+        vec![
+            "REBUILD_BLOCKED deploy: this bundle is waiting on a merge decision, so its folders \
+             were left as they are — settle it with `topos update -g deploy --onto-current` or \
+             `topos update -g deploy --reset`, then rebuild"
+                .to_owned()
+        ]
+    );
+    // The row in the SAME receipt still names the untouched folder — the rebuild changed nothing
+    // about what the conflict row can promise.
+    let row = out
+        .data
+        .skills
+        .iter()
+        .find(|s| s.action == PullAction::Conflicted)
+        .expect("the block is re-disclosed");
+    assert_eq!(
+        row.merge.as_ref().map(|m| m.placements.len()),
+        Some(1),
+        "{:?}",
+        row.merge
+    );
+}
+
 // =================================================================================================
 // The session-level facts: the ended freeze, and the quiet hook's staleness line.
 // =================================================================================================

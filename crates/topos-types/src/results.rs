@@ -690,6 +690,10 @@ pub enum SkillStatus {
     /// A machine-local `"off"` row withholds this bundle here — a standing statement of the file,
     /// never a delivery. **Additive.**
     Off,
+    /// A merge is undecided here (see [`StatusItemState::Blocked`]): this copy is neither current
+    /// nor an ordinary draft, and publishing it is refused until one of the two exits is taken.
+    /// **Additive.**
+    Blocked,
 }
 
 // =================================================================================================
@@ -1960,6 +1964,11 @@ pub enum StatusItemState {
     Behind,
     /// Local edits sit ahead of the applied version (a draft).
     LocalEdits,
+    /// A merge is undecided here: the team published a version that changes lines this person also
+    /// changed, so the folders still hold THEIR version, publishing is refused, and the two exits
+    /// (`update <name> --onto-current` / `--reset`) are the only ways forward. The row's
+    /// version/digest name what the folders hold, never the team's.
+    Blocked,
     /// An exclude line withholds this name here (the row's `source` recorded it).
     Excluded,
     /// A machine-local `"off"` row in the global manifest withholds this bundle from the feed

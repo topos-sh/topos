@@ -384,6 +384,9 @@ fn skill_entry(ctx: &Ctx<'_>, section: &ScopeResolution, row: &Row) -> SkillEntr
         StatusItemState::Behind => Some(SkillStatus::Behind),
         StatusItemState::LocalEdits => Some(SkillStatus::Draft),
         StatusItemState::Off => Some(SkillStatus::Off),
+        // Neither current nor a shareable draft: the row carries the block itself, because a
+        // blocked bundle that rendered like every other one would read as a clean install.
+        StatusItemState::Blocked => Some(SkillStatus::Blocked),
         // Never applied / pending / not available / no delivery yet: no update status is honestly
         // claimable.
         _ => None,
@@ -1409,6 +1412,134 @@ mod tests {
         assert!(row.draft, "{row:?}");
         assert_eq!(row.draft_dir, None, "{row:?}");
         assert_eq!(row.draft_diverged, Some(2), "{row:?}");
+    }
+
+    /// A BLOCKED bundle's row tells the truth about all three things it used to get wrong.
+    ///
+    /// A conflict advances the lock's base to the TEAM's version while every folder keeps holding
+    /// the person's own bytes — so the row used to read `<name>@<theirs> (draft)`, which says "you
+    /// are on the team's new version with local edits" about a folder that never received it, and
+    /// then offered `topos publish`, which the block refuses. Now the row names the version the
+    /// folder really holds, says publishing is blocked, and points at the merge's two exits.
+    #[test]
+    fn a_blocked_row_names_the_version_it_holds_and_the_two_exits() {
+        use topos_types::persisted::{ConflictReason, ConflictState};
+
+        let home = TempHome::new();
+        let cwd = home.0.join("plain");
+        std::fs::create_dir_all(&cwd).unwrap();
+        home.session(
+            "topos.sh",
+            "w_acme",
+            "acme",
+            crate::sessions::SESSION_ACTIVE,
+        );
+        home.cache(
+            "w_acme",
+            "topos.sh",
+            "acme",
+            vec![assigned("notes", None)],
+            Vec::new(),
+        );
+        home.global("[bundles]\n\"topos.sh/acme\" = \"*\"\n");
+        let placed = home.0.join(".claude/skills/notes");
+        lay_copy(&placed, "# my version\n");
+        // The post-conflict shape: the lock (and the map) name THEIRS, the folder holds mine.
+        let theirs = "d".repeat(64);
+        home.store_applied(
+            &skill_id_of("notes"),
+            "notes",
+            &theirs,
+            &[placed.to_string_lossy().as_ref()],
+        );
+        let sid = crate::id::SkillId::parse(&skill_id_of("notes")).unwrap();
+        let mine_commit = "1".repeat(64);
+        let mine_digest = "2".repeat(64);
+        crate::doc::write_doc(
+            &crate::fs_seam::RealFs,
+            &home.layout().published(&sid).conflict,
+            &ConflictState {
+                schema_version: topos_types::PERSISTED_SCHEMA_VERSION,
+                base_commit: "0".repeat(64),
+                base_digest: "0".repeat(64),
+                current_commit: theirs.clone(),
+                current_digest: "3".repeat(64),
+                draft_commit: mine_commit.clone(),
+                draft_digest: mine_digest.clone(),
+                result_commit: "4".repeat(64),
+                conflicted_digest: "5".repeat(64),
+                copy_dir: Some("notes".to_owned()),
+                reason: ConflictReason::ThreeWay,
+                paths: Vec::new(),
+            },
+        )
+        .unwrap();
+
+        let out = run(&home, &cwd, &request()).unwrap();
+        let row = row_named(scope(&out, "machine"), "notes");
+        // The version the FOLDER holds — never the team's, which this folder never received.
+        assert_eq!(row.version_id, mine_commit, "{row:?}");
+        assert_eq!(row.bundle_digest, mine_digest, "{row:?}");
+        assert_ne!(row.version_id, theirs, "{row:?}");
+        // Not an ordinary draft: no `(draft)` flag, no folder to go edit, its own status.
+        assert!(!row.draft, "{row:?}");
+        assert_eq!(row.draft_dir, None, "{row:?}");
+        assert_eq!(row.status, Some(SkillStatus::Blocked), "{row:?}");
+
+        // Composed, as a person reads it: the block, then the two exits — and never `publish`,
+        // which is refused while the block stands.
+        let text = crate::render::list_tty(&out);
+        assert!(text.contains("  [waiting on you]"), "{text}");
+        assert!(
+            text.contains(
+                "      the team's version needs merging — you cannot publish until you pick one\n\
+                 \x20     to keep yours:  topos update notes -g --onto-current\n\
+                 \x20     to take theirs: topos update notes -g --reset\n"
+            ),
+            "{text}"
+        );
+        assert!(!text.contains("topos publish notes"), "{text}");
+
+        // The deep dive answers the same way, in its own indentation.
+        let deep = run(
+            &home,
+            &cwd,
+            &ListRequest {
+                name: Some("notes".to_owned()),
+                ..request()
+            },
+        )
+        .unwrap();
+        let detail = deep.data.detail.as_ref().expect("a detail");
+        assert!(
+            matches!(detail.state, StatusItemState::Blocked),
+            "{detail:?}"
+        );
+        assert_eq!(detail.version.as_deref(), Some(mine_commit.as_str()));
+        let deep_text = crate::render::list_tty(&deep);
+        assert!(
+            deep_text.contains(
+                "  the team's version needs merging — you cannot publish until you pick one\n\
+                 \x20 to keep yours:  topos update notes -g --onto-current\n\
+                 \x20 to take theirs: topos update notes -g --reset"
+            ),
+            "{deep_text}"
+        );
+
+        // `status` counts it as a DECISION, not as a draft that a command would apply for you.
+        let snapshot = with_ctx(&home, Some(cwd.as_path()), |ctx| {
+            crate::ops::status_snapshot(ctx, ScopeView::Here).expect("a status snapshot")
+        });
+        let attention = &snapshot.scopes[0].attention;
+        assert_eq!(attention.len(), 1, "{attention:?}");
+        assert_eq!(attention[0].kind, "waiting-on-you");
+        assert_eq!(attention[0].count, 1);
+        assert_eq!(attention[0].command, "topos list");
+        let status_text = crate::render::status_tty(&snapshot);
+        assert!(
+            status_text.contains("1 merge waiting on you"),
+            "{status_text}"
+        );
     }
 
     /// A MACHINE-scope draft keeps the `~/` spelling — the `project/` token means the checkout

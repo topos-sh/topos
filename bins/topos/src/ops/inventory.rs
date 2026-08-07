@@ -21,7 +21,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
-use topos_types::persisted::{Lock, SyncState};
+use topos_types::persisted::{ConflictState, Lock, SyncState};
 use topos_types::results::{ForgeSource, ListDetail, StatusItemState, StatusRegime};
 
 use crate::ctx::Ctx;
@@ -157,11 +157,22 @@ impl ScopeResolution {
             .count() as u64
     }
 
-    /// Rows whose placements scan Modified (`drafts ahead`).
+    /// Rows whose placements scan Modified (`drafts ahead`). A BLOCKED row is deliberately not one
+    /// of them: its edits are not a draft anybody can share, and the command this count ends in
+    /// would send the reader to a row whose exits are the merge's two.
     pub(crate) fn drafts_ahead(&self) -> u64 {
         self.rows
             .iter()
             .filter(|r| r.bundle && matches!(r.state, StatusItemState::LocalEdits))
+            .count() as u64
+    }
+
+    /// Rows whose merge is undecided — the one count that names a DECISION rather than an update
+    /// that would apply itself.
+    pub(crate) fn waiting_on_you(&self) -> u64 {
+        self.rows
+            .iter()
+            .filter(|r| r.bundle && matches!(r.state, StatusItemState::Blocked))
             .count() as u64
     }
 }
@@ -921,9 +932,18 @@ impl Applied {
 }
 
 /// The APPLIED state for one bundle in one scope's store: never applied → `Unknown` ("not applied
-/// here yet"); a scanned draft → `LocalEdits`; a served version past the applied one → `Behind`;
-/// else `Applied` — an offline cache fact ("as of the last sync"), never a live claim. Any
-/// unreadable doc degrades to `Unknown`.
+/// here yet"); an undecided merge → `Blocked`; a scanned draft → `LocalEdits`; a served version
+/// past the applied one → `Behind`; else `Applied` — an offline cache fact ("as of the last sync"),
+/// never a live claim. Any unreadable doc degrades to `Unknown`.
+///
+/// **The blocked arm decides the row's VERSION, not only its word.** A conflict advances the lock's
+/// base to the team's version while leaving every folder holding the person's own bytes, so the
+/// lock is exactly the wrong thing for a blocked row to print: `<name>@<theirs> (draft)` reads as
+/// "you are on the team's new version with local edits" about a folder that never received it. The
+/// conflict record's own `draft_commit`/`draft_digest` are the version the folders DO hold, so a
+/// blocked row names those. Presence of the record is the test, the same gate `publish` applies —
+/// a leftover record from a crashed exit blocks publishing too, and healing it is the next
+/// `update`'s job, not a read verb's.
 fn applied_for_id(
     ctx: &Ctx<'_>,
     layout: Option<&Layout>,
@@ -949,8 +969,17 @@ fn applied_for_id(
     let Ok(Some(lock)) = doc::read_doc::<Lock>(ctx.fs, &sp.lock) else {
         return Applied::unknown();
     };
-    let version = Some(lock.base_commit.clone());
-    let digest = Some(lock.bundle_digest.clone());
+    let blocked: Option<ConflictState> = doc::read_doc(ctx.fs, &sp.conflict).ok().flatten();
+    let version = Some(
+        blocked
+            .as_ref()
+            .map_or_else(|| lock.base_commit.clone(), |cs| cs.draft_commit.clone()),
+    );
+    let digest = Some(
+        blocked
+            .as_ref()
+            .map_or_else(|| lock.bundle_digest.clone(), |cs| cs.draft_digest.clone()),
+    );
     let mut placements = Vec::new();
     let mut edited = false;
     let mut draft_in = DraftCopies::None;
@@ -975,6 +1004,18 @@ fn applied_for_id(
                 }
             }
         }
+    }
+    // The block outranks the draft word: these edits are not a publishable draft, and the row's
+    // exits are the merge's two, never `publish`. No folder is named either — the question a
+    // blocked row answers is which version to keep, not where to edit.
+    if blocked.is_some() {
+        return Applied {
+            state: StatusItemState::Blocked,
+            version,
+            digest,
+            placements,
+            draft_in: DraftCopies::None,
+        };
     }
     if edited {
         return Applied {

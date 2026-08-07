@@ -128,6 +128,17 @@ fn attention(
 ) -> Vec<AttentionCount> {
     let flag = if machine && in_project { " -g" } else { "" };
     let mut out = Vec::new();
+    // A merge nobody has decided leads: every other count names something a command applies for
+    // you, this one names a choice only the person can make. `list` is where the two exits are
+    // spelled per bundle, so that is the command it ends in.
+    let waiting = sr.waiting_on_you();
+    if waiting > 0 {
+        out.push(AttentionCount {
+            kind: "waiting-on-you".to_owned(),
+            count: waiting,
+            command: format!("topos list{flag}"),
+        });
+    }
     let updates = sr.updates_pending();
     if updates > 0 {
         out.push(AttentionCount {

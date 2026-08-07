@@ -5596,7 +5596,7 @@ fn clean_placements(
 /// then drop the recorded placement dirs and reset the bundle to never-received, so the ordinary
 /// sweep re-projects it pristine. The order is the whole guarantee — a rebuild is a repair, and a
 /// repair that can lose an edit is not one. A bundle whose placements cannot be read is left exactly
-/// as it is, with a line saying so.
+/// as it is, with a line saying so — and so is one whose merge is still undecided ([`rebuild_skill`]).
 fn rebuild_store(ctx: &Ctx<'_>, layout: &crate::sidecar::Layout, warnings: &mut Vec<String>) {
     let Ok(entries) = ctx.fs.read_dir(&layout.skills_dir()) else {
         return;
@@ -5613,33 +5613,62 @@ fn rebuild_store(ctx: &Ctx<'_>, layout: &crate::sidecar::Layout, warnings: &mut 
         if sidecar::record_retired(ctx.fs, layout, &sid) {
             continue;
         }
-        if let Err(e) = rebuild_skill(ctx, &sid) {
-            warnings.push(format!(
+        match rebuild_skill(ctx, &sid) {
+            Ok(None) => {}
+            Ok(Some(line)) => warnings.push(line),
+            Err(e) => warnings.push(format!(
                 "REBUILD_SKIPPED {id}: {}",
                 crate::render::safe_message(&e)
-            ));
+            )),
         }
     }
 }
 
-/// [`rebuild_store`] for one bundle (see its doc for the ordering rule).
-fn rebuild_skill(ctx: &Ctx<'_>, sid: &SkillId) -> Result<(), ClientError> {
+/// [`rebuild_store`] for one bundle (see its doc for the ordering rule). `Ok(Some(line))` is a
+/// bundle this rebuild deliberately did NOT touch, with the line that says why.
+fn rebuild_skill(ctx: &Ctx<'_>, sid: &SkillId) -> Result<Option<String>, ClientError> {
     let sp = ctx.layout.published(sid);
     {
         let _guard = crate::sidecar::lock_skill(ctx.fs, &ctx.layout, sid)?;
         let lock: Option<Lock> = doc::read_doc(ctx.fs, &sp.lock)?;
         let map: Option<PlacementMap> = doc::read_map(ctx.fs, &sp.map)?;
         let (Some(lock), Some(map)) = (lock, map) else {
-            return Ok(());
+            return Ok(None);
         };
+        // A bundle whose merge is still undecided has NO pristine version to re-project. Its
+        // folders hold the person's own bytes; the lock's base is the team's; and the sweep that
+        // would put a rebuilt folder back stops at the block and writes no placement. Dropping the
+        // dirs here would therefore empty every agent folder and leave them empty until the merge
+        // is settled — a repair that breaks the thing it repairs. So the rebuild stands aside and
+        // names the two exits, each of which rewrites every managed placement on its way out.
+        // Presence is the test, exactly as it is for the publish gate.
+        if ctx.fs.exists(&sp.conflict) {
+            return Ok(Some(rebuild_blocked_line(ctx, &lock.name)));
+        }
         if map.placements.is_empty() {
-            return Ok(());
+            return Ok(None);
         }
         let all: Vec<usize> = (0..map.placements.len()).collect();
         clean_placements(ctx, sid, &lock, &map, &all)?;
     }
     let sync: Option<SyncState> = doc::read_doc(ctx.fs, &sp.sync)?;
-    super::pull::reset_to_never_received(ctx, sid, sync.as_ref())
+    super::pull::reset_to_never_received(ctx, sid, sync.as_ref())?;
+    Ok(None)
+}
+
+/// Why a rebuild left a blocked bundle's folders exactly as they were, with both exits spelled for
+/// the scope the store lives in (the layout IS the scope) so each is runnable as printed.
+fn rebuild_blocked_line(ctx: &Ctx<'_>, name: &str) -> String {
+    let g = if ctx.layout.is_project_scope() {
+        ""
+    } else {
+        " -g"
+    };
+    format!(
+        "REBUILD_BLOCKED {name}: this bundle is waiting on a merge decision, so its folders were \
+         left as they are — settle it with `topos update{g} {name} --onto-current` or `topos \
+         update{g} {name} --reset`, then rebuild"
+    )
 }
 
 // =================================================================================================

@@ -1486,6 +1486,100 @@ fn a_deleted_conflict_copy_is_re_rendered_and_still_reads_as_untouched() {
     assert!(!copy.exists());
 }
 
+/// The escape writes its committed bytes over EVERY managed placement, so copies that held
+/// DIFFERENT edits are collapsed into one. The recorded-conflict entry runs before the work-tree
+/// classification, so the typed competitor freeze never fires here — deliberately, since freezing
+/// would deadlock the one exit that always works — and that makes the DISCLOSURE the whole
+/// protection: the row names how many folders disagreed and hands back one runnable line per copy
+/// that puts those exact bytes back.
+#[test]
+fn the_escape_discloses_the_divergent_copies_it_collapsed() {
+    let rig = Rig::new("escape-collapse");
+    let (id, _name, genesis) = rig.adopt(BASE);
+    let mine: FileSet = &[
+        ("SKILL.md", FileMode::Regular, b"# mine\n"),
+        ("run.sh", FileMode::Executable, b"#!/bin/sh\necho v0\n"),
+    ];
+    write_tree(&rig.placement(), mine);
+    let v1 = mk_version(&[genesis], V1, "d_pub", "v1");
+    let mut plane = FixturePlane::default();
+    plane.add_version(&id, &v1);
+    plane.set_current(&id, served(WS, &id, v1.id, 1));
+    let foll = follow(&id, FollowMode::Auto);
+
+    // Sweep → conflict: the placement keeps MINE, the workbench holds the marked-up tree.
+    assert_eq!(
+        only(&pull_data(&rig.ctx(&plane, &foll), ops::PullScope::AllFollowed).unwrap()).action,
+        PullAction::Conflicted
+    );
+
+    // A SECOND managed folder carrying its OWN, different edit: neither copy's bytes are the
+    // other's recorded baseline, so they are true competitors.
+    let replica = rig.work.0.join("replica");
+    let other: FileSet = &[
+        ("SKILL.md", FileMode::Regular, b"# other\n"),
+        ("run.sh", FileMode::Executable, b"#!/bin/sh\necho v0\n"),
+    ];
+    add_replica(&rig, &id, &replica, other);
+
+    let escaped = pull_data(
+        &rig.ctx(&plane, &foll),
+        ops::PullScope::One {
+            store: ops::StoreScope::Here,
+            name: "pr-describe".into(),
+            workspace: None,
+            mode: ops::TargetMode::OntoCurrent,
+        },
+    )
+    .unwrap();
+    let row = only(&escaped);
+    assert_eq!(row.action, PullAction::Merged);
+    // The collapse really happened: the untouched workbench means "keep my version", and BOTH
+    // folders now hold it — the replica's own edit is gone from disk.
+    assert_eq!(snapshot(&rig.placement()), Some(expect(mine)));
+    assert_eq!(snapshot(&replica), Some(expect(mine)));
+
+    // …and the row says so, in the receipt's own destination convention.
+    let note = row.note.as_deref().expect("the collapse is disclosed");
+    let lines: Vec<&str> = note.lines().collect();
+    assert_eq!(
+        lines[0], "overwrote different edits in 2 folders — put a copy's bytes back with:",
+        "{note}"
+    );
+    assert_eq!(
+        lines.len(),
+        3,
+        "one recovery line per collapsed copy: {note}"
+    );
+    // Each recovery line is runnable AS PRINTED and names the folder it came from — and the
+    // version it offers is one the store really holds, so the go-back it spells resolves.
+    let versions = rig.open_store(&id).list_versions().unwrap();
+    let real = |p: &std::path::Path| {
+        std::fs::canonicalize(p)
+            .unwrap_or_else(|_| p.to_path_buf())
+            .display()
+            .to_string()
+    };
+    for (line, dir) in lines[1..].iter().zip([rig.placement(), replica.clone()]) {
+        let named = line
+            .split_once("   (from ")
+            .and_then(|(_, rest)| rest.strip_suffix(')'))
+            .unwrap_or_else(|| panic!("a named folder: {line}"));
+        assert_eq!(real(std::path::Path::new(named)), real(&dir), "{line}");
+        let hash = line
+            .split_once("pr-describe@")
+            .and_then(|(_, rest)| rest.split_once("   "))
+            .map(|(h, _)| h)
+            .unwrap_or_else(|| panic!("a go-back token: {line}"));
+        assert!(line.starts_with("  topos update -g pr-describe@"), "{line}");
+        assert_eq!(hash.len(), 12, "{line}");
+        assert!(
+            versions.iter().any(|v| to_hex(v).starts_with(hash)),
+            "the offered version is in the store: {line}"
+        );
+    }
+}
+
 /// `update --reset` in the RECORDED-conflict state resolves it the team's way: the author's draft is
 /// snapshotted and discarded, theirs lands on the placement, and the conflict record is CLEARED —
 /// with the marked-up copy it named — so publish is not left refused by a divergence that no longer

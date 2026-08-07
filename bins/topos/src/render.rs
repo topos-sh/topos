@@ -1320,12 +1320,20 @@ fn list_row(entry: &SkillEntry, scope: &str) -> String {
 /// Copies that DISAGREE collapse to one line instead: no single folder is the draft, and a row that
 /// guessed one would send the reader to publish bytes they did not mean. The deep dive lists them.
 ///
+/// A BLOCKED row takes over the whole block: its edits are not shareable (`publish` is refused
+/// while the merge stands), so offering `publish` would print a command that cannot run, and the
+/// only two things that move this row are the merge's own exits. Terse on purpose — this is an
+/// inventory row, and the update receipt is where the folders and the marked-up copy are named.
+///
 /// Empty for every row that cannot name a folder — a clean row, and the rare edited one whose scan
 /// classified nothing. The commands are scope-exact through `flag`, exactly as the row's own are:
 /// `update` drives a scope, so a machine row spells `-g`; `publish` and `diff` take a name and no
 /// scope at all, so adding one there would print a command that does not parse.
 fn draft_sub_lines(entry: &SkillEntry, flag: &str) -> String {
     let name = &entry.skill;
+    if entry.status == Some(topos_types::results::SkillStatus::Blocked) {
+        return blocked_sub_lines(name, flag);
+    }
     if let Some(dir) = &entry.draft_dir {
         return format!(
             "      draft in {dir} (not shared)\n      to share:     topos publish {name}\n      \
@@ -1339,6 +1347,17 @@ fn draft_sub_lines(entry: &SkillEntry, flag: &str) -> String {
         }
         None => String::new(),
     }
+}
+
+/// The two exits a BLOCKED row prints beneath itself — the SAME pair the update receipt named,
+/// spelled for the section the row rides so each is runnable exactly as printed. Shared with the
+/// deep dive ([`list_detail_tty`]), so one bundle never reads two ways.
+fn blocked_sub_lines(name: &str, flag: &str) -> String {
+    format!(
+        "      the team's version needs merging — you cannot publish until you pick one\n      to \
+         keep yours:  topos update {name}{flag} --onto-current\n      to take theirs: topos update \
+         {name}{flag} --reset\n"
+    )
 }
 
 /// The STATUS / SOURCE suffix for an inventory row (`  [behind]  from topos.sh/acme`) — rendered
@@ -1360,12 +1379,15 @@ fn list_columns(entry: &SkillEntry) -> String {
     } else if let Some(status) = entry.status
         && !matches!(status, SkillStatus::Draft)
     {
-        // `draft` already shows via its own flag; skip it here to avoid a doubled note.
+        // `draft` already shows via its own flag; skip it here to avoid a doubled note. `blocked`
+        // has no flag of its own and must not read as an ordinary row at a glance, so it takes the
+        // status column in the receipt's own word for it.
         let label = match status {
             SkillStatus::Current => "current",
             SkillStatus::Behind => "behind",
             SkillStatus::Off => "off",
             SkillStatus::Draft => "draft",
+            SkillStatus::Blocked => "waiting on you",
         };
         s.push_str(&format!("  [{label}]"));
     }
@@ -1970,12 +1992,14 @@ fn short_hex_ref(c: &str) -> &str {
 }
 
 /// One attention count, phrased (`2 updates pending` / `1 assignment not applied` / `1 draft
-/// ahead`) — the command is appended by the caller (body line vs summary).
+/// ahead` / `1 merge waiting on you`) — the command is appended by the caller (body line vs
+/// summary).
 fn attention_phrase(a: &topos_types::results::AttentionCount) -> String {
     match a.kind.as_str() {
         "updates-pending" => format!("{} pending", counted(a.count, "update")),
         "assignments-not-applied" => format!("{} not applied", counted(a.count, "assignment")),
         "drafts-ahead" => format!("{} ahead", counted(a.count, "draft")),
+        "waiting-on-you" => format!("{} waiting on you", counted(a.count, "merge")),
         kind => format!("{} {kind}", a.count),
     }
 }
@@ -2067,6 +2091,14 @@ fn list_detail_tty(detail: &topos_types::results::ListDetail) -> String {
             format!("behind — `topos update{flag}` lands the newer version")
         }
         StatusItemState::LocalEdits => "local edits ahead of the applied version".to_owned(),
+        // The SAME two lines the inventory row prints, indented into the dive's own body: one
+        // bundle, one answer, whichever command asked.
+        StatusItemState::Blocked => format!(
+            "the team's version needs merging — you cannot publish until you pick one\n  to keep \
+             yours:  topos update {}{flag} --onto-current\n  to take theirs: topos update {}{flag} \
+             --reset",
+            detail.name, detail.name
+        ),
         StatusItemState::Excluded => "excluded here".to_owned(),
         StatusItemState::Off => "off — withheld here by your global manifest".to_owned(),
         StatusItemState::NotAvailable => "not available with your current access".to_owned(),
@@ -3201,12 +3233,15 @@ pub(crate) fn mcp_agent_line(h: &topos_types::results::McpAgentState) -> String 
 /// action's own line, plus the row's SECOND fact when it carries one (`also installed …` for a
 /// folder healed beside a draft fan-out, `also updated …` for a stale copy caught up beside a
 /// fresh install). A `released` row states its whole fact in `note` and never doubles it.
+///
+/// A note that spans lines becomes one detail line each, so a fact that needs a list (the escape's
+/// collapsed copies) is indented like every other detail rather than trailing off the first line.
 fn pull_row(s: &PullSkill, scope: &PullReceiptScope) -> (String, Vec<String>) {
     let (line, mut extra) = pull_action_row(s, scope);
     if s.action != topos_types::results::PullAction::Released
         && let Some(note) = &s.note
     {
-        extra.push(note.clone());
+        extra.extend(note.lines().map(str::to_owned));
     }
     (line, extra)
 }
@@ -3291,7 +3326,17 @@ fn pull_action_row(s: &PullSkill, scope: &PullReceiptScope) -> (String, Vec<Stri
                     ));
                     extra.extend(many.iter().map(|p| format!("  {p}")));
                 }
-                _ => {}
+                // No folder holds it any more. The reassuring line is the ONE thing this row must
+                // not say by omission: a reader who saw "your agents are unaffected" last time
+                // would read its absence as nothing having changed. Both exits below re-materialize
+                // the bytes, so the fact is stated and the row's own commands carry the fix.
+                Some([]) => extra.push(
+                    "no agent folder holds this skill right now — either way out below puts it \
+                     back"
+                        .to_owned(),
+                ),
+                // No merge report at all: nothing provable about disk, so nothing claimed.
+                None => {}
             }
             if let Some(dir) = s.merge.as_ref().and_then(|m| m.copy_dir.as_deref()) {
                 extra.push("to merge by hand, both versions are marked up here:".to_owned());
@@ -5762,6 +5807,31 @@ mod tests {
                  \x20     ~/.codex/skills/coolify-deploy\n"
             ),
             "{many}"
+        );
+
+        // NO folder holds it. The reassuring line's ABSENCE is what a reader would misread — it
+        // looks like the row simply had nothing extra to say — so the row states the loss instead,
+        // and the two exits below it are what put the bytes back.
+        let none = receipt(
+            conflicted("person", &[], "~/.topos/conflicts/coolify-deploy"),
+            "machine",
+        );
+        assert!(
+            none.contains(
+                "    no agent folder holds this skill right now — either way out below puts it \
+                 back\n"
+            ),
+            "{none}"
+        );
+        assert!(!none.contains("your agents are unaffected"), "{none}");
+        // The exits are still there, and still runnable as printed.
+        assert!(
+            none.contains("      topos update -g coolify-deploy --onto-current\n"),
+            "{none}"
+        );
+        assert!(
+            none.contains("      topos update -g coolify-deploy --reset\n"),
+            "{none}"
         );
     }
 

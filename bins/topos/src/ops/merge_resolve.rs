@@ -447,7 +447,10 @@ pub(crate) fn escape_recorded(
             super::parse_hex32(&cs.draft_digest)?,
         )?,
     };
-    escape(
+    // Read the copies BEFORE the escape converges them, so the row can say what it is about to
+    // overwrite (see [`collapsed_copies`]).
+    let collapsed = collapsed_copies(ctx, sp, lock, map);
+    let mut row = escape(
         ctx,
         skill_id,
         sp,
@@ -457,7 +460,88 @@ pub(crate) fn escape_recorded(
         &committed,
         &theirs,
         theirs_commit,
-    )
+    )?;
+    if let Some(saved) = collapsed {
+        row.note = Some(collapsed_note(ctx, &lock.name, &saved));
+    }
+    Ok(row)
+}
+
+/// One copy this escape is about to overwrite, as the disclosure names it: the folder a person
+/// reads, and the version its bytes were saved as.
+struct SavedCopy {
+    display: String,
+    version: String,
+}
+
+/// The copies holding edits that DISAGREE, each snapshotted and named — `None` when there is at
+/// most one edited copy (the ordinary case, which has nothing to disclose).
+///
+/// A recorded conflict enters [`super::sync_engine::sync_one`] BEFORE the work-tree
+/// classification, so the typed competitor freeze never fires on this path. That is deliberate:
+/// the freeze exists because nothing can tell which copy to act on, and the workbench folder
+/// answers exactly that question — freezing here would deadlock the one exit that always works.
+/// What the freeze also carried, though, was the DISCLOSURE, and that is still owed. The escape
+/// writes its committed bytes over EVERY managed placement, so copies that disagreed are collapsed
+/// into one; the materializer snapshots each before it overwrites, but a person who is never told
+/// has no reason to look for the snapshot and no id to ask for it back with.
+///
+/// So each competing copy is snapshotted HERE — [`snapshot_draft`] is content-addressed and
+/// idempotent, so this is the same commit the materializer's rail makes moments later, and the id
+/// is simply learned early enough to print. Best-effort by construction: a scan or a snapshot that
+/// fails says nothing rather than failing an escape that must never deadlock.
+fn collapsed_copies(
+    ctx: &Ctx<'_>,
+    sp: &SkillPaths,
+    lock: &Lock,
+    map: &PlacementMap,
+) -> Option<Vec<SavedCopy>> {
+    let scans = placement::scan_placements(ctx, map).ok()?;
+    let placement::DraftVerdict::Competitors(indices) = placement::classify_draft(&scans, map)
+    else {
+        return None;
+    };
+    let mut out = Vec::new();
+    for s in scans.iter().filter(|s| indices.contains(&s.idx)) {
+        let crate::placement::ScanStatus::Modified { scanned } = &s.status else {
+            continue; // a competitor is a Modified copy by construction
+        };
+        let version = snapshot_draft(ctx, sp, lock, scanned).ok()?;
+        out.push(SavedCopy {
+            display: super::inventory::pretty(ctx, &s.dir),
+            version,
+        });
+    }
+    (out.len() > 1).then_some(out)
+}
+
+/// What the escape's receipt row says about the copies it collapsed: the count, then ONE runnable
+/// line per copy that puts those exact bytes back, each naming the folder it came from. The
+/// go-back spelling is scope-exact (the layout IS the scope), so every line runs as printed.
+fn collapsed_note(ctx: &Ctx<'_>, name: &str, saved: &[SavedCopy]) -> String {
+    let g = if ctx.layout.is_project_scope() {
+        ""
+    } else {
+        " -g"
+    };
+    let mut out = format!(
+        "overwrote different edits in {} folders — put a copy's bytes back with:",
+        saved.len()
+    );
+    for c in saved {
+        out.push_str(&format!(
+            "\n  topos update{g} {name}@{}   (from {})",
+            short_version(&c.version),
+            c.display
+        ));
+    }
+    out
+}
+
+/// A version id as a command line spells it — short enough to type, long enough to be unique in
+/// one bundle's history (the same 12 the receipts print).
+fn short_version(v: &str) -> &str {
+    &v[..v.len().min(12)]
 }
 
 /// The author's hand resolution as a committable bundle, or `None` when the workbench folder is

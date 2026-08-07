@@ -677,6 +677,11 @@
           "description": "A machine-local `\"off\"` row withholds this bundle here — a standing statement of the file,\nnever a delivery. **Additive.**",
           "type": "string",
           "const": "off"
+        },
+        {
+          "description": "A merge is undecided here (see [`StatusItemState::Blocked`]): this copy is neither current\nnor an ordinary draft, and publishing it is refused until one of the two exits is taken.\n**Additive.**",
+          "type": "string",
+          "const": "blocked"
         }
       ]
     },
@@ -711,6 +716,11 @@
           "description": "Local edits sit ahead of the applied version (a draft).",
           "type": "string",
           "const": "local-edits"
+        },
+        {
+          "description": "A merge is undecided here: the team published a version that changes lines this person also\nchanged, so the folders still hold THEIR version, publishing is refused, and the two exits\n(`update <name> --onto-current` / `--reset`) are the only ways forward. The row's\nversion/digest name what the folders hold, never the team's.",
+          "type": "string",
+          "const": "blocked"
         },
         {
           "description": "An exclude line withholds this name here (the row's `source` recorded it).",
