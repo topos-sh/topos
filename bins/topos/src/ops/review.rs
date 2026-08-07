@@ -189,27 +189,40 @@ fn review_describe(
                         .into(),
             })?;
     let index = directory.proposals_index(&workspace_id)?;
-    // The proposal on this skill matching the wanted hash, or its SOLE open proposal for a bare skill.
-    let mut candidates: Vec<_> = index
+    // This skill's OPEN proposals — the whole set, before any `@<hash>` narrowing, because the two
+    // refusals below speak about different things: the bare-skill one about how many are open, the
+    // prefix one about which of them a typed prefix matched.
+    let mut open: Vec<_> = index
         .proposals
         .into_iter()
         .filter(|p| p.skill_id == id.as_str())
-        .filter(|p| {
-            wanted
-                .as_ref()
-                .is_none_or(|w| names_version(&p.version_id, w))
-        })
         .collect();
-    let proposal = match candidates.len() {
-        0 => return Err(crate::resolve::not_found(target)),
-        1 => candidates.remove(0),
-        _ => {
-            return Err(ClientError::InvalidArgument(format!(
-                "'{skill_name}' has {} open proposals — name one as `{skill_name}@<hash>` (run \
-                 `topos review` for the inbox)",
-                candidates.len()
-            )));
+    let proposal = match &wanted {
+        // `<skill>@<hash>`: resolved through the SAME resolution a verdict runs — a full id passes
+        // through, a unique prefix resolves, and an ambiguous one refuses NAMING the candidates,
+        // which is the only refusal a person can act on (they lengthen the prefix). Reporting the
+        // matched count as if it were the open count, and telling them to do the thing they just
+        // did, left them with nothing to type.
+        Some(w) => {
+            let ids: Vec<String> = open.iter().map(|p| p.version_id.clone()).collect();
+            let at = super::resolve_version_ref(&ids, w)?
+                .map(|commit| to_hex(&commit))
+                .and_then(|hex| open.iter().position(|p| p.version_id == hex))
+                .ok_or_else(|| crate::resolve::not_found(target))?;
+            open.remove(at)
         }
+        // A bare `<skill>` reads its SOLE open proposal; several is a genuine ambiguity about which
+        // proposal is meant, and `@<hash>` is what settles it.
+        None => match open.len() {
+            0 => return Err(crate::resolve::not_found(target)),
+            1 => open.remove(0),
+            n => {
+                return Err(ClientError::InvalidArgument(format!(
+                    "'{skill_name}' has {n} open proposals — name one as `{skill_name}@<hash>` \
+                     (run `topos review` for the inbox)"
+                )));
+            }
+        },
     };
     // Whose proposal is this? The server-computed `yours` is authoritative in BOTH directions
     // (resolved user id, never email equality) — a served `false` is never overridden; the principal
@@ -666,16 +679,6 @@ fn split_target(target: &str) -> Result<(String, VersionRef), ClientError> {
     Ok((skill.to_owned(), vref))
 }
 
-/// Whether `version_id` is the version `vref` names: a full id compares whole, a prefix by its
-/// leading chars. Ambiguity is NOT decided here — the caller counts the survivors and refuses on
-/// more than one.
-fn names_version(version_id: &str, vref: &VersionRef) -> bool {
-    match vref {
-        VersionRef::Full(h) => version_id == to_hex(h),
-        VersionRef::Prefix(p) => version_id.starts_with(p.as_str()),
-    }
-}
-
 /// Resolve a verdict target's `@<hash>` against `open` — the version ids of this skill's OPEN
 /// proposals. A full id passes straight through (its `open` is never consulted, so the
 /// paste-the-whole-hash path is untouched and the server keeps deciding whether the proposal is
@@ -728,8 +731,8 @@ mod tests {
     use topos_core::digest::to_hex;
 
     use super::{
-        VersionRef, denied_review_error, names_version, permanent_failure_error,
-        resolve_proposal_target, split_target, verdict_next_argvs,
+        VersionRef, denied_review_error, permanent_failure_error, resolve_proposal_target,
+        resolve_version_ref, split_target, verdict_next_argvs,
     };
     use crate::plane::WriteReceipt;
 
@@ -957,27 +960,40 @@ mod tests {
         assert_eq!(to_hex(&hit), "ab".repeat(32));
     }
 
+    /// The DESCRIBE resolves `<skill>@<hash>` through the SAME resolution a verdict runs, so the
+    /// two surfaces can never disagree about which proposal a handle names — and an ambiguous
+    /// prefix refuses the way the verdict's does: naming the candidates, so the reader has
+    /// something to type. The old describe-only refusal reported the FILTERED count as the open
+    /// count and told the reader to spell `<skill>@<hash>`, which is exactly what they had done.
     #[test]
     fn the_describe_narrows_by_the_same_two_hash_spellings_a_verdict_takes() {
-        // The receipt's short handle has to READ before it settles — the describe's candidate
-        // filter matches a prefix as well as a full id, so pasting it bare shows the diff.
         let version = format!("f154315d5fd9{}", "0".repeat(52));
-        let full = VersionRef::recognize(&version).expect("a full id");
-        assert!(names_version(&version, &full));
-        assert!(names_version(
-            &version,
-            &VersionRef::Prefix("f154315d5fd9".to_owned())
-        ));
-        assert!(names_version(
-            &version,
-            &VersionRef::Prefix("f154315d".to_owned())
-        ));
-        // A neighbour is NOT named by it — the filter narrows, it never widens.
-        assert!(!names_version(
-            &format!("f154315e{}", "0".repeat(56)),
-            &VersionRef::Prefix("f154315d".to_owned())
-        ));
-        let other = VersionRef::recognize(&"ab".repeat(32)).expect("a full id");
-        assert!(!names_version(&version, &other));
+        let sibling = format!("f154315dffff{}", "0".repeat(52));
+        let open = vec![version.clone(), sibling, "ab".repeat(32)];
+
+        // A full id and a unique prefix both land on the one proposal.
+        for spelling in [version.as_str(), "f154315d5fd9"] {
+            let vref = VersionRef::recognize(spelling).expect("a version ref");
+            let hit = resolve_version_ref(&open, &vref)
+                .expect("resolves")
+                .expect("a match");
+            assert_eq!(to_hex(&hit), version, "{spelling}");
+        }
+        // A prefix TWO of them share refuses, naming both 12-char candidates — never the count of
+        // what it matched, and never an instruction to re-type what was just typed.
+        let vref = VersionRef::recognize("f154315d").expect("a prefix");
+        let err = resolve_version_ref(&open, &vref).expect_err("ambiguous");
+        let message = crate::render::safe_message(&err);
+        assert!(
+            message.contains("f154315d5fd9") && message.contains("f154315dffff"),
+            "{message}"
+        );
+        assert!(message.contains("use a longer prefix"), "{message}");
+        // A prefix nothing carries resolves to nothing — the caller's own not-found.
+        assert_eq!(
+            resolve_version_ref(&open, &VersionRef::recognize("deadbeef").expect("a prefix"))
+                .expect("resolves"),
+            None
+        );
     }
 }

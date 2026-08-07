@@ -1726,6 +1726,26 @@ pub struct ResetData {
     pub drop_diff: String,
     /// `true` on the `--yes` apply, `false` on the describe.
     pub applied: bool,
+    /// The ONE copy a `-a`/`--dest` selection narrowed this reset to, as a receipt spells the
+    /// folder (`project/.agents/skills/coolify-deploy`). Absent = the whole bundle: every copy's
+    /// edits. The loss surface must never overstate its reach, so the copy is carried rather than
+    /// inferred. **INFERRED** (additive-only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dest: Option<String>,
+    /// The bundle's OTHER edited copies — the ones this reset leaves untouched, still holding
+    /// their edits. Always empty for a whole-bundle reset (it takes them all). **INFERRED**
+    /// (additive-only).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub others_kept: Vec<String>,
+    /// A recorded merge conflict that OUTLIVES this reset: a per-copy reset never clears the
+    /// bundle's conflict record (the draft it describes may be exactly the copy left alone), so
+    /// publish stays blocked and the receipt says so. **INFERRED** (additive-only).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub conflict_kept: bool,
+    /// The scope this reset ran in — `true` for the machine (`-g`). Every command the receipt
+    /// offers is spelled for it. **INFERRED** (additive-only).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub global: bool,
 }
 
 /// `publish` (bare, no `--yes`) — the describe: where it lands, the gate outcome, the audience, the

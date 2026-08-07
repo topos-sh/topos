@@ -114,9 +114,14 @@ topos update coolify-deploy --dest .claude/skills --reset --yes
 
 The folder is written however topos last printed it at you: the one the `topos.toml` line names
 (`.claude/skills`), the one `topos list` prints (`project/.claude/skills/coolify-deploy`), or an
-absolute path. Publishing or dropping one copy leaves the other exactly as it is — it becomes your
-single ordinary draft, and the freeze is over. `topos update <skill> --reset` with no folder still
-drops **every** copy's edits at once.
+absolute path. Publishing or dropping one copy leaves every other copy exactly as it is. With two
+copies that ends it: the survivor becomes your single ordinary draft. With three or more, repeat
+until one is left. `topos update <skill> --reset` with no folder still drops **every** copy's edits
+at once.
+
+A per-copy `--reset` is narrower than it looks in one respect: if the copies got there through a
+merge conflict, resetting one copy does not clear the conflict, so publish stays blocked. The
+receipt says so and names the whole-bundle `--reset` that does clear it.
 
 `--dest` on `diff` narrows only your side; it always compares against the team version, so two runs
 answer the same question about two folders.

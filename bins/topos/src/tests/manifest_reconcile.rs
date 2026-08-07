@@ -6885,6 +6885,130 @@ fn the_machine_copy_left_behind_by_a_project_update_earns_the_counted_trailer() 
     );
 }
 
+/// The PINNED half of the staleness rule, reached for real. The two tests around it never touch
+/// it: one pins the scope the run DRIVES (so the driven-scope filter answers first and the pin is
+/// never consulted), the other uses `"off"`. Here the pin sits on the scope this run leaves alone,
+/// which is the only arrangement in which the pin itself decides — and the control run, the same
+/// fixture with `"*"` in place of the pin, proves the silence is the PIN's doing and not the
+/// fixture's.
+#[test]
+fn a_pin_on_the_scope_this_run_left_alone_is_never_reported_behind() {
+    let rig = Rig::new("behind-pinned");
+    rig.seed_session();
+    let v1 = one_file(b"# deploy v1\n");
+    let v2 = one_file(b"# deploy v2\n");
+    let v1_hex = topos_core::digest::to_hex(&v1.id);
+    let proj = project(
+        "proj-pinned",
+        &format!("[bundles]\n\"{HOST}/{WS_NAME}/deploy\" = \"*\"\n"),
+    );
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let plane = FakePlane::new(log)
+        .with_version("s_deploy", &v1)
+        .with_version("s_deploy", &v2);
+    let dir = FakeDirectory::new(vec![catalog_entry("s_deploy", "deploy", &v1)], Vec::new());
+
+    // The MACHINE recipe pins the bundle to v1; the project takes whatever is current. Both land
+    // v1 on the first sweep, which drives both scopes.
+    rig.write_global(&format!(
+        "[bundles]\n\"{HOST}/{WS_NAME}\" = \"*\"\n\"{HOST}/{WS_NAME}/deploy\" = \"{v1_hex}\"\n"
+    ));
+    plane.serves(vec![delivered("s_deploy", "deploy", &v1)]);
+    let ctx = rig.ctx_at(Some(&proj.0));
+    sweep_both(&ctx, &plane, &dir);
+    assert_eq!(
+        std::fs::read(rig.work.0.join("skills/deploy/SKILL.md")).unwrap(),
+        b"# deploy v1\n"
+    );
+
+    // Current moves; a hand-run update from inside the checkout drives the PROJECT alone, so the
+    // machine scope is exactly the one nothing here touched — the arrangement that makes the pin
+    // the deciding fact.
+    let mut served = delivered("s_deploy", "deploy", &v2);
+    served.generation = 2;
+    plane.serves(vec![served.clone()]);
+    let mut listed = catalog_entry("s_deploy", "deploy", &v2);
+    listed.generation = 2;
+    let dir2 = FakeDirectory::new(vec![listed.clone()], Vec::new());
+    let out = sweep(&ctx, &plane, &dir2);
+    assert_eq!(
+        std::fs::read(proj.0.join(".claude/skills/deploy/SKILL.md")).unwrap(),
+        b"# deploy v2\n",
+        "the scope you stand in is the one that moves"
+    );
+    assert_eq!(
+        std::fs::read(rig.work.0.join("skills/deploy/SKILL.md")).unwrap(),
+        b"# deploy v1\n",
+        "the pinned machine copy is materially behind v2 — deliberately"
+    );
+    assert!(
+        out.data.behind_elsewhere.is_empty(),
+        "a pinned row is a choice no `topos update` would undo: {:?}",
+        out.data.behind_elsewhere
+    );
+    let tty = crate::render::pull_tty(&out.data, &out.warnings, &out.advisories, &out.disclosures);
+    assert!(!tty.contains("behind"), "{tty}");
+
+    // THE CONTROL. Same fixture, same undriven scope, same version gap — only the pin removed.
+    // The line appears, so the silence above is the pin's and nothing else's.
+    let rig = Rig::new("behind-unpinned");
+    rig.seed_session();
+    let proj = project(
+        "proj-unpinned",
+        &format!("[bundles]\n\"{HOST}/{WS_NAME}/deploy\" = \"*\"\n"),
+    );
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let plane = FakePlane::new(log)
+        .with_version("s_deploy", &v1)
+        .with_version("s_deploy", &v2);
+    rig.write_global(&format!(
+        "[bundles]\n\"{HOST}/{WS_NAME}\" = \"*\"\n\"{HOST}/{WS_NAME}/deploy\" = \"*\"\n"
+    ));
+    plane.serves(vec![delivered("s_deploy", "deploy", &v1)]);
+    let ctx = rig.ctx_at(Some(&proj.0));
+    let dir = FakeDirectory::new(vec![catalog_entry("s_deploy", "deploy", &v1)], Vec::new());
+    sweep_both(&ctx, &plane, &dir);
+    plane.serves(vec![served]);
+    let dir2 = FakeDirectory::new(vec![listed], Vec::new());
+    let out = sweep(&ctx, &plane, &dir2);
+    assert_eq!(
+        out.data.behind_elsewhere,
+        vec![topos_types::results::BehindElsewhere {
+            bundle: "deploy".to_owned(),
+            project_dir: None,
+        }],
+        "with no pin the same gap IS news"
+    );
+    let tty = crate::render::pull_tty(&out.data, &out.warnings, &out.advisories, &out.disclosures);
+    assert!(
+        tty.ends_with("1 bundle behind machine-wide — `topos update -g` updates it."),
+        "{tty}"
+    );
+}
+
+/// The reason there is no SET-level branch in the staleness rule: a channel — the only set a
+/// workspace bundle arrives through — cannot carry a pin at all. The grammar refuses it in both
+/// spellings, so "a pinned set delivers this bundle" is not a state a manifest can express, and a
+/// rule about it would be one no fixture could ever reach.
+#[test]
+fn a_channel_cannot_be_pinned_so_a_set_is_never_the_deliberate_fact() {
+    let rig = Rig::new("behind-pinned-set");
+    let v1 = one_file(b"# deploy v1\n");
+    let v1_hex = topos_core::digest::to_hex(&v1.id);
+    for body in [
+        format!("[bundles]\n\"{HOST}/{WS_NAME}/channels/backend\" = \"{v1_hex}\"\n"),
+        format!(
+            "[bundles]\n\"{HOST}/{WS_NAME}/channels/backend\" = {{ version = \"{v1_hex}\" }}\n"
+        ),
+    ] {
+        rig.write_global(&body);
+        let err = crate::manifest::scopes::person_plan(&rig.fs, &rig.layout())
+            .expect_err("a pinned channel is refused at the parser");
+        let message = crate::render::safe_message(&err);
+        assert!(message.contains("channel takes no pin"), "{message}");
+    }
+}
+
 #[test]
 fn an_off_row_is_never_reported_behind() {
     // The `"off"` switch is the other deliberate spelling: the machine keeps its copy but stops
@@ -12854,6 +12978,30 @@ fn zz_a_per_copy_reset_drops_one_copys_edits_and_leaves_the_other_alone() {
         "the loss shown is THIS copy's: {}",
         items[0].drop_diff
     );
+    // The SENTENCES around that delta say the same thing it does. The consent surface names the
+    // one folder it takes and states, in the same breath, that the other copy keeps its edits —
+    // a describe claiming the whole bundle's edits would be asking for the wrong yes.
+    assert_eq!(
+        items[0].dest.as_deref(),
+        Some("~/.claude/skills/coolify-deploy")
+    );
+    assert_eq!(
+        items[0].others_kept,
+        vec!["~/.agents/skills/coolify-deploy"]
+    );
+    let described_tty = crate::render::reset_describe_tty(items, yes_argv);
+    assert!(
+        described_tty.starts_with(
+            "Reset 'coolify-deploy' in ~/.claude/skills/coolify-deploy — this DISCARDS that \
+             copy's local edits back to "
+        ),
+        "{described_tty}"
+    );
+    assert!(
+        described_tty
+            .contains("your other copy in ~/.agents/skills/coolify-deploy keeps its edits"),
+        "{described_tty}"
+    );
     // The apply command carries the selector — without it `--yes` would discard both copies.
     assert_eq!(
         yes_argv,
@@ -12868,7 +13016,7 @@ fn zz_a_per_copy_reset_drops_one_copys_edits_and_leaves_the_other_alone() {
         ]
     );
 
-    ops::reset(
+    let applied = ops::reset(
         &ctx,
         std::slice::from_ref(&name),
         true,
@@ -12876,6 +13024,26 @@ fn zz_a_per_copy_reset_drops_one_copys_edits_and_leaves_the_other_alone() {
         &sel,
     )
     .unwrap();
+    let ops::ResetOutcome::Applied(done) = &applied else {
+        panic!("`--yes` applies: {applied:?}");
+    };
+    // The receipt tells the same truth as the describe: the named copy, and what survived.
+    let applied_tty = crate::render::reset_applied_tty(done);
+    assert!(
+        applied_tty.starts_with("Reset 'coolify-deploy' in ~/.claude/skills/coolify-deploy to "),
+        "{applied_tty}"
+    );
+    assert!(
+        applied_tty.contains(
+            "that copy's local edits discarded (a snapshot was kept under \
+             ~/.topos).\nyour other copy in ~/.agents/skills/coolify-deploy keeps its edits"
+        ),
+        "{applied_tty}"
+    );
+    assert!(
+        !applied_tty.contains("publish stays blocked"),
+        "no conflict was recorded here: {applied_tty}"
+    );
     assert_eq!(
         std::fs::read(native.join("SKILL.md")).unwrap(),
         b"# coolify-deploy\nbase\n",
@@ -12896,6 +13064,78 @@ fn zz_a_per_copy_reset_drops_one_copys_edits_and_leaves_the_other_alone() {
     )
     .expect("one edited copy is the ordinary draft");
     assert!(d.diff.contains("shared edit"), "{}", d.diff);
+}
+
+/// A per-copy reset can leave a PUBLISH BLOCK whose cause it just erased: the recorded merge
+/// conflict is the bundle's, not one copy's, so resetting one copy never clears it. Keeping the
+/// block is right — the markers may still be on disk in the copy nobody named — but keeping it
+/// SILENTLY is not: the next `publish` would refuse for a reason the receipt never mentioned.
+#[test]
+fn zz_a_per_copy_reset_discloses_the_publish_block_it_leaves_standing() {
+    use topos_types::persisted::{ConflictReason, ConflictState};
+
+    let (rig, name, id, _shared, _native) = frozen_copies("zz-per-copy-reset-conflict");
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    let sp = rig.layout().published(&id);
+    let record = |hex: &str| ConflictState {
+        schema_version: 1,
+        base_commit: hex.repeat(32),
+        base_digest: hex.repeat(32),
+        current_commit: hex.repeat(32),
+        current_digest: hex.repeat(32),
+        draft_commit: hex.repeat(32),
+        draft_digest: hex.repeat(32),
+        result_commit: hex.repeat(32),
+        conflicted_digest: hex.repeat(32),
+        reason: ConflictReason::ThreeWay,
+        paths: Vec::new(),
+    };
+    crate::doc::write_doc(&rig.fs, &sp.conflict, &record("ab")).unwrap();
+
+    // ONE copy reset: the block outlives it, and the receipt says so, naming the reset that does
+    // clear it.
+    let applied = ops::reset(
+        &ctx,
+        std::slice::from_ref(&name),
+        true,
+        ops::StoreScope::Here,
+        &ops::Selection::one(Some("claude-code"), None),
+    )
+    .unwrap();
+    let ops::ResetOutcome::Applied(done) = &applied else {
+        panic!("`--yes` applies: {applied:?}");
+    };
+    assert!(done[0].conflict_kept, "{done:?}");
+    assert!(sp.conflict.exists(), "the record itself is untouched");
+    let tty = crate::render::reset_applied_tty(done);
+    assert!(
+        tty.contains(
+            "publish stays blocked — the recorded merge conflict survives a one-copy reset; \
+             `topos update coolify-deploy --reset` clears it."
+        ),
+        "{tty}"
+    );
+
+    // The WHOLE-BUNDLE reset it names does clear it — and says nothing, because there is nothing
+    // left standing to disclose.
+    let applied = ops::reset(
+        &ctx,
+        std::slice::from_ref(&name),
+        true,
+        ops::StoreScope::Here,
+        &ops::Selection::default(),
+    )
+    .unwrap();
+    let ops::ResetOutcome::Applied(done) = &applied else {
+        panic!("`--yes` applies: {applied:?}");
+    };
+    assert!(!done[0].conflict_kept, "{done:?}");
+    assert!(!sp.conflict.exists(), "the block is gone with its cause");
+    assert!(
+        !crate::render::reset_applied_tty(done).contains("publish stays blocked"),
+        "{}",
+        crate::render::reset_applied_tty(done)
+    );
 }
 
 /// Publishing ONE copy is the other way out of the freeze, and it is safe: the copy that shipped

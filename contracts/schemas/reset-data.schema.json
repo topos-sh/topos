@@ -8,9 +8,31 @@
       "description": "`true` on the `--yes` apply, `false` on the describe.",
       "type": "boolean"
     },
+    "conflict_kept": {
+      "description": "A recorded merge conflict that OUTLIVES this reset: a per-copy reset never clears the\nbundle's conflict record (the draft it describes may be exactly the copy left alone), so\npublish stays blocked and the receipt says so. **INFERRED** (additive-only).",
+      "type": "boolean"
+    },
+    "dest": {
+      "description": "The ONE copy a `-a`/`--dest` selection narrowed this reset to, as a receipt spells the\nfolder (`project/.agents/skills/coolify-deploy`). Absent = the whole bundle: every copy's\nedits. The loss surface must never overstate its reach, so the copy is carried rather than\ninferred. **INFERRED** (additive-only).",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "drop_diff": {
       "description": "The unified diff of the draft that would be (describe) / was (apply) discarded.",
       "type": "string"
+    },
+    "global": {
+      "description": "The scope this reset ran in — `true` for the machine (`-g`). Every command the receipt\noffers is spelled for it. **INFERRED** (additive-only).",
+      "type": "boolean"
+    },
+    "others_kept": {
+      "description": "The bundle's OTHER edited copies — the ones this reset leaves untouched, still holding\ntheir edits. Always empty for a whole-bundle reset (it takes them all). **INFERRED**\n(additive-only).",
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
     },
     "skill": {
       "type": "string"

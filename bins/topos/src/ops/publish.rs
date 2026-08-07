@@ -1552,19 +1552,14 @@ fn map_outcome(
     followed: bool,
     picked: Option<&super::dest_select::SelectedCopy>,
 ) -> Result<PublishOutcome, ClientError> {
-    // The three lines both landed shapes compose from the workspace's own address: the
-    // `<host>/<workspace>` handle the receipt names the destination by, the members' deep link, and
-    // the teammate handoff. ONE best-effort read, AFTER the write — a failure just leaves the lines
-    // off; it never fails a write the plane already holds.
-    let addressed = || {
-        let me = directory.and_then(|d| d.me(&rec.workspace_id).ok());
-        me.map_or((None, None, None), |m| {
-            (
-                workspace_handle(&m.address),
-                Some(format!("{}/skills/{skill_name}", m.address)),
-                teammate_invite_line(&m.address),
-            )
-        })
+    // Both landed shapes name their destination from the workspace's own ADDRESS — ONE
+    // best-effort read, AFTER the write; a failure just leaves the lines off, it never fails a
+    // write the plane already holds. Each arm then composes exactly the lines it prints from that
+    // one address, so no arm builds a line it goes on to drop.
+    let address = || {
+        directory
+            .and_then(|d| d.me(&rec.workspace_id).ok())
+            .map(|m| m.address)
     };
     match receipt.outcome() {
         TerminalOutcome::Ok => {
@@ -1603,7 +1598,14 @@ fn map_outcome(
             // deleted before the write — the publish landed catalog-only, never a silent mint.
             let placement_missing =
                 (placement_outcome.as_deref() == Some("channel_not_found")).then(target_channel);
-            let (workspace_address, share_line, invite_line) = addressed();
+            let address = address();
+            let workspace_address = address.as_deref().and_then(workspace_handle);
+            let share_line = address
+                .as_deref()
+                .map(|a| format!("{a}/skills/{skill_name}"));
+            // The teammate handoff — the members' deep link above 404s for a non-member, so
+            // recruiting a teammate takes this join line instead.
+            let invite_line = address.as_deref().and_then(teammate_invite_line);
             // The base commit is named SHORT here — `revert --to` resolves a unique prefix of 8+
             // chars, so the receipt hands back the same 12-char spelling every other surface prints.
             let undo = landed_undo_is_restorative(followed, rec.expected_generation).then(|| {
@@ -1655,7 +1657,11 @@ fn map_outcome(
             // The proposal receipt names the same destination the landed one does. No undo rides
             // it: `current` never moved, so there is no prior state to restore — the author's
             // escape is `review <handle> --withdraw`, which the renderer names.
-            let (workspace_address, share_line, _invite_line) = addressed();
+            let address = address();
+            let workspace_address = address.as_deref().and_then(workspace_handle);
+            let share_line = address
+                .as_deref()
+                .map(|a| format!("{a}/skills/{skill_name}"));
             Ok(PublishOutcome::Proposed(ProposeData {
                 proposal: format!("{skill_name}@{}", rec.candidate_commit),
                 base_version_id: lock.base_commit.clone(),

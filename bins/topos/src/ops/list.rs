@@ -239,11 +239,31 @@ pub(crate) fn list_with(
     // way — "nothing manages it" is the whole answer, never an error.
     if let Some(name) = &req.name {
         let dive = dive_sections(&resolved, req.view);
-        let detail = match inventory::detail_for(&dive, &all, name) {
+        let mut detail = match inventory::detail_for(&dive, &all, name) {
             Ok(detail) => detail,
             Err(_) => builtin_detail(ctx, name)
                 .unwrap_or_else(|| unmanaged_detail(ctx, name, discover.as_ref())),
         };
+        // Every path the deep dive prints is spelled the way the rest of this command family
+        // spells one: `project/<rest>` under the checkout the answering scope's manifest governs,
+        // `~`-abbreviated on the machine. A draft sub-line one command earlier already reads
+        // `project/.claude/skills/deploy`, so an absolute twin here was the same folder said two
+        // ways in the same breath.
+        if let Some(section) = dive
+            .iter()
+            .find(|s| detail.scope.as_deref() == Some(s.scope))
+        {
+            for p in &mut detail.placements {
+                *p = scoped_folder(ctx, section, Path::new(p));
+            }
+            // The manifest is re-spelled from its PATH, not from the pretty string the row
+            // carries: an abbreviation cannot be un-abbreviated back into a folder.
+            if detail.source_file.is_some()
+                && let Some(file) = section.manifest_path.as_deref()
+            {
+                detail.source_file = Some(scoped_folder(ctx, section, file));
+            }
+        }
         // A one-skill answer names THIS skill's external source and NO other. Every line above it
         // is about the skill on screen, so an unrelated repository's last check reads as one more
         // fact about that skill — the listing's "what is my machine tracking?" block answering a
@@ -373,7 +393,7 @@ fn skill_entry(ctx: &Ctx<'_>, section: &ScopeResolution, row: &Row) -> SkillEntr
     // nothing it cannot prove.
     let (draft_dir, draft_diverged) = match &row.draft_in {
         DraftCopies::None => (None, None),
-        DraftCopies::In(dir) => (Some(draft_folder(ctx, section, dir)), None),
+        DraftCopies::In(dir) => (Some(scoped_folder(ctx, section, dir)), None),
         DraftCopies::Diverged(n) => (None, Some(*n as u32)),
     };
     SkillEntry {
@@ -416,14 +436,18 @@ fn with_source_health(
     entry
 }
 
-/// A draft copy's folder as the row prints it: `project/<rest>` under the folder the section's
+/// A folder as this scope's section prints it: `project/<rest>` under the folder the section's
 /// manifest governs, `~`-abbreviated anywhere else. The project spelling is the same one the
 /// `update` receipt writes its paths in — the checkout is named once (the section header's
 /// manifest, the receipt's lead line) and every path below it reads as a place inside the thing you
 /// are standing in. A dir that is not under that folder (nothing plans one there, but the read is
 /// best-effort) falls back to the plain `~`-abbreviated path rather than a `project/` prefix that
 /// would not resolve.
-fn draft_folder(ctx: &Ctx<'_>, section: &ScopeResolution, dir: &Path) -> String {
+///
+/// Verb-agnostic on purpose: a draft sub-line, the deep dive's `placed in:` list, and the file the
+/// dive names its source by are all the same question — where is this, from where I stand — and
+/// one answer is what keeps them from becoming two spellings of one folder.
+fn scoped_folder(ctx: &Ctx<'_>, section: &ScopeResolution, dir: &Path) -> String {
     if section.scope == "project"
         && let Some(root) = section.manifest_path.as_deref().and_then(Path::parent)
         && let Ok(rest) = dir.strip_prefix(root)
@@ -1323,6 +1347,47 @@ mod tests {
         );
     }
 
+    /// The deep dive writes its paths in the SAME spelling as the draft sub-line one command
+    /// earlier: `project/…` under the checkout the answering scope's manifest governs. Absolute
+    /// paths here and `project/…` there were two spellings of one folder inside one command
+    /// family, which is exactly the thing a reader cannot reconcile.
+    #[test]
+    fn the_project_deep_dive_writes_its_paths_against_the_project() {
+        let home = TempHome::new();
+        let repo = lay_project(&home);
+        let placed = repo.join("tools/repo-helper");
+        lay_placements(
+            &crate::sidecar::project_store_layout(&repo),
+            "repo-helper",
+            &[&placed],
+        );
+
+        let out = run(
+            &home,
+            &repo,
+            &ListRequest {
+                name: Some("repo-helper".to_owned()),
+                ..request()
+            },
+        )
+        .unwrap();
+        let detail = out.data.detail.as_ref().expect("a detail");
+        assert_eq!(detail.scope.as_deref(), Some("project"));
+        assert_eq!(detail.placements, vec!["project/tools/repo-helper"]);
+        assert_eq!(detail.source_file.as_deref(), Some("project/topos.toml"));
+        // Nothing absolute survives into the answer a person reads.
+        let text = crate::render::list_tty(&out);
+        assert!(
+            !text.contains(&repo.display().to_string()),
+            "the checkout's absolute path is never printed: {text}"
+        );
+        assert!(
+            text.contains("\n  from project/topos.toml, line key ./tools/repo-helper\n")
+                && text.contains("\n  placed in:\n    project/tools/repo-helper\n"),
+            "{text}"
+        );
+    }
+
     /// Copies whose edits DISAGREE name no folder — none of them is the draft — and report how
     /// many disagree instead. The count is the freeze's own: one per distinct content.
     #[test]
@@ -1595,18 +1660,12 @@ mod tests {
             )
         };
         let detail = deep("deploy").unwrap().data.detail.expect("a detail");
-        assert!(
-            detail
-                .source_file
-                .as_deref()
-                .is_some_and(|f| f.ends_with("topos.toml"))
-        );
+        // The machine scope's spelling is `~/…` — the one the rest of this command family uses,
+        // never a raw absolute path beside a `~`-abbreviated sibling line.
+        assert_eq!(detail.source_file.as_deref(), Some("~/.topos/topos.toml"));
         assert_eq!(detail.source_key.as_deref(), Some("topos.sh/acme/deploy"));
         assert_eq!(detail.feed, None);
-        assert_eq!(
-            detail.placements,
-            vec![placed.to_string_lossy().into_owned()]
-        );
+        assert_eq!(detail.placements, vec!["~/placed-deploy".to_owned()]);
         assert!(matches!(detail.state, StatusItemState::Applied));
 
         let detail = deep("notes").unwrap().data.detail.expect("a detail");
@@ -1891,7 +1950,7 @@ mod tests {
         assert_eq!(detail.version.as_deref(), Some(&*"a".repeat(64)));
         assert_eq!(
             detail.placements,
-            vec![placed.to_string_lossy().into_owned()],
+            vec!["~/placed-topos".to_owned()],
             "the built-in answers with the placements its store map records"
         );
         // No row names it, so no file, no key, no feed — the record IS the answer.

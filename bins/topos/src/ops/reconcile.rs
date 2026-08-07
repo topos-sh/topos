@@ -1767,29 +1767,25 @@ fn stale_scopes(
         .collect()
 }
 
-/// Whether a scope's recipe deliberately holds `bundle` somewhere other than current — a version
-/// pin on its own row, an `"off"` switch, or a pinned SET that delivers it. Each is a choice a
-/// person wrote down, and no `topos update` would ever undo it: naming one as "behind" would be a
-/// line that can never be cleared.
+/// Whether a scope's recipe deliberately holds `bundle` somewhere other than current — an `"off"`
+/// switch, or a version pin on the bundle's own row. Either is a choice a person wrote down, and
+/// no `topos update` would ever undo it: naming one as "behind" would be a line that can never be
+/// cleared.
+///
+/// There is deliberately no third, SET-level test. The only sets a workspace bundle can arrive
+/// through are channels, and the manifest grammar refuses a pin on a channel in both spellings
+/// (`= "<hash>"` and a `version` field) — so a pinned set that delivers this bundle is not a state
+/// the parser can produce, and a branch for it would be a rule no fixture could ever reach.
 fn deliberately_fixed(plan: &ScopePlan, host: &str, workspace: &str, bundle: &str) -> bool {
     let is_this_bundle = |r: &PlanRow| {
         matches!(&r.shape, KeyShape::WorkspaceBundle { host: h, workspace: w, bundle: b }
             if h == host && w == workspace && b == bundle)
     };
-    if plan.off_for(host, workspace, bundle).is_some() {
-        return true;
-    }
-    if plan
-        .things
-        .iter()
-        .any(|r| is_this_bundle(r) && r.pin().is_some())
-    {
-        return true;
-    }
-    let key = format!("{host}/{workspace}");
-    plan.sets
-        .iter()
-        .any(|r| r.pin().is_some() && r.shape.workspace_key().as_deref() == Some(key.as_str()))
+    plan.off_for(host, workspace, bundle).is_some()
+        || plan
+            .things
+            .iter()
+            .any(|r| is_this_bundle(r) && r.pin().is_some())
 }
 
 /// Persist what the forge round learned and hand back the per-HOST staleness signals the silent

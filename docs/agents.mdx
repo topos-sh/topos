@@ -183,12 +183,18 @@ whose copy has no edits refuses too, rather than reporting a no-op as success. `
 `update` without `--reset` is a usage error, never a silently ignored flag.
 
 This is the answer to `PLACEMENTS_DIVERGED` — the freeze raised when the same bundle is edited
-differently in two folders. Its message lists each copy with the three commands above; publishing
-or dropping one leaves the other as the single ordinary draft. `diff --dest` reads a frozen bundle
-that a bare `diff` refuses, and `publish` still refuses without a selector: it never picks a copy
-for you. Two additive receipt fields carry the choice — `from_placement` (the folder published
-from) and `other_edited` (the copies left untouched) — both present only when more than one copy
-was edited.
+differently in two or more folders. Its message lists each copy with the three commands above;
+publishing or dropping one leaves every other copy untouched, so with two copies the survivor is
+the single ordinary draft and with more the freeze stands until one is left. `diff --dest` reads a
+frozen bundle that a bare `diff` refuses, and `publish` still refuses without a selector: it never
+picks a copy for you. Two additive receipt fields carry the choice — `from_placement` (the folder
+published from) and `other_edited` (the copies left untouched) — both present only when more than
+one copy was edited.
+
+`update --reset --dest` carries the same disclosure the other way round: `dest` names the copy the
+reset took, `others_kept` names the copies that kept their edits, and `conflict_kept` is `true`
+when a recorded merge conflict outlived the reset (a one-copy reset never clears it, so publish
+stays blocked until the whole-bundle `--reset` runs).
 
 Three receipt fields say where bytes actually moved, so nothing has to be read out of prose:
 

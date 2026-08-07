@@ -685,7 +685,9 @@ fn update_dest_without_reset_is_refused_by_name() {
         assert!(!out.status.success(), "{args:?}");
         let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("JSON stdout");
         assert_eq!(v["error"]["code"], "INVALID_ARGUMENT", "{v}");
-        let message = v["error"]["context"]["message"].as_str().unwrap_or_default();
+        let message = v["error"]["context"]["message"]
+            .as_str()
+            .unwrap_or_default();
         assert!(message.contains("--reset"), "{message}");
     }
     // The two spellings are ONE choice: these verbs act on a single copy, so naming both refuses

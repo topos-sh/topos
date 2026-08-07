@@ -114,14 +114,17 @@ fn a_pinned_reference_delivers_its_version_and_publish_to_never_mints_a_channel(
     );
     // …while the machine-wide copy really did take v2, so the two scopes DO disagree here: the
     // silence above is a judgement about the difference, not an absence of one.
-    let person_copy = std::fs::read_dir(dev.root().join("work"))
-        .expect("the person-scope work root")
-        .flatten()
-        .map(|e| e.path().join("SKILL.md"))
-        .find(|p| p.is_file())
-        .expect("the feed landed the person-scope copy");
+    // The copy is NAMED, never picked off a directory walk: `read_dir` promises no order, so
+    // "the first SKILL.md under work/" is whichever entry the filesystem happens to yield — an
+    // assertion that passes today because only one folder is there, and starts reading some other
+    // skill's bytes the moment a second one is.
+    let skill_id = added
+        .skill_id
+        .as_deref()
+        .expect("the add recorded a bundle");
+    let person_copy = dev.work_dir(skill_id).join("SKILL.md");
     assert_eq!(
-        std::fs::read_to_string(&person_copy).expect("the person scope's own copy"),
+        std::fs::read_to_string(&person_copy).expect("the feed landed the person-scope copy"),
         "# pinme v2\n",
         "the machine scope tracks current — this is a real cross-scope split"
     );

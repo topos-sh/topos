@@ -420,6 +420,21 @@ pub(crate) fn reset(
     }
     let mut items = Vec::with_capacity(resolved.len());
     for (layout, id, lock) in &resolved {
+        // WHICH copy this reset acts on, and which edited copies it leaves ALONE — resolved from
+        // the same selection the loss diff below is measured through, so the sentences around that
+        // diff can never claim a wider loss than the diff shows. Empty selection = the whole
+        // bundle: every copy, and nothing left holding edits.
+        let picked = if sel.is_empty() {
+            None
+        } else {
+            let sctx = ctx_with_layout(ctx, layout);
+            let map: topos_types::persisted::PlacementMap =
+                doc::read_map(ctx.fs, &layout.published(id).map)?
+                    .ok_or_else(|| ClientError::Corrupt("missing placement map".to_owned()))?;
+            Some(super::dest_select::select_copy(
+                &sctx, sel, &lock.name, &map,
+            )?)
+        };
         // The draft delta vs current — the exact bytes a reset drops, read from the copy resolved
         // above (never re-resolved: a second pass could answer with the other scope's copy and
         // describe a loss nobody is about to take). DIVERGENT copies cannot render one diff (that
@@ -447,6 +462,13 @@ pub(crate) fn reset(
             to_version: lock.base_commit.clone(),
             drop_diff,
             applied: false,
+            dest: picked.as_ref().map(|p| p.spelling.display.clone()),
+            others_kept: picked
+                .as_ref()
+                .map(|p| p.others_edited.clone())
+                .unwrap_or_default(),
+            conflict_kept: false,
+            global: store == super::StoreScope::Machine,
         });
     }
 
@@ -468,11 +490,12 @@ pub(crate) fn reset(
 
     // ---- APPLY (`--yes`) ---- discard each draft back to its base (the draft is snapshotted first),
     // each through ITS owning store — the same copy the describe above measured the loss against.
-    for (layout, id, _lock) in &resolved {
-        sync_engine::reset_to_base(&ctx_with_layout(ctx, layout), id, sel)?;
-    }
-    for item in &mut items {
+    for ((layout, id, _lock), item) in resolved.iter().zip(items.iter_mut()) {
+        let report = sync_engine::reset_to_base(&ctx_with_layout(ctx, layout), id, sel)?;
         item.applied = true;
+        // A merge conflict a one-copy reset could not clear keeps publish refused — carried onto
+        // the receipt rather than left for the next `publish` to discover.
+        item.conflict_kept = report.conflict_kept;
     }
     Ok(ResetOutcome::Applied(items))
 }

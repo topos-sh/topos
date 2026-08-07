@@ -42,6 +42,13 @@ pub(crate) struct DivergedCopy {
     pub dest: String,
 }
 
+/// The scope flag every offered `update` carries: ` -g` for the machine, nothing for a project.
+/// The same discipline `list`'s rows keep — a command a refusal prints must act on the copy the
+/// reader is looking at, whichever directory they happen to run it from.
+pub(crate) fn scope_flag(global: bool) -> &'static str {
+    if global { " -g" } else { "" }
+}
+
 impl FetchFault {
     /// The host answered unusefully and asked for nothing in particular.
     pub(crate) fn unavailable() -> Self {
@@ -420,18 +427,26 @@ pub(crate) enum ClientError {
     /// Each copy is carried twice over — the folder as a reader sees it, and the `--dest` spelling
     /// that names it back to a verb — because the way out is CHOOSING one copy: publish it, read
     /// it, or drop it, and the survivor then becomes the single ordinary draft. Discarding every
-    /// copy's edits (`update <skill> --reset`) stays available, and stays last: it is the widest
-    /// loss on offer, not the first thing to reach for.
+    /// copy's edits stays available, and stays last: it is the widest loss on offer, not the first
+    /// thing to reach for.
+    ///
+    /// `global` is the SCOPE the frozen copies live in, and every command this refusal offers is
+    /// spelled for it — a machine-scope freeze says `topos update -g …`, because a bare `update`
+    /// read from inside a checkout drives the PROJECT and would find no copy to act on.
     #[error(
         "'{skill}' has different edits in {} folders ({}) — name the one to work with (`--dest \
-         <folder>` on `publish`, `diff`, or `update … --reset`), or discard every copy's edits with \
-         `topos update {skill} --reset` (each copy is snapshotted first)",
+         <folder>` on `topos publish {skill}`, `topos diff {skill}`, or `topos update{} {skill} \
+         --reset`), or discard every copy's edits with `topos update{} {skill} --reset` (each copy \
+         is snapshotted first)",
         copies.len(),
-        copies.iter().map(|c| c.display.as_str()).collect::<Vec<_>>().join(", ")
+        copies.iter().map(|c| c.display.as_str()).collect::<Vec<_>>().join(", "),
+        scope_flag(*global),
+        scope_flag(*global)
     )]
     PlacementsDiverged {
         skill: String,
         copies: Vec<DivergedCopy>,
+        global: bool,
     },
     /// The server could not be read for an explicitly-targeted skill (unreachable, not served, or a
     /// malformed response). A bare update sweep isolates such failures per skill instead of erroring.

@@ -1296,6 +1296,9 @@ pub(crate) fn placements_diverged(
     ClientError::PlacementsDiverged {
         skill: skill_name.to_owned(),
         copies,
+        // The scope the frozen copies live in — the layout IS the scope, and every command the
+        // refusal offers is spelled for it.
+        global: !ctx.layout.is_project_scope(),
     }
 }
 

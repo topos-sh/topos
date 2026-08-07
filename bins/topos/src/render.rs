@@ -1412,24 +1412,37 @@ fn agent_view_tty(view: &AgentView) -> String {
     s
 }
 
-/// The `update --reset` DESCRIBE's TTY — LOSS-led: it shows exactly the draft delta being discarded.
+/// The `update --reset` DESCRIBE's TTY — LOSS-led: it shows exactly the draft delta being
+/// discarded, and says exactly WHOSE edits those are. A `--dest`-narrowed reset takes ONE copy;
+/// the sentence around the diff names that folder and states that the other copies keep their
+/// edits, because a consent surface that overstates the loss is asking for the wrong yes.
 pub(crate) fn reset_describe_tty(
     items: &[topos_types::results::ResetData],
     yes_argv: &[String],
 ) -> String {
     let mut s = String::new();
     for item in items {
-        s.push_str(&format!(
-            "Reset '{}' — this DISCARDS your local edits back to {}:\n",
-            item.skill,
-            short(&item.to_version)
-        ));
+        match &item.dest {
+            Some(dest) => s.push_str(&format!(
+                "Reset '{}' in {dest} — this DISCARDS that copy's local edits back to {}:\n",
+                item.skill,
+                short(&item.to_version)
+            )),
+            None => s.push_str(&format!(
+                "Reset '{}' — this DISCARDS your local edits back to {}:\n",
+                item.skill,
+                short(&item.to_version)
+            )),
+        }
         if item.drop_diff.trim().is_empty() {
             s.push_str("  (no local edits — nothing to discard)\n");
         } else {
             for line in item.drop_diff.trim_end_matches('\n').lines() {
                 s.push_str(&format!("  {line}\n"));
             }
+        }
+        if let Some(line) = others_kept_line(&item.others_kept) {
+            s.push_str(&format!("  {line}\n"));
         }
     }
     s.push_str(&format!(
@@ -1439,17 +1452,53 @@ pub(crate) fn reset_describe_tty(
     s
 }
 
-/// The `update --reset` APPLY's TTY.
+/// The `update --reset` APPLY's TTY — the same naming discipline as the describe: a per-copy reset
+/// reports the copy it took, never the bundle.
 pub(crate) fn reset_applied_tty(items: &[topos_types::results::ResetData]) -> String {
     let mut s = String::new();
     for item in items {
-        s.push_str(&format!(
-            "Reset '{}' to {} — local edits discarded (a snapshot was kept under ~/.topos).\n",
-            item.skill,
-            short(&item.to_version)
-        ));
+        match &item.dest {
+            Some(dest) => s.push_str(&format!(
+                "Reset '{}' in {dest} to {} — that copy's local edits discarded (a snapshot was \
+                 kept under ~/.topos).\n",
+                item.skill,
+                short(&item.to_version)
+            )),
+            None => s.push_str(&format!(
+                "Reset '{}' to {} — local edits discarded (a snapshot was kept under ~/.topos).\n",
+                item.skill,
+                short(&item.to_version)
+            )),
+        }
+        if let Some(line) = others_kept_line(&item.others_kept) {
+            s.push_str(&format!("{line}\n"));
+        }
+        // The block that outlived its cause: a one-copy reset never clears the bundle's recorded
+        // merge conflict, so publish stays refused — said here rather than left for the next
+        // `publish` to discover.
+        if item.conflict_kept {
+            s.push_str(&format!(
+                "publish stays blocked — the recorded merge conflict survives a one-copy reset; \
+                 `topos update{} {} --reset` clears it.\n",
+                crate::error::scope_flag(item.global),
+                item.skill
+            ));
+        }
     }
     s.trim_end().to_owned()
+}
+
+/// What a per-copy reset LEAVES: the other edited copies, named, still holding their edits. `None`
+/// when there are none — a whole-bundle reset takes every copy, and there is nothing to keep.
+fn others_kept_line(others: &[String]) -> Option<String> {
+    match others {
+        [] => None,
+        [one] => Some(format!("your other copy in {one} keeps its edits")),
+        many => Some(format!(
+            "your other copies in {} keep their edits",
+            many.join(", ")
+        )),
+    }
 }
 
 pub(crate) fn diff_tty(data: &DiffData) -> String {
@@ -2990,17 +3039,26 @@ pub(crate) fn pull_tty(
     append_proposals_trailer(out, data.proposals_awaiting)
 }
 
-/// What an `update` receipt's summary counts, by name. Every action a person would call by one of
-/// these five words lands in its bucket; the states that are neither a landing nor a failure
-/// (an offer, a divergence, a hold, a withdrawal) are NOT summarized — each already prints its own
-/// row carrying the command that resolves it, and inventing a sixth word for them would summarize
-/// a decision as if it were an outcome.
+/// What an `update` receipt's summary counts, by name. The clause exists so the reader never has
+/// to subtract, which only holds if the arithmetic does: EVERY row lands in exactly one bucket, and
+/// the parts always sum to the total the line opens with. So each state that is a decision rather
+/// than a landing gets a bucket too, named in the SAME words its own row prints — a row saying
+/// `update offered @…` is counted `offered`, never rolled into a number with no word on it.
+/// Only the buckets that actually hold something are rendered.
 #[derive(Default)]
 struct PullTally {
     installed: usize,
     updated: usize,
+    synced: usize,
     removed: usize,
+    withdrawn: usize,
+    no_longer_delivered: usize,
+    not_on_this_device: usize,
     up_to_date: usize,
+    offered: usize,
+    diverged: usize,
+    merge_conflict: usize,
+    held: usize,
     failed: usize,
 }
 
@@ -3012,35 +3070,61 @@ impl PullTally {
             // Three ways bytes catch up: a served version landed, a copy behind the version this
             // machine holds was rewritten, a draft was rebased onto the new current.
             A::FastForwarded | A::Refreshed | A::Merged => self.updated += 1,
-            // `released` is deliberately absent: nothing on disk was deleted (the record retired),
-            // and its row says exactly that.
+            A::DraftSynced => self.synced += 1,
             A::Removed => self.removed += 1,
+            A::Withdrawn => self.withdrawn += 1,
+            // Nothing on disk was deleted — the record retired, and its row says so. It is still
+            // one of the rows this run checked, so it is still counted.
+            A::Released => self.no_longer_delivered += 1,
+            A::Excluded => self.not_on_this_device += 1,
             A::UpToDate => self.up_to_date += 1,
-            A::Offered
-            | A::Diverged
-            | A::Conflicted
-            | A::DraftSynced
-            | A::Held
-            | A::Withdrawn
-            | A::Excluded
-            | A::Released => {}
+            A::Offered => self.offered += 1,
+            A::Diverged => self.diverged += 1,
+            A::Conflicted => self.merge_conflict += 1,
+            A::Held => self.held += 1,
         }
     }
 
     /// The counted clauses, in the order a person reads them: what arrived, what moved, what left,
-    /// what needed nothing, what broke.
+    /// what needed nothing, what is waiting on a decision, what broke.
     fn parts(&self) -> Vec<String> {
         [
             (self.installed, "installed"),
             (self.updated, "updated"),
+            (self.synced, "synced"),
             (self.removed, "removed"),
+            (self.withdrawn, "withdrawn"),
+            (self.no_longer_delivered, "no longer delivered"),
+            (self.not_on_this_device, "not on this device"),
             (self.up_to_date, "already up to date"),
+            (self.offered, "offered"),
+            (self.diverged, "diverged"),
+            (self.merge_conflict, "in merge conflict"),
+            (self.held, "held"),
             (self.failed, "failed"),
         ]
         .into_iter()
         .filter(|(n, _)| *n > 0)
         .map(|(n, what)| format!("{n} {what}"))
         .collect()
+    }
+
+    /// Every counted row, however it was counted — the sum the summary's total must equal.
+    #[cfg(test)]
+    fn total(&self) -> usize {
+        self.installed
+            + self.updated
+            + self.synced
+            + self.removed
+            + self.withdrawn
+            + self.no_longer_delivered
+            + self.not_on_this_device
+            + self.up_to_date
+            + self.offered
+            + self.diverged
+            + self.merge_conflict
+            + self.held
+            + self.failed
     }
 }
 
@@ -3161,16 +3245,20 @@ fn pull_action_row(s: &PullSkill) -> (String, Vec<String>) {
         PullAction::UpToDate => (String::from("up to date"), Vec::new()),
         PullAction::FastForwarded => (String::from("fast-forwarded"), Vec::new()),
         // The destination column: exactly one destination prints its path; several print a
-        // count in the bundle's own noun (folders for a skill, config files for an MCP server).
-        // Never an agent name, never an agent count.
-        PullAction::Installed => (destination_column("installed", s), Vec::new()),
+        // count in the bundle's own noun (folders for a skill, config files for an MCP server),
+        // and then spell them out beneath — a bare `(2 folders)` is a number a person cannot act
+        // on, and that is as true of what arrived as of what was caught up. Never an agent name,
+        // never an agent count.
+        PullAction::Installed => (destination_column("installed", s), sub_destinations(s)),
         // A copy that stood behind the version this machine holds was caught up — the folder was
         // already there, so the word is never `installed`. Its destinations are every placement
         // that NOW holds the applied version, not only the ones this run rewrote, so the count is
         // an answer to "where is it?" rather than to "what did the disk do?"; two or more get a
         // line each, because a bare `(2 folders)` is a number a person cannot act on.
         PullAction::Refreshed => (destination_column("updated", s), sub_destinations(s)),
-        PullAction::Removed => (destination_column("removed", s), Vec::new()),
+        // A removal names the folders it emptied for the same reason: "2 folders" is not a place
+        // anybody can go and look.
+        PullAction::Removed => (destination_column("removed", s), sub_destinations(s)),
         PullAction::Offered => {
             let v = s
                 .offer
@@ -3373,7 +3461,16 @@ pub(crate) fn err_tty(err: &ClientError) -> String {
     // that discard goes last, still available, never the first thing to reach for. Like the
     // shared-copy refusal below it, the copy IS the answer, so it carries no `error:` prefix (the
     // `--json` envelope keeps the single-sentence message).
-    if let ClientError::PlacementsDiverged { skill, copies } = err {
+    if let ClientError::PlacementsDiverged {
+        skill,
+        copies,
+        global,
+    } = err
+    {
+        // Every `update` the menu offers is spelled for the scope the frozen copies live in: a
+        // machine-scope freeze says `-g`, or the command, read from inside a checkout, would drive
+        // the PROJECT, find no copy there, and refuse. Same discipline as a `list` row's `flag`.
+        let flag = crate::error::scope_flag(*global);
         let mut out = format!(
             "{skill} has different edits in {} folders — name the one to work with:",
             copies.len()
@@ -3382,14 +3479,24 @@ pub(crate) fn err_tty(err: &ClientError) -> String {
             let dest = &c.dest;
             out.push_str(&format!(
                 "\n  {}\n      to share:     topos publish {skill} --dest {dest}\n      to view \
-                 diff: topos diff {skill} --dest {dest}\n      to drop:      topos update {skill} \
-                 --dest {dest} --reset",
+                 diff: topos diff {skill} --dest {dest}\n      to drop:      topos \
+                 update{flag} {skill} --dest {dest} --reset",
                 c.display
             ));
         }
+        // With TWO copies, resolving one leaves exactly one draft and the freeze is over. With
+        // three or more it is not: dropping one still leaves copies that disagree, so the line
+        // says how many rounds are left rather than promising an end that will not come.
+        out.push_str(&match copies.len() {
+            n if n > 2 => format!(
+                "\nPublishing or dropping one leaves {} that still disagree — repeat until one is \
+                 left.",
+                n - 1
+            ),
+            _ => "\nPublishing or dropping one leaves the other as your single draft.".to_owned(),
+        });
         out.push_str(&format!(
-            "\nPublishing or dropping one leaves the other as your single draft.\nto drop every \
-             copy's edits: topos update {skill} --reset"
+            "\nto drop every copy's edits: topos update{flag} {skill} --reset"
         ));
         return out;
     }
@@ -3654,6 +3761,7 @@ mod tests {
                     dest: ".claude/skills".to_owned(),
                 },
             ],
+            global: false,
         };
         assert_eq!(
             super::err_tty(&err),
@@ -3680,6 +3788,93 @@ mod tests {
             message.contains("project/.agents/skills/coolify-deploy")
                 && message.contains("project/.claude/skills/coolify-deploy"),
             "{message}"
+        );
+        // Every command in the one-sentence message is RUNNABLE as printed — no elided middle a
+        // person or an agent has to reconstruct.
+        assert!(!message.contains('…'), "{message}");
+    }
+
+    /// A MACHINE-scope freeze spells every `update` it offers with `-g` — on the menu and in the
+    /// one-sentence `--json` message alike. A bare `update`, read from inside any checkout, drives
+    /// the PROJECT: it would find no copy of this bundle there and refuse, which is exactly the
+    /// dead end the menu exists to replace.
+    #[test]
+    fn a_machine_scope_freeze_spells_its_updates_with_the_scope_flag() {
+        let err = crate::error::ClientError::PlacementsDiverged {
+            skill: "coolify-deploy".to_owned(),
+            copies: vec![
+                crate::error::DivergedCopy {
+                    display: "~/.agents/skills/coolify-deploy".to_owned(),
+                    dest: "~/.agents/skills".to_owned(),
+                },
+                crate::error::DivergedCopy {
+                    display: "~/.claude/skills/coolify-deploy".to_owned(),
+                    dest: "~/.claude/skills".to_owned(),
+                },
+            ],
+            global: true,
+        };
+        let tty = super::err_tty(&err);
+        assert!(
+            tty.contains(
+                "to drop:      topos update -g coolify-deploy --dest ~/.agents/skills --reset"
+            ),
+            "{tty}"
+        );
+        assert!(
+            tty.ends_with("to drop every copy's edits: topos update -g coolify-deploy --reset"),
+            "{tty}"
+        );
+        // `publish` and `diff` take no scope flag at all — they read where you stand — so the
+        // menu must not invent one for them.
+        assert!(!tty.contains("topos publish -g"), "{tty}");
+        assert!(!tty.contains("topos diff -g"), "{tty}");
+        let message = safe_message(&err);
+        assert!(
+            message.contains("topos update -g coolify-deploy --reset"),
+            "{message}"
+        );
+    }
+
+    /// THREE competing copies: the two-copy promise ("leaves the other as your single draft") is
+    /// false there — resolving one still leaves copies that disagree, and the freeze stands. The
+    /// line says how many are left instead of promising an end that has not arrived.
+    #[test]
+    fn three_competing_copies_are_not_promised_a_single_draft() {
+        let copy = |n: &str| crate::error::DivergedCopy {
+            display: format!("project/.{n}/skills/coolify-deploy"),
+            dest: format!(".{n}/skills"),
+        };
+        let err = crate::error::ClientError::PlacementsDiverged {
+            skill: "coolify-deploy".to_owned(),
+            copies: vec![copy("agents"), copy("claude"), copy("cursor")],
+            global: false,
+        };
+        let tty = super::err_tty(&err);
+        assert!(
+            tty.contains(
+                "Publishing or dropping one leaves 2 that still disagree — repeat until one is \
+                 left."
+            ),
+            "{tty}"
+        );
+        assert!(!tty.contains("as your single draft"), "{tty}");
+
+        // FOUR counts down honestly too.
+        let err = crate::error::ClientError::PlacementsDiverged {
+            skill: "coolify-deploy".to_owned(),
+            copies: vec![
+                copy("agents"),
+                copy("claude"),
+                copy("cursor"),
+                copy("gemini"),
+            ],
+            global: false,
+        };
+        assert!(
+            super::err_tty(&err).contains("leaves 3 that still disagree"),
+            "{}",
+            super::err_tty(&err)
         );
     }
 
@@ -4293,11 +4488,14 @@ mod tests {
         assert!(out.contains("`topos update pinned`"), "{out}");
         // Up-to-date rows stay compact: counted in the summary, no `style` action row.
         assert!(!out.contains("style  up to date"), "{out}");
-        // The summary does the arithmetic: a fast-forward and a merge both landed bytes, so both
-        // read `updated`. The states that are decisions rather than outcomes (offered, diverged,
-        // conflicted, held) print their own rows and are not summarized.
+        // The summary does the arithmetic, and it SUMS: a fast-forward and a merge both landed
+        // bytes, so both read `updated`, and every remaining row is counted in the words its own
+        // row prints — 2 + 1 + 1 + 1 + 1 + 1 = the 7 the line opens with.
         assert!(
-            out.contains("Checked 7 skills: 2 updated, 1 already up to date."),
+            out.contains(
+                "Checked 7 skills: 2 updated, 1 already up to date, 1 offered, 1 diverged, 1 in \
+                 merge conflict, 1 held."
+            ),
             "{out}"
         );
         // The reviewer-queue trailer.
@@ -4797,6 +4995,116 @@ mod tests {
         );
     }
 
+    /// The clause exists so nobody has to subtract — so it must SUM. Over a payload holding every
+    /// action the sweep can report, plus a failure, the parts add up to exactly the total the line
+    /// opens with, and no row is silently uncounted.
+    ///
+    /// `bucket_word` is an EXHAUSTIVE match on purpose: a new `PullAction` cannot be added without
+    /// coming through here and naming the word its rows will be counted in.
+    #[test]
+    fn every_action_lands_in_a_counted_bucket_and_the_parts_sum_to_the_total() {
+        fn bucket_word(action: PullAction) -> &'static str {
+            match action {
+                PullAction::Installed => "installed",
+                PullAction::FastForwarded | PullAction::Refreshed | PullAction::Merged => "updated",
+                PullAction::DraftSynced => "synced",
+                PullAction::Removed => "removed",
+                PullAction::Withdrawn => "withdrawn",
+                PullAction::Released => "no longer delivered",
+                PullAction::Excluded => "not on this device",
+                PullAction::UpToDate => "already up to date",
+                PullAction::Offered => "offered",
+                PullAction::Diverged => "diverged",
+                PullAction::Conflicted => "in merge conflict",
+                PullAction::Held => "held",
+            }
+        }
+        const EVERY: [PullAction; 14] = [
+            PullAction::UpToDate,
+            PullAction::FastForwarded,
+            PullAction::Installed,
+            PullAction::Refreshed,
+            PullAction::Removed,
+            PullAction::Offered,
+            PullAction::Diverged,
+            PullAction::Merged,
+            PullAction::Conflicted,
+            PullAction::DraftSynced,
+            PullAction::Held,
+            PullAction::Withdrawn,
+            PullAction::Excluded,
+            PullAction::Released,
+        ];
+
+        let mut tally = super::PullTally::default();
+        let skills: Vec<PullSkill> = EVERY
+            .iter()
+            .enumerate()
+            .map(|(i, action)| {
+                tally.count(*action);
+                let mut r = row(&format!("skill{i}"), *action);
+                r.destinations = vec![format!("~/.claude/skills/skill{i}")];
+                // A released row states its whole line in `note`; the sweep composes it.
+                if *action == PullAction::Released {
+                    r.note = Some("topos.sh/acme no longer delivers this".to_owned());
+                }
+                r
+            })
+            .collect();
+        let warnings = vec!["IO_ERROR s_docs: a filesystem operation failed".to_owned()];
+        tally.failed = warnings.len();
+        assert_eq!(
+            tally.total(),
+            EVERY.len() + warnings.len(),
+            "every action is counted exactly once"
+        );
+
+        let data = PullData {
+            skills,
+            proposals_awaiting: 0,
+            notices: Vec::new(),
+            sync: Vec::new(),
+            behind_elsewhere: Vec::new(),
+            scope: None,
+        };
+        let out = pull_tty(&data, &warnings, &[], &[]);
+        let line = out
+            .lines()
+            .find(|l| l.starts_with("Checked "))
+            .expect("the summary line");
+
+        // `Checked <total> <noun>: <n> <word>, <n> <word>, ….`
+        let (head, clauses) = line.split_once(": ").expect("counted clauses");
+        let total: usize = head
+            .trim_start_matches("Checked ")
+            .split_whitespace()
+            .next()
+            .and_then(|n| n.parse().ok())
+            .expect("the total");
+        assert_eq!(total, EVERY.len() + warnings.len(), "{line}");
+        let parts: Vec<&str> = clauses.trim_end_matches('.').split(", ").collect();
+        let summed: usize = parts
+            .iter()
+            .map(|p| {
+                p.split_whitespace()
+                    .next()
+                    .and_then(|n| n.parse::<usize>().ok())
+                    .unwrap_or_else(|| panic!("a counted clause: {p}"))
+            })
+            .sum();
+        assert_eq!(summed, total, "the parts must sum to the total: {line}");
+
+        // And each row is counted in the word its OWN row prints, never a bucket invented here.
+        for action in EVERY {
+            let word = bucket_word(action);
+            assert!(
+                parts.iter().any(|p| p.ends_with(word)),
+                "{action:?} is counted as `{word}`: {line}"
+            );
+        }
+        assert!(parts.iter().any(|p| p.ends_with("failed")), "{line}");
+    }
+
     /// The staleness trailer's every shape: singular vs plural machine-wide, and the mirror case
     /// that names a folder because no command from here reaches it.
     #[test]
@@ -5056,6 +5364,7 @@ mod tests {
             source: Some("topos.sh/ideamotive".to_owned()),
             status,
             kind: None,
+            source_health: None,
             draft_dir: dir.map(str::to_owned),
             draft_diverged: diverged,
         };
@@ -5319,6 +5628,8 @@ mod tests {
             status: Some(SkillStatus::Current),
             kind: None,
             source_health: health,
+            draft_dir: None,
+            draft_diverged: None,
         };
         let render = |health: Option<SourceHealth>| {
             list_tty(&ListOutcome {
@@ -6095,6 +6406,7 @@ mod tests {
             &crate::error::ClientError::PlacementsDiverged {
                 skill: "deploy".to_owned(),
                 copies: vec![diverged_copy("/a"), diverged_copy("/b")],
+                global: false,
             },
         );
         assert_eq!(actions.len(), 1, "{actions:?}");
@@ -6640,6 +6952,7 @@ mod tests {
         let err = ClientError::PlacementsDiverged {
             skill: "docs".into(),
             copies: vec![diverged_copy("/x/a"), diverged_copy("/x/b")],
+            global: true,
         };
         // An `update -g` that refused is offered a `-g` resolution — the bare spelling would act
         // on the OTHER scope's copy from inside a checkout.

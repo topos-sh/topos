@@ -739,7 +739,7 @@ pub(crate) fn reset_to_base(
     ctx: &Ctx<'_>,
     skill_id: &crate::id::SkillId,
     sel: &super::Selection,
-) -> Result<[u8; 32], ClientError> {
+) -> Result<ResetReport, ClientError> {
     let _guard = sidecar::lock_skill(ctx.fs, &ctx.layout, skill_id)?;
     let sp = ctx.layout.published(skill_id);
     let sid = skill_id.as_str();
@@ -831,12 +831,22 @@ pub(crate) fn reset_to_base(
     //
     // A PER-COPY reset does not clear it: the draft the conflict describes may be exactly the copy
     // this run left alone, and lifting a publish block over bytes that are still on disk would let
-    // an unresolved merge ship.
-    if picked.is_none() {
+    // an unresolved merge ship. Failing toward the gate is right — staying QUIET about it is not,
+    // so the survival is reported and the receipt says publish is still blocked.
+    let conflict_kept = if picked.is_none() {
         ctx.fs.remove_file(&sp.conflict)?;
-    }
+        false
+    } else {
+        ctx.fs.exists(&sp.conflict)
+    };
     log_apply(ctx, sid, "update-reset", base, &report);
-    Ok(base)
+    Ok(ResetReport { conflict_kept })
+}
+
+/// What a [`reset_to_base`] left behind: whether a recorded merge conflict — and with it the
+/// publish block — outlived the reset.
+pub(crate) struct ResetReport {
+    pub conflict_kept: bool,
 }
 
 /// The current local state of a tracked skill as a read-only `PullSkill` (UpToDate) — used when a
