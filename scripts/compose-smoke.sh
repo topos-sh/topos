@@ -98,8 +98,21 @@ fi
 echo "PASS: the first landing document renders 200."
 
 # ── the boot ceremony printed the ONE setup line ─────────────────────────────────────────────────────
+# The render above already RAN the ceremony, so this waits only for the container's stdout to reach
+# `compose logs` — a READ-side delay, not a second chance for the app. Retrying here masks nothing:
+# the render itself is still the one attempt above, and this loop cannot make an unprinted line
+# appear. A bare grep, by contrast, races that flush and has reported the line missing and then
+# printed it in its own diagnostic dump a tenth of a second later.
 echo "== asserting the setup line was printed to the app logs =="
-if ! compose logs --no-color web | grep -q 'Finish setup:'; then
+setup_seen=""
+for _ in $(seq 1 30); do
+  if compose logs --no-color web | grep -q 'Finish setup:'; then
+    setup_seen=yes
+    break
+  fi
+  sleep 1
+done
+if [ -z "$setup_seen" ]; then
   echo "FAIL: the app logs carry no 'Finish setup:' line"
   compose logs --no-color web | tail -60
   exit 1
