@@ -78,8 +78,22 @@
         "null"
       ]
     },
+    "share_line": {
+      "description": "The paste-able share line (`<address>/skills/<name>`) — a members' deep link to the skill\nunder proposal. Absent when the workspace address is not known. **INFERRED**\n(additive-only). No `undo` rides this shape: a proposal never moved `current`, so there is\nno prior state to restore — the author's escape is `review <handle> --withdraw`.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "title": {
       "type": "string"
+    },
+    "workspace_address": {
+      "description": "The workspace's `<host>/<workspace>` address (`topos.sh/acme`) — how the receipt names\nWHERE the proposal was opened. Read from a best-effort `me`; absent when that read failed\nor the address does not validate. **INFERRED** (additive-only).",
+      "type": [
+        "string",
+        "null"
+      ]
     }
   },
   "required": [

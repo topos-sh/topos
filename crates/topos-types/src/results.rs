@@ -1249,6 +1249,23 @@ pub struct PublishData {
     /// itself is unaffected). **INFERRED** (additive-only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub invite_line: Option<String>,
+    /// The workspace's `<host>/<workspace>` address (`topos.sh/acme`) — how the receipt names
+    /// WHERE these bytes landed. Read from the same best-effort `me` the lines below come from;
+    /// absent when that read failed or the address does not validate. **INFERRED**
+    /// (additive-only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_address: Option<String>,
+    /// The paste-able share line (`<address>/skills/<name>`) — a members' deep link to the skill
+    /// just published. Absent when the workspace address is not known. **INFERRED**
+    /// (additive-only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub share_line: Option<String>,
+    /// The undo — the whole `topos revert <name> --to <version>` command that puts the team back
+    /// on the version `current` held before this publish. WITHHELD unless it verifiably restores
+    /// that state: a bundle this machine does not follow cannot be reverted from here, and a
+    /// genesis publish left no prior version to restore. **INFERRED** (additive-only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub undo: Option<String>,
     /// An honesty note about the bundle's GitHub origin, when one is recorded: publishing does
     /// NOT rewrite a manifest's origin-pin line (`github.com/…`), so when one still references
     /// the origin this says the project keeps tracking the pin until the line is swapped for the
@@ -1345,6 +1362,17 @@ pub struct ProposeData {
     /// undone. **INFERRED** (additive-only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rewrite_skipped: Option<String>,
+    /// The workspace's `<host>/<workspace>` address (`topos.sh/acme`) — how the receipt names
+    /// WHERE the proposal was opened. Read from a best-effort `me`; absent when that read failed
+    /// or the address does not validate. **INFERRED** (additive-only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_address: Option<String>,
+    /// The paste-able share line (`<address>/skills/<name>`) — a members' deep link to the skill
+    /// under proposal. Absent when the workspace address is not known. **INFERRED**
+    /// (additive-only). No `undo` rides this shape: a proposal never moved `current`, so there is
+    /// no prior state to restore — the author's escape is `review <handle> --withdraw`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub share_line: Option<String>,
 }
 
 /// `revert` (a **forward** git-revert restoring older bytes as a new, higher-generation version —
@@ -1657,6 +1685,13 @@ pub struct PublishDescribeData {
     pub workspace_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace_display_name: Option<String>,
+    /// The workspace's `<host>/<workspace>` address (`topos.sh/acme`) — how the describe names
+    /// WHERE these bytes would land. Derived from the same server-supplied address the share line
+    /// reads; absent when that read failed or the address does not validate (the copy then falls
+    /// back to the display name rather than printing a broken address). **INFERRED**
+    /// (additive-only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_address: Option<String>,
     /// The byte-exact digest of the draft being published.
     #[cfg_attr(feature = "contract-derives", schemars(extend("pattern" = "^[0-9a-f]{64}$")))]
     pub bundle_digest: String,
@@ -1678,7 +1713,10 @@ pub struct PublishDescribeData {
     /// origin + address (the same read as `share_line`). **INFERRED** (additive-only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub invite_line: Option<String>,
-    /// The undo path — the version `revert --to` restores to get back here.
+    /// The undo — the whole `topos revert <name> --to <version>` command that would put the team
+    /// back on the version `current` holds now. WITHHELD unless it verifiably restores that state:
+    /// a bundle this machine does not follow cannot be reverted from here, and a review-gated
+    /// publish never moves `current`, so there would be nothing to put back.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub undo: Option<String>,
     /// The origin-demotion disclosure for an imported skill (publishing makes the team copy the source
@@ -1966,6 +2004,9 @@ mod tests {
             rewrite_pending: None,
             rewrite_skipped: None,
             kind: None,
+            workspace_address: None,
+            share_line: None,
+            undo: None,
         };
         let v = serde_json::to_value(&done).unwrap();
         assert_eq!(v["version_id"], "a".repeat(64));
@@ -1979,6 +2020,13 @@ mod tests {
             v.get("invite_line").is_none(),
             "an absent teammate handoff omits"
         );
+        // The receipt's address-derived lines and its undo are all additive: each omits when the
+        // producer withheld it (a failed `me` read, or an undo that would not restore the state).
+        assert!(
+            v.get("workspace_address").is_none() && v.get("share_line").is_none(),
+            "the address-derived lines omit when the address is unknown"
+        );
+        assert!(v.get("undo").is_none(), "a withheld undo omits");
         let back: PublishData = serde_json::from_value(v).unwrap();
         assert_eq!(back.bundle_digest, "c".repeat(64));
     }

@@ -14,7 +14,8 @@
     "share_line": "https://topos.sh/acme/skills/deploy",
     "skill": "deploy",
     "skill_id": "s_deploy",
-    "undo": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "undo": "topos revert deploy --to aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "workspace_address": "topos.sh/acme",
     "workspace_display_name": "Acme",
     "workspace_id": "w_acme"
   },

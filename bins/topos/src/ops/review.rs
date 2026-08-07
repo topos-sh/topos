@@ -20,7 +20,7 @@ use topos_types::{PERSISTED_SCHEMA_VERSION, TerminalOutcome};
 use super::connect::DirectoryConnect;
 use super::contribute::{self, ContributeConnect, ReviewSend};
 use super::reconcile::SessionConnect;
-use super::{parse_hex32_arg, resolve_followed_skill_in_workspace, workspace_of};
+use super::{VersionRef, resolve_followed_skill_in_workspace, resolve_version_ref, workspace_of};
 use crate::ctx::Ctx;
 use crate::error::ClientError;
 use crate::id::SkillId;
@@ -158,9 +158,19 @@ fn review_describe(
     workspace: Option<&str>,
     budget: super::DiffBudget,
 ) -> Result<ReviewOutcome, ClientError> {
-    // A target is `<skill>` (its one open proposal) or `<skill>@<hash>` (a specific one).
-    let (skill_name, wanted_hash) = match target.split_once('@') {
-        Some((s, h)) if !s.is_empty() && !h.is_empty() => (s.to_owned(), Some(h.to_owned())),
+    // A target is `<skill>` (its one open proposal) or `<skill>@<hash>` (a specific one — the full
+    // 64-hex id or a unique prefix of 8+ chars, the SAME two spellings a verdict takes, so a handle
+    // pasted off a publish receipt reads its diff as readily as it settles it).
+    let (skill_name, wanted) = match target.split_once('@') {
+        Some((s, h)) if !s.is_empty() && !h.is_empty() => (
+            s.to_owned(),
+            Some(VersionRef::parse_arg(
+                h,
+                "the review target's `@<hash>` must be a 64-char lowercase hex version id (or a \
+                 unique prefix of at least 8 chars — copy it from the publish receipt or `topos \
+                 list <skill>`)",
+            )?),
+        ),
         Some(_) => {
             return Err(ClientError::InvalidArgument(format!(
                 "a review target is `<skill>` or `<skill>@<hash>`, got `{target}`"
@@ -184,7 +194,11 @@ fn review_describe(
         .proposals
         .into_iter()
         .filter(|p| p.skill_id == id.as_str())
-        .filter(|p| wanted_hash.as_deref().is_none_or(|h| p.version_id == h))
+        .filter(|p| {
+            wanted
+                .as_ref()
+                .is_none_or(|w| names_version(&p.version_id, w))
+        })
         .collect();
     let proposal = match candidates.len() {
         0 => return Err(crate::resolve::not_found(target)),
@@ -276,19 +290,14 @@ pub(crate) fn review(
             "`review --reject` needs a reason — pass `-m <message>`".into(),
         ));
     }
-    // `<skill>@<hash>` — the proposal's skill + its candidate commit id. Argv is validated FIRST
-    // (a malformed target is a usage error however un-enrolled the machine is). Unlike the go-back /
-    // revert / diff refs, this hash stays FULL-64 only: an open proposal's candidate id exists on the
-    // plane, never in the local recorded history short prefixes resolve against, and fetching the
-    // proposals listing at parse time would put a network read inside argv validation. The full hash is
-    // what the flow already hands the reviewer — `publish --propose` prints the ready-to-run command and
-    // `list <skill>` prints each open proposal as `<skill>@<full hash>`.
-    let (skill_name, proposal_hex) = split_target(target)?;
-    let proposal_commit = parse_hex32_arg(
-        &proposal_hex,
-        "the review target's `@<hash>` must be a 64-char lowercase hex version id (copy it from \
-         `publish --propose` output or `topos list <skill>`)",
-    )?;
+    // `<skill>@<hash>` — the proposal's skill + its candidate commit id. Argv SHAPE is validated
+    // FIRST (a malformed target is a usage error however un-enrolled the machine is); the hash is
+    // the full 64-hex id OR a unique prefix of at least 8 chars, exactly as `revert --to` accepts.
+    // A prefix costs one read, so it is resolved below — once the skill is known — against the
+    // OPEN PROPOSALS, which is the only place a candidate id lives (a proposal is not in the local
+    // pointer history the other prefix surfaces resolve against). A FULL id still resolves with no
+    // extra read at all.
+    let (skill_name, proposal_ref) = split_target(target)?;
 
     // Resolve the proposal's skill (a `--workspace` filter disambiguates a name shared across
     // workspaces). Prefer the STRICT local resolve — a followed skill binds to its OWN follow-entry
@@ -317,6 +326,31 @@ pub(crate) fn review(
                     "no session for this workspace — run `topos login <workspace-address>` first"
                         .into(),
             })?;
+
+    // The candidate set a SHORT prefix resolves against: this skill's OPEN proposals. A full id
+    // needs none (and pays for no read) — it already names the proposal.
+    let open: Vec<String> = match &proposal_ref {
+        VersionRef::Full(_) => Vec::new(),
+        VersionRef::Prefix(_) => {
+            let directory = su.directory_for(&workspace_id).ok_or_else(|| {
+                ClientError::SessionRequired {
+                    address: "<workspace-address>".to_owned(),
+                    message:
+                        "no session for this workspace — run `topos login <workspace-address>` first"
+                            .into(),
+                }
+            })?;
+            directory
+                .proposals_index(&workspace_id)?
+                .proposals
+                .into_iter()
+                .filter(|p| p.skill_id == id.as_str())
+                .map(|p| p.version_id)
+                .collect()
+        }
+    };
+    let proposal_commit = resolve_proposal_target(&open, &proposal_ref, &skill_name)?;
+    let proposal_hex = to_hex(&proposal_commit);
 
     // This command's WAL kind — the FULL 3-way verdict (approve / reject / withdraw), each a distinct
     // op kind, so a crashed op of a DIFFERENT verdict can never replay this one's stored receipt.
@@ -608,17 +642,54 @@ fn resolve_catalog_skill(
     }
 }
 
-/// Split a `<skill>@<hash>` review target on its first `@`. A malformed shape is a usage error
-/// (`INVALID_ARGUMENT` — the target is the user's own argv token, echoed back as clap would).
-fn split_target(target: &str) -> Result<(String, String), ClientError> {
-    match target.split_once('@') {
-        Some((skill, hash)) if !skill.is_empty() && !hash.is_empty() => {
-            Ok((skill.to_owned(), hash.to_owned()))
+/// Split a `<skill>@<hash>` review target on its first `@` and parse the hash as a version
+/// reference. A malformed shape is a usage error (`INVALID_ARGUMENT` — the target is the user's own
+/// argv token, echoed back as clap would); so is a hash that is neither the full 64-hex id nor a
+/// long-enough lowercase-hex prefix.
+fn split_target(target: &str) -> Result<(String, VersionRef), ClientError> {
+    let (skill, hash) = match target.split_once('@') {
+        Some((skill, hash)) if !skill.is_empty() && !hash.is_empty() => (skill, hash),
+        _ => {
+            return Err(ClientError::InvalidArgument(format!(
+                "a review target must be `<skill>@<hash>`, got `{target}`"
+            )));
         }
-        _ => Err(ClientError::InvalidArgument(format!(
-            "a review target must be `<skill>@<hash>`, got `{target}`"
-        ))),
+    };
+    let vref = VersionRef::parse_arg(
+        hash,
+        "the review target's `@<hash>` must be a 64-char lowercase hex version id (or a unique \
+         prefix of at least 8 chars — copy it from the publish receipt or `topos list <skill>`)",
+    )?;
+    Ok((skill.to_owned(), vref))
+}
+
+/// Whether `version_id` is the version `vref` names: a full id compares whole, a prefix by its
+/// leading chars. Ambiguity is NOT decided here — the caller counts the survivors and refuses on
+/// more than one.
+fn names_version(version_id: &str, vref: &VersionRef) -> bool {
+    match vref {
+        VersionRef::Full(h) => version_id == to_hex(h),
+        VersionRef::Prefix(p) => version_id.starts_with(p.as_str()),
     }
+}
+
+/// Resolve a verdict target's `@<hash>` against `open` — the version ids of this skill's OPEN
+/// proposals. A full id passes straight through (its `open` is never consulted, so the
+/// paste-the-whole-hash path is untouched and the server keeps deciding whether the proposal is
+/// still open). A short prefix must match EXACTLY ONE open proposal: none is a usage refusal
+/// pointing at the inbox, several refuse naming the candidates — a verdict is a decision, so it is
+/// never guessed onto a neighbouring proposal.
+fn resolve_proposal_target(
+    open: &[String],
+    vref: &VersionRef,
+    skill_name: &str,
+) -> Result<[u8; 32], ClientError> {
+    resolve_version_ref(open, vref)?.ok_or_else(|| {
+        ClientError::InvalidArgument(format!(
+            "'{skill_name}' has no open proposal matching '{}' — run `topos review` for the inbox",
+            vref.shown()
+        ))
+    })
 }
 
 fn skill_of(target: &str) -> String {
@@ -651,7 +722,12 @@ fn verdict_next_argvs(handle: &str, yours: bool) -> Vec<Vec<String>> {
 mod tests {
     use topos_types::{Affected, Receipt, TerminalOutcome, WireError};
 
-    use super::{denied_review_error, permanent_failure_error, split_target, verdict_next_argvs};
+    use topos_core::digest::to_hex;
+
+    use super::{
+        VersionRef, denied_review_error, names_version, permanent_failure_error,
+        resolve_proposal_target, split_target, verdict_next_argvs,
+    };
     use crate::plane::WriteReceipt;
 
     #[test]
@@ -804,6 +880,101 @@ mod tests {
                 "{bad:?}"
             );
         }
-        assert!(split_target("docs@abc12").is_ok());
+        // A well-shaped target whose hash is too short to be a safe prefix is ALSO a usage error —
+        // and the refusal states the 8-char floor rather than only the full-id shape.
+        let err = split_target("docs@abc12").unwrap_err();
+        assert_eq!(err.code(), "INVALID_ARGUMENT");
+        assert!(
+            crate::render::safe_message(&err).contains("at least 8 chars"),
+            "{}",
+            crate::render::safe_message(&err)
+        );
+        // Both accepted spellings parse: the full 64-hex id, and an 8+ char lowercase-hex prefix.
+        assert!(matches!(
+            split_target(&format!("docs@{}", "ab".repeat(32))),
+            Ok((_, VersionRef::Full(_)))
+        ));
+        assert!(matches!(
+            split_target("docs@a1b2c3d4"),
+            Ok((_, VersionRef::Prefix(_)))
+        ));
+    }
+
+    #[test]
+    fn a_verdict_prefix_resolves_uniquely_and_an_ambiguous_one_refuses() {
+        // The candidate set is the skill's OPEN proposals — two of them sharing a leading run.
+        let a = format!("a1b2c3d4{}", "0".repeat(56));
+        let b = format!("a1b2c3d4{}", "1".repeat(56));
+        let c = format!("f154315d{}", "2".repeat(56));
+        let open = vec![a.clone(), b.clone(), c.clone()];
+
+        // A prefix that reaches exactly one proposal resolves to its full id.
+        let hit = resolve_proposal_target(
+            &open,
+            &VersionRef::Prefix("f154315d".to_owned()),
+            "coolify-deploy",
+        )
+        .expect("a unique prefix resolves");
+        assert_eq!(to_hex(&hit), c);
+
+        // An AMBIGUOUS prefix REFUSES and names the candidates — a verdict is never guessed onto a
+        // neighbouring proposal.
+        let err = resolve_proposal_target(
+            &open,
+            &VersionRef::Prefix("a1b2c3d4".to_owned()),
+            "coolify-deploy",
+        )
+        .unwrap_err();
+        assert_eq!(err.code(), "INVALID_ARGUMENT");
+        let msg = crate::render::safe_message(&err);
+        assert!(msg.contains("ambiguous"), "{msg}");
+        assert!(msg.contains(&a[..12]), "the candidates are named: {msg}");
+        assert!(msg.contains(&b[..12]), "the candidates are named: {msg}");
+
+        // A prefix matching NO open proposal refuses by name, pointing at the inbox.
+        let err = resolve_proposal_target(
+            &open,
+            &VersionRef::Prefix("deadbeef".to_owned()),
+            "coolify-deploy",
+        )
+        .unwrap_err();
+        assert_eq!(err.code(), "INVALID_ARGUMENT");
+        let msg = crate::render::safe_message(&err);
+        assert!(msg.contains("coolify-deploy"), "{msg}");
+        assert!(
+            msg.contains("no open proposal matching 'deadbeef'"),
+            "{msg}"
+        );
+        assert!(msg.contains("topos review"), "{msg}");
+
+        // A FULL id never consults the candidate set at all — the pre-existing paste-the-whole-hash
+        // path costs no read, and the SERVER stays the one deciding whether it is still open.
+        let full = VersionRef::recognize(&"ab".repeat(32)).expect("a full id");
+        let hit = resolve_proposal_target(&[], &full, "coolify-deploy").expect("a full id passes");
+        assert_eq!(to_hex(&hit), "ab".repeat(32));
+    }
+
+    #[test]
+    fn the_describe_narrows_by_the_same_two_hash_spellings_a_verdict_takes() {
+        // The receipt's short handle has to READ before it settles — the describe's candidate
+        // filter matches a prefix as well as a full id, so pasting it bare shows the diff.
+        let version = format!("f154315d5fd9{}", "0".repeat(52));
+        let full = VersionRef::recognize(&version).expect("a full id");
+        assert!(names_version(&version, &full));
+        assert!(names_version(
+            &version,
+            &VersionRef::Prefix("f154315d5fd9".to_owned())
+        ));
+        assert!(names_version(
+            &version,
+            &VersionRef::Prefix("f154315d".to_owned())
+        ));
+        // A neighbour is NOT named by it — the filter narrows, it never widens.
+        assert!(!names_version(
+            &format!("f154315e{}", "0".repeat(56)),
+            &VersionRef::Prefix("f154315d".to_owned())
+        ));
+        let other = VersionRef::recognize(&"ab".repeat(32)).expect("a full id");
+        assert!(!names_version(&version, &other));
     }
 }

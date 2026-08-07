@@ -1226,6 +1226,8 @@ fn fixtures() -> Vec<(&'static str, String)> {
 
     // `publish <skill>` (bare, enrolled) — the DESCRIBE: where it lands, the gate outcome (an `open`
     // bundle lands directly), the audience, the share line, and the undo path. Nothing shipped yet.
+    // The TTY prints only the destination + the gate; the rest of these fields are the envelope's
+    // (an agent reads them, a person reads them on the receipt).
     let publish_describe = JsonEnvelope {
         schema_version: 1,
         command: "publish".to_owned(),
@@ -1235,6 +1237,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
             skill_id: "s_deploy".to_owned(),
             workspace_id: "w_acme".to_owned(),
             workspace_display_name: Some("Acme".to_owned()),
+            workspace_address: Some("topos.sh/acme".to_owned()),
             bundle_digest: "b".repeat(64),
             placements: vec!["everyone".to_owned()],
             gate: PublishGate::Lands,
@@ -1246,7 +1249,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
                  it. Our workspace: https://topos.sh/acme\""
                     .to_owned(),
             ),
-            undo: Some("a".repeat(64)),
+            undo: Some(format!("topos revert deploy --to {}", "a".repeat(64))),
             origin_note: None,
             placement_note: None,
             // An up-to-date copy predicts nothing — the additive preview omits (absent = unknown).
@@ -1268,9 +1271,10 @@ fn fixtures() -> Vec<(&'static str, String)> {
     };
 
     // `publish <skill> --yes` LANDED — the public SUCCESS envelope: the moved pointer's facts plus
-    // the teammate handoff line (`invite_line`) the landed receipt carries via the best-effort
-    // post-publish `me` read (the additive field omits when that read fails or the address does
-    // not validate — the publish itself is unaffected).
+    // the address-derived lines (`workspace_address` / `share_line` / `invite_line`) the landed
+    // receipt carries via the best-effort post-publish `me` read (each omits when that read fails
+    // or the address does not validate — the publish itself is unaffected), and the `undo` that
+    // puts the team back on the version `current` held before this one.
     let publish_ok = JsonEnvelope {
         schema_version: 1,
         command: "publish".to_owned(),
@@ -1297,6 +1301,9 @@ fn fixtures() -> Vec<(&'static str, String)> {
             rewrite_skipped: None,
             // The ordinary skill publish: the additive kind tag omits (absent = a skill).
             kind: None,
+            workspace_address: Some("topos.sh/acme".to_owned()),
+            share_line: Some("https://topos.sh/acme/skills/deploy".to_owned()),
+            undo: Some("topos revert deploy --to aaaaaaaaaaaa".to_owned()),
         })
         .expect("PublishData serializes"),
         warnings: vec![],

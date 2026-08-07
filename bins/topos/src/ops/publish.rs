@@ -65,6 +65,26 @@ pub(crate) enum PublishOutcome {
 /// generation `0` (the plane's genesis branch creates `current` at `1`).
 const GENESIS: u64 = 0;
 
+/// The short version spelling a receipt hands back (git-style, 12 chars) — well above the 8-char
+/// floor the prefix-resolving surfaces accept, so a version pasted from a receipt always resolves.
+const SHORT_VERSION: usize = 12;
+
+/// Whether a publish DESCRIBE may offer an undo. `revert` is the inverse only when it verifiably
+/// restores the WHOLE prior state, so both conditions are load-bearing: the verb resolves a
+/// FOLLOWED bundle (a locally-authored one is refused there, so naming the command would hand out
+/// an undo that cannot run), and it moves the TEAM's `current` — which a review gate never moves.
+/// On that gate a `--to <base>` would restore a state that was never left.
+fn undo_is_restorative(followed: bool, gate: PublishGate) -> bool {
+    followed && gate == PublishGate::Lands
+}
+
+/// Whether a LANDED publish's receipt may offer an undo: the same followed rule, plus an earlier
+/// version to name — a GENESIS publish CREATED `current` from nothing, so there is no prior state
+/// and no `--to` that means anything.
+fn landed_undo_is_restorative(followed: bool, expected_generation: u64) -> bool {
+    followed && expected_generation != GENESIS
+}
+
 /// Ship `target`'s draft (or, with `propose`, open a proposal), ADDING the skill to topos first if it is an
 /// untracked LOCAL source. `target` is `<source>[@<digest>]`: the optional `@<digest>` pin re-verifies the
 /// scanned bytes, and the SOURCE (the rest) is a tracked skill name, an untracked `<name>` / `<name>@<harness>`
@@ -470,7 +490,11 @@ pub(crate) fn publish_describe(
     // The teammate handoff — same source data as the share line (the members' deep link above
     // 404s for a non-member, so recruiting a teammate takes this join line instead).
     let invite_line = me.as_ref().and_then(|m| teammate_invite_line(&m.address));
-    let undo = followed.then(|| format!("topos revert {skill_name} --to {}", lock.base_commit));
+    // The `<host>/<workspace>` handle the describe's header names the destination by — same read,
+    // and `None` when it does not validate (the header falls back to the display name).
+    let workspace_address = me.as_ref().and_then(|m| workspace_handle(&m.address));
+    let undo = undo_is_restorative(followed, gate)
+        .then(|| format!("topos revert {skill_name} --to {}", lock.base_commit));
     // The predicted-conflict preview: when this copy is BEHIND the last-known observed `current`
     // (the apply would refuse with a locally-detected CONFLICT — pull to rebase first), dry-run the
     // three-way merge of the draft onto that current PURELY from bytes already on this machine: the
@@ -537,6 +561,7 @@ pub(crate) fn publish_describe(
             skill_id: id.into_string(),
             workspace_id,
             workspace_display_name: me.map(|m| m.display_name),
+            workspace_address,
             bundle_digest: digest_hex,
             placements,
             gate,
@@ -931,6 +956,15 @@ fn enrolled_publish(
         crate::compat::ensure_server_records_mcp(transport.protocol_card().as_ref())?;
     }
 
+    // Whether this machine FOLLOWS the bundle — read BEFORE the write, like the describe's, and
+    // carried to the receipt as the undo gate: `topos revert` resolves only a followed skill, so a
+    // locally-authored bundle's receipt must not print an undo the verb would refuse.
+    let followed = ctx
+        .follow
+        .followed()
+        .into_iter()
+        .any(|(fid, _)| fid == id.as_str());
+
     // Resume a crashed prior publish/propose for this skill (replay the SAME op_id) before minting a new
     // one — the plane returns the byte-identical receipt, so there is no double-advance / duplicate commit.
     let kinds = [OpKind::PublishDirect, OpKind::PublishPropose];
@@ -1011,7 +1045,9 @@ fn enrolled_publish(
         }
         (None, None) => None,
     };
-    let mut outcome = map_outcome(ctx, &sp, &lock, &map, &rec, &receipt, skill_name, dir_ref)?;
+    let mut outcome = map_outcome(
+        ctx, &sp, &lock, &map, &rec, &receipt, skill_name, dir_ref, followed,
+    )?;
     // GOVERNANCE TRANSFER, by default: a landed publish — OR an opened proposal (`--propose`,
     // the reviewed-bundle downgrade) — of a bundle some manifest referenced as a LOCAL PATH
     // rewrites that line to the canonical workspace reference: the local copy is now a managed
@@ -1195,11 +1231,23 @@ fn origin_asymmetry_note(
 /// gated first: only a clean http(s) URL composes a line. A control character, a quote, a space,
 /// or a non-URL shape yields `None` — the line is OMITTED, never rendered mangled.
 fn teammate_invite_line(address: &str) -> Option<String> {
-    // The output-integrity gate over the WHOLE address (the origin check below covers only its
-    // authority): every byte must be URL-safe printable ASCII. This excludes control characters,
-    // whitespace, both quote kinds, backslashes, and non-ASCII bytes — none of which the
-    // server-built address shape (`<origin>[/<slug>]`) ever carries.
-    let clean = address.bytes().all(|b| {
+    if !url_safe(address) {
+        return None;
+    }
+    let origin = server_origin(address)?;
+    Some(format!(
+        "Ask your agent: \"Set up Topos for us: fetch {origin}/agent and follow it. \
+         Our workspace: {address}\""
+    ))
+}
+
+/// The output-integrity gate over a WHOLE server-supplied address (the origin/authority checks
+/// cover only its host): every byte must be URL-safe printable ASCII. This excludes control
+/// characters, whitespace, both quote kinds, backslashes, and non-ASCII bytes — none of which the
+/// server-built address shape (`<origin>[/<slug>]`) ever carries, and all of which would land
+/// verbatim inside a quoted instruction or a copy line.
+fn url_safe(address: &str) -> bool {
+    address.bytes().all(|b| {
         b.is_ascii_alphanumeric()
             || matches!(
                 b,
@@ -1216,15 +1264,51 @@ fn teammate_invite_line(address: &str) -> Option<String> {
                     | b':'
                     | b'@'
             )
-    });
-    if !clean {
+    })
+}
+
+/// The `<host>/<workspace>` spelling publish copy names a workspace by (`topos.sh/acme`) — the
+/// workspace's own address with the scheme cut off, because that is the handle a person recognizes
+/// and types, not a display name two workspaces can share.
+///
+/// Derived by a real parse, not a trim: the same URL-safety gate the invite line runs, an OPTIONAL
+/// exact `http(s)://` scheme, a hostname-shaped authority (any port numeric), and the path kept up
+/// to a query/fragment with any trailing `/` dropped. `None` for anything else — the caller falls
+/// back to the display name rather than printing a broken address.
+fn workspace_handle(address: &str) -> Option<String> {
+    if !url_safe(address) {
         return None;
     }
-    let origin = server_origin(address)?;
-    Some(format!(
-        "Ask your agent: \"Set up Topos for us: fetch {origin}/agent and follow it. \
-         Our workspace: {address}\""
-    ))
+    // The scheme is optional here (unlike `server_origin`, which composes a URL): the handle IS
+    // the schemeless form, so an address already spelled that way is already a handle.
+    let rest = address
+        .strip_prefix("https://")
+        .or_else(|| address.strip_prefix("http://"))
+        .unwrap_or(address);
+    let end = rest.find(['?', '#']).unwrap_or(rest.len());
+    let handle = rest[..end].trim_end_matches('/');
+    let authority_len = handle.find('/').unwrap_or(handle.len());
+    if !valid_authority(&handle[..authority_len]) {
+        return None;
+    }
+    Some(handle.to_owned())
+}
+
+/// Whether `authority` is hostname-shaped: a non-empty host of hostname bytes, with any port
+/// digits only. The shared half of the address parses — a malformed authority composes no line.
+fn valid_authority(authority: &str) -> bool {
+    let (host, port) = match authority.split_once(':') {
+        Some((host, port)) => (host, Some(port)),
+        None => (authority, None),
+    };
+    if host.is_empty()
+        || !host
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'.')
+    {
+        return false;
+    }
+    port.is_none_or(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()))
 }
 
 /// The server ORIGIN of a workspace address — scheme + host (+ port), derived by a real parse:
@@ -1236,21 +1320,7 @@ fn server_origin(address: &str) -> Option<&str> {
         .strip_prefix("https://")
         .or_else(|| address.strip_prefix("http://"))?;
     let authority_len = rest.find(['/', '?', '#']).unwrap_or(rest.len());
-    let authority = &rest[..authority_len];
-    let (host, port) = match authority.split_once(':') {
-        Some((host, port)) => (host, Some(port)),
-        None => (authority, None),
-    };
-    if host.is_empty()
-        || !host
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'.')
-    {
-        return None;
-    }
-    if let Some(port) = port
-        && (port.is_empty() || !port.bytes().all(|b| b.is_ascii_digit()))
-    {
+    if !valid_authority(&rest[..authority_len]) {
         return None;
     }
     Some(&address[..address.len() - rest.len() + authority_len])
@@ -1404,8 +1474,9 @@ fn build_publish_op(
 }
 
 /// Map the plane's typed write outcome to a [`PublishOutcome`] (or a typed [`ClientError`]).
-/// `directory` + `base_url` feed the landed receipt's teammate handoff line — a best-effort `me`
-/// read AFTER the publish settled (a failed read leaves the line absent; the outcome is untouched).
+/// `directory` feeds the landed receipt's workspace address, share line, and teammate handoff — one
+/// best-effort `me` read AFTER the write settled (a failed read leaves those lines absent; the
+/// outcome is untouched). `followed` gates the undo (see the landed arm).
 #[allow(clippy::too_many_arguments)]
 fn map_outcome(
     ctx: &Ctx<'_>,
@@ -1416,7 +1487,22 @@ fn map_outcome(
     receipt: &WriteReceipt,
     skill_name: &str,
     directory: Option<&dyn crate::plane::DirectorySource>,
+    followed: bool,
 ) -> Result<PublishOutcome, ClientError> {
+    // The three lines both landed shapes compose from the workspace's own address: the
+    // `<host>/<workspace>` handle the receipt names the destination by, the members' deep link, and
+    // the teammate handoff. ONE best-effort read, AFTER the write — a failure just leaves the lines
+    // off; it never fails a write the plane already holds.
+    let addressed = || {
+        let me = directory.and_then(|d| d.me(&rec.workspace_id).ok());
+        me.map_or((None, None, None), |m| {
+            (
+                workspace_handle(&m.address),
+                Some(format!("{}/skills/{skill_name}", m.address)),
+                teammate_invite_line(&m.address),
+            )
+        })
+    };
     match receipt.outcome() {
         TerminalOutcome::Ok => {
             // A direct publish moved `current` — advance the local state (read-your-writes).
@@ -1443,13 +1529,16 @@ fn map_outcome(
             // deleted before the write — the publish landed catalog-only, never a silent mint.
             let placement_missing =
                 (placement_outcome.as_deref() == Some("channel_not_found")).then(target_channel);
-            // The teammate handoff line on the landed receipt — the same `me.address` source the
-            // describe's share line reads, fetched best-effort AFTER the publish settled (a failed
-            // read just leaves the line off; it never fails a landed publish).
-            let invite_line = directory.and_then(|d| {
-                d.me(&rec.workspace_id)
-                    .ok()
-                    .and_then(|m| teammate_invite_line(&m.address))
+            let (workspace_address, share_line, invite_line) = addressed();
+            // The base commit is named SHORT here — `revert --to` resolves a unique prefix of 8+
+            // chars, so the receipt hands back the same 12-char spelling every other surface prints.
+            let undo = landed_undo_is_restorative(followed, rec.expected_generation).then(|| {
+                format!(
+                    "topos revert {skill_name} --to {}",
+                    lock.base_commit
+                        .get(..SHORT_VERSION)
+                        .unwrap_or(&lock.base_commit)
+                )
             });
             Ok(PublishOutcome::Published(PublishData {
                 skill_id: rec.skill_id.clone(),
@@ -1470,6 +1559,9 @@ fn map_outcome(
                 // The kind the catalog now records for this bundle, replayed from the op record —
                 // so a WAL retry's receipt says exactly what the first attempt's said.
                 kind: rec.bundle_kind.clone(),
+                workspace_address,
+                share_line,
+                undo,
             }))
         }
         TerminalOutcome::NeedsReview => {
@@ -1483,6 +1575,10 @@ fn map_outcome(
                 .and_then(|p| p.as_str())
                 .map(str::to_owned);
             let target_channel = || rec.channel.clone().unwrap_or_else(|| "everyone".to_owned());
+            // The proposal receipt names the same destination the landed one does. No undo rides
+            // it: `current` never moved, so there is no prior state to restore — the author's
+            // escape is `review <handle> --withdraw`, which the renderer names.
+            let (workspace_address, share_line, _invite_line) = addressed();
             Ok(PublishOutcome::Proposed(ProposeData {
                 proposal: format!("{skill_name}@{}", rec.candidate_commit),
                 base_version_id: lock.base_commit.clone(),
@@ -1498,6 +1594,8 @@ fn map_outcome(
                 converted_from: None,
                 rewrite_pending: None,
                 rewrite_skipped: None,
+                workspace_address,
+                share_line,
             }))
         }
         TerminalOutcome::Conflict => Err(ClientError::Conflict {
@@ -1522,7 +1620,77 @@ fn denied_code(receipt: &WriteReceipt) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{server_origin, teammate_invite_line};
+    use topos_types::results::PublishGate;
+
+    use super::{
+        GENESIS, landed_undo_is_restorative, server_origin, teammate_invite_line,
+        undo_is_restorative, workspace_handle,
+    };
+
+    #[test]
+    fn a_workspace_is_named_by_its_address_not_its_scheme() {
+        // The multi-tenant shape: the handle is `<host>/<workspace>` — the spelling a person types.
+        assert_eq!(
+            workspace_handle("https://topos.sh/acme").as_deref(),
+            Some("topos.sh/acme")
+        );
+        // The single-tenant shape: the install IS its one workspace, so the host alone is the handle.
+        assert_eq!(
+            workspace_handle("https://topos.example.com").as_deref(),
+            Some("topos.example.com")
+        );
+        // A port belongs to the handle; a trailing slash, a query, and a fragment do not.
+        assert_eq!(
+            workspace_handle("http://localhost:3000/eng/").as_deref(),
+            Some("localhost:3000/eng")
+        );
+        assert_eq!(
+            workspace_handle("https://topos.sh/acme?tab=skills").as_deref(),
+            Some("topos.sh/acme")
+        );
+        assert_eq!(
+            workspace_handle("https://topos.sh/acme#top").as_deref(),
+            Some("topos.sh/acme")
+        );
+        // An address already spelled schemeless IS a handle — nothing to strip.
+        assert_eq!(
+            workspace_handle("acme.test/eng").as_deref(),
+            Some("acme.test/eng")
+        );
+        // Anything that would print BROKEN composes no handle at all: the caller falls back to the
+        // display name rather than putting these on a header.
+        for bad in [
+            "https://topos.sh/ac\u{7}me",
+            "https://topos.sh/acme team",
+            "https://topos.sh/a'cme",
+            "https://topos.sh/a\\cme",
+            "https://topos.sh/acme\nrun: rm -rf",
+            "https://:8443/eng",
+            "https://topos.sh:port/eng",
+            "",
+        ] {
+            assert_eq!(workspace_handle(bad), None, "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn an_undo_is_offered_only_where_it_restores_the_whole_prior_state() {
+        // The gate that MOVES `current` leaves something to put back; the review gate does not —
+        // a proposal never moved the pointer, so a `revert --to <base>` would restore a state that
+        // was never left.
+        assert!(undo_is_restorative(true, PublishGate::Lands));
+        assert!(!undo_is_restorative(true, PublishGate::Proposal));
+        // A bundle this machine does not FOLLOW cannot be reverted from here at all — `revert`
+        // resolves followed skills only, so naming the command would hand out an undo that fails.
+        assert!(!undo_is_restorative(false, PublishGate::Lands));
+        assert!(!undo_is_restorative(false, PublishGate::Proposal));
+
+        // On the LANDED receipt the same follow rule holds, plus a prior version to name: a
+        // genesis publish CREATED `current`, so there is no earlier state to go back to.
+        assert!(landed_undo_is_restorative(true, 42));
+        assert!(!landed_undo_is_restorative(true, GENESIS));
+        assert!(!landed_undo_is_restorative(false, 42));
+    }
 
     #[test]
     fn a_workspace_address_cuts_to_its_server_origin() {

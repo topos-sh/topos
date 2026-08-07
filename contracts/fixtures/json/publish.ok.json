@@ -7,8 +7,11 @@
     "current_generation": 43,
     "invite_line": "Ask your agent: \"Set up Topos for us: fetch https://topos.sh/agent and follow it. Our workspace: https://topos.sh/acme\"",
     "name": "deploy",
+    "share_line": "https://topos.sh/acme/skills/deploy",
     "skill_id": "s_deploy",
-    "version_id": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+    "undo": "topos revert deploy --to aaaaaaaaaaaa",
+    "version_id": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    "workspace_address": "topos.sh/acme"
   },
   "warnings": [],
   "next_actions": []

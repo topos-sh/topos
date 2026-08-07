@@ -10373,11 +10373,11 @@ fn a_genesis_publish_describe_never_asks_for_an_audience_that_cannot_exist() {
     assert_eq!(data.placements, vec!["everyone".to_owned()]);
 }
 
-/// The audience line prints against a live-shaped reach payload — and a reach that FAILS surfaces
-/// as a visible warning, never as a wordlessly missing line (the swallow that hid the wire
-/// mismatch for a week is gone). All of it on a SECOND publish: an audience is a question only a
-/// bundle the plane already holds a row for can answer. The failure reason names the SKILL, never
-/// the internal id the plane's 404 echoes back, and one person is `1 person`.
+/// The audience rides the ENVELOPE against a live-shaped reach payload — and a reach that FAILS
+/// surfaces as a visible warning, never as a wordlessly missing field (the swallow that hid the
+/// wire mismatch for a week is gone). All of it on a SECOND publish: an audience is a question only
+/// a bundle the plane already holds a row for can answer. The failure reason names the SKILL, never
+/// the internal id the plane's 404 echoes back.
 #[test]
 fn the_publish_describe_audience_line_prints_and_a_failed_reach_warns() {
     let rig = Rig::new("zq-reach");
@@ -10462,22 +10462,17 @@ fn the_publish_describe_audience_line_prints_and_a_failed_reach_warns() {
         .unwrap()
     };
 
-    // A LIVE-shaped payload: the line prints.
+    // A LIVE-shaped payload: the count reaches the envelope. It stays OFF the describe's TTY —
+    // an audience is a prediction, and the preview only says where these bytes go and what the
+    // gate does with them.
     let (data, warnings) = describe(FakeReach::Persons(4));
     assert_eq!(data.reach, Some(4));
     assert!(warnings.is_empty(), "{warnings:?}");
     let tty = crate::render::publish_describe_tty(&data, &argv);
-    assert!(tty.contains("reaches 4 people"), "{tty}");
+    assert!(!tty.contains("reaches"), "{tty}");
+    assert!(!tty.contains('4'), "{tty}");
 
-    // An audience of ONE is a person, not "1 people" — the number a solo workspace always sees.
-    let (data, warnings) = describe(FakeReach::Persons(1));
-    assert_eq!(data.reach, Some(1));
-    assert!(warnings.is_empty(), "{warnings:?}");
-    let tty = crate::render::publish_describe_tty(&data, &argv);
-    assert!(tty.contains("reaches 1 person"), "{tty}");
-    assert!(!tty.contains("1 people"), "{tty}");
-
-    // A reach that fails to parse: the line is absent AND a warning says why.
+    // A reach that fails to parse: the field is absent AND a warning says why.
     let (data, warnings) = describe(FakeReach::Malformed("missing field `sessions`".to_owned()));
     assert_eq!(data.reach, None);
     assert_eq!(warnings.len(), 1, "{warnings:?}");

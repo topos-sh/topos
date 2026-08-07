@@ -107,7 +107,14 @@
       "type": "string"
     },
     "undo": {
-      "description": "The undo path — the version `revert --to` restores to get back here.",
+      "description": "The undo — the whole `topos revert <name> --to <version>` command that would put the team\nback on the version `current` holds now. WITHHELD unless it verifiably restores that state:\na bundle this machine does not follow cannot be reverted from here, and a review-gated\npublish never moves `current`, so there would be nothing to put back.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "workspace_address": {
+      "description": "The workspace's `<host>/<workspace>` address (`topos.sh/acme`) — how the describe names\nWHERE these bytes would land. Derived from the same server-supplied address the share line\nreads; absent when that read failed or the address does not validate (the copy then falls\nback to the display name rather than printing a broken address). **INFERRED**\n(additive-only).",
       "type": [
         "string",
         "null"

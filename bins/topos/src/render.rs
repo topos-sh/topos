@@ -2361,16 +2361,24 @@ fn added_line(added: &AddedNote) -> String {
     }
 }
 
-/// The bare enrolled `publish` DESCRIBE — where it lands, the gate, the audience, the share line, and
-/// the undo. Nothing has landed on the plane yet.
+/// The bare enrolled `publish` DESCRIBE — where it lands and what the gate does with it. Nothing has
+/// landed on the plane yet.
+///
+/// The TTY is deliberately NARROWER than the `--json` payload: the digest, the audience count, the
+/// share/handoff lines, and the undo describe a publish that has not happened, so they say nothing a
+/// reader can act on BEFORE `--yes`. They ride the envelope untouched — every one of them prints on
+/// the receipt, where they are facts rather than predictions.
 pub(crate) fn publish_describe_tty(
     data: &topos_types::results::PublishDescribeData,
     yes_argv: &[String],
 ) -> String {
     use topos_types::results::PublishGate;
+    // A workspace is named by its ADDRESS — the handle a person recognizes and types. The display
+    // name is the fallback for an address that could not be read, never the first choice.
     let ws = data
-        .workspace_display_name
+        .workspace_address
         .as_deref()
+        .or(data.workspace_display_name.as_deref())
         .unwrap_or(&data.workspace_id);
     let mut s = format!("Publish '{}' to {ws}:", data.skill);
     // The KIND, when it is not the ordinary skill: it decides what the workspace records and how
@@ -2378,14 +2386,17 @@ pub(crate) fn publish_describe_tty(
     if let Some(kind) = &data.kind {
         s.push_str(&format!("\n  kind: {kind}"));
     }
-    s.push_str(&format!("\n  digest {}", short(&data.bundle_digest)));
+    // The gate, as the sentence it means for the person running the command — not the protection
+    // level's name.
     let gate = match data.gate {
-        PublishGate::Lands => "open — this moves current directly",
+        PublishGate::Lands => {
+            "No review required — it becomes immediately published in the workspace."
+        }
         PublishGate::Proposal => {
-            "reviewed — this opens a proposal (current does not move until approved)"
+            "Review required — will require approval by a reviewer after publishing."
         }
     };
-    s.push_str(&format!("\n  gate: {gate}"));
+    s.push_str(&format!("\n  {gate}"));
     if data.is_revert {
         s.push_str("\n  this restores earlier bytes (a revert), shipped through the same gate");
     }
@@ -2398,9 +2409,6 @@ pub(crate) fn publish_describe_tty(
             s.push_str(&format!(" — {note}"));
         }
     }
-    if let Some(reach) = data.reach {
-        s.push_str(&format!("\n  reaches {}", persons(reach)));
-    }
     // The behind-copy conflict prediction: this publish would be refused (rebase first), and the
     // in-memory dry run says how that rebase's merge would go.
     if let Some(preview) = &data.merge_preview {
@@ -2412,15 +2420,6 @@ pub(crate) fn publish_describe_tty(
     }
     if let Some(note) = &data.origin_note {
         s.push_str(&format!("\n  note: {note}"));
-    }
-    if let Some(line) = &data.share_line {
-        s.push_str(&format!("\n  share: {line}"));
-    }
-    if let Some(line) = &data.invite_line {
-        s.push_str(&format!("\n  bring a teammate: {line}"));
-    }
-    if let Some(undo) = &data.undo {
-        s.push_str(&format!("\n  undo: {undo}"));
     }
     // The predicted governance transfer — the manifest edit the apply would perform.
     if let (Some(manifest), Some(reference), Some(from)) =
@@ -2445,14 +2444,17 @@ pub(crate) fn publish_tty(data: &PublishData) -> String {
         out.push_str(&added_line(added));
         out.push('\n');
     }
-    // Lead with the NAME — the handle the person publishes by; the opaque skill_id stays a
-    // `--json` key, never the human line.
+    // Lead with the NAME and WHERE it landed — the two facts the author checks; the opaque
+    // skill_id stays a `--json` key, never the human line. The address falls off (rather than
+    // being faked from a display name) when the post-write `me` read did not answer.
     out.push_str(&format!(
-        "Published {}@{} (digest {}) — current now points at it.",
+        "Published {}@{}",
         data.name,
         short(&data.version_id),
-        short(&data.bundle_digest),
     ));
+    if let Some(address) = &data.workspace_address {
+        out.push_str(&format!(" to {address}"));
+    }
     // The KIND the catalog now records — stated because it is what decides how every receiving
     // machine places these bytes (an mcp bundle lands in each agent's MCP config, not a folder).
     if let Some(kind) = &data.kind {
@@ -2501,6 +2503,14 @@ pub(crate) fn publish_tty(data: &PublishData) -> String {
     if let Some(note) = &data.origin_note {
         out.push_str(&format!("\nnote: {note}"));
     }
+    // The undo LEADS the trailer — the receipt's first offer is the way back out. It is present
+    // only when it verifiably restores the whole prior state (the producer withholds it otherwise).
+    if let Some(undo) = &data.undo {
+        out.push_str(&format!("\nundo: {undo}"));
+    }
+    if let Some(line) = &data.share_line {
+        out.push_str(&format!("\nshare: {line}"));
+    }
     // The teammate handoff, after the confirmation: the one line to hand someone not yet in the
     // workspace (the skill page URL answers only for members, so it never recruits anyone).
     if let Some(line) = &data.invite_line {
@@ -2509,18 +2519,30 @@ pub(crate) fn publish_tty(data: &PublishData) -> String {
     out
 }
 
+/// The review-gated publish's receipt: the bytes ARE uploaded and named, `current` did NOT move, and
+/// BOTH ways it can settle are on the page. The two verdict lines are padded so their commands line
+/// up as the one block they are — and both are named because the four-eyes rule means the author
+/// cannot approve their own proposal: someone else's `--approve`, or the author's own `--withdraw`.
 pub(crate) fn propose_tty(data: &ProposeData) -> String {
     // If this invocation ADDED the skill first (the auto-add convenience), disclose it before the proposal.
     let prefix = match &data.added {
         Some(added) => format!("{}\n", added_line(added)),
         None => String::new(),
     };
-    // Honest: this is NEEDS_REVIEW — a proposal opened, `current` did NOT move.
+    // The handle a reviewer pastes — SHORT, because the verdict path resolves a unique prefix of
+    // 8+ chars exactly as `revert --to` does.
+    let handle = match data.proposal.split_once('@') {
+        Some((skill, version)) => format!("{skill}@{}", short(version)),
+        None => data.proposal.clone(),
+    };
+    let destination = match &data.workspace_address {
+        Some(address) => format!(" to {address}"),
+        None => String::new(),
+    };
     let mut out = format!(
-        "{prefix}Opened proposal {} on base {}. Awaiting review — a reviewer runs `topos review {} --approve`.",
-        data.proposal,
-        short(&data.base_version_id),
-        data.proposal,
+        "{prefix}Published {handle}{destination} for review.\n\
+         Review required — a reviewer approves with: topos review {handle} --approve\n\
+         withdraw it yourself:                       topos review {handle} --withdraw"
     );
     if let Some(ch) = &data.placement_withheld {
         out.push_str(&format!(
@@ -2548,6 +2570,9 @@ pub(crate) fn propose_tty(data: &ProposeData) -> String {
     }
     if let Some(note) = &data.rewrite_skipped {
         out.push_str(&format!("\nnote: {note}"));
+    }
+    if let Some(line) = &data.share_line {
+        out.push_str(&format!("\nshare: {line}"));
     }
     out
 }
@@ -3282,15 +3307,15 @@ mod tests {
     use topos_types::persisted::ConflictPathKind;
     use topos_types::results::{
         AgentView, Conflict, ConflictPathReport, ListData, LogData, MergeReport, Offer,
-        PublishData, PullAction, PullData, PullSkill, RemoteSkill, RemoveData, RemoveItem,
-        RemoveKind, SkillEntry, UntrackedEntry,
+        ProposeData, PublishData, PullAction, PullData, PullSkill, RemoteSkill, RemoveData,
+        RemoveItem, RemoveKind, SkillEntry, UntrackedEntry,
     };
 
     use crate::ops::ListOutcome;
 
     use super::{
-        add_tty, auth_status_next_actions, auth_status_tty, list_tty, log_tty, publish_tty,
-        pull_row, pull_tty, remove_applied_tty, safe_message, status_tty, welcome_tty,
+        add_tty, auth_status_next_actions, auth_status_tty, list_tty, log_tty, propose_tty,
+        publish_tty, pull_row, pull_tty, remove_applied_tty, safe_message, status_tty, welcome_tty,
     };
 
     /// A synthetic invocation for the render tests: what a user typed past the binary name.
@@ -3534,15 +3559,22 @@ mod tests {
         }
     }
 
-    #[test]
-    fn publish_tty_leads_with_the_skill_name_never_the_opaque_id() {
-        let line = publish_tty(&PublishData {
+    /// The teammate handoff exactly as `ops::publish` composes it — quoted verbatim because the
+    /// receipt's job is to be paste-able.
+    const INVITE: &str = "Ask your agent: \"Set up Topos for us: fetch https://topos.sh/agent and \
+                          follow it. Our workspace: https://topos.sh/ideamotive\"";
+
+    /// A LANDED publish's receipt payload, with every optional line off. The skill's `skill_id` and
+    /// `name` deliberately DIFFER: a fixture where they coincide lets an id printed where a name
+    /// belongs pass a whole suite.
+    fn published() -> PublishData {
+        PublishData {
             manifest: None,
             reference: None,
             converted_from: None,
             skill_id: "topos_a1b2c3".to_owned(),
-            name: "smoke-notes".to_owned(),
-            version_id: "a".repeat(64),
+            name: "coolify-deploy".to_owned(),
+            version_id: format!("fed180d80b8a{}", "0".repeat(52)),
             bundle_digest: "c".repeat(64),
             current_generation: 3,
             added: None,
@@ -3553,8 +3585,114 @@ mod tests {
             rewrite_pending: None,
             rewrite_skipped: None,
             kind: None,
-        });
-        assert!(line.starts_with("Published smoke-notes@"), "{line}");
+            workspace_address: None,
+            share_line: None,
+            undo: None,
+        }
+    }
+
+    /// A publish DESCRIBE payload at `gate`, carrying EVERY optional field the envelope can hold —
+    /// so a test of what the TTY prints is also a test of what it deliberately withholds.
+    fn describing(
+        gate: topos_types::results::PublishGate,
+    ) -> topos_types::results::PublishDescribeData {
+        topos_types::results::PublishDescribeData {
+            skill: "coolify-deploy".to_owned(),
+            skill_id: "topos_a1b2c3".to_owned(),
+            workspace_id: "w_ideamotive".to_owned(),
+            workspace_display_name: Some("Ideamotive".to_owned()),
+            workspace_address: Some("topos.sh/ideamotive".to_owned()),
+            bundle_digest: "b".repeat(64),
+            placements: Vec::new(),
+            gate,
+            is_revert: false,
+            reach: Some(12),
+            share_line: Some("https://topos.sh/ideamotive/skills/coolify-deploy".to_owned()),
+            invite_line: Some(INVITE.to_owned()),
+            undo: Some(format!(
+                "topos revert coolify-deploy --to {}",
+                "a".repeat(64)
+            )),
+            origin_note: None,
+            placement_note: None,
+            merge_preview: None,
+            manifest: None,
+            reference: None,
+            converted_from: None,
+            kind: None,
+        }
+    }
+
+    fn yes_argv() -> Vec<String> {
+        ["topos", "publish", "coolify-deploy", "--yes"]
+            .iter()
+            .map(|s| (*s).to_owned())
+            .collect()
+    }
+
+    #[test]
+    fn publish_describe_tty_names_the_address_and_says_what_the_gate_will_do() {
+        use topos_types::results::PublishGate;
+        // The whole describe, both gates: the destination is the workspace ADDRESS, and the gate is
+        // stated as the sentence it means for the person about to run `--yes`.
+        assert_eq!(
+            super::publish_describe_tty(&describing(PublishGate::Lands), &yes_argv()),
+            "Publish 'coolify-deploy' to topos.sh/ideamotive:\n  No review required — it becomes \
+             immediately published in the workspace.\nNothing has changed yet — apply with:\n  \
+             topos publish coolify-deploy --yes"
+        );
+        assert_eq!(
+            super::publish_describe_tty(&describing(PublishGate::Proposal), &yes_argv()),
+            "Publish 'coolify-deploy' to topos.sh/ideamotive:\n  Review required — will require \
+             approval by a reviewer after publishing.\nNothing has changed yet — apply with:\n  \
+             topos publish coolify-deploy --yes"
+        );
+    }
+
+    #[test]
+    fn publish_describe_tty_withholds_what_only_the_receipt_can_state() {
+        use topos_types::results::PublishGate;
+        // Every one of these fields is POPULATED on the payload above. None of them belongs on a
+        // preview: they describe a publish that has not happened. The envelope keeps them all.
+        let data = describing(PublishGate::Lands);
+        let s = super::publish_describe_tty(&data, &yes_argv());
+        for withheld in [
+            "digest",
+            "reaches",
+            "share:",
+            "bring a teammate:",
+            "undo:",
+            "gate:",
+        ] {
+            assert!(!s.contains(withheld), "{withheld:?} still prints: {s}");
+        }
+        assert!(data.reach.is_some() && data.undo.is_some() && data.share_line.is_some());
+    }
+
+    #[test]
+    fn publish_describe_tty_falls_back_to_the_display_name_without_an_address() {
+        use topos_types::results::PublishGate;
+        // An unreadable address never becomes a broken one — the header degrades to the display
+        // name, and to the opaque workspace id only when there is nothing else.
+        let mut data = describing(PublishGate::Lands);
+        data.workspace_address = None;
+        let s = super::publish_describe_tty(&data, &yes_argv());
+        assert!(
+            s.starts_with("Publish 'coolify-deploy' to Ideamotive:"),
+            "{s}"
+        );
+        data.workspace_display_name = None;
+        let s = super::publish_describe_tty(&data, &yes_argv());
+        assert!(
+            s.starts_with("Publish 'coolify-deploy' to w_ideamotive:"),
+            "{s}"
+        );
+    }
+
+    #[test]
+    fn publish_tty_leads_with_the_skill_name_never_the_opaque_id() {
+        let line = publish_tty(&published());
+        assert!(line.starts_with("Published coolify-deploy@"), "{line}");
         assert!(
             !line.contains("topos_a1b2c3"),
             "the internal bundle id must never surface on the TTY line: {line}"
@@ -3562,26 +3700,43 @@ mod tests {
     }
 
     #[test]
+    fn publish_tty_names_where_it_landed_and_leads_the_trailer_with_the_undo() {
+        // The whole receipt: what shipped, where it went, the way back out, the members' link, and
+        // the one line that brings in someone who is not a member yet.
+        let data = PublishData {
+            workspace_address: Some("topos.sh/ideamotive".to_owned()),
+            share_line: Some("https://topos.sh/ideamotive/skills/coolify-deploy".to_owned()),
+            undo: Some("topos revert coolify-deploy --to f154315d5fd9".to_owned()),
+            invite_line: Some(INVITE.to_owned()),
+            ..published()
+        };
+        assert_eq!(
+            publish_tty(&data),
+            format!(
+                "Published coolify-deploy@fed180d80b8a to topos.sh/ideamotive\n\
+                 undo: topos revert coolify-deploy --to f154315d5fd9\n\
+                 share: https://topos.sh/ideamotive/skills/coolify-deploy\n\
+                 bring a teammate: {INVITE}"
+            )
+        );
+    }
+
+    #[test]
+    fn publish_tty_omits_a_destination_it_could_not_read() {
+        // The post-write `me` read is best-effort. When it does not answer, the headline says less
+        // — it never invents a destination out of a display name.
+        let line = publish_tty(&published());
+        assert_eq!(line, "Published coolify-deploy@fed180d80b8a");
+    }
+
+    #[test]
     fn publish_tty_discloses_a_withheld_curated_placement_next_to_the_success() {
         let line = publish_tty(&PublishData {
-            manifest: None,
-            reference: None,
-            converted_from: None,
-            skill_id: "topos_a1b2c3".to_owned(),
-            name: "smoke-notes".to_owned(),
-            version_id: "a".repeat(64),
-            bundle_digest: "c".repeat(64),
             current_generation: 1,
-            added: None,
             placement_withheld: Some("everyone".to_owned()),
-            placement_missing: None,
-            invite_line: None,
-            origin_note: None,
-            rewrite_pending: None,
-            rewrite_skipped: None,
-            kind: None,
+            ..published()
         });
-        assert!(line.starts_with("Published smoke-notes@"), "{line}");
+        assert!(line.starts_with("Published coolify-deploy@"), "{line}");
         assert!(
             line.contains("channel 'everyone' is curated — the reference was NOT placed"),
             "the withheld placement is disclosed: {line}"
@@ -3596,72 +3751,75 @@ mod tests {
     fn publish_tty_carries_the_teammate_handoff_after_the_confirmation() {
         // The apply receipt hands the author the ONE line that brings a teammate in — after the
         // published confirmation, never before it (the success stays the lead).
-        let invite = "Ask your agent: \"Set up Topos for us: fetch https://topos.sh/agent and \
-                      follow it. Our workspace: https://topos.sh/acme\"";
         let line = publish_tty(&PublishData {
-            manifest: None,
-            reference: None,
-            converted_from: None,
-            skill_id: "topos_a1b2c3".to_owned(),
-            name: "smoke-notes".to_owned(),
-            version_id: "a".repeat(64),
-            bundle_digest: "c".repeat(64),
-            current_generation: 3,
-            added: None,
-            placement_withheld: None,
-            placement_missing: None,
-            invite_line: Some(invite.to_owned()),
-            origin_note: None,
-            rewrite_pending: None,
-            rewrite_skipped: None,
-            kind: None,
+            invite_line: Some(INVITE.to_owned()),
+            ..published()
         });
-        assert!(line.starts_with("Published smoke-notes@"), "{line}");
-        let handoff = format!("\nbring a teammate: {invite}");
+        assert!(line.starts_with("Published coolify-deploy@"), "{line}");
+        let handoff = format!("\nbring a teammate: {INVITE}");
         assert!(
             line.ends_with(&handoff),
             "the handoff line follows the confirmation: {line}"
         );
     }
 
+    /// A proposal receipt payload — the proposal handle carries the FULL candidate id, as the
+    /// envelope's field does; the TTY is what shortens it.
+    fn proposed() -> ProposeData {
+        ProposeData {
+            proposal: format!("coolify-deploy@a1b2c3d4e5f6{}", "0".repeat(52)),
+            base_version_id: "9".repeat(64),
+            title: "coolify-deploy".to_owned(),
+            body: None,
+            added: None,
+            placement_withheld: None,
+            placement_missing: None,
+            manifest: None,
+            reference: None,
+            converted_from: None,
+            rewrite_pending: None,
+            rewrite_skipped: None,
+            workspace_address: Some("topos.sh/ideamotive".to_owned()),
+            share_line: Some("https://topos.sh/ideamotive/skills/coolify-deploy".to_owned()),
+        }
+    }
+
     #[test]
-    fn publish_describe_tty_labels_the_teammate_handoff_next_to_the_share_line() {
-        use topos_types::results::{PublishDescribeData, PublishGate};
-        let invite = "Ask your agent: \"Set up Topos for us: fetch https://topos.sh/agent and \
-                      follow it. Our workspace: https://topos.sh/acme\"";
-        let s = super::publish_describe_tty(
-            &PublishDescribeData {
-                skill: "deploy".to_owned(),
-                skill_id: "s_deploy".to_owned(),
-                workspace_id: "w_acme".to_owned(),
-                workspace_display_name: Some("Acme".to_owned()),
-                bundle_digest: "b".repeat(64),
-                placements: vec!["everyone".to_owned()],
-                gate: PublishGate::Lands,
-                is_revert: false,
-                reach: Some(12),
-                share_line: Some("https://topos.sh/acme/skills/deploy".to_owned()),
-                invite_line: Some(invite.to_owned()),
-                undo: None,
-                origin_note: None,
-                placement_note: None,
-                merge_preview: None,
-                manifest: None,
-                reference: None,
-                converted_from: None,
-                kind: None,
-            },
-            &["topos".to_owned(), "publish".to_owned(), "--yes".to_owned()],
+    fn propose_tty_names_both_verdicts_and_aligns_their_commands() {
+        assert_eq!(
+            propose_tty(&proposed()),
+            "Published coolify-deploy@a1b2c3d4e5f6 to topos.sh/ideamotive for review.\n\
+             Review required — a reviewer approves with: topos review coolify-deploy@a1b2c3d4e5f6 --approve\n\
+             withdraw it yourself:                       topos review coolify-deploy@a1b2c3d4e5f6 --withdraw\n\
+             share: https://topos.sh/ideamotive/skills/coolify-deploy"
         );
-        let share_at = s.find("share: ").expect("the share line renders");
-        let invite_at = s
-            .find("bring a teammate: ")
-            .expect("the handoff line renders");
+    }
+
+    #[test]
+    fn propose_tty_prints_the_short_handle_and_never_an_undo() {
+        // The handle is SHORT (the verdict path resolves a unique 8+ char prefix), and no undo is
+        // offered at all: `current` never moved, so there is no prior state a `revert` could put
+        // back. The author's escape is the `--withdraw` line above.
+        let s = propose_tty(&proposed());
         assert!(
-            invite_at > share_at,
-            "the handoff sits next to (after) the share line: {s}"
+            !s.contains(&"0".repeat(52)),
+            "the full candidate id is not the handle: {s}"
         );
-        assert!(s.contains(invite), "the exact join line renders: {s}");
+        assert!(!s.contains("undo"), "{s}");
+        assert!(!s.contains("revert"), "{s}");
+    }
+
+    #[test]
+    fn propose_tty_omits_a_destination_it_could_not_read() {
+        let s = propose_tty(&ProposeData {
+            workspace_address: None,
+            share_line: None,
+            ..proposed()
+        });
+        assert!(
+            s.starts_with("Published coolify-deploy@a1b2c3d4e5f6 for review.\n"),
+            "{s}"
+        );
     }
 
     #[test]

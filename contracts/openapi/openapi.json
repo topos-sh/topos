@@ -2931,8 +2931,22 @@
             ],
             "description": "The manifest's local-path line was REMOVED while this propose ran (a concurrent\n`topos remove`): NO workspace row was written — a completed removal is never silently\nundone. **INFERRED** (additive-only)."
           },
+          "share_line": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The paste-able share line (`<address>/skills/<name>`) — a members' deep link to the skill\nunder proposal. Absent when the workspace address is not known. **INFERRED**\n(additive-only). No `undo` rides this shape: a proposal never moved `current`, so there is\nno prior state to restore — the author's escape is `review <handle> --withdraw`."
+          },
           "title": {
             "type": "string"
+          },
+          "workspace_address": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The workspace's `<host>/<workspace>` address (`topos.sh/acme`) — how the receipt names\nWHERE the proposal was opened. Read from a best-effort `me`; absent when that read failed\nor the address does not validate. **INFERRED** (additive-only)."
           }
         }
       },
@@ -3111,12 +3125,33 @@
             ],
             "description": "The manifest's local-path line was REMOVED while this publish ran (a concurrent\n`topos remove` completed between the describe and the locked rewrite): NO workspace row\nwas written — a completed removal is never silently undone. The publish stands\ncatalog-side; `topos add <reference>` records the demand deliberately. **INFERRED**\n(additive-only)."
           },
+          "share_line": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The paste-able share line (`<address>/skills/<name>`) — a members' deep link to the skill\njust published. Absent when the workspace address is not known. **INFERRED**\n(additive-only)."
+          },
           "skill_id": {
             "type": "string"
+          },
+          "undo": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The undo — the whole `topos revert <name> --to <version>` command that puts the team back\non the version `current` held before this publish. WITHHELD unless it verifiably restores\nthat state: a bundle this machine does not follow cannot be reverted from here, and a\ngenesis publish left no prior version to restore. **INFERRED** (additive-only)."
           },
           "version_id": {
             "type": "string",
             "description": "The new commit (the shipped `version_id`)."
+          },
+          "workspace_address": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The workspace's `<host>/<workspace>` address (`topos.sh/acme`) — how the receipt names\nWHERE these bytes landed. Read from the same best-effort `me` the lines below come from;\nabsent when that read failed or the address does not validate. **INFERRED**\n(additive-only)."
           }
         }
       },
