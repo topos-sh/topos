@@ -18,6 +18,13 @@
 //! Rows come from the SAME per-scope resolution `status` reads ([`super::inventory`]): project
 //! rows from the checkout's own store, machine rows from `~/.topos/` — one resolution, two views.
 //! The offline states are cache facts ("as of last sync"), never live claims.
+//!
+//! ONE list: every bundle the invocation shows is a row under a scope section, and each row names
+//! its own ORIGIN — the workspace address, the repository, the folder. A source is where a bundle
+//! comes from, never a second kind of thing to enumerate below the list, so nothing an origin
+//! covers gets a trailing block of its own here. What no row can say still does: an external
+//! source that has stopped answering rides the tail, because a row keeps reading `current` while
+//! its repository goes unreachable.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -144,9 +151,11 @@ pub(crate) fn list_with(
 
     // The external sources' health, over the sections THIS INVOCATION SHOWS — computed BEFORE any
     // of the focused views, every one of which returns early. `--agent` and `--remote` answer
-    // about machines that track external sources too, and the shared tail renders this block for
-    // them; leaving it empty there would make the contract true only of the view that happens to
-    // fall through. The one-skill deep dive is the exception, and narrows it below.
+    // about machines that track external sources too; leaving the field empty there would make the
+    // wire contract true only of the view that happens to fall through. The one-skill deep dive is
+    // the exception, and narrows it below. What the TTY does with the field differs by view: the
+    // dive prints its one source in full, every other view prints only the sources in trouble
+    // (each row already names its own origin).
     data.forge = inventory::forge_sources(ctx, &sections);
 
     if req.footprint {
@@ -291,7 +300,7 @@ pub(crate) fn list_with(
         }
         data.scopes.push(ListScope {
             scope: section.scope.to_owned(),
-            manifest: section.manifest.clone(),
+            manifest: manifest_display(ctx, section),
             rows,
         });
     }
@@ -365,10 +374,66 @@ fn skill_entry(row: &Row) -> SkillEntry {
         bundle_digest: row.digest.clone().unwrap_or_else(|| ZERO_HEX.to_owned()),
         draft: matches!(row.state, StatusItemState::LocalEdits),
         pending_proposals: Vec::new(),
-        source: (!row.source.is_empty()).then(|| row.source.clone()),
+        source: origin_of(&row.reference),
         status,
         kind: row.kind.clone(),
     }
+}
+
+/// Where a row's bytes COME FROM, as the inventory's `from` column names it: the workspace address
+/// for anything a workspace delivers (`topos.sh/acme` — an explicit bundle row, a channel's
+/// members and a feed's all answer the one address a person would type), the repository for a
+/// forge row (`github.com/owner/repo` — the same spelling the auto-update check log files it
+/// under), the folder as the manifest spells it for a local one.
+///
+/// The manifest FILE is deliberately not this answer: the section header above the row already
+/// names it, so repeating it per row spent the column on the one fact the reader already had. A
+/// reference that does not classify answers `None` — a column with nothing true to say prints
+/// nothing.
+fn origin_of(reference: &str) -> Option<String> {
+    match keys::classify_key(reference).ok()? {
+        KeyShape::LocalPath { raw } => Some(raw),
+        KeyShape::RepoSet { host, owner, repo }
+        | KeyShape::RepoSkill {
+            host, owner, repo, ..
+        } => Some(format!("{host}/{owner}/{repo}")),
+        KeyShape::Feed { host, workspace }
+        | KeyShape::WorkspaceBundle {
+            host, workspace, ..
+        }
+        | KeyShape::Channel {
+            host, workspace, ..
+        } => Some(format!("{host}/{workspace}")),
+    }
+}
+
+/// The governing file as the LIST header names it: a PROJECT manifest relative to where you stand
+/// (`./topos.toml` in this folder, `../topos.toml` a level up), the machine file `~`-abbreviated.
+/// The absolute path is noise in a header read from inside the folder it governs; the relative
+/// spelling is the one a person could paste. Falls back to the scope's own pretty spelling when no
+/// relative form exists (no working directory, or a manifest that is not an ancestor of it).
+fn manifest_display(ctx: &Ctx<'_>, section: &ScopeResolution) -> Option<String> {
+    let pretty = section.manifest.clone();
+    if section.scope != "project" {
+        return pretty;
+    }
+    let file = section.manifest_path.as_deref()?;
+    let cwd = ctx.roots.as_ref()?.cwd.as_deref()?;
+    relative_manifest(cwd, file).or(pretty)
+}
+
+/// `<cwd>` + the manifest's own path → `./topos.toml` / `../topos.toml` / `../../topos.toml`. A
+/// project manifest governs the cwd or an ancestor of it, so the walk is always upward; anything
+/// else answers `None` rather than a path that would not resolve from here.
+fn relative_manifest(cwd: &Path, file: &Path) -> Option<String> {
+    let name = file.file_name()?.to_str()?;
+    let up = cwd.strip_prefix(file.parent()?).ok()?.components().count();
+    let prefix = if up == 0 {
+        "./".to_owned()
+    } else {
+        "../".repeat(up)
+    };
+    Some(format!("{prefix}{name}"))
 }
 
 /// The ALL-OR-NONE filter gate: every `--skill` selector must match at least one shown row's name
@@ -961,6 +1026,45 @@ mod tests {
         repo
     }
 
+    /// Every reference shape answers ONE origin — the address a person would type to get those
+    /// bytes — and a set answers the same origin as the members it delivers, so a repo row and
+    /// its skills read as one source rather than two.
+    #[test]
+    fn every_reference_shape_names_where_its_bytes_come_from() {
+        let origin = |r: &str| origin_of(r).expect("a classifiable reference");
+        assert_eq!(origin("topos.sh/acme/deploy"), "topos.sh/acme");
+        assert_eq!(origin("topos.sh/acme"), "topos.sh/acme");
+        assert_eq!(origin("topos.sh/acme/channels/frontend"), "topos.sh/acme");
+        assert_eq!(origin("github.com/o/r"), "github.com/o/r");
+        assert_eq!(origin("github.com/o/r/alpha"), "github.com/o/r");
+        assert_eq!(origin("./tools/repo-helper"), "./tools/repo-helper");
+        assert_eq!(origin("~/skills/notes"), "~/skills/notes");
+        // A reference that classifies to nothing says nothing — never a guessed column.
+        assert_eq!(origin_of("gitlab.com/o/r"), None);
+        assert_eq!(origin_of(""), None);
+    }
+
+    /// The project manifest is spelled from where you stand: in the folder, a level up, two up.
+    /// A file that is not an ancestor of the cwd answers `None` rather than a path that would not
+    /// resolve from here.
+    #[test]
+    fn the_project_manifest_is_spelled_relative_to_where_you_stand() {
+        let rel = |cwd: &str, file: &str| relative_manifest(Path::new(cwd), Path::new(file));
+        assert_eq!(
+            rel("/repo", "/repo/topos.toml").as_deref(),
+            Some("./topos.toml")
+        );
+        assert_eq!(
+            rel("/repo/api", "/repo/topos.toml").as_deref(),
+            Some("../topos.toml")
+        );
+        assert_eq!(
+            rel("/repo/api/src", "/repo/topos.toml").as_deref(),
+            Some("../../topos.toml")
+        );
+        assert_eq!(rel("/elsewhere", "/repo/topos.toml"), None);
+    }
+
     /// The default view in a project: the PROJECT rows in full — including the skill adopted
     /// into the PROJECT's own store (invisible to a home-store-only read) — plus the machine
     /// summary with its counts and exact command, and the signed-in flag the remote pointer
@@ -989,14 +1093,25 @@ mod tests {
         let out = run(&home, &repo, &request()).unwrap();
         assert_eq!(out.data.scopes.len(), 1, "{:?}", out.data.scopes);
         let project = scope(&out, "project");
-        assert!(
-            project
-                .manifest
-                .as_deref()
-                .is_some_and(|m| m.ends_with("topos.toml"))
-        );
+        // The governing file, spelled from where you stand — the absolute path is noise in a
+        // header read from inside the folder it governs.
+        assert_eq!(project.manifest.as_deref(), Some("./topos.toml"));
         let names: Vec<&str> = project.rows.iter().map(|r| r.skill.as_str()).collect();
         assert!(names.contains(&"deploy"), "{names:?}");
+        // Each row names its ORIGIN, never the file the header already named: the workspace
+        // address for a delivered bundle, the folder for one adopted in place.
+        let source = |n: &str| {
+            project
+                .rows
+                .iter()
+                .find(|r| r.skill == n)
+                .and_then(|r| r.source.clone())
+        };
+        assert_eq!(source("deploy").as_deref(), Some("topos.sh/acme"));
+        assert_eq!(
+            source("repo-helper").as_deref(),
+            Some("./tools/repo-helper")
+        );
         // The PROJECT-STORE adopted skill shows with its stored identity — the custody leg made
         // these invisible to the old home-store-only list.
         let helper = project

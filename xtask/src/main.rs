@@ -855,7 +855,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
                     bundle_digest: "e".repeat(64),
                     draft: false,
                     pending_proposals: vec![],
-                    source: Some("the topos.sh/acme feed".to_owned()),
+                    source: Some("topos.sh/acme".to_owned()),
                     status: Some(SkillStatus::Current),
                     kind: None,
                 }],

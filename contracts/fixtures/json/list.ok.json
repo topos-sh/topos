@@ -11,7 +11,7 @@
             "bundle_digest": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
             "draft": false,
             "skill": "pr-describe",
-            "source": "the topos.sh/acme feed",
+            "source": "topos.sh/acme",
             "status": "current",
             "version_id": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
             "workspace_id": "w_acme"

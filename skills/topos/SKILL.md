@@ -71,9 +71,10 @@ topos list --json                 # the inventory where you stand (`-g` machine-
 topos list <name> --json          # ONE skill in depth: the exact row (or feed) behind it
 ```
 
-Rows arrive per scope (`scopes[]`, the one you stand in first) and carry source (workspace
-address = team-managed, `built-in`, an origin host, `local`) and status (`current` / `behind` /
-`draft` / `off`). Check before treating a skill dir as hand-authored — editing a team-managed
+Rows arrive per scope (`scopes[]`, the one you stand in first) and carry source — where the bytes
+come from (a workspace address like `topos.sh/acme` = team-managed, a repository like
+`github.com/owner/repo`, the folder itself when adopted in place, `built-in`) — and status
+(`current` / `behind` / `draft` / `off`). Check before treating a skill dir as hand-authored — editing a team-managed
 skill creates a draft, not a private fork. What a view does not show is
 never invisible and never dumped: it rides as ONE summary carrying the exact command that
 expands it (`machine_summary` → `topos list -g`, `untracked_summary` → `topos list --untracked`,
@@ -93,7 +94,8 @@ copy with a marked way out, and a settled draft is copied onto the skill's other
 same scope. One thing never moves on its own: a pin. A git row IS kept current by the quiet sweep, on its own
 much slower rhythm (a few times a day, not every session) — it asks what commit the repo is on and
 downloads only on a real change, receipted with the commit it moved to. `topos update` by hand
-checks every source immediately; `topos status` and `topos list` show when each was last checked.
+checks every source immediately; `topos status` shows when each was last checked, and `topos list`
+speaks up about a source only when it has stopped answering.
 
 ## Adding skills (a manifest row is the demand)
 

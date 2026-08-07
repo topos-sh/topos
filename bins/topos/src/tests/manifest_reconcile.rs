@@ -2486,20 +2486,21 @@ fn a_repo_set_member_reads_as_current_in_list_not_detached() {
             Some(topos_types::results::SkillStatus::Current),
             "{name} is managed by update, so list must call it current: {row:?}"
         );
-        // The source column names WHO ASKED — the manifest row, exactly as for every other kind
-        // of line. That is the whole point: the member is an ordinary delivered row now.
-        assert!(
-            row.source
-                .as_deref()
-                .is_some_and(|src| src.ends_with("topos.toml")),
-            "{row:?}"
-        );
+        // The source column names WHERE THE BYTES COME FROM — the repository, exactly as for
+        // every other kind of line. That is the whole point: the member is an ordinary delivered
+        // row now, and it says its own origin instead of leaning on a block below the list.
+        assert_eq!(row.source.as_deref(), Some("github.com/o/r"), "{row:?}");
     }
 
     // And the rendered text carries no contradiction either.
     let text = crate::render::list_tty(&listed);
     assert!(!text.contains("[detached]"), "{text}");
     assert!(!text.contains("removed from the skill list"), "{text}");
+    // ONE list: the repository is named on the rows it delivers, never as a trailing block of
+    // its own — the listing has exactly one place a bundle can be read from.
+    assert!(text.contains("alpha  alpha@"), "{text}");
+    assert!(text.contains("from github.com/o/r"), "{text}");
+    assert!(!text.contains("external sources:"), "{text}");
 }
 
 #[test]
@@ -3334,12 +3335,13 @@ fn scoped_forge_health_answers_about_the_scopes_own_pin() {
 
 #[test]
 fn the_deep_dive_names_only_its_own_external_source() {
-    // The focused views return early, and the shared tail renders this block for them: `--agent`
-    // is just as likely to be run on a machine that tracks external sources. The ONE-SKILL dive is
-    // the exception. Every line it prints is a fact about the skill on screen, so an unrelated
-    // repository's last check would read as one more of them — the listing's "what is this machine
-    // tracking?" answering a question nobody asked here. It shows the repository that DELIVERS
-    // this skill, or nothing.
+    // The one-skill dive is the only `list` view that PRINTS this block, and it prints one line at
+    // most. Every line the dive shows is a fact about the skill on screen, so an unrelated
+    // repository's last check would read as one more of them — "what is this machine tracking?"
+    // answering a question nobody asked here. It shows the repository that DELIVERS this skill, or
+    // nothing. The resolution still computes the field for every view (the wire contract must not
+    // depend on which view fell through); the LISTING simply names each row's origin in its `from`
+    // column instead of enumerating sources under the list.
     let rig = Rig::new("repo-focused-views");
     rig.write_global("[bundles]\n\"github.com/o/r\" = \"*\"\n");
     let log: CallLog = Arc::new(Mutex::new(Vec::new()));
@@ -3377,7 +3379,25 @@ fn the_deep_dive_names_only_its_own_external_source() {
     // about it. THE reported bug: this block used to ride every dive on the machine.
     assert!(dive("topos").is_empty(), "{:?}", dive("topos"));
 
-    // The LISTING is the view the block belongs to, and still carries it in full.
+    // The dive PRINTS the one line it kept — the block is not merely computed there.
+    let printed = crate::render::list_tty(
+        &crate::ops::list_with(
+            &ctx,
+            &ops::ListRequest {
+                name: Some("alpha".to_owned()),
+                ..ops::ListRequest::default()
+            },
+            None,
+            None,
+            crate::ops::RowPage::unlimited(),
+        )
+        .unwrap(),
+    );
+    assert!(printed.contains("external sources:"), "{printed}");
+    assert!(printed.contains("github.com/o/r"), "{printed}");
+
+    // The LISTING still carries the field on the wire — a `--json` reader asks about source health
+    // from any view — while its TTY says the same repository per row, in the `from` column.
     let listed = crate::ops::list_with(
         &ctx,
         &ops::ListRequest::default(),
@@ -3395,6 +3415,9 @@ fn the_deep_dive_names_only_its_own_external_source() {
         "{:?}",
         listed.data.forge
     );
+    let text = crate::render::list_tty(&listed);
+    assert!(!text.contains("external sources:"), "{text}");
+    assert!(text.contains("from github.com/o/r"), "{text}");
 }
 
 #[test]
@@ -3796,6 +3819,50 @@ fn every_check_is_recorded_and_visible_to_status_and_list() {
         Some(rig_now(&rig)),
         "the last ANSWER survives a later failure"
     );
+    // And the LISTING says it out loud. A healthy source is silent there — each row already names
+    // it in the `from` column — but a source that has stopped answering is the one thing no row
+    // can say: the copies keep reading `current` while the repository goes unreachable.
+    let text = crate::render::list_tty(&listed);
+    assert!(text.contains("external sources:"), "{text}");
+    assert!(
+        text.contains("github.com/o/r — last check failed"),
+        "{text}"
+    );
+}
+
+#[test]
+fn a_healthy_external_source_is_named_on_its_rows_and_nowhere_else() {
+    // The other half of the rule above: nothing is wrong, so the listing is ONE list of bundles.
+    // The repository appears in the `from` column of the rows it delivers and gets no block of its
+    // own — the block used to restate, under the list, an identity every row already carried.
+    let rig = Rig::new("repo-healthy-quiet");
+    rig.write_global("[bundles]\n\"github.com/o/r\" = \"*\"\n");
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let plane = FakePlane::new(log);
+    let dir = FakeDirectory::new(Vec::new(), Vec::new());
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    let git = FakeGit::new(build_repo_targz(
+        "o-r-aaaaaaaaaaaa1",
+        &[("skills/alpha/SKILL.md", b"# alpha v1\n")],
+    ));
+    update_now(&ctx, &plane, &dir, &git);
+
+    let listed = crate::ops::list_with(
+        &ctx,
+        &ops::ListRequest::default(),
+        None,
+        None,
+        crate::ops::RowPage::unlimited(),
+    )
+    .unwrap();
+    assert!(
+        listed.data.forge.iter().all(|f| f.error.is_none()),
+        "{:?}",
+        listed.data.forge
+    );
+    let text = crate::render::list_tty(&listed);
+    assert!(text.contains("from github.com/o/r"), "{text}");
+    assert!(!text.contains("external sources:"), "{text}");
 }
 
 #[test]

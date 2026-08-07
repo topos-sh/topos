@@ -351,7 +351,7 @@
       "type": "object",
       "properties": {
         "manifest": {
-          "description": "The governing manifest file; `None` = no machine-wide file — nothing is demanded\nmachine-wide (`topos login` writes a feed row on this machine's first connection to a\nworkspace).",
+          "description": "The governing manifest file, spelled as a person standing here reads it: a project manifest\nrelative to the working directory (`./topos.toml`, `../topos.toml`), the machine file\n`~`-abbreviated. `None` = no machine-wide file — nothing is demanded machine-wide (`topos\nlogin` writes a feed row on this machine's first connection to a workspace).",
           "type": [
             "string",
             "null"
@@ -591,7 +591,7 @@
           "type": "string"
         },
         "source": {
-          "description": "Where the bytes come from: the followed workspace's address name, an imported skill's origin\nhost, or `local` for a purely local `add`. **INFERRED** (additive).",
+          "description": "Where the bytes come from — the ORIGIN, never the manifest that asked for it: the workspace\naddress (`topos.sh/acme`) for anything a workspace delivers, the repository\n(`github.com/owner/repo`) for a forge row, the folder as the manifest spells it for a local\none, `built-in` for the CLI's own meta-skill. **INFERRED** (additive).",
           "type": [
             "string",
             "null"

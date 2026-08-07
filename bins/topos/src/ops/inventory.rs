@@ -55,10 +55,10 @@ pub(crate) enum ScopeView {
 pub(crate) struct Row {
     /// The bundle's name (the dedupe key within a scope).
     pub name: String,
-    /// The winning reference (canonical where known).
+    /// The winning reference (canonical where known). The inventory's `from` column is DERIVED
+    /// from it — the reference already names where the bytes come from, so no second source
+    /// string rides along to drift from it.
     pub reference: String,
-    /// ONE source line: the manifest that asked for it, or `the <host>/<ws> feed`.
-    pub source: String,
     /// EVERY channel the last delivery cached for it — the `--channel` filter's key (its first
     /// entry is the delivering channel, when the line rides one).
     pub via_channels: Vec<String>,
@@ -99,6 +99,10 @@ pub(crate) struct ScopeResolution {
     /// The governing manifest file (pretty-printed); `None` = no file (nothing demanded
     /// machine-wide).
     pub manifest: Option<String>,
+    /// The same file as a PATH — what a view spelling it another way (`list`'s header renders a
+    /// project manifest relative to the working directory) needs, since a pretty spelling cannot
+    /// be un-abbreviated back into one.
+    pub manifest_path: Option<PathBuf>,
     pub rows: Vec<Row>,
     pub notes: Vec<String>,
     /// The SET rows the file adopts, canonical (`<host>/<ws>/channels/<name>`, repo sets) — the
@@ -337,6 +341,7 @@ pub(crate) fn resolve(
         out.push(ScopeResolution {
             scope: "project",
             manifest: plan.file.as_deref().map(|p| pretty(ctx, p)),
+            manifest_path: plan.file.clone(),
             rows: project_out.rows,
             notes: project_notes,
             sets: plan.sets.iter().map(|r| r.shape.canonical()).collect(),
@@ -346,6 +351,7 @@ pub(crate) fn resolve(
     out.push(ScopeResolution {
         scope: "machine",
         manifest: person_plan.file.as_deref().map(|p| pretty(ctx, p)),
+        manifest_path: person_plan.file.clone(),
         rows: person_out.rows,
         notes: machine_notes,
         sets: person_plan
@@ -459,7 +465,6 @@ fn scope_rows(
         out.rows.push(Row {
             name,
             reference: identity,
-            source: file.clone().unwrap_or_default(),
             via_channels,
             attribution,
             version: applied.version,
@@ -503,7 +508,6 @@ fn scope_rows(
                 out.rows.push(Row {
                     name: member.name,
                     reference: member.reference,
-                    source: file.clone().unwrap_or_default(),
                     via_channels: Vec::new(),
                     attribution: None,
                     version: member.applied.version,
@@ -560,7 +564,6 @@ fn scope_rows(
             out.rows.push(Row {
                 name: ds.name.clone(),
                 reference: member,
-                source: file.clone().unwrap_or_default(),
                 via_channels: ds.via_channels.clone(),
                 attribution: attribution_of(ds),
                 version: applied.version,
@@ -618,7 +621,6 @@ fn scope_rows(
             out.rows.push(Row {
                 name: ds.name.clone(),
                 reference: identity,
-                source: format!("the {feed} feed"),
                 via_channels: ds.via_channels.clone(),
                 attribution: attribution_of(ds),
                 version: applied.version,
@@ -684,7 +686,6 @@ fn scope_rows(
         out.rows.push(Row {
             name: row.display_name(),
             reference: identity,
-            source: file.clone().unwrap_or_default(),
             via_channels: Vec::new(),
             attribution: None,
             version: None,
@@ -1692,7 +1693,7 @@ mod tests {
             m.manifest
         );
         let row = |n: &str| m.rows.iter().find(|i| i.name == n).expect("a row");
-        assert_eq!(row("deploy").source, "the topos.sh/acme feed");
+        assert_eq!(row("deploy").feed.as_deref(), Some("topos.sh/acme"));
         assert_eq!(row("deploy").reference, "topos.sh/acme/deploy");
         assert_eq!(
             row("deploy").attribution.as_deref(),
@@ -2065,7 +2066,15 @@ mod tests {
         );
         // The file's own row delivers, sourced to the file — the other assignments do not flow.
         let deploy = m.rows.iter().find(|i| i.name == "deploy").expect("a row");
-        assert!(deploy.source.ends_with("topos.toml"), "{}", deploy.source);
+        assert!(
+            deploy
+                .source_file
+                .as_deref()
+                .is_some_and(|f| f.ends_with("topos.toml")),
+            "{:?}",
+            deploy.source_file
+        );
+        assert_eq!(deploy.feed, None);
         assert_eq!(deploy.attribution.as_deref(), Some("assigned by Dana"));
         assert!(!m.rows.iter().any(|i| i.name == "notes"));
         assert!(!m.rows.iter().any(|i| i.name == "triage"));
