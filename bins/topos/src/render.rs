@@ -1908,8 +1908,15 @@ fn list_detail_tty(detail: &topos_types::results::ListDetail) -> String {
         (None, Some(p)) => s.push_str(&format!("\n  pinned {} (not applied here)", short(p))),
         (None, None) => {}
     }
+    // ONE folder per line. A comma-joined run of absolute paths wraps into a wall the eye cannot
+    // find a path's start in, and the count of copies — the thing this line exists to report — is
+    // unreadable at a glance. Same shape whatever the count, so a second copy never changes how
+    // the answer is read.
     if !detail.placements.is_empty() {
-        s.push_str(&format!("\n  placed in {}", detail.placements.join(", ")));
+        s.push_str("\n  placed in:");
+        for p in &detail.placements {
+            s.push_str(&format!("\n    {p}"));
+        }
     }
     // An mcp bundle's "where": per-agent config entries (placed file + state), instead of
     // placement dirs.
@@ -4592,7 +4599,10 @@ mod tests {
                     attribution: Some("assigned by Dana".to_owned()),
                     version: Some("a".repeat(64)),
                     pin: None,
-                    placements: vec!["/home/dev/.claude/skills/deploy".to_owned()],
+                    placements: vec![
+                        "/home/dev/.claude/skills/deploy".to_owned(),
+                        "/home/dev/.codex/skills/deploy".to_owned(),
+                    ],
                     state: S::Applied,
                     kind: None,
                     harnesses: Vec::new(),
@@ -4613,10 +4623,14 @@ mod tests {
         );
         assert!(text.contains("— assigned by Dana"), "{text}");
         assert!(text.contains("version aaaaaaaaaaaa"), "{text}");
+        // Every placement on its OWN line — never a comma-joined run of absolute paths.
         assert!(
-            text.contains("placed in /home/dev/.claude/skills/deploy"),
+            text.contains(
+                "placed in:\n    /home/dev/.claude/skills/deploy\n    /home/dev/.codex/skills/deploy"
+            ),
             "{text}"
         );
+        assert!(!text.contains("deploy, "), "{text}");
         assert!(text.ends_with("applied"), "{text}");
 
         // The agent-eye view: per-dir entries marked managed or untracked.
