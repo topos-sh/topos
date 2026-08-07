@@ -95,7 +95,7 @@ same scope. One thing never moves on its own: a pin. A git row IS kept current b
 much slower rhythm (a few times a day, not every session) — it asks what commit the repo is on and
 downloads only on a real change, receipted with the commit it moved to. `topos update` by hand
 checks every source immediately; `topos status` shows when each was last checked, and `topos list`
-speaks up about a source only when it has stopped answering.
+marks the rows a stopped source froze — `[not responding]`, with the last time it answered.
 
 ## Adding skills (a manifest row is the demand)
 

@@ -208,7 +208,9 @@ topos list <skill> --json
 `manifest` that governs it — and every row carries a **source** (where its bytes come from: a
 workspace address like `topos.sh/acme` means team-managed; a repository like `github.com/owner/repo`;
 the folder itself for one adopted in place; `built-in`) and a **status** (`current` / `behind` /
-`draft` / `off`). Every row originates from a manifest line (or the placed built-in); a copy no line manages
+`draft` / `off`). A row whose source has stopped answering carries **`source_health`** instead of a
+status, with the last time that source answered — the copy on disk still works, but nothing is
+keeping it current. Every row originates from a manifest line (or the placed built-in); a copy no line manages
 any more resolves once on the next `update` — its receipt says so, and the files are yours from
 then on. Check before treating a skill directory as hand-authored. Editing a team-managed skill
 creates a draft, not a private fork, and drafts are safe: updates merge around them and never

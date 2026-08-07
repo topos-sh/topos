@@ -3819,15 +3819,17 @@ fn every_check_is_recorded_and_visible_to_status_and_list() {
         Some(rig_now(&rig)),
         "the last ANSWER survives a later failure"
     );
-    // And the LISTING says it out loud. A healthy source is silent there — each row already names
-    // it in the `from` column — but a source that has stopped answering is the one thing no row
-    // can say: the copies keep reading `current` while the repository goes unreachable.
+    // And the LISTING says it ON THE ROWS THE SOURCE FROZE, never as a block under the list: the
+    // reader is already looking at the row, and the row is what stopped moving. `[not responding]`
+    // REPLACES `[current]` — current would be measured against an answer nobody got — and the last
+    // ANSWER is what says how stale the copy is (the sweep's clock advances on failure, so a
+    // "last checked" here would always be recent and read like a blip to ignore).
     let text = crate::render::list_tty(&listed);
-    assert!(text.contains("external sources:"), "{text}");
-    assert!(
-        text.contains("github.com/o/r — last check failed"),
-        "{text}"
-    );
+    assert!(text.contains("[not responding]"), "{text}");
+    assert!(text.contains("from github.com/o/r"), "{text}");
+    assert!(text.contains("last answered:"), "{text}");
+    assert!(!text.contains("[current]"), "{text}");
+    assert!(!text.contains("external sources:"), "{text}");
 }
 
 #[test]
