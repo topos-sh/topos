@@ -288,6 +288,7 @@ pub(crate) fn list_with(
             .inventory_rows()
             .filter(|r| keeps(&r.name, &r.via_channels))
             .map(skill_entry)
+            .map(|e| with_source_health(e, &data.forge))
             .collect();
         if section.scope == "machine"
             && let Some(b) = &builtin
@@ -377,7 +378,32 @@ fn skill_entry(row: &Row) -> SkillEntry {
         source: origin_of(&row.reference),
         status,
         kind: row.kind.clone(),
+        source_health: None,
     }
+}
+
+/// Join the source check log onto ONE row: a row whose origin has stopped answering carries that
+/// fact itself. The join key is the row's own origin — the same string the `from` column prints and
+/// the same one the check log files under — so a repo-set's members and an explicit import of the
+/// same repository all learn about it, which is exactly right: every one of them is frozen.
+///
+/// A source that is answering attaches NOTHING. Its identity is already on the row.
+fn with_source_health(
+    mut entry: SkillEntry,
+    forge: &[topos_types::results::ForgeSource],
+) -> SkillEntry {
+    let Some(origin) = entry.source.as_deref() else {
+        return entry;
+    };
+    if let Some(f) = forge
+        .iter()
+        .find(|f| f.source == origin && f.error.is_some())
+    {
+        entry.source_health = Some(topos_types::results::SourceHealth {
+            answered_at: f.answered_at,
+        });
+    }
+    entry
 }
 
 /// Where a row's bytes COME FROM, as the inventory's `from` column names it: the workspace address
@@ -516,6 +542,7 @@ fn builtin_entry(ctx: &Ctx<'_>) -> Option<SkillEntry> {
             SkillStatus::Current
         }),
         kind: None,
+        source_health: None,
     })
 }
 

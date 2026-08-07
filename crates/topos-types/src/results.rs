@@ -649,6 +649,27 @@ pub struct SkillEntry {
     /// `"skill"`. **Additive.**
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kind: Option<String>,
+    /// The health of the source named in [`Self::source`], when that source has STOPPED answering.
+    /// Absent = nothing is wrong (or the origin is not one that gets probed). **INFERRED**
+    /// (additive).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_health: Option<SourceHealth>,
+}
+
+/// A row's origin has STOPPED ANSWERING — the one fact about a bundle that no other column can
+/// carry. Its presence is the failure; the copy on disk keeps working, and would keep reading
+/// `current` forever, while nothing is keeping it current any more.
+///
+/// Why the last ANSWER and not the last check: the sweep retries on its own cadence and its clock
+/// advances on failure too, so "last checked" is always recent and reads like a blip to ignore.
+/// The question a stopped source raises is how stale this copy is, and only the last answer
+/// measures that. **INFERRED** (additive).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
+pub struct SourceHealth {
+    /// When the source last ANSWERED (epoch millis). Absent = it never has.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub answered_at: Option<i64>,
 }
 
 /// A tracked skill's update status in [`SkillEntry`]. **INFERRED** (additive value set).

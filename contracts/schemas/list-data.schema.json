@@ -597,6 +597,17 @@
             "null"
           ]
         },
+        "source_health": {
+          "description": "The health of the source named in [`Self::source`], when that source has STOPPED answering.\nAbsent = nothing is wrong (or the origin is not one that gets probed). **INFERRED**\n(additive).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SourceHealth"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "status": {
           "description": "The update status of the local copy: `current` / `behind` / `draft` / `off`. Absent when\nno status is honestly claimable (never applied, pending, no delivery yet). **INFERRED**\n(additive).",
           "anyOf": [
@@ -652,6 +663,20 @@
           "const": "off"
         }
       ]
+    },
+    "SourceHealth": {
+      "description": "A row's origin has STOPPED ANSWERING — the one fact about a bundle that no other column can\ncarry. Its presence is the failure; the copy on disk keeps working, and would keep reading\n`current` forever, while nothing is keeping it current any more.\n\nWhy the last ANSWER and not the last check: the sweep retries on its own cadence and its clock\nadvances on failure too, so \"last checked\" is always recent and reads like a blip to ignore.\nThe question a stopped source raises is how stale this copy is, and only the last answer\nmeasures that. **INFERRED** (additive).",
+      "type": "object",
+      "properties": {
+        "answered_at": {
+          "description": "When the source last ANSWERED (epoch millis). Absent = it never has.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64"
+        }
+      }
     },
     "StatusItemState": {
       "description": "A resolved line's state — the offline resolution's shared vocabulary ([`ListDetail::state`]\nand the internal per-scope rows). **INFERRED value set** (additive).",

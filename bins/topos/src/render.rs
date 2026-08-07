@@ -1060,9 +1060,10 @@ fn list_scope_header(scope: &str, manifest: Option<&str>) -> String {
 /// isolated warnings, and the footprint.
 ///
 /// ONE list of bundles: every managed line rides a scope section, and each one names its own
-/// origin in the `from` column. Nothing a row could say gets its own trailing block — an external
-/// repository is where a bundle comes from, not a second kind of thing to enumerate. What a row
-/// CANNOT say still rides the tail: a source that has stopped answering (see [`push_list_tail`]).
+/// origin in the `from` column — and, when that origin has stopped answering, says so itself
+/// (`[not responding] … last answered: <when>`). An external repository is where a bundle comes
+/// from, not a second kind of thing to enumerate, so nothing about it gets a trailing block here
+/// in any state. How the sources are FARING across the machine is `status`'s panel.
 pub(crate) fn list_tty(out: &ListOutcome) -> String {
     let data = &out.data;
     let mut s = String::new();
@@ -1199,29 +1200,17 @@ pub(crate) fn list_tty(out: &ListOutcome) -> String {
 /// footprint in `--json`, so they print it here too.
 fn push_list_tail(s: &mut String, out: &ListOutcome) {
     let data = &out.data;
-    // The external sources. The ONE-SKILL dive prints the source that delivers it whatever its
-    // state — the resolution narrowed the block to that one repository, so its last check reads as
-    // one more fact about the bundle on screen. Every other view prints only the sources in
-    // TROUBLE: a healthy source is already named on each row it delivers (the `from` column), so
-    // repeating it under the list is a block that says nothing new — while a source that has
-    // stopped answering is news, and an inventory that swallowed it would let a row read
-    // `[current]` for weeks with nobody told why it stopped moving.
-    let troubled: Vec<topos_types::results::ForgeSource>;
-    let forge = if data.detail.is_some() {
-        &data.forge[..]
-    } else {
-        troubled = data
-            .forge
-            .iter()
-            .filter(|f| f.error.is_some())
-            .cloned()
-            .collect();
-        &troubled[..]
-    };
-    let block = forge_block(forge);
-    if !block.is_empty() {
-        s.push_str(block.trim_start_matches('\n'));
-        s.push('\n');
+    // The external sources' block belongs to the ONE-SKILL dive alone: there it is narrowed to the
+    // repository that delivers the bundle on screen, so its last check reads as one more fact
+    // about that bundle. The LISTING has no block at all — a healthy source is named in each row's
+    // `from` column, and a source that has stopped answering is said ON the rows it froze, which
+    // is where a reader is already looking.
+    if data.detail.is_some() {
+        let block = forge_block(&data.forge);
+        if !block.is_empty() {
+            s.push_str(block.trim_start_matches('\n'));
+            s.push('\n');
+        }
     }
     // An explicit `--limit`/`--offset` page on the TTY: one line per capped bucket.
     for t in &data.truncated {
@@ -1336,10 +1325,14 @@ fn list_columns(entry: &SkillEntry) -> String {
     if let Some(kind) = &entry.kind {
         s.push_str(&format!("  [{kind}]"));
     }
-    // `draft` already shows via its own flag; skip it here to avoid a doubled note.
-    if let Some(status) = entry.status
+    // A source that has stopped answering REPLACES the update status: `current` would be measured
+    // against an answer nobody got. The copy on disk is fine — nothing is keeping it current.
+    if entry.source_health.is_some() {
+        s.push_str("  [not responding]");
+    } else if let Some(status) = entry.status
         && !matches!(status, SkillStatus::Draft)
     {
+        // `draft` already shows via its own flag; skip it here to avoid a doubled note.
         let label = match status {
             SkillStatus::Current => "current",
             SkillStatus::Behind => "behind",
@@ -1350,6 +1343,16 @@ fn list_columns(entry: &SkillEntry) -> String {
     }
     if let Some(source) = &entry.source {
         s.push_str(&format!("  from {source}"));
+    }
+    // How stale the row is, next to the badge that says it stopped moving.
+    if let Some(h) = &entry.source_health {
+        match h.answered_at {
+            Some(at) => s.push_str(&format!(
+                "  last answered: {}",
+                fmt_utc_millis(u64::try_from(at).unwrap_or(0))
+            )),
+            None => s.push_str("  never answered"),
+        }
     }
     s
 }
@@ -4106,6 +4109,7 @@ mod tests {
             source: Some("topos.sh/acme".to_owned()),
             status,
             kind: None,
+            source_health: None,
         };
         let out = ListOutcome {
             data: ListData {
@@ -4209,6 +4213,7 @@ mod tests {
             source: None,
             status: None,
             kind: None,
+            source_health: None,
         };
         let out = ListOutcome {
             data: ListData {
@@ -4381,6 +4386,79 @@ mod tests {
         );
     }
 
+    /// A row whose ORIGIN has stopped answering says so itself, in the badge slot and next to the
+    /// origin — byte-exact, because this is the line a person reads to learn their copy is frozen.
+    /// `[not responding]` REPLACES `[current]`: `current` is measured against an answer nobody
+    /// got. The timestamp is the last ANSWER, not the last check — the sweep retries on its own
+    /// cadence and its clock advances on failure, so a "last checked" here would always be recent
+    /// and read like a blip to ignore, when the point is how stale this copy has become.
+    #[test]
+    fn a_source_that_stopped_answering_is_said_on_the_rows_it_froze() {
+        use topos_types::results::{ListScope, SkillStatus, SourceHealth};
+        let row = |health: Option<SourceHealth>| SkillEntry {
+            skill: "rust-skills".to_owned(),
+            workspace_id: None,
+            version_id: "3d".repeat(32),
+            bundle_digest: "cd".repeat(32),
+            draft: false,
+            pending_proposals: Vec::new(),
+            source: Some("github.com/leonardomso/rust-skills".to_owned()),
+            status: Some(SkillStatus::Current),
+            kind: None,
+            source_health: health,
+        };
+        let render = |health: Option<SourceHealth>| {
+            list_tty(&ListOutcome {
+                data: ListData {
+                    scopes: vec![ListScope {
+                        scope: "project".to_owned(),
+                        manifest: Some("./topos.toml".to_owned()),
+                        rows: vec![row(health)],
+                    }],
+                    ..ListData::default()
+                },
+                warnings: Vec::new(),
+                untracked_view: false,
+            })
+        };
+
+        // Answering: the row is an ordinary current row, and says nothing about health.
+        let ok = render(None);
+        assert!(
+            ok.contains(
+                "  rust-skills  rust-skills@3d3d3d3d3d3d  [current]  \
+                 from github.com/leonardomso/rust-skills"
+            ),
+            "{ok}"
+        );
+        assert!(!ok.contains("not responding"), "{ok}");
+
+        // Stopped: the badge replaces the status, and the last ANSWER dates the staleness.
+        let bad = render(Some(SourceHealth {
+            answered_at: Some(1_786_000_000_000),
+        }));
+        assert!(
+            bad.contains(
+                "  rust-skills  rust-skills@3d3d3d3d3d3d  [not responding]  \
+                 from github.com/leonardomso/rust-skills  last answered: 2026-08-06 07:06"
+            ),
+            "{bad}"
+        );
+        assert!(!bad.contains("[current]"), "{bad}");
+        // No trailing block in ANY state — the listing is one list of bundles.
+        assert!(!bad.contains("external sources:"), "{bad}");
+
+        // A source that has NEVER answered cannot be dated, and does not pretend to be.
+        let never = render(Some(SourceHealth { answered_at: None }));
+        assert!(
+            never.contains(
+                "[not responding]  from github.com/leonardomso/rust-skills  never answered"
+            ),
+            "{never}"
+        );
+        assert!(!never.contains("last answered"), "{never}");
+    }
+
     /// An `off` row is the file's own standing statement: the `[off]` badge, never the
     /// "not applied here yet" note (an off row is exactly the row `update` will not apply).
     #[test]
@@ -4401,6 +4479,7 @@ mod tests {
                         source: Some("topos.sh/acme".to_owned()),
                         status: Some(SkillStatus::Off),
                         kind: None,
+                        source_health: None,
                     }],
                 }],
                 signed_in: false,
