@@ -147,24 +147,31 @@ pub(crate) fn sync_one_planned(
     // consumed `current`).
     if let Some(cs) = doc::read_doc::<topos_types::persisted::ConflictState>(ctx.fs, &sp.conflict)?
     {
-        if inv == Invocation::Escape {
-            // The 2nd witness mint site — guarded: a `conflict.json` only ever exists for an author who
-            // diverged (a follower never reaches merge code, so never records one).
-            return super::merge_resolve::escape_recorded(
-                DivergedWitness(()),
-                ctx,
-                skill_id,
-                &sp,
-                &sync,
-                &lock,
-                &map,
-                &cs,
+        // FIRST: a record that outlived its own resolution (an exit crashed between its placement
+        // write and the record's removal) is not a block at all — finish that clear and pull
+        // normally. Before either arm below, because both would read the leftover as live: the
+        // escape would commit the original draft over the resolution already on disk, and the
+        // recover would name a work tree that exists nowhere.
+        if !super::merge_resolve::heal_landed_resolution(ctx, &sp, &sync, &lock, &map, &cs)? {
+            if inv == Invocation::Escape {
+                // The 2nd witness mint site — guarded: a `conflict.json` only ever exists for an author who
+                // diverged (a follower never reaches merge code, so never records one).
+                return super::merge_resolve::escape_recorded(
+                    DivergedWitness(()),
+                    ctx,
+                    skill_id,
+                    &sp,
+                    &sync,
+                    &lock,
+                    &map,
+                    &cs,
+                );
+            }
+            super::merge_resolve::recover_resolution(ctx, &sp, &sync, &lock, &map, &cs)?;
+            return super::merge_resolve::conflicted_row_from_state(
+                ctx, &name, &sync, &lock, &map, &cs,
             );
         }
-        super::merge_resolve::recover_resolution(ctx, &sp, &sync, &lock, &map, &cs)?;
-        return super::merge_resolve::conflicted_row_from_state(
-            ctx, &name, &sync, &lock, &map, &cs,
-        );
     }
 
     // ---- checkForUpdates ----
@@ -428,11 +435,16 @@ pub(crate) fn sync_one_planned(
             // overwrites a local draft. Every situation a clean forward can reach APPLIES: the recipe row
             // is the standing pre-authorization, an explicit accept is the direct local command, and a
             // review-required workspace only ever serves an already-approved `current`. The kernel stays
-            // the authority for that claim, asserted here rather than re-decided.
-            debug_assert!(
-                topos_core::consent::decide(situation_for(follow, explicit)).applies_bytes(),
-                "the consent kernel refused a clean forward apply"
-            );
+            // the authority for that claim, ASKED here rather than re-decided — and asked in every
+            // build, not just a debug one. It is the last coupling between this engine and the
+            // consent kernel on the apply path, it costs one table lookup per skill, and the thing
+            // it guards is bytes landing in an agent's folder: a decision table that ever stopped
+            // agreeing must stop the apply, not be compiled out of the release the apply ships in.
+            if !topos_core::consent::decide(situation_for(follow, explicit)).applies_bytes() {
+                return Err(ClientError::Corrupt(format!(
+                    "the consent kernel refused a clean forward apply for {name}"
+                )));
+            }
             apply_forward(ctx, &sp, &map, &managed, &lock, &sync, skill_id, &t)?;
             let mut row = applied_row(&name, &sync, target_commit);
             row.harnesses = converge_explicit_mcp(ctx, mcp_record && explicit, skill_id, &name);

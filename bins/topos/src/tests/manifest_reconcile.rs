@@ -13078,7 +13078,9 @@ fn zz_a_per_copy_reset_clears_the_recorded_conflict_and_its_copy() {
     let (rig, name, id, _shared, _native) = frozen_copies("zz-per-copy-reset-conflict");
     let ctx = rig.ctx_at(Some(&rig.work.0));
     let sp = rig.layout().published(&id);
-    let copy = rig.layout().conflict_copy_dir("coolify-deploy");
+    let copy = rig.layout().conflict_copy_dir(
+        &crate::sidecar::ConflictDir::parse("coolify-deploy").expect("a plain safe component"),
+    );
     std::fs::create_dir_all(&copy).unwrap();
     std::fs::write(copy.join("SKILL.md"), b"<<<<<<< mine\n").unwrap();
     let record = |hex: &str| ConflictState {

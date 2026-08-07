@@ -513,6 +513,27 @@ pub(crate) enum ClientError {
     /// the draft must be resolved first. Refused before any build / WAL / send (the publish guard).
     #[error("publish is blocked — resolve the merge conflict in this skill first")]
     PublishBlocked { skill: String },
+    /// `--onto-current` found the merge's workbench folder PRESENT but unreadable as a bundle (a
+    /// symlink or file where the folder belongs, a symlink or non-regular file inside it, a
+    /// non-UTF-8 name, an emptied folder, a read failure). Refused with nothing committed and
+    /// nothing placed, because the folder is the ONLY copy of a hand resolution — it sits outside
+    /// the placement map, so no snapshot rail holds it, and treating it as absent would commit the
+    /// original draft over every placement and then delete it.
+    ///
+    /// `global` is the scope the bundle lives in, so the offered `--reset` is spelled for the copy
+    /// the reader is looking at.
+    #[error(
+        "'{skill}' cannot be resolved from {path} — that folder is not readable as a bundle \
+         ({reason}); fix it and re-run, or take the team's version with `topos update{} {skill} \
+         --reset`",
+        scope_flag(*global)
+    )]
+    ConflictCopyUnreadable {
+        skill: String,
+        path: String,
+        reason: String,
+        global: bool,
+    },
     /// A crashed prior write for this skill is still in-flight and DIFFERS from the command just issued
     /// (a different digest / mode / target). Settle it first (re-run the original command, which replays
     /// its `op_id`), then re-issue this change — never silently replay a different intent.
@@ -853,6 +874,9 @@ impl ClientError {
             // A review verdict on a no-longer-open proposal — an open code, its own domain refusal.
             ClientError::ReviewNotOpen(_) => "REVIEW_NOT_OPEN",
             ClientError::PublishBlocked { .. } => "PUBLISH_BLOCKED",
+            // The workbench folder an exit reads is unreadable — the same "resolve the divergence
+            // locally" family as the publish block, so agents branch on one code for both.
+            ClientError::ConflictCopyUnreadable { .. } => "PUBLISH_BLOCKED",
             ClientError::PendingOp { .. } => "PENDING_OP",
             ClientError::WorkspaceSelection(_) => "WORKSPACE_SELECTION",
             ClientError::PlaneRejected(_) => "PLANE_REJECTED",
@@ -963,6 +987,9 @@ impl ClientError {
             }
             ClientError::Denied(_) => TerminalOutcome::Denied,
             ClientError::PublishBlocked { .. } => TerminalOutcome::Diverged,
+            // An unreadable workbench folder is the same class: a local reconciliation the person
+            // performs, never a blind retry of the same command against the same folder.
+            ClientError::ConflictCopyUnreadable { .. } => TerminalOutcome::Diverged,
             // Divergent per-placement edits are the same class as a diverged draft: local
             // reconciliation (or the disclosed reset) resolves it, never a blind retry.
             ClientError::PlacementsDiverged { .. } => TerminalOutcome::Diverged,

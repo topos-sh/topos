@@ -113,6 +113,54 @@ pub(crate) fn revive_record(fs: &dyn FsOps, layout: &Layout, id: &SkillId) {
     }
 }
 
+/// The prefix marking the transient staging tree a conflict workbench folder is BUILT in
+/// (`conflicts/.topos-staging-<leaf>/`), renamed into place when it is complete. It leads with a
+/// DOT, which [`ConflictDir::parse`] refuses — so no staging name can ever collide with a real
+/// workbench folder, and the recovery sweep can drop one on sight.
+pub(crate) const CONFLICT_STAGING_PREFIX: &str = ".topos-staging-";
+
+/// The longest workbench component this build will accept. The naming ladder
+/// ([`topos_harness::choose_skill_dir`]) tops out at 193 bytes — a 64-byte sanitized name plus a
+/// 64-byte workspace slug plus a counter, or a 128-byte id plus that slug — so no name topos can
+/// MINT is ever refused here, and refusing anything longer keeps `CONFLICT_STAGING_PREFIX` + the
+/// component inside the 255-byte `NAME_MAX` every mainstream filesystem enforces. Without the cap
+/// a long recorded component makes the staging build fail `ENAMETOOLONG` on every sweep for that
+/// checkout, forever.
+const MAX_CONFLICT_DIR_LEN: usize = 200;
+
+/// A validated `conflicts/` component — ONE plainly safe path element (ASCII alphanumerics, `-`,
+/// `_`, no leading dot, bounded), and the ONLY thing [`Layout::conflict_copy_dir`] will join.
+///
+/// It exists because every string a workbench folder could be named from is UNTRUSTED: a project
+/// store travels with its checkout, so a hostile clone commits both the `conflict.json` that
+/// records the component and the `lock.json` whose `name`/`skill_id` the fallbacks read. Holding
+/// one of these is proof the string cannot be `.`/`..`, cannot carry a separator, and cannot hide
+/// under a dot — so neither a write nor a REMOVAL aimed by it can leave the store's own
+/// `conflicts/` directory.
+///
+/// Deliberately stricter than "not `..`": every component topos mints is alphanumerics plus
+/// `-`/`_`, so nothing legitimate is refused, and no length-capping re-sanitize can silently name
+/// a different folder than the one that was written.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ConflictDir(String);
+
+impl ConflictDir {
+    /// Parse one workbench component, or `None` when the string is not plainly safe.
+    pub(crate) fn parse(s: &str) -> Option<Self> {
+        let ok = !s.is_empty()
+            && s.len() <= MAX_CONFLICT_DIR_LEN
+            && !s.starts_with('.')
+            && s.chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+        ok.then(|| Self(s.to_owned()))
+    }
+
+    /// The component itself — a single path element, by construction.
+    pub(crate) fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
 impl Layout {
     pub(crate) fn new(home: &Path) -> Self {
         Self {
@@ -175,8 +223,14 @@ impl Layout {
     /// a skill dir climbs when the name is already held (`<name>-<workspace>`, then the id) and
     /// RECORDED in `conflict.json`: the record is what makes the choice stable across the runs
     /// that read it, exactly as `map.json` makes a placement's dir stable.
-    pub(crate) fn conflict_copy_dir(&self, dir: &str) -> PathBuf {
-        self.conflicts_dir().join(dir)
+    ///
+    /// The component is the VALIDATED [`ConflictDir`] newtype (parse-don't-validate, exactly as
+    /// `skills/<id>/` takes [`crate::id::SkillId`]): every string that reaches this join —
+    /// including the ones read back off a hostile checkout's `conflict.json` and `lock.json` — has
+    /// been proven a single plainly-safe path component first, so no `..`, separator, or leading
+    /// dot can travel through it.
+    pub(crate) fn conflict_copy_dir(&self, dir: &ConflictDir) -> PathBuf {
+        self.conflicts_dir().join(dir.as_str())
     }
 
     pub(crate) fn locks_dir(&self) -> PathBuf {
@@ -824,6 +878,9 @@ fn walk(fs: &dyn FsOps, dir: &Path, out: &mut Vec<String>) -> Result<(), ClientE
 /// - removes a published `skills/<id>/` **only** if `lock.json` is absent (an impossible-via-atomic-add
 ///   half state) — a *present* lock is never deleted, so an unknown/newer schema means "upgrade
 ///   required", never data loss;
+/// - drops an incomplete conflict-workbench staging tree (`conflicts/.topos-staging-<leaf>/`) —
+///   topos's own partial copy of a recorded `result_commit`, reproducible byte for byte from the
+///   store, and unreachable by any real workbench name (see [`recover_conflict_staging`]);
 /// - restores (or preserves + discloses) the parks the PARK JOURNAL records — an interrupted
 ///   refresh/retire/import left its only bytes under a unique park name;
 /// - JUDGES leftover placement-side parks (`.topos-staging-*` / `.topos-old-*`): accounted bytes
@@ -850,6 +907,7 @@ pub(crate) fn recover(
     // Restore (or preserve + disclose) the parks an interrupted operation journaled — BEFORE the
     // per-skill sweeps below, so a restored tree is back where its map/manifest rows expect it.
     recover_park_journal(fs, layout, now_millis, warnings)?;
+    recover_conflict_staging(fs, layout)?;
 
     // Sweep the retired device-era identity documents on sight: the keypair seed, the pinned
     // instance, the device credential, the membership roster, and the subscription file — the
@@ -902,6 +960,44 @@ pub(crate) fn recover(
                 continue;
             };
             recover_published(fs, layout, &id, &entry, warnings)?;
+        }
+    }
+    Ok(())
+}
+
+/// Drop any incomplete conflict-workbench staging tree under `conflicts/`.
+///
+/// The workbench copy is built in a `.topos-staging-<leaf>` sibling and RENAMED into place, so a
+/// crash mid-build strands the staging tree under a name nothing ever reads again: the folder it
+/// was becoming took the next rung of the naming ladder, and only the per-leaf write path (which
+/// clears its OWN staging name) would have swept it. Nothing else knows the prefix — the
+/// placement-side litter judge sweeps `.topos-staging-<id>` beside HARNESS dirs, never inside a
+/// store — so without this it lives forever.
+///
+/// Dropped blind, and safely so: the tree is topos's own partial render of a recorded
+/// `result_commit`, reproducible byte for byte from the store, and it is not a workbench folder by
+/// CONSTRUCTION — [`ConflictDir::parse`] refuses a leading dot, so no real folder can carry this
+/// prefix and no hand resolution can be sitting under one. A concurrent build that loses its stage
+/// fails its own rename with a typed refusal and rebuilds on the next sweep; no placement is
+/// involved at any point.
+///
+/// The listing and every removal ride a HELD handle on `conflicts/` (`openat`-anchored, no-follow),
+/// so a `conflicts` component swapped for a symlink is met as itself and nothing is swept through
+/// it; a `conflicts/` that is absent, or is not a real directory, is simply not visited.
+fn recover_conflict_staging(fs: &dyn FsOps, layout: &Layout) -> Result<(), ClientError> {
+    let conflicts = layout.conflicts_dir();
+    if fs.path_kind(&conflicts)? != Some(crate::fs_seam::PathKind::Dir) {
+        return Ok(());
+    }
+    let Ok(handle) = fs.open_dir_handle(&conflicts) else {
+        return Ok(());
+    };
+    for entry in fs.read_dir(&conflicts)? {
+        let Some(name) = entry.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        if name.starts_with(CONFLICT_STAGING_PREFIX) {
+            fs.remove_dir_all_at(&handle, name)?;
         }
     }
     Ok(())
@@ -1084,6 +1180,107 @@ mod tests {
         ));
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    /// The workbench-component parse is the ONE gate between an untrusted on-disk string and a
+    /// `conflicts/` path join, so every escape it exists to refuse is pinned here: traversal,
+    /// separators (both spellings), an absolute path, a dot-name, empty, non-ASCII, and the
+    /// unbounded length that would make the staging build fail `ENAMETOOLONG` forever.
+    #[test]
+    fn conflict_dir_parse_refuses_everything_that_is_not_one_plain_component() {
+        for raw in [
+            "",
+            ".",
+            "..",
+            "../victim",
+            "../../../../Users/victim/Projects",
+            "a/b",
+            "a\\b",
+            "/etc",
+            "/Users/victim",
+            ".hidden",
+            ".topos-staging-x",
+            "with space",
+            "quote'd",
+            "semi;colon",
+            "naïve",
+            "Ａ",
+            "trailing/",
+            "nul\0byte",
+        ] {
+            assert!(
+                ConflictDir::parse(raw).is_none(),
+                "{raw:?} must not become a path component"
+            );
+        }
+        for raw in [
+            "coolify-deploy",
+            "a",
+            "_x",
+            "-x",
+            "A1_b-2",
+            "pr-describe-w1",
+        ] {
+            assert_eq!(
+                ConflictDir::parse(raw).map(|d| d.as_str().to_owned()),
+                Some(raw.to_owned())
+            );
+        }
+        // Bounded — and the bound sits ABOVE every name the mint ladder can produce, so no
+        // recorded component is ever re-sanitized into naming a DIFFERENT folder than the one
+        // that was written.
+        assert!(ConflictDir::parse(&"a".repeat(MAX_CONFLICT_DIR_LEN)).is_some());
+        assert!(ConflictDir::parse(&"a".repeat(MAX_CONFLICT_DIR_LEN + 1)).is_none());
+        // The ladder's longest rungs: a 64-byte sanitized name + a 64-byte workspace slug + the
+        // counter, and the id-led rung (a 128-byte id + that slug).
+        let longest_named = format!("{}-{}-999", "n".repeat(64), "w".repeat(64));
+        let longest_id = format!("{}-{}", "i".repeat(128), "w".repeat(64));
+        assert!(ConflictDir::parse(&longest_named).is_some());
+        assert!(ConflictDir::parse(&longest_id).is_some());
+        assert!(
+            CONFLICT_STAGING_PREFIX.len() + MAX_CONFLICT_DIR_LEN <= 255,
+            "the staged sibling of an accepted component must fit NAME_MAX"
+        );
+        // Whatever the display-name sanitizer produces is always acceptable here, so the
+        // fallback rung never fails on a legitimate name.
+        for raw in [
+            "My Cool Skill!",
+            "../../evil",
+            "a/b\\c",
+            "ＡＢ",
+            &"-".repeat(90),
+        ] {
+            if let Some(s) = topos_harness::sanitize_skill_dir(raw) {
+                assert!(ConflictDir::parse(&s).is_some(), "{raw:?} -> {s:?}");
+            }
+        }
+    }
+
+    /// A crash inside the workbench staging build strands `conflicts/.topos-staging-<leaf>`, which
+    /// nothing else knows how to sweep. Recovery drops it — and only it: a real workbench folder
+    /// beside it (which can never carry the dot-prefix, by [`ConflictDir::parse`]) is left whole,
+    /// hand edits included.
+    #[test]
+    fn recovery_drops_a_stranded_conflict_staging_tree_and_keeps_the_workbench() {
+        let home = scratch("conflict-staging");
+        let layout = Layout::new(&home);
+        let conflicts = layout.conflicts_dir();
+        let stranded = conflicts.join(format!("{CONFLICT_STAGING_PREFIX}pr-describe"));
+        std::fs::create_dir_all(stranded.join("ref")).unwrap();
+        std::fs::write(stranded.join("SKILL.md"), b"# half-built\n").unwrap();
+        let live = conflicts.join("pr-describe");
+        std::fs::create_dir_all(&live).unwrap();
+        std::fs::write(live.join("SKILL.md"), b"# hand-resolved\n").unwrap();
+
+        recover(&RealFs, &layout, 1, &mut Vec::new()).unwrap();
+
+        assert!(!stranded.exists(), "the stranded staging tree is swept");
+        assert_eq!(
+            std::fs::read(live.join("SKILL.md")).unwrap(),
+            b"# hand-resolved\n",
+            "the workbench folder — and the hand resolution in it — is untouched"
+        );
+        let _ = std::fs::remove_dir_all(&home);
     }
 
     /// The store's self-ignore is a TRUE exclusive create: a file already at the path — whatever

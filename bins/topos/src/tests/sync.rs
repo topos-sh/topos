@@ -242,6 +242,19 @@ impl Rig {
     fn ctx<'a>(&'a self, plane: &'a dyn PlaneSource, follow: &'a dyn FollowSource) -> Ctx<'a> {
         self.ctx_fs(&self.fs, plane, follow)
     }
+    /// A [`Ctx`] over an arbitrary LAYOUT — the hostile-checkout tests drive a PROJECT store,
+    /// whose `.topos/` (and therefore every document a resolution reads) travels with the clone.
+    fn ctx_at<'a>(
+        &'a self,
+        layout: Layout,
+        plane: &'a dyn PlaneSource,
+        follow: &'a dyn FollowSource,
+    ) -> Ctx<'a> {
+        Ctx {
+            layout,
+            ..self.ctx_fs(&self.fs, plane, follow)
+        }
+    }
     /// A [`Ctx`] over an arbitrary [`FsOps`] (the crash gate injects a [`FaultFs`]).
     fn ctx_fs<'a>(
         &'a self,
@@ -306,8 +319,12 @@ impl Rig {
     /// Where the marked-up copy of a recorded conflict lives — read from the record itself, so the
     /// test asserts against the path the code actually documented, never a guess.
     fn conflict_copy(&self, id: &str) -> PathBuf {
-        self.layout()
-            .conflict_copy_dir(self.conflict_state(id).copy_dir.as_deref().unwrap())
+        self.layout().conflict_copy_dir(
+            &crate::sidecar::ConflictDir::parse(
+                self.conflict_state(id).copy_dir.as_deref().unwrap(),
+            )
+            .expect("a recorded workbench component parses"),
+        )
     }
 }
 
@@ -1846,6 +1863,372 @@ fn escape_of_edited_conflict_commits_the_resolution() {
     // Publishable: the resolution is a real 1-parent commit on `current`.
     let m = mk_version(&[v1.id], resolved, DEVICE, "topos: merge escape");
     assert!(rig.open_store(&id).list_versions().unwrap().contains(&m.id));
+}
+
+// --- the workbench folder is named by parsing, never by trusting ---
+
+/// A minimal PROJECT store holding one blocked bundle: the store tree, a `lock.json`, and
+/// (optionally) the `conflict.json` that names the workbench folder. Enough for the ONE act these
+/// tests exercise — clearing the block, which is the act a receipt tells the reader to run.
+struct HostileCheckout {
+    layout: Layout,
+    sp: crate::sidecar::SkillPaths,
+    lock: topos_types::persisted::Lock,
+}
+
+impl HostileCheckout {
+    /// `lock.name` / `lock.skill_id` are the two UNTRUSTED strings a clone controls; `record` is
+    /// the `conflict.json` `copy_dir` it can also commit (`None` writes no record at all, so the
+    /// lock's own strings are what the removal has to name the folder from).
+    fn plant(project: &Path, name: &str, skill_id: &str, record: Option<&str>) -> Self {
+        let layout = crate::sidecar::project_store_layout(project);
+        let sp = layout.published(&sid("topos_conflict1"));
+        std::fs::create_dir_all(&sp.store).unwrap();
+        let lock = topos_types::persisted::Lock {
+            schema_version: topos_types::PERSISTED_SCHEMA_VERSION,
+            skill_id: skill_id.to_owned(),
+            name: name.to_owned(),
+            base_commit: "0".repeat(64),
+            bundle_digest: "0".repeat(64),
+            files: Vec::new(),
+        };
+        doc::write_doc(&RealFs, &sp.lock, &lock).unwrap();
+        if let Some(copy_dir) = record {
+            let cs = topos_types::persisted::ConflictState {
+                schema_version: topos_types::PERSISTED_SCHEMA_VERSION,
+                base_commit: "0".repeat(64),
+                base_digest: "0".repeat(64),
+                current_commit: "1".repeat(64),
+                current_digest: "1".repeat(64),
+                draft_commit: "2".repeat(64),
+                draft_digest: "2".repeat(64),
+                result_commit: "3".repeat(64),
+                conflicted_digest: "3".repeat(64),
+                copy_dir: Some(copy_dir.to_owned()),
+                reason: topos_types::persisted::ConflictReason::ThreeWay,
+                paths: Vec::new(),
+            };
+            doc::write_doc(&RealFs, &sp.conflict, &cs).unwrap();
+        }
+        Self { layout, sp, lock }
+    }
+}
+
+/// **A hostile checkout must not be able to aim a recursive delete out of its own store.**
+///
+/// `clear_conflict` is what `--onto-current` and `--reset` both call — the two commands a conflict
+/// receipt tells the reader to run — so a clone that ships `.topos/state/<user>/conflicts` as a
+/// SYMLINK pointing at a home directory, plus a `conflict.json` naming a plain component inside
+/// it, used to get `~/Documents` deleted recursively: the removal was path-based, and the kernel
+/// resolved that symlinked intermediate component normally.
+///
+/// The removal now descends the same way the WRITE does — a held handle on the store's own
+/// `conflicts/` directory, opened `O_NOFOLLOW` — so the swapped component is met as itself and
+/// refused. Nothing outside the store is touched.
+#[test]
+fn a_symlinked_conflicts_component_deletes_nothing_outside_the_store() {
+    let rig = Rig::new("hostile-symlink");
+    let project = rig.work.0.join("checkout");
+    let victim = rig.work.0.join("victim-home");
+    let precious = victim.join("Documents");
+    std::fs::create_dir_all(precious.join("taxes")).unwrap();
+    std::fs::write(precious.join("taxes/2025.pdf"), b"irreplaceable\n").unwrap();
+
+    // The clone's committed state: the store, a record naming a plainly SAFE component, and the
+    // `conflicts` component itself swapped for a link to the victim's home.
+    let planted = HostileCheckout::plant(
+        &project,
+        "pr-describe",
+        "topos_conflict1",
+        Some("Documents"),
+    );
+    std::fs::create_dir_all(planted.layout.home()).unwrap();
+    std::os::unix::fs::symlink(&victim, planted.layout.conflicts_dir()).unwrap();
+
+    let (p, f) = (InertPlane, InertFollow);
+    let ctx = rig.ctx_at(planted.layout.clone(), &p, &f);
+    let cleared = ops::merge_resolve::clear_conflict(&ctx, &planted.sp, &planted.lock);
+
+    assert!(
+        precious.join("taxes/2025.pdf").exists(),
+        "nothing outside the store may be deleted"
+    );
+    assert!(victim.exists() && precious.exists());
+    assert!(
+        cleared.is_err(),
+        "a `conflicts` component that is not a real directory must refuse, not be followed"
+    );
+}
+
+/// The same rule for the OTHER door into the join: the record's fallbacks. A clone commits a
+/// `lock.json` whose display name sanitizes to nothing (all fullwidth) and whose `skill_id` — a
+/// raw string on disk, not the validated newtype — climbs out of the store with `..`. With no
+/// `conflict.json` at all, that raw id used to be joined straight onto `conflicts/` and the
+/// resulting path deleted recursively.
+///
+/// Now every candidate is PARSED: `..` and separators name no component, so the removal has no
+/// folder to act on and does nothing at all.
+#[test]
+fn a_hostile_lock_skill_id_cannot_traverse_out_of_the_store() {
+    let rig = Rig::new("hostile-traversal");
+    let project = rig.work.0.join("checkout");
+    let precious = project.join("src");
+    std::fs::create_dir_all(&precious).unwrap();
+    std::fs::write(precious.join("main.rs"), b"fn main() {}\n").unwrap();
+
+    // `<project>/.topos/state/<user>/conflicts/../../../../src` == `<project>/src`.
+    let planted = HostileCheckout::plant(&project, "ＡＢＣ", "../../../../src", None);
+    std::fs::create_dir_all(planted.layout.conflicts_dir()).unwrap();
+
+    let (p, f) = (InertPlane, InertFollow);
+    let ctx = rig.ctx_at(planted.layout.clone(), &p, &f);
+    ops::merge_resolve::clear_conflict(&ctx, &planted.sp, &planted.lock).unwrap();
+
+    assert!(
+        precious.join("main.rs").exists(),
+        "an unvalidated on-disk string must never reach a path join"
+    );
+    assert!(
+        !planted.sp.conflict.exists(),
+        "the block itself still clears"
+    );
+}
+
+/// **An unscannable workbench folder must refuse, never destroy the hand resolution in it.**
+///
+/// The folder is the ONLY copy of a hand merge — it sits outside the placement map, so the
+/// materializer's snapshot rail never sees it. `--onto-current` used to fold every scan failure
+/// into "the folder is absent": it committed the ORIGINAL draft, wrote it over every placement,
+/// deleted the folder, and reported `Merged`. The scanner rejects a tree holding a symlink (as
+/// here), a non-regular file, a non-UTF-8 name, or no files at all — every one of them a plausible
+/// state for someone mid-merge.
+#[test]
+fn an_unreadable_conflict_folder_refuses_instead_of_destroying_the_hand_resolution() {
+    let rig = Rig::new("unreadable-copy");
+    let (id, _name, genesis) = rig.adopt(BASE);
+    let mine: FileSet = &[
+        ("SKILL.md", FileMode::Regular, b"# mine\n"),
+        ("run.sh", FileMode::Executable, b"#!/bin/sh\necho v0\n"),
+    ];
+    write_tree(&rig.placement(), mine);
+    let v1 = mk_version(&[genesis], V1, "d_pub", "v1");
+    let mut plane = FixturePlane::default();
+    plane.add_version(&id, &v1);
+    plane.set_current(&id, served(WS, &id, v1.id, 1));
+    let foll = follow(&id, FollowMode::Auto);
+    pull_data(&rig.ctx(&plane, &foll), ops::PullScope::AllFollowed).unwrap();
+
+    // The hand merge, plus one thing the scanner refuses — a symlink to a note kept elsewhere.
+    let copy = rig.conflict_copy(&id);
+    write_tree(
+        &copy,
+        &[
+            ("SKILL.md", FileMode::Regular, b"# hand-resolved\n"),
+            ("run.sh", FileMode::Executable, b"#!/bin/sh\necho v1\n"),
+        ],
+    );
+    let elsewhere = rig.work.0.join("notes.md");
+    std::fs::write(&elsewhere, b"scratch\n").unwrap();
+    std::os::unix::fs::symlink(&elsewhere, copy.join("notes.md")).unwrap();
+
+    let err = pull_data(
+        &rig.ctx(&plane, &foll),
+        ops::PullScope::One {
+            store: ops::StoreScope::Here,
+            name: "pr-describe".into(),
+            workspace: None,
+            mode: ops::TargetMode::OntoCurrent,
+        },
+    )
+    .expect_err("an unreadable workbench folder must refuse");
+    match &err {
+        crate::error::ClientError::ConflictCopyUnreadable { skill, reason, .. } => {
+            assert_eq!(skill, "pr-describe");
+            assert!(reason.contains("symlink"), "{reason}");
+        }
+        other => panic!("expected the unreadable-workbench refusal, got {other:?}"),
+    }
+    // NOTHING moved: the hand resolution is still on disk, the block still stands, and the
+    // placement still holds the author's own version.
+    assert_eq!(
+        std::fs::read(copy.join("SKILL.md")).unwrap(),
+        b"# hand-resolved\n",
+        "the only copy of the hand merge must survive"
+    );
+    assert!(rig.conflict_exists(&id), "the block still stands");
+    assert_eq!(snapshot(&rig.placement()), Some(expect(mine)));
+
+    // Remove the offending entry and the same command resolves normally — the refusal is a state
+    // to fix, never a dead end.
+    std::fs::remove_file(copy.join("notes.md")).unwrap();
+    let escaped = pull_data(
+        &rig.ctx(&plane, &foll),
+        ops::PullScope::One {
+            store: ops::StoreScope::Here,
+            name: "pr-describe".into(),
+            workspace: None,
+            mode: ops::TargetMode::OntoCurrent,
+        },
+    )
+    .unwrap();
+    assert_eq!(only(&escaped).action, PullAction::Merged);
+    assert_eq!(
+        snapshot(&rig.placement()),
+        Some(expect(&[
+            ("SKILL.md", FileMode::Regular, b"# hand-resolved\n"),
+            ("run.sh", FileMode::Executable, b"#!/bin/sh\necho v1\n"),
+        ]))
+    );
+}
+
+/// `.topos-mine` siblings are topos's own compare-and-resolve scaffolding, so they never become
+/// bundle content. Keeping them out of the placements holds only while the block stands: the
+/// escape COMMITS the workbench folder and writes it to every placement, and `publish` ships a
+/// placement's bytes — so the moment the author edits anything and escapes, an unstripped sibling
+/// would ship to the team. It is stripped instead of refused, so resolving a binary conflict the
+/// obvious way (fix the file, leave the aid alone) is not a dead end.
+#[test]
+fn a_hand_resolution_never_commits_topos_mine_scaffolding() {
+    let rig = Rig::new("mine-strip");
+    let base: FileSet = &[("logo.bin", FileMode::Regular, &[0xffu8, 1, 2])];
+    let (id, _name, genesis) = rig.adopt(base);
+    let mine: FileSet = &[("logo.bin", FileMode::Regular, &[0xffu8, 9, 9])];
+    write_tree(&rig.placement(), mine);
+    let theirs: FileSet = &[("logo.bin", FileMode::Regular, &[0xffu8, 7, 7])];
+    let v1 = mk_version(&[genesis], theirs, "d_pub", "v1");
+    let mut plane = FixturePlane::default();
+    plane.add_version(&id, &v1);
+    plane.set_current(&id, served(WS, &id, v1.id, 1));
+    let foll = follow(&id, FollowMode::Auto);
+    pull_data(&rig.ctx(&plane, &foll), ops::PullScope::AllFollowed).unwrap();
+
+    // The binary conflict kept both sides in the workbench. The author resolves the real file and
+    // leaves the aid exactly where topos put it.
+    let copy = rig.conflict_copy(&id);
+    assert!(copy.join("logo.bin.topos-mine").exists());
+    std::fs::write(copy.join("logo.bin"), [0xffu8, 4, 4]).unwrap();
+
+    let escaped = pull_data(
+        &rig.ctx(&plane, &foll),
+        ops::PullScope::One {
+            store: ops::StoreScope::Here,
+            name: "pr-describe".into(),
+            workspace: None,
+            mode: ops::TargetMode::OntoCurrent,
+        },
+    )
+    .unwrap();
+    assert_eq!(only(&escaped).action, PullAction::Merged);
+    // The placement — which is what `publish` ships — holds the resolution and nothing else.
+    assert_eq!(
+        snapshot(&rig.placement()),
+        Some(expect(&[("logo.bin", FileMode::Regular, &[0xffu8, 4, 4])])),
+        "the .topos-mine sibling must not become bundle content"
+    );
+    assert!(!rig.placement().join("logo.bin.topos-mine").exists());
+    // And the committed version carries the same file set, so nothing can publish it later either.
+    let committed: FileSet = &[("logo.bin", FileMode::Regular, &[0xffu8, 4, 4])];
+    let m = mk_version(&[v1.id], committed, DEVICE, "topos: merge escape");
+    assert!(rig.open_store(&id).list_versions().unwrap().contains(&m.id));
+}
+
+/// An exit converges its placements FIRST and clears `conflict.json` LAST, so a crash in that beat
+/// leaves a fully resolved bundle still carrying the record. Read as a live block, that leftover
+/// does damage in both directions: a sweep re-settles `work_hash` to the pre-escape draft (naming
+/// bytes that are nowhere on disk) and re-discloses a block on a resolved bundle, and
+/// `--onto-current` sees the already-removed workbench folder as "untouched" and commits the
+/// ORIGINAL DRAFT over the resolution the placements hold. Both arms now recognize the leftover
+/// from the two durable documents and finish the interrupted clear instead.
+#[test]
+fn a_record_that_outlived_its_resolution_is_cleared_not_re_blocked() {
+    let rig = Rig::new("record-outlived");
+    let (id, _name, genesis) = rig.adopt(BASE);
+    let mine: FileSet = &[
+        ("SKILL.md", FileMode::Regular, b"# mine\n"),
+        ("run.sh", FileMode::Executable, b"#!/bin/sh\necho v0\n"),
+    ];
+    write_tree(&rig.placement(), mine);
+    let v1 = mk_version(&[genesis], V1, "d_pub", "v1");
+    let mut plane = FixturePlane::default();
+    plane.add_version(&id, &v1);
+    plane.set_current(&id, served(WS, &id, v1.id, 1));
+    let foll = follow(&id, FollowMode::Auto);
+    pull_data(&rig.ctx(&plane, &foll), ops::PullScope::AllFollowed).unwrap();
+
+    // Hand-resolve, escape — and then put the record back, which is exactly the on-disk state a
+    // crash between the escape's placement write and its record removal leaves.
+    let record = rig.conflict_state(&id);
+    let copy = rig.conflict_copy(&id);
+    let resolved: FileSet = &[
+        ("SKILL.md", FileMode::Regular, b"# hand-resolved\n"),
+        ("run.sh", FileMode::Executable, b"#!/bin/sh\necho v1\n"),
+        ("ref/notes.md", FileMode::Regular, b"new in v1\n"),
+    ];
+    write_tree(&copy, resolved);
+    let escaped = pull_data(
+        &rig.ctx(&plane, &foll),
+        ops::PullScope::One {
+            store: ops::StoreScope::Here,
+            name: "pr-describe".into(),
+            workspace: None,
+            mode: ops::TargetMode::OntoCurrent,
+        },
+    )
+    .unwrap();
+    assert_eq!(only(&escaped).action, PullAction::Merged);
+    let after_escape = rig.read_sync(&id);
+    doc::write_doc(
+        &rig.fs,
+        &rig.layout().published(&sid(&id)).conflict,
+        &record,
+    )
+    .unwrap();
+
+    // (a) the bare sweep: the leftover is cleared, no block is disclosed, and the docs keep naming
+    // the bytes that are actually on disk.
+    let row =
+        only(&pull_data(&rig.ctx(&plane, &foll), ops::PullScope::AllFollowed).unwrap()).clone();
+    assert_ne!(
+        row.action,
+        PullAction::Conflicted,
+        "a resolved bundle must not be re-blocked"
+    );
+    assert!(
+        !rig.conflict_exists(&id),
+        "the interrupted clear is finished"
+    );
+    let now = rig.read_sync(&id);
+    assert_eq!(now.work_hash, after_escape.work_hash);
+    assert_ne!(
+        now.work_hash, record.draft_digest,
+        "the docs must not name the pre-escape draft — nothing on disk holds it"
+    );
+    assert_eq!(snapshot(&rig.placement()), Some(expect(resolved)));
+
+    // (b) the same leftover under `--onto-current`: it must not commit the original draft over the
+    // resolution already on the placements.
+    doc::write_doc(
+        &rig.fs,
+        &rig.layout().published(&sid(&id)).conflict,
+        &record,
+    )
+    .unwrap();
+    pull_data(
+        &rig.ctx(&plane, &foll),
+        ops::PullScope::One {
+            store: ops::StoreScope::Here,
+            name: "pr-describe".into(),
+            workspace: None,
+            mode: ops::TargetMode::OntoCurrent,
+        },
+    )
+    .unwrap();
+    assert!(!rig.conflict_exists(&id));
+    assert_eq!(
+        snapshot(&rig.placement()),
+        Some(expect(resolved)),
+        "the hand resolution must survive a leftover record"
+    );
 }
 
 /// An accept RESOLVES against the version this very call discovered. `current` sits at v2 (whose
