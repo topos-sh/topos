@@ -1,7 +1,6 @@
 //! Two presentations of one typed outcome: the `--json` envelope (the agent surface) and a thin TTY
 //! renderer. Error messages are summarized so a raw git/io string never reaches a user surface.
 
-use topos_types::persisted::ConflictPathKind;
 use topos_types::requests::InvitationData;
 use topos_types::results::{
     AddData, AddedNote, AgentView, DiffData, LogData, ProposeData, PublishData, PullData,
@@ -2967,10 +2966,14 @@ pub(crate) fn pull_tty(
             }
             let lead = match s.action {
                 PullAction::Installed => format!("+ {shown}"),
-                PullAction::Removed | PullAction::Released => format!("- {shown}"),
+                PullAction::Removed => format!("- {shown}"),
+                // `-` is this receipt's mark for bytes that LEFT this machine. A released record
+                // deletes nothing — its own line says the files stay — so it leads with the name
+                // alone, still workspace-qualified: which workspace stopped sharing is the point.
+                PullAction::Released => shown.to_owned(),
                 _ => s.skill.clone(),
             };
-            let (line, mut extra) = pull_row(s);
+            let (line, mut extra) = pull_row(s, &scope);
             extra.extend(s.harnesses.iter().map(mcp_agent_line));
             Some((lead, line, extra))
         })
@@ -3030,20 +3033,20 @@ pub(crate) fn pull_tty(
 
 /// What an `update` receipt's summary counts, by name. The clause exists so the reader never has
 /// to subtract, which only holds if the arithmetic does: EVERY row lands in exactly one bucket, and
-/// the parts always sum to the total the line opens with. So each state that is a decision rather
-/// than a landing gets a bucket too, named in the SAME words its own row prints — a row saying
-/// `merge conflict with the new current @…` is counted `in merge conflict`, never rolled into a
-/// number with no word on it. Only the buckets that actually hold something are rendered.
+/// the parts always sum to the total the line opens with. So a state that is a decision rather than
+/// a landing gets a bucket too — a conflicted row is `waiting on you`, never rolled into a number
+/// with no word on it. The words are the ones a person uses about their own skills, not the
+/// engine's state names: every way bytes caught up reads `updated`, and a withdrawal and a retired
+/// record both read `no longer shared`, because the difference between them is the row's own line
+/// to make. Only the buckets that actually hold something are rendered.
 #[derive(Default)]
 struct PullTally {
     installed: usize,
     updated: usize,
-    synced: usize,
     removed: usize,
-    withdrawn: usize,
-    no_longer_delivered: usize,
     up_to_date: usize,
-    merge_conflict: usize,
+    waiting: usize,
+    no_longer_shared: usize,
     held: usize,
     failed: usize,
 }
@@ -3053,33 +3056,30 @@ impl PullTally {
         use topos_types::results::PullAction as A;
         match action {
             A::Installed => self.installed += 1,
-            // Three ways bytes catch up: a served version landed, a copy behind the version this
-            // machine holds was rewritten, a draft was rebased onto the new current.
-            A::FastForwarded | A::Refreshed | A::Merged => self.updated += 1,
-            A::DraftSynced => self.synced += 1,
+            // Four ways bytes caught up: a served version landed, a copy behind the version this
+            // machine holds was rewritten, a draft was rebased onto the new current, a settled
+            // draft was fanned out to this scope's other folders.
+            A::FastForwarded | A::Refreshed | A::Merged | A::DraftSynced => self.updated += 1,
             A::Removed => self.removed += 1,
-            A::Withdrawn => self.withdrawn += 1,
-            // Nothing on disk was deleted — the record retired, and its row says so. It is still
-            // one of the rows this run checked, so it is still counted.
-            A::Released => self.no_longer_delivered += 1,
             A::UpToDate => self.up_to_date += 1,
-            A::Conflicted => self.merge_conflict += 1,
+            A::Conflicted => self.waiting += 1,
+            // Nothing on disk was deleted in either case — delivery ended, and each row says what
+            // that left behind. Still rows this run checked, so still counted.
+            A::Withdrawn | A::Released => self.no_longer_shared += 1,
             A::Held => self.held += 1,
         }
     }
 
     /// The counted clauses, in the order a person reads them: what arrived, what moved, what left,
-    /// what needed nothing, what is waiting on a decision, what broke.
+    /// what needed nothing, what is waiting on a decision, what stopped being shared, what broke.
     fn parts(&self) -> Vec<String> {
         [
             (self.installed, "installed"),
             (self.updated, "updated"),
-            (self.synced, "synced"),
             (self.removed, "removed"),
-            (self.withdrawn, "withdrawn"),
-            (self.no_longer_delivered, "no longer delivered"),
             (self.up_to_date, "already up to date"),
-            (self.merge_conflict, "in merge conflict"),
+            (self.waiting, "waiting on you"),
+            (self.no_longer_shared, "no longer shared"),
             (self.held, "held"),
             (self.failed, "failed"),
         ]
@@ -3094,12 +3094,10 @@ impl PullTally {
     fn total(&self) -> usize {
         self.installed
             + self.updated
-            + self.synced
             + self.removed
-            + self.withdrawn
-            + self.no_longer_delivered
             + self.up_to_date
-            + self.merge_conflict
+            + self.waiting
+            + self.no_longer_shared
             + self.held
             + self.failed
     }
@@ -3202,9 +3200,9 @@ pub(crate) fn mcp_agent_line(h: &topos_types::results::McpAgentState) -> String 
 /// One non-up-to-date skill's line (after the padded name) + any indented detail lines — the
 /// action's own line, plus the row's SECOND fact when it carries one (`also installed …` for a
 /// folder healed beside a draft fan-out, `also updated …` for a stale copy caught up beside a
-/// fresh install). A `released` row states its whole line in `note` and never doubles it.
-fn pull_row(s: &PullSkill) -> (String, Vec<String>) {
-    let (line, mut extra) = pull_action_row(s);
+/// fresh install). A `released` row states its whole fact in `note` and never doubles it.
+fn pull_row(s: &PullSkill, scope: &PullReceiptScope) -> (String, Vec<String>) {
+    let (line, mut extra) = pull_action_row(s, scope);
     if s.action != topos_types::results::PullAction::Released
         && let Some(note) = &s.note
     {
@@ -3214,7 +3212,8 @@ fn pull_row(s: &PullSkill) -> (String, Vec<String>) {
 }
 
 /// The action's own line + its detail lines (see [`pull_row`], which adds the row's second fact).
-fn pull_action_row(s: &PullSkill) -> (String, Vec<String>) {
+/// `scope` spells the next commands for the set this row belongs to (see [`row_takes_g`]).
+fn pull_action_row(s: &PullSkill, scope: &PullReceiptScope) -> (String, Vec<String>) {
     use topos_types::results::PullAction;
     let name = &s.skill;
     match s.action {
@@ -3243,9 +3242,15 @@ fn pull_action_row(s: &PullSkill) -> (String, Vec<String>) {
             ),
             Vec::new(),
         ),
-        // The one-time orphan resolution's closing statement — the whole line IS the carried
-        // fact (why the record resolved and where its files stand), composed by the sweep.
-        PullAction::Released => (s.note.clone().unwrap_or_default(), Vec::new()),
+        // The one-time orphan resolution's closing statement — the whole row IS the carried fact
+        // (why the record resolved, and then where its files stand), composed by the sweep. Its
+        // second sentence is its own line, indented under the first like any other detail.
+        PullAction::Released => {
+            let fact = s.note.clone().unwrap_or_default();
+            let mut lines = fact.lines();
+            let head = lines.next().unwrap_or_default().to_owned();
+            (head, lines.map(str::to_owned).collect())
+        }
         PullAction::Merged => {
             let v = s
                 .merge
@@ -3260,24 +3265,48 @@ fn pull_action_row(s: &PullSkill) -> (String, Vec<String>) {
                 Vec::new(),
             )
         }
+        // The ONE row that asks for a decision, so it carries the whole situation in the order a
+        // person needs it: what landed, that their agents read the same bytes they read before it,
+        // where both versions are marked up for a by-hand merge, the two ways out — each named
+        // right under the sentence that describes what it does — and the one consequence of
+        // deciding neither. Every path and every command here is runnable as printed.
         PullAction::Conflicted => {
             let v = s
                 .merge
                 .as_ref()
                 .map(|m| short(&m.theirs_version_id))
                 .unwrap_or("?");
-            let extra = s
-                .merge
-                .iter()
-                .flat_map(|m| &m.conflicts)
-                .map(|c| format!("{} ({})", c.path, conflict_kind_label(c.kind)))
-                .collect();
+            let g = if row_takes_g(s, scope) { " -g" } else { "" };
+            let mut extra: Vec<String> = Vec::new();
+            match s.merge.as_ref().map(|m| m.placements.as_slice()) {
+                // The destination convention: one folder is named inline; several are counted and
+                // then spelled out, because a bare "2 folders" is not a place anyone can look.
+                Some([one]) => extra.push(format!(
+                    "your agents are unaffected — {one} still holds your version"
+                )),
+                Some(many @ [_, _, ..]) => {
+                    extra.push(format!(
+                        "your agents are unaffected — {} folders still hold your version:",
+                        many.len()
+                    ));
+                    extra.extend(many.iter().map(|p| format!("  {p}")));
+                }
+                _ => {}
+            }
+            if let Some(dir) = s.merge.as_ref().and_then(|m| m.copy_dir.as_deref()) {
+                extra.push("to merge by hand, both versions are marked up here:".to_owned());
+                extra.push(format!("  {dir}/"));
+            }
+            extra.push(
+                "commit your merge — or keep your version, by leaving that folder alone:"
+                    .to_owned(),
+            );
+            extra.push(format!("  topos update{g} {name} --onto-current"));
+            extra.push("take the team's version instead, dropping yours:".to_owned());
+            extra.push(format!("  topos update{g} {name} --reset"));
+            extra.push("you cannot publish this skill until you pick one".to_owned());
             (
-                format!(
-                    "merge conflict with the new current @{v} — markers written; edit the files, \
-                     then run `topos update {name} --onto-current` to commit your resolution \
-                     (publish is blocked until then)"
-                ),
+                format!("the team published {v}, and it changes lines you also changed"),
                 extra,
             )
         }
@@ -3357,16 +3386,14 @@ fn merge_preview_line(p: &topos_types::results::MergePreview) -> String {
     }
 }
 
-/// What a conflicted path's `kind` means on disk — where "yours" ended up, so the checklist is actionable.
-fn conflict_kind_label(kind: ConflictPathKind) -> &'static str {
-    match kind {
-        ConflictPathKind::Content => "content — diff3 markers at the path",
-        ConflictPathKind::BinaryContent => "binary content — yours kept alongside as .topos-mine",
-        ConflictPathKind::ModifyDelete => "you modified, current deleted — yours kept",
-        ConflictPathKind::DeleteModify => "you deleted, current modified — theirs kept",
-        ConflictPathKind::AddAdd => "both added — yours kept alongside as .topos-mine",
-        ConflictPathKind::ModeMode => "mode disagreement — theirs kept",
-        ConflictPathKind::Oversize => "too large to merge — yours kept alongside as .topos-mine",
+/// Whether a row's next commands take `-g` — the machine-wide set's spelling. The ROW's own scope
+/// answers (`person` is the machine's store, anything else a checkout's path), because one sweep
+/// reports both sets; the receipt's scope answers for a producer that stamped none.
+fn row_takes_g(s: &PullSkill, scope: &PullReceiptScope) -> bool {
+    match s.scope.as_deref() {
+        Some("person") => true,
+        Some(_) => false,
+        None => matches!(scope, PullReceiptScope::Machine),
     }
 }
 
@@ -3994,6 +4021,8 @@ mod tests {
             clean,
             conflicts,
             drop_diff: None,
+            placements: Vec::new(),
+            copy_dir: None,
         }
     }
 
@@ -4362,13 +4391,16 @@ mod tests {
         assert!(!out.contains("generation"), "{out}");
         // Merged points at the review-then-publish next step.
         assert!(out.contains("`topos diff runbook`"), "{out}");
-        // Conflicted: the resolving command + the conflicting path checklist.
+        // Conflicted: both exits, spelled runnable, and the consequence of taking neither.
         assert!(
-            out.contains("`topos update api-notes --onto-current`"),
+            out.contains("  topos update api-notes --onto-current\n"),
             "{out}"
         );
-        assert!(out.contains("SKILL.md (content"), "{out}");
-        assert!(out.contains("publish is blocked"), "{out}");
+        assert!(out.contains("  topos update api-notes --reset\n"), "{out}");
+        assert!(
+            out.contains("you cannot publish this skill until you pick one"),
+            "{out}"
+        );
         // Held says it is pinned by a local go-back and how to resume.
         assert!(out.contains("held — pinned at a local go-back"), "{out}");
         assert!(out.contains("`topos update pinned`"), "{out}");
@@ -4379,7 +4411,7 @@ mod tests {
         // row prints — 2 + 1 + 1 + 1 = the 5 the line opens with.
         assert!(
             out.contains(
-                "Checked 5 skills: 2 updated, 1 already up to date, 1 in merge conflict, 1 held."
+                "Checked 5 skills: 2 updated, 1 already up to date, 1 waiting on you, 1 held."
             ),
             "{out}"
         );
@@ -4436,16 +4468,25 @@ mod tests {
     fn a_single_destination_prints_its_path() {
         let mut one_folder = row("deploy", PullAction::Installed);
         one_folder.destinations = vec!["~/.codex/skills".to_owned()];
-        assert_eq!(pull_row(&one_folder).0, "installed (~/.codex/skills)");
+        assert_eq!(
+            pull_row(&one_folder, &super::PullReceiptScope::Unstated).0,
+            "installed (~/.codex/skills)"
+        );
 
         let mut one_file = row("linear", PullAction::Installed);
         one_file.kind = Some("mcp".to_owned());
         one_file.destinations = vec!["~/.codex/config.toml".to_owned()];
-        assert_eq!(pull_row(&one_file).0, "installed (~/.codex/config.toml)");
+        assert_eq!(
+            pull_row(&one_file, &super::PullReceiptScope::Unstated).0,
+            "installed (~/.codex/config.toml)"
+        );
 
         let mut gone = row("x", PullAction::Removed);
         gone.destinations = vec!["~/.claude/skills/x".to_owned()];
-        assert_eq!(pull_row(&gone).0, "removed (~/.claude/skills/x)");
+        assert_eq!(
+            pull_row(&gone, &super::PullReceiptScope::Unstated).0,
+            "removed (~/.claude/skills/x)"
+        );
     }
 
     /// A by-choice removal's `-` rows, kept line, and idempotent shape — the update receipt's
@@ -4891,13 +4932,14 @@ mod tests {
         fn bucket_word(action: PullAction) -> &'static str {
             match action {
                 PullAction::Installed => "installed",
-                PullAction::FastForwarded | PullAction::Refreshed | PullAction::Merged => "updated",
-                PullAction::DraftSynced => "synced",
+                PullAction::FastForwarded
+                | PullAction::Refreshed
+                | PullAction::Merged
+                | PullAction::DraftSynced => "updated",
                 PullAction::Removed => "removed",
-                PullAction::Withdrawn => "withdrawn",
-                PullAction::Released => "no longer delivered",
                 PullAction::UpToDate => "already up to date",
-                PullAction::Conflicted => "in merge conflict",
+                PullAction::Conflicted => "waiting on you",
+                PullAction::Withdrawn | PullAction::Released => "no longer shared",
                 PullAction::Held => "held",
             }
         }
@@ -4923,9 +4965,19 @@ mod tests {
                 tally.count(*action);
                 let mut r = row(&format!("skill{i}"), *action);
                 r.destinations = vec![format!("~/.claude/skills/skill{i}")];
-                // A released row states its whole line in `note`; the sweep composes it.
+                // A released row states its whole fact in `note`; the sweep composes it.
                 if *action == PullAction::Released {
-                    r.note = Some("topos.sh/acme no longer delivers this".to_owned());
+                    r.note = Some(
+                        "acme stopped sharing this — topos will not update it any more\nthe files \
+                         stay where they are, and are yours to keep or delete: \
+                         ~/.claude/skills/skill10"
+                            .to_owned(),
+                    );
+                }
+                // A conflicted row's two exits are commands, so its bucket word must not be read
+                // off one of them by accident — the row states them in full.
+                if *action == PullAction::Conflicted {
+                    r.merge = Some(merge_report(false, Vec::new()));
                 }
                 r
             })
@@ -5598,9 +5650,125 @@ mod tests {
         assert!(!text.contains("not applied here yet"), "{text}");
     }
 
-    /// The one-time orphan resolution's receipt rows: `- `-led like every other row that ends
-    /// standing state, the name column aligned, the whole line the carried fact — byte-exact for
-    /// both final-copy shapes and the single-folder path form.
+    /// The conflict row, byte-exact, in the scope a person is standing in and in the machine-wide
+    /// set: what the team published, that every agent folder still holds the author's own version,
+    /// where both versions are marked up, BOTH ways out spelled runnable as printed (`-g` for the
+    /// machine's set), and the one consequence of taking neither. Project paths read against the
+    /// folder the lead line named.
+    #[test]
+    fn the_conflict_row_names_the_untouched_folder_the_copy_and_both_ways_out() {
+        let conflicted = |scope: &str, placements: &[&str], copy_dir: &str| PullSkill {
+            merge: Some(MergeReport {
+                theirs_version_id: format!("fed180d80b8a{}", "0".repeat(52)),
+                placements: placements.iter().map(|p| (*p).to_owned()).collect(),
+                copy_dir: Some(copy_dir.to_owned()),
+                ..merge_report(
+                    false,
+                    vec![ConflictPathReport {
+                        path: "SKILL.md".to_owned(),
+                        kind: ConflictPathKind::Content,
+                    }],
+                )
+            }),
+            scope: Some(scope.to_owned()),
+            ..row("coolify-deploy", PullAction::Conflicted)
+        };
+        let receipt = |skill: PullSkill, scope: &str| {
+            pull_tty(
+                &PullData {
+                    skills: vec![skill],
+                    proposals_awaiting: 0,
+                    notices: Vec::new(),
+                    sync: Vec::new(),
+                    behind_elsewhere: Vec::new(),
+                    scope: Some(scope.to_owned()),
+                },
+                &[],
+                &[],
+                &[],
+            )
+        };
+
+        // The project scope: the checkout is named once, at the top, and every path below reads
+        // against it.
+        let project = "~/Forward/labs/api";
+        assert_eq!(
+            receipt(
+                conflicted(
+                    project,
+                    &["~/Forward/labs/api/.claude/skills/coolify-deploy"],
+                    "~/Forward/labs/api/.topos/state/robertkrajewski/conflicts/coolify-deploy",
+                ),
+                "project ~/Forward/labs/api"
+            ),
+            "updated project (~/Forward/labs/api)\n\
+             coolify-deploy   the team published fed180d80b8a, and it changes lines you also \
+             changed\n\
+             \x20   your agents are unaffected — project/.claude/skills/coolify-deploy still holds \
+             your version\n\
+             \x20   to merge by hand, both versions are marked up here:\n\
+             \x20     project/.topos/state/robertkrajewski/conflicts/coolify-deploy/\n\
+             \x20   commit your merge — or keep your version, by leaving that folder alone:\n\
+             \x20     topos update coolify-deploy --onto-current\n\
+             \x20   take the team's version instead, dropping yours:\n\
+             \x20     topos update coolify-deploy --reset\n\
+             \x20   you cannot publish this skill until you pick one\n\
+             Checked 1 skill: 1 waiting on you."
+        );
+
+        // The machine-wide set: `~/` paths stand as they are, and both exits carry `-g` — the
+        // command a person can run from anywhere, including inside some other checkout.
+        assert_eq!(
+            receipt(
+                conflicted(
+                    "person",
+                    &["~/.claude/skills/coolify-deploy"],
+                    "~/.topos/conflicts/coolify-deploy",
+                ),
+                "machine"
+            ),
+            "updated machine-wide\n\
+             coolify-deploy   the team published fed180d80b8a, and it changes lines you also \
+             changed\n\
+             \x20   your agents are unaffected — ~/.claude/skills/coolify-deploy still holds your \
+             version\n\
+             \x20   to merge by hand, both versions are marked up here:\n\
+             \x20     ~/.topos/conflicts/coolify-deploy/\n\
+             \x20   commit your merge — or keep your version, by leaving that folder alone:\n\
+             \x20     topos update -g coolify-deploy --onto-current\n\
+             \x20   take the team's version instead, dropping yours:\n\
+             \x20     topos update -g coolify-deploy --reset\n\
+             \x20   you cannot publish this skill until you pick one\n\
+             Checked 1 skill: 1 waiting on you."
+        );
+
+        // Several untouched folders are counted and then spelled out — a number is not a place a
+        // person can go and look.
+        let many = receipt(
+            conflicted(
+                "person",
+                &[
+                    "~/.claude/skills/coolify-deploy",
+                    "~/.codex/skills/coolify-deploy",
+                ],
+                "~/.topos/conflicts/coolify-deploy",
+            ),
+            "machine",
+        );
+        assert!(
+            many.contains(
+                "    your agents are unaffected — 2 folders still hold your version:\n\
+                 \x20     ~/.claude/skills/coolify-deploy\n\
+                 \x20     ~/.codex/skills/coolify-deploy\n"
+            ),
+            "{many}"
+        );
+    }
+
+    /// The one-time orphan resolution's receipt rows, byte-exact: the row leads with its NAME (a
+    /// `-` would mark bytes leaving this machine, and a retired record deletes nothing), states why
+    /// the record resolved, and then — on its own indented line — where that leaves the files.
+    /// Several folders are listed one per line; the no-copies-remain fact stays one line.
     #[test]
     fn released_rows_render_their_fact_byte_exact() {
         let released = |display: Option<&str>, name: &str, note: &str| PullSkill {
@@ -5619,23 +5787,43 @@ mod tests {
             harnesses: Vec::new(),
             kind: None,
         };
+        // The final copy, composed by the sweep (`ops::orphan_fact`) exactly as it is asserted
+        // there: the reason, then the files.
+        let one_folder = "acme stopped sharing this — topos will not update it any more\nthe files \
+                          stay where they are, and are yours to keep or delete: \
+                          ~/.claude/skills/legacy-deploy";
+        let data = PullData {
+            skills: vec![released(None, "legacy-deploy", one_folder)],
+            proposals_awaiting: 0,
+            notices: Vec::new(),
+            sync: Vec::new(),
+            behind_elsewhere: Vec::new(),
+            scope: Some("machine".to_owned()),
+        };
+        assert_eq!(
+            pull_tty(&data, &[], &[], &[]),
+            "updated machine-wide\n\
+             legacy-deploy   acme stopped sharing this — topos will not update it any more\n\
+             \x20   the files stay where they are, and are yours to keep or delete: \
+             ~/.claude/skills/legacy-deploy\n\
+             Checked 1 skill: 1 no longer shared."
+        );
+
+        // Several folders: the same sentence, one folder per line beneath it. And the
+        // no-copies-remain fact, which is one line and names no folder at all.
         let data = PullData {
             skills: vec![
                 released(
                     Some("@acme/frontend-design"),
                     "frontend-design",
-                    "acme no longer delivers this; files in 6 folders are yours now (topos list \
-                     frontend-design)",
+                    "acme stopped sharing this — topos will not update it any more\nthe files stay \
+                     where they are, and are yours to keep or delete:\n  \
+                     ~/.claude/skills/frontend-design\n  ~/.codex/skills/frontend-design",
                 ),
                 released(
                     None,
                     "deploy",
                     "its only copy, /private/tmp/deploy, no longer exists — nothing left to manage",
-                ),
-                released(
-                    None,
-                    "runbook",
-                    "~/.claude/skills/runbook is yours now (topos list runbook)",
                 ),
             ],
             proposals_awaiting: 0,
@@ -5644,26 +5832,16 @@ mod tests {
             behind_elsewhere: Vec::new(),
             scope: Some("machine".to_owned()),
         };
-        let out = pull_tty(&data, &[], &[], &[]);
-        assert!(
-            out.contains(
-                "- @acme/frontend-design   acme no longer delivers this; files in 6 folders are \
-                 yours now (topos list frontend-design)\n"
-            ),
-            "{out}"
-        );
-        assert!(
-            out.contains(
-                "- deploy                  its only copy, /private/tmp/deploy, no longer exists — \
-                 nothing left to manage\n"
-            ),
-            "{out}"
-        );
-        assert!(
-            out.contains(
-                "- runbook                 ~/.claude/skills/runbook is yours now (topos list runbook)\n"
-            ),
-            "{out}"
+        assert_eq!(
+            pull_tty(&data, &[], &[], &[]),
+            "updated machine-wide\n\
+             @acme/frontend-design   acme stopped sharing this — topos will not update it any more\n\
+             \x20   the files stay where they are, and are yours to keep or delete:\n\
+             \x20     ~/.claude/skills/frontend-design\n\
+             \x20     ~/.codex/skills/frontend-design\n\
+             deploy                  its only copy, /private/tmp/deploy, no longer exists — \
+             nothing left to manage\n\
+             Checked 2 skills: 2 no longer shared."
         );
     }
 

@@ -2877,7 +2877,8 @@ fn a_signed_out_workspaces_leftover_resolves_once_then_retires() {
         row.note.as_deref(),
         Some(
             format!(
-                "{WS_NAME} no longer delivers this; {} is yours now (topos list alpha)",
+                "{WS_NAME} stopped sharing this — topos will not update it any more\nthe files \
+                 stay where they are, and are yours to keep or delete: {}",
                 placed.display()
             )
             .as_str()
@@ -3076,21 +3077,38 @@ fn a_targeted_update_never_resolves_orphans() {
 
 #[test]
 fn the_released_fact_shapes_are_byte_exact() {
-    // Every final-copy shape, pinned at the composer (the renderer prints the fact verbatim).
+    // Every final-copy shape, pinned at the composer (the renderer prints the fact verbatim, one
+    // line per line). The two facts a person needs, in order: who stopped sharing, and where that
+    // leaves the files — the second line naming the ONE folder, or listing several beneath itself.
+    assert_eq!(
+        ops::orphan_fact(
+            Some("acme"),
+            &["~/.claude/skills/legacy-deploy".to_owned()],
+            &["~/.claude/skills/legacy-deploy".to_owned()],
+        ),
+        "acme stopped sharing this — topos will not update it any more\nthe files stay where they \
+         are, and are yours to keep or delete: ~/.claude/skills/legacy-deploy"
+    );
     let folders = |n: usize| -> Vec<String> { (0..n).map(|i| format!("/tmp/f{i}")).collect() };
     assert_eq!(
-        ops::orphan_fact(Some("acme"), &folders(6), &folders(6), "frontend-design"),
-        "acme no longer delivers this; files in 6 folders are yours now (topos list frontend-design)"
+        ops::orphan_fact(Some("acme"), &folders(2), &folders(2)),
+        "acme stopped sharing this — topos will not update it any more\nthe files stay where they \
+         are, and are yours to keep or delete:\n  /tmp/f0\n  /tmp/f1"
+    );
+    // No workspace name on record: the row states only what it knows — where the files stand —
+    // rather than a sentence with a hole where the name belongs.
+    assert_eq!(
+        ops::orphan_fact(
+            None,
+            &["~/.claude/skills/runbook".to_owned()],
+            &["~/.claude/skills/runbook".to_owned()],
+        ),
+        "the files stay where they are, and are yours to keep or delete: ~/.claude/skills/runbook"
     );
     // Nothing left on disk: the fact states the DISCOVERY (the copies were already gone), never an
     // act this run performed. One recorded copy names it; several name the last of them.
     assert_eq!(
-        ops::orphan_fact(
-            None,
-            &folders(0),
-            &["/private/tmp/deploy".to_owned()],
-            "deploy"
-        ),
+        ops::orphan_fact(None, &folders(0), &["/private/tmp/deploy".to_owned()]),
         "its only copy, /private/tmp/deploy, no longer exists — nothing left to manage"
     );
     assert_eq!(
@@ -3102,28 +3120,14 @@ fn the_released_fact_shapes_are_byte_exact() {
                 "~/.cursor/skills/deploy".to_owned(),
                 "/private/tmp/deploy".to_owned(),
             ],
-            "deploy"
         ),
         "its 3 copies, last at /private/tmp/deploy, no longer exist — nothing left to manage"
-    );
-    assert_eq!(
-        ops::orphan_fact(
-            None,
-            &["~/.claude/skills/runbook".to_owned()],
-            &["~/.claude/skills/runbook".to_owned()],
-            "runbook"
-        ),
-        "~/.claude/skills/runbook is yours now (topos list runbook)"
     );
     // Nothing on disk AND nothing recorded (the withdrawal already cleaned the map): the same
     // consequence, minimally stated.
     assert_eq!(
-        ops::orphan_fact(None, &folders(0), &folders(0), "gone"),
+        ops::orphan_fact(None, &folders(0), &folders(0)),
         "no copies remain — nothing left to manage"
-    );
-    assert_eq!(
-        ops::orphan_fact(Some("acme"), &folders(2), &folders(2), "notes"),
-        "acme no longer delivers this; files in 2 folders are yours now (topos list notes)"
     );
 }
 

@@ -178,12 +178,26 @@
             "$ref": "#/$defs/ConflictPathReport"
           }
         },
+        "copy_dir": {
+          "description": "Where the marked-up copy of BOTH versions was written: the scope's own conflict workbench,\nnever a folder an agent reads. A hand resolution left there is what `update <skill>\n--onto-current` commits. Display path (`~`-abbreviated). Absent for a clean merge.\n**INFERRED** (additive).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "drop_diff": {
           "description": "For the escape / no-base 2-way fallback: a unified diff of what the chosen side drops vs the other.",
           "type": [
             "string",
             "null"
           ]
+        },
+        "placements": {
+          "description": "The folders that still hold the AUTHOR'S OWN version — a conflict writes to none of them, so\nevery agent reads exactly what it read before the update. Display paths (`~`-abbreviated).\nEmpty for a clean merge (which rewrites its placements). **INFERRED** (additive).",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
         },
         "result_digest": {
           "description": "The merged/conflict tree's `bundle_digest`.",
@@ -329,7 +343,7 @@
           ]
         },
         "note": {
-          "description": "The one-line fact a row states BESIDE its action: the whole line a `released` row prints\n(why the record resolved and where its files stand now), or — on any other action — the\nfolders this run also wrote that the action's own column does not name (a healed folder\nthat rode along with a settled-draft fan-out, a stale copy refreshed beside a fresh\ninstall). Absent when the action says everything. **INFERRED** (additive).",
+          "description": "The fact a row states BESIDE its action: the whole thing a `released` row prints (why the\nrecord resolved and where its files stand now — two lines, the second the folders, which a\nhuman renderer indents under the first), or — on any other action — the one line naming\nthe folders this run also wrote that the action's own column does not name (a healed folder\nthat rode along with a settled-draft fan-out, a stale copy refreshed beside a fresh\ninstall). Absent when the action says everything. **INFERRED** (additive).",
           "type": [
             "string",
             "null"

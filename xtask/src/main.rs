@@ -764,6 +764,8 @@ fn fixtures() -> Vec<(&'static str, String)> {
                     clean: true,
                     conflicts: vec![],
                     drop_diff: None,
+                    placements: vec![],
+                    copy_dir: None,
                 }),
                 synced_placements: None,
                 destinations: Vec::new(),
@@ -783,7 +785,8 @@ fn fixtures() -> Vec<(&'static str, String)> {
         error: None,
     };
 
-    // A `pull` whose merge conflicted → a complete conflict tree on disk + publish blocked until resolved.
+    // A `pull` whose merge conflicted → every agent folder still holding the author's own version,
+    // the complete conflict tree in the scope's own workbench, publish blocked until resolved.
     let pull_conflicted = JsonEnvelope {
         schema_version: 1,
         command: "pull".to_owned(),
@@ -810,6 +813,10 @@ fn fixtures() -> Vec<(&'static str, String)> {
                         kind: ConflictPathKind::Content,
                     }],
                     drop_diff: None,
+                    // The folder that still holds the author's own version (a conflict writes to
+                    // none), and the workbench the marked-up copy of both versions went to.
+                    placements: vec!["~/.claude/skills/pr-describe".to_owned()],
+                    copy_dir: Some("~/.topos/conflicts/pr-describe".to_owned()),
                 }),
                 synced_placements: None,
                 destinations: Vec::new(),

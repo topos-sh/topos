@@ -122,9 +122,10 @@ pub struct PullSkill {
     /// sources, which read by their plain `skill` name. **INFERRED** (additive).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display: Option<String>,
-    /// The one-line fact a row states BESIDE its action: the whole line a `released` row prints
-    /// (why the record resolved and where its files stand now), or — on any other action — the
-    /// folders this run also wrote that the action's own column does not name (a healed folder
+    /// The fact a row states BESIDE its action: the whole thing a `released` row prints (why the
+    /// record resolved and where its files stand now — two lines, the second the folders, which a
+    /// human renderer indents under the first), or — on any other action — the one line naming
+    /// the folders this run also wrote that the action's own column does not name (a healed folder
     /// that rode along with a settled-draft fan-out, a stale copy refreshed beside a fresh
     /// install). Absent when the action says everything. **INFERRED** (additive).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -259,6 +260,17 @@ pub struct MergeReport {
     /// For the escape / no-base 2-way fallback: a unified diff of what the chosen side drops vs the other.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub drop_diff: Option<String>,
+    /// The folders that still hold the AUTHOR'S OWN version — a conflict writes to none of them, so
+    /// every agent reads exactly what it read before the update. Display paths (`~`-abbreviated).
+    /// Empty for a clean merge (which rewrites its placements). **INFERRED** (additive).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub placements: Vec<String>,
+    /// Where the marked-up copy of BOTH versions was written: the scope's own conflict workbench,
+    /// never a folder an agent reads. A hand resolution left there is what `update <skill>
+    /// --onto-current` commits. Display path (`~`-abbreviated). Absent for a clean merge.
+    /// **INFERRED** (additive).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub copy_dir: Option<String>,
 }
 
 /// One conflicting path in a [`MergeReport`]. **INFERRED** — `kind` reuses the persisted vocabulary.

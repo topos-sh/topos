@@ -627,6 +627,33 @@ fn a_conflict_marks_up_a_sidecar_copy_and_leaves_every_agent_folder_alone() {
         b"#!/bin/sh\necho v1\n"
     );
     assert!(copy.join("ref/notes.md").exists());
+    // The row carries both halves of that truth, so the receipt can name them without re-deriving
+    // either: the folder that still holds the author's version, and the folder the record names.
+    let real = |p: &std::path::Path| {
+        std::fs::canonicalize(p)
+            .unwrap_or_else(|_| p.to_path_buf())
+            .display()
+            .to_string()
+    };
+    assert_eq!(
+        mr.placements
+            .iter()
+            .map(|p| real(std::path::Path::new(p)))
+            .collect::<Vec<_>>(),
+        vec![real(&rig.placement())],
+        "the untouched placement is named on the row"
+    );
+    assert_eq!(
+        mr.copy_dir
+            .as_deref()
+            .map(|d| real(std::path::Path::new(d))),
+        Some(real(&copy))
+    );
+    assert_eq!(
+        row.scope.as_deref(),
+        Some("person"),
+        "the machine's own store — its exits are spelled with `-g`"
+    );
     // The copy IS the recorded conflict tree — the digest the escape reads as "untouched".
     let scanned = crate::scan::scan(&copy).unwrap();
     assert_eq!(

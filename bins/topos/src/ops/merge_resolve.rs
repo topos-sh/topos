@@ -236,6 +236,7 @@ pub(crate) fn resolve_diverged(
             )?;
             log_resolution(ctx, skill_id, "merge-conflict", result_commit);
             Ok(conflicted_row(
+                ctx,
                 &lock.name,
                 sync,
                 base_commit,
@@ -244,6 +245,7 @@ pub(crate) fn resolve_diverged(
                 &merged_digest_hex,
                 conflict_reports(&assembled.conflicts),
                 None,
+                conflict_disclosure(ctx, lock, map, &cs),
             ))
         }
         // `decide_outcome` never returns NoBaseTwoWay — that branch is taken before planning (above).
@@ -356,6 +358,7 @@ fn no_base(
     )?;
     log_resolution(ctx, skill_id, "merge-no-base", result_commit);
     Ok(conflicted_row(
+        ctx,
         &lock.name,
         sync,
         base_commit,
@@ -364,6 +367,7 @@ fn no_base(
         &merged_digest_hex,
         Vec::new(),
         Some(drop_diff(theirs, &merged)),
+        conflict_disclosure(ctx, lock, map, &cs),
     ))
 }
 
@@ -1137,6 +1141,10 @@ fn merged_row(
             clean: true,
             conflicts: Vec::new(),
             drop_diff,
+            // A clean merge REWRITES its placements, so it has neither an untouched-folder set nor
+            // a marked-up copy to name.
+            placements: Vec::new(),
+            copy_dir: None,
         }),
         synced_placements: None,
         destinations: Vec::new(),
@@ -1149,8 +1157,38 @@ fn merged_row(
     }
 }
 
+/// The two facts a conflict row states about disk, read where they are true: the folders that still
+/// hold the author's own version (the recorded map — a conflict wrote to none of them), and the one
+/// folder the marked-up copy went to (the record's own `copy_dir`, never recomputed, so the receipt
+/// names the folder every exit reads).
+fn conflict_disclosure(
+    ctx: &Ctx<'_>,
+    lock: &Lock,
+    map: &PlacementMap,
+    cs: &ConflictState,
+) -> (Vec<String>, Option<String>) {
+    let placements = map
+        .placements
+        .iter()
+        .map(|p| super::inventory::pretty(ctx, std::path::Path::new(p)))
+        .collect();
+    let copy = conflict_copy_path(ctx, lock, Some(cs));
+    (placements, Some(super::inventory::pretty(ctx, &copy)))
+}
+
+/// The SCOPE a row's next commands are spelled for: `"person"` for the machine's own store (whose
+/// verbs take `-g`), the checkout's path for a project store. The manifest reconcile re-stamps this
+/// with its own scope label; a TARGETED run has none, and a conflict row's two exits must be
+/// runnable exactly as printed either way.
+fn scope_label(ctx: &Ctx<'_>) -> String {
+    ctx.layout
+        .project_root()
+        .map_or_else(|| "person".to_owned(), |d| d.display().to_string())
+}
+
 #[allow(clippy::too_many_arguments)]
 fn conflicted_row(
+    ctx: &Ctx<'_>,
     name: &str,
     sync: &SyncState,
     base: [u8; 32],
@@ -1159,7 +1197,9 @@ fn conflicted_row(
     result_digest_hex: &str,
     conflicts: Vec<ConflictPathReport>,
     drop_diff: Option<String>,
+    disclosure: (Vec<String>, Option<String>),
 ) -> PullSkill {
+    let (placements, copy_dir) = disclosure;
     PullSkill {
         skill: name.to_owned(),
         workspace_id: None,
@@ -1174,13 +1214,15 @@ fn conflicted_row(
             clean: false,
             conflicts,
             drop_diff,
+            placements,
+            copy_dir,
         }),
         synced_placements: None,
         destinations: Vec::new(),
         kept: Vec::new(),
         display: None,
         note: None,
-        scope: None,
+        scope: Some(scope_label(ctx)),
         harnesses: Vec::new(),
         kind: None,
     }
@@ -1188,11 +1230,15 @@ fn conflicted_row(
 
 /// Build the typed conflict row from a recorded [`ConflictState`] (re-disclosed each pull while blocked).
 pub(crate) fn conflicted_row_from_state(
+    ctx: &Ctx<'_>,
     name: &str,
     sync: &SyncState,
+    lock: &Lock,
+    map: &PlacementMap,
     cs: &ConflictState,
 ) -> Result<PullSkill, ClientError> {
     Ok(conflicted_row(
+        ctx,
         name,
         sync,
         super::parse_hex32(&cs.base_commit)?,
@@ -1201,5 +1247,6 @@ pub(crate) fn conflicted_row_from_state(
         &cs.conflicted_digest,
         conflict_reports(&cs.paths),
         None,
+        conflict_disclosure(ctx, lock, map, cs),
     ))
 }

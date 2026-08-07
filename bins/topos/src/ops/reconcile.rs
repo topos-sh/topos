@@ -5090,7 +5090,6 @@ fn resolve_orphans(
                 ws_known.as_ref().map(|(_, _, w)| w.as_str()),
                 &present,
                 &recorded,
-                &lock.name,
             );
             let mut row = plain_row(
                 &lock.name,
@@ -5124,11 +5123,15 @@ fn orphan_placements(ctx: &Ctx<'_>, map: &PlacementMap) -> (Vec<String>, Vec<Str
     (recorded, present)
 }
 
-/// The ONE concrete fact a released row states. `workspace` is the delivering workspace's address
-/// name when the delivery cache knows it (`<ws> no longer delivers this; …`); `present` the
-/// still-existing placement dirs (display paths — exactly one prints its path, several count in
-/// folders, per the destination convention); `recorded` EVERY placement the record listed (display
-/// paths, `present` among them).
+/// The concrete fact a released row states — WHY the record resolved, and then WHERE that leaves
+/// the files, one line each (the receipt indents the second under the first). `workspace` is the
+/// delivering workspace's address name when the delivery cache knows it; `present` the
+/// still-existing placement dirs (display paths — exactly one is named inline, several are listed
+/// beneath, per this receipt's own convention for naming folders a person can go and look in);
+/// `recorded` EVERY placement the record listed (display paths, `present` among them).
+///
+/// The lines are separate facts, so each stands on its own: with no workspace name to say who
+/// stopped sharing, the row states only where the files stand — never a sentence with a hole in it.
 ///
 /// With nothing left on disk the fact states the DISCOVERY, never an act: the copies were already
 /// gone when the sweep looked, and this run deleted nothing. So it names what the record knew of
@@ -5139,18 +5142,23 @@ pub(crate) fn orphan_fact(
     workspace: Option<&str>,
     present: &[String],
     recorded: &[String],
-    name: &str,
 ) -> String {
+    const YOURS: &str = "the files stay where they are, and are yours to keep or delete:";
     let files = match present {
         [] => None,
-        [one] => Some(format!("{one} is yours now (topos list {name})")),
+        [one] => Some(format!("{YOURS} {one}")),
         many => Some(format!(
-            "files in {} folders are yours now (topos list {name})",
-            many.len()
+            "{YOURS}\n{}",
+            many.iter()
+                .map(|p| format!("  {p}"))
+                .collect::<Vec<_>>()
+                .join("\n")
         )),
     };
     match (workspace, files) {
-        (Some(ws), Some(f)) => format!("{ws} no longer delivers this; {f}"),
+        (Some(ws), Some(f)) => {
+            format!("{ws} stopped sharing this — topos will not update it any more\n{f}")
+        }
         (None, Some(f)) => f,
         (_, None) => match recorded {
             [] => "no copies remain — nothing left to manage".to_owned(),

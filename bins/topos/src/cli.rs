@@ -105,9 +105,9 @@ pub(crate) enum Command {
         /// Confirm an action that shows a preview first (like `--reset`).
         #[arg(long)]
         yes: bool,
-        /// Resolve a conflicted skill by keeping your bytes exactly as they are, skipping the
-        /// merge with the team's changes (what the merge would have brought is shown first).
-        /// Takes exactly one skill.
+        /// Resolve a conflicted skill: commit the merge you made in the conflict folder the
+        /// receipt named — or, by leaving that folder alone, keep your version and skip the team's
+        /// changes. Takes exactly one skill.
         #[arg(long = "onto-current")]
         onto_current: bool,
         /// Print nothing on stdout — the mode the session-start hook uses. The hook sweep always

@@ -162,7 +162,9 @@ pub(crate) fn sync_one_planned(
             );
         }
         super::merge_resolve::recover_resolution(ctx, &sp, &sync, &lock, &map, &cs)?;
-        return super::merge_resolve::conflicted_row_from_state(&name, &sync, &cs);
+        return super::merge_resolve::conflicted_row_from_state(
+            ctx, &name, &sync, &lock, &map, &cs,
+        );
     }
 
     // ---- checkForUpdates ----

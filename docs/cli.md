@@ -239,7 +239,7 @@ topos update [OPTIONS] [TARGETS]...
 | `-a, --agent <SLUG>` | With `--reset`: drop only this agent's copy of the edits (a slug like `codex`); every other copy keeps its own |
 | `--dest <FOLDER>` | With `--reset`: drop only the edits in this exact folder — the folder as `topos list` prints it, or the one the `topos.toml` line names |
 | `--yes` | Confirm an action that shows a preview first (like `--reset`) |
-| `--onto-current` | Resolve a conflicted skill by keeping your bytes exactly as they are, skipping the merge with the team's changes (what the merge would have brought is shown first). Takes exactly one skill |
+| `--onto-current` | Resolve a conflicted skill: commit the merge you made in the conflict folder the receipt named — or, by leaving that folder alone, keep your version and skip the team's changes. Takes exactly one skill |
 | `--quiet` | Print nothing on stdout — the mode the session-start hook uses. The hook sweep always covers both scopes (this folder's and your machine-wide set), so `-g` has no effect here. Errors still go to stderr with a non-zero exit |
 | `--ttl <SECONDS>` | With `--quiet`: skip the run entirely when one already completed within this many seconds, so hooks can fire often at no cost. `0` disables the throttle. Default 300; `TOPOS_UPDATE_TTL` changes the default |
 | `--rebuild` | Rebuild every managed skill folder from topos's own store: your unshared edits are saved first, then each folder is re-created fresh. Fixes a folder someone deleted or broke by hand |

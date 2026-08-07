@@ -17,6 +17,10 @@
               "path": "SKILL.md"
             }
           ],
+          "copy_dir": "~/.topos/conflicts/pr-describe",
+          "placements": [
+            "~/.claude/skills/pr-describe"
+          ],
           "result_digest": "1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f",
           "result_version_id": "1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f",
           "theirs_version_id": "c35004153b0f72e2e8363b557f36594319d5382eb9e4c7add5ff0feb3b15c369"

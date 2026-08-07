@@ -88,18 +88,21 @@ has settled — unchanged since the previous check — the next update copies it
 copies in the same scope and says so on the receipt.
 
 When the team's changes and yours genuinely collide, your agents' folders are left exactly as they
-were — still your version, never conflict markers — a marked-up copy of both versions is written
-to Topos's own folder for you to merge by hand, and the ways out are named right there:
+were: still your version, never conflict markers — nothing an agent could read mid-merge and act
+on. A copy of both versions, marked up for a by-hand merge, goes to Topos's own folder instead
+(`~/.topos/conflicts/<skill>/`, or `<project>/.topos/state/<you>/conflicts/<skill>/` for a skill a
+project asks for). The receipt names that folder and both ways out, and publishing that skill is
+blocked until you take one:
 
 ```bash
 topos diff customer-lookup
-topos update customer-lookup
-topos update customer-lookup --reset --yes
 topos update customer-lookup --onto-current
+topos update customer-lookup --reset --yes
 ```
 
-See your side; merge your draft onto the latest; drop **your** edits and take the team's; or keep
-**your** files and skip the merge.
+See your side; commit the merge you made in that folder — or, by leaving the folder alone, keep
+**your** version and skip the merge; or take the **team's** version instead, dropping yours. Either
+way out deletes the folder.
 
 ## When two copies disagree
 

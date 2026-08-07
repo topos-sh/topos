@@ -194,6 +194,15 @@ one copy was edited.
 `update --reset --dest` carries the same disclosure the other way round: `dest` names the copy the
 reset took and `others_kept` names the copies that kept their edits.
 
+A merge conflict never reaches a folder an agent reads. A `conflicted` row's `merge` object names
+both halves: `placements` — the folders that still hold the author's own version, byte for byte,
+untouched by the conflict — and `copy_dir`, the one folder holding a marked-up copy of both
+versions. Never look for markers in a placement; there are none. Resolve by editing that copy and
+running `topos update <skill> --onto-current`, which commits it (leaving the folder alone commits
+the author's version and drops the merge), or `topos update <skill> --reset --yes` to take the
+team's version instead. Publishing that bundle is refused until one of them runs, and either one
+deletes the folder.
+
 Three receipt fields say where bytes actually moved, so nothing has to be read out of prose:
 
 - `destinations` — the folders an install landed in or a removal emptied (config files for an MCP
