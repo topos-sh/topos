@@ -34,6 +34,7 @@ use topos_types::results::{
 use crate::ctx::Ctx;
 use crate::doc;
 use crate::error::ClientError;
+use crate::manifest::keys::{self, KeyShape};
 use crate::plane::DirectorySource;
 use crate::sessions::Session;
 use crate::sidecar;
@@ -142,10 +143,10 @@ pub(crate) fn list_with(
     };
 
     // The external sources' health, over the sections THIS INVOCATION SHOWS — computed BEFORE any
-    // of the focused views, every one of which returns early. `--agent`, `--remote` and the
-    // one-skill deep dive all answer about machines that track external sources too, and the
-    // shared tail renders this block for all of them; leaving it empty there would make the
-    // contract true only of the view that happens to fall through.
+    // of the focused views, every one of which returns early. `--agent` and `--remote` answer
+    // about machines that track external sources too, and the shared tail renders this block for
+    // them; leaving it empty there would make the contract true only of the view that happens to
+    // fall through. The one-skill deep dive is the exception, and narrows it below.
     data.forge = inventory::forge_sources(ctx, &sections);
 
     if req.footprint {
@@ -229,11 +230,23 @@ pub(crate) fn list_with(
     // way — "nothing manages it" is the whole answer, never an error.
     if let Some(name) = &req.name {
         let dive = dive_sections(&resolved, req.view);
-        data.detail = Some(match inventory::detail_for(&dive, &all, name) {
+        let detail = match inventory::detail_for(&dive, &all, name) {
             Ok(detail) => detail,
             Err(_) => builtin_detail(ctx, name)
                 .unwrap_or_else(|| unmanaged_detail(ctx, name, discover.as_ref())),
-        });
+        };
+        // A one-skill answer names THIS skill's external source and NO other. Every line above it
+        // is about the skill on screen, so an unrelated repository's last check reads as one more
+        // fact about that skill — the listing's "what is my machine tracking?" block answering a
+        // question nobody asked here. Recomputed over the DIVE's sections (which can exceed the
+        // listing's — a bare dive inside a project answers from the machine scope too) and then
+        // narrowed to the source the answering row itself names: the repository that delivers it,
+        // or nothing at all.
+        data.forge = inventory::forge_sources(ctx, &dive);
+        let origin = detail_forge_origin(&detail);
+        data.forge
+            .retain(|f| origin.as_deref() == Some(f.source.as_str()));
+        data.detail = Some(detail);
         return Ok(ListOutcome {
             data,
             warnings,
@@ -398,6 +411,21 @@ fn dive_sections(resolved: &Resolved, view: ScopeView) -> Vec<&ScopeResolution> 
     match view {
         ScopeView::Machine => vec![resolved.machine()],
         ScopeView::Here | ScopeView::All => resolved.scopes.iter().collect(),
+    }
+}
+
+/// The external repository a deep dive's answer comes from, as the check log spells it
+/// (`<host>/<owner>/<repo>`) — `None` when no row answered, or the row that did is not a forge
+/// row. The key the answering row is spelled with IS the reference, so classifying it is the same
+/// derivation the check log's own key gets: a repo-SET row and every member it delivers carry the
+/// set's key, a single import carries its own, and both resolve to the one repository.
+fn detail_forge_origin(detail: &ListDetail) -> Option<String> {
+    match keys::classify_key(detail.source_key.as_deref()?).ok()? {
+        KeyShape::RepoSet { host, owner, repo }
+        | KeyShape::RepoSkill {
+            host, owner, repo, ..
+        } => Some(format!("{host}/{owner}/{repo}")),
+        _ => None,
     }
 }
 

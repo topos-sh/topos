@@ -3333,9 +3333,13 @@ fn scoped_forge_health_answers_about_the_scopes_own_pin() {
 }
 
 #[test]
-fn every_focused_list_view_carries_the_forge_health() {
-    // The focused views return early. Each of them is just as likely to be run on a machine that
-    // tracks external sources, and the shared tail renders this block for all of them.
+fn the_deep_dive_names_only_its_own_external_source() {
+    // The focused views return early, and the shared tail renders this block for them: `--agent`
+    // is just as likely to be run on a machine that tracks external sources. The ONE-SKILL dive is
+    // the exception. Every line it prints is a fact about the skill on screen, so an unrelated
+    // repository's last check would read as one more of them — the listing's "what is this machine
+    // tracking?" answering a question nobody asked here. It shows the repository that DELIVERS
+    // this skill, or nothing.
     let rig = Rig::new("repo-focused-views");
     rig.write_global("[bundles]\n\"github.com/o/r\" = \"*\"\n");
     let log: CallLog = Arc::new(Mutex::new(Vec::new()));
@@ -3348,27 +3352,49 @@ fn every_focused_list_view_carries_the_forge_health() {
     ));
     update_now(&ctx, &plane, &dir, &git);
 
-    for req in [
-        ops::ListRequest {
-            name: Some("alpha".to_owned()),
-            ..ops::ListRequest::default()
-        },
-        ops::ListRequest::default(),
-    ] {
-        let named = req.name.clone();
-        let listed =
-            crate::ops::list_with(&ctx, &req, None, None, crate::ops::RowPage::unlimited())
-                .unwrap();
-        assert!(
-            listed
-                .data
-                .forge
-                .iter()
-                .any(|f| f.source == "github.com/o/r"),
-            "the {named:?} view carries it too: {:?}",
-            listed.data.forge
-        );
-    }
+    let dive = |name: &str| {
+        crate::ops::list_with(
+            &ctx,
+            &ops::ListRequest {
+                name: Some(name.to_owned()),
+                ..ops::ListRequest::default()
+            },
+            None,
+            None,
+            crate::ops::RowPage::unlimited(),
+        )
+        .unwrap()
+        .data
+        .forge
+    };
+
+    // The repo delivers `alpha`, so `alpha`'s own answer names it.
+    let mine = dive("alpha");
+    assert_eq!(mine.len(), 1, "{mine:?}");
+    assert_eq!(mine[0].source, "github.com/o/r");
+
+    // Nothing external delivers the built-in — and the machine's unrelated GitHub row is not news
+    // about it. THE reported bug: this block used to ride every dive on the machine.
+    assert!(dive("topos").is_empty(), "{:?}", dive("topos"));
+
+    // The LISTING is the view the block belongs to, and still carries it in full.
+    let listed = crate::ops::list_with(
+        &ctx,
+        &ops::ListRequest::default(),
+        None,
+        None,
+        crate::ops::RowPage::unlimited(),
+    )
+    .unwrap();
+    assert!(
+        listed
+            .data
+            .forge
+            .iter()
+            .any(|f| f.source == "github.com/o/r"),
+        "{:?}",
+        listed.data.forge
+    );
 }
 
 #[test]
