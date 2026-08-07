@@ -8,10 +8,6 @@
       "description": "`true` on the `--yes` apply, `false` on the describe.",
       "type": "boolean"
     },
-    "conflict_kept": {
-      "description": "A recorded merge conflict that OUTLIVES this reset: a per-copy reset never clears the\nbundle's conflict record (the draft it describes may be exactly the copy left alone), so\npublish stays blocked and the receipt says so. **INFERRED** (additive-only).",
-      "type": "boolean"
-    },
     "dest": {
       "description": "The ONE copy a `-a`/`--dest` selection narrowed this reset to, as a receipt spells the\nfolder (`project/.agents/skills/coolify-deploy`). Absent = the whole bundle: every copy's\nedits. The loss surface must never overstate its reach, so the copy is carried rather than\ninferred. **INFERRED** (additive-only).",
       "type": [

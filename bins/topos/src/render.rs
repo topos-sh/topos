@@ -1473,17 +1473,6 @@ pub(crate) fn reset_applied_tty(items: &[topos_types::results::ResetData]) -> St
         if let Some(line) = others_kept_line(&item.others_kept) {
             s.push_str(&format!("{line}\n"));
         }
-        // The block that outlived its cause: a one-copy reset never clears the bundle's recorded
-        // merge conflict, so publish stays refused — said here rather than left for the next
-        // `publish` to discover.
-        if item.conflict_kept {
-            s.push_str(&format!(
-                "publish stays blocked — the recorded merge conflict survives a one-copy reset; \
-                 `topos update{} {} --reset` clears it.\n",
-                crate::error::scope_flag(item.global),
-                item.skill
-            ));
-        }
     }
     s.trim_end().to_owned()
 }

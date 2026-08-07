@@ -298,6 +298,17 @@ impl Rig {
     fn conflict_exists(&self, id: &str) -> bool {
         self.layout().published(&sid(id)).conflict.exists()
     }
+    fn conflict_state(&self, id: &str) -> topos_types::persisted::ConflictState {
+        doc::read_doc(&self.fs, &self.layout().published(&sid(id)).conflict)
+            .unwrap()
+            .expect("a recorded conflict")
+    }
+    /// Where the marked-up copy of a recorded conflict lives — read from the record itself, so the
+    /// test asserts against the path the code actually documented, never a guess.
+    fn conflict_copy(&self, id: &str) -> PathBuf {
+        self.layout()
+            .conflict_copy_dir(self.conflict_state(id).copy_dir.as_deref().unwrap())
+    }
 }
 
 /// Parse a rig-minted skill id through the validated newtype (always charset-clean here).
@@ -549,12 +560,14 @@ fn the_merge_preview_names_a_conflicting_path_without_running_the_merge() {
     assert!(!rig.conflict_exists(&id));
 }
 
-/// Full-auto: an AUTO follower's bare sweep RESOLVES a diverged draft. Here the local edit
-/// overlaps theirs' edit to `SKILL.md`, so the merge conflicts: the complete conflict tree is materialized
-/// (markers carrying BOTH sides, the other files merged clean), the draft is snapshotted recoverably, and
-/// a durable conflict record blocks publish. The edit is never lost — it lives inside the markers.
+/// **A folder an agent reads always holds one coherent, complete bundle.** An AUTO follower's bare
+/// sweep RESOLVES a diverged draft; here the local edit overlaps theirs' edit to `SKILL.md`, so the
+/// merge conflicts — and the conflict writes NOTHING into the agent-readable placement. The folder
+/// keeps the author's own version, byte for byte, exactly as it stood before the update. The
+/// complete marked-up tree (markers carrying BOTH sides, the other files merged clean) goes to the
+/// scope's own workbench, `~/.topos/conflicts/<name>/`, where a person resolves it by hand.
 #[test]
-fn auto_sweep_resolves_a_diverged_draft_into_a_conflict_tree() {
+fn a_conflict_marks_up_a_sidecar_copy_and_leaves_every_agent_folder_alone() {
     let rig = Rig::new("diverge");
     let (id, _name, genesis) = rig.adopt(BASE);
     // Edit SKILL.md (overlaps theirs' SKILL.md edit → a conflict) and leave run.sh at base.
@@ -563,6 +576,7 @@ fn auto_sweep_resolves_a_diverged_draft_into_a_conflict_tree() {
         ("run.sh", FileMode::Executable, b"#!/bin/sh\necho v0\n"),
     ];
     write_tree(&rig.placement(), edited);
+    let before = snapshot(&rig.placement());
 
     let v1 = mk_version(&[genesis], V1, "d_pub", "v1");
     let mut plane = FixturePlane::default();
@@ -581,9 +595,25 @@ fn auto_sweep_resolves_a_diverged_draft_into_a_conflict_tree() {
     assert_eq!(mr.theirs_version_id, to_hex(&v1.id));
     assert!(mr.conflicts.iter().any(|c| c.path == "SKILL.md"));
 
-    // The COMPLETE conflict tree is on the placement: SKILL.md has diff3 markers carrying BOTH sides; the
-    // non-overlapping files are merged clean (run.sh → theirs, the new ref/notes.md → theirs).
-    let skill = std::fs::read_to_string(rig.placement().join("SKILL.md")).unwrap();
+    // THE POINT: the placement is byte-identical to what stood there before the update — the
+    // author's own version, no markers, no half-state, nothing an agent could read and act on.
+    assert_eq!(
+        snapshot(&rig.placement()),
+        before,
+        "a conflict must not write into a folder an agent reads"
+    );
+    assert_eq!(snapshot(&rig.placement()), Some(expect(edited)));
+
+    // The COMPLETE conflict tree is in the sidecar, at the path the record names: SKILL.md has
+    // diff3 markers carrying BOTH sides; the non-overlapping files are merged clean (run.sh →
+    // theirs, the new ref/notes.md → theirs).
+    let copy = rig.conflict_copy(&id);
+    assert_eq!(
+        copy,
+        rig.layout().home().join("conflicts").join("pr-describe"),
+        "the copy is keyed by the bundle NAME, under the scope's own store"
+    );
+    let skill = std::fs::read_to_string(copy.join("SKILL.md")).unwrap();
     assert!(
         skill.contains("<<<<<<<") && skill.contains(">>>>>>>"),
         "{skill}"
@@ -593,22 +623,31 @@ fn auto_sweep_resolves_a_diverged_draft_into_a_conflict_tree() {
         "the edit must survive inside the markers: {skill}"
     );
     assert_eq!(
-        std::fs::read(rig.placement().join("run.sh")).unwrap(),
+        std::fs::read(copy.join("run.sh")).unwrap(),
         b"#!/bin/sh\necho v1\n"
     );
-    assert!(rig.placement().join("ref/notes.md").exists());
+    assert!(copy.join("ref/notes.md").exists());
+    // The copy IS the recorded conflict tree — the digest the escape reads as "untouched".
+    let scanned = crate::scan::scan(&copy).unwrap();
+    assert_eq!(
+        to_hex(&scanned.bundle_digest),
+        rig.conflict_state(&id).conflicted_digest
+    );
 
     // Never clobbered: the pre-merge draft is snapshotted into the sidecar store (recoverable).
     let draft = mk_version(&[genesis], edited, DEVICE, "topos: draft snapshot");
     let store = topos_gitstore::Store::open(&rig.layout().published(&sid(&id)).store).unwrap();
     assert!(
         store.list_versions().unwrap().contains(&draft.id),
-        "the diverged draft must be snapshotted before the merge overwrites the placement"
+        "the diverged draft must be snapshotted by the merge"
     );
 
-    // A durable conflict record blocks publish; the pending update is consumed into the (blocked) draft.
-    assert!(rig.layout().published(&sid(&id)).conflict.exists());
-    assert_eq!(rig.read_sync(&id).applied, 1);
+    // A durable conflict record blocks publish; the pending update is consumed into the (blocked)
+    // draft, and the lock now names the team's version as the base a `--reset` restores.
+    assert!(rig.conflict_exists(&id));
+    let s = rig.read_sync(&id);
+    assert_eq!(s.applied, 1);
+    assert_eq!(s.base_commit, to_hex(&v1.id));
 }
 
 #[test]
@@ -1309,9 +1348,11 @@ fn conflict_blocks_and_persists_until_escaped() {
     );
     assert!(rig.conflict_exists(&id));
 
-    // The author edits the markers by hand — the block STILL stands (presence-based, not a marker scan).
+    // The author hand-resolves the marked-up copy — the block STILL stands (presence-based, not a
+    // marker scan), and the re-sweep leaves the hand resolution exactly as written.
+    let copy = rig.conflict_copy(&id);
     write_tree(
-        &rig.placement(),
+        &copy,
         &[
             ("SKILL.md", FileMode::Regular, b"# hand-resolved\n"),
             ("run.sh", FileMode::Executable, b"#!/bin/sh\necho v1\n"),
@@ -1326,8 +1367,14 @@ fn conflict_blocks_and_persists_until_escaped() {
         rig.conflict_exists(&id),
         "an edit must not clear the conflict"
     );
+    assert_eq!(
+        std::fs::read(copy.join("SKILL.md")).unwrap(),
+        b"# hand-resolved\n",
+        "a re-sweep never clobbers the author's hand resolution"
+    );
 
-    // The escape resolves it: the block clears + a publishable draft-on-current results.
+    // The escape resolves it: the block clears, the copy goes with it, and a publishable
+    // draft-on-current results.
     let escaped = pull_data(
         &rig.ctx(&plane, &foll),
         ops::PullScope::One {
@@ -1340,12 +1387,65 @@ fn conflict_blocks_and_persists_until_escaped() {
     .unwrap();
     assert_eq!(only(&escaped).action, PullAction::Merged);
     assert!(!rig.conflict_exists(&id), "the escape clears the block");
+    assert!(!copy.exists(), "the marked-up copy goes with the block");
 }
 
-/// `update --reset` in the RECORDED-conflict state resolves it the team's way: the marker tree is
-/// snapshotted and discarded, theirs lands on the placement, and the conflict record is CLEARED with
-/// the draft it described — so publish is not left refused by a divergence that no longer exists, and
-/// the next sweep reads the skill current instead of re-disclosing a stale block.
+/// A marked-up copy that goes missing while the block still stands is RE-RENDERED from the recorded
+/// result on the next sweep (the copy is derived state; the store holds it). And a copy nobody has
+/// touched means "keep my version": the escape then commits the author's original draft, exactly as
+/// if the folder had been sitting there untouched all along.
+#[test]
+fn a_deleted_conflict_copy_is_re_rendered_and_still_reads_as_untouched() {
+    let rig = Rig::new("copy-gone");
+    let (id, _name, genesis) = rig.adopt(BASE);
+    let mine: FileSet = &[
+        ("SKILL.md", FileMode::Regular, b"# mine\n"),
+        ("run.sh", FileMode::Executable, b"#!/bin/sh\necho v0\n"),
+    ];
+    write_tree(&rig.placement(), mine);
+    let v1 = mk_version(&[genesis], V1, "d_pub", "v1");
+    let mut plane = FixturePlane::default();
+    plane.add_version(&id, &v1);
+    plane.set_current(&id, served(WS, &id, v1.id, 1));
+    let foll = follow(&id, FollowMode::Auto);
+    pull_data(&rig.ctx(&plane, &foll), ops::PullScope::AllFollowed).unwrap();
+
+    let copy = rig.conflict_copy(&id);
+    let tree = snapshot(&copy);
+    std::fs::remove_dir_all(&copy).unwrap();
+
+    // The next bare sweep still reports the block AND puts the workbench back, byte for byte.
+    assert_eq!(
+        only(&pull_data(&rig.ctx(&plane, &foll), ops::PullScope::AllFollowed).unwrap()).action,
+        PullAction::Conflicted
+    );
+    assert_eq!(
+        snapshot(&copy),
+        tree,
+        "the copy is re-rendered from the store"
+    );
+    assert_eq!(snapshot(&rig.placement()), Some(expect(mine)));
+
+    // Untouched ⇒ the escape keeps the author's version.
+    let escaped = pull_data(
+        &rig.ctx(&plane, &foll),
+        ops::PullScope::One {
+            store: ops::StoreScope::Here,
+            name: "pr-describe".into(),
+            workspace: None,
+            mode: ops::TargetMode::OntoCurrent,
+        },
+    )
+    .unwrap();
+    assert_eq!(only(&escaped).action, PullAction::Merged);
+    assert_eq!(snapshot(&rig.placement()), Some(expect(mine)));
+    assert!(!copy.exists());
+}
+
+/// `update --reset` in the RECORDED-conflict state resolves it the team's way: the author's draft is
+/// snapshotted and discarded, theirs lands on the placement, and the conflict record is CLEARED —
+/// with the marked-up copy it named — so publish is not left refused by a divergence that no longer
+/// exists, and the next sweep reads the skill current instead of re-disclosing a stale block.
 #[test]
 fn reset_clears_the_recorded_conflict_block() {
     let rig = Rig::new("reset-clears");
@@ -1367,8 +1467,10 @@ fn reset_clears_the_recorded_conflict_block() {
         PullAction::Conflicted
     );
     assert!(rig.conflict_exists(&id));
+    let copy = rig.conflict_copy(&id);
+    assert!(copy.exists(), "the marked-up copy is written");
 
-    // The loss-led discard (`--yes`): theirs restored, the block gone.
+    // The loss-led discard (`--yes`): theirs restored, the block gone, the copy gone with it.
     ops::reset(
         &rig.ctx(&plane, &foll),
         &[name],
@@ -1378,9 +1480,10 @@ fn reset_clears_the_recorded_conflict_block() {
     )
     .unwrap();
     assert!(!rig.conflict_exists(&id), "the reset clears the block");
+    assert!(!copy.exists(), "and the marked-up copy with it");
     assert_eq!(
-        std::fs::read(rig.placement().join("SKILL.md")).unwrap(),
-        b"# v1\n",
+        snapshot(&rig.placement()),
+        Some(expect(V1)),
         "the placement holds the team's bytes after the reset"
     );
 
@@ -1471,9 +1574,11 @@ fn merge_unreachable_from_clean_follower_states() {
     }
 }
 
-/// A binary (non-UTF-8) file diverging three ways is never line-merged: theirs is kept at the path and
-/// mine in a `.topos-mine` sidecar, and the materialized tree scans back to the recorded conflict digest
-/// (the sidecar round-trips through the scanner — the heal signal stays valid).
+/// A binary (non-UTF-8) file diverging three ways is never line-merged: theirs is kept at the path
+/// and mine in a `.topos-mine` sibling — both inside the CONFLICT COPY, never in a placement, so a
+/// `.topos-mine` file can never become publishable bundle content (`publish` ships a placement's
+/// bytes). The copy scans back to the recorded conflict digest (the sidecar round-trips through the
+/// scanner — the untouched signal stays valid).
 #[test]
 fn binary_conflict_keeps_both_sides_via_sidecar() {
     let rig = Rig::new("binary");
@@ -1493,35 +1598,42 @@ fn binary_conflict_keeps_both_sides_via_sidecar() {
     let data = pull_data(&rig.ctx(&plane, &foll), ops::PullScope::AllFollowed).unwrap();
     let row = only(&data);
     assert_eq!(row.action, PullAction::Conflicted);
-    // theirs kept at the path, mine in the sidecar.
+    // The placement keeps MINE whole — no `.topos-mine` sibling, nothing of theirs. That is what
+    // makes the sibling unpublishable: `publish` ships a PLACEMENT's bytes.
+    assert_eq!(snapshot(&rig.placement()), Some(expect(mine)));
+    // theirs kept at the path, mine in the sidecar — both inside the conflict copy.
+    let copy = rig.conflict_copy(&id);
     assert_eq!(
-        std::fs::read(rig.placement().join("logo.bin")).unwrap(),
+        std::fs::read(copy.join("logo.bin")).unwrap(),
         &[0xffu8, 7, 7]
     );
     assert_eq!(
-        std::fs::read(rig.placement().join("logo.bin.topos-mine")).unwrap(),
+        std::fs::read(copy.join("logo.bin.topos-mine")).unwrap(),
         &[0xffu8, 9, 9]
     );
-    // The on-disk tree scans back to the recorded conflict digest (sidecars survive the scanner).
+    // The copy scans back to the recorded conflict digest (sidecars survive the scanner).
     let cs: topos_types::persisted::ConflictState =
         doc::read_doc(&rig.fs, &rig.layout().published(&sid(&id)).conflict)
             .unwrap()
             .unwrap();
-    let scanned = crate::scan::scan(&rig.placement()).unwrap();
+    let scanned = crate::scan::scan(&copy).unwrap();
     assert_eq!(to_hex(&scanned.bundle_digest), cs.conflicted_digest);
 }
 
-/// The release-blocker crash gate: fault every fs op during an auto conflict resolve and assert (a) a
-/// completed conflict tree is NEVER on disk without its guard record (a marker tree is never publishable),
-/// and (b) a clean re-run always converges to the blocked conflict state — the placement holding a
-/// complete tree throughout (never torn).
+/// The release-blocker crash gate: fault every fs op during an auto conflict resolve and assert (a)
+/// the agent-readable placement holds the author's OWN complete bytes at EVERY fault — never
+/// markers, never a torn tree, never theirs (the guarantee is structural: the conflict path writes
+/// no placement at all, so no crash window can put dangerous bytes in a folder an agent reads); (b)
+/// a marked-up copy on disk always has its guard record beside it (a marker tree is never
+/// publishable); and (c) a clean re-run always converges to the blocked conflict state, with the
+/// complete marker tree in the sidecar copy.
 #[test]
-fn resolve_crash_gate_converges_and_never_unguards_markers() {
+fn resolve_crash_gate_converges_and_never_writes_markers_into_an_agent_folder() {
     let mine: &[(&str, FileMode, &[u8])] = &[
         ("SKILL.md", FileMode::Regular, b"# mine\n"),
         ("run.sh", FileMode::Executable, b"#!/bin/sh\necho v0\n"),
     ];
-    // Capture the completed conflict tree + op count from a clean run.
+    // Capture the completed conflict copy + op count from a clean run.
     let (conflict_tree, n_ops) = {
         let rig = Rig::new("cg-count");
         let (id, _name, genesis) = rig.adopt(BASE);
@@ -1533,9 +1645,10 @@ fn resolve_crash_gate_converges_and_never_unguards_markers() {
         let foll = follow(&id, FollowMode::Auto);
         let fs = FaultFs::new(0);
         pull_data(&rig.ctx_fs(&fs, &plane, &foll), ops::PullScope::AllFollowed).unwrap();
-        (snapshot(&rig.placement()), fs.ops_attempted())
+        (snapshot(&rig.conflict_copy(&id)), fs.ops_attempted())
     };
     assert!(n_ops > 4, "expected several durable ops, got {n_ops}");
+    assert!(conflict_tree.is_some(), "the clean run writes the copy");
 
     for fail_at in 1..=n_ops {
         let rig = Rig::new(&format!("cg-{fail_at}"));
@@ -1546,21 +1659,30 @@ fn resolve_crash_gate_converges_and_never_unguards_markers() {
         plane.add_version(&id, &v1);
         plane.set_current(&id, served(WS, &id, v1.id, 1));
         let foll = follow(&id, FollowMode::Auto);
+        let copy_root = rig.layout().home().join("conflicts").join("pr-describe");
 
         // Fault the Nth op (may error mid-resolve).
         let fs = FaultFs::new(fail_at);
         let _ = pull_data(&rig.ctx_fs(&fs, &plane, &foll), ops::PullScope::AllFollowed);
 
-        // SAFETY: if the completed conflict tree is on disk, its guard record MUST be present (a marker
-        // tree is never publishable). It is written + fsynced before the swap, so this holds at every fault.
-        if snapshot(&rig.placement()) == conflict_tree {
+        // THE SAFETY PROPERTY: whatever the fault did, the folder an agent reads still holds the
+        // author's own complete bytes.
+        assert_eq!(
+            snapshot(&rig.placement()),
+            Some(expect(mine)),
+            "fail_at={fail_at}: the agent folder must never hold anything but the author's version"
+        );
+        // A marked-up copy on disk always has its guard record: the record is written + fsynced
+        // before the copy, so this holds at every fault.
+        if copy_root.exists() {
             assert!(
                 rig.conflict_exists(&id),
-                "fail_at={fail_at}: a conflict tree is on disk without its guard record"
+                "fail_at={fail_at}: a conflict copy exists without its guard record"
             );
         }
 
-        // A clean re-run converges: blocked conflict, complete conflict tree on disk, applied == observed.
+        // A clean re-run converges: blocked conflict, the complete marker tree in the copy,
+        // applied == observed — and the agent folder still untouched.
         let row =
             only(&pull_data(&rig.ctx(&plane, &foll), ops::PullScope::AllFollowed).unwrap()).clone();
         assert_eq!(
@@ -1573,9 +1695,14 @@ fn resolve_crash_gate_converges_and_never_unguards_markers() {
             "fail_at={fail_at}: no guard after converge"
         );
         assert_eq!(
-            snapshot(&rig.placement()),
+            snapshot(&rig.conflict_copy(&id)),
             conflict_tree,
-            "fail_at={fail_at}: placement did not converge to the complete conflict tree"
+            "fail_at={fail_at}: the conflict copy did not converge to the complete marker tree"
+        );
+        assert_eq!(
+            snapshot(&rig.placement()),
+            Some(expect(mine)),
+            "fail_at={fail_at}: converging must not touch the agent folder either"
         );
         assert_eq!(rig.read_sync(&id).applied, 1);
     }
@@ -1583,8 +1710,9 @@ fn resolve_crash_gate_converges_and_never_unguards_markers() {
 
 // --- review-driven regression tests ---
 
-/// Escaping a recorded conflict WITHOUT editing must commit the author's ORIGINAL draft (drop the merge),
-/// never the raw conflict-marker tree — otherwise the markers would become a publishable bundle.
+/// **The "keep my version" exit.** Leaving the conflict folder alone and running `--onto-current`
+/// commits the author's ORIGINAL draft (drop the merge), never the raw marker tree — otherwise the
+/// markers would become a publishable bundle. The folder goes with the block.
 #[test]
 fn escape_of_unedited_conflict_commits_original_draft_not_markers() {
     let rig = Rig::new("escape-unedited");
@@ -1600,18 +1728,22 @@ fn escape_of_unedited_conflict_commits_original_draft_not_markers() {
     plane.set_current(&id, served(WS, &id, v1.id, 1));
     let foll = follow(&id, FollowMode::Auto);
 
-    // Auto sweep → conflict (overlapping SKILL.md) → the placement holds markers.
+    // Auto sweep → conflict (overlapping SKILL.md) → the markers are in the CONFLICT COPY, and the
+    // placement still holds MINE.
     assert_eq!(
         only(&pull_data(&rig.ctx(&plane, &foll), ops::PullScope::AllFollowed).unwrap()).action,
         PullAction::Conflicted
     );
+    let copy = rig.conflict_copy(&id);
     assert!(
-        std::fs::read_to_string(rig.placement().join("SKILL.md"))
+        std::fs::read_to_string(copy.join("SKILL.md"))
             .unwrap()
             .contains("<<<<<<<")
     );
+    assert_eq!(snapshot(&rig.placement()), Some(expect(mine)));
 
-    // Escape WITHOUT editing → commits MINE (the original draft), not the markers; clears the block.
+    // Escape WITHOUT touching the folder → commits MINE (the original draft), not the markers;
+    // clears the block and removes the folder.
     let escaped = pull_data(
         &rig.ctx(&plane, &foll),
         ops::PullScope::One {
@@ -1624,7 +1756,8 @@ fn escape_of_unedited_conflict_commits_original_draft_not_markers() {
     .unwrap();
     assert_eq!(only(&escaped).action, PullAction::Merged);
     assert!(!rig.conflict_exists(&id), "escape clears the block");
-    // The placement is exactly MINE again — no markers anywhere.
+    assert!(!copy.exists(), "and removes the marked-up copy");
+    // The placement is exactly MINE — no markers anywhere.
     assert_eq!(snapshot(&rig.placement()), Some(expect(mine)));
     assert!(
         !std::fs::read_to_string(rig.placement().join("SKILL.md"))
@@ -1632,9 +1765,14 @@ fn escape_of_unedited_conflict_commits_original_draft_not_markers() {
             .contains("<<<<<<<"),
         "the escape must not commit unresolved markers"
     );
+    // The committed escape IS the original draft re-parented on `current` — the markers never
+    // entered the publishable lineage.
+    let m = mk_version(&[v1.id], mine, DEVICE, "topos: merge escape");
+    assert!(rig.open_store(&id).list_versions().unwrap().contains(&m.id));
 }
 
-/// Escaping a recorded conflict AFTER hand-editing it commits the author's resolution (the edited bytes).
+/// Hand-resolving the CONFLICT FOLDER and then running `--onto-current` commits those bytes — the
+/// author's resolution — onto `current`, and writes them to every managed placement.
 #[test]
 fn escape_of_edited_conflict_commits_the_resolution() {
     let rig = Rig::new("escape-edited");
@@ -1651,13 +1789,15 @@ fn escape_of_edited_conflict_commits_the_resolution() {
     let foll = follow(&id, FollowMode::Auto);
     pull_data(&rig.ctx(&plane, &foll), ops::PullScope::AllFollowed).unwrap();
 
-    // The author hand-resolves (removes markers) and then escapes.
+    // The author hand-resolves the marked-up copy (removes markers) and then escapes. The
+    // placement is deliberately left alone — the folder is the resolution surface now.
+    let copy = rig.conflict_copy(&id);
     let resolved: FileSet = &[
         ("SKILL.md", FileMode::Regular, b"# hand-resolved\n"),
         ("run.sh", FileMode::Executable, b"#!/bin/sh\necho v1\n"),
         ("ref/notes.md", FileMode::Regular, b"new in v1\n"),
     ];
-    write_tree(&rig.placement(), resolved);
+    write_tree(&copy, resolved);
     let escaped = pull_data(
         &rig.ctx(&plane, &foll),
         ops::PullScope::One {
@@ -1670,11 +1810,15 @@ fn escape_of_edited_conflict_commits_the_resolution() {
     .unwrap();
     assert_eq!(only(&escaped).action, PullAction::Merged);
     assert!(!rig.conflict_exists(&id));
+    assert!(!copy.exists(), "the resolved copy is consumed and removed");
     assert_eq!(
         snapshot(&rig.placement()),
         Some(expect(resolved)),
-        "the escape commits the author's hand resolution"
+        "the escape commits the author's hand resolution and places it"
     );
+    // Publishable: the resolution is a real 1-parent commit on `current`.
+    let m = mk_version(&[v1.id], resolved, DEVICE, "topos: merge escape");
+    assert!(rig.open_store(&id).list_versions().unwrap().contains(&m.id));
 }
 
 /// An accept RESOLVES against the version this very call discovered. `current` sits at v2 (whose
@@ -1757,23 +1901,26 @@ fn sidecar_avoids_case_fold_collision_with_a_real_path() {
         PullAction::Conflicted,
         "the binary conflict must resolve cleanly, not error on a digest collision"
     );
-    // theirs at the path, theirs' real file kept, and mine's sidecar DISAMBIGUATED away from the collision.
+    // In the CONFLICT COPY: theirs at the path, theirs' real file kept, and mine's sidecar
+    // DISAMBIGUATED away from the collision. (The placement, as always, keeps mine untouched.)
+    let copy = rig.conflict_copy(&id);
     assert_eq!(
-        std::fs::read(rig.placement().join("logo.bin")).unwrap(),
+        std::fs::read(copy.join("logo.bin")).unwrap(),
         &[0xffu8, 7, 7]
     );
-    assert!(rig.placement().join("LOGO.BIN.TOPOS-MINE").exists());
+    assert!(copy.join("LOGO.BIN.TOPOS-MINE").exists());
     assert_eq!(
-        std::fs::read(rig.placement().join("logo.bin.topos-mine-1")).unwrap(),
+        std::fs::read(copy.join("logo.bin.topos-mine-1")).unwrap(),
         &[0xffu8, 9, 9],
         "the sidecar was disambiguated to avoid the case-fold collision"
     );
-    // The materialized tree scans back to the recorded conflict digest (no kernel rejection).
+    assert_eq!(snapshot(&rig.placement()), Some(expect(mine)));
+    // The written tree scans back to the recorded conflict digest (no kernel rejection).
     let cs: topos_types::persisted::ConflictState =
         doc::read_doc(&rig.fs, &rig.layout().published(&sid(&id)).conflict)
             .unwrap()
             .unwrap();
-    let scanned = crate::scan::scan(&rig.placement()).unwrap();
+    let scanned = crate::scan::scan(&copy).unwrap();
     assert_eq!(to_hex(&scanned.bundle_digest), cs.conflicted_digest);
 }
 

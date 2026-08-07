@@ -686,8 +686,10 @@ pub(crate) fn go_back(
 /// recoverable), then the base bytes are re-materialized over the placement. `observed`/`applied` are
 /// untouched (the team's current did not move) and `held` stays `false`, so a later sweep sees the skill
 /// current again. A pristine working tree is a clean no-op (nothing to discard). A RECORDED merge
-/// conflict is cleared with the draft it described (the reset resolves the divergence the team's way),
-/// so publish is not left blocked by a conflict whose draft is gone.
+/// conflict is cleared with the draft it described — the record AND the marked-up copy in the scope's
+/// `conflicts/` dir (the reset resolves the divergence the team's way) — so publish is not left blocked
+/// by a conflict whose draft is gone. After a conflict `lock.base_commit` IS the team's version, which
+/// is what makes `--reset` on a blocked bundle mean "take theirs, drop mine".
 ///
 /// `sel` narrows the REWRITE to the ONE copy a `-a`/`--dest` selection names — the symmetric
 /// counterpart of a per-copy publish, and the other way out of a divergent-copies freeze. What it
@@ -703,7 +705,7 @@ pub(crate) fn reset_to_base(
     ctx: &Ctx<'_>,
     skill_id: &crate::id::SkillId,
     sel: &super::Selection,
-) -> Result<ResetReport, ClientError> {
+) -> Result<(), ClientError> {
     let _guard = sidecar::lock_skill(ctx.fs, &ctx.layout, skill_id)?;
     let sp = ctx.layout.published(skill_id);
     let sid = skill_id.as_str();
@@ -790,27 +792,13 @@ pub(crate) fn reset_to_base(
         },
     )?;
     // A recorded merge conflict describes the divergence this reset just DISCARDED — clear the
-    // block (idempotent; absent is fine), or publish would stay refused by a conflict whose draft
-    // no longer exists. Cleared AFTER the placements landed, mirroring the escape's order.
-    //
-    // A PER-COPY reset does not clear it: the draft the conflict describes may be exactly the copy
-    // this run left alone, and lifting a publish block over bytes that are still on disk would let
-    // an unresolved merge ship. Failing toward the gate is right — staying QUIET about it is not,
-    // so the survival is reported and the receipt says publish is still blocked.
-    let conflict_kept = if picked.is_none() {
-        ctx.fs.remove_file(&sp.conflict)?;
-        false
-    } else {
-        ctx.fs.exists(&sp.conflict)
-    };
+    // block and the marked-up copy it named (idempotent; absent is fine), or publish would stay
+    // refused by a conflict whose draft no longer exists. Cleared AFTER the placements landed,
+    // mirroring the escape's order. A PER-COPY reset clears it too: a conflict writes no markers
+    // into any folder, so there is no copy-scoped marker state a narrowed reset could leave behind.
+    super::merge_resolve::clear_conflict(ctx, &sp, &lock)?;
     log_apply(ctx, sid, "update-reset", base, &report);
-    Ok(ResetReport { conflict_kept })
-}
-
-/// What a [`reset_to_base`] left behind: whether a recorded merge conflict — and with it the
-/// publish block — outlived the reset.
-pub(crate) struct ResetReport {
-    pub conflict_kept: bool,
+    Ok(())
 }
 
 /// The current local state of a tracked skill as a read-only `PullSkill` (UpToDate) — used when a

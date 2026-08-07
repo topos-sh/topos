@@ -925,7 +925,11 @@ pub(crate) fn ignores_all(bytes: &[u8]) -> bool {
 /// the bundle ships its own root ignore file (a bundle's `.gitignore` is content, never overlaid).
 /// Returns the staging root's HELD handle: the landing re-proves the staging leaf against it
 /// (`_src`), so a stage substituted at its predictable name after this build cannot land.
-fn build_staging(
+///
+/// `pub(crate)` for ONE other caller — [`crate::ops::merge_resolve`]'s conflict copy, which writes
+/// a complete tree into the scope's own `conflicts/` dir under the same build-then-rename
+/// discipline (there is no second staged-tree builder to drift from this one).
+pub(crate) fn build_staging(
     fs: &dyn FsOps,
     parent_h: &crate::fs_seam::DirHandle,
     staging: &Path,

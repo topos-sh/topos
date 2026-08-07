@@ -192,9 +192,7 @@ published from) and `other_edited` (the copies left untouched) — both present 
 one copy was edited.
 
 `update --reset --dest` carries the same disclosure the other way round: `dest` names the copy the
-reset took, `others_kept` names the copies that kept their edits, and `conflict_kept` is `true`
-when a recorded merge conflict outlived the reset (a one-copy reset never clears it, so publish
-stays blocked until the whole-bundle `--reset` runs).
+reset took and `others_kept` names the copies that kept their edits.
 
 Three receipt fields say where bytes actually moved, so nothing has to be read out of prose:
 

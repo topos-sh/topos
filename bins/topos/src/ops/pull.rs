@@ -467,7 +467,6 @@ pub(crate) fn reset(
                 .as_ref()
                 .map(|p| p.others_edited.clone())
                 .unwrap_or_default(),
-            conflict_kept: false,
             global: store == super::StoreScope::Machine,
         });
     }
@@ -491,11 +490,8 @@ pub(crate) fn reset(
     // ---- APPLY (`--yes`) ---- discard each draft back to its base (the draft is snapshotted first),
     // each through ITS owning store — the same copy the describe above measured the loss against.
     for ((layout, id, _lock), item) in resolved.iter().zip(items.iter_mut()) {
-        let report = sync_engine::reset_to_base(&ctx_with_layout(ctx, layout), id, sel)?;
+        sync_engine::reset_to_base(&ctx_with_layout(ctx, layout), id, sel)?;
         item.applied = true;
-        // A merge conflict a one-copy reset could not clear keeps publish refused — carried onto
-        // the receipt rather than left for the next `publish` to discover.
-        item.conflict_kept = report.conflict_kept;
     }
     Ok(ResetOutcome::Applied(items))
 }

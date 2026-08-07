@@ -159,6 +159,26 @@ impl Layout {
         (base, paths)
     }
 
+    /// `conflicts/` — this scope's UNRESOLVED-MERGE workbench: one directory per blocked bundle,
+    /// holding the marked-up copy of a merge (both versions, diff3-marked) for a person to resolve
+    /// by hand. Deliberately OUTSIDE every agent-readable placement, because a folder an agent
+    /// reads must always hold one coherent, complete bundle — so markers live here and nowhere
+    /// else. Nothing under a store root is a skills directory for any harness (the person scope's
+    /// `~/.topos/`, a checkout's `.topos/` — which additionally ignores itself), so no agent ever
+    /// loads what sits here, and `publish` (which ships a PLACEMENT's bytes) can never ship it.
+    pub(crate) fn conflicts_dir(&self) -> PathBuf {
+        self.home.join("conflicts")
+    }
+
+    /// `conflicts/<dir>/` — ONE blocked bundle's marked-up copy. Keyed by the bundle's NAME (never
+    /// the opaque id) so a person can open what a receipt names, disambiguated by the SAME ladder
+    /// a skill dir climbs when the name is already held (`<name>-<workspace>`, then the id) and
+    /// RECORDED in `conflict.json`: the record is what makes the choice stable across the runs
+    /// that read it, exactly as `map.json` makes a placement's dir stable.
+    pub(crate) fn conflict_copy_dir(&self, dir: &str) -> PathBuf {
+        self.conflicts_dir().join(dir)
+    }
+
     pub(crate) fn locks_dir(&self) -> PathBuf {
         self.home.join("locks")
     }

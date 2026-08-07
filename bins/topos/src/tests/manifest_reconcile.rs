@@ -13040,10 +13040,6 @@ fn zz_a_per_copy_reset_drops_one_copys_edits_and_leaves_the_other_alone() {
         ),
         "{applied_tty}"
     );
-    assert!(
-        !applied_tty.contains("publish stays blocked"),
-        "no conflict was recorded here: {applied_tty}"
-    );
     assert_eq!(
         std::fs::read(native.join("SKILL.md")).unwrap(),
         b"# coolify-deploy\nbase\n",
@@ -13066,17 +13062,21 @@ fn zz_a_per_copy_reset_drops_one_copys_edits_and_leaves_the_other_alone() {
     assert!(d.diff.contains("shared edit"), "{}", d.diff);
 }
 
-/// A per-copy reset can leave a PUBLISH BLOCK whose cause it just erased: the recorded merge
-/// conflict is the bundle's, not one copy's, so resetting one copy never clears it. Keeping the
-/// block is right — the markers may still be on disk in the copy nobody named — but keeping it
-/// SILENTLY is not: the next `publish` would refuse for a reason the receipt never mentioned.
+/// A conflict writes markers into NO folder — only into the scope's own `conflicts/<name>/` — so
+/// there is no copy-scoped marker state a narrowed reset could leave standing. A per-copy reset
+/// therefore resolves the recorded conflict exactly as a whole-bundle one does: the record goes,
+/// the marked-up copy goes with it, and publish is unblocked. The receipt says nothing about it,
+/// because nothing outlived the reset.
 #[test]
-fn zz_a_per_copy_reset_discloses_the_publish_block_it_leaves_standing() {
+fn zz_a_per_copy_reset_clears_the_recorded_conflict_and_its_copy() {
     use topos_types::persisted::{ConflictReason, ConflictState};
 
     let (rig, name, id, _shared, _native) = frozen_copies("zz-per-copy-reset-conflict");
     let ctx = rig.ctx_at(Some(&rig.work.0));
     let sp = rig.layout().published(&id);
+    let copy = rig.layout().conflict_copy_dir("coolify-deploy");
+    std::fs::create_dir_all(&copy).unwrap();
+    std::fs::write(copy.join("SKILL.md"), b"<<<<<<< mine\n").unwrap();
     let record = |hex: &str| ConflictState {
         schema_version: 1,
         base_commit: hex.repeat(32),
@@ -13087,13 +13087,12 @@ fn zz_a_per_copy_reset_discloses_the_publish_block_it_leaves_standing() {
         draft_digest: hex.repeat(32),
         result_commit: hex.repeat(32),
         conflicted_digest: hex.repeat(32),
+        copy_dir: Some("coolify-deploy".to_owned()),
         reason: ConflictReason::ThreeWay,
         paths: Vec::new(),
     };
     crate::doc::write_doc(&rig.fs, &sp.conflict, &record("ab")).unwrap();
 
-    // ONE copy reset: the block outlives it, and the receipt says so, naming the reset that does
-    // clear it.
     let applied = ops::reset(
         &ctx,
         std::slice::from_ref(&name),
@@ -13105,34 +13104,10 @@ fn zz_a_per_copy_reset_discloses_the_publish_block_it_leaves_standing() {
     let ops::ResetOutcome::Applied(done) = &applied else {
         panic!("`--yes` applies: {applied:?}");
     };
-    assert!(done[0].conflict_kept, "{done:?}");
-    assert!(sp.conflict.exists(), "the record itself is untouched");
-    let tty = crate::render::reset_applied_tty(done);
-    assert!(
-        tty.contains(
-            "publish stays blocked — the recorded merge conflict survives a one-copy reset; \
-             `topos update coolify-deploy --reset` clears it."
-        ),
-        "{tty}"
-    );
-
-    // The WHOLE-BUNDLE reset it names does clear it — and says nothing, because there is nothing
-    // left standing to disclose.
-    let applied = ops::reset(
-        &ctx,
-        std::slice::from_ref(&name),
-        true,
-        ops::StoreScope::Here,
-        &ops::Selection::default(),
-    )
-    .unwrap();
-    let ops::ResetOutcome::Applied(done) = &applied else {
-        panic!("`--yes` applies: {applied:?}");
-    };
-    assert!(!done[0].conflict_kept, "{done:?}");
     assert!(!sp.conflict.exists(), "the block is gone with its cause");
+    assert!(!copy.exists(), "the marked-up copy goes with the record");
     assert!(
-        !crate::render::reset_applied_tty(done).contains("publish stays blocked"),
+        !crate::render::reset_applied_tty(done).contains("publish"),
         "{}",
         crate::render::reset_applied_tty(done)
     );

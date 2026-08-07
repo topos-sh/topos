@@ -87,8 +87,9 @@ If the same skill sits in several of your agents' directories, edit **one** of t
 has settled — unchanged since the previous check — the next update copies it onto the skill's other
 copies in the same scope and says so on the receipt.
 
-When the team's changes and yours genuinely collide, the copy is frozen with conflict markers and
-the ways out are named right there:
+When the team's changes and yours genuinely collide, your agents' folders are left exactly as they
+were — still your version, never conflict markers — a marked-up copy of both versions is written
+to Topos's own folder for you to merge by hand, and the ways out are named right there:
 
 ```bash
 topos diff customer-lookup
@@ -118,10 +119,6 @@ absolute path. Publishing or dropping one copy leaves every other copy exactly a
 copies that ends it: the survivor becomes your single ordinary draft. With three or more, repeat
 until one is left. `topos update <skill> --reset` with no folder still drops **every** copy's edits
 at once.
-
-A per-copy `--reset` is narrower than it looks in one respect: if the copies got there through a
-merge conflict, resetting one copy does not clear the conflict, so publish stays blocked. The
-receipt says so and names the whole-bundle `--reset` that does clear it.
 
 `--dest` on `diff` narrows only your side; it always compares against the team version, so two runs
 answer the same question about two folders.

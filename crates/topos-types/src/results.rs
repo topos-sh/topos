@@ -1697,11 +1697,6 @@ pub struct ResetData {
     /// (additive-only).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub others_kept: Vec<String>,
-    /// A recorded merge conflict that OUTLIVES this reset: a per-copy reset never clears the
-    /// bundle's conflict record (the draft it describes may be exactly the copy left alone), so
-    /// publish stays blocked and the receipt says so. **INFERRED** (additive-only).
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub conflict_kept: bool,
     /// The scope this reset ran in — `true` for the machine (`-g`). Every command the receipt
     /// offers is spelled for it. **INFERRED** (additive-only).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]

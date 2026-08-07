@@ -195,13 +195,15 @@ pub enum SwapCapability {
     Unsupported,
 }
 
-/// `skills/<id>/conflict.json` — the durable record that the working tree holds an **unresolved** author
+/// `skills/<id>/conflict.json` — the durable record that this bundle holds an **unresolved** author
 /// merge conflict. **Field-set pinned** (additive; the value enums are INFERRED). This is the single
-/// source of truth for the publish guard (presence ⇒ blocked — never a byte/marker scan) AND a pre-swap
-/// recovery journal: it is written + fsynced BEFORE the conflict tree is swapped onto the placement, so a
-/// crash mid-materialize is healed by rendering the already-committed `result_commit` (pinned by
-/// `conflicted_digest`), never by re-merging on-disk marker bytes. Cleared only by a clean resolution (a
-/// clean merge) or the disclosed escape — never by an incidental edit.
+/// source of truth for the publish guard (presence ⇒ blocked — never a byte/marker scan) AND a
+/// recovery journal: it is written + fsynced BEFORE the marked-up copy is written to the scope's own
+/// `conflicts/<copy_dir>/`, so a crash mid-write is healed by re-rendering the already-committed
+/// `result_commit` (pinned by `conflicted_digest`), never by re-merging on-disk marker bytes. The
+/// agent-readable placements are NOT touched by a conflict — they keep the author's own version —
+/// so nothing an agent reads is ever a half-state. Cleared only by a clean resolution (a clean
+/// merge), the disclosed escape, or a reset — never by an incidental edit.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
 pub struct ConflictState {
@@ -229,10 +231,19 @@ pub struct ConflictState {
     /// render target recovery re-materializes (so it never re-merges on-disk markers).
     #[cfg_attr(feature = "contract-derives", schemars(extend("pattern" = "^[0-9a-f]{64}$")))]
     pub result_commit: String,
-    /// The `bundle_digest` of the conflict tree (= `result_commit`'s tree) — the on-disk heal signal and
-    /// the `render_verified` pin. Disk re-scanning to this exact digest means "the materialize completed".
+    /// The `bundle_digest` of the conflict tree (= `result_commit`'s tree) — the `render_verified`
+    /// pin, and the UNTOUCHED signal: a `conflicts/<copy_dir>/` still scanning to exactly this
+    /// digest is a copy nobody has hand-resolved, so the escape commits the original draft instead.
     #[cfg_attr(feature = "contract-derives", schemars(extend("pattern" = "^[0-9a-f]{64}$")))]
     pub conflicted_digest: String,
+    /// The single directory component under this scope's `conflicts/` dir holding the marked-up
+    /// copy (`~/.topos/conflicts/<copy_dir>/`, or the project store's equivalent). Chosen once when
+    /// the conflict is recorded — the bundle's name, disambiguated like a skill dir — and read back
+    /// by every exit, so the folder a receipt names is the folder the escape reads and the
+    /// resolution deletes. **Additive optional**: an absent (or unsafe) value falls back to the
+    /// bundle's sanitized name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub copy_dir: Option<String>,
     pub reason: ConflictReason,
     /// The conflicting paths, sorted by raw path bytes (the agent's resolution checklist).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
