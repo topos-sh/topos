@@ -1116,14 +1116,19 @@ fn run_command(
         Command::Diff {
             skill,
             r#ref,
+            agent,
+            dest,
             max_bytes,
         } => {
             let budget = ops::DiffBudget::resolve(max_bytes, json);
-            // The FETCH_FULL_DIFF argv — this same diff, uncapped.
+            let selection = ops::Selection::one(agent.as_deref(), dest.as_deref());
+            // The FETCH_FULL_DIFF argv — this same diff, uncapped. The copy selector rides along:
+            // dropping it would refetch a DIFFERENT copy's diff than the one just truncated.
             let mut full_argv = vec!["topos".to_owned(), "diff".to_owned(), skill.clone()];
             if let Some(r) = &r#ref {
                 full_argv.push(r.clone());
             }
+            full_argv.extend(selection.argv_tail());
             full_argv.extend([
                 "--max-bytes".to_owned(),
                 "0".to_owned(),
@@ -1132,18 +1137,21 @@ fn run_command(
             finish_diff(
                 json,
                 cmd_name,
-                ops::diff(&ctx, &skill, r#ref.as_deref(), budget),
+                ops::diff(&ctx, &skill, r#ref.as_deref(), budget, &selection),
                 full_argv,
                 &diag,
             )
         }
         Command::Publish {
             target,
+            agent,
+            dest,
             to,
             propose,
             message,
             yes,
         } => {
+            let selection = ops::Selection::one(agent.as_deref(), dest.as_deref());
             // Discovery roots for the auto-add pre-step (a `publish` of an untracked local source adopts it
             // first) — the SAME roots `add`/`list` use; `None` degrades name/dir resolution the same way.
             let roots = list_discovery();
@@ -1166,11 +1174,14 @@ fn run_command(
                     propose,
                     to.as_deref(),
                     workspace.as_deref(),
+                    &selection,
                 );
                 // The paste-ready apply: this same publish plus `--yes` (preserving `--propose` / `--to`
                 // / `-m` — dropping the message would change the version's commit identity from what the
-                // describe computed, so an agent that runs this next action ships the wrong version).
+                // describe computed, so an agent that runs this next action ships the wrong version —
+                // and the copy selector, without which the apply would face the freeze again).
                 let mut yes_argv = vec!["topos".to_owned(), "publish".to_owned(), target.clone()];
+                yes_argv.extend(selection.argv_tail());
                 if propose {
                     yes_argv.push("--propose".to_owned());
                 }
@@ -1196,6 +1207,7 @@ fn run_command(
                 to.as_deref(),
                 workspace.as_deref(),
                 message.as_deref(),
+                &selection,
             );
             finish_publish(json, cmd_name, result, &diag)
         }
@@ -1273,6 +1285,8 @@ fn run_command(
             targets,
             global,
             reset,
+            agent,
+            dest,
             yes,
             onto_current,
             quiet,
@@ -1291,11 +1305,29 @@ fn run_command(
             };
             // `--reset` is its own two-phase discard verb (loss-led describe / `--yes` apply); it
             // does not flow through the reconcile and is never a `--quiet` hook shape.
+            let selection = ops::Selection::one(agent.as_deref(), dest.as_deref());
             if reset {
                 return finish_reset(
                     json,
                     cmd_name,
-                    ops::reset(&ctx, &targets, yes, store_scope),
+                    ops::reset(&ctx, &targets, yes, store_scope, &selection),
+                    &diag,
+                );
+            }
+            // `--dest`/`-a` on `update` narrows ONE thing: which copy's edits `--reset` drops. It
+            // has no meaning for the reconcile, which converges every copy the manifest demands —
+            // so it is refused by name rather than silently ignored, which would read as a
+            // narrowed update that quietly touched everything.
+            if !selection.is_empty() {
+                return emit_err(
+                    json,
+                    cmd_name,
+                    &ClientError::InvalidArgument(
+                        "`--dest`/`-a` on `update` names the copy `--reset` drops the edits of — \
+                         add `--reset`, or drop the selector (an update converges every copy your \
+                         `topos.toml` asks for)"
+                            .into(),
+                    ),
                     &diag,
                 );
             }

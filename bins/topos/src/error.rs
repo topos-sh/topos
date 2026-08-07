@@ -30,6 +30,18 @@ pub(crate) enum FetchFault {
     Gone,
 }
 
+/// ONE copy in a placement freeze ([`ClientError::PlacementsDiverged`]), spelled the two ways the
+/// refusal needs it: the folder as a person reads it, and the `--dest` value that names it back to
+/// a verb. Both come from the ONE spelling helper (`ops::dest_select::copy_spellings`), so the
+/// folder the refusal prints and the folder its offered commands accept can never drift apart.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DivergedCopy {
+    /// `project/.agents/skills/coolify-deploy` · `~/.claude/skills/coolify-deploy`.
+    pub display: String,
+    /// `.agents/skills` · `~/.claude/skills` — the `--dest` value naming this copy.
+    pub dest: String,
+}
+
 impl FetchFault {
     /// The host answered unusefully and asked for nothing in particular.
     pub(crate) fn unavailable() -> Self {
@@ -403,16 +415,24 @@ pub(crate) enum ClientError {
     #[error("the skill's files cannot be written safely — {reason}")]
     PlacementUnsupported { reason: String },
     /// MORE than one of a skill's placements holds a DIFFERENT local edit — there is no single draft
-    /// to sync, diff, or publish, and nothing is overwritten (the typed freeze). The paths name every
-    /// edited copy; the way out is reconciling them by hand into one, or discarding the edits with
-    /// `update --reset` (every edited copy is snapshotted into the sidecar store first).
+    /// to sync, diff, or publish, and nothing is overwritten (the typed freeze).
+    ///
+    /// Each copy is carried twice over — the folder as a reader sees it, and the `--dest` spelling
+    /// that names it back to a verb — because the way out is CHOOSING one copy: publish it, read
+    /// it, or drop it, and the survivor then becomes the single ordinary draft. Discarding every
+    /// copy's edits (`update <skill> --reset`) stays available, and stays last: it is the widest
+    /// loss on offer, not the first thing to reach for.
     #[error(
-        "'{skill}' has divergent local edits in more than one placement ({}) — reconcile the copies \
-         by hand, or discard the edits with `topos update {skill} --reset` (each copy is snapshotted \
-         first)",
-        paths.join(", ")
+        "'{skill}' has different edits in {} folders ({}) — name the one to work with (`--dest \
+         <folder>` on `publish`, `diff`, or `update … --reset`), or discard every copy's edits with \
+         `topos update {skill} --reset` (each copy is snapshotted first)",
+        copies.len(),
+        copies.iter().map(|c| c.display.as_str()).collect::<Vec<_>>().join(", ")
     )]
-    PlacementsDiverged { skill: String, paths: Vec<String> },
+    PlacementsDiverged {
+        skill: String,
+        copies: Vec<DivergedCopy>,
+    },
     /// The server could not be read for an explicitly-targeted skill (unreachable, not served, or a
     /// malformed response). A bare update sweep isolates such failures per skill instead of erroring.
     ///

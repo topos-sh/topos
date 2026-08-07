@@ -381,18 +381,32 @@ pub(crate) fn pull(ctx: &Ctx<'_>, scope: PullScope) -> Result<PullOutcome, Clien
 /// the followed `current` (an imported skill's adopted origin). Resolves ALL-OR-NONE, in the SCOPE the
 /// invocation named (`store`) — the copy the describe measures is the copy `--yes` discards.
 ///
+/// `sel` narrows the discard to ONE copy (`-a`/`--dest`). It is the symmetric counterpart of a
+/// per-copy publish, and strictly LESS destructive than the whole-bundle reset, which stays exactly
+/// as it was: the same two-phase rail, the same loss-led describe, and every edited copy still
+/// snapshotted into the store first — only the set of folders rewritten narrows.
+///
 /// # Errors
-/// [`ClientError::InvalidArgument`] with no named skill; name-resolution errors; a store / io failure.
+/// [`ClientError::InvalidArgument`] with no named skill, or with a selection spread over several
+/// skills; name-resolution errors; a store / io failure.
 pub(crate) fn reset(
     ctx: &Ctx<'_>,
     targets: &[String],
     yes: bool,
     store: super::StoreScope,
+    sel: &super::Selection,
 ) -> Result<ResetOutcome, ClientError> {
     if targets.is_empty() {
         return Err(ClientError::InvalidArgument(
             "`update --reset` needs a skill name — it discards that skill's local edits; it will not \
              reset every followed skill at once (name the skill: `topos update <skill> --reset`)"
+                .into(),
+        ));
+    }
+    if !sel.is_empty() && targets.len() > 1 {
+        return Err(ClientError::InvalidArgument(
+            "`--dest`/`-a` names ONE copy of ONE skill — name a single skill, or drop the \
+             selector to reset every copy of each"
                 .into(),
         ));
     }
@@ -412,15 +426,21 @@ pub(crate) fn reset(
         // freeze is exactly what `--reset` is the named way out of), so the loss is disclosed as
         // the frozen set instead of failing the reset. UNCAPPED deliberately: a loss disclosure
         // must never truncate what would be discarded.
-        let drop_diff =
-            match super::diff_resolved(ctx, layout, id, lock, None, super::DiffBudget::unlimited())
-            {
-                Ok(d) => d.diff,
-                Err(e @ ClientError::PlacementsDiverged { .. }) => {
-                    format!("{e}\n(each copy is snapshotted into the local store before the reset)")
-                }
-                Err(e) => return Err(e),
-            };
+        let drop_diff = match super::diff_resolved(
+            ctx,
+            layout,
+            id,
+            lock,
+            None,
+            super::DiffBudget::unlimited(),
+            sel,
+        ) {
+            Ok(d) => d.diff,
+            Err(e @ ClientError::PlacementsDiverged { .. }) => {
+                format!("{e}\n(each copy is snapshotted into the local store before the reset)")
+            }
+            Err(e) => return Err(e),
+        };
         items.push(ResetData {
             skill: lock.name.clone(),
             workspace_id: super::followed_workspace(ctx, id.as_str()),
@@ -438,6 +458,9 @@ pub(crate) fn reset(
             yes_argv.push("-g".to_owned());
         }
         yes_argv.extend(targets.iter().cloned());
+        // The copy selector rides along for the same reason the scope flag does — without it the
+        // apply would discard EVERY copy's edits, not the one described.
+        yes_argv.extend(sel.argv_tail());
         yes_argv.push("--reset".to_owned());
         yes_argv.push("--yes".to_owned());
         return Ok(ResetOutcome::Described { items, yes_argv });
@@ -446,7 +469,7 @@ pub(crate) fn reset(
     // ---- APPLY (`--yes`) ---- discard each draft back to its base (the draft is snapshotted first),
     // each through ITS owning store — the same copy the describe above measured the loss against.
     for (layout, id, _lock) in &resolved {
-        sync_engine::reset_to_base(&ctx_with_layout(ctx, layout), id)?;
+        sync_engine::reset_to_base(&ctx_with_layout(ctx, layout), id, sel)?;
     }
     for item in &mut items {
         item.applied = true;

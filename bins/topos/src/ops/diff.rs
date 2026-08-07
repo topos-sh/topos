@@ -71,12 +71,21 @@ pub(crate) fn diff(
     skill: &str,
     r#ref: Option<&str>,
     budget: DiffBudget,
+    sel: &super::Selection,
 ) -> Result<DiffData, ClientError> {
     // Resolve WHERE YOU STAND: a bundle a project `topos.toml` delivers keeps its custody in the
     // checkout's own store, and a `diff` run from inside that checkout is about THAT copy — not a
     // same-named machine twin, and not a not-found.
     let (layout, id, lock) = super::resolve_skill_here(ctx, skill, None)?;
-    diff_resolved(ctx, &layout, &id, &lock, r#ref, budget)
+    if !sel.is_empty() && r#ref.is_some() {
+        return Err(ClientError::InvalidArgument(
+            "`--dest`/`-a` narrows the copy of YOUR edits a diff reads — it has nothing to say \
+             about a diff between two versions, which are the same bytes everywhere. Drop the \
+             <ref>, or drop the selector."
+                .into(),
+        ));
+    }
+    diff_resolved(ctx, &layout, &id, &lock, r#ref, budget, sel)
 }
 
 /// [`diff`] over an ALREADY-RESOLVED copy — the entry the reset describe uses, so the loss it
@@ -84,6 +93,10 @@ pub(crate) fn diff(
 /// resolution could land on the other scope's copy and describe bytes nobody is about to lose).
 /// Every store/doc/scan read rides the OWNING layout; the plane and follow seams are machine-level
 /// and stay as they are.
+/// The `-a`/`--dest` selector narrows the RIGHT-HAND side only. The left side stays what it always
+/// is — the applied base — so two `--dest` runs answer against the same ruler and are directly
+/// comparable, which is what makes them a substitute for the copy-vs-copy grammar this deliberately
+/// does not invent.
 pub(crate) fn diff_resolved(
     ctx: &Ctx<'_>,
     layout: &sidecar::Layout,
@@ -91,12 +104,13 @@ pub(crate) fn diff_resolved(
     lock: &Lock,
     r#ref: Option<&str>,
     budget: DiffBudget,
+    sel: &super::Selection,
 ) -> Result<DiffData, ClientError> {
     let sctx = super::pull::ctx_with_layout(ctx, layout);
     let sp = layout.published(id);
 
     let Some(reference) = r#ref else {
-        return diff_draft_vs_current(&sctx, &sp, lock, budget);
+        return diff_draft_vs_current(&sctx, &sp, lock, budget, sel);
     };
 
     // Parse the ref: `<a>..<b>` is a range; otherwise a single endpoint compared against `current` (so a
@@ -119,6 +133,10 @@ pub(crate) fn diff_resolved(
         diff,
         truncated,
         files,
+        // A version-vs-version diff has no local copy to name: the same bytes reproduce the same
+        // ids everywhere, so no folder is part of the answer.
+        dest: None,
+        skill: None,
     })
 }
 
@@ -170,6 +188,7 @@ fn diff_draft_vs_current(
     sp: &sidecar::SkillPaths,
     lock: &Lock,
     budget: DiffBudget,
+    sel: &super::Selection,
 ) -> Result<DiffData, ClientError> {
     let store = Store::open(&sp.store)?;
     let version_id = parse_hex32(&lock.base_commit)?;
@@ -193,16 +212,33 @@ fn diff_draft_vs_current(
             diff: String::new(),
             truncated: false,
             files: Vec::new(),
+            dest: None,
+            skill: None,
         });
     }
     // The draft side is the WORK TREE — the single edited copy when one exists (draft-anywhere),
-    // else the first placement; several divergent copies freeze typed.
-    let placement = crate::placement::work_tree_dir(ctx, &lock.name, &map)?;
+    // else the first placement; several divergent copies freeze typed. A `-a`/`--dest` selection
+    // names ONE copy instead and BYPASSES that freeze: the aggregate classification refuses before
+    // anything can be picked, which left a frozen bundle impossible to even read.
+    let (placement, source_dir) = if sel.is_empty() {
+        (
+            crate::placement::work_tree_dir(ctx, &lock.name, &map)?,
+            None,
+        )
+    } else {
+        let picked = super::dest_select::select_copy(ctx, sel, &lock.name, &map)?;
+        (picked.dir, Some(picked.spelling.display))
+    };
     let ScannedBundle {
         files: draft,
         bundle_digest: draft_digest,
         ..
     } = scan::scan(&placement)?;
+    // WHICH copy this read: named only where the bundle sits in more than one folder — with a
+    // single copy there is nothing to disambiguate, and the answer stays exactly what it was.
+    let dest = (map.placements.len() > 1).then(|| {
+        source_dir.unwrap_or_else(|| super::dest_select::copy_spellings(ctx, &placement).display)
+    });
 
     let base_files: Vec<DiffFile<'_>> = base
         .files
@@ -235,6 +271,8 @@ fn diff_draft_vs_current(
         diff,
         truncated,
         files,
+        skill: dest.as_ref().map(|_| lock.name.clone()),
+        dest,
     })
 }
 

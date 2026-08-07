@@ -1451,7 +1451,14 @@ fn diff_is_empty_when_clean_and_a_golden_when_edited() {
     ops::add(&h.ctx(), &root).unwrap();
 
     // Clean: an unmodified added skill has an empty diff.
-    let clean = ops::diff(&h.ctx(), "pr-describe", None, ops::DiffBudget::unlimited()).unwrap();
+    let clean = ops::diff(
+        &h.ctx(),
+        "pr-describe",
+        None,
+        ops::DiffBudget::unlimited(),
+        &ops::Selection::default(),
+    )
+    .unwrap();
     assert!(
         clean.diff.is_empty(),
         "unmodified -> empty diff, got: {:?}",
@@ -1464,7 +1471,14 @@ fn diff_is_empty_when_clean_and_a_golden_when_edited() {
         "---\nname: pr-describe\n---\n\n# PR describe\n\nWrite a GREAT PR description.\n",
     )
     .unwrap();
-    let edited = ops::diff(&h.ctx(), "pr-describe", None, ops::DiffBudget::unlimited()).unwrap();
+    let edited = ops::diff(
+        &h.ctx(),
+        "pr-describe",
+        None,
+        ops::DiffBudget::unlimited(),
+        &ops::Selection::default(),
+    )
+    .unwrap();
     assert_eq!(edited.source, topos_types::results::DiffSource::Local);
     assert_golden("diff.ok", "diff", serde_json::to_value(&edited).unwrap());
 }
@@ -1486,7 +1500,14 @@ fn diff_reports_the_draft_digest_not_the_base() {
     )
     .unwrap();
 
-    let edited = ops::diff(&h.ctx(), "pr-describe", None, ops::DiffBudget::unlimited()).unwrap();
+    let edited = ops::diff(
+        &h.ctx(),
+        "pr-describe",
+        None,
+        ops::DiffBudget::unlimited(),
+        &ops::Selection::default(),
+    )
+    .unwrap();
 
     // The reported digest equals an independent scan of the on-disk draft (adopt-in-place → `root`)…
     let draft_digest = topos_core::digest::to_hex(&crate::scan::scan(&root).unwrap().bundle_digest);
@@ -1599,6 +1620,7 @@ fn add_under_fault_preserves_draft_and_is_all_or_nothing() {
                 "pr-describe",
                 None,
                 ops::DiffBudget::unlimited(),
+                &ops::Selection::default(),
             )
             .unwrap_or_else(|e| panic!("fail_at={fail_at}: tracked skill must be usable: {e:?}"));
         }

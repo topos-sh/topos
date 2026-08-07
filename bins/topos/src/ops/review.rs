@@ -230,6 +230,9 @@ fn review_describe(
         &skill_name,
         Some(&format!("current..{}", proposal.version_id)),
         budget,
+        // A proposal's diff is version-vs-version — the same bytes everywhere, so no local copy
+        // takes part in it and there is nothing to narrow.
+        &super::Selection::default(),
     )?;
     let handle = format!("{}@{}", skill_name, proposal.version_id);
     let next_argvs = verdict_next_argvs(&handle, yours);

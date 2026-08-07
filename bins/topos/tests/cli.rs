@@ -670,6 +670,43 @@ fn update_onto_current_flag_shapes_are_usage_errors() {
     let _ = std::fs::remove_dir_all(&home);
 }
 
+/// `--dest`/`-a` on `update` names the copy `--reset` drops the edits of, and nothing else. Without
+/// `--reset` it is REFUSED by name: silently ignoring it would read as a narrowed update while the
+/// reconcile converged every copy the manifest asks for. The refusal fires before any store is
+/// touched, so the machine it names is untouched too.
+#[test]
+fn update_dest_without_reset_is_refused_by_name() {
+    let home = scratch("destnoreset");
+    for args in [
+        &["update", "deploy", "--dest", ".claude/skills", "--json"][..],
+        &["update", "deploy", "-a", "codex", "--json"][..],
+    ] {
+        let out = run_raw(&home, args, false);
+        assert!(!out.status.success(), "{args:?}");
+        let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("JSON stdout");
+        assert_eq!(v["error"]["code"], "INVALID_ARGUMENT", "{v}");
+        let message = v["error"]["context"]["message"].as_str().unwrap_or_default();
+        assert!(message.contains("--reset"), "{message}");
+    }
+    // The two spellings are ONE choice: these verbs act on a single copy, so naming both refuses
+    // at the parser rather than resolving a set the act has no meaning for.
+    let out = run_raw(
+        &home,
+        &[
+            "update",
+            "deploy",
+            "--reset",
+            "-a",
+            "codex",
+            "--dest",
+            ".claude/skills",
+        ],
+        false,
+    );
+    assert!(!out.status.success());
+    let _ = std::fs::remove_dir_all(&home);
+}
+
 #[test]
 fn a_no_session_add_refusal_carries_the_structural_login_action() {
     // The most common refusal: `add @acme/foo` with no session. The envelope must carry the fix

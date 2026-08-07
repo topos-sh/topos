@@ -889,6 +889,9 @@ fn fixtures() -> Vec<(&'static str, String)> {
             diff: "--- a/SKILL.md\n+++ b/SKILL.md\n@@ -4,4 +4,4 @@\n \n # PR describe\n \n-Write a clear PR description.\n+Write a GREAT PR description.\n".to_owned(),
             truncated: false,
             files: Vec::new(),
+            // One placement — nothing to disambiguate, so the copy is not named.
+            dest: None,
+            skill: None,
         })
         .expect("DiffData serializes"),
         warnings: vec![],
@@ -1246,6 +1249,9 @@ fn fixtures() -> Vec<(&'static str, String)> {
             workspace_address: Some("topos.sh/acme".to_owned()),
             bundle_digest: "b".repeat(64),
             placements: vec!["everyone".to_owned()],
+            // ONE edited copy — nothing was chosen between, so no folder is named.
+            from_placement: None,
+            other_edited: Vec::new(),
             gate: PublishGate::Lands,
             is_revert: false,
             reach: Some(12),
@@ -1310,6 +1316,9 @@ fn fixtures() -> Vec<(&'static str, String)> {
             workspace_address: Some("topos.sh/acme".to_owned()),
             share_line: Some("https://topos.sh/acme/skills/deploy".to_owned()),
             undo: Some("topos revert deploy --to aaaaaaaaaaaa".to_owned()),
+            // ONE edited copy — the receipt names no folder and leaves none behind.
+            from_placement: None,
+            other_edited: Vec::new(),
         })
         .expect("PublishData serializes"),
         warnings: vec![],
@@ -1470,6 +1479,8 @@ fn fixtures() -> Vec<(&'static str, String)> {
                     patch_bytes: 98_304,
                 },
             ],
+            dest: None,
+            skill: None,
         })
         .expect("DiffData serializes"),
         warnings: vec![],

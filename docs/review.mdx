@@ -100,6 +100,27 @@ topos update customer-lookup --onto-current
 See your side; merge your draft onto the latest; drop **your** edits and take the team's; or keep
 **your** files and skip the merge.
 
+## When two copies disagree
+
+Edit the same skill in two folders and the copies stop agreeing on what the draft is. Nothing is
+overwritten — topos stops and asks which one you mean, listing every copy with what you can do
+with it. Answer with `--dest <folder>` (or `-a <agent>`) on any of the three verbs:
+
+```bash
+topos diff coolify-deploy --dest .claude/skills
+topos publish coolify-deploy --dest .agents/skills --yes
+topos update coolify-deploy --dest .claude/skills --reset --yes
+```
+
+The folder is written however topos last printed it at you: the one the `topos.toml` line names
+(`.claude/skills`), the one `topos list` prints (`project/.claude/skills/coolify-deploy`), or an
+absolute path. Publishing or dropping one copy leaves the other exactly as it is — it becomes your
+single ordinary draft, and the freeze is over. `topos update <skill> --reset` with no folder still
+drops **every** copy's edits at once.
+
+`--dest` on `diff` narrows only your side; it always compares against the team version, so two runs
+answer the same question about two folders.
+
 ## Leaked a secret?
 
 A revert doesn't help — old versions remain fetchable from history. In order:

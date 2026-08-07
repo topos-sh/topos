@@ -114,7 +114,14 @@ fn reset_without_a_named_skill_is_refused() {
     let inert_p = InertPlane;
     let inert_f = InertFollow;
     let ctx = rig.ctx(&inert_p, &inert_f);
-    let err = ops::reset(&ctx, &[], false, ops::StoreScope::Here).unwrap_err();
+    let err = ops::reset(
+        &ctx,
+        &[],
+        false,
+        ops::StoreScope::Here,
+        &ops::Selection::default(),
+    )
+    .unwrap_err();
     assert_eq!(err.code(), "INVALID_ARGUMENT");
     assert!(err.to_string().contains("needs a skill name"), "{err}");
 }

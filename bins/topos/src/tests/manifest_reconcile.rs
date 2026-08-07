@@ -5624,6 +5624,7 @@ fn a_landed_publish_survives_a_failed_rewrite_and_the_next_update_converges_it()
         None,
         None,
         None,
+        &ops::Selection::default(),
     )
     .unwrap();
     let data = match outcome {
@@ -5750,6 +5751,7 @@ fn a_project_scope_pending_rewrite_converges_from_the_projects_own_store() {
         None,
         None,
         None,
+        &ops::Selection::default(),
     )
     .unwrap();
     let data = match outcome {
@@ -5856,6 +5858,7 @@ fn a_removal_that_lands_mid_publish_is_never_silently_undone() {
         None,
         None,
         None,
+        &ops::Selection::default(),
     )
     .unwrap();
     let data = match outcome {
@@ -5984,6 +5987,7 @@ fn a_genesis_propose_pending_rewrite_still_converges() {
         None,
         None,
         None,
+        &ops::Selection::default(),
     )
     .unwrap();
     let data = match outcome {
@@ -9630,7 +9634,14 @@ fn diff_and_log_resolve_a_project_stores_copy() {
     let placed = proj.0.join(".claude/skills/deploy");
     std::fs::write(placed.join("SKILL.md"), b"# deploy\nrun the canary first\n").unwrap();
 
-    let d = ops::diff(&ctx, "deploy", None, ops::DiffBudget::unlimited()).unwrap();
+    let d = ops::diff(
+        &ctx,
+        "deploy",
+        None,
+        ops::DiffBudget::unlimited(),
+        &ops::Selection::default(),
+    )
+    .unwrap();
     assert!(
         d.diff.contains("run the canary first"),
         "the project copy's draft is the diff: {}",
@@ -9815,7 +9826,14 @@ fn reads_from_inside_a_project_answer_the_project_copy() {
     std::fs::write(machine_copy.join("SKILL.md"), b"# machine edit\n").unwrap();
     std::fs::write(project_copy.join("SKILL.md"), b"# project edit\n").unwrap();
 
-    let d = ops::diff(&ctx, "deploy", None, ops::DiffBudget::unlimited()).unwrap();
+    let d = ops::diff(
+        &ctx,
+        "deploy",
+        None,
+        ops::DiffBudget::unlimited(),
+        &ops::Selection::default(),
+    )
+    .unwrap();
     assert!(
         d.diff.contains("project edit") && !d.diff.contains("machine edit"),
         "the diff is the copy you stand in: {}",
@@ -9953,6 +9971,7 @@ fn a_g_reset_inside_a_project_never_reaches_the_checkouts_copy() {
         &["deploy".to_owned()],
         false,
         ops::StoreScope::Machine,
+        &ops::Selection::default(),
     )
     .expect("the machine store holds it");
     let (items, yes_argv) = match described {
@@ -9970,7 +9989,14 @@ fn a_g_reset_inside_a_project_never_reaches_the_checkouts_copy() {
         "the apply command re-spells the scope flag"
     );
 
-    ops::reset(&ctx, &["deploy".to_owned()], true, ops::StoreScope::Machine).unwrap();
+    ops::reset(
+        &ctx,
+        &["deploy".to_owned()],
+        true,
+        ops::StoreScope::Machine,
+        &ops::Selection::default(),
+    )
+    .unwrap();
     assert_eq!(
         std::fs::read(project_copy.join("SKILL.md")).unwrap(),
         b"# project edit\n",
@@ -9984,7 +10010,14 @@ fn a_g_reset_inside_a_project_never_reaches_the_checkouts_copy() {
 
     // The BARE run is the other half of the line: it acts where you stand, so it is the
     // checkout's edit that is disclosed and discarded.
-    let bare = ops::reset(&ctx, &["deploy".to_owned()], false, ops::StoreScope::Here).unwrap();
+    let bare = ops::reset(
+        &ctx,
+        &["deploy".to_owned()],
+        false,
+        ops::StoreScope::Here,
+        &ops::Selection::default(),
+    )
+    .unwrap();
     match &bare {
         ops::ResetOutcome::Described { items, yes_argv } => {
             assert!(
@@ -9996,7 +10029,14 @@ fn a_g_reset_inside_a_project_never_reaches_the_checkouts_copy() {
         }
         other => panic!("a bare reset describes: {other:?}"),
     }
-    ops::reset(&ctx, &["deploy".to_owned()], true, ops::StoreScope::Here).unwrap();
+    ops::reset(
+        &ctx,
+        &["deploy".to_owned()],
+        true,
+        ops::StoreScope::Here,
+        &ops::Selection::default(),
+    )
+    .unwrap();
     assert_eq!(
         std::fs::read(project_copy.join("SKILL.md")).unwrap(),
         b"# deploy\n",
@@ -10021,7 +10061,13 @@ fn a_g_targeted_run_misses_a_project_only_name() {
         (ops::StoreScope::Machine, false),
         (ops::StoreScope::Here, true),
     ] {
-        let r = ops::reset(&ctx, &["deploy".to_owned()], false, scope);
+        let r = ops::reset(
+            &ctx,
+            &["deploy".to_owned()],
+            false,
+            scope,
+            &ops::Selection::default(),
+        );
         assert_eq!(
             r.is_ok(),
             want,
@@ -10078,6 +10124,7 @@ fn a_reset_of_an_adopted_path_restores_the_source_dir() {
         &["zq-adopted".to_owned()],
         false,
         ops::StoreScope::Here,
+        &ops::Selection::default(),
     )
     .unwrap();
     match &described {
@@ -10094,6 +10141,7 @@ fn a_reset_of_an_adopted_path_restores_the_source_dir() {
         &["zq-adopted".to_owned()],
         true,
         ops::StoreScope::Here,
+        &ops::Selection::default(),
     )
     .unwrap();
     assert_eq!(
@@ -10472,6 +10520,7 @@ fn a_genesis_publish_describe_never_asks_for_an_audience_that_cannot_exist() {
         false,
         None,
         None,
+        &ops::Selection::default(),
     )
     .unwrap();
     assert_eq!(data.reach, None, "no audience is claimed");
@@ -10546,6 +10595,7 @@ fn the_publish_describe_audience_line_prints_and_a_failed_reach_warns() {
         None,
         None,
         None,
+        &ops::Selection::default(),
     )
     .unwrap();
     assert!(
@@ -10575,6 +10625,7 @@ fn the_publish_describe_audience_line_prints_and_a_failed_reach_warns() {
             false,
             None,
             None,
+            &ops::Selection::default(),
         )
         .unwrap()
     };
@@ -12613,4 +12664,312 @@ fn re_adding_the_feed_line_reinstalls_with_a_receipt_line() {
     );
     assert!(out.contains("installed ("), "{out}");
     assert!(!out.contains("all up to date"), "{out}");
+}
+
+// ---------------------------------------------------------------------------------------------
+// `-a`/`--dest` on `diff` / `publish` / `update --reset`: naming ONE copy when a bundle sits in
+// several folders — including the divergent-copies FREEZE, which is the case the selector exists
+// for. Naming the copy IS the choice the freeze asks for, so each verb reads past it rather than
+// re-refusing, and the copy nobody named is never touched.
+// ---------------------------------------------------------------------------------------------
+
+/// A locally-adopted bundle in TWO of the machine's skills folders, both edited with DIFFERENT
+/// bytes — the frozen shape. Returns the rig, the bundle's name, its id (which DIFFERS from the
+/// name), and the two dirs (the adopted one first). The folders are ones the registry actually
+/// spells, so `-a claude-code` names the second and the `~/` display form names either.
+fn frozen_copies(tag: &str) -> (Rig, String, crate::id::SkillId, PathBuf, PathBuf) {
+    let rig = Rig::new(tag);
+    rig.seed_session();
+    // The adopted copy lives in the shared agents folder; a sibling copy sits in Claude Code's.
+    let shared = rig.home.0.join(".agents/skills/coolify-deploy");
+    std::fs::create_dir_all(&shared).unwrap();
+    std::fs::write(shared.join("SKILL.md"), b"# coolify-deploy\nbase\n").unwrap();
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    let added = ops::add(&ctx, &shared).unwrap();
+    let id = crate::id::SkillId::parse(added.skill_id.as_deref().unwrap()).unwrap();
+    assert_ne!(id.as_str(), "coolify-deploy", "the id and the name differ");
+    // The sibling: the SAME base bytes at the same recorded baseline — a clean managed replica
+    // until it is edited below.
+    let native = rig.home.0.join(".claude/skills/coolify-deploy");
+    add_managed_copy(&rig, &id, &native, b"# coolify-deploy\nbase\n");
+    // Two DIFFERENT edits: neither copy's bytes are the other's recorded baseline, so they are
+    // true competitors — the freeze.
+    std::fs::write(shared.join("SKILL.md"), b"# coolify-deploy\nshared edit\n").unwrap();
+    std::fs::write(native.join("SKILL.md"), b"# coolify-deploy\nnative edit\n").unwrap();
+    (rig, "coolify-deploy".to_owned(), id, shared, native)
+}
+
+/// Write `body` into `dir` and record it as a second MANAGED placement of `id`, at the record's
+/// current baseline — the multi-folder shape the selector narrows.
+fn add_managed_copy(rig: &Rig, id: &crate::id::SkillId, dir: &std::path::Path, body: &[u8]) {
+    use topos_types::persisted::{PlacementKind, PlacementState, SwapCapability};
+    std::fs::create_dir_all(dir).unwrap();
+    std::fs::write(dir.join("SKILL.md"), body).unwrap();
+    let sp = rig.layout().published(id);
+    let lock: topos_types::persisted::Lock =
+        crate::doc::read_doc(&rig.fs, &sp.lock).unwrap().unwrap();
+    let mut map = crate::doc::read_map(&rig.fs, &sp.map).unwrap().unwrap();
+    map.placements.push(dir.display().to_string());
+    map.placement_state.push(PlacementState {
+        kind: PlacementKind::Native,
+        agent: Some("claude-code".to_owned()),
+        materialized_sha: Some(lock.bundle_digest),
+        pre_existing_sha: None,
+        swap_capability: SwapCapability::Unsupported,
+        adopted_source: false,
+    });
+    crate::doc::write_map(&rig.fs, &sp.map, &map).unwrap();
+}
+
+/// The freeze REFUSES a bare read and hands back a per-copy menu — and `--dest` reads straight past
+/// it. The bypass is the point: the aggregate classification refuses before anything can be picked,
+/// so before this a frozen bundle could not even be INSPECTED.
+#[test]
+fn zz_dest_reads_one_copy_of_a_frozen_bundle_while_the_bare_diff_still_refuses() {
+    let (rig, name, id, _shared, native) = frozen_copies("zz-freeze-diff");
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+
+    // Bare: the typed freeze, naming BOTH copies in both spellings the menu prints.
+    let err = ops::diff(
+        &ctx,
+        &name,
+        None,
+        ops::DiffBudget::unlimited(),
+        &ops::Selection::default(),
+    )
+    .expect_err("a bare diff of divergent copies refuses");
+    let ClientError::PlacementsDiverged { copies, .. } = &err else {
+        panic!("the typed freeze: {err:?}");
+    };
+    let displays: Vec<&str> = copies.iter().map(|c| c.display.as_str()).collect();
+    assert_eq!(
+        displays,
+        vec![
+            "~/.agents/skills/coolify-deploy",
+            "~/.claude/skills/coolify-deploy"
+        ]
+    );
+    let dests: Vec<&str> = copies.iter().map(|c| c.dest.as_str()).collect();
+    assert_eq!(dests, vec!["~/.agents/skills", "~/.claude/skills"]);
+
+    // ALL THREE accepted spellings of the SAME copy read that copy — plus `-a`, the registry's
+    // sugar for the row spelling.
+    for sel in [
+        ops::Selection::one(None, Some("~/.claude/skills")),
+        ops::Selection::one(None, Some("~/.claude/skills/coolify-deploy")),
+        ops::Selection::one(None, Some(&native.display().to_string())),
+        ops::Selection::one(Some("claude-code"), None),
+    ] {
+        let d = ops::diff(&ctx, &name, None, ops::DiffBudget::unlimited(), &sel)
+            .expect("the selector reads past the freeze");
+        assert!(d.diff.contains("native edit"), "{}", d.diff);
+        assert!(!d.diff.contains("shared edit"), "{}", d.diff);
+        // The header names WHICH copy — the bundle sits in more than one folder.
+        assert_eq!(d.dest.as_deref(), Some("~/.claude/skills/coolify-deploy"));
+        assert_eq!(d.skill.as_deref(), Some("coolify-deploy"));
+    }
+
+    // The OTHER copy, by its own folder — and the left-hand side is the SAME applied base, which
+    // is what makes two `--dest` runs comparable.
+    let sp = rig.layout().published(&id);
+    let lock: topos_types::persisted::Lock =
+        crate::doc::read_doc(&rig.fs, &sp.lock).unwrap().unwrap();
+    let other = ops::diff(
+        &ctx,
+        &name,
+        None,
+        ops::DiffBudget::unlimited(),
+        &ops::Selection::one(None, Some("~/.agents/skills")),
+    )
+    .unwrap();
+    assert!(other.diff.contains("shared edit"), "{}", other.diff);
+    assert_eq!(other.version_id, lock.base_commit);
+}
+
+/// The two refusals the selector owes a person who names the wrong folder: one holding no copy of
+/// this bundle (answered with every folder that DOES), and one holding a copy with nothing to act
+/// on (answered plainly, rather than doing a no-op and reporting success).
+#[test]
+fn zz_a_dest_naming_no_copy_or_a_clean_copy_refuses_by_name() {
+    let (rig, name, id, _shared, _native) = frozen_copies("zz-dest-refusals");
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+
+    let err = ops::diff(
+        &ctx,
+        &name,
+        None,
+        ops::DiffBudget::unlimited(),
+        &ops::Selection::one(None, Some("~/.cursor/skills")),
+    )
+    .expect_err("a folder holding no copy refuses");
+    assert_eq!(err.code(), "INVALID_ARGUMENT");
+    let message = crate::render::safe_message(&err);
+    assert!(
+        message.contains("~/.agents/skills/coolify-deploy")
+            && message.contains("~/.claude/skills/coolify-deploy"),
+        "the refusal names every copy it DOES have: {message}"
+    );
+
+    // A third copy at the recorded baseline — a managed replica with nothing edited in it.
+    let clean = rig.home.0.join(".codex/skills/coolify-deploy");
+    add_managed_copy(&rig, &id, &clean, b"# coolify-deploy\nbase\n");
+    let err = ops::diff(
+        &ctx,
+        &name,
+        None,
+        ops::DiffBudget::unlimited(),
+        &ops::Selection::one(None, Some("~/.codex/skills")),
+    )
+    .expect_err("a copy with no edits refuses rather than answering nothing");
+    let message = crate::render::safe_message(&err);
+    assert!(message.starts_with("that copy has no edits"), "{message}");
+    assert!(
+        message.contains("~/.codex/skills/coolify-deploy"),
+        "{message}"
+    );
+}
+
+/// The per-copy reset: the loss-led rail unchanged, narrowed to ONE folder. The described delta is
+/// that copy's alone, the apply restores only that copy, and the copy left behind keeps its bytes —
+/// which is what makes it the single ordinary draft afterwards.
+#[test]
+fn zz_a_per_copy_reset_drops_one_copys_edits_and_leaves_the_other_alone() {
+    let (rig, name, _id, shared, native) = frozen_copies("zz-per-copy-reset");
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    let sel = ops::Selection::one(Some("claude-code"), None);
+
+    let described = ops::reset(
+        &ctx,
+        std::slice::from_ref(&name),
+        false,
+        ops::StoreScope::Here,
+        &sel,
+    )
+    .unwrap();
+    let ops::ResetOutcome::Described { items, yes_argv } = &described else {
+        panic!("the bare reset DESCRIBES: {described:?}");
+    };
+    assert!(
+        items[0].drop_diff.contains("native edit") && !items[0].drop_diff.contains("shared edit"),
+        "the loss shown is THIS copy's: {}",
+        items[0].drop_diff
+    );
+    // The apply command carries the selector — without it `--yes` would discard both copies.
+    assert_eq!(
+        yes_argv,
+        &vec![
+            "topos".to_owned(),
+            "update".to_owned(),
+            name.clone(),
+            "-a".to_owned(),
+            "claude-code".to_owned(),
+            "--reset".to_owned(),
+            "--yes".to_owned(),
+        ]
+    );
+
+    ops::reset(
+        &ctx,
+        std::slice::from_ref(&name),
+        true,
+        ops::StoreScope::Here,
+        &sel,
+    )
+    .unwrap();
+    assert_eq!(
+        std::fs::read(native.join("SKILL.md")).unwrap(),
+        b"# coolify-deploy\nbase\n",
+        "the named copy is back at base"
+    );
+    assert_eq!(
+        std::fs::read(shared.join("SKILL.md")).unwrap(),
+        b"# coolify-deploy\nshared edit\n",
+        "the copy nobody named keeps its edits"
+    );
+    // The freeze is gone: one edited copy left, so it is THE draft and a bare diff reads it.
+    let d = ops::diff(
+        &ctx,
+        &name,
+        None,
+        ops::DiffBudget::unlimited(),
+        &ops::Selection::default(),
+    )
+    .expect("one edited copy is the ordinary draft");
+    assert!(d.diff.contains("shared edit"), "{}", d.diff);
+}
+
+/// Publishing ONE copy is the other way out of the freeze, and it is safe: the copy that shipped
+/// advances to the new current, the copy that did not is never written, and the competitor test
+/// then finds exactly one edited copy — the same shape "a teammate published while I had local
+/// edits" has always produced. The receipt carries both halves.
+#[test]
+fn zz_a_per_copy_publish_leaves_the_other_copy_alone_and_resolves_the_freeze() {
+    let (rig, name, _id, shared, native) = frozen_copies("zz-per-copy-publish");
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let plane = FakePlane::new(log);
+    plane.serves(Vec::new());
+    let dir = FakeDirectory::new(Vec::new(), Vec::new());
+    let session_connect = |_s: &Session| ops::SessionTransports {
+        plane: Box::new(plane.clone()),
+        directory: Box::new(dir.clone()),
+        contribute: Box::new(OkPublish),
+        governance: Box::new(NoGovernance),
+    };
+    let cc = |_base: &str, _tok: Option<&str>| -> Box<dyn crate::plane::ContributeSource> {
+        Box::new(NoContribute)
+    };
+    let publish = |sel: &ops::Selection| {
+        ops::publish(
+            &ctx,
+            &cc,
+            None,
+            Some(&session_connect),
+            None,
+            &name,
+            false,
+            None,
+            None,
+            None,
+            sel,
+        )
+    };
+
+    // A BARE publish still refuses — it must never pick for you; `--dest` is the consent.
+    let bare = publish(&ops::Selection::default())
+        .expect_err("a bare publish of divergent copies refuses");
+    assert_eq!(bare.code(), "PLACEMENTS_DIVERGED");
+
+    let outcome = publish(&ops::Selection::one(None, Some("~/.agents/skills")))
+        .expect("the named copy publishes");
+    let data = match outcome {
+        ops::PublishOutcome::Published(d) => d,
+        other => panic!("the publish LANDED: {other:?}"),
+    };
+    assert_eq!(
+        data.from_placement.as_deref(),
+        Some("~/.agents/skills/coolify-deploy")
+    );
+    assert_eq!(data.other_edited, vec!["~/.claude/skills/coolify-deploy"]);
+
+    // THE safety property: the copy nobody named is byte-for-byte untouched.
+    assert_eq!(
+        std::fs::read(native.join("SKILL.md")).unwrap(),
+        b"# coolify-deploy\nnative edit\n"
+    );
+    assert_eq!(
+        std::fs::read(shared.join("SKILL.md")).unwrap(),
+        b"# coolify-deploy\nshared edit\n",
+        "the published copy keeps the bytes it shipped"
+    );
+    // And the freeze has resolved: one edited copy remains, so it is the single ordinary draft.
+    let d = ops::diff(
+        &ctx,
+        &name,
+        None,
+        ops::DiffBudget::unlimited(),
+        &ops::Selection::default(),
+    )
+    .expect("the survivor is the single draft");
+    assert!(d.diff.contains("native edit"), "{}", d.diff);
 }

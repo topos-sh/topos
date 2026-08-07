@@ -33,6 +33,13 @@
       "format": "uint64",
       "minimum": 0
     },
+    "from_placement": {
+      "description": "The folder the published bytes were read from, as a person reads it\n(`project/.agents/skills/coolify-deploy`) — present only when a `--dest`/`-a` selection\nnamed ONE of several EDITED copies. A single edited copy needs no such line: it is the\ndraft, and naming its folder would say nothing. **INFERRED** (additive-only).",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "invite_line": {
       "description": "The paste-able teammate handoff line (`Ask your agent: …`) — the join instruction that\nbrings a teammate's machine into the workspace, composed from the workspace's server\norigin + address. Absent when the address is not known (a best-effort read — the publish\nitself is unaffected). **INFERRED** (additive-only).",
       "type": [
@@ -64,6 +71,13 @@
         "string",
         "null"
       ]
+    },
+    "other_edited": {
+      "description": "The other EDITED copies, untouched by this publish — each keeps its bytes and becomes an\nordinary draft ahead of the version just published. Populated on the same condition as\n`from_placement`. **INFERRED** (additive-only).",
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
     },
     "placement_missing": {
       "description": "The channel named by `--to` that no longer EXISTED at the write (deleted between the\nclient's existence check and the transaction — the in-transaction refusal, never a silent\nmint): the publish landed catalog-only; re-run `--to` once the channel exists. **INFERRED**\n(additive-only).",

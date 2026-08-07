@@ -725,11 +725,20 @@ pub(crate) fn go_back(
 /// conflict is cleared with the draft it described (the reset resolves the divergence the team's way),
 /// so publish is not left blocked by a conflict whose draft is gone.
 ///
+/// `sel` narrows the REWRITE to the ONE copy a `-a`/`--dest` selection names — the symmetric
+/// counterpart of a per-copy publish, and the other way out of a divergent-copies freeze. What it
+/// narrows is only which folders are written back to base: every edited copy is STILL snapshotted
+/// into the store first (the loss rail is not a per-copy thing — bytes that survive on disk are
+/// still bytes nobody wrote down), and the surviving copy stays exactly as it is, which makes it
+/// the single ordinary draft once the reset lands.
+///
 /// # Errors
-/// [`ClientError::PlacementUnsupported`] on an unscannable placement; a store / io / integrity failure.
+/// [`ClientError::PlacementUnsupported`] on an unscannable placement; a store / io / integrity
+/// failure; [`ClientError::SelectionRefused`] when the selection names no edited copy.
 pub(crate) fn reset_to_base(
     ctx: &Ctx<'_>,
     skill_id: &crate::id::SkillId,
+    sel: &super::Selection,
 ) -> Result<[u8; 32], ClientError> {
     let _guard = sidecar::lock_skill(ctx.fs, &ctx.layout, skill_id)?;
     let sp = ctx.layout.published(skill_id);
@@ -748,8 +757,28 @@ pub(crate) fn reset_to_base(
             placement::plan_for_skill(ctx, sid, &lock, &map)
         }
     };
+    // The selection is resolved against the RECORDED map, before reconcile: a reconcile only ever
+    // appends targets or replaces never-materialized reservations, so an EDITED copy keeps its
+    // index — and resolving against the dir rather than the index below makes that structural.
+    let picked = if sel.is_empty() {
+        None
+    } else {
+        Some(super::dest_select::select_copy(ctx, sel, &lock.name, &map)?)
+    };
     let map = placement::reconcile_map(&map, &plan);
     let managed = placement::managed_indices(&map, &plan);
+    // The apply set: every managed placement, or the ONE the selection named — located by its DIR
+    // in the reconciled map, so no index arithmetic can drift.
+    let managed = match &picked {
+        None => managed,
+        Some(p) => map
+            .placements
+            .iter()
+            .enumerate()
+            .filter(|(_, dir)| std::path::Path::new(dir) == p.dir)
+            .map(|(i, _)| i)
+            .collect(),
+    };
 
     let base = super::parse_hex32(&lock.base_commit)?;
     let base_digest = super::parse_hex32(&lock.bundle_digest)?;
@@ -799,7 +828,13 @@ pub(crate) fn reset_to_base(
     // A recorded merge conflict describes the divergence this reset just DISCARDED — clear the
     // block (idempotent; absent is fine), or publish would stay refused by a conflict whose draft
     // no longer exists. Cleared AFTER the placements landed, mirroring the escape's order.
-    ctx.fs.remove_file(&sp.conflict)?;
+    //
+    // A PER-COPY reset does not clear it: the draft the conflict describes may be exactly the copy
+    // this run left alone, and lifting a publish block over bytes that are still on disk would let
+    // an unresolved merge ship.
+    if picked.is_none() {
+        ctx.fs.remove_file(&sp.conflict)?;
+    }
     log_apply(ctx, sid, "update-reset", base, &report);
     Ok(base)
 }
@@ -1599,7 +1634,9 @@ pub(crate) fn compute_work(
     // The work tree: the resolved draft when one exists, else the first (canonical) present copy.
     let chosen: Option<&placement::PlacementScan> = match placement::classify_draft(&scans, map) {
         placement::DraftVerdict::Competitors(indices) => {
-            return Err(placement::placements_diverged(skill_name, &scans, &indices));
+            return Err(placement::placements_diverged(
+                ctx, skill_name, &scans, &indices,
+            ));
         }
         placement::DraftVerdict::One { idx, .. } => Some(&scans[idx]),
         placement::DraftVerdict::NoDraft => scans.iter().find(|s| {

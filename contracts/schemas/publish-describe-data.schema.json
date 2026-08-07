@@ -16,6 +16,13 @@
         "null"
       ]
     },
+    "from_placement": {
+      "description": "The folder the bytes WOULD be read from, as a person reads it\n(`project/.agents/skills/coolify-deploy`) — present only when a `--dest`/`-a` selection\nnamed ONE of several EDITED copies. A single edited copy needs no such line: it is the\ndraft, and naming its folder would say nothing. **INFERRED** (additive-only).",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "gate": {
       "description": "The gate outcome: an OPEN bundle lands directly; a REVIEWED one becomes a proposal.",
       "$ref": "#/$defs/PublishGate"
@@ -62,6 +69,13 @@
         "string",
         "null"
       ]
+    },
+    "other_edited": {
+      "description": "The other EDITED copies this publish would leave alone — each keeps its bytes and becomes\nan ordinary draft ahead of the version published. Populated on the same condition as\n`from_placement`. **INFERRED** (additive-only).",
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
     },
     "placement_note": {
       "description": "The default placement's mode annotation: present when a brand-new skill's `everyone`\nplacement will be WITHHELD at the apply (the channel is curated and the caller is a\nmember) — the publish lands catalog-only and a curator places it afterwards. **INFERRED**\n(additive-only).",

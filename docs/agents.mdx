@@ -167,6 +167,29 @@ file now spells it. On `remove` they **subtract**: only the named destinations a
 the row survives with the others (`kind: "manifest-narrowed"`, and `uninstalled[].remaining` counts
 what the row still names), and subtracting the last one removes the row.
 
+`diff`, `publish`, and `update --reset` take the same two flags in the **singular** — they act on
+one copy, so naming a set would mean nothing, and the two spellings refuse each other:
+
+```bash
+topos diff coolify-deploy --dest .claude/skills --json
+topos publish coolify-deploy --dest .agents/skills --yes --json
+topos update coolify-deploy --dest .claude/skills --reset --yes --json
+```
+
+The folder is accepted in any spelling topos itself prints: the manifest line's
+(`.claude/skills`), the display path (`project/.claude/skills/coolify-deploy`), or an absolute
+path. A folder holding no copy of that bundle refuses and names every folder that does; a folder
+whose copy has no edits refuses too, rather than reporting a no-op as success. `--dest` on
+`update` without `--reset` is a usage error, never a silently ignored flag.
+
+This is the answer to `PLACEMENTS_DIVERGED` — the freeze raised when the same bundle is edited
+differently in two folders. Its message lists each copy with the three commands above; publishing
+or dropping one leaves the other as the single ordinary draft. `diff --dest` reads a frozen bundle
+that a bare `diff` refuses, and `publish` still refuses without a selector: it never picks a copy
+for you. Two additive receipt fields carry the choice — `from_placement` (the folder published
+from) and `other_edited` (the copies left untouched) — both present only when more than one copy
+was edited.
+
 Three receipt fields say where bytes actually moved, so nothing has to be read out of prose:
 
 - `destinations` — the folders an install landed in or a removal emptied (config files for an MCP

@@ -114,6 +114,7 @@ pub(crate) fn publish(
     channel: Option<&str>,
     workspace: Option<&str>,
     message: Option<&str>,
+    sel: &super::Selection,
 ) -> Result<PublishOutcome, ClientError> {
     // Split off an optional `@<digest>` consent pin (64-hex only); everything else is the SOURCE.
     let (source_str, pin) = parse_target(target);
@@ -152,6 +153,7 @@ pub(crate) fn publish(
         pin.as_deref(),
         workspace,
         message,
+        sel,
     )?;
     Ok(stamp_added(outcome, added))
 }
@@ -280,6 +282,7 @@ pub(crate) fn publish_describe(
     propose: bool,
     channel: Option<&str>,
     workspace: Option<&str>,
+    sel: &super::Selection,
 ) -> Result<(PublishDescribeData, Vec<String>), ClientError> {
     let (source_str, pin) = parse_target(target);
     let _ = roots;
@@ -343,8 +346,13 @@ pub(crate) fn publish_describe(
         .ok_or_else(|| ClientError::Corrupt("missing placement map".to_owned()))?;
     // The WORK TREE: the single edited copy when one exists (the draft being shipped — it may live
     // in the shared dir or any native copy), else the first placement; several DIVERGENT copies are
-    // the typed freeze (reconcile or `update --reset` first — never publish an ambiguous draft).
-    let placement = crate::placement::work_tree_dir(ctx, &lock.name, &map)?;
+    // the typed freeze — a BARE publish never picks for you. `--dest`/`-a` is what supplies the
+    // missing consent: it names ONE copy, and the copies it does not name are not touched.
+    let picked = pick_copy(ctx, sel, &lock.name, &map)?;
+    let placement = match &picked {
+        Some(p) => p.dir.clone(),
+        None => crate::placement::work_tree_dir(ctx, &lock.name, &map)?,
+    };
     let scanned = scan::scan(&placement)?;
     let digest_hex = to_hex(&scanned.bundle_digest);
     if let Some(pin) = &pin
@@ -555,6 +563,7 @@ pub(crate) fn publish_describe(
         None => (None, None, None),
     };
 
+    let (from_placement, other_edited) = from_disclosure(picked.as_ref());
     Ok((
         PublishDescribeData {
             skill: skill_name,
@@ -564,6 +573,8 @@ pub(crate) fn publish_describe(
             workspace_address,
             bundle_digest: digest_hex,
             placements,
+            from_placement,
+            other_edited,
             gate,
             // The full ancestor-bytes revert detection is the apply path's (the server treats a
             // revert-shaped publish as a forward move); the describe reports the gate + placements
@@ -583,6 +594,39 @@ pub(crate) fn publish_describe(
         },
         warnings,
     ))
+}
+
+/// The ONE copy a `-a`/`--dest` selection named, or `None` for a bare publish (which resolves the
+/// draft the ordinary way, and refuses when the copies disagree).
+///
+/// Both halves of the verb — the describe and the apply — go through here, so the preview reads
+/// the same folder the apply ships from and a refusal fires on the describe rather than after
+/// `--yes`.
+fn pick_copy(
+    ctx: &Ctx<'_>,
+    sel: &super::Selection,
+    skill_name: &str,
+    map: &PlacementMap,
+) -> Result<Option<super::dest_select::SelectedCopy>, ClientError> {
+    if sel.is_empty() {
+        return Ok(None);
+    }
+    super::dest_select::select_copy(ctx, sel, skill_name, map).map(Some)
+}
+
+/// The two disclosure fields a `--dest` publish carries — the folder shipped FROM and the other
+/// edited copies left alone — populated only when more than one copy is edited.
+///
+/// With a single edited copy there is nothing to say: that copy IS the draft, a `--dest` naming it
+/// asks for exactly what a bare publish would do, and a `from …` line would name a folder the
+/// reader never had to choose between.
+fn from_disclosure(
+    picked: Option<&super::dest_select::SelectedCopy>,
+) -> (Option<String>, Vec<String>) {
+    match picked.filter(|p| !p.others_edited.is_empty()) {
+        Some(p) => (Some(p.spelling.display.clone()), p.others_edited.clone()),
+        None => (None, Vec::new()),
+    }
 }
 
 /// The `kind` tag a `kind = "mcp"` bundle carries everywhere: the manifest row, the catalog, the
@@ -858,6 +902,7 @@ fn enrolled_publish(
     pin: Option<&str>,
     workspace: Option<&str>,
     message: Option<&str>,
+    sel: &super::Selection,
 ) -> Result<PublishOutcome, ClientError> {
     // The `--workspace` filter disambiguates a name shared across workspaces. A DELIVERED skill signs in
     // its OWN workspace (the pointer scope); a brand-new local skill (a genesis publish, no delivery)
@@ -930,8 +975,16 @@ fn enrolled_publish(
     // compares against, so a re-run whose draft has drifted refuses the in-flight op instead of riding it.
     // The WORK TREE: the single edited copy when one exists (the draft being shipped — it may live
     // in the shared dir or any native copy), else the first placement; several DIVERGENT copies are
-    // the typed freeze (reconcile or `update --reset` first — never publish an ambiguous draft).
-    let placement = crate::placement::work_tree_dir(ctx, &lock.name, &map)?;
+    // the typed freeze — a BARE publish never picks for you. `--dest`/`-a` is what supplies the
+    // missing consent, and the copies it does not name are never touched: this publish advances
+    // ONE copy to the new current, and each other edited copy keeps its bytes and becomes an
+    // ordinary draft ahead of it (the shape "a teammate published while I had local edits" has
+    // always produced).
+    let picked = pick_copy(ctx, sel, &lock.name, &map)?;
+    let placement = match &picked {
+        Some(p) => p.dir.clone(),
+        None => crate::placement::work_tree_dir(ctx, &lock.name, &map)?,
+    };
     let scanned = scan::scan(&placement)?;
     let digest_hex = to_hex(&scanned.bundle_digest);
     if let Some(pin) = pin
@@ -1046,7 +1099,16 @@ fn enrolled_publish(
         (None, None) => None,
     };
     let mut outcome = map_outcome(
-        ctx, &sp, &lock, &map, &rec, &receipt, skill_name, dir_ref, followed,
+        ctx,
+        &sp,
+        &lock,
+        &map,
+        &rec,
+        &receipt,
+        skill_name,
+        dir_ref,
+        followed,
+        picked.as_ref(),
     )?;
     // GOVERNANCE TRANSFER, by default: a landed publish — OR an opened proposal (`--propose`,
     // the reviewed-bundle downgrade) — of a bundle some manifest referenced as a LOCAL PATH
@@ -1488,6 +1550,7 @@ fn map_outcome(
     skill_name: &str,
     directory: Option<&dyn crate::plane::DirectorySource>,
     followed: bool,
+    picked: Option<&super::dest_select::SelectedCopy>,
 ) -> Result<PublishOutcome, ClientError> {
     // The three lines both landed shapes compose from the workspace's own address: the
     // `<host>/<workspace>` handle the receipt names the destination by, the members' deep link, and
@@ -1509,7 +1572,18 @@ fn map_outcome(
             let record = receipt.wire_record.as_ref().ok_or_else(|| {
                 ClientError::Corrupt("an OK publish carried no current pointer".to_owned())
             })?;
-            let new_gen = contribute::apply_publish_ok(ctx, sp, lock, map, rec, record)?;
+            // The read-your-writes advance re-reads the SAME copy this publish shipped from — the
+            // selection is threaded through rather than re-derived, or a `--dest` publish out of a
+            // freeze would land remotely and then refuse locally on the very freeze it resolved.
+            let new_gen = contribute::apply_publish_ok(
+                ctx,
+                sp,
+                lock,
+                map,
+                rec,
+                record,
+                picked.map(|p| p.dir.as_path()),
+            )?;
             // The receipt's placement detail: `curated_role_required` means the channel placement
             // (the op's `--to` target, or the default `everyone` on a genesis) was WITHHELD by a
             // curated channel's role gate — the publish landed, the reference did not. Surfaced so
@@ -1540,6 +1614,7 @@ fn map_outcome(
                         .unwrap_or(&lock.base_commit)
                 )
             });
+            let (from_placement, other_edited) = from_disclosure(picked);
             Ok(PublishOutcome::Published(PublishData {
                 skill_id: rec.skill_id.clone(),
                 name: skill_name.to_owned(),
@@ -1562,6 +1637,8 @@ fn map_outcome(
                 workspace_address,
                 share_line,
                 undo,
+                from_placement,
+                other_edited,
             }))
         }
         TerminalOutcome::NeedsReview => {

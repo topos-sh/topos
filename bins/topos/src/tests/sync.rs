@@ -1335,6 +1335,7 @@ fn reset_clears_the_recorded_conflict_block() {
         &[name],
         true,
         ops::StoreScope::Here,
+        &ops::Selection::default(),
     )
     .unwrap();
     assert!(!rig.conflict_exists(&id), "the reset clears the block");

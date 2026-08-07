@@ -94,6 +94,14 @@ pub(crate) enum Command {
         /// lost first; `--yes` applies.
         #[arg(long)]
         reset: bool,
+        /// With `--reset`: drop only this agent's copy of the edits (a slug like `codex`); every
+        /// other copy keeps its own.
+        #[arg(long, short = 'a', value_name = "SLUG", conflicts_with = "dest")]
+        agent: Option<String>,
+        /// With `--reset`: drop only the edits in this exact folder — the folder as `topos list`
+        /// prints it, or the one the `topos.toml` line names.
+        #[arg(long, value_name = "FOLDER")]
+        dest: Option<String>,
         /// Confirm an action that shows a preview first (like `--reset`).
         #[arg(long)]
         yes: bool,
@@ -305,13 +313,22 @@ pub(crate) enum Command {
         offset: Option<u64>,
     },
     /// Show what changed in a skill. Bare: your local edits against the team version. With a
-    /// version id: that version against the team's. `<a>..<b>` compares two versions.
+    /// version id: that version against the team's. `<a>..<b>` compares two versions. When the
+    /// skill sits in more than one folder, `--dest <folder>` (or `-a <agent>`) reads the edits in
+    /// that one — still against the team version, so two such runs compare like for like.
     Diff {
         /// The skill name.
         skill: String,
         /// What to compare: a version id, or `<a>..<b>`. Omitted: your edits vs the team version.
         #[arg(value_name = "REF")]
         r#ref: Option<String>,
+        /// Read this agent's copy of the skill (a slug like `codex`).
+        #[arg(long, short = 'a', value_name = "SLUG", conflicts_with = "dest")]
+        agent: Option<String>,
+        /// Read the copy in this exact folder — the folder as `topos list` prints it, or the one
+        /// the `topos.toml` line names.
+        #[arg(long, value_name = "FOLDER")]
+        dest: Option<String>,
         /// Cap the diff at this many bytes, cut at file boundaries (`0` = no cap). Default:
         /// unlimited on a terminal, 64 KiB under `--json`.
         #[arg(long, value_name = "BYTES")]
@@ -334,10 +351,19 @@ pub(crate) enum Command {
     /// Share a skill with your team. A bare run is a preview — it shows where the skill would
     /// land and who would receive it, and changes nothing; add `--yes` to apply. Publishing
     /// again ships a new version; on a skill that requires review, a publish opens a proposal
-    /// instead. Needs a login.
+    /// instead. Needs a login. When you have edited the same skill in more than one folder,
+    /// a bare publish stops and asks which one you mean; `--dest <folder>` (or `-a <agent>`)
+    /// answers it. The copy you do not pick keeps its edits and becomes an ordinary draft.
     Publish {
         /// The skill to publish: a name, a folder, or `<name>@<version>` to pin the exact bytes.
         target: String,
+        /// Publish this agent's copy of the skill (a slug like `codex`).
+        #[arg(long, short = 'a', value_name = "SLUG", conflicts_with = "dest")]
+        agent: Option<String>,
+        /// Publish the copy in this exact folder — the folder as `topos list` prints it, or the
+        /// one the `topos.toml` line names.
+        #[arg(long, value_name = "FOLDER")]
+        dest: Option<String>,
         /// Place the skill in this channel. It must already exist — channels are created in the
         /// browser. A brand-new skill with no `--to` lands in `everyone`.
         #[arg(long, value_name = "CHANNEL")]
@@ -766,6 +792,51 @@ mod tests {
         assert!(
             Cli::try_parse_from(["topos", "add", "--mcp", "io.github.a/b", "-s", "x"]).is_err()
         );
+    }
+
+    /// The three verbs that act on ONE copy take the selector in the SINGULAR — a repeatable flag
+    /// would offer a set none of them can act on — and the two spellings refuse each other, being
+    /// two ways of saying the same thing.
+    #[test]
+    fn diff_publish_and_update_take_one_copy_selector() {
+        assert!(matches!(
+            Cli::try_parse_from(["topos", "diff", "deploy", "--dest", ".claude/skills"])
+                .unwrap()
+                .command,
+            Some(Command::Diff { dest: Some(d), .. }) if d == ".claude/skills"
+        ));
+        assert!(matches!(
+            Cli::try_parse_from(["topos", "publish", "deploy", "-a", "codex"])
+                .unwrap()
+                .command,
+            Some(Command::Publish { agent: Some(a), .. }) if a == "codex"
+        ));
+        assert!(matches!(
+            Cli::try_parse_from([
+                "topos",
+                "update",
+                "deploy",
+                "--reset",
+                "--dest",
+                "project/.claude/skills/deploy"
+            ])
+            .unwrap()
+            .command,
+            Some(Command::Update { reset: true, dest: Some(d), .. })
+                if d == "project/.claude/skills/deploy"
+        ));
+        // `-a` and `--dest` are two spellings of ONE copy; naming both is a usage error, and so is
+        // naming either twice.
+        for bad in [
+            &["topos", "diff", "deploy", "-a", "codex", "--dest", "x"][..],
+            &["topos", "publish", "deploy", "-a", "codex", "--dest", "x"][..],
+            &[
+                "topos", "update", "deploy", "--reset", "-a", "codex", "--dest", "x",
+            ][..],
+            &["topos", "diff", "deploy", "--dest", "x", "--dest", "y"][..],
+        ] {
+            assert!(Cli::try_parse_from(bad.iter().copied()).is_err(), "{bad:?}");
+        }
     }
 
     #[test]

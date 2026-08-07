@@ -2972,7 +2972,14 @@ fn a_bare_diff_of_a_config_placed_bundle_answers_the_empty_no_draft_shape() {
     let ctx = rig.ctx_at(Some(&rig.work.0));
     sweep(&ctx, &plane, &dir);
 
-    let d = ops::diff(&ctx, "linear", None, ops::DiffBudget::resolve(None, true)).unwrap();
+    let d = ops::diff(
+        &ctx,
+        "linear",
+        None,
+        ops::DiffBudget::resolve(None, true),
+        &ops::Selection::default(),
+    )
+    .unwrap();
     assert_eq!(d.diff, "", "no working tree — no draft to show");
     assert!(!d.truncated);
     assert_eq!(d.version_id, topos_core::digest::to_hex(&v.id));

@@ -432,6 +432,7 @@ impl SessionInstall {
                 to,
                 None,
                 message,
+                &ops::Selection::default(),
             )
             .map_err(err_str)?
             {
@@ -477,6 +478,7 @@ impl SessionInstall {
                 false,
                 None,
                 None,
+                &ops::Selection::default(),
             )
             .map_err(err_str)?;
             Ok((data.reach, warnings))

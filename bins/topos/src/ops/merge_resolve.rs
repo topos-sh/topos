@@ -372,7 +372,9 @@ pub(crate) fn escape_recorded(
             _ => None,
         },
         placement::DraftVerdict::Competitors(indices) => {
-            return Err(placement::placements_diverged(&lock.name, &scans, &indices));
+            return Err(placement::placements_diverged(
+                ctx, &lock.name, &scans, &indices,
+            ));
         }
     };
     let Some((digest_hex, work_dir)) = chosen else {

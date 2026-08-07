@@ -749,6 +749,16 @@ pub struct DiffData {
     /// accompanying `FETCH_FULL_DIFF` next action re-runs the diff uncapped. **INFERRED** (additive).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub files: Vec<DiffPatchInfo>,
+    /// The folder the LOCAL side was read from, as a person reads it
+    /// (`project/.agents/skills/coolify-deploy`). Populated only when the bundle sits in more than
+    /// one folder — with a single copy there is nothing to disambiguate and the shape stays exactly
+    /// as it was. **INFERRED** (additive-only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dest: Option<String>,
+    /// The bundle's name, carried alongside `dest` so the answer can say WHICH bundle's which copy
+    /// it read. Populated on the same condition. **INFERRED** (additive-only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skill: Option<String>,
 }
 
 /// One file's row in a byte-capped [`DiffData`]. **INFERRED** (additive).
@@ -1298,6 +1308,17 @@ pub struct PublishData {
     /// genesis publish left no prior version to restore. **INFERRED** (additive-only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub undo: Option<String>,
+    /// The folder the published bytes were read from, as a person reads it
+    /// (`project/.agents/skills/coolify-deploy`) — present only when a `--dest`/`-a` selection
+    /// named ONE of several EDITED copies. A single edited copy needs no such line: it is the
+    /// draft, and naming its folder would say nothing. **INFERRED** (additive-only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from_placement: Option<String>,
+    /// The other EDITED copies, untouched by this publish — each keeps its bytes and becomes an
+    /// ordinary draft ahead of the version just published. Populated on the same condition as
+    /// `from_placement`. **INFERRED** (additive-only).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub other_edited: Vec<String>,
     /// An honesty note about the bundle's GitHub origin, when one is recorded: publishing does
     /// NOT rewrite a manifest's origin-pin line (`github.com/…`), so when one still references
     /// the origin this says the project keeps tracking the pin until the line is swapped for the
@@ -1733,6 +1754,17 @@ pub struct PublishDescribeData {
     pub gate: PublishGate,
     /// Whether this publish restores an ancestor's bytes (a revert-shaped publish, same gate).
     pub is_revert: bool,
+    /// The folder the bytes WOULD be read from, as a person reads it
+    /// (`project/.agents/skills/coolify-deploy`) — present only when a `--dest`/`-a` selection
+    /// named ONE of several EDITED copies. A single edited copy needs no such line: it is the
+    /// draft, and naming its folder would say nothing. **INFERRED** (additive-only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from_placement: Option<String>,
+    /// The other EDITED copies this publish would leave alone — each keeps its bytes and becomes
+    /// an ordinary draft ahead of the version published. Populated on the same condition as
+    /// `from_placement`. **INFERRED** (additive-only).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub other_edited: Vec<String>,
     /// The audience the change reaches (people entitled to the skill), when the plane discloses it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reach: Option<u64>,
@@ -2040,6 +2072,8 @@ mod tests {
             workspace_address: None,
             share_line: None,
             undo: None,
+            from_placement: None,
+            other_edited: Vec::new(),
         };
         let v = serde_json::to_value(&done).unwrap();
         assert_eq!(v["version_id"], "a".repeat(64));
@@ -2075,9 +2109,14 @@ mod tests {
             diff: String::new(),
             truncated: false,
             files: Vec::new(),
+            dest: None,
+            skill: None,
         };
         let v = serde_json::to_value(&diff).unwrap();
         assert!(v.get("truncated").is_none() && v.get("files").is_none());
+        // The copy the local side was read from is named only where more than one exists — a
+        // single-copy diff keeps the exact prior shape.
+        assert!(v.get("dest").is_none() && v.get("skill").is_none());
 
         // An unpaged log/list likewise.
         let log = LogData::default();

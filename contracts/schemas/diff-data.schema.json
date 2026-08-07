@@ -8,6 +8,13 @@
       "type": "string",
       "pattern": "^[0-9a-f]{64}$"
     },
+    "dest": {
+      "description": "The folder the LOCAL side was read from, as a person reads it\n(`project/.agents/skills/coolify-deploy`). Populated only when the bundle sits in more than\none folder — with a single copy there is nothing to disambiguate and the shape stays exactly\nas it was. **INFERRED** (additive-only).",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "diff": {
       "description": "A plain unified diff. Under a byte budget (`--max-bytes`, or the `--json` default cap) it\ncarries only the LEADING whole-file sections that fit — truncation is always at a file\nboundary, never mid-hunk — and `truncated`/`files` disclose the rest.",
       "type": "string"
@@ -18,6 +25,13 @@
       "items": {
         "$ref": "#/$defs/DiffPatchInfo"
       }
+    },
+    "skill": {
+      "description": "The bundle's name, carried alongside `dest` so the answer can say WHICH bundle's which copy\nit read. Populated on the same condition. **INFERRED** (additive-only).",
+      "type": [
+        "string",
+        "null"
+      ]
     },
     "source": {
       "$ref": "#/$defs/DiffSource"
