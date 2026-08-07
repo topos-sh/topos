@@ -12,7 +12,7 @@
 pub enum SyncStatus {
     /// ① clean follower, caught up — nothing to do.
     Current,
-    /// ② clean follower, an update is pending — fast-forward (auto) / one-tap accept (confirm-each).
+    /// ② clean follower, an update is pending — fast-forward.
     Behind,
     /// ③ local edits, caught up — a draft ahead of `current`; never nagged.
     Draft,

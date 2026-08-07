@@ -387,10 +387,7 @@ pub(crate) fn escape_recorded(
             observed: sync.observed,
             applied: sync.applied,
             action: PullAction::UpToDate,
-            offer: None,
-            conflict: None,
             merge: None,
-            merge_preview: None,
             synced_placements: None,
             destinations: Vec::new(),
             kept: Vec::new(),
@@ -999,8 +996,6 @@ fn merged_row(
         observed: sync.observed,
         applied: sync.observed, // the pending update is consumed into the merged draft
         action: PullAction::Merged,
-        offer: None,
-        conflict: None,
         merge: Some(MergeReport {
             base_version_id: to_hex(&base),
             theirs_version_id: to_hex(&theirs),
@@ -1010,7 +1005,6 @@ fn merged_row(
             conflicts: Vec::new(),
             drop_diff,
         }),
-        merge_preview: None,
         synced_placements: None,
         destinations: Vec::new(),
         kept: Vec::new(),
@@ -1039,8 +1033,6 @@ fn conflicted_row(
         observed: sync.observed,
         applied: sync.observed, // theirs is incorporated into the (blocked) conflict draft
         action: PullAction::Conflicted,
-        offer: None,
-        conflict: None,
         merge: Some(MergeReport {
             base_version_id: to_hex(&base),
             theirs_version_id: to_hex(&theirs),
@@ -1050,7 +1042,6 @@ fn conflicted_row(
             conflicts,
             drop_diff,
         }),
-        merge_preview: None,
         synced_placements: None,
         destinations: Vec::new(),
         kept: Vec::new(),

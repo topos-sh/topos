@@ -1,8 +1,8 @@
 //! `pull` — the session-start auto-update entry point + the targeted accept / go-back.
 //!
 //! The bare `topos pull` (the installed session-start hook) sweeps every followed skill toward its
-//! `current`. A targeted `topos pull <skill>` accepts a pending update for one skill (the explicit
-//! command supplies the consent a confirm-each offer solicited); `topos pull <skill>@<hash>` goes back to
+//! `current`. A targeted `topos pull <skill>` brings one skill current now instead of waiting for the
+//! next sweep; `topos pull <skill>@<hash>` goes back to
 //! a specific local version. The per-skill engine (check → plan → apply) lives in
 //! [`super::sync_engine`]; this module is the scope dispatch + aggregation.
 //!
@@ -514,9 +514,9 @@ pub(crate) enum ResetOutcome {
 /// lays. The reset is what makes a later re-delivery (a curator re-places the skill, an owner
 /// unarchives it, a `follow` lifts this device's exclusion) REINSTALL: without it,
 /// `applied == observed` and an absent placement read as "already current", and the skill would
-/// never come back. Re-arrival then passes the kernel's I-TOFU first-receive consent — an offer,
-/// disclosed, exactly as the original arrival was. A skill with no prior sync state needs no reset
-/// (it already sits at the baseline).
+/// never come back. Re-arrival then lands exactly as the original arrival did — the row demanding
+/// it is the consent, so the next sweep places its bytes. A skill with no prior sync state needs no
+/// reset (it already sits at the baseline).
 ///
 /// # Errors
 /// A store/io failure writing the sync doc.
@@ -575,8 +575,8 @@ pub(super) struct VersionSplit {
 
 /// What this installation HOLDS after the reconcile, over the skills the workspace's deliveries
 /// (the feed AND the manifest rows) named: the materialized version from `map.json` (the honest
-/// "applied" — an offered-but-unaccepted first receive has none and is skipped, as is any skill
-/// whose placement this sweep removed). COMPLETE-state across stores. Read-only.
+/// "applied" — a never-received baseline whose bytes have not landed yet has none and is skipped,
+/// as is any skill whose placement this sweep removed). COMPLETE-state across stores. Read-only.
 ///
 /// THE PICK IS DETERMINISTIC AND STATED, because the wire carries exactly ONE row per
 /// `(session, bundle)`: the PERSON-scope store (the machine's own `~/.topos/`) answers whenever it

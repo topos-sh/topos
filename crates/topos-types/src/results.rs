@@ -77,8 +77,8 @@ pub struct WorkspaceSyncReport {
     pub staleness_window_ms: u64,
 }
 
-/// One followed skill's pull state. `observed`/`applied`/`action`/`offer`/`conflict` are PINNED by
-/// name; the *value enums* (`PullAction`) and the `offer`/`conflict` field shapes are INFERRED.
+/// One followed skill's pull state. `observed`/`applied`/`action` are PINNED by name; the *value
+/// enum* (`PullAction`) is INFERRED.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
 pub struct PullSkill {
@@ -94,18 +94,9 @@ pub struct PullSkill {
     /// Highest generation actually materialized to disk.
     pub applied: u64,
     pub action: PullAction,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub offer: Option<Offer>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub conflict: Option<Conflict>,
     /// Present for the author-merge outcomes (`merged` / `conflicted`) — the resolution disclosure.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub merge: Option<MergeReport>,
-    /// The PREDICTED outcome of the three-way merge a surfaced `diverged` row implies, computed
-    /// purely in memory from already-local bytes (never a network read). Absent = unknown (not a
-    /// diverged row, or the merge base is not locally renderable). **INFERRED** (additive).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub merge_preview: Option<MergePreview>,
     /// How many OTHER agent folders a settled local draft was copied onto this run (a
     /// `draft_synced` row's count). Absent when the run synced nothing. **INFERRED** (additive).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -197,7 +188,7 @@ pub enum MergePreviewVerdict {
     Conflicted,
 }
 
-/// What `pull` did / offers for a skill. **INFERRED value set** — the four-state machine pins the
+/// What `pull` did for a skill. **INFERRED value set** — the four-state machine pins the
 /// semantics (CURRENT / BEHIND / DRAFT / DIVERGED) but not these exact tokens.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
@@ -221,11 +212,6 @@ pub enum PullAction {
     /// what left, `kept` any edited copy left in place. Distinct from `withdrawn`, which is
     /// upstream's act. **Additive.**
     Removed,
-    /// State ② confirm-each / first-receive — a one-tap offer is waiting.
-    Offered,
-    /// State ④ — a local draft conflicts with a newer remote (surfaced, not yet resolved — e.g. a
-    /// confirm-each follower's bare sweep, which offers the merge rather than running it).
-    Diverged,
     /// State ④ resolved cleanly — a three-way merge (or the escape) landed a draft-on-current.
     Merged,
     /// State ④ resolved with conflicts — a complete conflict tree was materialized and publish is blocked
@@ -241,36 +227,10 @@ pub enum PullAction {
     /// dirs were cleaned; the sidecar keeps the bytes + any draft delta ("keep it as yours" is a
     /// narration away).
     Withdrawn,
-    /// THIS DEVICE excludes the skill ("not on this device"): the agent dirs are clear here, the
-    /// person keeps receiving it everywhere else, and following it here lifts the exclusion.
-    Excluded,
     /// A store record no row claims and nothing delivers RESOLVED, once: the record retires from
     /// every surface; nothing on disk was deleted — placed files belong to the person now, and
     /// `note` carries the one-line fact. **Additive.**
     Released,
-}
-
-/// The re-disclosed bytes a `pull` offers (confirm-each / first-receive). **INFERRED fields** — the
-/// spec pins that the offer re-discloses + re-binds the digest, not its exact shape.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
-pub struct Offer {
-    #[cfg_attr(feature = "contract-derives", schemars(extend("pattern" = "^[0-9a-f]{64}$")))]
-    pub version_id: String,
-    #[cfg_attr(feature = "contract-derives", schemars(extend("pattern" = "^[0-9a-f]{64}$")))]
-    pub bundle_digest: String,
-}
-
-/// The DIVERGED panel (local draft vs newer remote). **INFERRED fields.**
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
-pub struct Conflict {
-    /// The remote version the draft diverged from.
-    #[cfg_attr(feature = "contract-derives", schemars(extend("pattern" = "^[0-9a-f]{64}$")))]
-    pub remote_version_id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(feature = "contract-derives", schemars(extend("pattern" = "^[0-9a-f]{64}$")))]
-    pub local_version_id: Option<String>,
 }
 
 /// The author-merge disclosure (the `merged` / `conflicted` outcomes of a diverged draft). **INFERRED
@@ -2041,10 +2001,7 @@ mod tests {
                 observed: 42,
                 applied: 42,
                 action: PullAction::UpToDate,
-                offer: None,
-                conflict: None,
                 merge: None,
-                merge_preview: None,
                 synced_placements: None,
                 scope: None,
                 destinations: Vec::new(),

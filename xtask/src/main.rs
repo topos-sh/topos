@@ -421,12 +421,12 @@ fn fixtures() -> Vec<(&'static str, String)> {
     use topos_types::persisted::ConflictPathKind;
     use topos_types::requests::{WireDelivery, WireDeliverySkill, WireNotice, WireVia};
     use topos_types::results::{
-        AddData, Conflict, ConflictPathReport, DiffData, DiffPatchInfo, DiffSource,
-        EnrollmentPending, InviteReadData, ListData, LogData, LoginData, LogoutData, MergePreview,
-        MergePreviewVerdict, MergeReport, ProtectData, PublishData, PublishDescribeData,
-        PublishGate, PublishedMatch, PullAction, PullData, PullSkill, RemoveData, RemoveItem,
-        RemoveKind, ReviewIndexData, ReviewIndexEntry, SkillEntry, SkillStatus, StatusData,
-        StatusScope, StatusScopeSummary, StatusTrigger, WorkspaceSyncReport,
+        AddData, ConflictPathReport, DiffData, DiffPatchInfo, DiffSource, EnrollmentPending,
+        InviteReadData, ListData, LogData, LoginData, LogoutData, MergeReport, ProtectData,
+        PublishData, PublishDescribeData, PublishGate, PublishedMatch, PullAction, PullData,
+        PullSkill, RemoveData, RemoveItem, RemoveKind, ReviewIndexData, ReviewIndexEntry,
+        SkillEntry, SkillStatus, StatusData, StatusScope, StatusScopeSummary, StatusTrigger,
+        WorkspaceSyncReport,
     };
     use topos_types::results::{AttentionCount, ListScope, McpServerSummary};
     use topos_types::{ActionCode, Affected, JsonEnvelope, Receipt, TerminalOutcome, WireError};
@@ -720,10 +720,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
                 observed: 42,
                 applied: 42,
                 action: PullAction::UpToDate,
-                offer: None,
-                conflict: None,
                 merge: None,
-                merge_preview: None,
                 synced_placements: None,
                 destinations: Vec::new(),
                 kept: Vec::new(),
@@ -759,8 +756,6 @@ fn fixtures() -> Vec<(&'static str, String)> {
                 observed: 7,
                 applied: 7,
                 action: PullAction::Merged,
-                offer: None,
-                conflict: None,
                 merge: Some(MergeReport {
                     base_version_id: fx_version.to_owned(),
                     theirs_version_id: fx_digest.to_owned(),
@@ -770,7 +765,6 @@ fn fixtures() -> Vec<(&'static str, String)> {
                     conflicts: vec![],
                     drop_diff: None,
                 }),
-                merge_preview: None,
                 synced_placements: None,
                 destinations: Vec::new(),
                 kept: Vec::new(),
@@ -805,8 +799,6 @@ fn fixtures() -> Vec<(&'static str, String)> {
                 observed: 7,
                 applied: 7,
                 action: PullAction::Conflicted,
-                offer: None,
-                conflict: None,
                 merge: Some(MergeReport {
                     base_version_id: fx_version.to_owned(),
                     theirs_version_id: fx_digest.to_owned(),
@@ -819,7 +811,6 @@ fn fixtures() -> Vec<(&'static str, String)> {
                     }],
                     drop_diff: None,
                 }),
-                merge_preview: None,
                 synced_placements: None,
                 destinations: Vec::new(),
                 kept: Vec::new(),
@@ -1367,10 +1358,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
                 observed: 12,
                 applied: 12,
                 action: PullAction::UpToDate,
-                offer: None,
-                conflict: None,
                 merge: None,
-                merge_preview: None,
                 synced_placements: None,
                 destinations: Vec::new(),
                 kept: Vec::new(),
@@ -1400,52 +1388,6 @@ fn fixtures() -> Vec<(&'static str, String)> {
                 staleness_window_ms: 604_800_000,
             }],
             behind_elsewhere: vec![],
-        })
-        .expect("PullData serializes"),
-        warnings: vec![],
-        next_actions: vec![],
-        receipt: None,
-        error: None,
-    };
-
-    // A bare `update` sweep that SURFACED a divergence (a confirm-each follower): the row carries the
-    // conflict panel AND the additive in-memory merge PREVIEW — the predicted verdict + conflicting
-    // paths, computed from already-local bytes (never a network read; absent = unknown).
-    let update_diverged = JsonEnvelope {
-        schema_version: 1,
-        command: "update".to_owned(),
-        ok: true,
-        data: serde_json::to_value(PullData {
-            scope: None,
-            skills: vec![PullSkill {
-                skill: "deploy".to_owned(),
-                workspace_id: Some("w_acme".to_owned()),
-                observed: 13,
-                applied: 12,
-                action: PullAction::Diverged,
-                offer: None,
-                conflict: Some(Conflict {
-                    remote_version_id: "c".repeat(64),
-                    local_version_id: Some("d".repeat(64)),
-                }),
-                merge: None,
-                merge_preview: Some(MergePreview {
-                    verdict: MergePreviewVerdict::Conflicted,
-                    conflicts: vec!["SKILL.md".to_owned()],
-                }),
-                synced_placements: None,
-                destinations: Vec::new(),
-                kept: Vec::new(),
-                display: None,
-                note: None,
-                scope: Some("person".to_owned()),
-                harnesses: Vec::new(),
-                kind: None,
-            }],
-            proposals_awaiting: 0,
-            notices: Vec::new(),
-            sync: Vec::new(),
-            behind_elsewhere: Vec::new(),
         })
         .expect("PullData serializes"),
         warnings: vec![],
@@ -1801,7 +1743,6 @@ fn fixtures() -> Vec<(&'static str, String)> {
         ("json/publish.ok", emit_json(&publish_ok)),
         ("json/publish.no-changes", emit_json(&publish_no_changes)),
         ("json/update.stale", emit_json(&update_stale)),
-        ("json/update.diverged", emit_json(&update_diverged)),
         ("json/diff.truncated", emit_json(&diff_truncated)),
         ("json/log.paged", emit_json(&log_paged)),
     ]

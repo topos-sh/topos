@@ -70,27 +70,6 @@
         "bundle"
       ]
     },
-    "Conflict": {
-      "description": "The DIVERGED panel (local draft vs newer remote). **INFERRED fields.**",
-      "type": "object",
-      "properties": {
-        "local_version_id": {
-          "type": [
-            "string",
-            "null"
-          ],
-          "pattern": "^[0-9a-f]{64}$"
-        },
-        "remote_version_id": {
-          "description": "The remote version the draft diverged from.",
-          "type": "string",
-          "pattern": "^[0-9a-f]{64}$"
-        }
-      },
-      "required": [
-        "remote_version_id"
-      ]
-    },
     "ConflictPathKind": {
       "description": "How a single path conflicts. **INFERRED value set.**",
       "oneOf": [
@@ -179,40 +158,6 @@
         "state"
       ]
     },
-    "MergePreview": {
-      "description": "The predicted verdict of a three-way merge that has NOT been run against the placements — a pure\nin-memory dry run of the same kernel plan + per-file diff3 the real resolution executes. Never a\npromise: the authoritative outcome is the resolution's own [`MergeReport`]. **INFERRED** (additive).",
-      "type": "object",
-      "properties": {
-        "conflicts": {
-          "description": "The paths that would conflict when `verdict` is `conflicted` (structural conflicts + failed\ncontent merges). Empty for a clean preview — and for the rare conflicted-with-no-path case\n(a merge that would empty the bundle).",
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        },
-        "verdict": {
-          "$ref": "#/$defs/MergePreviewVerdict"
-        }
-      },
-      "required": [
-        "verdict"
-      ]
-    },
-    "MergePreviewVerdict": {
-      "description": "The two predicted merge verdicts. **INFERRED** (additive value set).",
-      "oneOf": [
-        {
-          "description": "Every path would resolve cleanly — the merge would land a publishable draft-on-current.",
-          "type": "string",
-          "const": "clean"
-        },
-        {
-          "description": "At least one path would conflict — the merge would write markers and block publish.",
-          "type": "string",
-          "const": "conflicted"
-        }
-      ]
-    },
     "MergeReport": {
       "description": "The author-merge disclosure (the `merged` / `conflicted` outcomes of a diverged draft). **INFERRED\nfields** — the spec pins the merge semantics (deterministic, author-only, conflict-blocks-publish),\nnot this exact shape.",
       "type": "object",
@@ -264,26 +209,8 @@
         "clean"
       ]
     },
-    "Offer": {
-      "description": "The re-disclosed bytes a `pull` offers (confirm-each / first-receive). **INFERRED fields** — the\nspec pins that the offer re-discloses + re-binds the digest, not its exact shape.",
-      "type": "object",
-      "properties": {
-        "bundle_digest": {
-          "type": "string",
-          "pattern": "^[0-9a-f]{64}$"
-        },
-        "version_id": {
-          "type": "string",
-          "pattern": "^[0-9a-f]{64}$"
-        }
-      },
-      "required": [
-        "version_id",
-        "bundle_digest"
-      ]
-    },
     "PullAction": {
-      "description": "What `pull` did / offers for a skill. **INFERRED value set** — the four-state machine pins the\nsemantics (CURRENT / BEHIND / DRAFT / DIVERGED) but not these exact tokens.",
+      "description": "What `pull` did for a skill. **INFERRED value set** — the four-state machine pins the\nsemantics (CURRENT / BEHIND / DRAFT / DIVERGED) but not these exact tokens.",
       "oneOf": [
         {
           "description": "State ① — already current; nothing to do.",
@@ -311,16 +238,6 @@
           "const": "removed"
         },
         {
-          "description": "State ② confirm-each / first-receive — a one-tap offer is waiting.",
-          "type": "string",
-          "const": "offered"
-        },
-        {
-          "description": "State ④ — a local draft conflicts with a newer remote (surfaced, not yet resolved — e.g. a\nconfirm-each follower's bare sweep, which offers the merge rather than running it).",
-          "type": "string",
-          "const": "diverged"
-        },
-        {
           "description": "State ④ resolved cleanly — a three-way merge (or the escape) landed a draft-on-current.",
           "type": "string",
           "const": "merged"
@@ -346,11 +263,6 @@
           "const": "withdrawn"
         },
         {
-          "description": "THIS DEVICE excludes the skill (\"not on this device\"): the agent dirs are clear here, the\nperson keeps receiving it everywhere else, and following it here lifts the exclusion.",
-          "type": "string",
-          "const": "excluded"
-        },
-        {
           "description": "A store record no row claims and nothing delivers RESOLVED, once: the record retires from\nevery surface; nothing on disk was deleted — placed files belong to the person now, and\n`note` carries the one-line fact. **Additive.**",
           "type": "string",
           "const": "released"
@@ -358,7 +270,7 @@
       ]
     },
     "PullSkill": {
-      "description": "One followed skill's pull state. `observed`/`applied`/`action`/`offer`/`conflict` are PINNED by\nname; the *value enums* (`PullAction`) and the `offer`/`conflict` field shapes are INFERRED.",
+      "description": "One followed skill's pull state. `observed`/`applied`/`action` are PINNED by name; the *value\nenum* (`PullAction`) is INFERRED.",
       "type": "object",
       "properties": {
         "action": {
@@ -369,16 +281,6 @@
           "type": "integer",
           "format": "uint64",
           "minimum": 0
-        },
-        "conflict": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/Conflict"
-            },
-            {
-              "type": "null"
-            }
-          ]
         },
         "destinations": {
           "description": "The DESTINATIONS this row's action touched: the skill folders an `installed` row landed in\n(or a `removed` row uninstalled), or the config files a config-placed (`mcp`) bundle's\nentries live in. Display paths — abbreviated to `~` under the user's home. Empty (and\nomitted) for actions that moved no destination. **INFERRED** (additive).",
@@ -426,17 +328,6 @@
             }
           ]
         },
-        "merge_preview": {
-          "description": "The PREDICTED outcome of the three-way merge a surfaced `diverged` row implies, computed\npurely in memory from already-local bytes (never a network read). Absent = unknown (not a\ndiverged row, or the merge base is not locally renderable). **INFERRED** (additive).",
-          "anyOf": [
-            {
-              "$ref": "#/$defs/MergePreview"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
         "note": {
           "description": "The one-line fact a row states BESIDE its action: the whole line a `released` row prints\n(why the record resolved and where its files stand now), or — on any other action — the\nfolders this run also wrote that the action's own column does not name (a healed folder\nthat rode along with a settled-draft fan-out, a stale copy refreshed beside a fresh\ninstall). Absent when the action says everything. **INFERRED** (additive).",
           "type": [
@@ -449,16 +340,6 @@
           "type": "integer",
           "format": "uint64",
           "minimum": 0
-        },
-        "offer": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/Offer"
-            },
-            {
-              "type": "null"
-            }
-          ]
         },
         "scope": {
           "description": "The SCOPE this row reconciled in — `\"person\"` for the home dirs, or the project\ndirectory's path for an in-checkout delivery. The receipt sections rows by it. Absent on\nrows predating the field. **INFERRED** (additive).",

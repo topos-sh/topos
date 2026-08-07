@@ -3043,8 +3043,8 @@ pub(crate) fn pull_tty(
 /// to subtract, which only holds if the arithmetic does: EVERY row lands in exactly one bucket, and
 /// the parts always sum to the total the line opens with. So each state that is a decision rather
 /// than a landing gets a bucket too, named in the SAME words its own row prints — a row saying
-/// `update offered @…` is counted `offered`, never rolled into a number with no word on it.
-/// Only the buckets that actually hold something are rendered.
+/// `merge conflict with the new current @…` is counted `in merge conflict`, never rolled into a
+/// number with no word on it. Only the buckets that actually hold something are rendered.
 #[derive(Default)]
 struct PullTally {
     installed: usize,
@@ -3053,10 +3053,7 @@ struct PullTally {
     removed: usize,
     withdrawn: usize,
     no_longer_delivered: usize,
-    not_on_this_device: usize,
     up_to_date: usize,
-    offered: usize,
-    diverged: usize,
     merge_conflict: usize,
     held: usize,
     failed: usize,
@@ -3076,10 +3073,7 @@ impl PullTally {
             // Nothing on disk was deleted — the record retired, and its row says so. It is still
             // one of the rows this run checked, so it is still counted.
             A::Released => self.no_longer_delivered += 1,
-            A::Excluded => self.not_on_this_device += 1,
             A::UpToDate => self.up_to_date += 1,
-            A::Offered => self.offered += 1,
-            A::Diverged => self.diverged += 1,
             A::Conflicted => self.merge_conflict += 1,
             A::Held => self.held += 1,
         }
@@ -3095,10 +3089,7 @@ impl PullTally {
             (self.removed, "removed"),
             (self.withdrawn, "withdrawn"),
             (self.no_longer_delivered, "no longer delivered"),
-            (self.not_on_this_device, "not on this device"),
             (self.up_to_date, "already up to date"),
-            (self.offered, "offered"),
-            (self.diverged, "diverged"),
             (self.merge_conflict, "in merge conflict"),
             (self.held, "held"),
             (self.failed, "failed"),
@@ -3118,10 +3109,7 @@ impl PullTally {
             + self.removed
             + self.withdrawn
             + self.no_longer_delivered
-            + self.not_on_this_device
             + self.up_to_date
-            + self.offered
-            + self.diverged
             + self.merge_conflict
             + self.held
             + self.failed
@@ -3259,17 +3247,6 @@ fn pull_action_row(s: &PullSkill) -> (String, Vec<String>) {
         // A removal names the folders it emptied for the same reason: "2 folders" is not a place
         // anybody can go and look.
         PullAction::Removed => (destination_column("removed", s), sub_destinations(s)),
-        PullAction::Offered => {
-            let v = s
-                .offer
-                .as_ref()
-                .map(|o| short(&o.version_id))
-                .unwrap_or("?");
-            (
-                format!("update offered @{v} — run `topos update {name}`"),
-                Vec::new(),
-            )
-        }
         PullAction::Withdrawn => (
             format!(
                 "withdrawn upstream — agent dirs cleaned; your copy + drafts are kept locally (run \
@@ -3280,33 +3257,6 @@ fn pull_action_row(s: &PullSkill) -> (String, Vec<String>) {
         // The one-time orphan resolution's closing statement — the whole line IS the carried
         // fact (why the record resolved and where its files stand), composed by the sweep.
         PullAction::Released => (s.note.clone().unwrap_or_default(), Vec::new()),
-        PullAction::Excluded => (
-            String::from(
-                "not on this device (you removed it here) — your other devices still receive it",
-            ),
-            Vec::new(),
-        ),
-        PullAction::Diverged => {
-            let v = s
-                .conflict
-                .as_ref()
-                .map(|c| short(&c.remote_version_id))
-                .unwrap_or("?");
-            (
-                format!(
-                    "diverged from the new current @{v} — your local draft is kept; run \
-                     `topos update {name}` to merge it (or `topos update {name} --onto-current` to \
-                     keep your bytes and drop the update)"
-                ),
-                // The in-memory merge PREVIEW (already-local bytes only): what the merge WOULD do,
-                // so the person picks merge-vs-escape informed. Absent = unknown, nothing printed.
-                s.merge_preview
-                    .as_ref()
-                    .map(merge_preview_line)
-                    .into_iter()
-                    .collect(),
-            )
-        }
         PullAction::Merged => {
             let v = s
                 .merge
@@ -3638,8 +3588,8 @@ fn short(hex: &str) -> &str {
 mod tests {
     use topos_types::persisted::ConflictPathKind;
     use topos_types::results::{
-        AgentView, BehindElsewhere, Conflict, ConflictPathReport, ListData, LogData, MergeReport,
-        Offer, ProposeData, PublishData, PullAction, PullData, PullSkill, RemoteSkill, RemoveData,
+        AgentView, BehindElsewhere, ConflictPathReport, ListData, LogData, MergeReport,
+        ProposeData, PublishData, PullAction, PullData, PullSkill, RemoteSkill, RemoveData,
         RemoveItem, RemoveKind, SkillEntry, UntrackedEntry,
     };
 
@@ -4034,10 +3984,7 @@ mod tests {
             observed: 2,
             applied: 2,
             action,
-            offer: None,
-            conflict: None,
             merge: None,
-            merge_preview: None,
             synced_placements: None,
             destinations: Vec::new(),
             kept: Vec::new(),
@@ -4390,20 +4337,6 @@ mod tests {
 
     #[test]
     fn pull_tty_renders_each_action_with_its_next_command() {
-        let offered = PullSkill {
-            offer: Some(Offer {
-                version_id: "ab12cd34ef56".to_owned() + &"0".repeat(52),
-                bundle_digest: "9f".repeat(32),
-            }),
-            ..row("docs", PullAction::Offered)
-        };
-        let diverged = PullSkill {
-            conflict: Some(Conflict {
-                remote_version_id: "77".repeat(32),
-                local_version_id: None,
-            }),
-            ..row("deploy", PullAction::Diverged)
-        };
         let merged = PullSkill {
             merge: Some(merge_report(true, Vec::new())),
             ..row("runbook", PullAction::Merged)
@@ -4422,8 +4355,6 @@ mod tests {
             skills: vec![
                 row("style", PullAction::UpToDate),
                 row("ffwd", PullAction::FastForwarded),
-                offered,
-                diverged,
                 merged,
                 conflicted,
                 row("pinned", PullAction::Held),
@@ -4436,26 +4367,10 @@ mod tests {
         };
         let out = pull_tty(&data, &[], &[], &[]);
 
-        // Offered: the short hash + the accept command.
-        assert!(out.contains("docs"), "{out}");
-        assert!(
-            out.contains("update offered @ab12cd34ef56 — run `topos update docs`"),
-            "{out}"
-        );
         // Fast-forwarded says only that it moved — the pointer's internal edition count is a
         // `--json` field, never the human line (versions are named by hash, git-style).
         assert!(out.contains("fast-forwarded"), "{out}");
         assert!(!out.contains("generation"), "{out}");
-        // Diverged: both the merge command and the disclosed escape.
-        assert!(out.contains("`topos update deploy`"), "{out}");
-        assert!(
-            out.contains("`topos update deploy --onto-current`"),
-            "{out}"
-        );
-        assert!(
-            out.contains(&format!("@{}", &"77".repeat(32)[..12])),
-            "{out}"
-        );
         // Merged points at the review-then-publish next step.
         assert!(out.contains("`topos diff runbook`"), "{out}");
         // Conflicted: the resolving command + the conflicting path checklist.
@@ -4472,11 +4387,10 @@ mod tests {
         assert!(!out.contains("style  up to date"), "{out}");
         // The summary does the arithmetic, and it SUMS: a fast-forward and a merge both landed
         // bytes, so both read `updated`, and every remaining row is counted in the words its own
-        // row prints — 2 + 1 + 1 + 1 + 1 + 1 = the 7 the line opens with.
+        // row prints — 2 + 1 + 1 + 1 = the 5 the line opens with.
         assert!(
             out.contains(
-                "Checked 7 skills: 2 updated, 1 already up to date, 1 offered, 1 diverged, 1 in \
-                 merge conflict, 1 held."
+                "Checked 5 skills: 2 updated, 1 already up to date, 1 in merge conflict, 1 held."
             ),
             "{out}"
         );
@@ -4993,28 +4907,22 @@ mod tests {
                 PullAction::Removed => "removed",
                 PullAction::Withdrawn => "withdrawn",
                 PullAction::Released => "no longer delivered",
-                PullAction::Excluded => "not on this device",
                 PullAction::UpToDate => "already up to date",
-                PullAction::Offered => "offered",
-                PullAction::Diverged => "diverged",
                 PullAction::Conflicted => "in merge conflict",
                 PullAction::Held => "held",
             }
         }
-        const EVERY: [PullAction; 14] = [
+        const EVERY: [PullAction; 11] = [
             PullAction::UpToDate,
             PullAction::FastForwarded,
             PullAction::Installed,
             PullAction::Refreshed,
             PullAction::Removed,
-            PullAction::Offered,
-            PullAction::Diverged,
             PullAction::Merged,
             PullAction::Conflicted,
             PullAction::DraftSynced,
             PullAction::Held,
             PullAction::Withdrawn,
-            PullAction::Excluded,
             PullAction::Released,
         ];
 
@@ -5712,10 +5620,7 @@ mod tests {
             observed: 0,
             applied: 0,
             action: PullAction::Released,
-            offer: None,
-            conflict: None,
             merge: None,
-            merge_preview: None,
             synced_placements: None,
             scope: Some("person".to_owned()),
             destinations: Vec::new(),

@@ -157,9 +157,6 @@ pub(crate) trait PlaneSource {
 pub(crate) enum FollowMode {
     /// Auto-apply a new `current` (the standing pre-authorization a session carries).
     Auto,
-    /// One-tap accept each new `current` — kept for the kernel's consent table; nothing mints it
-    /// today.
-    ConfirmEach,
 }
 
 /// The per-skill delivery context the engine needs. The `workspace_id` is the EXPECTED scope — a

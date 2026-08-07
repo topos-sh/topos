@@ -1,9 +1,9 @@
 //! End-to-end tests of the pull/apply engine against a real git store + fixture plane responses (no
 //! HTTP). These exercise the release-blocker invariants: never-clobber-draft, the served record IS the
 //! sync target (a server-restore backward move applies too), the crash-after-swap heal, mis-scoped
-//! rejection, go-back/resume, and the confirm-each offer→accept (APPLY_WAITING_UPDATE), all through the
-//! public `ops::pull` entry point. Integrity is the content-addressed version id re-verified on apply —
-//! there is no signature and no anti-rollback floor.
+//! rejection, go-back/resume, and the first receive landing on the bare sweep (a manifest row IS the
+//! consent), all through the public `ops::pull` entry point. Integrity is the content-addressed version
+//! id re-verified on apply — there is no signature and no anti-rollback floor.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -367,6 +367,36 @@ fn snapshot(dir: &Path) -> Option<Vec<(String, Vec<u8>)>> {
     Some(out)
 }
 
+/// A static file set as a [`topos_gitstore::RenderedBundle`] — the shape the in-memory merge
+/// preview takes for the two published sides it compares.
+fn rendered(files: &[(&str, FileMode, &[u8])]) -> topos_gitstore::RenderedBundle {
+    let entries: Vec<ManifestEntry> = files
+        .iter()
+        .map(|(p, m, b)| ManifestEntry {
+            path: (*p).to_owned(),
+            mode: *m,
+            content_sha256: digest::sha256(b),
+        })
+        .collect();
+    topos_gitstore::RenderedBundle {
+        files: files
+            .iter()
+            .map(|(p, m, b)| topos_gitstore::RenderedFile {
+                path: (*p).to_owned(),
+                mode: *m,
+                bytes: b.to_vec(),
+                content_sha256: digest::sha256(b),
+            })
+            .collect(),
+        bundle_digest: digest::bundle_digest(&entries).unwrap(),
+    }
+}
+
+/// The all-zero sentinel a never-received baseline carries for its commit ids.
+fn zero_hex() -> String {
+    "0".repeat(64)
+}
+
 fn expect(files: &[(&str, FileMode, &[u8])]) -> Vec<(String, Vec<u8>)> {
     let mut v: Vec<(String, Vec<u8>)> = files
         .iter()
@@ -429,72 +459,84 @@ fn clean_follower_auto_fast_forwards() {
     assert_eq!(s.base_commit, to_hex(&v1.id));
 }
 
+/// **A manifest row IS the consent.** A bundle this machine's recipe demands but has never
+/// received places its first bytes on the BARE sweep — no offer, no second command — and the row
+/// reads `installed`, naming the folder it landed in. The next bare sweep then has nothing to do.
 #[test]
-fn confirm_each_offers_then_explicit_pull_accepts() {
-    let rig = Rig::new("confirm");
-    let (id, name, genesis) = rig.adopt(BASE);
+fn a_never_received_bundle_installs_on_the_bare_sweep() {
+    let rig = Rig::new("first-receive");
+    let (id, _name, genesis) = rig.adopt(BASE);
     let v1 = mk_version(&[genesis], V1, "d_pub", "v1");
+
+    // Roll the sidecar back to the never-received baseline a brand-new arrival gets: nothing
+    // applied, the all-zero base, and no bytes on disk yet.
+    std::fs::remove_dir_all(rig.placement()).unwrap();
+    rig.patch_sync(&id, |s| {
+        s.observed = 0;
+        s.observed_version_id = zero_hex();
+        s.applied = 0;
+        s.base_commit = zero_hex();
+        s.work_hash = zero_hex();
+    });
+    rig.patch_lock(&id, |l| {
+        l.base_commit = zero_hex();
+        l.bundle_digest = zero_hex();
+    });
+
     let mut plane = FixturePlane::default();
     plane.add_version(&id, &v1);
     plane.set_current(&id, served(WS, &id, v1.id, 1));
-    let foll = follow(&id, FollowMode::ConfirmEach);
+    let foll = follow(&id, FollowMode::Auto);
 
-    // The bare sweep OFFERS (raises the floor) but does not apply.
-    let ctx = rig.ctx(&plane, &foll);
-    let data = pull_data(&ctx, ops::PullScope::AllFollowed).unwrap();
+    // ONE bare sweep. The bytes are on disk when it returns.
+    let data = pull_data(&rig.ctx(&plane, &foll), ops::PullScope::AllFollowed).unwrap();
     let row = only(&data);
-    assert_eq!(row.action, PullAction::Offered);
-    assert!(row.offer.is_some());
-    assert_eq!(row.observed, 1, "floor raised");
-    assert_eq!(row.applied, 0, "not applied");
+    assert_eq!(
+        row.action,
+        PullAction::Installed,
+        "a first receive installs on the bare sweep"
+    );
+    assert_eq!(row.applied, 1);
     assert_eq!(
         snapshot(&rig.placement()),
-        Some(expect(BASE)),
-        "bytes untouched"
+        Some(expect(V1)),
+        "the first bytes landed without a second command"
     );
-
-    // The explicit `pull <skill>` accepts the pending update (APPLY_WAITING_UPDATE).
-    let ctx = rig.ctx(&plane, &foll);
-    let data = pull_data(
-        &ctx,
-        ops::PullScope::One {
-            store: ops::StoreScope::Here,
-            name,
-            workspace: None,
-            mode: ops::TargetMode::AcceptPending,
-        },
-    )
-    .unwrap();
-    let row = only(&data);
-    assert_eq!(row.action, PullAction::FastForwarded);
-    assert_eq!(snapshot(&rig.placement()), Some(expect(V1)));
+    assert_eq!(
+        row.destinations.len(),
+        1,
+        "an installed row names where the bytes went: {:?}",
+        row.destinations
+    );
+    assert!(
+        row.destinations[0].ends_with("pr-describe"),
+        "{:?}",
+        row.destinations
+    );
     assert_eq!(rig.read_sync(&id).applied, 1);
+
+    // Nothing is left waiting on a person: the next bare sweep has nothing to do.
+    let again = pull_data(&rig.ctx(&plane, &foll), ops::PullScope::AllFollowed).unwrap();
+    assert_eq!(only(&again).action, PullAction::UpToDate);
+    assert_eq!(snapshot(&rig.placement()), Some(expect(V1)));
 }
 
-/// A confirm-each follower's surfaced divergence over an OVERLAPPING edit predicts the conflict —
-/// the in-memory preview names the conflicting path — while running nothing: no markers on disk,
-/// no conflict record, no snapshot side effects beyond the ordinary surfaced-diverged snapshot.
+/// The in-memory merge PREVIEW over an OVERLAPPING edit predicts the conflict and names the
+/// conflicting path, while running nothing: no markers on disk, no conflict record. (The preview
+/// is what `publish`'s describe shows an author whose copy is behind `current`.)
 #[test]
-fn surfaced_divergence_predicts_a_conflicted_merge_without_running_it() {
+fn the_merge_preview_names_a_conflicting_path_without_running_the_merge() {
     let rig = Rig::new("preview");
-    let (id, _name, genesis) = rig.adopt(BASE);
+    let (id, _name, _genesis) = rig.adopt(BASE);
     // The same overlap the auto-sweep conflict test uses: SKILL.md edited on both sides.
     let edited: &[(&str, FileMode, &[u8])] = &[
         ("SKILL.md", FileMode::Regular, b"# my local edit\n"),
         ("run.sh", FileMode::Executable, b"#!/bin/sh\necho v0\n"),
     ];
     write_tree(&rig.placement(), edited);
+    let mine = crate::scan::scan(&rig.placement()).unwrap();
 
-    let v1 = mk_version(&[genesis], V1, "d_pub", "v1");
-    let mut plane = FixturePlane::default();
-    plane.add_version(&id, &v1);
-    plane.set_current(&id, served(WS, &id, v1.id, 1));
-    let foll = follow(&id, FollowMode::ConfirmEach);
-
-    let data = pull_data(&rig.ctx(&plane, &foll), ops::PullScope::AllFollowed).unwrap();
-    let row = only(&data);
-    assert_eq!(row.action, PullAction::Diverged);
-    let preview = row.merge_preview.as_ref().expect("a merge preview");
+    let preview = ops::merge_resolve::preview_merge(&rendered(BASE), &mine, &rendered(V1));
     assert_eq!(
         preview.verdict,
         topos_types::results::MergePreviewVerdict::Conflicted
@@ -875,17 +917,18 @@ fn crash_after_swap_heals_without_false_divergence() {
     assert_eq!(
         row.action,
         PullAction::FastForwarded,
-        "healed, not diverged"
+        "healed, not merged as a false divergence"
     );
-    assert_ne!(row.action, PullAction::Diverged);
+    assert!(row.merge.is_none(), "a heal runs no merge");
     assert_eq!(snapshot(&rig.placement()), Some(expect(V1)));
     assert_eq!(rig.read_sync(&id).applied, 1);
 }
 
 #[test]
-fn confirm_each_accept_reoffers_a_version_that_moved() {
-    // A confirm-each skill is offered v1; the plane advances to v2 BEFORE the user accepts. The explicit
-    // `pull <skill>` must RE-OFFER v2 (re-disclose its digest), never silently apply the undisclosed v2.
+fn an_accept_applies_a_version_that_moved_during_the_pull() {
+    // The plane advances to v2 between the sweep that landed v1 and the targeted accept. The accept
+    // applies v2 in that same call: the row demanding the bundle already consented, so a version
+    // this call discovered is not held back for a second command.
     let rig = Rig::new("moved");
     let (id, name, genesis) = rig.adopt(BASE);
     let v1 = mk_version(&[genesis], V1, "d_pub", "v1");
@@ -895,14 +938,14 @@ fn confirm_each_accept_reoffers_a_version_that_moved() {
     plane.add_version(&id, &v1);
     plane.add_version(&id, &v2);
     plane.set_current(&id, served(WS, &id, v1.id, 1));
-    let foll = follow(&id, FollowMode::ConfirmEach);
-    // The sweep offers v1 (raises the floor, does not apply).
+    let foll = follow(&id, FollowMode::Auto);
+    // The sweep lands v1.
     {
         let ctx = rig.ctx(&plane, &foll);
         let d = pull_data(&ctx, ops::PullScope::AllFollowed).unwrap();
-        assert_eq!(only(&d).action, PullAction::Offered);
+        assert_eq!(only(&d).action, PullAction::FastForwarded);
     }
-    // The plane moves to v2 before the user accepts.
+    // The plane moves to v2 before the targeted accept runs.
     plane.set_current(&id, served(WS, &id, v2.id, 2));
     let ctx = rig.ctx(&plane, &foll);
     let d = pull_data(
@@ -918,14 +961,14 @@ fn confirm_each_accept_reoffers_a_version_that_moved() {
     let row = only(&d);
     assert_eq!(
         row.action,
-        PullAction::Offered,
-        "a version discovered during the accept is re-offered, not applied"
+        PullAction::FastForwarded,
+        "a version discovered during the accept is applied, not deferred"
     );
-    assert_eq!(row.offer.as_ref().unwrap().version_id, to_hex(&v2.id));
+    assert_eq!(row.applied, 2);
     assert_eq!(
         snapshot(&rig.placement()),
-        Some(expect(BASE)),
-        "v2 never applied"
+        Some(expect(v2files)),
+        "v2's bytes are on disk"
     );
 }
 
@@ -1029,7 +1072,7 @@ fn malformed_plane_response_is_a_wire_error() {
 }
 
 // =================================================================================================
-// Author-side merge resolution (the diff3 increment): clean merge, the fixpoint, confirm-each surface,
+// Author-side merge resolution (the diff3 increment): clean merge, the fixpoint, the targeted accept,
 // the escape, conflict-blocks-publish, no-base, structural author-only, binary sidecars, and the crash
 // gate. These drive the full resolve through the public `ops::pull` entry point against a real store.
 // =================================================================================================
@@ -1137,12 +1180,13 @@ fn clean_merge_is_a_stable_fixpoint_with_no_lost_update() {
     );
 }
 
-/// A confirm-each follower's BARE sweep surfaces a divergence — it never auto-merges (that would land
-/// theirs-incorporated bytes without the one-tap). The placement is left exactly as the author left it.
+/// The TARGETED accept resolves a diverged draft exactly as the bare sweep does — the other arm of
+/// the resolve-strategy table — and the in-memory preview called this trio clean before anything
+/// ran (the prediction `publish`'s describe shows an author whose copy is behind `current`).
 #[test]
-fn confirm_each_bare_sweep_surfaces_without_merging() {
+fn a_targeted_accept_merges_a_diverged_draft_the_preview_called_clean() {
     let (base, mine, theirs) = clean_trio();
-    let rig = Rig::new("confirm");
+    let rig = Rig::new("accept-merge");
     let (id, _name, genesis) = rig.adopt(base);
     write_tree(&rig.placement(), mine);
 
@@ -1150,19 +1194,11 @@ fn confirm_each_bare_sweep_surfaces_without_merging() {
     let mut plane = FixturePlane::default();
     plane.add_version(&id, &v1);
     plane.set_current(&id, served(WS, &id, v1.id, 1));
-    let foll = follow(&id, FollowMode::ConfirmEach);
+    let foll = follow(&id, FollowMode::Auto);
 
-    let data = pull_data(&rig.ctx(&plane, &foll), ops::PullScope::AllFollowed).unwrap();
-    let row = only(&data);
-    assert_eq!(row.action, PullAction::Diverged);
-    assert!(
-        row.merge.is_none(),
-        "confirm-each bare sweep must not merge"
-    );
-    // The surfaced divergence carries the in-memory merge PREVIEW (this trio merges cleanly): the
-    // person picks merge-vs-escape informed, and NOTHING ran — the placement assertion below proves
-    // the preview wrote no byte.
-    let preview = row.merge_preview.as_ref().expect("a merge preview");
+    // The prediction, over already-local bytes and writing none of them.
+    let scanned = crate::scan::scan(&rig.placement()).unwrap();
+    let preview = ops::merge_resolve::preview_merge(&rendered(base), &scanned, &rendered(theirs));
     assert_eq!(
         preview.verdict,
         topos_types::results::MergePreviewVerdict::Clean
@@ -1171,12 +1207,10 @@ fn confirm_each_bare_sweep_surfaces_without_merging() {
     assert_eq!(
         snapshot(&rig.placement()),
         Some(expect(mine)),
-        "left untouched"
+        "the preview wrote no byte"
     );
-    assert!(!rig.conflict_exists(&id));
-    assert_eq!(rig.read_sync(&id).applied, 0);
 
-    // The explicit accept (the one-tap) then runs the merge.
+    // The targeted accept runs it.
     let accepted = pull_data(
         &rig.ctx(&plane, &foll),
         ops::PullScope::One {
@@ -1188,6 +1222,11 @@ fn confirm_each_bare_sweep_surfaces_without_merging() {
     )
     .unwrap();
     assert_eq!(only(&accepted).action, PullAction::Merged);
+    assert_eq!(
+        std::fs::read(rig.placement().join("SKILL.md")).unwrap(),
+        b"MINE\nline2\nTHEIRS\n"
+    );
+    assert!(!rig.conflict_exists(&id));
 }
 
 /// The disclosed escape (`--onto-current`): commit MY bytes on top of `current`, dropping the merge. It
@@ -1638,43 +1677,33 @@ fn escape_of_edited_conflict_commits_the_resolution() {
     );
 }
 
-/// A confirm-each accept must NOT merge a version whose digest was raised (newly discovered) in the same
-/// pull — it re-offers instead, never applying undisclosed bytes.
+/// An accept RESOLVES against the version this very call discovered. `current` sits at v2 (whose
+/// parent v1 the client never saw), the author's copy is edited, and the accept merges against v2 —
+/// the version it raised — rather than deferring it to a second command.
 #[test]
-fn confirm_each_accept_reoffers_a_version_raised_in_the_same_pull() {
-    let rig = Rig::new("ce-raised");
+fn an_accept_resolves_against_a_version_raised_in_the_same_pull() {
+    let rig = Rig::new("raised");
     let (id, _name, genesis) = rig.adopt(BASE);
     let edited: FileSet = &[
         ("SKILL.md", FileMode::Regular, b"# mine\n"),
         ("run.sh", FileMode::Executable, b"#!/bin/sh\necho v0\n"),
     ];
     write_tree(&rig.placement(), edited);
-    let foll = follow(&id, FollowMode::ConfirmEach);
+    let foll = follow(&id, FollowMode::Auto);
 
-    // Step 1: a bare sweep discloses the divergence vs v1 (observed → (1,1)), surfaced not merged.
     let v1 = mk_version(&[genesis], V1, "d_pub", "v1");
-    let mut p1 = FixturePlane::default();
-    p1.add_version(&id, &v1);
-    p1.set_current(&id, served(WS, &id, v1.id, 1));
-    assert_eq!(
-        only(&pull_data(&rig.ctx(&p1, &foll), ops::PullScope::AllFollowed).unwrap()).action,
-        PullAction::Diverged
-    );
-    assert_eq!(rig.read_sync(&id).observed, 1);
-
-    // Step 2: the plane has moved to v2 (1,2). An explicit accept would now merge an UNDISCLOSED version —
-    // it must re-offer instead.
     let v2files: FileSet = &[
         ("SKILL.md", FileMode::Regular, b"# v2\n"),
         ("run.sh", FileMode::Executable, b"#!/bin/sh\necho v2\n"),
     ];
     let v2 = mk_version(&[v1.id], v2files, "d_pub", "v2");
-    let mut p2 = FixturePlane::default();
-    p2.add_version(&id, &v1);
-    p2.add_version(&id, &v2);
-    p2.set_current(&id, served(WS, &id, v2.id, 2));
+    let mut plane = FixturePlane::default();
+    plane.add_version(&id, &v1);
+    plane.add_version(&id, &v2);
+    plane.set_current(&id, served(WS, &id, v2.id, 2));
+
     let row = pull_data(
-        &rig.ctx(&p2, &foll),
+        &rig.ctx(&plane, &foll),
         ops::PullScope::One {
             store: ops::StoreScope::Here,
             name: "pr-describe".into(),
@@ -1683,13 +1712,17 @@ fn confirm_each_accept_reoffers_a_version_raised_in_the_same_pull() {
         },
     )
     .unwrap();
+    let row = only(&row);
+    // Both sides edited SKILL.md, so the resolution conflicts — the point is that it RAN, against
+    // the version the same call discovered.
     assert_eq!(
-        only(&row).action,
-        PullAction::Diverged,
-        "an accept must re-offer a version raised in the same call, not merge it"
+        row.action,
+        PullAction::Conflicted,
+        "an accept resolves a version raised in the same call, it does not defer it"
     );
-    assert!(only(&row).merge.is_none());
-    assert!(!rig.conflict_exists(&id));
+    let mr = row.merge.as_ref().expect("a merge report");
+    assert_eq!(mr.theirs_version_id, to_hex(&v2.id));
+    assert_eq!(rig.read_sync(&id).observed, 2);
 }
 
 /// A `.topos-mine` sidecar must be disambiguated against the kernel's collision rule (NFC + case-fold),

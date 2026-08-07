@@ -35,7 +35,7 @@ mod log;
 mod login;
 pub(crate) mod loopback;
 mod manifest_edit;
-mod merge_resolve;
+pub(crate) mod merge_resolve;
 mod protect;
 mod publish;
 mod pull;

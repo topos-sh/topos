@@ -454,13 +454,12 @@ fn finish_workspace(
             data.dest = Vec::new();
             data.display = None;
             // The bundle's own row may report a STANDING state a bare re-update will not change
-            // (diverged / conflicted / held) — then the note says what the row reports; the
-            // next-update promise belongs to the run that produced no row at all.
+            // (conflicted / held) — then the note says what the row reports; the next-update
+            // promise belongs to the run that produced no row at all.
             let standing = match &resolved.entry {
                 Some(_) => out
                     .and_then(|o| o.data.skills.iter().find(|r| owned(r)))
                     .and_then(|r| match r.action {
-                        PullAction::Diverged => Some("diverged"),
                         PullAction::Conflicted => Some("conflicted"),
                         PullAction::Held => Some("held"),
                         _ => None,
