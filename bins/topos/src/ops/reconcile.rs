@@ -95,10 +95,13 @@ pub(crate) struct ManifestUpdateOpts {
     /// Ack the delivered notices (the interactive / `--json` update); the quiet hook fetches
     /// WITHOUT acking, so nothing is marked read that no one narrated.
     pub ack_notices: bool,
-    /// `--rebuild`: absorb every edited copy into its store, drop the recorded placement dirs, and
+    /// `--force`: absorb every edited copy into its store, drop the recorded placement dirs, and
     /// let the ordinary sweep re-project them from the store. The absorb-then-drop ORDER is the
     /// whole guarantee — a rebuild must never be a way to lose an edit. Gated per scope, like
-    /// everything else this run drives.
+    /// everything else this run drives. What it uniquely serves is the folder that EXISTS but is
+    /// damaged: an ABSENT placement is refilled by an ordinary run (the converge targets
+    /// [`placement::ScanStatus::Absent`]), while a CHANGED one is protected forever as the
+    /// person's draft.
     pub rebuild: bool,
     /// Which scope(s) to DRIVE (see [`UpdateScope`]). Both plans are still read either way — the
     /// selector decides which ones converge, clean, and disclose.
@@ -1315,7 +1318,7 @@ pub(crate) fn manifest_update(
         default_host: super::manifest_edit::default_host(ctx),
     };
 
-    // ---- 3. `--rebuild`, BEFORE the fan-out: absorb, then drop, then let the sweep re-project.
+    // ---- 3. `--force`, BEFORE the fan-out: absorb, then drop, then let the sweep re-project.
     // A rebuild rebuilds exactly what this run converges: re-projecting a store no scope drives
     // would drop placement dirs nothing is about to write back.
     if opts.rebuild {
@@ -5589,7 +5592,7 @@ fn clean_placements(
 }
 
 // =================================================================================================
-// `--rebuild`.
+// `--force` (the rebuild repair).
 // =================================================================================================
 
 /// Rebuild ONE store: for every bundle it tracks, ABSORB each distinct edited copy into the store,
@@ -5658,16 +5661,16 @@ fn rebuild_skill(ctx: &Ctx<'_>, sid: &SkillId) -> Result<Option<String>, ClientE
 
 /// Why a rebuild left a blocked bundle's folders exactly as they were, with both exits spelled for
 /// the scope the store lives in (the layout IS the scope) so each is runnable as printed.
+///
+/// The bundle leads its own line and the way out sits under it, one command per line — the shape
+/// every other per-bundle answer takes. No internal code prefixes it: the reader is being told what
+/// happened to a folder of theirs, and a code says nothing they can act on.
 fn rebuild_blocked_line(ctx: &Ctx<'_>, name: &str) -> String {
-    let g = if ctx.layout.is_project_scope() {
-        ""
-    } else {
-        " -g"
-    };
+    let g = crate::error::scope_flag(!ctx.layout.is_project_scope());
     format!(
-        "REBUILD_BLOCKED {name}: this bundle is waiting on a merge decision, so its folders were \
-         left as they are — settle it with `topos update{g} {name} --keep-mine` or `topos \
-         update{g} {name} --reset`, then rebuild"
+        "{name}   waiting on a merge decision, so its folders were left as they are\n    settle it \
+         first, then rebuild:\n      topos update{g} {name} --keep-mine\n      topos update{g} \
+         {name} --reset"
     )
 }
 

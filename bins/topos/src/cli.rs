@@ -130,11 +130,13 @@ pub(crate) enum Command {
         /// unrecognized name — gets the conservative document every agent's schema accepts.
         #[arg(long, value_name = "HARNESS", hide = true)]
         hook: Option<String>,
-        /// Rebuild every managed skill folder from topos's own store: your unshared edits are
-        /// saved first, then each folder is re-created fresh. Fixes a folder someone deleted or
-        /// broke by hand.
-        #[arg(long)]
-        rebuild: bool,
+        /// Re-create managed skill folders that exist but are damaged — topos normally protects a
+        /// changed folder as your own edit. Deleted folders come back on an ordinary `topos
+        /// update`.
+        // `--rebuild` is the prior spelling, kept as a HIDDEN alias (clap's `alias` never reaches
+        // the help or the generated reference) so anything already in flight keeps working.
+        #[arg(long = "force", alias = "rebuild")]
+        force: bool,
     },
     /// Log this machine in to topos. Opens your browser for a one-click approval, where you
     /// choose (or create) the workspace to join. The first login to a workspace records its feed
@@ -680,6 +682,32 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn update_force_parses_under_both_spellings() {
+        // The disclosed name.
+        let out = Cli::try_parse_from(["topos", "update", "--force"]).unwrap();
+        assert!(matches!(
+            out.command,
+            Some(Command::Update { force: true, .. })
+        ));
+        // …and the prior spelling, which stays a working (hidden) alias so nothing in flight breaks.
+        let aliased = Cli::try_parse_from(["topos", "update", "--rebuild"]).unwrap();
+        assert!(matches!(
+            aliased.command,
+            Some(Command::Update { force: true, .. })
+        ));
+        // The disclosed spelling is the ONE the help and the generated reference teach.
+        let help = super::cli_command()
+            .get_subcommands()
+            .find(|c| c.get_name() == "update")
+            .expect("the update subcommand")
+            .clone()
+            .render_help()
+            .to_string();
+        assert!(help.contains("--force"), "{help}");
+        assert!(!help.contains("--rebuild"), "{help}");
     }
 
     /// `--keep-mine` and `--reset` are opposites — keep your version, or take the team's. Accepting

@@ -673,6 +673,39 @@ fn update_keep_mine_flag_shapes_are_usage_errors() {
     let _ = std::fs::remove_dir_all(&home);
 }
 
+/// The built-in `topos` skill is refused BY NAME on every targeted arm of `update` — the reconcile,
+/// the go-back, `--keep-mine`, `--force`, and `--reset`.
+///
+/// `--reset` is the one that used to slip through: it dispatches ahead of the reconcile, so it never
+/// met the guard the other arms enforced and went looking for a manifest row and a version to take
+/// — neither of which exists for a bundle that ships with the binary. One guard, ahead of all of
+/// them, so the answer cannot depend on which flag was typed.
+#[test]
+fn update_never_takes_the_builtin_by_name() {
+    let home = scratch("builtin-update");
+    for args in [
+        &["update", "topos", "--json"][..],
+        &["update", "topos", "--reset", "--json"][..],
+        &["update", "topos", "--reset", "--yes", "--json"][..],
+        &["update", "topos", "--force", "--json"][..],
+        &["update", "topos", "--keep-mine", "--json"][..],
+        &["update", "topos@abc1234", "--json"][..],
+        // Named beside another target, it is still the built-in being asked for.
+        &["update", "deploy", "topos", "--reset", "--json"][..],
+    ] {
+        let out = run_raw(&home, args, false);
+        assert!(!out.status.success(), "{args:?}");
+        let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("JSON stdout");
+        assert_eq!(v["error"]["code"], "INVALID_ARGUMENT", "{args:?}: {v}");
+        let message = v["error"]["context"]["message"]
+            .as_str()
+            .unwrap_or_default();
+        assert!(message.contains("built-in skill"), "{args:?}: {message}");
+        assert!(message.contains("topos self-update"), "{args:?}: {message}");
+    }
+    let _ = std::fs::remove_dir_all(&home);
+}
+
 /// `--dest`/`-a` on `update` names the copy `--reset` drops the edits of, and nothing else. Without
 /// `--reset` it is REFUSED by name: silently ignoring it would read as a narrowed update while the
 /// reconcile converged every copy the manifest asks for. The refusal fires before any store is

@@ -6,7 +6,7 @@
 //! `"off"` row withholds exactly its bundle; an explicit row's pin beats the feed's and a set's
 //! version of the same identity; the NEAREST project file governs whole; the same bundle at both
 //! scopes lands twice with two stores; git rows move only on an explicit update; a dropped row
-//! cleans snapshot-first; and `--rebuild` absorbs before it drops.
+//! cleans snapshot-first; and `--force` absorbs before it drops.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -4107,7 +4107,7 @@ fn an_offline_sweep_freezes_and_never_cleans() {
 }
 
 // =================================================================================================
-// `--rebuild`.
+// `--force` (the rebuild repair).
 // =================================================================================================
 
 #[test]
@@ -4204,7 +4204,7 @@ fn rebuild_leaves_a_blocked_bundle_alone_and_names_both_exits() {
         vec![("SKILL.md".to_owned(), b"# deploy, mine\n".to_vec())]
     );
 
-    // THE POINT: `--rebuild` touches nothing here, and says why in the scope's own spelling.
+    // THE POINT: `--force` touches nothing here, and says why in the scope's own spelling.
     let out = ops::manifest_update(
         &ctx,
         &connect(&plane, &dir),
@@ -4221,12 +4221,13 @@ fn rebuild_leaves_a_blocked_bundle_alone_and_names_both_exits() {
         "a rebuild must not empty the folders of a bundle it cannot re-project"
     );
     assert!(sp.conflict.exists(), "and the block still stands");
+    // No internal code, and each way out on its own line, runnable exactly as printed.
     assert_eq!(
         out.warnings,
         vec![
-            "REBUILD_BLOCKED deploy: this bundle is waiting on a merge decision, so its folders \
-             were left as they are — settle it with `topos update -g deploy --keep-mine` or \
-             `topos update -g deploy --reset`, then rebuild"
+            "deploy   waiting on a merge decision, so its folders were left as they are\n    \
+             settle it first, then rebuild:\n      topos update -g deploy --keep-mine\n      topos \
+             update -g deploy --reset"
                 .to_owned()
         ]
     );
@@ -10487,7 +10488,7 @@ fn remove_then_update_never_touches_an_adopted_source_dir() {
 }
 
 /// The MACHINE scope holds the same promise: a `-g` adopted source survives the row-drop sweep AND
-/// the `--rebuild` repair (which parks + re-projects every placement topos wrote — the user's own
+/// the `--force` repair (which parks + re-projects every placement topos wrote — the user's own
 /// dir is not one of them).
 #[test]
 fn an_adopted_source_dir_survives_the_machine_sweeps_and_rebuild() {
@@ -10504,7 +10505,7 @@ fn an_adopted_source_dir_survives_the_machine_sweeps_and_rebuild() {
     scoped_path_add(&ctx, &src, true).unwrap();
     let baseline = dir_bytes(&src);
 
-    // `update --rebuild` with the row present: every topos-written placement re-projects; the
+    // `update --force` with the row present: every topos-written placement re-projects; the
     // adopted source is left exactly as it stands.
     ops::manifest_update(
         &ctx,

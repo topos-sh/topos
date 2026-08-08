@@ -579,32 +579,29 @@ fn detail_forge_origin(detail: &ListDetail) -> Option<String> {
 /// The placed BUILT-IN meta-skill's inventory row — read from its own record in the MACHINE store
 /// (engine custody: `ops::builtin` places and force-syncs it with no manifest row anywhere). It
 /// originates from disk, so the inventory shows it — hiding it would make `remove topos`'s own
-/// target invisible. `None` when the machine holds no built-in record (opted out, or never
-/// placed). A hand edit shows `draft` honestly until the next sweep overwrites it
-/// (snapshot-first).
+/// target invisible. `None` when the machine holds no built-in record (opted out, or never placed).
+///
+/// The row carries NO state: no `(draft)` flag, no status column, no sub-lines. The bundle ships
+/// with the binary and is force-synced to it on every sweep, so a hand edit is not durable work —
+/// no verb can retrieve it, nothing can publish it (the name is reserved workspace-side), and no
+/// manifest row exists for `update --reset` to act on. A `(draft)` flag would promise work a person
+/// could come back to; a `[current]` column would report a comparison nobody makes. The edit is
+/// still SNAPSHOTTED into the store before the sweep overwrites it — recoverable, just never
+/// advertised as a state of the row.
 fn builtin_entry(ctx: &Ctx<'_>) -> Option<SkillEntry> {
-    let (lock, draft, _) = builtin_record(ctx)?;
+    let (lock, _) = builtin_record(ctx)?;
     Some(SkillEntry {
         skill: lock.name.clone(),
         workspace_id: None,
         version_id: lock.base_commit.clone(),
         bundle_digest: lock.bundle_digest.clone(),
-        draft,
+        draft: false,
         pending_proposals: Vec::new(),
         source: Some("built-in".to_owned()),
-        status: Some(if draft {
-            SkillStatus::Draft
-        } else {
-            SkillStatus::Current
-        }),
+        status: None,
         kind: None,
         source_health: None,
-        // No folder is named for an edited built-in, deliberately: the sub-lines a named folder
-        // earns offer `publish` / `update --reset`, and neither reaches engine custody — the name
-        // is reserved workspace-side (nothing can publish it) and no manifest row demands it, so
-        // `update topos --reset` and `topos publish topos` would both print a command that cannot
-        // run. The honest `(draft)` flag stands alone until the next sweep force-syncs the copy
-        // back. Locked by `an_edited_builtin_row_offers_no_commands`.
+        // Locked by `an_edited_builtin_row_offers_no_commands`.
         draft_dir: None,
         draft_diverged: None,
     })
@@ -617,7 +614,7 @@ fn builtin_detail(ctx: &Ctx<'_>, token: &str) -> Option<ListDetail> {
     if token != super::builtin::BUILTIN_NAME {
         return None;
     }
-    let (lock, draft, placements) = builtin_record(ctx)?;
+    let (lock, placements) = builtin_record(ctx)?;
     let version = lock.base_commit.clone();
     Some(ListDetail {
         name: lock.name,
@@ -629,11 +626,10 @@ fn builtin_detail(ctx: &Ctx<'_>, token: &str) -> Option<ListDetail> {
         version: (!version.bytes().all(|b| b == b'0')).then_some(version),
         pin: None,
         placements,
-        state: if draft {
-            StatusItemState::LocalEdits
-        } else {
-            StatusItemState::Applied
-        },
+        // Always `applied`, edited copy or not — the same reason the row carries no `(draft)` flag
+        // (see [`builtin_entry`]): a hand edit here is not durable work, and `local edits ahead of
+        // the applied version` would name a state with no act behind it.
+        state: StatusItemState::Applied,
         kind: None,
         harnesses: Vec::new(),
         managed: true,
@@ -644,30 +640,20 @@ fn builtin_detail(ctx: &Ctx<'_>, token: &str) -> Option<ListDetail> {
     })
 }
 
-/// The built-in's `(lock, draft, placements)` off its machine-store record: a draft iff ANY
-/// recorded placement holds bytes hashing to a different digest than the lock pins. A missing
-/// record answers `None`; an unreadable map is no-draft, no placements — never an error.
-fn builtin_record(ctx: &Ctx<'_>) -> Option<(Lock, bool, Vec<String>)> {
+/// The built-in's `(lock, placements)` off its machine-store record. A missing record answers
+/// `None`; an unreadable map answers no placements — never an error.
+///
+/// The placement bytes are deliberately NOT scanned: nothing this record feeds reports a difference
+/// between the folder and the binary (see [`builtin_entry`]), so scanning would buy an inventory
+/// read nothing but the cost.
+fn builtin_record(ctx: &Ctx<'_>) -> Option<(Lock, Vec<String>)> {
     let sid = crate::id::SkillId::parse(super::builtin::BUILTIN_NAME).ok()?;
     let sp = ctx.layout.published(&sid);
     let lock = doc::read_doc::<Lock>(ctx.fs, &sp.lock).ok().flatten()?;
     let Ok(Some(map)) = doc::read_map(ctx.fs, &sp.map) else {
-        return Some((lock, false, Vec::new()));
+        return Some((lock, Vec::new()));
     };
-    let mut draft = false;
-    for placement in &map.placements {
-        let source = Path::new(placement);
-        if !source.exists() {
-            continue;
-        }
-        if let Ok(scanned) = crate::scan::scan(source)
-            && topos_core::digest::to_hex(&scanned.bundle_digest) != lock.bundle_digest
-        {
-            draft = true;
-            break;
-        }
-    }
-    Some((lock, draft, map.placements))
+    Some((lock, map.placements))
 }
 
 /// The deep answer for a name NOTHING manages — no row in any visible scope, not the built-in:
@@ -1478,13 +1464,15 @@ mod tests {
         );
     }
 
-    /// The placed BUILT-IN's edited row stands ALONE: `(draft)` and nothing under it.
+    /// The placed BUILT-IN's row says nothing about an edit — not a flag, not a status, not one
+    /// sub-line — even when the placed copy has been hand-edited.
     ///
     /// A named folder earns the three sub-lines a draft row prints, and every one of them would be
     /// a command that cannot run here — `topos publish topos` is refused by the reserved name, and
-    /// `topos update topos --reset` acts on a manifest row nothing has. The built-in is engine
-    /// custody force-synced to the binary, so a hand edit is overwritten on the next sweep; the
-    /// row says that edits exist and offers nothing it cannot honor.
+    /// `topos update topos --reset` acts on a manifest row nothing has. The bundle ships with the
+    /// binary and is force-synced to it on every sweep, so the edit is not durable work and no verb
+    /// can retrieve it: a `(draft)` flag would promise something to come back to. The bytes ARE
+    /// snapshotted before the overwrite; the row simply never advertises them.
     #[test]
     fn an_edited_builtin_row_offers_no_commands() {
         let home = TempHome::new();
@@ -1501,16 +1489,18 @@ mod tests {
 
         let out = run(&home, &cwd, &request()).unwrap();
         let row = row_named(scope(&out, "machine"), "topos");
-        assert!(row.draft, "{row:?}");
+        assert!(!row.draft, "{row:?}");
+        assert_eq!(row.status, None, "{row:?}");
         assert_eq!(row.source.as_deref(), Some("built-in"), "{row:?}");
         assert_eq!(row.draft_dir, None, "{row:?}");
         assert_eq!(row.draft_diverged, None, "{row:?}");
         let text = crate::render::list_tty(&out);
         assert!(
-            text.ends_with("  topos  topos@aaaaaaaaaaaa  (draft)  from built-in"),
+            text.ends_with("  topos  topos@aaaaaaaaaaaa  from built-in"),
             "{text}"
         );
         for offered in [
+            "(draft)",
             "to share:",
             "to view diff:",
             "to drop:",
@@ -1518,6 +1508,25 @@ mod tests {
         ] {
             assert!(!text.contains(offered), "{offered}: {text}");
         }
+        // The deep dive answers the same way over the SAME edited copy: `applied`, never `local
+        // edits ahead of the applied version`.
+        let dive = run(
+            &home,
+            &cwd,
+            &ListRequest {
+                name: Some("topos".to_owned()),
+                ..request()
+            },
+        )
+        .unwrap();
+        let detail = dive.data.detail.as_ref().expect("the built-in has a dive");
+        assert!(
+            matches!(detail.state, StatusItemState::Applied),
+            "{detail:?}"
+        );
+        let dive_text = crate::render::list_tty(&dive);
+        assert!(dive_text.ends_with("\n  applied"), "{dive_text}");
+        assert!(!dive_text.contains("local edits"), "{dive_text}");
     }
 
     /// A BLOCKED bundle's row tells the truth about all three things it used to get wrong.
@@ -2076,7 +2085,9 @@ mod tests {
                 panic!("the built-in rides the machine section: {:?}", machine.rows)
             });
         assert_eq!(topos.source.as_deref(), Some("built-in"));
-        assert_eq!(topos.status, Some(SkillStatus::Current));
+        // The source column is the whole row: it is force-synced to the binary, so there is no
+        // state to report and no comparison a status word could be measured against.
+        assert_eq!(topos.status, None);
         assert_eq!(topos.version_id, "a".repeat(64));
         // The unclaimed records mint NOTHING — no row, no rendered mention.
         for name in ["ghosty", "frozen"] {
@@ -2144,8 +2155,7 @@ mod tests {
             "acme",
             crate::sessions::SESSION_ACTIVE,
         );
-        // The built-in, placed: a clean placement (its recorded sha never matches real bytes, so
-        // an EXISTING dir would scan as a draft — leave it absent for the clean reading).
+        // The built-in, placed — the dir itself need not exist: the record IS the answer.
         let placed = home.0.join("placed-topos");
         home.store_applied(
             "topos",

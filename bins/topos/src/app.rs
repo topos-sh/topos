@@ -1292,7 +1292,7 @@ fn run_command(
             quiet,
             ttl,
             hook,
-            rebuild,
+            force,
         } => {
             // The scope flag decides which STORE every targeted arm below resolves in — and, since
             // the store it resolves in is the store it writes, which copy it acts on. It is
@@ -1303,6 +1303,26 @@ fn run_command(
             } else {
                 ops::StoreScope::Here
             };
+            // The BUILT-IN by name, refused ONCE for every targeted arm — ahead of all of them,
+            // including `--reset`, which dispatches on its own and used to slip past a guard the
+            // reconcile, the go-back and `--keep-mine` each enforced separately. It is not a
+            // subscription and no store of ours holds a version to take: the bare sweep re-syncs it
+            // to this binary, and the binary itself is `self-update`'s business.
+            if targets
+                .iter()
+                .any(|t| ops::is_builtin(t.split('@').next().unwrap_or(t)))
+            {
+                return emit_err(
+                    json,
+                    cmd_name,
+                    &ClientError::InvalidArgument(
+                        "`topos` is the built-in skill — the bare `topos update` re-syncs it to \
+                         this binary; `topos self-update` updates the binary itself"
+                            .into(),
+                    ),
+                    &diag,
+                );
+            }
             // `--reset` is its own two-phase discard verb (loss-led describe / `--yes` apply); it
             // does not flow through the reconcile and is never a `--quiet` hook shape.
             let selection = ops::Selection::one(agent.as_deref(), dest.as_deref());
@@ -1384,15 +1404,6 @@ fn run_command(
                     Err(ClientError::InvalidArgument(
                         "the go-back and --keep-mine take a single <skill> target".into(),
                     ))
-                } else if targets
-                    .first()
-                    .is_some_and(|t| ops::is_builtin(t.split('@').next().unwrap_or(t)))
-                {
-                    Err(ClientError::InvalidArgument(
-                        "`topos` is the built-in skill — the bare `topos update` re-syncs it to \
-                         this binary; `topos self-update` updates the binary itself"
-                            .into(),
-                    ))
                 } else {
                     pull_with_name_fallback(
                         &ctx,
@@ -1403,12 +1414,6 @@ fn run_command(
                         &ops::ReconcileOpts::default(),
                     )
                 }
-            } else if targets.first().is_some_and(|t| ops::is_builtin(t.as_str())) {
-                Err(ClientError::InvalidArgument(
-                    "`topos` is the built-in skill — the bare `topos update` re-syncs it to \
-                     this binary; `topos self-update` updates the binary itself"
-                        .into(),
-                ))
             } else {
                 // The background sweep DOES contact a forge — a row pointing at a repository is
                 // kept current like everything else. It just runs on the git lane's own, much
@@ -1434,7 +1439,7 @@ fn run_command(
                     &ops::ManifestUpdateOpts {
                         targets,
                         ack_notices: !quiet,
-                        rebuild,
+                        rebuild: force,
                         scope,
                         // A person who typed the command gets an answer now; the hook sweep waits
                         // for the interval.

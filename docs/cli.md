@@ -242,7 +242,7 @@ topos update [OPTIONS] [TARGETS]...
 | `--keep-mine` | Finish a merge that stopped because you and your team changed the same lines. Topos writes one copy of the skill into a folder under `.topos/conflicts/` and prints the path; files you both changed hold both versions, wrapped in `<<<<<<<` markers. Edit that copy and run this to use it — or run it without touching the folder to keep your own version. Takes exactly one skill |
 | `--quiet` | Print nothing on stdout — the mode the session-start hook uses. The hook sweep always covers both scopes (this folder's and your machine-wide set), so `-g` has no effect here. Errors still go to stderr with a non-zero exit |
 | `--ttl <SECONDS>` | With `--quiet`: skip the run entirely when one already completed within this many seconds, so hooks can fire often at no cost. `0` disables the throttle. Default 300; `TOPOS_UPDATE_TTL` changes the default |
-| `--rebuild` | Rebuild every managed skill folder from topos's own store: your unshared edits are saved first, then each folder is re-created fresh. Fixes a folder someone deleted or broke by hand |
+| `--force` | Re-create managed skill folders that exist but are damaged — topos normally protects a changed folder as your own edit. Deleted folders come back on an ordinary `topos update` |
 
 
 ### `topos list`

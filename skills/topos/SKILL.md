@@ -86,8 +86,9 @@ skills dirs as that agent reads them.
 
 `topos update` converges the scope you STAND in — this folder's `topos.toml` when one covers it,
 the machine-wide set otherwise; `-g` converges the machine from anywhere, `topos update <name>`
-narrows within that scope, `topos update --rebuild` re-creates a folder someone broke by hand
-(edits saved first). Every receipt names the scope it acted on. The session-start trigger runs
+narrows within that scope, `topos update --force` re-creates a managed folder that exists but is
+damaged (edits saved first; a deleted folder comes back on an ordinary update). Every receipt names
+the scope it acted on. The session-start trigger runs
 `topos update --quiet`, which always covers BOTH scopes, so nothing goes stale while the session
 works in one folder. Updates never destroy drafts — they merge around them; a conflict freezes the
 copy with a marked way out, and a settled draft is copied onto the skill's other copies in the
