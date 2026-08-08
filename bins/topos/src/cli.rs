@@ -109,10 +109,10 @@ pub(crate) enum Command {
         /// writes one copy of the skill into a folder under `.topos/conflicts/` and prints the
         /// path; files you both changed hold both versions, wrapped in `<<<<<<<` markers. Edit
         /// that copy and run this to use it — or run it without touching the folder to keep your
-        /// own version. Whichever you choose becomes your draft, on top of the team's version; if
-        /// it leaves out something they wrote, `topos publish` says so and makes you name what it
-        /// replaces before it ships. Only for a merge that has actually stopped — with nothing
-        /// waiting, `topos update <skill>` is the command. Takes exactly one skill.
+        /// wording on those lines and take the team's other changes. Either way you get an
+        /// ordinary draft on top of the team's version, which `topos publish` ships like any
+        /// other. Only for a merge that has actually stopped — with nothing waiting, `topos
+        /// update <skill>` is the command. Takes exactly one skill.
         // `--onto-current` is the prior spelling, kept as a HIDDEN alias (clap's `alias` never
         // reaches the help or the generated reference) so anything already in flight keeps working.
         #[arg(long = "keep-mine", alias = "onto-current")]
@@ -383,11 +383,6 @@ pub(crate) enum Command {
         /// A short message saying what changed and why — it becomes the version's history line.
         #[arg(long, short = 'm', value_name = "MSG")]
         message: Option<String>,
-        /// Replace a team version your copy does not carry, naming it — this also confirms the
-        /// publish, so `--yes` is not needed. `topos publish <skill>` prints that version and the
-        /// diff of what the team loses.
-        #[arg(long, value_name = "VERSION")]
-        over: Option<String>,
         /// Apply the previewed publish.
         #[arg(long)]
         yes: bool,

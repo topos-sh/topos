@@ -239,7 +239,7 @@ topos update [OPTIONS] [TARGETS]...
 | `-a, --agent <SLUG>` | With `--reset`: drop only this agent's copy of the edits (a slug like `codex`); every other copy keeps its own |
 | `--dest <FOLDER>` | With `--reset`: drop only the edits in this exact folder — the folder as `topos list` prints it, or the one the `topos.toml` line names |
 | `--yes` | Confirm an action that shows a preview first (like `--reset`) |
-| `--keep-mine` | Finish a merge that stopped because you and your team changed the same lines. Topos writes one copy of the skill into a folder under `.topos/conflicts/` and prints the path; files you both changed hold both versions, wrapped in `<<<<<<<` markers. Edit that copy and run this to use it — or run it without touching the folder to keep your own version. Whichever you choose becomes your draft, on top of the team's version; if it leaves out something they wrote, `topos publish` says so and makes you name what it replaces before it ships. Only for a merge that has actually stopped — with nothing waiting, `topos update <skill>` is the command. Takes exactly one skill |
+| `--keep-mine` | Finish a merge that stopped because you and your team changed the same lines. Topos writes one copy of the skill into a folder under `.topos/conflicts/` and prints the path; files you both changed hold both versions, wrapped in `<<<<<<<` markers. Edit that copy and run this to use it — or run it without touching the folder to keep your wording on those lines and take the team's other changes. Either way you get an ordinary draft on top of the team's version, which `topos publish` ships like any other. Only for a merge that has actually stopped — with nothing waiting, `topos update <skill>` is the command. Takes exactly one skill |
 | `--quiet` | Print nothing on stdout — the mode the session-start hook uses. The hook sweep always covers both scopes (this folder's and your machine-wide set), so `-g` has no effect here. Errors still go to stderr with a non-zero exit |
 | `--ttl <SECONDS>` | With `--quiet`: skip the run entirely when one already completed within this many seconds, so hooks can fire often at no cost. `0` disables the throttle. Default 300; `TOPOS_UPDATE_TTL` changes the default |
 | `--force` | Re-create managed skill folders that exist but are damaged — topos normally protects a changed folder as your own edit. Deleted folders come back on an ordinary `topos update` |
@@ -319,7 +319,6 @@ topos publish [OPTIONS] <TARGET>
 | `--to <CHANNEL>` | Place the skill in this channel. It must already exist — channels are created in the browser. A brand-new skill with no `--to` lands in `everyone` |
 | `--propose` | Ask for review instead of shipping directly — opens a proposal |
 | `-m, --message <MSG>` | A short message saying what changed and why — it becomes the version's history line |
-| `--over <VERSION>` | Replace a team version your copy does not carry, naming it — this also confirms the publish, so `--yes` is not needed. `topos publish <skill>` prints that version and the diff of what the team loses |
 | `--yes` | Apply the previewed publish |
 
 

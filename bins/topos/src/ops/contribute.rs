@@ -473,9 +473,6 @@ pub(crate) fn apply_publish_ok(
             work_hash: published_digest_hex,
             held: false,
             draft_observed: None,
-            // The draft IS the new `current` now, so there is no longer a draft that drops
-            // anything — whatever this publish replaced, it replaced for the whole team.
-            superseded: None,
         };
         materialize::commit_docs(ctx.fs, sp, &next_map, &next_lock, &next_sync)?;
     } else {
@@ -492,9 +489,6 @@ pub(crate) fn apply_publish_ok(
             work_hash: sync.work_hash.clone(),
             held: sync.held,
             draft_observed: None,
-            // The work tree moved during the round-trip, so a draft still stands here and
-            // whatever it was recorded as dropping, it still drops.
-            superseded: sync.superseded.clone(),
         };
         doc::write_doc(ctx.fs, &sp.sync, &next_sync)?;
     }
@@ -536,9 +530,6 @@ pub(crate) fn apply_light_advance(
         work_hash: sync.work_hash,
         held: sync.held,
         draft_observed: None,
-        // A revert / approve moves only the TARGET; this machine's own copy (and whatever it
-        // was recorded as dropping) is untouched until its next update.
-        superseded: sync.superseded,
     };
     doc::write_doc(ctx.fs, &sp.sync, &next_sync)?;
     Ok(new_gen)

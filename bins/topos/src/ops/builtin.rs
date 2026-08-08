@@ -461,7 +461,6 @@ fn create_builtin(ctx: &Ctx<'_>, sid: &SkillId, bundle: &ScannedBundle) -> Resul
             work_hash: digest_hex.clone(),
             held: false,
             draft_observed: None,
-            superseded: None,
         },
     )?;
     doc::write_map(

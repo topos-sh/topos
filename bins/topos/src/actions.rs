@@ -102,17 +102,6 @@ fn safety(code: &ActionCode, argv: &[String], subject: Subject) -> Safety {
             Safety::new(Some(true), Some(true), None)
         }
         "RESOLVE_DIVERGED_DRAFT" => resolve_diverged_draft(argv),
-        // The supersede consent, re-issued with the version named. `--over` IS the apply, so it
-        // mutates and it dials — and its caution says the thing the flag exists to make deliberate:
-        // a teammate's version stops being what everyone receives.
-        "PUBLISH_OVER_VERSION" => Safety::new(
-            Some(true),
-            Some(true),
-            Some(
-                "ships a version that leaves out the team's named one — everyone receives it \
-                 instead",
-            ),
-        ),
         "PROPOSE_PUBLISH" => Safety::new(
             Some(true),
             Some(true),
@@ -188,10 +177,10 @@ fn safety(code: &ActionCode, argv: &[String], subject: Subject) -> Safety {
 }
 
 /// The per-shape refinement for `RESOLVE_DIVERGED_DRAFT` — WHICH act resolves the divergence is the
-/// argv's story. The `--keep-mine` escape commits YOUR bytes onto current and clears a recorded
-/// conflict (a local resolution — no plane call in the blocked state this action is emitted for); a
-/// bare `--reset` only DESCRIBES the loss-led discard (its own describe carries the `--yes`); the
-/// plain targeted update runs the three-way merge.
+/// argv's story. The `--keep-mine` escape commits the merge with your side kept on the contested
+/// lines and clears a recorded conflict (a local resolution — no plane call in the blocked state
+/// this action is emitted for); a bare `--reset` only DESCRIBES the loss-led discard (its own
+/// describe carries the `--yes`); the plain targeted update runs the three-way merge.
 fn resolve_diverged_draft(argv: &[String]) -> Safety {
     // Both spellings, because an argv is whatever was TYPED: `--onto-current` is still a working
     // (hidden) alias, and a command classified as "the plain merge" when it is in fact the escape
@@ -201,9 +190,8 @@ fn resolve_diverged_draft(argv: &[String]) -> Safety {
             Some(true),
             Some(false),
             Some(
-                "commits YOUR bytes (your edited resolution, or your original draft) on top of \
-                 current; anything of the team's it leaves out must be named before a publish \
-                 can ship it",
+                "drops the team's side of the lines you both changed; their other changes are \
+                 kept",
             ),
         );
     }
@@ -556,7 +544,8 @@ mod tests {
 
     #[test]
     fn resolve_diverged_draft_refines_by_the_resolution_shape() {
-        // The `--keep-mine` escape resolves a recorded conflict locally — your bytes win.
+        // The `--keep-mine` escape resolves a recorded conflict locally, and its caution names the
+        // one thing that is lost: the team's side of the lines both sides changed.
         let escape = next_action(
             ActionCode::ResolveDivergedDraft,
             argv(&["topos", "update", "deploy", "--keep-mine", "--json"]),
@@ -565,8 +554,11 @@ mod tests {
             (escape.mutates, escape.needs_network),
             (Some(true), Some(false))
         );
-        assert!(
-            escape.risk_note.as_deref().unwrap_or("").contains("YOUR"),
+        assert_eq!(
+            escape.risk_note.as_deref(),
+            Some(
+                "drops the team's side of the lines you both changed; their other changes are kept"
+            ),
             "{escape:?}"
         );
         // A bare `--reset` only DESCRIBES the loss-led discard (its describe carries the `--yes`).

@@ -18,14 +18,12 @@
 //! my version), `--keep-mine` over an EDITED one (commit the hand merge), and `--reset` (take the
 //! team's). Each clears the block and deletes the workbench.
 //!
-//! **And the second property: `--keep-mine` cannot revert the team IN SILENCE.** It is one ordinary
-//! commit on top of the team's version, so publishing it is possible — but what it CONTAINS is
-//! measured, and a resolution that drops the team's change refuses a bare `--yes`, discloses the
-//! version and a diff of what is lost, and ships only when that version is named back with
-//! `--over`. The whole arc runs here against the real server: the refusal, the describe, a wrong
-//! `--over`, the landed publish, and the sweep afterwards. Its counterpart runs beside it — a hand
-//! merge that TOOK the team's line records nothing and publishes with a plain `--yes`, which is
-//! what proves the gate is measured from bytes rather than triggered by the command.
+//! **And the second property: `--keep-mine` is `git merge -X ours`, not `-s ours`.** The author's v2
+//! changes the line this person also changed AND a line nobody contested AND adds a whole new file.
+//! Keeping your version keeps YOUR wording on the contested line and takes the other two — through
+//! the exit, through an ordinary `--yes` publish, and all the way into what a fresh teammate
+//! receives on their first sweep. That last hop is the one that matters: it is the difference
+//! between "my folder looks right" and "the team did not lose anything".
 //!
 //! A last arm covers the OTHER refusal this touches: a copy deliberately put behind (a go-back)
 //! cannot publish directly — the plane's lineage fence would refuse the candidate anyway — but its
@@ -57,30 +55,83 @@ const TAKE: &str = "oncall-rota";
 /// All three, in the order the scenario publishes them.
 const BUNDLES: [&str; 3] = [KEEP, HAND, TAKE];
 
-/// The version the author publishes first, and the bytes both later sides diverge from.
+/// The version the author publishes first, and the bytes both later sides diverge from. The two
+/// numbered steps sit far enough apart to be separate hunks — adjacent lines are ONE conflict to
+/// diff3 and to git, and this suite is about what happens to the hunk nobody contested.
 fn v1(name: &str) -> String {
-    format!("# {name}\n\nsteps:\n1. check the region\n2. run the deploy\n")
+    body(name, "1. check the region", "2. run the deploy", "")
 }
 
-/// What the RECEIVER edits their own copy to — line 4, the same line the author changes.
+/// What the RECEIVER edits their own copy to — step 1, the same line the author changes. Step 2 is
+/// left exactly as it stands, which is what makes it uncontested.
 fn mine(name: &str) -> String {
-    format!("# {name}\n\nsteps:\n1. check the region twice\n2. run the deploy\n")
+    body(name, "1. check the region twice", "2. run the deploy", "")
 }
 
-/// What the AUTHOR publishes as v2 — the same line, differently.
+/// What the AUTHOR publishes as v2: the contested step 1, AND an uncontested step 2 the receiver
+/// never touched. (The author also adds a whole new file — see `NEW_FILE`.)
 fn theirs(name: &str) -> String {
-    format!("# {name}\n\nsteps:\n1. check the region and the account\n2. run the deploy\n")
+    body(
+        name,
+        "1. check the region and the account",
+        "2. run the deploy and tail the logs",
+        "",
+    )
+}
+
+/// What `--keep-mine` must produce over an untouched workbench: THIS person's step 1, the AUTHOR's
+/// step 2. The shipped code produced `mine(name)` — reverting a line nobody argued about.
+fn kept(name: &str) -> String {
+    body(
+        name,
+        "1. check the region twice",
+        "2. run the deploy and tail the logs",
+        "",
+    )
 }
 
 /// The by-hand merge a person types INTO the workbench: the team's contested line taken as it
-/// stands, plus a step of this person's own. Reconciling the contested line is what makes the next
-/// `topos update` merge CLEANLY — which is the only route from `--keep-mine` back to publishing.
+/// stands, plus a step of this person's own.
 fn hand_merge(name: &str) -> String {
     format!(
-        "# {name}\n\nsteps:\n1. check the region and the account\n2. run the deploy\n3. tail the \
-         logs\n"
+        "{}3. tail the logs\n",
+        body(
+            name,
+            "1. check the region and the account",
+            "2. run the deploy",
+            ""
+        )
     )
 }
+
+/// A go-back copy edited in the NOTES block — far enough from both lines the author's v2 rewrites
+/// that the merge which follows is clean. The point of that arm is the publish refusal, not another
+/// collision.
+fn goback_edit(name: &str) -> String {
+    body(
+        name,
+        "1. check the region",
+        "2. run the deploy",
+        "- page the on-call\n",
+    )
+}
+
+/// The one shape every version of these bundles takes: a contested first step, a notes block nobody
+/// argues about, and a last step the author alone rewrites. The blocks are separated by enough
+/// unchanged lines to be distinct diff3 hunks — adjacent edits are ONE conflict to diff3 and to git,
+/// and this suite is about the hunk nobody contested.
+fn body(name: &str, first: &str, last: &str, extra_note: &str) -> String {
+    format!(
+        "# {name}\n\nsteps:\n{first}\n\nnotes:\n- keep the runbook short\n- ask before a \
+         rollback\n{extra_note}- confirm the change window\n- announce in the channel\n\n\
+         afterwards:\n{last}\n"
+    )
+}
+
+/// A file the author's v2 ADDS — nowhere near the contested line, and nowhere in this person's copy.
+/// The probe that started all this deleted exactly this.
+const NEW_FILE: &str = "ROLLBACK.md";
+const NEW_FILE_BODY: &str = "# rollback\n\n1. stop the deploy\n2. restore the last version\n";
 
 /// The diff3 marker a folder an agent reads must never contain.
 const MARKER: &str = "<<<<<<<";
@@ -361,6 +412,9 @@ fn a_merge_conflict_never_reaches_a_folder_an_agent_reads() {
     for name in BUNDLES {
         std::fs::write(authored.join(name).join("SKILL.md"), theirs(name))
             .expect("the author's own edit");
+        // …and a brand-new file, nowhere near the contested line.
+        std::fs::write(authored.join(name).join(NEW_FILE), NEW_FILE_BODY)
+            .expect("the author's new file");
         author
             .publish(name, false, None, Some("v2"), Some(&authored))
             .unwrap_or_else(|e| panic!("publish {name} v2: {e}"));
@@ -477,19 +531,42 @@ fn a_merge_conflict_never_reaches_a_folder_an_agent_reads() {
         );
     }
 
-    // ── ASSERTION 5: `--keep-mine` over an UNTOUCHED workbench keeps this person's version ──────
-    let kept = dev
+    // ── ASSERTION 5: `--keep-mine` is `git merge -X ours` ──────────────────────────────────────
+    // THE ASSERTION THIS WHOLE CHANGE EXISTS FOR. The author's v2 did three things at once: it
+    // rewrote the line this person also rewrote, it rewrote a line they never touched, and it added
+    // a file they have never seen. Keeping your version keeps YOUR wording on the first and takes
+    // BOTH of the others. The shipped code committed this person's whole folder instead, so the
+    // second line reverted and the new file was deleted — silently.
+    let kept_receipt = dev
         .run(&["update", "-g", KEEP, "--keep-mine", "--json"])
         .data("--keep-mine with the workbench untouched");
-    assert_eq!(row(&kept, KEEP)["action"], "merged", "{kept}");
+    assert_eq!(
+        row(&kept_receipt, KEEP)["action"],
+        "merged",
+        "{kept_receipt}"
+    );
     for dir in &record(&placed, KEEP).placements {
         assert_eq!(
             placed_text(dir),
-            mine(KEEP),
-            "the original draft is what landed in {}",
+            kept(KEEP),
+            "my wording on the contested line, the team's on the one I never touched, in {}",
+            dir.display()
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join(NEW_FILE)).ok().as_deref(),
+            Some(NEW_FILE_BODY),
+            "the file the team added, nowhere near the collision, in {}",
             dir.display()
         );
     }
+    // The receipt NAMES what came along, so the fact is readable rather than inferred.
+    let took: Vec<&str> = row(&kept_receipt, KEEP)["merge"]["took"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .collect();
+    assert_eq!(took, vec![NEW_FILE, "SKILL.md"], "{kept_receipt}");
     assert!(
         !dev.topos_home().join("conflicts").join(KEEP).exists(),
         "the exit deletes the workbench"
@@ -499,108 +576,18 @@ fn a_merge_conflict_never_reaches_a_folder_an_agent_reads() {
         "the exit clears the block"
     );
 
-    // ── ASSERTION 5b: the publish ANNOUNCES what it replaces, and then lands ────────────────────
-    // The decision is durable — the escape's commit sits on the team's version, so publishing is
-    // possible at all — but its contents drop what the team wrote, so a bare apply refuses and
-    // names the version. THIS IS THE WORKFLOW THE SHIPPED CODE COULD NOT COMPLETE.
-    let refused = dev
-        .run(&["publish", KEEP, "--yes", "--json"])
-        .refusal("a bare apply of a superseding draft");
-    assert_eq!(refused["error"]["code"], "PUBLISH_SUPERSEDES", "{refused}");
-    let over_version = refused["next_actions"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .find(|a| a["code"] == "PUBLISH_OVER_VERSION")
-        .and_then(|a| {
-            let argv = a["argv"].as_array()?;
-            let at = argv.iter().position(|t| t == "--over")?;
-            argv.get(at + 1)?.as_str().map(str::to_owned)
-        })
-        .unwrap_or_else(|| panic!("the refusal names the version to publish over: {refused}"));
-    assert!(
-        refused["error"]["context"]["message"]
-            .as_str()
-            .is_some_and(|m| m.contains(&over_version)),
-        "the message names the same version the action does: {refused}"
-    );
-
-    // The DESCRIBE is where that version is read, with a diff of exactly what the team loses —
-    // computed locally, and it is the surface the receipt row pointed at.
-    let described = dev
-        .run(&["publish", KEEP, "--json"])
-        .envelope("the describe of a superseding publish");
-    let sup = &described["data"]["describe"]["supersedes"];
-    assert!(
-        sup["version_id"]
-            .as_str()
-            .is_some_and(|v| v.starts_with(&over_version)),
-        "the describe names the version being replaced: {described}"
-    );
-    let shown = sup["diff"].as_str().unwrap_or_default();
-    assert!(
-        shown.contains("check the region and the account")
-            && shown.contains("check the region twice"),
-        "the diff shows what the team loses: {described}"
-    );
-    // Its apply action IS the `--over` command — never a bare `--yes`.
-    let apply_argv: Vec<String> = described["next_actions"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .flat_map(|a| a["argv"].as_array().into_iter().flatten())
-        .filter_map(|t| t.as_str().map(str::to_owned))
-        .collect();
-    assert!(
-        apply_argv.contains(&"--over".to_owned()) && !apply_argv.contains(&"--yes".to_owned()),
-        "the describe's apply names the version: {described}"
-    );
-
-    // A version that is NOT the one being replaced refuses, naming the one that is.
-    let stale = dev
-        .run(&["publish", KEEP, "--over", "0000000000ff", "--json"])
-        .refusal("a --over naming the wrong version");
-    assert_eq!(stale["error"]["code"], "PUBLISH_SUPERSEDES", "{stale}");
-
-    // And the read surfaces call it what it is: a draft. Every folder holds it (topos wrote it),
-    // so no single folder is named as THE draft.
-    let listed = dev
-        .run(&["list", "-g", "--json"])
-        .data("list after keep-mine");
-    let listed_row = listed["scopes"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .flat_map(|s| s["rows"].as_array().into_iter().flatten())
-        .find(|r| r["skill"] == KEEP)
-        .unwrap_or_else(|| panic!("no {KEEP} row in {listed}"));
-    assert_eq!(listed_row["status"], "draft", "{listed}");
-
-    // NOW IT SHIPS — named, and against the real server.
+    // ── ASSERTION 5b: publishing it is an ORDINARY publish, and the team gets everything ────────
+    // No extra flag, no extra confirmation — git has none either. The resolution's commit parents
+    // on the team's version, so the plane's lineage fence is satisfied and a plain `--yes` ships it.
     let landed = dev
-        .run(&[
-            "publish",
-            KEEP,
-            "--over",
-            &over_version,
-            "-m",
-            "kept mine",
-            "--json",
-        ])
-        .data("the publish that names what it replaces");
+        .run(&["publish", KEEP, "--yes", "-m", "kept mine", "--json"])
+        .data("a plain --yes ships the resolution");
     assert!(
-        landed["supersedes"]
-            .as_str()
-            .is_some_and(|v| v.starts_with(&over_version)),
-        "the receipt states what it replaced: {landed}"
+        landed["version_id"].as_str().is_some(),
+        "the publish landed: {landed}"
     );
-    assert!(
-        landed["undo"]
-            .as_str()
-            .is_some_and(|u| u.contains("topos revert") && u.contains(&over_version)),
-        "and the undo puts the team back on it: {landed}"
-    );
-    // The team now receives THIS person's version — the whole point of the arc.
+    // And the read surfaces call it what it is: a draft, until it ships. Every folder holds it
+    // (topos wrote it), so no single folder is named as THE draft.
     let after_publish = dev
         .run(&["update", "-g", KEEP, "--json"])
         .data("the sweep after publishing");
@@ -609,20 +596,38 @@ fn a_merge_conflict_never_reaches_a_folder_an_agent_reads() {
         "up_to_date",
         "{after_publish}"
     );
-    for dir in &record(&placed, KEEP).placements {
-        assert_eq!(
-            placed_text(dir),
-            mine(KEEP),
-            "the published version is this person's, in {}",
-            dir.display()
-        );
-    }
-    // Nothing is superseded any more: the draft became `current`, so an ordinary re-publish of
-    // unchanged bytes refuses as a no-op rather than asking for `--over` again.
+    // Republishing the landed bytes is an ordinary no-op refusal.
     let noop = dev
         .run(&["publish", KEEP, "--yes", "--json"])
         .refusal("republishing the landed bytes");
     assert_eq!(noop["error"]["code"], "NO_CHANGES", "{noop}");
+
+    // THE ROUND TRIP: what the TEAM receives. The author's own copy is now behind, and their next
+    // ordinary update fast-forwards onto this person's resolution — carrying the author's OWN
+    // uncontested line and their OWN new file back to them, which is precisely what `-s ours` threw
+    // away. A folder looking right locally proves nothing; this does.
+    let (authors_sweep, _) = author
+        .update(&[KEEP], Some(&authored))
+        .unwrap_or_else(|e| panic!("the author's sweep after the receiver published: {e}"));
+    let authors_copy: PathBuf = authors_sweep
+        .skills
+        .iter()
+        .find(|r| r.skill == KEEP)
+        .and_then(|r| r.destinations.first())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| panic!("the author's sweep landed nowhere: {authors_sweep:?}"));
+    assert_eq!(
+        std::fs::read_to_string(authors_copy.join("SKILL.md")).expect("the author's copy"),
+        kept(KEEP),
+        "the team receives this person's contested line — and their own uncontested one back"
+    );
+    assert_eq!(
+        std::fs::read_to_string(authors_copy.join(NEW_FILE))
+            .ok()
+            .as_deref(),
+        Some(NEW_FILE_BODY),
+        "and the file they added survived the whole round trip"
+    );
 
     // ── ASSERTION 6: an EDITED workbench is committed as the hand resolution ────────────────────
     let workbench = dev.topos_home().join("conflicts").join(HAND);
@@ -638,6 +643,12 @@ fn a_merge_conflict_never_reaches_a_folder_an_agent_reads() {
             "the hand resolution is what landed in {}",
             dir.display()
         );
+        assert_eq!(
+            std::fs::read_to_string(dir.join(NEW_FILE)).ok().as_deref(),
+            Some(NEW_FILE_BODY),
+            "the workbench IS the merged tree, so the team's new file was already in it: {}",
+            dir.display()
+        );
     }
     assert!(!workbench.exists(), "the exit deletes the workbench");
     assert!(
@@ -645,28 +656,12 @@ fn a_merge_conflict_never_reaches_a_folder_an_agent_reads() {
         "the exit clears the block"
     );
 
-    // ── ASSERTION 6b: a RECONCILING hand merge publishes like any other draft ───────────────────
-    // This resolution took the team's contested line, so it CARRIES their version — nothing is
-    // being replaced, and nothing extra is asked of it. That is the measured answer, not a
-    // property of the command: the same `--keep-mine` produced the gated draft above.
-    assert!(
-        row(&resolved, HAND)["merge"]["supersedes"].is_null(),
-        "a reconciling hand merge records no replacement: {resolved}"
-    );
-    let described = dev
-        .run(&["publish", HAND, "--json"])
-        .data("the describe of a reconciled draft");
-    assert!(
-        described["describe"]["supersedes"].is_null(),
-        "so the describe discloses none: {described}"
-    );
+    // ── ASSERTION 6b: a hand resolution publishes like any other draft ─────────────────────────
+    // Nothing extra is asked of it, exactly as nothing extra was asked of the kept-mine one above.
     let landed = dev
         .run(&["publish", HAND, "--yes", "-m", "merged", "--json"])
-        .data("a plain --yes ships it");
-    assert!(
-        landed["supersedes"].is_null(),
-        "and the receipt states none: {landed}"
-    );
+        .data("a plain --yes ships the hand merge");
+    assert!(landed["version_id"].as_str().is_some(), "{landed}");
     for dir in &record(&placed, HAND).placements {
         assert_eq!(
             placed_text(dir),
@@ -703,8 +698,7 @@ fn a_merge_conflict_never_reaches_a_folder_an_agent_reads() {
     dev.run(&["update", "-g", &goback, "--json"])
         .data("a go-back to the earlier version");
     for dir in &record(&placed, TAKE).placements {
-        std::fs::write(dir.join("SKILL.md"), format!("{}extra step\n", v1(TAKE)))
-            .expect("edit the restored copy");
+        std::fs::write(dir.join("SKILL.md"), goback_edit(TAKE)).expect("edit the restored copy");
     }
     let behind = dev
         .run(&["publish", TAKE, "--yes", "--json"])

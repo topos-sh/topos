@@ -126,6 +126,21 @@
         "kind"
       ]
     },
+    "ConflictReason": {
+      "description": "Why a merge could not be applied cleanly. **INFERRED value set.**",
+      "oneOf": [
+        {
+          "description": "A genuine three-way merge with at least one unresolved path.",
+          "type": "string",
+          "const": "three_way"
+        },
+        {
+          "description": "Unrelated histories — no recorded base; a 2-way manual choice is required.",
+          "type": "string",
+          "const": "no_base"
+        }
+      ]
+    },
     "McpAgentState": {
       "description": "One agent's (harness's) state for a config-placed (`mcp`) bundle on this installation.\n`state` is an OPEN vocabulary — `current` / `drifted` / `not-supported` / `unprovable` /\n`conflicting` / `removed`; a reader ignores a state it does not recognize. **INFERRED**\n(additive).",
       "type": "object",
@@ -199,6 +214,17 @@
             "type": "string"
           }
         },
+        "reason": {
+          "description": "Why the merge could not resolve itself — `three_way` (a real fork point; the workbench holds\nboth sides marked up) or `no_base` (unrelated histories; the workbench holds this person's\nfiles with the team's beside them). Absent on a clean merge and on a resolution. **INFERRED**\n(additive).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ConflictReason"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "result_digest": {
           "description": "The merged/conflict tree's `bundle_digest`.",
           "type": "string",
@@ -209,18 +235,17 @@
           "type": "string",
           "pattern": "^[0-9a-f]{64}$"
         },
-        "supersedes": {
-          "description": "The team version this resolution's bytes deliberately do NOT contain — present only on a\n`--keep-mine` result whose chosen tree was MEASURED not to carry it (a hand resolution that\ntook the team's side records nothing here). It is what makes the later publish disclose the\nreplacement rather than ship it in silence. **INFERRED** (additive).",
-          "type": [
-            "string",
-            "null"
-          ],
-          "pattern": "^[0-9a-f]{64}$"
-        },
         "theirs_version_id": {
           "description": "`current` (theirs) the draft was merged onto.",
           "type": "string",
           "pattern": "^[0-9a-f]{64}$"
+        },
+        "took": {
+          "description": "The paths a `--keep-mine` resolution TOOK from the team — every file whose committed content\nor mode differs from this person's own draft, including ones the team deleted. Sorted by raw\npath bytes. Empty when the resolution changed nothing of theirs. **INFERRED** (additive).",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
         }
       },
       "required": [

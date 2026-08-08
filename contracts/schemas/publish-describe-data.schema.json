@@ -120,17 +120,6 @@
     "skill_id": {
       "type": "string"
     },
-    "supersedes": {
-      "description": "What this publish would REPLACE: the team version the draft deliberately does not carry,\nrecorded when a `--keep-mine` resolution kept bytes that drop it. Present only while that\nversion is still the one a publish would land on top of — and when it is present, the apply\nrefuses until the version is named back with `--over`. **INFERRED** (additive-only).",
-      "anyOf": [
-        {
-          "$ref": "#/$defs/PublishSupersedes"
-        },
-        {
-          "type": "null"
-        }
-      ]
-    },
     "undo": {
       "description": "The undo — the whole `topos revert <name> --to <version>` command that would put the team\nback on the version `current` holds now. WITHHELD unless it verifiably restores that state:\na bundle this machine does not follow cannot be reverted from here, and a review-gated\npublish never moves `current`, so there would be nothing to put back.",
       "type": [
@@ -212,27 +201,6 @@
           "type": "string",
           "const": "proposal"
         }
-      ]
-    },
-    "PublishSupersedes": {
-      "description": "What a publish would replace (see [`PublishDescribeData::supersedes`]). **INFERRED** (additive).",
-      "type": "object",
-      "properties": {
-        "diff": {
-          "description": "A unified diff from that version to the bytes this publish would ship — what the team\nloses, computed from local bytes alone (the describe adds no network call). Absent when\nthat version's bytes are not held locally.",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "version_id": {
-          "description": "The version being replaced — the value `--over` must name.",
-          "type": "string",
-          "pattern": "^[0-9a-f]{64}$"
-        }
-      },
-      "required": [
-        "version_id"
       ]
     }
   }

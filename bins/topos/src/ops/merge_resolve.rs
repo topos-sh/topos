@@ -68,11 +68,10 @@ use topos_core::merge::{
 };
 use topos_gitstore::{
     DiffFile, ImportFile, MergeFileResult, RenderedBundle, RenderedFile, Store, merge_file,
-    unified_diff,
+    merge_file_keep_ours, unified_diff,
 };
 use topos_types::persisted::{
-    ConflictPath, ConflictPathKind, ConflictReason, ConflictState, Lock, PlacementMap, Superseded,
-    SyncState,
+    ConflictPath, ConflictPathKind, ConflictReason, ConflictState, Lock, PlacementMap, SyncState,
 };
 use topos_types::results::{
     ConflictPathReport, MergePreview, MergePreviewVerdict, MergeReport, PullAction, PullSkill,
@@ -160,7 +159,13 @@ pub(crate) fn resolve_diverged(
     let mine_map = scanned_map(mine);
     let theirs_map = render_map(theirs);
 
-    let assembled = assemble(&plan, &base_map, &mine_map, &theirs_map)?;
+    let assembled = assemble(
+        &plan,
+        &base_map,
+        &mine_map,
+        &theirs_map,
+        OnCollision::KeepBoth,
+    )?;
     let outcome = decide_outcome(&plan, &assembled.content_results);
     let merged = build_bundle(assembled.files)?;
     let merged_digest_hex = to_hex(&merged.bundle_digest);
@@ -184,10 +189,6 @@ pub(crate) fn resolve_diverged(
                 &merged,
                 theirs,
                 theirs_commit,
-                // CARRIED, not cleared: this merge landed the team's NEWEST version, but a draft
-                // that already dropped an older one still drops it, and the row that says so
-                // (and the publish that must disclose it) reads this field.
-                sync.superseded.clone(),
             )?;
             log_resolution(ctx, skill_id, "merge", result_commit);
             Ok(merged_row(
@@ -198,7 +199,7 @@ pub(crate) fn resolve_diverged(
                 result_commit,
                 &merged_digest_hex,
                 None,
-                None,
+                Vec::new(),
             ))
         }
         MergeOutcome::BlockedConflict => {
@@ -251,6 +252,7 @@ pub(crate) fn resolve_diverged(
                 &merged_digest_hex,
                 conflict_reports(&assembled.conflicts),
                 None,
+                ConflictReason::ThreeWay,
                 conflict_disclosure(ctx, lock, map, &cs),
             ))
         }
@@ -261,11 +263,12 @@ pub(crate) fn resolve_diverged(
     }
 }
 
-/// The escape (`--keep-mine`): commit the author's chosen bytes (`committed`) as a fresh 1-parent commit
-/// on `current` (which snapshots them recoverably), write them to every managed placement, and clear the
+/// The escape (`--keep-mine`): commit the author's chosen tree (`committed`) as a fresh 1-parent commit
+/// on `current` (which snapshots it recoverably), write it to every managed placement, and clear the
 /// conflict record (and the marked-up copy it named). The CALLER chooses `committed`: the author's hand
-/// resolution from the conflict copy, or — if that copy is still the raw conflict tree — their ORIGINAL
-/// draft, so the escape never commits unresolved markers as bundle content.
+/// resolution from the conflict copy, or — if that copy is still the raw conflict tree — the merge
+/// resolved to their side where the two collided ([`keep_mine_tree`]), so the escape never commits
+/// unresolved markers as bundle content and never throws away what the team changed elsewhere.
 ///
 /// ## One ordinary commit, on top of theirs
 ///
@@ -274,16 +277,12 @@ pub(crate) fn resolve_diverged(
 /// the working bytes read as an ordinary DRAFT on top of `current`. Nothing is rebased, nothing is
 /// rewritten, and the version has exactly one parent — the history stays a list.
 ///
-/// ## What is special is what the commit CONTAINS, so that is what is recorded
+/// ## What it CONTAINS is the merge, resolved your way where you collided
 ///
-/// The one unusual thing about this draft is that its contents may quietly drop what a teammate wrote.
-/// That is a fact about bytes, so it is COMPUTED rather than assumed: the merge is re-run in memory over
-/// the CHOSEN tree ([`already_carries_theirs`]), and only when the answer is "no, theirs is not in
-/// here" does [`SyncState::superseded`] record the version being dropped. A hand resolution that took
-/// the team's contested line records nothing and publishes like any other draft.
-///
-/// The record is what makes the later publish announce itself instead of shipping in silence, and what
-/// keeps `list`/`status` reading `draft` for a copy topos itself wrote into every folder.
+/// The caller assembles `committed` (see [`escape_recorded`]); `took` is what that tree brought over
+/// from the team, so the receipt can name it. Publishing afterwards is an ordinary publish: the
+/// commit's parent IS the version `current` names, so the plane's lineage fence is satisfied, and
+/// nothing here gates the ship — git gates none either.
 ///
 /// The no-deadlock guarantee is unchanged: it needs no renderable base, it never touches the plane, and
 /// it always leaves a coherent bundle in every folder.
@@ -296,7 +295,7 @@ fn escape(
     lock: &Lock,
     map: &PlacementMap,
     committed: &RenderedBundle,
-    base: Option<&RenderedBundle>,
+    took: Vec<String>,
     base_commit: [u8; 32],
     theirs: &RenderedBundle,
     theirs_commit: [u8; 32],
@@ -305,13 +304,6 @@ fn escape(
     let merged_digest_hex = to_hex(&committed.bundle_digest);
     let result_commit = commit_result(ctx, &store, theirs_commit, committed, MERGE_ESCAPE_MESSAGE)?;
     let drop = drop_diff(theirs, committed);
-    // The containment question, answered from bytes: does the chosen tree already hold the team's
-    // version? An unrenderable base cannot merge, so it answers `false` by definition.
-    let superseded = (!already_carries_theirs(base, committed, theirs)).then(|| Superseded {
-        version_id: to_hex(&theirs_commit),
-        bundle_digest: to_hex(&theirs.bundle_digest),
-    });
-    let supersedes_row = superseded.as_ref().map(|s| s.version_id.clone());
 
     place_draft_on_current(
         ctx,
@@ -323,7 +315,6 @@ fn escape(
         committed,
         theirs,
         theirs_commit,
-        superseded,
     )?;
     // The escape RESOLVES — clear the block last, once the placements have settled (idempotent: a
     // crash before this is healed by re-running).
@@ -337,38 +328,72 @@ fn escape(
         result_commit,
         &merged_digest_hex,
         Some(drop),
-        supersedes_row,
+        took,
     ))
 }
 
-/// Whether `committed` ALREADY contains everything `theirs` brought — the one question that decides
-/// whether a `--keep-mine` resolution supersedes the team's version or merely reconciles with it.
+/// The tree a `--keep-mine` over an UNTOUCHED workbench commits: the ordinary three-way merge,
+/// settled on the author's side at exactly the paths where the two sides collide — `git merge
+/// -X ours`.
 ///
-/// It is answered by running the merge, not by inspecting the command: plan `(base, committed, theirs)`
-/// with the SAME kernel the real resolution uses, assemble the tree, and ask two things of the result —
-/// that it merged CLEANLY, and that it came out byte-identical to `committed`. Both together mean
-/// "merging theirs in changes nothing here", which is exactly containment. Pure and in memory: no
-/// commit, no placement, no store write, no network.
+/// The distinction from `-s ours` is the whole fix: everything the team changed WITHOUT colliding
+/// lands normally (a file only they touched, a hunk far from the contested one, a file they added).
+/// Only what they wrote over the author's own change is dropped, which is the only thing "keep mine"
+/// ever meant.
 ///
-/// `None` base (the no-base fallback's unrenderable one) is `false` by definition — with no fork point
-/// there is no merge to run, so nothing can be proven contained.
-fn already_carries_theirs(
-    base: Option<&RenderedBundle>,
-    committed: &RenderedBundle,
+/// It is the SAME kernel plan and the SAME assembly the blocked merge runs — one merge, two
+/// resolutions of its collisions ([`OnCollision`]) — so no second reconciliation table exists to
+/// drift from the first.
+///
+/// # The emptying corner
+/// A merge can resolve to no files at all (each side deleted what the other left alone). Git would
+/// commit that empty tree; a topos bundle cannot be fileless, so the author's own tree stands —
+/// the least-loss answer, and the one every other exit already produces.
+fn keep_mine_tree(
+    base: &RenderedBundle,
+    mine: &RenderedBundle,
     theirs: &RenderedBundle,
-) -> bool {
-    let Some(base) = base else { return false };
-    let plan = plan_merge(&file_ids(base), &file_ids(committed), &file_ids(theirs));
-    let base_map = render_map(base);
-    let mine_map = render_map(committed);
-    let theirs_map = render_map(theirs);
-    let Ok(assembled) = assemble(&plan, &base_map, &mine_map, &theirs_map) else {
-        return false;
-    };
-    if decide_outcome(&plan, &assembled.content_results) != MergeOutcome::CleanCommitOnTip {
-        return false;
+) -> Result<RenderedBundle, ClientError> {
+    let plan = plan_merge(&file_ids(base), &file_ids(mine), &file_ids(theirs));
+    let assembled = assemble(
+        &plan,
+        &render_map(base),
+        &render_map(mine),
+        &render_map(theirs),
+        OnCollision::KeepMine,
+    )?;
+    if assembled.files.is_empty() {
+        return Ok(mine.clone());
     }
-    build_bundle(assembled.files).is_ok_and(|m| m.bundle_digest == committed.bundle_digest)
+    build_bundle(assembled.files)
+}
+
+/// What a resolution TOOK from the team: every path whose committed content or mode differs from
+/// the author's own draft, including the ones the team's version deleted.
+///
+/// Computed from the two trees rather than from the plan, so it is true of whatever was actually
+/// committed — the `-X ours` merge, or a tree the author hand-wrote in the workbench (which starts
+/// from the merged tree, so their non-conflicting changes are in it too).
+fn took_from_theirs(mine: &RenderedBundle, committed: &RenderedBundle) -> Vec<String> {
+    let before: BTreeMap<&str, (FileMode, [u8; 32])> = mine
+        .files
+        .iter()
+        .map(|f| (f.path.as_str(), (f.mode, f.content_sha256)))
+        .collect();
+    let mut out: BTreeSet<String> = committed
+        .files
+        .iter()
+        .filter(|f| before.get(f.path.as_str()) != Some(&(f.mode, f.content_sha256)))
+        .map(|f| f.path.clone())
+        .collect();
+    let kept: BTreeSet<&str> = committed.files.iter().map(|f| f.path.as_str()).collect();
+    out.extend(
+        before
+            .keys()
+            .filter(|p| !kept.contains(*p))
+            .map(|p| (*p).to_owned()),
+    );
+    out.into_iter().collect()
 }
 
 /// The no-base fallback: keep MINE on disk, block, and surface a 2-way diff of what theirs would add —
@@ -461,6 +486,7 @@ fn no_base(
         &merged_digest_hex,
         Vec::new(),
         Some(drop_diff(theirs, &merged)),
+        ConflictReason::NoBase,
         conflict_disclosure(ctx, lock, map, &cs),
     ))
 }
@@ -474,17 +500,21 @@ fn no_base(
 /// they still hold the author's own version). The folder is read as exactly one of three things, and
 /// the difference between the last two is the difference between an exit and a loss:
 ///
-/// - **absent** (or unnameable) ⇒ commit the author's ORIGINAL draft (`draft_commit`). There is no
-///   hand resolution on disk to lose, and this is what makes the removal ORDER in
-///   [`clear_conflict`] safe (see the module doc).
-/// - **present and scanning to `conflicted_digest`** — the raw, unedited marker tree ⇒ commit the
-///   ORIGINAL draft too. This is the "keep my version" exit: leave the folder alone and the merge
-///   is dropped, never the markers published.
-/// - **present and edited** ⇒ those bytes ARE the hand resolution; commit them.
+/// - **absent** (or unnameable) ⇒ commit the MERGE, resolved to the author's side wherever the two
+///   sides collided ([`keep_mine_tree`]). There is no hand resolution on disk to lose, and this is
+///   what makes the removal ORDER in [`clear_conflict`] safe (see the module doc).
+/// - **present and scanning to `conflicted_digest`** — the raw, unedited marker tree ⇒ the same
+///   merge. This is the "keep my version" exit: leave the folder alone and your wording wins the
+///   lines you both changed, never the markers published.
+/// - **present and edited** ⇒ those bytes ARE the hand resolution; commit them, unexamined. The
+///   person resolved it; second-guessing their tree would be the one thing worse than not asking.
+///
+/// The first two are `git merge -X ours` and the third is `git commit` after editing by hand —
+/// which is the whole model: a copy whose base could not be rendered has no merge to run, so there
+/// the author's own tree stands (the 2-way [`no_base`] fallback's exit).
 ///
 /// Whichever of the three it is, the result is committed on the team's version and the docs advance
-/// with it — one ordinary commit on top of theirs. What the three differ in is only what is INSIDE
-/// that commit, which is why [`escape`] measures the contents rather than trusting the command.
+/// with it — one ordinary commit on top of theirs, publishable like any other draft.
 ///
 /// A folder that is present but CANNOT BE READ as a bundle is none of the three, and it is
 /// refused. The scanner rejects a tree holding a symlink, a non-regular file, a non-UTF-8 name, or
@@ -509,23 +539,29 @@ pub(crate) fn escape_recorded(
     let store = Store::open(&sp.store)?;
     let theirs_commit = super::parse_hex32(&cs.current_commit)?;
     let theirs = store.render_verified(theirs_commit, super::parse_hex32(&cs.current_digest)?)?;
-    let committed = match read_hand_resolution(ctx, lock, cs)? {
-        Some(bundle) => bundle,
-        None => store.render_verified(
-            super::parse_hex32(&cs.draft_commit)?,
-            super::parse_hex32(&cs.draft_digest)?,
-        )?,
-    };
-    // Read the copies BEFORE the escape converges them, so the row can say what it is about to
-    // overwrite (see [`collapsed_copies`]).
-    let collapsed = collapsed_copies(ctx, sp, lock, map);
-    // The conflict's own fork point — the base the containment check merges against. It is the ONE
-    // thing a no-base record cannot supply, and its absence is exactly what makes that record's exit
-    // count as superseding.
+    // The author's own draft as it stood when the merge stopped — the tree the resolution is
+    // measured against, and the fallback when there is no fork point to merge from.
+    let draft = store.render_verified(
+        super::parse_hex32(&cs.draft_commit)?,
+        super::parse_hex32(&cs.draft_digest)?,
+    )?;
+    // The conflict's own fork point. It is the ONE thing a no-base record cannot supply, and
+    // without it there is no merge to run at all — the author's tree is the whole answer there.
     let base_commit = super::parse_hex32(&cs.base_commit)?;
     let base = store
         .render_verified(base_commit, super::parse_hex32(&cs.base_digest)?)
         .ok();
+    let committed = match read_hand_resolution(ctx, lock, cs)? {
+        Some(bundle) => bundle,
+        None => match &base {
+            Some(base) => keep_mine_tree(base, &draft, &theirs)?,
+            None => draft.clone(),
+        },
+    };
+    let took = took_from_theirs(&draft, &committed);
+    // Read the copies BEFORE the escape converges them, so the row can say what it is about to
+    // overwrite (see [`collapsed_copies`]).
+    let collapsed = collapsed_copies(ctx, sp, lock, map);
     let mut row = escape(
         ctx,
         skill_id,
@@ -534,7 +570,7 @@ pub(crate) fn escape_recorded(
         lock,
         map,
         &committed,
-        base.as_ref(),
+        took,
         base_commit,
         &theirs,
         theirs_commit,
@@ -608,17 +644,11 @@ fn collapsed_note(ctx: &Ctx<'_>, name: &str, saved: &[SavedCopy]) -> String {
     for c in saved {
         out.push_str(&format!(
             "\n  topos update{g} {name}@{}   (was in {})",
-            short_version(&c.version),
+            crate::render::short(&c.version),
             c.display
         ));
     }
     out
-}
-
-/// A version id as a command line spells it — short enough to type, long enough to be unique in
-/// one bundle's history (the same 12 the receipts print).
-fn short_version(v: &str) -> &str {
-    &v[..v.len().min(12)]
 }
 
 /// The author's hand resolution as a committable bundle, or `None` when the workbench folder is
@@ -844,10 +874,34 @@ pub(crate) fn preview_merge(
 // Tree assembly.
 // --------------------------------------------------------------------------------------------------
 
+/// What the assembly does at the paths where the two sides genuinely collide — the ONE thing the
+/// blocked merge and the `--keep-mine` resolution disagree about. Everything else (the plan, the
+/// clean takes, the merged hunks) is identical, so there is no second reconciliation table.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum OnCollision {
+    /// Write BOTH sides for a person to settle: diff3 markers where there are hunks to mark, a
+    /// `.topos-mine` sibling where there are not. The workbench tree.
+    KeepBoth,
+    /// Settle every collision on the author's side, and take the team's changes everywhere else —
+    /// `git merge -X ours`, path rules included:
+    ///
+    /// | collision | resolved to | git |
+    /// |---|---|---|
+    /// | contested text hunks | mine, their other hunks kept | `-X ours` |
+    /// | binary / over-cap | mine, whole | `-X ours` on a binary conflict |
+    /// | mine modified, theirs deleted | mine, kept | `git checkout --ours` |
+    /// | mine deleted, theirs modified | deleted | `git checkout --ours` |
+    /// | both added, different content | mine | `-X ours` |
+    /// | both added, modes disagree | mine's mode | `-X ours` |
+    KeepMine,
+}
+
 /// The complete resolved tree + the per-content-merge verdicts (in plan order) + the conflicting paths.
 struct Assembled {
     files: Vec<RenderedFile>,
     content_results: Vec<ContentMergeResult>,
+    /// The collisions, for the record a blocked merge writes. Always EMPTY under
+    /// [`OnCollision::KeepMine`]: that assembly leaves nothing unresolved to check off.
     conflicts: Vec<ConflictPath>,
 }
 
@@ -858,6 +912,7 @@ fn assemble(
     base_map: &BTreeMap<&str, Side<'_>>,
     mine_map: &BTreeMap<&str, Side<'_>>,
     theirs_map: &BTreeMap<&str, Side<'_>>,
+    on_collision: OnCollision,
 ) -> Result<Assembled, ClientError> {
     let union: BTreeSet<&str> = plan.paths.iter().map(|p| p.path.as_str()).collect();
     let mut emitted: BTreeSet<String> = BTreeSet::new();
@@ -917,6 +972,14 @@ fn assemble(
                 let b = side(base_map, path)?;
                 let m = side(mine_map, path)?;
                 let t = side(theirs_map, path)?;
+                if on_collision == OnCollision::KeepMine {
+                    // The `-X ours` byte answer for this path — the merge with every contested
+                    // hunk settled on mine, so it always resolves.
+                    let bytes = merge_file_keep_ours(b.bytes, m.bytes, t.bytes);
+                    emit(&mut files, &mut emitted, pp.path.clone(), *mode, bytes);
+                    content_results.push(ContentMergeResult::Clean);
+                    continue;
+                }
                 match merge_file(b.bytes, m.bytes, t.bytes) {
                     Ok(MergeFileResult::Clean(bytes)) => {
                         emit(&mut files, &mut emitted, pp.path.clone(), *mode, bytes);
@@ -941,6 +1004,8 @@ fn assemble(
             }
             PathPlan::FileSetConflict { kind } => match kind {
                 FileSetConflictKind::ModifyDelete => {
+                    // Mine modified, theirs deleted — mine stands either way (the workbench needs
+                    // the file to resolve in; `--ours` keeps it).
                     let m = side(mine_map, path)?;
                     emit(
                         &mut files,
@@ -949,9 +1014,16 @@ fn assemble(
                         m.mode,
                         m.bytes.to_vec(),
                     );
-                    conflicts.push(cpath(path, ConflictPathKind::ModifyDelete));
+                    if on_collision == OnCollision::KeepBoth {
+                        conflicts.push(cpath(path, ConflictPathKind::ModifyDelete));
+                    }
                 }
                 FileSetConflictKind::DeleteModify => {
+                    // Mine deleted, theirs modified. Keeping mine means the file stays GONE, which
+                    // is what `git checkout --ours` leaves; the workbench needs theirs to look at.
+                    if on_collision == OnCollision::KeepMine {
+                        continue;
+                    }
                     let t = side(theirs_map, path)?;
                     emit(
                         &mut files,
@@ -964,21 +1036,40 @@ fn assemble(
                 }
                 FileSetConflictKind::AddAddDifferent => {
                     let m = side(mine_map, path)?;
+                    if on_collision == OnCollision::KeepMine {
+                        emit(
+                            &mut files,
+                            &mut emitted,
+                            pp.path.clone(),
+                            m.mode,
+                            m.bytes.to_vec(),
+                        );
+                        continue;
+                    }
                     let t = side(theirs_map, path)?;
                     keep_both(&mut files, &mut emitted, &mut emit, &union, path, m, t);
                     conflicts.push(cpath(path, ConflictPathKind::AddAdd));
                 }
                 FileSetConflictKind::AddAddModeDiffers => {
-                    // Identical content, disagreeing modes — keep theirs' bytes + mode, flag the disagreement.
-                    let t = side(theirs_map, path)?;
+                    // Identical content, disagreeing modes. The workbench keeps theirs' mode and
+                    // flags the disagreement; keeping mine keeps MY mode — the only thing in
+                    // dispute here is the executable bit.
+                    let (s, kind) = match on_collision {
+                        OnCollision::KeepMine => (side(mine_map, path)?, None),
+                        OnCollision::KeepBoth => {
+                            (side(theirs_map, path)?, Some(ConflictPathKind::ModeMode))
+                        }
+                    };
                     emit(
                         &mut files,
                         &mut emitted,
                         pp.path.clone(),
-                        t.mode,
-                        t.bytes.to_vec(),
+                        s.mode,
+                        s.bytes.to_vec(),
                     );
-                    conflicts.push(cpath(path, ConflictPathKind::ModeMode));
+                    if let Some(kind) = kind {
+                        conflicts.push(cpath(path, kind));
+                    }
                 }
             },
         }
@@ -1132,10 +1223,6 @@ fn cpath(path: &str, kind: ConflictPathKind) -> ConflictPath {
 /// `lock = theirs` (so the working bytes read as a draft), `applied = observed`, `work_hash = merged`.
 /// Reuses the crash-safe dir-swap; the auto-update/harness hook is NOT fired (materialize only writes bytes).
 ///
-/// `superseded` is the ONE thing the two callers disagree about, so it is a parameter rather than a
-/// derivation: a clean merge CARRIES whatever stood (its result may still drop an older team version),
-/// while the escape passes what it just measured. The forward apply/heal path — which lands the
-/// pristine target everywhere and therefore drops nothing — clears it in [`forwarded_sync`] itself.
 #[allow(clippy::too_many_arguments)]
 fn place_draft_on_current(
     ctx: &Ctx<'_>,
@@ -1147,14 +1234,10 @@ fn place_draft_on_current(
     merged: &RenderedBundle,
     theirs: &RenderedBundle,
     theirs_commit: [u8; 32],
-    superseded: Option<Superseded>,
 ) -> Result<(), ClientError> {
     let merged_digest_hex = to_hex(&merged.bundle_digest);
     let next_lock = lock_from_bundle(lock, theirs_commit, theirs);
-    let next_sync = SyncState {
-        superseded,
-        ..forwarded_sync(sync, theirs_commit, &merged_digest_hex)
-    };
+    let next_sync = forwarded_sync(sync, theirs_commit, &merged_digest_hex);
     // The resolution converges EVERY managed placement onto the merged tree (the draft copy included
     // — its bytes are already committed in the store as a merge parent / the recoverable draft).
     let plan = placement::plan_for_skill(ctx, skill_id, lock, map);
@@ -1372,12 +1455,7 @@ fn settle_conflict_docs(
     work_hash_hex: &str,
 ) -> Result<(), ClientError> {
     let next_lock = lock_from_bundle(lock, theirs_commit, theirs);
-    // A conflict decides nothing, so it changes nothing about what this draft drops — whatever
-    // an earlier `--keep-mine` recorded stands until an exit resolves it.
-    let next_sync = SyncState {
-        superseded: sync.superseded.clone(),
-        ..forwarded_sync(sync, theirs_commit, work_hash_hex)
-    };
+    let next_sync = forwarded_sync(sync, theirs_commit, work_hash_hex);
     if lock.base_commit == next_lock.base_commit
         && lock.bundle_digest == next_lock.bundle_digest
         && sync.base_commit == next_sync.base_commit
@@ -1538,23 +1616,6 @@ fn drop_diff(theirs: &RenderedBundle, mine: &RenderedBundle) -> String {
     unified_diff(&t, &m)
 }
 
-/// [`drop_diff`] against a live SCAN rather than a stored tree — the publish describe's disclosure,
-/// which diffs the version being replaced against the bytes actually sitting in the folder.
-pub(crate) fn drop_diff_from_scan(theirs: &RenderedBundle, mine: &ScannedBundle) -> String {
-    let t = diff_view(theirs);
-    let mut m: Vec<DiffFile<'_>> = mine
-        .files
-        .iter()
-        .map(|f| DiffFile {
-            path: &f.path,
-            mode: f.mode,
-            bytes: &f.bytes,
-        })
-        .collect();
-    m.sort_by(|a, b| a.path.as_bytes().cmp(b.path.as_bytes()));
-    unified_diff(&t, &m)
-}
-
 /// A bundle as `DiffFile` views, sorted by raw path bytes (the `unified_diff` contract).
 fn diff_view(b: &RenderedBundle) -> Vec<DiffFile<'_>> {
     let mut v: Vec<DiffFile<'_>> = b
@@ -1593,7 +1654,7 @@ fn merged_row(
     result: [u8; 32],
     result_digest_hex: &str,
     drop_diff: Option<String>,
-    supersedes: Option<String>,
+    took: Vec<String>,
 ) -> PullSkill {
     PullSkill {
         skill: name.to_owned(),
@@ -1610,7 +1671,9 @@ fn merged_row(
             clean: true,
             conflicts: Vec::new(),
             drop_diff,
-            supersedes,
+            // A merge that RESOLVED is not a stopped one, so it names no reason.
+            reason: None,
+            took,
             // A clean merge REWRITES its placements, so it has neither an untouched-folder set nor
             // a marked-up copy to name.
             placements: Vec::new(),
@@ -1667,6 +1730,7 @@ fn conflicted_row(
     result_digest_hex: &str,
     conflicts: Vec<ConflictPathReport>,
     drop_diff: Option<String>,
+    reason: ConflictReason,
     disclosure: (Vec<String>, Option<String>),
 ) -> PullSkill {
     let (placements, copy_dir) = disclosure;
@@ -1684,9 +1748,11 @@ fn conflicted_row(
             clean: false,
             conflicts,
             drop_diff,
-            // A block decides nothing, so it replaces nothing — the field belongs to the
-            // resolution that follows it.
-            supersedes: None,
+            // WHY it stopped — which decides what the workbench holds, and therefore what the row
+            // sends a person there to do.
+            reason: Some(reason),
+            // A block resolves nothing, so it takes nothing.
+            took: Vec::new(),
             placements,
             copy_dir,
         }),
@@ -1702,6 +1768,11 @@ fn conflicted_row(
 }
 
 /// Build the typed conflict row from a recorded [`ConflictState`] (re-disclosed each pull while blocked).
+///
+/// The RECORD's own `reason` rides along, so a re-disclosure sends a person to the same folder
+/// holding the same thing the first disclosure named. It used to be inferred from the presence of a
+/// `drop_diff` this function does not have, so every sweep after the first told a no-base workbench's
+/// reader to look for markers in a folder that has none.
 pub(crate) fn conflicted_row_from_state(
     ctx: &Ctx<'_>,
     name: &str,
@@ -1720,6 +1791,7 @@ pub(crate) fn conflicted_row_from_state(
         &cs.conflicted_digest,
         conflict_reports(&cs.paths),
         None,
+        cs.reason,
         conflict_disclosure(ctx, lock, map, cs),
     ))
 }

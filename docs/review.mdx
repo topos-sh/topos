@@ -101,26 +101,21 @@ topos update customer-lookup --reset --yes
 ```
 
 See your side; commit the merge you made in that folder — or, by leaving the folder alone, keep
-**your** version and skip the merge; or take the **team's** version instead, dropping yours. Either
-way out deletes the folder.
+**your** wording on the lines you both changed; or take the **team's** version instead, dropping
+yours. Either way out deletes the folder.
 
-Keeping your version is exactly what it sounds like: your files, saved on top of the team's version,
-the way you would edit a file back to your wording after pulling and then commit. It is a normal
-draft from there on — `topos diff` shows it, `topos update` keeps merging their later changes into
-it, `topos publish` ships it.
+Keeping your version is exactly what it sounds like, and no more than that: your wording wins the
+lines the two of you both rewrote, and everything else they changed comes in — a file only they
+touched, a paragraph nowhere near yours, a file they added. The receipt names the files that came
+along. It is the same thing you would get by pulling their change, editing the contested lines back
+to your wording, and committing.
 
-The one thing topos will not let it do is take away their change in silence. If what you kept leaves
-out something they wrote, the publish stops and says so:
+From there it is a normal draft: `topos diff` shows it, `topos update` keeps merging their later
+changes into it, and `topos publish` ships it like any other change.
 
-```
-customer-lookup: this publish drops the team's fed180d80b8a, which your copy does not carry.
-  name what it replaces: topos publish customer-lookup --over fed180d80b8a
-```
-
-Run `topos publish customer-lookup` first and you get the whole picture — the version you would be
-replacing and a diff of what the team loses — then name it back to ship. If your merge took their
-side of the contested lines, none of this appears: there is nothing being dropped, so it publishes
-like any other change.
+`--keep-mine` only finishes a merge that has actually stopped. Run it when nothing is waiting and it
+says so and points you at `topos update <skill>` — the ordinary update, which takes their changes
+and stops only where the two of you really collide.
 
 ## When two copies disagree
 

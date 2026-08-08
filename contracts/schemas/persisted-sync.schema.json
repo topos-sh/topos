@@ -44,17 +44,6 @@
       "const": 1,
       "minimum": 0
     },
-    "superseded": {
-      "description": "The team `current` this machine's draft deliberately does not contain — written when a\n`--keep-mine` resolution commits bytes that do NOT already carry the served version, and\nCOMPUTED at that moment (the merge is re-run in memory over the chosen tree), never\nasserted from the fact that the command was typed. It is what makes a later `publish`\ndisclose the replacement instead of shipping it silently.\n\nMeaningful only while a draft stands: it is carried through a clean merge onto a newer\nteam version (the draft still drops the older one) and cleared by a reset, a landed\npublish, a go-back, a fast-forward, and by the sweep once the work tree equals the base.\n**Additive optional** (absent in older documents, and absent whenever nothing is dropped).",
-      "anyOf": [
-        {
-          "$ref": "#/$defs/Superseded"
-        },
-        {
-          "type": "null"
-        }
-      ]
-    },
     "work_hash": {
       "description": "sha256 (lowercase hex) of the current harness-dir bytes (recomputed; cheap).",
       "type": "string",
@@ -69,27 +58,5 @@
     "base_commit",
     "work_hash",
     "held"
-  ],
-  "$defs": {
-    "Superseded": {
-      "description": "The version a draft deliberately does not contain (see [`SyncState::superseded`]). **Field-set\npinned** (additive).",
-      "type": "object",
-      "properties": {
-        "bundle_digest": {
-          "description": "That version's `bundle_digest` — the render pin, so the publish describe can diff against\nit offline without re-deriving anything.",
-          "type": "string",
-          "pattern": "^[0-9a-f]{64}$"
-        },
-        "version_id": {
-          "description": "The `version_id` of the team `current` the draft drops.",
-          "type": "string",
-          "pattern": "^[0-9a-f]{64}$"
-        }
-      },
-      "required": [
-        "version_id",
-        "bundle_digest"
-      ]
-    }
-  }
+  ]
 }

@@ -94,7 +94,6 @@ fn sample_sync(tag: u8) -> SyncState {
         work_hash: hex(tag),
         held: false,
         draft_observed: None,
-        superseded: None,
     }
 }
 

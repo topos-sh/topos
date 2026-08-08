@@ -1345,7 +1345,6 @@ mod tests {
             work_hash: work.to_owned(),
             held: false,
             draft_observed: None,
-            superseded: None,
         }
     }
 

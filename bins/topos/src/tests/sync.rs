@@ -448,6 +448,20 @@ const V1: &[(&str, FileMode, &[u8])] = &[
     ("run.sh", FileMode::Executable, b"#!/bin/sh\necho v1\n"),
     ("ref/notes.md", FileMode::Regular, b"new in v1\n"),
 ];
+/// A draft over [`BASE`] that rewrites `SKILL.md` and nothing else — the shape every
+/// conflict-with-[`V1`] fixture below uses.
+const MINE_OVER_BASE: &[(&str, FileMode, &[u8])] = &[
+    ("SKILL.md", FileMode::Regular, b"# mine\n"),
+    ("run.sh", FileMode::Executable, b"#!/bin/sh\necho v0\n"),
+];
+/// What `--keep-mine` commits for [`MINE_OVER_BASE`] against [`V1`]: this person's `SKILL.md` (the
+/// one file both sides rewrote), plus everything V1 changed that they did not touch — `run.sh`
+/// caught up, and the file V1 added. `git merge -X ours`, not `-s ours`.
+const KEPT_OVER_V1: &[(&str, FileMode, &[u8])] = &[
+    ("SKILL.md", FileMode::Regular, b"# mine\n"),
+    ("run.sh", FileMode::Executable, b"#!/bin/sh\necho v1\n"),
+    ("ref/notes.md", FileMode::Regular, b"new in v1\n"),
+];
 
 // ---------------------------------------------------------------------------------------------
 // Tests.
@@ -1312,33 +1326,58 @@ fn a_targeted_accept_merges_a_diverged_draft_the_preview_called_clean() {
     assert!(!rig.conflict_exists(&id));
 }
 
-/// The disclosed escape (`--keep-mine`): one ordinary commit on top of the team's version, whose
-/// CONTENTS keep this person's bytes.
+/// **The escape is `git merge -X ours`, and this is the test that says so.**
 ///
-/// Everything durable says exactly that. The recorded base IS the team's version (the commit's only
-/// parent), `applied` catches up to `observed`, and the working bytes read as an ordinary draft — so
-/// the plane's lineage fence is satisfied and a publish from here is possible at all. What the docs
-/// ALSO carry is the one unusual thing about this draft: `superseded` names the team version its
-/// contents drop, measured by re-running the merge rather than assumed from the flag.
+/// The team's version does THREE things at once: it rewrites the line this person also rewrote
+/// (contested), it rewrites a line far away that this person left alone (uncontested), and it adds a
+/// file that did not exist before (uncontested). `--keep-mine` must keep this person's wording on the
+/// first and take BOTH of the others — which is exactly what a person gets by pulling, editing the
+/// contested line back to their wording, and committing.
+///
+/// The shipped code committed the person's WHOLE folder instead (`-s ours`), so the far-away line
+/// reverted and the new file was deleted — silently, and nowhere disclosed. That is the defect.
 #[test]
-fn keep_mine_commits_my_bytes_on_theirs_and_records_what_they_drop() {
+fn keep_mine_keeps_my_side_of_the_collision_and_takes_the_rest() {
     let rig = Rig::new("escape");
-    let (id, _name, genesis) = rig.adopt(BASE);
-    // An overlapping edit — the merge stops, and the escape is what finishes it.
-    let mine: &[(&str, FileMode, &[u8])] = &[
-        ("SKILL.md", FileMode::Regular, b"# my way\n"),
+    let base: FileSet = &[
+        (
+            "SKILL.md",
+            FileMode::Regular,
+            b"top\nmid1\nmid2\nmid3\nmid4\nmid5\nbottom\n",
+        ),
+        ("run.sh", FileMode::Executable, b"#!/bin/sh\necho v0\n"),
+    ];
+    let (id, _name, genesis) = rig.adopt(base);
+    // MINE: the top line, and nothing else.
+    let mine: FileSet = &[
+        (
+            "SKILL.md",
+            FileMode::Regular,
+            b"TOP-mine\nmid1\nmid2\nmid3\nmid4\nmid5\nbottom\n",
+        ),
         ("run.sh", FileMode::Executable, b"#!/bin/sh\necho v0\n"),
     ];
     write_tree(&rig.placement(), mine);
+    // THEIRS: the same top line (contested), the bottom line (uncontested), a new file, and a
+    // rewrite of a file this person never touched.
+    let theirs: FileSet = &[
+        (
+            "SKILL.md",
+            FileMode::Regular,
+            b"TOP-theirs\nmid1\nmid2\nmid3\nmid4\nmid5\nBOTTOM-theirs\n",
+        ),
+        ("run.sh", FileMode::Executable, b"#!/bin/sh\necho v1\n"),
+        ("ref/notes.md", FileMode::Regular, b"new in v1\n"),
+    ];
 
-    let v1 = mk_version(&[genesis], V1, "d_pub", "v1");
+    let v1 = mk_version(&[genesis], theirs, "d_pub", "v1");
     let mut plane = FixturePlane::default();
     plane.add_version(&id, &v1);
     plane.set_current(&id, served(WS, &id, v1.id, 1));
     let foll = follow(&id, FollowMode::Auto);
 
     // The merge stops FIRST — `--keep-mine` finishes a stopped merge, and there is nothing to
-    // finish before one has stopped (see `keep_mine_refuses_when_no_merge_has_stopped`).
+    // finish before one has stopped (see `keep_mine_refuses_wherever_no_merge_has_stopped`).
     assert_eq!(
         only(&pull_data(&rig.ctx(&plane, &foll), ops::PullScope::AllFollowed).unwrap()).action,
         PullAction::Conflicted
@@ -1359,18 +1398,37 @@ fn keep_mine_commits_my_bytes_on_theirs_and_records_what_they_drop() {
     let mr = row.merge.as_ref().expect("a merge report");
     assert!(mr.clean);
     assert!(mr.drop_diff.is_some(), "the escape discloses what it drops");
+
+    // THE ASSERTION THIS WHOLE CHANGE EXISTS FOR.
+    let resolved: FileSet = &[
+        (
+            "SKILL.md",
+            FileMode::Regular,
+            b"TOP-mine\nmid1\nmid2\nmid3\nmid4\nmid5\nBOTTOM-theirs\n",
+        ),
+        ("run.sh", FileMode::Executable, b"#!/bin/sh\necho v1\n"),
+        ("ref/notes.md", FileMode::Regular, b"new in v1\n"),
+    ];
     assert_eq!(
-        mr.supersedes.as_deref(),
-        Some(to_hex(&v1.id).as_str()),
-        "the row names the team version these bytes leave out"
+        snapshot(&rig.placement()),
+        Some(expect(resolved)),
+        "my wording on the contested line; everything else of theirs came with it"
+    );
+    // And the receipt NAMES what came along, so the fact is readable rather than inferred.
+    assert_eq!(
+        mr.took,
+        vec![
+            "SKILL.md".to_owned(),
+            "ref/notes.md".to_owned(),
+            "run.sh".to_owned()
+        ],
+        "{mr:?}"
     );
 
-    // The placement holds exactly MY bytes (theirs was dropped) and the decision is made — no block.
-    assert_eq!(snapshot(&rig.placement()), Some(expect(mine)));
     assert!(!rig.conflict_exists(&id));
     let s = rig.read_sync(&id);
     // The base IS theirs — the commit's one parent — so the plane's lineage fence is satisfied and
-    // publishing is reachable at all.
+    // publishing from here is an ordinary publish.
     assert_eq!(
         s.base_commit,
         to_hex(&v1.id),
@@ -1379,20 +1437,144 @@ fn keep_mine_commits_my_bytes_on_theirs_and_records_what_they_drop() {
     assert_eq!(s.applied, s.observed, "and takes it as applied");
     assert_eq!(s.observed, 1);
     assert!(!s.held);
-    // …and the contents are recorded for what they are.
-    let sup = s.superseded.expect("the dropped version is recorded");
-    assert_eq!(sup.version_id, to_hex(&v1.id));
-    assert_eq!(sup.bundle_digest, to_hex(&rendered(V1).bundle_digest));
 
     // The escape's own commit is a real 1-parent commit on `current` — the history stays a list.
-    let m = mk_version(&[v1.id], mine, DEVICE, "topos: merge escape");
+    let m = mk_version(&[v1.id], resolved, DEVICE, "topos: merge escape");
     assert!(rig.open_store(&id).list_versions().unwrap().contains(&m.id));
 }
 
-/// A hand resolution that TOOK the team's contested line records nothing: the same command, the same
-/// exit, and no supersede — because the answer is measured from the bytes, never from the flag.
+/// The structural collisions, one table, against what `git merge -X ours` does with each. Every one
+/// resolves — `--keep-mine` never deadlocks on a file — and every one resolves the way git resolves
+/// it, so nothing here is a topos invention a person has to learn.
 #[test]
-fn a_reconciling_hand_merge_records_no_supersede() {
+fn keep_mine_settles_every_structural_collision_the_way_git_does() {
+    // (label, base, mine, theirs, expected)
+    let cases: &[(&str, FileSet, FileSet, FileSet, FileSet)] = &[
+        (
+            // Mine modified, theirs deleted — `git checkout --ours` keeps the file.
+            "modify/delete",
+            &[
+                ("SKILL.md", FileMode::Regular, b"keep\n"),
+                ("doomed.md", FileMode::Regular, b"base\n"),
+            ],
+            &[
+                ("SKILL.md", FileMode::Regular, b"keep\n"),
+                ("doomed.md", FileMode::Regular, b"MINE\n"),
+            ],
+            &[("SKILL.md", FileMode::Regular, b"keep\n")],
+            &[
+                ("SKILL.md", FileMode::Regular, b"keep\n"),
+                ("doomed.md", FileMode::Regular, b"MINE\n"),
+            ],
+        ),
+        (
+            // Mine deleted, theirs modified — ours has no file, so it stays gone.
+            "delete/modify",
+            &[
+                ("SKILL.md", FileMode::Regular, b"keep\n"),
+                ("gone.md", FileMode::Regular, b"base\n"),
+            ],
+            &[("SKILL.md", FileMode::Regular, b"keep\n")],
+            &[
+                ("SKILL.md", FileMode::Regular, b"keep\n"),
+                ("gone.md", FileMode::Regular, b"THEIRS\n"),
+            ],
+            &[("SKILL.md", FileMode::Regular, b"keep\n")],
+        ),
+        (
+            // Both added the same path with different content — ours wins.
+            "add/add",
+            &[("SKILL.md", FileMode::Regular, b"keep\n")],
+            &[
+                ("SKILL.md", FileMode::Regular, b"keep\n"),
+                ("new.md", FileMode::Regular, b"MINE\n"),
+            ],
+            &[
+                ("SKILL.md", FileMode::Regular, b"keep\n"),
+                ("new.md", FileMode::Regular, b"THEIRS\n"),
+            ],
+            &[
+                ("SKILL.md", FileMode::Regular, b"keep\n"),
+                ("new.md", FileMode::Regular, b"MINE\n"),
+            ],
+        ),
+        (
+            // Both added identical content with disagreeing modes — ours wins the bit.
+            "add/add, mode only",
+            &[("SKILL.md", FileMode::Regular, b"keep\n")],
+            &[
+                ("SKILL.md", FileMode::Regular, b"keep\n"),
+                ("run.sh", FileMode::Regular, b"#!/bin/sh\n"),
+            ],
+            &[
+                ("SKILL.md", FileMode::Regular, b"keep\n"),
+                ("run.sh", FileMode::Executable, b"#!/bin/sh\n"),
+            ],
+            &[
+                ("SKILL.md", FileMode::Regular, b"keep\n"),
+                ("run.sh", FileMode::Regular, b"#!/bin/sh\n"),
+            ],
+        ),
+        (
+            // A binary file both sides changed — no hunks to reconcile, so ours stands whole.
+            "binary",
+            &[
+                ("SKILL.md", FileMode::Regular, b"keep\n"),
+                ("logo.bin", FileMode::Regular, &[0xff, 0x00, 0x01]),
+            ],
+            &[
+                ("SKILL.md", FileMode::Regular, b"keep\n"),
+                ("logo.bin", FileMode::Regular, &[0xff, 0x00, 0x02]),
+            ],
+            &[
+                ("SKILL.md", FileMode::Regular, b"keep\n"),
+                ("logo.bin", FileMode::Regular, &[0xff, 0x00, 0x03]),
+            ],
+            &[
+                ("SKILL.md", FileMode::Regular, b"keep\n"),
+                ("logo.bin", FileMode::Regular, &[0xff, 0x00, 0x02]),
+            ],
+        ),
+    ];
+
+    for (label, base, mine, theirs, want) in cases {
+        let rig = Rig::new(&format!("escape-{}", label.replace(['/', ' ', ','], "-")));
+        let (id, _name, genesis) = rig.adopt(base);
+        write_tree(&rig.placement(), mine);
+        let v1 = mk_version(&[genesis], theirs, "d_pub", "v1");
+        let mut plane = FixturePlane::default();
+        plane.add_version(&id, &v1);
+        plane.set_current(&id, served(WS, &id, v1.id, 1));
+        let foll = follow(&id, FollowMode::Auto);
+        assert_eq!(
+            only(&pull_data(&rig.ctx(&plane, &foll), ops::PullScope::AllFollowed).unwrap()).action,
+            PullAction::Conflicted,
+            "{label}"
+        );
+        let row = only(
+            &pull_data(
+                &rig.ctx(&plane, &foll),
+                ops::PullScope::One {
+                    store: ops::StoreScope::Here,
+                    name: "pr-describe".into(),
+                    workspace: None,
+                    mode: ops::TargetMode::KeepMine,
+                },
+            )
+            .unwrap(),
+        )
+        .clone();
+        assert_eq!(row.action, PullAction::Merged, "{label}");
+        assert_eq!(snapshot(&rig.placement()), Some(expect(want)), "{label}");
+        assert!(!rig.conflict_exists(&id), "{label}");
+    }
+}
+
+/// A hand-edited workbench is committed EXACTLY as the person wrote it — the merge is not re-run
+/// over it and nothing of theirs is re-applied. They resolved it; second-guessing their tree would
+/// be worse than not asking.
+#[test]
+fn a_hand_resolution_is_committed_exactly_as_written() {
     let rig = Rig::new("escape-reconciled");
     let base: FileSet = &[("SKILL.md", FileMode::Regular, b"line1\nline2\nline3\n")];
     let (id, _name, genesis) = rig.adopt(base);
@@ -1427,20 +1609,10 @@ fn a_reconciling_hand_merge_records_no_supersede() {
     )
     .clone();
     assert_eq!(row.action, PullAction::Merged);
-    assert_eq!(
-        row.merge.as_ref().and_then(|m| m.supersedes.clone()),
-        None,
-        "these bytes carry the team's version, so nothing is superseded: {row:?}"
-    );
     assert_eq!(snapshot(&rig.placement()), Some(expect(reconciled)));
     let s = rig.read_sync(&id);
     assert_eq!(s.base_commit, to_hex(&v1.id));
     assert_eq!(s.applied, s.observed);
-    assert!(
-        s.superseded.is_none(),
-        "and the durable record says so too: {:?}",
-        s.superseded
-    );
 }
 
 /// Where `--keep-mine` leaves the bundle, seen from the NEXT update: an ordinary draft on the team's
@@ -1522,65 +1694,84 @@ fn after_keep_mine_the_draft_sits_on_theirs_and_merges_forward_from_it() {
     let s = rig.read_sync(&id);
     assert_eq!(s.base_commit, to_hex(&v2.id));
     assert_eq!(s.applied, s.observed);
-    // The draft STILL drops v1's line-1 change, so the record is carried across the clean merge.
-    assert_eq!(
-        s.superseded.map(|x| x.version_id),
-        Some(to_hex(&v1.id)),
-        "a clean merge onto a newer version does not un-drop the older one"
-    );
 }
 
-/// `--keep-mine` FINISHES a stopped merge. With nothing stopped, committing this draft on top would
-/// drop every non-conflicting change the merge is about to land — wordlessly — so it refuses and
-/// names the merge instead.
+/// `--keep-mine` FINISHES a stopped merge, and refuses ALL FOUR ways there is nothing to finish.
+///
+/// Each had its own silent wrong answer: on an up-to-date copy and on a plain draft it reported
+/// success and did nothing; on a clean copy that was merely behind it APPLIED the team's version —
+/// the exact opposite of what the flag says; on a live divergence it committed the draft over
+/// changes the merge was about to land. One check, before any of them.
 #[test]
-fn keep_mine_refuses_when_no_merge_has_stopped() {
-    let rig = Rig::new("keepmine-nothing-stopped");
+fn keep_mine_refuses_wherever_no_merge_has_stopped() {
     let base: FileSet = &[("SKILL.md", FileMode::Regular, b"line1\nline2\nline3\n")];
-    let (id, name, genesis) = rig.adopt(base);
-    // A draft on line 1; the team changed line 3. NOTHING collides — a merge would land both.
     let mine: FileSet = &[("SKILL.md", FileMode::Regular, b"MINE\nline2\nline3\n")];
+    // The team changed line 3 only — nothing collides, so a merge would land both sides.
     let theirs: FileSet = &[("SKILL.md", FileMode::Regular, b"line1\nline2\nTEAM3\n")];
-    write_tree(&rig.placement(), mine);
+    let both: FileSet = &[("SKILL.md", FileMode::Regular, b"MINE\nline2\nTEAM3\n")];
 
-    let v1 = mk_version(&[genesis], theirs, "d_pub", "v1");
-    let mut plane = FixturePlane::default();
-    plane.add_version(&id, &v1);
-    plane.set_current(&id, served(WS, &id, v1.id, 1));
-    let foll = follow(&id, FollowMode::Auto);
+    // (label, does the team have a newer version?, is there a local draft?, what disk must still hold)
+    let shapes: &[(&str, bool, bool)] = &[
+        ("up to date", false, false),
+        ("a plain draft, nothing pending", false, true),
+        ("behind, clean", true, false),
+        ("diverged, merge never run", true, true),
+    ];
+    for (label, pending, drafted) in shapes {
+        let rig = Rig::new(&format!("keepmine-{}", label.replace([' ', ','], "-")));
+        let (id, name, genesis) = rig.adopt(base);
+        let on_disk: FileSet = if *drafted { mine } else { base };
+        if *drafted {
+            write_tree(&rig.placement(), mine);
+        }
+        let v1 = mk_version(&[genesis], theirs, "d_pub", "v1");
+        let mut plane = FixturePlane::default();
+        if *pending {
+            plane.add_version(&id, &v1);
+            plane.set_current(&id, served(WS, &id, v1.id, 1));
+        } else {
+            plane.set_current(&id, served(WS, &id, genesis, 0));
+        }
+        let foll = follow(&id, FollowMode::Auto);
 
-    let err = pull_data(
-        &rig.ctx(&plane, &foll),
-        ops::PullScope::One {
-            store: ops::StoreScope::Here,
-            name: "pr-describe".into(),
-            workspace: None,
-            mode: ops::TargetMode::KeepMine,
-        },
-    )
-    .expect_err("nothing has stopped, so there is nothing to finish");
-    assert!(
-        matches!(&err, crate::error::ClientError::NoStoppedMerge { skill, .. } if skill == &name),
-        "{err:?}"
-    );
-    // Nothing moved: no commit, no placement write, no record.
-    assert_eq!(snapshot(&rig.placement()), Some(expect(mine)));
-    assert!(!rig.conflict_exists(&id));
-    assert_eq!(rig.read_sync(&id).base_commit, to_hex(&genesis));
+        let err = pull_data(
+            &rig.ctx(&plane, &foll),
+            ops::PullScope::One {
+                store: ops::StoreScope::Here,
+                name: "pr-describe".into(),
+                workspace: None,
+                mode: ops::TargetMode::KeepMine,
+            },
+        )
+        .expect_err(label);
+        assert!(
+            matches!(&err, crate::error::ClientError::NoStoppedMerge { skill, .. } if skill == &name),
+            "{label}: {err:?}"
+        );
+        // Nothing moved: no commit, no placement write, no record.
+        assert_eq!(snapshot(&rig.placement()), Some(expect(on_disk)), "{label}");
+        assert!(!rig.conflict_exists(&id), "{label}");
+        assert_eq!(rig.read_sync(&id).base_commit, to_hex(&genesis), "{label}");
 
-    // And the merge it names does exactly what it promised — both changes, no conflict.
-    assert_eq!(
-        only(&pull_data(&rig.ctx(&plane, &foll), ops::PullScope::AllFollowed).unwrap()).action,
-        PullAction::Merged
-    );
-    assert_eq!(
-        snapshot(&rig.placement()),
-        Some(expect(&[(
-            "SKILL.md",
-            FileMode::Regular,
-            b"MINE\nline2\nTEAM3\n"
-        )]))
-    );
+        // And the merge the refusal names does exactly what it promised.
+        if *pending {
+            assert_eq!(
+                only(&pull_data(&rig.ctx(&plane, &foll), ops::PullScope::AllFollowed).unwrap())
+                    .action,
+                if *drafted {
+                    PullAction::Merged
+                } else {
+                    PullAction::FastForwarded
+                },
+                "{label}"
+            );
+            assert_eq!(
+                snapshot(&rig.placement()),
+                Some(expect(if *drafted { both } else { theirs })),
+                "{label}"
+            );
+        }
+    }
 }
 
 /// A conflict blocks publish and the block PERSISTS — a bare re-sweep keeps reporting it (healing a
@@ -1659,16 +1850,13 @@ fn conflict_blocks_and_persists_until_escaped() {
 
 /// A marked-up copy that goes missing while the block still stands is RE-RENDERED from the recorded
 /// result on the next sweep (the copy is derived state; the store holds it). And a copy nobody has
-/// touched means "keep my version": the escape then commits the author's original draft, exactly as
-/// if the folder had been sitting there untouched all along.
+/// touched still means "keep my version": the escape then commits the merge resolved to this
+/// person's side, exactly as if the folder had been sitting there untouched all along.
 #[test]
 fn a_deleted_conflict_copy_is_re_rendered_and_still_reads_as_untouched() {
     let rig = Rig::new("copy-gone");
     let (id, _name, genesis) = rig.adopt(BASE);
-    let mine: FileSet = &[
-        ("SKILL.md", FileMode::Regular, b"# mine\n"),
-        ("run.sh", FileMode::Executable, b"#!/bin/sh\necho v0\n"),
-    ];
+    let mine: FileSet = MINE_OVER_BASE;
     write_tree(&rig.placement(), mine);
     let v1 = mk_version(&[genesis], V1, "d_pub", "v1");
     let mut plane = FixturePlane::default();
@@ -1705,7 +1893,7 @@ fn a_deleted_conflict_copy_is_re_rendered_and_still_reads_as_untouched() {
     )
     .unwrap();
     assert_eq!(only(&escaped).action, PullAction::Merged);
-    assert_eq!(snapshot(&rig.placement()), Some(expect(mine)));
+    assert_eq!(snapshot(&rig.placement()), Some(expect(KEPT_OVER_V1)));
     assert!(!copy.exists());
 }
 
@@ -1719,10 +1907,7 @@ fn a_deleted_conflict_copy_is_re_rendered_and_still_reads_as_untouched() {
 fn the_escape_discloses_the_divergent_copies_it_collapsed() {
     let rig = Rig::new("escape-collapse");
     let (id, _name, genesis) = rig.adopt(BASE);
-    let mine: FileSet = &[
-        ("SKILL.md", FileMode::Regular, b"# mine\n"),
-        ("run.sh", FileMode::Executable, b"#!/bin/sh\necho v0\n"),
-    ];
+    let mine: FileSet = MINE_OVER_BASE;
     write_tree(&rig.placement(), mine);
     let v1 = mk_version(&[genesis], V1, "d_pub", "v1");
     let mut plane = FixturePlane::default();
@@ -1758,9 +1943,9 @@ fn the_escape_discloses_the_divergent_copies_it_collapsed() {
     let row = only(&escaped);
     assert_eq!(row.action, PullAction::Merged);
     // The collapse really happened: the untouched workbench means "keep my version", and BOTH
-    // folders now hold it — the replica's own edit is gone from disk.
-    assert_eq!(snapshot(&rig.placement()), Some(expect(mine)));
-    assert_eq!(snapshot(&replica), Some(expect(mine)));
+    // folders now hold the resolution — the replica's own edit is gone from disk.
+    assert_eq!(snapshot(&rig.placement()), Some(expect(KEPT_OVER_V1)));
+    assert_eq!(snapshot(&replica), Some(expect(KEPT_OVER_V1)));
 
     // …and the row says so, in the receipt's own destination convention.
     let note = row.note.as_deref().expect("the collapse is disclosed");
@@ -1945,11 +2130,6 @@ fn no_base_falls_back_to_two_way_never_silent() {
     );
     assert!(!rig.conflict_exists(&id));
     assert!(!copy.exists());
-    // An unrenderable base can prove nothing contained, so the exit records the drop.
-    assert_eq!(
-        escaped.merge.as_ref().and_then(|m| m.supersedes.clone()),
-        Some(to_hex(&v1.id))
-    );
 
     // AFTERWARDS, the ordinary verbs work: the base renders (it is the team's version now), so
     // `diff` answers and `--reset` restores it.
@@ -1971,10 +2151,6 @@ fn no_base_falls_back_to_two_way_never_silent() {
     )
     .expect("the reset restores the team's version");
     assert_eq!(snapshot(&rig.placement()), Some(expect(V1)));
-    assert!(
-        rig.read_sync(&id).superseded.is_none(),
-        "and clears the drop"
-    );
 }
 
 /// Structural author-only: the merge code is unreachable from a clean follower state. A behind-clean pull
@@ -2160,16 +2336,13 @@ fn resolve_crash_gate_converges_and_never_writes_markers_into_an_agent_folder() 
 // --- review-driven regression tests ---
 
 /// **The "keep my version" exit.** Leaving the conflict folder alone and running `--keep-mine`
-/// commits the author's ORIGINAL draft (drop the merge), never the raw marker tree — otherwise the
-/// markers would become a publishable bundle. The folder goes with the block.
+/// commits the merge with this person's side kept on the contested file, never the raw marker tree
+/// — otherwise the markers would become a publishable bundle. The folder goes with the block.
 #[test]
-fn escape_of_unedited_conflict_commits_original_draft_not_markers() {
+fn escape_of_unedited_conflict_commits_the_resolution_not_markers() {
     let rig = Rig::new("escape-unedited");
     let (id, _name, genesis) = rig.adopt(BASE);
-    let mine: FileSet = &[
-        ("SKILL.md", FileMode::Regular, b"# mine\n"),
-        ("run.sh", FileMode::Executable, b"#!/bin/sh\necho v0\n"),
-    ];
+    let mine: FileSet = MINE_OVER_BASE;
     write_tree(&rig.placement(), mine);
     let v1 = mk_version(&[genesis], V1, "d_pub", "v1");
     let mut plane = FixturePlane::default();
@@ -2191,8 +2364,8 @@ fn escape_of_unedited_conflict_commits_original_draft_not_markers() {
     );
     assert_eq!(snapshot(&rig.placement()), Some(expect(mine)));
 
-    // Escape WITHOUT touching the folder → commits MINE (the original draft), not the markers;
-    // clears the block and removes the folder.
+    // Escape WITHOUT touching the folder → commits the resolution, not the markers; clears the
+    // block and removes the folder.
     let escaped = pull_data(
         &rig.ctx(&plane, &foll),
         ops::PullScope::One {
@@ -2206,17 +2379,18 @@ fn escape_of_unedited_conflict_commits_original_draft_not_markers() {
     assert_eq!(only(&escaped).action, PullAction::Merged);
     assert!(!rig.conflict_exists(&id), "escape clears the block");
     assert!(!copy.exists(), "and removes the marked-up copy");
-    // The placement is exactly MINE — no markers anywhere.
-    assert_eq!(snapshot(&rig.placement()), Some(expect(mine)));
+    // The placement holds this person's `SKILL.md` and the team's other changes — no markers
+    // anywhere.
+    assert_eq!(snapshot(&rig.placement()), Some(expect(KEPT_OVER_V1)));
     assert!(
         !std::fs::read_to_string(rig.placement().join("SKILL.md"))
             .unwrap()
             .contains("<<<<<<<"),
         "the escape must not commit unresolved markers"
     );
-    // The committed escape IS the original draft re-parented on `current` — the markers never
+    // The committed escape is a 1-parent commit on `current` carrying that tree — the markers never
     // entered the publishable lineage.
-    let m = mk_version(&[v1.id], mine, DEVICE, "topos: merge escape");
+    let m = mk_version(&[v1.id], KEPT_OVER_V1, DEVICE, "topos: merge escape");
     assert!(rig.open_store(&id).list_versions().unwrap().contains(&m.id));
 }
 
@@ -2589,9 +2763,10 @@ fn a_record_that_outlived_its_resolution_is_cleared_not_re_blocked() {
     )
     .unwrap();
 
-    // (a) the leftover under `--keep-mine`: it must not commit the original draft over the
-    // resolution already on the placements.
-    pull_data(
+    // (a) the leftover under `--keep-mine`: the interrupted clear is finished, and then there is
+    // no stopped merge left to finish — so it refuses rather than committing anything over the
+    // resolution the placements already hold.
+    let err = pull_data(
         &rig.ctx(&plane, &foll),
         ops::PullScope::One {
             store: ops::StoreScope::Here,
@@ -2600,7 +2775,11 @@ fn a_record_that_outlived_its_resolution_is_cleared_not_re_blocked() {
             mode: ops::TargetMode::KeepMine,
         },
     )
-    .unwrap();
+    .expect_err("the resolution already landed; nothing is stopped");
+    assert!(
+        matches!(err, crate::error::ClientError::NoStoppedMerge { .. }),
+        "{err:?}"
+    );
     assert!(!rig.conflict_exists(&id));
     assert_eq!(
         snapshot(&rig.placement()),

@@ -264,13 +264,17 @@ pub struct MergeReport {
     /// For the escape / no-base 2-way fallback: a unified diff of what the chosen side drops vs the other.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub drop_diff: Option<String>,
-    /// The team version this resolution's bytes deliberately do NOT contain — present only on a
-    /// `--keep-mine` result whose chosen tree was MEASURED not to carry it (a hand resolution that
-    /// took the team's side records nothing here). It is what makes the later publish disclose the
-    /// replacement rather than ship it in silence. **INFERRED** (additive).
+    /// Why the merge could not resolve itself — `three_way` (a real fork point; the workbench holds
+    /// both sides marked up) or `no_base` (unrelated histories; the workbench holds this person's
+    /// files with the team's beside them). Absent on a clean merge and on a resolution. **INFERRED**
+    /// (additive).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(feature = "contract-derives", schemars(extend("pattern" = "^[0-9a-f]{64}$")))]
-    pub supersedes: Option<String>,
+    pub reason: Option<crate::persisted::ConflictReason>,
+    /// The paths a `--keep-mine` resolution TOOK from the team — every file whose committed content
+    /// or mode differs from this person's own draft, including ones the team deleted. Sorted by raw
+    /// path bytes. Empty when the resolution changed nothing of theirs. **INFERRED** (additive).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub took: Vec<String>,
     /// The folders that still hold the AUTHOR'S OWN version — a conflict writes to none of them, so
     /// every agent reads exactly what it read before the update. Display paths (`~`-abbreviated).
     /// Empty for a clean merge (which rewrites its placements). **INFERRED** (additive).
@@ -1326,12 +1330,6 @@ pub struct PublishData {
     /// `from_placement`. **INFERRED** (additive-only).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub other_edited: Vec<String>,
-    /// The team version this publish REPLACED without carrying it — present only where the apply
-    /// went through the `--over` gate, so the receipt states the one thing the new `current` does
-    /// not contain. **INFERRED** (additive-only).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(feature = "contract-derives", schemars(extend("pattern" = "^[0-9a-f]{64}$")))]
-    pub supersedes: Option<String>,
     /// An honesty note about the bundle's GitHub origin, when one is recorded: publishing does
     /// NOT rewrite a manifest's origin-pin line (`github.com/…`), so when one still references
     /// the origin this says the project keeps tracking the pin until the line is swapped for the
@@ -1846,26 +1844,6 @@ pub struct PublishDescribeData {
     /// (additive-only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kind: Option<String>,
-    /// What this publish would REPLACE: the team version the draft deliberately does not carry,
-    /// recorded when a `--keep-mine` resolution kept bytes that drop it. Present only while that
-    /// version is still the one a publish would land on top of — and when it is present, the apply
-    /// refuses until the version is named back with `--over`. **INFERRED** (additive-only).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub supersedes: Option<PublishSupersedes>,
-}
-
-/// What a publish would replace (see [`PublishDescribeData::supersedes`]). **INFERRED** (additive).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
-pub struct PublishSupersedes {
-    /// The version being replaced — the value `--over` must name.
-    #[cfg_attr(feature = "contract-derives", schemars(extend("pattern" = "^[0-9a-f]{64}$")))]
-    pub version_id: String,
-    /// A unified diff from that version to the bytes this publish would ship — what the team
-    /// loses, computed from local bytes alone (the describe adds no network call). Absent when
-    /// that version's bytes are not held locally.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub diff: Option<String>,
 }
 
 /// The gate a `publish` describe predicts. **INFERRED value set.**
@@ -2137,7 +2115,6 @@ mod tests {
             undo: None,
             from_placement: None,
             other_edited: Vec::new(),
-            supersedes: None,
         };
         let v = serde_json::to_value(&done).unwrap();
         assert_eq!(v["version_id"], "a".repeat(64));

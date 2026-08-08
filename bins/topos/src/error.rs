@@ -525,28 +525,11 @@ pub(crate) enum ClientError {
     /// the sentence and carries the same command as its next action.
     #[error("{skill}: your version is behind.")]
     PublishBehind { skill: String },
-    /// A `publish --yes` is refused because these bytes deliberately do NOT carry the team version
-    /// they would land on top of — a `--keep-mine` resolution recorded exactly that. The publish is
-    /// allowed; it may not happen in silence. Naming the version back with `--over` is the whole
-    /// consent step, and it is why an agent cannot replace a teammate's change without having been
-    /// shown what it is replacing.
-    ///
-    /// The TTY renders the `--over` line under the sentence; the envelope carries the same command.
-    #[error("{skill}: this publish drops the team's {version}, which your copy does not carry.")]
-    PublishSupersedes { skill: String, version: String },
-    /// A `publish --over <version>` named a version that is not the one this publish would replace —
-    /// the team has moved since the describe. Refused with nothing sent: the person is shown the
-    /// version that IS being replaced, and reads it before naming it.
-    #[error("{skill}: `--over {named}` is not what this publish replaces — that is {actual}.")]
-    PublishOverMismatch {
-        skill: String,
-        named: String,
-        actual: String,
-    },
-    /// `--keep-mine` was typed for a bundle where no merge has stopped: there is a newer team version
-    /// and a local draft, but the three-way merge was never run, so nothing is blocked and nothing is
-    /// waiting on a decision. Committing this draft on top would drop every non-conflicting change the
-    /// merge is about to land, wordlessly — so it refuses toward the merge.
+    /// `--keep-mine` was typed for a bundle where no merge has stopped — an up-to-date copy, a plain
+    /// draft with nothing pending, a clean copy that is merely behind, or a divergence the merge has
+    /// not been run on. There is nothing to finish, and every one of those states has a different
+    /// silent wrong answer (report success, apply the team's version, drop what the merge was about
+    /// to land), so all four refuse toward the merge instead.
     #[error(
         "no merge has stopped on '{skill}' — run `topos update{} {skill}` to merge the team's \
          version in; it stops only where you both changed the same lines",
@@ -918,11 +901,6 @@ impl ClientError {
             // CONFLICT, caught locally one step earlier — so it carries that code, and an agent that
             // already branches on a stale base needs no new arm.
             ClientError::PublishBehind { .. } => "CONFLICT",
-            // Both halves of the supersede consent are the same fact to an agent: this publish
-            // would replace a team version, and the version has to be named before it ships.
-            ClientError::PublishSupersedes { .. } | ClientError::PublishOverMismatch { .. } => {
-                "PUBLISH_SUPERSEDES"
-            }
             // No merge stopped, so nothing is blocked — this is a wrong command for the state,
             // and the argv is the fix.
             ClientError::NoStoppedMerge { .. } => "INVALID_ARGUMENT",
@@ -1042,11 +1020,9 @@ impl ClientError {
             // Behind is the local half of the stale-base CONFLICT: update to rebase, then retry —
             // never a blind re-run of the same publish.
             ClientError::PublishBehind { .. } => TerminalOutcome::Conflict,
-            // A consent step, not a fault: the same command with the version named succeeds, so
-            // it is the permanent-as-issued class every other usage refusal takes.
-            ClientError::PublishSupersedes { .. }
-            | ClientError::PublishOverMismatch { .. }
-            | ClientError::NoStoppedMerge { .. } => TerminalOutcome::PermanentFailure,
+            // A wrong command for the state: re-running it changes nothing, so it is the
+            // permanent-as-issued class every other usage refusal takes.
+            ClientError::NoStoppedMerge { .. } => TerminalOutcome::PermanentFailure,
             // An unreadable workbench folder is the same class: a local reconciliation the person
             // performs, never a blind retry of the same command against the same folder.
             ClientError::ConflictCopyUnreadable { .. } => TerminalOutcome::Diverged,

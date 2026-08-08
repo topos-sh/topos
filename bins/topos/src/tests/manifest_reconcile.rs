@@ -5802,7 +5802,6 @@ fn a_landed_publish_survives_a_failed_rewrite_and_the_next_update_converges_it()
         None,
         None,
         None,
-        None,
         &ops::Selection::default(),
     )
     .unwrap();
@@ -5930,7 +5929,6 @@ fn a_project_scope_pending_rewrite_converges_from_the_projects_own_store() {
         None,
         None,
         None,
-        None,
         &ops::Selection::default(),
     )
     .unwrap();
@@ -6035,7 +6033,6 @@ fn a_removal_that_lands_mid_publish_is_never_silently_undone() {
         None,
         "deploy",
         false,
-        None,
         None,
         None,
         None,
@@ -6165,7 +6162,6 @@ fn a_genesis_propose_pending_rewrite_still_converges() {
         None,
         "deploy",
         true,
-        None,
         None,
         None,
         None,
@@ -10899,7 +10895,6 @@ fn a_genesis_publish_describe_never_asks_for_an_audience_that_cannot_exist() {
         false,
         None,
         None,
-        None,
         &ops::Selection::default(),
     )
     .unwrap();
@@ -10975,7 +10970,6 @@ fn the_publish_describe_audience_line_prints_and_a_failed_reach_warns() {
         None,
         None,
         None,
-        None,
         &ops::Selection::default(),
     )
     .unwrap();
@@ -11004,7 +10998,6 @@ fn the_publish_describe_audience_line_prints_and_a_failed_reach_warns() {
             None,
             "deploy",
             false,
-            None,
             None,
             None,
             &ops::Selection::default(),
@@ -13410,7 +13403,6 @@ fn zz_a_per_copy_publish_leaves_the_other_copy_alone_and_resolves_the_freeze() {
             None,
             &name,
             false,
-            None,
             None,
             None,
             None,

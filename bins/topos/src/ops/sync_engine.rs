@@ -67,9 +67,9 @@ pub(crate) enum Invocation {
     /// A targeted accept / resume (`topos pull <skill>`).
     Accept,
     /// The disclosed escape (`topos pull <skill> --keep-mine`): FINISH a stopped merge by committing
-    /// the author's chosen bytes on top of `current`. It resolves a RECORDED conflict and nothing
-    /// else — reaching a live divergence with no record means no merge ever stopped, and the
-    /// engine refuses toward the merge rather than dropping what it would have landed.
+    /// the author's chosen tree on top of `current`. It resolves a RECORDED conflict and nothing
+    /// else — every other state has no stopped merge to finish, and the engine refuses toward the
+    /// merge rather than answering with a different act.
     Escape,
 }
 
@@ -181,6 +181,19 @@ pub(crate) fn sync_one_planned(
         }
     }
 
+    // `--keep-mine` FINISHES a merge that has STOPPED, and the only stopped merge is the record
+    // handled above. Every state reachable from here has nothing to finish — and each had its own
+    // silent wrong answer: an up-to-date copy and a plain draft reported success and did nothing, a
+    // clean copy that was merely behind APPLIED the team's version (the opposite of the flag), and a
+    // live divergence committed the draft over changes the merge was about to land. One refusal,
+    // before the state is even classified, so all four say the same thing and name the merge.
+    if inv == Invocation::Escape {
+        return Err(ClientError::NoStoppedMerge {
+            skill: name,
+            global: !ctx.layout.is_project_scope(),
+        });
+    }
+
     // ---- checkForUpdates ----
     let fetched = match target {
         // The delivery already answered for this workspace — no per-skill GET, no conditional
@@ -213,16 +226,17 @@ pub(crate) fn sync_one_planned(
         // store, exactly as it does for a plane that cannot be read — the delivery lane's own
         // warning is what carries the fix.
         Err(PlaneError::UpdateRequired { min }) => {
-            if explicit && inv != Invocation::Escape {
+            if explicit {
                 return Err(ClientError::UpdateRequired { min });
             }
         }
         Err(PlaneError::Unavailable(m) | PlaneError::Unreachable(m)) => {
-            // Targeted accept: surface the failure. Bare sweep + the escape: fall through to drive `applied`
-            // toward `observed` from the LOCAL store — a pending apply (or an escape) whose target is
-            // already local still completes when the plane is unreachable (the escape is the offline-capable
-            // no-deadlock guarantee); one that needs a fetch fails per-skill below, never a false UpToDate.
-            if explicit && inv != Invocation::Escape {
+            // Targeted accept: surface the failure. A bare sweep falls through to drive `applied`
+            // toward `observed` from the LOCAL store — a pending apply whose target is already local
+            // still completes when the plane is unreachable; one that needs a fetch fails per-skill
+            // below, never a false UpToDate. (The escape's own offline-capable no-deadlock path is
+            // the recorded-conflict arm above, which returns before any of this.)
+            if explicit {
                 return Err(ClientError::Plane(m));
             }
         }
@@ -312,14 +326,11 @@ pub(crate) fn sync_one_planned(
                     }
                     return Ok(row);
                 }
-            } else if sync.draft_observed.is_some() || sync.superseded.is_some() {
+            } else if sync.draft_observed.is_some() {
                 // The draft resolved outside an apply (reverted by hand): the stale observation
-                // must not let a FUTURE identical edit spread on its first sighting — and a
-                // recorded supersede describes a draft that no longer exists, so it goes with
-                // it (the work tree IS the base here; nothing of the team's is being dropped).
+                // must not let a FUTURE identical edit spread on its first sighting.
                 let cleared = SyncState {
                     draft_observed: None,
-                    superseded: None,
                     ..sync.clone()
                 };
                 doc::write_doc(ctx.fs, &sp.sync, &cleared)?;
@@ -474,17 +485,6 @@ pub(crate) fn sync_one_planned(
                     "{name} reads as diverged with no draft working tree"
                 )));
             };
-            // `--keep-mine` FINISHES a merge that stopped; here nothing has stopped. The recorded
-            // conflict was handled at the top of this function, so reaching the escape down here
-            // means the merge was never run — and running it is exactly what would land the
-            // team's non-conflicting changes. Committing this draft over them instead would drop
-            // work nobody has looked at, so it refuses and names the merge.
-            if inv == Invocation::Escape {
-                return Err(ClientError::NoStoppedMerge {
-                    skill: name,
-                    global: !ctx.layout.is_project_scope(),
-                });
-            }
             // The structural author-only gate: the witness is minted ONLY here.
             super::merge_resolve::resolve_diverged(
                 DivergedWitness(()),
@@ -643,10 +643,8 @@ pub(crate) fn go_back(
         base_commit: target_hex.clone(),
         work_hash: target_digest_hex.clone(),
         held: true,
-        // A go-back installs an OLD version whole — no draft stands, and nothing of the
-        // team's is being deliberately dropped by these bytes.
+        // A go-back installs an OLD version whole — no draft stands.
         draft_observed: None,
-        superseded: None,
     };
     let next_lock = lock_from_bundle(&lock, target, &bundle);
     let report = materialize::materialize(
@@ -800,9 +798,6 @@ pub(crate) fn reset_to_base(
         work_hash: base_digest_hex.clone(),
         held: false,
         draft_observed: None,
-        // The reset discards the draft, and a supersede record describes exactly that draft —
-        // it goes with it, or the restored copy would keep reporting a decision nobody holds.
-        superseded: None,
     };
     let report = materialize::materialize(
         ctx.fs,
@@ -1343,10 +1338,8 @@ pub(crate) fn forwarded_sync(
         base_commit: to_hex(&target),
         work_hash: target_digest_hex.to_owned(),
         held: false,
-        // A forward apply/heal lands the pristine target everywhere — no standing draft remains,
-        // and nothing of the team's is being dropped any more.
+        // A forward apply/heal lands the pristine target everywhere — no standing draft remains.
         draft_observed: None,
-        superseded: None,
     }
 }
 

@@ -45,11 +45,10 @@ what only a cross-crate composed run can prove.
   holds that person's own bytes, the marked-up copy is in `~/.topos/conflicts/<name>/` carrying
   both sides, `publish` refused — and drives all three exits end to end (`--keep-mine` over an
   untouched workbench, over an edited one, and `--reset`), each clearing the block and deleting the
-  workbench. Then the second property: `--keep-mine` cannot replace the team's version in silence —
-  a resolution whose bytes drop it refuses a bare `--yes` (`PUBLISH_SUPERSEDES`), the describe shows
-  the version plus a diff of what is lost, a wrong `--over` refuses, and naming it ships; a hand
-  merge that TOOK the team's line records nothing and publishes with a plain `--yes`. A last arm
-  puts a copy behind (a go-back): the direct publish refuses, the `--propose` lands.
+  workbench. Then the second property: `--keep-mine` is `git merge -X ours` — the author's v2 also
+  changes a line nobody contested and adds a whole new file, and BOTH survive the exit, the publish,
+  and the round trip back to a second receiver. Publishing after it is an ordinary `--yes`. A last
+  arm puts a copy behind (a go-back): the direct publish refuses, the `--propose` lands.
   Binary-driven too: the placement dirs and the workbench path resolve against the environment.
 - **`tests/hardening_e2e.rs`** — pinned references delivering exactly their version and holding
   across sweeps; `publish --to` refusing nonexistent channels without minting one.

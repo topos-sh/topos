@@ -418,7 +418,7 @@ fn gen_schema(check: bool) -> Result<()> {
 /// Golden `--json` fixtures — representative envelopes built FROM the typed shapes (so they cannot
 /// drift from the contract) and committed as the agent-facing examples + the positive L1 oracle.
 fn fixtures() -> Vec<(&'static str, String)> {
-    use topos_types::persisted::ConflictPathKind;
+    use topos_types::persisted::{ConflictPathKind, ConflictReason};
     use topos_types::requests::{WireDelivery, WireDeliverySkill, WireNotice, WireVia};
     use topos_types::results::{
         AddData, ConflictPathReport, DiffData, DiffPatchInfo, DiffSource, EnrollmentPending,
@@ -764,7 +764,8 @@ fn fixtures() -> Vec<(&'static str, String)> {
                     clean: true,
                     conflicts: vec![],
                     drop_diff: None,
-                    supersedes: None,
+                    reason: None,
+                    took: vec![],
                     placements: vec![],
                     copy_dir: None,
                 }),
@@ -814,7 +815,9 @@ fn fixtures() -> Vec<(&'static str, String)> {
                         kind: ConflictPathKind::Content,
                     }],
                     drop_diff: None,
-                    supersedes: None,
+                    // WHY it stopped — which decides what the workbench below holds.
+                    reason: Some(ConflictReason::ThreeWay),
+                    took: vec![],
                     // The folder that still holds the author's own version (a conflict writes to
                     // none), and the workbench the marked-up copy of both versions went to.
                     placements: vec!["~/.claude/skills/pr-describe".to_owned()],
@@ -1271,8 +1274,6 @@ fn fixtures() -> Vec<(&'static str, String)> {
             converted_from: None,
             // The ordinary skill publish: the additive kind tag omits (absent = a skill).
             kind: None,
-            // An ordinary draft replaces nothing the team would miss — the additive disclosure omits.
-            supersedes: None,
         })
         .expect("PublishDescribeData serializes"),
         warnings: vec![],
@@ -1321,8 +1322,6 @@ fn fixtures() -> Vec<(&'static str, String)> {
             // ONE edited copy — the receipt names no folder and leaves none behind.
             from_placement: None,
             other_edited: Vec::new(),
-            // Nothing of the team's was left out of these bytes — the additive line omits.
-            supersedes: None,
         })
         .expect("PublishData serializes"),
         warnings: vec![],

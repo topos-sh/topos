@@ -566,7 +566,6 @@ pub(crate) fn reset_to_never_received(
                 work_hash: ZERO_HEX.to_owned(),
                 held: false,
                 draft_observed: None,
-                superseded: None,
             },
         )?;
     }

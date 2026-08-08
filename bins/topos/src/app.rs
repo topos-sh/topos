@@ -1149,7 +1149,6 @@ fn run_command(
             to,
             propose,
             message,
-            over,
             yes,
         } => {
             let selection = ops::Selection::one(agent.as_deref(), dest.as_deref());
@@ -1161,9 +1160,7 @@ fn run_command(
             let publish_sessions = crate::sessions::read_sessions(&fs, &ctx.layout)
                 .map(|s| !s.sessions.is_empty())
                 .unwrap_or(false);
-            // `--over <version>` IS the confirmation for the one publish that needs one: it names
-            // what is being replaced, which is strictly more than `--yes` says.
-            if !yes && over.is_none() && publish_sessions {
+            if !yes && publish_sessions {
                 let connectors = ops::PublishDescribeConnectors {
                     directory: &connect_directory,
                     delivery: &connect_delivery,
@@ -1177,16 +1174,12 @@ fn run_command(
                     propose,
                     to.as_deref(),
                     workspace.as_deref(),
-                    None,
                     &selection,
                 );
-                // The paste-ready apply: this same publish plus its confirmation (preserving
-                // `--propose` / `--to` / `-m` — dropping the message would change the version's commit
-                // identity from what the describe computed, so an agent that runs this next action
-                // ships the wrong version — and the copy selector, without which the apply would face
-                // the freeze again). The confirmation itself is chosen by the DESCRIBE's own answer
-                // ([`finish_publish_describe`]): `--over <version>` where this publish replaces one,
-                // `--yes` everywhere else.
+                // The paste-ready apply: this same publish plus `--yes` (preserving `--propose` / `--to`
+                // / `-m` — dropping the message would change the version's commit identity from what the
+                // describe computed, so an agent that runs this next action ships the wrong version —
+                // and the copy selector, without which the apply would face the freeze again).
                 let mut yes_argv = vec!["topos".to_owned(), "publish".to_owned(), target.clone()];
                 yes_argv.extend(selection.argv_tail());
                 if propose {
@@ -1200,6 +1193,7 @@ fn run_command(
                     yes_argv.push("-m".to_owned());
                     yes_argv.push(m.clone());
                 }
+                yes_argv.push("--yes".to_owned());
                 return finish_publish_describe(json, cmd_name, described, yes_argv, &diag);
             }
             let result = ops::publish(
@@ -1213,7 +1207,6 @@ fn run_command(
                 to.as_deref(),
                 workspace.as_deref(),
                 message.as_deref(),
-                over.as_deref(),
                 &selection,
             );
             finish_publish(json, cmd_name, result, &diag)
@@ -2914,18 +2907,6 @@ fn finish_publish_describe(
 ) -> ExitCode {
     match result {
         Ok((data, warnings)) => {
-            // The apply's confirmation token, chosen by what the describe found: a publish that
-            // REPLACES a team version the draft does not carry confirms by naming that version, so
-            // the one command a reader copies is the one that discloses what it drops. Everything
-            // else keeps the plain `--yes`.
-            let mut yes_argv = yes_argv;
-            match &data.supersedes {
-                Some(s) => {
-                    yes_argv.push("--over".to_owned());
-                    yes_argv.push(render::short(&s.version_id).to_owned());
-                }
-                None => yes_argv.push("--yes".to_owned()),
-            }
             if json {
                 let value = serde_json::json!({ "describe": data });
                 let mut envelope = render::ok_envelope(command, value);

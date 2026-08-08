@@ -48,32 +48,6 @@ pub struct SyncState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "contract-derives", schemars(extend("pattern" = "^[0-9a-f]{64}$")))]
     pub draft_observed: Option<String>,
-    /// The team `current` this machine's draft deliberately does not contain — written when a
-    /// `--keep-mine` resolution commits bytes that do NOT already carry the served version, and
-    /// COMPUTED at that moment (the merge is re-run in memory over the chosen tree), never
-    /// asserted from the fact that the command was typed. It is what makes a later `publish`
-    /// disclose the replacement instead of shipping it silently.
-    ///
-    /// Meaningful only while a draft stands: it is carried through a clean merge onto a newer
-    /// team version (the draft still drops the older one) and cleared by a reset, a landed
-    /// publish, a go-back, a fast-forward, and by the sweep once the work tree equals the base.
-    /// **Additive optional** (absent in older documents, and absent whenever nothing is dropped).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub superseded: Option<Superseded>,
-}
-
-/// The version a draft deliberately does not contain (see [`SyncState::superseded`]). **Field-set
-/// pinned** (additive).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
-pub struct Superseded {
-    /// The `version_id` of the team `current` the draft drops.
-    #[cfg_attr(feature = "contract-derives", schemars(extend("pattern" = "^[0-9a-f]{64}$")))]
-    pub version_id: String,
-    /// That version's `bundle_digest` — the render pin, so the publish describe can diff against
-    /// it offline without re-deriving anything.
-    #[cfg_attr(feature = "contract-derives", schemars(extend("pattern" = "^[0-9a-f]{64}$")))]
-    pub bundle_digest: String,
 }
 
 /// `skills/<id>/lock.json` — the pinned skill identity + the byte-exact file list. **Pinned** (the
@@ -410,7 +384,6 @@ mod tests {
             work_hash: "b".repeat(64),
             held: false,
             draft_observed: None,
-            superseded: None,
         };
         let v = serde_json::to_value(&s).unwrap();
         assert_eq!(v["observed"], 7);

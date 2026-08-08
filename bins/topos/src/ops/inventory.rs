@@ -359,8 +359,8 @@ pub(crate) fn resolve(
             let mut note = format!(
                 "{}: project pins {}, machine delivers {} — the project copy is projected in-repo",
                 prow.name,
-                short(&a),
-                short(&b)
+                crate::render::short(&a),
+                crate::render::short(&b)
             );
             if claude {
                 note.push_str(
@@ -1031,11 +1031,13 @@ fn applied_for_id(
             }
         }
     }
-    // A `--keep-mine` resolution is a DRAFT even though every folder agrees with the record: topos
-    // wrote those bytes itself, so nothing scans as edited, yet what they hold is this person's
-    // version rather than the team's — and `publish` is its way out, which is exactly what `draft`
-    // means everywhere else. No folder is named as THE draft, because every copy holds it.
-    if sync.superseded.is_some() {
+    // A RESOLUTION is a draft even though every folder agrees with the record: topos itself wrote
+    // those bytes, so nothing scans as edited, yet what they hold is not the version the base
+    // names — and `publish` is its way out, which is exactly what `draft` means everywhere else.
+    // The durable documents say so on their own: `work_hash` is what topos last wrote, and it
+    // differs from the base's digest only where a merge (or a `--keep-mine`) settled onto it. No
+    // folder is named as THE draft, because every copy holds it.
+    if sync.work_hash != lock.bundle_digest {
         edited = true;
     }
     // The block outranks the draft word: these edits are not a publishable draft, and the row's
@@ -1454,11 +1456,6 @@ fn claude_code_detected(ctx: &Ctx<'_>) -> bool {
     })
 }
 
-/// A version/commit as a note spells it.
-pub(crate) fn short(hex: &str) -> &str {
-    hex.get(..12).unwrap_or(hex)
-}
-
 /// The reader both verbs open with: the sessions file and the offline delivery cache.
 pub(crate) fn read_sources(ctx: &Ctx<'_>) -> Result<(Sessions, SyncStatus), ClientError> {
     let all = sessions::read_sessions(ctx.fs, &ctx.layout)?;
@@ -1614,7 +1611,6 @@ pub(crate) mod testkit {
                     work_hash: "e".repeat(64),
                     held: false,
                     draft_observed: None,
-                    superseded: None,
                 },
             )
             .unwrap();

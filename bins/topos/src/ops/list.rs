@@ -1111,10 +1111,11 @@ mod tests {
                 observed_version_id: "b".repeat(64),
                 applied: 1,
                 base_commit: "b".repeat(64),
-                work_hash: "e".repeat(64),
+                // A settled copy's work hash IS its base digest — the documents agree, which is
+                // what makes the row read `current` rather than `draft`.
+                work_hash: "f".repeat(64),
                 held: false,
                 draft_observed: None,
-                superseded: None,
             },
         )
         .unwrap();
