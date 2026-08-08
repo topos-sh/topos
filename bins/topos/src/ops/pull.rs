@@ -82,9 +82,12 @@ pub(crate) enum TargetMode {
 #[derive(Debug)]
 pub(crate) struct PullOutcome {
     pub data: PullData,
-    /// Isolated per-skill FAILURES — what the receipt counts and calls failed. Only
-    /// [`note_skill_failure`] and its reconcile twin write here.
+    /// Isolated per-skill FAILURES — what the receipt counts and calls failed, and what makes the
+    /// run exit non-zero. Only [`note_skill_failure`] and its reconcile twin write here.
     pub warnings: Vec<String>,
+    /// Bundles waiting on a DECISION only the person can make (see [`PendingDecision`]). They are
+    /// not failures: the run exits 0 and the receipt counts them under `waiting on you`.
+    pub decisions: Vec<PendingDecision>,
     /// ADVISORIES — `warning:` lines about a row that still DELIVERED (an unknown MCP dest entry
     /// dropped from a bundle's narrowing). They join `warnings` in the `--json` envelope's one
     /// stable array and print beside them, but the summary never counts them: the bundle they
@@ -113,6 +116,31 @@ pub(crate) struct PullOutcome {
     /// gate reads it: a channel whose member list could not be read proved nothing, whatever
     /// else the same sweep happened to reconcile.
     pub failed_channels: HashSet<(String, String)>,
+}
+
+/// One bundle this run left exactly as it was because a DECISION is owed — the person's own edits
+/// stand in the way of a newer version, and only they can say which side wins.
+///
+/// A decision is NOT a failure, and the two must not share a word. Nothing broke, nothing was
+/// lost, and no retry will change the answer: what is needed is a person choosing, which is the
+/// one thing "failed" never says. So it renders as an ordinary receipt row — the bundle's name,
+/// what is standing in the way, and the ways out under it — counts under `waiting on you`, and
+/// leaves the run's exit status at 0. A real failure keeps `failed` and a non-zero exit, so an
+/// agent that checks the status learns the difference between "something is broken" and "you owe
+/// me an answer".
+#[derive(Debug, Clone)]
+pub(crate) struct PendingDecision {
+    /// The bundle's name — the receipt row's left column, padded with every other row's.
+    pub name: String,
+    /// What is waiting, in one sentence, beside the name.
+    pub line: String,
+    /// The ways out as the RECEIPT lays them out, one per line, indented beneath the row. Each
+    /// producer owns its own layout, because the sentence and the shape are one piece of writing.
+    pub detail: Vec<String>,
+    /// The SAME ways out as argv — what the `--json` envelope's next actions carry, so an agent
+    /// runs the choice instead of parsing the sentence about it. Built from the same tokens the
+    /// lines above are printed from.
+    pub ways_out: Vec<Vec<String>>,
 }
 
 /// One forge host that went quiet this run, and how long its rows have gone unanswered.
@@ -214,6 +242,7 @@ impl PullOutcome {
         Self {
             data,
             warnings,
+            decisions: Vec::new(),
             advisories: Vec::new(),
             disclosures: Vec::new(),
             access_gone: Vec::new(),

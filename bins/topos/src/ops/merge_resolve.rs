@@ -572,21 +572,20 @@ fn collapsed_copies(
 }
 
 /// What the escape's receipt row says about the copies it collapsed: the count, then ONE runnable
-/// line per copy that puts those exact bytes back, each naming the folder it came from. The
-/// go-back spelling is scope-exact (the layout IS the scope), so every line runs as printed.
+/// line per copy that restores it, each naming the folder it came from. The go-back spelling is
+/// scope-exact (the layout IS the scope), so every line runs as printed.
+///
+/// It says COPY and FOLDER, never bytes: the reader is being told about work of theirs that a
+/// folder no longer holds, and the word for that is the one they would use themselves.
 fn collapsed_note(ctx: &Ctx<'_>, name: &str, saved: &[SavedCopy]) -> String {
-    let g = if ctx.layout.is_project_scope() {
-        ""
-    } else {
-        " -g"
-    };
+    let g = crate::error::scope_flag(!ctx.layout.is_project_scope());
     let mut out = format!(
-        "overwrote different edits in {} folders — put a copy's bytes back with:",
+        "overwrote different edits in {} folders — restore a copy:",
         saved.len()
     );
     for c in saved {
         out.push_str(&format!(
-            "\n  topos update{g} {name}@{}   (from {})",
+            "\n  topos update{g} {name}@{}   (was in {})",
             short_version(&c.version),
             c.display
         ));

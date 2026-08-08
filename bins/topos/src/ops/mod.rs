@@ -69,6 +69,7 @@ pub(crate) use auth::{AuthConnectors, AuthStatusData, status};
 #[cfg(test)]
 pub(crate) use builtin::{
     ensure_with as builtin_ensure_with, marker_in_frontmatter as builtin_marker_in_frontmatter,
+    placement_dirs as builtin_placement_dirs,
 };
 pub(crate) use diff::{DiffBudget, diff, diff_resolved};
 pub(crate) use feed_migration::ensure_feed_migration;
@@ -94,8 +95,8 @@ pub(crate) use protect::{ProtectConnectors, ProtectOutcome, protect};
 #[cfg(test)]
 pub(crate) use publish::ensure_tracked;
 pub(crate) use pull::{
-    PullOutcome, PullScope, ReconcileOpts, ResetOutcome, StaleReason, TargetMode, ctx_with_layout,
-    pull, quiet_hook_lines, quiet_soft_failure, reset,
+    PendingDecision, PullOutcome, PullScope, ReconcileOpts, ResetOutcome, StaleReason, TargetMode,
+    ctx_with_layout, pull, quiet_hook_lines, quiet_soft_failure, reset,
 };
 pub(crate) use reconcile::{
     CacheFollow, ForgeCadence, ManifestUpdateOpts, SessionRoutedPlane, SessionTransports,

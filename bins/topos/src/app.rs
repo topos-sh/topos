@@ -1800,8 +1800,15 @@ fn finish_status(
 
 /// `pull`'s finisher — like [`finish`], but a bare sweep's isolated per-skill failures ride the
 /// envelope's `warnings` (one stable-shape line per failed skill) AND the TTY summary, so a wedged
-/// skill is visible on both surfaces. Isolation semantics hold: `ok` stays `true`, exit stays 0 (each
-/// failure also reached stderr inside the sweep).
+/// skill is visible on both surfaces. Isolation semantics hold — `ok` stays `true` and the sweep
+/// still reports every other bundle — but the EXIT STATUS does not lie: a run that could not carry
+/// a bundle forward exits non-zero, because the caller most likely to be watching is an agent, and
+/// an agent that reads 0 forever never learns the run is not converging.
+///
+/// A pending DECISION is the one thing that looks like a failure and is not: the bundle is
+/// waiting on the person, nothing is broken, and no retry changes the answer. Those exit 0 and are
+/// counted under `waiting on you`; only real faults (network, unreadable store, corrupt record)
+/// take the non-zero status.
 fn finish_pull(
     json: bool,
     command: &str,
@@ -1815,6 +1822,7 @@ fn finish_pull(
             // because nothing CAN be — state the join fix in prose and mirror it structurally
             // (the argv template's `needs` names the workspace address).
             let unenrolled_dead_end = !enrolled && out.data.skills.is_empty();
+            let failed = !out.warnings.is_empty();
             if json {
                 // Each WITHDRAWN skill carries a paste-ready `keep-as-yours` next action.
                 let mut next_actions = render::withdrawn_next_actions(&out.data);
@@ -1829,19 +1837,31 @@ fn finish_pull(
                         ],
                     ));
                 }
+                // A bundle waiting on a decision carries its ways out as runnable argv — the same
+                // structured channel every other "what do I do now" answer uses, so an agent acts
+                // on the choice instead of parsing a sentence about it.
+                next_actions.extend(render::decision_next_actions(&out.decisions));
                 let value = serde_json::to_value(&out.data).unwrap_or_default();
                 let mut envelope = render::ok_envelope(command, value);
-                // ONE stable machine channel: failures first, then the advisories, then the
-                // disclosures. The split is the receipt's (an advisory or disclosure must not be
-                // counted as a failure), not the wire's.
+                // ONE stable machine channel: failures first, then the decisions, then the
+                // advisories, then the disclosures. The split is the receipt's (a decision, an
+                // advisory or a disclosure must not be counted as a failure), not the wire's.
                 envelope.warnings = out.warnings;
+                envelope
+                    .warnings
+                    .extend(out.decisions.iter().map(render::decision_wire_line));
                 envelope.warnings.extend(out.advisories.iter().cloned());
                 envelope.warnings.extend(out.disclosures.iter().cloned());
                 envelope.next_actions = next_actions;
                 println!("{}", render::to_json(&envelope));
             } else {
-                let mut text =
-                    render::pull_tty(&out.data, &out.warnings, &out.advisories, &out.disclosures);
+                let mut text = render::pull_tty(
+                    &out.data,
+                    &out.decisions,
+                    &out.warnings,
+                    &out.advisories,
+                    &out.disclosures,
+                );
                 if !out.access_gone.is_empty() {
                     text.push_str(&format!(
                         "\nnote: the session{} for {} ended — every skill it delivered stays in \
@@ -1858,7 +1878,11 @@ fn finish_pull(
                 }
                 println!("{text}");
             }
-            ExitCode::SUCCESS
+            if failed {
+                ExitCode::FAILURE
+            } else {
+                ExitCode::SUCCESS
+            }
         }
         Err(e) => emit_err(json, command, &e, diag),
     }
@@ -3159,8 +3183,10 @@ mod tests {
         list_page_argv, next_page_action, parse_rfc3339_utc_millis, resolve_web_origin,
         waiting_line,
     };
+    use std::process::ExitCode;
+
     use crate::ids::Clock;
-    use crate::ops::{PullScope, RowPage, StoreScope, TargetMode, VersionRef};
+    use crate::ops::{self, PullScope, RowPage, StoreScope, TargetMode, VersionRef};
 
     struct TestClock(u64);
     impl Clock for TestClock {
@@ -3341,6 +3367,108 @@ mod tests {
                 None
             ),
             vec!["topos", "list"]
+        );
+    }
+
+    /// The one thing an agent reads without being asked: the exit status. It has to distinguish
+    /// the two states a sweep can end in without erroring, because they call for opposite
+    /// responses — a FAULT is worth retrying or escalating, and a DECISION is worth stopping and
+    /// asking a person. A status of 0 on both taught an agent that a run which never converges is
+    /// a run that succeeded.
+    #[test]
+    fn a_pending_decision_exits_zero_and_a_real_failure_does_not() {
+        let fs = crate::fs_seam::RealFs;
+        let clock = TestClock(0);
+        let argv = ["update".to_owned()];
+        let diag = super::Diag {
+            fs: &fs,
+            clock: &clock,
+            log_path: std::env::temp_dir().join("topos-exit-code-test-never-written.jsonl"),
+            argv: &argv,
+        };
+        let empty = || topos_types::results::PullData {
+            skills: Vec::new(),
+            proposals_awaiting: 0,
+            notices: Vec::new(),
+            sync: Vec::new(),
+            behind_elsewhere: Vec::new(),
+            scope: Some("machine".to_owned()),
+        };
+        let outcome = |decisions: Vec<crate::ops::PendingDecision>, warnings: Vec<String>| {
+            Ok(ops::PullOutcome {
+                data: empty(),
+                warnings,
+                decisions,
+                advisories: Vec::new(),
+                disclosures: Vec::new(),
+                access_gone: Vec::new(),
+                unreachable: Vec::new(),
+                stale_forge: Vec::new(),
+                forge_gone: Vec::new(),
+                failed_channels: std::collections::HashSet::new(),
+            })
+        };
+        let decision = crate::ops::PendingDecision {
+            name: "find-skills".to_owned(),
+            line: "github.com/vercel-labs/skills has a newer version, but your edits would be \
+                   overwritten"
+                .to_owned(),
+            detail: vec!["to share your edits:   topos publish find-skills".to_owned()],
+            ways_out: vec![vec![
+                "topos".to_owned(),
+                "publish".to_owned(),
+                "find-skills".to_owned(),
+            ]],
+        };
+
+        // A clean sweep, and a sweep that only ever asked a question: both are successes.
+        assert_eq!(
+            super::finish_pull(
+                false,
+                "update",
+                outcome(Vec::new(), Vec::new()),
+                true,
+                &diag
+            ),
+            ExitCode::SUCCESS
+        );
+        assert_eq!(
+            super::finish_pull(
+                false,
+                "update",
+                outcome(vec![decision.clone()], Vec::new()),
+                true,
+                &diag
+            ),
+            ExitCode::SUCCESS
+        );
+        // A real fault is not, on either face — and a decision standing beside it does not soften
+        // the status either.
+        assert_eq!(
+            super::finish_pull(
+                false,
+                "update",
+                outcome(
+                    Vec::new(),
+                    vec!["IO_ERROR deploy: the store is unreadable".to_owned()]
+                ),
+                true,
+                &diag
+            ),
+            ExitCode::FAILURE
+        );
+        assert_eq!(
+            super::finish_pull(
+                true,
+                "update",
+                outcome(
+                    vec![decision],
+                    vec!["IO_ERROR deploy: the store is unreadable".to_owned()]
+                ),
+                true,
+                &diag
+            ),
+            ExitCode::FAILURE
         );
     }
 

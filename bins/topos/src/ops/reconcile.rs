@@ -404,9 +404,15 @@ impl PlaneSource for SessionRoutedPlane {
 struct Sweep {
     rows: Vec<PullSkill>,
     /// FAILURES only — the isolated per-skill faults the receipt counts and the renderer calls
-    /// failed. A line that describes something that WORKED belongs in `disclosures`, or a clean
-    /// run reports itself as broken.
+    /// failed, and the one channel that makes the run exit non-zero. A line that describes
+    /// something that WORKED belongs in `disclosures`, or a clean run reports itself as broken;
+    /// a bundle waiting on a person belongs in `decisions`, or an answer nobody has given yet
+    /// reads as a fault to go and fix.
     warnings: Vec<String>,
+    /// Bundles left as they are until the PERSON decides (see [`super::PendingDecision`]) — their
+    /// own edits standing in the way of a newer version. Counted under `waiting on you`, never
+    /// under `failed`, and the run still exits 0.
+    decisions: Vec<super::PendingDecision>,
     /// Successful facts worth stating — the settled-draft fan-out, a cross-scope version split.
     /// They ride the same `--json` `warnings` array (one stable machine channel) but are never
     /// counted as failures.
@@ -1280,7 +1286,12 @@ pub(crate) fn manifest_update(
     } else {
         project.iter().map(|(dir, _)| dir.clone()).collect()
     };
-    handover_legacy_project_rows(ctx, &handover_dirs, &mut sweep.warnings);
+    handover_legacy_project_rows(
+        ctx,
+        &handover_dirs,
+        &mut sweep.advisories,
+        &mut sweep.warnings,
+    );
 
     // The follow seam for this run: current deliveries first, the cache behind them.
     let mut follow = CacheFollow::load(ctx.fs, &ctx.layout);
@@ -1323,14 +1334,14 @@ pub(crate) fn manifest_update(
     // would drop placement dirs nothing is about to write back.
     if opts.rebuild {
         if driven.person {
-            rebuild_store(ctx, &ctx.layout, &mut sweep.warnings);
+            rebuild_store(ctx, &ctx.layout, &mut sweep);
         }
         if driven.project
             && let Some((dir, _)) = &project
             && let Some(playout) = sidecar::existing_project_store(ctx.fs, dir)
         {
             let pctx = super::pull::ctx_with_layout(ctx, &playout);
-            rebuild_store(&pctx, &playout, &mut sweep.warnings);
+            rebuild_store(&pctx, &playout, &mut sweep);
         }
     }
 
@@ -1695,6 +1706,7 @@ pub(crate) fn manifest_update(
             behind_elsewhere,
         },
         warnings: sweep.warnings,
+        decisions: sweep.decisions,
         advisories: sweep.advisories,
         disclosures: sweep.disclosures,
         access_gone,
@@ -2838,9 +2850,11 @@ fn sync_workspace_skill<'a>(
             // Disclose a delivery the naming ladder had to place BESIDE a same-named occupant the
             // record does not own (the never-clobber outcome) — and a project placement a
             // bundle's OWN root ignore file leaves visible to git. An mcp bundle placed nothing.
+            // Both are ADVISORIES: the bundle DELIVERED and has its own row above, so the line is
+            // an annotation on a success, not a fault to count or to exit non-zero on.
             if !mcp && let ResolvedScope::Project { .. } = sc.scope {
-                disclose_namespaced(&run_ctx, &sid, &st.display, &mut sweep.warnings);
-                disclose_git_visible(&run_ctx, &sid, &target.name, &mut sweep.warnings);
+                disclose_namespaced(&run_ctx, &sid, &st.display, &mut sweep.advisories);
+                disclose_git_visible(&run_ctx, &sid, &target.name, &mut sweep.advisories);
             }
             row_index = Some(sweep.next_row_index());
             sweep.push(row);
@@ -3239,8 +3253,11 @@ fn converge_pending_governance(env: &Env<'_>, dir: &Path, sweep: &mut Sweep) -> 
         &run.session.workspace_name,
         std::slice::from_ref(&canonical),
     ) {
+        // The rewrite LANDED — an advisory about a row that delivered, never a failure: a run
+        // that finished someone's pending transfer must not report itself as broken, and must not
+        // hand an agent a non-zero status for it.
         Ok(super::GovernedOutcome::Rewritten(rw)) => {
-            sweep.warnings.push(format!(
+            sweep.advisories.push(format!(
                 "GOVERNANCE_CONVERGED {}: {} — the \"{}\" line is now \"{}\" (a landed publish's \
                  pending transfer)",
                 lock.name, rw.manifest, rw.from, rw.canonical
@@ -3621,17 +3638,6 @@ fn reconcile_repo_set(
         }
         return;
     }
-    // The commit motion an explicit update just landed — a DISCLOSURE of what worked, beside the
-    // rows that carry the members. It must not ride the channel the summary counts as failures.
-    if !recorded.is_empty() && !resolved.is_empty() && !commit_matches(&recorded, &resolved) {
-        sweep.disclosures.push(git_updated_line(
-            &origin,
-            &recorded,
-            &resolved,
-            &tracked,
-            &discovered,
-        ));
-    }
     // Members the NEW archive no longer holds leave with it: the ordinary undemanded clean
     // (snapshot-first — an edited copy is committed into the store before any dir goes), in this
     // scope's own store. The `-member` the receipt line rendered is thereby true on disk.
@@ -3652,6 +3658,7 @@ fn reconcile_repo_set(
             Err(e) => note_item_failure(env.ctx, &mut sweep.warnings, &import.lock.name, &e),
         }
     }
+    let decisions_before = sweep.decisions.len();
     for name in &discovered {
         if !set_selected && !targets.hit(&[name.as_str()]) {
             continue;
@@ -3670,6 +3677,31 @@ fn reconcile_repo_set(
             continue;
         }
         install_or_refresh_repo_skill(env, sc, &sctx, &spec, &targz, name, &slots, sweep);
+    }
+    // The commit motion this update landed — a DISCLOSURE of what worked, beside the rows that
+    // carry the members. It must not ride the channel the summary counts as failures, and it is
+    // said only NOW, once every member has had its turn: a member that stood down for a DECISION
+    // did not move, so the line does not list it as one that did. With every member standing down
+    // there is nothing left for this line to add — the decision rows already say, in words a
+    // person can act on, that the source has a newer version.
+    let blocked: Vec<String> = sweep.decisions[decisions_before..]
+        .iter()
+        .map(|d| d.name.clone())
+        .collect();
+    let all_blocked = !discovered.is_empty() && discovered.iter().all(|d| blocked.contains(d));
+    if !recorded.is_empty()
+        && !resolved.is_empty()
+        && !commit_matches(&recorded, &resolved)
+        && !all_blocked
+    {
+        sweep.disclosures.push(git_updated_line(
+            &origin,
+            &recorded,
+            &resolved,
+            &tracked,
+            &discovered,
+            &blocked,
+        ));
     }
     // The pass finished. CONVERGENCE IS RE-READ FROM THE STORE, not inferred from the plan: the
     // slot view above was captured before any of the installs ran, and it only ever asked whether
@@ -3823,6 +3855,8 @@ fn reconcile_repo_skill(
         }
     };
     lane.note_landed(&origin, &git_ref, &tree.commit.clone().unwrap_or_default());
+    // The source's motion, said only once the re-import has had its turn (see below).
+    let mut motion: Option<String> = None;
     // Every slot's copy at the same commit is settled: nothing moves without a real change.
     if let Some(import) = &tracked {
         let resolved = tree.commit.clone().unwrap_or_default();
@@ -3844,8 +3878,10 @@ fn reconcile_repo_skill(
         }
         if !recorded.is_empty() && !resolved.is_empty() && !commit_matches(&recorded, &resolved) {
             // The single-skill row's twin of the set arm's motion line — a disclosure, not a
-            // failure (see the set arm above).
-            sweep.disclosures.push(format!(
+            // failure (see the set arm above). HELD until the re-import has run: if the copy
+            // here carries edits, the decision row below says the source moved in words a person
+            // can act on, and this line would repeat it in the engine's.
+            motion = Some(format!(
                 "GIT_UPDATED {origin}: {} → {}; skills: ~{}",
                 short_commit(&recorded),
                 short_commit(&resolved),
@@ -3853,7 +3889,11 @@ fn reconcile_repo_skill(
             ));
         }
     }
+    let before = sweep.decisions.len();
     install_or_refresh_repo_skill(env, sc, &sctx, &spec, &targz, skill, &slots, sweep);
+    if let Some(line) = motion.filter(|_| sweep.decisions.len() == before) {
+        sweep.disclosures.push(line);
+    }
 }
 
 /// ONE converge slot of a forge row's member: the destination root the row aimed this copy at
@@ -4022,6 +4062,7 @@ fn install_or_refresh_repo_skill(
         return;
     }
     let mut landed: Option<String> = None;
+    let mut blocked = false;
     for slot in slots {
         let opts = super::AddRemoteOpts {
             // A row that spells a literal `subdir` has already narrowed the archive; otherwise the
@@ -4034,23 +4075,76 @@ fn install_or_refresh_repo_skill(
         };
         let outcome = match slot.import {
             Some(import) => refresh_repo_skill(sctx, targz, spec, &opts, &roots, &import.sid),
-            None => super::add_remote_fetched(sctx, targz, spec, &roots, &opts).map(|d| d.name),
+            None => super::add_remote_fetched(sctx, targz, spec, &roots, &opts)
+                .map(|d| RefreshOutcome::Landed(d.name)),
         };
         match outcome {
             // One receipt row per MEMBER, whatever the slot count — the person asked for a skill,
             // not for a copy per agent.
-            Ok(name) => landed = landed.or(Some(name)),
+            Ok(RefreshOutcome::Landed(name)) => landed = landed.or(Some(name)),
+            // The source moved and this copy carries edits: nothing was overwritten, and the
+            // choice is the person's. It is stated ONCE, as a decision row — a second slot
+            // blocked on the same edits is the same unanswered question, not a second one.
+            Ok(RefreshOutcome::BlockedByEdits) => blocked = true,
             Err(e) => note_item_failure(env.ctx, &mut sweep.warnings, name, &e),
         }
     }
     if let Some(name) = landed {
         sweep.push(plain_row(&name, PullAction::FastForwarded, None, &sc.label));
+    } else if blocked {
+        sweep
+            .decisions
+            .push(import_blocked_decision(name, &spec.origin(), &sc.scope));
     }
 }
 
-/// Re-import a tracked external skill at a NEW commit: local edits refuse (never overwritten by an
-/// import), a clean copy is snapshot-verified, the sidecar record replaced wholesale, and the fresh
-/// import lands through the ordinary adopt.
+/// The decision a moved source hands back when the copy here carries edits: what changed, what
+/// stands in the way, and the two answers — share the edits, or drop them.
+///
+/// Both facts belong in the first sentence: the SOURCE moved (which is why anything is happening
+/// at all) and the EDITS are why nothing did. Neither exit is recommended over the other, because
+/// only the person knows whether the work in that folder is worth keeping; what the row owes them
+/// is two runnable commands and no third thing to read. The commands' labels are padded so the
+/// two line up as the one choice they are.
+fn import_blocked_decision(
+    name: &str,
+    origin: &str,
+    scope: &ResolvedScope,
+) -> super::PendingDecision {
+    let argv =
+        |tokens: &[&str]| -> Vec<String> { tokens.iter().map(|t| (*t).to_owned()).collect() };
+    let reset = match scope {
+        ResolvedScope::Person => argv(&["topos", "update", "-g", name, "--reset"]),
+        ResolvedScope::Project { .. } => argv(&["topos", "update", name, "--reset"]),
+    };
+    let ways = vec![
+        ("to share your edits:", argv(&["topos", "publish", name])),
+        ("to discard them:", reset),
+    ];
+    let pad = ways.iter().map(|(label, _)| label.len()).max().unwrap_or(0);
+    super::PendingDecision {
+        name: name.to_owned(),
+        line: format!("{origin} has a newer version, but your edits would be overwritten"),
+        detail: ways
+            .iter()
+            .map(|(label, cmd)| format!("{label:<pad$}   {}", cmd.join(" ")))
+            .collect(),
+        ways_out: ways.into_iter().map(|(_, cmd)| cmd).collect(),
+    }
+}
+
+/// What a re-import of a tracked external skill concluded.
+enum RefreshOutcome {
+    /// The re-import landed — the bundle's tracked name.
+    Landed(String),
+    /// Local edits stand in the way, so nothing was touched. Not an error: the source moved, the
+    /// person's work is intact, and the only thing missing is their answer about which wins.
+    BlockedByEdits,
+}
+
+/// Re-import a tracked external skill at a NEW commit: local edits stand the refresh down (never
+/// overwritten by an import), a clean copy is snapshot-verified, the sidecar record replaced
+/// wholesale, and the fresh import lands through the ordinary adopt.
 ///
 /// The WHOLE replacement runs under this skill's own writer lock — it reads the map, scans every
 /// placement, moves those dirs and the sidecar record aside, and replaces them; a second writer
@@ -4065,22 +4159,20 @@ fn refresh_repo_skill(
     opts: &super::AddRemoteOpts,
     roots: &super::DiscoveryRoots,
     sid: &SkillId,
-) -> Result<String, ClientError> {
+) -> Result<RefreshOutcome, ClientError> {
     let _guard = crate::sidecar::lock_skill(ctx.fs, &ctx.layout, sid)?;
     let sp = ctx.layout.published(sid);
     let map: PlacementMap = sync_engine::read_map_required(ctx, &sp)?;
-    let lock: Lock = doc::read_doc::<Lock>(ctx.fs, &sp.lock)?
+    // Read for its own sake: a record with no readable lock is corrupt, and this refresh is about
+    // to park and replace directories — it stops here rather than on a half-moved tree.
+    let _lock: Lock = doc::read_doc::<Lock>(ctx.fs, &sp.lock)?
         .ok_or_else(|| ClientError::Corrupt(format!("{}: lock.json missing", sid.as_str())))?;
     let scans = placement::scan_placements(ctx, &map)?;
     if scans
         .iter()
         .any(|s| matches!(s.status, placement::ScanStatus::Modified { .. }))
     {
-        return Err(ClientError::InvalidArgument(format!(
-            "'{name}' has local edits ahead of its imported version — publish them (or `topos \
-             update {name} --reset`) before the source refresh",
-            name = lock.name
-        )));
+        return Ok(RefreshOutcome::BlockedByEdits);
     }
     if scans
         .iter()
@@ -4143,7 +4235,7 @@ fn refresh_repo_skill(
         stashed.push((from.to_path_buf(), to.clone(), digest));
         Ok(to)
     };
-    let mut stash_all = || -> Result<(), ClientError> {
+    let mut stash_all = || -> Result<bool, ClientError> {
         for scan in &scans {
             let placement::ScanStatus::Clean { digest } = &scan.status else {
                 continue;
@@ -4155,16 +4247,12 @@ fn refresh_repo_skill(
             // PARK-THEN-VERIFY: the classification above rode a scan taken before the archive
             // fetch and the extract, so "clean" is a claim about a directory anyone could have
             // edited since. Re-read the PARKED tree — nothing can reach it by path now — and
-            // treat a difference exactly as an up-front local edit: refuse, restoring every
+            // treat a difference exactly as an up-front local edit: stand down, restoring every
             // stash. An import never overwrites work it did not put there, whenever it arrived.
             let still_clean =
                 crate::scan::scan(&parked).is_ok_and(|fresh| fresh.bundle_digest == *digest);
             if !still_clean {
-                return Err(ClientError::InvalidArgument(format!(
-                    "'{name}' was edited while its source refresh was running — publish those \
-                     edits (or `topos update {name} --reset`) before the refresh",
-                    name = lock.name
-                )));
+                return Ok(false);
             }
         }
         let sidecar_dir = ctx.layout.skill_dir(sid);
@@ -4173,12 +4261,20 @@ fn refresh_repo_skill(
             // this fn holds — no content digest to re-prove (`None`).
             stash_dir(ctx.fs, &sidecar_dir, None, &mut stashed)?;
         }
-        Ok(())
+        Ok(true)
     };
-    // A stash failure MID-LOOP restores what was already moved — the old import stays coherent.
-    if let Err(e) = stash_all() {
-        restore(ctx.fs, &stashed);
-        return Err(e);
+    // A stash failure MID-LOOP restores what was already moved — the old import stays coherent,
+    // and so does an edit that arrived mid-refresh: that is a decision, not a fault.
+    match stash_all() {
+        Ok(true) => {}
+        Ok(false) => {
+            restore(ctx.fs, &stashed);
+            return Ok(RefreshOutcome::BlockedByEdits);
+        }
+        Err(e) => {
+            restore(ctx.fs, &stashed);
+            return Err(e);
+        }
     }
     match super::add_remote_fetched(ctx, targz, spec, roots, opts) {
         Ok(d) => {
@@ -4206,7 +4302,7 @@ fn refresh_repo_skill(
                     crate::sidecar::settle_park_journal(ctx.fs, &ctx.layout, stash);
                 }
             }
-            Ok(d.name)
+            Ok(RefreshOutcome::Landed(d.name))
         }
         Err(e) => {
             restore(ctx.fs, &stashed);
@@ -4255,16 +4351,25 @@ fn renamed_line(origin: &str, head: &RepoHead, sweep: &mut Sweep) {
 
 /// The ONE receipt line a moved git source earns: what it was, what it is, and which members that
 /// moved — a source that silently swaps bytes under an agent is exactly what this line prevents.
+///
+/// `blocked` names the members that stood down for a DECISION. They are dropped from BOTH readings:
+/// nothing of theirs moved, so they are neither a member that changed nor — the mistake worth
+/// guarding — a member that left.
 fn git_updated_line(
     origin: &str,
     old: &str,
     new: &str,
     tracked: &[ForgeImport],
     discovered: &[String],
+    blocked: &[String],
 ) -> String {
-    let had: Vec<&str> = tracked.iter().map(|i| i.lock.name.as_str()).collect();
+    let had: Vec<&str> = tracked
+        .iter()
+        .map(|i| i.lock.name.as_str())
+        .filter(|n| !blocked.iter().any(|b| b == n))
+        .collect();
     let mut parts: Vec<String> = Vec::new();
-    for name in discovered {
+    for name in discovered.iter().filter(|d| !blocked.contains(d)) {
         if had.contains(&name.as_str()) {
             parts.push(format!("~{name}"));
         } else {
@@ -4401,6 +4506,11 @@ pub(crate) fn commit_matches(recorded: &str, pin: &str) -> bool {
 /// The lines a table cannot carry per row: the LOUD note when a hand-written global manifest
 /// withholds a connected workspace's feed, and the honest note when a row delivers a bundle the
 /// person declined on the web.
+///
+/// Both are ADVISORIES. They read as warnings and are meant to, but neither describes a fault:
+/// a recipe that adopts less than the workspace assigns is a choice someone made, and a declined
+/// bundle a local row still delivers is the machine's row winning exactly as designed. Counting
+/// either as `failed` — let alone exiting non-zero on it — would call a working machine broken.
 fn disclose(env: &Env<'_>, person: Option<&ScopePlan>, sweep: &mut Sweep) {
     let adopted = sweep
         .synced_in(&ResolvedScope::Person.label())
@@ -4422,7 +4532,7 @@ fn disclose(env: &Env<'_>, person: Option<&ScopePlan>, sweep: &mut Sweep) {
             if unadopted == 0 {
                 continue;
             }
-            sweep.warnings.push(format!(
+            sweep.advisories.push(format!(
                 "GLOBAL_MANIFEST {}/{}: global manifest adopts {total} bundles; {unadopted} \
                  assigned bundles are not adopted here (no feed row) — `topos add -g @{}` restores \
                  them",
@@ -4436,7 +4546,7 @@ fn disclose(env: &Env<'_>, person: Option<&ScopePlan>, sweep: &mut Sweep) {
         let Some(snap) = &run.snapshot else { continue };
         for (skill_id, name) in &snap.declined {
             if sweep.explicit.contains(skill_id) {
-                sweep.warnings.push(format!(
+                sweep.advisories.push(format!(
                     "DECLINED_OVERRIDE {name}: declined on the web, delivered here by your manifest"
                 ));
             }
@@ -5600,7 +5710,13 @@ fn clean_placements(
 /// sweep re-projects it pristine. The order is the whole guarantee — a rebuild is a repair, and a
 /// repair that can lose an edit is not one. A bundle whose placements cannot be read is left exactly
 /// as it is, with a line saying so — and so is one whose merge is still undecided ([`rebuild_skill`]).
-fn rebuild_store(ctx: &Ctx<'_>, layout: &crate::sidecar::Layout, warnings: &mut Vec<String>) {
+///
+/// TWO records are skipped outright. A RETIRED one is never re-projected: the sweep would not write
+/// it back, so a rebuild that dropped its dirs would be a plain delete of the person's own copies.
+/// And the BUILT-IN is force-synced from the binary at the top of every invocation — that sync IS
+/// its rebuild, and it has already run by the time this loop starts, so dropping its folder here
+/// deletes a dir nothing later in the same run puts back.
+fn rebuild_store(ctx: &Ctx<'_>, layout: &crate::sidecar::Layout, sweep: &mut Sweep) {
     let Ok(entries) = ctx.fs.read_dir(&layout.skills_dir()) else {
         return;
     };
@@ -5611,15 +5727,16 @@ fn rebuild_store(ctx: &Ctx<'_>, layout: &crate::sidecar::Layout, warnings: &mut 
         let Ok(sid) = SkillId::parse(id) else {
             continue;
         };
-        // A RETIRED record is never re-projected: the sweep would not write it back, so a rebuild
-        // that dropped its kept files would be a plain delete of the person's own copies.
-        if sidecar::record_retired(ctx.fs, layout, &sid) {
+        if super::builtin::is_builtin(sid.as_str()) || sidecar::record_retired(ctx.fs, layout, &sid)
+        {
             continue;
         }
         match rebuild_skill(ctx, &sid) {
             Ok(None) => {}
-            Ok(Some(line)) => warnings.push(line),
-            Err(e) => warnings.push(format!(
+            // Undecided merge: a DECISION, not a fault. Nothing is broken and no retry helps —
+            // the folders stand exactly as they were until the person picks a side.
+            Ok(Some(decision)) => sweep.decisions.push(decision),
+            Err(e) => sweep.warnings.push(format!(
                 "REBUILD_SKIPPED {id}: {}",
                 crate::render::safe_message(&e)
             )),
@@ -5627,9 +5744,12 @@ fn rebuild_store(ctx: &Ctx<'_>, layout: &crate::sidecar::Layout, warnings: &mut 
     }
 }
 
-/// [`rebuild_store`] for one bundle (see its doc for the ordering rule). `Ok(Some(line))` is a
-/// bundle this rebuild deliberately did NOT touch, with the line that says why.
-fn rebuild_skill(ctx: &Ctx<'_>, sid: &SkillId) -> Result<Option<String>, ClientError> {
+/// [`rebuild_store`] for one bundle (see its doc for the ordering rule). `Ok(Some(..))` is a bundle
+/// this rebuild deliberately did NOT touch, with the decision that says why.
+fn rebuild_skill(
+    ctx: &Ctx<'_>,
+    sid: &SkillId,
+) -> Result<Option<super::PendingDecision>, ClientError> {
     let sp = ctx.layout.published(sid);
     {
         let _guard = crate::sidecar::lock_skill(ctx.fs, &ctx.layout, sid)?;
@@ -5646,7 +5766,7 @@ fn rebuild_skill(ctx: &Ctx<'_>, sid: &SkillId) -> Result<Option<String>, ClientE
         // names the two exits, each of which rewrites every managed placement on its way out.
         // Presence is the test, exactly as it is for the publish gate.
         if ctx.fs.exists(&sp.conflict) {
-            return Ok(Some(rebuild_blocked_line(ctx, &lock.name)));
+            return Ok(Some(rebuild_blocked_decision(ctx, &lock.name)));
         }
         if map.placements.is_empty() {
             return Ok(None);
@@ -5665,13 +5785,28 @@ fn rebuild_skill(ctx: &Ctx<'_>, sid: &SkillId) -> Result<Option<String>, ClientE
 /// The bundle leads its own line and the way out sits under it, one command per line — the shape
 /// every other per-bundle answer takes. No internal code prefixes it: the reader is being told what
 /// happened to a folder of theirs, and a code says nothing they can act on.
-fn rebuild_blocked_line(ctx: &Ctx<'_>, name: &str) -> String {
-    let g = crate::error::scope_flag(!ctx.layout.is_project_scope());
-    format!(
-        "{name}   waiting on a merge decision, so its folders were left as they are\n    settle it \
-         first, then rebuild:\n      topos update{g} {name} --keep-mine\n      topos update{g} \
-         {name} --reset"
-    )
+fn rebuild_blocked_decision(ctx: &Ctx<'_>, name: &str) -> super::PendingDecision {
+    let global = !ctx.layout.is_project_scope();
+    let g = crate::error::scope_flag(global);
+    let argv = |flag: &str| -> Vec<String> {
+        let mut v = vec!["topos".to_owned(), "update".to_owned()];
+        if global {
+            v.push("-g".to_owned());
+        }
+        v.push(name.to_owned());
+        v.push(flag.to_owned());
+        v
+    };
+    super::PendingDecision {
+        name: name.to_owned(),
+        line: "waiting on a merge decision, so its folders were left as they are".to_owned(),
+        detail: vec![
+            "settle it first, then rebuild:".to_owned(),
+            format!("  topos update{g} {name} --keep-mine"),
+            format!("  topos update{g} {name} --reset"),
+        ],
+        ways_out: vec![argv("--keep-mine"), argv("--reset")],
+    }
 }
 
 // =================================================================================================
@@ -5767,9 +5902,15 @@ fn note_item_failure(ctx: &Ctx<'_>, warnings: &mut Vec<String>, name: &str, e: &
 /// carried into the project store's fresh baseline, so the dir is renamed to a
 /// `.topos-handover-*` sibling (outside every sweep's reach), disclosed with a warning line, and
 /// journaled in the log — a person can delete it deliberately; topos does not.
+///
+/// The two channels are not interchangeable. A PARK that landed is an advisory — it says where
+/// the person's old history now lives, and a handover that worked must not make the run report a
+/// failure or exit non-zero. A handover that could NOT complete is a real fault and rides
+/// `warnings`.
 pub(crate) fn handover_legacy_project_rows(
     ctx: &Ctx<'_>,
     project_dirs: &[PathBuf],
+    advisories: &mut Vec<String>,
     warnings: &mut Vec<String>,
 ) {
     use topos_types::persisted::PlacementKind;
@@ -5842,7 +5983,7 @@ pub(crate) fn handover_legacy_project_rows(
                 Some(&sid),
             ) {
                 Ok(parked) => {
-                    warnings.push(format!(
+                    advisories.push(format!(
                         "STATE_HANDOVER {id}: the project store now tracks it; the old home-side \
                          state (history + draft snapshots) is preserved at {} — delete it \
                          deliberately when you no longer want it",

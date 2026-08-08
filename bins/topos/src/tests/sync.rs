@@ -1644,7 +1644,7 @@ fn the_escape_discloses_the_divergent_copies_it_collapsed() {
     let note = row.note.as_deref().expect("the collapse is disclosed");
     let lines: Vec<&str> = note.lines().collect();
     assert_eq!(
-        lines[0], "overwrote different edits in 2 folders — put a copy's bytes back with:",
+        lines[0], "overwrote different edits in 2 folders — restore a copy:",
         "{note}"
     );
     assert_eq!(
@@ -1663,7 +1663,7 @@ fn the_escape_discloses_the_divergent_copies_it_collapsed() {
     };
     for (line, dir) in lines[1..].iter().zip([rig.placement(), replica.clone()]) {
         let named = line
-            .split_once("   (from ")
+            .split_once("   (was in ")
             .and_then(|(_, rest)| rest.strip_suffix(')'))
             .unwrap_or_else(|| panic!("a named folder: {line}"));
         assert_eq!(real(std::path::Path::new(named)), real(&dir), "{line}");
@@ -3759,7 +3759,13 @@ fn a_refreshed_stale_replica_never_reads_all_up_to_date() {
         ops::sweep_changed_bytes(&out.data),
         "the quiet hook must hear about bytes that moved"
     );
-    let tty = crate::render::pull_tty(&out.data, &out.warnings, &out.advisories, &out.disclosures);
+    let tty = crate::render::pull_tty(
+        &out.data,
+        &out.decisions,
+        &out.warnings,
+        &out.advisories,
+        &out.disclosures,
+    );
     assert!(tty.contains("updated (3 folders)"), "{tty}");
     // Counted rows spell their folders out — a number nobody can act on is not an answer.
     assert!(
@@ -3786,6 +3792,7 @@ fn a_refreshed_stale_replica_never_reads_all_up_to_date() {
     assert!(
         crate::render::pull_tty(
             &again.data,
+            &again.decisions,
             &again.warnings,
             &again.advisories,
             &again.disclosures
@@ -3842,7 +3849,13 @@ fn a_heal_riding_along_with_a_settled_fanout_is_named_on_the_row() {
         Some(expect(V1)),
         "the heal landed the pristine version from the local store"
     );
-    let tty = crate::render::pull_tty(&out.data, &out.warnings, &out.advisories, &out.disclosures);
+    let tty = crate::render::pull_tty(
+        &out.data,
+        &out.decisions,
+        &out.warnings,
+        &out.advisories,
+        &out.disclosures,
+    );
     assert!(tty.contains("synced your edits to"), "{tty}");
     assert!(
         tty.contains(&format!("also installed {}", extra.display())),

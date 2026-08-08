@@ -2189,6 +2189,7 @@ fn a_rows_dest_files_narrow_the_placement_and_unknown_files_warn_once() {
     let clean = sweep(&ctx, &plane, &dir);
     let receipt = crate::render::pull_tty(
         &clean.data,
+        &clean.decisions,
         &clean.warnings,
         &clean.advisories,
         &clean.disclosures,
@@ -2257,6 +2258,7 @@ fn a_skill_rows_folder_dest_never_warns_mcp_dest_unknown() {
     assert_eq!(
         crate::render::pull_tty(
             &clean.data,
+            &clean.decisions,
             &clean.warnings,
             &clean.advisories,
             &clean.disclosures
