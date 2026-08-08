@@ -501,6 +501,7 @@ pub(crate) fn reset(
                 .map(|p| p.others_edited.clone())
                 .unwrap_or_default(),
             global: store == super::StoreScope::Machine,
+            hand_merge: None,
         });
     }
 
@@ -523,7 +524,7 @@ pub(crate) fn reset(
     // ---- APPLY (`--yes`) ---- discard each draft back to its base (the draft is snapshotted first),
     // each through ITS owning store — the same copy the describe above measured the loss against.
     for ((layout, id, _lock), item) in resolved.iter().zip(items.iter_mut()) {
-        sync_engine::reset_to_base(&ctx_with_layout(ctx, layout), id, sel)?;
+        item.hand_merge = sync_engine::reset_to_base(&ctx_with_layout(ctx, layout), id, sel)?;
         item.applied = true;
     }
     Ok(ResetOutcome::Applied(items))

@@ -110,10 +110,19 @@ pub(crate) fn escape_one(
         // and the record's removal) is not a stopped merge: finish that clear, then refuse like any
         // other resolved state — committing the original draft over the resolution already on disk
         // is exactly the loss this ordering exists to prevent.
-        if !super::merge_resolve::heal_landed_resolution(ctx, &sp, &sync, &lock, &map, &cs)? {
+        if !super::merge_resolve::heal_landed_resolution(ctx, &sp, &sync, &map, &cs)? {
+            // A record from a build that put the marked-up tree INTO the agent folders is
+            // converted first — before this exit reads a folder, since under that record the
+            // folders hold markers and the exit stands on what they hold.
+            let (cs, sync, map, note) = match super::merge_resolve::convert_pre_workbench_record(
+                ctx, skill_id, &sp, &sync, &lock, &map, &cs,
+            )? {
+                Some(c) => (c.state, c.sync, c.map, c.note),
+                None => (cs, sync, map, None),
+            };
             // The 2nd witness mint site — guarded: a `conflict.json` only ever exists for an author
             // who diverged (a follower never reaches merge code, so never records one).
-            return super::merge_resolve::escape_recorded(
+            let mut row = super::merge_resolve::escape_recorded(
                 DivergedWitness(()),
                 ctx,
                 skill_id,
@@ -122,7 +131,13 @@ pub(crate) fn escape_one(
                 &lock,
                 &map,
                 &cs,
-            );
+            )?;
+            // Two facts can both be owed here; neither may swallow the other.
+            row.note = match (row.note.take(), note) {
+                (Some(a), Some(b)) => Some(format!("{b}\n{a}")),
+                (a, b) => a.or(b),
+            };
+            return Ok(row);
         }
     }
     Err(ClientError::NoStoppedMerge {
@@ -207,11 +222,21 @@ pub(crate) fn sync_one_planned(
         // write and the record's removal) is not a block at all — finish that clear and pull
         // normally. Before the re-disclosure, which would otherwise name a work tree that exists
         // nowhere.
-        if !super::merge_resolve::heal_landed_resolution(ctx, &sp, &sync, &lock, &map, &cs)? {
+        if !super::merge_resolve::heal_landed_resolution(ctx, &sp, &sync, &map, &cs)? {
+            // A record from a build that materialized the marked-up tree ONTO the placements is
+            // converted here — the author's own version back in every agent folder, the marked-up
+            // tree into the workbench — and the ordinary blocked flow then proceeds over it.
+            let (cs, sync, map, note) = match super::merge_resolve::convert_pre_workbench_record(
+                ctx, skill_id, &sp, &sync, &lock, &map, &cs,
+            )? {
+                Some(c) => (c.state, c.sync, c.map, c.note),
+                None => (cs, sync, map, None),
+            };
             super::merge_resolve::recover_resolution(ctx, &sp, &sync, &lock, &map, &cs)?;
-            return super::merge_resolve::conflicted_row_from_state(
-                ctx, &name, &sync, &lock, &map, &cs,
-            );
+            let mut row =
+                super::merge_resolve::conflicted_row_from_state(ctx, &name, &sync, &map, &cs)?;
+            row.note = note;
+            return Ok(row);
         }
     }
 
@@ -744,7 +769,11 @@ pub(crate) fn go_back(
 /// narrows is only which folders are written back to base: every edited copy is STILL snapshotted
 /// into the store first (the loss rail is not a per-copy thing — bytes that survive on disk are
 /// still bytes nobody wrote down), and the surviving copy stays exactly as it is, which makes it
-/// the single ordinary draft once the reset lands.
+/// the single ordinary draft once the reset lands. A narrowed reset therefore does NOT end a
+/// stopped merge: the record stands while any copy still holds edits (see [`every_copy_settled`]).
+///
+/// Returns the workbench folder LEFT BEHIND — a hand merge this reset did not read and so does not
+/// delete — for the receipt to name; `None` when nothing survives.
 ///
 /// # Errors
 /// [`ClientError::PlacementUnsupported`] on an unscannable placement; a store / io / integrity
@@ -753,7 +782,7 @@ pub(crate) fn reset_to_base(
     ctx: &Ctx<'_>,
     skill_id: &crate::id::SkillId,
     sel: &super::Selection,
-) -> Result<(), ClientError> {
+) -> Result<Option<String>, ClientError> {
     let _guard = sidecar::lock_skill(ctx.fs, &ctx.layout, skill_id)?;
     let sp = ctx.layout.published(skill_id);
     let sid = skill_id.as_str();
@@ -842,11 +871,42 @@ pub(crate) fn reset_to_base(
     // A recorded merge conflict describes the divergence this reset just DISCARDED — clear the
     // block and the marked-up copy it named (idempotent; absent is fine), or publish would stay
     // refused by a conflict whose draft no longer exists. Cleared AFTER the placements landed,
-    // mirroring the escape's order. A PER-COPY reset clears it too: a conflict writes no markers
-    // into any folder, so there is no copy-scoped marker state a narrowed reset could leave behind.
-    super::merge_resolve::clear_conflict(ctx, &sp, &lock)?;
+    // mirroring the escape's order.
+    //
+    // But only once NOTHING is left unresolved. A `--dest` reset narrows to ONE copy so the others
+    // keep their edits — and a copy still holding its edits is a copy still holding this merge, so
+    // clearing the record there would unblock publishing while the merge stands. In git, resolving
+    // one path does not end a merge; only the commit does, and it refuses while anything is
+    // unresolved. The scan reads every recorded copy, and an unreadable one keeps the block (fail
+    // toward the gate, never through it).
+    //
+    // The removal is `Unread`: this command never looked inside the workbench, so a hand merge in
+    // it is left where the person can see it and named on the receipt.
+    let hand_merge = if every_copy_settled(ctx, &sp) {
+        super::merge_resolve::clear_conflict(ctx, &sp, super::merge_resolve::Workbench::Unread)?
+    } else {
+        None
+    };
     log_apply(ctx, sid, "update-reset", base, &report);
-    Ok(())
+    Ok(hand_merge)
+}
+
+/// Whether every copy this bundle records now sits at its own recorded baseline — the reset's
+/// "nothing is left unresolved" test, read from disk after the placements landed. An unreadable
+/// map or an unscannable copy answers NO: a block that cannot be proven finished stands.
+fn every_copy_settled(ctx: &Ctx<'_>, sp: &sidecar::SkillPaths) -> bool {
+    let Ok(Some(map)) = doc::read_map(ctx.fs, &sp.map) else {
+        return false;
+    };
+    let Ok(scans) = placement::scan_placements(ctx, &map) else {
+        return false;
+    };
+    !scans.iter().any(|s| {
+        matches!(
+            s.status,
+            ScanStatus::Modified { .. } | ScanStatus::Unscannable
+        )
+    })
 }
 
 /// The current local state of a tracked skill as a read-only `PullSkill` (UpToDate) — used when a

@@ -1772,6 +1772,12 @@ pub struct ResetData {
     /// offers is spelled for it. **INFERRED** (additive-only).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub global: bool,
+    /// The folder holding a by-hand merge this reset did NOT delete, as a receipt spells it. A
+    /// reset never reads that folder, so it removes it only while it still holds what topos wrote
+    /// there; anything else is left where the person can see it. Absent on the describe and
+    /// whenever nothing survived. **INFERRED** (additive-only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hand_merge: Option<String>,
 }
 
 /// `publish` (bare, no `--yes`) — the describe: where it lands, the gate outcome, the audience, the

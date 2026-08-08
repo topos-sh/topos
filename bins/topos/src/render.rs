@@ -1554,6 +1554,11 @@ pub(crate) fn reset_applied_tty(items: &[topos_types::results::ResetData]) -> St
         if let Some(line) = others_kept_line(&item.others_kept) {
             s.push_str(&format!("{line}\n"));
         }
+        // A by-hand merge this reset did not read — and therefore did not delete. It lives nowhere
+        // else, so the folder is named.
+        if let Some(folder) = &item.hand_merge {
+            s.push_str(&format!("your hand merge is still in {folder}\n"));
+        }
     }
     s.trim_end().to_owned()
 }

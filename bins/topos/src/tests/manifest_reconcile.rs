@@ -13320,13 +13320,16 @@ fn zz_a_per_copy_reset_drops_one_copys_edits_and_leaves_the_other_alone() {
     assert!(d.diff.contains("shared edit"), "{}", d.diff);
 }
 
-/// A conflict writes markers into NO folder — only into the scope's own `conflicts/<name>/` — so
-/// there is no copy-scoped marker state a narrowed reset could leave standing. A per-copy reset
-/// therefore resolves the recorded conflict exactly as a whole-bundle one does: the record goes,
-/// the marked-up copy goes with it, and publish is unblocked. The receipt says nothing about it,
-/// because nothing outlived the reset.
+/// **A reset that names ONE folder does not end the merge.**
+///
+/// `--dest` narrows a reset so the copies it does not name keep their edits — and a copy still
+/// holding its edits is a copy still holding this unfinished merge. Clearing the record there
+/// would unblock `publish` while the merge stands in another folder. Git ends a merge at the
+/// commit, and refuses to commit while anything is still unresolved; so the record stands until
+/// the last copy is settled, and the reset that settles it takes the block and the marked-up copy
+/// with it.
 #[test]
-fn zz_a_per_copy_reset_clears_the_recorded_conflict_and_its_copy() {
+fn zz_a_per_copy_reset_ends_the_merge_only_once_no_copy_still_holds_it() {
     use topos_types::persisted::{ConflictReason, ConflictState};
 
     let (rig, name, id, _shared, _native) = frozen_copies("zz-per-copy-reset-conflict");
@@ -13337,39 +13340,134 @@ fn zz_a_per_copy_reset_clears_the_recorded_conflict_and_its_copy() {
     );
     std::fs::create_dir_all(&copy).unwrap();
     std::fs::write(copy.join("SKILL.md"), b"<<<<<<< mine\n").unwrap();
-    let record = |hex: &str| ConflictState {
+    // The record names the workbench AND the bytes topos wrote into it — the untouched signal a
+    // reset reads before it removes anything.
+    let marked = topos_core::digest::to_hex(&crate::scan::scan(&copy).unwrap().bundle_digest);
+    let record = ConflictState {
         schema_version: 1,
-        base_commit: hex.repeat(32),
-        base_digest: hex.repeat(32),
-        current_commit: hex.repeat(32),
-        current_digest: hex.repeat(32),
-        draft_commit: hex.repeat(32),
-        draft_digest: hex.repeat(32),
-        result_commit: hex.repeat(32),
-        conflicted_digest: hex.repeat(32),
+        base_commit: "ab".repeat(32),
+        base_digest: "ab".repeat(32),
+        current_commit: "ab".repeat(32),
+        current_digest: "ab".repeat(32),
+        draft_commit: "ab".repeat(32),
+        draft_digest: "ab".repeat(32),
+        result_commit: "ab".repeat(32),
+        conflicted_digest: marked,
         copy_dir: Some("coolify-deploy".to_owned()),
         reason: ConflictReason::ThreeWay,
         paths: Vec::new(),
     };
-    crate::doc::write_doc(&rig.fs, &sp.conflict, &record("ab")).unwrap();
+    crate::doc::write_doc(&rig.fs, &sp.conflict, &record).unwrap();
+
+    let reset_one = |sel: ops::Selection| {
+        let applied = ops::reset(
+            &ctx,
+            std::slice::from_ref(&name),
+            true,
+            ops::StoreScope::Here,
+            &sel,
+        )
+        .unwrap();
+        let ops::ResetOutcome::Applied(done) = applied else {
+            panic!("`--yes` applies");
+        };
+        done
+    };
+
+    // ONE copy taken back to base; the other still holds its edits — so the merge is not over.
+    let done = reset_one(ops::Selection::one(Some("claude-code"), None));
+    assert!(
+        sp.conflict.exists(),
+        "a copy still holding this merge keeps the block"
+    );
+    assert!(copy.exists(), "and the marked-up copy stays with it");
+    let tty = crate::render::reset_applied_tty(&done);
+    assert!(
+        tty.contains("your other copy in ~/.agents/skills/coolify-deploy keeps its edits"),
+        "{tty}"
+    );
+    assert!(
+        !tty.contains("hand merge"),
+        "nothing survived unread: {tty}"
+    );
+
+    // The last copy: now nothing is unresolved, so the block clears and the workbench — still
+    // exactly what topos wrote there — goes with it.
+    let done = reset_one(ops::Selection::default());
+    assert!(!sp.conflict.exists(), "the block is gone with its cause");
+    assert!(!copy.exists(), "the marked-up copy goes with the record");
+    let tty = crate::render::reset_applied_tty(&done);
+    assert!(!tty.contains("publish"), "{tty}");
+    assert!(!tty.contains("hand merge"), "{tty}");
+}
+
+/// **A reset never deletes a by-hand merge it did not read.** The workbench folder is the only copy
+/// of a hand resolution — it sits outside the placement map, so the materializer's snapshot rail
+/// never sees it — and `--reset` snapshots every placement while deleting that folder blind. Now it
+/// reads it first: bytes topos wrote go, anything else stays and is named on the receipt.
+/// `git merge --abort` removes no untracked file either.
+#[test]
+fn zz_a_reset_leaves_a_hand_merge_it_never_read_and_names_it() {
+    use topos_types::persisted::{ConflictReason, ConflictState};
+
+    let (rig, name, id, shared, _native) = frozen_copies("zz-reset-hand-merge");
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    let sp = rig.layout().published(&id);
+    let copy = rig.layout().conflict_copy_dir(
+        &crate::sidecar::ConflictDir::parse("coolify-deploy").expect("a plain safe component"),
+    );
+    std::fs::create_dir_all(&copy).unwrap();
+    std::fs::write(copy.join("SKILL.md"), b"<<<<<<< mine\n").unwrap();
+    let marked = topos_core::digest::to_hex(&crate::scan::scan(&copy).unwrap().bundle_digest);
+    // …and then the person merges it by hand, so the folder no longer holds what topos wrote.
+    std::fs::write(
+        copy.join("SKILL.md"),
+        b"# coolify-deploy\nreconciled by hand\n",
+    )
+    .unwrap();
+    crate::doc::write_doc(
+        &rig.fs,
+        &sp.conflict,
+        &ConflictState {
+            schema_version: 1,
+            base_commit: "ab".repeat(32),
+            base_digest: "ab".repeat(32),
+            current_commit: "ab".repeat(32),
+            current_digest: "ab".repeat(32),
+            draft_commit: "ab".repeat(32),
+            draft_digest: "ab".repeat(32),
+            result_commit: "ab".repeat(32),
+            conflicted_digest: marked,
+            copy_dir: Some("coolify-deploy".to_owned()),
+            reason: ConflictReason::ThreeWay,
+            paths: Vec::new(),
+        },
+    )
+    .unwrap();
+    // Both copies at once, so the merge really is over and the record really does clear.
+    std::fs::write(shared.join("SKILL.md"), b"# coolify-deploy\nbase\n").unwrap();
 
     let applied = ops::reset(
         &ctx,
         std::slice::from_ref(&name),
         true,
         ops::StoreScope::Here,
-        &ops::Selection::one(Some("claude-code"), None),
+        &ops::Selection::default(),
     )
     .unwrap();
     let ops::ResetOutcome::Applied(done) = &applied else {
         panic!("`--yes` applies: {applied:?}");
     };
-    assert!(!sp.conflict.exists(), "the block is gone with its cause");
-    assert!(!copy.exists(), "the marked-up copy goes with the record");
+    assert!(!sp.conflict.exists(), "the block still clears");
+    assert_eq!(
+        std::fs::read(copy.join("SKILL.md")).unwrap(),
+        b"# coolify-deploy\nreconciled by hand\n",
+        "the only copy of the hand merge must survive"
+    );
+    let tty = crate::render::reset_applied_tty(done);
     assert!(
-        !crate::render::reset_applied_tty(done).contains("publish"),
-        "{}",
-        crate::render::reset_applied_tty(done)
+        tty.contains("your hand merge is still in ~/.topos/conflicts/coolify-deploy"),
+        "{tty}"
     );
 }
 

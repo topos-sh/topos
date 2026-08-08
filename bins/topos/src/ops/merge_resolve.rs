@@ -45,18 +45,25 @@
 //! landed but its record outlived them — is recognized from the two durable documents
 //! ([`resolution_landed`]) and finishes the clear rather than re-blocking a resolved bundle.
 //!
-//! ## The workbench folder is named by parsing, never by trusting
+//! ## The workbench folder is named by the record, and by nothing else
 //!
 //! `conflicts/<leaf>/` is the one place in this module where a string off disk becomes a path, and
-//! every candidate for it is UNTRUSTED: a project store travels with its checkout, so a hostile
-//! clone commits both the `conflict.json` that records the leaf and the `lock.json` whose `name`
-//! and `skill_id` the fallbacks read. So the leaf is a validated [`ConflictDir`]
+//! that string is UNTRUSTED: a project store travels with its checkout, so a hostile clone commits
+//! the `conflict.json` that records the leaf. So the leaf is a validated [`ConflictDir`]
 //! ([`conflict_copy_leaf`] is the one derivation) — one plainly safe component, never `..`, never a
 //! separator, never a dot-name — and both the WRITE and the REMOVAL run at a held handle on
 //! `conflicts/` itself, by that leaf ([`write_conflict_copy`] / [`remove_conflict_copy`]). Nothing
 //! below `conflicts/` is ever re-resolved as a path, so neither a `conflicts` component swapped for
 //! a symlink nor a recorded leaf climbing out of it can aim a write — or a recursive delete —
 //! outside the store.
+//!
+//! The record is also the ONLY source for that name. Deriving it from the bundle's display name
+//! when no record could be read — the mint's own first rung — let a removal act on a folder this
+//! record never named, and two bundles can legitimately share a display name, so the guess could
+//! take another bundle's live hand merge. And a removal by a caller that never READ the folder
+//! ([`Workbench::Unread`] — a reset, a clean re-merge) removes it only while it still holds what
+//! topos wrote there; a hand merge, whose only copy that folder is, stays and is named on the
+//! receipt. `git merge --abort` removes no untracked file either.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -178,7 +185,7 @@ pub(crate) fn resolve_diverged(
             // draft-on-current. BEFORE the place, not after: a record left standing across the
             // swap would describe a divergence this merge just resolved, and the next sweep would
             // re-disclose it (and re-render its copy) over state that has moved on.
-            clear_conflict(ctx, sp, lock)?;
+            clear_conflict(ctx, sp, Workbench::Unread)?;
             place_draft_on_current(
                 ctx,
                 skill_id,
@@ -256,7 +263,7 @@ pub(crate) fn resolve_diverged(
                 conflict_reports(&assembled.conflicts),
                 None,
                 ConflictReason::ThreeWay,
-                conflict_disclosure(ctx, lock, map, &cs),
+                conflict_disclosure(ctx, map, &cs),
             ))
         }
         // `decide_outcome` never returns NoBaseTwoWay — that branch is taken before planning (above).
@@ -323,7 +330,7 @@ fn escape(
     )?;
     // The escape RESOLVES — clear the block last, once the placements have settled (idempotent: a
     // crash before this is healed by re-running).
-    clear_conflict(ctx, sp, lock)?;
+    clear_conflict(ctx, sp, Workbench::Consumed)?;
     log_resolution(ctx, skill_id, "merge-escape", result_commit);
     Ok(merged_row(
         &lock.name,
@@ -351,7 +358,11 @@ struct Resolution {
 
 /// The tree a `--keep-mine` over an UNTOUCHED workbench commits: the ordinary three-way merge,
 /// settled on the author's side at exactly the paths where the two sides collide — `git merge
-/// -X ours`.
+/// -X ours` where the collision is over content, and the per-file take-ours command where it is
+/// over the file set (the per-row citations are on [`OnCollision::KeepMine`]).
+///
+/// `mine` is the author's version as it stands NOW, not as it stood when the merge stopped: work
+/// continues while a merge is blocked, and git commits the working tree.
 ///
 /// The distinction from `-s ours` is the whole fix: everything the team changed WITHOUT colliding
 /// lands normally (a file only they touched, a hunk far from the contested one, a file they added).
@@ -507,7 +518,7 @@ fn no_base(
         Vec::new(),
         Some(drop_diff(theirs, &merged)),
         ConflictReason::NoBase,
-        conflict_disclosure(ctx, lock, map, &cs),
+        conflict_disclosure(ctx, map, &cs),
     ))
 }
 
@@ -526,6 +537,13 @@ fn no_base(
 /// - **present and scanning to `conflicted_digest`** — the raw, unedited marker tree ⇒ the same
 ///   merge. This is the "keep my version" exit: leave the folder alone and your wording wins the
 ///   lines you both changed, never the markers published.
+///
+/// The side that merge stands on is the author's version **as the folder holds it now**, not the
+/// snapshot taken when the merge stopped. Publishing is blocked while a merge is stopped, so
+/// "keep working, finish later" is the expected sequence — and committing the old snapshot over it
+/// would revert everything done since, silently. Git concludes a stopped merge from the working
+/// tree; the snapshot stands in only where there is no single working tree to read
+/// ([`live_copies`]).
 /// - **present and edited** ⇒ those bytes ARE the hand resolution; commit them, unexamined. The
 ///   person resolved it; second-guessing their tree would be the one thing worse than not asking.
 ///
@@ -562,6 +580,9 @@ pub(crate) fn escape_recorded(
     // The conflict's own fork point. It is the ONE thing a no-base record cannot supply, and
     // without it there is no merge to run at all — the author's tree is the whole answer there.
     let base_commit = super::parse_hex32(&cs.base_commit)?;
+    // Read the folders BEFORE the escape converges them: they are what this exit stands on, and
+    // they are also what it is about to overwrite (see [`live_copies`]).
+    let live = live_copies(ctx, sp, lock, map);
     let resolution = match read_hand_resolution(ctx, lock, cs)? {
         // The person's own tree. It needs NEITHER the stored draft nor the fork point, and it must
         // not be made to depend on them: an exit that always works cannot start by re-rendering
@@ -573,20 +594,27 @@ pub(crate) fn escape_recorded(
             took: Vec::new(),
         },
         None => {
-            // The author's own draft as it stood when the merge stopped — the tree the `-X ours`
-            // resolution is measured against, and the whole answer when there is no fork point.
-            let draft = store.render_verified(
-                super::parse_hex32(&cs.draft_commit)?,
-                super::parse_hex32(&cs.draft_digest)?,
-            )?;
+            // The author's own version, read from the FOLDER — publishing is blocked while a merge
+            // is stopped, so "keep working, finish later" is the ordinary sequence and the work
+            // done since must not be reverted. Git concludes a stopped merge from the working
+            // tree; so does this. The conflict-time snapshot stands in only where there is no
+            // single working tree to read: several copies that disagree, or folders that cannot be
+            // scanned.
+            let mine = match live.mine {
+                Some(tree) => tree,
+                None => store.render_verified(
+                    super::parse_hex32(&cs.draft_commit)?,
+                    super::parse_hex32(&cs.draft_digest)?,
+                )?,
+            };
             let tree = match store
                 .render_verified(base_commit, super::parse_hex32(&cs.base_digest)?)
                 .ok()
             {
-                Some(base) => keep_mine_tree(&base, &draft, &theirs)?,
-                None => draft.clone(),
+                Some(base) => keep_mine_tree(&base, &mine, &theirs)?,
+                None => mine.clone(),
             };
-            let took = took_from_theirs(&draft, &tree);
+            let took = took_from_theirs(&mine, &tree);
             Resolution {
                 how: topos_types::results::MergeResolution::KeepMine,
                 tree,
@@ -594,9 +622,7 @@ pub(crate) fn escape_recorded(
             }
         }
     };
-    // Read the copies BEFORE the escape converges them, so the row can say what it is about to
-    // overwrite (see [`collapsed_copies`]).
-    let collapsed = collapsed_copies(ctx, sp, lock, map);
+    let collapsed = live.collapsed;
     let mut row = escape(
         ctx,
         skill_id,
@@ -622,8 +648,19 @@ struct SavedCopy {
     version: String,
 }
 
-/// The copies holding edits that DISAGREE, each snapshotted and named — `None` when there is at
-/// most one edited copy (the ordinary case, which has nothing to disclose).
+/// What the bundle's own folders say, read once, for the two questions the escape asks of them.
+struct LiveCopies {
+    /// The author's version AS IT STANDS — the one copy that holds the working tree. `None` when
+    /// there is no single answer: copies that genuinely disagree, an unreadable folder, or no
+    /// readable copy at all. The caller then falls back to the conflict-time snapshot.
+    mine: Option<RenderedBundle>,
+    /// The copies holding edits that DISAGREE, each snapshotted and named — `None` when there is
+    /// at most one edited copy (the ordinary case, which has nothing to disclose).
+    collapsed: Option<Vec<SavedCopy>>,
+}
+
+/// Read the bundle's folders: which one holds the working tree, and which ones this escape is
+/// about to overwrite with different bytes.
 ///
 /// A recorded conflict enters [`super::sync_engine::sync_one`] BEFORE the work-tree
 /// classification, so the typed competitor freeze never fires on this path. That is deliberate:
@@ -638,29 +675,64 @@ struct SavedCopy {
 /// idempotent, so this is the same commit the materializer's rail makes moments later, and the id
 /// is simply learned early enough to print. Best-effort by construction: a scan or a snapshot that
 /// fails says nothing rather than failing an escape that must never deadlock.
-fn collapsed_copies(
-    ctx: &Ctx<'_>,
-    sp: &SkillPaths,
-    lock: &Lock,
-    map: &PlacementMap,
-) -> Option<Vec<SavedCopy>> {
-    let scans = placement::scan_placements(ctx, map).ok()?;
-    let placement::DraftVerdict::Competitors(indices) = placement::classify_draft(&scans, map)
-    else {
-        return None;
+fn live_copies(ctx: &Ctx<'_>, sp: &SkillPaths, lock: &Lock, map: &PlacementMap) -> LiveCopies {
+    let none = LiveCopies {
+        mine: None,
+        collapsed: None,
     };
-    let mut out = Vec::new();
-    for s in scans.iter().filter(|s| indices.contains(&s.idx)) {
-        let crate::placement::ScanStatus::Modified { scanned } = &s.status else {
-            continue; // a competitor is a Modified copy by construction
-        };
-        let version = snapshot_draft(ctx, sp, lock, scanned).ok()?;
-        out.push(SavedCopy {
-            display: super::inventory::pretty(ctx, &s.dir),
-            version,
-        });
+    let Ok(scans) = placement::scan_placements(ctx, map) else {
+        return none;
+    };
+    match placement::classify_draft(&scans, map) {
+        // Several copies genuinely disagree: there is no single working tree to conclude from, so
+        // the escape falls back to the snapshot — and every one of them is named.
+        placement::DraftVerdict::Competitors(indices) => {
+            let mut out = Vec::new();
+            for s in scans.iter().filter(|s| indices.contains(&s.idx)) {
+                let crate::placement::ScanStatus::Modified { scanned } = &s.status else {
+                    continue; // a competitor is a Modified copy by construction
+                };
+                let Ok(version) = snapshot_draft(ctx, sp, lock, scanned) else {
+                    return none;
+                };
+                out.push(SavedCopy {
+                    display: super::inventory::pretty(ctx, &s.dir),
+                    version,
+                });
+            }
+            LiveCopies {
+                mine: None,
+                collapsed: (out.len() > 1).then_some(out),
+            }
+        }
+        // ONE advanced copy — the working tree, bytes already in hand (a Modified scan always
+        // carries them).
+        placement::DraftVerdict::One { idx, .. } => {
+            let Some(crate::placement::ScanStatus::Modified { scanned }) =
+                scans.get(idx).map(|s| &s.status)
+            else {
+                return none;
+            };
+            LiveCopies {
+                mine: scanned_to_bundle(scanned).ok(),
+                collapsed: None,
+            }
+        }
+        // No copy differs from its own baseline — the person undid their edits while the merge sat
+        // stopped. That IS their working tree, and committing it is what git would do; the
+        // digest-only clean scan carries no bytes, so the copy is read again.
+        placement::DraftVerdict::NoDraft => {
+            let mine = scans
+                .iter()
+                .find(|s| matches!(s.status, crate::placement::ScanStatus::Clean { .. }))
+                .and_then(|s| crate::scan::scan(&s.dir).ok())
+                .and_then(|s| scanned_to_bundle(&s).ok());
+            LiveCopies {
+                mine,
+                collapsed: None,
+            }
+        }
     }
-    (out.len() > 1).then_some(out)
 }
 
 /// What the escape's receipt row says about the copies it collapsed: the count, then ONE runnable
@@ -700,7 +772,7 @@ fn read_hand_resolution(
     lock: &Lock,
     cs: &ConflictState,
 ) -> Result<Option<RenderedBundle>, ClientError> {
-    let Some(dir) = conflict_copy_path(ctx, lock, Some(cs)) else {
+    let Some(dir) = conflict_copy_path(ctx, cs) else {
         return Ok(None);
     };
     let refuse = |reason: String| ClientError::ConflictCopyUnreadable {
@@ -771,7 +843,7 @@ pub(crate) fn recover_resolution(
     // Re-render the workbench ONLY when it is genuinely absent — by `lstat`, so a symlink or a
     // file that appeared at the name reads as PRESENT and is left exactly where the author (or
     // whoever put it there) can see it; the escape refuses over it and names it.
-    if let Some(leaf) = conflict_copy_leaf(lock, Some(cs))
+    if let Some(leaf) = conflict_copy_leaf(cs)
         && ctx
             .fs
             .path_kind(&ctx.layout.conflict_copy_dir(&leaf))?
@@ -814,14 +886,13 @@ pub(crate) fn heal_landed_resolution(
     ctx: &Ctx<'_>,
     sp: &SkillPaths,
     sync: &SyncState,
-    lock: &Lock,
     map: &PlacementMap,
     cs: &ConflictState,
 ) -> Result<bool, ClientError> {
     if !resolution_landed(sync, map, cs) {
         return Ok(false);
     }
-    clear_conflict(ctx, sp, lock)?;
+    clear_conflict(ctx, sp, Workbench::Unread)?;
     Ok(true)
 }
 
@@ -832,16 +903,183 @@ pub(crate) fn heal_landed_resolution(
 /// The question is answered from the durable documents alone, by the ONE thing a live block cannot
 /// say: that topos itself wrote what the folders hold, at the conflict's own `current`.
 ///
+/// - the record carries a `copy_dir` — only a build that keeps the marked-up tree OUT of the
+///   placements writes that field, AND
 /// - `map.applied_commit` == the conflict's `current_commit` — the map names that version as the one
 ///   materialized here, AND
 /// - `map.materialized_sha` == `sync.work_hash` — the bytes topos wrote ARE the bytes on disk.
 ///
-/// While a block stands, the second half is false by construction: a conflict writes NO placement, so
+/// While a block stands, the last half is false by construction: a conflict writes NO placement, so
 /// the map keeps naming the last bytes topos really wrote while `work_hash` names the author's own
 /// diverged draft. Every exit converges the placements and records what it wrote, which is what makes
 /// the pair hold — so the pair means "an exit's placement write already landed" and nothing else.
+///
+/// The `copy_dir` clause is what keeps that inference honest across an upgrade. An older build
+/// wrote the marked-up tree ONTO the placements and recorded it in the map, so a LIVE, unfinished
+/// block from it satisfies the two document clauses exactly — and the first sweep after the
+/// upgrade would delete it with no receipt, leaving the markers on disk and publishable. Such a
+/// record carries no `copy_dir`, so it is never mistaken for a landed exit; it is converted
+/// instead ([`convert_pre_workbench_record`]). Every record this build writes carries the field.
 fn resolution_landed(sync: &SyncState, map: &PlacementMap, cs: &ConflictState) -> bool {
-    map.applied_commit == cs.current_commit && map.materialized_sha == sync.work_hash
+    cs.copy_dir.is_some()
+        && map.applied_commit == cs.current_commit
+        && map.materialized_sha == sync.work_hash
+}
+
+/// A pre-workbench conflict record, converted — the documents as they now stand, plus what the
+/// receipt owes the reader about it.
+pub(crate) struct ConvertedConflict {
+    pub state: ConflictState,
+    pub sync: SyncState,
+    pub map: PlacementMap,
+    /// The row's second fact: an older build had put this merge into the agent folders, and what
+    /// that cost if a folder had been edited since.
+    pub note: Option<String>,
+}
+
+/// Turn a conflict recorded by a PRE-WORKBENCH build into one this build can resolve, and say so.
+/// `Ok(None)` when the record already carries a `copy_dir` (every record this build writes does),
+/// which is the ordinary case and costs one field read.
+///
+/// The build being upgraded FROM materialized the marked-up tree onto every placement, so the
+/// markers are sitting in folders agents read: a diff3 marker is not an instruction, and the whole
+/// point of this module is that no folder an agent reads ever holds one. Recognising the record
+/// ([`resolution_landed`]) only stops it being deleted; the bytes still have to move. So the
+/// conversion puts each half where this build keeps it —
+///
+/// - **the placements** get the author's OWN version back (the `draft_commit` snapshot the old
+///   build committed before it merged), so every agent folder holds one coherent bundle again;
+/// - **the marked-up tree** goes to the scope's workbench, exactly where a conflict recorded today
+///   would have written it, and the record is rewritten with the `copy_dir` that names it.
+///
+/// The block itself is untouched: the ordinary blocked flow proceeds from here, both exits work,
+/// and `publish` stays refused.
+///
+/// ## Order, and why a crash cannot strand the markers
+///
+/// Placements FIRST, then the record, then the copy. A crash before the record is written leaves
+/// an old-format record over already-converted folders — the conversion simply runs again, and the
+/// placement write is idempotent (the materializer heals a dir that already holds the target with
+/// no second swap). A crash after it leaves a new-format record whose workbench is absent, which
+/// is precisely the state [`recover_resolution`] re-renders. The reverse order would leave a
+/// converted RECORD over unconverted FOLDERS, and nothing would ever come back for them.
+pub(crate) fn convert_pre_workbench_record(
+    ctx: &Ctx<'_>,
+    skill_id: &str,
+    sp: &SkillPaths,
+    sync: &SyncState,
+    lock: &Lock,
+    map: &PlacementMap,
+    cs: &ConflictState,
+) -> Result<Option<ConvertedConflict>, ClientError> {
+    if cs.copy_dir.is_some() {
+        return Ok(None);
+    }
+    let copy_leaf = choose_conflict_dir(ctx, skill_id, lock).ok_or_else(|| {
+        ClientError::Corrupt(
+            "this bundle's conflict workbench folder cannot be named safely".into(),
+        )
+    })?;
+    let store = Store::open(&sp.store)?;
+    let draft_commit = super::parse_hex32(&cs.draft_commit)?;
+    let draft = store.render_verified(draft_commit, super::parse_hex32(&cs.draft_digest)?)?;
+    let theirs_commit = super::parse_hex32(&cs.current_commit)?;
+    let theirs = store.render_verified(theirs_commit, super::parse_hex32(&cs.current_digest)?)?;
+    let marked = store.render_verified(
+        super::parse_hex32(&cs.result_commit)?,
+        super::parse_hex32(&cs.conflicted_digest)?,
+    )?;
+
+    // Read the folders BEFORE the placement write converges them, so the row can say what it is
+    // about to replace — the same early snapshot [`live_copies`] takes, for the same reason.
+    let replaced = replaced_copies(ctx, sp, lock, map, &cs.draft_digest);
+
+    // ① the folders: the author's own version, and the map naming that snapshot as what is
+    //    realized there. `lock`/`sync` land exactly where a conflict recorded today leaves them.
+    let next_lock = lock_from_bundle(lock, theirs_commit, &theirs);
+    let next_sync = forwarded_sync(sync, theirs_commit, &cs.draft_digest);
+    place_bundle(
+        ctx,
+        skill_id,
+        sp,
+        lock,
+        map,
+        &draft,
+        draft_commit,
+        &next_lock,
+        &next_sync,
+    )?;
+    // ② the record, now naming the workbench; ③ the marked-up tree in it.
+    let state = ConflictState {
+        copy_dir: Some(copy_leaf.as_str().to_owned()),
+        ..cs.clone()
+    };
+    doc::write_doc(ctx.fs, &sp.conflict, &state)?;
+    write_conflict_copy(ctx, &copy_leaf, &marked)?;
+
+    let next_map = doc::read_map(ctx.fs, &sp.map)?
+        .ok_or_else(|| ClientError::Corrupt("missing placement map".into()))?;
+    Ok(Some(ConvertedConflict {
+        state,
+        sync: next_sync,
+        map: next_map,
+        note: Some(converted_note(ctx, &lock.name, &replaced)),
+    }))
+}
+
+/// The copies the conversion is about to REPLACE: every edited folder whose bytes are neither what
+/// the old build wrote there nor the author's own version going back into it. Each is snapshotted
+/// (content-addressed and idempotent — the same commit the materializer's rail makes moments
+/// later) so the note can hand back a runnable way to read it again.
+///
+/// Best-effort by construction: a scan or a snapshot that fails says nothing rather than failing a
+/// conversion the whole upgrade depends on.
+fn replaced_copies(
+    ctx: &Ctx<'_>,
+    sp: &SkillPaths,
+    lock: &Lock,
+    map: &PlacementMap,
+    draft_digest: &str,
+) -> Vec<SavedCopy> {
+    let Ok(scans) = placement::scan_placements(ctx, map) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for s in &scans {
+        let crate::placement::ScanStatus::Modified { scanned } = &s.status else {
+            continue;
+        };
+        if to_hex(&scanned.bundle_digest) == draft_digest {
+            continue; // already the author's own version — nothing is replaced
+        }
+        let Ok(version) = snapshot_draft(ctx, sp, lock, scanned) else {
+            continue;
+        };
+        out.push(SavedCopy {
+            display: super::inventory::pretty(ctx, &s.dir),
+            version,
+        });
+    }
+    out
+}
+
+/// What a converted record's receipt says: the one fact a reader cannot see for themselves (their
+/// agent folders changed, and why), then — only when it happened — one runnable line per folder
+/// whose own edits the conversion replaced, each naming the folder it came from.
+fn converted_note(ctx: &Ctx<'_>, name: &str, replaced: &[SavedCopy]) -> String {
+    let g = crate::error::scope_flag(!ctx.layout.is_project_scope());
+    let mut out =
+        "an older version of topos left this merge in your agent folders — they hold your version \
+         again"
+            .to_owned();
+    for c in replaced {
+        out.push_str(&format!(
+            "\nedits in {} were replaced — read that copy again:\n  topos update{g} {name}@{}",
+            c.display,
+            crate::render::short(&c.version),
+        ));
+    }
+    out
 }
 
 // --------------------------------------------------------------------------------------------------
@@ -916,17 +1154,20 @@ enum OnCollision {
     /// Write BOTH sides for a person to settle: diff3 markers where there are hunks to mark, a
     /// `.topos-mine` sibling where there are not. The workbench tree.
     KeepBoth,
-    /// Settle every collision on the author's side, and take the team's changes everywhere else —
-    /// `git merge -X ours`, path rules included:
+    /// Settle every collision on the author's side, and take the team's changes everywhere else.
+    ///
+    /// `git merge -X ours` settles CONTENT, so it is the citation for the content rows alone; a
+    /// collision over the file SET stops that merge dead, and what takes your side there is the
+    /// per-file take-ours command:
     ///
     /// | collision | resolved to | git |
     /// |---|---|---|
-    /// | contested text hunks | mine, their other hunks kept | `-X ours` |
-    /// | binary / over-cap | mine, whole | `-X ours` on a binary conflict |
-    /// | mine modified, theirs deleted | mine, kept | `git checkout --ours` |
-    /// | mine deleted, theirs modified | deleted | `git checkout --ours` |
-    /// | both added, different content | mine | `-X ours` |
-    /// | both added, modes disagree | mine's mode | `-X ours` |
+    /// | contested text hunks | mine, their other hunks kept | `merge -X ours` |
+    /// | binary / over-cap | mine, whole | `merge -X ours` on a binary conflict |
+    /// | both added, different content | mine | `merge -X ours` |
+    /// | mine modified, theirs deleted | mine, kept | `checkout --ours <path>` |
+    /// | mine deleted, theirs modified | deleted | `rm <path>` (our side has no file to check out) |
+    /// | both added, modes disagree | mine's mode | `checkout --ours <path>` (restores our bit) |
     KeepMine,
 }
 
@@ -1273,7 +1514,43 @@ fn place_draft_on_current(
     let next_lock = lock_from_bundle(lock, theirs_commit, theirs);
     let next_sync = forwarded_sync(sync, theirs_commit, &merged_digest_hex);
     // The resolution converges EVERY managed placement onto the merged tree (the draft copy included
-    // — its bytes are already committed in the store as a merge parent / the recoverable draft).
+    // — its bytes are already committed in the store as a merge parent / the recoverable draft), and
+    // the map names the version now realized on disk: the resolution's own parent, `current`.
+    place_bundle(
+        ctx,
+        skill_id,
+        sp,
+        lock,
+        map,
+        merged,
+        theirs_commit,
+        &next_lock,
+        &next_sync,
+    )
+}
+
+/// Write `bundle` onto every MANAGED placement and commit the three docs, recording `realized` as
+/// the version the map now names on disk. The one placement write the merge paths make; the
+/// caller decides what the docs say about it.
+///
+/// `realized` is deliberately a parameter rather than derived from `next_sync`: a resolution
+/// realizes the version it committed on, while the pre-workbench conversion
+/// ([`convert_pre_workbench_record`]) realizes the author's own DRAFT snapshot while the block
+/// still stands — and the map has to name what it really wrote, or the never-a-lost-byte rail
+/// compares the next overwrite against a baseline no folder holds.
+#[allow(clippy::too_many_arguments)]
+fn place_bundle(
+    ctx: &Ctx<'_>,
+    skill_id: &str,
+    sp: &SkillPaths,
+    lock: &Lock,
+    map: &PlacementMap,
+    bundle: &RenderedBundle,
+    realized: [u8; 32],
+    next_lock: &Lock,
+    next_sync: &SyncState,
+) -> Result<(), ClientError> {
+    let digest_hex = to_hex(&bundle.bundle_digest);
     let plan = placement::plan_for_skill(ctx, skill_id, lock, map);
     let map = placement::reconcile_map(map, &plan);
     let managed = placement::managed_indices(&map, &plan);
@@ -1282,10 +1559,10 @@ fn place_draft_on_current(
         &MaterializeReq {
             skill_id,
             target_indices: &managed,
-            bundle: merged,
-            next_map: next_map(&map, theirs_commit, &merged_digest_hex),
-            next_lock: &next_lock,
-            next_sync: &next_sync,
+            bundle,
+            next_map: next_map(&map, realized, &digest_hex),
+            next_lock,
+            next_sync,
             sp,
             snapshot: Some(&|s: &ScannedBundle| snapshot_draft(ctx, sp, lock, s).map(|_| ())),
             takeover: None,
@@ -1336,37 +1613,27 @@ fn choose_conflict_dir(ctx: &Ctx<'_>, skill_id: &str, lock: &Lock) -> Option<Con
 /// [`ConflictDir`] — the ONE derivation every read, write and removal of a workbench folder goes
 /// through, so they can never disagree about which folder they mean.
 ///
-/// EVERY candidate here is untrusted input, and every one is parsed rather than trusted: a project
-/// store travels with its checkout, so a hostile clone commits the `conflict.json` whose `copy_dir`
-/// leads AND the `lock.json` whose `name`/`skill_id` the fallbacks read. So the recorded component
-/// is used only when it parses; then the bundle's sanitized name (already one safe component by
-/// construction, re-parsed anyway so this function has exactly one exit); then the record's own
-/// `skill_id`, which is a raw string on disk and is therefore parsed like the rest — the whole
-/// point being that no unvalidated on-disk string reaches a path join.
+/// It reads exactly ONE thing: the `copy_dir` the record itself wrote at the moment the conflict
+/// was recorded. That value is untrusted input — a project store travels with its checkout, so a
+/// hostile clone commits the `conflict.json` this reads — so it is PARSED rather than trusted, and
+/// a component that does not parse names nothing.
 ///
-/// `None` means the folder cannot be NAMED at all (a hostile record whose every candidate fails).
-/// Callers read that as "there is no workbench folder": nothing is written, nothing is scanned, and
-/// — this is the load-bearing part — nothing is removed.
-fn conflict_copy_leaf(lock: &Lock, cs: Option<&ConflictState>) -> Option<ConflictDir> {
-    cs.and_then(|c| c.copy_dir.as_deref())
-        .and_then(ConflictDir::parse)
-        .or_else(|| {
-            topos_harness::sanitize_skill_dir(&lock.name)
-                .as_deref()
-                .and_then(ConflictDir::parse)
-        })
-        .or_else(|| ConflictDir::parse(&lock.skill_id))
+/// There is deliberately no fallback ladder. Deriving the folder from the bundle's display name
+/// (the mint's own first rung) let a removal act on a folder this record never named: two followed
+/// bundles can legitimately share a name — two workspaces, or a workspace copy beside a local one
+/// — so the guess could delete ANOTHER bundle's live hand merge, and a `--reset` reached it
+/// unconditionally. Git never re-derives a deletion target from a user-facing name; neither does
+/// this. A record that names no folder is read as "there is no workbench folder": nothing is
+/// written, nothing is scanned, and — the load-bearing part — nothing is removed.
+fn conflict_copy_leaf(cs: &ConflictState) -> Option<ConflictDir> {
+    cs.copy_dir.as_deref().and_then(ConflictDir::parse)
 }
 
 /// Where a recorded conflict's marked-up copy lives — [`conflict_copy_leaf`] joined onto this
 /// scope's `conflicts/`. For DISPLAY and for the scan; the write and the removal work at a held
 /// handle on `conflicts/` and take the leaf itself, never this path.
-fn conflict_copy_path(
-    ctx: &Ctx<'_>,
-    lock: &Lock,
-    cs: Option<&ConflictState>,
-) -> Option<std::path::PathBuf> {
-    conflict_copy_leaf(lock, cs).map(|d| ctx.layout.conflict_copy_dir(&d))
+fn conflict_copy_path(ctx: &Ctx<'_>, cs: &ConflictState) -> Option<std::path::PathBuf> {
+    conflict_copy_leaf(cs).map(|d| ctx.layout.conflict_copy_dir(&d))
 }
 
 /// Write the marked-up tree into the scope's conflict workbench — the ONE write of marker bytes
@@ -1420,10 +1687,20 @@ fn write_conflict_copy(
 ///   the two disagreed, and the delete was the one that could leave the sidecar.
 ///
 /// An absent `conflicts/` is success (there is nothing to remove), and so is an absent leaf.
-fn remove_conflict_copy(ctx: &Ctx<'_>, leaf: &ConflictDir) -> Result<(), ClientError> {
+///
+/// `keep_edited` is the record when the caller did NOT read the folder before asking for it to go
+/// (`--reset`, a clean re-merge, a finished-clear heal). Those callers get the folder removed only
+/// while it still holds exactly what topos wrote into it; a hand merge, or a folder that cannot be
+/// read, is LEFT and reported. `None` is the escape, which committed those exact bytes moments
+/// ago. Returns whether the folder is gone.
+fn remove_conflict_copy(
+    ctx: &Ctx<'_>,
+    leaf: &ConflictDir,
+    keep_edited: Option<&ConflictState>,
+) -> Result<bool, ClientError> {
     let conflicts = ctx.layout.conflicts_dir();
     match ctx.fs.path_kind(&conflicts)? {
-        None => return Ok(()),
+        None => return Ok(true),
         Some(crate::fs_seam::PathKind::Dir) => {}
         Some(_) => {
             return Err(ClientError::Io(format!(
@@ -1432,9 +1709,47 @@ fn remove_conflict_copy(ctx: &Ctx<'_>, leaf: &ConflictDir) -> Result<(), ClientE
             )));
         }
     }
+    if let Some(cs) = keep_edited
+        && !workbench_is_topos_own(ctx, leaf, cs)
+    {
+        return Ok(false);
+    }
     let handle = ctx.fs.open_dir_handle(&conflicts)?;
     ctx.fs.remove_dir_all_at(&handle, leaf.as_str())?;
-    Ok(())
+    Ok(true)
+}
+
+/// Whether the workbench folder still holds exactly the marked-up tree topos wrote into it — the
+/// same `conflicted_digest` comparison the escape reads as "untouched".
+///
+/// An ABSENT folder answers yes: there is nothing to keep, and the removal that follows is a
+/// no-op. Everything else answers no and is left where the person can see it: a hand merge lives
+/// nowhere but that folder (it sits outside the placement map, so the materializer's snapshot rail
+/// never sees it), and a folder that cannot be read is one nothing can prove anything about.
+/// `git merge --abort` removes no untracked file either; a stray folder is litter the next
+/// conflict simply names around.
+fn workbench_is_topos_own(ctx: &Ctx<'_>, leaf: &ConflictDir, cs: &ConflictState) -> bool {
+    let dir = ctx.layout.conflict_copy_dir(leaf);
+    match ctx.fs.path_kind(&dir) {
+        Ok(None) => true,
+        Ok(Some(crate::fs_seam::PathKind::Dir)) => {
+            crate::scan::scan(&dir).is_ok_and(|s| to_hex(&s.bundle_digest) == cs.conflicted_digest)
+        }
+        _ => false,
+    }
+}
+
+/// Whether the caller already READ the workbench folder before asking for it to go — the one thing
+/// that decides whether a hand merge in it may be deleted.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Workbench {
+    /// The escape: it scanned that folder and committed those exact bytes. Removing it is the
+    /// cleanup at the end of a merge, not a discard.
+    Consumed,
+    /// Everything else — a reset, a clean re-merge, a finished-clear heal. None of them looked
+    /// inside, so a folder that no longer holds what topos wrote is left where the person can see
+    /// it, and named on the receipt.
+    Unread,
 }
 
 /// Clear a recorded conflict — the ONE exit every resolution (the escape, a reset, a clean re-merge)
@@ -1443,26 +1758,39 @@ fn remove_conflict_copy(ctx: &Ctx<'_>, leaf: &ConflictDir) -> Result<(), ClientE
 /// record's would let a re-run of the escape commit the ORIGINAL DRAFT over a hand resolution the
 /// crashed run had already committed. The other order's residual is one unreferenced folder.
 ///
-/// An unreadable record still clears: the file is removed either way, and the copy is looked for
-/// under the name the bundle would have taken.
+/// An unreadable record still clears the BLOCK — the file is removed either way — but it removes
+/// no folder at all: without the record there is nothing that names one, and guessing the name is
+/// how another bundle's live hand merge gets deleted (see [`conflict_copy_leaf`]).
 ///
 /// The copy's removal runs through [`remove_conflict_copy`] — anchored on a held handle over this
-/// scope's own `conflicts/` directory, by ONE validated leaf. A record whose every candidate name
-/// fails to parse names no folder, and no folder is removed.
+/// scope's own `conflicts/` directory, by ONE validated leaf.
+///
+/// Returns the folder LEFT BEHIND, as a receipt would name it: `None` when nothing survives (the
+/// ordinary case), `Some(dir)` when an `Unread` caller found a hand merge there.
 ///
 /// # Errors
 /// The [`crate::fs_seam::FsOps`] failure removing the record or the copy.
 pub(crate) fn clear_conflict(
     ctx: &Ctx<'_>,
     sp: &SkillPaths,
-    lock: &Lock,
-) -> Result<(), ClientError> {
+    workbench: Workbench,
+) -> Result<Option<String>, ClientError> {
     let recorded: Option<ConflictState> = doc::read_doc(ctx.fs, &sp.conflict).ok().flatten();
     ctx.fs.remove_file(&sp.conflict)?;
-    let Some(leaf) = conflict_copy_leaf(lock, recorded.as_ref()) else {
-        return Ok(());
+    let Some(cs) = recorded else {
+        return Ok(None);
     };
-    remove_conflict_copy(ctx, &leaf)
+    let Some(leaf) = conflict_copy_leaf(&cs) else {
+        return Ok(None);
+    };
+    let keep_edited = (workbench == Workbench::Unread).then_some(&cs);
+    if remove_conflict_copy(ctx, &leaf, keep_edited)? {
+        return Ok(None);
+    }
+    Ok(Some(super::inventory::pretty(
+        ctx,
+        &ctx.layout.conflict_copy_dir(&leaf),
+    )))
 }
 
 /// Advance the durable docs to the conflict's draft-on-current WITHOUT touching a placement:
@@ -1732,7 +2060,6 @@ fn merged_row(
 /// names the folder every exit reads).
 fn conflict_disclosure(
     ctx: &Ctx<'_>,
-    lock: &Lock,
     map: &PlacementMap,
     cs: &ConflictState,
 ) -> (Vec<String>, Option<String>) {
@@ -1741,7 +2068,7 @@ fn conflict_disclosure(
         .iter()
         .map(|p| super::inventory::pretty(ctx, std::path::Path::new(p)))
         .collect();
-    let copy = conflict_copy_path(ctx, lock, Some(cs)).map(|p| super::inventory::pretty(ctx, &p));
+    let copy = conflict_copy_path(ctx, cs).map(|p| super::inventory::pretty(ctx, &p));
     (placements, copy)
 }
 
@@ -1814,7 +2141,6 @@ pub(crate) fn conflicted_row_from_state(
     ctx: &Ctx<'_>,
     name: &str,
     sync: &SyncState,
-    lock: &Lock,
     map: &PlacementMap,
     cs: &ConflictState,
 ) -> Result<PullSkill, ClientError> {
@@ -1829,6 +2155,6 @@ pub(crate) fn conflicted_row_from_state(
         conflict_reports(&cs.paths),
         None,
         cs.reason,
-        conflict_disclosure(ctx, lock, map, cs),
+        conflict_disclosure(ctx, map, cs),
     ))
 }
