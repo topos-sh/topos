@@ -743,7 +743,7 @@
           "const": "local-edits"
         },
         {
-          "description": "A merge is undecided here: the team published a version that changes lines this person also\nchanged, so the folders still hold THEIR version, publishing is refused, and the two exits\n(`update <name> --onto-current` / `--reset`) are the only ways forward. The row's\nversion/digest name what the folders hold, never the team's.",
+          "description": "A merge is undecided here: the team published a version that changes lines this person also\nchanged, so the folders still hold THEIR version, publishing is refused, and the two exits\n(`update <name> --keep-mine` / `--reset`) are the only ways forward. The row's\nversion/digest name what the folders hold, never the team's.",
           "type": "string",
           "const": "blocked"
         },

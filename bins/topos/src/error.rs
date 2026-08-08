@@ -513,7 +513,18 @@ pub(crate) enum ClientError {
     /// the draft must be resolved first. Refused before any build / WAL / send (the publish guard).
     #[error("publish is blocked — resolve the merge conflict in this skill first")]
     PublishBlocked { skill: String },
-    /// `--onto-current` found the merge's workbench folder PRESENT but unreadable as a bundle (a
+    /// A `publish` is refused because this copy does not include the served `current`: the team moved
+    /// ahead and this machine has not taken it (the ordinary behind state, and where `--keep-mine`
+    /// deliberately leaves a person). Shipping from here would land bytes with the team's change nowhere
+    /// inside — a silent revert — so the update comes first, and the merge it runs is what makes the
+    /// publish safe. Refused before any build / WAL / send, and before the describe reads a byte of the
+    /// network, so it costs nothing and mutates nothing.
+    ///
+    /// The TTY renders the way out under the sentence ([`crate::render::err_tty`]); the envelope keeps
+    /// the sentence and carries the same command as its next action.
+    #[error("{skill}: your version is behind.")]
+    PublishBehind { skill: String },
+    /// `--keep-mine` found the merge's workbench folder PRESENT but unreadable as a bundle (a
     /// symlink or file where the folder belongs, a symlink or non-regular file inside it, a
     /// non-UTF-8 name, an emptied folder, a read failure). Refused with nothing committed and
     /// nothing placed, because the folder is the ONLY copy of a hand resolution — it sits outside
@@ -874,6 +885,10 @@ impl ClientError {
             // A review verdict on a no-longer-open proposal — an open code, its own domain refusal.
             ClientError::ReviewNotOpen(_) => "REVIEW_NOT_OPEN",
             ClientError::PublishBlocked { .. } => "PUBLISH_BLOCKED",
+            // A copy behind the served `current` is the SAME state the plane's compare-and-set names
+            // CONFLICT, caught locally one step earlier — so it carries that code, and an agent that
+            // already branches on a stale base needs no new arm.
+            ClientError::PublishBehind { .. } => "CONFLICT",
             // The workbench folder an exit reads is unreadable — the same "resolve the divergence
             // locally" family as the publish block, so agents branch on one code for both.
             ClientError::ConflictCopyUnreadable { .. } => "PUBLISH_BLOCKED",
@@ -987,6 +1002,9 @@ impl ClientError {
             }
             ClientError::Denied(_) => TerminalOutcome::Denied,
             ClientError::PublishBlocked { .. } => TerminalOutcome::Diverged,
+            // Behind is the local half of the stale-base CONFLICT: update to rebase, then retry —
+            // never a blind re-run of the same publish.
+            ClientError::PublishBehind { .. } => TerminalOutcome::Conflict,
             // An unreadable workbench folder is the same class: a local reconciliation the person
             // performs, never a blind retry of the same command against the same folder.
             ClientError::ConflictCopyUnreadable { .. } => TerminalOutcome::Diverged,

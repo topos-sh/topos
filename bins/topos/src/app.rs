@@ -1288,7 +1288,7 @@ fn run_command(
             agent,
             dest,
             yes,
-            onto_current,
+            keep_mine,
             quiet,
             ttl,
             hook,
@@ -1371,7 +1371,7 @@ fn run_command(
             } else {
                 false
             };
-            // The go-back (`<skill>@<hash>`) and the `--onto-current` escape act on LOCAL bytes
+            // The go-back (`<skill>@<hash>`) and the `--keep-mine` escape act on LOCAL bytes
             // through the classic per-skill engine; everything else is the MANIFEST reconcile —
             // resolve the manifest layers covering cwd + the logged-in profiles and converge.
             let goback_target = targets
@@ -1379,10 +1379,10 @@ fn run_command(
                 .eq(&1)
                 .then(|| targets[0].clone())
                 .filter(|t| t.split_once('@').is_some_and(|(_, r)| !r.is_empty()));
-            let result = if onto_current || goback_target.is_some() {
+            let result = if keep_mine || goback_target.is_some() {
                 if targets.len() > 1 {
                     Err(ClientError::InvalidArgument(
-                        "the go-back and --onto-current take a single <skill> target".into(),
+                        "the go-back and --keep-mine take a single <skill> target".into(),
                     ))
                 } else if targets
                     .first()
@@ -1397,7 +1397,7 @@ fn run_command(
                     pull_with_name_fallback(
                         &ctx,
                         targets.into_iter().next(),
-                        onto_current,
+                        keep_mine,
                         store_scope,
                         None,
                         &ops::ReconcileOpts::default(),
@@ -2992,7 +2992,7 @@ fn emit_err(json: bool, command: &str, err: &ClientError, diag: &Diag<'_>) -> Ex
 }
 
 /// Parse the optional `pull` target into a [`ops::PullScope`]: absent = the sweep; `<name>` = accept a
-/// pending update; `<name>@<ref>` = go back to that version's bytes; `--onto-current` = the escape.
+/// pending update; `<name>@<ref>` = go back to that version's bytes; `--keep-mine` = the escape.
 ///
 /// A go-back suffix is recognized when the part after the LAST `@` is a version reference — the full
 /// 64-char lowercase-hex id, or a short prefix of at least 8 hex chars (resolved against the skill's
@@ -3000,8 +3000,8 @@ fn emit_err(json: bool, command: &str, err: &ClientError, diag: &Diag<'_>) -> Ex
 /// argument is the skill name: `team@cli` is accepted as a name, and `team@cli@<ref>` still goes back
 /// correctly. A hex suffix SHORTER than 8 chars stays part of the name (never a silent go-back).
 ///
-/// `--onto-current` (the escape) requires a `<skill>` target (clap enforces that half via `requires`)
-/// and is mutually exclusive with `@<ref>` (a runtime usage error — the suffix shape is only known
+/// `--keep-mine` (the escape) requires a `<skill>` target and is mutually exclusive with `@<ref>`
+/// (both runtime usage errors — the suffix shape is only known
 /// after parsing). A skill LITERALLY named like `docs@abcdef12` is not lost to the go-back parse:
 /// [`pull_with_name_fallback`] retries the whole argument as the name when the pre-@ part resolves to
 /// no tracked skill.
@@ -3010,15 +3010,13 @@ fn emit_err(json: bool, command: &str, err: &ClientError, diag: &Diag<'_>) -> Ex
 /// the mode resolves (and acts) in the store the flag named.
 fn build_pull_scope(
     skill: Option<String>,
-    onto_current: bool,
+    keep_mine: bool,
     store: ops::StoreScope,
 ) -> Result<ops::PullScope, ClientError> {
     let Some(arg) = skill else {
-        if onto_current {
-            // Unreachable through clap (`--onto-current` requires the <skill> positional) — kept as a
-            // defensive usage error for a direct caller.
+        if keep_mine {
             return Err(ClientError::InvalidArgument(
-                "--onto-current requires a <skill> target".into(),
+                "--keep-mine requires a <skill> target".into(),
             ));
         }
         return Ok(ops::PullScope::AllFollowed);
@@ -3026,9 +3024,9 @@ fn build_pull_scope(
     if let Some((name, suffix)) = arg.rsplit_once('@')
         && let Some(vref) = ops::VersionRef::recognize(suffix)
     {
-        if onto_current {
+        if keep_mine {
             return Err(ClientError::InvalidArgument(
-                "--onto-current is not valid with @<ref>".into(),
+                "--keep-mine is not valid with @<ref>".into(),
             ));
         }
         return Ok(ops::PullScope::One {
@@ -3041,8 +3039,8 @@ fn build_pull_scope(
     Ok(ops::PullScope::One {
         name: arg,
         workspace: None,
-        mode: if onto_current {
-            ops::TargetMode::OntoCurrent
+        mode: if keep_mine {
+            ops::TargetMode::KeepMine
         } else {
             ops::TargetMode::AcceptPending
         },
@@ -3059,15 +3057,14 @@ fn build_pull_scope(
 pub(crate) fn pull_with_name_fallback(
     ctx: &Ctx<'_>,
     skill: Option<String>,
-    onto_current: bool,
+    keep_mine: bool,
     store: ops::StoreScope,
     delivery: Option<&dyn crate::plane::DeliverySource>,
     reconcile: &ops::ReconcileOpts,
 ) -> Result<ops::PullOutcome, ClientError> {
     let arg = skill.clone();
     let _ = (delivery, reconcile);
-    let first =
-        build_pull_scope(skill, onto_current, store).and_then(|scope| ops::pull(ctx, scope));
+    let first = build_pull_scope(skill, keep_mine, store).and_then(|scope| ops::pull(ctx, scope));
     match first {
         Err(ClientError::NoSuchSkill { .. })
             if arg.as_ref().is_some_and(|a| {

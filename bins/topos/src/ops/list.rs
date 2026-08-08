@@ -1599,7 +1599,7 @@ mod tests {
         assert!(
             text.contains(
                 "      the team's version needs merging — you cannot publish until you pick one\n\
-                 \x20     to keep yours:  topos update notes -g --onto-current\n\
+                 \x20     to keep yours:  topos update notes -g --keep-mine\n\
                  \x20     to take theirs: topos update notes -g --reset\n"
             ),
             "{text}"
@@ -1626,7 +1626,7 @@ mod tests {
         assert!(
             deep_text.contains(
                 "  the team's version needs merging — you cannot publish until you pick one\n\
-                 \x20 to keep yours:  topos update notes -g --onto-current\n\
+                 \x20 to keep yours:  topos update notes -g --keep-mine\n\
                  \x20 to take theirs: topos update notes -g --reset"
             ),
             "{deep_text}"

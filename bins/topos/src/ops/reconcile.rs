@@ -5666,7 +5666,7 @@ fn rebuild_blocked_line(ctx: &Ctx<'_>, name: &str) -> String {
     };
     format!(
         "REBUILD_BLOCKED {name}: this bundle is waiting on a merge decision, so its folders were \
-         left as they are — settle it with `topos update{g} {name} --onto-current` or `topos \
+         left as they are — settle it with `topos update{g} {name} --keep-mine` or `topos \
          update{g} {name} --reset`, then rebuild"
     )
 }

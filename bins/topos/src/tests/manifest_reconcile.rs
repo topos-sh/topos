@@ -4225,7 +4225,7 @@ fn rebuild_leaves_a_blocked_bundle_alone_and_names_both_exits() {
         out.warnings,
         vec![
             "REBUILD_BLOCKED deploy: this bundle is waiting on a merge decision, so its folders \
-             were left as they are — settle it with `topos update -g deploy --onto-current` or \
+             were left as they are — settle it with `topos update -g deploy --keep-mine` or \
              `topos update -g deploy --reset`, then rebuild"
                 .to_owned()
         ]

@@ -144,19 +144,25 @@ pub(crate) fn next_actions(command: &str, argv: &[String], err: &ClientError) ->
         // An unresolved author merge blocks publish. The block only ever exists with a RECORDED
         // conflict, and a plain `update <skill>` merely RE-DISCLOSES a recorded conflict (it never
         // re-merges) — naming it here sent agents into a publish→update→publish refusal loop. Name
-        // the two acts that actually RESOLVE the block: keep yours (`--onto-current` commits your
+        // the two acts that actually RESOLVE the block: keep yours (`--keep-mine` commits your
         // edited resolution — or your original draft — onto current and clears the record) or let
         // the team win (`--reset`, the loss-led two-phase discard).
         ClientError::PublishBlocked { skill } => vec![
             crate::actions::next_action(
                 ActionCode::ResolveDivergedDraft,
-                update_rebuild(command, argv, skill, &["--onto-current"]),
+                update_rebuild(command, argv, skill, &["--keep-mine"]),
             ),
             crate::actions::next_action(
                 ActionCode::ResolveDivergedDraft,
                 update_rebuild(command, argv, skill, &["--reset"]),
             ),
         ],
+        // A copy behind the served `current`. ONE way out, and it is the same one the sentence names:
+        // update, which runs the merge that makes a publish safe to ship.
+        ClientError::PublishBehind { skill } => vec![crate::actions::next_action(
+            ActionCode::RebaseAndRetry,
+            update_rebuild(command, argv, skill, &[]),
+        )],
         // A denial is not self-service (ask an owner to invite/roster you, or contact an admin) — the
         // codes carry no executable argv.
         ClientError::Denied(_) => vec![
@@ -1355,7 +1361,7 @@ fn draft_sub_lines(entry: &SkillEntry, flag: &str) -> String {
 fn blocked_sub_lines(name: &str, flag: &str) -> String {
     format!(
         "      the team's version needs merging — you cannot publish until you pick one\n      to \
-         keep yours:  topos update {name}{flag} --onto-current\n      to take theirs: topos update \
+         keep yours:  topos update {name}{flag} --keep-mine\n      to take theirs: topos update \
          {name}{flag} --reset\n"
     )
 }
@@ -2103,7 +2109,7 @@ fn list_detail_tty(detail: &topos_types::results::ListDetail) -> String {
         // bundle, one answer, whichever command asked.
         StatusItemState::Blocked => format!(
             "the team's version needs merging — you cannot publish until you pick one\n  to keep \
-             yours:  topos update {}{flag} --onto-current\n  to take theirs: topos update {}{flag} \
+             yours:  topos update {}{flag} --keep-mine\n  to take theirs: topos update {}{flag} \
              --reset",
             detail.name, detail.name
         ),
@@ -3325,6 +3331,27 @@ fn pull_action_row(s: &PullSkill, scope: &PullReceiptScope) -> (String, Vec<Stri
             let head = lines.next().unwrap_or_default().to_owned();
             (head, lines.map(str::to_owned).collect())
         }
+        // Two outcomes share this word, and they say opposite things about the team's version, so
+        // they must not share a sentence. A real merge REBASED your draft onto the team's version,
+        // and publishing is the next step. `--keep-mine` did the opposite: it kept your bytes and
+        // took nothing, so the team's version is still ahead of you and publishing is refused until
+        // an update merges it. The escape is the row carrying a `drop_diff` (what choosing yours
+        // left behind) — the only producer of one on a Merged row.
+        PullAction::Merged if s.merge.as_ref().is_some_and(|m| m.drop_diff.is_some()) => {
+            let v = s
+                .merge
+                .as_ref()
+                .map(|m| short(&m.theirs_version_id))
+                .unwrap_or("?");
+            let g = if row_takes_g(s, scope) { " -g" } else { "" };
+            (
+                format!("kept your version — the team's {v} is not in it"),
+                vec![
+                    "you cannot publish until you merge it:".to_owned(),
+                    format!("  topos update{g} {name}"),
+                ],
+            )
+        }
         PullAction::Merged => {
             let v = s
                 .merge
@@ -3385,7 +3412,7 @@ fn pull_action_row(s: &PullSkill, scope: &PullReceiptScope) -> (String, Vec<Stri
                 "commit your merge — or keep your version, by leaving that folder alone:"
                     .to_owned(),
             );
-            extra.push(format!("  topos update{g} {name} --onto-current"));
+            extra.push(format!("  topos update{g} {name} --keep-mine"));
             extra.push("take the team's version instead, dropping yours:".to_owned());
             extra.push(format!("  topos update{g} {name} --reset"));
             extra.push("you cannot publish this skill until you pick one".to_owned());
@@ -3543,6 +3570,16 @@ pub(crate) fn err_tty(err: &ClientError) -> String {
         ));
         return out;
     }
+    // A copy behind the served `current` states the fact and then the one command that fixes it,
+    // indented under it — the same shape as the refusals below: the copy IS the answer, so it carries
+    // no `error:` prefix (the `--json` envelope keeps the single-sentence message, and the same command
+    // rides `next_actions`).
+    if let ClientError::PublishBehind { skill } = err {
+        return format!(
+            "{}\n  update first: topos update {skill}",
+            safe_message(err)
+        );
+    }
     // The shared-copy narrowing refusal renders its ways out as ALIGNED command lines under the
     // statement — the copy is the answer, so it carries no `error:` prefix (the `--json`
     // envelope keeps the single-sentence message; the same two commands ride `next_actions`).
@@ -3589,10 +3626,13 @@ pub(crate) fn err_hint_tty(command: &str, argv: &[String], err: &ClientError) ->
     // The shared-copy refusal's TTY already prints its two ways out as aligned, annotated
     // command lines (see [`err_tty`]) — a `try:` block underneath would repeat them bare. The
     // divergent-copies menu is the same case, one step further: its last line IS the whole-bundle
-    // discard the action offers, and repeating it under the menu would read as a fourth option.
+    // discard the action offers, and repeating it under the menu would read as a fourth option. The
+    // behind refusal is the same case at its simplest: it prints its one command already.
     if matches!(
         err,
-        ClientError::SharedCopyOnly { .. } | ClientError::PlacementsDiverged { .. }
+        ClientError::SharedCopyOnly { .. }
+            | ClientError::PlacementsDiverged { .. }
+            | ClientError::PublishBehind { .. }
     ) {
         return None;
     }
@@ -4477,7 +4517,7 @@ mod tests {
         assert!(out.contains("`topos diff runbook`"), "{out}");
         // Conflicted: both exits, spelled runnable, and the consequence of taking neither.
         assert!(
-            out.contains("  topos update api-notes --onto-current\n"),
+            out.contains("  topos update api-notes --keep-mine\n"),
             "{out}"
         );
         assert!(out.contains("  topos update api-notes --reset\n"), "{out}");
@@ -5854,7 +5894,7 @@ mod tests {
              \x20   to merge by hand, both versions are marked up here:\n\
              \x20     project/.topos/state/robertkrajewski/conflicts/coolify-deploy/\n\
              \x20   commit your merge — or keep your version, by leaving that folder alone:\n\
-             \x20     topos update coolify-deploy --onto-current\n\
+             \x20     topos update coolify-deploy --keep-mine\n\
              \x20   take the team's version instead, dropping yours:\n\
              \x20     topos update coolify-deploy --reset\n\
              \x20   you cannot publish this skill until you pick one\n\
@@ -5880,7 +5920,7 @@ mod tests {
              \x20   to merge by hand, both versions are marked up here:\n\
              \x20     ~/.topos/conflicts/coolify-deploy/\n\
              \x20   commit your merge — or keep your version, by leaving that folder alone:\n\
-             \x20     topos update -g coolify-deploy --onto-current\n\
+             \x20     topos update -g coolify-deploy --keep-mine\n\
              \x20   take the team's version instead, dropping yours:\n\
              \x20     topos update -g coolify-deploy --reset\n\
              \x20   you cannot publish this skill until you pick one\n\
@@ -5926,7 +5966,7 @@ mod tests {
         assert!(!none.contains("your agents are unaffected"), "{none}");
         // The exits are still there, and still runnable as printed.
         assert!(
-            none.contains("      topos update -g coolify-deploy --onto-current\n"),
+            none.contains("      topos update -g coolify-deploy --keep-mine\n"),
             "{none}"
         );
         assert!(
@@ -6759,7 +6799,7 @@ mod tests {
         // PUBLISH_BLOCKED only ever fires with a RECORDED conflict, and a plain `update <skill>`
         // merely RE-DISCLOSES a recorded conflict (it never re-merges) — an agent following that
         // pointer looped publish→update→publish forever. The envelope names the two acts that
-        // actually clear the block: the `--onto-current` escape and the `--reset` discard.
+        // actually clear the block: the `--keep-mine` escape and the `--reset` discard.
         let actions = super::next_actions(
             "publish",
             &typed(&["publish"]),
@@ -6769,7 +6809,7 @@ mod tests {
         );
         assert_eq!(actions.len(), 2, "{actions:?}");
         assert!(
-            actions[0].argv.iter().any(|t| t == "--onto-current"),
+            actions[0].argv.iter().any(|t| t == "--keep-mine"),
             "{actions:?}"
         );
         assert!(
@@ -6783,6 +6823,72 @@ mod tests {
                 "the argv must name the blocked skill: {a:?}"
             );
         }
+    }
+
+    /// Two outcomes share the `merged` action and say opposite things about the team's version, so
+    /// they must not share a sentence. A real merge rebased the draft ONTO the team's version and
+    /// points at publishing; `--keep-mine` took nothing, so it says the team's version is not in
+    /// this copy and that publishing waits on an update. The escape is the row carrying a
+    /// `drop_diff` — what choosing yours left behind.
+    #[test]
+    fn a_kept_mine_row_never_borrows_the_rebased_sentence() {
+        let kept = PullSkill {
+            merge: Some(MergeReport {
+                drop_diff: Some("--- a\n+++ b\n".to_owned()),
+                ..merge_report(true, Vec::new())
+            }),
+            ..row("runbook", PullAction::Merged)
+        };
+        let data = PullData {
+            skills: vec![kept],
+            proposals_awaiting: 0,
+            notices: Vec::new(),
+            sync: Vec::new(),
+            behind_elsewhere: Vec::new(),
+            scope: None,
+        };
+        let out = pull_tty(&data, &[], &[], &[]);
+        assert!(
+            out.contains("kept your version — the team's 1b1b1b1b1b1b is not in it"),
+            "{out}"
+        );
+        assert!(
+            out.contains("you cannot publish until you merge it:\n")
+                && out.contains("topos update runbook"),
+            "{out}"
+        );
+        assert!(
+            !out.contains("rebased onto the new current"),
+            "the rebase sentence belongs to a real merge: {out}"
+        );
+    }
+
+    /// The behind refusal is two lines: the fact, then the one command that resolves it. It carries
+    /// no `error:` prefix and no `try:` block — the copy IS the answer, and repeating the command
+    /// under it would read as a second step. The envelope keeps the single sentence and offers the
+    /// same command as its action.
+    #[test]
+    fn a_publish_behind_refusal_states_the_fact_then_the_one_way_out() {
+        let err = crate::error::ClientError::PublishBehind {
+            skill: "coolify-deploy".to_owned(),
+        };
+        assert_eq!(
+            super::err_tty(&err),
+            "coolify-deploy: your version is behind.\n  update first: topos update coolify-deploy"
+        );
+        assert_eq!(
+            super::err_hint_tty("publish", &typed(&["publish", "coolify-deploy"]), &err),
+            None,
+            "the command is already printed"
+        );
+        let actions = super::next_actions("publish", &typed(&["publish", "coolify-deploy"]), &err);
+        assert_eq!(actions.len(), 1, "{actions:?}");
+        assert_eq!(actions[0].code.as_str(), "REBASE_AND_RETRY");
+        assert_eq!(
+            actions[0].argv,
+            vec!["topos", "update", "coolify-deploy", "--json"],
+            "{actions:?}"
+        );
     }
 
     #[test]
@@ -7217,7 +7323,7 @@ mod tests {
         let hint = super::err_hint_tty("publish", &typed(&["publish"]), &blocked)
             .expect("a blocked publish offers its two exits");
         assert_eq!(
-            hint, "try:\n  topos update deploy --onto-current\n  topos update deploy --reset",
+            hint, "try:\n  topos update deploy --keep-mine\n  topos update deploy --reset",
             "the machine surface's argv, minus its `--json` tail"
         );
 

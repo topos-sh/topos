@@ -39,11 +39,16 @@ use crate::{doc, logfile, sidecar};
 pub(crate) const DRAFT_SNAPSHOT_MESSAGE: &str = "topos: draft snapshot";
 /// A bound on ancestor backfill — far beyond any real lineage gap; stops a forged cyclic store.
 const MAX_BACKFILL: usize = 256;
-/// The `applied` generation a go-back leaves behind: the genesis sentinel `(0,0)`, which is strictly below
-/// any real served `observed`, so a later `pull` sees `applied != observed` (behind) and — once the `held`
-/// pin is released by an explicit pull — fast-forwards back to the team's current. (The go-back installs an
-/// OLD version whose true generation is no longer tracked locally; `(0,0)` is the honest "not at current".)
-const GO_BACK_APPLIED: u64 = 0;
+/// The `applied` generation a deliberate local decision leaves behind when this machine is knowingly NOT
+/// holding the served `current`: the genesis sentinel `(0,0)`, which is strictly below any real served
+/// `observed`, so a later pull sees `applied != observed` (behind) and drives toward the team's version
+/// again. Two decisions leave it: the go-back (which installs an OLD version whose true generation is no
+/// longer tracked locally — and pins `held` until an explicit pull) and `--keep-mine` (which keeps this
+/// machine's own bytes and takes nothing from the team). `(0,0)` is the honest "not at current" in both.
+///
+/// It never reads as never-received: [`is_never_received`] also requires the all-zero `base_commit`
+/// sentinel, and both decisions leave a real commit there.
+pub(crate) const APPLIED_BEHIND_CURRENT: u64 = 0;
 
 /// A capability token proving the author-merge code was reached from a divergence. Its field is private to
 /// this module, so NO other module can mint one; [`super::merge_resolve::resolve_diverged`] takes it by
@@ -62,7 +67,7 @@ pub(crate) enum Invocation {
     Sweep,
     /// A targeted accept / resume (`topos pull <skill>`).
     Accept,
-    /// The disclosed escape (`topos pull <skill> --onto-current`): commit MY bytes on top of `current`.
+    /// The disclosed escape (`topos pull <skill> --keep-mine`): commit MY bytes on top of `current`.
     Escape,
 }
 
@@ -77,7 +82,7 @@ impl Invocation {
 ///
 /// `inv` is [`Invocation::Sweep`] for the bare session-start sweep, [`Invocation::Accept`] for a targeted
 /// `topos pull <skill>` (which also releases a `held` pin), or [`Invocation::Escape`] for
-/// `--onto-current` (resolve a divergence by committing the author's bytes on `current`).
+/// `--keep-mine` (resolve a divergence by committing the author's bytes on `current`).
 pub(crate) fn sync_one(
     ctx: &Ctx<'_>,
     skill_id: &crate::id::SkillId,
@@ -141,7 +146,7 @@ pub(crate) fn sync_one_planned(
     // for the never-received baseline (no observed commit yet) → an unconditional first GET.
     let known = known_current(&sync)?;
 
-    // An unresolved conflict is on record. The escape (`--onto-current`) RESOLVES it (plane-independent, so
+    // An unresolved conflict is on record. The escape (`--keep-mine`) RESOLVES it (plane-independent, so
     // it runs even when the plane is unreachable — the no-deadlock guarantee). Any OTHER invocation heals a
     // crashed materialization and re-discloses the block WITHOUT re-merging (the conflict draft already
     // consumed `current`).
@@ -627,7 +632,7 @@ pub(crate) fn go_back(
         schema_version: sync.schema_version,
         observed: sync.observed,
         observed_version_id: sync.observed_version_id.clone(),
-        applied: GO_BACK_APPLIED,
+        applied: APPLIED_BEHIND_CURRENT,
         base_commit: target_hex.clone(),
         work_hash: target_digest_hex.clone(),
         held: true,
@@ -1326,6 +1331,26 @@ pub(crate) fn forwarded_sync(
         work_hash: target_digest_hex.to_owned(),
         held: false,
         // A forward apply/heal lands the pristine target everywhere — no standing draft remains.
+        draft_observed: None,
+    }
+}
+
+/// The sync state a KEPT-MINE resolution leaves: the base stays exactly where it was (`base_commit`), the
+/// work hash names the bytes now in every folder, and `applied` drops to [`APPLIED_BEHIND_CURRENT`] —
+/// this machine holds its own version and the served `observed` is not in it. `held` is cleared, because
+/// the next `topos update` must be free to run the real three-way merge (the no-deadlock half).
+///
+/// The mirror image of [`forwarded_sync`]: same three fields, the opposite claim about `current`.
+pub(crate) fn kept_sync(sync: &SyncState, base_commit: &str, work_hash_hex: &str) -> SyncState {
+    SyncState {
+        schema_version: sync.schema_version,
+        observed: sync.observed,
+        observed_version_id: sync.observed_version_id.clone(),
+        applied: APPLIED_BEHIND_CURRENT,
+        base_commit: base_commit.to_owned(),
+        work_hash: work_hash_hex.to_owned(),
+        held: false,
+        // Topos itself wrote these bytes into every folder, so no unsaved draft is standing.
         draft_observed: None,
     }
 }

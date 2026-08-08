@@ -179,7 +179,7 @@
           }
         },
         "copy_dir": {
-          "description": "Where the marked-up copy of BOTH versions was written: the scope's own conflict workbench,\nnever a folder an agent reads. A hand resolution left there is what `update <skill>\n--onto-current` commits. Display path (`~`-abbreviated). Absent for a clean merge.\n**INFERRED** (additive).",
+          "description": "Where the marked-up copy of BOTH versions was written: the scope's own conflict workbench,\nnever a folder an agent reads. A hand resolution left there is what `update <skill>\n--keep-mine` commits. Display path (`~`-abbreviated). Absent for a clean merge.\n**INFERRED** (additive).",
           "type": [
             "string",
             "null"

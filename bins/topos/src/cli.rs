@@ -92,7 +92,7 @@ pub(crate) enum Command {
         global: bool,
         /// Discard your local edits to a skill and take the team version. Shows what would be
         /// lost first; `--yes` applies.
-        #[arg(long)]
+        #[arg(long, conflicts_with = "keep_mine")]
         reset: bool,
         /// With `--reset`: drop only this agent's copy of the edits (a slug like `codex`); every
         /// other copy keeps its own.
@@ -105,11 +105,15 @@ pub(crate) enum Command {
         /// Confirm an action that shows a preview first (like `--reset`).
         #[arg(long)]
         yes: bool,
-        /// Resolve a conflicted skill: commit the merge you made in the conflict folder the
-        /// receipt named — or, by leaving that folder alone, keep your version and skip the team's
-        /// changes. Takes exactly one skill.
-        #[arg(long = "onto-current")]
-        onto_current: bool,
+        /// Finish a merge that stopped because you and your team changed the same lines. Topos
+        /// writes one copy of the skill into a folder under `.topos/conflicts/` and prints the
+        /// path; files you both changed hold both versions, wrapped in `<<<<<<<` markers. Edit
+        /// that copy and run this to use it — or run it without touching the folder to keep your
+        /// own version. Takes exactly one skill.
+        // `--onto-current` is the prior spelling, kept as a HIDDEN alias (clap's `alias` never
+        // reaches the help or the generated reference) so anything already in flight keeps working.
+        #[arg(long = "keep-mine", alias = "onto-current")]
+        keep_mine: bool,
         /// Print nothing on stdout — the mode the session-start hook uses. The hook sweep always
         /// covers both scopes (this folder's and your machine-wide set), so `-g` has no effect
         /// here. Errors still go to stderr with a non-zero exit.
@@ -657,16 +661,44 @@ mod tests {
     }
 
     #[test]
-    fn update_onto_current_parses() {
-        // Now a DISCLOSED escape (no longer `hide`), still parses as before.
-        let out = Cli::try_parse_from(["topos", "update", "docs", "--onto-current"]).unwrap();
+    fn update_keep_mine_parses_under_both_spellings() {
+        // The disclosed name.
+        let out = Cli::try_parse_from(["topos", "update", "docs", "--keep-mine"]).unwrap();
         assert!(matches!(
             out.command,
             Some(Command::Update {
-                onto_current: true,
+                keep_mine: true,
                 ..
             })
         ));
+        // …and the prior spelling, which stays a working (hidden) alias so nothing in flight breaks.
+        let aliased = Cli::try_parse_from(["topos", "update", "docs", "--onto-current"]).unwrap();
+        assert!(matches!(
+            aliased.command,
+            Some(Command::Update {
+                keep_mine: true,
+                ..
+            })
+        ));
+    }
+
+    /// `--keep-mine` and `--reset` are opposites — keep your version, or take the team's. Accepting
+    /// both let the reset silently win a command that asked for the exact opposite as well, so clap
+    /// refuses the pair outright (the same shape `diff`'s `-a`/`--dest` pair already takes).
+    #[test]
+    fn update_keep_mine_and_reset_are_refused_together() {
+        for argv in [
+            ["topos", "update", "docs", "--keep-mine", "--reset"],
+            ["topos", "update", "docs", "--reset", "--keep-mine"],
+            ["topos", "update", "docs", "--onto-current", "--reset"],
+        ] {
+            let err = Cli::try_parse_from(argv).expect_err("the pair is refused");
+            assert_eq!(
+                err.kind(),
+                clap::error::ErrorKind::ArgumentConflict,
+                "{argv:?}: {err}"
+            );
+        }
     }
 
     #[test]

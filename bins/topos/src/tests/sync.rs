@@ -1312,11 +1312,16 @@ fn a_targeted_accept_merges_a_diverged_draft_the_preview_called_clean() {
     assert!(!rig.conflict_exists(&id));
 }
 
-/// The disclosed escape (`--onto-current`): commit MY bytes on top of `current`, dropping the merge. It
-/// always produces a clean, publishable draft-on-current (no deadlock), discloses what it drops, and the
-/// pre-escape bytes stay recoverable in the sidecar store.
+/// The disclosed escape (`--keep-mine`): commit MY bytes, drop the merge — and leave the recorded base
+/// exactly where it stood, so this machine reads as BEHIND rather than as up to date.
+///
+/// That last part is the whole point. Advancing the base made the author's bytes look like a draft ON
+/// the team's version, so the very next `publish` shipped them as the new `current` with the team's
+/// change nowhere inside — a silent revert from the one command that promises to touch nothing but your
+/// own copy. Here the base stays at the pre-escape commit and `applied` drops below `observed`, which is
+/// what refuses that publish and what lets the next `topos update` run a real three-way merge.
 #[test]
-fn escape_commits_mine_on_current_and_is_publishable() {
+fn keep_mine_keeps_my_bytes_and_leaves_the_base_behind() {
     let rig = Rig::new("escape");
     let (id, _name, genesis) = rig.adopt(BASE);
     // An overlapping edit (would conflict if merged) — the escape sidesteps the merge entirely.
@@ -1338,7 +1343,7 @@ fn escape_commits_mine_on_current_and_is_publishable() {
             store: ops::StoreScope::Here,
             name: "pr-describe".into(),
             workspace: None,
-            mode: ops::TargetMode::OntoCurrent,
+            mode: ops::TargetMode::KeepMine,
         },
     )
     .unwrap();
@@ -1348,16 +1353,112 @@ fn escape_commits_mine_on_current_and_is_publishable() {
     assert!(mr.clean);
     assert!(mr.drop_diff.is_some(), "the escape discloses what it drops");
 
-    // The placement holds exactly MY bytes (theirs was dropped); publishable (no conflict record).
+    // The placement holds exactly MY bytes (theirs was dropped) and the decision is made — no block.
     assert_eq!(snapshot(&rig.placement()), Some(expect(mine)));
     assert!(!rig.conflict_exists(&id));
     let s = rig.read_sync(&id);
-    assert_eq!(s.applied, 1);
-    assert_eq!(s.base_commit, to_hex(&v1.id));
+    // BEHIND, and honestly so: the base is still the version my bytes descend from, and the served
+    // generation is NOT recorded as applied — the two facts `publish` reads to refuse.
+    assert_eq!(
+        s.base_commit,
+        to_hex(&genesis),
+        "the recorded base must not advance to the team's version"
+    );
+    assert_ne!(s.applied, s.observed, "the served version was not applied");
+    assert_eq!(s.observed, 1, "the team's version is still the target");
+    assert!(!s.held, "the next update must be free to merge");
 
     // The pre-escape draft is recoverable: MINE re-parented on `current` is a real commit in the store.
     let m = mk_version(&[v1.id], mine, DEVICE, "topos: merge escape");
     assert!(rig.open_store(&id).list_versions().unwrap().contains(&m.id));
+}
+
+/// The route back from `--keep-mine`, end to end: the merge RE-RAISES on the next update — from the
+/// PRE-CONFLICT base, not from the team's version — and once the author's copy no longer contests the
+/// team's lines it merges clean, the base advances, and the bundle is publishable again.
+///
+/// Both halves are load-bearing. Rewinding to the wrong base would make the re-merge a no-op that
+/// silently declares the author current (the old defect, one step later); not rewinding `applied` would
+/// leave the bundle in the DRAFT state, where no merge ever runs again and the team's version could
+/// never arrive.
+#[test]
+fn after_keep_mine_the_next_update_merges_from_the_pre_conflict_base() {
+    let rig = Rig::new("keepmine-remerge");
+    let base: FileSet = &[("SKILL.md", FileMode::Regular, b"line1\nline2\nline3\n")];
+    let (id, _name, genesis) = rig.adopt(base);
+    // The same line, differently — a genuine conflict.
+    let mine: FileSet = &[("SKILL.md", FileMode::Regular, b"MINE\nline2\nline3\n")];
+    let theirs: FileSet = &[("SKILL.md", FileMode::Regular, b"THEIRS\nline2\nline3\n")];
+    write_tree(&rig.placement(), mine);
+
+    let v1 = mk_version(&[genesis], theirs, "d_pub", "v1");
+    let mut plane = FixturePlane::default();
+    plane.add_version(&id, &v1);
+    plane.set_current(&id, served(WS, &id, v1.id, 1));
+    let foll = follow(&id, FollowMode::Auto);
+
+    // The ordinary sweep conflicts.
+    assert_eq!(
+        only(&pull_data(&rig.ctx(&plane, &foll), ops::PullScope::AllFollowed).unwrap()).action,
+        PullAction::Conflicted
+    );
+    // Keep mine, leaving the workbench alone.
+    let keep = ops::PullScope::One {
+        store: ops::StoreScope::Here,
+        name: "pr-describe".into(),
+        workspace: None,
+        mode: ops::TargetMode::KeepMine,
+    };
+    assert_eq!(
+        only(&pull_data(&rig.ctx(&plane, &foll), keep).unwrap()).action,
+        PullAction::Merged
+    );
+    assert!(!rig.conflict_exists(&id));
+    assert_eq!(rig.read_sync(&id).base_commit, to_hex(&genesis));
+
+    // The next update runs the merge again — and the line both sides changed is still contested, so
+    // it returns to the workbench exactly as the receipt said it would.
+    assert_eq!(
+        only(&pull_data(&rig.ctx(&plane, &foll), ops::PullScope::AllFollowed).unwrap()).action,
+        PullAction::Conflicted,
+        "a still-contested line comes back"
+    );
+    assert!(rig.conflict_exists(&id));
+
+    // The author now takes the team's line and keeps a change of their own elsewhere — a real hand
+    // merge — through the escape, and the next update merges it CLEANLY against the same base.
+    let reconciled: FileSet = &[("SKILL.md", FileMode::Regular, b"THEIRS\nline2\nMINE3\n")];
+    write_tree(&rig.conflict_copy(&id), reconciled);
+    let keep_again = ops::PullScope::One {
+        store: ops::StoreScope::Here,
+        name: "pr-describe".into(),
+        workspace: None,
+        mode: ops::TargetMode::KeepMine,
+    };
+    assert_eq!(
+        only(&pull_data(&rig.ctx(&plane, &foll), keep_again).unwrap()).action,
+        PullAction::Merged
+    );
+    assert_eq!(snapshot(&rig.placement()), Some(expect(reconciled)));
+    assert_eq!(rig.read_sync(&id).base_commit, to_hex(&genesis));
+
+    let settled =
+        only(&pull_data(&rig.ctx(&plane, &foll), ops::PullScope::AllFollowed).unwrap()).clone();
+    assert_eq!(settled.action, PullAction::Merged);
+    assert!(
+        settled.merge.as_ref().is_some_and(|m| m.clean),
+        "the reconciled copy merges clean: {settled:?}"
+    );
+    assert!(!rig.conflict_exists(&id));
+    let s = rig.read_sync(&id);
+    assert_eq!(
+        s.base_commit,
+        to_hex(&v1.id),
+        "a real merge is what advances the base"
+    );
+    assert_eq!(s.applied, s.observed, "and what ends the behind state");
+    // The author's own line survived the merge; the team's is in it too.
+    assert_eq!(snapshot(&rig.placement()), Some(expect(reconciled)));
 }
 
 /// A conflict blocks publish and the block PERSISTS — a bare re-sweep keeps reporting it (healing a
@@ -1425,7 +1526,7 @@ fn conflict_blocks_and_persists_until_escaped() {
             store: ops::StoreScope::Here,
             name: "pr-describe".into(),
             workspace: None,
-            mode: ops::TargetMode::OntoCurrent,
+            mode: ops::TargetMode::KeepMine,
         },
     )
     .unwrap();
@@ -1477,7 +1578,7 @@ fn a_deleted_conflict_copy_is_re_rendered_and_still_reads_as_untouched() {
             store: ops::StoreScope::Here,
             name: "pr-describe".into(),
             workspace: None,
-            mode: ops::TargetMode::OntoCurrent,
+            mode: ops::TargetMode::KeepMine,
         },
     )
     .unwrap();
@@ -1528,7 +1629,7 @@ fn the_escape_discloses_the_divergent_copies_it_collapsed() {
             store: ops::StoreScope::Here,
             name: "pr-describe".into(),
             workspace: None,
-            mode: ops::TargetMode::OntoCurrent,
+            mode: ops::TargetMode::KeepMine,
         },
     )
     .unwrap();
@@ -1848,7 +1949,7 @@ fn resolve_crash_gate_converges_and_never_writes_markers_into_an_agent_folder() 
 
 // --- review-driven regression tests ---
 
-/// **The "keep my version" exit.** Leaving the conflict folder alone and running `--onto-current`
+/// **The "keep my version" exit.** Leaving the conflict folder alone and running `--keep-mine`
 /// commits the author's ORIGINAL draft (drop the merge), never the raw marker tree — otherwise the
 /// markers would become a publishable bundle. The folder goes with the block.
 #[test]
@@ -1888,7 +1989,7 @@ fn escape_of_unedited_conflict_commits_original_draft_not_markers() {
             store: ops::StoreScope::Here,
             name: "pr-describe".into(),
             workspace: None,
-            mode: ops::TargetMode::OntoCurrent,
+            mode: ops::TargetMode::KeepMine,
         },
     )
     .unwrap();
@@ -1909,7 +2010,7 @@ fn escape_of_unedited_conflict_commits_original_draft_not_markers() {
     assert!(rig.open_store(&id).list_versions().unwrap().contains(&m.id));
 }
 
-/// Hand-resolving the CONFLICT FOLDER and then running `--onto-current` commits those bytes — the
+/// Hand-resolving the CONFLICT FOLDER and then running `--keep-mine` commits those bytes — the
 /// author's resolution — onto `current`, and writes them to every managed placement.
 #[test]
 fn escape_of_edited_conflict_commits_the_resolution() {
@@ -1942,7 +2043,7 @@ fn escape_of_edited_conflict_commits_the_resolution() {
             store: ops::StoreScope::Here,
             name: "pr-describe".into(),
             workspace: None,
-            mode: ops::TargetMode::OntoCurrent,
+            mode: ops::TargetMode::KeepMine,
         },
     )
     .unwrap();
@@ -2010,7 +2111,7 @@ impl HostileCheckout {
 
 /// **A hostile checkout must not be able to aim a recursive delete out of its own store.**
 ///
-/// `clear_conflict` is what `--onto-current` and `--reset` both call — the two commands a conflict
+/// `clear_conflict` is what `--keep-mine` and `--reset` both call — the two commands a conflict
 /// receipt tells the reader to run — so a clone that ships `.topos/state/<user>/conflicts` as a
 /// SYMLINK pointing at a home directory, plus a `conflict.json` naming a plain component inside
 /// it, used to get `~/Documents` deleted recursively: the removal was path-based, and the kernel
@@ -2091,7 +2192,7 @@ fn a_hostile_lock_skill_id_cannot_traverse_out_of_the_store() {
 /// **An unscannable workbench folder must refuse, never destroy the hand resolution in it.**
 ///
 /// The folder is the ONLY copy of a hand merge — it sits outside the placement map, so the
-/// materializer's snapshot rail never sees it. `--onto-current` used to fold every scan failure
+/// materializer's snapshot rail never sees it. `--keep-mine` used to fold every scan failure
 /// into "the folder is absent": it committed the ORIGINAL draft, wrote it over every placement,
 /// deleted the folder, and reported `Merged`. The scanner rejects a tree holding a symlink (as
 /// here), a non-regular file, a non-UTF-8 name, or no files at all — every one of them a plausible
@@ -2131,7 +2232,7 @@ fn an_unreadable_conflict_folder_refuses_instead_of_destroying_the_hand_resoluti
             store: ops::StoreScope::Here,
             name: "pr-describe".into(),
             workspace: None,
-            mode: ops::TargetMode::OntoCurrent,
+            mode: ops::TargetMode::KeepMine,
         },
     )
     .expect_err("an unreadable workbench folder must refuse");
@@ -2161,7 +2262,7 @@ fn an_unreadable_conflict_folder_refuses_instead_of_destroying_the_hand_resoluti
             store: ops::StoreScope::Here,
             name: "pr-describe".into(),
             workspace: None,
-            mode: ops::TargetMode::OntoCurrent,
+            mode: ops::TargetMode::KeepMine,
         },
     )
     .unwrap();
@@ -2208,7 +2309,7 @@ fn a_hand_resolution_never_commits_topos_mine_scaffolding() {
             store: ops::StoreScope::Here,
             name: "pr-describe".into(),
             workspace: None,
-            mode: ops::TargetMode::OntoCurrent,
+            mode: ops::TargetMode::KeepMine,
         },
     )
     .unwrap();
@@ -2230,7 +2331,7 @@ fn a_hand_resolution_never_commits_topos_mine_scaffolding() {
 /// leaves a fully resolved bundle still carrying the record. Read as a live block, that leftover
 /// does damage in both directions: a sweep re-settles `work_hash` to the pre-escape draft (naming
 /// bytes that are nowhere on disk) and re-discloses a block on a resolved bundle, and
-/// `--onto-current` sees the already-removed workbench folder as "untouched" and commits the
+/// `--keep-mine` sees the already-removed workbench folder as "untouched" and commits the
 /// ORIGINAL DRAFT over the resolution the placements hold. Both arms now recognize the leftover
 /// from the two durable documents and finish the interrupted clear instead.
 #[test]
@@ -2265,7 +2366,7 @@ fn a_record_that_outlived_its_resolution_is_cleared_not_re_blocked() {
             store: ops::StoreScope::Here,
             name: "pr-describe".into(),
             workspace: None,
-            mode: ops::TargetMode::OntoCurrent,
+            mode: ops::TargetMode::KeepMine,
         },
     )
     .unwrap();
@@ -2278,42 +2379,15 @@ fn a_record_that_outlived_its_resolution_is_cleared_not_re_blocked() {
     )
     .unwrap();
 
-    // (a) the bare sweep: the leftover is cleared, no block is disclosed, and the docs keep naming
-    // the bytes that are actually on disk.
-    let row =
-        only(&pull_data(&rig.ctx(&plane, &foll), ops::PullScope::AllFollowed).unwrap()).clone();
-    assert_ne!(
-        row.action,
-        PullAction::Conflicted,
-        "a resolved bundle must not be re-blocked"
-    );
-    assert!(
-        !rig.conflict_exists(&id),
-        "the interrupted clear is finished"
-    );
-    let now = rig.read_sync(&id);
-    assert_eq!(now.work_hash, after_escape.work_hash);
-    assert_ne!(
-        now.work_hash, record.draft_digest,
-        "the docs must not name the pre-escape draft — nothing on disk holds it"
-    );
-    assert_eq!(snapshot(&rig.placement()), Some(expect(resolved)));
-
-    // (b) the same leftover under `--onto-current`: it must not commit the original draft over the
+    // (a) the leftover under `--keep-mine`: it must not commit the original draft over the
     // resolution already on the placements.
-    doc::write_doc(
-        &rig.fs,
-        &rig.layout().published(&sid(&id)).conflict,
-        &record,
-    )
-    .unwrap();
     pull_data(
         &rig.ctx(&plane, &foll),
         ops::PullScope::One {
             store: ops::StoreScope::Here,
             name: "pr-describe".into(),
             workspace: None,
-            mode: ops::TargetMode::OntoCurrent,
+            mode: ops::TargetMode::KeepMine,
         },
     )
     .unwrap();
@@ -2323,6 +2397,42 @@ fn a_record_that_outlived_its_resolution_is_cleared_not_re_blocked() {
         Some(expect(resolved)),
         "the hand resolution must survive a leftover record"
     );
+
+    // (b) the same leftover under a bare sweep. The interrupted clear is finished first, and the
+    // bundle is then treated as what it now IS — a person holding their own resolution, still behind
+    // the team — so the sweep may well raise a block of its own. What must never happen is the STALE
+    // record's re-disclosure, which would re-settle `work_hash` to the pre-escape draft and send the
+    // reader to a workbench describing bytes that are nowhere on disk. The discriminator is what the
+    // documents NAME, not whether a block stands.
+    doc::write_doc(
+        &rig.fs,
+        &rig.layout().published(&sid(&id)).conflict,
+        &record,
+    )
+    .unwrap();
+    let _row = only(&pull_data(&rig.ctx(&plane, &foll), ops::PullScope::AllFollowed).unwrap());
+    let now = rig.read_sync(&id);
+    assert_eq!(now.work_hash, after_escape.work_hash);
+    assert_ne!(
+        now.work_hash, record.draft_digest,
+        "the docs must not name the pre-escape draft — nothing on disk holds it"
+    );
+    assert_eq!(snapshot(&rig.placement()), Some(expect(resolved)));
+    if let Some(fresh) = doc::read_doc::<topos_types::persisted::ConflictState>(
+        &rig.fs,
+        &rig.layout().published(&sid(&id)).conflict,
+    )
+    .unwrap()
+    {
+        assert_eq!(
+            fresh.draft_digest, after_escape.work_hash,
+            "a re-raised block describes the bytes on disk, never the pre-escape draft"
+        );
+        assert_ne!(
+            fresh.result_commit, record.result_commit,
+            "…and it is a fresh merge, not the leftover re-disclosed"
+        );
+    }
 }
 
 /// An accept RESOLVES against the version this very call discovered. `current` sits at v2 (whose

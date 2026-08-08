@@ -102,8 +102,9 @@ const SIDECAR_SUFFIX: &str = ".topos-mine";
 pub(crate) enum ResolveStrategy {
     /// Run the three-way merge (clean → draft-on-current; conflict → markers + block).
     Merge,
-    /// The disclosed escape: commit MY bytes on top of `current`, dropping the merge (a 2-way diff of what
-    /// is dropped is surfaced); the pre-escape draft is snapshotted recoverably.
+    /// The disclosed escape (`--keep-mine`): commit MY bytes as this machine's own version, dropping the
+    /// merge (a 2-way diff of what is dropped is surfaced) and leaving the recorded base where it stood,
+    /// so the person stays behind the team; the pre-escape draft is snapshotted recoverably.
     Escape,
 }
 
@@ -139,6 +140,8 @@ pub(crate) fn resolve_diverged(
 
     if strategy == ResolveStrategy::Escape {
         // A fresh escape (no recorded conflict): the placement holds MINE (no markers), so commit it.
+        // No conflict was ever recorded here, so nothing has moved the lock — the base to KEEP is the
+        // one already standing.
         let committed = scanned_to_bundle(mine)?;
         return escape(
             ctx,
@@ -148,6 +151,7 @@ pub(crate) fn resolve_diverged(
             lock,
             map,
             &committed,
+            lock,
             theirs,
             theirs_commit,
         );
@@ -277,13 +281,33 @@ pub(crate) fn resolve_diverged(
     }
 }
 
-/// The escape: commit the author's chosen bytes (`committed`) on top of `current` (a fresh 1-parent commit
-/// — which also snapshots them recoverably), place it draft-on-current, and clear any conflict record
-/// (and the marked-up copy it named). Always produces a clean, publishable candidate (no deadlock), and
-/// needs no renderable base. The CALLER chooses `committed`: a fresh escape commits the placement (mine);
-/// a recorded-conflict escape commits the author's hand resolution from the conflict copy, or — if that
-/// copy is still the raw conflict tree — their ORIGINAL draft, so the escape never commits unresolved
-/// markers as a publishable bundle.
+/// The escape (`--keep-mine`): commit the author's chosen bytes (`committed`) as a fresh 1-parent commit
+/// on `current` (which snapshots them recoverably), write them to every managed placement, and clear any
+/// conflict record (and the marked-up copy it named) — while leaving the RECORDED BASE exactly where it
+/// stood. The CALLER chooses `committed`: a fresh escape commits the placement (mine); a recorded-conflict
+/// escape commits the author's hand resolution from the conflict copy, or — if that copy is still the raw
+/// conflict tree — their ORIGINAL draft, so the escape never commits unresolved markers as bundle content.
+///
+/// ## The base does not advance — this is the whole point
+///
+/// The escape used to record the team's version as the base. That made the author's bytes read as a
+/// draft ON the team's version, so the very next `publish` shipped them as the new `current` with the
+/// team's change nowhere inside — a silent revert, from a command whose whole promise is "keep mine".
+/// So `kept_base` is the base the docs must still name afterwards (the pre-conflict one: the standing
+/// lock on a fresh escape, the conflict's own recorded base on a recorded one), and the sync's `applied`
+/// drops to [`super::sync_engine::APPLIED_BEHIND_CURRENT`]. Together they say the honest thing: this
+/// machine holds ITS version, and the team's `current` is not in it.
+///
+/// Three consequences, all wanted:
+/// - `publish` refuses (`applied != observed` — the behind gate);
+/// - `list`/`status` read BEHIND rather than up-to-date (the placements hold what topos itself wrote, so
+///   they are not a draft; the served version is simply ahead of the recorded base);
+/// - the next `topos update` is a REAL three-way merge from the right base — their non-conflicting
+///   changes land silently, and anything still contested returns to the workbench.
+///
+/// What the escape still guarantees is the no-deadlock one: it needs no renderable base, it never
+/// touches the plane, and it always leaves a coherent bundle in every folder with `topos update` open
+/// as the way forward.
 #[allow(clippy::too_many_arguments)]
 fn escape(
     ctx: &Ctx<'_>,
@@ -293,6 +317,7 @@ fn escape(
     lock: &Lock,
     map: &PlacementMap,
     committed: &RenderedBundle,
+    kept_base: &Lock,
     theirs: &RenderedBundle,
     theirs_commit: [u8; 32],
 ) -> Result<PullSkill, ClientError> {
@@ -301,7 +326,7 @@ fn escape(
     let result_commit = commit_result(ctx, &store, theirs_commit, committed, MERGE_ESCAPE_MESSAGE)?;
     let drop = drop_diff(theirs, committed);
 
-    place_draft_on_current(
+    place_keeping_base(
         ctx,
         skill_id,
         sp,
@@ -309,7 +334,7 @@ fn escape(
         lock,
         map,
         committed,
-        theirs,
+        kept_base,
         theirs_commit,
     )?;
     // The escape RESOLVES — clear the block last, once the placements have settled (idempotent: a
@@ -319,7 +344,7 @@ fn escape(
     Ok(merged_row(
         &lock.name,
         sync,
-        super::parse_hex32(&lock.base_commit).unwrap_or([0u8; 32]),
+        super::parse_hex32(&kept_base.base_commit).unwrap_or([0u8; 32]),
         theirs_commit,
         result_commit,
         &merged_digest_hex,
@@ -417,6 +442,10 @@ fn no_base(
 ///   is dropped, never the markers published.
 /// - **present and edited** ⇒ those bytes ARE the hand resolution; commit them.
 ///
+/// Whichever of the three it is, the RECORDED BASE goes back to the conflict's own
+/// ([`pre_conflict_lock`]): this exit takes nothing from the team, so nothing may claim it did. See
+/// [`escape`].
+///
 /// A folder that is present but CANNOT BE READ as a bundle is none of the three, and it is
 /// refused. The scanner rejects a tree holding a symlink, a non-regular file, a non-UTF-8 name, or
 /// nothing at all — every one of them a plausible state for a person mid-hand-merge — and this arm
@@ -450,6 +479,7 @@ pub(crate) fn escape_recorded(
     // Read the copies BEFORE the escape converges them, so the row can say what it is about to
     // overwrite (see [`collapsed_copies`]).
     let collapsed = collapsed_copies(ctx, sp, lock, map);
+    let kept_base = pre_conflict_lock(&store, lock, cs)?;
     let mut row = escape(
         ctx,
         skill_id,
@@ -458,6 +488,7 @@ pub(crate) fn escape_recorded(
         lock,
         map,
         &committed,
+        &kept_base,
         &theirs,
         theirs_commit,
     )?;
@@ -465,6 +496,31 @@ pub(crate) fn escape_recorded(
         row.note = Some(collapsed_note(ctx, &lock.name, &saved));
     }
     Ok(row)
+}
+
+/// The lock as it stood BEFORE this conflict was recorded — the base `--keep-mine` must leave standing.
+///
+/// Recording a conflict advances the lock to the team's version ([`settle_conflict_docs`]), which is what
+/// makes `--reset` mean "take theirs". `--keep-mine` means the opposite, so it has to put the pointer
+/// back, and the conflict record is where the pre-conflict `(commit, digest)` was written down.
+///
+/// The file list is rebuilt from the base's own rendered tree. When that base no longer renders — the
+/// exact state the NoBase conflict records, and the reason it never had a three-way merge to offer — the
+/// POINTER is still rewound and the prior file list carried: nothing in the client makes a decision from
+/// `lock.files` (the work tree is classified against `bundle_digest` alone), and the next successful sync
+/// rewrites the lock whole. Refusing here instead would break the one guarantee this exit owes — that it
+/// always works, offline, from any state.
+fn pre_conflict_lock(store: &Store, lock: &Lock, cs: &ConflictState) -> Result<Lock, ClientError> {
+    let base_commit = super::parse_hex32(&cs.base_commit)?;
+    let base_digest = super::parse_hex32(&cs.base_digest)?;
+    Ok(match store.render_verified(base_commit, base_digest) {
+        Ok(base) => lock_from_bundle(lock, base_commit, &base),
+        Err(_) => Lock {
+            base_commit: cs.base_commit.clone(),
+            bundle_digest: cs.base_digest.clone(),
+            ..lock.clone()
+        },
+    })
 }
 
 /// One copy this escape is about to overwrite, as the disclosure names it: the folder a person
@@ -659,7 +715,7 @@ pub(crate) fn recover_resolution(
 /// - a sweep would re-settle the conflict's docs, putting `work_hash` back to the pre-exit draft
 ///   while the folders hold the resolution — a document naming bytes that exist nowhere — and
 ///   re-disclose a block on a bundle nothing is blocking;
-/// - `--onto-current` would see the (already removed) workbench folder as "untouched" and commit
+/// - `--keep-mine` would see the (already removed) workbench folder as "untouched" and commit
 ///   the ORIGINAL DRAFT over the resolution the placements already hold — the exact loss the
 ///   record-before-copy removal order exists to prevent, arriving from the other side.
 ///
@@ -677,7 +733,7 @@ pub(crate) fn heal_landed_resolution(
     map: &PlacementMap,
     cs: &ConflictState,
 ) -> Result<bool, ClientError> {
-    if !resolution_landed(sync, map, cs) {
+    if !resolution_landed(sync, lock, map, cs) {
         return Ok(false);
     }
     clear_conflict(ctx, sp, lock)?;
@@ -688,22 +744,35 @@ pub(crate) fn heal_landed_resolution(
 /// record is a leftover from a crash between an exit's materialize and its
 /// [`clear_conflict`], not a live block.
 ///
-/// Read from the two durable documents, which say different things in the two states:
+/// The question is answered from the durable documents alone, and the FIRST thing asked is whether
+/// they still carry the block's OWN signature — the pair [`settle_conflict_docs`] writes and
+/// nothing else does:
 ///
-/// - while BLOCKED, the conflict wrote no placement, so `map.json` is exactly what it was before:
-///   `applied_commit` still names the version realized on disk BEFORE the team's new one, and
-///   `materialized_sha` still names the last bytes topos itself wrote — which is never the
-///   author's diverged draft that `sync.work_hash` names (a divergence is precisely bytes topos
-///   did not write);
-/// - once an exit's materialize landed, both were rewritten together: `applied_commit` == the
-///   conflict's `current_commit` (the escape re-parents on it; a reset restores a base that a
-///   conflict already advanced to it) and `materialized_sha` == the bytes now on disk, which is
-///   what `sync.work_hash` names.
+/// - `lock.base_commit` == the conflict's `current_commit` (a block records the team's version as
+///   the base — which is exactly what makes `--reset` mean "take theirs"), AND
+/// - `sync.work_hash` != `lock.bundle_digest` (the folders hold the author's own bytes, not that
+///   base — which is what "diverged" means).
 ///
-/// So the two agreements together mean "topos wrote what the folders hold, at the conflict's own
-/// current" — reachable only after an exit converged the placements.
-fn resolution_landed(sync: &SyncState, map: &PlacementMap, cs: &ConflictState) -> bool {
-    map.applied_commit == cs.current_commit && map.materialized_sha == sync.work_hash
+/// Both exits break that pair, in their own direction: `--keep-mine` puts the base back to the
+/// conflict's `base_commit` (it takes nothing from the team), and a reset restores the base BYTES,
+/// so `work_hash` becomes the base digest. A live block is the only state where both hold.
+///
+/// The map agreement is then the second, corroborating half — `applied_commit` == the conflict's
+/// `current_commit` and `materialized_sha` == what `sync.work_hash` names, i.e. "topos itself wrote
+/// what the folders hold, at the conflict's own current". It used to carry the whole test on the
+/// argument that topos never writes the author's diverged draft; `--keep-mine` is precisely the
+/// command that does, so the block's own signature has to lead.
+fn resolution_landed(
+    sync: &SyncState,
+    lock: &Lock,
+    map: &PlacementMap,
+    cs: &ConflictState,
+) -> bool {
+    let still_blocked =
+        lock.base_commit == cs.current_commit && sync.work_hash != lock.bundle_digest;
+    !still_blocked
+        && map.applied_commit == cs.current_commit
+        && map.materialized_sha == sync.work_hash
 }
 
 // --------------------------------------------------------------------------------------------------
@@ -1047,6 +1116,63 @@ fn place_draft_on_current(
             bundle: merged,
             next_map: next_map(&map, theirs_commit, &merged_digest_hex),
             next_lock: &next_lock,
+            next_sync: &next_sync,
+            sp,
+            snapshot: Some(&|s: &ScannedBundle| snapshot_draft(ctx, sp, lock, s).map(|_| ())),
+            takeover: None,
+            self_ignore: ctx.layout.is_project_scope(),
+            expected: None,
+            project_root: ctx.layout.project_root(),
+        },
+    )?;
+    Ok(())
+}
+
+/// Place `committed`'s bytes on every managed placement WITHOUT advancing the recorded base — the
+/// escape's write (see [`escape`] for why the base must not move).
+///
+/// The docs it leaves are the difference between "I kept mine" and the silent revert this replaced:
+///
+/// - `lock` ⇒ `kept_base` — the pre-conflict base, file list and all: the version this machine's bytes
+///   descend from, unchanged by a decision that took nothing from the team;
+/// - `sync` ⇒ [`super::sync_engine::kept_sync`] on that same commit: `base_commit` put back,
+///   `work_hash` = what the folders now hold, `applied` dropped below `observed` (the served version was
+///   NOT applied), `held` cleared so the next update may merge.
+///
+/// The MAP still records `applied_commit = theirs`, and that is deliberate: it is not a claim about the
+/// base but the crash-recovery signal [`resolution_landed`] reads. Together with
+/// `materialized_sha == sync.work_hash` it says "an exit's placement write already landed", which is what
+/// stops a re-run from committing the ORIGINAL DRAFT over a hand resolution when the clear was
+/// interrupted between the write and the record's removal.
+///
+/// Reuses the crash-safe dir-swap; the auto-update/harness hook is NOT fired (materialize only writes
+/// bytes).
+#[allow(clippy::too_many_arguments)]
+fn place_keeping_base(
+    ctx: &Ctx<'_>,
+    skill_id: &str,
+    sp: &SkillPaths,
+    sync: &SyncState,
+    lock: &Lock,
+    map: &PlacementMap,
+    committed: &RenderedBundle,
+    kept_base: &Lock,
+    theirs_commit: [u8; 32],
+) -> Result<(), ClientError> {
+    let committed_digest_hex = to_hex(&committed.bundle_digest);
+    let next_sync =
+        super::sync_engine::kept_sync(sync, &kept_base.base_commit, &committed_digest_hex);
+    let plan = placement::plan_for_skill(ctx, skill_id, lock, map);
+    let map = placement::reconcile_map(map, &plan);
+    let managed = placement::managed_indices(&map, &plan);
+    materialize::materialize(
+        ctx.fs,
+        &MaterializeReq {
+            skill_id,
+            target_indices: &managed,
+            bundle: committed,
+            next_map: next_map(&map, theirs_commit, &committed_digest_hex),
+            next_lock: kept_base,
             next_sync: &next_sync,
             sp,
             snapshot: Some(&|s: &ScannedBundle| snapshot_draft(ctx, sp, lock, s).map(|_| ())),

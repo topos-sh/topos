@@ -339,6 +339,11 @@ pub(crate) fn publish_describe(
             skill: skill_name.clone(),
         });
     }
+    // Its neighbour: a copy that does not include the served `current` (the ordinary behind state, and
+    // where `--keep-mine` deliberately leaves a person). Shipping from here would land bytes with the
+    // team's change nowhere inside. The DESCRIBE refuses too, and refuses FIRST — a preview of a publish
+    // the apply will refuse is two steps to reach one answer.
+    behind_guard(ctx, &sp, &skill_name)?;
 
     // Scan the live draft ONCE → the byte-exact digest the apply would ship; the optional `@<digest>` pin
     // gates it here too (refuse on mismatch), so a describe never previews bytes the apply would refuse.
@@ -957,6 +962,9 @@ fn enrolled_publish(
             skill: skill_name.to_owned(),
         });
     }
+    // Its neighbour: this copy does not include the served `current`. Refused here, before the
+    // transport is built and before a byte of the draft is scanned — the same answer the describe gave.
+    behind_guard(ctx, &sp, skill_name)?;
 
     let legacy_transport;
     let transport: &dyn crate::plane::ContributeSource = match &lane {
@@ -1406,6 +1414,38 @@ fn is_full_digest(s: &str) -> bool {
     s.len() == 64 && s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
 
+/// Whether this copy does NOT include the served `current`: the served generation has not been
+/// materialized here, so anything published from these bytes would land with the team's newer version
+/// nowhere inside it.
+///
+/// A GENESIS bundle is exempt by construction — its baseline is laid with `applied == observed`, so a
+/// never-published local skill's first publish never reads as behind.
+fn is_behind(sync: &SyncState) -> bool {
+    sync.applied != sync.observed
+}
+
+/// The behind guard both publish preflights run, beside the `conflict.json` one.
+///
+/// It is the SAME precondition the op builder has always enforced ([`build_publish_op`]); hoisting it to
+/// the preflight is what lets the DESCRIBE answer it too — previewing a publish the apply would refuse is
+/// two steps to reach one answer — and what gives `--keep-mine` its promise: that exit leaves the
+/// recorded base behind on purpose, so the publish it would otherwise unlock (this machine's bytes as the
+/// new `current`, the team's change nowhere inside) stays refused until `topos update` has actually
+/// merged. The merge is what makes the publish safe; there is no other route, and no route that reverts.
+///
+/// # Errors
+/// [`ClientError::PublishBehind`] naming the skill; [`ClientError::Corrupt`] when `sync.json` is missing.
+fn behind_guard(ctx: &Ctx<'_>, sp: &sidecar::SkillPaths, skill: &str) -> Result<(), ClientError> {
+    let sync: SyncState = doc::read_doc(ctx.fs, &sp.sync)?
+        .ok_or_else(|| ClientError::Corrupt("missing sync state".to_owned()))?;
+    if is_behind(&sync) {
+        return Err(ClientError::PublishBehind {
+            skill: skill.to_owned(),
+        });
+    }
+    Ok(())
+}
+
 /// Build the fresh op from the already-scanned draft (`scanned` / `digest` were computed + gated in
 /// `enrolled_publish`): precondition the state, compute the byte-identical `(commit_id, bundle_digest)`,
 /// commit the candidate into the local store (renderable for a replay + local history), and assemble the
@@ -1439,12 +1479,13 @@ fn build_publish_op(
         .ok_or_else(|| ClientError::Corrupt("missing sync state".to_owned()))?;
 
     // Be current before publishing: a behind state (a newer `current` not yet applied) would publish on a
-    // stale base and could clobber the unapplied version — surface it as a locally-detected CONFLICT
-    // (pull to rebase), never a confusing server DENIED.
-    if sync.applied != sync.observed {
-        return Err(ClientError::Conflict {
+    // stale base and could clobber the unapplied version — surface it as a locally-detected refusal
+    // (update to rebase), never a confusing server DENIED. The preflight already answered this for both
+    // entry points; the check stands here as the op builder's own precondition, so a future caller that
+    // reaches it another way still cannot mint a reverting op.
+    if is_behind(&sync) {
+        return Err(ClientError::PublishBehind {
             skill: lock.name.clone(),
-            current: Some(sync.observed),
         });
     }
 

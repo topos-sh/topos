@@ -177,12 +177,15 @@ fn safety(code: &ActionCode, argv: &[String], subject: Subject) -> Safety {
 }
 
 /// The per-shape refinement for `RESOLVE_DIVERGED_DRAFT` — WHICH act resolves the divergence is the
-/// argv's story. The `--onto-current` escape commits YOUR bytes onto current and clears a recorded
+/// argv's story. The `--keep-mine` escape commits YOUR bytes onto current and clears a recorded
 /// conflict (a local resolution — no plane call in the blocked state this action is emitted for); a
 /// bare `--reset` only DESCRIBES the loss-led discard (its own describe carries the `--yes`); the
 /// plain targeted update runs the three-way merge.
 fn resolve_diverged_draft(argv: &[String]) -> Safety {
-    if has_flag(argv, "--onto-current") {
+    // Both spellings, because an argv is whatever was TYPED: `--onto-current` is still a working
+    // (hidden) alias, and a command classified as "the plain merge" when it is in fact the escape
+    // would carry the wrong caution.
+    if has_flag(argv, "--keep-mine") || has_flag(argv, "--onto-current") {
         return Safety::new(
             Some(true),
             Some(false),
@@ -541,10 +544,10 @@ mod tests {
 
     #[test]
     fn resolve_diverged_draft_refines_by_the_resolution_shape() {
-        // The `--onto-current` escape resolves a recorded conflict locally — your bytes win.
+        // The `--keep-mine` escape resolves a recorded conflict locally — your bytes win.
         let escape = next_action(
             ActionCode::ResolveDivergedDraft,
-            argv(&["topos", "update", "deploy", "--onto-current", "--json"]),
+            argv(&["topos", "update", "deploy", "--keep-mine", "--json"]),
         );
         assert_eq!(
             (escape.mutates, escape.needs_network),

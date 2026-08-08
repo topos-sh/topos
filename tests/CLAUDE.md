@@ -43,10 +43,12 @@ what only a cross-crate composed run can prove.
   edited by a second person, republished over the SAME lines, then merged by an ordinary `topos
   update`. Asserts the property — no folder an agent reads holds a marker, every placement still
   holds that person's own bytes, the marked-up copy is in `~/.topos/conflicts/<name>/` carrying
-  both sides, `publish` refused — and drives all three exits end to end (`--onto-current` over an
+  both sides, `publish` refused — and drives all three exits end to end (`--keep-mine` over an
   untouched workbench, over an edited one, and `--reset`), each clearing the block and deleting the
-  workbench. Binary-driven too: the placement dirs and the workbench path resolve against the
-  environment.
+  workbench. Then the second property: `--keep-mine` is LOCAL, so `publish` stays refused (*your
+  version is behind*) until an ordinary `topos update` has merged the team's version in — clean
+  where the person reconciled the contested line, back to the workbench where they did not.
+  Binary-driven too: the placement dirs and the workbench path resolve against the environment.
 - **`tests/hardening_e2e.rs`** — pinned references delivering exactly their version and holding
   across sweeps; `publish --to` refusing nonexistent channels without minting one.
 - **`tests/uniform_e2e.rs`** — the NON-ORACLE discipline over real HTTP: byte-identical uniform

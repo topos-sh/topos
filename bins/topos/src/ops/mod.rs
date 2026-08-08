@@ -7,7 +7,7 @@
 //! - [`sync_engine`] — the per-skill `checkForUpdates → plan → apply` sync machine over the kernel's
 //!   four-state transition. `pull` is its scope dispatch; the `follow <skill>` path drives it too.
 //! - [`merge_resolve`] — the author-side resolution of a diverged draft (three-way merge / conflict
-//!   materialization / the `--onto-current` escape), reachable only through the engine's witness token.
+//!   materialization / the `--keep-mine` escape), reachable only through the engine's witness token.
 //! - [`contribute`] — the device-signed write plumbing `publish`/`review`/`revert` share: the fresh-current
 //!   read, identity re-derivation, the op-WAL replay, and the all-outcome receipt mapping.
 //! - [`crate::materialize`] (at the crate root, beside the other placement seams) — the engine's

@@ -646,23 +646,26 @@ fn an_io_error_is_redacted_on_the_surface_and_detailed_in_the_log() {
 }
 
 #[test]
-fn update_onto_current_flag_shapes_are_usage_errors() {
-    let home = scratch("ontousage");
+fn update_keep_mine_flag_shapes_are_usage_errors() {
+    let home = scratch("keepmineusage");
 
-    // Missing <skill> target → the runtime usage error (INVALID_ARGUMENT, exit 1). `--onto-current` is a
-    // hidden flag on `update` (reached here through the `pull` alias the field's armed hooks still run).
-    let out = run_raw(&home, &["pull", "--onto-current", "--json"], false);
+    // Missing <skill> target → the runtime usage error (INVALID_ARGUMENT, exit 1). Reached here
+    // through the `pull` alias the field's armed hooks still run.
+    let out = run_raw(&home, &["pull", "--keep-mine", "--json"], false);
     assert!(!out.status.success());
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("JSON stdout");
     assert_eq!(v["error"]["code"], "INVALID_ARGUMENT");
 
     // Combined with @<hash> → the runtime usage error rides the envelope as INVALID_ARGUMENT.
     let target = format!("docs@{}", "ab".repeat(32));
-    let out = run_raw(
-        &home,
-        &["update", &target, "--onto-current", "--json"],
-        false,
-    );
+    let out = run_raw(&home, &["update", &target, "--keep-mine", "--json"], false);
+    assert!(!out.status.success());
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("JSON stdout");
+    assert_eq!(v["error"]["code"], "INVALID_ARGUMENT");
+
+    // The prior spelling is a HIDDEN alias of the same flag, so it reaches the same refusals —
+    // anything already scripted against it keeps working, and keeps failing the same way.
+    let out = run_raw(&home, &["pull", "--onto-current", "--json"], false);
     assert!(!out.status.success());
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("JSON stdout");
     assert_eq!(v["error"]["code"], "INVALID_ARGUMENT");

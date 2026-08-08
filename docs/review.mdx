@@ -96,13 +96,19 @@ blocked until you take one:
 
 ```bash
 topos diff customer-lookup
-topos update customer-lookup --onto-current
+topos update customer-lookup --keep-mine
 topos update customer-lookup --reset --yes
 ```
 
 See your side; commit the merge you made in that folder — or, by leaving the folder alone, keep
 **your** version and skip the merge; or take the **team's** version instead, dropping yours. Either
 way out deletes the folder.
+
+Keeping your version is a decision about **your** machine, so it changes nothing for the team: your
+files stay exactly as they are, and publishing that skill stays blocked — *your version is behind* —
+until a plain `topos update customer-lookup` has merged the team's version in. That merge takes
+their changes wherever the two of you did not collide, and puts anything still contested back in the
+folder. Nothing you publish afterwards can drop what they wrote.
 
 ## When two copies disagree
 

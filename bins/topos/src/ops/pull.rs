@@ -63,9 +63,10 @@ pub(crate) enum PullScope {
 pub(crate) enum TargetMode {
     /// `topos pull <skill>` — accept a pending update / resume a held skill / resolve a divergence (no `@hash`).
     AcceptPending,
-    /// `topos pull <skill> --onto-current` — the disclosed escape: commit MY bytes on top of `current`,
-    /// dropping the merge (a 2-way diff of what is dropped is surfaced). Resolves a divergence without merging.
-    OntoCurrent,
+    /// `topos pull <skill> --keep-mine` — the disclosed escape: commit MY bytes as this machine's own
+    /// version (a 2-way diff of what is dropped is surfaced). Resolves a divergence without merging and
+    /// WITHOUT advancing the recorded base, so the person stays behind the team's version.
+    KeepMine,
     /// `topos pull <skill>@<ref>` — install an older version's bytes locally (a deliberate go-back).
     /// The ref is the full 64-hex id or a short prefix, resolved against the skill's recorded history
     /// inside [`sync_engine::go_back`] (where that history is already loaded and validated).
@@ -328,14 +329,14 @@ pub(crate) fn pull(ctx: &Ctx<'_>, scope: PullScope) -> Result<PullOutcome, Clien
             let (layout, skill_id, _lock) =
                 super::resolve_skill_in_scope(ctx, &name, workspace.as_deref(), store)?;
             let sctx = ctx_with_layout(ctx, &layout);
-            // The go-back and the `--onto-current` escape are documented plane-independent (the escape is
+            // The go-back and the `--keep-mine` escape are documented plane-independent (the escape is
             // the offline no-deadlock guarantee) — neither spends a network call on the proposals count.
-            let plane_independent = matches!(mode, TargetMode::GoBack(_) | TargetMode::OntoCurrent);
+            let plane_independent = matches!(mode, TargetMode::GoBack(_) | TargetMode::KeepMine);
             let mut row = match mode {
                 TargetMode::GoBack(vref) => sync_engine::go_back(&sctx, &skill_id, &vref)?,
-                TargetMode::AcceptPending | TargetMode::OntoCurrent => {
+                TargetMode::AcceptPending | TargetMode::KeepMine => {
                     let inv = match mode {
-                        TargetMode::OntoCurrent => sync_engine::Invocation::Escape,
+                        TargetMode::KeepMine => sync_engine::Invocation::Escape,
                         _ => sync_engine::Invocation::Accept,
                     };
                     match ctx

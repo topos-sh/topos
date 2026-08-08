@@ -14,9 +14,15 @@
 //! The conflict writes NOTHING into any placement — every one keeps the person's own bytes, byte for
 //! byte — and the marked-up copy (diff3 markers carrying both sides) goes to the scope's own
 //! workbench, `~/.topos/conflicts/<name>/`, which no harness reads and `publish` cannot ship. Then
-//! each of the three exits is driven end to end: `--onto-current` over an UNTOUCHED workbench (keep
-//! my version), `--onto-current` over an EDITED one (commit the hand merge), and `--reset` (take the
+//! each of the three exits is driven end to end: `--keep-mine` over an UNTOUCHED workbench (keep
+//! my version), `--keep-mine` over an EDITED one (commit the hand merge), and `--reset` (take the
 //! team's). Each clears the block and deletes the workbench.
+//!
+//! **And the second property: `--keep-mine` cannot revert the team.** It keeps this person's files
+//! and leaves the recorded base where it stood, so `publish` is refused until an ordinary
+//! `topos update` has merged the team's version in. Both halves of that are driven here: the
+//! refusal, and the update that lifts it — clean where the person reconciled the contested line,
+//! straight back to the workbench where they did not.
 //!
 //! Like the MCP suite, this one drives the REAL CLI BINARY as a subprocess over a fake `$HOME` — the
 //! placement dirs, the workbench path and the two exits all resolve against the environment, so only
@@ -34,9 +40,9 @@ use topos::test_support::SessionInstall;
 
 // ── the three bundles, one per exit ─────────────────────────────────────────────────────────────
 
-/// Resolved by leaving the workbench ALONE — `--onto-current` keeps this person's version.
+/// Resolved by leaving the workbench ALONE — `--keep-mine` keeps this person's version.
 const KEEP: &str = "deploy-guide";
-/// Resolved by EDITING the workbench — `--onto-current` commits that hand merge.
+/// Resolved by EDITING the workbench — `--keep-mine` commits that hand merge.
 const HAND: &str = "release-runbook";
 /// Resolved by `--reset` — the team's version lands and this person's edits are dropped.
 const TAKE: &str = "oncall-rota";
@@ -58,13 +64,28 @@ fn theirs(name: &str) -> String {
     format!("# {name}\n\nsteps:\n1. check the region and the account\n2. run the deploy\n")
 }
 
-/// The by-hand merge a person types INTO the workbench (both sides reconciled).
+/// The by-hand merge a person types INTO the workbench: the team's contested line taken as it
+/// stands, plus a step of this person's own. Reconciling the contested line is what makes the next
+/// `topos update` merge CLEANLY — which is the only route from `--keep-mine` back to publishing.
 fn hand_merge(name: &str) -> String {
-    format!("# {name}\n\nsteps:\n1. check the region and the account, twice\n2. run the deploy\n")
+    format!(
+        "# {name}\n\nsteps:\n1. check the region and the account\n2. run the deploy\n3. tail the \
+         logs\n"
+    )
 }
 
 /// The diff3 marker a folder an agent reads must never contain.
 const MARKER: &str = "<<<<<<<";
+
+/// Whether these bytes hold a real conflict marker — a LINE that begins with `<<<<<<<`, which is the
+/// only shape diff3 ever writes. Prose that merely mentions the characters (the built-in `topos`
+/// skill's own reference documents `--keep-mine` by naming them) is not a corrupted instruction file,
+/// and a substring search that called it one would fail this suite on a documentation edit.
+fn holds_a_marker(bytes: &[u8]) -> bool {
+    String::from_utf8_lossy(bytes)
+        .lines()
+        .any(|l| l.starts_with(MARKER))
+}
 
 // ── the installations ───────────────────────────────────────────────────────────────────────────
 
@@ -201,7 +222,7 @@ fn marked_up_files(dir: &Path) -> Vec<PathBuf> {
             if path.is_dir() {
                 stack.push(path);
             } else if std::fs::read(&path)
-                .map(|b| String::from_utf8_lossy(&b).contains(MARKER))
+                .map(|b| holds_a_marker(&b))
                 .unwrap_or(false)
             {
                 out.push(path);
@@ -442,10 +463,10 @@ fn a_merge_conflict_never_reaches_a_folder_an_agent_reads() {
         );
     }
 
-    // ── ASSERTION 5: `--onto-current` over an UNTOUCHED workbench keeps this person's version ───
+    // ── ASSERTION 5: `--keep-mine` over an UNTOUCHED workbench keeps this person's version ──────
     let kept = dev
-        .run(&["update", "-g", KEEP, "--onto-current", "--json"])
-        .data("--onto-current with the workbench untouched");
+        .run(&["update", "-g", KEEP, "--keep-mine", "--json"])
+        .data("--keep-mine with the workbench untouched");
     assert_eq!(row(&kept, KEEP)["action"], "merged", "{kept}");
     for dir in &record(&placed, KEEP).placements {
         assert_eq!(
@@ -463,16 +484,67 @@ fn a_merge_conflict_never_reaches_a_folder_an_agent_reads() {
         !record(&placed, KEEP).conflict_json().exists(),
         "the exit clears the block"
     );
-    // The block really is gone: the publish that was refused a moment ago now lands.
-    dev.run(&["publish", KEEP, "--yes", "-m", "mine", "--json"])
-        .data("publish after the escape");
+
+    // ── ASSERTION 5b: the decision is LOCAL — the person is behind, and publish says so ─────────
+    // Keeping your version takes nothing from the team, so the recorded base does not advance and
+    // publishing these bytes as the new `current` — which would erase the team's change with
+    // nothing said — is refused, naming the one command that fixes it.
+    let behind = dev
+        .run(&["publish", KEEP, "--yes", "--json"])
+        .refusal("publish after keeping mine");
+    assert_eq!(behind["error"]["code"], "CONFLICT", "{behind}");
+    assert_eq!(
+        behind["error"]["context"]["message"],
+        format!("{KEEP}: your version is behind."),
+        "{behind}"
+    );
+    // The describe refuses identically — one answer, whichever half of the two-phase asked.
+    let described = dev
+        .run(&["publish", KEEP, "--json"])
+        .refusal("the describe answers the same");
+    assert_eq!(described["error"]["code"], "CONFLICT", "{described}");
+    // And the read surfaces say it out loud: behind, not "up to date with local edits".
+    let listed = dev
+        .run(&["list", "-g", "--json"])
+        .data("list after keep-mine");
+    let listed_row = listed["scopes"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .flat_map(|s| s["rows"].as_array().into_iter().flatten())
+        .find(|r| r["skill"] == KEEP)
+        .unwrap_or_else(|| panic!("no {KEEP} row in {listed}"));
+    assert_eq!(listed_row["status"], "behind", "{listed}");
+    assert_eq!(
+        listed_row["draft"], false,
+        "topos wrote these bytes itself — they are not an unsaved edit: {listed}"
+    );
+
+    // ── ASSERTION 5c: the way forward is the ordinary update, and it cannot revert anyone ───────
+    // This person kept a line the team also changed, so the merge has the same decision to make and
+    // it goes straight back to the workbench — exactly what the receipt promised.
+    let remerged = dev
+        .run(&["update", "-g", KEEP, "--json"])
+        .data("the update after keeping mine");
+    assert_eq!(row(&remerged, KEEP)["action"], "conflicted", "{remerged}");
+    assert!(
+        dev.topos_home().join("conflicts").join(KEEP).is_dir(),
+        "a still-contested line comes back to the workbench"
+    );
+    for dir in &record(&placed, KEEP).placements {
+        assert_eq!(
+            placed_text(dir),
+            mine(KEEP),
+            "and the agent folders still hold this person's version"
+        );
+    }
 
     // ── ASSERTION 6: an EDITED workbench is committed as the hand resolution ────────────────────
     let workbench = dev.topos_home().join("conflicts").join(HAND);
     std::fs::write(workbench.join("SKILL.md"), hand_merge(HAND)).expect("resolve by hand");
     let resolved = dev
-        .run(&["update", "-g", HAND, "--onto-current", "--json"])
-        .data("--onto-current over an edited workbench");
+        .run(&["update", "-g", HAND, "--keep-mine", "--json"])
+        .data("--keep-mine over an edited workbench");
     assert_eq!(row(&resolved, HAND)["action"], "merged", "{resolved}");
     for dir in &record(&placed, HAND).placements {
         assert_eq!(
@@ -487,6 +559,33 @@ fn a_merge_conflict_never_reaches_a_folder_an_agent_reads() {
         !record(&placed, HAND).conflict_json().exists(),
         "the exit clears the block"
     );
+
+    // ── ASSERTION 6b: a hand merge reaches the team through the update, never around it ─────────
+    // Publishing is refused here too — the base has not moved yet — and the ordinary update is what
+    // moves it: this resolution took the team's contested line, so the merge is CLEAN, and the
+    // publish that follows carries both sides.
+    let refused = dev
+        .run(&["publish", HAND, "--yes", "--json"])
+        .refusal("publish before the merge");
+    assert_eq!(refused["error"]["code"], "CONFLICT", "{refused}");
+    let settled = dev
+        .run(&["update", "-g", HAND, "--json"])
+        .data("the update after the hand merge");
+    assert_eq!(row(&settled, HAND)["action"], "merged", "{settled}");
+    assert_eq!(row(&settled, HAND)["merge"]["clean"], true, "{settled}");
+    assert!(
+        !dev.topos_home().join("conflicts").join(HAND).exists(),
+        "a clean merge leaves no workbench"
+    );
+    for dir in &record(&placed, HAND).placements {
+        assert_eq!(
+            placed_text(dir),
+            hand_merge(HAND),
+            "the merged bytes are the person's reconciliation"
+        );
+    }
+    dev.run(&["publish", HAND, "--yes", "-m", "merged", "--json"])
+        .data("publish after the merge");
 
     // ── ASSERTION 7: `--reset` lands the team's bytes ───────────────────────────────────────────
     dev.run(&["update", "-g", TAKE, "--reset", "--yes", "--json"])
@@ -508,24 +607,21 @@ fn a_merge_conflict_never_reaches_a_folder_an_agent_reads() {
         "the exit clears the block"
     );
 
-    // ── the aftermath: nothing re-blocks, nothing re-renders a workbench, no marker anywhere ────
+    // ── the aftermath: a settled bundle stays settled, and no marker ever reached an agent ──────
+    // KEEP is the exception, and deliberately so: that person is still holding a line the team also
+    // changed, so its decision is still open — and its workbench is the only one left standing.
     let after = dev.run(&["update", "--json"]).data("the settling sweep");
-    for name in BUNDLES {
+    for name in [HAND, TAKE] {
         assert_ne!(
             row(&after, name)["action"],
             "conflicted",
             "{name} is resolved and stays resolved: {after}"
         );
+        assert!(
+            !dev.topos_home().join("conflicts").join(name).exists(),
+            "{name}: its workbench is gone"
+        );
     }
-    assert!(
-        !dev.topos_home().join("conflicts").exists()
-            || std::fs::read_dir(dev.topos_home().join("conflicts"))
-                .expect("the conflicts dir")
-                .flatten()
-                .next()
-                .is_none(),
-        "every workbench is gone"
-    );
     assert_eq!(
         marked_up_files(&dev.home()),
         Vec::<PathBuf>::new(),

@@ -267,7 +267,7 @@ pub struct MergeReport {
     pub placements: Vec<String>,
     /// Where the marked-up copy of BOTH versions was written: the scope's own conflict workbench,
     /// never a folder an agent reads. A hand resolution left there is what `update <skill>
-    /// --onto-current` commits. Display path (`~`-abbreviated). Absent for a clean merge.
+    /// --keep-mine` commits. Display path (`~`-abbreviated). Absent for a clean merge.
     /// **INFERRED** (additive).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub copy_dir: Option<String>,
@@ -1986,7 +1986,7 @@ pub enum StatusItemState {
     LocalEdits,
     /// A merge is undecided here: the team published a version that changes lines this person also
     /// changed, so the folders still hold THEIR version, publishing is refused, and the two exits
-    /// (`update <name> --onto-current` / `--reset`) are the only ways forward. The row's
+    /// (`update <name> --keep-mine` / `--reset`) are the only ways forward. The row's
     /// version/digest name what the folders hold, never the team's.
     Blocked,
     /// An exclude line withholds this name here (the row's `source` recorded it).
