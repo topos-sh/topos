@@ -90,9 +90,14 @@ narrows within that scope, `topos update --force` re-creates a managed folder th
 damaged (edits saved first; a deleted folder comes back on an ordinary update). Every receipt names
 the scope it acted on. The session-start trigger runs
 `topos update --quiet`, which always covers BOTH scopes, so nothing goes stale while the session
-works in one folder. Updates never destroy drafts — they merge around them; a conflict freezes the
-copy with a marked way out, and a settled draft is copied onto the skill's other copies in the
-same scope. One thing never moves on its own: a pin. A git row IS kept current by the quiet sweep, on its own
+works in one folder. Updates never destroy drafts — they merge around them. Where you and the team
+changed the same lines the update stops: every agent folder keeps your version untouched (never
+markers), and a marked-up copy of both sides goes to a folder of Topos's own, named on the receipt.
+Finish it with `topos update <name> --keep-mine` — edit that folder first to commit your merge, or
+leave it alone to keep your wording on the contested lines and take the team's other changes — or
+`topos update <name> --reset` to take the team's version. Publishing is blocked until you pick one.
+A settled draft is copied onto the skill's other copies in the same scope. One thing never moves on
+its own: a pin. A git row IS kept current by the quiet sweep, on its own
 much slower rhythm (a few times a day, not every session) — it asks what commit the repo is on and
 downloads only on a real change, receipted with the commit it moved to. `topos update` by hand
 checks every source immediately; `topos status` shows when each was last checked, and `topos list`

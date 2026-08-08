@@ -200,7 +200,8 @@ untouched by the conflict — and `copy_dir`, the one folder holding a marked-up
 versions. Never look for markers in a placement; there are none. Resolve by editing that copy and
 running `topos update <skill> --keep-mine`, which commits it (leaving the folder alone keeps your
 wording on the contested lines), or `topos update <skill> --reset --yes` to take the team's version
-instead. Either one clears the block and deletes the folder.
+instead. Either one clears the block. The folder goes with it, except where a reset finds it
+edited — a reset never reads it, so it is left in place and named on the receipt.
 
 The `merged` row's `merge.resolved` says which of the two exits ran, because they say different
 things about whose wording landed. `keep_mine` — the folder was left alone — is `git merge -X ours`:

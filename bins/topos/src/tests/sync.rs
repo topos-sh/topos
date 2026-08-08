@@ -714,6 +714,66 @@ fn a_conflict_marks_up_a_sidecar_copy_and_leaves_every_agent_folder_alone() {
     assert_eq!(s.base_commit, to_hex(&v1.id));
 }
 
+/// The blocked row promises the reader that a named folder still holds their version, so it may
+/// only name a folder it LOOKED AT. The placement map is what was recorded when the block was
+/// raised; a folder deleted since is still in it, and reading the promise off the map alone keeps
+/// asserting a directory that is gone. The row already owns the words for holding nothing, and
+/// both of its exits put the bytes back.
+#[test]
+fn a_re_disclosed_block_never_names_a_folder_that_is_no_longer_there() {
+    let rig = Rig::new("gone");
+    let (id, _name, genesis) = rig.adopt(BASE);
+    let edited: &[(&str, FileMode, &[u8])] = &[
+        ("SKILL.md", FileMode::Regular, b"# my local edit\n"),
+        ("run.sh", FileMode::Executable, b"#!/bin/sh\necho v0\n"),
+    ];
+    write_tree(&rig.placement(), edited);
+
+    let v1 = mk_version(&[genesis], V1, "d_pub", "v1");
+    let mut plane = FixturePlane::default();
+    plane.add_version(&id, &v1);
+    plane.set_current(&id, served(WS, &id, v1.id, 1));
+    let foll = follow(&id, FollowMode::Auto);
+
+    // The block is raised, and the folder that holds this person's version is named on it.
+    let raised = pull_data(&rig.ctx(&plane, &foll), ops::PullScope::AllFollowed).unwrap();
+    let row = only(&raised);
+    assert_eq!(row.action, PullAction::Conflicted);
+    assert_eq!(
+        row.merge.as_ref().expect("a merge report").placements.len(),
+        1
+    );
+
+    // The person deletes it while the merge stands. The record is untouched — nothing about the
+    // merge changed — but the promise is no longer true.
+    std::fs::remove_dir_all(rig.placement()).unwrap();
+
+    let data = pull_data(&rig.ctx(&plane, &foll), ops::PullScope::AllFollowed).unwrap();
+    let row = only(&data);
+    assert_eq!(
+        row.action,
+        PullAction::Conflicted,
+        "the block itself is unaffected"
+    );
+    assert!(
+        row.merge
+            .as_ref()
+            .expect("a merge report")
+            .placements
+            .is_empty(),
+        "{:?}",
+        row.merge
+    );
+    let tty = crate::render::pull_tty(&data, &[], &[], &[], &[]);
+    assert!(
+        tty.contains(
+            "    no agent folder holds this skill right now — either way out below puts it back\n"
+        ),
+        "{tty}"
+    );
+    assert!(!tty.contains("your agents are unaffected"), "{tty}");
+}
+
 #[test]
 fn go_back_then_resume() {
     let rig = Rig::new("goback");
@@ -3524,7 +3584,7 @@ fn a_pre_workbench_conflict_record_is_recognised_and_converted() {
 
     // ⑥ publish still refuses — the guard is the record's presence, and the record is still there.
     match publish_describe_err(&rig, &plane, &foll, &name) {
-        crate::error::ClientError::PublishBlocked { skill } => assert_eq!(skill, name),
+        crate::error::ClientError::PublishBlocked { skill, .. } => assert_eq!(skill, name),
         other => panic!("expected the publish block, got {other:?}"),
     }
 

@@ -333,7 +333,7 @@ fn unusable_copy(display: &str, status: &ScanStatus) -> ClientError {
         }
         ScanStatus::Absent => format!("that copy is not there — nothing is placed at {display}"),
         ScanStatus::Foreign => {
-            format!("{display} holds bytes topos did not write — it is not a copy of this bundle")
+            format!("{display} holds files topos did not write — it is not a copy of this bundle")
         }
         ScanStatus::Modified { .. } | ScanStatus::Unscannable => {
             format!("{display} cannot be read safely — nothing was touched")
@@ -462,6 +462,37 @@ mod tests {
             agents: agents.iter().map(|s| (*s).to_owned()).collect(),
             dests: dests.iter().map(|s| (*s).to_owned()).collect(),
         }
+    }
+
+    /// The four refusals a named-but-unusable copy takes, whole. The foreign one says FILES, not
+    /// the word for what a file is made of: a person looking at a folder sees files in it, and the
+    /// sentence is about what is in the folder, not about its contents' representation.
+    #[test]
+    fn a_named_copy_that_cannot_be_acted_on_says_which_of_the_four_it_is() {
+        let msg = |status: &ScanStatus| -> String {
+            match unusable_copy("~/.claude/skills/coolify-deploy", status) {
+                ClientError::SelectionRefused(m) => m,
+                other => panic!("expected a selection refusal, got {other:?}"),
+            }
+        };
+        assert_eq!(
+            msg(&ScanStatus::Foreign),
+            "~/.claude/skills/coolify-deploy holds files topos did not write — it is not a copy \
+             of this bundle"
+        );
+        assert_eq!(
+            msg(&ScanStatus::Clean { digest: [0; 32] }),
+            "that copy has no edits — ~/.claude/skills/coolify-deploy holds the version topos \
+             placed there"
+        );
+        assert_eq!(
+            msg(&ScanStatus::Absent),
+            "that copy is not there — nothing is placed at ~/.claude/skills/coolify-deploy"
+        );
+        assert_eq!(
+            msg(&ScanStatus::Unscannable),
+            "~/.claude/skills/coolify-deploy cannot be read safely — nothing was touched"
+        );
     }
 
     #[test]

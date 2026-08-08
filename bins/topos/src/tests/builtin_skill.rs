@@ -171,6 +171,32 @@ fn fake_bundle(body: &str) -> ScannedBundle {
     }
 }
 
+/// The one paragraph an agent reads about a stopped merge — BEFORE it ever meets one, since these
+/// bytes are compiled into the binary and placed in every agent's skills directory. It is asserted
+/// as a whole and whitespace-normalized: the file hard-wraps its prose, so a wrap an editor moved
+/// must not read as a change of copy, while a changed word must.
+#[test]
+fn the_built_in_teaches_the_whole_stopped_merge_loop() {
+    let skill_md = include_str!("../../../../skills/topos/SKILL.md");
+    let flat = skill_md.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(
+        flat.contains(
+            "Updates never destroy drafts — they merge around them. Where you and the team \
+             changed the same lines the update stops: every agent folder keeps your version \
+             untouched (never markers), and a marked-up copy of both sides goes to a folder of \
+             Topos's own, named on the receipt. Finish it with `topos update <name> --keep-mine` \
+             — edit that folder first to commit your merge, or leave it alone to keep your \
+             wording on the contested lines and take the team's other changes — or `topos update \
+             <name> --reset` to take the team's version. Publishing is blocked until you pick \
+             one. A settled draft is copied onto the skill's other copies in the same scope."
+        ),
+        "{flat}"
+    );
+    // The model this replaced is gone: nothing freezes, and the exit that finishes a stopped merge
+    // is named rather than left for the reader to discover.
+    assert!(!flat.contains("freezes the copy"), "{flat}");
+}
+
 #[test]
 fn ensure_places_the_bundle_and_lists_it_as_built_in() {
     let rig = Rig::new("place");

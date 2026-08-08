@@ -511,8 +511,13 @@ pub(crate) enum ClientError {
     ReviewNotOpen(String),
     /// A `publish` is blocked because an unresolved author-merge conflict (`conflict.json`) is present —
     /// the draft must be resolved first. Refused before any build / WAL / send (the publish guard).
+    ///
+    /// `global` is the scope the blocked copy lives in. `publish` resolves a bare name home-first,
+    /// so the copy it refused over is not always the one the reader's directory would pick — the
+    /// offered exits are spelled for the copy that is actually blocked, or following them lands on
+    /// the other scope and refuses again.
     #[error("publish is blocked — resolve the merge conflict in this skill first")]
-    PublishBlocked { skill: String },
+    PublishBlocked { skill: String, global: bool },
     /// A `publish` is refused because this copy does not include the served `current`: the team moved
     /// ahead and this machine has not taken it (the ordinary behind state). Shipping from here would
     /// land bytes with the team's change nowhere inside — and the plane refuses it anyway, since a
@@ -522,9 +527,10 @@ pub(crate) enum ClientError {
     /// the one act a behind copy can always safely perform.
     ///
     /// The TTY renders the way out under the sentence ([`crate::render::err_tty`]); the envelope keeps
-    /// the sentence and carries the same command as its next action.
+    /// the sentence and carries the same command as its next action. `global` is the scope the
+    /// behind copy lives in, for the same reason [`ClientError::PublishBlocked`] carries one.
     #[error("{skill}: your version is behind.")]
-    PublishBehind { skill: String },
+    PublishBehind { skill: String, global: bool },
     /// `--keep-mine` was typed for a bundle where no merge has stopped — an up-to-date copy, a plain
     /// draft with nothing pending, a clean copy that is merely behind, or a divergence the merge has
     /// not been run on. There is nothing to finish, and every one of those states has a different

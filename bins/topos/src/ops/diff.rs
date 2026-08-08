@@ -79,8 +79,8 @@ pub(crate) fn diff(
     let (layout, id, lock) = super::resolve_skill_here(ctx, skill, None)?;
     if !sel.is_empty() && r#ref.is_some() {
         return Err(ClientError::InvalidArgument(
-            "`--dest`/`-a` names the copy of YOUR edits a diff reads, and two versions are the \
-             same bytes everywhere — drop the `<ref>`, or drop the selector"
+            "`--dest`/`-a` names the copy of YOUR edits a diff reads, and a version-to-version \
+             diff reads the same in every folder — drop the `<ref>`, or drop the selector"
                 .into(),
         ));
     }

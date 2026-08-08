@@ -2058,6 +2058,13 @@ fn merged_row(
 /// hold the author's own version (the recorded map — a conflict wrote to none of them), and the one
 /// folder the marked-up copy went to (the record's own `copy_dir`, never recomputed, so the receipt
 /// names the folder every exit reads).
+///
+/// The map is what the placements were RECORDED as, which is not the same as what is there now: a
+/// folder deleted since the block was raised is still in it, and the row that reads this list goes
+/// on to promise the reader that folder holds their version. So the list is filtered to the
+/// directories that are actually present, and a path that cannot be read at all is dropped for the
+/// same reason — an unverifiable folder must not become a claim. Filtering to nothing is a state
+/// the row already has words for, and both of its exits put the bytes back.
 fn conflict_disclosure(
     ctx: &Ctx<'_>,
     map: &PlacementMap,
@@ -2066,6 +2073,12 @@ fn conflict_disclosure(
     let placements = map
         .placements
         .iter()
+        .filter(|p| {
+            matches!(
+                ctx.fs.path_kind(std::path::Path::new(p.as_str())),
+                Ok(Some(crate::fs_seam::PathKind::Dir))
+            )
+        })
         .map(|p| super::inventory::pretty(ctx, std::path::Path::new(p)))
         .collect();
     let copy = conflict_copy_path(ctx, cs).map(|p| super::inventory::pretty(ctx, &p));

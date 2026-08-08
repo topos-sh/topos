@@ -4099,13 +4099,17 @@ fn install_or_refresh_repo_skill(
 }
 
 /// The decision a moved source hands back when the copy here carries edits: what changed, what
-/// stands in the way, and the two answers — share the edits, or drop them.
+/// stands in the way, and the one runnable answer — drop them.
 ///
 /// Both facts belong in the first sentence: the SOURCE moved (which is why anything is happening
-/// at all) and the EDITS are why nothing did. Neither exit is recommended over the other, because
-/// only the person knows whether the work in that folder is worth keeping; what the row owes them
-/// is two runnable commands and no third thing to read. The commands' labels are padded so the
-/// two line up as the one choice they are.
+/// at all) and the EDITS are why nothing did. Keeping them needs no command at all — nothing was
+/// overwritten, so a person who wants the work simply leaves it where it is; the row's job is to
+/// say that the source moved and to hand over the one command that is not obvious.
+///
+/// A `publish` offer used to ride here too, and it was a command this reader could not run: a
+/// skill that came from a repository is the one kind that reaches a person with no workspace at
+/// all, and `publish` refuses them at the login step. A way out that dead-ends is worse than no
+/// way out, so the row names only what works.
 fn import_blocked_decision(
     name: &str,
     origin: &str,
@@ -4117,10 +4121,7 @@ fn import_blocked_decision(
         ResolvedScope::Person => argv(&["topos", "update", "-g", name, "--reset"]),
         ResolvedScope::Project { .. } => argv(&["topos", "update", name, "--reset"]),
     };
-    let ways = vec![
-        ("to share your edits:", argv(&["topos", "publish", name])),
-        ("to discard them:", reset),
-    ];
+    let ways = vec![("to discard them:", reset)];
     let pad = ways.iter().map(|(label, _)| label.len()).max().unwrap_or(0);
     super::PendingDecision {
         name: name.to_owned(),

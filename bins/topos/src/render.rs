@@ -147,21 +147,26 @@ pub(crate) fn next_actions(command: &str, argv: &[String], err: &ClientError) ->
         // the two acts that actually RESOLVE the block: keep yours (`--keep-mine` commits your
         // edited resolution — or your original draft — onto current and clears the record) or let
         // the team win (`--reset`, the loss-led two-phase discard).
-        ClientError::PublishBlocked { skill } => vec![
+        //
+        // Spelled for the scope the BLOCK is in, not the one the invocation stood in: `publish`
+        // carries no scope flag and resolves home-first, so a rebuild from its argv can offer an
+        // exit that drives the other copy and refuses all over again.
+        ClientError::PublishBlocked { skill, global } => vec![
             crate::actions::next_action(
                 ActionCode::ResolveDivergedDraft,
-                update_rebuild(command, argv, skill, &["--keep-mine"]),
+                update_at_scope(*global, skill, &["--keep-mine"]),
             ),
             crate::actions::next_action(
                 ActionCode::ResolveDivergedDraft,
-                update_rebuild(command, argv, skill, &["--reset"]),
+                update_at_scope(*global, skill, &["--reset"]),
             ),
         ],
         // A copy behind the served `current`. ONE way out, and it is the same one the sentence names:
-        // update, which runs the merge that makes a publish safe to ship.
-        ClientError::PublishBehind { skill } => vec![crate::actions::next_action(
+        // update, which runs the merge that makes a publish safe to ship — in the scope that copy
+        // lives in, for the reason the block above carries its own.
+        ClientError::PublishBehind { skill, global } => vec![crate::actions::next_action(
             ActionCode::RebaseAndRetry,
-            update_rebuild(command, argv, skill, &[]),
+            update_at_scope(*global, skill, &[]),
         )],
         // No merge stopped, so the fix is the merge itself — the one that lands the team's
         // non-conflicting changes and stops only where the two sides really collide.
@@ -420,11 +425,24 @@ fn is_lone_target_invocation(argv: &[String]) -> bool {
 /// A rebuilt `topos update <skill> …` way-out that PRESERVES the refused invocation's scope: an
 /// `update -g` that refused must be offered a `-g` resolution, or the offered command would act on
 /// the OTHER scope's copy (the project's, from inside a checkout). The flag carries over only when
-/// the refused verb was `update` itself and spelled it — a publish-origin refusal has no scope
-/// flag to preserve, and inventing one would change what the user asked.
+/// the refused verb was `update` itself and spelled it — reading a scope out of some OTHER verb's
+/// argv would be inventing one. A refusal whose own TYPE knows the scope says so directly through
+/// [`update_at_scope`] instead; that is a fact, not an inference from what the user typed.
 fn update_rebuild(command: &str, argv: &[String], skill: &str, extras: &[&str]) -> Vec<String> {
+    update_at_scope(
+        command == "update" && argv.iter().any(|t| t == "-g" || t == "--global"),
+        skill,
+        extras,
+    )
+}
+
+/// The same offered `update`, spelled for a scope the REFUSAL knows and the invocation does not.
+/// `publish` takes no scope flag and resolves a bare name home-first, so an exit rebuilt from its
+/// argv would drive whichever copy the reader's directory happens to pick — not the one that
+/// refused. The typed error carries the answer; this is where it is spelled.
+fn update_at_scope(global: bool, skill: &str, extras: &[&str]) -> Vec<String> {
     let mut out = vec!["topos".to_owned(), "update".to_owned()];
-    if command == "update" && argv.iter().any(|t| t == "-g" || t == "--global") {
+    if global {
         out.push("-g".to_owned());
     }
     out.push(skill.to_owned());
@@ -1540,13 +1558,12 @@ pub(crate) fn reset_applied_tty(items: &[topos_types::results::ResetData]) -> St
     for item in items {
         match &item.dest {
             Some(dest) => s.push_str(&format!(
-                "Reset '{}' in {dest} to {} — that copy's local edits discarded (a snapshot was \
-                 kept under ~/.topos).\n",
+                "Reset '{}' in {dest} to {} — that copy's local edits discarded.\n",
                 item.skill,
                 short(&item.to_version)
             )),
             None => s.push_str(&format!(
-                "Reset '{}' to {} — local edits discarded (a snapshot was kept under ~/.topos).\n",
+                "Reset '{}' to {} — local edits discarded.\n",
                 item.skill,
                 short(&item.to_version)
             )),
@@ -3526,10 +3543,18 @@ fn pull_action_row(s: &PullSkill, scope: &PullReceiptScope) -> (String, Vec<Stri
             extra.push("take the team's version instead, dropping yours:".to_owned());
             extra.push(format!("  topos update{g} {name} --reset"));
             extra.push("you cannot publish this skill until you pick one".to_owned());
-            (
-                format!("the team published {v}, and it changes lines you also changed"),
-                extra,
-            )
+            // WHY it stopped, in the reader's own terms — read off the RECORDED reason, exactly as
+            // the by-hand line above is. Unrelated histories compared no line at all (there is no
+            // fork point to compare from), so the lead may not say lines were changed twice; it
+            // says the one thing that IS true of that state.
+            let lead = if s.merge.as_ref().and_then(|m| m.reason)
+                == Some(topos_types::persisted::ConflictReason::NoBase)
+            {
+                format!("the team published {v}, and it shares no history with your copy")
+            } else {
+                format!("the team published {v}, and it changes lines you also changed")
+            };
+            (lead, extra)
         }
         PullAction::DraftSynced => {
             let n = s.synced_placements.unwrap_or(0);
@@ -3693,10 +3718,11 @@ pub(crate) fn err_tty(err: &ClientError) -> String {
     // indented under it — the same shape as the refusals below: the copy IS the answer, so it carries
     // no `error:` prefix (the `--json` envelope keeps the single-sentence message, and the same command
     // rides `next_actions`).
-    if let ClientError::PublishBehind { skill } = err {
+    if let ClientError::PublishBehind { skill, global } = err {
         return format!(
-            "{}\n  update first: topos update {skill}",
-            safe_message(err)
+            "{}\n  update first: topos update{} {skill}",
+            safe_message(err),
+            crate::error::scope_flag(*global)
         );
     }
     // The shared-copy narrowing refusal renders its ways out as ALIGNED command lines under the
@@ -7098,6 +7124,7 @@ mod tests {
             &typed(&["publish"]),
             &crate::error::ClientError::PublishBlocked {
                 skill: "deploy-checklist".to_owned(),
+                global: false,
             },
         );
         assert_eq!(actions.len(), 2, "{actions:?}");
@@ -7281,6 +7308,52 @@ mod tests {
         );
     }
 
+    /// The reset receipt, whole, in both of its shapes. It states what it discarded and stops
+    /// there: the snapshot it took lands in whichever store owns the copy — which is not `~/.topos`
+    /// inside a checkout — and there is no command a person could type to get the edits back, so
+    /// advertising recovery offered a handle that does not exist. Git says nothing either when it
+    /// discards changes, and only names a recovery when it can hand you something to run.
+    #[test]
+    fn the_reset_receipt_names_what_it_discarded_and_promises_no_recovery() {
+        let item = |dest: Option<&str>,
+                    others: &[&str],
+                    hand_merge: Option<&str>|
+         -> topos_types::results::ResetData {
+            topos_types::results::ResetData {
+                skill: "coolify-deploy".to_owned(),
+                workspace_id: None,
+                to_version: "abc1234def56".to_owned() + &"0".repeat(52),
+                drop_diff: String::new(),
+                applied: true,
+                dest: dest.map(str::to_owned),
+                others_kept: others.iter().map(|s| (*s).to_owned()).collect(),
+                global: false,
+                hand_merge: hand_merge.map(str::to_owned),
+            }
+        };
+
+        assert_eq!(
+            super::reset_applied_tty(&[item(
+                Some("~/.claude/skills/coolify-deploy"),
+                &["~/.agents/skills/coolify-deploy"],
+                None
+            )]),
+            "Reset 'coolify-deploy' in ~/.claude/skills/coolify-deploy to abc1234def56 — that \
+             copy's local edits discarded.\nyour other copy in ~/.agents/skills/coolify-deploy \
+             keeps its edits"
+        );
+        assert_eq!(
+            super::reset_applied_tty(&[item(None, &[], None)]),
+            "Reset 'coolify-deploy' to abc1234def56 — local edits discarded."
+        );
+        // The one thing a reset DOES hand back: a by-hand merge it never read, so never deleted.
+        assert_eq!(
+            super::reset_applied_tty(&[item(None, &[], Some("~/.topos/conflicts/coolify-deploy"))]),
+            "Reset 'coolify-deploy' to abc1234def56 — local edits discarded.\nyour hand merge is \
+             still in ~/.topos/conflicts/coolify-deploy"
+        );
+    }
+
     /// A blocked row sends a person to the workbench for what is ACTUALLY in it, and says the same
     /// thing every time it is re-disclosed. A three-way conflict marks both sides up inside the
     /// files; a no-base one has no fork point to mark against, so it writes the team's files beside
@@ -7313,6 +7386,11 @@ mod tests {
         let marked = "to merge by hand, both versions are marked up here:";
         let beside = "to merge by hand, your files are here with the team's beside them \
                       (.topos-theirs):";
+        // The LEAD branches on the same recorded reason the by-hand line does — unrelated
+        // histories have no fork point, so no line was ever compared and the row may not say
+        // otherwise.
+        let collided = "the team published 1b1b1b1b1b1b, and it changes lines you also changed";
+        let unrelated = "the team published 1b1b1b1b1b1b, and it shares no history with your copy";
 
         // The FIRST no-base disclosure, and every LATER one — the recorded reason is the same, so
         // the line is the same. The re-disclosure is the row with no `drop_diff`.
@@ -7320,12 +7398,16 @@ mod tests {
             let out = render_one(ConflictReason::NoBase, drop_diff);
             assert!(out.contains(beside), "{out}");
             assert!(!out.contains(marked), "{out}");
+            assert!(out.contains(unrelated), "{out}");
+            assert!(!out.contains(collided), "{out}");
         }
         // A three-way conflict does write markers, first disclosure and every one after.
         for drop_diff in [Some("--- a\n+++ b\n".to_owned()), None] {
             let out = render_one(ConflictReason::ThreeWay, drop_diff);
             assert!(out.contains(marked), "{out}");
             assert!(!out.contains(beside), "{out}");
+            assert!(out.contains(collided), "{out}");
+            assert!(!out.contains(unrelated), "{out}");
         }
     }
 
@@ -7363,6 +7445,7 @@ mod tests {
     fn a_publish_behind_refusal_states_the_fact_then_the_one_way_out() {
         let err = crate::error::ClientError::PublishBehind {
             skill: "coolify-deploy".to_owned(),
+            global: false,
         };
         assert_eq!(
             super::err_tty(&err),
@@ -7380,6 +7463,98 @@ mod tests {
             actions[0].argv,
             vec!["topos", "update", "coolify-deploy", "--json"],
             "{actions:?}"
+        );
+    }
+
+    /// Both publish refusals are spelled for the copy that REFUSED, not for the directory the
+    /// reader happened to stand in. `publish` takes no scope flag and resolves a bare name
+    /// home-first, so from inside a checkout the machine copy is what refuses — and an offered
+    /// `topos update <skill>` would drive the project copy and refuse all over again. The screen
+    /// and the machine-readable action say the same thing, because they are one computation.
+    #[test]
+    fn both_publish_refusals_carry_the_scope_of_the_copy_that_refused() {
+        use crate::error::ClientError;
+
+        // The invocation is identical in every case — a bare `publish` from inside a checkout.
+        let argv = typed(&["publish", "coolify-deploy"]);
+
+        let behind_here = ClientError::PublishBehind {
+            skill: "coolify-deploy".to_owned(),
+            global: false,
+        };
+        let behind_machine = ClientError::PublishBehind {
+            skill: "coolify-deploy".to_owned(),
+            global: true,
+        };
+        assert_eq!(
+            super::err_tty(&behind_here),
+            "coolify-deploy: your version is behind.\n  update first: topos update coolify-deploy"
+        );
+        assert_eq!(
+            super::err_tty(&behind_machine),
+            "coolify-deploy: your version is behind.\n  update first: topos update -g \
+             coolify-deploy"
+        );
+        assert_eq!(
+            super::next_actions("publish", &argv, &behind_here)[0].argv,
+            vec!["topos", "update", "coolify-deploy", "--json"]
+        );
+        assert_eq!(
+            super::next_actions("publish", &argv, &behind_machine)[0].argv,
+            vec!["topos", "update", "-g", "coolify-deploy", "--json"]
+        );
+
+        // The block's two exits, both scopes: the flag rides right after the verb, ahead of the
+        // name — the one order every offered command uses.
+        let blocked_here = ClientError::PublishBlocked {
+            skill: "coolify-deploy".to_owned(),
+            global: false,
+        };
+        let blocked_machine = ClientError::PublishBlocked {
+            skill: "coolify-deploy".to_owned(),
+            global: true,
+        };
+        let argvs = |e: &ClientError| -> Vec<Vec<String>> {
+            super::next_actions("publish", &argv, e)
+                .into_iter()
+                .map(|a| a.argv)
+                .collect()
+        };
+        assert_eq!(
+            argvs(&blocked_here),
+            vec![
+                typed(&["topos", "update", "coolify-deploy", "--keep-mine", "--json"]),
+                typed(&["topos", "update", "coolify-deploy", "--reset", "--json"]),
+            ]
+        );
+        assert_eq!(
+            argvs(&blocked_machine),
+            vec![
+                typed(&[
+                    "topos",
+                    "update",
+                    "-g",
+                    "coolify-deploy",
+                    "--keep-mine",
+                    "--json"
+                ]),
+                typed(&[
+                    "topos",
+                    "update",
+                    "-g",
+                    "coolify-deploy",
+                    "--reset",
+                    "--json"
+                ]),
+            ]
+        );
+        // And the TTY hint block is the same argv, minus the `--json` tail — so a human and an
+        // agent are handed the same scope.
+        assert_eq!(
+            super::err_hint_tty("publish", &argv, &blocked_machine)
+                .expect("a blocked publish offers its two exits"),
+            "try:\n  topos update -g coolify-deploy --keep-mine\n  topos update -g coolify-deploy \
+             --reset"
         );
     }
 
@@ -7788,18 +7963,29 @@ mod tests {
             actions[0].argv,
             vec!["topos", "update", "-g", "docs", "--reset", "--json"]
         );
-        // A publish-origin refusal has no scope flag to preserve.
+        // A publish-origin refusal has no scope flag in its ARGV to preserve — `publish` takes
+        // none — so its scope comes off the typed error instead: the copy that actually refused.
         let publish_argv: Vec<String> = ["publish", "docs"]
             .iter()
             .map(|s| (*s).to_owned())
             .collect();
         let blocked = ClientError::PublishBlocked {
             skill: "docs".into(),
+            global: false,
         };
         let actions = super::next_actions("publish", &publish_argv, &blocked);
         assert_eq!(
             actions[1].argv,
             vec!["topos", "update", "docs", "--reset", "--json"]
+        );
+        let blocked_machine = ClientError::PublishBlocked {
+            skill: "docs".into(),
+            global: true,
+        };
+        let actions = super::next_actions("publish", &publish_argv, &blocked_machine);
+        assert_eq!(
+            actions[1].argv,
+            vec!["topos", "update", "-g", "docs", "--reset", "--json"]
         );
     }
 
@@ -7811,6 +7997,7 @@ mod tests {
         // indented, under the one lead-in — this is the gap the block exists to close.
         let blocked = ClientError::PublishBlocked {
             skill: "deploy".to_owned(),
+            global: false,
         };
         let hint = super::err_hint_tty("publish", &typed(&["publish"]), &blocked)
             .expect("a blocked publish offers its two exits");

@@ -8410,14 +8410,22 @@ fn a_forge_refresh_holds_the_lock_and_keeps_an_edit_that_lands_at_the_stash() {
         out.decisions[0].line,
         "github.com/o/r has a newer version, but your edits would be overwritten"
     );
+    // ONE way out, and it is the only one that runs: a skill imported from a repository reaches
+    // people who have no workspace at all, and `topos publish` refuses them at the login step.
+    // Keeping the edits needs no command — nothing was overwritten.
     assert_eq!(
         out.decisions[0].detail,
-        vec![
-            "to share your edits:   topos publish deploy".to_owned(),
-            "to discard them:       topos update -g deploy --reset".to_owned(),
-        ]
+        vec!["to discard them:   topos update -g deploy --reset".to_owned()]
     );
-    // The whole receipt block, as a person reads it: one row, its two ways out, and a summary that
+    assert!(
+        !out.decisions[0]
+            .ways_out
+            .iter()
+            .any(|w| w.iter().any(|t| t == "publish")),
+        "{:?}",
+        out.decisions[0].ways_out
+    );
+    // The whole receipt block, as a person reads it: one row, its way out, and a summary that
     // counts the row under the answer it is waiting for.
     let tty = crate::render::pull_tty(
         &out.data,
@@ -8428,10 +8436,10 @@ fn a_forge_refresh_holds_the_lock_and_keeps_an_edit_that_lands_at_the_stash() {
     );
     let expected_block = concat!(
         "deploy   github.com/o/r has a newer version, but your edits would be overwritten\n",
-        "    to share your edits:   topos publish deploy\n",
-        "    to discard them:       topos update -g deploy --reset\n",
+        "    to discard them:   topos update -g deploy --reset\n",
     );
     assert!(tty.contains(expected_block), "{tty}");
+    assert!(!tty.contains("topos publish"), "{tty}");
     assert!(tty.contains("waiting on you"), "{tty}");
     // Neither internal code survives: not the refusal's, and not the source-moved disclosure's —
     // the row already says the source has a newer version, in words a person can act on.
@@ -11019,13 +11027,13 @@ fn the_publish_describe_audience_line_prints_and_a_failed_reach_warns() {
     let (data, warnings) = describe(FakeReach::Malformed("missing field `sessions`".to_owned()));
     assert_eq!(data.reach, None);
     assert_eq!(warnings.len(), 1, "{warnings:?}");
-    assert!(
-        warnings[0].starts_with("REACH_UNAVAILABLE deploy:"),
-        "{warnings:?}"
-    );
-    assert!(
-        warnings[0].contains("audience line is omitted"),
-        "{warnings:?}"
+    // The whole line: what could not be read, and why. It stops there — the preview withholds the
+    // audience whether or not the reach was readable, so "the audience line is omitted" was a
+    // consequence that was never a consequence of this failure.
+    assert_eq!(
+        warnings[0],
+        "REACH_UNAVAILABLE deploy: the server sent a response topos could not read — how many \
+         people this reaches could not be read"
     );
     let tty = crate::render::publish_describe_tty(&data, &argv);
     assert!(!tty.contains("reaches"), "{tty}");
@@ -11102,9 +11110,11 @@ fn a_protect_describe_reach_failure_warns_instead_of_vanishing() {
         ops::ProtectOutcome::Described { data, warnings, .. } => {
             assert_eq!(data.audience, None);
             assert_eq!(warnings.len(), 1, "{warnings:?}");
-            assert!(
-                warnings[0].starts_with("REACH_UNAVAILABLE deploy:"),
-                "{warnings:?}"
+            // One wording, both verbs — the whole line, not a prefix of it.
+            assert_eq!(
+                warnings[0],
+                "REACH_UNAVAILABLE deploy: the server sent a response topos could not read — how \
+                 many people this reaches could not be read"
             );
         }
         other => panic!("a bare protect describes: {other:?}"),
@@ -13206,6 +13216,23 @@ fn zz_a_dest_naming_no_copy_or_a_clean_copy_refuses_by_name() {
         message.contains("~/.codex/skills/coolify-deploy"),
         "{message}"
     );
+
+    // A selector plus a `<ref>` asks two different questions at once: the selector narrows the
+    // side that holds YOUR edits, and a version-to-version diff has no such side — it reads the
+    // same in every folder. Refused whole, with both ways to re-spell it.
+    let err = ops::diff(
+        &ctx,
+        &name,
+        Some(&"ab".repeat(32)),
+        ops::DiffBudget::unlimited(),
+        &ops::Selection::one(None, Some("~/.claude/skills")),
+    )
+    .expect_err("a selector with a version reference refuses");
+    assert_eq!(
+        crate::render::safe_message(&err),
+        "`--dest`/`-a` names the copy of YOUR edits a diff reads, and a version-to-version diff \
+         reads the same in every folder — drop the `<ref>`, or drop the selector"
+    );
 }
 
 /// The per-copy reset: the loss-led rail unchanged, narrowed to ONE folder. The described delta is
@@ -13291,13 +13318,16 @@ fn zz_a_per_copy_reset_drops_one_copys_edits_and_leaves_the_other_alone() {
         applied_tty.starts_with("Reset 'coolify-deploy' in ~/.claude/skills/coolify-deploy to "),
         "{applied_tty}"
     );
+    // No recovery clause: the snapshot lands in whichever store owns the copy, and there is no
+    // command a person could type to get it back — an offer nobody can take is not an offer.
     assert!(
         applied_tty.contains(
-            "that copy's local edits discarded (a snapshot was kept under \
-             ~/.topos).\nyour other copy in ~/.agents/skills/coolify-deploy keeps its edits"
+            "that copy's local edits discarded.\nyour other copy in \
+             ~/.agents/skills/coolify-deploy keeps its edits"
         ),
         "{applied_tty}"
     );
+    assert!(!applied_tty.contains("snapshot"), "{applied_tty}");
     assert_eq!(
         std::fs::read(native.join("SKILL.md")).unwrap(),
         b"# coolify-deploy\nbase\n",

@@ -63,9 +63,13 @@ pub(crate) enum PullScope {
 pub(crate) enum TargetMode {
     /// `topos pull <skill>` — accept a pending update / resume a held skill / resolve a divergence (no `@hash`).
     AcceptPending,
-    /// `topos pull <skill> --keep-mine` — the disclosed escape: commit MY bytes as this machine's own
-    /// version (a 2-way diff of what is dropped is surfaced). Resolves a divergence without merging and
-    /// WITHOUT advancing the recorded base, so the person stays behind the team's version.
+    /// `topos pull <skill> --keep-mine` — the disclosed exit from a merge that STOPPED: commit the
+    /// tree the person settled on as a fresh one-parent commit on the team's version (a 2-way diff
+    /// of what it leaves out is surfaced). The team's changes ARE merged in everywhere the two
+    /// sides did not collide; only the contested lines keep this person's wording — unless they
+    /// edited the folder by hand, in which case that tree is committed exactly as they left it. The
+    /// recorded base advances to the team's version, so what remains is an ordinary draft on top of
+    /// current, ahead of the team rather than behind it.
     KeepMine,
     /// `topos pull <skill>@<ref>` — install an older version's bytes locally (a deliberate go-back).
     /// The ref is the full 64-hex id or a short prefix, resolved against the skill's recorded history

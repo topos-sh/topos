@@ -106,13 +106,14 @@ pub(crate) enum Command {
         #[arg(long)]
         yes: bool,
         /// Finish a merge that stopped because you and your team changed the same lines. Topos
-        /// writes one copy of the skill into a folder under `.topos/conflicts/` and prints the
-        /// path; files you both changed hold both versions, wrapped in `<<<<<<<` markers. Edit
-        /// that copy and run this to use it — or run it without touching the folder to keep your
-        /// wording on those lines and take the team's other changes. Either way you get an
-        /// ordinary draft on top of the team's version, which `topos publish` ships like any
-        /// other. Only for a merge that has actually stopped — with nothing waiting, `topos
-        /// update <skill>` is the command. Takes exactly one skill.
+        /// puts one copy of the skill in a folder of its own — never a folder your agents read —
+        /// and prints the path; in it, files you both changed hold both versions: marked up in
+        /// place with `<<<<<<<` markers where the two can be lined up, and side by side
+        /// otherwise. Edit that copy and run this to use it — or run it without touching the
+        /// folder to keep your wording on those lines and take the team's other changes. Either
+        /// way you get an ordinary draft on top of the team's version, which `topos publish`
+        /// ships like any other. Only for a merge that has actually stopped — with nothing
+        /// waiting, `topos update <skill>` is the command. Takes exactly one skill.
         // `--onto-current` is the prior spelling, kept as a HIDDEN alias (clap's `alias` never
         // reaches the help or the generated reference) so anything already in flight keeps working.
         #[arg(long = "keep-mine", alias = "onto-current")]
@@ -321,14 +322,16 @@ pub(crate) enum Command {
         #[arg(long, value_name = "N")]
         offset: Option<u64>,
     },
-    /// Show what changed in a skill. Bare: your local edits against the team version. With a
-    /// version id: that version against the team's. `<a>..<b>` compares two versions. When the
-    /// skill sits in more than one folder, `--dest <folder>` (or `-a <agent>`) reads the edits in
-    /// that one — still against the team version, so two such runs compare like for like.
+    /// Show what changed in a skill. Bare: your local edits against the version you last applied.
+    /// With a version id: that version against the team's current. `<a>..<b>` compares two
+    /// versions. When the skill sits in more than one folder, `--dest <folder>` (or `-a <agent>`)
+    /// reads the edits in that one — still against the version you last applied, so two such runs
+    /// compare like for like.
     Diff {
         /// The skill name.
         skill: String,
-        /// What to compare: a version id, or `<a>..<b>`. Omitted: your edits vs the team version.
+        /// What to compare: a version id, or `<a>..<b>`. Omitted: your edits vs the version you
+        /// last applied.
         #[arg(value_name = "REF")]
         r#ref: Option<String>,
         /// Read this agent's copy of the skill (a slug like `codex`).
@@ -358,7 +361,7 @@ pub(crate) enum Command {
 
     // ---- Team-scoped ----
     /// Share a skill with your team. A bare run is a preview — it shows where the skill would
-    /// land and who would receive it, and changes nothing; add `--yes` to apply. Publishing
+    /// land and whether review is required, and changes nothing; add `--yes` to apply. Publishing
     /// again ships a new version; on a skill that requires review, a publish opens a proposal
     /// instead. Needs a login. When you have edited the same skill in more than one folder,
     /// a bare publish stops and asks which one you mean; `--dest <folder>` (or `-a <agent>`)
@@ -765,6 +768,86 @@ mod tests {
             .to_string();
         assert!(help.contains("--force"), "{help}");
         assert!(!help.contains("--rebuild"), "{help}");
+    }
+
+    /// The one flag help of a verb or an arg, flattened the way the generated reference flattens
+    /// it — the paragraph as a reader meets it, with the source's own wrapping gone.
+    fn flat(text: &str) -> String {
+        text.split_whitespace().collect::<Vec<_>>().join(" ")
+    }
+
+    fn subcommand(name: &str) -> clap::Command {
+        super::cli_command()
+            .get_subcommands()
+            .find(|c| c.get_name() == name)
+            .unwrap_or_else(|| panic!("the {name} subcommand"))
+            .clone()
+    }
+
+    fn flag_help(command: &str, flag: &str) -> String {
+        flat(
+            &subcommand(command)
+                .get_arguments()
+                .find(|a| a.get_id().as_str() == flag)
+                .unwrap_or_else(|| panic!("{command} has no {flag}"))
+                .get_help()
+                .unwrap_or_else(|| panic!("{command} {flag} has no help"))
+                .to_string(),
+        )
+    }
+
+    /// The teaching surfaces a person meets before they meet the behaviour, asserted whole. Each
+    /// one used to describe something the binary does not do: `--keep-mine` named a folder that
+    /// does not exist inside a checkout and promised markers that are absent whenever the two
+    /// copies share no history; `diff` said it compares against the team's version when it
+    /// compares against the version you last applied; `publish`'s preview promised an audience it
+    /// deliberately withholds.
+    #[test]
+    fn the_help_paragraphs_describe_what_the_binary_actually_does() {
+        assert_eq!(
+            flag_help("update", "keep_mine"),
+            "Finish a merge that stopped because you and your team changed the same lines. Topos \
+             puts one copy of the skill in a folder of its own — never a folder your agents read \
+             — and prints the path; in it, files you both changed hold both versions: marked up \
+             in place with `<<<<<<<` markers where the two can be lined up, and side by side \
+             otherwise. Edit that copy and run this to use it — or run it without touching the \
+             folder to keep your wording on those lines and take the team's other changes. Either \
+             way you get an ordinary draft on top of the team's version, which `topos publish` \
+             ships like any other. Only for a merge that has actually stopped — with nothing \
+             waiting, `topos update <skill>` is the command. Takes exactly one skill"
+        );
+        assert_eq!(
+            flat(
+                &subcommand("diff")
+                    .get_about()
+                    .expect("diff has an about")
+                    .to_string()
+            ),
+            "Show what changed in a skill. Bare: your local edits against the version you last \
+             applied. With a version id: that version against the team's current. `<a>..<b>` \
+             compares two versions. When the skill sits in more than one folder, `--dest \
+             <folder>` (or `-a <agent>`) reads the edits in that one — still against the version \
+             you last applied, so two such runs compare like for like"
+        );
+        assert_eq!(
+            flag_help("diff", "ref"),
+            "What to compare: a version id, or `<a>..<b>`. Omitted: your edits vs the version you \
+             last applied"
+        );
+        // The publish preview's own sentence — the rest of the paragraph is untouched.
+        assert!(
+            flat(
+                &subcommand("publish")
+                    .get_about()
+                    .expect("publish has an about")
+                    .to_string()
+            )
+            .starts_with(
+                "Share a skill with your team. A bare run is a preview — it shows where the skill \
+                 would land and whether review is required, and changes nothing; add `--yes` to \
+                 apply."
+            )
+        );
     }
 
     /// `--keep-mine` and `--reset` are opposites — keep your version, or take the team's. Accepting

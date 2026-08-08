@@ -238,10 +238,7 @@ pub(crate) fn reach_unavailable(name: &str, skill_id: &str, e: &ClientError) -> 
     } else {
         reason.replace(skill_id, name)
     };
-    format!(
-        "REACH_UNAVAILABLE {name}: {reason} — how many people this reaches could not be read; the \
-         audience line is omitted"
-    )
+    format!("REACH_UNAVAILABLE {name}: {reason} — how many people this reaches could not be read")
 }
 
 /// The seams `publish`'s describe needs, both read only AFTER the local scan: the directory connector
@@ -333,6 +330,7 @@ pub(crate) fn publish_describe(
     if doc::read_doc::<ConflictState>(ctx.fs, &sp.conflict)?.is_some() {
         return Err(ClientError::PublishBlocked {
             skill: skill_name.clone(),
+            global: !ctx.layout.is_project_scope(),
         });
     }
     // Its neighbour: a copy that does not include the served `current` (the ordinary behind state).
@@ -956,6 +954,7 @@ fn enrolled_publish(
     if doc::read_doc::<ConflictState>(ctx.fs, &sp.conflict)?.is_some() {
         return Err(ClientError::PublishBlocked {
             skill: skill_name.to_owned(),
+            global: !ctx.layout.is_project_scope(),
         });
     }
     // Its neighbour: this copy does not include the served `current`. Refused here, before the
@@ -1445,6 +1444,7 @@ fn behind_guard(
     if !propose && is_behind(&sync) {
         return Err(ClientError::PublishBehind {
             skill: skill.to_owned(),
+            global: !ctx.layout.is_project_scope(),
         });
     }
     Ok(())
@@ -1493,6 +1493,7 @@ fn build_publish_op(
     if !propose && is_behind(&sync) {
         return Err(ClientError::PublishBehind {
             skill: lock.name.clone(),
+            global: !ctx.layout.is_project_scope(),
         });
     }
 
