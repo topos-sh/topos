@@ -21,7 +21,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
-use topos_types::persisted::{Lock, SyncState};
+use topos_types::persisted::{ConflictState, Lock, SyncState};
 use topos_types::results::{ForgeSource, ListDetail, StatusItemState, StatusRegime};
 
 use crate::ctx::Ctx;
@@ -49,6 +49,29 @@ pub(crate) enum ScopeView {
     Machine,
     /// Both scopes in full (`--all`).
     All,
+}
+
+/// What a row's local edits amount to ON DISK — the draft classification's own verdict, kept so a
+/// listing can NAME the folder a person would open instead of only flagging that edits exist. It is
+/// the [`crate::placement::classify_draft`] answer verbatim (one edited copy is THE draft; copies
+/// that explain none of the others are the freeze), carried rather than recomputed: the scan that
+/// decides a row is edited at all is the one being classified.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) enum DraftCopies {
+    /// No edited copy — or a read that could not classify one (an unreadable map, a scan that
+    /// failed). A row with nothing provable to say about a folder says nothing.
+    #[default]
+    None,
+    /// Exactly one advanced edited copy — THE draft — in this folder.
+    In(PathBuf),
+    /// Several copies hold edits that disagree (always ≥ 2). No single one is the draft, so a ROW
+    /// names none of them — it reports the count and sends the reader to the deep dive, which
+    /// answers with these: each copy in the two spellings every surface that names one uses (the
+    /// folder as a person reads it, and the `--dest` value that names it back). They are spelled
+    /// HERE, at the scope whose store was read, through the same
+    /// [`crate::ops::dest_select::copy_spellings`] the placement freeze's refusal uses — one
+    /// vocabulary for one state.
+    Diverged(Vec<crate::ops::dest_select::CopySpelling>),
 }
 
 /// One resolved line plus the provenance the deep answer spells out.
@@ -82,6 +105,8 @@ pub(crate) struct Row {
     pub pin: Option<String>,
     /// The placement dirs this machine holds for it.
     pub placements: Vec<String>,
+    /// Where this row's local EDITS sit, when it has any (see [`DraftCopies`]).
+    pub draft_in: DraftCopies,
     /// A BUNDLE line (not an `"off"` switch) — what the inventory counts as a delivered skill.
     pub bundle: bool,
     /// The cached bundle kind (`Some("mcp")` for a config-placed bundle; `None` = a skill).
@@ -137,11 +162,22 @@ impl ScopeResolution {
             .count() as u64
     }
 
-    /// Rows whose placements scan Modified (`drafts ahead`).
+    /// Rows whose placements scan Modified (`drafts ahead`). A BLOCKED row is deliberately not one
+    /// of them: its edits are not a draft anybody can share, and the command this count ends in
+    /// would send the reader to a row whose exits are the merge's two.
     pub(crate) fn drafts_ahead(&self) -> u64 {
         self.rows
             .iter()
             .filter(|r| r.bundle && matches!(r.state, StatusItemState::LocalEdits))
+            .count() as u64
+    }
+
+    /// Rows whose merge is undecided — the one count that names a DECISION rather than an update
+    /// that would apply itself.
+    pub(crate) fn waiting_on_you(&self) -> u64 {
+        self.rows
+            .iter()
+            .filter(|r| r.bundle && matches!(r.state, StatusItemState::Blocked))
             .count() as u64
     }
 }
@@ -323,8 +359,8 @@ pub(crate) fn resolve(
             let mut note = format!(
                 "{}: project pins {}, machine delivers {} — the project copy is projected in-repo",
                 prow.name,
-                short(&a),
-                short(&b)
+                crate::render::short(&a),
+                crate::render::short(&b)
             );
             if claude {
                 note.push_str(
@@ -476,6 +512,7 @@ fn scope_rows(
             feed: None,
             pin: row.pin(),
             placements: applied.placements,
+            draft_in: applied.draft_in,
             bundle: true,
             kind,
             harness_states,
@@ -519,6 +556,7 @@ fn scope_rows(
                     feed: None,
                     pin: row.pin(),
                     placements: member.applied.placements,
+                    draft_in: member.applied.draft_in,
                     bundle: true,
                     // A repo-set member is always a skill: `kind = "mcp"` on GitHub rows refuses.
                     kind: None,
@@ -575,6 +613,7 @@ fn scope_rows(
                 feed: None,
                 pin: None,
                 placements: applied.placements,
+                draft_in: applied.draft_in,
                 bundle: true,
                 kind: ds.kind.clone(),
                 harness_states: ds.harness_states.clone(),
@@ -632,6 +671,7 @@ fn scope_rows(
                 feed: Some(feed.clone()),
                 pin: None,
                 placements: applied.placements,
+                draft_in: applied.draft_in,
                 bundle: true,
                 kind: ds.kind.clone(),
                 harness_states: ds.harness_states.clone(),
@@ -697,6 +737,8 @@ fn scope_rows(
             feed: None,
             pin: None,
             placements: Vec::new(),
+            // An `"off"` switch is a statement of the file, never a placed copy — nothing to edit.
+            draft_in: DraftCopies::None,
             bundle: false,
             kind: None,
             harness_states: Vec::new(),
@@ -787,6 +829,18 @@ pub(crate) fn detail_for(
         harnesses: row.harness_states.clone(),
         managed: true,
         folders: Vec::new(),
+        // The competing copies, when the row's own classification found some — the question the
+        // row's `draft in N folders that disagree (see: topos list <name>)` line sends here.
+        diverged: match &row.draft_in {
+            DraftCopies::Diverged(copies) => copies
+                .iter()
+                .map(|c| topos_types::results::DivergedCopy {
+                    display: c.display.clone(),
+                    dest: c.dest.clone(),
+                })
+                .collect(),
+            DraftCopies::None | DraftCopies::In(_) => Vec::new(),
+        },
     })
 }
 
@@ -875,6 +929,7 @@ struct Applied {
     version: Option<String>,
     digest: Option<String>,
     placements: Vec<String>,
+    draft_in: DraftCopies,
 }
 
 impl Applied {
@@ -884,6 +939,7 @@ impl Applied {
             version: None,
             digest: None,
             placements: Vec::new(),
+            draft_in: DraftCopies::None,
         }
     }
 
@@ -893,9 +949,18 @@ impl Applied {
 }
 
 /// The APPLIED state for one bundle in one scope's store: never applied → `Unknown` ("not applied
-/// here yet"); a scanned draft → `LocalEdits`; a served version past the applied one → `Behind`;
-/// else `Applied` — an offline cache fact ("as of the last sync"), never a live claim. Any
-/// unreadable doc degrades to `Unknown`.
+/// here yet"); an undecided merge → `Blocked`; a scanned draft → `LocalEdits`; a served version
+/// past the applied one → `Behind`; else `Applied` — an offline cache fact ("as of the last sync"),
+/// never a live claim. Any unreadable doc degrades to `Unknown`.
+///
+/// **The blocked arm decides the row's VERSION, not only its word.** A conflict advances the lock's
+/// base to the team's version while leaving every folder holding the person's own bytes, so the
+/// lock is exactly the wrong thing for a blocked row to print: `<name>@<theirs> (draft)` reads as
+/// "you are on the team's new version with local edits" about a folder that never received it. The
+/// conflict record's own `draft_commit`/`draft_digest` are the version the folders DO hold, so a
+/// blocked row names those. Presence of the record is the test, the same gate `publish` applies —
+/// a leftover record from a crashed exit blocks publishing too, and healing it is the next
+/// `update`'s job, not a read verb's.
 fn applied_for_id(
     ctx: &Ctx<'_>,
     layout: Option<&Layout>,
@@ -921,18 +986,71 @@ fn applied_for_id(
     let Ok(Some(lock)) = doc::read_doc::<Lock>(ctx.fs, &sp.lock) else {
         return Applied::unknown();
     };
-    let version = Some(lock.base_commit.clone());
-    let digest = Some(lock.bundle_digest.clone());
+    let blocked: Option<ConflictState> = doc::read_doc(ctx.fs, &sp.conflict).ok().flatten();
+    let version = Some(
+        blocked
+            .as_ref()
+            .map_or_else(|| lock.base_commit.clone(), |cs| cs.draft_commit.clone()),
+    );
+    let digest = Some(
+        blocked
+            .as_ref()
+            .map_or_else(|| lock.bundle_digest.clone(), |cs| cs.draft_digest.clone()),
+    );
     let mut placements = Vec::new();
     let mut edited = false;
+    let mut draft_in = DraftCopies::None;
     if let Ok(Some(map)) = doc::read_map(ctx.fs, &sp.map) {
         placements.clone_from(&map.placements);
         let scoped = super::pull::ctx_with_layout(ctx, layout);
         if let Ok(scans) = placement::scan_placements(&scoped, &map) {
-            edited = scans
-                .iter()
-                .any(|s| matches!(s.status, placement::ScanStatus::Modified { .. }));
+            // The ONE draft classification — the same verdict the sync engine reconciles with —
+            // read off the scan that was happening anyway. `edited` stays a separate flag so a
+            // verdict whose folder cannot be named still reports the state it always did.
+            match placement::classify_draft(&scans, &map) {
+                placement::DraftVerdict::NoDraft => {}
+                placement::DraftVerdict::One { idx, .. } => {
+                    edited = true;
+                    if let Some(scan) = scans.get(idx) {
+                        draft_in = DraftCopies::In(scan.dir.clone());
+                    }
+                }
+                placement::DraftVerdict::Competitors(indices) => {
+                    edited = true;
+                    // Spelled at the SCOPED ctx (the store that was just read), so the folders the
+                    // deep dive prints and the `--dest` values its commands take are the same
+                    // strings the freeze's own refusal would print for this bundle.
+                    draft_in = DraftCopies::Diverged(
+                        scans
+                            .iter()
+                            .filter(|s| indices.contains(&s.idx))
+                            .map(|s| super::dest_select::copy_spellings(&scoped, &s.dir))
+                            .collect(),
+                    );
+                }
+            }
         }
+    }
+    // A RESOLUTION is a draft even though every folder agrees with the record: topos itself wrote
+    // those bytes, so nothing scans as edited, yet what they hold is not the version the base
+    // names — and `publish` is its way out, which is exactly what `draft` means everywhere else.
+    // The durable documents say so on their own: `work_hash` is what topos last wrote, and it
+    // differs from the base's digest only where a merge (or a `--keep-mine`) settled onto it. No
+    // folder is named as THE draft, because every copy holds it.
+    if sync.work_hash != lock.bundle_digest {
+        edited = true;
+    }
+    // The block outranks the draft word: these edits are not a publishable draft, and the row's
+    // exits are the merge's two, never `publish`. No folder is named either — the question a
+    // blocked row answers is which version to keep, not where to edit.
+    if blocked.is_some() {
+        return Applied {
+            state: StatusItemState::Blocked,
+            version,
+            digest,
+            placements,
+            draft_in: DraftCopies::None,
+        };
     }
     if edited {
         return Applied {
@@ -940,6 +1058,7 @@ fn applied_for_id(
             version,
             digest,
             placements,
+            draft_in,
         };
     }
     if !served_version.is_empty() && served_version != lock.base_commit {
@@ -948,6 +1067,7 @@ fn applied_for_id(
             version,
             digest,
             placements,
+            draft_in: DraftCopies::None,
         };
     }
     Applied {
@@ -955,6 +1075,7 @@ fn applied_for_id(
         version,
         digest,
         placements,
+        draft_in: DraftCopies::None,
     }
 }
 
@@ -1333,11 +1454,6 @@ fn claude_code_detected(ctx: &Ctx<'_>) -> bool {
             .iter()
             .any(|h| h.slug == "claude-code")
     })
-}
-
-/// A version/commit as a note spells it.
-pub(crate) fn short(hex: &str) -> &str {
-    hex.get(..12).unwrap_or(hex)
 }
 
 /// The reader both verbs open with: the sessions file and the offline delivery cache.

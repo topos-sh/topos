@@ -2189,6 +2189,7 @@ fn a_rows_dest_files_narrow_the_placement_and_unknown_files_warn_once() {
     let clean = sweep(&ctx, &plane, &dir);
     let receipt = crate::render::pull_tty(
         &clean.data,
+        &clean.decisions,
         &clean.warnings,
         &clean.advisories,
         &clean.disclosures,
@@ -2197,7 +2198,10 @@ fn a_rows_dest_files_narrow_the_placement_and_unknown_files_warn_once() {
         receipt.contains("MCP_DEST_UNKNOWN"),
         "still warned: {receipt}"
     );
-    assert!(receipt.contains("Checked 1 managed bundle(s)"), "{receipt}");
+    assert!(
+        receipt.contains("Checked 1 bundle: all up to date."),
+        "{receipt}"
+    );
     assert!(
         !receipt.contains("failed"),
         "a delivered bundle is not a failure: {receipt}"
@@ -2254,11 +2258,12 @@ fn a_skill_rows_folder_dest_never_warns_mcp_dest_unknown() {
     assert_eq!(
         crate::render::pull_tty(
             &clean.data,
+            &clean.decisions,
             &clean.warnings,
             &clean.advisories,
             &clean.disclosures
         ),
-        "updated machine-wide\nChecked 1 managed skill(s) — all up to date."
+        "updated machine-wide\nChecked 1 skill: all up to date."
     );
 }
 
@@ -2969,7 +2974,14 @@ fn a_bare_diff_of_a_config_placed_bundle_answers_the_empty_no_draft_shape() {
     let ctx = rig.ctx_at(Some(&rig.work.0));
     sweep(&ctx, &plane, &dir);
 
-    let d = ops::diff(&ctx, "linear", None, ops::DiffBudget::resolve(None, true)).unwrap();
+    let d = ops::diff(
+        &ctx,
+        "linear",
+        None,
+        ops::DiffBudget::resolve(None, true),
+        &ops::Selection::default(),
+    )
+    .unwrap();
     assert_eq!(d.diff, "", "no working tree — no draft to show");
     assert!(!d.truncated);
     assert_eq!(d.version_id, topos_core::digest::to_hex(&v.id));

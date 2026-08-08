@@ -9,8 +9,8 @@
 //!    snapshot a draft FIRST, fetch the target's bytes, re-verify them (digest == tree == `commit_id`),
 //!    record them durably in the sidecar store, then refine (a crash-after-swap heals, never a false
 //!    divergence), and map the situation to a `consent::Situation`.
-//! 3. **apply** — act on `consent::decide()`: materialize + advance `applied` (auto / explicit accept),
-//!    offer (confirm-each), or snapshot + surface the DIVERGED panel (never clobber).
+//! 3. **apply** — act on `consent::decide()`: materialize + advance `applied`, or resolve a diverged
+//!    draft with the author-merge (never clobber).
 //!
 //! `applied` advances only after a successful swap. The served record IS the sync target; its integrity is
 //! the content-addressed `version_id`, re-verified byte-for-byte by digest on apply — a digest mismatch is
@@ -24,7 +24,7 @@ use topos_core::identity::{self, Commit};
 use topos_core::sync::{self, ApplyClass};
 use topos_gitstore::{ImportFile, Store, WriteBatch};
 use topos_types::persisted::{Lock, LockedFile, PlacementMap, SyncState};
-use topos_types::results::{Conflict, MergePreview, Offer, PullAction, PullSkill};
+use topos_types::results::{PullAction, PullSkill};
 
 use crate::ctx::Ctx;
 use crate::error::ClientError;
@@ -39,46 +39,102 @@ use crate::{doc, logfile, sidecar};
 pub(crate) const DRAFT_SNAPSHOT_MESSAGE: &str = "topos: draft snapshot";
 /// A bound on ancestor backfill — far beyond any real lineage gap; stops a forged cyclic store.
 const MAX_BACKFILL: usize = 256;
-/// The `applied` generation a go-back leaves behind: the genesis sentinel `(0,0)`, which is strictly below
-/// any real served `observed`, so a later `pull` sees `applied != observed` (behind) and — once the `held`
-/// pin is released by an explicit pull — fast-forwards back to the team's current. (The go-back installs an
-/// OLD version whose true generation is no longer tracked locally; `(0,0)` is the honest "not at current".)
-const GO_BACK_APPLIED: u64 = 0;
+/// The `applied` generation a deliberate local decision leaves behind when this machine is knowingly NOT
+/// holding the served `current`: the genesis sentinel `(0,0)`, which is strictly below any real served
+/// `observed`, so a later pull sees `applied != observed` (behind) and drives toward the team's version
+/// again. ONE decision leaves it: the go-back, which installs an OLD version whose true generation is no
+/// longer tracked locally (and pins `held` until an explicit pull).
+///
+/// It never reads as never-received: [`is_never_received`] also requires the all-zero `base_commit`
+/// sentinel, and the go-back leaves a real commit there.
+pub(crate) const APPLIED_BEHIND_CURRENT: u64 = 0;
 
 /// A capability token proving the author-merge code was reached from a divergence. Its field is private to
 /// this module, so NO other module can mint one; [`super::merge_resolve::resolve_diverged`] takes it by
 /// value, so the merge is unreachable from a current/behind/clean-follower state **by construction** — a
-/// structural gate, not a role check. It is minted at exactly two guarded sites in [`sync_one`]: the
-/// post-fetch `Diverged` arm (entered only when `work != base`), and the entry escape of an already-recorded
+/// structural gate, not a role check. It is minted at exactly two guarded sites: [`sync_one`]'s
+/// post-fetch `Diverged` arm (entered only when `work != base`), and [`escape_one`]'s already-recorded
 /// conflict (a `conflict.json` exists only for an author who diverged). A clean follower hits neither.
 pub(crate) struct DivergedWitness(());
 
-/// What a per-skill `sync_one` invocation is — the bare sweep, an explicit accept, or the disclosed escape.
-/// Replaces the old `explicit: bool`: the escape is also "explicit", but it resolves a divergence by
-/// committing the author's bytes on `current` rather than accepting a pending update.
+/// What a per-skill `sync_one` invocation is — the bare sweep or an explicit accept.
+/// Replaces the old `explicit: bool`. The `--keep-mine` escape is NOT a member: it never syncs
+/// anything, so it has its own entry ([`escape_one`]) rather than a mode this function must
+/// remember to refuse.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Invocation {
     /// The bare session-start sweep (`topos pull`).
     Sweep,
     /// A targeted accept / resume (`topos pull <skill>`).
     Accept,
-    /// The disclosed escape (`topos pull <skill> --onto-current`): commit MY bytes on top of `current`.
-    Escape,
 }
 
 impl Invocation {
-    /// Whether the user's command itself supplies consent (a targeted accept or escape) vs the bare sweep.
+    /// Whether the user's command itself supplies consent (a targeted accept) vs the bare sweep.
     fn is_explicit(self) -> bool {
-        matches!(self, Invocation::Accept | Invocation::Escape)
+        matches!(self, Invocation::Accept)
     }
 }
 
-/// Bring one followed skill current (the sweep, the explicit-accept path, and the diverged-draft resolve).
+/// `topos update <skill> --keep-mine` — FINISH a merge that has STOPPED, by committing the author's
+/// chosen tree on top of `current`. Plane-independent by construction (it reads the local record and
+/// the local store and nothing else), which is the offline no-deadlock guarantee.
 ///
-/// `inv` is [`Invocation::Sweep`] for the bare session-start sweep, [`Invocation::Accept`] for a targeted
-/// `topos pull <skill>` (the command supplies consent, so a confirm-each skill applies rather than offers,
-/// and a `held` pin is released), or [`Invocation::Escape`] for `--onto-current` (resolve a divergence by
-/// committing the author's bytes on `current`).
+/// It is its OWN entry, and deliberately not a mode of [`sync_one`]: `sync_one` is reached only for
+/// a FOLLOWED bundle, so an escape routed through it silently fell through to a read-only
+/// "up to date" for every other kind of row — a local path, a forge import, an unfollowed workspace
+/// bundle — which is the one answer an explicit `--keep-mine` must never give. Here the refusal is
+/// structural: the only success is a recorded conflict, and every other state (whatever the row's
+/// kind, followed or not) refuses toward the merge.
+///
+/// The states that reach the refusal each had their own silent wrong answer: an up-to-date copy and
+/// a plain draft reported success and did nothing, a clean copy that was merely behind APPLIED the
+/// team's version (the opposite of the flag), and a live divergence committed the draft over changes
+/// the merge was about to land.
+pub(crate) fn escape_one(
+    ctx: &Ctx<'_>,
+    skill_id: &crate::id::SkillId,
+) -> Result<PullSkill, ClientError> {
+    let _guard = sidecar::lock_skill(ctx.fs, &ctx.layout, skill_id)?;
+    let sp = ctx.layout.published(skill_id);
+    let skill_id = skill_id.as_str();
+    let sync: SyncState = read_required(ctx, &sp.sync, "sync.json")?;
+    let lock: Lock = read_required(ctx, &sp.lock, "lock.json")?;
+    // The placement map is read only where an escape is actually about to write — the refusal
+    // needs nothing but the name, and must not turn into a different error for a row whose map
+    // cannot be read.
+    if let Some(cs) = doc::read_doc::<topos_types::persisted::ConflictState>(ctx.fs, &sp.conflict)?
+    {
+        let map: PlacementMap = read_map_required(ctx, &sp)?;
+        // A record that outlived its own resolution (an exit crashed between its placement write
+        // and the record's removal) is not a stopped merge: finish that clear, then refuse like any
+        // other resolved state — committing the original draft over the resolution already on disk
+        // is exactly the loss this ordering exists to prevent.
+        if !super::merge_resolve::heal_landed_resolution(ctx, &sp, &sync, &lock, &map, &cs)? {
+            // The 2nd witness mint site — guarded: a `conflict.json` only ever exists for an author
+            // who diverged (a follower never reaches merge code, so never records one).
+            return super::merge_resolve::escape_recorded(
+                DivergedWitness(()),
+                ctx,
+                skill_id,
+                &sp,
+                &sync,
+                &lock,
+                &map,
+                &cs,
+            );
+        }
+    }
+    Err(ClientError::NoStoppedMerge {
+        skill: lock.name,
+        global: !ctx.layout.is_project_scope(),
+    })
+}
+
+/// Bring one followed skill current (the sweep and the explicit-accept path).
+///
+/// `inv` is [`Invocation::Sweep`] for the bare session-start sweep or [`Invocation::Accept`] for a
+/// targeted `topos pull <skill>` (which also releases a `held` pin).
 pub(crate) fn sync_one(
     ctx: &Ctx<'_>,
     skill_id: &crate::id::SkillId,
@@ -131,9 +187,10 @@ pub(crate) fn sync_one_planned(
     let map: PlacementMap = read_map_required(ctx, &sp)?;
     let name = lock.name.clone();
 
-    // A never-received followed skill (the first-receive baseline `follow` lays: nothing observed yet, no
-    // placement). I-TOFU: its first version is an OFFER behind one explicit accept/`--approve`, never
-    // auto-landed — captured BEFORE checkForUpdates mutates `observed`.
+    // A never-received followed skill (the first-receive baseline the reconcile lays: nothing observed
+    // yet, no placement). It applies like any other pending version — the recipe row IS the consent —
+    // so this only decides how the run READS: an `installed` row rather than a fast-forward, plus the
+    // adoption-lapse correction below. Captured BEFORE checkForUpdates mutates `observed`.
     let first_receive = is_never_received(&sync);
 
     // The conditional-GET validator: what the client currently holds (its observed generation AND the commit
@@ -141,33 +198,22 @@ pub(crate) fn sync_one_planned(
     // for the never-received baseline (no observed commit yet) → an unconditional first GET.
     let known = known_current(&sync)?;
 
-    // An unresolved conflict is on record. The escape (`--onto-current`) RESOLVES it (plane-independent, so
-    // it runs even when the plane is unreachable — the no-deadlock guarantee). Any OTHER invocation heals a
-    // crashed materialization and re-discloses the block WITHOUT re-merging (the conflict draft already
-    // consumed `current`).
+    // An unresolved conflict is on record. A sync heals a crashed materialization and re-discloses
+    // the block WITHOUT re-merging (the conflict draft already consumed `current`). The escape that
+    // RESOLVES it is [`escape_one`], which never enters here.
     if let Some(cs) = doc::read_doc::<topos_types::persisted::ConflictState>(ctx.fs, &sp.conflict)?
     {
-        if inv == Invocation::Escape {
-            // The 2nd witness mint site — guarded: a `conflict.json` only ever exists for an author who
-            // diverged (a follower never reaches merge code, so never records one).
-            return super::merge_resolve::escape_recorded(
-                DivergedWitness(()),
-                ctx,
-                skill_id,
-                &sp,
-                &sync,
-                &lock,
-                &map,
-                &cs,
+        // FIRST: a record that outlived its own resolution (an exit crashed between its placement
+        // write and the record's removal) is not a block at all — finish that clear and pull
+        // normally. Before the re-disclosure, which would otherwise name a work tree that exists
+        // nowhere.
+        if !super::merge_resolve::heal_landed_resolution(ctx, &sp, &sync, &lock, &map, &cs)? {
+            super::merge_resolve::recover_resolution(ctx, &sp, &sync, &lock, &map, &cs)?;
+            return super::merge_resolve::conflicted_row_from_state(
+                ctx, &name, &sync, &lock, &map, &cs,
             );
         }
-        super::merge_resolve::recover_resolution(ctx, &sp, &sync, &lock, &map, &cs)?;
-        return super::merge_resolve::conflicted_row_from_state(&name, &sync, &cs);
     }
-
-    // Whether THIS pull discovered a new target (moved `observed`). A confirm-each skill must re-offer such
-    // a version rather than let an explicit accept apply bytes it never disclosed.
-    let mut raised = false;
 
     // ---- checkForUpdates ----
     let fetched = match target {
@@ -193,7 +239,6 @@ pub(crate) fn sync_one_planned(
                 sync.observed = rec.record.generation;
                 sync.observed_version_id = version_hex;
                 doc::write_doc(ctx.fs, &sp.sync, &sync)?;
-                raised = true;
             }
         }
         Err(PlaneError::NotFound) => return Ok(state_row(&name, &sync, PullAction::UpToDate)),
@@ -202,16 +247,17 @@ pub(crate) fn sync_one_planned(
         // store, exactly as it does for a plane that cannot be read — the delivery lane's own
         // warning is what carries the fix.
         Err(PlaneError::UpdateRequired { min }) => {
-            if explicit && inv != Invocation::Escape {
+            if explicit {
                 return Err(ClientError::UpdateRequired { min });
             }
         }
         Err(PlaneError::Unavailable(m) | PlaneError::Unreachable(m)) => {
-            // Targeted accept: surface the failure. Bare sweep + the escape: fall through to drive `applied`
-            // toward `observed` from the LOCAL store — a pending apply (or an escape) whose target is
-            // already local still completes when the plane is unreachable (the escape is the offline-capable
-            // no-deadlock guarantee); one that needs a fetch fails per-skill below, never a false UpToDate.
-            if explicit && inv != Invocation::Escape {
+            // Targeted accept: surface the failure. A bare sweep falls through to drive `applied`
+            // toward `observed` from the LOCAL store — a pending apply whose target is already local
+            // still completes when the plane is unreachable; one that needs a fetch fails per-skill
+            // below, never a false UpToDate. (The escape's own offline-capable no-deadlock path is
+            // the recorded-conflict arm above, which returns before any of this.)
+            if explicit {
                 return Err(ClientError::Plane(m));
             }
         }
@@ -319,16 +365,18 @@ pub(crate) fn sync_one_planned(
                 let mut row = state_row(&name, &sync, PullAction::Installed);
                 row.destinations = converged.created;
                 // A refresh alongside a creation rides the same row: the install leads (a folder
-                // appeared), the refreshed copies are named as the second fact rather than
+                // appeared), the caught-up copies are named as the second fact rather than
                 // relabelled `installed` or dropped.
                 if !converged.refreshed.is_empty() {
-                    row.note = Some(also_line("refreshed", &converged.refreshed));
+                    row.note = Some(also_line("updated", &converged.refreshed));
                 }
                 return Ok(row);
             }
             if !converged.refreshed.is_empty() {
                 let mut row = state_row(&name, &sync, PullAction::Refreshed);
-                row.destinations = converged.refreshed;
+                // Every folder holding the applied version, not only the ones rewritten — a
+                // bundle in two folders that needed one rewrite still lives in two folders.
+                row.destinations = converged.at_version;
                 return Ok(row);
             }
             return Ok(state_row(&name, &sync, PullAction::UpToDate));
@@ -368,9 +416,9 @@ pub(crate) fn sync_one_planned(
     let target_digest_hex = to_hex(&target_digest);
     // A first-receive ADOPTION recorded for an EARLIER served version LAPSES here — the plan runs
     // before the fetch, so only now can the reservation's digest be checked against the resolved
-    // target. The offer's consent was "adopt the byte-identical occupant"; a target that resolved
-    // to DIFFERENT bytes no longer describes it, and proceeding would wedge the apply on the
-    // materializer's never-clobber refusal. Clear the stale record and re-plan: the re-choose
+    // target. The reservation meant "adopt the byte-identical occupant in place"; a target that
+    // resolved to DIFFERENT bytes no longer describes it, and proceeding would wedge the apply on
+    // the materializer's never-clobber refusal. Clear the stale record and re-plan: the re-choose
     // suffixes past the occupied dir, the reservation swap puts the record right, and the apply
     // proceeds with the fresh state (the correction only touches never-materialized reservations,
     // which scan Foreign/Absent either way — the base classification above is unchanged).
@@ -426,83 +474,51 @@ pub(crate) fn sync_one_planned(
         }
         ApplyClass::CleanForward => {
             // A swap happens only here, and only when `work_eq_base` (a clean follower) — so a swap never
-            // overwrites a local draft.
-            if topos_core::consent::decide(situation_for(follow, explicit, raised, first_receive))
-                .applies_bytes()
-            {
-                apply_forward(ctx, &sp, &map, &managed, &lock, &sync, skill_id, &t)?;
-                let mut row = applied_row(&name, &sync, target_commit);
-                row.harnesses = converge_explicit_mcp(ctx, mcp_record && explicit, skill_id, &name);
-                row.kind = mcp_record.then(|| "mcp".to_owned());
-                mark_installed(ctx, &mut row, first_receive, &map, &managed);
-                Ok(row)
-            } else {
-                // confirm-each / first-receive TOFU: re-disclose the digest as a one-tap offer; nothing
-                // materializes (a bare sweep never auto-lands a never-received skill — I-TOFU).
-                Ok(offer_row(&name, &sync, target_commit, &target_digest_hex))
+            // overwrites a local draft. Every situation a clean forward can reach APPLIES: the recipe row
+            // is the standing pre-authorization, an explicit accept is the direct local command, and a
+            // review-required workspace only ever serves an already-approved `current`. The kernel stays
+            // the authority for that claim, ASKED here rather than re-decided — and asked in every
+            // build, not just a debug one. It is the last coupling between this engine and the
+            // consent kernel on the apply path, it costs one table lookup per skill, and the thing
+            // it guards is bytes landing in an agent's folder: a decision table that ever stopped
+            // agreeing must stop the apply, not be compiled out of the release the apply ships in.
+            if !topos_core::consent::decide(situation_for(follow, explicit)).applies_bytes() {
+                return Err(ClientError::Corrupt(format!(
+                    "the consent kernel refused a clean forward apply for {name}"
+                )));
             }
+            apply_forward(ctx, &sp, &map, &managed, &lock, &sync, skill_id, &t)?;
+            let mut row = applied_row(&name, &sync, target_commit);
+            row.harnesses = converge_explicit_mcp(ctx, mcp_record && explicit, skill_id, &name);
+            row.kind = mcp_record.then(|| "mcp".to_owned());
+            mark_installed(ctx, &mut row, first_receive, &map, &managed);
+            Ok(row)
         }
         ApplyClass::Diverged => {
             // ④ a GENUINE local draft vs a newer remote — resolve it (author-side three-way merge / escape).
             // DIVERGED implies `work != base`, which can only hold for a Draft work tree (the ONE
             // edited copy — several divergent copies froze typed back in compute_work).
             let WorkState::Draft { scanned } = &work.state else {
-                return Ok(diverged_row(&name, &sync, target_commit, None, None));
+                // Unreachable by construction (Absent / CleanAtBase are equal to base; Unscannable
+                // returned above) — fail closed rather than resolve a divergence whose bytes this
+                // run cannot name.
+                return Err(ClientError::Corrupt(format!(
+                    "{name} reads as diverged with no draft working tree"
+                )));
             };
             // The structural author-only gate: the witness is minted ONLY here.
-            let witness = DivergedWitness(());
-            use super::merge_resolve::{ResolveStrategy, resolve_diverged};
-            let confirm_each = follow.mode == FollowMode::ConfirmEach;
-            let strategy = match inv {
-                Invocation::Escape => Some(ResolveStrategy::Escape),
-                // An explicit accept merges the disclosed divergence — UNLESS this pull discovered a
-                // strictly-newer `current` (`raised`) for a confirm-each skill: that version's digest was
-                // never offered, so re-offer it instead of merging undisclosed bytes (mirrors the
-                // clean-forward `situation_for(raised)` re-offer).
-                Invocation::Accept if confirm_each && raised => None,
-                Invocation::Accept => Some(ResolveStrategy::Merge),
-                // Full-auto: an AUTO follower's bare sweep runs the full merge unattended; a confirm-each
-                // follower is surfaced instead (auto-merging would land theirs without the one-tap accept).
-                Invocation::Sweep if confirm_each => None,
-                Invocation::Sweep => Some(ResolveStrategy::Merge),
-            };
-            match strategy {
-                Some(strategy) => resolve_diverged(
-                    witness,
-                    ctx,
-                    skill_id,
-                    &sp,
-                    &sync,
-                    &lock,
-                    &map,
-                    scanned,
-                    &bundle,
-                    target_commit,
-                    strategy,
-                ),
-                None => {
-                    let draft_id = snapshot_draft(ctx, &sp, &lock, scanned)?;
-                    // The SURFACED divergence (a confirm-each follower's offer, not a resolution):
-                    // predict the merge purely in memory — the target's bytes are already local
-                    // (fetched above) and the base renders from the store, so this adds NO network
-                    // call. An unrenderable base (the no-base fallback's territory) yields no
-                    // preview: absent = unknown.
-                    let preview = super::parse_hex32(&lock.bundle_digest)
-                        .ok()
-                        .and_then(|base_digest| {
-                            let base_commit = super::parse_hex32(&lock.base_commit).ok()?;
-                            store.render_verified(base_commit, base_digest).ok()
-                        })
-                        .map(|base| super::merge_resolve::preview_merge(&base, scanned, &bundle));
-                    Ok(diverged_row(
-                        &name,
-                        &sync,
-                        target_commit,
-                        Some(draft_id),
-                        preview,
-                    ))
-                }
-            }
+            super::merge_resolve::resolve_diverged(
+                DivergedWitness(()),
+                ctx,
+                skill_id,
+                &sp,
+                &sync,
+                &lock,
+                &map,
+                scanned,
+                &bundle,
+                target_commit,
+            )
         }
     }
 }
@@ -644,10 +660,11 @@ pub(crate) fn go_back(
         schema_version: sync.schema_version,
         observed: sync.observed,
         observed_version_id: sync.observed_version_id.clone(),
-        applied: GO_BACK_APPLIED,
+        applied: APPLIED_BEHIND_CURRENT,
         base_commit: target_hex.clone(),
         work_hash: target_digest_hex.clone(),
         held: true,
+        // A go-back installs an OLD version whole — no draft stands.
         draft_observed: None,
     };
     let next_lock = lock_from_bundle(&lock, target, &bundle);
@@ -698,10 +715,7 @@ pub(crate) fn go_back(
         observed: next_sync.observed,
         applied: next_sync.applied,
         action: PullAction::Held,
-        offer: None,
-        conflict: None,
         merge: None,
-        merge_preview: None,
         synced_placements: None,
         destinations: Vec::new(),
         kept: Vec::new(),
@@ -720,15 +734,26 @@ pub(crate) fn go_back(
 /// recoverable), then the base bytes are re-materialized over the placement. `observed`/`applied` are
 /// untouched (the team's current did not move) and `held` stays `false`, so a later sweep sees the skill
 /// current again. A pristine working tree is a clean no-op (nothing to discard). A RECORDED merge
-/// conflict is cleared with the draft it described (the reset resolves the divergence the team's way),
-/// so publish is not left blocked by a conflict whose draft is gone.
+/// conflict is cleared with the draft it described — the record AND the marked-up copy in the scope's
+/// `conflicts/` dir (the reset resolves the divergence the team's way) — so publish is not left blocked
+/// by a conflict whose draft is gone. After a conflict `lock.base_commit` IS the team's version, which
+/// is what makes `--reset` on a blocked bundle mean "take theirs, drop mine".
+///
+/// `sel` narrows the REWRITE to the ONE copy a `-a`/`--dest` selection names — the symmetric
+/// counterpart of a per-copy publish, and the other way out of a divergent-copies freeze. What it
+/// narrows is only which folders are written back to base: every edited copy is STILL snapshotted
+/// into the store first (the loss rail is not a per-copy thing — bytes that survive on disk are
+/// still bytes nobody wrote down), and the surviving copy stays exactly as it is, which makes it
+/// the single ordinary draft once the reset lands.
 ///
 /// # Errors
-/// [`ClientError::PlacementUnsupported`] on an unscannable placement; a store / io / integrity failure.
+/// [`ClientError::PlacementUnsupported`] on an unscannable placement; a store / io / integrity
+/// failure; [`ClientError::SelectionRefused`] when the selection names no edited copy.
 pub(crate) fn reset_to_base(
     ctx: &Ctx<'_>,
     skill_id: &crate::id::SkillId,
-) -> Result<[u8; 32], ClientError> {
+    sel: &super::Selection,
+) -> Result<(), ClientError> {
     let _guard = sidecar::lock_skill(ctx.fs, &ctx.layout, skill_id)?;
     let sp = ctx.layout.published(skill_id);
     let sid = skill_id.as_str();
@@ -746,8 +771,28 @@ pub(crate) fn reset_to_base(
             placement::plan_for_skill(ctx, sid, &lock, &map)
         }
     };
+    // The selection is resolved against the RECORDED map, before reconcile: a reconcile only ever
+    // appends targets or replaces never-materialized reservations, so an EDITED copy keeps its
+    // index — and resolving against the dir rather than the index below makes that structural.
+    let picked = if sel.is_empty() {
+        None
+    } else {
+        Some(super::dest_select::select_copy(ctx, sel, &lock.name, &map)?)
+    };
     let map = placement::reconcile_map(&map, &plan);
     let managed = placement::managed_indices(&map, &plan);
+    // The apply set: every managed placement, or the ONE the selection named — located by its DIR
+    // in the reconciled map, so no index arithmetic can drift.
+    let managed = match &picked {
+        None => managed,
+        Some(p) => map
+            .placements
+            .iter()
+            .enumerate()
+            .filter(|(_, dir)| std::path::Path::new(dir) == p.dir)
+            .map(|(i, _)| i)
+            .collect(),
+    };
 
     let base = super::parse_hex32(&lock.base_commit)?;
     let base_digest = super::parse_hex32(&lock.bundle_digest)?;
@@ -795,11 +840,13 @@ pub(crate) fn reset_to_base(
         },
     )?;
     // A recorded merge conflict describes the divergence this reset just DISCARDED — clear the
-    // block (idempotent; absent is fine), or publish would stay refused by a conflict whose draft
-    // no longer exists. Cleared AFTER the placements landed, mirroring the escape's order.
-    ctx.fs.remove_file(&sp.conflict)?;
+    // block and the marked-up copy it named (idempotent; absent is fine), or publish would stay
+    // refused by a conflict whose draft no longer exists. Cleared AFTER the placements landed,
+    // mirroring the escape's order. A PER-COPY reset clears it too: a conflict writes no markers
+    // into any folder, so there is no copy-scoped marker state a narrowed reset could leave behind.
+    super::merge_resolve::clear_conflict(ctx, &sp, &lock)?;
     log_apply(ctx, sid, "update-reset", base, &report);
-    Ok(base)
+    Ok(())
 }
 
 /// The current local state of a tracked skill as a read-only `PullSkill` (UpToDate) — used when a
@@ -820,40 +867,21 @@ pub(crate) fn current_state(
 
 /// Map the follow-state + invocation to the consent situation. A follower only ever receives an
 /// already-approved `current` (the gate is server-side), so a forward move under `review_required` is
-/// `ReviewRequiredApproved`; auto is `FollowedAutoNewVersion`; confirm-each is `FollowedConfirmEach`.
+/// `ReviewRequiredApproved`, and an ordinary delivered move is `FollowedAutoNewVersion` — the standing
+/// pre-authorization the recipe row records. A never-received bundle takes the same rows as every
+/// later version: a row that demands it IS the consent, so its first bytes land on the bare sweep.
 ///
-/// An explicit `topos pull <skill>` is the user accepting a **previously-disclosed** pending version: it
-/// maps to `ExplicitLocalPull` (a direct local command that authorizes the apply and re-binds the digest)
-/// ONLY when this pull did NOT discover a newer version (`!raised`). If the pointer advanced during the
-/// accept (`raised`), that newer version was never offered, so it goes through the follow-mode gate — a
-/// confirm-each skill re-offers it (re-disclosing its digest) rather than applying bytes it never showed.
-///
-/// A `first_receive` skill is TOFU (I-TOFU): a bare sweep maps to `FirstReceiveFromLink` (an OFFER, never
-/// auto-landed — even an `auto` follower), while an explicit accept / `--approve` is the user's direct
-/// first-receive yes and maps to `ExplicitLocalPull` (places the first bytes). This takes precedence over
-/// the follow-mode gate, so a never-received skill is never silently materialized by a session-start sweep.
-fn situation_for(
-    follow: &FollowContext,
-    explicit: bool,
-    raised: bool,
-    first_receive: bool,
-) -> topos_core::consent::Situation {
+/// An explicit `topos pull <skill>` is a direct local command the user typed, so it maps to
+/// `ExplicitLocalPull` — the same apply, attributed to the person rather than to the standing follow.
+fn situation_for(follow: &FollowContext, explicit: bool) -> topos_core::consent::Situation {
     use topos_core::consent::Situation;
-    if first_receive {
-        return if explicit {
-            Situation::ExplicitLocalPull
-        } else {
-            Situation::FirstReceiveFromLink
-        };
-    }
-    if explicit && !raised {
+    if explicit {
         Situation::ExplicitLocalPull
     } else if follow.review_required {
         Situation::ReviewRequiredApproved
     } else {
         match follow.mode {
             FollowMode::Auto => Situation::FollowedAutoNewVersion,
-            FollowMode::ConfirmEach => Situation::FollowedConfirmEach,
         }
     }
 }
@@ -943,6 +971,11 @@ fn converge_placements(
     let mut absent: Vec<usize> = Vec::new();
     let mut stale: Vec<usize> = Vec::new();
     let mut missing: Vec<usize> = Vec::new();
+    // Already holding the applied version before this run touched anything. Not a target — but
+    // the receipt's destination column counts it, because it IS one of the places the bundle is.
+    // An EDITED copy is deliberately excluded: it does not hold this version, and the removal
+    // receipt's `kept …` line is what speaks for it.
+    let mut settled: Vec<usize> = Vec::new();
     for &i in managed {
         let Some(s) = work.scans.get(i) else { continue };
         match &s.status {
@@ -959,6 +992,9 @@ fn converge_placements(
             {
                 stale.push(i);
                 missing.push(i);
+            }
+            ScanStatus::Clean { digest } if to_hex(digest) == lock.bundle_digest => {
+                settled.push(i);
             }
             // Edited, foreign, or unreadable dirs are never converge targets.
             ScanStatus::Clean { .. }
@@ -1009,33 +1045,53 @@ fn converge_placements(
     // What this run REFRESHED: a stale target whose recorded baseline NOW names the applied
     // version — the same existence-over-intent rule (a target the materializer re-stat-skipped
     // keeps its old baseline and claims nothing).
-    let refreshed = stale
+    let caught_up: Vec<usize> = stale
         .iter()
-        .filter(|&&i| {
+        .copied()
+        .filter(|&i| {
             after
                 .placement_state
                 .get(i)
                 .is_some_and(|st| st.materialized_sha.as_deref() == Some(&lock.bundle_digest))
         })
-        .filter_map(|&i| after.placements.get(i))
-        .map(|p| super::inventory::pretty(ctx, Path::new(p)))
         .collect();
+    let pretty = |i: &usize| {
+        after
+            .placements
+            .get(*i)
+            .map(|p| super::inventory::pretty(ctx, Path::new(p)))
+    };
+    let refreshed: Vec<String> = caught_up.iter().filter_map(pretty).collect();
+    // Where the bundle stands at the applied version now, in placement-map order: the copies that
+    // caught up, plus the ones that were already there. `created` is deliberately absent — a dir
+    // that appeared this run leads its own `installed` row, which names it.
+    let mut at_version: Vec<usize> = caught_up;
+    at_version.extend(settled);
+    at_version.sort_unstable();
+    let at_version = at_version.iter().filter_map(pretty).collect();
     Ok(LocalConverge {
         map: after,
         created,
         refreshed,
+        at_version,
     })
 }
 
-/// A local placement converge's outcome: the COMMITTED map, plus the two disk facts a receipt
-/// speaks differently about (display paths, receipt-ready) — the placements it CREATED (dirs
-/// materialized where nothing stood) and the stale copies it REFRESHED (dirs that existed but
-/// held bytes behind the applied version). Creations flip the row to `installed`, refreshes to
-/// `refreshed`: "up to date" may only claim itself when nothing changed on disk.
+/// A local placement converge's outcome: the COMMITTED map, plus the disk facts a receipt speaks
+/// differently about (display paths, receipt-ready) — the placements it CREATED (dirs materialized
+/// where nothing stood) and the stale copies it REFRESHED (dirs that existed but held bytes behind
+/// the applied version). Creations flip the row to `installed`, refreshes to `refreshed`: "up to
+/// date" may only claim itself when nothing changed on disk.
+///
+/// `at_version` is a different KIND of fact, and the one a person actually asked for: not what the
+/// disk did, but WHERE the bundle now stands at the applied version — the refreshed copies plus
+/// every sibling that already held those bytes. A row that names only what it rewrote reports one
+/// folder for a bundle that lives in two, which reads as a placement having gone missing.
 struct LocalConverge {
     map: PlacementMap,
     created: Vec<String>,
     refreshed: Vec<String>,
+    at_version: Vec<String>,
 }
 
 impl LocalConverge {
@@ -1045,12 +1101,13 @@ impl LocalConverge {
             map: map.clone(),
             created: Vec::new(),
             refreshed: Vec::new(),
+            at_version: Vec::new(),
         }
     }
 }
 
 /// The SECOND fact a receipt row carries when this run wrote folders its action does not name —
-/// `also installed <path>` / `also refreshed <path>` (several join with ", "). It rides the row's
+/// `also installed <path>` / `also updated <path>` (several join with ", "). It rides the row's
 /// `note`, which the renderer prints as an indented line under the row.
 pub(crate) fn also_line(verb: &str, dirs: &[String]) -> String {
     format!("also {verb} {}", dirs.join(", "))
@@ -1568,7 +1625,9 @@ pub(crate) fn compute_work(
     // The work tree: the resolved draft when one exists, else the first (canonical) present copy.
     let chosen: Option<&placement::PlacementScan> = match placement::classify_draft(&scans, map) {
         placement::DraftVerdict::Competitors(indices) => {
-            return Err(placement::placements_diverged(skill_name, &scans, &indices));
+            return Err(placement::placements_diverged(
+                ctx, skill_name, &scans, &indices,
+            ));
         }
         placement::DraftVerdict::One { idx, .. } => Some(&scans[idx]),
         placement::DraftVerdict::NoDraft => scans.iter().find(|s| {
@@ -1659,16 +1718,16 @@ fn is_zero_gen(g: u64) -> bool {
     g == 0
 }
 
-/// Whether this followed skill has NEVER received bytes — the first-receive baseline `follow` lays: nothing
-/// applied, on the all-zero base. An `add`-ed skill carries a real local genesis (a non-zero `base_commit`),
-/// and a received skill has applied a version (`applied` > `(0,0)`), so neither is ever mistaken for it.
+/// Whether this followed skill has NEVER received bytes — the first-receive baseline the reconcile lays:
+/// nothing applied, on the all-zero base. An `add`-ed skill carries a real local genesis (a non-zero
+/// `base_commit`), and a received skill has applied a version (`applied` > `(0,0)`), so neither is ever
+/// mistaken for it.
 ///
-/// DURABLE across sweeps: keyed on `applied` + the zero base, NOT `observed`. A bare sweep that only OFFERS a
-/// first-receive baseline still moves `observed` to the served target (so the conditional GET keeps working)
-/// — which would make `observed` non-zero after sweep 1, so keying on it would let a SECOND auto sweep
-/// mistake the still-unapproved baseline for a normal followed skill and AUTO-LAND it (breaking I-TOFU).
-/// `applied` stays `(0,0)` and `base_commit` stays all-zero until the first explicit accept actually
-/// MATERIALIZES bytes, so they remain a true "never placed" signal every sweep.
+/// DURABLE across sweeps: keyed on `applied` + the zero base, NOT `observed`. A sweep that reaches the
+/// plane moves `observed` to the served target (so the conditional GET keeps working) whether or not its
+/// apply then succeeds — so keying on `observed` would make a run that failed mid-fetch report its
+/// eventual first materialization as an ordinary fast-forward. `applied` stays `(0,0)` and `base_commit`
+/// stays all-zero until bytes actually LAND, so they remain a true "never placed" signal every sweep.
 pub(crate) fn is_never_received(sync: &SyncState) -> bool {
     is_zero_gen(sync.applied) && is_zero_commit(&sync.base_commit)
 }
@@ -1807,10 +1866,7 @@ fn state_row(name: &str, sync: &SyncState, action: PullAction) -> PullSkill {
         observed: sync.observed,
         applied: sync.applied,
         action,
-        offer: None,
-        conflict: None,
         merge: None,
-        merge_preview: None,
         synced_placements: None,
         destinations: Vec::new(),
         kept: Vec::new(),
@@ -1830,10 +1886,7 @@ fn applied_row(name: &str, sync: &SyncState, _target: [u8; 32]) -> PullSkill {
         observed: sync.observed,
         applied: sync.observed,
         action: PullAction::FastForwarded,
-        offer: None,
-        conflict: None,
         merge: None,
-        merge_preview: None,
         synced_placements: None,
         destinations: Vec::new(),
         kept: Vec::new(),
@@ -1853,67 +1906,8 @@ fn synced_row(name: &str, sync: &SyncState, n: u32) -> PullSkill {
         observed: sync.observed,
         applied: sync.applied,
         action: PullAction::DraftSynced,
-        offer: None,
-        conflict: None,
         merge: None,
-        merge_preview: None,
         synced_placements: Some(n),
-        destinations: Vec::new(),
-        kept: Vec::new(),
-        display: None,
-        note: None,
-        scope: None,
-        harnesses: Vec::new(),
-        kind: None,
-    }
-}
-
-fn offer_row(name: &str, sync: &SyncState, target: [u8; 32], target_digest_hex: &str) -> PullSkill {
-    PullSkill {
-        skill: name.to_owned(),
-        workspace_id: None,
-        observed: sync.observed,
-        applied: sync.applied,
-        action: PullAction::Offered,
-        offer: Some(Offer {
-            version_id: to_hex(&target),
-            bundle_digest: target_digest_hex.to_owned(),
-        }),
-        conflict: None,
-        merge: None,
-        merge_preview: None,
-        synced_placements: None,
-        destinations: Vec::new(),
-        kept: Vec::new(),
-        display: None,
-        note: None,
-        scope: None,
-        harnesses: Vec::new(),
-        kind: None,
-    }
-}
-
-fn diverged_row(
-    name: &str,
-    sync: &SyncState,
-    target: [u8; 32],
-    draft_id: Option<String>,
-    merge_preview: Option<MergePreview>,
-) -> PullSkill {
-    PullSkill {
-        skill: name.to_owned(),
-        workspace_id: None,
-        observed: sync.observed,
-        applied: sync.applied,
-        action: PullAction::Diverged,
-        offer: None,
-        conflict: Some(Conflict {
-            remote_version_id: to_hex(&target),
-            local_version_id: draft_id,
-        }),
-        merge: None,
-        merge_preview,
-        synced_placements: None,
         destinations: Vec::new(),
         kept: Vec::new(),
         display: None,

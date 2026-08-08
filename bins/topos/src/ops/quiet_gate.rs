@@ -266,10 +266,7 @@ mod tests {
             observed: 1,
             applied: 1,
             action,
-            offer: None,
-            conflict: None,
             merge: None,
-            merge_preview: None,
             synced_placements: None,
             destinations: Vec::new(),
             kept: Vec::new(),
@@ -398,13 +395,10 @@ mod tests {
             // A refresh rewrote a folder that had fallen behind — bytes moved on disk.
             (PullAction::Refreshed, true),
             (PullAction::Removed, true),
-            (PullAction::Offered, false),
-            (PullAction::Diverged, false),
             (PullAction::Merged, true),
             (PullAction::Conflicted, true),
             (PullAction::Held, false),
             (PullAction::Withdrawn, true),
-            (PullAction::Excluded, false),
             // A released row writes a marker, never placement bytes — the resolution deletes
             // nothing on disk.
             (PullAction::Released, false),
@@ -415,6 +409,7 @@ mod tests {
                 proposals_awaiting: 0,
                 notices: Vec::new(),
                 sync: Vec::new(),
+                behind_elsewhere: Vec::new(),
                 scope: None,
             };
             assert_eq!(sweep_changed_bytes(&data), changed, "{action:?}");
@@ -424,6 +419,7 @@ mod tests {
             proposals_awaiting: 0,
             notices: Vec::new(),
             sync: Vec::new(),
+            behind_elsewhere: Vec::new(),
             scope: None,
         };
         assert!(!sweep_changed_bytes(&empty));

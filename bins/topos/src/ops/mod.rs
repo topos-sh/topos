@@ -7,7 +7,7 @@
 //! - [`sync_engine`] — the per-skill `checkForUpdates → plan → apply` sync machine over the kernel's
 //!   four-state transition. `pull` is its scope dispatch; the `follow <skill>` path drives it too.
 //! - [`merge_resolve`] — the author-side resolution of a diverged draft (three-way merge / conflict
-//!   materialization / the `--onto-current` escape), reachable only through the engine's witness token.
+//!   materialization / the `--keep-mine` escape), reachable only through the engine's witness token.
 //! - [`contribute`] — the device-signed write plumbing `publish`/`review`/`revert` share: the fresh-current
 //!   read, identity re-derivation, the op-WAL replay, and the all-outcome receipt mapping.
 //! - [`crate::materialize`] (at the crate root, beside the other placement seams) — the engine's
@@ -35,7 +35,7 @@ mod log;
 mod login;
 pub(crate) mod loopback;
 mod manifest_edit;
-mod merge_resolve;
+pub(crate) mod merge_resolve;
 mod protect;
 mod publish;
 mod pull;
@@ -69,6 +69,7 @@ pub(crate) use auth::{AuthConnectors, AuthStatusData, status};
 #[cfg(test)]
 pub(crate) use builtin::{
     ensure_with as builtin_ensure_with, marker_in_frontmatter as builtin_marker_in_frontmatter,
+    placement_dirs as builtin_placement_dirs,
 };
 pub(crate) use diff::{DiffBudget, diff, diff_resolved};
 pub(crate) use feed_migration::ensure_feed_migration;
@@ -94,8 +95,8 @@ pub(crate) use protect::{ProtectConnectors, ProtectOutcome, protect};
 #[cfg(test)]
 pub(crate) use publish::ensure_tracked;
 pub(crate) use pull::{
-    PullOutcome, PullScope, ReconcileOpts, ResetOutcome, StaleReason, TargetMode, ctx_with_layout,
-    pull, quiet_hook_lines, quiet_soft_failure, reset,
+    PendingDecision, PullOutcome, PullScope, ReconcileOpts, ResetOutcome, StaleReason, TargetMode,
+    ctx_with_layout, pull, quiet_hook_lines, quiet_soft_failure, reset,
 };
 pub(crate) use reconcile::{
     CacheFollow, ForgeCadence, ManifestUpdateOpts, SessionRoutedPlane, SessionTransports,
@@ -496,15 +497,6 @@ pub(crate) fn parse_hex32(hex_str: &str) -> Result<[u8; 32], ClientError> {
     Ok(out)
 }
 
-/// The ARGV-boundary wrapper over [`parse_hex32`]: a user-typed hash that fails to parse is a usage
-/// error (`INVALID_ARGUMENT`, with `usage` shown verbatim on both surfaces), never `CORRUPT_STATE` —
-/// that family stays reserved for the sidecar-document call sites, where the same malformed bytes
-/// genuinely mean a corrupt persisted doc. `usage` describes the expected shape; it never echoes the
-/// raw input (the caller names the argument, not its bytes).
-pub(crate) fn parse_hex32_arg(hex_str: &str, usage: &str) -> Result<[u8; 32], ClientError> {
-    parse_hex32(hex_str).map_err(|_| ClientError::InvalidArgument(usage.to_owned()))
-}
-
 /// The shortest version prefix an argv surface accepts (git-style; outputs render 12 chars, so a pasted
 /// short form always clears this floor).
 pub(crate) const MIN_VERSION_PREFIX: usize = 8;
@@ -512,8 +504,9 @@ pub(crate) const MIN_VERSION_PREFIX: usize = 8;
 /// An argv version reference: the always-valid full 64-hex id, or a short lowercase-hex prefix
 /// ([`MIN_VERSION_PREFIX`]..64 chars) resolved against the skill's locally recorded pointer history via
 /// [`resolve_version_ref`]. The local-resolution surfaces (`pull <skill>@<ref>`, `revert --to`, the
-/// `diff <ref>` endpoints) accept both forms; `review <skill>@<hash>` stays full-hash-only (a proposal's
-/// candidate id lives on the plane, never in local history — see [`review`]'s parse site).
+/// `diff <ref>` endpoints) accept both forms and resolve against local history; `review
+/// <skill>@<hash>` accepts both too, but resolves a prefix against the workspace's OPEN PROPOSALS
+/// instead — a proposal's candidate id lives on the plane, never in local history (see [`review`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum VersionRef {
     Full([u8; 32]),
@@ -642,7 +635,7 @@ mod tests {
         assert_eq!(rows, vec![1, 2, 3]);
     }
 
-    use super::{VersionRef, parse_hex32, parse_hex32_arg, resolve_version_ref};
+    use super::{VersionRef, parse_hex32, resolve_version_ref};
 
     fn recorded(commits: &[&str]) -> Vec<String> {
         commits.iter().map(|c| (*c).to_owned()).collect()
@@ -726,7 +719,7 @@ mod tests {
     #[test]
     fn argv_and_document_boundaries_classify_the_same_bytes_differently() {
         // The SAME malformed hash: a usage error from argv, corruption from a persisted doc.
-        let arg = parse_hex32_arg("abc", "`--to` must be a 64-char lowercase hex version id")
+        let arg = VersionRef::parse_arg("abc", "`--to` must be a 64-char lowercase hex version id")
             .unwrap_err();
         assert_eq!(arg.code(), "INVALID_ARGUMENT");
         assert_eq!(
@@ -734,8 +727,8 @@ mod tests {
             "`--to` must be a 64-char lowercase hex version id"
         );
         assert_eq!(parse_hex32("abc").unwrap_err().code(), "CORRUPT_STATE");
-        // A good hash parses identically through the wrapper.
-        assert!(parse_hex32_arg(&"abcdef0123456789".repeat(4), "unused").is_ok());
+        // A good hash parses identically through the argv parser.
+        assert!(VersionRef::parse_arg(&"abcdef0123456789".repeat(4), "unused").is_ok());
     }
 
     /// The workspace-scoped + followed-only name resolvers over a real fs + a fixture follow-state.

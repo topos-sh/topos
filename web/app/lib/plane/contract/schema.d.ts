@@ -754,7 +754,20 @@ export interface components {
              *     undone. **INFERRED** (additive-only).
              */
             rewrite_skipped?: string | null;
+            /**
+             * @description The paste-able share line (`<address>/skills/<name>`) — a members' deep link to the skill
+             *     under proposal. Absent when the workspace address is not known. **INFERRED**
+             *     (additive-only). No `undo` rides this shape: a proposal never moved `current`, so there is
+             *     no prior state to restore — the author's escape is `review <handle> --withdraw`.
+             */
+            share_line?: string | null;
             title: string;
+            /**
+             * @description The workspace's `<host>/<workspace>` address (`topos.sh/acme`) — how the receipt names
+             *     WHERE the proposal was opened. Read from a best-effort `me`; absent when that read failed
+             *     or the address does not validate. **INFERRED** (additive-only).
+             */
+            workspace_address?: string | null;
         };
         /**
          * @description `POST /v1/proposals` body — opens a proposal (a PR): ingests a full candidate **without moving
@@ -828,6 +841,13 @@ export interface components {
              */
             current_generation: number;
             /**
+             * @description The folder the published bytes were read from, as a person reads it
+             *     (`project/.agents/skills/coolify-deploy`) — present only when a `--dest`/`-a` selection
+             *     named ONE of several EDITED copies. A single edited copy needs no such line: it is the
+             *     draft, and naming its folder would say nothing. **INFERRED** (additive-only).
+             */
+            from_placement?: string | null;
+            /**
              * @description The paste-able teammate handoff line (`Ask your agent: …`) — the join instruction that
              *     brings a teammate's machine into the workspace, composed from the workspace's server
              *     origin + address. Absent when the address is not known (a best-effort read — the publish
@@ -860,6 +880,12 @@ export interface components {
              */
             origin_note?: string | null;
             /**
+             * @description The other EDITED copies, untouched by this publish — each keeps its bytes and becomes an
+             *     ordinary draft ahead of the version just published. Populated on the same condition as
+             *     `from_placement`. **INFERRED** (additive-only).
+             */
+            other_edited?: string[];
+            /**
              * @description The channel named by `--to` that no longer EXISTED at the write (deleted between the
              *     client's existence check and the transaction — the in-transaction refusal, never a silent
              *     mint): the publish landed catalog-only; re-run `--to` once the channel exists. **INFERRED**
@@ -891,9 +917,29 @@ export interface components {
              *     (additive-only).
              */
             rewrite_skipped?: string | null;
+            /**
+             * @description The paste-able share line (`<address>/skills/<name>`) — a members' deep link to the skill
+             *     just published. Absent when the workspace address is not known. **INFERRED**
+             *     (additive-only).
+             */
+            share_line?: string | null;
             skill_id: string;
+            /**
+             * @description The undo — the whole `topos revert <name> --to <version>` command that puts the team back
+             *     on the version `current` held before this publish. WITHHELD unless it verifiably restores
+             *     that state: a bundle this machine does not follow cannot be reverted from here, and a
+             *     genesis publish left no prior version to restore. **INFERRED** (additive-only).
+             */
+            undo?: string | null;
             /** @description The new commit (the shipped `version_id`). */
             version_id: string;
+            /**
+             * @description The workspace's `<host>/<workspace>` address (`topos.sh/acme`) — how the receipt names
+             *     WHERE these bytes landed. Read from the same best-effort `me` the lines below come from;
+             *     absent when that read failed or the address does not validate. **INFERRED**
+             *     (additive-only).
+             */
+            workspace_address?: string | null;
         };
         /**
          * @description `POST /v1/publish` body — a direct publish that moves `current`. The acting device rides the

@@ -1841,6 +1841,7 @@ fn publish_through(
         None,
         None,
         None,
+        &ops::Selection::default(),
     )
 }
 
@@ -2009,6 +2010,7 @@ fn an_mcp_publish_to_a_pre_mcp_server_refuses_before_the_wal() {
         None,
         None,
         None,
+        &ops::Selection::default(),
     )
     .expect_err("a pre-MCP server refuses the mcp publish");
     assert_eq!(err.code(), "SERVER_TOO_OLD");

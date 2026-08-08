@@ -4,6 +4,13 @@
   "description": "`pull` result — per-skill update status plus the reviewer-queue count. **PINNED** (the original\nfields); `notices` + `sync` are ADDITIVE (the delivery-driven sweep's feed + freshness — absent\non a targeted pull and from an older producer).",
   "type": "object",
   "properties": {
+    "behind_elsewhere": {
+      "description": "Bundles this installation holds at an OLDER version in a scope this run did not reconcile\n— the cross-scope staleness the ONE applied row per bundle cannot carry. Empty (and\nomitted) whenever every other scope is current, and whenever the difference is DELIBERATE\n(a pinned or `\"off\"` row, a local go-back): a copy that is meant to differ is not behind.\n**INFERRED** (additive).",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/BehindElsewhere"
+      }
+    },
     "notices": {
       "description": "The unacked, person-scoped notices the delivery answered (verdicts first) — narrated by an\ninteractive `update`, which then acks exactly these ids; the quiet hook fetches without\nacking. **INFERRED** (additive).",
       "type": "array",
@@ -43,25 +50,24 @@
     "proposals_awaiting"
   ],
   "$defs": {
-    "Conflict": {
-      "description": "The DIVERGED panel (local draft vs newer remote). **INFERRED fields.**",
+    "BehindElsewhere": {
+      "description": "One bundle whose copy in ANOTHER scope stands behind the workspace's current. **INFERRED**\n(additive).",
       "type": "object",
       "properties": {
-        "local_version_id": {
+        "bundle": {
+          "description": "The bundle's catalog name.",
+          "type": "string"
+        },
+        "project_dir": {
+          "description": "The project directory whose copy is behind (display path, `~`-abbreviated). Absent ⇒ the\nmachine-wide copy, which `topos update -g` brings current.",
           "type": [
             "string",
             "null"
-          ],
-          "pattern": "^[0-9a-f]{64}$"
-        },
-        "remote_version_id": {
-          "description": "The remote version the draft diverged from.",
-          "type": "string",
-          "pattern": "^[0-9a-f]{64}$"
+          ]
         }
       },
       "required": [
-        "remote_version_id"
+        "bundle"
       ]
     },
     "ConflictPathKind": {
@@ -120,6 +126,21 @@
         "kind"
       ]
     },
+    "ConflictReason": {
+      "description": "Why a merge could not be applied cleanly. **INFERRED value set.**",
+      "oneOf": [
+        {
+          "description": "A genuine three-way merge with at least one unresolved path.",
+          "type": "string",
+          "const": "three_way"
+        },
+        {
+          "description": "Unrelated histories — no recorded base; a 2-way manual choice is required.",
+          "type": "string",
+          "const": "no_base"
+        }
+      ]
+    },
     "McpAgentState": {
       "description": "One agent's (harness's) state for a config-placed (`mcp`) bundle on this installation.\n`state` is an OPEN vocabulary — `current` / `drifted` / `not-supported` / `unprovable` /\n`conflicting` / `removed`; a reader ignores a state it does not recognize. **INFERRED**\n(additive).",
       "type": "object",
@@ -152,40 +173,6 @@
         "state"
       ]
     },
-    "MergePreview": {
-      "description": "The predicted verdict of a three-way merge that has NOT been run against the placements — a pure\nin-memory dry run of the same kernel plan + per-file diff3 the real resolution executes. Never a\npromise: the authoritative outcome is the resolution's own [`MergeReport`]. **INFERRED** (additive).",
-      "type": "object",
-      "properties": {
-        "conflicts": {
-          "description": "The paths that would conflict when `verdict` is `conflicted` (structural conflicts + failed\ncontent merges). Empty for a clean preview — and for the rare conflicted-with-no-path case\n(a merge that would empty the bundle).",
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        },
-        "verdict": {
-          "$ref": "#/$defs/MergePreviewVerdict"
-        }
-      },
-      "required": [
-        "verdict"
-      ]
-    },
-    "MergePreviewVerdict": {
-      "description": "The two predicted merge verdicts. **INFERRED** (additive value set).",
-      "oneOf": [
-        {
-          "description": "Every path would resolve cleanly — the merge would land a publishable draft-on-current.",
-          "type": "string",
-          "const": "clean"
-        },
-        {
-          "description": "At least one path would conflict — the merge would write markers and block publish.",
-          "type": "string",
-          "const": "conflicted"
-        }
-      ]
-    },
     "MergeReport": {
       "description": "The author-merge disclosure (the `merged` / `conflicted` outcomes of a diverged draft). **INFERRED\nfields** — the spec pins the merge semantics (deterministic, author-only, conflict-blocks-publish),\nnot this exact shape.",
       "type": "object",
@@ -206,11 +193,47 @@
             "$ref": "#/$defs/ConflictPathReport"
           }
         },
+        "copy_dir": {
+          "description": "Where the marked-up copy of BOTH versions was written: the scope's own conflict workbench,\nnever a folder an agent reads. A hand resolution left there is what `update <skill>\n--keep-mine` commits. Display path (`~`-abbreviated). Absent for a clean merge.\n**INFERRED** (additive).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "drop_diff": {
           "description": "For the escape / no-base 2-way fallback: a unified diff of what the chosen side drops vs the other.",
           "type": [
             "string",
             "null"
+          ]
+        },
+        "placements": {
+          "description": "The folders that still hold the AUTHOR'S OWN version — a conflict writes to none of them, so\nevery agent reads exactly what it read before the update. Display paths (`~`-abbreviated).\nEmpty for a clean merge (which rewrites its placements). **INFERRED** (additive).",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "reason": {
+          "description": "Why the merge could not resolve itself — `three_way` (a real fork point; the workbench holds\nboth sides marked up) or `no_base` (unrelated histories; the workbench holds this person's\nfiles with the team's beside them). Absent on a clean merge and on a resolution. **INFERRED**\n(additive).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ConflictReason"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "resolved": {
+          "description": "How a STOPPED merge was finished, when this row is a `--keep-mine` resolution. Absent on a\nclean merge and on a conflict. **INFERRED** (additive).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MergeResolution"
+            },
+            {
+              "type": "null"
+            }
           ]
         },
         "result_digest": {
@@ -227,6 +250,13 @@
           "description": "`current` (theirs) the draft was merged onto.",
           "type": "string",
           "pattern": "^[0-9a-f]{64}$"
+        },
+        "took": {
+          "description": "The paths a `keep_mine` resolution TOOK from the team — every file whose committed content\nor mode differs from this person's own draft, including ones the team deleted. Sorted by raw\npath bytes. Empty when the resolution changed nothing of theirs, and always empty for a\n`by_hand` resolution (that tree is the person's own, wholesale — nothing in it is claimable\nas taken from the team). **INFERRED** (additive).",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
         }
       },
       "required": [
@@ -237,26 +267,23 @@
         "clean"
       ]
     },
-    "Offer": {
-      "description": "The re-disclosed bytes a `pull` offers (confirm-each / first-receive). **INFERRED fields** — the\nspec pins that the offer re-discloses + re-binds the digest, not its exact shape.",
-      "type": "object",
-      "properties": {
-        "bundle_digest": {
+    "MergeResolution": {
+      "description": "How `--keep-mine` finished a stopped merge — the two paths say different things about whose\nwording landed, so a receipt must never speak for both at once. **INFERRED** (additive).",
+      "oneOf": [
+        {
+          "description": "The workbench was left alone: the three-way merge, settled on this person's side wherever\nthe two sides collided, with everything else the team changed taken (`git merge -X ours`).",
           "type": "string",
-          "pattern": "^[0-9a-f]{64}$"
+          "const": "keep_mine"
         },
-        "version_id": {
+        {
+          "description": "The workbench was EDITED: those files are the person's own reconciliation, committed\nunexamined (`git commit` after resolving by hand). Nothing here is topos's choice.",
           "type": "string",
-          "pattern": "^[0-9a-f]{64}$"
+          "const": "by_hand"
         }
-      },
-      "required": [
-        "version_id",
-        "bundle_digest"
       ]
     },
     "PullAction": {
-      "description": "What `pull` did / offers for a skill. **INFERRED value set** — the four-state machine pins the\nsemantics (CURRENT / BEHIND / DRAFT / DIVERGED) but not these exact tokens.",
+      "description": "What `pull` did for a skill. **INFERRED value set** — the four-state machine pins the\nsemantics (CURRENT / BEHIND / DRAFT / DIVERGED) but not these exact tokens.",
       "oneOf": [
         {
           "description": "State ① — already current; nothing to do.",
@@ -274,24 +301,14 @@
           "const": "installed"
         },
         {
-          "description": "A managed copy that stood BEHIND the version this machine already holds was rewritten to it\n— no version moved (`observed`/`applied` are unchanged), only bytes on disk caught up (a\ncrash-window residue, a copy left at an older version). `destinations` names the folders. A\nrefresh is not a first materialization, so it never reads `installed`. **Additive.**",
+          "description": "A managed copy that stood BEHIND the version this machine already holds was rewritten to it\n— no version moved (`observed`/`applied` are unchanged), only bytes on disk caught up (a\ncrash-window residue, a copy left at an older version). `destinations` names the folders. A\ncatch-up is not a first materialization, so it never reads `installed`. **Additive.**\n\nSerialized as `updated` — the word every human surface prints for it. A wire token and a\nterminal line naming one outcome two ways is one vocabulary too many.",
           "type": "string",
-          "const": "refreshed"
+          "const": "updated"
         },
         {
           "description": "This machine's OWN recipe choice ended delivery here (a dropped feed line, an `\"off\"`\nswitch, a dropped row) and the placed copies were uninstalled now — `destinations` names\nwhat left, `kept` any edited copy left in place. Distinct from `withdrawn`, which is\nupstream's act. **Additive.**",
           "type": "string",
           "const": "removed"
-        },
-        {
-          "description": "State ② confirm-each / first-receive — a one-tap offer is waiting.",
-          "type": "string",
-          "const": "offered"
-        },
-        {
-          "description": "State ④ — a local draft conflicts with a newer remote (surfaced, not yet resolved — e.g. a\nconfirm-each follower's bare sweep, which offers the merge rather than running it).",
-          "type": "string",
-          "const": "diverged"
         },
         {
           "description": "State ④ resolved cleanly — a three-way merge (or the escape) landed a draft-on-current.",
@@ -319,11 +336,6 @@
           "const": "withdrawn"
         },
         {
-          "description": "THIS DEVICE excludes the skill (\"not on this device\"): the agent dirs are clear here, the\nperson keeps receiving it everywhere else, and following it here lifts the exclusion.",
-          "type": "string",
-          "const": "excluded"
-        },
-        {
           "description": "A store record no row claims and nothing delivers RESOLVED, once: the record retires from\nevery surface; nothing on disk was deleted — placed files belong to the person now, and\n`note` carries the one-line fact. **Additive.**",
           "type": "string",
           "const": "released"
@@ -331,7 +343,7 @@
       ]
     },
     "PullSkill": {
-      "description": "One followed skill's pull state. `observed`/`applied`/`action`/`offer`/`conflict` are PINNED by\nname; the *value enums* (`PullAction`) and the `offer`/`conflict` field shapes are INFERRED.",
+      "description": "One followed skill's pull state. `observed`/`applied`/`action` are PINNED by name; the *value\nenum* (`PullAction`) is INFERRED.",
       "type": "object",
       "properties": {
         "action": {
@@ -342,16 +354,6 @@
           "type": "integer",
           "format": "uint64",
           "minimum": 0
-        },
-        "conflict": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/Conflict"
-            },
-            {
-              "type": "null"
-            }
-          ]
         },
         "destinations": {
           "description": "The DESTINATIONS this row's action touched: the skill folders an `installed` row landed in\n(or a `removed` row uninstalled), or the config files a config-placed (`mcp`) bundle's\nentries live in. Display paths — abbreviated to `~` under the user's home. Empty (and\nomitted) for actions that moved no destination. **INFERRED** (additive).",
@@ -399,19 +401,8 @@
             }
           ]
         },
-        "merge_preview": {
-          "description": "The PREDICTED outcome of the three-way merge a surfaced `diverged` row implies, computed\npurely in memory from already-local bytes (never a network read). Absent = unknown (not a\ndiverged row, or the merge base is not locally renderable). **INFERRED** (additive).",
-          "anyOf": [
-            {
-              "$ref": "#/$defs/MergePreview"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
         "note": {
-          "description": "The one-line fact a row states BESIDE its action: the whole line a `released` row prints\n(why the record resolved and where its files stand now), or — on any other action — the\nfolders this run also wrote that the action's own column does not name (a healed folder\nthat rode along with a settled-draft fan-out, a stale copy refreshed beside a fresh\ninstall). Absent when the action says everything. **INFERRED** (additive).",
+          "description": "The fact a row states BESIDE its action: the whole thing a `released` row prints (why the\nrecord resolved and where its files stand now — two lines, the second the folders, which a\nhuman renderer indents under the first), or — on any other action — the one line naming\nthe folders this run also wrote that the action's own column does not name (a healed folder\nthat rode along with a settled-draft fan-out, a stale copy refreshed beside a fresh\ninstall). Absent when the action says everything. **INFERRED** (additive).",
           "type": [
             "string",
             "null"
@@ -422,16 +413,6 @@
           "type": "integer",
           "format": "uint64",
           "minimum": 0
-        },
-        "offer": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/Offer"
-            },
-            {
-              "type": "null"
-            }
-          ]
         },
         "scope": {
           "description": "The SCOPE this row reconciled in — `\"person\"` for the home dirs, or the project\ndirectory's path for an in-checkout delivery. The receipt sections rows by it. Absent on\nrows predating the field. **INFERRED** (additive).",

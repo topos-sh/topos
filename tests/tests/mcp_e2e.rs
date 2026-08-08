@@ -6,20 +6,18 @@
 //! the bytes the person had; a hand-edited entry is DRIFTED — never overwritten, never removed,
 //! and disclosed; and a project-scoped row reaches the four project surfaces alone.
 //!
-//! Unlike the sibling suites this one drives the REAL CLI BINARY (`target/<profile>/topos`) as a
-//! subprocess, not the in-process fixture rig: `add --mcp`, the per-scope config converge and the
-//! harness detection all resolve against `$HOME` / `$TOPOS_HOME`, so only a real process with a
-//! fake home proves them. The two halves share one installation — the fixture rig owns the browser
-//! login (the `/verify` approval), the binary owns every verb after it, both over the same
+//! Like the conflict suite, this one drives the REAL CLI BINARY (`target/<profile>/topos`) as a
+//! subprocess rather than the in-process fixture rig: `add --mcp`, the per-scope config converge
+//! and the harness detection all resolve against `$HOME` / `$TOPOS_HOME`, so only a real process
+//! with a fake home proves them. The two halves share one installation — the fixture rig owns the
+//! browser login (the `/verify` approval), the binary owns every verb after it, both over the same
 //! `~/.topos`.
 
 mod common;
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
-use std::sync::Once;
 
-use common::{OWNER_EMAIL, Session, Stack, start_stack};
+use common::{CliOut, OWNER_EMAIL, Session, Stack, cli_binary, run_cli, start_stack};
 use serde_json::{Value, json};
 use topos::test_support::SessionInstall;
 
@@ -47,68 +45,6 @@ const SIX: [&str; 6] = [
 ];
 
 // ── the real binary ─────────────────────────────────────────────────────────────────────────────
-
-/// The `topos` binary this run drives: the sibling of the test binary in the SAME cargo profile
-/// dir (`<target>/<profile>/topos`). Built on demand when absent, exactly as the suite's web-app
-/// half is built ahead of the run — the binary is a different package, so `CARGO_BIN_EXE_*` is not
-/// available here.
-fn cli_binary() -> PathBuf {
-    static BUILD: Once = Once::new();
-    let exe = std::env::current_exe().expect("the test binary's own path");
-    let profile_dir = exe
-        .parent()
-        .and_then(Path::parent)
-        .expect("<target>/<profile>/deps/<test binary>");
-    let bin = profile_dir.join("topos");
-    if !bin.exists() {
-        BUILD.call_once(|| {
-            let status = Command::new(std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()))
-                .args(["build", "-p", "topos"])
-                .current_dir(repo_root())
-                .status()
-                .expect("build the topos binary");
-            assert!(status.success(), "`cargo build -p topos` failed");
-        });
-    }
-    assert!(
-        bin.exists(),
-        "the MCP e2e drives the real CLI — run `cargo build -p topos` first ({})",
-        bin.display()
-    );
-    bin
-}
-
-/// Repo root (this crate lives at `<repo>/tests`).
-fn repo_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .expect("tests/ has a parent")
-        .to_path_buf()
-}
-
-/// One CLI invocation's whole answer.
-#[derive(Debug)]
-struct CliOut {
-    code: i32,
-    stdout: String,
-    stderr: String,
-}
-
-impl CliOut {
-    /// The `--json` envelope, asserted successful.
-    fn envelope(&self, what: &str) -> Value {
-        assert_eq!(self.code, 0, "{what} exited {}: {}", self.code, self.stderr);
-        let value: Value = serde_json::from_str(&self.stdout)
-            .unwrap_or_else(|e| panic!("{what} printed a JSON envelope ({e}): {}", self.stdout));
-        assert_eq!(value["ok"], true, "{what}: {}", self.stdout);
-        value
-    }
-
-    /// The envelope's `data` object.
-    fn data(&self, what: &str) -> Value {
-        self.envelope(what)["data"].clone()
-    }
-}
 
 /// One installation the REAL binary drives: a fake `$HOME` (where the six harnesses are detected
 /// and their configs live) over the fixture rig's `~/.topos` (where the login it performed lives).
@@ -149,30 +85,15 @@ impl Install {
         self.rig.root().join("home")
     }
 
-    /// Run the real binary from `cwd` with this installation's roots. Every per-harness home
-    /// override is REMOVED from the child environment (the developer's own `$CLAUDE_CONFIG_DIR` /
-    /// `$CODEX_HOME` / `$XDG_CONFIG_HOME` would otherwise point the surfaces out of the fake home),
-    /// and the passive version check is off (an offline suite never dials releases).
+    /// Run the real binary from `cwd` with this installation's roots.
     fn run(&self, cwd: &Path, args: &[&str]) -> CliOut {
-        let out = Command::new(&self.bin)
-            .args(args)
-            .current_dir(cwd)
-            .env("HOME", self.home())
-            .env("TOPOS_HOME", self.root().join(".topos"))
-            .env("TOPOS_NO_UPDATE_CHECK", "1")
-            .env_remove("CLAUDE_CONFIG_DIR")
-            .env_remove("CODEX_HOME")
-            .env_remove("HERMES_HOME")
-            .env_remove("XDG_CONFIG_HOME")
-            .env_remove("VIBE_HOME")
-            .env_remove("AUTOHAND_HOME")
-            .output()
-            .expect("run the topos binary");
-        CliOut {
-            code: out.status.code().unwrap_or(-1),
-            stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
-            stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
-        }
+        run_cli(
+            &self.bin,
+            &self.home(),
+            &self.root().join(".topos"),
+            cwd,
+            args,
+        )
     }
 }
 

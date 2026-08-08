@@ -87,18 +87,62 @@ If the same skill sits in several of your agents' directories, edit **one** of t
 has settled — unchanged since the previous check — the next update copies it onto the skill's other
 copies in the same scope and says so on the receipt.
 
-When the team's changes and yours genuinely collide, the copy is frozen with conflict markers and
-the ways out are named right there:
+When the team's changes and yours genuinely collide, your agents' folders are left exactly as they
+were: still your version, never conflict markers — nothing an agent could read mid-merge and act
+on. A copy of both versions, marked up for a by-hand merge, goes to Topos's own folder instead
+(`~/.topos/conflicts/<skill>/`, or `<project>/.topos/state/<you>/conflicts/<skill>/` for a skill a
+project asks for). The receipt names that folder and both ways out, and publishing that skill is
+blocked until you take one:
 
 ```bash
 topos diff customer-lookup
-topos update customer-lookup
+topos update customer-lookup --keep-mine
 topos update customer-lookup --reset --yes
-topos update customer-lookup --onto-current
 ```
 
-See your side; merge your draft onto the latest; drop **your** edits and take the team's; or keep
-**your** files and skip the merge.
+See your side; commit the merge you made in that folder — or, by leaving the folder alone, keep
+**your** wording on the lines you both changed; or take the **team's** version instead, dropping
+yours. Either way out deletes the folder.
+
+Keeping your version is exactly what it sounds like, and no more than that: your wording wins the
+lines the two of you both rewrote, and everything else they changed comes in — a file only they
+touched, a paragraph nowhere near yours, a file they added. The receipt names the files the rest
+came in on, the contested one included: your wording won those lines, and their other changes to
+that same file still landed. It is the same thing you would get by pulling their change, editing the
+contested lines back to your wording, and committing.
+
+Committing a merge you made by hand is the other half, and the receipt says so plainly — it landed
+what you left in the folder, exactly as you left it. Nothing there is topos's choice, so it claims
+nothing about whose wording won.
+
+From there it is a normal draft: `topos diff` shows it, `topos update` keeps merging their later
+changes into it, and `topos publish` ships it like any other change.
+
+`--keep-mine` only finishes a merge that has actually stopped. Run it when nothing is waiting and it
+says so and points you at `topos update <skill>` — the ordinary update, which takes their changes
+and stops only where the two of you really collide.
+
+## When two copies disagree
+
+Edit the same skill in two folders and the copies stop agreeing on what the draft is. Nothing is
+overwritten — topos stops and asks which one you mean, listing every copy with what you can do
+with it. Answer with `--dest <folder>` (or `-a <agent>`) on any of the three verbs:
+
+```bash
+topos diff coolify-deploy --dest .claude/skills
+topos publish coolify-deploy --dest .agents/skills --yes
+topos update coolify-deploy --dest .claude/skills --reset --yes
+```
+
+The folder is written however topos last printed it at you: the one the `topos.toml` line names
+(`.claude/skills`), the one `topos list` prints (`project/.claude/skills/coolify-deploy`), or an
+absolute path. Publishing or dropping one copy leaves every other copy exactly as it is. With two
+copies that ends it: the survivor becomes your single ordinary draft. With three or more, repeat
+until one is left. `topos update <skill> --reset` with no folder still drops **every** copy's edits
+at once.
+
+`--dest` on `diff` narrows only your side; it always compares against the team version, so two runs
+answer the same question about two folders.
 
 ## Leaked a secret?
 

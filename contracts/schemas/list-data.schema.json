@@ -202,6 +202,24 @@
         "total"
       ]
     },
+    "DivergedCopy": {
+      "description": "ONE copy of a bundle whose edits disagree with another copy's, in the two spellings every\nsurface that names such a copy uses: the folder as a person reads it, and the `--dest` value\nthat names it back on a command line. The same pair the placement freeze's refusal prints —\none vocabulary, so the deep dive and the refusal never describe one state two ways.",
+      "type": "object",
+      "properties": {
+        "dest": {
+          "description": "`.agents/skills` · `~/.claude/skills` — the `--dest` value naming this copy.",
+          "type": "string"
+        },
+        "display": {
+          "description": "`project/.agents/skills/coolify-deploy` · `~/.claude/skills/coolify-deploy`.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "display",
+        "dest"
+      ]
+    },
     "ForgeSource": {
       "description": "One external source's last auto-update check — the answer to \"is this even working?\", computed\nentirely from local state. Every check is recorded whatever its outcome, so a source that has\ngone quiet is visible here long before the silent sweep is willing to interrupt a session over\nit. **INFERRED** (additive).",
       "type": "object",
@@ -257,6 +275,13 @@
             "string",
             "null"
           ]
+        },
+        "diverged": {
+          "description": "The copies whose edits DISAGREE (always ≥ 2 when present) — the state the inventory row\nreports as `draft in N folders that disagree` and sends the reader here to resolve. Each\ncarries the folder as a person reads it and the `--dest` value that names it back, so the\nanswer can offer the per-copy acts. Absent whenever at most one copy is edited.\n**INFERRED** (additive).",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/DivergedCopy"
+          }
         },
         "feed": {
           "description": "The feed origin, when no row names it (`<host>/<workspace>` — the workspace whose feed\ndelivers it).",
@@ -573,6 +598,22 @@
           "description": "Local edits ahead of the version this entry is on.",
           "type": "boolean"
         },
+        "draft_dir": {
+          "description": "The FOLDER holding this row's edited copy — the draft — as the row prints it: written\nagainst the folder its manifest governs (`project/.claude/skills/<name>`) for a project\nrow, `~`-abbreviated for a machine-wide one. Present only when exactly one copy is edited;\nabsent when several disagree (`draft_diverged` says so instead) and on every non-draft row.\n**INFERRED** (additive).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "draft_diverged": {
+          "description": "How many folders hold edits that DISAGREE — copies none of which explains another, so no\nsingle one is the draft. Always ≥ 2 when present, and present only on a draft row whose\ncopies compete; `draft_dir` is the one-copy case. **INFERRED** (additive).",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
         "kind": {
           "description": "The catalog bundle kind (`\"mcp\"` for a config-placed MCP-server bundle). Absent ⇒\n`\"skill\"`. **Additive.**",
           "type": [
@@ -661,6 +702,11 @@
           "description": "A machine-local `\"off\"` row withholds this bundle here — a standing statement of the file,\nnever a delivery. **Additive.**",
           "type": "string",
           "const": "off"
+        },
+        {
+          "description": "A merge is undecided here (see [`StatusItemState::Blocked`]): this copy is neither current\nnor an ordinary draft, and publishing it is refused until one of the two exits is taken.\n**Additive.**",
+          "type": "string",
+          "const": "blocked"
         }
       ]
     },
@@ -695,6 +741,11 @@
           "description": "Local edits sit ahead of the applied version (a draft).",
           "type": "string",
           "const": "local-edits"
+        },
+        {
+          "description": "A merge is undecided here: the team published a version that changes lines this person also\nchanged, so the folders still hold THEIR version, publishing is refused, and the two exits\n(`update <name> --keep-mine` / `--reset`) are the only ways forward. The row's\nversion/digest name what the folders hold, never the team's.",
+          "type": "string",
+          "const": "blocked"
         },
         {
           "description": "An exclude line withholds this name here (the row's `source` recorded it).",

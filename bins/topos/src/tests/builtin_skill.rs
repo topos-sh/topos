@@ -251,6 +251,152 @@ fn a_hand_edit_is_overwritten_on_the_next_sweep() {
     );
 }
 
+/// The edit a force-sync overwrites is KEPT in the store — and named on no surface.
+///
+/// Both halves matter. Keeping it is the standing promise: no byte differing from its baseline is
+/// destroyed without a snapshot behind it, and this one is recoverable from the store forever.
+/// Surfacing it would be a lie of a different kind — the bundle ships with the binary, so there is
+/// no verb that puts those bytes back, nothing to publish (the name is reserved workspace-side) and
+/// no manifest row to reset. A `(draft)` on the row, a `drafts ahead` count, or a version in the
+/// history would each name work a person could come back to, and none of them can be come back to.
+#[test]
+fn an_overwritten_edit_is_kept_in_the_store_and_named_on_no_surface() {
+    let rig = Rig::new("edit-quiet");
+    rig.detect(".cline");
+    let inert_f = InertFollow;
+    let inert_p = InertPlane;
+    let ctx = rig.ctx(&inert_f, &inert_p);
+    ops::builtin_ensure_with(&ctx, &fake_bundle("old body")).unwrap();
+
+    // A hand edit. While it is still ON DISK — the window where the copy really does differ from
+    // the record — the inventory and the health panel say nothing about it.
+    let dir = rig.shared_copy();
+    std::fs::write(dir.join("SKILL.md"), "---\nname: topos\n---\nmy own edit\n").unwrap();
+    let edited = crate::scan::scan(&dir).unwrap();
+    assert_quiet_surfaces(&ctx);
+
+    // Then a binary change — the force-sync overwrites the copy, snapshot-first.
+    assert!(
+        ops::builtin_ensure_with(&ctx, &fake_bundle("new body"))
+            .unwrap()
+            .changed
+    );
+
+    // KEPT: exactly one stored version renders the bytes that were on disk, byte for byte.
+    let sid = crate::id::SkillId::parse("topos").unwrap();
+    let store = topos_gitstore::Store::open(&ctx.layout.published(&sid).store).unwrap();
+    let recovered: Vec<_> = store
+        .list_versions()
+        .unwrap()
+        .into_iter()
+        .filter_map(|v| store.render_verified(v, edited.bundle_digest).ok())
+        .collect();
+    assert_eq!(recovered.len(), 1, "the edit is recoverable from the store");
+    assert_eq!(
+        recovered[0]
+            .files
+            .iter()
+            .map(|f| (f.path.clone(), f.bytes.clone()))
+            .collect::<Vec<_>>(),
+        edited
+            .files
+            .iter()
+            .map(|f| (f.path.clone(), f.bytes.clone()))
+            .collect::<Vec<_>>(),
+    );
+
+    // And with the snapshot now standing in the store, the same surfaces stay quiet.
+    assert_quiet_surfaces(&ctx);
+
+    // The history walks the built-in's own lineage; the snapshot hangs OFF it and never appears.
+    let dir_conn = |_: &str| -> Box<dyn crate::plane::DirectorySource> {
+        unreachable!("a local log builds no directory transport")
+    };
+    let nosess = |_: &crate::sessions::Session| -> ops::SessionTransports {
+        unreachable!("a local log builds no session transports")
+    };
+    let history = ops::log(
+        &ctx,
+        &ops::LogConnectors {
+            directory: &dir_conn,
+            session: &nosess,
+        },
+        "topos",
+        crate::ops::RowPage::unlimited(),
+    )
+    .unwrap();
+    let snapshot_id = topos_core::digest::to_hex(&recovered_version(&store, &edited));
+    assert!(
+        history
+            .events
+            .iter()
+            .any(|e| e.get("action").and_then(|v| v.as_str()) == Some("version")),
+        "the built-in's own versions ARE in the history — this is not an empty read: {:?}",
+        history.events
+    );
+    for event in &history.events {
+        let rendered = event.to_string();
+        assert!(!rendered.contains(&snapshot_id), "{rendered}");
+        assert!(!rendered.contains("draft"), "{rendered}");
+    }
+}
+
+/// `list` (the row AND the deep dive) and `status` say nothing about an edit to the built-in.
+/// `status` is manifest-row driven and the built-in has no row anywhere, so it is asserted here as
+/// the standing guarantee it is, not as a thing that once leaked.
+fn assert_quiet_surfaces(ctx: &Ctx<'_>) {
+    let page = crate::ops::RowPage::unlimited();
+    let listed = ops::list_with(ctx, &ops::ListRequest::default(), None, None, page).unwrap();
+    let row = listed
+        .data
+        .scopes
+        .iter()
+        .flat_map(|s| &s.rows)
+        .find(|r| r.skill == "topos")
+        .expect("the built-in is listed");
+    assert!(!row.draft, "{row:?}");
+    assert_eq!(row.status, None, "{row:?}");
+    let text = crate::render::list_tty(&listed);
+    assert!(!text.contains("(draft)"), "{text}");
+
+    let dive = ops::list_with(
+        ctx,
+        &ops::ListRequest {
+            name: Some("topos".to_owned()),
+            ..ops::ListRequest::default()
+        },
+        None,
+        None,
+        page,
+    )
+    .unwrap();
+    assert!(
+        !crate::render::list_tty(&dive).contains("local edits"),
+        "the deep dive claims no edits either"
+    );
+
+    let status = ops::status_snapshot(ctx, ops::ScopeView::All).unwrap();
+    assert!(
+        !status
+            .scopes
+            .iter()
+            .flat_map(|s| &s.attention)
+            .any(|a| a.kind == "drafts-ahead"),
+        "{status:?}"
+    );
+}
+
+/// The stored version whose bytes ARE the edited copy (the snapshot) — the one `render_verified`
+/// accepts against that copy's digest.
+fn recovered_version(store: &topos_gitstore::Store, edited: &ScannedBundle) -> [u8; 32] {
+    store
+        .list_versions()
+        .unwrap()
+        .into_iter()
+        .find(|v| store.render_verified(*v, edited.bundle_digest).is_ok())
+        .expect("the snapshot is in the store")
+}
+
 #[test]
 fn a_binary_change_refreshes_every_placed_copy() {
     let rig = Rig::new("upgrade");

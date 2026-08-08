@@ -145,6 +145,79 @@ fn merge_file_capped(
     })
 }
 
+/// Three-way merge resolved to MINE on every hunk the two sides genuinely collide over — the byte
+/// half of `git merge -X ours`.
+///
+/// Everything the other side changed WITHOUT colliding is taken exactly as [`merge_file`] takes it;
+/// only the hunks diff3 marks as contested come out as mine. A file that cannot be line-merged at
+/// all (a non-UTF-8 side, one over the caps) has no hunks to reconcile, so the whole of mine stands
+/// — which is what `-X ours` does with a binary conflict.
+///
+/// TOTAL: every input has an answer, so a resolution built on this can never deadlock on one file.
+#[must_use]
+pub fn merge_file_keep_ours(base: &[u8], mine: &[u8], theirs: &[u8]) -> Vec<u8> {
+    match merge_file(base, mine, theirs) {
+        Ok(MergeFileResult::Clean(bytes)) => bytes,
+        // [`marker_length`] is a pure function of the same three inputs, so the length recomputed
+        // here is byte-exactly the one those markers were written with.
+        Ok(MergeFileResult::Conflict(bytes)) => {
+            keep_ours(&bytes, marker_length(base, mine, theirs))
+        }
+        Ok(MergeFileResult::Binary) | Err(_) => mine.to_vec(),
+    }
+}
+
+/// Drop every diff3 conflict region from `merged`, keeping the OURS section of each.
+///
+/// The boundaries are unambiguous by construction: [`marker_length`] chose a run STRICTLY longer
+/// than any leading marker run in any of the three inputs, so a line opening with `marker_len`
+/// marker characters is one this module wrote and never content — the same uniqueness property that
+/// stops a file from forging a resolution boundary.
+fn keep_ours(merged: &[u8], marker_len: usize) -> Vec<u8> {
+    enum Region {
+        /// Ordinary merged content — the non-conflicting hunks, theirs included.
+        Outside,
+        Ours,
+        Base,
+        Theirs,
+    }
+    let opens =
+        |line: &[u8], marker: u8| line.iter().take_while(|&&b| b == marker).count() >= marker_len;
+    let mut out = Vec::with_capacity(merged.len());
+    let mut region = Region::Outside;
+    for line in merged.split_inclusive(|&b| b == b'\n') {
+        match region {
+            Region::Outside => {
+                if opens(line, b'<') {
+                    region = Region::Ours;
+                } else {
+                    out.extend_from_slice(line);
+                }
+            }
+            Region::Ours => {
+                if opens(line, b'|') {
+                    region = Region::Base;
+                } else if opens(line, b'=') {
+                    region = Region::Theirs;
+                } else {
+                    out.extend_from_slice(line);
+                }
+            }
+            Region::Base => {
+                if opens(line, b'=') {
+                    region = Region::Theirs;
+                }
+            }
+            Region::Theirs => {
+                if opens(line, b'>') {
+                    region = Region::Outside;
+                }
+            }
+        }
+    }
+    out
+}
+
 /// A safe upper bound on `diffy`'s Diff3 output for these inputs: the three conflict sections never exceed
 /// the inputs' combined size, and the markers cost at most `4 × (marker_len + label/newline overhead)` per
 /// conflict hunk, with at most one hunk per source line. Computed with saturating arithmetic so it never
@@ -249,6 +322,60 @@ B-theirs\n\
 >>>>>>> theirs\n\
 c\n";
         assert_eq!(String::from_utf8(bytes).unwrap(), expected);
+    }
+
+    /// `-X ours`: the other side's NON-colliding change is taken exactly as a clean merge takes it,
+    /// and only the contested hunk comes out as mine. This is the whole difference from `-s ours`,
+    /// which would throw the uncontested line away with everything else.
+    ///
+    /// The two edits are far enough apart to be separate hunks — adjacent ones are ONE conflict to
+    /// diff3 (and to git), and resolving a hunk to ours takes all of it.
+    #[test]
+    fn keep_ours_takes_their_uncontested_change_and_wins_the_contested_one() {
+        let base = b"top\nmid1\nmid2\nmid3\nmid4\nmid5\nbottom\n";
+        let mine = b"TOP-mine\nmid1\nmid2\nmid3\nmid4\nmid5\nbottom\n";
+        let theirs = b"TOP-theirs\nmid1\nmid2\nmid3\nmid4\nmid5\nBOTTOM-theirs\n";
+        assert_eq!(
+            merge_file_keep_ours(base, mine, theirs),
+            b"TOP-mine\nmid1\nmid2\nmid3\nmid4\nmid5\nBOTTOM-theirs\n".to_vec()
+        );
+    }
+
+    /// A clean merge has no conflict region, so the resolution is that merge, byte for byte.
+    #[test]
+    fn keep_ours_of_a_clean_merge_is_the_merge() {
+        let base = b"line1\nline2\nline3\n";
+        let mine = b"MINE\nline2\nline3\n";
+        let theirs = b"line1\nline2\nTHEIRS\n";
+        assert_eq!(
+            merge_file_keep_ours(base, mine, theirs),
+            b"MINE\nline2\nTHEIRS\n".to_vec()
+        );
+    }
+
+    /// A file with no hunks to reconcile — a non-UTF-8 side, or one refused by the caps — resolves
+    /// to the whole of mine, exactly as `-X ours` resolves a binary conflict.
+    #[test]
+    fn keep_ours_of_an_unmergeable_file_is_mine_whole() {
+        let mine = &[0xff, 0xfe, 0x00, 0x01][..];
+        assert_eq!(merge_file_keep_ours(b"text\n", mine, b"other\n"), mine);
+        let mut pathological = vec![b'<'; MAX_MARKER_LEN + 1];
+        pathological.push(b'\n');
+        assert_eq!(merge_file_keep_ours(b"a\n", b"b\n", &pathological), b"b\n");
+    }
+
+    /// Content that merely LOOKS like a marker never opens or closes a region: the emitted markers
+    /// are lengthened past any run in the content, and the strip matches on that length — so a file
+    /// carrying its own `<<<<<<<` line keeps it, and cannot swallow the lines around it.
+    #[test]
+    fn keep_ours_is_not_fooled_by_marker_like_content() {
+        let base = b"<<<<<<< not a marker\nb\n";
+        let mine = b"<<<<<<< not a marker\nB-mine\n";
+        let theirs = b"<<<<<<< not a marker\nB-theirs\n";
+        assert_eq!(
+            merge_file_keep_ours(base, mine, theirs),
+            b"<<<<<<< not a marker\nB-mine\n".to_vec()
+        );
     }
 
     /// A non-UTF-8 side is never line-merged.

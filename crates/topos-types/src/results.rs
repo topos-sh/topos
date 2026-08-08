@@ -40,6 +40,26 @@ pub struct PullData {
     /// (additive).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scope: Option<String>,
+    /// Bundles this installation holds at an OLDER version in a scope this run did not reconcile
+    /// — the cross-scope staleness the ONE applied row per bundle cannot carry. Empty (and
+    /// omitted) whenever every other scope is current, and whenever the difference is DELIBERATE
+    /// (a pinned or `"off"` row, a local go-back): a copy that is meant to differ is not behind.
+    /// **INFERRED** (additive).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub behind_elsewhere: Vec<BehindElsewhere>,
+}
+
+/// One bundle whose copy in ANOTHER scope stands behind the workspace's current. **INFERRED**
+/// (additive).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
+pub struct BehindElsewhere {
+    /// The bundle's catalog name.
+    pub bundle: String,
+    /// The project directory whose copy is behind (display path, `~`-abbreviated). Absent ⇒ the
+    /// machine-wide copy, which `topos update -g` brings current.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_dir: Option<String>,
 }
 
 /// One workspace's sync freshness in a [`PullData`]. **INFERRED** (additive-only).
@@ -57,8 +77,8 @@ pub struct WorkspaceSyncReport {
     pub staleness_window_ms: u64,
 }
 
-/// One followed skill's pull state. `observed`/`applied`/`action`/`offer`/`conflict` are PINNED by
-/// name; the *value enums* (`PullAction`) and the `offer`/`conflict` field shapes are INFERRED.
+/// One followed skill's pull state. `observed`/`applied`/`action` are PINNED by name; the *value
+/// enum* (`PullAction`) is INFERRED.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
 pub struct PullSkill {
@@ -74,18 +94,9 @@ pub struct PullSkill {
     /// Highest generation actually materialized to disk.
     pub applied: u64,
     pub action: PullAction,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub offer: Option<Offer>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub conflict: Option<Conflict>,
     /// Present for the author-merge outcomes (`merged` / `conflicted`) — the resolution disclosure.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub merge: Option<MergeReport>,
-    /// The PREDICTED outcome of the three-way merge a surfaced `diverged` row implies, computed
-    /// purely in memory from already-local bytes (never a network read). Absent = unknown (not a
-    /// diverged row, or the merge base is not locally renderable). **INFERRED** (additive).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub merge_preview: Option<MergePreview>,
     /// How many OTHER agent folders a settled local draft was copied onto this run (a
     /// `draft_synced` row's count). Absent when the run synced nothing. **INFERRED** (additive).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -111,9 +122,10 @@ pub struct PullSkill {
     /// sources, which read by their plain `skill` name. **INFERRED** (additive).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display: Option<String>,
-    /// The one-line fact a row states BESIDE its action: the whole line a `released` row prints
-    /// (why the record resolved and where its files stand now), or — on any other action — the
-    /// folders this run also wrote that the action's own column does not name (a healed folder
+    /// The fact a row states BESIDE its action: the whole thing a `released` row prints (why the
+    /// record resolved and where its files stand now — two lines, the second the folders, which a
+    /// human renderer indents under the first), or — on any other action — the one line naming
+    /// the folders this run also wrote that the action's own column does not name (a healed folder
     /// that rode along with a settled-draft fan-out, a stale copy refreshed beside a fresh
     /// install). Absent when the action says everything. **INFERRED** (additive).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -177,7 +189,7 @@ pub enum MergePreviewVerdict {
     Conflicted,
 }
 
-/// What `pull` did / offers for a skill. **INFERRED value set** — the four-state machine pins the
+/// What `pull` did for a skill. **INFERRED value set** — the four-state machine pins the
 /// semantics (CURRENT / BEHIND / DRAFT / DIVERGED) but not these exact tokens.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
@@ -194,18 +206,17 @@ pub enum PullAction {
     /// A managed copy that stood BEHIND the version this machine already holds was rewritten to it
     /// — no version moved (`observed`/`applied` are unchanged), only bytes on disk caught up (a
     /// crash-window residue, a copy left at an older version). `destinations` names the folders. A
-    /// refresh is not a first materialization, so it never reads `installed`. **Additive.**
+    /// catch-up is not a first materialization, so it never reads `installed`. **Additive.**
+    ///
+    /// Serialized as `updated` — the word every human surface prints for it. A wire token and a
+    /// terminal line naming one outcome two ways is one vocabulary too many.
+    #[serde(rename = "updated")]
     Refreshed,
     /// This machine's OWN recipe choice ended delivery here (a dropped feed line, an `"off"`
     /// switch, a dropped row) and the placed copies were uninstalled now — `destinations` names
     /// what left, `kept` any edited copy left in place. Distinct from `withdrawn`, which is
     /// upstream's act. **Additive.**
     Removed,
-    /// State ② confirm-each / first-receive — a one-tap offer is waiting.
-    Offered,
-    /// State ④ — a local draft conflicts with a newer remote (surfaced, not yet resolved — e.g. a
-    /// confirm-each follower's bare sweep, which offers the merge rather than running it).
-    Diverged,
     /// State ④ resolved cleanly — a three-way merge (or the escape) landed a draft-on-current.
     Merged,
     /// State ④ resolved with conflicts — a complete conflict tree was materialized and publish is blocked
@@ -221,36 +232,10 @@ pub enum PullAction {
     /// dirs were cleaned; the sidecar keeps the bytes + any draft delta ("keep it as yours" is a
     /// narration away).
     Withdrawn,
-    /// THIS DEVICE excludes the skill ("not on this device"): the agent dirs are clear here, the
-    /// person keeps receiving it everywhere else, and following it here lifts the exclusion.
-    Excluded,
     /// A store record no row claims and nothing delivers RESOLVED, once: the record retires from
     /// every surface; nothing on disk was deleted — placed files belong to the person now, and
     /// `note` carries the one-line fact. **Additive.**
     Released,
-}
-
-/// The re-disclosed bytes a `pull` offers (confirm-each / first-receive). **INFERRED fields** — the
-/// spec pins that the offer re-discloses + re-binds the digest, not its exact shape.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
-pub struct Offer {
-    #[cfg_attr(feature = "contract-derives", schemars(extend("pattern" = "^[0-9a-f]{64}$")))]
-    pub version_id: String,
-    #[cfg_attr(feature = "contract-derives", schemars(extend("pattern" = "^[0-9a-f]{64}$")))]
-    pub bundle_digest: String,
-}
-
-/// The DIVERGED panel (local draft vs newer remote). **INFERRED fields.**
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
-pub struct Conflict {
-    /// The remote version the draft diverged from.
-    #[cfg_attr(feature = "contract-derives", schemars(extend("pattern" = "^[0-9a-f]{64}$")))]
-    pub remote_version_id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(feature = "contract-derives", schemars(extend("pattern" = "^[0-9a-f]{64}$")))]
-    pub local_version_id: Option<String>,
 }
 
 /// The author-merge disclosure (the `merged` / `conflicted` outcomes of a diverged draft). **INFERRED
@@ -279,6 +264,48 @@ pub struct MergeReport {
     /// For the escape / no-base 2-way fallback: a unified diff of what the chosen side drops vs the other.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub drop_diff: Option<String>,
+    /// Why the merge could not resolve itself — `three_way` (a real fork point; the workbench holds
+    /// both sides marked up) or `no_base` (unrelated histories; the workbench holds this person's
+    /// files with the team's beside them). Absent on a clean merge and on a resolution. **INFERRED**
+    /// (additive).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<crate::persisted::ConflictReason>,
+    /// How a STOPPED merge was finished, when this row is a `--keep-mine` resolution. Absent on a
+    /// clean merge and on a conflict. **INFERRED** (additive).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved: Option<MergeResolution>,
+    /// The paths a `keep_mine` resolution TOOK from the team — every file whose committed content
+    /// or mode differs from this person's own draft, including ones the team deleted. Sorted by raw
+    /// path bytes. Empty when the resolution changed nothing of theirs, and always empty for a
+    /// `by_hand` resolution (that tree is the person's own, wholesale — nothing in it is claimable
+    /// as taken from the team). **INFERRED** (additive).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub took: Vec<String>,
+    /// The folders that still hold the AUTHOR'S OWN version — a conflict writes to none of them, so
+    /// every agent reads exactly what it read before the update. Display paths (`~`-abbreviated).
+    /// Empty for a clean merge (which rewrites its placements). **INFERRED** (additive).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub placements: Vec<String>,
+    /// Where the marked-up copy of BOTH versions was written: the scope's own conflict workbench,
+    /// never a folder an agent reads. A hand resolution left there is what `update <skill>
+    /// --keep-mine` commits. Display path (`~`-abbreviated). Absent for a clean merge.
+    /// **INFERRED** (additive).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub copy_dir: Option<String>,
+}
+
+/// How `--keep-mine` finished a stopped merge — the two paths say different things about whose
+/// wording landed, so a receipt must never speak for both at once. **INFERRED** (additive).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
+pub enum MergeResolution {
+    /// The workbench was left alone: the three-way merge, settled on this person's side wherever
+    /// the two sides collided, with everything else the team changed taken (`git merge -X ours`).
+    KeepMine,
+    /// The workbench was EDITED: those files are the person's own reconciliation, committed
+    /// unexamined (`git commit` after resolving by hand). Nothing here is topos's choice.
+    ByHand,
 }
 
 /// One conflicting path in a [`MergeReport`]. **INFERRED** — `kind` reuses the persisted vocabulary.
@@ -539,6 +566,26 @@ pub struct ListDetail {
     /// (additive).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub folders: Vec<String>,
+    /// The copies whose edits DISAGREE (always ≥ 2 when present) — the state the inventory row
+    /// reports as `draft in N folders that disagree` and sends the reader here to resolve. Each
+    /// carries the folder as a person reads it and the `--dest` value that names it back, so the
+    /// answer can offer the per-copy acts. Absent whenever at most one copy is edited.
+    /// **INFERRED** (additive).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub diverged: Vec<DivergedCopy>,
+}
+
+/// ONE copy of a bundle whose edits disagree with another copy's, in the two spellings every
+/// surface that names such a copy uses: the folder as a person reads it, and the `--dest` value
+/// that names it back on a command line. The same pair the placement freeze's refusal prints —
+/// one vocabulary, so the deep dive and the refusal never describe one state two ways.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
+pub struct DivergedCopy {
+    /// `project/.agents/skills/coolify-deploy` · `~/.claude/skills/coolify-deploy`.
+    pub display: String,
+    /// `.agents/skills` · `~/.claude/skills` — the `--dest` value naming this copy.
+    pub dest: String,
 }
 
 /// serde helper — [`ListDetail::managed`] defaults `true` and omits when `true`, so every managed
@@ -654,6 +701,18 @@ pub struct SkillEntry {
     /// (additive).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_health: Option<SourceHealth>,
+    /// The FOLDER holding this row's edited copy — the draft — as the row prints it: written
+    /// against the folder its manifest governs (`project/.claude/skills/<name>`) for a project
+    /// row, `~`-abbreviated for a machine-wide one. Present only when exactly one copy is edited;
+    /// absent when several disagree (`draft_diverged` says so instead) and on every non-draft row.
+    /// **INFERRED** (additive).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub draft_dir: Option<String>,
+    /// How many folders hold edits that DISAGREE — copies none of which explains another, so no
+    /// single one is the draft. Always ≥ 2 when present, and present only on a draft row whose
+    /// copies compete; `draft_dir` is the one-copy case. **INFERRED** (additive).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub draft_diverged: Option<u32>,
 }
 
 /// A row's origin has STOPPED ANSWERING — the one fact about a bundle that no other column can
@@ -686,6 +745,10 @@ pub enum SkillStatus {
     /// A machine-local `"off"` row withholds this bundle here — a standing statement of the file,
     /// never a delivery. **Additive.**
     Off,
+    /// A merge is undecided here (see [`StatusItemState::Blocked`]): this copy is neither current
+    /// nor an ordinary draft, and publishing it is refused until one of the two exits is taken.
+    /// **Additive.**
+    Blocked,
 }
 
 // =================================================================================================
@@ -717,6 +780,16 @@ pub struct DiffData {
     /// accompanying `FETCH_FULL_DIFF` next action re-runs the diff uncapped. **INFERRED** (additive).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub files: Vec<DiffPatchInfo>,
+    /// The folder the LOCAL side was read from, as a person reads it
+    /// (`project/.agents/skills/coolify-deploy`). Populated only when the bundle sits in more than
+    /// one folder — with a single copy there is nothing to disambiguate and the shape stays exactly
+    /// as it was. **INFERRED** (additive-only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dest: Option<String>,
+    /// The bundle's name, carried alongside `dest` so the answer can say WHICH bundle's which copy
+    /// it read. Populated on the same condition. **INFERRED** (additive-only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skill: Option<String>,
 }
 
 /// One file's row in a byte-capped [`DiffData`]. **INFERRED** (additive).
@@ -1249,6 +1322,34 @@ pub struct PublishData {
     /// itself is unaffected). **INFERRED** (additive-only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub invite_line: Option<String>,
+    /// The workspace's `<host>/<workspace>` address (`topos.sh/acme`) — how the receipt names
+    /// WHERE these bytes landed. Read from the same best-effort `me` the lines below come from;
+    /// absent when that read failed or the address does not validate. **INFERRED**
+    /// (additive-only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_address: Option<String>,
+    /// The paste-able share line (`<address>/skills/<name>`) — a members' deep link to the skill
+    /// just published. Absent when the workspace address is not known. **INFERRED**
+    /// (additive-only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub share_line: Option<String>,
+    /// The undo — the whole `topos revert <name> --to <version>` command that puts the team back
+    /// on the version `current` held before this publish. WITHHELD unless it verifiably restores
+    /// that state: a bundle this machine does not follow cannot be reverted from here, and a
+    /// genesis publish left no prior version to restore. **INFERRED** (additive-only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub undo: Option<String>,
+    /// The folder the published bytes were read from, as a person reads it
+    /// (`project/.agents/skills/coolify-deploy`) — present only when a `--dest`/`-a` selection
+    /// named ONE of several EDITED copies. A single edited copy needs no such line: it is the
+    /// draft, and naming its folder would say nothing. **INFERRED** (additive-only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from_placement: Option<String>,
+    /// The other EDITED copies, untouched by this publish — each keeps its bytes and becomes an
+    /// ordinary draft ahead of the version just published. Populated on the same condition as
+    /// `from_placement`. **INFERRED** (additive-only).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub other_edited: Vec<String>,
     /// An honesty note about the bundle's GitHub origin, when one is recorded: publishing does
     /// NOT rewrite a manifest's origin-pin line (`github.com/…`), so when one still references
     /// the origin this says the project keeps tracking the pin until the line is swapped for the
@@ -1345,6 +1446,17 @@ pub struct ProposeData {
     /// undone. **INFERRED** (additive-only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rewrite_skipped: Option<String>,
+    /// The workspace's `<host>/<workspace>` address (`topos.sh/acme`) — how the receipt names
+    /// WHERE the proposal was opened. Read from a best-effort `me`; absent when that read failed
+    /// or the address does not validate. **INFERRED** (additive-only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_address: Option<String>,
+    /// The paste-able share line (`<address>/skills/<name>`) — a members' deep link to the skill
+    /// under proposal. Absent when the workspace address is not known. **INFERRED**
+    /// (additive-only). No `undo` rides this shape: a proposal never moved `current`, so there is
+    /// no prior state to restore — the author's escape is `review <handle> --withdraw`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub share_line: Option<String>,
 }
 
 /// `revert` (a **forward** git-revert restoring older bytes as a new, higher-generation version —
@@ -1645,6 +1757,21 @@ pub struct ResetData {
     pub drop_diff: String,
     /// `true` on the `--yes` apply, `false` on the describe.
     pub applied: bool,
+    /// The ONE copy a `-a`/`--dest` selection narrowed this reset to, as a receipt spells the
+    /// folder (`project/.agents/skills/coolify-deploy`). Absent = the whole bundle: every copy's
+    /// edits. The loss surface must never overstate its reach, so the copy is carried rather than
+    /// inferred. **INFERRED** (additive-only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dest: Option<String>,
+    /// The bundle's OTHER edited copies — the ones this reset leaves untouched, still holding
+    /// their edits. Always empty for a whole-bundle reset (it takes them all). **INFERRED**
+    /// (additive-only).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub others_kept: Vec<String>,
+    /// The scope this reset ran in — `true` for the machine (`-g`). Every command the receipt
+    /// offers is spelled for it. **INFERRED** (additive-only).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub global: bool,
 }
 
 /// `publish` (bare, no `--yes`) — the describe: where it lands, the gate outcome, the audience, the
@@ -1657,6 +1784,13 @@ pub struct PublishDescribeData {
     pub workspace_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace_display_name: Option<String>,
+    /// The workspace's `<host>/<workspace>` address (`topos.sh/acme`) — how the describe names
+    /// WHERE these bytes would land. Derived from the same server-supplied address the share line
+    /// reads; absent when that read failed or the address does not validate (the copy then falls
+    /// back to the display name rather than printing a broken address). **INFERRED**
+    /// (additive-only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_address: Option<String>,
     /// The byte-exact digest of the draft being published.
     #[cfg_attr(feature = "contract-derives", schemars(extend("pattern" = "^[0-9a-f]{64}$")))]
     pub bundle_digest: String,
@@ -1666,6 +1800,17 @@ pub struct PublishDescribeData {
     pub gate: PublishGate,
     /// Whether this publish restores an ancestor's bytes (a revert-shaped publish, same gate).
     pub is_revert: bool,
+    /// The folder the bytes WOULD be read from, as a person reads it
+    /// (`project/.agents/skills/coolify-deploy`) — present only when a `--dest`/`-a` selection
+    /// named ONE of several EDITED copies. A single edited copy needs no such line: it is the
+    /// draft, and naming its folder would say nothing. **INFERRED** (additive-only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from_placement: Option<String>,
+    /// The other EDITED copies this publish would leave alone — each keeps its bytes and becomes
+    /// an ordinary draft ahead of the version published. Populated on the same condition as
+    /// `from_placement`. **INFERRED** (additive-only).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub other_edited: Vec<String>,
     /// The audience the change reaches (people entitled to the skill), when the plane discloses it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reach: Option<u64>,
@@ -1678,7 +1823,10 @@ pub struct PublishDescribeData {
     /// origin + address (the same read as `share_line`). **INFERRED** (additive-only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub invite_line: Option<String>,
-    /// The undo path — the version `revert --to` restores to get back here.
+    /// The undo — the whole `topos revert <name> --to <version>` command that would put the team
+    /// back on the version `current` holds now. WITHHELD unless it verifiably restores that state:
+    /// a bundle this machine does not follow cannot be reverted from here, and a review-gated
+    /// publish never moves `current`, so there would be nothing to put back.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub undo: Option<String>,
     /// The origin-demotion disclosure for an imported skill (publishing makes the team copy the source
@@ -1871,6 +2019,11 @@ pub enum StatusItemState {
     Behind,
     /// Local edits sit ahead of the applied version (a draft).
     LocalEdits,
+    /// A merge is undecided here: the team published a version that changes lines this person also
+    /// changed, so the folders still hold THEIR version, publishing is refused, and the two exits
+    /// (`update <name> --keep-mine` / `--reset`) are the only ways forward. The row's
+    /// version/digest name what the folders hold, never the team's.
+    Blocked,
     /// An exclude line withholds this name here (the row's `source` recorded it).
     Excluded,
     /// A machine-local `"off"` row in the global manifest withholds this bundle from the feed
@@ -1919,10 +2072,7 @@ mod tests {
                 observed: 42,
                 applied: 42,
                 action: PullAction::UpToDate,
-                offer: None,
-                conflict: None,
                 merge: None,
-                merge_preview: None,
                 synced_placements: None,
                 scope: None,
                 destinations: Vec::new(),
@@ -1935,6 +2085,7 @@ mod tests {
             proposals_awaiting: 0,
             notices: Vec::new(),
             sync: Vec::new(),
+            behind_elsewhere: Vec::new(),
             scope: None,
         };
         let v = serde_json::to_value(&data).unwrap();
@@ -1945,6 +2096,19 @@ mod tests {
         assert!(v.get("notices").is_none() && v.get("sync").is_none());
         let back: PullData = serde_json::from_value(v).unwrap();
         assert_eq!(back.skills[0].action, PullAction::UpToDate);
+    }
+
+    /// The catch-up outcome is `updated` on the wire — the same word the terminal prints for it.
+    /// One outcome cannot carry two names: an agent reading the envelope and a person reading the
+    /// receipt have to be able to talk about the same run.
+    #[test]
+    fn the_catch_up_action_is_spelled_updated_on_the_wire() {
+        assert_eq!(
+            serde_json::to_value(PullAction::Refreshed).unwrap(),
+            serde_json::json!("updated")
+        );
+        let back: PullAction = serde_json::from_value(serde_json::json!("updated")).unwrap();
+        assert_eq!(back, PullAction::Refreshed);
     }
 
     #[test]
@@ -1966,6 +2130,11 @@ mod tests {
             rewrite_pending: None,
             rewrite_skipped: None,
             kind: None,
+            workspace_address: None,
+            share_line: None,
+            undo: None,
+            from_placement: None,
+            other_edited: Vec::new(),
         };
         let v = serde_json::to_value(&done).unwrap();
         assert_eq!(v["version_id"], "a".repeat(64));
@@ -1979,6 +2148,13 @@ mod tests {
             v.get("invite_line").is_none(),
             "an absent teammate handoff omits"
         );
+        // The receipt's address-derived lines and its undo are all additive: each omits when the
+        // producer withheld it (a failed `me` read, or an undo that would not restore the state).
+        assert!(
+            v.get("workspace_address").is_none() && v.get("share_line").is_none(),
+            "the address-derived lines omit when the address is unknown"
+        );
+        assert!(v.get("undo").is_none(), "a withheld undo omits");
         let back: PublishData = serde_json::from_value(v).unwrap();
         assert_eq!(back.bundle_digest, "c".repeat(64));
     }
@@ -1994,9 +2170,14 @@ mod tests {
             diff: String::new(),
             truncated: false,
             files: Vec::new(),
+            dest: None,
+            skill: None,
         };
         let v = serde_json::to_value(&diff).unwrap();
         assert!(v.get("truncated").is_none() && v.get("files").is_none());
+        // The copy the local side was read from is named only where more than one exists — a
+        // single-copy diff keeps the exact prior shape.
+        assert!(v.get("dest").is_none() && v.get("skill").is_none());
 
         // An unpaged log/list likewise.
         let log = LogData::default();

@@ -1,8 +1,8 @@
 //! `pull` — the session-start auto-update entry point + the targeted accept / go-back.
 //!
 //! The bare `topos pull` (the installed session-start hook) sweeps every followed skill toward its
-//! `current`. A targeted `topos pull <skill>` accepts a pending update for one skill (the explicit
-//! command supplies the consent a confirm-each offer solicited); `topos pull <skill>@<hash>` goes back to
+//! `current`. A targeted `topos pull <skill>` brings one skill current now instead of waiting for the
+//! next sweep; `topos pull <skill>@<hash>` goes back to
 //! a specific local version. The per-skill engine (check → plan → apply) lives in
 //! [`super::sync_engine`]; this module is the scope dispatch + aggregation.
 //!
@@ -21,7 +21,6 @@ use std::cell::Cell;
 use std::collections::HashSet;
 use std::path::Path;
 
-use topos_core::digest::to_hex;
 use topos_types::persisted::SyncState;
 use topos_types::results::{ExchangeFault, PullData, ResetData};
 
@@ -64,9 +63,10 @@ pub(crate) enum PullScope {
 pub(crate) enum TargetMode {
     /// `topos pull <skill>` — accept a pending update / resume a held skill / resolve a divergence (no `@hash`).
     AcceptPending,
-    /// `topos pull <skill> --onto-current` — the disclosed escape: commit MY bytes on top of `current`,
-    /// dropping the merge (a 2-way diff of what is dropped is surfaced). Resolves a divergence without merging.
-    OntoCurrent,
+    /// `topos pull <skill> --keep-mine` — the disclosed escape: commit MY bytes as this machine's own
+    /// version (a 2-way diff of what is dropped is surfaced). Resolves a divergence without merging and
+    /// WITHOUT advancing the recorded base, so the person stays behind the team's version.
+    KeepMine,
     /// `topos pull <skill>@<ref>` — install an older version's bytes locally (a deliberate go-back).
     /// The ref is the full 64-hex id or a short prefix, resolved against the skill's recorded history
     /// inside [`sync_engine::go_back`] (where that history is already loaded and validated).
@@ -82,9 +82,12 @@ pub(crate) enum TargetMode {
 #[derive(Debug)]
 pub(crate) struct PullOutcome {
     pub data: PullData,
-    /// Isolated per-skill FAILURES — what the receipt counts and calls failed. Only
-    /// [`note_skill_failure`] and its reconcile twin write here.
+    /// Isolated per-skill FAILURES — what the receipt counts and calls failed, and what makes the
+    /// run exit non-zero. Only [`note_skill_failure`] and its reconcile twin write here.
     pub warnings: Vec<String>,
+    /// Bundles waiting on a DECISION only the person can make (see [`PendingDecision`]). They are
+    /// not failures: the run exits 0 and the receipt counts them under `waiting on you`.
+    pub decisions: Vec<PendingDecision>,
     /// ADVISORIES — `warning:` lines about a row that still DELIVERED (an unknown MCP dest entry
     /// dropped from a bundle's narrowing). They join `warnings` in the `--json` envelope's one
     /// stable array and print beside them, but the summary never counts them: the bundle they
@@ -113,6 +116,31 @@ pub(crate) struct PullOutcome {
     /// gate reads it: a channel whose member list could not be read proved nothing, whatever
     /// else the same sweep happened to reconcile.
     pub failed_channels: HashSet<(String, String)>,
+}
+
+/// One bundle this run left exactly as it was because a DECISION is owed — the person's own edits
+/// stand in the way of a newer version, and only they can say which side wins.
+///
+/// A decision is NOT a failure, and the two must not share a word. Nothing broke, nothing was
+/// lost, and no retry will change the answer: what is needed is a person choosing, which is the
+/// one thing "failed" never says. So it renders as an ordinary receipt row — the bundle's name,
+/// what is standing in the way, and the ways out under it — counts under `waiting on you`, and
+/// leaves the run's exit status at 0. A real failure keeps `failed` and a non-zero exit, so an
+/// agent that checks the status learns the difference between "something is broken" and "you owe
+/// me an answer".
+#[derive(Debug, Clone)]
+pub(crate) struct PendingDecision {
+    /// The bundle's name — the receipt row's left column, padded with every other row's.
+    pub name: String,
+    /// What is waiting, in one sentence, beside the name.
+    pub line: String,
+    /// The ways out as the RECEIPT lays them out, one per line, indented beneath the row. Each
+    /// producer owns its own layout, because the sentence and the shape are one piece of writing.
+    pub detail: Vec<String>,
+    /// The SAME ways out as argv — what the `--json` envelope's next actions carry, so an agent
+    /// runs the choice instead of parsing the sentence about it. Built from the same tokens the
+    /// lines above are printed from.
+    pub ways_out: Vec<Vec<String>>,
 }
 
 /// One forge host that went quiet this run, and how long its rows have gone unanswered.
@@ -214,6 +242,7 @@ impl PullOutcome {
         Self {
             data,
             warnings,
+            decisions: Vec::new(),
             advisories: Vec::new(),
             disclosures: Vec::new(),
             access_gone: Vec::new(),
@@ -303,6 +332,7 @@ pub(crate) fn pull(ctx: &Ctx<'_>, scope: PullScope) -> Result<PullOutcome, Clien
                     proposals_awaiting,
                     notices: Vec::new(),
                     sync: Vec::new(),
+                    behind_elsewhere: Vec::new(),
                     scope: None,
                 },
                 warnings,
@@ -328,29 +358,32 @@ pub(crate) fn pull(ctx: &Ctx<'_>, scope: PullScope) -> Result<PullOutcome, Clien
             let (layout, skill_id, _lock) =
                 super::resolve_skill_in_scope(ctx, &name, workspace.as_deref(), store)?;
             let sctx = ctx_with_layout(ctx, &layout);
-            // The go-back and the `--onto-current` escape are documented plane-independent (the escape is
+            // The go-back and the `--keep-mine` escape are documented plane-independent (the escape is
             // the offline no-deadlock guarantee) — neither spends a network call on the proposals count.
-            let plane_independent = matches!(mode, TargetMode::GoBack(_) | TargetMode::OntoCurrent);
+            let plane_independent = matches!(mode, TargetMode::GoBack(_) | TargetMode::KeepMine);
             let mut row = match mode {
                 TargetMode::GoBack(vref) => sync_engine::go_back(&sctx, &skill_id, &vref)?,
-                TargetMode::AcceptPending | TargetMode::OntoCurrent => {
-                    let inv = match mode {
-                        TargetMode::OntoCurrent => sync_engine::Invocation::Escape,
-                        _ => sync_engine::Invocation::Accept,
-                    };
-                    match ctx
-                        .follow
-                        .followed()
-                        .into_iter()
-                        .find(|(id, _)| *id == *skill_id.as_str())
-                    {
-                        Some((_, follow)) if follow.following => {
-                            sync_engine::sync_one(&sctx, &skill_id, &follow, inv)?
-                        }
-                        // Tracked but not followed → there is no `current` to pull; report the local state.
-                        _ => sync_engine::current_state(&sctx, &skill_id)?,
-                    }
-                }
+                // The escape consults NO follow state: it finishes a stopped merge from the local
+                // record and the local store, and a bundle nobody follows can hold one just the
+                // same. Routing it through the followed-only sync is what made an explicit
+                // `--keep-mine` answer "up to date" for a local path, a forge import, or an
+                // unfollowed workspace bundle.
+                TargetMode::KeepMine => sync_engine::escape_one(&sctx, &skill_id)?,
+                TargetMode::AcceptPending => match ctx
+                    .follow
+                    .followed()
+                    .into_iter()
+                    .find(|(id, _)| *id == *skill_id.as_str())
+                {
+                    Some((_, follow)) if follow.following => sync_engine::sync_one(
+                        &sctx,
+                        &skill_id,
+                        &follow,
+                        sync_engine::Invocation::Accept,
+                    )?,
+                    // Tracked but not followed → there is no `current` to pull; report the local state.
+                    _ => sync_engine::current_state(&sctx, &skill_id)?,
+                },
             };
             // Stamp the row's workspace provenance from the follow-state (a retained-but-paused entry still
             // resolves; a purely local go-back / tracked-only skill is honestly `None`).
@@ -366,6 +399,7 @@ pub(crate) fn pull(ctx: &Ctx<'_>, scope: PullScope) -> Result<PullOutcome, Clien
                     proposals_awaiting,
                     notices: Vec::new(),
                     sync: Vec::new(),
+                    behind_elsewhere: Vec::new(),
                     scope: None,
                 },
                 Vec::new(),
@@ -380,18 +414,32 @@ pub(crate) fn pull(ctx: &Ctx<'_>, scope: PullScope) -> Result<PullOutcome, Clien
 /// the followed `current` (an imported skill's adopted origin). Resolves ALL-OR-NONE, in the SCOPE the
 /// invocation named (`store`) — the copy the describe measures is the copy `--yes` discards.
 ///
+/// `sel` narrows the discard to ONE copy (`-a`/`--dest`). It is the symmetric counterpart of a
+/// per-copy publish, and strictly LESS destructive than the whole-bundle reset, which stays exactly
+/// as it was: the same two-phase rail, the same loss-led describe, and every edited copy still
+/// snapshotted into the store first — only the set of folders rewritten narrows.
+///
 /// # Errors
-/// [`ClientError::InvalidArgument`] with no named skill; name-resolution errors; a store / io failure.
+/// [`ClientError::InvalidArgument`] with no named skill, or with a selection spread over several
+/// skills; name-resolution errors; a store / io failure.
 pub(crate) fn reset(
     ctx: &Ctx<'_>,
     targets: &[String],
     yes: bool,
     store: super::StoreScope,
+    sel: &super::Selection,
 ) -> Result<ResetOutcome, ClientError> {
     if targets.is_empty() {
         return Err(ClientError::InvalidArgument(
             "`update --reset` needs a skill name — it discards that skill's local edits; it will not \
              reset every followed skill at once (name the skill: `topos update <skill> --reset`)"
+                .into(),
+        ));
+    }
+    if !sel.is_empty() && targets.len() > 1 {
+        return Err(ClientError::InvalidArgument(
+            "`--dest`/`-a` names ONE copy of ONE skill — name a single skill, or drop the \
+             selector to reset every copy of each"
                 .into(),
         ));
     }
@@ -405,27 +453,54 @@ pub(crate) fn reset(
     }
     let mut items = Vec::with_capacity(resolved.len());
     for (layout, id, lock) in &resolved {
+        // WHICH copy this reset acts on, and which edited copies it leaves ALONE — resolved from
+        // the same selection the loss diff below is measured through, so the sentences around that
+        // diff can never claim a wider loss than the diff shows. Empty selection = the whole
+        // bundle: every copy, and nothing left holding edits.
+        let picked = if sel.is_empty() {
+            None
+        } else {
+            let sctx = ctx_with_layout(ctx, layout);
+            let map: topos_types::persisted::PlacementMap =
+                doc::read_map(ctx.fs, &layout.published(id).map)?
+                    .ok_or_else(|| ClientError::Corrupt("missing placement map".to_owned()))?;
+            Some(super::dest_select::select_copy(
+                &sctx, sel, &lock.name, &map,
+            )?)
+        };
         // The draft delta vs current — the exact bytes a reset drops, read from the copy resolved
         // above (never re-resolved: a second pass could answer with the other scope's copy and
         // describe a loss nobody is about to take). DIVERGENT copies cannot render one diff (that
         // freeze is exactly what `--reset` is the named way out of), so the loss is disclosed as
         // the frozen set instead of failing the reset. UNCAPPED deliberately: a loss disclosure
         // must never truncate what would be discarded.
-        let drop_diff =
-            match super::diff_resolved(ctx, layout, id, lock, None, super::DiffBudget::unlimited())
-            {
-                Ok(d) => d.diff,
-                Err(e @ ClientError::PlacementsDiverged { .. }) => {
-                    format!("{e}\n(each copy is snapshotted into the local store before the reset)")
-                }
-                Err(e) => return Err(e),
-            };
+        let drop_diff = match super::diff_resolved(
+            ctx,
+            layout,
+            id,
+            lock,
+            None,
+            super::DiffBudget::unlimited(),
+            sel,
+        ) {
+            Ok(d) => d.diff,
+            Err(e @ ClientError::PlacementsDiverged { .. }) => {
+                format!("{e}\n(each copy is snapshotted into the local store before the reset)")
+            }
+            Err(e) => return Err(e),
+        };
         items.push(ResetData {
             skill: lock.name.clone(),
             workspace_id: super::followed_workspace(ctx, id.as_str()),
             to_version: lock.base_commit.clone(),
             drop_diff,
             applied: false,
+            dest: picked.as_ref().map(|p| p.spelling.display.clone()),
+            others_kept: picked
+                .as_ref()
+                .map(|p| p.others_edited.clone())
+                .unwrap_or_default(),
+            global: store == super::StoreScope::Machine,
         });
     }
 
@@ -437,6 +512,9 @@ pub(crate) fn reset(
             yes_argv.push("-g".to_owned());
         }
         yes_argv.extend(targets.iter().cloned());
+        // The copy selector rides along for the same reason the scope flag does — without it the
+        // apply would discard EVERY copy's edits, not the one described.
+        yes_argv.extend(sel.argv_tail());
         yes_argv.push("--reset".to_owned());
         yes_argv.push("--yes".to_owned());
         return Ok(ResetOutcome::Described { items, yes_argv });
@@ -444,10 +522,8 @@ pub(crate) fn reset(
 
     // ---- APPLY (`--yes`) ---- discard each draft back to its base (the draft is snapshotted first),
     // each through ITS owning store — the same copy the describe above measured the loss against.
-    for (layout, id, _lock) in &resolved {
-        sync_engine::reset_to_base(&ctx_with_layout(ctx, layout), id)?;
-    }
-    for item in &mut items {
+    for ((layout, id, _lock), item) in resolved.iter().zip(items.iter_mut()) {
+        sync_engine::reset_to_base(&ctx_with_layout(ctx, layout), id, sel)?;
         item.applied = true;
     }
     Ok(ResetOutcome::Applied(items))
@@ -467,9 +543,9 @@ pub(crate) enum ResetOutcome {
 /// lays. The reset is what makes a later re-delivery (a curator re-places the skill, an owner
 /// unarchives it, a `follow` lifts this device's exclusion) REINSTALL: without it,
 /// `applied == observed` and an absent placement read as "already current", and the skill would
-/// never come back. Re-arrival then passes the kernel's I-TOFU first-receive consent — an offer,
-/// disclosed, exactly as the original arrival was. A skill with no prior sync state needs no reset
-/// (it already sits at the baseline).
+/// never come back. Re-arrival then lands exactly as the original arrival did — the row demanding
+/// it is the consent, so the next sweep places its bytes. A skill with no prior sync state needs no
+/// reset (it already sits at the baseline).
 ///
 /// # Errors
 /// A store/io failure writing the sync doc.
@@ -503,31 +579,53 @@ pub(crate) fn reset_to_never_received(
 pub(super) struct AppliedSnapshot {
     /// The wire rows — one `(skill_id, applied commit)` per held bundle.
     pub applied: Vec<(String, [u8; 32])>,
-    /// One line per bundle this installation holds at DIFFERENT versions in more than one store —
-    /// the cross-scope version split the reported row cannot carry.
-    pub splits: Vec<String>,
+    /// Every store holding a bundle at a version OTHER than the workspace's current — the
+    /// cross-scope split the ONE reported row cannot carry, as DATA: the caller decides which of
+    /// them a person is told about, and phrases it.
+    pub splits: Vec<VersionSplit>,
+}
+
+/// One store holding one bundle at a version that is not the workspace's current.
+///
+/// Deliberately not pre-formatted. Whether a split is worth a line depends on facts this function
+/// does not hold (which scope the run drove, whether the row is pinned there), and the line itself
+/// COUNTS bundles rather than naming them — both are the caller's business.
+pub(super) struct VersionSplit {
+    /// The bundle's opaque plane id — the key the caller resolves to a name.
+    pub skill_id: String,
+    /// Which store holds it: `None` = the machine's own (person) store, else the project dir.
+    pub project_dir: Option<std::path::PathBuf>,
+    /// Whether that copy is genuinely BEHIND the workspace's current. `false` when the delivery
+    /// answer named no current for the bundle (there is nothing to be behind of) — and `false`
+    /// for a copy the store's own sync state says is HELD, which is a deliberate local go-back:
+    /// no update command would move it, so nagging about it would nag forever.
+    pub behind: bool,
 }
 
 /// What this installation HOLDS after the reconcile, over the skills the workspace's deliveries
 /// (the feed AND the manifest rows) named: the materialized version from `map.json` (the honest
-/// "applied" — an offered-but-unaccepted first receive has none and is skipped, as is any skill
-/// whose placement this sweep removed). COMPLETE-state across stores. Read-only.
+/// "applied" — a never-received baseline whose bytes have not landed yet has none and is skipped,
+/// as is any skill whose placement this sweep removed). COMPLETE-state across stores. Read-only.
 ///
 /// THE PICK IS DETERMINISTIC AND STATED, because the wire carries exactly ONE row per
 /// `(session, bundle)`: the PERSON-scope store (the machine's own `~/.topos/`) answers whenever it
 /// holds the bundle, and otherwise the project stores answer in ascending order of their project
-/// directory path. Nothing depends on which checkout the sweep happened to run from. When more
-/// than one store holds the bundle at DIFFERENT versions the deterministic row still stands and
-/// [`AppliedSnapshot::splits`] names the split — the same fact `status`'s cross-scope note makes,
-/// said where the report is produced rather than swallowed by the first-store-wins loop.
+/// directory path. Nothing depends on which checkout the sweep happened to run from. The
+/// deterministic row still stands when the stores disagree, and [`AppliedSnapshot::splits`] carries
+/// every store's standing against `current` — the fact the one-row pick would otherwise swallow.
 ///
 /// Scoping to the delivered set is load-bearing: reporting a withdrawn or frozen skill would tell
 /// the fleet page this device still serves bytes it does not, and would revive the very detach
 /// record the plane wrote.
+///
+/// `current` is the delivery answer's version per bundle — the ONLY thing that makes "behind"
+/// mean anything. A bundle it does not name yields splits that are never `behind`: an unknown
+/// current cannot be stood behind.
 pub(super) fn applied_snapshot(
     ctx: &Ctx<'_>,
     delivered: &HashSet<&str>,
     project_stores: &[crate::sidecar::Layout],
+    current: &std::collections::HashMap<&str, [u8; 32]>,
 ) -> Result<AppliedSnapshot, ClientError> {
     // The stated order: the person store, then the project stores by path. `recall_and_record`
     // already yields a path-sorted set; sorting here makes the guarantee this function's own.
@@ -541,8 +639,9 @@ pub(super) fn applied_snapshot(
             continue;
         };
         // Every store that genuinely holds it, in the stated order — the first is the reported
-        // row, the rest exist only to disclose a version split.
-        let mut holdings: Vec<(String, [u8; 32])> = Vec::new();
+        // row; EVERY one of them (the first included) is measured against the workspace's current,
+        // because the store that answers the wire is just as able to be the stale one.
+        let mut holdings: Vec<(Option<std::path::PathBuf>, [u8; 32], bool)> = Vec::new();
         for layout in std::iter::once(&ctx.layout).chain(projects.iter().copied()) {
             let sp = layout.published(&sid);
             let Some(map) = doc::read_map(ctx.fs, &sp.map)? else {
@@ -565,41 +664,35 @@ pub(super) fn applied_snapshot(
             if let Ok(commit) = super::parse_hex32(&map.applied_commit)
                 && commit != [0u8; 32]
             {
-                let where_ = layout
-                    .project_root()
-                    .map_or_else(|| "this machine".to_owned(), |d| d.display().to_string());
-                holdings.push((where_, commit));
+                // Behind = not at the served current. A HELD store (a deliberate local go-back)
+                // is exempt: no update command would move it, so it is a choice, not staleness.
+                let behind = current.get(skill_id).is_some_and(|c| *c != commit)
+                    && !doc::read_doc::<SyncState>(ctx.fs, &sp.sync)?
+                        .is_some_and(|s: SyncState| s.held);
+                holdings.push((
+                    layout.project_root().map(std::path::Path::to_path_buf),
+                    commit,
+                    behind,
+                ));
             }
         }
-        let Some((first_where, first_commit)) = holdings.first().cloned() else {
+        let Some((_, first_commit, _)) = holdings.first().cloned() else {
             continue;
         };
         applied.push(((*skill_id).to_owned(), first_commit));
-        let mut differing: Vec<String> = holdings
-            .iter()
-            .skip(1)
-            .filter(|(_, c)| *c != first_commit)
-            .map(|(w, c)| format!("{w} holds {}", short_hex(c)))
-            .collect();
-        if !differing.is_empty() {
-            differing.sort();
-            differing.dedup();
-            splits.push(format!(
-                "VERSION_SPLIT {skill_id}: reported as {first_where}'s {} — {}; nothing blends, \
-                 so each scope keeps its own copy",
-                short_hex(&first_commit),
-                differing.join("; ")
-            ));
-        }
+        splits.extend(
+            holdings
+                .into_iter()
+                .map(|(project_dir, _, behind)| VersionSplit {
+                    skill_id: (*skill_id).to_owned(),
+                    project_dir,
+                    behind,
+                }),
+        );
     }
     applied.sort();
-    splits.sort();
+    splits.sort_by(|a, b| (&a.skill_id, &a.project_dir).cmp(&(&b.skill_id, &b.project_dir)));
     Ok(AppliedSnapshot { applied, splits })
-}
-
-/// A version as a disclosure line spells it.
-fn short_hex(commit: &[u8; 32]) -> String {
-    to_hex(commit).get(..12).unwrap_or_default().to_owned()
 }
 
 /// One isolated per-skill failure as a stable, machine-parseable envelope warning:

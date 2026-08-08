@@ -16,8 +16,14 @@
 //! project), and a slug picked out of a shared set names something the person never asked for, so
 //! the shared folder prints as itself.
 
+use std::path::{Path, PathBuf};
+
+use topos_types::persisted::PlacementMap;
+
+use crate::ctx::Ctx;
 use crate::error::ClientError;
 use crate::manifest::document::ManifestScope;
+use crate::placement::ScanStatus;
 
 /// The `-a`/`--dest` tokens one invocation carried, verbatim.
 #[derive(Debug, Clone, Default)]
@@ -31,6 +37,16 @@ impl Selection {
         Selection {
             agents: agents.to_vec(),
             dests: dests.to_vec(),
+        }
+    }
+
+    /// The SINGULAR spelling — the one `diff` / `publish` / `update --reset` take. Those verbs act
+    /// on exactly ONE copy, so a repeatable flag would offer a set the act has no meaning for; the
+    /// two spellings refuse each other at the parser for the same reason.
+    pub(crate) fn one(agent: Option<&str>, dest: Option<&str>) -> Self {
+        Selection {
+            agents: agent.map(str::to_owned).into_iter().collect(),
+            dests: dest.map(str::to_owned).into_iter().collect(),
         }
     }
 
@@ -73,6 +89,45 @@ impl Selection {
         self.entries(scope, true)
     }
 
+    /// The tokens this selection names an EXISTING copy by: each `-a` slug's scope-correct skills
+    /// folder (the same registry resolution a recorded row gets) plus the literal `--dest` tokens
+    /// VERBATIM.
+    ///
+    /// The literals skip the manifest dialect check [`Selection::skill_entries`] runs, and
+    /// deliberately: that check asks "may a file at this scope RECORD this line", which is a
+    /// different question from "does this folder name a copy that is already there". A person
+    /// reading a project copy's absolute path off a receipt must be able to paste it back, and the
+    /// project dialect refuses absolute paths in a file. Nothing is recorded here, so nothing needs
+    /// the file's grammar — the token is matched against the spellings the copy already answers to
+    /// ([`copy_spellings`]), and a token that names none of them refuses.
+    ///
+    /// # Errors
+    /// [`ClientError::UnknownAgent`] / [`ClientError::SelectionRefused`], exactly as
+    /// [`Selection::skill_entries`] raises them for the `-a` half.
+    fn copy_tokens(&self, scope: ManifestScope) -> Result<Vec<String>, ClientError> {
+        let mut out: Vec<String> = Vec::new();
+        for slug in &self.agents {
+            let entry = crate::manifest::dest::skills_dest_spelling(slug, scope);
+            if entry.is_none()
+                && !topos_harness::registry::known_harnesses()
+                    .iter()
+                    .any(|h| h.slug == slug)
+            {
+                return Err(unknown_agent(slug, false));
+            }
+            let entry = entry.ok_or_else(|| no_scope_dir(slug, scope, false))?;
+            if !out.contains(&entry) {
+                out.push(entry);
+            }
+        }
+        for entry in &self.dests {
+            if !out.contains(entry) {
+                out.push(entry.clone());
+            }
+        }
+        Ok(out)
+    }
+
     fn entries(&self, scope: ManifestScope, mcp: bool) -> Result<Vec<String>, ClientError> {
         let mut out: Vec<String> = Vec::new();
         for slug in &self.agents {
@@ -111,6 +166,179 @@ impl Selection {
         }
         Ok(out)
     }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Naming ONE existing copy — the `-a`/`--dest` selector on `diff` / `publish` / `update --reset`.
+// ---------------------------------------------------------------------------------------------
+
+/// The two spellings ONE recorded placement answers to on a receipt and on a command line: the
+/// folder as a person reads it, and the `--dest` value that names it back.
+///
+/// The display path is written against the thing the reader is standing in — `project/<rest>` under
+/// the checkout a project store belongs to, `~/`-abbreviated on the machine — the same spelling the
+/// `update` receipt and a draft row already print. The `--dest` value is the folder HOLDING the
+/// copy (the skills root, not the skill dir): the shortest form, and the one a manifest row records.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CopySpelling {
+    /// `project/.agents/skills/coolify-deploy` · `~/.claude/skills/coolify-deploy`.
+    pub display: String,
+    /// `.agents/skills` · `~/.claude/skills` — the `--dest` value.
+    pub dest: String,
+}
+
+/// How ONE placement dir is spelled at `ctx`'s scope (see [`CopySpelling`]). A dir outside the
+/// scope's own root (nothing plans one there; the read is best-effort) falls back to the plain
+/// `~`-abbreviated path rather than a `project/` prefix that would not resolve.
+pub(crate) fn copy_spellings(ctx: &Ctx<'_>, dir: &Path) -> CopySpelling {
+    let parent = dir.parent().unwrap_or(dir);
+    if let Some(root) = ctx.layout.project_root()
+        && let Ok(rest) = dir.strip_prefix(root)
+    {
+        return CopySpelling {
+            display: format!("project/{}", rest.display()),
+            dest: parent.strip_prefix(root).map_or_else(
+                |_| super::inventory::pretty(ctx, parent),
+                |p| p.display().to_string(),
+            ),
+        };
+    }
+    CopySpelling {
+        display: super::inventory::pretty(ctx, dir),
+        dest: super::inventory::pretty(ctx, parent),
+    }
+}
+
+/// The ONE copy a `-a`/`--dest` selection named, with the bytes it holds.
+pub(crate) struct SelectedCopy {
+    /// The placement dir itself — always an EDITED copy (a clean one refuses).
+    pub dir: PathBuf,
+    /// How a receipt spells it.
+    pub spelling: CopySpelling,
+    /// The OTHER copies holding edits, as a receipt spells them — what this act leaves alone.
+    pub others_edited: Vec<String>,
+}
+
+/// Resolve a `-a`/`--dest` selection to ONE of `map`'s recorded copies, scanned.
+///
+/// **The placement freeze is deliberately NOT consulted.** Naming the copy IS the choice the freeze
+/// asks for, so a bundle whose copies disagree can still be read, published, or dropped one copy at
+/// a time — where the aggregate classification ([`crate::placement::work_tree_dir`]) refuses before
+/// anything can be picked, which left a frozen bundle impossible to even inspect.
+///
+/// Three spellings resolve to the same copy: the folder the row records (`.claude/skills`), the
+/// display path a receipt prints (`project/.claude/skills/coolify-deploy`), and either of those
+/// absolute — with a `./` prefix and a trailing slash tolerated on all of them. `-a <slug>` is the
+/// registry's sugar for the first.
+///
+/// # Errors
+/// [`ClientError::UnknownAgent`] for a slug the registry does not know;
+/// [`ClientError::SelectionRefused`] when the folder names no copy of this bundle (the refusal
+/// names every copy it DOES have), when it names one holding no edits (refused plainly rather than
+/// doing a no-op), or when the copy cannot be read as this bundle's right now.
+pub(crate) fn select_copy(
+    ctx: &Ctx<'_>,
+    sel: &Selection,
+    skill: &str,
+    map: &PlacementMap,
+) -> Result<SelectedCopy, ClientError> {
+    let scope = if ctx.layout.is_project_scope() {
+        ManifestScope::Project
+    } else {
+        ManifestScope::Global
+    };
+    let tokens = sel.copy_tokens(scope)?;
+    let dirs: Vec<PathBuf> = map.placements.iter().map(PathBuf::from).collect();
+    let spellings: Vec<CopySpelling> = dirs.iter().map(|d| copy_spellings(ctx, d)).collect();
+
+    let mut picked: Vec<usize> = Vec::new();
+    for token in &tokens {
+        for (i, dir) in dirs.iter().enumerate() {
+            if names_copy(token, dir, &spellings[i]) && !picked.contains(&i) {
+                picked.push(i);
+            }
+        }
+    }
+    let [idx] = picked[..] else {
+        return Err(ClientError::SelectionRefused(if picked.is_empty() {
+            format!(
+                "no copy of '{skill}' is in {} — its copies are: {}",
+                tokens.join(", "),
+                spellings
+                    .iter()
+                    .map(|s| s.display.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        } else {
+            format!(
+                "that names {} copies of '{skill}' — these verbs act on ONE copy; name a single \
+                 folder",
+                picked.len()
+            )
+        }));
+    };
+
+    // The scan is the ordinary per-placement one (each copy against ITS OWN recorded baseline) —
+    // only the aggregate verdict is skipped, so the edited/clean answer is the same one every other
+    // surface reads.
+    let scans = crate::placement::scan_placements(ctx, map)?;
+    let Some(row) = scans.iter().find(|s| s.idx == idx) else {
+        return Err(ClientError::Corrupt("placement scan missing a row".into()));
+    };
+    if !matches!(row.status, ScanStatus::Modified { .. }) {
+        return Err(unusable_copy(&spellings[idx].display, &row.status));
+    }
+    Ok(SelectedCopy {
+        dir: dirs[idx].clone(),
+        spelling: spellings[idx].clone(),
+        others_edited: scans
+            .iter()
+            .filter(|s| s.idx != idx && matches!(s.status, ScanStatus::Modified { .. }))
+            .filter_map(|s| spellings.get(s.idx).map(|sp| sp.display.clone()))
+            .collect(),
+    })
+}
+
+/// Whether a typed token names this copy — matched against the four spellings it answers to (the
+/// recorded folder, the display path, and either absolute), each compared after the same light
+/// normalization (`./` prefix, trailing slashes) so a pasted path is not refused over punctuation.
+fn names_copy(token: &str, dir: &Path, spelling: &CopySpelling) -> bool {
+    let want = norm(token);
+    let parent = dir.parent().unwrap_or(dir);
+    [
+        spelling.dest.clone(),
+        spelling.display.clone(),
+        dir.display().to_string(),
+        parent.display().to_string(),
+    ]
+    .iter()
+    .any(|candidate| norm(candidate) == want)
+}
+
+/// A path token as it is compared: trimmed, `./`-stripped, trailing slashes dropped.
+fn norm(raw: &str) -> String {
+    let t = raw.trim();
+    let t = t.strip_prefix("./").unwrap_or(t);
+    t.trim_end_matches('/').to_owned()
+}
+
+/// The refusal for a named copy that holds nothing to act on. A CLEAN copy is the one the rule was
+/// written for — naming it would otherwise publish nothing, or reset nothing, and report success;
+/// the other three states say what is actually in the way instead of pretending it is emptiness.
+fn unusable_copy(display: &str, status: &ScanStatus) -> ClientError {
+    ClientError::SelectionRefused(match status {
+        ScanStatus::Clean { .. } => {
+            format!("that copy has no edits — {display} holds the version topos placed there")
+        }
+        ScanStatus::Absent => format!("that copy is not there — nothing is placed at {display}"),
+        ScanStatus::Foreign => {
+            format!("{display} holds bytes topos did not write — it is not a copy of this bundle")
+        }
+        ScanStatus::Modified { .. } | ScanStatus::Unscannable => {
+            format!("{display} cannot be read safely — nothing was touched")
+        }
+    })
 }
 
 /// The `unknown agent: <typed> — known: …` refusal — real registry slugs, alphabetical, ellipsis
@@ -333,6 +561,81 @@ mod tests {
             true,
         );
         assert_eq!(tail, vec!["-a", "codex"]);
+    }
+
+    /// ONE copy answers to three spellings — the folder its manifest row records, the display path
+    /// a receipt prints, and either of those absolute — with `./` and a trailing slash tolerated on
+    /// every one. That is the whole promise of `--dest` on `diff`/`publish`/`update --reset`: a
+    /// person pastes back whatever topos last printed at them, in whichever form they have.
+    #[test]
+    fn one_copy_answers_to_the_row_the_display_path_and_the_absolute_form() {
+        let dir = Path::new("/proj/.claude/skills/coolify-deploy");
+        let spelling = CopySpelling {
+            display: "project/.claude/skills/coolify-deploy".to_owned(),
+            dest: ".claude/skills".to_owned(),
+        };
+        for token in [
+            // The row's own spelling — what the freeze menu and `topos.toml` print.
+            ".claude/skills",
+            "./.claude/skills",
+            ".claude/skills/",
+            // The display path — what `list` and the `update` receipt print.
+            "project/.claude/skills/coolify-deploy",
+            "./project/.claude/skills/coolify-deploy",
+            // Absolute, either the dir or the folder holding it.
+            "/proj/.claude/skills/coolify-deploy",
+            "/proj/.claude/skills",
+            "/proj/.claude/skills/",
+        ] {
+            assert!(names_copy(token, dir, &spelling), "{token}");
+        }
+        // A neighbour folder, a prefix of the row, and the bare skill name name nothing.
+        for token in [
+            ".agents/skills",
+            ".claude",
+            "coolify-deploy",
+            "project/.claude/skills",
+        ] {
+            assert!(!names_copy(token, dir, &spelling), "{token}");
+        }
+    }
+
+    /// The selector's tokens are the SAME agent resolution a recorded row gets — and a literal
+    /// folder passes through untouched, INCLUDING an absolute one inside a project, which the
+    /// manifest dialect refuses as a line but which is a perfectly ordinary way to name a copy that
+    /// is already there.
+    #[test]
+    fn copy_tokens_reuse_the_agent_resolution_and_pass_literals_through() {
+        assert_eq!(
+            sel(&["claude-code"], &[])
+                .copy_tokens(ManifestScope::Project)
+                .unwrap(),
+            vec![".claude/skills".to_owned()]
+        );
+        assert_eq!(
+            sel(&["codex"], &[])
+                .copy_tokens(ManifestScope::Global)
+                .unwrap(),
+            vec!["~/.codex/skills".to_owned()]
+        );
+        // The literal a `--dest` line could never RECORD at this scope still NAMES a copy here.
+        assert_eq!(
+            sel(&[], &["/proj/.claude/skills"])
+                .copy_tokens(ManifestScope::Project)
+                .unwrap(),
+            vec!["/proj/.claude/skills".to_owned()]
+        );
+        assert!(
+            sel(&[], &["/proj/.claude/skills"])
+                .skill_entries(ManifestScope::Project)
+                .is_err(),
+            "the premise: a project FILE refuses to record that spelling"
+        );
+        // An unknown slug still refuses with the registry list — the selector teaches the same way.
+        assert!(matches!(
+            sel(&["codx"], &[]).copy_tokens(ManifestScope::Global),
+            Err(ClientError::UnknownAgent { .. })
+        ));
     }
 
     /// A folder SEVERAL slugs share is reconstructed as the folder, never as one of them: the

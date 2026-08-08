@@ -398,10 +398,23 @@ fn run_disc(
     claude: &Path,
     args: &[&str],
 ) -> serde_json::Value {
+    run_disc_at(topos_home, disc_home, claude, disc_home, args)
+}
+
+/// [`run_disc`] from a chosen working directory — for the flows whose whole point is standing in a
+/// CHECKOUT (a project `topos.toml` covers the cwd) while discovery still resolves the same
+/// hermetic roots.
+fn run_disc_at(
+    topos_home: &Path,
+    disc_home: &Path,
+    claude: &Path,
+    cwd: &Path,
+    args: &[&str],
+) -> serde_json::Value {
     let out = Command::new(bin())
         .env("TOPOS_HOME", topos_home)
         .env("HOME", disc_home)
-        .current_dir(disc_home)
+        .current_dir(cwd)
         .env("CLAUDE_CONFIG_DIR", claude)
         .env_remove("XDG_CONFIG_HOME")
         .env_remove("CODEX_HOME")
@@ -415,6 +428,58 @@ fn run_disc(
         .expect("spawn topos");
     serde_json::from_slice(&out.stdout)
         .unwrap_or_else(|_| panic!("non-JSON stdout: {}", String::from_utf8_lossy(&out.stdout)))
+}
+
+/// A skill this very checkout DELIVERS is not an untracked discovery. The tracked-paths scan used
+/// to read the machine store alone while the discovery scan spanned the home AND the checkout, so
+/// a skill added into the project (`--dest .claude/skills`, custody in the checkout's own store)
+/// came back as adoptable — and the wrong count then leaked into the bare listing's summary line.
+#[test]
+fn a_project_scoped_skill_is_not_offered_back_as_untracked() {
+    let home = scratch("proj-untracked-home");
+    let disc = scratch("proj-untracked-disc"); // an EMPTY discovery HOME
+    let claude = scratch("proj-untracked-claude");
+    // The checkout sits OUTSIDE `$HOME` — the manifest walk stops at the home directory.
+    let proj = scratch("proj-untracked-repo");
+    let src = proj.join("src").join("writer");
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::write(
+        src.join("SKILL.md"),
+        "---\nname: writer\ndescription: writes it down\n---\n\nWrite it down.\n",
+    )
+    .unwrap();
+
+    let at = |args: &[&str]| run_disc_at(&home, &disc, &claude, &proj, args);
+    let v = at(&["--json", "init"]);
+    assert_eq!(v["ok"], true, "{v}");
+    let v = at(&["--json", "add", "./src/writer", "--dest", ".claude/skills"]);
+    assert_eq!(v["ok"], true, "{v}");
+    let v = at(&["--json", "update"]);
+    assert_eq!(v["ok"], true, "{v}");
+    assert!(
+        proj.join(".claude/skills/writer/SKILL.md").is_file(),
+        "the project copy landed"
+    );
+
+    // The discovery listing finds the placed copy — and does not offer it as untracked.
+    let v = at(&["--json", "list", "--untracked"]);
+    let empty = Vec::new();
+    let untracked = v["data"]["untracked"].as_array().unwrap_or(&empty);
+    assert!(
+        !untracked.iter().any(|u| u["name"] == "writer"),
+        "the checkout's own delivery is tracked, not adoptable: {untracked:?}"
+    );
+    // …and the bare listing's summary line does not count it either.
+    let v = at(&["--json", "list"]);
+    assert!(
+        v["data"].get("untracked_summary").is_none(),
+        "nothing is being withheld: {v}"
+    );
+
+    let _ = std::fs::remove_dir_all(&home);
+    let _ = std::fs::remove_dir_all(&disc);
+    let _ = std::fs::remove_dir_all(&claude);
+    let _ = std::fs::remove_dir_all(&proj);
 }
 
 #[test]
@@ -646,27 +711,102 @@ fn an_io_error_is_redacted_on_the_surface_and_detailed_in_the_log() {
 }
 
 #[test]
-fn update_onto_current_flag_shapes_are_usage_errors() {
-    let home = scratch("ontousage");
+fn update_keep_mine_flag_shapes_are_usage_errors() {
+    let home = scratch("keepmineusage");
 
-    // Missing <skill> target → the runtime usage error (INVALID_ARGUMENT, exit 1). `--onto-current` is a
-    // hidden flag on `update` (reached here through the `pull` alias the field's armed hooks still run).
-    let out = run_raw(&home, &["pull", "--onto-current", "--json"], false);
+    // Missing <skill> target → the runtime usage error (INVALID_ARGUMENT, exit 1). Reached here
+    // through the `pull` alias the field's armed hooks still run.
+    let out = run_raw(&home, &["pull", "--keep-mine", "--json"], false);
     assert!(!out.status.success());
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("JSON stdout");
     assert_eq!(v["error"]["code"], "INVALID_ARGUMENT");
 
     // Combined with @<hash> → the runtime usage error rides the envelope as INVALID_ARGUMENT.
     let target = format!("docs@{}", "ab".repeat(32));
-    let out = run_raw(
-        &home,
-        &["update", &target, "--onto-current", "--json"],
-        false,
-    );
+    let out = run_raw(&home, &["update", &target, "--keep-mine", "--json"], false);
     assert!(!out.status.success());
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("JSON stdout");
     assert_eq!(v["error"]["code"], "INVALID_ARGUMENT");
 
+    // The prior spelling is a HIDDEN alias of the same flag, so it reaches the same refusals —
+    // anything already scripted against it keeps working, and keeps failing the same way.
+    let out = run_raw(&home, &["pull", "--onto-current", "--json"], false);
+    assert!(!out.status.success());
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("JSON stdout");
+    assert_eq!(v["error"]["code"], "INVALID_ARGUMENT");
+
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+/// The built-in `topos` skill is refused BY NAME on every targeted arm of `update` — the reconcile,
+/// the go-back, `--keep-mine`, `--force`, and `--reset`.
+///
+/// `--reset` is the one that used to slip through: it dispatches ahead of the reconcile, so it never
+/// met the guard the other arms enforced and went looking for a manifest row and a version to take
+/// — neither of which exists for a bundle that ships with the binary. One guard, ahead of all of
+/// them, so the answer cannot depend on which flag was typed.
+#[test]
+fn update_never_takes_the_builtin_by_name() {
+    let home = scratch("builtin-update");
+    for args in [
+        &["update", "topos", "--json"][..],
+        &["update", "topos", "--reset", "--json"][..],
+        &["update", "topos", "--reset", "--yes", "--json"][..],
+        &["update", "topos", "--force", "--json"][..],
+        &["update", "topos", "--keep-mine", "--json"][..],
+        &["update", "topos@abc1234", "--json"][..],
+        // Named beside another target, it is still the built-in being asked for.
+        &["update", "deploy", "topos", "--reset", "--json"][..],
+    ] {
+        let out = run_raw(&home, args, false);
+        assert!(!out.status.success(), "{args:?}");
+        let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("JSON stdout");
+        assert_eq!(v["error"]["code"], "INVALID_ARGUMENT", "{args:?}: {v}");
+        let message = v["error"]["context"]["message"]
+            .as_str()
+            .unwrap_or_default();
+        assert!(message.contains("built-in skill"), "{args:?}: {message}");
+        assert!(message.contains("topos self-update"), "{args:?}: {message}");
+    }
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+/// `--dest`/`-a` on `update` names the copy `--reset` drops the edits of, and nothing else. Without
+/// `--reset` it is REFUSED by name: silently ignoring it would read as a narrowed update while the
+/// reconcile converged every copy the manifest asks for. The refusal fires before any store is
+/// touched, so the machine it names is untouched too.
+#[test]
+fn update_dest_without_reset_is_refused_by_name() {
+    let home = scratch("destnoreset");
+    for args in [
+        &["update", "deploy", "--dest", ".claude/skills", "--json"][..],
+        &["update", "deploy", "-a", "codex", "--json"][..],
+    ] {
+        let out = run_raw(&home, args, false);
+        assert!(!out.status.success(), "{args:?}");
+        let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("JSON stdout");
+        assert_eq!(v["error"]["code"], "INVALID_ARGUMENT", "{v}");
+        let message = v["error"]["context"]["message"]
+            .as_str()
+            .unwrap_or_default();
+        assert!(message.contains("--reset"), "{message}");
+    }
+    // The two spellings are ONE choice: these verbs act on a single copy, so naming both refuses
+    // at the parser rather than resolving a set the act has no meaning for.
+    let out = run_raw(
+        &home,
+        &[
+            "update",
+            "deploy",
+            "--reset",
+            "-a",
+            "codex",
+            "--dest",
+            ".claude/skills",
+        ],
+        false,
+    );
+    assert!(!out.status.success());
     let _ = std::fs::remove_dir_all(&home);
 }
 

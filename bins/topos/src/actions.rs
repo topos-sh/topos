@@ -163,11 +163,17 @@ fn safety(code: &ActionCode, argv: &[String], subject: Subject) -> Safety {
             Some(true),
             Some("logs this machine in (browser approval; a session credential is stored)"),
         ),
-        // A refusal's prose-named fix, mirrored verbatim (`render::mirror_prose_commands`). The
-        // argv is the whole story; only the read-only verbs are classifiable from it.
+        // A prose-named command, mirrored verbatim — a refusal's fix
+        // (`render::mirror_prose_commands`) or a receipt's next step
+        // (`render::resolution_next_actions`). The argv is the whole story.
         "RUN_COMMAND" => match verb(argv) {
             Some("list") | Some("log") | Some("diff") | Some("status") => {
                 Safety::new(Some(false), None, None)
+            }
+            // A `publish` with no `--yes` is the DESCRIBE half of the two-phase ship: it dials the
+            // plane for what publishing would reach and prints it; `--yes` is what mutates.
+            Some("publish") if !has_flag(argv, "--yes") => {
+                Safety::new(Some(false), Some(true), None)
             }
             _ => Safety::new(None, None, None),
         },
@@ -177,18 +183,21 @@ fn safety(code: &ActionCode, argv: &[String], subject: Subject) -> Safety {
 }
 
 /// The per-shape refinement for `RESOLVE_DIVERGED_DRAFT` — WHICH act resolves the divergence is the
-/// argv's story. The `--onto-current` escape commits YOUR bytes onto current and clears a recorded
-/// conflict (a local resolution — no plane call in the blocked state this action is emitted for); a
-/// bare `--reset` only DESCRIBES the loss-led discard (its own describe carries the `--yes`); the
-/// plain targeted update runs the three-way merge.
+/// argv's story. The `--keep-mine` escape commits the merge with your side kept on the contested
+/// lines and clears a recorded conflict (a local resolution — no plane call in the blocked state
+/// this action is emitted for); a bare `--reset` only DESCRIBES the loss-led discard (its own
+/// describe carries the `--yes`); the plain targeted update runs the three-way merge.
 fn resolve_diverged_draft(argv: &[String]) -> Safety {
-    if has_flag(argv, "--onto-current") {
+    // Both spellings, because an argv is whatever was TYPED: `--onto-current` is still a working
+    // (hidden) alias, and a command classified as "the plain merge" when it is in fact the escape
+    // would carry the wrong caution.
+    if has_flag(argv, "--keep-mine") || has_flag(argv, "--onto-current") {
         return Safety::new(
             Some(true),
             Some(false),
             Some(
-                "commits YOUR bytes (your edited resolution, or your original draft) onto current, \
-                 dropping the team's side of the merge",
+                "drops the team's side of the lines you both changed; their other changes are \
+                 kept",
             ),
         );
     }
@@ -421,9 +430,20 @@ mod tests {
             argv(&["topos", "diff", "deploy", "--json"]),
         );
         assert_eq!(read.mutates, Some(false));
-        let write = next_action(
+        // A bare publish is the DESCRIBE half of the two-phase ship — it dials for what the
+        // publish would reach and prints it. With `--yes` it is the ship itself, and the argv
+        // alone no longer says what that costs.
+        let describe = next_action(
             ActionCode::from("RUN_COMMAND".to_owned()),
             argv(&["topos", "publish", "deploy", "--json"]),
+        );
+        assert_eq!(
+            (describe.mutates, describe.needs_network),
+            (Some(false), Some(true))
+        );
+        let write = next_action(
+            ActionCode::from("RUN_COMMAND".to_owned()),
+            argv(&["topos", "publish", "deploy", "--yes", "--json"]),
         );
         assert_eq!((write.mutates, write.needs_network), (None, None));
     }
@@ -541,17 +561,21 @@ mod tests {
 
     #[test]
     fn resolve_diverged_draft_refines_by_the_resolution_shape() {
-        // The `--onto-current` escape resolves a recorded conflict locally — your bytes win.
+        // The `--keep-mine` escape resolves a recorded conflict locally, and its caution names the
+        // one thing that is lost: the team's side of the lines both sides changed.
         let escape = next_action(
             ActionCode::ResolveDivergedDraft,
-            argv(&["topos", "update", "deploy", "--onto-current", "--json"]),
+            argv(&["topos", "update", "deploy", "--keep-mine", "--json"]),
         );
         assert_eq!(
             (escape.mutates, escape.needs_network),
             (Some(true), Some(false))
         );
-        assert!(
-            escape.risk_note.as_deref().unwrap_or("").contains("YOUR"),
+        assert_eq!(
+            escape.risk_note.as_deref(),
+            Some(
+                "drops the team's side of the lines you both changed; their other changes are kept"
+            ),
             "{escape:?}"
         );
         // A bare `--reset` only DESCRIBES the loss-led discard (its describe carries the `--yes`).

@@ -30,6 +30,25 @@ pub(crate) enum FetchFault {
     Gone,
 }
 
+/// ONE copy in a placement freeze ([`ClientError::PlacementsDiverged`]), spelled the two ways the
+/// refusal needs it: the folder as a person reads it, and the `--dest` value that names it back to
+/// a verb. Both come from the ONE spelling helper (`ops::dest_select::copy_spellings`), so the
+/// folder the refusal prints and the folder its offered commands accept can never drift apart.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DivergedCopy {
+    /// `project/.agents/skills/coolify-deploy` · `~/.claude/skills/coolify-deploy`.
+    pub display: String,
+    /// `.agents/skills` · `~/.claude/skills` — the `--dest` value naming this copy.
+    pub dest: String,
+}
+
+/// The scope flag every offered `update` carries: ` -g` for the machine, nothing for a project.
+/// The same discipline `list`'s rows keep — a command a refusal prints must act on the copy the
+/// reader is looking at, whichever directory they happen to run it from.
+pub(crate) fn scope_flag(global: bool) -> &'static str {
+    if global { " -g" } else { "" }
+}
+
 impl FetchFault {
     /// The host answered unusefully and asked for nothing in particular.
     pub(crate) fn unavailable() -> Self {
@@ -403,16 +422,32 @@ pub(crate) enum ClientError {
     #[error("the skill's files cannot be written safely — {reason}")]
     PlacementUnsupported { reason: String },
     /// MORE than one of a skill's placements holds a DIFFERENT local edit — there is no single draft
-    /// to sync, diff, or publish, and nothing is overwritten (the typed freeze). The paths name every
-    /// edited copy; the way out is reconciling them by hand into one, or discarding the edits with
-    /// `update --reset` (every edited copy is snapshotted into the sidecar store first).
+    /// to sync, diff, or publish, and nothing is overwritten (the typed freeze).
+    ///
+    /// Each copy is carried twice over — the folder as a reader sees it, and the `--dest` spelling
+    /// that names it back to a verb — because the way out is CHOOSING one copy: publish it, read
+    /// it, or drop it, and the survivor then becomes the single ordinary draft. Discarding every
+    /// copy's edits stays available, and stays last: it is the widest loss on offer, not the first
+    /// thing to reach for.
+    ///
+    /// `global` is the SCOPE the frozen copies live in, and every command this refusal offers is
+    /// spelled for it — a machine-scope freeze says `topos update -g …`, because a bare `update`
+    /// read from inside a checkout drives the PROJECT and would find no copy to act on.
     #[error(
-        "'{skill}' has divergent local edits in more than one placement ({}) — reconcile the copies \
-         by hand, or discard the edits with `topos update {skill} --reset` (each copy is snapshotted \
-         first)",
-        paths.join(", ")
+        "'{skill}' has different edits in {} folders ({}) — name the one to work with (`--dest \
+         <folder>` on `topos publish {skill}`, `topos diff {skill}`, or `topos update{} {skill} \
+         --reset`), or discard every copy's edits with `topos update{} {skill} --reset` (each copy \
+         is snapshotted first)",
+        copies.len(),
+        copies.iter().map(|c| c.display.as_str()).collect::<Vec<_>>().join(", "),
+        scope_flag(*global),
+        scope_flag(*global)
     )]
-    PlacementsDiverged { skill: String, paths: Vec<String> },
+    PlacementsDiverged {
+        skill: String,
+        copies: Vec<DivergedCopy>,
+        global: bool,
+    },
     /// The server could not be read for an explicitly-targeted skill (unreachable, not served, or a
     /// malformed response). A bare update sweep isolates such failures per skill instead of erroring.
     ///
@@ -478,6 +513,50 @@ pub(crate) enum ClientError {
     /// the draft must be resolved first. Refused before any build / WAL / send (the publish guard).
     #[error("publish is blocked — resolve the merge conflict in this skill first")]
     PublishBlocked { skill: String },
+    /// A `publish` is refused because this copy does not include the served `current`: the team moved
+    /// ahead and this machine has not taken it (the ordinary behind state). Shipping from here would
+    /// land bytes with the team's change nowhere inside — and the plane refuses it anyway, since a
+    /// candidate's first parent must be the version `current` names — so the update comes first.
+    /// Refused before any build / WAL / send, and before the describe reads a byte of the network, so
+    /// it costs nothing and mutates nothing. A `--propose` is exempt: it moves no pointer, so it is
+    /// the one act a behind copy can always safely perform.
+    ///
+    /// The TTY renders the way out under the sentence ([`crate::render::err_tty`]); the envelope keeps
+    /// the sentence and carries the same command as its next action.
+    #[error("{skill}: your version is behind.")]
+    PublishBehind { skill: String },
+    /// `--keep-mine` was typed for a bundle where no merge has stopped — an up-to-date copy, a plain
+    /// draft with nothing pending, a clean copy that is merely behind, or a divergence the merge has
+    /// not been run on. There is nothing to finish, and every one of those states has a different
+    /// silent wrong answer (report success, apply the team's version, drop what the merge was about
+    /// to land), so all four refuse toward the merge instead.
+    #[error(
+        "no merge has stopped on '{skill}' — run `topos update{} {skill}` to merge the team's \
+         version in; it stops only where you both changed the same lines",
+        scope_flag(*global)
+    )]
+    NoStoppedMerge { skill: String, global: bool },
+    /// `--keep-mine` found the merge's workbench folder PRESENT but unreadable as a bundle (a
+    /// symlink or file where the folder belongs, a symlink or non-regular file inside it, a
+    /// non-UTF-8 name, an emptied folder, a read failure). Refused with nothing committed and
+    /// nothing placed, because the folder is the ONLY copy of a hand resolution — it sits outside
+    /// the placement map, so no snapshot rail holds it, and treating it as absent would commit the
+    /// original draft over every placement and then delete it.
+    ///
+    /// `global` is the scope the bundle lives in, so the offered `--reset` is spelled for the copy
+    /// the reader is looking at.
+    #[error(
+        "'{skill}' cannot be resolved from {path} — that folder is not readable as a bundle \
+         ({reason}); fix it and re-run, or take the team's version with `topos update{} {skill} \
+         --reset`",
+        scope_flag(*global)
+    )]
+    ConflictCopyUnreadable {
+        skill: String,
+        path: String,
+        reason: String,
+        global: bool,
+    },
     /// A crashed prior write for this skill is still in-flight and DIFFERS from the command just issued
     /// (a different digest / mode / target). Settle it first (re-run the original command, which replays
     /// its `op_id`), then re-issue this change — never silently replay a different intent.
@@ -818,6 +897,16 @@ impl ClientError {
             // A review verdict on a no-longer-open proposal — an open code, its own domain refusal.
             ClientError::ReviewNotOpen(_) => "REVIEW_NOT_OPEN",
             ClientError::PublishBlocked { .. } => "PUBLISH_BLOCKED",
+            // A copy behind the served `current` is the SAME state the plane's compare-and-set names
+            // CONFLICT, caught locally one step earlier — so it carries that code, and an agent that
+            // already branches on a stale base needs no new arm.
+            ClientError::PublishBehind { .. } => "CONFLICT",
+            // No merge stopped, so nothing is blocked — this is a wrong command for the state,
+            // and the argv is the fix.
+            ClientError::NoStoppedMerge { .. } => "INVALID_ARGUMENT",
+            // The workbench folder an exit reads is unreadable — the same "resolve the divergence
+            // locally" family as the publish block, so agents branch on one code for both.
+            ClientError::ConflictCopyUnreadable { .. } => "PUBLISH_BLOCKED",
             ClientError::PendingOp { .. } => "PENDING_OP",
             ClientError::WorkspaceSelection(_) => "WORKSPACE_SELECTION",
             ClientError::PlaneRejected(_) => "PLANE_REJECTED",
@@ -928,6 +1017,15 @@ impl ClientError {
             }
             ClientError::Denied(_) => TerminalOutcome::Denied,
             ClientError::PublishBlocked { .. } => TerminalOutcome::Diverged,
+            // Behind is the local half of the stale-base CONFLICT: update to rebase, then retry —
+            // never a blind re-run of the same publish.
+            ClientError::PublishBehind { .. } => TerminalOutcome::Conflict,
+            // A wrong command for the state: re-running it changes nothing, so it is the
+            // permanent-as-issued class every other usage refusal takes.
+            ClientError::NoStoppedMerge { .. } => TerminalOutcome::PermanentFailure,
+            // An unreadable workbench folder is the same class: a local reconciliation the person
+            // performs, never a blind retry of the same command against the same folder.
+            ClientError::ConflictCopyUnreadable { .. } => TerminalOutcome::Diverged,
             // Divergent per-placement edits are the same class as a diverged draft: local
             // reconciliation (or the disclosed reset) resolves it, never a blind retry.
             ClientError::PlacementsDiverged { .. } => TerminalOutcome::Diverged,

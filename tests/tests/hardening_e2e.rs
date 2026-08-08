@@ -91,25 +91,42 @@ fn a_pinned_reference_delivers_its_version_and_publish_to_never_mints_a_channel(
     // what makes the split below real.
     dev.update(&[], None).expect("the machine-scoped sweep");
 
-    // A fresh sweep keeps the pin (never silently fast-forwarded to v2). The ONE line it earns is
-    // the cross-store disclosure: this installation now holds `pinme` at two versions — the
-    // person scope's current and this checkout's pin — and the applied report carries only one row
-    // per bundle, so the split is said out loud rather than swallowed by the pick.
-    let (_, warnings) = dev.update(&[], Some(&proj)).expect("sweep");
-    let split: Vec<&String> = warnings
-        .iter()
-        .filter(|w| w.starts_with("VERSION_SPLIT"))
-        .collect();
-    assert_eq!(warnings.len(), split.len(), "{warnings:?}");
-    assert_eq!(split.len(), 1, "{warnings:?}");
+    // A fresh sweep keeps the pin (never silently fast-forwarded to v2) — and says NOTHING about
+    // it. This installation genuinely holds `pinme` at two versions, the person scope's current
+    // and this checkout's pin, and the applied report carries only one row per bundle; but the
+    // difference is the pin doing its job. The receipt's cross-scope line is about STALENESS, and
+    // no `topos update` anywhere would move a pinned row, so a line here could never be cleared.
+    // This is the whole silence half of that rule, over the real engine.
+    let (data, warnings) = dev.update(&[], Some(&proj)).expect("sweep");
     assert!(
-        split[0].contains(&proj.display().to_string()),
-        "the split names the checkout that holds the other version: {}",
-        split[0]
+        warnings.is_empty(),
+        "a clean run earns no lines: {warnings:?}"
     );
+    assert!(
+        data.behind_elsewhere.is_empty(),
+        "a pinned copy is deliberate, and the person copy is current: {:?}",
+        data.behind_elsewhere
+    );
+    // The pin still holds on disk — the fact the silence is silent ABOUT.
     assert_eq!(
         std::fs::read_to_string(&placed).expect("still placed"),
         "# pinme v1\n"
+    );
+    // …while the machine-wide copy really did take v2, so the two scopes DO disagree here: the
+    // silence above is a judgement about the difference, not an absence of one.
+    // The copy is NAMED, never picked off a directory walk: `read_dir` promises no order, so
+    // "the first SKILL.md under work/" is whichever entry the filesystem happens to yield — an
+    // assertion that passes today because only one folder is there, and starts reading some other
+    // skill's bytes the moment a second one is.
+    let skill_id = added
+        .skill_id
+        .as_deref()
+        .expect("the add recorded a bundle");
+    let person_copy = dev.work_dir(skill_id).join("SKILL.md");
+    assert_eq!(
+        std::fs::read_to_string(&person_copy).expect("the feed landed the person-scope copy"),
+        "# pinme v2\n",
+        "the machine scope tracks current — this is a real cross-scope split"
     );
 
     // ── `--to` takes an EXISTING channel — refusals, and no channel is minted ───────────────────

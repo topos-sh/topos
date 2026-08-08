@@ -13,27 +13,23 @@
 /// closed set of the truth-table's rows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Situation {
-    /// 1 · First receive from an `/i/` link (TOFU).
-    FirstReceiveFromLink,
-    /// 2 · A new version of a followed skill, `auto` armed.
+    /// 1 · A new version of a followed skill (the standing pre-authorization the recipe records).
     FollowedAutoNewVersion,
-    /// 3 · A followed skill in confirm-each / `--manual`.
-    FollowedConfirmEach,
-    /// 4 · A `review-required` workspace, an **approved** proposal.
+    /// 2 · A `review-required` workspace, an **approved** proposal.
     ReviewRequiredApproved,
-    /// 5 · A `review-required` workspace, an **unapproved** candidate.
+    /// 3 · A `review-required` workspace, an **unapproved** candidate.
     ReviewRequiredUnapproved,
-    /// 6 · A peer / foreign skill, not previously followed.
+    /// 4 · A peer / foreign skill nothing demands, not previously followed.
     PeerForeignSkill,
-    /// 7 · The recomputed digest ≠ the disclosed approval.
+    /// 5 · The recomputed digest ≠ the disclosed approval.
     DigestMismatch,
-    /// 8 · The signed pointer fails, or the generation goes backward.
+    /// 6 · The signed pointer fails, or the generation goes backward.
     PointerVerifyFailure,
-    /// 9 · A local draft exists and the remote is newer.
+    /// 7 · A local draft exists and the remote is newer.
     LocalDraftVsNewerRemote,
-    /// 10 · An explicit local `pull <skill>@<hash>`.
+    /// 8 · An explicit local `pull <skill>@<hash>`.
     ExplicitLocalPull,
-    /// 11 · A team `revert` on a followed skill.
+    /// 9 · A team `revert` on a followed skill.
     TeamRevertFollowed,
 }
 
@@ -56,12 +52,10 @@ pub enum Satisfier {
 /// What the client does as a result.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Outcome {
-    /// Offer; never auto-land (TOFU first-receive).
+    /// Offer; never auto-land (TOFU on a bundle nothing on this machine demands).
     OfferNeverAutoLand,
     /// Re-disclose + re-bind the digest, then apply (no fresh prompt).
     Apply,
-    /// A one-tap offer (confirm-each).
-    OneTapOffer,
     /// Apply with no local prompt; bytes are still re-verified (reviewer-delegated).
     ApplyNoLocalPrompt,
     /// `current` does not move.
@@ -109,9 +103,7 @@ pub fn decide(situation: Situation) -> Decision {
     use Outcome::*;
     use Satisfier::*;
     let (satisfier, outcome) = match situation {
-        Situation::FirstReceiveFromLink => (DirectHuman, OfferNeverAutoLand),
         Situation::FollowedAutoNewVersion => (StandingFollow, Apply),
-        Situation::FollowedConfirmEach => (DirectHuman, OneTapOffer),
         Situation::ReviewRequiredApproved => (ReviewerDelegated, ApplyNoLocalPrompt),
         Situation::ReviewRequiredUnapproved => (None, CurrentDoesNotMove),
         Situation::PeerForeignSkill => (DirectHuman, OfferNeverAutoLand),
@@ -136,19 +128,9 @@ mod tests {
     fn truth_table_matches_the_contract() {
         let rows = [
             (
-                Situation::FirstReceiveFromLink,
-                Satisfier::DirectHuman,
-                Outcome::OfferNeverAutoLand,
-            ),
-            (
                 Situation::FollowedAutoNewVersion,
                 Satisfier::StandingFollow,
                 Outcome::Apply,
-            ),
-            (
-                Situation::FollowedConfirmEach,
-                Satisfier::DirectHuman,
-                Outcome::OneTapOffer,
             ),
             (
                 Situation::ReviewRequiredApproved,
@@ -195,14 +177,13 @@ mod tests {
     }
 
     #[test]
-    fn tofu_never_auto_lands() {
-        // A standing-follow pre-auth can NEVER satisfy a first-receive — only a direct human can.
-        for s in [Situation::FirstReceiveFromLink, Situation::PeerForeignSkill] {
-            let d = decide(s);
-            assert_eq!(d.satisfier, Satisfier::DirectHuman);
-            assert_eq!(d.outcome, Outcome::OfferNeverAutoLand);
-            assert!(!d.applies_bytes());
-        }
+    fn a_foreign_bundle_never_auto_lands() {
+        // A standing-follow pre-auth reaches only what this machine's recipe demands — a foreign
+        // bundle no row names still needs a direct human yes.
+        let d = decide(Situation::PeerForeignSkill);
+        assert_eq!(d.satisfier, Satisfier::DirectHuman);
+        assert_eq!(d.outcome, Outcome::OfferNeverAutoLand);
+        assert!(!d.applies_bytes());
     }
 
     #[test]

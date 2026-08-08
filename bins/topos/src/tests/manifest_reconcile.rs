@@ -6,7 +6,7 @@
 //! `"off"` row withholds exactly its bundle; an explicit row's pin beats the feed's and a set's
 //! version of the same identity; the NEAREST project file governs whole; the same bundle at both
 //! scopes lands twice with two stores; git rows move only on an explicit update; a dropped row
-//! cleans snapshot-first; and `--rebuild` absorbs before it drops.
+//! cleans snapshot-first; and `--force` absorbs before it drops.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -725,7 +725,7 @@ fn the_feed_row_adopts_the_workspaces_feed() {
     );
     // Nothing is loud: the feed row adopts everything, so there is nothing to disclose.
     assert!(
-        !out.warnings
+        !out.advisories
             .iter()
             .any(|w| w.starts_with("GLOBAL_MANIFEST")),
         "{:?}",
@@ -833,7 +833,7 @@ fn a_global_file_withholds_the_feed_and_says_so_loudly() {
         "no feed row, no feed"
     );
     let loud = out
-        .warnings
+        .advisories
         .iter()
         .find(|w| w.starts_with("GLOBAL_MANIFEST"))
         .expect("the loud line");
@@ -986,7 +986,7 @@ fn an_off_row_withholds_exactly_its_bundle_from_a_flowing_feed() {
     );
     // A flowing feed is not a withheld one — no loud line here.
     assert!(
-        !out.warnings
+        !out.advisories
             .iter()
             .any(|w| w.starts_with("GLOBAL_MANIFEST")),
         "{:?}",
@@ -1047,7 +1047,7 @@ fn a_declined_bundle_a_row_still_delivers_is_disclosed() {
     let out = sweep(&ctx, &plane, &dir);
     assert!(rig.work.0.join("skills/deploy/SKILL.md").exists());
     let line = out
-        .warnings
+        .advisories
         .iter()
         .find(|w| w.starts_with("DECLINED_OVERRIDE"))
         .expect("the honest note");
@@ -2877,7 +2877,8 @@ fn a_signed_out_workspaces_leftover_resolves_once_then_retires() {
         row.note.as_deref(),
         Some(
             format!(
-                "{WS_NAME} no longer delivers this; {} is yours now (topos list alpha)",
+                "{WS_NAME} stopped sharing this — topos will not update it any more\nthe files \
+                 stay where they are, and are yours to keep or delete: {}",
                 placed.display()
             )
             .as_str()
@@ -3076,21 +3077,38 @@ fn a_targeted_update_never_resolves_orphans() {
 
 #[test]
 fn the_released_fact_shapes_are_byte_exact() {
-    // Every final-copy shape, pinned at the composer (the renderer prints the fact verbatim).
+    // Every final-copy shape, pinned at the composer (the renderer prints the fact verbatim, one
+    // line per line). The two facts a person needs, in order: who stopped sharing, and where that
+    // leaves the files — the second line naming the ONE folder, or listing several beneath itself.
+    assert_eq!(
+        ops::orphan_fact(
+            Some("acme"),
+            &["~/.claude/skills/legacy-deploy".to_owned()],
+            &["~/.claude/skills/legacy-deploy".to_owned()],
+        ),
+        "acme stopped sharing this — topos will not update it any more\nthe files stay where they \
+         are, and are yours to keep or delete: ~/.claude/skills/legacy-deploy"
+    );
     let folders = |n: usize| -> Vec<String> { (0..n).map(|i| format!("/tmp/f{i}")).collect() };
     assert_eq!(
-        ops::orphan_fact(Some("acme"), &folders(6), &folders(6), "frontend-design"),
-        "acme no longer delivers this; files in 6 folders are yours now (topos list frontend-design)"
+        ops::orphan_fact(Some("acme"), &folders(2), &folders(2)),
+        "acme stopped sharing this — topos will not update it any more\nthe files stay where they \
+         are, and are yours to keep or delete:\n  /tmp/f0\n  /tmp/f1"
+    );
+    // No workspace name on record: the row states only what it knows — where the files stand —
+    // rather than a sentence with a hole where the name belongs.
+    assert_eq!(
+        ops::orphan_fact(
+            None,
+            &["~/.claude/skills/runbook".to_owned()],
+            &["~/.claude/skills/runbook".to_owned()],
+        ),
+        "the files stay where they are, and are yours to keep or delete: ~/.claude/skills/runbook"
     );
     // Nothing left on disk: the fact states the DISCOVERY (the copies were already gone), never an
     // act this run performed. One recorded copy names it; several name the last of them.
     assert_eq!(
-        ops::orphan_fact(
-            None,
-            &folders(0),
-            &["/private/tmp/deploy".to_owned()],
-            "deploy"
-        ),
+        ops::orphan_fact(None, &folders(0), &["/private/tmp/deploy".to_owned()]),
         "its only copy, /private/tmp/deploy, no longer exists — nothing left to manage"
     );
     assert_eq!(
@@ -3102,28 +3120,14 @@ fn the_released_fact_shapes_are_byte_exact() {
                 "~/.cursor/skills/deploy".to_owned(),
                 "/private/tmp/deploy".to_owned(),
             ],
-            "deploy"
         ),
         "its 3 copies, last at /private/tmp/deploy, no longer exist — nothing left to manage"
-    );
-    assert_eq!(
-        ops::orphan_fact(
-            None,
-            &["~/.claude/skills/runbook".to_owned()],
-            &["~/.claude/skills/runbook".to_owned()],
-            "runbook"
-        ),
-        "~/.claude/skills/runbook is yours now (topos list runbook)"
     );
     // Nothing on disk AND nothing recorded (the withdrawal already cleaned the map): the same
     // consequence, minimally stated.
     assert_eq!(
-        ops::orphan_fact(None, &folders(0), &folders(0), "gone"),
+        ops::orphan_fact(None, &folders(0), &folders(0)),
         "no copies remain — nothing left to manage"
-    );
-    assert_eq!(
-        ops::orphan_fact(Some("acme"), &folders(2), &folders(2), "notes"),
-        "acme no longer delivers this; files in 2 folders are yours now (topos list notes)"
     );
 }
 
@@ -4103,7 +4107,7 @@ fn an_offline_sweep_freezes_and_never_cleans() {
 }
 
 // =================================================================================================
-// `--rebuild`.
+// `--force` (the rebuild repair).
 // =================================================================================================
 
 #[test]
@@ -4147,6 +4151,180 @@ fn rebuild_absorbs_the_edit_before_it_re_projects() {
         snapshot_dir(&placed),
         vec![("SKILL.md".to_owned(), b"# deploy\n".to_vec())],
         "the copy is re-materialized from the store"
+    );
+}
+
+/// The BUILT-IN survives a `--force`, in the same invocation.
+///
+/// Its force-sync from the binary IS its rebuild, and it has already run by the time the repair
+/// starts. Re-projecting it the ordinary way — drop the dirs, let the sweep write them back —
+/// therefore deletes a folder nothing later in the run puts back: the person asks for a repair and
+/// their agents lose the one skill that teaches them what topos is, silently, until the next bare
+/// sweep happens to heal it.
+#[test]
+fn force_leaves_the_built_in_placed() {
+    let rig = Rig::new("rebuild-builtin");
+    rig.seed_session();
+    rig.seed_feed();
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let v = one_file(b"# deploy\n");
+    let plane = FakePlane::new(log).with_version("s_deploy", &v);
+    plane.serves(vec![delivered("s_deploy", "deploy", &v)]);
+    let dir = FakeDirectory::new(vec![catalog_entry("s_deploy", "deploy", &v)], Vec::new());
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    sweep(&ctx, &plane, &dir);
+    // The same force-sync every real invocation runs before the reconcile.
+    ops::ensure_builtin(&ctx).unwrap();
+    let builtin: Vec<std::path::PathBuf> = ops::builtin_placement_dirs(&ctx)
+        .unwrap()
+        .iter()
+        .map(std::path::PathBuf::from)
+        .collect();
+    assert!(!builtin.is_empty(), "the built-in is placed to begin with");
+    for dir in &builtin {
+        assert!(dir.join("SKILL.md").exists(), "{}", dir.display());
+    }
+
+    let out = ops::manifest_update(
+        &ctx,
+        &connect(&plane, &dir),
+        None,
+        &ops::ManifestUpdateOpts {
+            rebuild: true,
+            ..ops::ManifestUpdateOpts::default()
+        },
+    )
+    .unwrap();
+    assert!(out.warnings.is_empty(), "{:?}", out.warnings);
+    for dir in &builtin {
+        assert!(
+            dir.join("SKILL.md").exists(),
+            "the built-in is still placed after --force: {}",
+            dir.display()
+        );
+    }
+}
+
+/// A rebuild of a bundle whose merge is still UNDECIDED leaves its folders exactly as they are.
+///
+/// The ordinary repair works by dropping every placement dir and letting the sweep re-project the
+/// bundle pristine — but a blocked bundle has no pristine version to project: the sweep stops at
+/// the block and writes no placement, so dropping the dirs would empty every agent folder and
+/// leave it empty until the merge is settled. Nothing is lost either way (the bytes are
+/// snapshotted), but "your agents have this skill" would stop being true because of a repair. So
+/// the rebuild stands aside and names the two exits — both of which rewrite every managed
+/// placement on their way out, which is the repair the person came for.
+#[test]
+fn rebuild_leaves_a_blocked_bundle_alone_and_names_both_exits() {
+    let rig = Rig::new("rebuild-blocked");
+    rig.seed_session();
+    rig.seed_feed();
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let v1 = one_file(b"# deploy\n");
+    let v2 = one_file(b"# deploy, theirs\n");
+    let plane = FakePlane::new(log)
+        .with_version("s_deploy", &v1)
+        .with_version("s_deploy", &v2);
+    plane.serves(vec![delivered("s_deploy", "deploy", &v1)]);
+    let dir = FakeDirectory::new(vec![catalog_entry("s_deploy", "deploy", &v1)], Vec::new());
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    sweep(&ctx, &plane, &dir);
+    let placed = rig.work.0.join("skills/deploy");
+    assert!(placed.join("SKILL.md").exists());
+
+    // My own edit to the same file the team is about to change → a conflict on the next sweep.
+    std::fs::write(placed.join("SKILL.md"), b"# deploy, mine\n").unwrap();
+    plane.serves(vec![DeliverySkill {
+        version_id: v2.id,
+        generation: 2,
+        bundle_digest: v2.digest,
+        ..delivered("s_deploy", "deploy", &v2)
+    }]);
+    let out = sweep(&ctx, &plane, &dir);
+    assert_eq!(
+        out.data.skills.iter().map(|s| s.action).collect::<Vec<_>>(),
+        vec![PullAction::Conflicted]
+    );
+    let sp = rig
+        .layout()
+        .published(&crate::id::SkillId::parse("s_deploy").unwrap());
+    assert!(sp.conflict.exists(), "the block is recorded");
+    let mine = snapshot_dir(&placed);
+    assert_eq!(
+        mine,
+        vec![("SKILL.md".to_owned(), b"# deploy, mine\n".to_vec())]
+    );
+
+    // THE POINT: `--force` touches nothing here, and says why in the scope's own spelling.
+    let out = ops::manifest_update(
+        &ctx,
+        &connect(&plane, &dir),
+        None,
+        &ops::ManifestUpdateOpts {
+            rebuild: true,
+            ..ops::ManifestUpdateOpts::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        snapshot_dir(&placed),
+        mine,
+        "a rebuild must not empty the folders of a bundle it cannot re-project"
+    );
+    assert!(sp.conflict.exists(), "and the block still stands");
+    // A bundle waiting on a person is NOT a failure: nothing broke, no retry helps, and the run's
+    // exit status must not say otherwise.
+    assert!(out.warnings.is_empty(), "{:?}", out.warnings);
+    // No internal code, and each way out on its own line, runnable exactly as printed.
+    assert_eq!(out.decisions.len(), 1, "{:?}", out.decisions);
+    assert_eq!(
+        out.decisions[0].name, "deploy",
+        "the bundle leads its own row"
+    );
+    assert_eq!(
+        out.decisions[0].line,
+        "waiting on a merge decision, so its folders were left as they are"
+    );
+    assert_eq!(
+        out.decisions[0].detail,
+        vec![
+            "settle it first, then rebuild:".to_owned(),
+            "  topos update -g deploy --keep-mine".to_owned(),
+            "  topos update -g deploy --reset".to_owned(),
+        ]
+    );
+    // The receipt renders it as a row of this run, padded with the rest, and counts it as an
+    // answer owed — never as something that failed.
+    let tty = crate::render::pull_tty(
+        &out.data,
+        &out.decisions,
+        &out.warnings,
+        &out.advisories,
+        &out.disclosures,
+    );
+    assert!(
+        tty.contains(
+            "deploy   waiting on a merge decision, so its folders were left as they are\n    \
+             settle it first, then rebuild:\n      topos update -g deploy --keep-mine\n      topos \
+             update -g deploy --reset"
+        ),
+        "{tty}"
+    );
+    assert!(tty.contains("waiting on you"), "{tty}");
+    assert!(!tty.contains("failed"), "{tty}");
+    // The row in the SAME receipt still names the untouched folder — the rebuild changed nothing
+    // about what the conflict row can promise.
+    let row = out
+        .data
+        .skills
+        .iter()
+        .find(|s| s.action == PullAction::Conflicted)
+        .expect("the block is re-disclosed");
+    assert_eq!(
+        row.merge.as_ref().map(|m| m.placements.len()),
+        Some(1),
+        "{:?}",
+        row.merge
     );
 }
 
@@ -4888,7 +5066,7 @@ fn the_report_covers_a_declined_but_locally_added_bundle() {
     let ctx = rig.ctx_at(Some(&rig.work.0));
     let out = sweep(&ctx, &plane, &dir);
     assert!(
-        out.warnings
+        out.advisories
             .iter()
             .any(|w| w.starts_with("DECLINED_OVERRIDE")),
         "{:?}",
@@ -5624,6 +5802,7 @@ fn a_landed_publish_survives_a_failed_rewrite_and_the_next_update_converges_it()
         None,
         None,
         None,
+        &ops::Selection::default(),
     )
     .unwrap();
     let data = match outcome {
@@ -5655,10 +5834,10 @@ fn a_landed_publish_survives_a_failed_rewrite_and_the_next_update_converges_it()
     )
     .unwrap();
     let line = out
-        .warnings
+        .advisories
         .iter()
         .find(|w| w.starts_with("GOVERNANCE_CONVERGED"))
-        .unwrap_or_else(|| panic!("the converge line: {:?}", out.warnings));
+        .unwrap_or_else(|| panic!("the converge line: {:?}", out.advisories));
     assert!(line.contains(&format!("{HOST}/{WS_NAME}/deploy")), "{line}");
     let text =
         std::fs::read_to_string(rig.layout().home().join(crate::manifest::MANIFEST_FILE)).unwrap();
@@ -5681,7 +5860,7 @@ fn a_landed_publish_survives_a_failed_rewrite_and_the_next_update_converges_it()
     .unwrap();
     assert!(
         !out2
-            .warnings
+            .advisories
             .iter()
             .any(|w| w.starts_with("GOVERNANCE_CONVERGED")),
         "{:?}",
@@ -5750,6 +5929,7 @@ fn a_project_scope_pending_rewrite_converges_from_the_projects_own_store() {
         None,
         None,
         None,
+        &ops::Selection::default(),
     )
     .unwrap();
     let data = match outcome {
@@ -5776,10 +5956,10 @@ fn a_project_scope_pending_rewrite_converges_from_the_projects_own_store() {
     )
     .unwrap();
     let line = out
-        .warnings
+        .advisories
         .iter()
         .find(|w| w.starts_with("GOVERNANCE_CONVERGED"))
-        .unwrap_or_else(|| panic!("the converge line: {:?}", out.warnings));
+        .unwrap_or_else(|| panic!("the converge line: {:?}", out.advisories));
     assert!(line.contains(&format!("{HOST}/{WS_NAME}/deploy")), "{line}");
     let text = std::fs::read_to_string(proj.0.join(crate::manifest::MANIFEST_FILE)).unwrap();
     assert!(
@@ -5856,6 +6036,7 @@ fn a_removal_that_lands_mid_publish_is_never_silently_undone() {
         None,
         None,
         None,
+        &ops::Selection::default(),
     )
     .unwrap();
     let data = match outcome {
@@ -5984,6 +6165,7 @@ fn a_genesis_propose_pending_rewrite_still_converges() {
         None,
         None,
         None,
+        &ops::Selection::default(),
     )
     .unwrap();
     let data = match outcome {
@@ -6010,10 +6192,10 @@ fn a_genesis_propose_pending_rewrite_still_converges() {
     )
     .unwrap();
     let line = out
-        .warnings
+        .advisories
         .iter()
         .find(|w| w.starts_with("GOVERNANCE_CONVERGED"))
-        .unwrap_or_else(|| panic!("the converge line: {:?}", out.warnings));
+        .unwrap_or_else(|| panic!("the converge line: {:?}", out.advisories));
     assert!(line.contains(&format!("{HOST}/{WS_NAME}/deploy")), "{line}");
     let text =
         std::fs::read_to_string(rig.layout().home().join(crate::manifest::MANIFEST_FILE)).unwrap();
@@ -6166,10 +6348,10 @@ fn a_delivered_bundle_shipping_a_non_self_ignoring_gitignore_warns_on_the_sweep(
         out.warnings
     );
     let w = out
-        .warnings
+        .advisories
         .iter()
         .find(|w| w.starts_with("GIT_VISIBLE"))
-        .unwrap_or_else(|| panic!("the visibility disclosure: {:?}", out.warnings));
+        .unwrap_or_else(|| panic!("the visibility disclosure: {:?}", out.advisories));
     assert!(w.contains("deploy"), "{w}");
 }
 
@@ -6749,15 +6931,17 @@ fn a_committed_skills_symlink_is_refused_as_a_placement_root() {
 }
 
 // =================================================================================================
-// The applied report's cross-store pick is deterministic, and a version split is disclosed.
+// The applied report's cross-store pick is deterministic; cross-scope STALENESS is disclosed and
+// a deliberate pin is not.
 // =================================================================================================
 
 #[test]
-fn a_bundle_held_at_two_versions_reports_the_person_copy_and_discloses_the_split() {
+fn a_bundle_held_at_two_versions_reports_the_person_copy_and_says_nothing_about_a_pin() {
     // The wire carries ONE row per (session, bundle). Which store answers must not depend on which
     // checkout the update happened to run from — the PERSON store answers whenever it holds the
-    // bundle — and the version the OTHER store holds must not simply vanish from the person's view.
-    // The split only EXISTS once both scopes have converged, so this rides the background sweep.
+    // bundle. The OTHER store's version is a DIFFERENCE, and here a deliberate one: the project
+    // row is pinned, so no line is earned. Difference is the design working; only staleness is
+    // news, and only when a command from here would fix it.
     let rig = Rig::new("split-report");
     rig.seed_session();
     rig.seed_feed();
@@ -6795,20 +6979,283 @@ fn a_bundle_held_at_two_versions_reports_the_person_copy_and_discloses_the_split
         .find(|(id, ..)| id == "s_deploy")
         .unwrap_or_else(|| panic!("the bundle is reported: {reported:?}"));
     assert_eq!(row.1, topos_core::digest::to_hex(&v2.id), "{reported:?}");
-    // And the split the single row cannot carry is said out loud.
-    let line = out
-        .disclosures
-        .iter()
-        .find(|w| w.starts_with("VERSION_SPLIT"))
-        .unwrap_or_else(|| panic!("the split is disclosed: {:?}", out.disclosures));
-    assert!(line.contains("s_deploy"), "{line}");
+    // The pin is a CHOICE, so the receipt says nothing about it: no staleness entry, no line, and
+    // above all no internal warning code on a run where everything went right.
     assert!(
-        line.contains(&v1_hex[..12]),
-        "names the other version: {line}"
+        out.data.behind_elsewhere.is_empty(),
+        "a pinned row is deliberate, never behind: {:?}",
+        out.data.behind_elsewhere
+    );
+    let tty = crate::render::pull_tty(
+        &out.data,
+        &out.decisions,
+        &out.warnings,
+        &out.advisories,
+        &out.disclosures,
+    );
+    assert!(!tty.contains("behind"), "{tty}");
+    assert!(!tty.contains("VERSION_SPLIT"), "{tty}");
+    assert!(!tty.contains(&v1_hex[..12]), "{tty}");
+}
+
+#[test]
+fn the_machine_copy_left_behind_by_a_project_update_earns_the_counted_trailer() {
+    // The other half of the rule: a copy that differs because it is simply OLD — no pin, no `off`,
+    // nothing deliberate — IS news, and the receipt closes with the count and the one command
+    // that fixes it. This run drives the PROJECT (the scope rule), so the machine-wide copy is
+    // exactly what nothing here touched.
+    let rig = Rig::new("behind-machine");
+    rig.seed_session();
+    rig.seed_feed();
+    let v1 = one_file(b"# deploy v1\n");
+    let v2 = one_file(b"# deploy v2\n");
+    let proj = project(
+        "proj-behind",
+        &format!("[bundles]\n\"{HOST}/{WS_NAME}/deploy\" = \"*\"\n"),
+    );
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let plane = FakePlane::new(log)
+        .with_version("s_deploy", &v1)
+        .with_version("s_deploy", &v2);
+    let dir = FakeDirectory::new(vec![catalog_entry("s_deploy", "deploy", &v1)], Vec::new());
+
+    // Both scopes land v1 (the background sweep drives both).
+    plane.serves(vec![delivered("s_deploy", "deploy", &v1)]);
+    let ctx = rig.ctx_at(Some(&proj.0));
+    sweep_both(&ctx, &plane, &dir);
+    assert_eq!(
+        std::fs::read(rig.work.0.join("skills/deploy/SKILL.md")).unwrap(),
+        b"# deploy v1\n"
+    );
+
+    // Current moves; a HAND-RUN update from inside the checkout drives the project alone.
+    let mut served = delivered("s_deploy", "deploy", &v2);
+    served.generation = 2;
+    plane.serves(vec![served]);
+    let mut listed = catalog_entry("s_deploy", "deploy", &v2);
+    listed.generation = 2;
+    let dir = FakeDirectory::new(vec![listed], Vec::new());
+    let out = sweep(&ctx, &plane, &dir);
+    assert_eq!(
+        std::fs::read(proj.0.join(".claude/skills/deploy/SKILL.md")).unwrap(),
+        b"# deploy v2\n",
+        "the scope you stand in is the one that moves"
+    );
+    assert_eq!(
+        std::fs::read(rig.work.0.join("skills/deploy/SKILL.md")).unwrap(),
+        b"# deploy v1\n",
+        "the machine-wide copy was never driven"
+    );
+    assert_eq!(
+        out.data.behind_elsewhere,
+        vec![topos_types::results::BehindElsewhere {
+            bundle: "deploy".to_owned(),
+            project_dir: None,
+        }],
+        "the machine's own copy is the one behind"
+    );
+    let tty = crate::render::pull_tty(
+        &out.data,
+        &out.decisions,
+        &out.warnings,
+        &out.advisories,
+        &out.disclosures,
     );
     assert!(
-        line.contains(&proj.0.display().to_string()),
-        "names which store holds it: {line}"
+        tty.ends_with("1 bundle behind machine-wide — `topos update -g` updates it."),
+        "{tty}"
+    );
+
+    // Run THAT command and the line is gone — a trailer nobody can clear is a nag, not a receipt.
+    let after = sweep_scoped(&ctx, &plane, &dir, ops::UpdateScope::Machine);
+    assert!(
+        after.data.behind_elsewhere.is_empty(),
+        "{:?}",
+        after.data.behind_elsewhere
+    );
+}
+
+/// The PINNED half of the staleness rule, reached for real. The two tests around it never touch
+/// it: one pins the scope the run DRIVES (so the driven-scope filter answers first and the pin is
+/// never consulted), the other uses `"off"`. Here the pin sits on the scope this run leaves alone,
+/// which is the only arrangement in which the pin itself decides — and the control run, the same
+/// fixture with `"*"` in place of the pin, proves the silence is the PIN's doing and not the
+/// fixture's.
+#[test]
+fn a_pin_on_the_scope_this_run_left_alone_is_never_reported_behind() {
+    let rig = Rig::new("behind-pinned");
+    rig.seed_session();
+    let v1 = one_file(b"# deploy v1\n");
+    let v2 = one_file(b"# deploy v2\n");
+    let v1_hex = topos_core::digest::to_hex(&v1.id);
+    let proj = project(
+        "proj-pinned",
+        &format!("[bundles]\n\"{HOST}/{WS_NAME}/deploy\" = \"*\"\n"),
+    );
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let plane = FakePlane::new(log)
+        .with_version("s_deploy", &v1)
+        .with_version("s_deploy", &v2);
+    let dir = FakeDirectory::new(vec![catalog_entry("s_deploy", "deploy", &v1)], Vec::new());
+
+    // The MACHINE recipe pins the bundle to v1; the project takes whatever is current. Both land
+    // v1 on the first sweep, which drives both scopes.
+    rig.write_global(&format!(
+        "[bundles]\n\"{HOST}/{WS_NAME}\" = \"*\"\n\"{HOST}/{WS_NAME}/deploy\" = \"{v1_hex}\"\n"
+    ));
+    plane.serves(vec![delivered("s_deploy", "deploy", &v1)]);
+    let ctx = rig.ctx_at(Some(&proj.0));
+    sweep_both(&ctx, &plane, &dir);
+    assert_eq!(
+        std::fs::read(rig.work.0.join("skills/deploy/SKILL.md")).unwrap(),
+        b"# deploy v1\n"
+    );
+
+    // Current moves; a hand-run update from inside the checkout drives the PROJECT alone, so the
+    // machine scope is exactly the one nothing here touched — the arrangement that makes the pin
+    // the deciding fact.
+    let mut served = delivered("s_deploy", "deploy", &v2);
+    served.generation = 2;
+    plane.serves(vec![served.clone()]);
+    let mut listed = catalog_entry("s_deploy", "deploy", &v2);
+    listed.generation = 2;
+    let dir2 = FakeDirectory::new(vec![listed.clone()], Vec::new());
+    let out = sweep(&ctx, &plane, &dir2);
+    assert_eq!(
+        std::fs::read(proj.0.join(".claude/skills/deploy/SKILL.md")).unwrap(),
+        b"# deploy v2\n",
+        "the scope you stand in is the one that moves"
+    );
+    assert_eq!(
+        std::fs::read(rig.work.0.join("skills/deploy/SKILL.md")).unwrap(),
+        b"# deploy v1\n",
+        "the pinned machine copy is materially behind v2 — deliberately"
+    );
+    assert!(
+        out.data.behind_elsewhere.is_empty(),
+        "a pinned row is a choice no `topos update` would undo: {:?}",
+        out.data.behind_elsewhere
+    );
+    let tty = crate::render::pull_tty(
+        &out.data,
+        &out.decisions,
+        &out.warnings,
+        &out.advisories,
+        &out.disclosures,
+    );
+    assert!(!tty.contains("behind"), "{tty}");
+
+    // THE CONTROL. Same fixture, same undriven scope, same version gap — only the pin removed.
+    // The line appears, so the silence above is the pin's and nothing else's.
+    let rig = Rig::new("behind-unpinned");
+    rig.seed_session();
+    let proj = project(
+        "proj-unpinned",
+        &format!("[bundles]\n\"{HOST}/{WS_NAME}/deploy\" = \"*\"\n"),
+    );
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let plane = FakePlane::new(log)
+        .with_version("s_deploy", &v1)
+        .with_version("s_deploy", &v2);
+    rig.write_global(&format!(
+        "[bundles]\n\"{HOST}/{WS_NAME}\" = \"*\"\n\"{HOST}/{WS_NAME}/deploy\" = \"*\"\n"
+    ));
+    plane.serves(vec![delivered("s_deploy", "deploy", &v1)]);
+    let ctx = rig.ctx_at(Some(&proj.0));
+    let dir = FakeDirectory::new(vec![catalog_entry("s_deploy", "deploy", &v1)], Vec::new());
+    sweep_both(&ctx, &plane, &dir);
+    plane.serves(vec![served]);
+    let dir2 = FakeDirectory::new(vec![listed], Vec::new());
+    let out = sweep(&ctx, &plane, &dir2);
+    assert_eq!(
+        out.data.behind_elsewhere,
+        vec![topos_types::results::BehindElsewhere {
+            bundle: "deploy".to_owned(),
+            project_dir: None,
+        }],
+        "with no pin the same gap IS news"
+    );
+    let tty = crate::render::pull_tty(
+        &out.data,
+        &out.decisions,
+        &out.warnings,
+        &out.advisories,
+        &out.disclosures,
+    );
+    assert!(
+        tty.ends_with("1 bundle behind machine-wide — `topos update -g` updates it."),
+        "{tty}"
+    );
+}
+
+/// The reason there is no SET-level branch in the staleness rule: a channel — the only set a
+/// workspace bundle arrives through — cannot carry a pin at all. The grammar refuses it in both
+/// spellings, so "a pinned set delivers this bundle" is not a state a manifest can express, and a
+/// rule about it would be one no fixture could ever reach.
+#[test]
+fn a_channel_cannot_be_pinned_so_a_set_is_never_the_deliberate_fact() {
+    let rig = Rig::new("behind-pinned-set");
+    let v1 = one_file(b"# deploy v1\n");
+    let v1_hex = topos_core::digest::to_hex(&v1.id);
+    for body in [
+        format!("[bundles]\n\"{HOST}/{WS_NAME}/channels/backend\" = \"{v1_hex}\"\n"),
+        format!(
+            "[bundles]\n\"{HOST}/{WS_NAME}/channels/backend\" = {{ version = \"{v1_hex}\" }}\n"
+        ),
+    ] {
+        rig.write_global(&body);
+        let err = crate::manifest::scopes::person_plan(&rig.fs, &rig.layout())
+            .expect_err("a pinned channel is refused at the parser");
+        let message = crate::render::safe_message(&err);
+        assert!(message.contains("channel takes no pin"), "{message}");
+    }
+}
+
+#[test]
+fn an_off_row_is_never_reported_behind() {
+    // The `"off"` switch is the other deliberate spelling: the machine keeps its copy but stops
+    // taking the workspace's version of it. Nothing would ever bring it to current, so a line
+    // saying it is behind could never be cleared.
+    let rig = Rig::new("behind-off");
+    rig.seed_session();
+    let v1 = one_file(b"# deploy v1\n");
+    let v2 = one_file(b"# deploy v2\n");
+    let proj = project(
+        "proj-off",
+        &format!("[bundles]\n\"{HOST}/{WS_NAME}/deploy\" = \"*\"\n"),
+    );
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let plane = FakePlane::new(log)
+        .with_version("s_deploy", &v1)
+        .with_version("s_deploy", &v2);
+    let dir = FakeDirectory::new(vec![catalog_entry("s_deploy", "deploy", &v1)], Vec::new());
+    rig.seed_feed();
+    plane.serves(vec![delivered("s_deploy", "deploy", &v1)]);
+    let ctx = rig.ctx_at(Some(&proj.0));
+    sweep_both(&ctx, &plane, &dir);
+
+    // The machine switches the bundle off AFTER its copy landed, then current moves on. The `off`
+    // row is global-file-only, so the copy STAYS on disk at v1 — materially behind v2, and
+    // deliberately so.
+    rig.write_global(&format!(
+        "[bundles]\n\"{HOST}/{WS_NAME}\" = \"*\"\n\"{HOST}/{WS_NAME}/deploy\" = \"off\"\n"
+    ));
+    let mut served = delivered("s_deploy", "deploy", &v2);
+    served.generation = 2;
+    plane.serves(vec![served]);
+    let mut listed = catalog_entry("s_deploy", "deploy", &v2);
+    listed.generation = 2;
+    let dir = FakeDirectory::new(vec![listed], Vec::new());
+    let out = sweep(&ctx, &plane, &dir);
+    assert_eq!(
+        std::fs::read(rig.work.0.join("skills/deploy/SKILL.md")).unwrap(),
+        b"# deploy v1\n",
+        "the switched-off copy is left exactly where it was"
+    );
+    assert!(
+        out.data.behind_elsewhere.is_empty(),
+        "an `off` row is a choice: {:?}",
+        out.data.behind_elsewhere
     );
 }
 
@@ -7953,11 +8400,44 @@ fn a_forge_refresh_holds_the_lock_and_keeps_an_edit_that_lands_at_the_stash() {
         !lock_free.get(),
         "the whole refresh replacement runs under the skill's writer lock"
     );
-    assert!(
-        out.warnings.iter().any(|w| w.contains("was edited while")),
-        "the refresh refuses and says why: {:?}",
-        out.warnings
+    // The refresh stood down, and said so as a DECISION — not a failure. Nothing broke, nothing
+    // was lost, and no retry answers it: the person picks, and until they do the run is still a
+    // clean one.
+    assert!(out.warnings.is_empty(), "{:?}", out.warnings);
+    assert_eq!(out.decisions.len(), 1, "{:?}", out.decisions);
+    assert_eq!(out.decisions[0].name, "deploy");
+    assert_eq!(
+        out.decisions[0].line,
+        "github.com/o/r has a newer version, but your edits would be overwritten"
     );
+    assert_eq!(
+        out.decisions[0].detail,
+        vec![
+            "to share your edits:   topos publish deploy".to_owned(),
+            "to discard them:       topos update -g deploy --reset".to_owned(),
+        ]
+    );
+    // The whole receipt block, as a person reads it: one row, its two ways out, and a summary that
+    // counts the row under the answer it is waiting for.
+    let tty = crate::render::pull_tty(
+        &out.data,
+        &out.decisions,
+        &out.warnings,
+        &out.advisories,
+        &out.disclosures,
+    );
+    let expected_block = concat!(
+        "deploy   github.com/o/r has a newer version, but your edits would be overwritten\n",
+        "    to share your edits:   topos publish deploy\n",
+        "    to discard them:       topos update -g deploy --reset\n",
+    );
+    assert!(tty.contains(expected_block), "{tty}");
+    assert!(tty.contains("waiting on you"), "{tty}");
+    // Neither internal code survives: not the refusal's, and not the source-moved disclosure's —
+    // the row already says the source has a newer version, in words a person can act on.
+    assert!(!tty.contains("INVALID_ARGUMENT"), "{tty}");
+    assert!(!tty.contains("GIT_UPDATED"), "{tty}");
+    assert!(!tty.contains('~'), "{tty}");
     assert_eq!(
         std::fs::read(placed.join("SKILL.md")).unwrap(),
         b"# my local edit\n",
@@ -8265,10 +8745,17 @@ fn an_unadopted_project_placement_never_retires_the_home_row() {
     seed_store_row(&rig.layout(), "s_legacy", &placed);
     let ctx = rig.ctx_at(Some(&proj.0));
 
+    let mut advisories = Vec::new();
     let mut warnings = Vec::new();
-    ops::handover_legacy_project_rows(&ctx, std::slice::from_ref(&proj.0), &mut warnings);
+    ops::handover_legacy_project_rows(
+        &ctx,
+        std::slice::from_ref(&proj.0),
+        &mut advisories,
+        &mut warnings,
+    );
 
-    assert!(warnings.is_empty(), "nothing to disclose: {warnings:?}");
+    assert!(advisories.is_empty(), "nothing to disclose: {advisories:?}");
+    assert!(warnings.is_empty(), "and nothing failed: {warnings:?}");
     let sid = crate::id::SkillId::parse("s_legacy").unwrap();
     let map = crate::doc::read_map(&rig.fs, &rig.layout().published(&sid).map)
         .unwrap()
@@ -8304,9 +8791,18 @@ fn an_adopted_project_placement_hands_over_and_parks_the_home_store() {
     seed_store_row(&playout, "s_proj", &placed);
     let ctx = rig.ctx_at(Some(&proj.0));
 
+    let mut advisories = Vec::new();
     let mut warnings = Vec::new();
-    ops::handover_legacy_project_rows(&ctx, std::slice::from_ref(&proj.0), &mut warnings);
+    ops::handover_legacy_project_rows(
+        &ctx,
+        std::slice::from_ref(&proj.0),
+        &mut advisories,
+        &mut warnings,
+    );
 
+    // The park LANDED — the line rides the advisory channel, never the failure one: a handover
+    // that worked must not make the run count a failure or exit non-zero.
+    assert!(warnings.is_empty(), "{warnings:?}");
     let sid = crate::id::SkillId::parse("s_legacy").unwrap();
     let parked = rig.layout().skills_dir().join(".topos-handover-s_legacy");
     assert!(
@@ -8318,10 +8814,10 @@ fn an_adopted_project_placement_hands_over_and_parks_the_home_store() {
         .unwrap()
         .expect("the parked store's bytes are intact");
     assert_eq!(kept.placements.len(), 1, "{kept:?}");
-    let line = warnings
+    let line = advisories
         .iter()
         .find(|w| w.starts_with("STATE_HANDOVER"))
-        .unwrap_or_else(|| panic!("the disclosure line: {warnings:?}"));
+        .unwrap_or_else(|| panic!("the disclosure line: {advisories:?}"));
     assert!(line.contains(&parked.display().to_string()), "{line}");
     // The bytes in the checkout were never the subject — they stay exactly where they are.
     assert!(placed.join("SKILL.md").exists());
@@ -9513,7 +10009,14 @@ fn diff_and_log_resolve_a_project_stores_copy() {
     let placed = proj.0.join(".claude/skills/deploy");
     std::fs::write(placed.join("SKILL.md"), b"# deploy\nrun the canary first\n").unwrap();
 
-    let d = ops::diff(&ctx, "deploy", None, ops::DiffBudget::unlimited()).unwrap();
+    let d = ops::diff(
+        &ctx,
+        "deploy",
+        None,
+        ops::DiffBudget::unlimited(),
+        &ops::Selection::default(),
+    )
+    .unwrap();
     assert!(
         d.diff.contains("run the canary first"),
         "the project copy's draft is the diff: {}",
@@ -9698,7 +10201,14 @@ fn reads_from_inside_a_project_answer_the_project_copy() {
     std::fs::write(machine_copy.join("SKILL.md"), b"# machine edit\n").unwrap();
     std::fs::write(project_copy.join("SKILL.md"), b"# project edit\n").unwrap();
 
-    let d = ops::diff(&ctx, "deploy", None, ops::DiffBudget::unlimited()).unwrap();
+    let d = ops::diff(
+        &ctx,
+        "deploy",
+        None,
+        ops::DiffBudget::unlimited(),
+        &ops::Selection::default(),
+    )
+    .unwrap();
     assert!(
         d.diff.contains("project edit") && !d.diff.contains("machine edit"),
         "the diff is the copy you stand in: {}",
@@ -9836,6 +10346,7 @@ fn a_g_reset_inside_a_project_never_reaches_the_checkouts_copy() {
         &["deploy".to_owned()],
         false,
         ops::StoreScope::Machine,
+        &ops::Selection::default(),
     )
     .expect("the machine store holds it");
     let (items, yes_argv) = match described {
@@ -9853,7 +10364,14 @@ fn a_g_reset_inside_a_project_never_reaches_the_checkouts_copy() {
         "the apply command re-spells the scope flag"
     );
 
-    ops::reset(&ctx, &["deploy".to_owned()], true, ops::StoreScope::Machine).unwrap();
+    ops::reset(
+        &ctx,
+        &["deploy".to_owned()],
+        true,
+        ops::StoreScope::Machine,
+        &ops::Selection::default(),
+    )
+    .unwrap();
     assert_eq!(
         std::fs::read(project_copy.join("SKILL.md")).unwrap(),
         b"# project edit\n",
@@ -9867,7 +10385,14 @@ fn a_g_reset_inside_a_project_never_reaches_the_checkouts_copy() {
 
     // The BARE run is the other half of the line: it acts where you stand, so it is the
     // checkout's edit that is disclosed and discarded.
-    let bare = ops::reset(&ctx, &["deploy".to_owned()], false, ops::StoreScope::Here).unwrap();
+    let bare = ops::reset(
+        &ctx,
+        &["deploy".to_owned()],
+        false,
+        ops::StoreScope::Here,
+        &ops::Selection::default(),
+    )
+    .unwrap();
     match &bare {
         ops::ResetOutcome::Described { items, yes_argv } => {
             assert!(
@@ -9879,7 +10404,14 @@ fn a_g_reset_inside_a_project_never_reaches_the_checkouts_copy() {
         }
         other => panic!("a bare reset describes: {other:?}"),
     }
-    ops::reset(&ctx, &["deploy".to_owned()], true, ops::StoreScope::Here).unwrap();
+    ops::reset(
+        &ctx,
+        &["deploy".to_owned()],
+        true,
+        ops::StoreScope::Here,
+        &ops::Selection::default(),
+    )
+    .unwrap();
     assert_eq!(
         std::fs::read(project_copy.join("SKILL.md")).unwrap(),
         b"# deploy\n",
@@ -9904,7 +10436,13 @@ fn a_g_targeted_run_misses_a_project_only_name() {
         (ops::StoreScope::Machine, false),
         (ops::StoreScope::Here, true),
     ] {
-        let r = ops::reset(&ctx, &["deploy".to_owned()], false, scope);
+        let r = ops::reset(
+            &ctx,
+            &["deploy".to_owned()],
+            false,
+            scope,
+            &ops::Selection::default(),
+        );
         assert_eq!(
             r.is_ok(),
             want,
@@ -9961,6 +10499,7 @@ fn a_reset_of_an_adopted_path_restores_the_source_dir() {
         &["zq-adopted".to_owned()],
         false,
         ops::StoreScope::Here,
+        &ops::Selection::default(),
     )
     .unwrap();
     match &described {
@@ -9977,6 +10516,7 @@ fn a_reset_of_an_adopted_path_restores_the_source_dir() {
         &["zq-adopted".to_owned()],
         true,
         ops::StoreScope::Here,
+        &ops::Selection::default(),
     )
     .unwrap();
     assert_eq!(
@@ -10102,7 +10642,7 @@ fn remove_then_update_never_touches_an_adopted_source_dir() {
 }
 
 /// The MACHINE scope holds the same promise: a `-g` adopted source survives the row-drop sweep AND
-/// the `--rebuild` repair (which parks + re-projects every placement topos wrote — the user's own
+/// the `--force` repair (which parks + re-projects every placement topos wrote — the user's own
 /// dir is not one of them).
 #[test]
 fn an_adopted_source_dir_survives_the_machine_sweeps_and_rebuild() {
@@ -10119,7 +10659,7 @@ fn an_adopted_source_dir_survives_the_machine_sweeps_and_rebuild() {
     scoped_path_add(&ctx, &src, true).unwrap();
     let baseline = dir_bytes(&src);
 
-    // `update --rebuild` with the row present: every topos-written placement re-projects; the
+    // `update --force` with the row present: every topos-written placement re-projects; the
     // adopted source is left exactly as it stands.
     ops::manifest_update(
         &ctx,
@@ -10355,6 +10895,7 @@ fn a_genesis_publish_describe_never_asks_for_an_audience_that_cannot_exist() {
         false,
         None,
         None,
+        &ops::Selection::default(),
     )
     .unwrap();
     assert_eq!(data.reach, None, "no audience is claimed");
@@ -10373,11 +10914,11 @@ fn a_genesis_publish_describe_never_asks_for_an_audience_that_cannot_exist() {
     assert_eq!(data.placements, vec!["everyone".to_owned()]);
 }
 
-/// The audience line prints against a live-shaped reach payload — and a reach that FAILS surfaces
-/// as a visible warning, never as a wordlessly missing line (the swallow that hid the wire
-/// mismatch for a week is gone). All of it on a SECOND publish: an audience is a question only a
-/// bundle the plane already holds a row for can answer. The failure reason names the SKILL, never
-/// the internal id the plane's 404 echoes back, and one person is `1 person`.
+/// The audience rides the ENVELOPE against a live-shaped reach payload — and a reach that FAILS
+/// surfaces as a visible warning, never as a wordlessly missing field (the swallow that hid the
+/// wire mismatch for a week is gone). All of it on a SECOND publish: an audience is a question only
+/// a bundle the plane already holds a row for can answer. The failure reason names the SKILL, never
+/// the internal id the plane's 404 echoes back.
 #[test]
 fn the_publish_describe_audience_line_prints_and_a_failed_reach_warns() {
     let rig = Rig::new("zq-reach");
@@ -10429,6 +10970,7 @@ fn the_publish_describe_audience_line_prints_and_a_failed_reach_warns() {
         None,
         None,
         None,
+        &ops::Selection::default(),
     )
     .unwrap();
     assert!(
@@ -10458,26 +11000,22 @@ fn the_publish_describe_audience_line_prints_and_a_failed_reach_warns() {
             false,
             None,
             None,
+            &ops::Selection::default(),
         )
         .unwrap()
     };
 
-    // A LIVE-shaped payload: the line prints.
+    // A LIVE-shaped payload: the count reaches the envelope. It stays OFF the describe's TTY —
+    // an audience is a prediction, and the preview only says where these bytes go and what the
+    // gate does with them.
     let (data, warnings) = describe(FakeReach::Persons(4));
     assert_eq!(data.reach, Some(4));
     assert!(warnings.is_empty(), "{warnings:?}");
     let tty = crate::render::publish_describe_tty(&data, &argv);
-    assert!(tty.contains("reaches 4 people"), "{tty}");
+    assert!(!tty.contains("reaches"), "{tty}");
+    assert!(!tty.contains('4'), "{tty}");
 
-    // An audience of ONE is a person, not "1 people" — the number a solo workspace always sees.
-    let (data, warnings) = describe(FakeReach::Persons(1));
-    assert_eq!(data.reach, Some(1));
-    assert!(warnings.is_empty(), "{warnings:?}");
-    let tty = crate::render::publish_describe_tty(&data, &argv);
-    assert!(tty.contains("reaches 1 person"), "{tty}");
-    assert!(!tty.contains("1 people"), "{tty}");
-
-    // A reach that fails to parse: the line is absent AND a warning says why.
+    // A reach that fails to parse: the field is absent AND a warning says why.
     let (data, warnings) = describe(FakeReach::Malformed("missing field `sessions`".to_owned()));
     assert_eq!(data.reach, None);
     assert_eq!(warnings.len(), 1, "{warnings:?}");
@@ -12398,11 +12936,12 @@ fn healing_a_deleted_placement_reads_installed_never_all_up_to_date() {
     assert_eq!(
         crate::render::pull_tty(
             &clean.data,
+            &clean.decisions,
             &clean.warnings,
             &clean.advisories,
             &clean.disclosures
         ),
-        "updated machine-wide\nChecked 1 managed skill(s) — all up to date."
+        "updated machine-wide\nChecked 1 skill: all up to date."
     );
 
     // The placement folder vanishes (a hand-delete, an agent cleanup). The next update re-creates
@@ -12427,6 +12966,7 @@ fn healing_a_deleted_placement_reads_installed_never_all_up_to_date() {
     assert_eq!(row.destinations.len(), 1, "{:?}", row.destinations);
     let out = crate::render::pull_tty(
         &healed.data,
+        &healed.decisions,
         &healed.warnings,
         &healed.advisories,
         &healed.disclosures,
@@ -12443,11 +12983,12 @@ fn healing_a_deleted_placement_reads_installed_never_all_up_to_date() {
     assert_eq!(
         crate::render::pull_tty(
             &again.data,
+            &again.decisions,
             &again.warnings,
             &again.advisories,
             &again.disclosures
         ),
-        "updated machine-wide\nChecked 1 managed skill(s) — all up to date."
+        "updated machine-wide\nChecked 1 skill: all up to date."
     );
 }
 
@@ -12495,10 +13036,415 @@ fn re_adding_the_feed_line_reinstalls_with_a_receipt_line() {
     assert!(!row.destinations.is_empty(), "{row:?}");
     let out = crate::render::pull_tty(
         &back.data,
+        &back.decisions,
         &back.warnings,
         &back.advisories,
         &back.disclosures,
     );
     assert!(out.contains("installed ("), "{out}");
     assert!(!out.contains("all up to date"), "{out}");
+}
+
+// ---------------------------------------------------------------------------------------------
+// `-a`/`--dest` on `diff` / `publish` / `update --reset`: naming ONE copy when a bundle sits in
+// several folders — including the divergent-copies FREEZE, which is the case the selector exists
+// for. Naming the copy IS the choice the freeze asks for, so each verb reads past it rather than
+// re-refusing, and the copy nobody named is never touched.
+// ---------------------------------------------------------------------------------------------
+
+/// A locally-adopted bundle in TWO of the machine's skills folders, both edited with DIFFERENT
+/// bytes — the frozen shape. Returns the rig, the bundle's name, its id (which DIFFERS from the
+/// name), and the two dirs (the adopted one first). The folders are ones the registry actually
+/// spells, so `-a claude-code` names the second and the `~/` display form names either.
+fn frozen_copies(tag: &str) -> (Rig, String, crate::id::SkillId, PathBuf, PathBuf) {
+    let rig = Rig::new(tag);
+    rig.seed_session();
+    // The adopted copy lives in the shared agents folder; a sibling copy sits in Claude Code's.
+    let shared = rig.home.0.join(".agents/skills/coolify-deploy");
+    std::fs::create_dir_all(&shared).unwrap();
+    std::fs::write(shared.join("SKILL.md"), b"# coolify-deploy\nbase\n").unwrap();
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    let added = ops::add(&ctx, &shared).unwrap();
+    let id = crate::id::SkillId::parse(added.skill_id.as_deref().unwrap()).unwrap();
+    assert_ne!(id.as_str(), "coolify-deploy", "the id and the name differ");
+    // The sibling: the SAME base bytes at the same recorded baseline — a clean managed replica
+    // until it is edited below.
+    let native = rig.home.0.join(".claude/skills/coolify-deploy");
+    add_managed_copy(&rig, &id, &native, b"# coolify-deploy\nbase\n");
+    // Two DIFFERENT edits: neither copy's bytes are the other's recorded baseline, so they are
+    // true competitors — the freeze.
+    std::fs::write(shared.join("SKILL.md"), b"# coolify-deploy\nshared edit\n").unwrap();
+    std::fs::write(native.join("SKILL.md"), b"# coolify-deploy\nnative edit\n").unwrap();
+    (rig, "coolify-deploy".to_owned(), id, shared, native)
+}
+
+/// Write `body` into `dir` and record it as a second MANAGED placement of `id`, at the record's
+/// current baseline — the multi-folder shape the selector narrows.
+fn add_managed_copy(rig: &Rig, id: &crate::id::SkillId, dir: &std::path::Path, body: &[u8]) {
+    use topos_types::persisted::{PlacementKind, PlacementState, SwapCapability};
+    std::fs::create_dir_all(dir).unwrap();
+    std::fs::write(dir.join("SKILL.md"), body).unwrap();
+    let sp = rig.layout().published(id);
+    let lock: topos_types::persisted::Lock =
+        crate::doc::read_doc(&rig.fs, &sp.lock).unwrap().unwrap();
+    let mut map = crate::doc::read_map(&rig.fs, &sp.map).unwrap().unwrap();
+    map.placements.push(dir.display().to_string());
+    map.placement_state.push(PlacementState {
+        kind: PlacementKind::Native,
+        agent: Some("claude-code".to_owned()),
+        materialized_sha: Some(lock.bundle_digest),
+        pre_existing_sha: None,
+        swap_capability: SwapCapability::Unsupported,
+        adopted_source: false,
+    });
+    crate::doc::write_map(&rig.fs, &sp.map, &map).unwrap();
+}
+
+/// The freeze REFUSES a bare read and hands back a per-copy menu — and `--dest` reads straight past
+/// it. The bypass is the point: the aggregate classification refuses before anything can be picked,
+/// so before this a frozen bundle could not even be INSPECTED.
+#[test]
+fn zz_dest_reads_one_copy_of_a_frozen_bundle_while_the_bare_diff_still_refuses() {
+    let (rig, name, id, _shared, native) = frozen_copies("zz-freeze-diff");
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+
+    // Bare: the typed freeze, naming BOTH copies in both spellings the menu prints.
+    let err = ops::diff(
+        &ctx,
+        &name,
+        None,
+        ops::DiffBudget::unlimited(),
+        &ops::Selection::default(),
+    )
+    .expect_err("a bare diff of divergent copies refuses");
+    let ClientError::PlacementsDiverged { copies, .. } = &err else {
+        panic!("the typed freeze: {err:?}");
+    };
+    let displays: Vec<&str> = copies.iter().map(|c| c.display.as_str()).collect();
+    assert_eq!(
+        displays,
+        vec![
+            "~/.agents/skills/coolify-deploy",
+            "~/.claude/skills/coolify-deploy"
+        ]
+    );
+    let dests: Vec<&str> = copies.iter().map(|c| c.dest.as_str()).collect();
+    assert_eq!(dests, vec!["~/.agents/skills", "~/.claude/skills"]);
+
+    // ALL THREE accepted spellings of the SAME copy read that copy — plus `-a`, the registry's
+    // sugar for the row spelling.
+    for sel in [
+        ops::Selection::one(None, Some("~/.claude/skills")),
+        ops::Selection::one(None, Some("~/.claude/skills/coolify-deploy")),
+        ops::Selection::one(None, Some(&native.display().to_string())),
+        ops::Selection::one(Some("claude-code"), None),
+    ] {
+        let d = ops::diff(&ctx, &name, None, ops::DiffBudget::unlimited(), &sel)
+            .expect("the selector reads past the freeze");
+        assert!(d.diff.contains("native edit"), "{}", d.diff);
+        assert!(!d.diff.contains("shared edit"), "{}", d.diff);
+        // The header names WHICH copy — the bundle sits in more than one folder.
+        assert_eq!(d.dest.as_deref(), Some("~/.claude/skills/coolify-deploy"));
+        assert_eq!(d.skill.as_deref(), Some("coolify-deploy"));
+    }
+
+    // The OTHER copy, by its own folder — and the left-hand side is the SAME applied base, which
+    // is what makes two `--dest` runs comparable.
+    let sp = rig.layout().published(&id);
+    let lock: topos_types::persisted::Lock =
+        crate::doc::read_doc(&rig.fs, &sp.lock).unwrap().unwrap();
+    let other = ops::diff(
+        &ctx,
+        &name,
+        None,
+        ops::DiffBudget::unlimited(),
+        &ops::Selection::one(None, Some("~/.agents/skills")),
+    )
+    .unwrap();
+    assert!(other.diff.contains("shared edit"), "{}", other.diff);
+    assert_eq!(other.version_id, lock.base_commit);
+}
+
+/// The two refusals the selector owes a person who names the wrong folder: one holding no copy of
+/// this bundle (answered with every folder that DOES), and one holding a copy with nothing to act
+/// on (answered plainly, rather than doing a no-op and reporting success).
+#[test]
+fn zz_a_dest_naming_no_copy_or_a_clean_copy_refuses_by_name() {
+    let (rig, name, id, _shared, _native) = frozen_copies("zz-dest-refusals");
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+
+    let err = ops::diff(
+        &ctx,
+        &name,
+        None,
+        ops::DiffBudget::unlimited(),
+        &ops::Selection::one(None, Some("~/.cursor/skills")),
+    )
+    .expect_err("a folder holding no copy refuses");
+    assert_eq!(err.code(), "INVALID_ARGUMENT");
+    let message = crate::render::safe_message(&err);
+    assert!(
+        message.contains("~/.agents/skills/coolify-deploy")
+            && message.contains("~/.claude/skills/coolify-deploy"),
+        "the refusal names every copy it DOES have: {message}"
+    );
+
+    // A third copy at the recorded baseline — a managed replica with nothing edited in it.
+    let clean = rig.home.0.join(".codex/skills/coolify-deploy");
+    add_managed_copy(&rig, &id, &clean, b"# coolify-deploy\nbase\n");
+    let err = ops::diff(
+        &ctx,
+        &name,
+        None,
+        ops::DiffBudget::unlimited(),
+        &ops::Selection::one(None, Some("~/.codex/skills")),
+    )
+    .expect_err("a copy with no edits refuses rather than answering nothing");
+    let message = crate::render::safe_message(&err);
+    assert!(message.starts_with("that copy has no edits"), "{message}");
+    assert!(
+        message.contains("~/.codex/skills/coolify-deploy"),
+        "{message}"
+    );
+}
+
+/// The per-copy reset: the loss-led rail unchanged, narrowed to ONE folder. The described delta is
+/// that copy's alone, the apply restores only that copy, and the copy left behind keeps its bytes —
+/// which is what makes it the single ordinary draft afterwards.
+#[test]
+fn zz_a_per_copy_reset_drops_one_copys_edits_and_leaves_the_other_alone() {
+    let (rig, name, _id, shared, native) = frozen_copies("zz-per-copy-reset");
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    let sel = ops::Selection::one(Some("claude-code"), None);
+
+    let described = ops::reset(
+        &ctx,
+        std::slice::from_ref(&name),
+        false,
+        ops::StoreScope::Here,
+        &sel,
+    )
+    .unwrap();
+    let ops::ResetOutcome::Described { items, yes_argv } = &described else {
+        panic!("the bare reset DESCRIBES: {described:?}");
+    };
+    assert!(
+        items[0].drop_diff.contains("native edit") && !items[0].drop_diff.contains("shared edit"),
+        "the loss shown is THIS copy's: {}",
+        items[0].drop_diff
+    );
+    // The SENTENCES around that delta say the same thing it does. The consent surface names the
+    // one folder it takes and states, in the same breath, that the other copy keeps its edits —
+    // a describe claiming the whole bundle's edits would be asking for the wrong yes.
+    assert_eq!(
+        items[0].dest.as_deref(),
+        Some("~/.claude/skills/coolify-deploy")
+    );
+    assert_eq!(
+        items[0].others_kept,
+        vec!["~/.agents/skills/coolify-deploy"]
+    );
+    // The sentence states the loss plainly, in the same voice the receipt uses: the delta printed
+    // under it is the argument, and a shouted word above it would only make the surface anxious.
+    let described_tty = crate::render::reset_describe_tty(items, yes_argv);
+    assert!(
+        described_tty.starts_with(
+            "Reset 'coolify-deploy' in ~/.claude/skills/coolify-deploy — discard \
+             local edits to "
+        ),
+        "{described_tty}"
+    );
+    assert!(!described_tty.contains("DISCARDS"), "{described_tty}");
+    assert!(
+        described_tty
+            .contains("your other copy in ~/.agents/skills/coolify-deploy keeps its edits"),
+        "{described_tty}"
+    );
+    // The apply command carries the selector — without it `--yes` would discard both copies.
+    assert_eq!(
+        yes_argv,
+        &vec![
+            "topos".to_owned(),
+            "update".to_owned(),
+            name.clone(),
+            "-a".to_owned(),
+            "claude-code".to_owned(),
+            "--reset".to_owned(),
+            "--yes".to_owned(),
+        ]
+    );
+
+    let applied = ops::reset(
+        &ctx,
+        std::slice::from_ref(&name),
+        true,
+        ops::StoreScope::Here,
+        &sel,
+    )
+    .unwrap();
+    let ops::ResetOutcome::Applied(done) = &applied else {
+        panic!("`--yes` applies: {applied:?}");
+    };
+    // The receipt tells the same truth as the describe: the named copy, and what survived.
+    let applied_tty = crate::render::reset_applied_tty(done);
+    assert!(
+        applied_tty.starts_with("Reset 'coolify-deploy' in ~/.claude/skills/coolify-deploy to "),
+        "{applied_tty}"
+    );
+    assert!(
+        applied_tty.contains(
+            "that copy's local edits discarded (a snapshot was kept under \
+             ~/.topos).\nyour other copy in ~/.agents/skills/coolify-deploy keeps its edits"
+        ),
+        "{applied_tty}"
+    );
+    assert_eq!(
+        std::fs::read(native.join("SKILL.md")).unwrap(),
+        b"# coolify-deploy\nbase\n",
+        "the named copy is back at base"
+    );
+    assert_eq!(
+        std::fs::read(shared.join("SKILL.md")).unwrap(),
+        b"# coolify-deploy\nshared edit\n",
+        "the copy nobody named keeps its edits"
+    );
+    // The freeze is gone: one edited copy left, so it is THE draft and a bare diff reads it.
+    let d = ops::diff(
+        &ctx,
+        &name,
+        None,
+        ops::DiffBudget::unlimited(),
+        &ops::Selection::default(),
+    )
+    .expect("one edited copy is the ordinary draft");
+    assert!(d.diff.contains("shared edit"), "{}", d.diff);
+}
+
+/// A conflict writes markers into NO folder — only into the scope's own `conflicts/<name>/` — so
+/// there is no copy-scoped marker state a narrowed reset could leave standing. A per-copy reset
+/// therefore resolves the recorded conflict exactly as a whole-bundle one does: the record goes,
+/// the marked-up copy goes with it, and publish is unblocked. The receipt says nothing about it,
+/// because nothing outlived the reset.
+#[test]
+fn zz_a_per_copy_reset_clears_the_recorded_conflict_and_its_copy() {
+    use topos_types::persisted::{ConflictReason, ConflictState};
+
+    let (rig, name, id, _shared, _native) = frozen_copies("zz-per-copy-reset-conflict");
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    let sp = rig.layout().published(&id);
+    let copy = rig.layout().conflict_copy_dir(
+        &crate::sidecar::ConflictDir::parse("coolify-deploy").expect("a plain safe component"),
+    );
+    std::fs::create_dir_all(&copy).unwrap();
+    std::fs::write(copy.join("SKILL.md"), b"<<<<<<< mine\n").unwrap();
+    let record = |hex: &str| ConflictState {
+        schema_version: 1,
+        base_commit: hex.repeat(32),
+        base_digest: hex.repeat(32),
+        current_commit: hex.repeat(32),
+        current_digest: hex.repeat(32),
+        draft_commit: hex.repeat(32),
+        draft_digest: hex.repeat(32),
+        result_commit: hex.repeat(32),
+        conflicted_digest: hex.repeat(32),
+        copy_dir: Some("coolify-deploy".to_owned()),
+        reason: ConflictReason::ThreeWay,
+        paths: Vec::new(),
+    };
+    crate::doc::write_doc(&rig.fs, &sp.conflict, &record("ab")).unwrap();
+
+    let applied = ops::reset(
+        &ctx,
+        std::slice::from_ref(&name),
+        true,
+        ops::StoreScope::Here,
+        &ops::Selection::one(Some("claude-code"), None),
+    )
+    .unwrap();
+    let ops::ResetOutcome::Applied(done) = &applied else {
+        panic!("`--yes` applies: {applied:?}");
+    };
+    assert!(!sp.conflict.exists(), "the block is gone with its cause");
+    assert!(!copy.exists(), "the marked-up copy goes with the record");
+    assert!(
+        !crate::render::reset_applied_tty(done).contains("publish"),
+        "{}",
+        crate::render::reset_applied_tty(done)
+    );
+}
+
+/// Publishing ONE copy is the other way out of the freeze, and it is safe: the copy that shipped
+/// advances to the new current, the copy that did not is never written, and the competitor test
+/// then finds exactly one edited copy — the same shape "a teammate published while I had local
+/// edits" has always produced. The receipt carries both halves.
+#[test]
+fn zz_a_per_copy_publish_leaves_the_other_copy_alone_and_resolves_the_freeze() {
+    let (rig, name, _id, shared, native) = frozen_copies("zz-per-copy-publish");
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let plane = FakePlane::new(log);
+    plane.serves(Vec::new());
+    let dir = FakeDirectory::new(Vec::new(), Vec::new());
+    let session_connect = |_s: &Session| ops::SessionTransports {
+        plane: Box::new(plane.clone()),
+        directory: Box::new(dir.clone()),
+        contribute: Box::new(OkPublish),
+        governance: Box::new(NoGovernance),
+    };
+    let cc = |_base: &str, _tok: Option<&str>| -> Box<dyn crate::plane::ContributeSource> {
+        Box::new(NoContribute)
+    };
+    let publish = |sel: &ops::Selection| {
+        ops::publish(
+            &ctx,
+            &cc,
+            None,
+            Some(&session_connect),
+            None,
+            &name,
+            false,
+            None,
+            None,
+            None,
+            sel,
+        )
+    };
+
+    // A BARE publish still refuses — it must never pick for you; `--dest` is the consent.
+    let bare = publish(&ops::Selection::default())
+        .expect_err("a bare publish of divergent copies refuses");
+    assert_eq!(bare.code(), "PLACEMENTS_DIVERGED");
+
+    let outcome = publish(&ops::Selection::one(None, Some("~/.agents/skills")))
+        .expect("the named copy publishes");
+    let data = match outcome {
+        ops::PublishOutcome::Published(d) => d,
+        other => panic!("the publish LANDED: {other:?}"),
+    };
+    assert_eq!(
+        data.from_placement.as_deref(),
+        Some("~/.agents/skills/coolify-deploy")
+    );
+    assert_eq!(data.other_edited, vec!["~/.claude/skills/coolify-deploy"]);
+
+    // THE safety property: the copy nobody named is byte-for-byte untouched.
+    assert_eq!(
+        std::fs::read(native.join("SKILL.md")).unwrap(),
+        b"# coolify-deploy\nnative edit\n"
+    );
+    assert_eq!(
+        std::fs::read(shared.join("SKILL.md")).unwrap(),
+        b"# coolify-deploy\nshared edit\n",
+        "the published copy keeps the bytes it shipped"
+    );
+    // And the freeze has resolved: one edited copy remains, so it is the single ordinary draft.
+    let d = ops::diff(
+        &ctx,
+        &name,
+        None,
+        ops::DiffBudget::unlimited(),
+        &ops::Selection::default(),
+    )
+    .expect("the survivor is the single draft");
+    assert!(d.diff.contains("native edit"), "{}", d.diff);
 }

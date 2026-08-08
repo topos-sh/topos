@@ -1116,14 +1116,19 @@ fn run_command(
         Command::Diff {
             skill,
             r#ref,
+            agent,
+            dest,
             max_bytes,
         } => {
             let budget = ops::DiffBudget::resolve(max_bytes, json);
-            // The FETCH_FULL_DIFF argv — this same diff, uncapped.
+            let selection = ops::Selection::one(agent.as_deref(), dest.as_deref());
+            // The FETCH_FULL_DIFF argv — this same diff, uncapped. The copy selector rides along:
+            // dropping it would refetch a DIFFERENT copy's diff than the one just truncated.
             let mut full_argv = vec!["topos".to_owned(), "diff".to_owned(), skill.clone()];
             if let Some(r) = &r#ref {
                 full_argv.push(r.clone());
             }
+            full_argv.extend(selection.argv_tail());
             full_argv.extend([
                 "--max-bytes".to_owned(),
                 "0".to_owned(),
@@ -1132,18 +1137,21 @@ fn run_command(
             finish_diff(
                 json,
                 cmd_name,
-                ops::diff(&ctx, &skill, r#ref.as_deref(), budget),
+                ops::diff(&ctx, &skill, r#ref.as_deref(), budget, &selection),
                 full_argv,
                 &diag,
             )
         }
         Command::Publish {
             target,
+            agent,
+            dest,
             to,
             propose,
             message,
             yes,
         } => {
+            let selection = ops::Selection::one(agent.as_deref(), dest.as_deref());
             // Discovery roots for the auto-add pre-step (a `publish` of an untracked local source adopts it
             // first) — the SAME roots `add`/`list` use; `None` degrades name/dir resolution the same way.
             let roots = list_discovery();
@@ -1166,11 +1174,14 @@ fn run_command(
                     propose,
                     to.as_deref(),
                     workspace.as_deref(),
+                    &selection,
                 );
                 // The paste-ready apply: this same publish plus `--yes` (preserving `--propose` / `--to`
                 // / `-m` — dropping the message would change the version's commit identity from what the
-                // describe computed, so an agent that runs this next action ships the wrong version).
+                // describe computed, so an agent that runs this next action ships the wrong version —
+                // and the copy selector, without which the apply would face the freeze again).
                 let mut yes_argv = vec!["topos".to_owned(), "publish".to_owned(), target.clone()];
+                yes_argv.extend(selection.argv_tail());
                 if propose {
                     yes_argv.push("--propose".to_owned());
                 }
@@ -1196,6 +1207,7 @@ fn run_command(
                 to.as_deref(),
                 workspace.as_deref(),
                 message.as_deref(),
+                &selection,
             );
             finish_publish(json, cmd_name, result, &diag)
         }
@@ -1273,12 +1285,14 @@ fn run_command(
             targets,
             global,
             reset,
+            agent,
+            dest,
             yes,
-            onto_current,
+            keep_mine,
             quiet,
             ttl,
             hook,
-            rebuild,
+            force,
         } => {
             // The scope flag decides which STORE every targeted arm below resolves in — and, since
             // the store it resolves in is the store it writes, which copy it acts on. It is
@@ -1289,13 +1303,51 @@ fn run_command(
             } else {
                 ops::StoreScope::Here
             };
+            // The BUILT-IN by name, refused ONCE for every targeted arm — ahead of all of them,
+            // including `--reset`, which dispatches on its own and used to slip past a guard the
+            // reconcile, the go-back and `--keep-mine` each enforced separately. It is not a
+            // subscription and no store of ours holds a version to take: the bare sweep re-syncs it
+            // to this binary, and the binary itself is `self-update`'s business.
+            if targets
+                .iter()
+                .any(|t| ops::is_builtin(t.split('@').next().unwrap_or(t)))
+            {
+                return emit_err(
+                    json,
+                    cmd_name,
+                    &ClientError::InvalidArgument(
+                        "`topos` is the built-in skill — the bare `topos update` re-syncs it to \
+                         this binary; `topos self-update` updates the binary itself"
+                            .into(),
+                    ),
+                    &diag,
+                );
+            }
             // `--reset` is its own two-phase discard verb (loss-led describe / `--yes` apply); it
             // does not flow through the reconcile and is never a `--quiet` hook shape.
+            let selection = ops::Selection::one(agent.as_deref(), dest.as_deref());
             if reset {
                 return finish_reset(
                     json,
                     cmd_name,
-                    ops::reset(&ctx, &targets, yes, store_scope),
+                    ops::reset(&ctx, &targets, yes, store_scope, &selection),
+                    &diag,
+                );
+            }
+            // `--dest`/`-a` on `update` narrows ONE thing: which copy's edits `--reset` drops. It
+            // has no meaning for the reconcile, which converges every copy the manifest demands —
+            // so it is refused by name rather than silently ignored, which would read as a
+            // narrowed update that quietly touched everything.
+            if !selection.is_empty() {
+                return emit_err(
+                    json,
+                    cmd_name,
+                    &ClientError::InvalidArgument(
+                        "`--dest`/`-a` on `update` names the copy `--reset` drops the edits of — \
+                         add `--reset`, or drop the selector (an update converges every copy your \
+                         `topos.toml` asks for)"
+                            .into(),
+                    ),
                     &diag,
                 );
             }
@@ -1339,7 +1391,7 @@ fn run_command(
             } else {
                 false
             };
-            // The go-back (`<skill>@<hash>`) and the `--onto-current` escape act on LOCAL bytes
+            // The go-back (`<skill>@<hash>`) and the `--keep-mine` escape act on LOCAL bytes
             // through the classic per-skill engine; everything else is the MANIFEST reconcile —
             // resolve the manifest layers covering cwd + the logged-in profiles and converge.
             let goback_target = targets
@@ -1347,36 +1399,21 @@ fn run_command(
                 .eq(&1)
                 .then(|| targets[0].clone())
                 .filter(|t| t.split_once('@').is_some_and(|(_, r)| !r.is_empty()));
-            let result = if onto_current || goback_target.is_some() {
+            let result = if keep_mine || goback_target.is_some() {
                 if targets.len() > 1 {
                     Err(ClientError::InvalidArgument(
-                        "the go-back and --onto-current take a single <skill> target".into(),
-                    ))
-                } else if targets
-                    .first()
-                    .is_some_and(|t| ops::is_builtin(t.split('@').next().unwrap_or(t)))
-                {
-                    Err(ClientError::InvalidArgument(
-                        "`topos` is the built-in skill — the bare `topos update` re-syncs it to \
-                         this binary; `topos self-update` updates the binary itself"
-                            .into(),
+                        "the go-back and --keep-mine take a single <skill> target".into(),
                     ))
                 } else {
                     pull_with_name_fallback(
                         &ctx,
                         targets.into_iter().next(),
-                        onto_current,
+                        keep_mine,
                         store_scope,
                         None,
                         &ops::ReconcileOpts::default(),
                     )
                 }
-            } else if targets.first().is_some_and(|t| ops::is_builtin(t.as_str())) {
-                Err(ClientError::InvalidArgument(
-                    "`topos` is the built-in skill — the bare `topos update` re-syncs it to \
-                     this binary; `topos self-update` updates the binary itself"
-                        .into(),
-                ))
             } else {
                 // The background sweep DOES contact a forge — a row pointing at a repository is
                 // kept current like everything else. It just runs on the git lane's own, much
@@ -1402,7 +1439,7 @@ fn run_command(
                     &ops::ManifestUpdateOpts {
                         targets,
                         ack_notices: !quiet,
-                        rebuild,
+                        rebuild: force,
                         scope,
                         // A person who typed the command gets an answer now; the hook sweep waits
                         // for the interval.
@@ -1763,8 +1800,15 @@ fn finish_status(
 
 /// `pull`'s finisher — like [`finish`], but a bare sweep's isolated per-skill failures ride the
 /// envelope's `warnings` (one stable-shape line per failed skill) AND the TTY summary, so a wedged
-/// skill is visible on both surfaces. Isolation semantics hold: `ok` stays `true`, exit stays 0 (each
-/// failure also reached stderr inside the sweep).
+/// skill is visible on both surfaces. Isolation semantics hold — `ok` stays `true` and the sweep
+/// still reports every other bundle — but the EXIT STATUS does not lie: a run that could not carry
+/// a bundle forward exits non-zero, because the caller most likely to be watching is an agent, and
+/// an agent that reads 0 forever never learns the run is not converging.
+///
+/// A pending DECISION is the one thing that looks like a failure and is not: the bundle is
+/// waiting on the person, nothing is broken, and no retry changes the answer. Those exit 0 and are
+/// counted under `waiting on you`; only real faults (network, unreadable store, corrupt record)
+/// take the non-zero status.
 fn finish_pull(
     json: bool,
     command: &str,
@@ -1778,6 +1822,7 @@ fn finish_pull(
             // because nothing CAN be — state the join fix in prose and mirror it structurally
             // (the argv template's `needs` names the workspace address).
             let unenrolled_dead_end = !enrolled && out.data.skills.is_empty();
+            let failed = !out.warnings.is_empty();
             if json {
                 // Each WITHDRAWN skill carries a paste-ready `keep-as-yours` next action.
                 let mut next_actions = render::withdrawn_next_actions(&out.data);
@@ -1792,19 +1837,34 @@ fn finish_pull(
                         ],
                     ));
                 }
+                // A merge that a `--keep-mine` just FINISHED carries the one command left to run on
+                // it: the ordinary publish. It replaces a state an agent could not ship at all.
+                next_actions.extend(render::resolution_next_actions(&out.data));
+                // A bundle waiting on a decision carries its ways out as runnable argv — the same
+                // structured channel every other "what do I do now" answer uses, so an agent acts
+                // on the choice instead of parsing a sentence about it.
+                next_actions.extend(render::decision_next_actions(&out.decisions));
                 let value = serde_json::to_value(&out.data).unwrap_or_default();
                 let mut envelope = render::ok_envelope(command, value);
-                // ONE stable machine channel: failures first, then the advisories, then the
-                // disclosures. The split is the receipt's (an advisory or disclosure must not be
-                // counted as a failure), not the wire's.
+                // ONE stable machine channel: failures first, then the decisions, then the
+                // advisories, then the disclosures. The split is the receipt's (a decision, an
+                // advisory or a disclosure must not be counted as a failure), not the wire's.
                 envelope.warnings = out.warnings;
+                envelope
+                    .warnings
+                    .extend(out.decisions.iter().map(render::decision_wire_line));
                 envelope.warnings.extend(out.advisories.iter().cloned());
                 envelope.warnings.extend(out.disclosures.iter().cloned());
                 envelope.next_actions = next_actions;
                 println!("{}", render::to_json(&envelope));
             } else {
-                let mut text =
-                    render::pull_tty(&out.data, &out.warnings, &out.advisories, &out.disclosures);
+                let mut text = render::pull_tty(
+                    &out.data,
+                    &out.decisions,
+                    &out.warnings,
+                    &out.advisories,
+                    &out.disclosures,
+                );
                 if !out.access_gone.is_empty() {
                     text.push_str(&format!(
                         "\nnote: the session{} for {} ended — every skill it delivered stays in \
@@ -1821,7 +1881,11 @@ fn finish_pull(
                 }
                 println!("{text}");
             }
-            ExitCode::SUCCESS
+            if failed {
+                ExitCode::FAILURE
+            } else {
+                ExitCode::SUCCESS
+            }
         }
         Err(e) => emit_err(json, command, &e, diag),
     }
@@ -2960,7 +3024,7 @@ fn emit_err(json: bool, command: &str, err: &ClientError, diag: &Diag<'_>) -> Ex
 }
 
 /// Parse the optional `pull` target into a [`ops::PullScope`]: absent = the sweep; `<name>` = accept a
-/// pending update; `<name>@<ref>` = go back to that version's bytes; `--onto-current` = the escape.
+/// pending update; `<name>@<ref>` = go back to that version's bytes; `--keep-mine` = the escape.
 ///
 /// A go-back suffix is recognized when the part after the LAST `@` is a version reference — the full
 /// 64-char lowercase-hex id, or a short prefix of at least 8 hex chars (resolved against the skill's
@@ -2968,8 +3032,8 @@ fn emit_err(json: bool, command: &str, err: &ClientError, diag: &Diag<'_>) -> Ex
 /// argument is the skill name: `team@cli` is accepted as a name, and `team@cli@<ref>` still goes back
 /// correctly. A hex suffix SHORTER than 8 chars stays part of the name (never a silent go-back).
 ///
-/// `--onto-current` (the escape) requires a `<skill>` target (clap enforces that half via `requires`)
-/// and is mutually exclusive with `@<ref>` (a runtime usage error — the suffix shape is only known
+/// `--keep-mine` (the escape) requires a `<skill>` target and is mutually exclusive with `@<ref>`
+/// (both runtime usage errors — the suffix shape is only known
 /// after parsing). A skill LITERALLY named like `docs@abcdef12` is not lost to the go-back parse:
 /// [`pull_with_name_fallback`] retries the whole argument as the name when the pre-@ part resolves to
 /// no tracked skill.
@@ -2978,15 +3042,13 @@ fn emit_err(json: bool, command: &str, err: &ClientError, diag: &Diag<'_>) -> Ex
 /// the mode resolves (and acts) in the store the flag named.
 fn build_pull_scope(
     skill: Option<String>,
-    onto_current: bool,
+    keep_mine: bool,
     store: ops::StoreScope,
 ) -> Result<ops::PullScope, ClientError> {
     let Some(arg) = skill else {
-        if onto_current {
-            // Unreachable through clap (`--onto-current` requires the <skill> positional) — kept as a
-            // defensive usage error for a direct caller.
+        if keep_mine {
             return Err(ClientError::InvalidArgument(
-                "--onto-current requires a <skill> target".into(),
+                "--keep-mine requires a <skill> target".into(),
             ));
         }
         return Ok(ops::PullScope::AllFollowed);
@@ -2994,9 +3056,9 @@ fn build_pull_scope(
     if let Some((name, suffix)) = arg.rsplit_once('@')
         && let Some(vref) = ops::VersionRef::recognize(suffix)
     {
-        if onto_current {
+        if keep_mine {
             return Err(ClientError::InvalidArgument(
-                "--onto-current is not valid with @<ref>".into(),
+                "--keep-mine is not valid with @<ref>".into(),
             ));
         }
         return Ok(ops::PullScope::One {
@@ -3009,8 +3071,8 @@ fn build_pull_scope(
     Ok(ops::PullScope::One {
         name: arg,
         workspace: None,
-        mode: if onto_current {
-            ops::TargetMode::OntoCurrent
+        mode: if keep_mine {
+            ops::TargetMode::KeepMine
         } else {
             ops::TargetMode::AcceptPending
         },
@@ -3027,15 +3089,14 @@ fn build_pull_scope(
 pub(crate) fn pull_with_name_fallback(
     ctx: &Ctx<'_>,
     skill: Option<String>,
-    onto_current: bool,
+    keep_mine: bool,
     store: ops::StoreScope,
     delivery: Option<&dyn crate::plane::DeliverySource>,
     reconcile: &ops::ReconcileOpts,
 ) -> Result<ops::PullOutcome, ClientError> {
     let arg = skill.clone();
     let _ = (delivery, reconcile);
-    let first =
-        build_pull_scope(skill, onto_current, store).and_then(|scope| ops::pull(ctx, scope));
+    let first = build_pull_scope(skill, keep_mine, store).and_then(|scope| ops::pull(ctx, scope));
     match first {
         Err(ClientError::NoSuchSkill { .. })
             if arg.as_ref().is_some_and(|a| {
@@ -3125,8 +3186,10 @@ mod tests {
         list_page_argv, next_page_action, parse_rfc3339_utc_millis, resolve_web_origin,
         waiting_line,
     };
+    use std::process::ExitCode;
+
     use crate::ids::Clock;
-    use crate::ops::{PullScope, RowPage, StoreScope, TargetMode, VersionRef};
+    use crate::ops::{self, PullScope, RowPage, StoreScope, TargetMode, VersionRef};
 
     struct TestClock(u64);
     impl Clock for TestClock {
@@ -3307,6 +3370,108 @@ mod tests {
                 None
             ),
             vec!["topos", "list"]
+        );
+    }
+
+    /// The one thing an agent reads without being asked: the exit status. It has to distinguish
+    /// the two states a sweep can end in without erroring, because they call for opposite
+    /// responses — a FAULT is worth retrying or escalating, and a DECISION is worth stopping and
+    /// asking a person. A status of 0 on both taught an agent that a run which never converges is
+    /// a run that succeeded.
+    #[test]
+    fn a_pending_decision_exits_zero_and_a_real_failure_does_not() {
+        let fs = crate::fs_seam::RealFs;
+        let clock = TestClock(0);
+        let argv = ["update".to_owned()];
+        let diag = super::Diag {
+            fs: &fs,
+            clock: &clock,
+            log_path: std::env::temp_dir().join("topos-exit-code-test-never-written.jsonl"),
+            argv: &argv,
+        };
+        let empty = || topos_types::results::PullData {
+            skills: Vec::new(),
+            proposals_awaiting: 0,
+            notices: Vec::new(),
+            sync: Vec::new(),
+            behind_elsewhere: Vec::new(),
+            scope: Some("machine".to_owned()),
+        };
+        let outcome = |decisions: Vec<crate::ops::PendingDecision>, warnings: Vec<String>| {
+            Ok(ops::PullOutcome {
+                data: empty(),
+                warnings,
+                decisions,
+                advisories: Vec::new(),
+                disclosures: Vec::new(),
+                access_gone: Vec::new(),
+                unreachable: Vec::new(),
+                stale_forge: Vec::new(),
+                forge_gone: Vec::new(),
+                failed_channels: std::collections::HashSet::new(),
+            })
+        };
+        let decision = crate::ops::PendingDecision {
+            name: "find-skills".to_owned(),
+            line: "github.com/vercel-labs/skills has a newer version, but your edits would be \
+                   overwritten"
+                .to_owned(),
+            detail: vec!["to share your edits:   topos publish find-skills".to_owned()],
+            ways_out: vec![vec![
+                "topos".to_owned(),
+                "publish".to_owned(),
+                "find-skills".to_owned(),
+            ]],
+        };
+
+        // A clean sweep, and a sweep that only ever asked a question: both are successes.
+        assert_eq!(
+            super::finish_pull(
+                false,
+                "update",
+                outcome(Vec::new(), Vec::new()),
+                true,
+                &diag
+            ),
+            ExitCode::SUCCESS
+        );
+        assert_eq!(
+            super::finish_pull(
+                false,
+                "update",
+                outcome(vec![decision.clone()], Vec::new()),
+                true,
+                &diag
+            ),
+            ExitCode::SUCCESS
+        );
+        // A real fault is not, on either face — and a decision standing beside it does not soften
+        // the status either.
+        assert_eq!(
+            super::finish_pull(
+                false,
+                "update",
+                outcome(
+                    Vec::new(),
+                    vec!["IO_ERROR deploy: the store is unreadable".to_owned()]
+                ),
+                true,
+                &diag
+            ),
+            ExitCode::FAILURE
+        );
+        assert_eq!(
+            super::finish_pull(
+                true,
+                "update",
+                outcome(
+                    vec![decision],
+                    vec!["IO_ERROR deploy: the store is unreadable".to_owned()]
+                ),
+                true,
+                &diag
+            ),
+            ExitCode::FAILURE
         );
     }
 

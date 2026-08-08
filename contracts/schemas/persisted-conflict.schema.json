@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "ConflictState",
-  "description": "`skills/<id>/conflict.json` — the durable record that the working tree holds an **unresolved** author\nmerge conflict. **Field-set pinned** (additive; the value enums are INFERRED). This is the single\nsource of truth for the publish guard (presence ⇒ blocked — never a byte/marker scan) AND a pre-swap\nrecovery journal: it is written + fsynced BEFORE the conflict tree is swapped onto the placement, so a\ncrash mid-materialize is healed by rendering the already-committed `result_commit` (pinned by\n`conflicted_digest`), never by re-merging on-disk marker bytes. Cleared only by a clean resolution (a\nclean merge) or the disclosed escape — never by an incidental edit.",
+  "description": "`skills/<id>/conflict.json` — the durable record that this bundle holds an **unresolved** author\nmerge conflict. **Field-set pinned** (additive; the value enums are INFERRED). This is the single\nsource of truth for the publish guard (presence ⇒ blocked — never a byte/marker scan) AND a\nrecovery journal: it is written + fsynced BEFORE the marked-up copy is written to the scope's own\n`conflicts/<copy_dir>/`, so a crash mid-write is healed by re-rendering the already-committed\n`result_commit` (pinned by `conflicted_digest`), never by re-merging on-disk marker bytes. The\nagent-readable placements are NOT touched by a conflict — they keep the author's own version —\nso nothing an agent reads is ever a half-state. Cleared only by a clean resolution (a clean\nmerge), the disclosed escape, or a reset — never by an incidental edit.",
   "type": "object",
   "properties": {
     "base_commit": {
@@ -15,9 +15,16 @@
       "pattern": "^[0-9a-f]{64}$"
     },
     "conflicted_digest": {
-      "description": "The `bundle_digest` of the conflict tree (= `result_commit`'s tree) — the on-disk heal signal and\nthe `render_verified` pin. Disk re-scanning to this exact digest means \"the materialize completed\".",
+      "description": "The `bundle_digest` of the conflict tree (= `result_commit`'s tree) — the `render_verified`\npin, and the UNTOUCHED signal: a `conflicts/<copy_dir>/` still scanning to exactly this\ndigest is a copy nobody has hand-resolved, so the escape commits the original draft instead.",
       "type": "string",
       "pattern": "^[0-9a-f]{64}$"
+    },
+    "copy_dir": {
+      "description": "The single directory component under this scope's `conflicts/` dir holding the marked-up\ncopy (`~/.topos/conflicts/<copy_dir>/`, or the project store's equivalent). Chosen once when\nthe conflict is recorded — the bundle's name, disambiguated like a skill dir — and read back\nby every exit, so the folder a receipt names is the folder the escape reads and the\nresolution deletes. **Additive optional**: an absent (or unsafe) value falls back to the\nbundle's sanitized name.",
+      "type": [
+        "string",
+        "null"
+      ]
     },
     "current_commit": {
       "description": "`current` (theirs) at the time the conflict was recorded.",

@@ -402,6 +402,12 @@ fn verified_new_generation(
 /// working draft is left untouched, so the next `pull` resolves the divergence rather than this path silently
 /// clobbering it. Returns the new generation.
 ///
+/// `work_tree` is the copy the publish SHIPPED FROM, when a `-a`/`--dest` selection named one.
+/// Passing it is load-bearing rather than an optimization: the aggregate work-tree resolution
+/// refuses on divergent copies, so a `--dest` publish that resolved a freeze would land on the
+/// plane and then fail here, on the very freeze it just resolved. `None` keeps the ordinary
+/// resolution (the single edited copy, else the first).
+///
 /// # Errors
 /// [`ClientError::WireInvalid`] if the OK pointer is mis-scoped; a store/fs/scan failure.
 pub(crate) fn apply_publish_ok(
@@ -411,6 +417,7 @@ pub(crate) fn apply_publish_ok(
     map: &PlacementMap,
     rec: &OpRecord,
     wire_record: &WireCurrentRecord,
+    work_tree: Option<&std::path::Path>,
 ) -> Result<u64, ClientError> {
     let new_gen = verified_new_generation(rec, wire_record)?;
     let commit_id = parse_hex32(&rec.candidate_commit)?;
@@ -427,9 +434,12 @@ pub(crate) fn apply_publish_ok(
         return Ok(new_gen);
     }
 
-    // Re-scan the WORK TREE (the single edited copy when one exists — the draft that was published —
-    // else the first copy): did it change during the round-trip?
-    let placement = crate::placement::work_tree_dir(ctx, &lock.name, map)?;
+    // Re-scan the WORK TREE (the copy this publish shipped from — named by the selection, else the
+    // single edited copy, else the first): did it change during the round-trip?
+    let placement = match work_tree {
+        Some(dir) => dir.to_path_buf(),
+        None => crate::placement::work_tree_dir(ctx, &lock.name, map)?,
+    };
     let scanned = scan::scan(&placement)?;
     if scanned.bundle_digest == published_digest {
         // CLEAN → state ①. The work tree already holds the published bytes (no dir-swap); update the docs

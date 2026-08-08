@@ -1254,7 +1254,7 @@ pub(crate) fn work_tree_dir(
     let scans = scan_placements(ctx, map)?;
     match classify_draft(&scans, map) {
         DraftVerdict::Competitors(indices) => {
-            return Err(placements_diverged(skill_name, &scans, &indices));
+            return Err(placements_diverged(ctx, skill_name, &scans, &indices));
         }
         DraftVerdict::One { idx, .. } => return Ok(scans[idx].dir.clone()),
         DraftVerdict::NoDraft => {}
@@ -1270,21 +1270,35 @@ pub(crate) fn work_tree_dir(
         .ok_or_else(|| ClientError::Corrupt("placement map has no placement".into()))
 }
 
-/// The typed competitor freeze, with its per-path disclosure: exactly the TRUE competitors are
+/// The typed competitor freeze, with its per-copy disclosure: exactly the TRUE competitors are
 /// named (a copy merely stale behind the draft is a sync target, not part of the freeze).
+///
+/// Each is carried in BOTH spellings the refusal's menu needs — the folder a person reads and the
+/// `--dest` value that names it back — through the one shared spelling helper, so the folders the
+/// menu prints and the folders its commands accept are the same strings.
 pub(crate) fn placements_diverged(
+    ctx: &Ctx<'_>,
     skill_name: &str,
     scans: &[PlacementScan],
     competitor_indices: &[usize],
 ) -> ClientError {
-    let paths: Vec<String> = scans
+    let copies: Vec<crate::error::DivergedCopy> = scans
         .iter()
         .filter(|s| competitor_indices.contains(&s.idx))
-        .map(|s| s.dir.display().to_string())
+        .map(|s| {
+            let sp = crate::ops::dest_select::copy_spellings(ctx, &s.dir);
+            crate::error::DivergedCopy {
+                display: sp.display,
+                dest: sp.dest,
+            }
+        })
         .collect();
     ClientError::PlacementsDiverged {
         skill: skill_name.to_owned(),
-        paths,
+        copies,
+        // The scope the frozen copies live in — the layout IS the scope, and every command the
+        // refusal offers is spelled for it.
+        global: !ctx.layout.is_project_scope(),
     }
 }
 

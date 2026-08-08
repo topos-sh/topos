@@ -92,16 +92,31 @@ pub(crate) enum Command {
         global: bool,
         /// Discard your local edits to a skill and take the team version. Shows what would be
         /// lost first; `--yes` applies.
-        #[arg(long)]
+        #[arg(long, conflicts_with = "keep_mine")]
         reset: bool,
+        /// With `--reset`: drop only this agent's copy of the edits (a slug like `codex`); every
+        /// other copy keeps its own.
+        #[arg(long, short = 'a', value_name = "SLUG", conflicts_with = "dest")]
+        agent: Option<String>,
+        /// With `--reset`: drop only the edits in this exact folder — the folder as `topos list`
+        /// prints it, or the one the `topos.toml` line names.
+        #[arg(long, value_name = "FOLDER")]
+        dest: Option<String>,
         /// Confirm an action that shows a preview first (like `--reset`).
         #[arg(long)]
         yes: bool,
-        /// Resolve a conflicted skill by keeping your bytes exactly as they are, skipping the
-        /// merge with the team's changes (what the merge would have brought is shown first).
-        /// Takes exactly one skill.
-        #[arg(long = "onto-current")]
-        onto_current: bool,
+        /// Finish a merge that stopped because you and your team changed the same lines. Topos
+        /// writes one copy of the skill into a folder under `.topos/conflicts/` and prints the
+        /// path; files you both changed hold both versions, wrapped in `<<<<<<<` markers. Edit
+        /// that copy and run this to use it — or run it without touching the folder to keep your
+        /// wording on those lines and take the team's other changes. Either way you get an
+        /// ordinary draft on top of the team's version, which `topos publish` ships like any
+        /// other. Only for a merge that has actually stopped — with nothing waiting, `topos
+        /// update <skill>` is the command. Takes exactly one skill.
+        // `--onto-current` is the prior spelling, kept as a HIDDEN alias (clap's `alias` never
+        // reaches the help or the generated reference) so anything already in flight keeps working.
+        #[arg(long = "keep-mine", alias = "onto-current")]
+        keep_mine: bool,
         /// Print nothing on stdout — the mode the session-start hook uses. The hook sweep always
         /// covers both scopes (this folder's and your machine-wide set), so `-g` has no effect
         /// here. Errors still go to stderr with a non-zero exit.
@@ -118,11 +133,13 @@ pub(crate) enum Command {
         /// unrecognized name — gets the conservative document every agent's schema accepts.
         #[arg(long, value_name = "HARNESS", hide = true)]
         hook: Option<String>,
-        /// Rebuild every managed skill folder from topos's own store: your unshared edits are
-        /// saved first, then each folder is re-created fresh. Fixes a folder someone deleted or
-        /// broke by hand.
-        #[arg(long)]
-        rebuild: bool,
+        /// Re-create managed skill folders that exist but are damaged — topos normally protects a
+        /// changed folder as your own edit. Deleted folders come back on an ordinary `topos
+        /// update`.
+        // `--rebuild` is the prior spelling, kept as a HIDDEN alias (clap's `alias` never reaches
+        // the help or the generated reference) so anything already in flight keeps working.
+        #[arg(long = "force", alias = "rebuild")]
+        force: bool,
     },
     /// Log this machine in to topos. Opens your browser for a one-click approval, where you
     /// choose (or create) the workspace to join. The first login to a workspace records its feed
@@ -305,13 +322,22 @@ pub(crate) enum Command {
         offset: Option<u64>,
     },
     /// Show what changed in a skill. Bare: your local edits against the team version. With a
-    /// version id: that version against the team's. `<a>..<b>` compares two versions.
+    /// version id: that version against the team's. `<a>..<b>` compares two versions. When the
+    /// skill sits in more than one folder, `--dest <folder>` (or `-a <agent>`) reads the edits in
+    /// that one — still against the team version, so two such runs compare like for like.
     Diff {
         /// The skill name.
         skill: String,
         /// What to compare: a version id, or `<a>..<b>`. Omitted: your edits vs the team version.
         #[arg(value_name = "REF")]
         r#ref: Option<String>,
+        /// Read this agent's copy of the skill (a slug like `codex`).
+        #[arg(long, short = 'a', value_name = "SLUG", conflicts_with = "dest")]
+        agent: Option<String>,
+        /// Read the copy in this exact folder — the folder as `topos list` prints it, or the one
+        /// the `topos.toml` line names.
+        #[arg(long, value_name = "FOLDER")]
+        dest: Option<String>,
         /// Cap the diff at this many bytes, cut at file boundaries (`0` = no cap). Default:
         /// unlimited on a terminal, 64 KiB under `--json`.
         #[arg(long, value_name = "BYTES")]
@@ -334,10 +360,19 @@ pub(crate) enum Command {
     /// Share a skill with your team. A bare run is a preview — it shows where the skill would
     /// land and who would receive it, and changes nothing; add `--yes` to apply. Publishing
     /// again ships a new version; on a skill that requires review, a publish opens a proposal
-    /// instead. Needs a login.
+    /// instead. Needs a login. When you have edited the same skill in more than one folder,
+    /// a bare publish stops and asks which one you mean; `--dest <folder>` (or `-a <agent>`)
+    /// answers it. The copy you do not pick keeps its edits and becomes an ordinary draft.
     Publish {
         /// The skill to publish: a name, a folder, or `<name>@<version>` to pin the exact bytes.
         target: String,
+        /// Publish this agent's copy of the skill (a slug like `codex`).
+        #[arg(long, short = 'a', value_name = "SLUG", conflicts_with = "dest")]
+        agent: Option<String>,
+        /// Publish the copy in this exact folder — the folder as `topos list` prints it, or the
+        /// one the `topos.toml` line names.
+        #[arg(long, value_name = "FOLDER")]
+        dest: Option<String>,
         /// Place the skill in this channel. It must already exist — channels are created in the
         /// browser. A brand-new skill with no `--to` lands in `everyone`.
         #[arg(long, value_name = "CHANNEL")]
@@ -631,16 +666,124 @@ mod tests {
     }
 
     #[test]
-    fn update_onto_current_parses() {
-        // Now a DISCLOSED escape (no longer `hide`), still parses as before.
-        let out = Cli::try_parse_from(["topos", "update", "docs", "--onto-current"]).unwrap();
+    fn update_keep_mine_parses_under_both_spellings() {
+        // The disclosed name.
+        let out = Cli::try_parse_from(["topos", "update", "docs", "--keep-mine"]).unwrap();
         assert!(matches!(
             out.command,
             Some(Command::Update {
-                onto_current: true,
+                keep_mine: true,
                 ..
             })
         ));
+        // …and the prior spelling, which stays a working (hidden) alias so nothing in flight breaks.
+        let aliased = Cli::try_parse_from(["topos", "update", "docs", "--onto-current"]).unwrap();
+        assert!(matches!(
+            aliased.command,
+            Some(Command::Update {
+                keep_mine: true,
+                ..
+            })
+        ));
+    }
+
+    /// The scope flag PARSES on either side of the bundle name — a person who typed it after the
+    /// name is not corrected — while every command topos PRINTS puts it right after the verb, the
+    /// one order the suggestions use. This test is what lets the printed order be a display choice
+    /// rather than a grammar change.
+    #[test]
+    fn the_scope_flag_parses_on_either_side_of_the_name() {
+        for argv in [
+            ["topos", "update", "-g", "notes", "--reset"],
+            ["topos", "update", "notes", "-g", "--reset"],
+        ] {
+            let out = Cli::try_parse_from(argv).unwrap_or_else(|e| panic!("{argv:?}: {e}"));
+            assert!(
+                matches!(
+                    out.command,
+                    Some(Command::Update { global: true, reset: true, ref targets, .. })
+                        if targets == &["notes".to_owned()]
+                ),
+                "{argv:?}"
+            );
+        }
+        for argv in [
+            ["topos", "update", "-g", "notes", "--keep-mine"],
+            ["topos", "update", "notes", "-g", "--keep-mine"],
+        ] {
+            let out = Cli::try_parse_from(argv).unwrap_or_else(|e| panic!("{argv:?}: {e}"));
+            assert!(
+                matches!(
+                    out.command,
+                    Some(Command::Update {
+                        global: true,
+                        keep_mine: true,
+                        ..
+                    })
+                ),
+                "{argv:?}"
+            );
+        }
+        // The deep dive a diverged row points at, both ways round.
+        for argv in [
+            ["topos", "list", "-g", "coolify-deploy"],
+            ["topos", "list", "coolify-deploy", "-g"],
+        ] {
+            let out = Cli::try_parse_from(argv).unwrap_or_else(|e| panic!("{argv:?}: {e}"));
+            assert!(
+                matches!(
+                    out.command,
+                    Some(Command::List { global: true, name: Some(ref n), .. })
+                        if n == "coolify-deploy"
+                ),
+                "{argv:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn update_force_parses_under_both_spellings() {
+        // The disclosed name.
+        let out = Cli::try_parse_from(["topos", "update", "--force"]).unwrap();
+        assert!(matches!(
+            out.command,
+            Some(Command::Update { force: true, .. })
+        ));
+        // …and the prior spelling, which stays a working (hidden) alias so nothing in flight breaks.
+        let aliased = Cli::try_parse_from(["topos", "update", "--rebuild"]).unwrap();
+        assert!(matches!(
+            aliased.command,
+            Some(Command::Update { force: true, .. })
+        ));
+        // The disclosed spelling is the ONE the help and the generated reference teach.
+        let help = super::cli_command()
+            .get_subcommands()
+            .find(|c| c.get_name() == "update")
+            .expect("the update subcommand")
+            .clone()
+            .render_help()
+            .to_string();
+        assert!(help.contains("--force"), "{help}");
+        assert!(!help.contains("--rebuild"), "{help}");
+    }
+
+    /// `--keep-mine` and `--reset` are opposites — keep your version, or take the team's. Accepting
+    /// both let the reset silently win a command that asked for the exact opposite as well, so clap
+    /// refuses the pair outright (the same shape `diff`'s `-a`/`--dest` pair already takes).
+    #[test]
+    fn update_keep_mine_and_reset_are_refused_together() {
+        for argv in [
+            ["topos", "update", "docs", "--keep-mine", "--reset"],
+            ["topos", "update", "docs", "--reset", "--keep-mine"],
+            ["topos", "update", "docs", "--onto-current", "--reset"],
+        ] {
+            let err = Cli::try_parse_from(argv).expect_err("the pair is refused");
+            assert_eq!(
+                err.kind(),
+                clap::error::ErrorKind::ArgumentConflict,
+                "{argv:?}: {err}"
+            );
+        }
     }
 
     #[test]
@@ -766,6 +909,51 @@ mod tests {
         assert!(
             Cli::try_parse_from(["topos", "add", "--mcp", "io.github.a/b", "-s", "x"]).is_err()
         );
+    }
+
+    /// The three verbs that act on ONE copy take the selector in the SINGULAR — a repeatable flag
+    /// would offer a set none of them can act on — and the two spellings refuse each other, being
+    /// two ways of saying the same thing.
+    #[test]
+    fn diff_publish_and_update_take_one_copy_selector() {
+        assert!(matches!(
+            Cli::try_parse_from(["topos", "diff", "deploy", "--dest", ".claude/skills"])
+                .unwrap()
+                .command,
+            Some(Command::Diff { dest: Some(d), .. }) if d == ".claude/skills"
+        ));
+        assert!(matches!(
+            Cli::try_parse_from(["topos", "publish", "deploy", "-a", "codex"])
+                .unwrap()
+                .command,
+            Some(Command::Publish { agent: Some(a), .. }) if a == "codex"
+        ));
+        assert!(matches!(
+            Cli::try_parse_from([
+                "topos",
+                "update",
+                "deploy",
+                "--reset",
+                "--dest",
+                "project/.claude/skills/deploy"
+            ])
+            .unwrap()
+            .command,
+            Some(Command::Update { reset: true, dest: Some(d), .. })
+                if d == "project/.claude/skills/deploy"
+        ));
+        // `-a` and `--dest` are two spellings of ONE copy; naming both is a usage error, and so is
+        // naming either twice.
+        for bad in [
+            &["topos", "diff", "deploy", "-a", "codex", "--dest", "x"][..],
+            &["topos", "publish", "deploy", "-a", "codex", "--dest", "x"][..],
+            &[
+                "topos", "update", "deploy", "--reset", "-a", "codex", "--dest", "x",
+            ][..],
+            &["topos", "diff", "deploy", "--dest", "x", "--dest", "y"][..],
+        ] {
+            assert!(Cli::try_parse_from(bad.iter().copied()).is_err(), "{bad:?}");
+        }
     }
 
     #[test]

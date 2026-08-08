@@ -46,7 +46,7 @@ use crate::plane::DirectorySource;
 use crate::sessions::Session;
 use crate::sidecar;
 
-use super::inventory::{self, Resolved, Row, ScopeResolution, ScopeView, ZERO_HEX};
+use super::inventory::{self, DraftCopies, Resolved, Row, ScopeResolution, ScopeView, ZERO_HEX};
 
 /// The filesystem roots `list` probes for **untracked** skills: the user home (every harness's
 /// global skill dir resolves under it) and, optionally, the current project dir (for repo-scoped
@@ -239,11 +239,31 @@ pub(crate) fn list_with(
     // way — "nothing manages it" is the whole answer, never an error.
     if let Some(name) = &req.name {
         let dive = dive_sections(&resolved, req.view);
-        let detail = match inventory::detail_for(&dive, &all, name) {
+        let mut detail = match inventory::detail_for(&dive, &all, name) {
             Ok(detail) => detail,
             Err(_) => builtin_detail(ctx, name)
                 .unwrap_or_else(|| unmanaged_detail(ctx, name, discover.as_ref())),
         };
+        // Every path the deep dive prints is spelled the way the rest of this command family
+        // spells one: `project/<rest>` under the checkout the answering scope's manifest governs,
+        // `~`-abbreviated on the machine. A draft sub-line one command earlier already reads
+        // `project/.claude/skills/deploy`, so an absolute twin here was the same folder said two
+        // ways in the same breath.
+        if let Some(section) = dive
+            .iter()
+            .find(|s| detail.scope.as_deref() == Some(s.scope))
+        {
+            for p in &mut detail.placements {
+                *p = scoped_folder(ctx, section, Path::new(p));
+            }
+            // The manifest is re-spelled from its PATH, not from the pretty string the row
+            // carries: an abbreviation cannot be un-abbreviated back into a folder.
+            if detail.source_file.is_some()
+                && let Some(file) = section.manifest_path.as_deref()
+            {
+                detail.source_file = Some(scoped_folder(ctx, section, file));
+            }
+        }
         // A one-skill answer names THIS skill's external source and NO other. Every line above it
         // is about the skill on screen, so an unrelated repository's last check reads as one more
         // fact about that skill — the listing's "what is my machine tracking?" block answering a
@@ -287,7 +307,7 @@ pub(crate) fn list_with(
         let mut rows: Vec<SkillEntry> = section
             .inventory_rows()
             .filter(|r| keeps(&r.name, &r.via_channels))
-            .map(skill_entry)
+            .map(|r| skill_entry(ctx, section, r))
             .map(|e| with_source_health(e, &data.forge))
             .collect();
         if section.scope == "machine"
@@ -358,15 +378,28 @@ pub(crate) fn list_with(
 /// baseline as its identity (the system's own "never applied" sentinel — the honest reading of a
 /// required field with nothing to put in it); an `"off"` switch reads `off` — the file's own
 /// standing statement, never a delivery state.
-fn skill_entry(row: &Row) -> SkillEntry {
+fn skill_entry(ctx: &Ctx<'_>, section: &ScopeResolution, row: &Row) -> SkillEntry {
     let status = match row.state {
         StatusItemState::Applied => Some(SkillStatus::Current),
         StatusItemState::Behind => Some(SkillStatus::Behind),
         StatusItemState::LocalEdits => Some(SkillStatus::Draft),
         StatusItemState::Off => Some(SkillStatus::Off),
+        // Neither current nor a shareable draft: the row carries the block itself, because a
+        // blocked bundle that rendered like every other one would read as a clean install.
+        StatusItemState::Blocked => Some(SkillStatus::Blocked),
         // Never applied / pending / not available / no delivery yet: no update status is honestly
         // claimable.
         _ => None,
+    };
+    // Where the edits are, as this row will print it. A folder the row cannot name (a scan that
+    // could not classify one) leaves both absent — the row still reads `(draft)` and simply says
+    // nothing it cannot prove.
+    let (draft_dir, draft_diverged) = match &row.draft_in {
+        DraftCopies::None => (None, None),
+        DraftCopies::In(dir) => (Some(scoped_folder(ctx, section, dir)), None),
+        // The ROW reports only how many disagree — naming one would send the reader to publish
+        // bytes they did not mean. The copies themselves are the deep dive's answer.
+        DraftCopies::Diverged(copies) => (None, Some(copies.len() as u32)),
     };
     SkillEntry {
         skill: row.name.clone(),
@@ -379,6 +412,8 @@ fn skill_entry(row: &Row) -> SkillEntry {
         status,
         kind: row.kind.clone(),
         source_health: None,
+        draft_dir,
+        draft_diverged,
     }
 }
 
@@ -404,6 +439,27 @@ fn with_source_health(
         });
     }
     entry
+}
+
+/// A folder as this scope's section prints it: `project/<rest>` under the folder the section's
+/// manifest governs, `~`-abbreviated anywhere else. The project spelling is the same one the
+/// `update` receipt writes its paths in — the checkout is named once (the section header's
+/// manifest, the receipt's lead line) and every path below it reads as a place inside the thing you
+/// are standing in. A dir that is not under that folder (nothing plans one there, but the read is
+/// best-effort) falls back to the plain `~`-abbreviated path rather than a `project/` prefix that
+/// would not resolve.
+///
+/// Verb-agnostic on purpose: a draft sub-line, the deep dive's `placed in:` list, and the file the
+/// dive names its source by are all the same question — where is this, from where I stand — and
+/// one answer is what keeps them from becoming two spellings of one folder.
+fn scoped_folder(ctx: &Ctx<'_>, section: &ScopeResolution, dir: &Path) -> String {
+    if section.scope == "project"
+        && let Some(root) = section.manifest_path.as_deref().and_then(Path::parent)
+        && let Ok(rest) = dir.strip_prefix(root)
+    {
+        return format!("project/{}", rest.display());
+    }
+    inventory::pretty(ctx, dir)
 }
 
 /// Where a row's bytes COME FROM, as the inventory's `from` column names it: the workspace address
@@ -523,26 +579,31 @@ fn detail_forge_origin(detail: &ListDetail) -> Option<String> {
 /// The placed BUILT-IN meta-skill's inventory row — read from its own record in the MACHINE store
 /// (engine custody: `ops::builtin` places and force-syncs it with no manifest row anywhere). It
 /// originates from disk, so the inventory shows it — hiding it would make `remove topos`'s own
-/// target invisible. `None` when the machine holds no built-in record (opted out, or never
-/// placed). A hand edit shows `draft` honestly until the next sweep overwrites it
-/// (snapshot-first).
+/// target invisible. `None` when the machine holds no built-in record (opted out, or never placed).
+///
+/// The row carries NO state: no `(draft)` flag, no status column, no sub-lines. The bundle ships
+/// with the binary and is force-synced to it on every sweep, so a hand edit is not durable work —
+/// no verb can retrieve it, nothing can publish it (the name is reserved workspace-side), and no
+/// manifest row exists for `update --reset` to act on. A `(draft)` flag would promise work a person
+/// could come back to; a `[current]` column would report a comparison nobody makes. The edit is
+/// still SNAPSHOTTED into the store before the sweep overwrites it — recoverable, just never
+/// advertised as a state of the row.
 fn builtin_entry(ctx: &Ctx<'_>) -> Option<SkillEntry> {
-    let (lock, draft, _) = builtin_record(ctx)?;
+    let (lock, _) = builtin_record(ctx)?;
     Some(SkillEntry {
         skill: lock.name.clone(),
         workspace_id: None,
         version_id: lock.base_commit.clone(),
         bundle_digest: lock.bundle_digest.clone(),
-        draft,
+        draft: false,
         pending_proposals: Vec::new(),
         source: Some("built-in".to_owned()),
-        status: Some(if draft {
-            SkillStatus::Draft
-        } else {
-            SkillStatus::Current
-        }),
+        status: None,
         kind: None,
         source_health: None,
+        // Locked by `an_edited_builtin_row_offers_no_commands`.
+        draft_dir: None,
+        draft_diverged: None,
     })
 }
 
@@ -553,7 +614,7 @@ fn builtin_detail(ctx: &Ctx<'_>, token: &str) -> Option<ListDetail> {
     if token != super::builtin::BUILTIN_NAME {
         return None;
     }
-    let (lock, draft, placements) = builtin_record(ctx)?;
+    let (lock, placements) = builtin_record(ctx)?;
     let version = lock.base_commit.clone();
     Some(ListDetail {
         name: lock.name,
@@ -565,42 +626,34 @@ fn builtin_detail(ctx: &Ctx<'_>, token: &str) -> Option<ListDetail> {
         version: (!version.bytes().all(|b| b == b'0')).then_some(version),
         pin: None,
         placements,
-        state: if draft {
-            StatusItemState::LocalEdits
-        } else {
-            StatusItemState::Applied
-        },
+        // Always `applied`, edited copy or not — the same reason the row carries no `(draft)` flag
+        // (see [`builtin_entry`]): a hand edit here is not durable work, and `local edits ahead of
+        // the applied version` would name a state with no act behind it.
+        state: StatusItemState::Applied,
         kind: None,
         harnesses: Vec::new(),
         managed: true,
         folders: Vec::new(),
+        // Engine custody re-syncs every copy to the binary on the next sweep, so copies never
+        // compete here — and the per-copy acts a competition offers reach nothing the built-in has.
+        diverged: Vec::new(),
     })
 }
 
-/// The built-in's `(lock, draft, placements)` off its machine-store record: a draft iff ANY
-/// recorded placement holds bytes hashing to a different digest than the lock pins. A missing
-/// record answers `None`; an unreadable map is no-draft, no placements — never an error.
-fn builtin_record(ctx: &Ctx<'_>) -> Option<(Lock, bool, Vec<String>)> {
+/// The built-in's `(lock, placements)` off its machine-store record. A missing record answers
+/// `None`; an unreadable map answers no placements — never an error.
+///
+/// The placement bytes are deliberately NOT scanned: nothing this record feeds reports a difference
+/// between the folder and the binary (see [`builtin_entry`]), so scanning would buy an inventory
+/// read nothing but the cost.
+fn builtin_record(ctx: &Ctx<'_>) -> Option<(Lock, Vec<String>)> {
     let sid = crate::id::SkillId::parse(super::builtin::BUILTIN_NAME).ok()?;
     let sp = ctx.layout.published(&sid);
     let lock = doc::read_doc::<Lock>(ctx.fs, &sp.lock).ok().flatten()?;
     let Ok(Some(map)) = doc::read_map(ctx.fs, &sp.map) else {
-        return Some((lock, false, Vec::new()));
+        return Some((lock, Vec::new()));
     };
-    let mut draft = false;
-    for placement in &map.placements {
-        let source = Path::new(placement);
-        if !source.exists() {
-            continue;
-        }
-        if let Ok(scanned) = crate::scan::scan(source)
-            && topos_core::digest::to_hex(&scanned.bundle_digest) != lock.bundle_digest
-        {
-            draft = true;
-            break;
-        }
-    }
-    Some((lock, draft, map.placements))
+    Some((lock, map.placements))
 }
 
 /// The deep answer for a name NOTHING manages — no row in any visible scope, not the built-in:
@@ -633,6 +686,7 @@ fn unmanaged_detail(ctx: &Ctx<'_>, token: &str, roots: Option<&DiscoveryRoots>) 
         harnesses: Vec::new(),
         managed: false,
         folders,
+        diverged: Vec::new(),
     }
 }
 
@@ -881,7 +935,7 @@ pub(crate) fn discover_untracked(
     ctx: &Ctx<'_>,
     roots: &DiscoveryRoots,
 ) -> Result<Vec<UntrackedEntry>, ClientError> {
-    let tracked = tracked_placement_paths(ctx)?;
+    let tracked = tracked_placement_paths(ctx, roots)?;
     let mut seen: HashSet<PathBuf> = HashSet::new();
     let mut out: Vec<UntrackedEntry> = Vec::new();
     for d in registry::discover_all(&roots.home, roots.cwd.as_deref()) {
@@ -928,13 +982,40 @@ pub(crate) fn discover_untracked(
     Ok(out)
 }
 
-/// Every tracked skill's placement paths in the MACHINE store, canonicalized (a placement that no
-/// longer resolves on disk is dropped — it can't shadow a real discovery). The same dedup key
-/// `add`'s `reject_already_tracked` uses. A RETIRED record's paths are NOT tracked: its kept
-/// copies are the person's own now, so discovery must surface them as adoptable again.
-fn tracked_placement_paths(ctx: &Ctx<'_>) -> Result<Vec<PathBuf>, ClientError> {
+/// Every tracked skill's placement paths, canonicalized (a placement that no longer resolves on
+/// disk is dropped — it can't shadow a real discovery). The same dedup key `add`'s
+/// `reject_already_tracked` uses.
+///
+/// Read over the SAME scopes the discovery scan spans: the machine store, plus every project store
+/// up the chain from the discovery cwd. A machine-only read made a skill this very checkout
+/// delivers — `topos add ./tools/x --dest .claude/skills`, recorded in the checkout's own store —
+/// read as untracked, and the wrong count then leaked into the bare listing's summary line.
+fn tracked_placement_paths(
+    ctx: &Ctx<'_>,
+    roots: &DiscoveryRoots,
+) -> Result<Vec<PathBuf>, ClientError> {
     let mut paths = Vec::new();
-    for entry in ctx.fs.read_dir(&ctx.layout.skills_dir())? {
+    collect_placement_paths(ctx, &ctx.layout, &mut paths)?;
+    if let Some(cwd) = roots.cwd.as_deref() {
+        for dir in crate::manifest::scopes::manifest_dirs_up(ctx.fs, cwd, Some(&roots.home)) {
+            let Some(playout) = sidecar::existing_project_store(ctx.fs, &dir) else {
+                continue;
+            };
+            collect_placement_paths(ctx, &playout, &mut paths)?;
+        }
+    }
+    Ok(paths)
+}
+
+/// One store's recorded placement paths, appended to `out`. A RETIRED record's paths are NOT
+/// tracked: its kept copies are the person's own now, so discovery must surface them as adoptable
+/// again.
+fn collect_placement_paths(
+    ctx: &Ctx<'_>,
+    layout: &sidecar::Layout,
+    out: &mut Vec<PathBuf>,
+) -> Result<(), ClientError> {
+    for entry in ctx.fs.read_dir(&layout.skills_dir())? {
         let Some(id) = entry.file_name().and_then(|n| n.to_str()) else {
             continue;
         };
@@ -944,21 +1025,20 @@ fn tracked_placement_paths(ctx: &Ctx<'_>) -> Result<Vec<PathBuf>, ClientError> {
         let Ok(id) = crate::id::SkillId::parse(id) else {
             continue;
         };
-        if sidecar::record_retired(ctx.fs, &ctx.layout, &id) {
+        if sidecar::record_retired(ctx.fs, layout, &id) {
             continue;
         }
-        let Some(map): Option<PlacementMap> =
-            doc::read_map(ctx.fs, &ctx.layout.published(&id).map)?
+        let Some(map): Option<PlacementMap> = doc::read_map(ctx.fs, &layout.published(&id).map)?
         else {
             continue;
         };
         for p in &map.placements {
             if let Ok(canon) = Path::new(p).canonicalize() {
-                paths.push(canon);
+                out.push(canon);
             }
         }
     }
-    Ok(paths)
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1031,7 +1111,9 @@ mod tests {
                 observed_version_id: "b".repeat(64),
                 applied: 1,
                 base_commit: "b".repeat(64),
-                work_hash: "e".repeat(64),
+                // A settled copy's work hash IS its base digest — the documents agree, which is
+                // what makes the row read `current` rather than `draft`.
+                work_hash: "f".repeat(64),
                 held: false,
                 draft_observed: None,
             },
@@ -1194,6 +1276,453 @@ mod tests {
         assert_eq!(machine.rows[0].version_id, super::ZERO_HEX);
         assert_eq!(machine.rows[0].status, None);
         assert!(out.data.machine_summary.is_none());
+    }
+
+    /// Record placements for a skill in one scope's store, each with a recorded sha no real dir
+    /// bytes can match — so an existing placement dir scans as an EDITED copy (the same shape
+    /// [`TempHome::store_applied`] lays machine-side).
+    fn lay_placements(layout: &crate::sidecar::Layout, name: &str, dirs: &[&Path]) {
+        use topos_types::persisted::{PlacementKind, PlacementState, SwapCapability};
+        let sid = crate::id::SkillId::parse(&skill_id_of(name)).unwrap();
+        crate::doc::write_map(
+            &crate::fs_seam::RealFs,
+            &layout.published(&sid).map,
+            &PlacementMap {
+                schema_version: 2,
+                placements: dirs
+                    .iter()
+                    .map(|d| d.to_string_lossy().into_owned())
+                    .collect(),
+                applied_commit: "b".repeat(64),
+                materialized_sha: "e".repeat(64),
+                pre_existing_sha: None,
+                swap_capability: SwapCapability::Unsupported,
+                harness: None,
+                harness_layer: None,
+                harness_slug: None,
+                placement_state: dirs
+                    .iter()
+                    .map(|_| PlacementState {
+                        kind: PlacementKind::Native,
+                        agent: None,
+                        materialized_sha: Some("e".repeat(64)),
+                        pre_existing_sha: None,
+                        swap_capability: SwapCapability::Unsupported,
+                        adopted_source: false,
+                    })
+                    .collect(),
+            },
+        )
+        .unwrap();
+    }
+
+    /// A placed copy holding `body` — enough for the scanner to read it as a bundle.
+    fn lay_copy(dir: &Path, body: &str) {
+        std::fs::create_dir_all(dir).unwrap();
+        std::fs::write(dir.join("SKILL.md"), body.as_bytes()).unwrap();
+    }
+
+    fn row_named<'a>(scope: &'a ListScope, name: &str) -> &'a SkillEntry {
+        scope
+            .rows
+            .iter()
+            .find(|r| r.skill == name)
+            .unwrap_or_else(|| panic!("no {name} row in {:?}", scope.rows))
+    }
+
+    /// A draft row NAMES the folder its edits sit in — the one thing `(draft)` alone never said.
+    /// The folder is written against the project the section's manifest governs, and it comes off
+    /// the SAME scan that decides the row is edited at all (no second walk of the disk).
+    #[test]
+    fn a_project_draft_row_names_its_folder_against_the_project() {
+        let home = TempHome::new();
+        let repo = lay_project(&home);
+        let placed = repo.join(".claude/skills/repo-helper");
+        lay_copy(&placed, "# edited by hand\n");
+        lay_placements(
+            &crate::sidecar::project_store_layout(&repo),
+            "repo-helper",
+            &[&placed],
+        );
+
+        let out = run(&home, &repo, &request()).unwrap();
+        let row = row_named(scope(&out, "project"), "repo-helper");
+        assert!(row.draft, "{row:?}");
+        assert_eq!(
+            row.draft_dir.as_deref(),
+            Some("project/.claude/skills/repo-helper"),
+            "{row:?}"
+        );
+        assert_eq!(row.draft_diverged, None, "{row:?}");
+        // A row with no edits claims no folder.
+        let clean = row_named(scope(&out, "project"), "deploy");
+        assert!(!clean.draft, "{clean:?}");
+        assert_eq!(clean.draft_dir, None, "{clean:?}");
+        assert_eq!(clean.draft_diverged, None, "{clean:?}");
+        // Composed: the whole block as a person reads it, off a real scan.
+        let text = crate::render::list_tty(&out);
+        assert!(
+            text.contains(
+                "      draft in project/.claude/skills/repo-helper (not shared)\n\
+                 \x20     to share:     topos publish repo-helper\n\
+                 \x20     to view diff: topos diff repo-helper\n\
+                 \x20     to drop:      topos update repo-helper --reset\n"
+            ),
+            "{text}"
+        );
+    }
+
+    /// The deep dive writes its paths in the SAME spelling as the draft sub-line one command
+    /// earlier: `project/…` under the checkout the answering scope's manifest governs. Absolute
+    /// paths here and `project/…` there were two spellings of one folder inside one command
+    /// family, which is exactly the thing a reader cannot reconcile.
+    #[test]
+    fn the_project_deep_dive_writes_its_paths_against_the_project() {
+        let home = TempHome::new();
+        let repo = lay_project(&home);
+        let placed = repo.join("tools/repo-helper");
+        lay_placements(
+            &crate::sidecar::project_store_layout(&repo),
+            "repo-helper",
+            &[&placed],
+        );
+
+        let out = run(
+            &home,
+            &repo,
+            &ListRequest {
+                name: Some("repo-helper".to_owned()),
+                ..request()
+            },
+        )
+        .unwrap();
+        let detail = out.data.detail.as_ref().expect("a detail");
+        assert_eq!(detail.scope.as_deref(), Some("project"));
+        assert_eq!(detail.placements, vec!["project/tools/repo-helper"]);
+        assert_eq!(detail.source_file.as_deref(), Some("project/topos.toml"));
+        // Nothing absolute survives into the answer a person reads.
+        let text = crate::render::list_tty(&out);
+        assert!(
+            !text.contains(&repo.display().to_string()),
+            "the checkout's absolute path is never printed: {text}"
+        );
+        assert!(
+            text.contains("\n  from project/topos.toml, line key ./tools/repo-helper\n")
+                && text.contains("\n  placed in:\n    project/tools/repo-helper\n"),
+            "{text}"
+        );
+    }
+
+    /// Copies whose edits DISAGREE name no folder — none of them is the draft — and report how
+    /// many disagree instead, in the ONE vocabulary every surface uses for this state (`different
+    /// edits in N folders`). The count is the freeze's own: one per distinct content.
+    ///
+    /// And the DEEP DIVE the row sends the reader to answers with the copies themselves: each
+    /// named, each carrying the three acts that apply to ONE of them, in the same words the
+    /// placement freeze's refusal prints. `local edits ahead of the applied version` was true of
+    /// every one of them and answered neither question the reader arrived with.
+    #[test]
+    fn competing_copies_report_their_count_and_the_dive_names_them_all() {
+        let home = TempHome::new();
+        let repo = lay_project(&home);
+        let one = repo.join(".claude/skills/repo-helper");
+        let two = repo.join(".agents/skills/repo-helper");
+        lay_copy(&one, "# this way\n");
+        lay_copy(&two, "# that way\n");
+        lay_placements(
+            &crate::sidecar::project_store_layout(&repo),
+            "repo-helper",
+            &[&one, &two],
+        );
+
+        let out = run(&home, &repo, &request()).unwrap();
+        let row = row_named(scope(&out, "project"), "repo-helper");
+        assert!(row.draft, "{row:?}");
+        assert_eq!(row.draft_dir, None, "{row:?}");
+        assert_eq!(row.draft_diverged, Some(2), "{row:?}");
+        // The row's own line is the one that sends the reader on.
+        let listing = crate::render::list_tty(&out);
+        assert!(
+            listing.contains("      different edits in 2 folders (see: topos list repo-helper)\n"),
+            "{listing}"
+        );
+
+        let deep = run(
+            &home,
+            &repo,
+            &ListRequest {
+                name: Some("repo-helper".to_owned()),
+                ..request()
+            },
+        )
+        .unwrap();
+        let detail = deep.data.detail.as_ref().expect("a detail");
+        assert_eq!(
+            detail
+                .diverged
+                .iter()
+                .map(|c| (c.display.as_str(), c.dest.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("project/.claude/skills/repo-helper", ".claude/skills"),
+                ("project/.agents/skills/repo-helper", ".agents/skills"),
+            ],
+            "{detail:?}"
+        );
+        let text = crate::render::list_tty(&deep);
+        assert!(
+            text.ends_with(
+                "  different edits in 2 folders — name the one to work with:\n\
+                 \x20   project/.claude/skills/repo-helper\n\
+                 \x20     to share:     topos publish repo-helper --dest .claude/skills\n\
+                 \x20     to view diff: topos diff repo-helper --dest .claude/skills\n\
+                 \x20     to drop:      topos update repo-helper --dest .claude/skills --reset\n\
+                 \x20   project/.agents/skills/repo-helper\n\
+                 \x20     to share:     topos publish repo-helper --dest .agents/skills\n\
+                 \x20     to view diff: topos diff repo-helper --dest .agents/skills\n\
+                 \x20     to drop:      topos update repo-helper --dest .agents/skills --reset\n\
+                 \x20 to drop every copy's edits: topos update repo-helper --reset"
+            ),
+            "{text}"
+        );
+        // The vague line the block replaces is gone.
+        assert!(
+            !text.contains("local edits ahead of the applied version"),
+            "{text}"
+        );
+    }
+
+    /// The placed BUILT-IN's row says nothing about an edit — not a flag, not a status, not one
+    /// sub-line — even when the placed copy has been hand-edited.
+    ///
+    /// A named folder earns the three sub-lines a draft row prints, and every one of them would be
+    /// a command that cannot run here — `topos publish topos` is refused by the reserved name, and
+    /// `topos update topos --reset` acts on a manifest row nothing has. The bundle ships with the
+    /// binary and is force-synced to it on every sweep, so the edit is not durable work and no verb
+    /// can retrieve it: a `(draft)` flag would promise something to come back to. The bytes ARE
+    /// snapshotted before the overwrite; the row simply never advertises them.
+    #[test]
+    fn an_edited_builtin_row_offers_no_commands() {
+        let home = TempHome::new();
+        let cwd = home.0.join("plain");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let placed = home.0.join(".claude/skills/topos");
+        lay_copy(&placed, "# edited by hand\n");
+        home.store_applied(
+            "topos",
+            "topos",
+            &"a".repeat(64),
+            &[placed.to_string_lossy().as_ref()],
+        );
+
+        let out = run(&home, &cwd, &request()).unwrap();
+        let row = row_named(scope(&out, "machine"), "topos");
+        assert!(!row.draft, "{row:?}");
+        assert_eq!(row.status, None, "{row:?}");
+        assert_eq!(row.source.as_deref(), Some("built-in"), "{row:?}");
+        assert_eq!(row.draft_dir, None, "{row:?}");
+        assert_eq!(row.draft_diverged, None, "{row:?}");
+        let text = crate::render::list_tty(&out);
+        assert!(
+            text.ends_with("  topos  topos@aaaaaaaaaaaa  from built-in"),
+            "{text}"
+        );
+        for offered in [
+            "(draft)",
+            "to share:",
+            "to view diff:",
+            "to drop:",
+            "topos publish topos",
+        ] {
+            assert!(!text.contains(offered), "{offered}: {text}");
+        }
+        // The deep dive answers the same way over the SAME edited copy: `applied`, never `local
+        // edits ahead of the applied version`.
+        let dive = run(
+            &home,
+            &cwd,
+            &ListRequest {
+                name: Some("topos".to_owned()),
+                ..request()
+            },
+        )
+        .unwrap();
+        let detail = dive.data.detail.as_ref().expect("the built-in has a dive");
+        assert!(
+            matches!(detail.state, StatusItemState::Applied),
+            "{detail:?}"
+        );
+        let dive_text = crate::render::list_tty(&dive);
+        assert!(dive_text.ends_with("\n  applied"), "{dive_text}");
+        assert!(!dive_text.contains("local edits"), "{dive_text}");
+    }
+
+    /// A BLOCKED bundle's row tells the truth about all three things it used to get wrong.
+    ///
+    /// A conflict advances the lock's base to the TEAM's version while every folder keeps holding
+    /// the person's own bytes — so the row used to read `<name>@<theirs> (draft)`, which says "you
+    /// are on the team's new version with local edits" about a folder that never received it, and
+    /// then offered `topos publish`, which the block refuses. Now the row names the version the
+    /// folder really holds, says publishing is blocked, and points at the merge's two exits.
+    #[test]
+    fn a_blocked_row_names_the_version_it_holds_and_the_two_exits() {
+        use topos_types::persisted::{ConflictReason, ConflictState};
+
+        let home = TempHome::new();
+        let cwd = home.0.join("plain");
+        std::fs::create_dir_all(&cwd).unwrap();
+        home.session(
+            "topos.sh",
+            "w_acme",
+            "acme",
+            crate::sessions::SESSION_ACTIVE,
+        );
+        home.cache(
+            "w_acme",
+            "topos.sh",
+            "acme",
+            vec![assigned("notes", None)],
+            Vec::new(),
+        );
+        home.global("[bundles]\n\"topos.sh/acme\" = \"*\"\n");
+        let placed = home.0.join(".claude/skills/notes");
+        lay_copy(&placed, "# my version\n");
+        // The post-conflict shape: the lock (and the map) name THEIRS, the folder holds mine.
+        let theirs = "d".repeat(64);
+        home.store_applied(
+            &skill_id_of("notes"),
+            "notes",
+            &theirs,
+            &[placed.to_string_lossy().as_ref()],
+        );
+        let sid = crate::id::SkillId::parse(&skill_id_of("notes")).unwrap();
+        let mine_commit = "1".repeat(64);
+        let mine_digest = "2".repeat(64);
+        crate::doc::write_doc(
+            &crate::fs_seam::RealFs,
+            &home.layout().published(&sid).conflict,
+            &ConflictState {
+                schema_version: topos_types::PERSISTED_SCHEMA_VERSION,
+                base_commit: "0".repeat(64),
+                base_digest: "0".repeat(64),
+                current_commit: theirs.clone(),
+                current_digest: "3".repeat(64),
+                draft_commit: mine_commit.clone(),
+                draft_digest: mine_digest.clone(),
+                result_commit: "4".repeat(64),
+                conflicted_digest: "5".repeat(64),
+                copy_dir: Some("notes".to_owned()),
+                reason: ConflictReason::ThreeWay,
+                paths: Vec::new(),
+            },
+        )
+        .unwrap();
+
+        let out = run(&home, &cwd, &request()).unwrap();
+        let row = row_named(scope(&out, "machine"), "notes");
+        // The version the FOLDER holds — never the team's, which this folder never received.
+        assert_eq!(row.version_id, mine_commit, "{row:?}");
+        assert_eq!(row.bundle_digest, mine_digest, "{row:?}");
+        assert_ne!(row.version_id, theirs, "{row:?}");
+        // Not an ordinary draft: no `(draft)` flag, no folder to go edit, its own status.
+        assert!(!row.draft, "{row:?}");
+        assert_eq!(row.draft_dir, None, "{row:?}");
+        assert_eq!(row.status, Some(SkillStatus::Blocked), "{row:?}");
+
+        // Composed, as a person reads it: the block, then the two exits — and never `publish`,
+        // which is refused while the block stands.
+        let text = crate::render::list_tty(&out);
+        assert!(text.contains("  [waiting on you]"), "{text}");
+        assert!(
+            text.contains(
+                "      the team's version needs merging — you cannot publish until you pick one\n\
+                 \x20     to keep yours:  topos update -g notes --keep-mine\n\
+                 \x20     to take theirs: topos update -g notes --reset\n"
+            ),
+            "{text}"
+        );
+        assert!(!text.contains("topos publish notes"), "{text}");
+
+        // The deep dive answers the same way, in its own indentation.
+        let deep = run(
+            &home,
+            &cwd,
+            &ListRequest {
+                name: Some("notes".to_owned()),
+                ..request()
+            },
+        )
+        .unwrap();
+        let detail = deep.data.detail.as_ref().expect("a detail");
+        assert!(
+            matches!(detail.state, StatusItemState::Blocked),
+            "{detail:?}"
+        );
+        assert_eq!(detail.version.as_deref(), Some(mine_commit.as_str()));
+        let deep_text = crate::render::list_tty(&deep);
+        assert!(
+            deep_text.contains(
+                "  the team's version needs merging — you cannot publish until you pick one\n\
+                 \x20 to keep yours:  topos update -g notes --keep-mine\n\
+                 \x20 to take theirs: topos update -g notes --reset"
+            ),
+            "{deep_text}"
+        );
+
+        // `status` counts it as a DECISION, not as a draft that a command would apply for you.
+        let snapshot = with_ctx(&home, Some(cwd.as_path()), |ctx| {
+            crate::ops::status_snapshot(ctx, ScopeView::Here).expect("a status snapshot")
+        });
+        let attention = &snapshot.scopes[0].attention;
+        assert_eq!(attention.len(), 1, "{attention:?}");
+        assert_eq!(attention[0].kind, "waiting-on-you");
+        assert_eq!(attention[0].count, 1);
+        assert_eq!(attention[0].command, "topos list");
+        let status_text = crate::render::status_tty(&snapshot);
+        assert!(
+            status_text.contains("1 merge waiting on you"),
+            "{status_text}"
+        );
+    }
+
+    /// A MACHINE-scope draft keeps the `~/` spelling — the `project/` token means the checkout
+    /// you are standing in, and a machine copy is not in one.
+    #[test]
+    fn a_machine_draft_row_keeps_the_home_spelling() {
+        let home = TempHome::new();
+        let cwd = home.0.join("plain");
+        std::fs::create_dir_all(&cwd).unwrap();
+        home.session(
+            "topos.sh",
+            "w_acme",
+            "acme",
+            crate::sessions::SESSION_ACTIVE,
+        );
+        home.cache(
+            "w_acme",
+            "topos.sh",
+            "acme",
+            vec![assigned("notes", None)],
+            Vec::new(),
+        );
+        home.global("[bundles]\n\"topos.sh/acme\" = \"*\"\n");
+        let placed = home.0.join(".claude/skills/notes");
+        lay_copy(&placed, "# edited by hand\n");
+        home.store_applied(
+            &skill_id_of("notes"),
+            "notes",
+            &"d".repeat(64),
+            &[placed.to_string_lossy().as_ref()],
+        );
+
+        let out = run(&home, &cwd, &request()).unwrap();
+        let row = row_named(scope(&out, "machine"), "notes");
+        assert!(row.draft, "{row:?}");
+        assert_eq!(
+            row.draft_dir.as_deref(),
+            Some("~/.claude/skills/notes"),
+            "{row:?}"
+        );
     }
 
     /// `-g` inside a project: machine rows only — scope-blind like `update -g`.
@@ -1405,18 +1934,12 @@ mod tests {
             )
         };
         let detail = deep("deploy").unwrap().data.detail.expect("a detail");
-        assert!(
-            detail
-                .source_file
-                .as_deref()
-                .is_some_and(|f| f.ends_with("topos.toml"))
-        );
+        // The machine scope's spelling is `~/…` — the one the rest of this command family uses,
+        // never a raw absolute path beside a `~`-abbreviated sibling line.
+        assert_eq!(detail.source_file.as_deref(), Some("~/.topos/topos.toml"));
         assert_eq!(detail.source_key.as_deref(), Some("topos.sh/acme/deploy"));
         assert_eq!(detail.feed, None);
-        assert_eq!(
-            detail.placements,
-            vec![placed.to_string_lossy().into_owned()]
-        );
+        assert_eq!(detail.placements, vec!["~/placed-deploy".to_owned()]);
         assert!(matches!(detail.state, StatusItemState::Applied));
 
         let detail = deep("notes").unwrap().data.detail.expect("a detail");
@@ -1590,7 +2113,9 @@ mod tests {
                 panic!("the built-in rides the machine section: {:?}", machine.rows)
             });
         assert_eq!(topos.source.as_deref(), Some("built-in"));
-        assert_eq!(topos.status, Some(SkillStatus::Current));
+        // The source column is the whole row: it is force-synced to the binary, so there is no
+        // state to report and no comparison a status word could be measured against.
+        assert_eq!(topos.status, None);
         assert_eq!(topos.version_id, "a".repeat(64));
         // The unclaimed records mint NOTHING — no row, no rendered mention.
         for name in ["ghosty", "frozen"] {
@@ -1658,8 +2183,7 @@ mod tests {
             "acme",
             crate::sessions::SESSION_ACTIVE,
         );
-        // The built-in, placed: a clean placement (its recorded sha never matches real bytes, so
-        // an EXISTING dir would scan as a draft — leave it absent for the clean reading).
+        // The built-in, placed — the dir itself need not exist: the record IS the answer.
         let placed = home.0.join("placed-topos");
         home.store_applied(
             "topos",
@@ -1701,7 +2225,7 @@ mod tests {
         assert_eq!(detail.version.as_deref(), Some(&*"a".repeat(64)));
         assert_eq!(
             detail.placements,
-            vec![placed.to_string_lossy().into_owned()],
+            vec!["~/placed-topos".to_owned()],
             "the built-in answers with the placements its store map records"
         );
         // No row names it, so no file, no key, no feed — the record IS the answer.
@@ -2440,6 +2964,7 @@ mod tests {
                     harnesses: Vec::new(),
                     managed: true,
                     folders: Vec::new(),
+                    diverged: Vec::new(),
                 }),
                 footprint: footprint.clone(),
                 ..ListData::default()

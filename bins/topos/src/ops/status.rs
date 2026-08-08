@@ -128,6 +128,17 @@ fn attention(
 ) -> Vec<AttentionCount> {
     let flag = if machine && in_project { " -g" } else { "" };
     let mut out = Vec::new();
+    // A merge nobody has decided leads: every other count names something a command applies for
+    // you, this one names a choice only the person can make. `list` is where the two exits are
+    // spelled per bundle, so that is the command it ends in.
+    let waiting = sr.waiting_on_you();
+    if waiting > 0 {
+        out.push(AttentionCount {
+            kind: "waiting-on-you".to_owned(),
+            count: waiting,
+            command: format!("topos list{flag}"),
+        });
+    }
     let updates = sr.updates_pending();
     if updates > 0 {
         out.push(AttentionCount {
@@ -375,6 +386,80 @@ mod tests {
         assert_eq!(drafts.count, 1);
         assert_eq!(drafts.command, "topos list");
         assert!(of("assignments-not-applied").is_none(), "{a:?}");
+    }
+
+    /// A machine-wide draft is the MACHINE scope's business wherever the run stands: `-g` counts
+    /// it from inside a checkout, the here-scope counts it outside one, and the summary line the
+    /// project body rides carries the same number. `-g` narrows WHICH scope answers, never what
+    /// that scope is allowed to say about itself.
+    #[test]
+    fn a_machine_wide_draft_counts_under_g_from_inside_a_project() {
+        let home = TempHome::new();
+        let repo = home.0.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        std::fs::write(repo.join(crate::manifest::MANIFEST_FILE), "[bundles]\n").unwrap();
+        home.session(
+            "topos.sh",
+            "w_acme",
+            "acme",
+            crate::sessions::SESSION_ACTIVE,
+        );
+        home.cache(
+            "w_acme",
+            "topos.sh",
+            "acme",
+            vec![assigned("notes", None)],
+            Vec::new(),
+        );
+        home.global("[bundles]\n\"topos.sh/acme\" = \"*\"\n");
+        let placed = home.0.join("placed-notes");
+        std::fs::create_dir_all(&placed).unwrap();
+        std::fs::write(placed.join("SKILL.md"), b"# edited\n").unwrap();
+        home.store_applied(
+            "topos_nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn",
+            "notes",
+            &"d".repeat(64),
+            &[placed.to_string_lossy().as_ref()],
+        );
+
+        let drafts = |d: &StatusData, scope: &str| -> Option<AttentionCount> {
+            d.scopes
+                .iter()
+                .find(|s| s.scope == scope)
+                .and_then(|s| s.attention.iter().find(|c| c.kind == "drafts-ahead"))
+                .cloned()
+        };
+
+        // `-g` from inside the checkout: the machine body alone, and it says so.
+        let g = snapshot(&home, &repo, ScopeView::Machine);
+        let count = drafts(&g, "machine").expect("the machine draft counts under -g");
+        assert_eq!(count.count, 1);
+        assert_eq!(count.command, "topos list -g");
+
+        // The project body says nothing about it — and the machine summary it rides says the same
+        // number the `-g` body did.
+        let here = snapshot(&home, &repo, ScopeView::Here);
+        assert!(drafts(&here, "project").is_none(), "{:?}", here.scopes);
+        let summary = here
+            .machine_summary
+            .expect("a machine summary in a project");
+        assert!(
+            summary
+                .attention
+                .iter()
+                .any(|c| c.kind == "drafts-ahead" && c.count == 1),
+            "{:?}",
+            summary.attention
+        );
+
+        // Outside any checkout the machine IS the here-scope, and the count keeps the plain
+        // spelling that acts on it.
+        let plain = home.0.join("plain");
+        std::fs::create_dir_all(&plain).unwrap();
+        let out = snapshot(&home, &plain, ScopeView::Machine);
+        let count = drafts(&out, "machine").expect("the machine draft counts outside a project");
+        assert_eq!(count.count, 1);
+        assert_eq!(count.command, "topos list");
     }
 
     /// Every file under `dir`, as `relative path → bytes` — the byte-identity oracle.

@@ -236,11 +236,13 @@ topos update [OPTIONS] [TARGETS]...
 | `[TARGETS]...` | The skill(s) to update; `<skill>@<version>` restores that version's bytes locally. Omitted, everything in this scope is updated |
 | `-g, --global` | Update only your machine-wide skills (`~/.topos/topos.toml` and your workspace feeds), even when run inside a project |
 | `--reset` | Discard your local edits to a skill and take the team version. Shows what would be lost first; `--yes` applies |
+| `-a, --agent <SLUG>` | With `--reset`: drop only this agent's copy of the edits (a slug like `codex`); every other copy keeps its own |
+| `--dest <FOLDER>` | With `--reset`: drop only the edits in this exact folder — the folder as `topos list` prints it, or the one the `topos.toml` line names |
 | `--yes` | Confirm an action that shows a preview first (like `--reset`) |
-| `--onto-current` | Resolve a conflicted skill by keeping your bytes exactly as they are, skipping the merge with the team's changes (what the merge would have brought is shown first). Takes exactly one skill |
+| `--keep-mine` | Finish a merge that stopped because you and your team changed the same lines. Topos writes one copy of the skill into a folder under `.topos/conflicts/` and prints the path; files you both changed hold both versions, wrapped in `<<<<<<<` markers. Edit that copy and run this to use it — or run it without touching the folder to keep your wording on those lines and take the team's other changes. Either way you get an ordinary draft on top of the team's version, which `topos publish` ships like any other. Only for a merge that has actually stopped — with nothing waiting, `topos update <skill>` is the command. Takes exactly one skill |
 | `--quiet` | Print nothing on stdout — the mode the session-start hook uses. The hook sweep always covers both scopes (this folder's and your machine-wide set), so `-g` has no effect here. Errors still go to stderr with a non-zero exit |
 | `--ttl <SECONDS>` | With `--quiet`: skip the run entirely when one already completed within this many seconds, so hooks can fire often at no cost. `0` disables the throttle. Default 300; `TOPOS_UPDATE_TTL` changes the default |
-| `--rebuild` | Rebuild every managed skill folder from topos's own store: your unshared edits are saved first, then each folder is re-created fresh. Fixes a folder someone deleted or broke by hand |
+| `--force` | Re-create managed skill folders that exist but are damaged — topos normally protects a changed folder as your own edit. Deleted folders come back on an ordinary `topos update` |
 
 
 ### `topos list`
@@ -268,7 +270,7 @@ topos list [OPTIONS] [NAME]
 
 ### `topos diff`
 
-Show what changed in a skill. Bare: your local edits against the team version. With a version id: that version against the team's. `<a>..<b>` compares two versions
+Show what changed in a skill. Bare: your local edits against the team version. With a version id: that version against the team's. `<a>..<b>` compares two versions. When the skill sits in more than one folder, `--dest <folder>` (or `-a <agent>`) reads the edits in that one — still against the team version, so two such runs compare like for like
 
 ```
 topos diff [OPTIONS] <SKILL> [REF]
@@ -278,6 +280,8 @@ topos diff [OPTIONS] <SKILL> [REF]
 |---|---|
 | `<SKILL>` | The skill name |
 | `[REF]` | What to compare: a version id, or `<a>..<b>`. Omitted: your edits vs the team version |
+| `-a, --agent <SLUG>` | Read this agent's copy of the skill (a slug like `codex`) |
+| `--dest <FOLDER>` | Read the copy in this exact folder — the folder as `topos list` prints it, or the one the `topos.toml` line names |
 | `--max-bytes <BYTES>` | Cap the diff at this many bytes, cut at file boundaries (`0` = no cap). Default: unlimited on a terminal, 64 KiB under `--json` |
 
 
@@ -301,7 +305,7 @@ These reach your workspace, so each one previews first or confirms via its flag.
 
 ### `topos publish`
 
-Share a skill with your team. A bare run is a preview — it shows where the skill would land and who would receive it, and changes nothing; add `--yes` to apply. Publishing again ships a new version; on a skill that requires review, a publish opens a proposal instead. Needs a login
+Share a skill with your team. A bare run is a preview — it shows where the skill would land and who would receive it, and changes nothing; add `--yes` to apply. Publishing again ships a new version; on a skill that requires review, a publish opens a proposal instead. Needs a login. When you have edited the same skill in more than one folder, a bare publish stops and asks which one you mean; `--dest <folder>` (or `-a <agent>`) answers it. The copy you do not pick keeps its edits and becomes an ordinary draft
 
 ```
 topos publish [OPTIONS] <TARGET>
@@ -310,6 +314,8 @@ topos publish [OPTIONS] <TARGET>
 | Argument / flag | What it does |
 |---|---|
 | `<TARGET>` | The skill to publish: a name, a folder, or `<name>@<version>` to pin the exact bytes |
+| `-a, --agent <SLUG>` | Publish this agent's copy of the skill (a slug like `codex`) |
+| `--dest <FOLDER>` | Publish the copy in this exact folder — the folder as `topos list` prints it, or the one the `topos.toml` line names |
 | `--to <CHANNEL>` | Place the skill in this channel. It must already exist — channels are created in the browser. A brand-new skill with no `--to` lands in `everyone` |
 | `--propose` | Ask for review instead of shipping directly — opens a proposal |
 | `-m, --message <MSG>` | A short message saying what changed and why — it becomes the version's history line |

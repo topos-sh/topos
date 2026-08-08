@@ -176,13 +176,14 @@ topos update
 topos update -g
 topos update code-review
 topos update code-review@<version>
-topos update --rebuild
+topos update --force
 ```
 
 Everything the scope you are standing in asks for — this folder's `topos.toml` when one covers it,
 your machine-wide set otherwise; then the machine-wide set explicitly; one skill inside that scope;
 that version's bytes put back on this machine only; or every managed folder re-created from topos's
-own store. Each receipt names the scope it acted on.
+own store, for the rare folder that is still there but damaged. Each receipt names the scope it
+acted on.
 
 New files are verified against the workspace's records before anything lands, and **your local
 edits are never overwritten** — updates merge around them, and a genuine conflict is frozen with a

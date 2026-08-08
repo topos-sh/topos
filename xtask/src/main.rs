@@ -418,15 +418,15 @@ fn gen_schema(check: bool) -> Result<()> {
 /// Golden `--json` fixtures — representative envelopes built FROM the typed shapes (so they cannot
 /// drift from the contract) and committed as the agent-facing examples + the positive L1 oracle.
 fn fixtures() -> Vec<(&'static str, String)> {
-    use topos_types::persisted::ConflictPathKind;
+    use topos_types::persisted::{ConflictPathKind, ConflictReason};
     use topos_types::requests::{WireDelivery, WireDeliverySkill, WireNotice, WireVia};
     use topos_types::results::{
-        AddData, Conflict, ConflictPathReport, DiffData, DiffPatchInfo, DiffSource,
-        EnrollmentPending, InviteReadData, ListData, LogData, LoginData, LogoutData, MergePreview,
-        MergePreviewVerdict, MergeReport, ProtectData, PublishData, PublishDescribeData,
-        PublishGate, PublishedMatch, PullAction, PullData, PullSkill, RemoveData, RemoveItem,
-        RemoveKind, ReviewIndexData, ReviewIndexEntry, SkillEntry, SkillStatus, StatusData,
-        StatusScope, StatusScopeSummary, StatusTrigger, WorkspaceSyncReport,
+        AddData, ConflictPathReport, DiffData, DiffPatchInfo, DiffSource, EnrollmentPending,
+        InviteReadData, ListData, LogData, LoginData, LogoutData, MergeReport, ProtectData,
+        PublishData, PublishDescribeData, PublishGate, PublishedMatch, PullAction, PullData,
+        PullSkill, RemoveData, RemoveItem, RemoveKind, ReviewIndexData, ReviewIndexEntry,
+        SkillEntry, SkillStatus, StatusData, StatusScope, StatusScopeSummary, StatusTrigger,
+        WorkspaceSyncReport,
     };
     use topos_types::results::{AttentionCount, ListScope, McpServerSummary};
     use topos_types::{ActionCode, Affected, JsonEnvelope, Receipt, TerminalOutcome, WireError};
@@ -713,16 +713,14 @@ fn fixtures() -> Vec<(&'static str, String)> {
             scope: None,
             notices: Vec::new(),
             sync: Vec::new(),
+            behind_elsewhere: Vec::new(),
             skills: vec![PullSkill {
                 skill: "pr-describe".to_owned(),
                 workspace_id: Some("w_acme".to_owned()),
                 observed: 42,
                 applied: 42,
                 action: PullAction::UpToDate,
-                offer: None,
-                conflict: None,
                 merge: None,
-                merge_preview: None,
                 synced_placements: None,
                 destinations: Vec::new(),
                 kept: Vec::new(),
@@ -751,14 +749,13 @@ fn fixtures() -> Vec<(&'static str, String)> {
             scope: None,
             notices: Vec::new(),
             sync: Vec::new(),
+            behind_elsewhere: Vec::new(),
             skills: vec![PullSkill {
                 skill: "pr-describe".to_owned(),
                 workspace_id: Some("w_acme".to_owned()),
                 observed: 7,
                 applied: 7,
                 action: PullAction::Merged,
-                offer: None,
-                conflict: None,
                 merge: Some(MergeReport {
                     base_version_id: fx_version.to_owned(),
                     theirs_version_id: fx_digest.to_owned(),
@@ -767,8 +764,14 @@ fn fixtures() -> Vec<(&'static str, String)> {
                     clean: true,
                     conflicts: vec![],
                     drop_diff: None,
+                    reason: None,
+                    // A merge that ran to completion on its own was never stopped, so no exit
+                    // finished it.
+                    resolved: None,
+                    took: vec![],
+                    placements: vec![],
+                    copy_dir: None,
                 }),
-                merge_preview: None,
                 synced_placements: None,
                 destinations: Vec::new(),
                 kept: Vec::new(),
@@ -787,7 +790,8 @@ fn fixtures() -> Vec<(&'static str, String)> {
         error: None,
     };
 
-    // A `pull` whose merge conflicted → a complete conflict tree on disk + publish blocked until resolved.
+    // A `pull` whose merge conflicted → every agent folder still holding the author's own version,
+    // the complete conflict tree in the scope's own workbench, publish blocked until resolved.
     let pull_conflicted = JsonEnvelope {
         schema_version: 1,
         command: "pull".to_owned(),
@@ -796,14 +800,13 @@ fn fixtures() -> Vec<(&'static str, String)> {
             scope: None,
             notices: Vec::new(),
             sync: Vec::new(),
+            behind_elsewhere: Vec::new(),
             skills: vec![PullSkill {
                 skill: "pr-describe".to_owned(),
                 workspace_id: Some("w_acme".to_owned()),
                 observed: 7,
                 applied: 7,
                 action: PullAction::Conflicted,
-                offer: None,
-                conflict: None,
                 merge: Some(MergeReport {
                     base_version_id: fx_version.to_owned(),
                     theirs_version_id: fx_digest.to_owned(),
@@ -815,8 +818,16 @@ fn fixtures() -> Vec<(&'static str, String)> {
                         kind: ConflictPathKind::Content,
                     }],
                     drop_diff: None,
+                    // WHY it stopped — which decides what the workbench below holds.
+                    reason: Some(ConflictReason::ThreeWay),
+                    // A block is finished by neither exit, so it takes nothing.
+                    resolved: None,
+                    took: vec![],
+                    // The folder that still holds the author's own version (a conflict writes to
+                    // none), and the workbench the marked-up copy of both versions went to.
+                    placements: vec!["~/.claude/skills/pr-describe".to_owned()],
+                    copy_dir: Some("~/.topos/conflicts/pr-describe".to_owned()),
                 }),
-                merge_preview: None,
                 synced_placements: None,
                 destinations: Vec::new(),
                 kept: Vec::new(),
@@ -859,6 +870,9 @@ fn fixtures() -> Vec<(&'static str, String)> {
                     status: Some(SkillStatus::Current),
                     kind: None,
                     source_health: None,
+                    // A clean row names no draft folder — both fields omit from the envelope.
+                    draft_dir: None,
+                    draft_diverged: None,
                 }],
             }],
             signed_in: true,
@@ -883,6 +897,9 @@ fn fixtures() -> Vec<(&'static str, String)> {
             diff: "--- a/SKILL.md\n+++ b/SKILL.md\n@@ -4,4 +4,4 @@\n \n # PR describe\n \n-Write a clear PR description.\n+Write a GREAT PR description.\n".to_owned(),
             truncated: false,
             files: Vec::new(),
+            // One placement — nothing to disambiguate, so the copy is not named.
+            dest: None,
+            skill: None,
         })
         .expect("DiffData serializes"),
         warnings: vec![],
@@ -1226,6 +1243,8 @@ fn fixtures() -> Vec<(&'static str, String)> {
 
     // `publish <skill>` (bare, enrolled) — the DESCRIBE: where it lands, the gate outcome (an `open`
     // bundle lands directly), the audience, the share line, and the undo path. Nothing shipped yet.
+    // The TTY prints only the destination + the gate; the rest of these fields are the envelope's
+    // (an agent reads them, a person reads them on the receipt).
     let publish_describe = JsonEnvelope {
         schema_version: 1,
         command: "publish".to_owned(),
@@ -1235,8 +1254,12 @@ fn fixtures() -> Vec<(&'static str, String)> {
             skill_id: "s_deploy".to_owned(),
             workspace_id: "w_acme".to_owned(),
             workspace_display_name: Some("Acme".to_owned()),
+            workspace_address: Some("topos.sh/acme".to_owned()),
             bundle_digest: "b".repeat(64),
             placements: vec!["everyone".to_owned()],
+            // ONE edited copy — nothing was chosen between, so no folder is named.
+            from_placement: None,
+            other_edited: Vec::new(),
             gate: PublishGate::Lands,
             is_revert: false,
             reach: Some(12),
@@ -1246,7 +1269,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
                  it. Our workspace: https://topos.sh/acme\""
                     .to_owned(),
             ),
-            undo: Some("a".repeat(64)),
+            undo: Some(format!("topos revert deploy --to {}", "a".repeat(64))),
             origin_note: None,
             placement_note: None,
             // An up-to-date copy predicts nothing — the additive preview omits (absent = unknown).
@@ -1268,9 +1291,10 @@ fn fixtures() -> Vec<(&'static str, String)> {
     };
 
     // `publish <skill> --yes` LANDED — the public SUCCESS envelope: the moved pointer's facts plus
-    // the teammate handoff line (`invite_line`) the landed receipt carries via the best-effort
-    // post-publish `me` read (the additive field omits when that read fails or the address does
-    // not validate — the publish itself is unaffected).
+    // the address-derived lines (`workspace_address` / `share_line` / `invite_line`) the landed
+    // receipt carries via the best-effort post-publish `me` read (each omits when that read fails
+    // or the address does not validate — the publish itself is unaffected), and the `undo` that
+    // puts the team back on the version `current` held before this one.
     let publish_ok = JsonEnvelope {
         schema_version: 1,
         command: "publish".to_owned(),
@@ -1297,6 +1321,12 @@ fn fixtures() -> Vec<(&'static str, String)> {
             rewrite_skipped: None,
             // The ordinary skill publish: the additive kind tag omits (absent = a skill).
             kind: None,
+            workspace_address: Some("topos.sh/acme".to_owned()),
+            share_line: Some("https://topos.sh/acme/skills/deploy".to_owned()),
+            undo: Some("topos revert deploy --to aaaaaaaaaaaa".to_owned()),
+            // ONE edited copy — the receipt names no folder and leaves none behind.
+            from_placement: None,
+            other_edited: Vec::new(),
         })
         .expect("PublishData serializes"),
         warnings: vec![],
@@ -1345,10 +1375,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
                 observed: 12,
                 applied: 12,
                 action: PullAction::UpToDate,
-                offer: None,
-                conflict: None,
                 merge: None,
-                merge_preview: None,
                 synced_placements: None,
                 destinations: Vec::new(),
                 kept: Vec::new(),
@@ -1377,51 +1404,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
                 last_report_at: Some(1_699_000_000_000),
                 staleness_window_ms: 604_800_000,
             }],
-        })
-        .expect("PullData serializes"),
-        warnings: vec![],
-        next_actions: vec![],
-        receipt: None,
-        error: None,
-    };
-
-    // A bare `update` sweep that SURFACED a divergence (a confirm-each follower): the row carries the
-    // conflict panel AND the additive in-memory merge PREVIEW — the predicted verdict + conflicting
-    // paths, computed from already-local bytes (never a network read; absent = unknown).
-    let update_diverged = JsonEnvelope {
-        schema_version: 1,
-        command: "update".to_owned(),
-        ok: true,
-        data: serde_json::to_value(PullData {
-            scope: None,
-            skills: vec![PullSkill {
-                skill: "deploy".to_owned(),
-                workspace_id: Some("w_acme".to_owned()),
-                observed: 13,
-                applied: 12,
-                action: PullAction::Diverged,
-                offer: None,
-                conflict: Some(Conflict {
-                    remote_version_id: "c".repeat(64),
-                    local_version_id: Some("d".repeat(64)),
-                }),
-                merge: None,
-                merge_preview: Some(MergePreview {
-                    verdict: MergePreviewVerdict::Conflicted,
-                    conflicts: vec!["SKILL.md".to_owned()],
-                }),
-                synced_placements: None,
-                destinations: Vec::new(),
-                kept: Vec::new(),
-                display: None,
-                note: None,
-                scope: Some("person".to_owned()),
-                harnesses: Vec::new(),
-                kind: None,
-            }],
-            proposals_awaiting: 0,
-            notices: Vec::new(),
-            sync: Vec::new(),
+            behind_elsewhere: vec![],
         })
         .expect("PullData serializes"),
         warnings: vec![],
@@ -1455,6 +1438,8 @@ fn fixtures() -> Vec<(&'static str, String)> {
                     patch_bytes: 98_304,
                 },
             ],
+            dest: None,
+            skill: None,
         })
         .expect("DiffData serializes"),
         warnings: vec![],
@@ -1725,6 +1710,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
             proposals_awaiting: 0,
             notices: vec![],
             sync: vec![],
+            behind_elsewhere: vec![],
         })
         .expect("PullData serializes"),
         warnings: vec![],
@@ -1774,7 +1760,6 @@ fn fixtures() -> Vec<(&'static str, String)> {
         ("json/publish.ok", emit_json(&publish_ok)),
         ("json/publish.no-changes", emit_json(&publish_no_changes)),
         ("json/update.stale", emit_json(&update_stale)),
-        ("json/update.diverged", emit_json(&update_diverged)),
         ("json/diff.truncated", emit_json(&diff_truncated)),
         ("json/log.paged", emit_json(&log_paged)),
     ]
