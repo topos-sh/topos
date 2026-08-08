@@ -106,9 +106,14 @@ yours. Either way out deletes the folder.
 
 Keeping your version is exactly what it sounds like, and no more than that: your wording wins the
 lines the two of you both rewrote, and everything else they changed comes in — a file only they
-touched, a paragraph nowhere near yours, a file they added. The receipt names the files that came
-along. It is the same thing you would get by pulling their change, editing the contested lines back
-to your wording, and committing.
+touched, a paragraph nowhere near yours, a file they added. The receipt names the files the rest
+came in on, the contested one included: your wording won those lines, and their other changes to
+that same file still landed. It is the same thing you would get by pulling their change, editing the
+contested lines back to your wording, and committing.
+
+Committing a merge you made by hand is the other half, and the receipt says so plainly — it landed
+what you left in the folder, exactly as you left it. Nothing there is topos's choice, so it claims
+nothing about whose wording won.
 
 From there it is a normal draft: `topos diff` shows it, `topos update` keeps merging their later
 changes into it, and `topos publish` ships it like any other change.

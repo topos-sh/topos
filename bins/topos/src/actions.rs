@@ -163,11 +163,17 @@ fn safety(code: &ActionCode, argv: &[String], subject: Subject) -> Safety {
             Some(true),
             Some("logs this machine in (browser approval; a session credential is stored)"),
         ),
-        // A refusal's prose-named fix, mirrored verbatim (`render::mirror_prose_commands`). The
-        // argv is the whole story; only the read-only verbs are classifiable from it.
+        // A prose-named command, mirrored verbatim — a refusal's fix
+        // (`render::mirror_prose_commands`) or a receipt's next step
+        // (`render::resolution_next_actions`). The argv is the whole story.
         "RUN_COMMAND" => match verb(argv) {
             Some("list") | Some("log") | Some("diff") | Some("status") => {
                 Safety::new(Some(false), None, None)
+            }
+            // A `publish` with no `--yes` is the DESCRIBE half of the two-phase ship: it dials the
+            // plane for what publishing would reach and prints it; `--yes` is what mutates.
+            Some("publish") if !has_flag(argv, "--yes") => {
+                Safety::new(Some(false), Some(true), None)
             }
             _ => Safety::new(None, None, None),
         },
@@ -424,9 +430,20 @@ mod tests {
             argv(&["topos", "diff", "deploy", "--json"]),
         );
         assert_eq!(read.mutates, Some(false));
-        let write = next_action(
+        // A bare publish is the DESCRIBE half of the two-phase ship — it dials for what the
+        // publish would reach and prints it. With `--yes` it is the ship itself, and the argv
+        // alone no longer says what that costs.
+        let describe = next_action(
             ActionCode::from("RUN_COMMAND".to_owned()),
             argv(&["topos", "publish", "deploy", "--json"]),
+        );
+        assert_eq!(
+            (describe.mutates, describe.needs_network),
+            (Some(false), Some(true))
+        );
+        let write = next_action(
+            ActionCode::from("RUN_COMMAND".to_owned()),
+            argv(&["topos", "publish", "deploy", "--yes", "--json"]),
         );
         assert_eq!((write.mutates, write.needs_network), (None, None));
     }

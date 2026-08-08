@@ -21,9 +21,12 @@
 //! **And the second property: `--keep-mine` is `git merge -X ours`, not `-s ours`.** The author's v2
 //! changes the line this person also changed AND a line nobody contested AND adds a whole new file.
 //! Keeping your version keeps YOUR wording on the contested line and takes the other two — through
-//! the exit, through an ordinary `--yes` publish, and all the way into what a fresh teammate
-//! receives on their first sweep. That last hop is the one that matters: it is the difference
-//! between "my folder looks right" and "the team did not lose anything".
+//! the exit, through an ordinary `--yes` publish, and back out to the AUTHOR, whose next ordinary
+//! update fast-forwards their own install onto the resolution. That last hop is the one that
+//! matters: it is the difference between "my folder looks right" and "the team did not lose
+//! anything". It is the author's install and not a fresh teammate's first sweep — their folder
+//! already held the file they added — so what the hop proves is that the PUBLISHED tree still
+//! carries both, since a fast-forward rewrites the whole folder from it.
 //!
 //! A last arm covers the OTHER refusal this touches: a copy deliberately put behind (a go-back)
 //! cannot publish directly — the plane's lineage fence would refuse the candidate anyway — but its
@@ -559,6 +562,13 @@ fn a_merge_conflict_never_reaches_a_folder_an_agent_reads() {
             dir.display()
         );
     }
+    // The receipt names WHICH exit finished it — the two say different things about whose wording
+    // landed, and a reader (or an agent) must not have to infer that from a diff both of them carry.
+    assert_eq!(
+        row(&kept_receipt, KEEP)["merge"]["resolved"],
+        "keep_mine",
+        "{kept_receipt}"
+    );
     // The receipt NAMES what came along, so the fact is readable rather than inferred.
     let took: Vec<&str> = row(&kept_receipt, KEEP)["merge"]["took"]
         .as_array()
@@ -605,7 +615,10 @@ fn a_merge_conflict_never_reaches_a_folder_an_agent_reads() {
     // THE ROUND TRIP: what the TEAM receives. The author's own copy is now behind, and their next
     // ordinary update fast-forwards onto this person's resolution — carrying the author's OWN
     // uncontested line and their OWN new file back to them, which is precisely what `-s ours` threw
-    // away. A folder looking right locally proves nothing; this does.
+    // away. A folder looking right locally proves nothing; this does. (This is the AUTHOR's install,
+    // not a fresh teammate's first one: their folder already held the new file. The fast-forward
+    // rewrites that folder wholesale from the published tree, so what it reads afterwards is what
+    // the published tree carries.)
     let (authors_sweep, _) = author
         .update(&[KEEP], Some(&authored))
         .unwrap_or_else(|e| panic!("the author's sweep after the receiver published: {e}"));
@@ -626,7 +639,7 @@ fn a_merge_conflict_never_reaches_a_folder_an_agent_reads() {
             .ok()
             .as_deref(),
         Some(NEW_FILE_BODY),
-        "and the file they added survived the whole round trip"
+        "and the file they added is still in the published tree the fast-forward rewrote from"
     );
 
     // ── ASSERTION 6: an EDITED workbench is committed as the hand resolution ────────────────────
@@ -636,6 +649,18 @@ fn a_merge_conflict_never_reaches_a_folder_an_agent_reads() {
         .run(&["update", "-g", HAND, "--keep-mine", "--json"])
         .data("--keep-mine over an edited workbench");
     assert_eq!(row(&resolved, HAND)["action"], "merged", "{resolved}");
+    // This person took the TEAM's contested line and added a step of their own — the tree a
+    // "kept your wording" headline would misdescribe. The row says which exit ran, and claims no
+    // file as taken from the team: topos never examined a byte of this.
+    assert_eq!(
+        row(&resolved, HAND)["merge"]["resolved"],
+        "by_hand",
+        "{resolved}"
+    );
+    assert!(
+        row(&resolved, HAND)["merge"]["took"].is_null(),
+        "{resolved}"
+    );
     for dir in &record(&placed, HAND).placements {
         assert_eq!(
             placed_text(dir),

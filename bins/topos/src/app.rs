@@ -1837,6 +1837,9 @@ fn finish_pull(
                         ],
                     ));
                 }
+                // A merge that a `--keep-mine` just FINISHED carries the one command left to run on
+                // it: the ordinary publish. It replaces a state an agent could not ship at all.
+                next_actions.extend(render::resolution_next_actions(&out.data));
                 // A bundle waiting on a decision carries its ways out as runnable argv — the same
                 // structured channel every other "what do I do now" answer uses, so an agent acts
                 // on the choice instead of parsing a sentence about it.

@@ -199,6 +199,9 @@ pub(crate) fn resolve_diverged(
                 result_commit,
                 &merged_digest_hex,
                 None,
+                // A merge that ran to completion on its own was never STOPPED, so no exit finished
+                // it and there is nothing to attribute.
+                None,
                 Vec::new(),
             ))
         }
@@ -277,10 +280,12 @@ pub(crate) fn resolve_diverged(
 /// the working bytes read as an ordinary DRAFT on top of `current`. Nothing is rebased, nothing is
 /// rewritten, and the version has exactly one parent — the history stays a list.
 ///
-/// ## What it CONTAINS is the merge, resolved your way where you collided
+/// ## What it CONTAINS is whichever of the two the caller chose
 ///
-/// The caller assembles `committed` (see [`escape_recorded`]); `took` is what that tree brought over
-/// from the team, so the receipt can name it. Publishing afterwards is an ordinary publish: the
+/// [`escape_recorded`] assembles `resolution` and says which of the two paths produced it, because
+/// the receipt cannot speak for both at once: one settled the contested lines on this person's side
+/// and took the rest of the team's work (`took` names those files); the other is the tree the person
+/// wrote by hand, committed unexamined. Publishing afterwards is an ordinary publish either way: the
 /// commit's parent IS the version `current` names, so the plane's lineage fence is satisfied, and
 /// nothing here gates the ship — git gates none either.
 ///
@@ -294,13 +299,13 @@ fn escape(
     sync: &SyncState,
     lock: &Lock,
     map: &PlacementMap,
-    committed: &RenderedBundle,
-    took: Vec<String>,
+    resolution: &Resolution,
     base_commit: [u8; 32],
     theirs: &RenderedBundle,
     theirs_commit: [u8; 32],
 ) -> Result<PullSkill, ClientError> {
     let store = Store::open(&sp.store)?;
+    let committed = &resolution.tree;
     let merged_digest_hex = to_hex(&committed.bundle_digest);
     let result_commit = commit_result(ctx, &store, theirs_commit, committed, MERGE_ESCAPE_MESSAGE)?;
     let drop = drop_diff(theirs, committed);
@@ -328,8 +333,20 @@ fn escape(
         result_commit,
         &merged_digest_hex,
         Some(drop),
-        took,
+        Some(resolution.how),
+        resolution.took.clone(),
     ))
+}
+
+/// The tree a `--keep-mine` is about to commit, and the two facts the receipt needs about it: WHICH
+/// of the two exits produced it, and — for the `-X ours` one alone — the files that came over from
+/// the team. A hand resolution carries an empty `took` by construction: those files are the
+/// person's own reconciliation, and naming any of them as "taken from the team" would be a claim
+/// about a tree topos never examined.
+struct Resolution {
+    how: topos_types::results::MergeResolution,
+    tree: RenderedBundle,
+    took: Vec<String>,
 }
 
 /// The tree a `--keep-mine` over an UNTOUCHED workbench commits: the ordinary three-way merge,
@@ -368,12 +385,15 @@ fn keep_mine_tree(
     build_bundle(assembled.files)
 }
 
-/// What a resolution TOOK from the team: every path whose committed content or mode differs from
-/// the author's own draft, including the ones the team's version deleted.
+/// What the `-X ours` resolution TOOK from the team: every path whose committed content or mode
+/// differs from the author's own draft, including the ones the team's version deleted. It is the
+/// diffstat `git merge` prints against the side you were standing on, so a file that ALSO carried a
+/// collision belongs in it — your wording won those lines, and the team's other changes to that
+/// same file still landed. The receipt is what has to make those two facts read as two facts.
 ///
-/// Computed from the two trees rather than from the plan, so it is true of whatever was actually
-/// committed — the `-X ours` merge, or a tree the author hand-wrote in the workbench (which starts
-/// from the merged tree, so their non-conflicting changes are in it too).
+/// Computed from the two trees rather than from the plan, so it is true of what was actually
+/// committed. Only the `-X ours` path calls it: a hand resolution is the person's own tree, and no
+/// part of it is topos's to attribute to the team.
 fn took_from_theirs(mine: &RenderedBundle, committed: &RenderedBundle) -> Vec<String> {
     let before: BTreeMap<&str, (FileMode, [u8; 32])> = mine
         .files
@@ -539,26 +559,41 @@ pub(crate) fn escape_recorded(
     let store = Store::open(&sp.store)?;
     let theirs_commit = super::parse_hex32(&cs.current_commit)?;
     let theirs = store.render_verified(theirs_commit, super::parse_hex32(&cs.current_digest)?)?;
-    // The author's own draft as it stood when the merge stopped — the tree the resolution is
-    // measured against, and the fallback when there is no fork point to merge from.
-    let draft = store.render_verified(
-        super::parse_hex32(&cs.draft_commit)?,
-        super::parse_hex32(&cs.draft_digest)?,
-    )?;
     // The conflict's own fork point. It is the ONE thing a no-base record cannot supply, and
     // without it there is no merge to run at all — the author's tree is the whole answer there.
     let base_commit = super::parse_hex32(&cs.base_commit)?;
-    let base = store
-        .render_verified(base_commit, super::parse_hex32(&cs.base_digest)?)
-        .ok();
-    let committed = match read_hand_resolution(ctx, lock, cs)? {
-        Some(bundle) => bundle,
-        None => match &base {
-            Some(base) => keep_mine_tree(base, &draft, &theirs)?,
-            None => draft.clone(),
+    let resolution = match read_hand_resolution(ctx, lock, cs)? {
+        // The person's own tree. It needs NEITHER the stored draft nor the fork point, and it must
+        // not be made to depend on them: an exit that always works cannot start by re-rendering
+        // objects a hand resolution has no use for, or a corrupt one would deadlock the very state
+        // this path exists to open.
+        Some(tree) => Resolution {
+            how: topos_types::results::MergeResolution::ByHand,
+            tree,
+            took: Vec::new(),
         },
+        None => {
+            // The author's own draft as it stood when the merge stopped — the tree the `-X ours`
+            // resolution is measured against, and the whole answer when there is no fork point.
+            let draft = store.render_verified(
+                super::parse_hex32(&cs.draft_commit)?,
+                super::parse_hex32(&cs.draft_digest)?,
+            )?;
+            let tree = match store
+                .render_verified(base_commit, super::parse_hex32(&cs.base_digest)?)
+                .ok()
+            {
+                Some(base) => keep_mine_tree(&base, &draft, &theirs)?,
+                None => draft.clone(),
+            };
+            let took = took_from_theirs(&draft, &tree);
+            Resolution {
+                how: topos_types::results::MergeResolution::KeepMine,
+                tree,
+                took,
+            }
+        }
     };
-    let took = took_from_theirs(&draft, &committed);
     // Read the copies BEFORE the escape converges them, so the row can say what it is about to
     // overwrite (see [`collapsed_copies`]).
     let collapsed = collapsed_copies(ctx, sp, lock, map);
@@ -569,8 +604,7 @@ pub(crate) fn escape_recorded(
         sync,
         lock,
         map,
-        &committed,
-        took,
+        &resolution,
         base_commit,
         &theirs,
         theirs_commit,
@@ -1654,6 +1688,7 @@ fn merged_row(
     result: [u8; 32],
     result_digest_hex: &str,
     drop_diff: Option<String>,
+    resolved: Option<topos_types::results::MergeResolution>,
     took: Vec<String>,
 ) -> PullSkill {
     PullSkill {
@@ -1673,6 +1708,7 @@ fn merged_row(
             drop_diff,
             // A merge that RESOLVED is not a stopped one, so it names no reason.
             reason: None,
+            resolved,
             took,
             // A clean merge REWRITES its placements, so it has neither an untouched-folder set nor
             // a marked-up copy to name.
@@ -1751,7 +1787,8 @@ fn conflicted_row(
             // WHY it stopped — which decides what the workbench holds, and therefore what the row
             // sends a person there to do.
             reason: Some(reason),
-            // A block resolves nothing, so it takes nothing.
+            // A block resolves nothing, so it is finished by neither exit and it takes nothing.
+            resolved: None,
             took: Vec::new(),
             placements,
             copy_dir,

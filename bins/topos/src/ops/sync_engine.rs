@@ -52,39 +52,89 @@ pub(crate) const APPLIED_BEHIND_CURRENT: u64 = 0;
 /// A capability token proving the author-merge code was reached from a divergence. Its field is private to
 /// this module, so NO other module can mint one; [`super::merge_resolve::resolve_diverged`] takes it by
 /// value, so the merge is unreachable from a current/behind/clean-follower state **by construction** — a
-/// structural gate, not a role check. It is minted at exactly two guarded sites in [`sync_one`]: the
-/// post-fetch `Diverged` arm (entered only when `work != base`), and the entry escape of an already-recorded
+/// structural gate, not a role check. It is minted at exactly two guarded sites: [`sync_one`]'s
+/// post-fetch `Diverged` arm (entered only when `work != base`), and [`escape_one`]'s already-recorded
 /// conflict (a `conflict.json` exists only for an author who diverged). A clean follower hits neither.
 pub(crate) struct DivergedWitness(());
 
-/// What a per-skill `sync_one` invocation is — the bare sweep, an explicit accept, or the disclosed escape.
-/// Replaces the old `explicit: bool`: the escape is also "explicit", but it resolves a divergence by
-/// committing the author's bytes on `current` rather than accepting a pending update.
+/// What a per-skill `sync_one` invocation is — the bare sweep or an explicit accept.
+/// Replaces the old `explicit: bool`. The `--keep-mine` escape is NOT a member: it never syncs
+/// anything, so it has its own entry ([`escape_one`]) rather than a mode this function must
+/// remember to refuse.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Invocation {
     /// The bare session-start sweep (`topos pull`).
     Sweep,
     /// A targeted accept / resume (`topos pull <skill>`).
     Accept,
-    /// The disclosed escape (`topos pull <skill> --keep-mine`): FINISH a stopped merge by committing
-    /// the author's chosen tree on top of `current`. It resolves a RECORDED conflict and nothing
-    /// else — every other state has no stopped merge to finish, and the engine refuses toward the
-    /// merge rather than answering with a different act.
-    Escape,
 }
 
 impl Invocation {
-    /// Whether the user's command itself supplies consent (a targeted accept or escape) vs the bare sweep.
+    /// Whether the user's command itself supplies consent (a targeted accept) vs the bare sweep.
     fn is_explicit(self) -> bool {
-        matches!(self, Invocation::Accept | Invocation::Escape)
+        matches!(self, Invocation::Accept)
     }
 }
 
-/// Bring one followed skill current (the sweep, the explicit-accept path, and the diverged-draft resolve).
+/// `topos update <skill> --keep-mine` — FINISH a merge that has STOPPED, by committing the author's
+/// chosen tree on top of `current`. Plane-independent by construction (it reads the local record and
+/// the local store and nothing else), which is the offline no-deadlock guarantee.
 ///
-/// `inv` is [`Invocation::Sweep`] for the bare session-start sweep, [`Invocation::Accept`] for a targeted
-/// `topos pull <skill>` (which also releases a `held` pin), or [`Invocation::Escape`] for
-/// `--keep-mine` (resolve a divergence by committing the author's bytes on `current`).
+/// It is its OWN entry, and deliberately not a mode of [`sync_one`]: `sync_one` is reached only for
+/// a FOLLOWED bundle, so an escape routed through it silently fell through to a read-only
+/// "up to date" for every other kind of row — a local path, a forge import, an unfollowed workspace
+/// bundle — which is the one answer an explicit `--keep-mine` must never give. Here the refusal is
+/// structural: the only success is a recorded conflict, and every other state (whatever the row's
+/// kind, followed or not) refuses toward the merge.
+///
+/// The states that reach the refusal each had their own silent wrong answer: an up-to-date copy and
+/// a plain draft reported success and did nothing, a clean copy that was merely behind APPLIED the
+/// team's version (the opposite of the flag), and a live divergence committed the draft over changes
+/// the merge was about to land.
+pub(crate) fn escape_one(
+    ctx: &Ctx<'_>,
+    skill_id: &crate::id::SkillId,
+) -> Result<PullSkill, ClientError> {
+    let _guard = sidecar::lock_skill(ctx.fs, &ctx.layout, skill_id)?;
+    let sp = ctx.layout.published(skill_id);
+    let skill_id = skill_id.as_str();
+    let sync: SyncState = read_required(ctx, &sp.sync, "sync.json")?;
+    let lock: Lock = read_required(ctx, &sp.lock, "lock.json")?;
+    // The placement map is read only where an escape is actually about to write — the refusal
+    // needs nothing but the name, and must not turn into a different error for a row whose map
+    // cannot be read.
+    if let Some(cs) = doc::read_doc::<topos_types::persisted::ConflictState>(ctx.fs, &sp.conflict)?
+    {
+        let map: PlacementMap = read_map_required(ctx, &sp)?;
+        // A record that outlived its own resolution (an exit crashed between its placement write
+        // and the record's removal) is not a stopped merge: finish that clear, then refuse like any
+        // other resolved state — committing the original draft over the resolution already on disk
+        // is exactly the loss this ordering exists to prevent.
+        if !super::merge_resolve::heal_landed_resolution(ctx, &sp, &sync, &lock, &map, &cs)? {
+            // The 2nd witness mint site — guarded: a `conflict.json` only ever exists for an author
+            // who diverged (a follower never reaches merge code, so never records one).
+            return super::merge_resolve::escape_recorded(
+                DivergedWitness(()),
+                ctx,
+                skill_id,
+                &sp,
+                &sync,
+                &lock,
+                &map,
+                &cs,
+            );
+        }
+    }
+    Err(ClientError::NoStoppedMerge {
+        skill: lock.name,
+        global: !ctx.layout.is_project_scope(),
+    })
+}
+
+/// Bring one followed skill current (the sweep and the explicit-accept path).
+///
+/// `inv` is [`Invocation::Sweep`] for the bare session-start sweep or [`Invocation::Accept`] for a
+/// targeted `topos pull <skill>` (which also releases a `held` pin).
 pub(crate) fn sync_one(
     ctx: &Ctx<'_>,
     skill_id: &crate::id::SkillId,
@@ -148,50 +198,21 @@ pub(crate) fn sync_one_planned(
     // for the never-received baseline (no observed commit yet) → an unconditional first GET.
     let known = known_current(&sync)?;
 
-    // An unresolved conflict is on record. The escape (`--keep-mine`) RESOLVES it (plane-independent, so
-    // it runs even when the plane is unreachable — the no-deadlock guarantee). Any OTHER invocation heals a
-    // crashed materialization and re-discloses the block WITHOUT re-merging (the conflict draft already
-    // consumed `current`).
+    // An unresolved conflict is on record. A sync heals a crashed materialization and re-discloses
+    // the block WITHOUT re-merging (the conflict draft already consumed `current`). The escape that
+    // RESOLVES it is [`escape_one`], which never enters here.
     if let Some(cs) = doc::read_doc::<topos_types::persisted::ConflictState>(ctx.fs, &sp.conflict)?
     {
         // FIRST: a record that outlived its own resolution (an exit crashed between its placement
         // write and the record's removal) is not a block at all — finish that clear and pull
-        // normally. Before either arm below, because both would read the leftover as live: the
-        // escape would commit the original draft over the resolution already on disk, and the
-        // recover would name a work tree that exists nowhere.
+        // normally. Before the re-disclosure, which would otherwise name a work tree that exists
+        // nowhere.
         if !super::merge_resolve::heal_landed_resolution(ctx, &sp, &sync, &lock, &map, &cs)? {
-            if inv == Invocation::Escape {
-                // The 2nd witness mint site — guarded: a `conflict.json` only ever exists for an author who
-                // diverged (a follower never reaches merge code, so never records one).
-                return super::merge_resolve::escape_recorded(
-                    DivergedWitness(()),
-                    ctx,
-                    skill_id,
-                    &sp,
-                    &sync,
-                    &lock,
-                    &map,
-                    &cs,
-                );
-            }
             super::merge_resolve::recover_resolution(ctx, &sp, &sync, &lock, &map, &cs)?;
             return super::merge_resolve::conflicted_row_from_state(
                 ctx, &name, &sync, &lock, &map, &cs,
             );
         }
-    }
-
-    // `--keep-mine` FINISHES a merge that has STOPPED, and the only stopped merge is the record
-    // handled above. Every state reachable from here has nothing to finish — and each had its own
-    // silent wrong answer: an up-to-date copy and a plain draft reported success and did nothing, a
-    // clean copy that was merely behind APPLIED the team's version (the opposite of the flag), and a
-    // live divergence committed the draft over changes the merge was about to land. One refusal,
-    // before the state is even classified, so all four say the same thing and name the merge.
-    if inv == Invocation::Escape {
-        return Err(ClientError::NoStoppedMerge {
-            skill: name,
-            global: !ctx.layout.is_project_scope(),
-        });
     }
 
     // ---- checkForUpdates ----

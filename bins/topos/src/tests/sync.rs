@@ -1398,6 +1398,12 @@ fn keep_mine_keeps_my_side_of_the_collision_and_takes_the_rest() {
     let mr = row.merge.as_ref().expect("a merge report");
     assert!(mr.clean);
     assert!(mr.drop_diff.is_some(), "the escape discloses what it drops");
+    // WHICH exit finished it — the receipt cannot speak for both at once, and a `drop_diff` cannot
+    // tell them apart because both carry one.
+    assert_eq!(
+        mr.resolved,
+        Some(topos_types::results::MergeResolution::KeepMine)
+    );
 
     // THE ASSERTION THIS WHOLE CHANGE EXISTS FOR.
     let resolved: FileSet = &[
@@ -1573,6 +1579,12 @@ fn keep_mine_settles_every_structural_collision_the_way_git_does() {
 /// A hand-edited workbench is committed EXACTLY as the person wrote it — the merge is not re-run
 /// over it and nothing of theirs is re-applied. They resolved it; second-guessing their tree would
 /// be worse than not asking.
+///
+/// And the ROW says so. This person took the team's contested line and kept a change of their own
+/// somewhere else — the exact tree a "kept your wording where you both changed the same lines"
+/// headline would misdescribe, which is what the row said while both exits were told apart by a
+/// `drop_diff` they both carry. It also claims no file as taken from the team: every byte here is
+/// this person's, and topos never looked at any of it.
 #[test]
 fn a_hand_resolution_is_committed_exactly_as_written() {
     let rig = Rig::new("escape-reconciled");
@@ -1610,9 +1622,117 @@ fn a_hand_resolution_is_committed_exactly_as_written() {
     .clone();
     assert_eq!(row.action, PullAction::Merged);
     assert_eq!(snapshot(&rig.placement()), Some(expect(reconciled)));
+    let mr = row.merge.as_ref().expect("a merge report");
+    assert_eq!(
+        mr.resolved,
+        Some(topos_types::results::MergeResolution::ByHand)
+    );
+    assert!(
+        mr.took.is_empty(),
+        "nothing in a tree topos never examined is claimable as taken from the team: {:?}",
+        mr.took
+    );
     let s = rig.read_sync(&id);
     assert_eq!(s.base_commit, to_hex(&v1.id));
     assert_eq!(s.applied, s.observed);
+}
+
+/// The no-deadlock guarantee, at its narrowest: a hand resolution needs NEITHER the stored draft
+/// nor the fork point, so an exit that always works must not begin by re-rendering them.
+///
+/// The recorded `draft_commit` here names an object that is not in the store. Reading it up front —
+/// only ever to compute what the OTHER exit took from the team — turned a corrupt or pruned draft
+/// into a failed escape on the one path that has a complete answer sitting on disk.
+#[test]
+fn a_hand_resolution_needs_neither_the_draft_nor_the_fork_point() {
+    let rig = Rig::new("escape-lazy-draft");
+    let base: FileSet = &[("SKILL.md", FileMode::Regular, b"line1\nline2\nline3\n")];
+    let (id, _name, genesis) = rig.adopt(base);
+    let mine: FileSet = &[("SKILL.md", FileMode::Regular, b"MINE\nline2\nline3\n")];
+    let theirs: FileSet = &[("SKILL.md", FileMode::Regular, b"THEIRS\nline2\nline3\n")];
+    write_tree(&rig.placement(), mine);
+
+    let v1 = mk_version(&[genesis], theirs, "d_pub", "v1");
+    let mut plane = FixturePlane::default();
+    plane.add_version(&id, &v1);
+    plane.set_current(&id, served(WS, &id, v1.id, 1));
+    let foll = follow(&id, FollowMode::Auto);
+    assert_eq!(
+        only(&pull_data(&rig.ctx(&plane, &foll), ops::PullScope::AllFollowed).unwrap()).action,
+        PullAction::Conflicted
+    );
+
+    let reconciled: FileSet = &[("SKILL.md", FileMode::Regular, b"THEIRS\nline2\nMINE3\n")];
+    write_tree(&rig.conflict_copy(&id), reconciled);
+    // Point the record's draft at an object nothing ever wrote.
+    let path = rig.layout().published(&sid(&id)).conflict;
+    let mut cs = rig.conflict_state(&id);
+    cs.draft_commit = "ab".repeat(32);
+    cs.draft_digest = "cd".repeat(32);
+    doc::write_doc(&rig.fs, &path, &cs).unwrap();
+
+    let row = only(
+        &pull_data(
+            &rig.ctx(&plane, &foll),
+            ops::PullScope::One {
+                store: ops::StoreScope::Here,
+                name: "pr-describe".into(),
+                workspace: None,
+                mode: ops::TargetMode::KeepMine,
+            },
+        )
+        .expect("the exit that always works, works"),
+    )
+    .clone();
+    assert_eq!(row.action, PullAction::Merged);
+    assert_eq!(snapshot(&rig.placement()), Some(expect(reconciled)));
+    assert!(!rig.conflict_exists(&id));
+}
+
+/// A stopped merge is finished by `--keep-mine` whether or not anything still FOLLOWS the bundle.
+///
+/// The block lives in this machine's own record and the resolution in its own store; nothing about
+/// either is the follow-state's to answer. Unfollowing a bundle that is mid-conflict used to leave
+/// it wedged: the exit was routed through the followed-only sync, so it fell through to a read-only
+/// "up to date" while `publish` stayed refused by a block nothing could clear.
+#[test]
+fn keep_mine_finishes_a_stopped_merge_on_a_row_nobody_follows() {
+    let rig = Rig::new("escape-unfollowed");
+    let base: FileSet = &[("SKILL.md", FileMode::Regular, b"line1\nline2\nline3\n")];
+    let (id, _name, genesis) = rig.adopt(base);
+    let mine: FileSet = &[("SKILL.md", FileMode::Regular, b"MINE\nline2\nline3\n")];
+    let theirs: FileSet = &[("SKILL.md", FileMode::Regular, b"THEIRS\nline2\nline3\n")];
+    write_tree(&rig.placement(), mine);
+
+    let v1 = mk_version(&[genesis], theirs, "d_pub", "v1");
+    let mut plane = FixturePlane::default();
+    plane.add_version(&id, &v1);
+    plane.set_current(&id, served(WS, &id, v1.id, 1));
+    let foll = follow(&id, FollowMode::Auto);
+    assert_eq!(
+        only(&pull_data(&rig.ctx(&plane, &foll), ops::PullScope::AllFollowed).unwrap()).action,
+        PullAction::Conflicted
+    );
+
+    // The follow goes away with the block still standing.
+    let unfollowed = InertFollow;
+    let row = only(
+        &pull_data(
+            &rig.ctx(&plane, &unfollowed),
+            ops::PullScope::One {
+                store: ops::StoreScope::Here,
+                name: "pr-describe".into(),
+                workspace: None,
+                mode: ops::TargetMode::KeepMine,
+            },
+        )
+        .expect("the escape is plane- and follow-independent"),
+    )
+    .clone();
+    assert_eq!(row.action, PullAction::Merged);
+    assert_eq!(snapshot(&rig.placement()), Some(expect(mine)));
+    assert!(!rig.conflict_exists(&id), "the block is cleared");
+    assert_eq!(rig.read_sync(&id).base_commit, to_hex(&v1.id));
 }
 
 /// Where `--keep-mine` leaves the bundle, seen from the NEXT update: an ordinary draft on the team's
@@ -1696,12 +1816,18 @@ fn after_keep_mine_the_draft_sits_on_theirs_and_merges_forward_from_it() {
     assert_eq!(s.applied, s.observed);
 }
 
-/// `--keep-mine` FINISHES a stopped merge, and refuses ALL FOUR ways there is nothing to finish.
+/// `--keep-mine` FINISHES a stopped merge, and refuses EVERY way there is nothing to finish —
+/// including on a row nobody follows.
 ///
-/// Each had its own silent wrong answer: on an up-to-date copy and on a plain draft it reported
-/// success and did nothing; on a clean copy that was merely behind it APPLIED the team's version —
-/// the exact opposite of what the flag says; on a live divergence it committed the draft over
-/// changes the merge was about to land. One check, before any of them.
+/// Each shape had its own silent wrong answer: on an up-to-date copy and on a plain draft it
+/// reported success and did nothing; on a clean copy that was merely behind it APPLIED the team's
+/// version — the exact opposite of what the flag says; on a live divergence it committed the draft
+/// over changes the merge was about to land. One check, before any of them.
+///
+/// The last two shapes are the ROUTING half, and they are the ones a followed-only fixture could
+/// never catch: the refusal used to live inside the followed-sync path, so a tracked-but-unfollowed
+/// row — a local path, a forge import, an unfollowed workspace bundle — never reached it and was
+/// answered with a read-only "up to date" instead, `ok: true` and exit 0.
 #[test]
 fn keep_mine_refuses_wherever_no_merge_has_stopped() {
     let base: FileSet = &[("SKILL.md", FileMode::Regular, b"line1\nline2\nline3\n")];
@@ -1710,14 +1836,16 @@ fn keep_mine_refuses_wherever_no_merge_has_stopped() {
     let theirs: FileSet = &[("SKILL.md", FileMode::Regular, b"line1\nline2\nTEAM3\n")];
     let both: FileSet = &[("SKILL.md", FileMode::Regular, b"MINE\nline2\nTEAM3\n")];
 
-    // (label, does the team have a newer version?, is there a local draft?, what disk must still hold)
-    let shapes: &[(&str, bool, bool)] = &[
-        ("up to date", false, false),
-        ("a plain draft, nothing pending", false, true),
-        ("behind, clean", true, false),
-        ("diverged, merge never run", true, true),
+    // (label, does the team have a newer version?, is there a local draft?, is the row followed?)
+    let shapes: &[(&str, bool, bool, bool)] = &[
+        ("up to date", false, false, true),
+        ("a plain draft, nothing pending", false, true, true),
+        ("behind, clean", true, false, true),
+        ("diverged, merge never run", true, true, true),
+        ("not followed, clean", false, false, false),
+        ("not followed, drafted", false, true, false),
     ];
-    for (label, pending, drafted) in shapes {
+    for (label, pending, drafted, followed) in shapes {
         let rig = Rig::new(&format!("keepmine-{}", label.replace([' ', ','], "-")));
         let (id, name, genesis) = rig.adopt(base);
         let on_disk: FileSet = if *drafted { mine } else { base };
@@ -1733,9 +1861,11 @@ fn keep_mine_refuses_wherever_no_merge_has_stopped() {
             plane.set_current(&id, served(WS, &id, genesis, 0));
         }
         let foll = follow(&id, FollowMode::Auto);
+        let unfollowed = InertFollow;
+        let fsrc: &dyn FollowSource = if *followed { &foll } else { &unfollowed };
 
         let err = pull_data(
-            &rig.ctx(&plane, &foll),
+            &rig.ctx(&plane, fsrc),
             ops::PullScope::One {
                 store: ops::StoreScope::Here,
                 name: "pr-describe".into(),

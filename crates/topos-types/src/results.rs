@@ -270,9 +270,15 @@ pub struct MergeReport {
     /// (additive).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<crate::persisted::ConflictReason>,
-    /// The paths a `--keep-mine` resolution TOOK from the team — every file whose committed content
+    /// How a STOPPED merge was finished, when this row is a `--keep-mine` resolution. Absent on a
+    /// clean merge and on a conflict. **INFERRED** (additive).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved: Option<MergeResolution>,
+    /// The paths a `keep_mine` resolution TOOK from the team — every file whose committed content
     /// or mode differs from this person's own draft, including ones the team deleted. Sorted by raw
-    /// path bytes. Empty when the resolution changed nothing of theirs. **INFERRED** (additive).
+    /// path bytes. Empty when the resolution changed nothing of theirs, and always empty for a
+    /// `by_hand` resolution (that tree is the person's own, wholesale — nothing in it is claimable
+    /// as taken from the team). **INFERRED** (additive).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub took: Vec<String>,
     /// The folders that still hold the AUTHOR'S OWN version — a conflict writes to none of them, so
@@ -286,6 +292,20 @@ pub struct MergeReport {
     /// **INFERRED** (additive).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub copy_dir: Option<String>,
+}
+
+/// How `--keep-mine` finished a stopped merge — the two paths say different things about whose
+/// wording landed, so a receipt must never speak for both at once. **INFERRED** (additive).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
+pub enum MergeResolution {
+    /// The workbench was left alone: the three-way merge, settled on this person's side wherever
+    /// the two sides collided, with everything else the team changed taken (`git merge -X ours`).
+    KeepMine,
+    /// The workbench was EDITED: those files are the person's own reconciliation, committed
+    /// unexamined (`git commit` after resolving by hand). Nothing here is topos's choice.
+    ByHand,
 }
 
 /// One conflicting path in a [`MergeReport`]. **INFERRED** — `kind` reuses the persisted vocabulary.

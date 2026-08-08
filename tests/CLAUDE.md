@@ -47,7 +47,9 @@ what only a cross-crate composed run can prove.
   untouched workbench, over an edited one, and `--reset`), each clearing the block and deleting the
   workbench. Then the second property: `--keep-mine` is `git merge -X ours` — the author's v2 also
   changes a line nobody contested and adds a whole new file, and BOTH survive the exit, the publish,
-  and the round trip back to a second receiver. Publishing after it is an ordinary `--yes`. A last
+  and the round trip back into the AUTHOR's own install, whose next update fast-forwards onto the
+  resolution (their folder is rewritten from the published tree, which is what that hop proves —
+  it is not a fresh teammate's first install). Publishing after it is an ordinary `--yes`. A last
   arm puts a copy behind (a go-back): the direct publish refuses, the `--propose` lands.
   Binary-driven too: the placement dirs and the workbench path resolve against the environment.
 - **`tests/hardening_e2e.rs`** — pinned references delivering exactly their version and holding

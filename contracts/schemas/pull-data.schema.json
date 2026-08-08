@@ -225,6 +225,17 @@
             }
           ]
         },
+        "resolved": {
+          "description": "How a STOPPED merge was finished, when this row is a `--keep-mine` resolution. Absent on a\nclean merge and on a conflict. **INFERRED** (additive).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MergeResolution"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "result_digest": {
           "description": "The merged/conflict tree's `bundle_digest`.",
           "type": "string",
@@ -241,7 +252,7 @@
           "pattern": "^[0-9a-f]{64}$"
         },
         "took": {
-          "description": "The paths a `--keep-mine` resolution TOOK from the team — every file whose committed content\nor mode differs from this person's own draft, including ones the team deleted. Sorted by raw\npath bytes. Empty when the resolution changed nothing of theirs. **INFERRED** (additive).",
+          "description": "The paths a `keep_mine` resolution TOOK from the team — every file whose committed content\nor mode differs from this person's own draft, including ones the team deleted. Sorted by raw\npath bytes. Empty when the resolution changed nothing of theirs, and always empty for a\n`by_hand` resolution (that tree is the person's own, wholesale — nothing in it is claimable\nas taken from the team). **INFERRED** (additive).",
           "type": "array",
           "items": {
             "type": "string"
@@ -254,6 +265,21 @@
         "result_version_id",
         "result_digest",
         "clean"
+      ]
+    },
+    "MergeResolution": {
+      "description": "How `--keep-mine` finished a stopped merge — the two paths say different things about whose\nwording landed, so a receipt must never speak for both at once. **INFERRED** (additive).",
+      "oneOf": [
+        {
+          "description": "The workbench was left alone: the three-way merge, settled on this person's side wherever\nthe two sides collided, with everything else the team changed taken (`git merge -X ours`).",
+          "type": "string",
+          "const": "keep_mine"
+        },
+        {
+          "description": "The workbench was EDITED: those files are the person's own reconciliation, committed\nunexamined (`git commit` after resolving by hand). Nothing here is topos's choice.",
+          "type": "string",
+          "const": "by_hand"
+        }
       ]
     },
     "PullAction": {

@@ -363,24 +363,27 @@ pub(crate) fn pull(ctx: &Ctx<'_>, scope: PullScope) -> Result<PullOutcome, Clien
             let plane_independent = matches!(mode, TargetMode::GoBack(_) | TargetMode::KeepMine);
             let mut row = match mode {
                 TargetMode::GoBack(vref) => sync_engine::go_back(&sctx, &skill_id, &vref)?,
-                TargetMode::AcceptPending | TargetMode::KeepMine => {
-                    let inv = match mode {
-                        TargetMode::KeepMine => sync_engine::Invocation::Escape,
-                        _ => sync_engine::Invocation::Accept,
-                    };
-                    match ctx
-                        .follow
-                        .followed()
-                        .into_iter()
-                        .find(|(id, _)| *id == *skill_id.as_str())
-                    {
-                        Some((_, follow)) if follow.following => {
-                            sync_engine::sync_one(&sctx, &skill_id, &follow, inv)?
-                        }
-                        // Tracked but not followed → there is no `current` to pull; report the local state.
-                        _ => sync_engine::current_state(&sctx, &skill_id)?,
-                    }
-                }
+                // The escape consults NO follow state: it finishes a stopped merge from the local
+                // record and the local store, and a bundle nobody follows can hold one just the
+                // same. Routing it through the followed-only sync is what made an explicit
+                // `--keep-mine` answer "up to date" for a local path, a forge import, or an
+                // unfollowed workspace bundle.
+                TargetMode::KeepMine => sync_engine::escape_one(&sctx, &skill_id)?,
+                TargetMode::AcceptPending => match ctx
+                    .follow
+                    .followed()
+                    .into_iter()
+                    .find(|(id, _)| *id == *skill_id.as_str())
+                {
+                    Some((_, follow)) if follow.following => sync_engine::sync_one(
+                        &sctx,
+                        &skill_id,
+                        &follow,
+                        sync_engine::Invocation::Accept,
+                    )?,
+                    // Tracked but not followed → there is no `current` to pull; report the local state.
+                    _ => sync_engine::current_state(&sctx, &skill_id)?,
+                },
             };
             // Stamp the row's workspace provenance from the follow-state (a retained-but-paused entry still
             // resolves; a purely local go-back / tracked-only skill is honestly `None`).

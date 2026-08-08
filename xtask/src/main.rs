@@ -765,6 +765,9 @@ fn fixtures() -> Vec<(&'static str, String)> {
                     conflicts: vec![],
                     drop_diff: None,
                     reason: None,
+                    // A merge that ran to completion on its own was never stopped, so no exit
+                    // finished it.
+                    resolved: None,
                     took: vec![],
                     placements: vec![],
                     copy_dir: None,
@@ -817,6 +820,8 @@ fn fixtures() -> Vec<(&'static str, String)> {
                     drop_diff: None,
                     // WHY it stopped — which decides what the workbench below holds.
                     reason: Some(ConflictReason::ThreeWay),
+                    // A block is finished by neither exit, so it takes nothing.
+                    resolved: None,
                     took: vec![],
                     // The folder that still holds the author's own version (a conflict writes to
                     // none), and the workbench the marked-up copy of both versions went to.

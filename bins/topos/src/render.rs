@@ -1017,6 +1017,24 @@ pub(crate) fn withdrawn_next_actions(data: &PullData) -> Vec<NextAction> {
         .collect()
 }
 
+/// The per-row next-action a FINISHED merge surfaces. A `--keep-mine` resolution is one ordinary
+/// commit on top of the team's version, so the only thing left to do with it is the ordinary
+/// publish — and that is exactly the fact worth carrying, because the state it replaced (a blocked
+/// bundle) was one an agent could not ship at all. The argv mirrors the command the receipt prints,
+/// so a human and an agent are offered the same one.
+pub(crate) fn resolution_next_actions(data: &PullData) -> Vec<NextAction> {
+    data.skills
+        .iter()
+        .filter(|s| s.merge.as_ref().is_some_and(|m| m.resolved.is_some()))
+        .map(|s| {
+            crate::actions::next_action(
+                ActionCode::from("RUN_COMMAND".to_owned()),
+                vec!["topos".to_owned(), "publish".to_owned(), s.skill.clone()],
+            )
+        })
+        .collect()
+}
+
 /// One line per bundle waiting on a decision, for the `--json` envelope's one stable line channel:
 /// the bundle, then what is waiting. NO internal code leads it — the codes on that channel name a
 /// fault to look up, and there is no fault here; what the reader (or the agent) needs is the two
@@ -3341,7 +3359,7 @@ fn pull_row(s: &PullSkill, scope: &PullReceiptScope) -> (String, Vec<String>) {
 /// The action's own line + its detail lines (see [`pull_row`], which adds the row's second fact).
 /// `scope` spells the next commands for the set this row belongs to (see [`row_takes_g`]).
 fn pull_action_row(s: &PullSkill, scope: &PullReceiptScope) -> (String, Vec<String>) {
-    use topos_types::results::PullAction;
+    use topos_types::results::{MergeResolution, PullAction};
     let name = &s.skill;
     match s.action {
         // Handled by the caller's compact summary.
@@ -3378,32 +3396,50 @@ fn pull_action_row(s: &PullSkill, scope: &PullReceiptScope) -> (String, Vec<Stri
             let head = lines.next().unwrap_or_default().to_owned();
             (head, lines.map(str::to_owned).collect())
         }
-        // Two outcomes share this word and say different things about the team's version, so they
-        // must not share a sentence. `--keep-mine` settled the lines the two sides both changed on
-        // this person's side and took everything else the team wrote — so the row says both halves,
-        // and names the files that came along, because "their other changes" is a claim a reader
-        // can only check against files. A real merge is the arm below. The escape is the row
-        // carrying a `drop_diff` (what choosing yours left behind) — the only producer of one on a
-        // Merged row.
-        PullAction::Merged if s.merge.as_ref().is_some_and(|m| m.drop_diff.is_some()) => {
+        // THREE outcomes share this word and say different things about whose wording landed, so
+        // none of them may share a sentence. Both exits from a STOPPED merge are named by the row's
+        // own `resolved` — never inferred from a `drop_diff`, which both of them carry.
+        //
+        // The `-X ours` exit settled the lines the two sides both changed on this person's side and
+        // took everything else the team wrote, so the row says both halves and names the files the
+        // rest came in on. That list is the diffstat against this person's own side, so a file they
+        // collided in appears in it too — the second line therefore reads "everything else the team
+        // changed, IN <n> files", never "their other changes TO <n> files", which a reader takes as
+        // "<n> other files" and then cannot square with the line above it.
+        PullAction::Merged
+            if s.merge.as_ref().and_then(|m| m.resolved) == Some(MergeResolution::KeepMine) =>
+        {
             let took = s.merge.as_ref().map_or(&[][..], |m| m.took.as_slice());
             // The destination convention, over files: one is named inline, several are counted and
             // then spelled out — a bare "3 files" is not something a person can go and read.
-            let extra = match took {
+            let mut extra = match took {
                 [] => Vec::new(),
-                [one] => vec![format!("took the team's other changes: {one}")],
+                [one] => vec![format!("took everything else the team changed, in {one}")],
                 many => {
                     let mut lines = vec![format!(
-                        "took the team's other changes to {} files:",
+                        "took everything else the team changed, in {} files:",
                         many.len()
                     )];
                     lines.extend(many.iter().map(|p| format!("  {p}")));
                     lines
                 }
             };
+            extra.push(ordinary_draft_line(name));
             (
                 "kept your wording where you both changed the same lines".to_owned(),
                 extra,
+            )
+        }
+        // The hand-resolution exit. topos chose NOTHING here — it committed the tree the person
+        // left in the folder, unexamined — so the row must not claim their wording won the
+        // contested lines (they may well have taken the team's), and it names no files as taken
+        // from the team.
+        PullAction::Merged
+            if s.merge.as_ref().and_then(|m| m.resolved) == Some(MergeResolution::ByHand) =>
+        {
+            (
+                "committed the merge you made by hand, exactly as you left it".to_owned(),
+                vec![ordinary_draft_line(name)],
             )
         }
         PullAction::Merged => {
@@ -3564,6 +3600,15 @@ fn merge_preview_line(p: &topos_types::results::MergePreview) -> String {
             format!("merge preview: conflicts in {}", p.conflicts.join(", "))
         }
     }
+}
+
+/// The line every `--keep-mine` row closes on. Finishing a stopped merge leaves ONE ordinary commit
+/// on top of the team's version, and the thing a person most needs told is that nothing further is
+/// asked of it: no extra flag, no extra confirmation, no disclosure — the same `topos publish` as
+/// any other draft. (`publish` resolves the name across scopes on its own, so this command takes no
+/// `-g`; the row's other commands do.)
+fn ordinary_draft_line(name: &str) -> String {
+    format!("it is an ordinary draft now — `topos publish {name}` ships it like any other")
 }
 
 /// Whether a row's next commands take `-g` — the machine-wide set's spelling. The ROW's own scope
@@ -3800,15 +3845,16 @@ mod tests {
     use topos_types::persisted::ConflictPathKind;
     use topos_types::results::{
         AgentView, BehindElsewhere, ConflictPathReport, ListData, LogData, MergeReport,
-        ProposeData, PublishData, PullAction, PullData, PullSkill, RemoteSkill, RemoveData,
-        RemoveItem, RemoveKind, SkillEntry, UntrackedEntry,
+        MergeResolution, ProposeData, PublishData, PullAction, PullData, PullSkill, RemoteSkill,
+        RemoveData, RemoveItem, RemoveKind, SkillEntry, UntrackedEntry,
     };
 
     use crate::ops::ListOutcome;
 
     use super::{
         add_tty, auth_status_next_actions, auth_status_tty, list_tty, log_tty, propose_tty,
-        publish_tty, pull_row, pull_tty, remove_applied_tty, safe_message, status_tty, welcome_tty,
+        publish_tty, pull_row, pull_tty, remove_applied_tty, resolution_next_actions, safe_message,
+        status_tty, welcome_tty,
     };
 
     /// A synthetic invocation for the render tests: what a user typed past the binary name.
@@ -4249,6 +4295,7 @@ mod tests {
             conflicts,
             drop_diff: None,
             reason: None,
+            resolved: None,
             took: Vec::new(),
             placements: Vec::new(),
             copy_dir: None,
@@ -7066,13 +7113,22 @@ mod tests {
         }
     }
 
-    /// Two outcomes share the `merged` action and say different things about the team's version, so
-    /// they must not share a sentence. `--keep-mine` says what it actually did — this person's
-    /// wording on the lines both sides changed, the team's other changes taken — and NAMES those
-    /// files, because a reader can only check that claim against files. A real merge keeps the
-    /// rebase sentence. The escape is the row carrying a `drop_diff`.
+    /// THREE outcomes share the `merged` action and say different things about whose wording
+    /// landed, so none of them may share a sentence.
+    ///
+    /// The `-X ours` exit says what it actually did — this person's wording on the lines both sides
+    /// changed, everything else the team wrote taken — and NAMES the files it came in on, because a
+    /// reader can only check that claim against files. The HAND exit claims none of that: topos
+    /// chose nothing there, so it must not say your wording won (you may well have taken theirs)
+    /// and it names no file as taken from the team. A real merge keeps the rebase sentence. Both
+    /// exits close on the same fact: what is left is an ordinary draft, and an ordinary `publish`
+    /// ships it.
+    ///
+    /// The discriminator is the row's own `resolved`. It used to be `drop_diff.is_some()`, which
+    /// BOTH exits carry — so a hand resolution was announced as "kept your wording", about a tree
+    /// the person may have written entirely the team's way.
     #[test]
-    fn a_kept_mine_row_says_what_it_kept_and_names_what_came_with_it() {
+    fn each_way_a_merge_finishes_says_only_what_it_did() {
         let render_one = |merge: MergeReport| {
             let data = PullData {
                 skills: vec![PullSkill {
@@ -7087,19 +7143,21 @@ mod tests {
             };
             pull_tty(&data, &[], &[], &[], &[])
         };
+        let kept_mine = |took: Vec<String>| MergeReport {
+            drop_diff: Some("--- a\n+++ b\n".to_owned()),
+            resolved: Some(MergeResolution::KeepMine),
+            took,
+            ..merge_report(true, Vec::new())
+        };
 
         // ONE file came along: it is named inline, the destination convention over files.
-        let out = render_one(MergeReport {
-            drop_diff: Some("--- a\n+++ b\n".to_owned()),
-            took: vec!["docs/setup.md".to_owned()],
-            ..merge_report(true, Vec::new())
-        });
+        let out = render_one(kept_mine(vec!["docs/setup.md".to_owned()]));
         assert!(
             out.contains("kept your wording where you both changed the same lines"),
             "{out}"
         );
         assert!(
-            out.contains("took the team's other changes: docs/setup.md"),
+            out.contains("took everything else the team changed, in docs/setup.md"),
             "{out}"
         );
         assert!(
@@ -7108,33 +7166,114 @@ mod tests {
         );
 
         // SEVERAL: counted, then spelled out — a bare "2 files" is not something to go and read.
-        let out = render_one(MergeReport {
-            drop_diff: Some("--- a\n+++ b\n".to_owned()),
-            took: vec!["docs/setup.md".to_owned(), "run.sh".to_owned()],
-            ..merge_report(true, Vec::new())
-        });
+        // And the list is the diffstat against THIS PERSON'S side, so the file they collided in is
+        // in it too (their wording won those lines; the team's other changes to that same file
+        // still landed). The wording has to carry that: "their other changes TO 2 files" reads as
+        // "2 OTHER files", which the contested name then contradicts.
+        let out = render_one(kept_mine(vec![
+            "ROLLBACK.md".to_owned(),
+            "SKILL.md".to_owned(),
+        ]));
         assert!(
-            out.contains("took the team's other changes to 2 files:")
-                && out.contains("docs/setup.md")
-                && out.contains("run.sh"),
+            out.contains("took everything else the team changed, in 2 files:")
+                && out.contains("ROLLBACK.md")
+                && out.contains("SKILL.md"),
             "{out}"
+        );
+        assert!(
+            !out.contains("other changes to 2 files"),
+            "the phrasing a reader takes as \"2 other files\": {out}"
         );
 
         // NOTHING of theirs came along — the row claims nothing rather than claiming an empty set.
-        let out = render_one(MergeReport {
-            drop_diff: Some("--- a\n+++ b\n".to_owned()),
-            ..merge_report(true, Vec::new())
-        });
+        let out = render_one(kept_mine(Vec::new()));
         assert!(
             out.contains("kept your wording where you both changed the same lines"),
             "{out}"
         );
-        assert!(!out.contains("took the team's other changes"), "{out}");
+        assert!(!out.contains("the team changed, in"), "{out}");
 
-        // A REAL MERGE keeps its own sentence.
+        // THE HAND RESOLUTION: the person's own tree, committed unexamined. It claims nothing about
+        // whose wording won and names nothing as taken from the team.
+        let out = render_one(MergeReport {
+            drop_diff: Some("--- a\n+++ b\n".to_owned()),
+            resolved: Some(MergeResolution::ByHand),
+            ..merge_report(true, Vec::new())
+        });
+        assert!(
+            out.contains("committed the merge you made by hand, exactly as you left it"),
+            "{out}"
+        );
+        assert!(!out.contains("kept your wording"), "{out}");
+        assert!(!out.contains("the team changed"), "{out}");
+
+        // BOTH exits name the one thing left to do, and say that it is nothing special.
+        for merge in [
+            kept_mine(vec!["docs/setup.md".to_owned()]),
+            MergeReport {
+                drop_diff: Some("--- a\n+++ b\n".to_owned()),
+                resolved: Some(MergeResolution::ByHand),
+                ..merge_report(true, Vec::new())
+            },
+        ] {
+            let out = render_one(merge);
+            assert!(
+                out.contains(
+                    "it is an ordinary draft now — `topos publish runbook` ships it like any other"
+                ),
+                "{out}"
+            );
+        }
+
+        // A REAL MERGE keeps its own sentence — it finished on its own, so no exit is attributed.
         let out = render_one(merge_report(true, Vec::new()));
         assert!(out.contains("rebased onto the new current"), "{out}");
         assert!(!out.contains("kept your wording"), "{out}");
+        assert!(!out.contains("by hand"), "{out}");
+        assert!(!out.contains("an ordinary draft now"), "{out}");
+    }
+
+    /// A finished merge carries its one next step as runnable argv too, so an agent acts on the
+    /// ordinary publish instead of parsing the sentence that names it. Both exits, and nothing from
+    /// a merge that was never stopped.
+    #[test]
+    fn a_finished_merge_offers_the_ordinary_publish() {
+        let row_with = |resolved: Option<MergeResolution>| PullSkill {
+            merge: Some(MergeReport {
+                resolved,
+                ..merge_report(true, Vec::new())
+            }),
+            ..row("runbook", PullAction::Merged)
+        };
+        let data = |skills: Vec<PullSkill>| PullData {
+            skills,
+            proposals_awaiting: 0,
+            notices: Vec::new(),
+            sync: Vec::new(),
+            behind_elsewhere: Vec::new(),
+            scope: None,
+        };
+
+        for how in [MergeResolution::KeepMine, MergeResolution::ByHand] {
+            let actions = resolution_next_actions(&data(vec![row_with(Some(how))]));
+            assert_eq!(actions.len(), 1, "{how:?}: {actions:?}");
+            assert_eq!(
+                actions[0].argv,
+                vec![
+                    "topos".to_owned(),
+                    "publish".to_owned(),
+                    "runbook".to_owned()
+                ],
+                "{how:?}"
+            );
+            // The describe half of a two-phase publish: it dials, and it does not mutate.
+            assert_eq!(actions[0].mutates, Some(false), "{how:?}");
+            assert_eq!(actions[0].needs_network, Some(true), "{how:?}");
+        }
+        assert!(
+            resolution_next_actions(&data(vec![row_with(None)])).is_empty(),
+            "a merge that was never stopped had no exit to finish it"
+        );
     }
 
     /// A blocked row sends a person to the workbench for what is ACTUALLY in it, and says the same

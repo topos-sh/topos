@@ -202,16 +202,21 @@ running `topos update <skill> --keep-mine`, which commits it (leaving the folder
 wording on the contested lines), or `topos update <skill> --reset --yes` to take the team's version
 instead. Either one clears the block and deletes the folder.
 
-`--keep-mine` over an untouched folder is `git merge -X ours`: your side wins the lines you both
-changed, and everything else the team wrote lands normally — a file only they touched, a hunk far
-from the contested one, a file they added. The `merged` row's `merge.took` names the paths that came
-along. Over an EDITED folder it commits what you wrote, unexamined. Either way the result is one
+The `merged` row's `merge.resolved` says which of the two exits ran, because they say different
+things about whose wording landed. `keep_mine` — the folder was left alone — is `git merge -X ours`:
+your side wins the lines you both changed, and everything else the team wrote lands normally, a file
+only they touched, a hunk far from the contested one, a file they added. `merge.took` names the
+files the rest came in on; it is the diffstat against your own side, so a file you collided in is
+listed too (your wording won those lines, and their other changes to that same file still landed).
+`by_hand` — the folder was edited — commits what you wrote, unexamined, and names nothing as taken
+from the team, because none of that tree is topos's to attribute. Either way the result is one
 ordinary commit on top of the team's version, so `topos publish` ships it like any other draft — no
-extra flag, no extra confirmation.
+extra flag, no extra confirmation, and the row carries that publish as its next action.
 
-It only ever finishes a merge that has STOPPED. With nothing stopped — up to date, a plain draft, a
-copy that is merely behind, a divergence the merge has not been run on — it refuses and names
-`topos update <skill>`, because every one of those states has a different silent wrong answer.
+It only ever finishes a merge that has STOPPED, whatever the row is — a workspace bundle, a repo
+import, a local folder, followed or not. With nothing stopped — up to date, a plain draft, a copy
+that is merely behind, a divergence the merge has not been run on — it refuses and names `topos
+update <skill>`, because every one of those states has a different silent wrong answer.
 
 Where there is no shared history to merge against at all, the `conflicted` row carries
 `merge.reason: "no_base"` and the folder holds your files with the team's beside them as
