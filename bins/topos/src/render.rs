@@ -163,6 +163,26 @@ pub(crate) fn next_actions(command: &str, argv: &[String], err: &ClientError) ->
             ActionCode::RebaseAndRetry,
             update_rebuild(command, argv, skill, &[]),
         )],
+        // The supersede consent. Both halves carry the SAME way out — this publish, re-issued with
+        // the version it replaces named — because the refusal has just stated that version, and
+        // stating it is the consent step. The mismatch arm names the ACTUAL one, so the corrected
+        // command is runnable as offered rather than sending a reader back to work it out.
+        ClientError::PublishSupersedes { skill, version } => vec![crate::actions::next_action(
+            ActionCode::PublishOverVersion,
+            publish_over(argv, skill, version),
+        )],
+        ClientError::PublishOverMismatch { skill, actual, .. } => {
+            vec![crate::actions::next_action(
+                ActionCode::PublishOverVersion,
+                publish_over(argv, skill, actual),
+            )]
+        }
+        // No merge stopped, so the fix is the merge itself — the one that lands the team's
+        // non-conflicting changes and stops only where the two sides really collide.
+        ClientError::NoStoppedMerge { skill, .. } => vec![crate::actions::next_action(
+            ActionCode::ApplyWaitingUpdate,
+            update_rebuild(command, argv, skill, &[]),
+        )],
         // A denial is not self-service (ask an owner to invite/roster you, or contact an admin) — the
         // codes carry no executable argv.
         ClientError::Denied(_) => vec![
@@ -423,6 +443,42 @@ fn update_rebuild(command: &str, argv: &[String], skill: &str, extras: &[&str]) 
     }
     out.push(skill.to_owned());
     out.extend(extras.iter().map(|s| (*s).to_owned()));
+    out.push("--json".to_owned());
+    out
+}
+
+/// The refused publish re-spelled with the version it replaces NAMED — the supersede consent's one
+/// way out. Everything the caller already asked for is carried across (`--propose`, `--to`, `-m`,
+/// the copy selector), because dropping any of them would offer a different publish than the one
+/// that was refused; the plain confirmation tokens are dropped, since `--over` is the confirmation.
+fn publish_over(argv: &[String], skill: &str, version: &str) -> Vec<String> {
+    /// The flags whose NEXT token is their value, so a carry-over takes the pair or neither.
+    const VALUED: [&str; 6] = ["--to", "-m", "--message", "--dest", "-a", "--agent"];
+    let mut out = vec!["topos".to_owned(), "publish".to_owned(), skill.to_owned()];
+    let mut rest = argv.iter().peekable();
+    let mut verb_seen = false;
+    while let Some(token) = rest.next() {
+        match token.as_str() {
+            // The confirmation tokens: `--over` IS the confirmation, so neither rides along, and a
+            // wrong `--over` value goes with its flag.
+            "--json" | "--yes" => {}
+            "--over" => {
+                rest.next();
+            }
+            t if VALUED.contains(&t) => {
+                out.push(token.clone());
+                if let Some(v) = rest.next() {
+                    out.push(v.clone());
+                }
+            }
+            t if t.starts_with('-') => out.push(token.clone()),
+            // The verb, then the target — both already spelled above.
+            _ if !verb_seen => verb_seen = true,
+            _ => {}
+        }
+    }
+    out.push("--over".to_owned());
+    out.push(version.to_owned());
     out.push("--json".to_owned());
     out
 }
@@ -2568,6 +2624,21 @@ pub(crate) fn publish_describe_tty(
         .or(data.workspace_display_name.as_deref())
         .unwrap_or(&data.workspace_id);
     let mut s = format!("Publish '{}' to {ws}:", data.skill);
+    // WHAT THIS REPLACES leads everything else. It is the one fact that changes what the reader is
+    // agreeing to — the team loses a version they are on — and it is stated before the destination,
+    // the gate, or the channel, because those describe where the publish goes and this describes
+    // what it takes away. The diff rides underneath, indented, so a reader sees the actual lines.
+    if let Some(sup) = &data.supersedes {
+        s.push_str(&format!(
+            "\n  replaces the team's {} — this version leaves out what they changed:",
+            short(&sup.version_id)
+        ));
+        if let Some(diff) = &sup.diff {
+            for line in diff.lines() {
+                s.push_str(&format!("\n    {line}"));
+            }
+        }
+    }
     // WHICH copy, when the skill was edited in more than one folder: the producer populates this
     // only then, because with a single edited copy there was nothing to choose between and naming
     // the folder would answer a question nobody asked.
@@ -2611,12 +2682,14 @@ pub(crate) fn publish_describe_tty(
             s.push_str(&format!(" — {note}"));
         }
     }
-    // The behind-copy conflict prediction: this publish would be refused (rebase first), and the
-    // in-memory dry run says how that rebase's merge would go.
+    // A behind copy reaches the describe only on the `--propose` arm (the behind guard refuses the
+    // direct one first), and a proposal from behind is fine — a reviewer decides. What they are
+    // owed is the fact that this candidate is not built on the team's newest version, plus the
+    // in-memory dry run of the merge that would follow.
     if let Some(preview) = &data.merge_preview {
         s.push_str(&format!(
-            "\n  note: your copy is behind the team's current — this publish will be refused \
-             (update to rebase); {}",
+            "\n  note: the team has a newer version this copy does not have, so this proposal is \
+             not built on it; {}",
             merge_preview_line(preview)
         ));
     }
@@ -2684,6 +2757,14 @@ pub(crate) fn publish_tty(data: &PublishData) -> String {
     }
     if !data.other_edited.is_empty() {
         out.push_str(&format!("\n{}", other_copies_clause(&data.other_edited)));
+    }
+    // WHAT THIS REPLACED — the fact the whole `--over` gate exists to make deliberate, restated
+    // once it is done. The undo below is the way back to that version, so the two read together.
+    if let Some(v) = &data.supersedes {
+        out.push_str(&format!(
+            "\nreplaced the team's {} — this version does not carry it",
+            short(v)
+        ));
     }
     // The KIND the catalog now records — stated because it is what decides how every receiving
     // machine places these bytes (an mcp bundle lands in each agent's MCP config, not a folder).
@@ -3370,25 +3451,43 @@ fn pull_action_row(s: &PullSkill, scope: &PullReceiptScope) -> (String, Vec<Stri
             let head = lines.next().unwrap_or_default().to_owned();
             (head, lines.map(str::to_owned).collect())
         }
-        // Two outcomes share this word, and they say opposite things about the team's version, so
-        // they must not share a sentence. A real merge REBASED your draft onto the team's version,
-        // and publishing is the next step. `--keep-mine` did the opposite: it kept your bytes and
-        // took nothing, so the team's version is still ahead of you and publishing is refused until
-        // an update merges it. The escape is the row carrying a `drop_diff` (what choosing yours
-        // left behind) — the only producer of one on a Merged row.
+        // Three outcomes share this word, and they say different things about the team's version,
+        // so they must not share a sentence. The two `--keep-mine` ones are told apart by what the
+        // resolution was MEASURED to contain, never by which flag was typed: a result that drops
+        // the team's version carries `supersedes`, and its row leads with that fact and points at
+        // the describe (the one surface that shows what would be replaced). A resolution that
+        // reconciled carries only the `drop_diff` and says so plainly. A real merge is the arm
+        // below.
+        PullAction::Merged if s.merge.as_ref().is_some_and(|m| m.supersedes.is_some()) => {
+            let v = s
+                .merge
+                .as_ref()
+                .and_then(|m| m.supersedes.as_deref())
+                .map(short)
+                .unwrap_or("?");
+            // `publish` carries no scope flag — it resolves the bundle across this machine's
+            // stores — so the line is spelled bare wherever the row came from.
+            (
+                format!("kept your version — the team's {v} is not in it"),
+                vec![
+                    "publishing this replaces their version for everyone — read it first:"
+                        .to_owned(),
+                    format!("  topos publish {name}"),
+                ],
+            )
+        }
         PullAction::Merged if s.merge.as_ref().is_some_and(|m| m.drop_diff.is_some()) => {
             let v = s
                 .merge
                 .as_ref()
                 .map(|m| short(&m.theirs_version_id))
                 .unwrap_or("?");
-            let g = if row_takes_g(s, scope) { " -g" } else { "" };
             (
-                format!("kept your version — the team's {v} is not in it"),
-                vec![
-                    "you cannot publish until you merge it:".to_owned(),
-                    format!("  topos update{g} {name}"),
-                ],
+                format!(
+                    "kept your version — it already carries the team's {v}; review with `topos \
+                     diff {name}`, then publish"
+                ),
+                Vec::new(),
             )
         }
         PullAction::Merged => {
@@ -3444,7 +3543,20 @@ fn pull_action_row(s: &PullSkill, scope: &PullReceiptScope) -> (String, Vec<Stri
                 None => {}
             }
             if let Some(dir) = s.merge.as_ref().and_then(|m| m.copy_dir.as_deref()) {
-                extra.push("to merge by hand, both versions are marked up here:".to_owned());
+                // The no-base fallback has no shared fork point, so it writes no markers — the
+                // workbench holds your files with the team's beside them instead, and the line
+                // names that convention rather than sending a reader to look for markers that
+                // are not there. It is the row carrying a `drop_diff`, the same discriminator
+                // the escape row uses.
+                if s.merge.as_ref().is_some_and(|m| m.drop_diff.is_some()) {
+                    extra.push(
+                        "to merge by hand, your files are here with the team's beside them \
+                         (.topos-theirs):"
+                            .to_owned(),
+                    );
+                } else {
+                    extra.push("to merge by hand, both versions are marked up here:".to_owned());
+                }
                 extra.push(format!("  {dir}/"));
             }
             extra.push(
@@ -3619,6 +3731,21 @@ pub(crate) fn err_tty(err: &ClientError) -> String {
             safe_message(err)
         );
     }
+    // The supersede consent, in the same two-line shape: the fact, then the ONE command that
+    // carries it out — which is the same command with the version named back, so a reader who has
+    // read the sentence has everything the flag needs.
+    if let ClientError::PublishSupersedes { skill, version } = err {
+        return format!(
+            "{}\n  name what it replaces: topos publish {skill} --over {version}",
+            safe_message(err)
+        );
+    }
+    if let ClientError::PublishOverMismatch { skill, actual, .. } = err {
+        return format!(
+            "{}\n  name the newer one: topos publish {skill} --over {actual}",
+            safe_message(err)
+        );
+    }
     // The shared-copy narrowing refusal renders its ways out as ALIGNED command lines under the
     // statement — the copy is the answer, so it carries no `error:` prefix (the `--json`
     // envelope keeps the single-sentence message; the same two commands ride `next_actions`).
@@ -3672,6 +3799,8 @@ pub(crate) fn err_hint_tty(command: &str, argv: &[String], err: &ClientError) ->
         ClientError::SharedCopyOnly { .. }
             | ClientError::PlacementsDiverged { .. }
             | ClientError::PublishBehind { .. }
+            | ClientError::PublishSupersedes { .. }
+            | ClientError::PublishOverMismatch { .. }
     ) {
         return None;
     }
@@ -3759,7 +3888,9 @@ fn is_placeholder(token: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
-fn short(hex: &str) -> &str {
+/// A version id as every human surface spells it: the 12 chars that resolve everywhere a prefix is
+/// accepted, so a version read off a receipt can be typed straight back into a command.
+pub(crate) fn short(hex: &str) -> &str {
     hex.get(..12).unwrap_or(hex)
 }
 
@@ -4216,6 +4347,7 @@ mod tests {
             clean,
             conflicts,
             drop_diff: None,
+            supersedes: None,
             placements: Vec::new(),
             copy_dir: None,
         }
@@ -4252,6 +4384,7 @@ mod tests {
             undo: None,
             from_placement: None,
             other_edited: Vec::new(),
+            supersedes: None,
         }
     }
 
@@ -4286,6 +4419,7 @@ mod tests {
             reference: None,
             converted_from: None,
             kind: None,
+            supersedes: None,
         }
     }
 
@@ -7032,41 +7166,241 @@ mod tests {
         }
     }
 
-    /// Two outcomes share the `merged` action and say opposite things about the team's version, so
-    /// they must not share a sentence. A real merge rebased the draft ONTO the team's version and
-    /// points at publishing; `--keep-mine` took nothing, so it says the team's version is not in
-    /// this copy and that publishing waits on an update. The escape is the row carrying a
-    /// `drop_diff` — what choosing yours left behind.
+    /// Three outcomes share the `merged` action and say different things about the team's version,
+    /// so they must not share a sentence — and the one that matters is told apart by what the
+    /// resolution was MEASURED to contain, never by which flag was typed.
+    ///
+    /// A `--keep-mine` whose bytes DROP the team's version leads with that and points at the
+    /// describe, the one surface that shows what publishing would replace. A `--keep-mine` that
+    /// reconciled says so plainly and points at `diff`. A real merge keeps the rebase sentence.
     #[test]
-    fn a_kept_mine_row_never_borrows_the_rebased_sentence() {
-        let kept = PullSkill {
-            merge: Some(MergeReport {
-                drop_diff: Some("--- a\n+++ b\n".to_owned()),
-                ..merge_report(true, Vec::new())
-            }),
-            ..row("runbook", PullAction::Merged)
+    fn a_kept_mine_row_says_what_its_bytes_actually_carry() {
+        let render_one = |merge: MergeReport| {
+            let data = PullData {
+                skills: vec![PullSkill {
+                    merge: Some(merge),
+                    ..row("runbook", PullAction::Merged)
+                }],
+                proposals_awaiting: 0,
+                notices: Vec::new(),
+                sync: Vec::new(),
+                behind_elsewhere: Vec::new(),
+                scope: None,
+            };
+            pull_tty(&data, &[], &[], &[], &[])
         };
-        let data = PullData {
-            skills: vec![kept],
-            proposals_awaiting: 0,
-            notices: Vec::new(),
-            sync: Vec::new(),
-            behind_elsewhere: Vec::new(),
-            scope: None,
-        };
-        let out = pull_tty(&data, &[], &[], &[], &[]);
+
+        // SUPERSEDING: the fact leads, and the way on is the describe (never a `--yes`, which the
+        // apply refuses precisely so the version gets read first).
+        let out = render_one(MergeReport {
+            drop_diff: Some("--- a\n+++ b\n".to_owned()),
+            supersedes: Some(format!("1b1b1b1b1b1b{}", "0".repeat(52))),
+            ..merge_report(true, Vec::new())
+        });
         assert!(
             out.contains("kept your version — the team's 1b1b1b1b1b1b is not in it"),
             "{out}"
         );
         assert!(
-            out.contains("you cannot publish until you merge it:\n")
-                && out.contains("topos update runbook"),
+            out.contains("publishing this replaces their version for everyone — read it first:\n")
+                && out.contains("topos publish runbook"),
             "{out}"
+        );
+        assert!(
+            !out.contains("--yes"),
+            "the apply is refused until the version is named: {out}"
         );
         assert!(
             !out.contains("rebased onto the new current"),
             "the rebase sentence belongs to a real merge: {out}"
+        );
+
+        // RECONCILED: the same command, the same exit, a different truth about the bytes.
+        let out = render_one(MergeReport {
+            drop_diff: Some("--- a\n+++ b\n".to_owned()),
+            supersedes: None,
+            ..merge_report(true, Vec::new())
+        });
+        assert!(
+            out.contains(
+                "kept your version — it already carries the team's 1b1b1b1b1b1b; review with \
+                 `topos diff runbook`, then publish"
+            ),
+            "{out}"
+        );
+
+        // A REAL MERGE keeps its own sentence.
+        let out = render_one(merge_report(true, Vec::new()));
+        assert!(out.contains("rebased onto the new current"), "{out}");
+        assert!(!out.contains("kept your version"), "{out}");
+    }
+
+    /// The publish surfaces of the supersede consent, byte-exact: the describe LEADS with what it
+    /// replaces (before the destination or the gate — those say where it goes; this says what it
+    /// takes away) and closes with the `--over` apply; the receipt restates it beside the undo.
+    #[test]
+    fn the_publish_surfaces_disclose_what_the_version_replaces() {
+        use topos_types::results::{PublishGate, PublishSupersedes};
+
+        let described = topos_types::results::PublishDescribeData {
+            supersedes: Some(PublishSupersedes {
+                version_id: format!("fed180d80b8a{}", "0".repeat(52)),
+                diff: Some("--- SKILL.md\n+++ SKILL.md\n-their line\n+my line\n".to_owned()),
+            }),
+            ..describing(PublishGate::Lands)
+        };
+        let over_argv: Vec<String> = [
+            "topos",
+            "publish",
+            "coolify-deploy",
+            "--over",
+            "fed180d80b8a",
+        ]
+        .iter()
+        .map(|s| (*s).to_owned())
+        .collect();
+        let out = super::publish_describe_tty(&described, &over_argv);
+        assert!(
+            out.starts_with(
+                "Publish 'coolify-deploy' to topos.sh/ideamotive:\n  replaces the team's \
+                 fed180d80b8a — this version leaves out what they changed:\n    --- SKILL.md\n    \
+                 +++ SKILL.md\n    -their line\n    +my line"
+            ),
+            "{out}"
+        );
+        assert!(
+            out.ends_with(
+                "Nothing has changed yet — apply with:\n  topos publish coolify-deploy --over \
+                 fed180d80b8a"
+            ),
+            "{out}"
+        );
+
+        let landed = PublishData {
+            supersedes: Some("fed180d80b8a".to_owned()),
+            undo: Some("topos revert coolify-deploy --to fed180d80b8a".to_owned()),
+            ..published()
+        };
+        let out = publish_tty(&landed);
+        assert!(
+            out.contains(
+                "replaced the team's fed180d80b8a — this version does not carry it\nundo: topos \
+                 revert coolify-deploy --to fed180d80b8a"
+            ),
+            "{out}"
+        );
+    }
+
+    /// Both halves of the supersede consent render as the fact plus the ONE command that carries it
+    /// out, and the machine surface offers exactly the same command — the version named back. The
+    /// mismatch arm names the ACTUAL version, so the corrected command runs as printed.
+    #[test]
+    fn the_supersede_refusals_state_the_fact_then_the_command_that_names_the_version() {
+        use crate::error::ClientError;
+
+        let bare = ClientError::PublishSupersedes {
+            skill: "coolify-deploy".to_owned(),
+            version: "fed180d80b8a".to_owned(),
+        };
+        assert_eq!(
+            super::err_tty(&bare),
+            "coolify-deploy: this publish drops the team's fed180d80b8a, which your copy does not \
+             carry.\n  name what it replaces: topos publish coolify-deploy --over fed180d80b8a"
+        );
+        assert_eq!(
+            super::err_hint_tty(
+                "publish",
+                &typed(&["publish", "coolify-deploy", "--yes"]),
+                &bare
+            ),
+            None,
+            "the command is already printed"
+        );
+        let actions = super::next_actions(
+            "publish",
+            &typed(&["publish", "coolify-deploy", "--yes"]),
+            &bare,
+        );
+        assert_eq!(actions.len(), 1, "{actions:?}");
+        assert_eq!(actions[0].code.as_str(), "PUBLISH_OVER_VERSION");
+        assert_eq!(
+            actions[0].argv,
+            vec![
+                "topos",
+                "publish",
+                "coolify-deploy",
+                "--over",
+                "fed180d80b8a",
+                "--json"
+            ]
+        );
+
+        // The mismatch: the team moved. Everything the caller asked for rides along (`--propose`,
+        // `--to`, `-m`), and the wrong `--over` value goes with its flag.
+        let stale = ClientError::PublishOverMismatch {
+            skill: "coolify-deploy".to_owned(),
+            named: "0000aaaa1111".to_owned(),
+            actual: "fed180d80b8a".to_owned(),
+        };
+        assert_eq!(
+            super::err_tty(&stale),
+            "coolify-deploy: `--over 0000aaaa1111` is not what this publish replaces — that is \
+             fed180d80b8a.\n  name the newer one: topos publish coolify-deploy --over fed180d80b8a"
+        );
+        let actions = super::next_actions(
+            "publish",
+            &typed(&[
+                "publish",
+                "coolify-deploy",
+                "--to",
+                "backend",
+                "-m",
+                "why",
+                "--over",
+                "0000aaaa1111",
+            ]),
+            &stale,
+        );
+        assert_eq!(
+            actions[0].argv,
+            vec![
+                "topos",
+                "publish",
+                "coolify-deploy",
+                "--to",
+                "backend",
+                "-m",
+                "why",
+                "--over",
+                "fed180d80b8a",
+                "--json"
+            ]
+        );
+    }
+
+    /// `--keep-mine` with nothing stopped is a wrong command for the state, so the refusal names
+    /// the merge — and the merge is what lands the team's non-conflicting changes.
+    #[test]
+    fn the_no_stopped_merge_refusal_names_the_merge() {
+        let err = crate::error::ClientError::NoStoppedMerge {
+            skill: "coolify-deploy".to_owned(),
+            global: true,
+        };
+        assert_eq!(
+            super::safe_message(&err),
+            "no merge has stopped on 'coolify-deploy' — run `topos update -g coolify-deploy` to \
+             merge the team's version in; it stops only where you both changed the same lines"
+        );
+        let actions = super::next_actions(
+            "update",
+            &typed(&["update", "-g", "coolify-deploy", "--keep-mine"]),
+            &err,
+        );
+        assert_eq!(actions.len(), 1, "{actions:?}");
+        assert_eq!(actions[0].code.as_str(), "APPLY_WAITING_UPDATE");
+        assert_eq!(
+            actions[0].argv,
+            vec!["topos", "update", "-g", "coolify-deploy", "--json"]
         );
     }
 

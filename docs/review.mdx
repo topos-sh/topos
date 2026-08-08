@@ -104,11 +104,23 @@ See your side; commit the merge you made in that folder — or, by leaving the f
 **your** version and skip the merge; or take the **team's** version instead, dropping yours. Either
 way out deletes the folder.
 
-Keeping your version is a decision about **your** machine, so it changes nothing for the team: your
-files stay exactly as they are, and publishing that skill stays blocked — *your version is behind* —
-until a plain `topos update customer-lookup` has merged the team's version in. That merge takes
-their changes wherever the two of you did not collide, and puts anything still contested back in the
-folder. Nothing you publish afterwards can drop what they wrote.
+Keeping your version is exactly what it sounds like: your files, saved on top of the team's version,
+the way you would edit a file back to your wording after pulling and then commit. It is a normal
+draft from there on — `topos diff` shows it, `topos update` keeps merging their later changes into
+it, `topos publish` ships it.
+
+The one thing topos will not let it do is take away their change in silence. If what you kept leaves
+out something they wrote, the publish stops and says so:
+
+```
+customer-lookup: this publish drops the team's fed180d80b8a, which your copy does not carry.
+  name what it replaces: topos publish customer-lookup --over fed180d80b8a
+```
+
+Run `topos publish customer-lookup` first and you get the whole picture — the version you would be
+replacing and a diff of what the team loses — then name it back to ship. If your merge took their
+side of the contested lines, none of this appears: there is nothing being dropped, so it publishes
+like any other change.
 
 ## When two copies disagree
 

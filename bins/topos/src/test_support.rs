@@ -432,6 +432,7 @@ impl SessionInstall {
                 to,
                 None,
                 message,
+                None,
                 &ops::Selection::default(),
             )
             .map_err(err_str)?
@@ -476,6 +477,7 @@ impl SessionInstall {
                 None,
                 target,
                 false,
+                None,
                 None,
                 None,
                 &ops::Selection::default(),

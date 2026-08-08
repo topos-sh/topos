@@ -102,6 +102,17 @@ fn safety(code: &ActionCode, argv: &[String], subject: Subject) -> Safety {
             Safety::new(Some(true), Some(true), None)
         }
         "RESOLVE_DIVERGED_DRAFT" => resolve_diverged_draft(argv),
+        // The supersede consent, re-issued with the version named. `--over` IS the apply, so it
+        // mutates and it dials — and its caution says the thing the flag exists to make deliberate:
+        // a teammate's version stops being what everyone receives.
+        "PUBLISH_OVER_VERSION" => Safety::new(
+            Some(true),
+            Some(true),
+            Some(
+                "ships a version that leaves out the team's named one — everyone receives it \
+                 instead",
+            ),
+        ),
         "PROPOSE_PUBLISH" => Safety::new(
             Some(true),
             Some(true),
@@ -190,8 +201,9 @@ fn resolve_diverged_draft(argv: &[String]) -> Safety {
             Some(true),
             Some(false),
             Some(
-                "commits YOUR bytes (your edited resolution, or your original draft) onto current, \
-                 dropping the team's side of the merge",
+                "commits YOUR bytes (your edited resolution, or your original draft) on top of \
+                 current; anything of the team's it leaves out must be named before a publish \
+                 can ship it",
             ),
         );
     }

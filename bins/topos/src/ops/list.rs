@@ -1114,6 +1114,7 @@ mod tests {
                 work_hash: "e".repeat(64),
                 held: false,
                 draft_observed: None,
+                superseded: None,
             },
         )
         .unwrap();

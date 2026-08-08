@@ -6096,6 +6096,7 @@ pub(crate) fn lay_baseline_with_plan(
             work_hash: ZERO_HEX.to_owned(),
             held: false,
             draft_observed: None,
+            superseded: None,
         },
     )?;
     let baseline = PlacementMap {

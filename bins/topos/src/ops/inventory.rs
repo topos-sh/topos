@@ -1031,6 +1031,13 @@ fn applied_for_id(
             }
         }
     }
+    // A `--keep-mine` resolution is a DRAFT even though every folder agrees with the record: topos
+    // wrote those bytes itself, so nothing scans as edited, yet what they hold is this person's
+    // version rather than the team's — and `publish` is its way out, which is exactly what `draft`
+    // means everywhere else. No folder is named as THE draft, because every copy holds it.
+    if sync.superseded.is_some() {
+        edited = true;
+    }
     // The block outranks the draft word: these edits are not a publishable draft, and the row's
     // exits are the merge's two, never `publish`. No folder is named either — the question a
     // blocked row answers is which version to keep, not where to edit.
@@ -1607,6 +1614,7 @@ pub(crate) mod testkit {
                     work_hash: "e".repeat(64),
                     held: false,
                     draft_observed: None,
+                    superseded: None,
                 },
             )
             .unwrap();

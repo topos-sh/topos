@@ -202,11 +202,21 @@ running `topos update <skill> --keep-mine`, which commits it (leaving the folder
 the author's version and drops the merge), or `topos update <skill> --reset --yes` to take the
 team's version instead. Either one clears the block and deletes the folder.
 
-`--keep-mine` is a LOCAL decision: it takes nothing from the team, so the recorded base does not
-move and `publish` keeps refusing — code `CONFLICT`, message `<skill>: your version is behind.` —
-until an ordinary `topos update <skill>` has merged the team's version in. That merge lands their
-non-conflicting changes silently and returns any still-contested lines to the same folder. It is
-the only route to publishing, and it cannot revert anyone.
+`--keep-mine` is one ordinary commit on top of the team's version, whose contents are the bytes you
+chose. It only ever finishes a merge that has STOPPED: with nothing waiting it refuses and names
+`topos update <skill>`, because committing your draft over changes the merge was about to land
+would drop them wordlessly. Where there is no shared history to merge against at all
+(`reason: "no_base"`), the folder holds your files with the team's beside them as
+`<path>.topos-theirs` siblings — topos's own comparison copies, stripped out of anything you
+publish.
+
+What the resolution CONTAINS is then measured, not assumed: if it already carries the team's
+version (you took their side of the contested lines), publishing is ordinary. If it does not, the
+`merged` row carries `merge.supersedes` — the version your bytes leave out — and `publish` refuses
+a bare `--yes` with code `PUBLISH_SUPERSEDES`, naming
+`topos publish <skill> --over <version>`. The describe (`topos publish <skill>`) leads with
+`supersedes`: the version and a diff of exactly what the team loses, computed locally. Naming that
+version back is what ships it; nothing can replace a teammate's change without stating which one.
 
 Three receipt fields say where bytes actually moved, so nothing has to be read out of prose:
 

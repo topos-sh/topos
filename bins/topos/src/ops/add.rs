@@ -318,6 +318,7 @@ pub(crate) fn add_with_name(
             work_hash: digest_hex.clone(),
             held: false,
             draft_observed: None,
+            superseded: None,
         },
     )?;
     // Attribute the harness. Either the adapter recognized it (adopt-in-place; auto-update armed below), OR

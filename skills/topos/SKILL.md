@@ -39,7 +39,10 @@ reference is `reference.md` next to this file; `topos <verb> --help` matches it.
   into its members. A bare `add` of a git source describes too — every time, tracked or not:
   listing what the repo holds is what the command is for. Everything else — every other file edit,
   `login`, `fmt` — applies immediately and prints its undo. Read the receipt's `undo`/next action
-  to reverse it, and tell the person what changed.
+  to reverse it, and tell the person what changed. Run the argv the describe RETURNS rather than
+  appending `--yes` yourself: a publish whose bytes leave out a version the team is on confirms by
+  naming it (`--over <version>`), and the describe is where that version and the diff of what they
+  lose are shown.
 - Describe once, then act: when a describe matches what the user already asked for, apply
   `--yes` immediately — repeating a describe or survey is never progress. Acting decisively
   never overrides the consent bar: anything org-bound (`publish`, with or without `--propose`)

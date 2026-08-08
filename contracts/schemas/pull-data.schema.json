@@ -209,6 +209,14 @@
           "type": "string",
           "pattern": "^[0-9a-f]{64}$"
         },
+        "supersedes": {
+          "description": "The team version this resolution's bytes deliberately do NOT contain — present only on a\n`--keep-mine` result whose chosen tree was MEASURED not to carry it (a hand resolution that\ntook the team's side records nothing here). It is what makes the later publish disclose the\nreplacement rather than ship it in silence. **INFERRED** (additive).",
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^[0-9a-f]{64}$"
+        },
         "theirs_version_id": {
           "description": "`current` (theirs) the draft was merged onto.",
           "type": "string",

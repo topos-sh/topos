@@ -114,6 +114,7 @@ pub(crate) fn publish(
     channel: Option<&str>,
     workspace: Option<&str>,
     message: Option<&str>,
+    over: Option<&str>,
     sel: &super::Selection,
 ) -> Result<PublishOutcome, ClientError> {
     // Split off an optional `@<digest>` consent pin (64-hex only); everything else is the SOURCE.
@@ -153,6 +154,7 @@ pub(crate) fn publish(
         pin.as_deref(),
         workspace,
         message,
+        over,
         sel,
     )?;
     Ok(stamp_added(outcome, added))
@@ -282,6 +284,7 @@ pub(crate) fn publish_describe(
     propose: bool,
     channel: Option<&str>,
     workspace: Option<&str>,
+    over: Option<&str>,
     sel: &super::Selection,
 ) -> Result<(PublishDescribeData, Vec<String>), ClientError> {
     let (source_str, pin) = parse_target(target);
@@ -339,11 +342,11 @@ pub(crate) fn publish_describe(
             skill: skill_name.clone(),
         });
     }
-    // Its neighbour: a copy that does not include the served `current` (the ordinary behind state, and
-    // where `--keep-mine` deliberately leaves a person). Shipping from here would land bytes with the
-    // team's change nowhere inside. The DESCRIBE refuses too, and refuses FIRST — a preview of a publish
-    // the apply will refuse is two steps to reach one answer.
-    behind_guard(ctx, &sp, &skill_name)?;
+    // Its neighbour: a copy that does not include the served `current` (the ordinary behind state).
+    // Shipping from here would land bytes with the team's change nowhere inside, and the plane's own
+    // lineage fence refuses it anyway. The DESCRIBE refuses too, and refuses FIRST — a preview of a
+    // publish the apply will refuse is two steps to reach one answer.
+    behind_guard(ctx, &sp, &skill_name, propose)?;
 
     // Scan the live draft ONCE → the byte-exact digest the apply would ship; the optional `@<digest>` pin
     // gates it here too (refuse on mismatch), so a describe never previews bytes the apply would refuse.
@@ -390,6 +393,10 @@ pub(crate) fn publish_describe(
     // first publish must NOT be refused. `follow_entry`/`followed` are also read below for the gate.
     let sync: SyncState = doc::read_doc(ctx.fs, &sp.sync)?
         .ok_or_else(|| ClientError::Corrupt("missing sync state".to_owned()))?;
+    // The supersede consent's describe half: a bare describe is exactly where the version gets
+    // SHOWN, so a missing `--over` is fine here; a `--over` naming the wrong version refuses on both
+    // halves, and one naming nothing to replace refuses as the usage error it is.
+    supersede_gate(&sync, &lock, &skill_name, over, propose, false)?;
     let follow_entry = ctx
         .follow
         .followed()
@@ -568,6 +575,27 @@ pub(crate) fn publish_describe(
         None => (None, None, None),
     };
 
+    // WHAT THIS PUBLISH REPLACES — the disclosure the whole `--over` gate exists to deliver. The
+    // version is the one recorded at the `--keep-mine` resolution; the diff beside it is computed from
+    // LOCAL bytes only (that version renders out of this bundle's own store, and the draft was scanned
+    // above), so the describe gains no network call for it — a version whose bytes are not held renders
+    // no diff rather than fetching one.
+    let supersedes = supersedes(&sync, &lock).map(|target| {
+        let diff = Store::open(&sp.store).ok().and_then(|store| {
+            let theirs = store
+                .render_verified(
+                    parse_hex32(&target.version_id).ok()?,
+                    parse_hex32(&target.bundle_digest).ok()?,
+                )
+                .ok()?;
+            Some(super::merge_resolve::drop_diff_from_scan(&theirs, &scanned))
+        });
+        topos_types::results::PublishSupersedes {
+            version_id: target.version_id,
+            diff,
+        }
+    });
+
     let (from_placement, other_edited) = from_disclosure(picked.as_ref());
     Ok((
         PublishDescribeData {
@@ -596,6 +624,7 @@ pub(crate) fn publish_describe(
             reference: transfer_reference,
             converted_from: transfer_from,
             kind: bundle_kind,
+            supersedes,
         },
         warnings,
     ))
@@ -907,6 +936,7 @@ fn enrolled_publish(
     pin: Option<&str>,
     workspace: Option<&str>,
     message: Option<&str>,
+    over: Option<&str>,
     sel: &super::Selection,
 ) -> Result<PublishOutcome, ClientError> {
     // The `--workspace` filter disambiguates a name shared across workspaces. A DELIVERED skill signs in
@@ -964,7 +994,17 @@ fn enrolled_publish(
     }
     // Its neighbour: this copy does not include the served `current`. Refused here, before the
     // transport is built and before a byte of the draft is scanned — the same answer the describe gave.
-    behind_guard(ctx, &sp, skill_name)?;
+    behind_guard(ctx, &sp, skill_name, propose)?;
+    // The supersede consent, in the same beat and for the same reason: a publish that would replace a
+    // team version these bytes do not carry refuses until `--over` names it. Nothing has been scanned,
+    // built, or sent when it fires. The version is read HERE, before the write clears the record, so
+    // the receipt below can state the one thing the new `current` does not contain.
+    let superseding = {
+        let sync: SyncState = doc::read_doc(ctx.fs, &sp.sync)?
+            .ok_or_else(|| ClientError::Corrupt("missing sync state".to_owned()))?;
+        supersede_gate(&sync, &lock, skill_name, over, propose, true)?;
+        supersedes(&sync, &lock).map(|s| short_version(&s.version_id))
+    };
 
     let legacy_transport;
     let transport: &dyn crate::plane::ContributeSource = match &lane {
@@ -1117,6 +1157,7 @@ fn enrolled_publish(
         dir_ref,
         followed,
         picked.as_ref(),
+        superseding,
     )?;
     // GOVERNANCE TRANSFER, by default: a landed publish — OR an opened proposal (`--propose`,
     // the reviewed-bundle downgrade) — of a bundle some manifest referenced as a LOCAL PATH
@@ -1426,24 +1467,122 @@ fn is_behind(sync: &SyncState) -> bool {
 
 /// The behind guard both publish preflights run, beside the `conflict.json` one.
 ///
-/// It is the SAME precondition the op builder has always enforced ([`build_publish_op`]); hoisting it to
-/// the preflight is what lets the DESCRIBE answer it too — previewing a publish the apply would refuse is
-/// two steps to reach one answer — and what gives `--keep-mine` its promise: that exit leaves the
-/// recorded base behind on purpose, so the publish it would otherwise unlock (this machine's bytes as the
-/// new `current`, the team's change nowhere inside) stays refused until `topos update` has actually
-/// merged. The merge is what makes the publish safe; there is no other route, and no route that reverts.
+/// It is the SAME precondition the op builder has always enforced ([`build_publish_op`]) and the plane's
+/// own lineage fence: a candidate whose first parent is not the version `current` names is refused
+/// server-side, so this is that refusal caught locally, one step earlier and for free. Hoisting it to the
+/// preflight is what lets the DESCRIBE answer it too — previewing a publish the apply would refuse is two
+/// steps to reach one answer.
+///
+/// **`--propose` is exempt**, and that exemption is the point rather than a hole: a proposal moves no
+/// pointer, so no fence applies to it and nothing of the team's can be replaced by it. Refusing it would
+/// block the one act a behind copy can always safely take — asking the team to look.
 ///
 /// # Errors
 /// [`ClientError::PublishBehind`] naming the skill; [`ClientError::Corrupt`] when `sync.json` is missing.
-fn behind_guard(ctx: &Ctx<'_>, sp: &sidecar::SkillPaths, skill: &str) -> Result<(), ClientError> {
+fn behind_guard(
+    ctx: &Ctx<'_>,
+    sp: &sidecar::SkillPaths,
+    skill: &str,
+    propose: bool,
+) -> Result<(), ClientError> {
     let sync: SyncState = doc::read_doc(ctx.fs, &sp.sync)?
         .ok_or_else(|| ClientError::Corrupt("missing sync state".to_owned()))?;
-    if is_behind(&sync) {
+    if !propose && is_behind(&sync) {
         return Err(ClientError::PublishBehind {
             skill: skill.to_owned(),
         });
     }
     Ok(())
+}
+
+/// What this publish would REPLACE — the team version the draft was MEASURED not to carry when a
+/// `--keep-mine` resolution committed it ([`SyncState::superseded`]), or `None` for the ordinary case.
+///
+/// The record is honoured only while it still describes THIS publish: the candidate parents on
+/// `lock.base_commit`, so the version being replaced is that one, and a `superseded` naming anything
+/// else is a stale note about a state the bundle has already left.
+fn supersedes(sync: &SyncState, lock: &Lock) -> Option<topos_types::persisted::Superseded> {
+    sync.superseded
+        .clone()
+        .filter(|s| s.version_id == lock.base_commit)
+}
+
+/// The consent gate for a publish that would replace a version its own bytes do not carry.
+///
+/// Nothing here decides whether the publish is ALLOWED — it is; a `--keep-mine` decision is a real
+/// decision and shipping it is the ordinary next step. What the gate decides is whether it may happen
+/// in SILENCE, and the answer is no: the apply refuses until the version is named back with
+/// `--over <version>`, which a person or an agent can only do after the describe has shown it to them.
+/// That is the whole mechanism that closes "an agent replaced a teammate's change and said nothing".
+///
+/// `applying` separates the two halves of the verb: the DESCRIBE is what shows the version, so a
+/// missing `--over` there is not a refusal but the reason the describe exists. A `--over` that names
+/// the WRONG version refuses on both halves — the team moved, and the newer version must be read
+/// before it is replaced.
+///
+/// `--propose` is exempt for the same reason it is exempt from the behind guard: it moves no pointer,
+/// and a human reads it before anything of the team's is replaced. A `--over` passed alongside one is
+/// still verified — it is an assertion the person made, and a wrong assertion is never waved through.
+///
+/// # Errors
+/// [`ClientError::PublishSupersedes`] on a bare apply; [`ClientError::PublishOverMismatch`] when
+/// `--over` names a different version; [`ClientError::InvalidArgument`] when `--over` is passed for a
+/// publish that replaces nothing.
+fn supersede_gate(
+    sync: &SyncState,
+    lock: &Lock,
+    skill: &str,
+    over: Option<&str>,
+    propose: bool,
+    applying: bool,
+) -> Result<(), ClientError> {
+    let Some(target) = supersedes(sync, lock) else {
+        // A flag that asserts something untrue is never silently ignored (`--dest` on a bare
+        // `update` takes the same line).
+        if over.is_some() {
+            return Err(ClientError::InvalidArgument(format!(
+                "`--over` names a version this publish replaces, and '{skill}' replaces nothing — \
+                 its draft carries the team's version. Publish it with `--yes`."
+            )));
+        }
+        return Ok(());
+    };
+    match over {
+        None if applying && !propose => Err(ClientError::PublishSupersedes {
+            skill: skill.to_owned(),
+            version: short_version(&target.version_id),
+        }),
+        None => Ok(()),
+        Some(named) => {
+            let vref = super::VersionRef::parse_arg(
+                named,
+                &format!(
+                    "`--over` takes a version id (or a unique prefix of at least \
+                     {} characters), not '{named}'",
+                    super::MIN_VERSION_PREFIX
+                ),
+            )?;
+            let matches = match &vref {
+                super::VersionRef::Full(h) => to_hex(h) == target.version_id,
+                super::VersionRef::Prefix(p) => target.version_id.starts_with(p.as_str()),
+            };
+            if matches {
+                Ok(())
+            } else {
+                Err(ClientError::PublishOverMismatch {
+                    skill: skill.to_owned(),
+                    named: named.to_owned(),
+                    actual: short_version(&target.version_id),
+                })
+            }
+        }
+    }
+}
+
+/// A version id as every receipt and command line spells it — the 12 chars that resolve everywhere a
+/// prefix is accepted.
+fn short_version(v: &str) -> String {
+    v.get(..SHORT_VERSION).unwrap_or(v).to_owned()
 }
 
 /// Build the fresh op from the already-scanned draft (`scanned` / `digest` were computed + gated in
@@ -1478,12 +1617,15 @@ fn build_publish_op(
     let sync: SyncState = doc::read_doc(ctx.fs, &sp.sync)?
         .ok_or_else(|| ClientError::Corrupt("missing sync state".to_owned()))?;
 
-    // Be current before publishing: a behind state (a newer `current` not yet applied) would publish on a
-    // stale base and could clobber the unapplied version — surface it as a locally-detected refusal
-    // (update to rebase), never a confusing server DENIED. The preflight already answered this for both
-    // entry points; the check stands here as the op builder's own precondition, so a future caller that
-    // reaches it another way still cannot mint a reverting op.
-    if is_behind(&sync) {
+    // Be current before publishing: a behind state (a newer `current` not yet applied) would build a
+    // candidate whose first parent is not the pointed version, which the plane's lineage fence refuses
+    // — surface it as a locally-detected refusal (update to rebase), never a confusing server DENIED.
+    // The preflight already answered this for both entry points; the check stands here as the op
+    // builder's own precondition, so a future caller that reaches it another way still cannot mint an
+    // op the plane will reject. A PROPOSAL moves no pointer and meets no fence, so it is exempt here
+    // exactly as it is in [`behind_guard`] — the two must not disagree, or a described proposal would
+    // die at the op builder.
+    if !propose && is_behind(&sync) {
         return Err(ClientError::PublishBehind {
             skill: lock.name.clone(),
         });
@@ -1592,6 +1734,7 @@ fn map_outcome(
     directory: Option<&dyn crate::plane::DirectorySource>,
     followed: bool,
     picked: Option<&super::dest_select::SelectedCopy>,
+    superseding: Option<String>,
 ) -> Result<PublishOutcome, ClientError> {
     // Both landed shapes name their destination from the workspace's own ADDRESS — ONE
     // best-effort read, AFTER the write; a failure just leaves the lines off, it never fails a
@@ -1682,6 +1825,9 @@ fn map_outcome(
                 undo,
                 from_placement,
                 other_edited,
+                // The one thing the new `current` does not carry — stated on the receipt because
+                // the undo above is the only way back to it.
+                supersedes: superseding,
             }))
         }
         TerminalOutcome::NeedsReview => {
@@ -1744,12 +1890,117 @@ fn denied_code(receipt: &WriteReceipt) -> String {
 
 #[cfg(test)]
 mod tests {
+    use topos_types::persisted::{Lock, Superseded, SyncState};
     use topos_types::results::PublishGate;
 
+    use crate::error::ClientError;
+
     use super::{
-        GENESIS, landed_undo_is_restorative, server_origin, teammate_invite_line,
-        undo_is_restorative, workspace_handle,
+        GENESIS, landed_undo_is_restorative, server_origin, supersede_gate, supersedes,
+        teammate_invite_line, undo_is_restorative, workspace_handle,
     };
+
+    /// A lock at `base`, and a sync whose draft drops `dropped` (or nothing).
+    fn state(base: &str, dropped: Option<&str>) -> (SyncState, Lock) {
+        (
+            SyncState {
+                schema_version: 1,
+                observed: 4,
+                observed_version_id: base.to_owned(),
+                applied: 4,
+                base_commit: base.to_owned(),
+                work_hash: "c".repeat(64),
+                held: false,
+                draft_observed: None,
+                superseded: dropped.map(|v| Superseded {
+                    version_id: v.to_owned(),
+                    bundle_digest: "d".repeat(64),
+                }),
+            },
+            Lock {
+                schema_version: 1,
+                skill_id: "topos_a1b2c3".to_owned(),
+                name: "coolify-deploy".to_owned(),
+                base_commit: base.to_owned(),
+                bundle_digest: "e".repeat(64),
+                files: Vec::new(),
+            },
+        )
+    }
+
+    /// The record is honoured only while it still describes THIS publish. A candidate parents on
+    /// `lock.base_commit`, so a `superseded` naming anything else is a stale note about a state the
+    /// bundle has already left — and reading it would disclose (and gate on) the wrong version.
+    #[test]
+    fn a_stale_supersede_record_is_not_what_this_publish_replaces() {
+        let base = "a".repeat(64);
+        let older = "b".repeat(64);
+        let (sync, lock) = state(&base, Some(&base));
+        assert_eq!(
+            supersedes(&sync, &lock).map(|s| s.version_id),
+            Some(base.clone())
+        );
+        let (sync, lock) = state(&base, Some(&older));
+        assert!(supersedes(&sync, &lock).is_none());
+        let (sync, lock) = state(&base, None);
+        assert!(supersedes(&sync, &lock).is_none());
+    }
+
+    /// The gate's whole job: an APPLY may not replace a version in silence, and every other shape
+    /// passes. The describe is exempt because the describe is where the version gets shown; a
+    /// proposal is exempt because it moves no pointer and a human reads it first.
+    #[test]
+    fn the_supersede_gate_stops_only_a_silent_apply() {
+        let base = "a".repeat(64);
+        let (sync, lock) = state(&base, Some(&base));
+        let gate = |over: Option<&str>, propose: bool, applying: bool| {
+            supersede_gate(&sync, &lock, "coolify-deploy", over, propose, applying)
+        };
+
+        // The one refusal: a bare apply.
+        let err = gate(None, false, true).expect_err("a bare apply names nothing");
+        assert!(
+            matches!(&err, ClientError::PublishSupersedes { version, .. } if base.starts_with(version.as_str())),
+            "{err:?}"
+        );
+        // The describe SHOWS the version, so it is not the place to demand it back.
+        gate(None, false, false).expect("the describe discloses instead of refusing");
+        // A proposal moves no pointer — nothing of the team's can be replaced by it.
+        gate(None, true, true).expect("a proposal is exempt");
+
+        // Named back: the full id, and the 12 chars every receipt prints.
+        gate(Some(&base), false, true).expect("the full id");
+        gate(Some(&base[..12]), false, true).expect("the printed short form");
+        // A prefix too short to be unique anywhere is a usage error, not a match.
+        let err = gate(Some(&base[..4]), false, true).expect_err("4 chars is not a version");
+        assert!(matches!(err, ClientError::InvalidArgument(_)), "{err:?}");
+
+        // A DIFFERENT version refuses on BOTH halves — the team moved, and the newer one is read
+        // before it is replaced. Named in the refusal, so the corrected command is composable.
+        for applying in [true, false] {
+            let err = gate(Some(&"b".repeat(64)), false, applying)
+                .expect_err("a wrong version never passes");
+            assert!(
+                matches!(&err, ClientError::PublishOverMismatch { actual, .. } if base.starts_with(actual.as_str())),
+                "{err:?}"
+            );
+        }
+        // Even under `--propose`: an assertion the person made is never waved through.
+        assert!(gate(Some(&"b".repeat(64)), true, true).is_err());
+    }
+
+    /// `--over` on a publish that replaces nothing is a flag asserting something untrue — refused,
+    /// never silently ignored (the same line `--dest` on a bare `update` takes).
+    #[test]
+    fn an_over_with_nothing_to_replace_is_a_usage_error() {
+        let base = "a".repeat(64);
+        let (sync, lock) = state(&base, None);
+        let err = supersede_gate(&sync, &lock, "coolify-deploy", Some(&base), false, true)
+            .expect_err("nothing is being replaced");
+        assert!(matches!(err, ClientError::InvalidArgument(_)), "{err:?}");
+        supersede_gate(&sync, &lock, "coolify-deploy", None, false, true)
+            .expect("and the ordinary apply is untouched");
+    }
 
     #[test]
     fn a_workspace_is_named_by_its_address_not_its_scheme() {

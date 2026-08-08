@@ -124,6 +124,14 @@
     "skill_id": {
       "type": "string"
     },
+    "supersedes": {
+      "description": "The team version this publish REPLACED without carrying it — present only where the apply\nwent through the `--over` gate, so the receipt states the one thing the new `current` does\nnot contain. **INFERRED** (additive-only).",
+      "type": [
+        "string",
+        "null"
+      ],
+      "pattern": "^[0-9a-f]{64}$"
+    },
     "undo": {
       "description": "The undo — the whole `topos revert <name> --to <version>` command that puts the team back\non the version `current` held before this publish. WITHHELD unless it verifiably restores\nthat state: a bundle this machine does not follow cannot be reverted from here, and a\ngenesis publish left no prior version to restore. **INFERRED** (additive-only).",
       "type": [

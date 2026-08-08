@@ -145,10 +145,11 @@ pub struct NextAction {
 /// The closed initial action-code vocabulary (each maps to its producing outcome). Advertised in
 /// the [`ActionCode`] schema's `examples` so a cross-language consumer learns the set without
 /// reading Rust; additive-only — new codes append here.
-pub const KNOWN_ACTION_CODES: [&str; 11] = [
+pub const KNOWN_ACTION_CODES: [&str; 12] = [
     "PROPOSE_PUBLISH",
     "REBASE_AND_RETRY",
     "RESOLVE_DIVERGED_DRAFT",
+    "PUBLISH_OVER_VERSION",
     "APPLY_WAITING_UPDATE",
     "DISAMBIGUATE_NAME",
     "REQUEST_ACCESS",
@@ -166,6 +167,7 @@ pub enum ActionCode {
     ProposePublish,       // APPROVAL_REQUIRED
     RebaseAndRetry,       // CONFLICT
     ResolveDivergedDraft, // DIVERGED
+    PublishOverVersion,   // PUBLISH_SUPERSEDES — re-issue naming the version being replaced
     ApplyWaitingUpdate,   // `pull <skill>` — a previously observed-but-unapplied version
     DisambiguateName,     // AMBIGUOUS_NAME
     RequestAccess,        // DENIED → invite/enroll
@@ -199,6 +201,7 @@ impl ActionCode {
             ActionCode::ProposePublish => "PROPOSE_PUBLISH",
             ActionCode::RebaseAndRetry => "REBASE_AND_RETRY",
             ActionCode::ResolveDivergedDraft => "RESOLVE_DIVERGED_DRAFT",
+            ActionCode::PublishOverVersion => "PUBLISH_OVER_VERSION",
             ActionCode::ApplyWaitingUpdate => "APPLY_WAITING_UPDATE",
             ActionCode::DisambiguateName => "DISAMBIGUATE_NAME",
             ActionCode::RequestAccess => "REQUEST_ACCESS",
@@ -218,6 +221,7 @@ impl From<String> for ActionCode {
             "PROPOSE_PUBLISH" => ActionCode::ProposePublish,
             "REBASE_AND_RETRY" => ActionCode::RebaseAndRetry,
             "RESOLVE_DIVERGED_DRAFT" => ActionCode::ResolveDivergedDraft,
+            "PUBLISH_OVER_VERSION" => ActionCode::PublishOverVersion,
             "APPLY_WAITING_UPDATE" => ActionCode::ApplyWaitingUpdate,
             "DISAMBIGUATE_NAME" => ActionCode::DisambiguateName,
             "REQUEST_ACCESS" => ActionCode::RequestAccess,

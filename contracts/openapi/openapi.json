@@ -2336,6 +2336,7 @@
           "PROPOSE_PUBLISH",
           "REBASE_AND_RETRY",
           "RESOLVE_DIVERGED_DRAFT",
+          "PUBLISH_OVER_VERSION",
           "APPLY_WAITING_UPDATE",
           "DISAMBIGUATE_NAME",
           "REQUEST_ACCESS",
@@ -3148,6 +3149,13 @@
           },
           "skill_id": {
             "type": "string"
+          },
+          "supersedes": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The team version this publish REPLACED without carrying it — present only where the apply\nwent through the `--over` gate, so the receipt states the one thing the new `current` does\nnot contain. **INFERRED** (additive-only)."
           },
           "undo": {
             "type": [

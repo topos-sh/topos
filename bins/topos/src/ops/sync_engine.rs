@@ -42,12 +42,11 @@ const MAX_BACKFILL: usize = 256;
 /// The `applied` generation a deliberate local decision leaves behind when this machine is knowingly NOT
 /// holding the served `current`: the genesis sentinel `(0,0)`, which is strictly below any real served
 /// `observed`, so a later pull sees `applied != observed` (behind) and drives toward the team's version
-/// again. Two decisions leave it: the go-back (which installs an OLD version whose true generation is no
-/// longer tracked locally — and pins `held` until an explicit pull) and `--keep-mine` (which keeps this
-/// machine's own bytes and takes nothing from the team). `(0,0)` is the honest "not at current" in both.
+/// again. ONE decision leaves it: the go-back, which installs an OLD version whose true generation is no
+/// longer tracked locally (and pins `held` until an explicit pull).
 ///
 /// It never reads as never-received: [`is_never_received`] also requires the all-zero `base_commit`
-/// sentinel, and both decisions leave a real commit there.
+/// sentinel, and the go-back leaves a real commit there.
 pub(crate) const APPLIED_BEHIND_CURRENT: u64 = 0;
 
 /// A capability token proving the author-merge code was reached from a divergence. Its field is private to
@@ -67,7 +66,10 @@ pub(crate) enum Invocation {
     Sweep,
     /// A targeted accept / resume (`topos pull <skill>`).
     Accept,
-    /// The disclosed escape (`topos pull <skill> --keep-mine`): commit MY bytes on top of `current`.
+    /// The disclosed escape (`topos pull <skill> --keep-mine`): FINISH a stopped merge by committing
+    /// the author's chosen bytes on top of `current`. It resolves a RECORDED conflict and nothing
+    /// else — reaching a live divergence with no record means no merge ever stopped, and the
+    /// engine refuses toward the merge rather than dropping what it would have landed.
     Escape,
 }
 
@@ -310,11 +312,14 @@ pub(crate) fn sync_one_planned(
                     }
                     return Ok(row);
                 }
-            } else if sync.draft_observed.is_some() {
+            } else if sync.draft_observed.is_some() || sync.superseded.is_some() {
                 // The draft resolved outside an apply (reverted by hand): the stale observation
-                // must not let a FUTURE identical edit spread on its first sighting.
+                // must not let a FUTURE identical edit spread on its first sighting — and a
+                // recorded supersede describes a draft that no longer exists, so it goes with
+                // it (the work tree IS the base here; nothing of the team's is being dropped).
                 let cleared = SyncState {
                     draft_observed: None,
+                    superseded: None,
                     ..sync.clone()
                 };
                 doc::write_doc(ctx.fs, &sp.sync, &cleared)?;
@@ -469,17 +474,20 @@ pub(crate) fn sync_one_planned(
                     "{name} reads as diverged with no draft working tree"
                 )));
             };
+            // `--keep-mine` FINISHES a merge that stopped; here nothing has stopped. The recorded
+            // conflict was handled at the top of this function, so reaching the escape down here
+            // means the merge was never run — and running it is exactly what would land the
+            // team's non-conflicting changes. Committing this draft over them instead would drop
+            // work nobody has looked at, so it refuses and names the merge.
+            if inv == Invocation::Escape {
+                return Err(ClientError::NoStoppedMerge {
+                    skill: name,
+                    global: !ctx.layout.is_project_scope(),
+                });
+            }
             // The structural author-only gate: the witness is minted ONLY here.
-            let witness = DivergedWitness(());
-            use super::merge_resolve::{ResolveStrategy, resolve_diverged};
-            let strategy = match inv {
-                Invocation::Escape => ResolveStrategy::Escape,
-                // Every other invocation runs the three-way merge: the bare sweep unattended (the
-                // recipe row is the standing consent), a targeted accept the same thing typed out.
-                Invocation::Accept | Invocation::Sweep => ResolveStrategy::Merge,
-            };
-            resolve_diverged(
-                witness,
+            super::merge_resolve::resolve_diverged(
+                DivergedWitness(()),
                 ctx,
                 skill_id,
                 &sp,
@@ -489,7 +497,6 @@ pub(crate) fn sync_one_planned(
                 scanned,
                 &bundle,
                 target_commit,
-                strategy,
             )
         }
     }
@@ -636,7 +643,10 @@ pub(crate) fn go_back(
         base_commit: target_hex.clone(),
         work_hash: target_digest_hex.clone(),
         held: true,
+        // A go-back installs an OLD version whole — no draft stands, and nothing of the
+        // team's is being deliberately dropped by these bytes.
         draft_observed: None,
+        superseded: None,
     };
     let next_lock = lock_from_bundle(&lock, target, &bundle);
     let report = materialize::materialize(
@@ -790,6 +800,9 @@ pub(crate) fn reset_to_base(
         work_hash: base_digest_hex.clone(),
         held: false,
         draft_observed: None,
+        // The reset discards the draft, and a supersede record describes exactly that draft —
+        // it goes with it, or the restored copy would keep reporting a decision nobody holds.
+        superseded: None,
     };
     let report = materialize::materialize(
         ctx.fs,
@@ -1330,28 +1343,10 @@ pub(crate) fn forwarded_sync(
         base_commit: to_hex(&target),
         work_hash: target_digest_hex.to_owned(),
         held: false,
-        // A forward apply/heal lands the pristine target everywhere — no standing draft remains.
+        // A forward apply/heal lands the pristine target everywhere — no standing draft remains,
+        // and nothing of the team's is being dropped any more.
         draft_observed: None,
-    }
-}
-
-/// The sync state a KEPT-MINE resolution leaves: the base stays exactly where it was (`base_commit`), the
-/// work hash names the bytes now in every folder, and `applied` drops to [`APPLIED_BEHIND_CURRENT`] —
-/// this machine holds its own version and the served `observed` is not in it. `held` is cleared, because
-/// the next `topos update` must be free to run the real three-way merge (the no-deadlock half).
-///
-/// The mirror image of [`forwarded_sync`]: same three fields, the opposite claim about `current`.
-pub(crate) fn kept_sync(sync: &SyncState, base_commit: &str, work_hash_hex: &str) -> SyncState {
-    SyncState {
-        schema_version: sync.schema_version,
-        observed: sync.observed,
-        observed_version_id: sync.observed_version_id.clone(),
-        applied: APPLIED_BEHIND_CURRENT,
-        base_commit: base_commit.to_owned(),
-        work_hash: work_hash_hex.to_owned(),
-        held: false,
-        // Topos itself wrote these bytes into every folder, so no unsaved draft is standing.
-        draft_observed: None,
+        superseded: None,
     }
 }
 

@@ -1312,19 +1312,19 @@ fn a_targeted_accept_merges_a_diverged_draft_the_preview_called_clean() {
     assert!(!rig.conflict_exists(&id));
 }
 
-/// The disclosed escape (`--keep-mine`): commit MY bytes, drop the merge — and leave the recorded base
-/// exactly where it stood, so this machine reads as BEHIND rather than as up to date.
+/// The disclosed escape (`--keep-mine`): one ordinary commit on top of the team's version, whose
+/// CONTENTS keep this person's bytes.
 ///
-/// That last part is the whole point. Advancing the base made the author's bytes look like a draft ON
-/// the team's version, so the very next `publish` shipped them as the new `current` with the team's
-/// change nowhere inside — a silent revert from the one command that promises to touch nothing but your
-/// own copy. Here the base stays at the pre-escape commit and `applied` drops below `observed`, which is
-/// what refuses that publish and what lets the next `topos update` run a real three-way merge.
+/// Everything durable says exactly that. The recorded base IS the team's version (the commit's only
+/// parent), `applied` catches up to `observed`, and the working bytes read as an ordinary draft — so
+/// the plane's lineage fence is satisfied and a publish from here is possible at all. What the docs
+/// ALSO carry is the one unusual thing about this draft: `superseded` names the team version its
+/// contents drop, measured by re-running the merge rather than assumed from the flag.
 #[test]
-fn keep_mine_keeps_my_bytes_and_leaves_the_base_behind() {
+fn keep_mine_commits_my_bytes_on_theirs_and_records_what_they_drop() {
     let rig = Rig::new("escape");
     let (id, _name, genesis) = rig.adopt(BASE);
-    // An overlapping edit (would conflict if merged) — the escape sidesteps the merge entirely.
+    // An overlapping edit — the merge stops, and the escape is what finishes it.
     let mine: &[(&str, FileMode, &[u8])] = &[
         ("SKILL.md", FileMode::Regular, b"# my way\n"),
         ("run.sh", FileMode::Executable, b"#!/bin/sh\necho v0\n"),
@@ -1336,6 +1336,13 @@ fn keep_mine_keeps_my_bytes_and_leaves_the_base_behind() {
     plane.add_version(&id, &v1);
     plane.set_current(&id, served(WS, &id, v1.id, 1));
     let foll = follow(&id, FollowMode::Auto);
+
+    // The merge stops FIRST — `--keep-mine` finishes a stopped merge, and there is nothing to
+    // finish before one has stopped (see `keep_mine_refuses_when_no_merge_has_stopped`).
+    assert_eq!(
+        only(&pull_data(&rig.ctx(&plane, &foll), ops::PullScope::AllFollowed).unwrap()).action,
+        PullAction::Conflicted
+    );
 
     let data = pull_data(
         &rig.ctx(&plane, &foll),
@@ -1352,38 +1359,100 @@ fn keep_mine_keeps_my_bytes_and_leaves_the_base_behind() {
     let mr = row.merge.as_ref().expect("a merge report");
     assert!(mr.clean);
     assert!(mr.drop_diff.is_some(), "the escape discloses what it drops");
+    assert_eq!(
+        mr.supersedes.as_deref(),
+        Some(to_hex(&v1.id).as_str()),
+        "the row names the team version these bytes leave out"
+    );
 
     // The placement holds exactly MY bytes (theirs was dropped) and the decision is made — no block.
     assert_eq!(snapshot(&rig.placement()), Some(expect(mine)));
     assert!(!rig.conflict_exists(&id));
     let s = rig.read_sync(&id);
-    // BEHIND, and honestly so: the base is still the version my bytes descend from, and the served
-    // generation is NOT recorded as applied — the two facts `publish` reads to refuse.
+    // The base IS theirs — the commit's one parent — so the plane's lineage fence is satisfied and
+    // publishing is reachable at all.
     assert_eq!(
         s.base_commit,
-        to_hex(&genesis),
-        "the recorded base must not advance to the team's version"
+        to_hex(&v1.id),
+        "the escape commits ON the team's version"
     );
-    assert_ne!(s.applied, s.observed, "the served version was not applied");
-    assert_eq!(s.observed, 1, "the team's version is still the target");
-    assert!(!s.held, "the next update must be free to merge");
+    assert_eq!(s.applied, s.observed, "and takes it as applied");
+    assert_eq!(s.observed, 1);
+    assert!(!s.held);
+    // …and the contents are recorded for what they are.
+    let sup = s.superseded.expect("the dropped version is recorded");
+    assert_eq!(sup.version_id, to_hex(&v1.id));
+    assert_eq!(sup.bundle_digest, to_hex(&rendered(V1).bundle_digest));
 
-    // The pre-escape draft is recoverable: MINE re-parented on `current` is a real commit in the store.
+    // The escape's own commit is a real 1-parent commit on `current` — the history stays a list.
     let m = mk_version(&[v1.id], mine, DEVICE, "topos: merge escape");
     assert!(rig.open_store(&id).list_versions().unwrap().contains(&m.id));
 }
 
-/// The route back from `--keep-mine`, end to end: the merge RE-RAISES on the next update — from the
-/// PRE-CONFLICT base, not from the team's version — and once the author's copy no longer contests the
-/// team's lines it merges clean, the base advances, and the bundle is publishable again.
-///
-/// Both halves are load-bearing. Rewinding to the wrong base would make the re-merge a no-op that
-/// silently declares the author current (the old defect, one step later); not rewinding `applied` would
-/// leave the bundle in the DRAFT state, where no merge ever runs again and the team's version could
-/// never arrive.
+/// A hand resolution that TOOK the team's contested line records nothing: the same command, the same
+/// exit, and no supersede — because the answer is measured from the bytes, never from the flag.
 #[test]
-fn after_keep_mine_the_next_update_merges_from_the_pre_conflict_base() {
-    let rig = Rig::new("keepmine-remerge");
+fn a_reconciling_hand_merge_records_no_supersede() {
+    let rig = Rig::new("escape-reconciled");
+    let base: FileSet = &[("SKILL.md", FileMode::Regular, b"line1\nline2\nline3\n")];
+    let (id, _name, genesis) = rig.adopt(base);
+    let mine: FileSet = &[("SKILL.md", FileMode::Regular, b"MINE\nline2\nline3\n")];
+    let theirs: FileSet = &[("SKILL.md", FileMode::Regular, b"THEIRS\nline2\nline3\n")];
+    write_tree(&rig.placement(), mine);
+
+    let v1 = mk_version(&[genesis], theirs, "d_pub", "v1");
+    let mut plane = FixturePlane::default();
+    plane.add_version(&id, &v1);
+    plane.set_current(&id, served(WS, &id, v1.id, 1));
+    let foll = follow(&id, FollowMode::Auto);
+    assert_eq!(
+        only(&pull_data(&rig.ctx(&plane, &foll), ops::PullScope::AllFollowed).unwrap()).action,
+        PullAction::Conflicted
+    );
+
+    // The team's contested line, taken as it stands, plus a change of this person's own elsewhere.
+    let reconciled: FileSet = &[("SKILL.md", FileMode::Regular, b"THEIRS\nline2\nMINE3\n")];
+    write_tree(&rig.conflict_copy(&id), reconciled);
+    let row = only(
+        &pull_data(
+            &rig.ctx(&plane, &foll),
+            ops::PullScope::One {
+                store: ops::StoreScope::Here,
+                name: "pr-describe".into(),
+                workspace: None,
+                mode: ops::TargetMode::KeepMine,
+            },
+        )
+        .unwrap(),
+    )
+    .clone();
+    assert_eq!(row.action, PullAction::Merged);
+    assert_eq!(
+        row.merge.as_ref().and_then(|m| m.supersedes.clone()),
+        None,
+        "these bytes carry the team's version, so nothing is superseded: {row:?}"
+    );
+    assert_eq!(snapshot(&rig.placement()), Some(expect(reconciled)));
+    let s = rig.read_sync(&id);
+    assert_eq!(s.base_commit, to_hex(&v1.id));
+    assert_eq!(s.applied, s.observed);
+    assert!(
+        s.superseded.is_none(),
+        "and the durable record says so too: {:?}",
+        s.superseded
+    );
+}
+
+/// Where `--keep-mine` leaves the bundle, seen from the NEXT update: an ordinary draft on the team's
+/// version. Nothing new from the team is a no-op; a newer team version runs a real three-way merge
+/// FROM THEIRS — the version the escape's commit is parented on.
+///
+/// The old shape of this test asserted the opposite (a merge re-run from the PRE-conflict base, with
+/// the same conflict raised again forever). That was the loop: the decision never became durable, so
+/// every sweep re-asked the question the person had already answered.
+#[test]
+fn after_keep_mine_the_draft_sits_on_theirs_and_merges_forward_from_it() {
+    let rig = Rig::new("keepmine-forward");
     let base: FileSet = &[("SKILL.md", FileMode::Regular, b"line1\nline2\nline3\n")];
     let (id, _name, genesis) = rig.adopt(base);
     // The same line, differently — a genuine conflict.
@@ -1414,51 +1483,104 @@ fn after_keep_mine_the_next_update_merges_from_the_pre_conflict_base() {
         PullAction::Merged
     );
     assert!(!rig.conflict_exists(&id));
+    assert_eq!(rig.read_sync(&id).base_commit, to_hex(&v1.id));
+
+    // NOTHING NEW FROM THE TEAM: the decision stands and the sweep says so. The old behavior
+    // re-raised the very conflict this exit resolved, on every single sweep.
+    let quiet =
+        only(&pull_data(&rig.ctx(&plane, &foll), ops::PullScope::AllFollowed).unwrap()).action;
+    assert_eq!(quiet, PullAction::UpToDate, "the decision is durable");
+    assert!(!rig.conflict_exists(&id));
+    assert_eq!(snapshot(&rig.placement()), Some(expect(mine)));
+
+    // A NEWER TEAM VERSION: a real three-way merge, from THEIRS (v1) — the version this draft is
+    // parented on. v2 touches a line nobody else did, so it merges clean and lands silently.
+    let v2files: FileSet = &[("SKILL.md", FileMode::Regular, b"THEIRS\nline2\nTEAM3\n")];
+    let v2 = mk_version(&[v1.id], v2files, "d_pub", "v2");
+    let mut plane2 = FixturePlane::default();
+    plane2.add_version(&id, &v1);
+    plane2.add_version(&id, &v2);
+    plane2.set_current(&id, served(WS, &id, v2.id, 2));
+    let merged =
+        only(&pull_data(&rig.ctx(&plane2, &foll), ops::PullScope::AllFollowed).unwrap()).clone();
+    assert_eq!(merged.action, PullAction::Merged);
+    assert!(merged.merge.as_ref().is_some_and(|m| m.clean));
+    assert_eq!(
+        merged.merge.as_ref().map(|m| m.base_version_id.clone()),
+        Some(to_hex(&v1.id)),
+        "the merge's base is the version the escape committed on: {merged:?}"
+    );
+    // This person's line-1 choice survived; the team's new line-3 landed beside it.
+    assert_eq!(
+        snapshot(&rig.placement()),
+        Some(expect(&[(
+            "SKILL.md",
+            FileMode::Regular,
+            b"MINE\nline2\nTEAM3\n"
+        )]))
+    );
+    let s = rig.read_sync(&id);
+    assert_eq!(s.base_commit, to_hex(&v2.id));
+    assert_eq!(s.applied, s.observed);
+    // The draft STILL drops v1's line-1 change, so the record is carried across the clean merge.
+    assert_eq!(
+        s.superseded.map(|x| x.version_id),
+        Some(to_hex(&v1.id)),
+        "a clean merge onto a newer version does not un-drop the older one"
+    );
+}
+
+/// `--keep-mine` FINISHES a stopped merge. With nothing stopped, committing this draft on top would
+/// drop every non-conflicting change the merge is about to land — wordlessly — so it refuses and
+/// names the merge instead.
+#[test]
+fn keep_mine_refuses_when_no_merge_has_stopped() {
+    let rig = Rig::new("keepmine-nothing-stopped");
+    let base: FileSet = &[("SKILL.md", FileMode::Regular, b"line1\nline2\nline3\n")];
+    let (id, name, genesis) = rig.adopt(base);
+    // A draft on line 1; the team changed line 3. NOTHING collides — a merge would land both.
+    let mine: FileSet = &[("SKILL.md", FileMode::Regular, b"MINE\nline2\nline3\n")];
+    let theirs: FileSet = &[("SKILL.md", FileMode::Regular, b"line1\nline2\nTEAM3\n")];
+    write_tree(&rig.placement(), mine);
+
+    let v1 = mk_version(&[genesis], theirs, "d_pub", "v1");
+    let mut plane = FixturePlane::default();
+    plane.add_version(&id, &v1);
+    plane.set_current(&id, served(WS, &id, v1.id, 1));
+    let foll = follow(&id, FollowMode::Auto);
+
+    let err = pull_data(
+        &rig.ctx(&plane, &foll),
+        ops::PullScope::One {
+            store: ops::StoreScope::Here,
+            name: "pr-describe".into(),
+            workspace: None,
+            mode: ops::TargetMode::KeepMine,
+        },
+    )
+    .expect_err("nothing has stopped, so there is nothing to finish");
+    assert!(
+        matches!(&err, crate::error::ClientError::NoStoppedMerge { skill, .. } if skill == &name),
+        "{err:?}"
+    );
+    // Nothing moved: no commit, no placement write, no record.
+    assert_eq!(snapshot(&rig.placement()), Some(expect(mine)));
+    assert!(!rig.conflict_exists(&id));
     assert_eq!(rig.read_sync(&id).base_commit, to_hex(&genesis));
 
-    // The next update runs the merge again — and the line both sides changed is still contested, so
-    // it returns to the workbench exactly as the receipt said it would.
+    // And the merge it names does exactly what it promised — both changes, no conflict.
     assert_eq!(
         only(&pull_data(&rig.ctx(&plane, &foll), ops::PullScope::AllFollowed).unwrap()).action,
-        PullAction::Conflicted,
-        "a still-contested line comes back"
-    );
-    assert!(rig.conflict_exists(&id));
-
-    // The author now takes the team's line and keeps a change of their own elsewhere — a real hand
-    // merge — through the escape, and the next update merges it CLEANLY against the same base.
-    let reconciled: FileSet = &[("SKILL.md", FileMode::Regular, b"THEIRS\nline2\nMINE3\n")];
-    write_tree(&rig.conflict_copy(&id), reconciled);
-    let keep_again = ops::PullScope::One {
-        store: ops::StoreScope::Here,
-        name: "pr-describe".into(),
-        workspace: None,
-        mode: ops::TargetMode::KeepMine,
-    };
-    assert_eq!(
-        only(&pull_data(&rig.ctx(&plane, &foll), keep_again).unwrap()).action,
         PullAction::Merged
     );
-    assert_eq!(snapshot(&rig.placement()), Some(expect(reconciled)));
-    assert_eq!(rig.read_sync(&id).base_commit, to_hex(&genesis));
-
-    let settled =
-        only(&pull_data(&rig.ctx(&plane, &foll), ops::PullScope::AllFollowed).unwrap()).clone();
-    assert_eq!(settled.action, PullAction::Merged);
-    assert!(
-        settled.merge.as_ref().is_some_and(|m| m.clean),
-        "the reconciled copy merges clean: {settled:?}"
-    );
-    assert!(!rig.conflict_exists(&id));
-    let s = rig.read_sync(&id);
     assert_eq!(
-        s.base_commit,
-        to_hex(&v1.id),
-        "a real merge is what advances the base"
+        snapshot(&rig.placement()),
+        Some(expect(&[(
+            "SKILL.md",
+            FileMode::Regular,
+            b"MINE\nline2\nTEAM3\n"
+        )]))
     );
-    assert_eq!(s.applied, s.observed, "and what ends the behind state");
-    // The author's own line survived the merge; the team's is in it too.
-    assert_eq!(snapshot(&rig.placement()), Some(expect(reconciled)));
 }
 
 /// A conflict blocks publish and the block PERSISTS — a bare re-sweep keeps reporting it (healing a
@@ -1735,10 +1857,15 @@ fn reset_clears_the_recorded_conflict_block() {
 
 /// Unrelated histories (no renderable base) fall back to a 2-way manual choice — never a silent merge:
 /// MINE is kept on disk, a 2-way diff is disclosed, and publish is blocked until the author resolves.
+///
+/// The workbench is a WORKBENCH here too: it holds this person's files WITH the team's beside them as
+/// `.topos-theirs` siblings, so the by-hand merge the row asks for can actually be done in one folder.
+/// Those siblings are topos's own scaffolding — they never become published bundle content — and the
+/// exit, `diff`, and `--reset` all work afterwards.
 #[test]
 fn no_base_falls_back_to_two_way_never_silent() {
     let rig = Rig::new("nobase");
-    let (id, _name, genesis) = rig.adopt(BASE);
+    let (id, name, genesis) = rig.adopt(BASE);
     let mine: &[(&str, FileMode, &[u8])] = &[
         ("SKILL.md", FileMode::Regular, b"# independent\n"),
         ("run.sh", FileMode::Executable, b"#!/bin/sh\necho v0\n"),
@@ -1765,6 +1892,89 @@ fn no_base_falls_back_to_two_way_never_silent() {
     // MINE is never silently overwritten by theirs.
     assert_eq!(snapshot(&rig.placement()), Some(expect(mine)));
     assert!(rig.conflict_exists(&id));
+
+    // BOTH SIDES ARE IN THE WORKBENCH: this person's files at their own paths, the team's beside
+    // them. Without them the folder invites a merge while holding only one of the two things to
+    // merge.
+    let copy = rig.conflict_copy(&id);
+    assert_eq!(
+        std::fs::read(copy.join("SKILL.md")).unwrap(),
+        b"# independent\n"
+    );
+    assert_eq!(
+        std::fs::read(copy.join("SKILL.md.topos-theirs")).unwrap(),
+        V1[0].2,
+        "the team's version is beside this person's"
+    );
+    assert!(
+        copy.join("ref/notes.md.topos-theirs").exists(),
+        "every file of theirs, including ones this person does not have"
+    );
+    // And nothing of the sort reached a folder an agent reads.
+    assert!(!rig.placement().join("SKILL.md.topos-theirs").exists());
+
+    // THE EXIT: a hand merge in that folder commits, and topos's own siblings are stripped out of
+    // it — a `.topos-theirs` file must never become published bundle content.
+    let resolved: &[(&str, FileMode, &[u8])] = &[
+        ("SKILL.md", FileMode::Regular, b"# reconciled\n"),
+        ("run.sh", FileMode::Executable, b"#!/bin/sh\necho v0\n"),
+        ("SKILL.md.topos-theirs", FileMode::Regular, V1[0].2),
+    ];
+    write_tree(&copy, resolved);
+    let escaped = only(
+        &pull_data(
+            &rig.ctx(&plane, &foll),
+            ops::PullScope::One {
+                store: ops::StoreScope::Here,
+                name: name.clone(),
+                workspace: None,
+                mode: ops::TargetMode::KeepMine,
+            },
+        )
+        .unwrap(),
+    )
+    .clone();
+    assert_eq!(escaped.action, PullAction::Merged);
+    assert_eq!(
+        snapshot(&rig.placement()),
+        Some(expect(&[
+            ("SKILL.md", FileMode::Regular, b"# reconciled\n"),
+            ("run.sh", FileMode::Executable, b"#!/bin/sh\necho v0\n"),
+        ])),
+        "the sibling is scaffolding, never content"
+    );
+    assert!(!rig.conflict_exists(&id));
+    assert!(!copy.exists());
+    // An unrenderable base can prove nothing contained, so the exit records the drop.
+    assert_eq!(
+        escaped.merge.as_ref().and_then(|m| m.supersedes.clone()),
+        Some(to_hex(&v1.id))
+    );
+
+    // AFTERWARDS, the ordinary verbs work: the base renders (it is the team's version now), so
+    // `diff` answers and `--reset` restores it.
+    let diffed = ops::diff(
+        &rig.ctx(&plane, &foll),
+        &name,
+        None,
+        ops::DiffBudget::unlimited(),
+        &ops::Selection::default(),
+    )
+    .expect("diff reads the draft against a renderable base");
+    assert!(diffed.diff.contains("reconciled"), "{}", diffed.diff);
+    ops::reset(
+        &rig.ctx(&plane, &foll),
+        &[name],
+        true,
+        ops::StoreScope::Here,
+        &ops::Selection::default(),
+    )
+    .expect("the reset restores the team's version");
+    assert_eq!(snapshot(&rig.placement()), Some(expect(V1)));
+    assert!(
+        rig.read_sync(&id).superseded.is_none(),
+        "and clears the drop"
+    );
 }
 
 /// Structural author-only: the merge code is unreachable from a clean follower state. A behind-clean pull

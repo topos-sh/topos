@@ -413,6 +413,7 @@ export interface components {
          * @example PROPOSE_PUBLISH
          * @example REBASE_AND_RETRY
          * @example RESOLVE_DIVERGED_DRAFT
+         * @example PUBLISH_OVER_VERSION
          * @example APPLY_WAITING_UPDATE
          * @example DISAMBIGUATE_NAME
          * @example REQUEST_ACCESS
@@ -924,6 +925,12 @@ export interface components {
              */
             share_line?: string | null;
             skill_id: string;
+            /**
+             * @description The team version this publish REPLACED without carrying it — present only where the apply
+             *     went through the `--over` gate, so the receipt states the one thing the new `current` does
+             *     not contain. **INFERRED** (additive-only).
+             */
+            supersedes?: string | null;
             /**
              * @description The undo — the whole `topos revert <name> --to <version>` command that puts the team back
              *     on the version `current` held before this publish. WITHHELD unless it verifiably restores
