@@ -684,6 +684,60 @@ mod tests {
         ));
     }
 
+    /// The scope flag PARSES on either side of the bundle name — a person who typed it after the
+    /// name is not corrected — while every command topos PRINTS puts it right after the verb, the
+    /// one order the suggestions use. This test is what lets the printed order be a display choice
+    /// rather than a grammar change.
+    #[test]
+    fn the_scope_flag_parses_on_either_side_of_the_name() {
+        for argv in [
+            ["topos", "update", "-g", "notes", "--reset"],
+            ["topos", "update", "notes", "-g", "--reset"],
+        ] {
+            let out = Cli::try_parse_from(argv).unwrap_or_else(|e| panic!("{argv:?}: {e}"));
+            assert!(
+                matches!(
+                    out.command,
+                    Some(Command::Update { global: true, reset: true, ref targets, .. })
+                        if targets == &["notes".to_owned()]
+                ),
+                "{argv:?}"
+            );
+        }
+        for argv in [
+            ["topos", "update", "-g", "notes", "--keep-mine"],
+            ["topos", "update", "notes", "-g", "--keep-mine"],
+        ] {
+            let out = Cli::try_parse_from(argv).unwrap_or_else(|e| panic!("{argv:?}: {e}"));
+            assert!(
+                matches!(
+                    out.command,
+                    Some(Command::Update {
+                        global: true,
+                        keep_mine: true,
+                        ..
+                    })
+                ),
+                "{argv:?}"
+            );
+        }
+        // The deep dive a diverged row points at, both ways round.
+        for argv in [
+            ["topos", "list", "-g", "coolify-deploy"],
+            ["topos", "list", "coolify-deploy", "-g"],
+        ] {
+            let out = Cli::try_parse_from(argv).unwrap_or_else(|e| panic!("{argv:?}: {e}"));
+            assert!(
+                matches!(
+                    out.command,
+                    Some(Command::List { global: true, name: Some(ref n), .. })
+                        if n == "coolify-deploy"
+                ),
+                "{argv:?}"
+            );
+        }
+    }
+
     #[test]
     fn update_force_parses_under_both_spellings() {
         // The disclosed name.

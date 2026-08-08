@@ -242,9 +242,9 @@
           "const": "installed"
         },
         {
-          "description": "A managed copy that stood BEHIND the version this machine already holds was rewritten to it\n— no version moved (`observed`/`applied` are unchanged), only bytes on disk caught up (a\ncrash-window residue, a copy left at an older version). `destinations` names the folders. A\nrefresh is not a first materialization, so it never reads `installed`. **Additive.**",
+          "description": "A managed copy that stood BEHIND the version this machine already holds was rewritten to it\n— no version moved (`observed`/`applied` are unchanged), only bytes on disk caught up (a\ncrash-window residue, a copy left at an older version). `destinations` names the folders. A\ncatch-up is not a first materialization, so it never reads `installed`. **Additive.**\n\nSerialized as `updated` — the word every human surface prints for it. A wire token and a\nterminal line naming one outcome two ways is one vocabulary too many.",
           "type": "string",
-          "const": "refreshed"
+          "const": "updated"
         },
         {
           "description": "This machine's OWN recipe choice ended delivery here (a dropped feed line, an `\"off\"`\nswitch, a dropped row) and the placed copies were uninstalled now — `destinations` names\nwhat left, `kept` any edited copy left in place. Distinct from `withdrawn`, which is\nupstream's act. **Additive.**",

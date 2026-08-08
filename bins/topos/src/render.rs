@@ -1354,7 +1354,9 @@ fn list_row(entry: &SkillEntry, scope: &str) -> String {
 /// Empty for every row that cannot name a folder — a clean row, and the rare edited one whose scan
 /// classified nothing. The commands are scope-exact through `flag`, exactly as the row's own are:
 /// `update` drives a scope, so a machine row spells `-g`; `publish` and `diff` take a name and no
-/// scope at all, so adding one there would print a command that does not parse.
+/// scope at all, so adding one there would print a command that does not parse. The flag is
+/// written where a person writes it — right after the verb, ahead of the bundle name — which is
+/// the one order every offered command uses (both orders parse; only one is printed).
 fn draft_sub_lines(entry: &SkillEntry, flag: &str) -> String {
     let name = &entry.skill;
     if entry.status == Some(topos_types::results::SkillStatus::Blocked) {
@@ -1363,14 +1365,18 @@ fn draft_sub_lines(entry: &SkillEntry, flag: &str) -> String {
     if let Some(dir) = &entry.draft_dir {
         return format!(
             "      draft in {dir} (not shared)\n      to share:     topos publish {name}\n      \
-             to view diff: topos diff {name}\n      to drop:      topos update {name}{flag} \
+             to view diff: topos diff {name}\n      to drop:      topos update{flag} {name} \
              --reset\n"
         );
     }
     match entry.draft_diverged {
-        Some(n) => {
-            format!("      draft in {n} folders that disagree (see: topos list {name}{flag})\n")
-        }
+        // The SAME words every other surface uses for this state (the deep dive, the freeze menu,
+        // the escape's receipt): copies whose edits disagree are "different edits in N folders".
+        // A row that said it a second way would read as a second state.
+        Some(n) => format!(
+            "      different edits in {} (see: topos list{flag} {name})\n",
+            counted(u64::from(n), "folder")
+        ),
         None => String::new(),
     }
 }
@@ -1381,8 +1387,8 @@ fn draft_sub_lines(entry: &SkillEntry, flag: &str) -> String {
 fn blocked_sub_lines(name: &str, flag: &str) -> String {
     format!(
         "      the team's version needs merging — you cannot publish until you pick one\n      to \
-         keep yours:  topos update {name}{flag} --keep-mine\n      to take theirs: topos update \
-         {name}{flag} --reset\n"
+         keep yours:  topos update{flag} {name} --keep-mine\n      to take theirs: topos \
+         update{flag} {name} --reset\n"
     )
 }
 
@@ -1542,19 +1548,23 @@ fn others_kept_line(others: &[String]) -> Option<String> {
 }
 
 pub(crate) fn diff_tty(data: &DiffData) -> String {
-    if data.diff.is_empty() && !data.truncated {
-        return "No changes — the draft matches current.".to_owned();
-    }
     // WHICH copy was read, when the bundle sits in more than one folder — the producer populates
     // the pair on exactly that condition, so a single-copy diff is byte-identical to what it always
     // printed. The left side is named too: it is the applied base whether or not `--dest` narrowed
     // the right, which is what makes two `--dest` runs comparable.
+    //
+    // Built BEFORE the no-changes answer, and printed with it: "nothing differs" is a claim about
+    // ONE copy, and a bundle sitting in several folders that answered it without saying which copy
+    // it read would leave the reader no way to tell which of them is clean.
     let header = match (&data.skill, &data.dest) {
         (Some(skill), Some(dest)) => {
             format!("{skill} — {dest} vs applied {}\n", short(&data.version_id))
         }
         _ => String::new(),
     };
+    if data.diff.is_empty() && !data.truncated {
+        return format!("{header}No changes — the draft matches current.");
+    }
     let mut s = data.diff.trim_end_matches('\n').to_owned();
     // An explicit `--max-bytes` cap on the TTY: say what fell off and how to get it (the same cap
     // the `--json` envelope discloses structurally).
@@ -2133,7 +2143,7 @@ fn list_detail_tty(detail: &topos_types::results::ListDetail) -> String {
         // bundle, one answer, whichever command asked.
         StatusItemState::Blocked => format!(
             "the team's version needs merging — you cannot publish until you pick one\n  to keep \
-             yours:  topos update {}{flag} --keep-mine\n  to take theirs: topos update {}{flag} \
+             yours:  topos update{flag} {} --keep-mine\n  to take theirs: topos update{flag} {} \
              --reset",
             detail.name, detail.name
         ),
@@ -2165,8 +2175,8 @@ fn diverged_copies_block(
     copies: &[topos_types::results::DivergedCopy],
 ) -> String {
     let mut out = format!(
-        "different edits in {} folders — name the one to work with:",
-        copies.len()
+        "different edits in {} — name the one to work with:",
+        counted(copies.len() as u64, "folder")
     );
     for c in copies {
         let dest = &c.dest;
@@ -3578,8 +3588,8 @@ pub(crate) fn err_tty(err: &ClientError) -> String {
         // the PROJECT, find no copy there, and refuse. Same discipline as a `list` row's `flag`.
         let flag = crate::error::scope_flag(*global);
         let mut out = format!(
-            "{skill} has different edits in {} folders — name the one to work with:",
-            copies.len()
+            "{skill} has different edits in {} — name the one to work with:",
+            counted(copies.len() as u64, "folder")
         );
         for c in copies {
             let dest = &c.dest;
@@ -3852,6 +3862,38 @@ mod tests {
                  f154315d5fd9\n{}",
                 body.trim_end()
             )
+        );
+    }
+
+    /// NOTHING TO SHOW still says which copy was read. "No changes" is a claim about ONE folder,
+    /// and a bundle sitting in several that answered it bare left the reader unable to tell which
+    /// of them is the clean one. A single-copy diff keeps its old, headerless answer.
+    #[test]
+    fn a_clean_diff_of_one_copy_among_several_still_names_the_copy() {
+        use topos_types::results::{DiffData, DiffSource};
+        let clean = DiffData {
+            source: DiffSource::Local,
+            version_id: format!("f154315d5fd9{}", "0".repeat(52)),
+            bundle_digest: "cd".repeat(32),
+            diff: String::new(),
+            truncated: false,
+            files: Vec::new(),
+            dest: None,
+            skill: None,
+        };
+        assert_eq!(
+            super::diff_tty(&clean),
+            "No changes — the draft matches current."
+        );
+        let named = DiffData {
+            dest: Some("project/.agents/skills/coolify-deploy".to_owned()),
+            skill: Some("coolify-deploy".to_owned()),
+            ..clean
+        };
+        assert_eq!(
+            super::diff_tty(&named),
+            "coolify-deploy — project/.agents/skills/coolify-deploy vs applied f154315d5fd9\nNo \
+             changes — the draft matches current."
         );
     }
 
@@ -5574,12 +5616,13 @@ mod tests {
                 "\x20     draft in ~/.agents/skills/coolify-deploy (not shared)\n\
                  \x20     to share:     topos publish coolify-deploy\n\
                  \x20     to view diff: topos diff coolify-deploy\n\
-                 \x20     to drop:      topos update coolify-deploy -g --reset"
+                 \x20     to drop:      topos update -g coolify-deploy --reset"
             ),
             "{text}"
         );
 
-        // Copies that disagree: ONE line, no folder named, pointing at the deep dive.
+        // Copies that disagree: ONE line, no folder named, pointing at the deep dive — in the same
+        // words the deep dive, the freeze menu and the escape's receipt use for this state.
         let text = render(
             "project",
             row("coolify-deploy", Some(SkillStatus::Draft), None, Some(2)),
@@ -5587,7 +5630,7 @@ mod tests {
         assert!(
             text.ends_with(
                 "  coolify-deploy  coolify-deploy@f154315d5fd9  (draft)  from topos.sh/ideamotive\n\
-                 \x20     draft in 2 folders that disagree (see: topos list coolify-deploy)"
+                 \x20     different edits in 2 folders (see: topos list coolify-deploy)"
             ),
             "{text}"
         );
@@ -5596,7 +5639,16 @@ mod tests {
             row("coolify-deploy", Some(SkillStatus::Draft), None, Some(3)),
         );
         assert!(
-            text.ends_with("draft in 3 folders that disagree (see: topos list coolify-deploy -g)"),
+            text.ends_with("different edits in 3 folders (see: topos list -g coolify-deploy)"),
+            "{text}"
+        );
+        // The count is READ, never assumed: a one-element vector says `1 folder`.
+        let text = render(
+            "project",
+            row("coolify-deploy", Some(SkillStatus::Draft), None, Some(1)),
+        );
+        assert!(
+            text.ends_with("different edits in 1 folder (see: topos list coolify-deploy)"),
             "{text}"
         );
 
@@ -5678,6 +5730,60 @@ mod tests {
                  \x20 to drop every copy's edits: topos update -g coolify-deploy --reset"
             ),
             "{text}"
+        );
+    }
+
+    /// The count is READ off the vector, never assumed: one copy says `1 folder`, on the deep dive
+    /// and on the freeze menu alike. Producers only ever hand these two surfaces ≥ 2 copies today,
+    /// so a hard-coded `folders` would sit there being right by luck until the day it wasn't.
+    #[test]
+    fn one_competing_copy_is_named_in_the_singular() {
+        use topos_types::results::{DivergedCopy, ListDetail, StatusItemState};
+        let text = list_tty(&ListOutcome {
+            data: ListData {
+                detail: Some(ListDetail {
+                    name: "coolify-deploy".to_owned(),
+                    scope: Some("project".to_owned()),
+                    source_file: None,
+                    source_key: None,
+                    feed: Some("topos.sh/acme".to_owned()),
+                    attribution: None,
+                    version: None,
+                    pin: None,
+                    placements: Vec::new(),
+                    state: StatusItemState::LocalEdits,
+                    kind: None,
+                    harnesses: Vec::new(),
+                    managed: true,
+                    folders: Vec::new(),
+                    diverged: vec![DivergedCopy {
+                        display: "project/.claude/skills/coolify-deploy".to_owned(),
+                        dest: ".claude/skills".to_owned(),
+                    }],
+                }),
+                signed_in: false,
+                ..ListData::default()
+            },
+            warnings: Vec::new(),
+            untracked_view: false,
+        });
+        assert!(
+            text.contains("different edits in 1 folder — name the one to work with:"),
+            "{text}"
+        );
+
+        let err = crate::error::ClientError::PlacementsDiverged {
+            skill: "coolify-deploy".to_owned(),
+            copies: vec![crate::error::DivergedCopy {
+                display: "project/.claude/skills/coolify-deploy".to_owned(),
+                dest: ".claude/skills".to_owned(),
+            }],
+            global: false,
+        };
+        let tty = super::err_tty(&err);
+        assert!(
+            tty.starts_with("coolify-deploy has different edits in 1 folder — name the one"),
+            "{tty}"
         );
     }
 

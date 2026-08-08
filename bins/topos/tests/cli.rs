@@ -398,10 +398,23 @@ fn run_disc(
     claude: &Path,
     args: &[&str],
 ) -> serde_json::Value {
+    run_disc_at(topos_home, disc_home, claude, disc_home, args)
+}
+
+/// [`run_disc`] from a chosen working directory — for the flows whose whole point is standing in a
+/// CHECKOUT (a project `topos.toml` covers the cwd) while discovery still resolves the same
+/// hermetic roots.
+fn run_disc_at(
+    topos_home: &Path,
+    disc_home: &Path,
+    claude: &Path,
+    cwd: &Path,
+    args: &[&str],
+) -> serde_json::Value {
     let out = Command::new(bin())
         .env("TOPOS_HOME", topos_home)
         .env("HOME", disc_home)
-        .current_dir(disc_home)
+        .current_dir(cwd)
         .env("CLAUDE_CONFIG_DIR", claude)
         .env_remove("XDG_CONFIG_HOME")
         .env_remove("CODEX_HOME")
@@ -415,6 +428,58 @@ fn run_disc(
         .expect("spawn topos");
     serde_json::from_slice(&out.stdout)
         .unwrap_or_else(|_| panic!("non-JSON stdout: {}", String::from_utf8_lossy(&out.stdout)))
+}
+
+/// A skill this very checkout DELIVERS is not an untracked discovery. The tracked-paths scan used
+/// to read the machine store alone while the discovery scan spanned the home AND the checkout, so
+/// a skill added into the project (`--dest .claude/skills`, custody in the checkout's own store)
+/// came back as adoptable — and the wrong count then leaked into the bare listing's summary line.
+#[test]
+fn a_project_scoped_skill_is_not_offered_back_as_untracked() {
+    let home = scratch("proj-untracked-home");
+    let disc = scratch("proj-untracked-disc"); // an EMPTY discovery HOME
+    let claude = scratch("proj-untracked-claude");
+    // The checkout sits OUTSIDE `$HOME` — the manifest walk stops at the home directory.
+    let proj = scratch("proj-untracked-repo");
+    let src = proj.join("src").join("writer");
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::write(
+        src.join("SKILL.md"),
+        "---\nname: writer\ndescription: writes it down\n---\n\nWrite it down.\n",
+    )
+    .unwrap();
+
+    let at = |args: &[&str]| run_disc_at(&home, &disc, &claude, &proj, args);
+    let v = at(&["--json", "init"]);
+    assert_eq!(v["ok"], true, "{v}");
+    let v = at(&["--json", "add", "./src/writer", "--dest", ".claude/skills"]);
+    assert_eq!(v["ok"], true, "{v}");
+    let v = at(&["--json", "update"]);
+    assert_eq!(v["ok"], true, "{v}");
+    assert!(
+        proj.join(".claude/skills/writer/SKILL.md").is_file(),
+        "the project copy landed"
+    );
+
+    // The discovery listing finds the placed copy — and does not offer it as untracked.
+    let v = at(&["--json", "list", "--untracked"]);
+    let empty = Vec::new();
+    let untracked = v["data"]["untracked"].as_array().unwrap_or(&empty);
+    assert!(
+        !untracked.iter().any(|u| u["name"] == "writer"),
+        "the checkout's own delivery is tracked, not adoptable: {untracked:?}"
+    );
+    // …and the bare listing's summary line does not count it either.
+    let v = at(&["--json", "list"]);
+    assert!(
+        v["data"].get("untracked_summary").is_none(),
+        "nothing is being withheld: {v}"
+    );
+
+    let _ = std::fs::remove_dir_all(&home);
+    let _ = std::fs::remove_dir_all(&disc);
+    let _ = std::fs::remove_dir_all(&claude);
+    let _ = std::fs::remove_dir_all(&proj);
 }
 
 #[test]

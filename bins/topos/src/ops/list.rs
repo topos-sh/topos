@@ -935,7 +935,7 @@ pub(crate) fn discover_untracked(
     ctx: &Ctx<'_>,
     roots: &DiscoveryRoots,
 ) -> Result<Vec<UntrackedEntry>, ClientError> {
-    let tracked = tracked_placement_paths(ctx)?;
+    let tracked = tracked_placement_paths(ctx, roots)?;
     let mut seen: HashSet<PathBuf> = HashSet::new();
     let mut out: Vec<UntrackedEntry> = Vec::new();
     for d in registry::discover_all(&roots.home, roots.cwd.as_deref()) {
@@ -982,13 +982,40 @@ pub(crate) fn discover_untracked(
     Ok(out)
 }
 
-/// Every tracked skill's placement paths in the MACHINE store, canonicalized (a placement that no
-/// longer resolves on disk is dropped — it can't shadow a real discovery). The same dedup key
-/// `add`'s `reject_already_tracked` uses. A RETIRED record's paths are NOT tracked: its kept
-/// copies are the person's own now, so discovery must surface them as adoptable again.
-fn tracked_placement_paths(ctx: &Ctx<'_>) -> Result<Vec<PathBuf>, ClientError> {
+/// Every tracked skill's placement paths, canonicalized (a placement that no longer resolves on
+/// disk is dropped — it can't shadow a real discovery). The same dedup key `add`'s
+/// `reject_already_tracked` uses.
+///
+/// Read over the SAME scopes the discovery scan spans: the machine store, plus every project store
+/// up the chain from the discovery cwd. A machine-only read made a skill this very checkout
+/// delivers — `topos add ./tools/x --dest .claude/skills`, recorded in the checkout's own store —
+/// read as untracked, and the wrong count then leaked into the bare listing's summary line.
+fn tracked_placement_paths(
+    ctx: &Ctx<'_>,
+    roots: &DiscoveryRoots,
+) -> Result<Vec<PathBuf>, ClientError> {
     let mut paths = Vec::new();
-    for entry in ctx.fs.read_dir(&ctx.layout.skills_dir())? {
+    collect_placement_paths(ctx, &ctx.layout, &mut paths)?;
+    if let Some(cwd) = roots.cwd.as_deref() {
+        for dir in crate::manifest::scopes::manifest_dirs_up(ctx.fs, cwd, Some(&roots.home)) {
+            let Some(playout) = sidecar::existing_project_store(ctx.fs, &dir) else {
+                continue;
+            };
+            collect_placement_paths(ctx, &playout, &mut paths)?;
+        }
+    }
+    Ok(paths)
+}
+
+/// One store's recorded placement paths, appended to `out`. A RETIRED record's paths are NOT
+/// tracked: its kept copies are the person's own now, so discovery must surface them as adoptable
+/// again.
+fn collect_placement_paths(
+    ctx: &Ctx<'_>,
+    layout: &sidecar::Layout,
+    out: &mut Vec<PathBuf>,
+) -> Result<(), ClientError> {
+    for entry in ctx.fs.read_dir(&layout.skills_dir())? {
         let Some(id) = entry.file_name().and_then(|n| n.to_str()) else {
             continue;
         };
@@ -998,21 +1025,20 @@ fn tracked_placement_paths(ctx: &Ctx<'_>) -> Result<Vec<PathBuf>, ClientError> {
         let Ok(id) = crate::id::SkillId::parse(id) else {
             continue;
         };
-        if sidecar::record_retired(ctx.fs, &ctx.layout, &id) {
+        if sidecar::record_retired(ctx.fs, layout, &id) {
             continue;
         }
-        let Some(map): Option<PlacementMap> =
-            doc::read_map(ctx.fs, &ctx.layout.published(&id).map)?
+        let Some(map): Option<PlacementMap> = doc::read_map(ctx.fs, &layout.published(&id).map)?
         else {
             continue;
         };
         for p in &map.placements {
             if let Ok(canon) = Path::new(p).canonicalize() {
-                paths.push(canon);
+                out.push(canon);
             }
         }
     }
-    Ok(paths)
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1386,7 +1412,8 @@ mod tests {
     }
 
     /// Copies whose edits DISAGREE name no folder — none of them is the draft — and report how
-    /// many disagree instead. The count is the freeze's own: one per distinct content.
+    /// many disagree instead, in the ONE vocabulary every surface uses for this state (`different
+    /// edits in N folders`). The count is the freeze's own: one per distinct content.
     ///
     /// And the DEEP DIVE the row sends the reader to answers with the copies themselves: each
     /// named, each carrying the three acts that apply to ONE of them, in the same words the
@@ -1414,8 +1441,7 @@ mod tests {
         // The row's own line is the one that sends the reader on.
         let listing = crate::render::list_tty(&out);
         assert!(
-            listing
-                .contains("      draft in 2 folders that disagree (see: topos list repo-helper)\n"),
+            listing.contains("      different edits in 2 folders (see: topos list repo-helper)\n"),
             "{listing}"
         );
 
@@ -1608,8 +1634,8 @@ mod tests {
         assert!(
             text.contains(
                 "      the team's version needs merging — you cannot publish until you pick one\n\
-                 \x20     to keep yours:  topos update notes -g --keep-mine\n\
-                 \x20     to take theirs: topos update notes -g --reset\n"
+                 \x20     to keep yours:  topos update -g notes --keep-mine\n\
+                 \x20     to take theirs: topos update -g notes --reset\n"
             ),
             "{text}"
         );
@@ -1635,8 +1661,8 @@ mod tests {
         assert!(
             deep_text.contains(
                 "  the team's version needs merging — you cannot publish until you pick one\n\
-                 \x20 to keep yours:  topos update notes -g --keep-mine\n\
-                 \x20 to take theirs: topos update notes -g --reset"
+                 \x20 to keep yours:  topos update -g notes --keep-mine\n\
+                 \x20 to take theirs: topos update -g notes --reset"
             ),
             "{deep_text}"
         );

@@ -206,7 +206,11 @@ pub enum PullAction {
     /// A managed copy that stood BEHIND the version this machine already holds was rewritten to it
     /// — no version moved (`observed`/`applied` are unchanged), only bytes on disk caught up (a
     /// crash-window residue, a copy left at an older version). `destinations` names the folders. A
-    /// refresh is not a first materialization, so it never reads `installed`. **Additive.**
+    /// catch-up is not a first materialization, so it never reads `installed`. **Additive.**
+    ///
+    /// Serialized as `updated` — the word every human surface prints for it. A wire token and a
+    /// terminal line naming one outcome two ways is one vocabulary too many.
+    #[serde(rename = "updated")]
     Refreshed,
     /// This machine's OWN recipe choice ended delivery here (a dropped feed line, an `"off"`
     /// switch, a dropped row) and the placed copies were uninstalled now — `destinations` names
@@ -2061,6 +2065,19 @@ mod tests {
         assert!(v.get("notices").is_none() && v.get("sync").is_none());
         let back: PullData = serde_json::from_value(v).unwrap();
         assert_eq!(back.skills[0].action, PullAction::UpToDate);
+    }
+
+    /// The catch-up outcome is `updated` on the wire — the same word the terminal prints for it.
+    /// One outcome cannot carry two names: an agent reading the envelope and a person reading the
+    /// receipt have to be able to talk about the same run.
+    #[test]
+    fn the_catch_up_action_is_spelled_updated_on_the_wire() {
+        assert_eq!(
+            serde_json::to_value(PullAction::Refreshed).unwrap(),
+            serde_json::json!("updated")
+        );
+        let back: PullAction = serde_json::from_value(serde_json::json!("updated")).unwrap();
+        assert_eq!(back, PullAction::Refreshed);
     }
 
     #[test]
