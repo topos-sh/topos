@@ -394,6 +394,35 @@ fn verified_new_generation(
     Ok(wire_record.record.generation)
 }
 
+/// The REMOTE-TRACKING half of read-your-writes: the pointer this op just moved, recorded in the
+/// machine's delivery cache. The offline surfaces derive `behind` by comparing what the plane last
+/// SERVED (that cache, refreshed by sweeps) against what this copy applied — so a landed move that
+/// updates only the local documents leaves `list` naming the pre-move current, and the row
+/// contradicts the receipt printed a line earlier. Git settles this the same way: a landed push
+/// updates the remote-tracking ref. Both callers reach here only PAST their forward-only guard, so
+/// a replayed receipt already superseded locally never drags the cache backwards.
+///
+/// Advisory freshness, so it is best-effort exactly like the other cache writes: the remote half has
+/// landed by now, and no local failure may fail a write the plane already holds.
+fn advance_served(ctx: &Ctx<'_>, rec: &OpRecord) {
+    // The cache is ONE document per machine, in the HOME sidecar; a project-scope ctx stands in the
+    // checkout's own store, so resolve the home store from the roots (unresolvable ⇒ skip).
+    let layout = match ctx.layout.project_root() {
+        None => ctx.layout.clone(),
+        Some(_) => match &ctx.roots {
+            Some(r) => crate::sidecar::Layout::new(&r.home.join(".topos")),
+            None => return,
+        },
+    };
+    let _ = crate::sync_status::record_served(
+        ctx.fs,
+        &layout,
+        &rec.workspace_id,
+        &rec.skill_id,
+        &rec.candidate_commit,
+    );
+}
+
 /// The publish-OK read-your-writes advance (I-RESPECT-DIVERGENCE). On a CLEAN publish (the working tree still
 /// equals the bytes just published) the author's own write fast-forwards the local state to `current` (state
 /// ① — `applied = observed = new_gen`, no dir-swap: the bytes are already placed). If the working tree
@@ -492,6 +521,10 @@ pub(crate) fn apply_publish_ok(
         };
         doc::write_doc(ctx.fs, &sp.sync, &next_sync)?;
     }
+    // The publish IS the new current: record it as served, or `list` keeps naming the version this
+    // publish replaced (see [`advance_served`]). Both arms — the CLEAN one is now on it, the DIRTY
+    // one is a draft ahead of it, and neither is behind the version it just published.
+    advance_served(ctx, rec);
     Ok(new_gen)
 }
 
@@ -532,6 +565,10 @@ pub(crate) fn apply_light_advance(
         draft_observed: None,
     };
     doc::write_doc(ctx.fs, &sp.sync, &next_sync)?;
+    // This move IS the new current, so the cache says so (see [`advance_served`]). Unlike a publish
+    // it places no bytes: the copy here now trails the version this actor just moved to, and the row
+    // reads `behind` until the next pull lands it — which is what actually stands.
+    advance_served(ctx, rec);
     Ok(new_gen)
 }
 
@@ -762,6 +799,130 @@ mod tests {
             vec![op_id.clone(), op_id],
             "BOTH sends carried the identical op_id (no double-advance — the server replays the receipt)"
         );
+    }
+
+    // ── a landed pointer move tells the delivery cache what is served now ──
+
+    /// The light advance (a landed `revert`, an approved proposal) moves `current` without placing a
+    /// byte here, so the copy is genuinely BEHIND afterwards — and the offline surfaces can only say
+    /// so if the delivery cache carries the pointer this device just moved. It never runs backwards:
+    /// a replay whose generation the local state already passed leaves the cache where it stands.
+    #[test]
+    fn a_landed_light_advance_records_the_served_pointer_and_never_regresses_it() {
+        let scratch = Scratch::new();
+        let fs = RealFs;
+        let ids = SeqIds::new("s");
+        let clock = FixedClock(1);
+        let harness = NullHarness;
+        let inert_p = InertPlane;
+        let inert_f = InertFollow;
+        let layout = crate::sidecar::Layout::new(&scratch.0);
+        let ctx = Ctx {
+            progress: crate::progress::silent(),
+            fs: &fs,
+            ids: &ids,
+            clock: &clock,
+            device_id: "d_author".to_owned(),
+            layout: layout.clone(),
+            harness: &harness,
+            plane: &inert_p,
+            follow: &inert_f,
+            roots: None,
+        };
+        let sp = layout.published(&crate::id::SkillId::parse("s_deploy").unwrap());
+        let old = "a".repeat(64);
+        let forward = "b".repeat(64);
+
+        // The copy stands ON the served version — the state every row reads as current.
+        crate::fs_seam::FsOps::create_dir_all(&fs, sp.sync.parent().unwrap()).unwrap();
+        doc::write_doc(
+            &fs,
+            &sp.sync,
+            &SyncState {
+                schema_version: topos_types::PERSISTED_SCHEMA_VERSION,
+                observed: 1,
+                observed_version_id: old.clone(),
+                applied: 1,
+                base_commit: old.clone(),
+                work_hash: "c".repeat(64),
+                held: false,
+                draft_observed: None,
+            },
+        )
+        .unwrap();
+        crate::sync_status::record(
+            &fs,
+            &layout,
+            &[(
+                "w_acme".to_owned(),
+                crate::sync_status::WorkspaceSync {
+                    delivered: [(
+                        "s_deploy".to_owned(),
+                        crate::sync_status::DeliveredSkill {
+                            name: "deploy".to_owned(),
+                            served_version: old.clone(),
+                            ..crate::sync_status::DeliveredSkill::default()
+                        },
+                    )]
+                    .into_iter()
+                    .collect(),
+                    ..crate::sync_status::WorkspaceSync::default()
+                },
+            )],
+        )
+        .unwrap();
+
+        let rec = |commit: &str| OpRecord {
+            schema_version: 1,
+            upstream: None,
+            op_id: "e0000000-0000-4000-8000-000000000001".to_owned(),
+            workspace_id: "w_acme".to_owned(),
+            skill_id: "s_deploy".to_owned(),
+            op: OpKind::Revert,
+            candidate_commit: commit.to_owned(),
+            bundle_digest: "d".repeat(64),
+            expected_generation: 1,
+            good: Some(old.clone()),
+            display_name: None,
+            channel: None,
+            last_receipt: None,
+            bundle_kind: None,
+        };
+        let pointer = |commit: &str, generation: u64| WireCurrentRecord {
+            schema_version: topos_types::WIRE_SCHEMA_VERSION,
+            scope: topos_types::PointerScope {
+                workspace_id: "w_acme".to_owned(),
+                skill_id: "s_deploy".to_owned(),
+            },
+            record: topos_types::CurrentRecord {
+                version_id: commit.to_owned(),
+                generation,
+            },
+        };
+        let served = || {
+            crate::sync_status::read(&fs, &layout).unwrap().workspaces["w_acme"].delivered
+                ["s_deploy"]
+                .served_version
+                .clone()
+        };
+
+        // The move lands: the cache names the forward version, and the row is honestly behind it.
+        let moved = apply_light_advance(&ctx, &sp, &rec(&forward), &pointer(&forward, 2)).unwrap();
+        assert_eq!(moved, 2);
+        assert_eq!(served(), forward);
+        assert_eq!(
+            doc::read_doc::<SyncState>(&fs, &sp.sync)
+                .unwrap()
+                .unwrap()
+                .base_commit,
+            old,
+            "no byte was placed here — only the target moved"
+        );
+
+        // A settled receipt replayed AFTER the local state passed it advances nothing, the cache
+        // least of all: read-your-writes is forward-only in both halves.
+        apply_light_advance(&ctx, &sp, &rec(&old), &pointer(&old, 1)).unwrap();
+        assert_eq!(served(), forward, "the cache is never dragged backwards");
     }
 
     // ── a receipt-less DENIED settles the WAL (the wedge escape) ──

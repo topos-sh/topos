@@ -1,8 +1,10 @@
 //! `state/sync_status.json` — the per-workspace delivery/report freshness record.
 //!
 //! Written by the delivery-driven reconcile on every successful delivery fetch and applied-state
-//! report; read by the hook's staleness warning (`update --quiet`) and by `auth status` (the
-//! reporting posture). A PLAIN document — timestamps and the workspace's staleness window, never a
+//! report — and, between sweeps, advanced by a pointer move this device itself landed ([`record_served`],
+//! the remote-tracking half of read-your-writes); read by the hook's staleness warning
+//! (`update --quiet`), by `auth status` (the reporting posture), and by the offline `list`/`status`
+//! surfaces. A PLAIN document — timestamps and the workspace's staleness window, never a
 //! secret — through the ordinary crash-safe [`crate::doc`] writers (atomic, fail-closed schema).
 
 use std::collections::BTreeMap;
@@ -206,6 +208,39 @@ pub(crate) fn merge_delivered(
     doc::write_doc(fs, &layout.sync_status_path(), &status)
 }
 
+/// Advance ONE delivered row's SERVED version — the remote-tracking half of a pointer move this
+/// device just made (a landed publish; a landed revert). `list`/`status` derive `behind` OFFLINE by
+/// comparing the served version cached here against the locally applied one, so a move whose
+/// receipt just printed has to land here too, or the very next row contradicts it until the
+/// following sweep. It is git's own rule: a landed push updates the remote-tracking ref.
+///
+/// EXISTING rows ONLY — the rule [`record_faults`] keeps: a bundle the sweep never delivered here
+/// has no cached version to correct, and an absent row already reads as nothing-served rather than
+/// `behind`, so nothing is born and, when no row matched, no write happens at all. A WITHDRAWN row
+/// keeps its empty version: a write of ours does not prove the workspace serves the bundle to this
+/// caller again — only a delivery says that.
+pub(crate) fn record_served(
+    fs: &dyn FsOps,
+    layout: &Layout,
+    workspace_id: &str,
+    skill_id: &str,
+    version_id: &str,
+) -> Result<(), ClientError> {
+    let mut status = read(fs, layout)?;
+    let Some(row) = status
+        .workspaces
+        .get_mut(workspace_id)
+        .and_then(|w| w.delivered.get_mut(skill_id))
+        .filter(|row| !row.withdrawn && row.served_version != version_id)
+    else {
+        return Ok(());
+    };
+    row.served_version = version_id.to_owned();
+    status.schema_version = PERSISTED_SCHEMA_VERSION;
+    fs.create_dir_all(&layout.state_dir())?;
+    doc::write_doc(fs, &layout.sync_status_path(), &status)
+}
+
 /// Whether a workspace's last delivery is STALE against its recorded window: `true` only when a
 /// last-delivery time exists, the window is non-zero, and `now` is past `last + window`. A
 /// workspace never yet delivered (no record) is NOT stale — there is nothing to be stale FROM, and
@@ -355,6 +390,60 @@ mod tests {
         // An empty update writes nothing either.
         record_faults(&fs, &layout, &[]).unwrap();
         assert!(!layout.sync_status_path().exists());
+    }
+
+    #[test]
+    fn a_landed_move_advances_the_served_version_of_an_existing_row_only() {
+        let fs = RealFs;
+        let layout = Layout::new(&scratch("served"));
+        let row = |v: &str, withdrawn: bool| DeliveredSkill {
+            name: "deploy".to_owned(),
+            served_version: v.to_owned(),
+            withdrawn,
+            via_channels: vec!["everyone".to_owned()],
+            ..DeliveredSkill::default()
+        };
+        record(
+            &fs,
+            &layout,
+            &[(
+                "w_a".into(),
+                WorkspaceSync {
+                    last_delivery_at: Some(1_000),
+                    delivered: [
+                        ("s_deploy".to_owned(), row(&"1".repeat(64), false)),
+                        ("s_gone".to_owned(), row("", true)),
+                    ]
+                    .into_iter()
+                    .collect(),
+                    ..WorkspaceSync::default()
+                },
+            )],
+        )
+        .unwrap();
+
+        // The move lands on the row it names; every other fact in the entry stays the sweep's.
+        record_served(&fs, &layout, "w_a", "s_deploy", &"2".repeat(64)).unwrap();
+        let entry = read(&fs, &layout).unwrap().workspaces["w_a"].clone();
+        assert_eq!(entry.delivered["s_deploy"].served_version, "2".repeat(64));
+        assert_eq!(entry.delivered["s_deploy"].via_channels, vec!["everyone"]);
+        assert_eq!(entry.last_delivery_at, Some(1_000));
+
+        // A WITHDRAWN row keeps its empty version — only a delivery may say it is served again.
+        record_served(&fs, &layout, "w_a", "s_gone", &"3".repeat(64)).unwrap();
+        assert!(
+            read(&fs, &layout).unwrap().workspaces["w_a"].delivered["s_gone"]
+                .served_version
+                .is_empty()
+        );
+
+        // An unknown workspace or skill is not born here (the [`record_faults`] rule): a bundle the
+        // sweep never delivered has no cached version to correct.
+        record_served(&fs, &layout, "w_ghost", "s_deploy", &"4".repeat(64)).unwrap();
+        record_served(&fs, &layout, "w_a", "s_ghost", &"4".repeat(64)).unwrap();
+        let after = read(&fs, &layout).unwrap();
+        assert!(!after.workspaces.contains_key("w_ghost"));
+        assert_eq!(after.workspaces["w_a"].delivered.len(), 2);
     }
 
     #[test]

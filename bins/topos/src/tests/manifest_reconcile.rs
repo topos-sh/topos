@@ -5868,6 +5868,125 @@ fn a_landed_publish_survives_a_failed_rewrite_and_the_next_update_converges_it()
     );
 }
 
+/// A landed publish IS the new current, and the row naming it has to say so with no sweep in
+/// between. `behind` is decided OFFLINE against the delivery cache — what the plane last SERVED —
+/// which only the sweep used to write, so a publish that advanced its local documents alone left
+/// `list` tagging the version it had just published `behind`, contradicting the receipt printed a
+/// line earlier. A landed push updates the remote-tracking ref; so does this.
+#[test]
+fn a_landed_publish_leaves_its_own_version_current_before_any_sweep() {
+    let rig = Rig::new("publish-served");
+    rig.seed_session();
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let plane = FakePlane::new(log);
+    plane.serves(Vec::new());
+
+    // A bundle adopted here and already governed by the workspace: the delivery cache carries the
+    // sweep's row for it, naming exactly the version this copy applies (so the row reads current).
+    let src = rig.work.0.join("deploy");
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::write(src.join("SKILL.md"), b"# deploy\n").unwrap();
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    let added = ops::add(&ctx, &src).unwrap();
+    let id = added.skill_id.clone().expect("the adopt minted a record");
+    let base = added.version_id.clone().expect("and a base version");
+    // The machine recipe demands it by path — the line the landed publish transfers to the
+    // workspace reference.
+    rig.write_global(&format!(
+        "[bundles]\n\"{}\" = \"*\"\n",
+        src.canonicalize().unwrap().display()
+    ));
+    sync_status::record(
+        &rig.fs,
+        &rig.layout(),
+        &[(
+            WS.to_owned(),
+            sync_status::WorkspaceSync {
+                host: Some(HOST.to_owned()),
+                workspace_name: Some(WS_NAME.to_owned()),
+                last_delivery_at: Some(1),
+                delivered: [(
+                    id.clone(),
+                    sync_status::DeliveredSkill {
+                        name: "deploy".to_owned(),
+                        served_version: base.clone(),
+                        ..Default::default()
+                    },
+                )]
+                .into_iter()
+                .collect(),
+                ..Default::default()
+            },
+        )],
+    )
+    .unwrap();
+
+    let v = one_file(b"# deploy\n");
+    let dir = FakeDirectory::new(vec![catalog_entry(&id, "deploy", &v)], Vec::new());
+    let session_connect = |_s: &Session| ops::SessionTransports {
+        plane: Box::new(plane.clone()),
+        directory: Box::new(dir.clone()),
+        contribute: Box::new(OkPublish),
+        governance: Box::new(NoGovernance),
+    };
+    let cc = |_base: &str, _tok: Option<&str>| -> Box<dyn crate::plane::ContributeSource> {
+        Box::new(NoContribute)
+    };
+
+    // Edit the copy and publish it — a clean landed publish (state ①).
+    std::fs::write(src.join("SKILL.md"), b"# deploy, sharper\n").unwrap();
+    let outcome = ops::publish(
+        &ctx,
+        &cc,
+        None,
+        Some(&session_connect),
+        None,
+        "deploy",
+        false,
+        None,
+        None,
+        None,
+        &ops::Selection::default(),
+    )
+    .unwrap();
+    let data = match outcome {
+        ops::PublishOutcome::Published(d) => d,
+        other => panic!("the publish LANDED: {other:?}"),
+    };
+    assert_ne!(data.version_id, base, "the publish minted a new version");
+
+    // The remote-tracking half: the cache names what was just published, not what it replaced.
+    let cache = sync_status::read(&rig.fs, &rig.layout()).unwrap();
+    assert_eq!(
+        cache.workspaces[WS].delivered[&id].served_version, data.version_id,
+        "the delivery cache holds the version this publish landed"
+    );
+
+    // THE REPORTED BUG: the very next `list`, with no sweep in between, must not tag the published
+    // version `behind` its own publish.
+    let listed = crate::ops::list_with(
+        &ctx,
+        &ops::ListRequest::default(),
+        None,
+        None,
+        crate::ops::RowPage::unlimited(),
+    )
+    .unwrap();
+    let row = listed
+        .data
+        .scopes
+        .iter()
+        .flat_map(|s| &s.rows)
+        .find(|r| r.skill == "deploy")
+        .unwrap_or_else(|| panic!("the published row is listed: {:?}", listed.data.scopes));
+    assert_eq!(row.version_id, data.version_id, "{row:?}");
+    assert_eq!(
+        row.status,
+        Some(topos_types::results::SkillStatus::Current),
+        "the row agrees with the receipt that just printed: {row:?}"
+    );
+}
+
 #[test]
 fn a_project_scope_pending_rewrite_converges_from_the_projects_own_store() {
     // The pending governance transfer of a bundle tracked in the PROJECT's own store: the
