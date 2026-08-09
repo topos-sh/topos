@@ -128,9 +128,21 @@ pub(crate) fn remove(
     // reservation but leaves the occupied dir — the inverse re-plans around it, never restoring
     // the prior record) — their receipts offer no undo.
     for (removal, item) in removals.iter().zip(items.iter_mut()) {
-        let _ = item;
         match removal {
-            Removal::TrackedLocal { .. } | Removal::Untracked { .. } | Removal::Builtin { .. } => {
+            // A config-placed bundle's blast radius is not its dirs — the `--yes` gate must name
+            // the agent configs the apply will edit BEFORE consent, not only on the receipt after
+            // it. The list is knowable now: the scope ledger records every entry topos placed.
+            Removal::TrackedLocal { skill_id, .. } => {
+                gated = true;
+                let files = mcp_entry_files(ctx, skill_id);
+                if let Some(line) = also_removes_line(&files) {
+                    item.note = Some(match item.note.take() {
+                        Some(prev) => format!("{prev} · {line}"),
+                        None => line,
+                    });
+                }
+            }
+            Removal::Untracked { .. } | Removal::Builtin { .. } => {
                 gated = true;
             }
         }
@@ -224,6 +236,40 @@ pub(crate) fn remove(
         undo,
         uninstalled: Vec::new(),
     }))
+}
+
+/// The config files this scope's ledger records standing entries for, `~`-abbreviated, in ledger
+/// order and deduped — what the describe names before consent and what the apply will edit. Empty
+/// for an ordinary skill record (no ledger entries) and for a scope that never config-placed.
+fn mcp_entry_files(ctx: &Ctx<'_>, skill_id: &str) -> Vec<String> {
+    if !ctx.fs.exists(&ctx.layout.mcp_ledger_path()) {
+        return Vec::new();
+    }
+    let Ok(ledger) = crate::mcp_ledger::read(ctx.fs, &ctx.layout) else {
+        return Vec::new();
+    };
+    let mut out: Vec<String> = Vec::new();
+    for entry in ledger.entries.values().filter(|e| e.bundle_id == skill_id) {
+        let file = super::inventory::pretty(ctx, std::path::Path::new(&entry.file));
+        if !out.contains(&file) {
+            out.push(file);
+        }
+    }
+    out
+}
+
+/// The describe's blast-radius line for the config entries a removal will take with it — the same
+/// "one is named inline, several are spelled out" shape every destination list here uses, in the
+/// tense of something not yet done. `None` when there are none to name.
+fn also_removes_line(files: &[String]) -> Option<String> {
+    match files {
+        [] => None,
+        [one] => Some(format!("also removes its MCP server entry from {one}")),
+        many => Some(format!(
+            "also removes its MCP server entries from {}",
+            many.join(", ")
+        )),
+    }
 }
 
 /// Retire this scope's MCP config entries for a record the classic delete is about to erase — the

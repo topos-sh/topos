@@ -79,7 +79,7 @@ pub(crate) const SHELL_SWEEP_LINE: &str =
 /// try/catch is the exit-0 tail's analog). Unmarked, so the conservative dialect applies.
 pub(crate) const PLAIN_SWEEP: &str = "topos update --quiet";
 
-/// Whether a command a person wrote themselves is a topos auto-update sweep — the
+/// Whether a command a person wrote themselves INVOKES a topos auto-update sweep — the
 /// hand-rolled-hook probe every trigger engine runs on a command carrying NO [`SENTINEL`], so such
 /// an entry is adopted-or-left rather than duplicated beside.
 ///
@@ -87,8 +87,59 @@ pub(crate) const PLAIN_SWEEP: &str = "topos update --quiet";
 /// today; the legacy one is what earlier builds taught, and a machine still carrying it must not
 /// grow a second, managed entry the moment it is re-armed. Ownership is never decided here — that
 /// keys on the sentinel alone.
+///
+/// **A mention is not an invocation.** `notify-send "topos update failed last night"` names the
+/// verb without running it, and reading that as somebody's own hook would leave the machine with no
+/// topos trigger at all — silently, because adopt-or-leave writes nothing and reports success. So
+/// the phrase must sit where a command can START (the string's beginning, a new line, or after an
+/// operator that opens one) and END at a token boundary, which is what [`invokes_at_command_start`]
+/// decides.
+///
+/// Two residuals, both deliberate, both failing toward the safer side (a duplicate entry a person
+/// can see, never a silently absent trigger): a PATH-spelled invocation (`/usr/local/bin/topos
+/// update`) reads as not-hand-rolled, because accepting `/` as an opener would take
+/// `notify-send "logs/topos update failed"` with it; and a command wrapped in an interpreter
+/// (`sh -c "topos update"`) does too, since knowing which arguments of which programs are
+/// themselves commands is a shell parser's job, not this predicate's.
 pub(crate) fn is_hand_rolled_sweep(cmd: &str) -> bool {
-    cmd.contains("topos update") || cmd.contains("topos pull")
+    ["topos update", "topos pull"]
+        .iter()
+        .any(|verb| invokes_at_command_start(cmd, verb))
+}
+
+/// Whether `verb` occurs in `cmd` at a command position and ends at a token boundary. Every
+/// occurrence is tried: a line may hold the guard, the sweep, and a tail.
+fn invokes_at_command_start(cmd: &str, verb: &str) -> bool {
+    let mut from = 0;
+    while let Some(rel) = cmd[from..].find(verb) {
+        let start = from + rel;
+        let end = start + verb.len();
+        // Ending at a token boundary is what tells `topos update` from `topos updated`; a flag or
+        // an argument arrives after whitespace, so whitespace covers `--quiet`.
+        let ends_token = cmd[end..]
+            .chars()
+            .next()
+            .is_none_or(|c| c.is_whitespace() || matches!(c, ';' | '&' | '|' | ')' | '"' | '\''));
+        if ends_token && opens_a_command(&cmd[..start]) {
+            return true;
+        }
+        from = start + 1;
+    }
+    false
+}
+
+/// Whether a command can START right after `prefix` — nothing before it, a line break, or a shell
+/// operator that ends the previous command. One opening quote is transparent, so a quoted command
+/// in command position still counts while a quoted MENTION (whose prefix keeps its own program
+/// name) does not.
+fn opens_a_command(prefix: &str) -> bool {
+    let head = prefix.trim_end();
+    // A newline anywhere in the whitespace run before the phrase starts a fresh command line.
+    if prefix[head.len()..].contains('\n') {
+        return true;
+    }
+    let head = head.strip_suffix(['"', '\'']).unwrap_or(head).trim_end();
+    head.is_empty() || head.ends_with([';', '&', '|', '(', '{'])
 }
 
 /// One trigger (un)install outcome for a registry-slug harness. The big-three adapters keep
@@ -215,6 +266,51 @@ pub(crate) fn resolve_config_home(home: &Path) -> PathBuf {
 mod tests {
     use super::testutil::MemConfig;
     use super::*;
+
+    /// The hand-rolled probe decides whether topos installs its trigger AT ALL on a machine, and a
+    /// false positive is the silent failure: adopt-or-leave writes nothing and reports success, so
+    /// a person whose hook merely NAMES the verb would be left with no auto-update and no sign of
+    /// it. Invocations must match, mentions must not.
+    #[test]
+    fn the_hand_rolled_probe_matches_invocations_and_not_mentions() {
+        for invocation in [
+            "topos update",
+            "topos update --quiet",
+            "topos pull",
+            GUARDED_SWEEP,
+            PLAIN_SWEEP,
+            "command -v topos >/dev/null 2>&1 && topos pull --quiet || true",
+            "echo starting; topos update --quiet",
+            "(topos update --quiet)",
+            "setup && { topos update; }",
+            "echo one\ntopos update --quiet\necho two",
+            // A quoted command sitting in command position is still an invocation.
+            "cd /tmp && \"topos update\"",
+        ] {
+            assert!(
+                is_hand_rolled_sweep(invocation),
+                "must be recognized: {invocation:?}"
+            );
+        }
+        for mention in [
+            // The reported case: a notification ABOUT the sweep is not the sweep.
+            "notify-send \"topos update failed last night\"",
+            "echo 'remember to run topos update'",
+            "# topos update runs from the other hook",
+            "log --message=\"topos pull skipped\"",
+            // A token boundary, not a prefix match.
+            "topos updated",
+            "topos updates --all",
+            "mytopos update",
+            // Named as an argument, not run.
+            "echo topos update",
+        ] {
+            assert!(
+                !is_hand_rolled_sweep(mention),
+                "must NOT be recognized: {mention:?}"
+            );
+        }
+    }
 
     #[test]
     fn the_sweep_consts_compose() {

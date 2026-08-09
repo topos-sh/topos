@@ -2420,12 +2420,7 @@ fn remove_item_line(item: &RemoveItem, applied: bool) -> String {
     // opt-out and its way back).
     if let Some(note) = &item.note {
         let verb = if applied { "Removed" } else { "Would remove" };
-        let dirs = if item.agent_dirs.is_empty() {
-            String::new()
-        } else {
-            format!(" from {}", item.agent_dirs.join(", "))
-        };
-        return format!("{verb} '{}'{dirs} — {note}.", item.name);
+        return format!("{verb} '{}'{} — {note}.", item.name, from_dirs(item));
     }
     match item.kind {
         RemoveKind::ManifestRemoved => {
@@ -2473,18 +2468,31 @@ fn remove_item_line(item: &RemoveItem, applied: bool) -> String {
         RemoveKind::TrackedLocalPermanent => {
             let verb = if applied { "Deleted" } else { "Would delete" };
             format!(
-                "{verb} '{}' PERMANENTLY — it was never published, so no other copy exists (the \
+                "{verb} '{}'{} PERMANENTLY — it was never published, so no other copy exists (the \
                  topos entry is dropped too).",
-                item.name
+                item.name,
+                from_dirs(item)
             )
         }
         RemoveKind::UntrackedLocal => {
             let verb = if applied { "Deleted" } else { "Would delete" };
             format!(
-                "{verb} '{}' PERMANENTLY — an untracked local copy; no other copy exists.",
-                item.name
+                "{verb} '{}'{} PERMANENTLY — an untracked local copy; no other copy exists.",
+                item.name,
+                from_dirs(item)
             )
         }
+    }
+}
+
+/// The ` from <dir>[, <dir>…]` clause a removal line carries when it names folders — ONE spelling,
+/// so a describe names the very places its apply will empty, in the same words. A permanent delete
+/// that named no path made the `--yes` gate ask about bytes it would not show.
+fn from_dirs(item: &RemoveItem) -> String {
+    if item.agent_dirs.is_empty() {
+        String::new()
+    } else {
+        format!(" from {}", item.agent_dirs.join(", "))
     }
 }
 
@@ -4308,6 +4316,47 @@ mod tests {
                 "{count}: {tty}"
             );
         }
+    }
+
+    /// **A permanent delete names the folder it will empty, before consent.** The `--yes` gate is
+    /// the whole disclosure for an act with no inverse, and a describe that said only "Would delete
+    /// 'demo' PERMANENTLY" asked a person to approve bytes it declined to show — while the APPLY
+    /// receipt afterwards named the path. Both tenses name it now, and both permanent shapes do.
+    #[test]
+    fn a_permanent_delete_names_its_folders_in_both_tenses() {
+        let item = |kind| RemoveItem {
+            name: "demo".to_owned(),
+            kind,
+            manifest: None,
+            workspace_id: None,
+            agent_dirs: vec!["~/work/demo".to_owned()],
+            bytes_kept: false,
+            note: None,
+        };
+        for kind in [
+            RemoveKind::TrackedLocalPermanent,
+            RemoveKind::UntrackedLocal,
+        ] {
+            let describe = super::remove_item_line(&item(kind), false);
+            assert!(
+                describe.starts_with("Would delete 'demo' from ~/work/demo")
+                    && describe.contains("PERMANENTLY"),
+                "the gate names the folder AND keeps the permanence teaching: {describe}"
+            );
+            let applied = super::remove_item_line(&item(kind), true);
+            assert!(
+                applied.starts_with("Deleted 'demo' from ~/work/demo"),
+                "{applied}"
+            );
+        }
+        // A removal that names no folder says nothing about one — no dangling `from`.
+        let mut bare = item(RemoveKind::TrackedLocalPermanent);
+        bare.agent_dirs = Vec::new();
+        assert!(
+            super::remove_item_line(&bare, false).starts_with("Would delete 'demo' PERMANENTLY"),
+            "{}",
+            super::remove_item_line(&bare, false)
+        );
     }
 
     /// An APPLIED whole-row removal whose uninstall moved nothing must not claim the copies

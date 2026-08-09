@@ -2422,6 +2422,83 @@ fn a_dest_naming_only_unknown_files_reaches_no_agent_and_says_so() {
     );
 }
 
+/// **A live entry outranks the row's arithmetic.** An entry topos placed and then found
+/// hand-edited is LEFT in place — drift is never clobbered — and it keeps its ledger entry. If the
+/// row's `dest` is later changed to files topos cannot edit, the reach arithmetic says "no agent"
+/// while that entry is still sitting in the config, quite possibly still being loaded by the agent.
+/// `list` must not tell that lie: the per-agent states say where the bytes actually are, and the
+/// sweep's own MCP_DEST_NO_AGENT warning stays the causality carrier.
+#[test]
+fn a_drifted_entry_keeps_list_from_claiming_the_bundle_reaches_no_agent() {
+    let rig = Rig::new("dest-none-drift");
+    rig.seed_session();
+    seed_harness_dirs(&rig.home.0);
+    let v = mk_version(&[(
+        "server.json",
+        server_json("https://mcp.example/a").as_bytes(),
+    )]);
+    let plane = FakePlane::new().with_version("s_a", &v);
+    let dir = FakeDirectory {
+        skills: vec![mcp_catalog_entry("s_a", "alpha", &v)],
+        channels: Vec::new(),
+    };
+    rig.write_global(&format!(
+        "[bundles]\n\"{HOST}/{WS_NAME}/alpha\" = {{ dest = [\"~/.cursor/mcp.json\"] }}\n"
+    ));
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    sweep(&ctx, &plane, &dir);
+    let cursor = rig.home.0.join(".cursor/mcp.json");
+
+    // The person edits the placed entry by hand.
+    let edited = std::fs::read_to_string(&cursor)
+        .unwrap()
+        .replace("https://mcp.example/a", "https://my-fork.example");
+    std::fs::write(&cursor, &edited).unwrap();
+
+    // …and then the row's dest is changed to a file topos cannot edit. The sweep warns, and leaves
+    // the hand edit exactly where it is.
+    rig.write_global(&format!(
+        "[bundles]\n\"{HOST}/{WS_NAME}/alpha\" = {{ dest = [\"~/.codex/config.yaml\"] }}\n"
+    ));
+    let out = sweep(&ctx, &plane, &dir);
+    assert!(
+        out.warnings.iter().any(|w| w.contains("MCP_DEST_NO_AGENT")),
+        "the causality still rides the sweep warning: {:?}",
+        out.warnings
+    );
+    assert_eq!(
+        std::fs::read_to_string(&cursor).unwrap(),
+        edited,
+        "the hand edit is never clobbered"
+    );
+
+    let list = ops::list_with(
+        &ctx,
+        &ops::ListRequest {
+            name: Some("alpha".into()),
+            ..Default::default()
+        },
+        None,
+        None,
+        ops::RowPage::unlimited(),
+    )
+    .unwrap();
+    let detail = list.data.detail.clone().unwrap();
+    assert_eq!(
+        detail.mcp_unreachable, None,
+        "something of this bundle's is still in a config: {detail:?}"
+    );
+    assert!(
+        detail.harnesses.iter().any(|h| h.agent == "cursor"),
+        "the states name the agent whose config still holds it: {detail:?}"
+    );
+    let text = crate::render::list_tty(&list);
+    assert!(
+        !text.contains("reaches no agent"),
+        "an entry still in a config file is not 'no agent': {text}"
+    );
+}
+
 /// Two bundles, ONE typo'd spelling: the first still delivers (the typo is an advisory beside a
 /// working row), the second reaches nothing. The once-per-run dedupe must not let the first one's
 /// advisory swallow the second one's warning — they answer different questions about different

@@ -250,14 +250,10 @@ pub(crate) fn add_with_name(
         },
     };
 
-    // The built-in skill's name is reserved end-to-end — an adopted skill can never share it (the
-    // sidecar, `list`, `publish`, and the placement dirs would all collide with the built-in's).
-    if super::builtin::is_builtin(&name) {
-        return Err(ClientError::InvalidArgument(
-            "the name `topos` is reserved for the built-in topos skill — adopt under another name \
-             (`--skill <name>`)"
-                .into(),
-        ));
+    // The dirs topos keeps for itself are reserved end-to-end — an adopted skill can never take
+    // one (the sidecar, `list`, `publish`, and the placement dirs would all collide).
+    if let Some(refusal) = reserved_name_refusal(&name, skill_id.as_str()) {
+        return Err(ClientError::InvalidArgument(refusal));
     }
 
     // version_id depends ONLY on the bytes + device id + the fixed message — never the id/time/RNG — so a
@@ -1918,6 +1914,29 @@ pub(super) fn locked_files(bundle: &ScannedBundle) -> Vec<LockedFile> {
 
 fn dir_basename(path: &Path) -> Option<String> {
     path.file_name().map(|n| n.to_string_lossy().into_owned())
+}
+
+/// The refusal an adopted name earns when it would claim a placement dir topos keeps for itself —
+/// the ADD-TIME half of the reservation [`topos_harness::is_reserved_skill_dir`] enforces in the
+/// naming ladder. Keyed on the SANITIZED name, the same spelling the ladder reserves, so a name
+/// that would land in a reserved dir is answered here instead of silently renamed.
+///
+/// Only an add refuses. A person naming a folder asked a question and gets an answer; a workspace
+/// DELIVERY has nobody to ask — a silent update cannot refuse — so there the ladder's degrade to a
+/// suffixed dir stands as the belt.
+fn reserved_name_refusal(name: &str, skill_id: &str) -> Option<String> {
+    let dir = topos_harness::sanitize_skill_dir(name)?;
+    if !topos_harness::is_reserved_skill_dir(&dir, skill_id) {
+        return None;
+    }
+    let held = if dir == topos_harness::RESERVED_MCP_PLUGIN_DIR {
+        "topos's own MCP surface"
+    } else {
+        "the built-in topos skill"
+    };
+    Some(format!(
+        "the name `{dir}` is reserved for {held} — adopt under another name (`--skill <name>`)"
+    ))
 }
 
 /// Refuse to re-adopt a directory topos already tracks (same canonical path). Best-effort: the writer

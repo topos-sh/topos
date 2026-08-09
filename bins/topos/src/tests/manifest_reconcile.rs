@@ -10994,6 +10994,40 @@ fn a_classic_delete_of_an_mcp_record_takes_its_config_entries_with_it() {
         session: &named_connect,
         directory: &dir_connect,
     };
+    // The DESCRIBE names the whole blast radius BEFORE consent: the config files the apply will
+    // edit are knowable from the ledger right now, and a `--yes` gate that mentions them only on
+    // the receipt afterwards is asking for a decision it did not state.
+    let described = ops::remove(&ctx, &connectors, &["linear".to_owned()], &[], None, false)
+        .expect("the permanent delete describes first");
+    let ops::RemoveOutcome::Described { data, .. } = described else {
+        panic!("a permanent delete describes first");
+    };
+    let note = data.items[0]
+        .note
+        .clone()
+        .expect("the describe states what goes");
+    assert!(
+        note.contains("also removes its MCP server entries from")
+            && note.contains(".cursor/mcp.json")
+            && note.contains(".openclaw/openclaw.json"),
+        "the describe names every config file the apply will edit: {note}"
+    );
+    // The whole blast radius on ONE rendered line. A config-placed bundle is store-only — it has
+    // no placement folders at all — so the line names the config entries and invents no folder:
+    // the `from …` clause appears only where there really are dirs to empty.
+    assert!(
+        data.items[0].agent_dirs.is_empty(),
+        "an mcp record places no skill folders: {:?}",
+        data.items[0].agent_dirs
+    );
+    let described_tty = crate::render::remove_describe_tty(&data, &["topos".to_owned()]);
+    assert!(
+        described_tty.contains("Would remove 'linear' — ")
+            && described_tty.contains(".cursor/mcp.json")
+            && described_tty.contains(".openclaw/openclaw.json"),
+        "the gate names the config entries, with no invented folder: {described_tty}"
+    );
+
     let outcome = ops::remove(&ctx, &connectors, &["linear".to_owned()], &[], None, true)
         .expect("the consented apply");
     let ops::RemoveOutcome::Applied(data) = outcome else {

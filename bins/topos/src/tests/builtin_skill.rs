@@ -600,6 +600,22 @@ fn the_name_is_reserved_end_to_end_client_side() {
         "{err:?}"
     );
 
+    // …INCLUDING the dir topos's own MCP surface owns. A folder named `topos-mcp` would otherwise
+    // adopt fine and land in the opaque-id dir, while the receipt printed `+ topos-mcp installed`
+    // — a rename nobody asked for and nothing disclosed. An add is a question a person asked, so
+    // it gets an answer.
+    let mcp_dir = rig.agent_home.0.join("topos-mcp");
+    std::fs::create_dir_all(&mcp_dir).unwrap();
+    std::fs::write(mcp_dir.join("SKILL.md"), "# mine\n").unwrap();
+    let err = ops::add(&ctx, &mcp_dir).expect_err("reserved");
+    assert_eq!(err.code(), "INVALID_ARGUMENT");
+    let message = crate::render::safe_message(&err);
+    assert!(
+        message.contains("the name `topos-mcp` is reserved for topos's own MCP surface")
+            && message.contains("--skill <name>"),
+        "the refusal teaches which name is taken and how to adopt anyway: {message}"
+    );
+
     // …and the one naming discipline never hands the reserved dir to another skill, even free.
     let root = rig.agent_home.0.join(".agents").join("skills");
     let chosen = topos_harness::choose_skill_dir(

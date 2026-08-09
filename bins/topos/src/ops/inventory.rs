@@ -527,7 +527,15 @@ fn scope_rows(
         // A frozen `dest` that names no config file topos can edit costs the bundle every agent.
         // The deep dive resolves it here rather than reading it off the cache: the row is right in
         // front of it, and the fact must be told whether or not a sweep has run since the typo.
-        let mcp_unreachable = (kind.as_deref() == Some("mcp"))
+        //
+        // ONLY while nothing of this bundle's is still sitting in an agent's config, though. An
+        // entry topos placed and then found hand-edited is LEFT in place (drift is never
+        // clobbered), and it keeps its ledger entry — so a dest change made afterwards would have
+        // this line claim the bundle reaches nobody while that entry is still in the file, and
+        // possibly still being loaded. A live entry outranks the row's arithmetic: the states below
+        // say where the bytes actually are, and the sweep's own warning carries the causality.
+        let placed_somewhere = ledger_ids.iter().any(|id| ledger.has_entries_for(id));
+        let mcp_unreachable = (kind.as_deref() == Some("mcp") && !placed_somewhere)
             .then(|| {
                 let narrowing = super::reconcile::mcp_dest_narrowing(row.fields().dest, scope);
                 narrowing.reaches_nothing().then(|| {

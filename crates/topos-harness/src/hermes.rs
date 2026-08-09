@@ -525,6 +525,18 @@ fn is_command_line(trimmed: &str) -> bool {
         || trimmed.starts_with("command:")
 }
 
+/// The command VALUE a recognized entry line carries — everything after its `command:` key. The
+/// hand-rolled probe reads THIS, never the whole line: `- command: ` is YAML syntax, not a shell
+/// prefix, and a probe looking for a shell command position in the raw line would find none.
+fn command_value(trimmed: &str) -> &str {
+    trimmed
+        .strip_prefix("- {command:")
+        .or_else(|| trimmed.strip_prefix("- command:"))
+        .or_else(|| trimmed.strip_prefix("command:"))
+        .unwrap_or("")
+        .trim_start()
+}
+
 /// Whether a trimmed line is a topos-MANAGED entry: a list item carrying our ownership sentinel.
 /// Keys on the sentinel ALONE (never the command text or entry shape), so an entry an earlier
 /// build wrote under a different spelling (the block-form `- command:` per-turn entry) is still
@@ -665,7 +677,9 @@ fn analyze(text: &str) -> Analysis {
         .collect();
     let unmanaged_topos_sweep = (hooks_idx + 1..end).any(|j| {
         let t = lines[j].trim();
-        !claimed.contains(&j) && is_command_line(t) && crate::triggers::is_hand_rolled_sweep(t)
+        !claimed.contains(&j)
+            && is_command_line(t)
+            && crate::triggers::is_hand_rolled_sweep(command_value(t))
     });
     Analysis::Region(HooksRegion {
         hooks_idx,

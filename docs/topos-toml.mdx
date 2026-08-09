@@ -117,7 +117,7 @@ line does. Each file speaks its own path dialect: your machine's file names mach
 (`~/`-prefixed or absolute), a committed file names relative paths that stay inside the checkout —
 no `..`, no `~`, not absolute — so a repo can never aim managed bytes elsewhere on a contributor's
 disk. For a skill line the entries are folders (any dialect-legal folder works); for an MCP line
-they are the agents' own config files, from the known set below. Edit the array by hand and the
+they are the agents' own MCP config destinations, from the known set below. Edit the array by hand and the
 next `topos update` converges it: a new entry installs there, a dropped entry's copy is
 uninstalled — with an edited copy kept in place, disclosed. `dest` is also what
 `topos add … -a <agent>` (and `--dest <folder>`) records on any line, spelled as that agent's
@@ -149,12 +149,13 @@ local folder above rewrites the row to exactly that spelling, kind field and all
 row tagged `kind = "mcp"` refuses when the file loads: an MCP server is delivered from a workspace,
 so publish the bundle there and name it by its workspace address instead.
 
-An MCP line's `dest` entries are config FILES, and they must come from the set topos knows how to
-edit — `~/.claude/skills/topos-mcp`, `~/.codex/config.toml`, `~/.cursor/mcp.json`,
-`~/.config/opencode/opencode.json`, `~/.openclaw/openclaw.json`, `~/.hermes/config.yaml` in your
-machine's file; `.mcp.json`, `.codex/config.toml`, `.cursor/mcp.json`, `opencode.json` in a
-committed one (an agent whose env override moves its file still counts — the resolved path matches
-too). A file outside that set refuses, because its format must be known to edit it.
+An MCP line's `dest` entries name each agent's own MCP config, and they must come from the set
+topos knows how to edit — `~/.claude/skills/topos-mcp` (a Topos-owned plugin *directory*, not a
+file), `~/.codex/config.toml`, `~/.cursor/mcp.json`, `~/.config/opencode/opencode.json`,
+`~/.openclaw/openclaw.json`, `~/.hermes/config.yaml` in your machine's file; `.mcp.json`,
+`.codex/config.toml`, `.cursor/mcp.json`, `opencode.json` in a committed one (an agent whose env
+override moves its config still counts — the resolved path matches too). A destination outside
+that set refuses, because its format must be known to edit it.
 
 ## Which commands write which lines
 
