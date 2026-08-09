@@ -160,10 +160,22 @@ export function mintCatalogName(displayName: string | null, bundleId: string): s
 }
 
 /**
- * Catalog names reserved for the CLI's own artifacts (the built-in `topos` skill). A reserved
- * name behaves byte-identically to a taken one: the genesis mint suffixes past it.
+ * Catalog names reserved for the CLI's own artifacts — the directories it owns inside an agent's
+ * skills root: `topos` (the built-in skill) and `topos-mcp` (the plugin directory an MCP-capable
+ * harness is served through). A workspace bundle that minted either name would compete for a
+ * directory the client already governs.
+ *
+ * The reservation binds at EVERY door that writes a catalog name, not just the genesis mint —
+ * a rename reaches the same namespace by a different route. Server-side on purpose: a reserved
+ * name answers byte-identically to a taken one everywhere, so the list is never enumerable
+ * through a form.
  */
-const RESERVED_BUNDLE_NAMES = new Set(["topos"]);
+const RESERVED_BUNDLE_NAMES = new Set(["topos", "topos-mcp"]);
+
+/** Is `name` reserved for the client's own directories? (see [`RESERVED_BUNDLE_NAMES`]) */
+export function isReservedBundleName(name: string): boolean {
+  return RESERVED_BUNDLE_NAMES.has(name);
+}
 
 export interface GenesisRegistration {
   bundleId: string;

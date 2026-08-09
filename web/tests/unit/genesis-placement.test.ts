@@ -107,6 +107,18 @@ describe("registerGenesisBundleInTx — exclusive placement", () => {
     // Byte-identical to a collision: no refusal, no oracle — the suffix walks past the reserve.
     expect(reg.name).toBe("topos-2");
   });
+
+  it("the catalog name `topos-mcp` is reserved too (the CLI's MCP plugin directory)", async () => {
+    const { getDb } = await import("@/lib/db/index.server");
+    const custody = await import("@/lib/db/queries.custody.server");
+    const actor = asSession(wsId, "u_auth", "dk_auth", "member");
+    // The second directory the client owns inside an agent's skills root. A workspace bundle
+    // folding onto that name would compete for it, so the mint suffixes past it identically.
+    const reg = await getDb().transaction((tx) =>
+      custody.registerGenesisBundleInTx(tx, actor, "s_g_reserved_mcp", "Topos MCP", null),
+    );
+    expect(reg.name).toBe("topos-mcp-2");
+  });
 });
 
 describe("registerGenesisBundleInTx — a curated `everyone` gates REACH, never custody", () => {

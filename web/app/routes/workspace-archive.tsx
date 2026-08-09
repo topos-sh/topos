@@ -75,13 +75,19 @@ export async function action({ request, params }: ActionFunctionArgs) {
 }
 
 /**
- * The MCP arm's own copy. The shared map words the CATALOG-name refusals; this outcome is about
- * the other name an MCP bundle carries — the registry name inside its document, which the
- * workspace's active servers must not share. It covers the unreadable case too, so it says what
- * is actually known: not provably free.
+ * The MCP arm's own copy. The shared map words the CATALOG-name refusals; these two outcomes are
+ * about the other name an MCP bundle carries — the registry name inside its document, which the
+ * workspace's active servers must not share. Each says what is actually known: a name that is not
+ * provably free, or a document that could not be read at all. The second names no way out on
+ * purpose — an archived bundle cannot be republished, so every instruction here would be one the
+ * reader cannot follow.
  */
-const MCP_NAME_TAKEN_COPY =
-  "Its registry name isn't free here any more — another active server claims it, or this one's own document couldn't be read. Unarchive is refused; retire that server first.";
+const MCP_REFUSAL_COPY: Record<string, string> = {
+  mcp_name_taken:
+    "Its registry name isn't free here any more — another active server claims it, or the catalog couldn't be read end to end. Unarchive is refused; retire that server first.",
+  mcp_document_unreadable:
+    "Its server document can't be read, so the registry name it would claim can't be established. Unarchive is refused.",
+};
 
 async function unarchiveIntent(request: Request, ws: string, formData: FormData) {
   const owner = await requireWorkspaceOwner(request, ws);
@@ -118,10 +124,7 @@ async function unarchiveIntent(request: Request, ws: string, formData: FormData)
   return data<ArchiveActionData>({
     op: "unarchive",
     skillId,
-    message:
-      outcome.outcome === "mcp_name_taken"
-        ? MCP_NAME_TAKEN_COPY
-        : unarchiveDeniedCopy(outcome.outcome),
+    message: MCP_REFUSAL_COPY[outcome.outcome] ?? unarchiveDeniedCopy(outcome.outcome),
   });
 }
 

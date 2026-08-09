@@ -75,12 +75,9 @@ export async function action({ request, params }: ActionFunctionArgs): Promise<R
   }
   if (outcome.outcome === "invited") {
     const address = workspaceAddress(request, me.name);
-    const mailHint =
-      body.skill !== undefined
-        ? { kind: "skill", name: body.skill as string }
-        : body.channel !== undefined
-          ? { kind: "channel", name: body.channel as string }
-          : undefined;
+    // The hint the write RESOLVED — an MCP server named through the `skill` field is mailed as
+    // one, because the mail's noun comes from the catalog row, not from the request field.
+    const mailHint = outcome.hint;
     // Fire-and-forget invitation mail per invitee (the rows already stand; a mail fault never
     // fails the invite — re-inviting mints a fresh link). The tokened URL goes ONLY into the
     // mail; the receipt below carries the workspace address.

@@ -273,4 +273,30 @@ describe("renameBundle + resolveSkillName (live-then-hint)", () => {
       via: "name",
     });
   });
+
+  it("refuses a rename onto the client's reserved directory names, exactly like a taken name", async () => {
+    const queries = await q();
+    await seedBundle(db, wsId, "s_resv", "ordinary");
+    // The two directories the client owns inside an agent's skills root. The genesis mint
+    // suffixes past them; rename reaches the same namespace by another route, so it refuses —
+    // in the SAME words a real collision gets, which is what keeps the reserve from being an
+    // oracle that tells a caller which names are special.
+    expect(await queries.renameBundle(owner(), "s_resv", "topos")).toEqual({
+      outcome: "name_taken",
+    });
+    expect(await queries.renameBundle(owner(), "s_resv", "topos-mcp")).toEqual({
+      outcome: "name_taken",
+    });
+    // Refused means UNCHANGED: the row keeps its name and no hint was minted on the way out.
+    const still = await db.q<{ name: string }>(`SELECT name FROM web.bundle WHERE id = 's_resv'`);
+    expect(still[0]?.name).toBe("ordinary");
+    expect(
+      await db.q(`SELECT 1 FROM web.bundle_name_hint WHERE old_name = 'ordinary'`),
+    ).toHaveLength(0);
+    // The reserve is an EXACT pair, not a prefix ban — an ordinary free name still renames.
+    expect(await queries.renameBundle(owner(), "s_resv", "topos-adjacent")).toEqual({
+      outcome: "renamed",
+      name: "topos-adjacent",
+    });
+  });
 });

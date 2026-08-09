@@ -697,7 +697,17 @@ export async function laneAckNotices(actor: SessionActor, ids: string[]): Promis
 
 /** The session lane's minted invitations (folded address + fresh link token per address). */
 export type LaneInviteOutcome =
-  | { outcome: "invited"; minted: { email: string; token: string }[] }
+  | {
+      outcome: "invited";
+      minted: { email: string; token: string }[];
+      /**
+       * The RESOLVED first destination — the bundle's own catalog kind ('skill' or 'mcp') or
+       * 'channel', read from the row the hint resolved to rather than assumed from which field
+       * the caller filled in. The audit row and the invitation mail both name the destination,
+       * and both must call it what it is.
+       */
+      hint?: { kind: string; name: string };
+    }
   | { outcome: "owner_role_required" }
   | { outcome: "unknown_skill" }
   | { outcome: "unknown_channel" }
@@ -731,28 +741,35 @@ export async function laneInvite(
   return await getDb().transaction(async (tx) => {
     let hintBundleId: string | null = null;
     let hintChannelId: string | null = null;
+    // The destination as RESOLVED. The lane's `skill` field names any bundle in the catalog,
+    // MCP servers included, so the kind is read off the row — never inferred from the field.
+    let resolvedHint: { kind: string; name: string } | undefined;
     if (hint.skill !== undefined) {
       const rows = await tx
-        .select({ id: bundle.id })
+        .select({ id: bundle.id, kind: bundle.kind })
         .from(bundle)
         .where(
           and(eq(bundle.workspaceId, ws), eq(bundle.name, hint.skill), eq(bundle.status, "active")),
         )
         .limit(1);
-      if (rows.length === 0) {
+      const row = rows[0];
+      if (row === undefined) {
         return { outcome: "unknown_skill" };
       }
-      hintBundleId = rows[0]?.id ?? null;
+      hintBundleId = row.id;
+      resolvedHint = { kind: row.kind, name: hint.skill };
     } else if (hint.channel !== undefined) {
       const rows = await tx
         .select({ id: channel.id })
         .from(channel)
         .where(and(eq(channel.workspaceId, ws), eq(channel.name, hint.channel)))
         .limit(1);
-      if (rows.length === 0) {
+      const row = rows[0];
+      if (row === undefined) {
         return { outcome: "unknown_channel" };
       }
-      hintChannelId = rows[0]?.id ?? null;
+      hintChannelId = row.id;
+      resolvedHint = { kind: "channel", name: hint.channel };
     }
     const expiresAt = new Date(Date.now() + INVITATION_TTL_MS);
     const minted: { email: string; token: string }[] = [];
@@ -779,14 +796,15 @@ export async function laneInvite(
         kind: "invitation_created",
         subject: email,
         outcome: "ok",
-        details: {
-          ...(hint.skill !== undefined ? { hint: { kind: "skill", name: hint.skill } } : {}),
-          ...(hint.channel !== undefined ? { hint: { kind: "channel", name: hint.channel } } : {}),
-        },
+        details: { ...(resolvedHint === undefined ? {} : { hint: resolvedHint }) },
       });
       minted.push({ email, token });
     }
-    return { outcome: "invited", minted };
+    return {
+      outcome: "invited",
+      minted,
+      ...(resolvedHint === undefined ? {} : { hint: resolvedHint }),
+    };
   });
 }
 

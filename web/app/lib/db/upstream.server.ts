@@ -1,6 +1,7 @@
 import { gunzipSync } from "node:zlib";
 import { sql } from "drizzle-orm";
 import { getDb } from "@/lib/db/index.server";
+import { validateCandidateFiles } from "@/lib/mcp/validate.server";
 import { commitVersion } from "@/lib/plane/custody.server";
 
 /**
@@ -412,7 +413,7 @@ export async function checkBundleUpstream(
   // never resolve a bundle id from another one (a cross-workspace check would write proposals
   // where the caller holds no seat).
   const rows = await db.execute(sql`
-    SELECT bu.workspace_id, bu.repo, bu.path, bu.last_seen_commit,
+    SELECT bu.workspace_id, bu.repo, bu.path, bu.last_seen_commit, b.kind,
            cp.version_id AS current_version_id
     FROM web.bundle_upstream bu
     JOIN web.bundle b ON b.id = bu.bundle_id AND b.status = 'active'
@@ -426,6 +427,7 @@ export async function checkBundleUpstream(
         repo: string;
         path: string;
         last_seen_commit: string | null;
+        kind: string;
         current_version_id: string | null;
       }
     | undefined;
@@ -454,6 +456,21 @@ export async function checkBundleUpstream(
   if (tree.commit !== null && tree.commit === row.last_seen_commit) {
     await stamp();
     return { outcome: "unchanged", commit: tree.commit };
+  }
+
+  // AN `mcp` BUNDLE'S UPSTREAM PASSES THE SAME GATE ITS PUBLISH DOORS DO — before any custody
+  // call, like every other door: the whole fetched tree is judged against what an MCP bundle may
+  // BE (the allowed file set, the credential scan, the server.json rules). Without this the
+  // candidate lands and the refusal arrives later from the name claim, which would name the
+  // wrong cause. The embedded NAME is deliberately not claimed here: a candidate reaches nobody,
+  // and every door that MOVES a pointer onto an mcp version re-claims the name under its lock.
+  if (row.kind === "mcp") {
+    const validated = validateCandidateFiles(
+      tree.files.map((f) => ({ path: f.path, bytes: f.bytes })),
+    );
+    if (!validated.ok) {
+      return { outcome: "error", message: validated.message };
+    }
   }
 
   // Import as a CANDIDATE (commit-only — `current` never moves from here). The vault rehashes;

@@ -369,6 +369,30 @@ describe("the locked re-check", () => {
       name: "plain-arch",
     });
   });
+
+  it("an mcp bundle with no published current unarchives — it claims no registry name", async () => {
+    const owner = asOwner(wsId, "u_auth", "Author");
+    const { archiveBundle, unarchiveBundle } = await import("@/lib/db/queries.lifecycle.server");
+    // Born but never published: no `current`, so nothing is served for it and no registry name
+    // is claimed. A refusal here would strand it in the archive over a name it never held.
+    await seedBundle(db, wsId, "s_unpub", "unpub-server", { kind: "mcp", withPointer: false });
+    expect((await archiveBundle(owner, "s_unpub")).outcome).toBe("archived");
+    expect(await unarchiveBundle(owner, "s_unpub")).toEqual({
+      outcome: "unarchived",
+      name: "unpub-server",
+    });
+  });
+
+  it("an mcp bundle whose document can't be read refuses as unreadable, not as a taken name", async () => {
+    const owner = asOwner(wsId, "u_auth", "Author");
+    const { archiveBundle, unarchiveBundle } = await import("@/lib/db/queries.lifecycle.server");
+    // A live `current` the vault holds no bytes for: the tier cannot establish what would be
+    // served. That fails closed like a collision does, but it is a DIFFERENT fact, and the
+    // outcome has to say which one it is — a name nobody else claims is not "taken".
+    await seedBundle(db, wsId, "s_dark", "dark-server", { kind: "mcp" });
+    expect((await archiveBundle(owner, "s_dark")).outcome).toBe("archived");
+    expect(await unarchiveBundle(owner, "s_dark")).toEqual({ outcome: "mcp_document_unreadable" });
+  });
 });
 
 /**

@@ -2,6 +2,7 @@ import { and, asc, eq, sql } from "drizzle-orm";
 import type { MemberActor, OwnerActor } from "@/lib/auth/guards.server";
 import { auditInTx } from "@/lib/db/identity.server";
 import { getDb } from "@/lib/db/index.server";
+import { isReservedBundleName } from "@/lib/db/queries.custody.server";
 import { lockMcpNamesInTx } from "@/lib/db/queries.mcp.server";
 import { bundle, bundleNameHint, channelBundle, notice, proposal } from "@/lib/db/schema.app";
 import { planeCurrentPointer } from "@/lib/db/schema.custody";
@@ -200,12 +201,21 @@ export async function archiveBundle(actor: OwnerActor, bundleId: string): Promis
 }
 
 /**
- * The registry name an `mcp` bundle's CURRENT version embeds, or null when this tier cannot
- * read it end to end — no `current` at all, bytes the vault will not serve, or a document
- * today's gate refuses. Null is never "no name": it is "not provably free", and the caller
- * refuses on it.
+ * What an `mcp` bundle's CURRENT version says its registry name is. THREE answers, because a
+ * caller deciding whether a name can be claimed must tell them apart:
+ *
+ *  · `none`       — no `current` pointer at all. Nothing is served for this bundle under any
+ *                   registry name, so there is no claim to make and nothing to be ambiguous
+ *                   with. Absence of a name, not an unreadable one.
+ *  · `unreadable` — a live `current` whose document this tier cannot read end to end (bytes the
+ *                   vault will not serve, no `server.json` in the version, or a document today's
+ *                   gate refuses). It proves nothing about what would be served, so a caller
+ *                   fails closed on it — and says THAT, not that some name is taken.
+ *  · `name`       — the embedded registry name, read from the stored bytes.
  */
-async function embeddedServerName(tx: Tx, ws: string, bundleId: string): Promise<string | null> {
+type EmbeddedName = { kind: "none" } | { kind: "unreadable" } | { kind: "name"; name: string };
+
+async function embeddedServerName(tx: Tx, ws: string, bundleId: string): Promise<EmbeddedName> {
   const pointer = await tx
     .select({ versionId: planeCurrentPointer.versionId })
     .from(planeCurrentPointer)
@@ -213,16 +223,19 @@ async function embeddedServerName(tx: Tx, ws: string, bundleId: string): Promise
     .limit(1);
   const versionId = pointer[0]?.versionId;
   if (versionId === undefined) {
-    return null;
+    return { kind: "none" };
   }
   const document = await serverDocumentOf(ws, bundleId, versionId);
-  return typeof document?.name === "string" ? document.name : null;
+  return typeof document?.name === "string"
+    ? { kind: "name", name: document.name }
+    : { kind: "unreadable" };
 }
 
 export type UnarchiveOutcome =
   | { outcome: "unarchived"; name: string }
   | { outcome: "name_taken" }
   | { outcome: "mcp_name_taken" }
+  | { outcome: "mcp_document_unreadable" }
   | { outcome: "not_archived" }
   | { outcome: "unknown_skill" };
 
@@ -260,16 +273,23 @@ export async function unarchiveBundle(
     // on it all over again: the scan re-runs here under the same lock a publish takes, and an
     // answer that is not provably free refuses rather than resurrect an ambiguity an agent's
     // lookup would then resolve by accident.
+    //
+    // A bundle with NO `current` is the third case and NOT a refusal: it serves no document, so
+    // it claims no registry name and can collide with nothing. Refusing it would strand a
+    // never-published MCP bundle in the archive with no way out — the name it cannot claim is
+    // one it never had.
     if (row.kind === "mcp") {
       await lockMcpNamesInTx(tx, ws);
-      const serverName = await embeddedServerName(tx, ws, bundleId);
-      if (serverName === null) {
-        return { outcome: "mcp_name_taken" } as const;
+      const embedded = await embeddedServerName(tx, ws, bundleId);
+      if (embedded.kind === "unreadable") {
+        return { outcome: "mcp_document_unreadable" } as const;
       }
-      // On the HELD client — a pool checkout under the lock is the exhaustion shape.
-      const claimed = await mcpNameTaken(actor, serverName, bundleId, tx);
-      if (claimed.kind !== "free") {
-        return { outcome: "mcp_name_taken" } as const;
+      if (embedded.kind === "name") {
+        // On the HELD client — a pool checkout under the lock is the exhaustion shape.
+        const claimed = await mcpNameTaken(actor, embedded.name, bundleId, tx);
+        if (claimed.kind !== "free") {
+          return { outcome: "mcp_name_taken" } as const;
+        }
       }
     }
     await tx
@@ -462,6 +482,12 @@ export async function renameBundle(
     }
     if (row.name === newName) {
       return { outcome: "renamed", name: newName } as const;
+    }
+    // Rename is a second door onto the catalog namespace, so it owes the same reservation the
+    // genesis mint does — the client's own directories are not renameable-into. A reserved name
+    // answers exactly like a taken one: same outcome, same words, no oracle.
+    if (isReservedBundleName(newName)) {
+      return { outcome: "name_taken" } as const;
     }
     const taken = await tx
       .select({ id: bundle.id })
