@@ -1613,6 +1613,7 @@ mod tests {
                 conflicted_digest: "5".repeat(64),
                 copy_dir: Some("notes".to_owned()),
                 reason: ConflictReason::ThreeWay,
+                concluded: None,
                 paths: Vec::new(),
             },
         )

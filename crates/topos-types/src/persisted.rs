@@ -195,15 +195,17 @@ pub enum SwapCapability {
     Unsupported,
 }
 
-/// `skills/<id>/conflict.json` — the durable record that this bundle holds an **unresolved** author
-/// merge conflict. **Field-set pinned** (additive; the value enums are INFERRED). This is the single
+/// `skills/<id>/conflict.json` — the durable record that this bundle holds a **stopped** author
+/// merge. **Field-set pinned** (additive; the value enums are INFERRED). This is the single
 /// source of truth for the publish guard (presence ⇒ blocked — never a byte/marker scan) AND a
 /// recovery journal: it is written + fsynced BEFORE the marked-up copy is written to the scope's own
 /// `conflicts/<copy_dir>/`, so a crash mid-write is healed by re-rendering the already-committed
 /// `result_commit` (pinned by `conflicted_digest`), never by re-merging on-disk marker bytes. The
 /// agent-readable placements are NOT touched by a conflict — they keep the author's own version —
-/// so nothing an agent reads is ever a half-state. Cleared only by a clean resolution (a clean
-/// merge), the disclosed escape, or a reset — never by an incidental edit.
+/// so nothing an agent reads is ever a half-state. Presence means the merge is LIVE unless
+/// [`Self::concluded`] marks the exit that ended it (the mark is what makes a crashed exit
+/// recoverable); the record is removed only by a LANDED conclusion — a clean re-merge, the
+/// disclosed escape, or a reset — never by an incidental edit, and never on a document comparison.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
 pub struct ConflictState {
@@ -240,14 +242,36 @@ pub struct ConflictState {
     /// copy (`~/.topos/conflicts/<copy_dir>/`, or the project store's equivalent). Chosen once when
     /// the conflict is recorded — the bundle's name, disambiguated like a skill dir — and read back
     /// by every exit, so the folder a receipt names is the folder the escape reads and the
-    /// resolution deletes. **Additive optional**: an absent (or unsafe) value falls back to the
-    /// bundle's sanitized name.
+    /// resolution deletes. **Additive optional**: an absent (or unparseable) value means the record
+    /// names no folder, and nothing is ever written, scanned, or removed for it — there is
+    /// deliberately no fallback derivation from the bundle's name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub copy_dir: Option<String>,
     pub reason: ConflictReason,
+    /// The exit that CONCLUDED this merge, written durably BEFORE that exit mutates any placement —
+    /// the `MERGE_HEAD` discipline: the record's presence says a merge stopped, this mark says
+    /// which exit ended it, and the record's removal says the conclusion landed. A record without
+    /// it is a LIVE stopped merge, full stop — no document comparison ever decides liveness; a
+    /// marked record is finished idempotently by the next run. **Additive optional** (absent in
+    /// every record a stop writes).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub concluded: Option<ConcludedExit>,
     /// The conflicting paths, sorted by raw path bytes (the agent's resolution checklist).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub paths: Vec<ConflictPath>,
+}
+
+/// Which exit concluded a stopped merge (see [`ConflictState::concluded`]). **INFERRED value set.**
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum ConcludedExit {
+    /// `--keep-mine` — the author's chosen tree committed on `current`.
+    Escape,
+    /// `update --reset` — the merge resolved the team's way, every copy back to base.
+    Reset,
+    /// A clean re-merge landed over a (defensively) stale record.
+    Merge,
 }
 
 /// Why a merge could not be applied cleanly. **INFERRED value set.**

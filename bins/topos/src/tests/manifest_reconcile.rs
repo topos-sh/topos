@@ -13385,6 +13385,7 @@ fn zz_a_per_copy_reset_ends_the_merge_only_once_no_copy_still_holds_it() {
         conflicted_digest: marked,
         copy_dir: Some("coolify-deploy".to_owned()),
         reason: ConflictReason::ThreeWay,
+        concluded: None,
         paths: Vec::new(),
     };
     crate::doc::write_doc(&rig.fs, &sp.conflict, &record).unwrap();
@@ -13470,6 +13471,7 @@ fn zz_a_reset_leaves_a_hand_merge_it_never_read_and_names_it() {
             conflicted_digest: marked,
             copy_dir: Some("coolify-deploy".to_owned()),
             reason: ConflictReason::ThreeWay,
+            concluded: None,
             paths: Vec::new(),
         },
     )

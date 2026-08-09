@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "ConflictState",
-  "description": "`skills/<id>/conflict.json` — the durable record that this bundle holds an **unresolved** author\nmerge conflict. **Field-set pinned** (additive; the value enums are INFERRED). This is the single\nsource of truth for the publish guard (presence ⇒ blocked — never a byte/marker scan) AND a\nrecovery journal: it is written + fsynced BEFORE the marked-up copy is written to the scope's own\n`conflicts/<copy_dir>/`, so a crash mid-write is healed by re-rendering the already-committed\n`result_commit` (pinned by `conflicted_digest`), never by re-merging on-disk marker bytes. The\nagent-readable placements are NOT touched by a conflict — they keep the author's own version —\nso nothing an agent reads is ever a half-state. Cleared only by a clean resolution (a clean\nmerge), the disclosed escape, or a reset — never by an incidental edit.",
+  "description": "`skills/<id>/conflict.json` — the durable record that this bundle holds a **stopped** author\nmerge. **Field-set pinned** (additive; the value enums are INFERRED). This is the single\nsource of truth for the publish guard (presence ⇒ blocked — never a byte/marker scan) AND a\nrecovery journal: it is written + fsynced BEFORE the marked-up copy is written to the scope's own\n`conflicts/<copy_dir>/`, so a crash mid-write is healed by re-rendering the already-committed\n`result_commit` (pinned by `conflicted_digest`), never by re-merging on-disk marker bytes. The\nagent-readable placements are NOT touched by a conflict — they keep the author's own version —\nso nothing an agent reads is ever a half-state. Presence means the merge is LIVE unless\n[`Self::concluded`] marks the exit that ended it (the mark is what makes a crashed exit\nrecoverable); the record is removed only by a LANDED conclusion — a clean re-merge, the\ndisclosed escape, or a reset — never by an incidental edit, and never on a document comparison.",
   "type": "object",
   "properties": {
     "base_commit": {
@@ -14,13 +14,24 @@
       "type": "string",
       "pattern": "^[0-9a-f]{64}$"
     },
+    "concluded": {
+      "description": "The exit that CONCLUDED this merge, written durably BEFORE that exit mutates any placement —\nthe `MERGE_HEAD` discipline: the record's presence says a merge stopped, this mark says\nwhich exit ended it, and the record's removal says the conclusion landed. A record without\nit is a LIVE stopped merge, full stop — no document comparison ever decides liveness; a\nmarked record is finished idempotently by the next run. **Additive optional** (absent in\nevery record a stop writes).",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ConcludedExit"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "conflicted_digest": {
       "description": "The `bundle_digest` of the conflict tree (= `result_commit`'s tree) — the `render_verified`\npin, and the UNTOUCHED signal: a `conflicts/<copy_dir>/` still scanning to exactly this\ndigest is a copy nobody has hand-resolved, so the escape commits the original draft instead.",
       "type": "string",
       "pattern": "^[0-9a-f]{64}$"
     },
     "copy_dir": {
-      "description": "The single directory component under this scope's `conflicts/` dir holding the marked-up\ncopy (`~/.topos/conflicts/<copy_dir>/`, or the project store's equivalent). Chosen once when\nthe conflict is recorded — the bundle's name, disambiguated like a skill dir — and read back\nby every exit, so the folder a receipt names is the folder the escape reads and the\nresolution deletes. **Additive optional**: an absent (or unsafe) value falls back to the\nbundle's sanitized name.",
+      "description": "The single directory component under this scope's `conflicts/` dir holding the marked-up\ncopy (`~/.topos/conflicts/<copy_dir>/`, or the project store's equivalent). Chosen once when\nthe conflict is recorded — the bundle's name, disambiguated like a skill dir — and read back\nby every exit, so the folder a receipt names is the folder the escape reads and the\nresolution deletes. **Additive optional**: an absent (or unparseable) value means the record\nnames no folder, and nothing is ever written, scanned, or removed for it — there is\ndeliberately no fallback derivation from the bundle's name.",
       "type": [
         "string",
         "null"
@@ -81,6 +92,26 @@
     "reason"
   ],
   "$defs": {
+    "ConcludedExit": {
+      "description": "Which exit concluded a stopped merge (see [`ConflictState::concluded`]). **INFERRED value set.**",
+      "oneOf": [
+        {
+          "description": "`--keep-mine` — the author's chosen tree committed on `current`.",
+          "type": "string",
+          "const": "escape"
+        },
+        {
+          "description": "`update --reset` — the merge resolved the team's way, every copy back to base.",
+          "type": "string",
+          "const": "reset"
+        },
+        {
+          "description": "A clean re-merge landed over a (defensively) stale record.",
+          "type": "string",
+          "const": "merge"
+        }
+      ]
+    },
     "ConflictPath": {
       "description": "One conflicting path + how it conflicts. **Field-set pinned**; `kind`'s value set is INFERRED.",
       "type": "object",

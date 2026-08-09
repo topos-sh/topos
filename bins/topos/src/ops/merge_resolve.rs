@@ -36,14 +36,34 @@
 //! the dangerous bytes never enter the namespace an agent reads. The copy itself is built in a staging
 //! sibling and RENAMED into place, so `conflicts/<name>/` is either absent or complete;
 //! [`recover_resolution`] re-renders it only when it is ABSENT (an edited copy is never clobbered) and
-//! re-commits the docs when they lag. Every resolution ([`escape`], a reset, a clean re-merge) clears
-//! `conflict.json` FIRST and the copy after — never the reverse, because an absent copy reads as
-//! "untouched", and a re-run must not commit the original draft over a hand resolution the crashed run
-//! already committed. The residual that ordering leaves is one unreferenced folder under `conflicts/`
-//! after a crash between the two removals: litter, never loss, and the next conflict for that bundle
-//! simply takes the next rung of the naming ladder. The reverse residual — a resolution's placements
-//! landed but its record outlived them — is recognized from the two durable documents
-//! ([`resolution_landed`]) and finishes the clear rather than re-blocking a resolved bundle.
+//! re-commits the docs when they lag.
+//!
+//! The record is the `MERGE_HEAD` analog: written when the merge STOPS, marked `concluded` by the
+//! chosen exit BEFORE that exit mutates any placement, removed only when the conclusion has landed.
+//! Recovery reads the mark and nothing else: a marked record is finished idempotently
+//! ([`finish_concluded`] — re-run the escape, finish the reset, or clear after a clean re-merge),
+//! and an UNMARKED record is a live stopped merge, full stop — no comparison of the durable
+//! documents ever decides liveness, because a narrowed reset legitimately drives them to exactly
+//! the values a landed exit leaves while another copy still holds the merge. Each exit's order:
+//!
+//! - **escape** — commit the resolution (a content-addressed store write, harmless) → mark
+//!   `Escape` → converge the placements → clear;
+//! - **full reset** — snapshot every edited copy (store writes, harmless) → mark `Reset` →
+//!   materialize base → clear once every copy proves settled;
+//! - **narrowed reset** — no pre-mark (it concludes nothing while other copies hold edits);
+//!   only when the settle proof passes after the write does it mark `Reset` and clear;
+//! - **clean re-merge** — mark `Merge` → clear → place (the clear stays before the place: a
+//!   record standing across the swap would describe a divergence this merge just resolved).
+//!
+//! The clear itself ([`clear_conflict`]) removes `conflict.json` FIRST and the copy after — never
+//! the reverse, because an absent copy reads as "untouched", and a re-run must not commit the
+//! original draft over a hand resolution the crashed run already committed. The residual that
+//! ordering leaves is one unreferenced folder under `conflicts/` after a crash between the two
+//! removals: litter, never loss, and the next conflict for that bundle simply takes the next rung
+//! of the naming ladder. One caveat to "the copy after": a caller that never READ the folder (a
+//! reset, a clean re-merge, the finisher) removes it only while it still holds exactly what topos
+//! wrote there — an EDITED workbench is deliberately left in place and named on the receipt
+//! ([`Workbench::Unread`]).
 //!
 //! ## The workbench folder is named by the record, and by nothing else
 //!
@@ -78,7 +98,8 @@ use topos_gitstore::{
     merge_file_keep_ours, unified_diff,
 };
 use topos_types::persisted::{
-    ConflictPath, ConflictPathKind, ConflictReason, ConflictState, Lock, PlacementMap, SyncState,
+    ConcludedExit, ConflictPath, ConflictPathKind, ConflictReason, ConflictState, Lock,
+    PlacementMap, SyncState,
 };
 use topos_types::results::{
     ConflictPathReport, MergePreview, MergePreviewVerdict, MergeReport, PullAction, PullSkill,
@@ -184,7 +205,15 @@ pub(crate) fn resolve_diverged(
             // Clear any (defensively) stale conflict record + its copy, then place the merged
             // draft-on-current. BEFORE the place, not after: a record left standing across the
             // swap would describe a divergence this merge just resolved, and the next sweep would
-            // re-disclose it (and re-render its copy) over state that has moved on.
+            // re-disclose it (and re-render its copy) over state that has moved on. A readable
+            // record is marked CONCLUDED first, so a crash between the two writes leaves a fact
+            // recovery can finish rather than a record it must treat as live.
+            if let Some(stale) = doc::read_doc::<ConflictState>(ctx.fs, &sp.conflict)
+                .ok()
+                .flatten()
+            {
+                mark_concluded(ctx, sp, &stale, ConcludedExit::Merge)?;
+            }
             clear_conflict(ctx, sp, Workbench::Unread)?;
             place_draft_on_current(
                 ctx,
@@ -235,6 +264,7 @@ pub(crate) fn resolve_diverged(
                 conflicted_digest: merged_digest_hex.clone(),
                 copy_dir: Some(copy_leaf.as_str().to_owned()),
                 reason: ConflictReason::ThreeWay,
+                concluded: None,
                 paths: assembled.conflicts.clone(),
             };
             doc::write_doc(ctx.fs, &sp.conflict, &cs)?;
@@ -306,6 +336,7 @@ fn escape(
     sync: &SyncState,
     lock: &Lock,
     map: &PlacementMap,
+    cs: &ConflictState,
     resolution: &Resolution,
     base_commit: [u8; 32],
     theirs: &RenderedBundle,
@@ -315,6 +346,10 @@ fn escape(
     let committed = &resolution.tree;
     let merged_digest_hex = to_hex(&committed.bundle_digest);
     let result_commit = commit_result(ctx, &store, theirs_commit, committed, MERGE_ESCAPE_MESSAGE)?;
+    // The die is cast HERE, before any placement moves: the commit above is a content-addressed
+    // store write (harmless — nothing reads it until a doc names it), and the mark is what turns
+    // a crash anywhere past this line into "finish the escape" rather than "a live block".
+    mark_concluded(ctx, sp, cs, ConcludedExit::Escape)?;
     let drop = drop_diff(theirs, committed);
 
     place_draft_on_current(
@@ -329,7 +364,8 @@ fn escape(
         theirs_commit,
     )?;
     // The escape RESOLVES — clear the block last, once the placements have settled (idempotent: a
-    // crash before this is healed by re-running).
+    // crash before this leaves the marked record, which [`finish_concluded`] re-runs to the same
+    // content-addressed commit).
     clear_conflict(ctx, sp, Workbench::Consumed)?;
     log_resolution(ctx, skill_id, "merge-escape", result_commit);
     Ok(merged_row(
@@ -490,6 +526,7 @@ fn no_base(
         conflicted_digest: workbench_digest_hex,
         copy_dir: Some(copy_leaf.as_str().to_owned()),
         reason: ConflictReason::NoBase,
+        concluded: None,
         paths: Vec::new(),
     };
     doc::write_doc(ctx.fs, &sp.conflict, &cs)?;
@@ -630,6 +667,7 @@ pub(crate) fn escape_recorded(
         sync,
         lock,
         map,
+        cs,
         &resolution,
         base_commit,
         &theirs,
@@ -819,8 +857,8 @@ fn unreadable_reason(e: &ClientError) -> String {
 /// author's hand resolution is never clobbered), and the docs are re-committed only when they still
 /// lag the recorded conflict.
 ///
-/// Reached only for a record that still describes a LIVE divergence — [`heal_landed_resolution`]
-/// runs first and takes the leftover-record case away.
+/// Reached only for a record that still describes a LIVE divergence — an UNMARKED one; a record
+/// whose `concluded` mark names an exit is taken away first by [`finish_concluded`].
 pub(crate) fn recover_resolution(
     ctx: &Ctx<'_>,
     sp: &SkillPaths,
@@ -863,67 +901,100 @@ pub(crate) fn recover_resolution(
     )
 }
 
-/// Finish an exit whose RECORD outlived it, and say whether a block still stands.
-///
-/// Every exit ([`escape`], a reset) converges its placements FIRST and clears `conflict.json`
-/// last, so a crash in that beat leaves a fully resolved bundle still carrying the record. Read
-/// naively, that leftover is worse than litter in both directions:
-///
-/// - a sweep would re-settle the conflict's docs, putting `work_hash` back to the pre-exit draft
-///   while the folders hold the resolution — a document naming bytes that exist nowhere — and
-///   re-disclose a block on a bundle nothing is blocking;
-/// - `--keep-mine` would see the (already removed) workbench folder as "untouched" and commit
-///   the ORIGINAL DRAFT over the resolution the placements already hold — the exact loss the
-///   record-before-copy removal order exists to prevent, arriving from the other side.
-///
-/// So the leftover is recognized and the interrupted clear is finished before anything reads the
-/// record. Returns `true` when it did (no block stands; the caller pulls normally), `false` when
-/// the record still describes a live divergence.
+/// Mark the recorded conflict CONCLUDED by `exit` — the durable fact every later liveness read
+/// stands on. Written through the same atomic doc writer that wrote the record (temp → fsync →
+/// rename), BEFORE the exit mutates any placement, so whatever the crash window, the record either
+/// still reads as live or names the exit that must be finished. Idempotent: re-marking with the
+/// exit already recorded rewrites nothing.
 ///
 /// # Errors
-/// The [`crate::fs_seam::FsOps`] failure clearing the record or the workbench folder.
-pub(crate) fn heal_landed_resolution(
+/// The [`crate::fs_seam::FsOps`] failure writing the record.
+pub(crate) fn mark_concluded(
     ctx: &Ctx<'_>,
     sp: &SkillPaths,
-    sync: &SyncState,
-    map: &PlacementMap,
     cs: &ConflictState,
-) -> Result<bool, ClientError> {
-    if !resolution_landed(sync, map, cs) {
-        return Ok(false);
+    exit: ConcludedExit,
+) -> Result<(), ClientError> {
+    if cs.concluded == Some(exit) {
+        return Ok(());
     }
-    clear_conflict(ctx, sp, Workbench::Unread)?;
-    Ok(true)
+    doc::write_doc(
+        ctx.fs,
+        &sp.conflict,
+        &ConflictState {
+            concluded: Some(exit),
+            ..cs.clone()
+        },
+    )
 }
 
-/// Whether a resolution's PLACEMENT WRITE already landed for this recorded conflict — i.e. the
-/// record is a leftover from a crash between an exit's materialize and its
-/// [`clear_conflict`], not a live block.
+/// FINISH a merge an exit already CONCLUDED — the recovery half of the mark discipline. A crash
+/// between an exit's `concluded` mark and its landed [`clear_conflict`] leaves the marked record
+/// standing; this runs that exit to completion, idempotently, and never guesses from any other
+/// document:
 ///
-/// The question is answered from the durable documents alone, by the ONE thing a live block cannot
-/// say: that topos itself wrote what the folders hold, at the conflict's own `current`.
+/// - **`Escape`** — re-run [`escape_recorded`] whole. Content-addressed commits mean a re-run over
+///   unchanged inputs converges to the same commit id; the materializer heals an already-landed
+///   dir with no second swap; and a workbench edited between crash and recovery is committed as
+///   the hand resolution — exactly the "git commits the working tree" model. Returns the finished
+///   `Merged` row.
+/// - **`Reset`** — finish the reset: placements already settled clear the record now; otherwise
+///   the lock's base is materialized over every managed placement (snapshot rail armed — the same
+///   write [`super::sync_engine::reset_to_base`] makes, shared through
+///   [`super::sync_engine::materialize_reset`]) and the record clears only once every copy proves
+///   settled. A state that cannot be proven settled leaves the marked record standing for the next
+///   run — fail toward the gate, never through it. Returns `None`; the caller proceeds normally.
+/// - **`Merge`** — the clean re-merge's clear was interrupted after the mark; finish it. Returns
+///   `None`.
 ///
-/// - the record carries a `copy_dir` — only a build that keeps the marked-up tree OUT of the
-///   placements writes that field, AND
-/// - `map.applied_commit` == the conflict's `current_commit` — the map names that version as the one
-///   materialized here, AND
-/// - `map.materialized_sha` == `sync.work_hash` — the bytes topos wrote ARE the bytes on disk.
+/// An UNMARKED record is a LIVE stopped merge and never reaches here — the two callers dispatch on
+/// the mark — and this fn refuses to clear one rather than infer anything about it.
 ///
-/// While a block stands, the last half is false by construction: a conflict writes NO placement, so
-/// the map keeps naming the last bytes topos really wrote while `work_hash` names the author's own
-/// diverged draft. Every exit converges the placements and records what it wrote, which is what makes
-/// the pair hold — so the pair means "an exit's placement write already landed" and nothing else.
+/// Runs under the CALLER's per-skill flock and takes none itself (flock does not nest).
 ///
-/// The `copy_dir` clause is what keeps that inference honest across an upgrade. An older build
-/// wrote the marked-up tree ONTO the placements and recorded it in the map, so a LIVE, unfinished
-/// block from it satisfies the two document clauses exactly — and the first sweep after the
-/// upgrade would delete it with no receipt, leaving the markers on disk and publishable. Such a
-/// record carries no `copy_dir`, so it is never mistaken for a landed exit; it is converted
-/// instead ([`convert_pre_workbench_record`]). Every record this build writes carries the field.
-fn resolution_landed(sync: &SyncState, map: &PlacementMap, cs: &ConflictState) -> bool {
-    cs.copy_dir.is_some()
-        && map.applied_commit == cs.current_commit
-        && map.materialized_sha == sync.work_hash
+/// # Errors
+/// The underlying store / placement / fs failure finishing the recorded exit.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn finish_concluded(
+    witness: DivergedWitness,
+    ctx: &Ctx<'_>,
+    skill_id: &str,
+    sp: &SkillPaths,
+    sync: &SyncState,
+    lock: &Lock,
+    map: &PlacementMap,
+    cs: &ConflictState,
+) -> Result<Option<PullSkill>, ClientError> {
+    match cs.concluded {
+        Some(ConcludedExit::Escape) => {
+            escape_recorded(witness, ctx, skill_id, sp, sync, lock, map, cs).map(Some)
+        }
+        Some(ConcludedExit::Reset) => {
+            if !super::sync_engine::every_copy_settled(ctx, sp) {
+                // The reset's placement write did not (fully) land — run it again, whole: the
+                // materializer skips dirs already at base, and the snapshot rail retains any edit
+                // made between crash and recovery before it is overwritten.
+                let plan = placement::plan_for_skill(ctx, skill_id, lock, map);
+                let map = placement::reconcile_map(map, &plan);
+                let managed = placement::managed_indices(&map, &plan);
+                super::sync_engine::snapshot_all_modified(ctx, sp, lock, &map, "a reset")?;
+                super::sync_engine::materialize_reset(
+                    ctx, sp, skill_id, lock, sync, &map, &managed,
+                )?;
+            }
+            if super::sync_engine::every_copy_settled(ctx, sp) {
+                clear_conflict(ctx, sp, Workbench::Unread)?;
+            }
+            Ok(None)
+        }
+        Some(ConcludedExit::Merge) => {
+            clear_conflict(ctx, sp, Workbench::Unread)?;
+            Ok(None)
+        }
+        None => Err(ClientError::Corrupt(
+            "finish_concluded reached with an unmarked conflict record".into(),
+        )),
+    }
 }
 
 /// A pre-workbench conflict record, converted — the documents as they now stand, plus what the
@@ -943,9 +1014,10 @@ pub(crate) struct ConvertedConflict {
 ///
 /// The build being upgraded FROM materialized the marked-up tree onto every placement, so the
 /// markers are sitting in folders agents read: a diff3 marker is not an instruction, and the whole
-/// point of this module is that no folder an agent reads ever holds one. Recognising the record
-/// ([`resolution_landed`]) only stops it being deleted; the bytes still have to move. So the
-/// conversion puts each half where this build keeps it —
+/// point of this module is that no folder an agent reads ever holds one. The absent `copy_dir` is
+/// an honest signal of which SHAPE the record is in — never of whether the merge is over — and
+/// recognising the shape only stops the wrong exits running over it; the bytes still have to move.
+/// So the conversion puts each half where this build keeps it —
 ///
 /// - **the placements** get the author's OWN version back (the `draft_commit` snapshot the old
 ///   build committed before it merged), so every agent folder holds one coherent bundle again;

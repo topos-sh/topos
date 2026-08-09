@@ -2240,6 +2240,86 @@ fn the_escape_discloses_the_divergent_copies_it_collapsed() {
     }
 }
 
+/// **A `--dest` reset of ONE copy does not conclude a stopped merge — and the `--keep-mine` the
+/// receipt names must then FINISH it, never refuse.** The narrowed reset advances the durable
+/// documents to exactly the values a LANDED exit leaves behind — `sync.work_hash` to the reset
+/// copy's digest (= base = the conflict's theirs), `map.applied_commit` to `lock.base_commit`
+/// (= the conflict's `current_commit`), the map-level `materialized_sha` mirror to the same digest
+/// — while another copy still holds the un-merged draft. Any recovery that INFERS "an exit already
+/// landed" from those documents deletes the live record and its workbench, refuses
+/// `NoStoppedMerge`, and leaves the surviving draft unblocked for `publish` (the record's absence
+/// IS the publish guard). Liveness is a recorded fact (the `concluded` mark), never a document
+/// comparison.
+#[test]
+fn a_narrowed_reset_leaves_the_merge_stopped_and_the_escape_still_finishes_it() {
+    let rig = Rig::new("narrow-reset-live");
+    let (id, name, genesis) = rig.adopt(BASE);
+    let mine: FileSet = MINE_OVER_BASE;
+    write_tree(&rig.placement(), mine);
+    let v1 = mk_version(&[genesis], V1, "d_pub", "v1");
+    let mut plane = FixturePlane::default();
+    plane.add_version(&id, &v1);
+    plane.set_current(&id, served(WS, &id, v1.id, 1));
+    let foll = follow(&id, FollowMode::Auto);
+
+    // Sweep → a recorded stopped merge; then a SECOND managed copy holding the same un-merged
+    // draft (one draft in two folders — never competitors), which is what the narrowed reset
+    // leaves standing.
+    assert_eq!(
+        only(&pull_data(&rig.ctx(&plane, &foll), ops::PullScope::AllFollowed).unwrap()).action,
+        PullAction::Conflicted
+    );
+    let replica = rig.work.0.join("replica");
+    add_replica(&rig, &id, &replica, mine);
+    let copy = rig.conflict_copy(&id);
+
+    // The REAL narrowed reset, apply arm: the FIRST copy back to the team's version (the first,
+    // because the map-level `materialized_sha` mirrors placement 0 — the exact document shape the
+    // deleted inference misread as a landed exit). Named by its recorded spelling.
+    let recorded_first = doc::read_map(&rig.fs, &rig.layout().published(&sid(&id)).map)
+        .unwrap()
+        .unwrap()
+        .placements[0]
+        .clone();
+    let sel = ops::Selection::one(None, Some(&recorded_first));
+    ops::reset(
+        &rig.ctx(&plane, &foll),
+        std::slice::from_ref(&name),
+        true,
+        ops::StoreScope::Here,
+        &sel,
+    )
+    .unwrap();
+    assert_eq!(
+        snapshot(&rig.placement()),
+        Some(expect(V1)),
+        "the named copy is reset to theirs"
+    );
+    assert_eq!(
+        snapshot(&replica),
+        Some(expect(mine)),
+        "the copy nobody named keeps the draft"
+    );
+    assert!(
+        rig.conflict_exists(&id),
+        "a copy still holds the merge, so the record — the publish guard — must stand"
+    );
+    assert!(copy.exists(), "and the workbench with it");
+
+    // The `--keep-mine` the receipt names FINISHES the stopped merge: the surviving copy's side
+    // wins the collided lines, every managed folder converges on the resolution, and only that
+    // real conclusion takes the record and the workbench with it.
+    let escaped = pull_data(&rig.ctx(&plane, &foll), keep_mine_scope(name)).unwrap();
+    assert_eq!(only(&escaped).action, PullAction::Merged);
+    assert_eq!(snapshot(&rig.placement()), Some(expect(KEPT_OVER_V1)));
+    assert_eq!(snapshot(&replica), Some(expect(KEPT_OVER_V1)));
+    assert!(
+        !rig.conflict_exists(&id),
+        "publish unblocks only with the real conclusion"
+    );
+    assert!(!copy.exists());
+}
+
 /// `update --reset` in the RECORDED-conflict state resolves it the team's way: the author's draft is
 /// snapshotted and discarded, theirs lands on the placement, and the conflict record is CLEARED —
 /// with the marked-up copy it named — so publish is not left refused by a divergence that no longer
@@ -2585,17 +2665,23 @@ fn resolve_crash_gate_converges_and_never_writes_markers_into_an_agent_folder() 
     }
 }
 
-/// The same gate over the way OUT. Every exit converges the placements and then clears the record,
-/// so a crash in that beat is the one window where a folder an agent reads and the block that
-/// guards it can disagree — and the workbench folder holding a by-hand merge is the only copy of
-/// bytes nothing else in the system has written down. Faulting every fs op of `--keep-mine`, both
-/// exits, asserts:
+/// The same gate over the way OUT. The escape commits its resolution, marks the record CONCLUDED,
+/// converges the placements, and clears the record last — so a crash mid-exit leaves either a
+/// live block (unmarked, nothing placed) or a marked conclusion to finish, and the workbench
+/// folder holding a by-hand merge is the only copy of bytes nothing else in the system has
+/// written down. Faulting every fs op of `--keep-mine`, both exits, asserts:
 ///
 /// (a) the agent folder always holds ONE complete bundle — the author's own version or the
 ///     committed resolution, never markers, never a torn tree;
-/// (b) while the record still stands, the hand merge is still in the workbench (the record goes
-///     FIRST, the folder after — the order that makes a re-run safe);
-/// (c) a clean re-run always finishes, with the resolution in the folder and no block left.
+/// (b) while the record still stands — marked or not — the workbench is byte-identical to how
+///     the person left it (the clear removes the record FIRST, the folder after — the order that
+///     makes a re-run safe);
+/// (c) a clean re-run FINISHES a standing record to `Merged`, whether the crash left it unmarked
+///     (a live block, escaped afresh) or marked (the crashed exit's own conclusion, finished
+///     idempotently — where the deleted document-pair inference refused `NoStoppedMerge` with the
+///     record still standing); `NoStoppedMerge` remains only for faults past the record's
+///     removal, where the merge had already concluded whole — and the placement holds the
+///     expected resolution either way.
 #[test]
 fn escape_crash_gate_keeps_one_coherent_bundle_and_never_eats_the_hand_merge() {
     let mine: FileSet = MINE_OVER_BASE;
@@ -2670,15 +2756,22 @@ fn escape_crash_gate_keeps_one_coherent_bundle_and_never_eats_the_hand_merge() {
                 );
             }
 
-            // (c) a clean re-run finishes it — or reports there is nothing left to finish, when the
-            // crashed run's placement write had already landed.
+            // (c) a clean re-run finishes it. A STANDING record — the live unmarked block, or the
+            // marked conclusion a crash stranded — must re-run to `Merged`; the refusal is honest
+            // only once the record's removal already landed (the merge concluded whole, and the
+            // fault hit the workbench cleanup after it).
+            let record_stood = rig.conflict_exists(&id);
             match pull_data(&rig.ctx(&plane, &foll), keep_mine_scope(name.clone())) {
                 Ok(d) => assert_eq!(
                     only(&d).action,
                     PullAction::Merged,
                     "by_hand={by_hand} fail_at={fail_at}"
                 ),
-                Err(crate::error::ClientError::NoStoppedMerge { .. }) => {}
+                Err(crate::error::ClientError::NoStoppedMerge { .. }) => assert!(
+                    !record_stood,
+                    "by_hand={by_hand} fail_at={fail_at}: a standing record must re-run to Merged, \
+                     never be refused away"
+                ),
                 Err(e) => panic!("by_hand={by_hand} fail_at={fail_at}: {e:?}"),
             }
             assert!(
@@ -2695,8 +2788,12 @@ fn escape_crash_gate_keeps_one_coherent_bundle_and_never_eats_the_hand_merge() {
 }
 
 /// The `--reset` half of the same gate: this exit DISCARDS, so what it must never do under a fault
-/// is leave a folder holding half of anything, or take the workbench with it before the record. A
-/// clean re-run always converges on the team's version with no block and no workbench left.
+/// is leave a folder holding half of anything, or take the workbench with it before the record.
+/// The full reset marks the record CONCLUDED before it materializes, so a standing record after a
+/// fault is either still unmarked (nothing placed yet) or a marked conclusion the next run
+/// finishes — and in BOTH shapes the workbench must be intact (the finisher's removal still runs
+/// through the record-first clear, which spares an edited folder). A clean re-run always
+/// converges on the team's version with no block and no workbench left.
 #[test]
 fn reset_crash_gate_converges_and_never_takes_the_workbench_before_the_record() {
     let mine: FileSet = MINE_OVER_BASE;
@@ -2746,7 +2843,8 @@ fn reset_crash_gate_converges_and_never_takes_the_workbench_before_the_record() 
             on_disk == Some(expect(mine)) || on_disk == Some(expect(V1)),
             "fail_at={fail_at}: the agent folder holds neither side whole: {on_disk:?}"
         );
-        // The record goes FIRST, so a standing record means the workbench is still intact.
+        // The record goes FIRST, so a standing record — marked concluded or not — means the
+        // workbench is still intact.
         if rig.conflict_exists(&id) {
             assert_eq!(
                 snapshot(&copy),
@@ -2965,6 +3063,7 @@ impl HostileCheckout {
                 conflicted_digest: "3".repeat(64),
                 copy_dir: Some(copy_dir.to_owned()),
                 reason: topos_types::persisted::ConflictReason::ThreeWay,
+                concluded: None,
                 paths: Vec::new(),
             };
             doc::write_doc(&RealFs, &sp.conflict, &cs).unwrap();
@@ -3244,13 +3343,14 @@ fn a_hand_resolution_never_commits_topos_mine_scaffolding() {
     assert!(rig.open_store(&id).list_versions().unwrap().contains(&m.id));
 }
 
-/// An exit converges its placements FIRST and clears `conflict.json` LAST, so a crash in that beat
-/// leaves a fully resolved bundle still carrying the record. Read as a live block, that leftover
-/// does damage in both directions: a sweep re-settles `work_hash` to the pre-escape draft (naming
-/// bytes that are nowhere on disk) and re-discloses a block on a resolved bundle, and
-/// `--keep-mine` sees the already-removed workbench folder as "untouched" and commits the
-/// ORIGINAL DRAFT over the resolution the placements hold. Both arms now recognize the leftover
-/// from the two durable documents and finish the interrupted clear instead.
+/// An exit marks the record CONCLUDED, converges its placements, and clears `conflict.json` LAST,
+/// so a crash in that beat leaves a fully resolved bundle still carrying the MARKED record — that
+/// is the one shape a real crash leaves, and both arms must FINISH it rather than read it as a
+/// live block. Read live, the leftover does damage in both directions: a sweep re-settles
+/// `work_hash` to the pre-escape draft (naming bytes that are nowhere on disk) and re-discloses a
+/// block on a resolved bundle, and `--keep-mine` sees the already-removed workbench folder as
+/// "untouched" and commits the ORIGINAL DRAFT over the resolution the placements hold. The mark —
+/// never a document comparison — is what tells the leftover from a live block.
 #[test]
 fn a_record_that_outlived_its_resolution_is_cleared_not_re_blocked() {
     let rig = Rig::new("record-outlived");
@@ -3267,8 +3367,9 @@ fn a_record_that_outlived_its_resolution_is_cleared_not_re_blocked() {
     let foll = follow(&id, FollowMode::Auto);
     pull_data(&rig.ctx(&plane, &foll), ops::PullScope::AllFollowed).unwrap();
 
-    // Hand-resolve, escape — and then put the record back, which is exactly the on-disk state a
-    // crash between the escape's placement write and its record removal leaves.
+    // Hand-resolve, escape — and then put the record back MARKED, which is exactly the on-disk
+    // state a crash between the escape's placement write and its record removal leaves (the mark
+    // goes down before any placement moves).
     let record = rig.conflict_state(&id);
     let copy = rig.conflict_copy(&id);
     let resolved: FileSet = &[
@@ -3289,17 +3390,22 @@ fn a_record_that_outlived_its_resolution_is_cleared_not_re_blocked() {
     .unwrap();
     assert_eq!(only(&escaped).action, PullAction::Merged);
     let after_escape = rig.read_sync(&id);
+    let crashed = topos_types::persisted::ConflictState {
+        concluded: Some(topos_types::persisted::ConcludedExit::Escape),
+        ..record.clone()
+    };
     doc::write_doc(
         &rig.fs,
         &rig.layout().published(&sid(&id)).conflict,
-        &record,
+        &crashed,
     )
     .unwrap();
 
-    // (a) the leftover under `--keep-mine`: the interrupted clear is finished, and then there is
-    // no stopped merge left to finish — so it refuses rather than committing anything over the
-    // resolution the placements already hold.
-    let err = pull_data(
+    // (a) the marked leftover under `--keep-mine`: the crashed exit's own command re-runs it to
+    // completion, idempotently — the content-addressed conclusion is the SAME commit, the
+    // materializer heals the already-landed placement with no second swap, and the record clears
+    // with the real finish. Nothing re-commits the pre-escape draft over the hand resolution.
+    let finished = pull_data(
         &rig.ctx(&plane, &foll),
         ops::PullScope::One {
             store: ops::StoreScope::Here,
@@ -3308,10 +3414,11 @@ fn a_record_that_outlived_its_resolution_is_cleared_not_re_blocked() {
             mode: ops::TargetMode::KeepMine,
         },
     )
-    .expect_err("the resolution already landed; nothing is stopped");
-    assert!(
-        matches!(err, crate::error::ClientError::NoStoppedMerge { .. }),
-        "{err:?}"
+    .unwrap();
+    assert_eq!(
+        only(&finished).action,
+        PullAction::Merged,
+        "a marked-Escape leftover finishes, never refuses"
     );
     assert!(!rig.conflict_exists(&id));
     assert_eq!(
@@ -3319,17 +3426,22 @@ fn a_record_that_outlived_its_resolution_is_cleared_not_re_blocked() {
         Some(expect(resolved)),
         "the hand resolution must survive a leftover record"
     );
+    assert_eq!(
+        rig.read_sync(&id).work_hash,
+        after_escape.work_hash,
+        "the finish re-lands the escape's own state"
+    );
 
-    // (b) the same leftover under a bare sweep. The interrupted clear is finished first, and the
-    // bundle is then treated as what it now IS — a person holding their own resolution, still behind
-    // the team — so the sweep may well raise a block of its own. What must never happen is the STALE
-    // record's re-disclosure, which would re-settle `work_hash` to the pre-escape draft and send the
-    // reader to a workbench describing bytes that are nowhere on disk. The discriminator is what the
-    // documents NAME, not whether a block stands.
+    // (b) the same marked leftover under a bare sweep, after the team publishes AGAIN. The sweep
+    // FIRST finishes the marked conclusion — its row IS the finished merge — and only a LATER
+    // sweep raises a fresh block against the version that actually moved. What must never happen
+    // is the STALE record's re-disclosure, which would re-settle `work_hash` to the pre-escape
+    // draft and send the reader to a workbench describing bytes that are nowhere on disk. The
+    // discriminator is the MARK, not whether a block stands.
     //
     // The team publishes AGAIN first, so a block really is raised. Without a pending update the
-    // sweep has nothing to merge, and the assertions about the FRESH record below never run — the
-    // situation they check has to be created for them to check anything at all.
+    // second sweep has nothing to merge, and the assertions about the FRESH record below never run
+    // — the situation they check has to be created for them to check anything at all.
     let v2files: FileSet = &[
         ("SKILL.md", FileMode::Regular, b"# v2\n"),
         ("run.sh", FileMode::Executable, b"#!/bin/sh\necho v1\n"),
@@ -3341,9 +3453,20 @@ fn a_record_that_outlived_its_resolution_is_cleared_not_re_blocked() {
     doc::write_doc(
         &rig.fs,
         &rig.layout().published(&sid(&id)).conflict,
-        &record,
+        &crashed,
     )
     .unwrap();
+    let first =
+        only(&pull_data(&rig.ctx(&plane, &foll), ops::PullScope::AllFollowed).unwrap()).clone();
+    assert_eq!(
+        first.action,
+        PullAction::Merged,
+        "the sweep finishes the marked conclusion before anything else"
+    );
+    assert!(
+        !rig.conflict_exists(&id),
+        "the finished conclusion takes the leftover record with it"
+    );
     let row =
         only(&pull_data(&rig.ctx(&plane, &foll), ops::PullScope::AllFollowed).unwrap()).clone();
     assert_eq!(
@@ -3379,6 +3502,126 @@ fn a_record_that_outlived_its_resolution_is_cleared_not_re_blocked() {
     );
 }
 
+/// **The regression pin for the deleted inference.** An UNMARKED record whose durable documents
+/// happen to satisfy the retired landed-exit pair — `map.applied_commit == current_commit` and
+/// `map.materialized_sha == sync.work_hash`, with a `copy_dir` on the record — is a LIVE stopped
+/// merge and must be treated as one: re-disclosed by the sweep, never cleared, and FINISHED (not
+/// refused) by `--keep-mine`. A narrowed `--dest` reset produces exactly this document shape while
+/// another copy still holds the merge, which is why liveness is the recorded mark and never a
+/// document comparison.
+#[test]
+fn an_unmarked_record_matching_the_old_landed_pair_is_still_live() {
+    let rig = Rig::new("old-pair-live");
+    let (id, _name, genesis) = rig.adopt(BASE);
+    write_tree(&rig.placement(), MINE_OVER_BASE);
+    let v1 = mk_version(&[genesis], V1, "d_pub", "v1");
+    let mut plane = FixturePlane::default();
+    plane.add_version(&id, &v1);
+    plane.set_current(&id, served(WS, &id, v1.id, 1));
+    let foll = follow(&id, FollowMode::Auto);
+    assert_eq!(
+        only(&pull_data(&rig.ctx(&plane, &foll), ops::PullScope::AllFollowed).unwrap()).action,
+        PullAction::Conflicted
+    );
+
+    // Plant exactly the pair the deleted inference read as "an exit already landed".
+    let cs = rig.conflict_state(&id);
+    assert!(cs.copy_dir.is_some() && cs.concluded.is_none());
+    let work_hash = rig.read_sync(&id).work_hash;
+    rig.patch_map(&id, |m| {
+        m.applied_commit = cs.current_commit.clone();
+        m.materialized_sha = work_hash.clone();
+    });
+
+    // The sweep re-discloses the live block — record and workbench both stand.
+    let copy = rig.conflict_copy(&id);
+    let workbench = snapshot(&copy);
+    assert_eq!(
+        only(&pull_data(&rig.ctx(&plane, &foll), ops::PullScope::AllFollowed).unwrap()).action,
+        PullAction::Conflicted,
+        "an unmarked record is live whatever the other documents say"
+    );
+    assert!(rig.conflict_exists(&id), "never cleared on a document pair");
+    assert_eq!(
+        snapshot(&copy),
+        workbench,
+        "the workbench survives untouched"
+    );
+
+    // …and the escape still FINISHES it, because the merge really is stopped.
+    let escaped = pull_data(
+        &rig.ctx(&plane, &foll),
+        keep_mine_scope("pr-describe".into()),
+    )
+    .unwrap();
+    assert_eq!(only(&escaped).action, PullAction::Merged);
+    assert_eq!(snapshot(&rig.placement()), Some(expect(KEPT_OVER_V1)));
+    assert!(!rig.conflict_exists(&id));
+}
+
+/// A full `--reset` marks the record CONCLUDED before it touches any placement, so a crash right
+/// after the mark leaves every folder still holding the draft under a marked-Reset record. The
+/// next bare sweep FINISHES that reset — the team's version lands everywhere, the record and the
+/// untouched workbench go with the landed conclusion, the draft's bytes survive as a
+/// content-addressed store snapshot — and the sweep then reads an ordinary current bundle.
+#[test]
+fn a_marked_reset_record_is_finished_by_the_next_sweep() {
+    let rig = Rig::new("marked-reset-finish");
+    let (id, _name, genesis) = rig.adopt(BASE);
+    write_tree(&rig.placement(), MINE_OVER_BASE);
+    let v1 = mk_version(&[genesis], V1, "d_pub", "v1");
+    let mut plane = FixturePlane::default();
+    plane.add_version(&id, &v1);
+    plane.set_current(&id, served(WS, &id, v1.id, 1));
+    let foll = follow(&id, FollowMode::Auto);
+    assert_eq!(
+        only(&pull_data(&rig.ctx(&plane, &foll), ops::PullScope::AllFollowed).unwrap()).action,
+        PullAction::Conflicted
+    );
+
+    // The crash state a full reset leaves when it dies right after its mark: the record concluded,
+    // nothing placed yet, the placement still holding the draft.
+    let cs = rig.conflict_state(&id);
+    doc::write_doc(
+        &rig.fs,
+        &rig.layout().published(&sid(&id)).conflict,
+        &topos_types::persisted::ConflictState {
+            concluded: Some(topos_types::persisted::ConcludedExit::Reset),
+            ..cs
+        },
+    )
+    .unwrap();
+    let copy = rig.conflict_copy(&id);
+
+    let row =
+        only(&pull_data(&rig.ctx(&plane, &foll), ops::PullScope::AllFollowed).unwrap()).clone();
+    assert_eq!(
+        row.action,
+        PullAction::UpToDate,
+        "the sweep finishes the reset and reads the bundle as current"
+    );
+    assert_eq!(
+        snapshot(&rig.placement()),
+        Some(expect(V1)),
+        "the team's version landed"
+    );
+    assert!(
+        !rig.conflict_exists(&id),
+        "the finished reset clears the block"
+    );
+    assert!(!copy.exists(), "and the untouched workbench with it");
+    // The draft is never lost: the finisher's snapshot rail commits it on the post-conflict base
+    // (the team's version — what the conflict made the draft's recorded base).
+    let saved = mk_version(&[v1.id], MINE_OVER_BASE, DEVICE, "topos: draft snapshot");
+    assert!(
+        rig.open_store(&id)
+            .list_versions()
+            .unwrap()
+            .contains(&saved.id),
+        "the discarded draft survives as a store snapshot"
+    );
+}
+
 // --- upgrading while a merge is stopped ---
 
 /// Copy a whole tree, modes included — the by-hand fixtures below plant on-disk states no code
@@ -3397,16 +3640,25 @@ fn copy_tree(from: &Path, to: &Path) {
 }
 
 /// Rewrite a freshly-blocked bundle into the state a PRE-WORKBENCH build left on disk: that build
-/// materialized the marked-up tree onto every placement and recorded it as placed at `current`, and
+/// materialized the marked-up tree onto EVERY placement and recorded it as placed at `current`, and
 /// its `conflict.json` carried no `copy_dir` (the field did not exist). Every value here is one that
-/// build really wrote — the markers in the agent folder, the map naming them, `work_hash` naming
-/// them, and no workbench folder anywhere.
+/// build really wrote — the markers in each agent folder, the map naming them (map-level AND
+/// per-placement), `work_hash` naming them, and no workbench folder anywhere. The folders come from
+/// the MAP, so a bundle placed in several agent folders plants in all of them (the shape a machine
+/// with two harnesses upgraded from).
 fn plant_pre_workbench_state(rig: &Rig, id: &str) {
     let cs = rig.conflict_state(id);
     let marked = cs.conflicted_digest.clone();
     let at = cs.current_commit.clone();
-    copy_tree(&rig.conflict_copy(id), &rig.placement());
-    std::fs::remove_dir_all(rig.conflict_copy(id)).unwrap();
+    let copy = rig.conflict_copy(id);
+    let map: topos_types::persisted::PlacementMap =
+        doc::read_map(&rig.fs, &rig.layout().published(&sid(id)).map)
+            .unwrap()
+            .unwrap();
+    for dir in &map.placements {
+        copy_tree(&copy, Path::new(dir));
+    }
+    std::fs::remove_dir_all(&copy).unwrap();
     rig.patch_map(id, |m| {
         m.applied_commit = at;
         m.materialized_sha = marked.clone();
@@ -3606,6 +3858,128 @@ fn a_pre_workbench_conflict_record_is_recognised_and_converted() {
     assert!(!copy.exists());
 }
 
+/// **The conversion heals EVERY folder that build wrote markers into, not just the first.**
+///
+/// A pre-workbench build materialized the marked-up tree onto every placement, so a machine with
+/// two harnesses came out of the upgrade with markers in two agent folders — the shape a
+/// single-placement fixture cannot express at all. A conversion that healed one of them would
+/// leave the other holding diff3 markers for an agent to read, and the exit that follows would
+/// then take those markers as this person's own bytes. The two halves are placed differently by
+/// design: the author's own version goes back into EACH folder, the marked-up tree is written
+/// ONCE, into the single workbench the record names.
+#[test]
+fn a_pre_workbench_conflict_is_converted_in_every_agent_folder() {
+    let rig = Rig::new("pre-workbench-fanout");
+    let (id, name, genesis) = rig.adopt(BASE);
+    let mine: FileSet = MINE_OVER_BASE;
+    write_tree(&rig.placement(), mine);
+    let v1 = mk_version(&[genesis], V1, "d_pub", "v1");
+    let mut plane = FixturePlane::default();
+    plane.add_version(&id, &v1);
+    plane.set_current(&id, served(WS, &id, v1.id, 1));
+    let foll = follow(&id, FollowMode::Auto);
+    seed_instance(&rig);
+
+    // A real stopped merge — then a SECOND managed copy beside the first (the other harness's
+    // folder), and the whole state rewound to what the older build left in BOTH of them.
+    assert_eq!(
+        only(&pull_data(&rig.ctx(&plane, &foll), ops::PullScope::AllFollowed).unwrap()).action,
+        PullAction::Conflicted
+    );
+    let marked_tree = snapshot(&rig.conflict_copy(&id));
+    let replica = rig.work.0.join("replica");
+    add_replica(&rig, &id, &replica, mine);
+    plant_pre_workbench_state(&rig, &id);
+    let folders = [rig.placement(), replica.clone()];
+    for dir in &folders {
+        assert!(
+            std::fs::read_to_string(dir.join("SKILL.md"))
+                .unwrap()
+                .contains("<<<<<<<"),
+            "the fixture must plant markers in {}",
+            dir.display()
+        );
+    }
+
+    // The first sweep after the upgrade.
+    let data = pull_data(&rig.ctx(&plane, &foll), ops::PullScope::AllFollowed).unwrap();
+    let row = only(&data).clone();
+    assert_eq!(row.action, PullAction::Conflicted, "the block still stands");
+
+    // ① EVERY folder holds this person's own version again, byte for byte.
+    for dir in &folders {
+        assert_eq!(
+            snapshot(dir),
+            Some(expect(mine)),
+            "{} holds the author's own version again",
+            dir.display()
+        );
+    }
+
+    // ② the marked-up tree is in the ONE workbench, and reads as untouched — so the exit below
+    //    still means keep MY version rather than commit a hand merge nobody made.
+    let copy = rig.conflict_copy(&id);
+    assert_eq!(
+        snapshot(&copy),
+        marked_tree,
+        "the marked-up copy is written"
+    );
+    let converted = rig.conflict_state(&id);
+    assert_eq!(
+        to_hex(&crate::scan::scan(&copy).unwrap().bundle_digest),
+        converted.conflicted_digest,
+        "and reads as untouched"
+    );
+
+    // ③ the record names that workbench and carries NO conclusion — a live stopped merge is
+    //    exactly what it still is, and both exits are still open.
+    assert!(converted.copy_dir.is_some());
+    assert_eq!(
+        converted.concluded, None,
+        "a conversion concludes nothing — the merge is still stopped"
+    );
+
+    // ④ the receipt states the one fact a reader cannot see for themselves, once for the bundle
+    //    (not once per folder), and claims no replaced edits: neither folder had any.
+    let note = row.note.as_deref().expect("the conversion is disclosed");
+    assert_eq!(
+        note,
+        "an older version of topos left this merge in your agent folders — they hold your version \
+         again",
+        "{note}"
+    );
+
+    // ⑤ publish still refuses — the guard is the record's presence, and the record is still there.
+    match publish_describe_err(&rig, &plane, &foll, &name) {
+        crate::error::ClientError::PublishBlocked { skill, .. } => assert_eq!(skill, name),
+        other => panic!("expected the publish block, got {other:?}"),
+    }
+
+    // ⑥ and the exit finishes the merge in both folders at once: this person's wording on the
+    //    contested line, the team's other changes with it, everywhere.
+    let escaped = pull_data(
+        &rig.ctx(&plane, &foll),
+        ops::PullScope::One {
+            store: ops::StoreScope::Here,
+            name: name.clone(),
+            workspace: None,
+            mode: ops::TargetMode::KeepMine,
+        },
+    )
+    .unwrap();
+    assert_eq!(only(&escaped).action, PullAction::Merged);
+    for dir in &folders {
+        assert_eq!(
+            snapshot(dir),
+            Some(expect(KEPT_OVER_V1)),
+            "the resolution lands in {}",
+            dir.display()
+        );
+    }
+    assert!(!rig.conflict_exists(&id));
+    assert!(!copy.exists());
+}
+
 /// The pre-workbench build sent people to resolve IN the agent folder — that is where it put the
 /// markers — so an upgrade can land on a folder holding a half-finished hand merge. Converting
 /// replaces it (a partly-resolved tree may still hold markers, and that is the one thing an agent
@@ -3686,6 +4060,106 @@ fn a_conversion_that_replaces_a_folders_own_edits_hands_back_a_way_to_read_them(
         snapshot(&rig.placement()),
         Some(expect(half_done)),
         "the half-finished hand merge comes back byte for byte"
+    );
+}
+
+/// A person resolving by hand in the folder that build sent them to had SEVERAL folders to choose
+/// from, and worked in one of them. So the replaced-copy line is per FOLDER, not per bundle: the
+/// one that carried their own bytes is named and handed a way to read them again, and the folder
+/// that still held exactly what topos wrote is restored plainly, with nothing to say about it. A
+/// note that named both would send a person after bytes that were never theirs.
+#[test]
+fn a_multi_folder_conversion_names_only_the_folder_whose_own_edits_it_replaced() {
+    let rig = Rig::new("pre-workbench-fanout-edited");
+    let (id, name, genesis) = rig.adopt(BASE);
+    write_tree(&rig.placement(), MINE_OVER_BASE);
+    let v1 = mk_version(&[genesis], V1, "d_pub", "v1");
+    let mut plane = FixturePlane::default();
+    plane.add_version(&id, &v1);
+    plane.set_current(&id, served(WS, &id, v1.id, 1));
+    let foll = follow(&id, FollowMode::Auto);
+    assert_eq!(
+        only(&pull_data(&rig.ctx(&plane, &foll), ops::PullScope::AllFollowed).unwrap()).action,
+        PullAction::Conflicted
+    );
+    let replica = rig.work.0.join("replica");
+    add_replica(&rig, &id, &replica, MINE_OVER_BASE);
+    plant_pre_workbench_state(&rig, &id);
+
+    // Mid-hand-merge in ONE of the two folders; the other still holds exactly what that build
+    // wrote there.
+    let half_done: FileSet = &[
+        ("SKILL.md", FileMode::Regular, b"# half reconciled\n"),
+        ("run.sh", FileMode::Executable, b"#!/bin/sh\necho v1\n"),
+        ("ref/notes.md", FileMode::Regular, b"new in v1\n"),
+    ];
+    write_tree(&replica, half_done);
+
+    let data = pull_data(&rig.ctx(&plane, &foll), ops::PullScope::AllFollowed).unwrap();
+    let row = only(&data).clone();
+    assert_eq!(row.action, PullAction::Conflicted);
+    for dir in [rig.placement(), replica.clone()] {
+        assert_eq!(
+            snapshot(&dir),
+            Some(expect(MINE_OVER_BASE)),
+            "the conversion puts the author's own version back in {}",
+            dir.display()
+        );
+    }
+
+    // The receipt names the EDITED folder and offers ONE runnable line for it — and says nothing
+    // about the folder whose bytes were topos's own.
+    let note = row.note.as_deref().expect("the replacement is disclosed");
+    let lines: Vec<&str> = note.lines().collect();
+    assert_eq!(lines.len(), 3, "one folder, one line, one command: {note}");
+    let real = |p: &std::path::Path| {
+        std::fs::canonicalize(p)
+            .unwrap_or_else(|_| p.to_path_buf())
+            .display()
+            .to_string()
+    };
+    let named = lines[1]
+        .strip_prefix("edits in ")
+        .and_then(|r| r.strip_suffix(" were replaced — read that copy again:"))
+        .unwrap_or_else(|| panic!("a named folder: {}", lines[1]));
+    assert_eq!(real(std::path::Path::new(named)), real(&replica));
+    assert!(
+        !note.contains(&real(&rig.placement())),
+        "the untouched folder is not named: {note}"
+    );
+    let go_back = lines[2]
+        .strip_prefix("  ")
+        .unwrap_or_else(|| panic!("an indented command: {}", lines[2]));
+    assert!(
+        go_back.starts_with(&format!("topos update -g {name}@")),
+        "{go_back}"
+    );
+
+    // And it really reads them again — the line is run exactly as printed. A go-back names a
+    // VERSION, so it lands in every folder this bundle is placed in; what the line promises is
+    // that those bytes are readable again, and they are.
+    let target = go_back
+        .strip_prefix("topos update -g ")
+        .expect("the printed command")
+        .to_owned();
+    crate::app::pull_with_name_fallback(
+        &rig.ctx(&plane, &foll),
+        Some(target),
+        false,
+        ops::StoreScope::Here,
+        None,
+        &ops::ReconcileOpts::default(),
+    )
+    .expect("the offered go-back resolves");
+    assert_eq!(
+        snapshot(&replica),
+        Some(expect(half_done)),
+        "the half-finished hand merge comes back byte for byte"
+    );
+    assert_eq!(
+        snapshot(&rig.placement()),
+        Some(expect(half_done)),
+        "a version is a version — the go-back lands in every folder, the untouched one included"
     );
 }
 

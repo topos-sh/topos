@@ -52,9 +52,10 @@ pub(crate) const APPLIED_BEHIND_CURRENT: u64 = 0;
 /// A capability token proving the author-merge code was reached from a divergence. Its field is private to
 /// this module, so NO other module can mint one; [`super::merge_resolve::resolve_diverged`] takes it by
 /// value, so the merge is unreachable from a current/behind/clean-follower state **by construction** — a
-/// structural gate, not a role check. It is minted at exactly two guarded sites: [`sync_one`]'s
-/// post-fetch `Diverged` arm (entered only when `work != base`), and [`escape_one`]'s already-recorded
-/// conflict (a `conflict.json` exists only for an author who diverged). A clean follower hits neither.
+/// structural gate, not a role check. Every mint site is guarded by one of two facts: [`sync_one`]'s
+/// post-fetch `Diverged` arm holds `work != base`, and every other site stands on a recorded
+/// `conflict.json` (the escape, and both recorded-conflict finisher dispatches) — a record only an
+/// author's divergence ever writes. A clean follower hits none of them.
 pub(crate) struct DivergedWitness(());
 
 /// What a per-skill `sync_one` invocation is — the bare sweep or an explicit accept.
@@ -106,11 +107,26 @@ pub(crate) fn escape_one(
     if let Some(cs) = doc::read_doc::<topos_types::persisted::ConflictState>(ctx.fs, &sp.conflict)?
     {
         let map: PlacementMap = read_map_required(ctx, &sp)?;
-        // A record that outlived its own resolution (an exit crashed between its placement write
-        // and the record's removal) is not a stopped merge: finish that clear, then refuse like any
-        // other resolved state — committing the original draft over the resolution already on disk
-        // is exactly the loss this ordering exists to prevent.
-        if !super::merge_resolve::heal_landed_resolution(ctx, &sp, &sync, &map, &cs)? {
+        // A MARKED record is a merge an exit already CONCLUDED, interrupted before its clear
+        // landed — never a stopped merge this command may act on afresh. A marked Escape IS this
+        // command's own crashed run: finish it and return its row. A marked Reset/Merge is
+        // finished too, and then there is no stopped merge left — refuse like any other resolved
+        // state, because committing the original draft over a landed conclusion is exactly the
+        // loss the mark exists to prevent.
+        if cs.concluded.is_some() {
+            if let Some(row) = super::merge_resolve::finish_concluded(
+                DivergedWitness(()),
+                ctx,
+                skill_id,
+                &sp,
+                &sync,
+                &lock,
+                &map,
+                &cs,
+            )? {
+                return Ok(row);
+            }
+        } else {
             // A record from a build that put the marked-up tree INTO the agent folders is
             // converted first — before this exit reads a folder, since under that record the
             // folders hold markers and the exit stands on what they hold.
@@ -120,7 +136,7 @@ pub(crate) fn escape_one(
                 Some(c) => (c.state, c.sync, c.map, c.note),
                 None => (cs, sync, map, None),
             };
-            // The 2nd witness mint site — guarded: a `conflict.json` only ever exists for an author
+            // A witness mint site — guarded: a `conflict.json` only ever exists for an author
             // who diverged (a follower never reaches merge code, so never records one).
             let mut row = super::merge_resolve::escape_recorded(
                 DivergedWitness(()),
@@ -199,30 +215,39 @@ pub(crate) fn sync_one_planned(
     let skill_id = skill_id.as_str();
     let mut sync: SyncState = read_required(ctx, &sp.sync, "sync.json")?;
     let lock: Lock = read_required(ctx, &sp.lock, "lock.json")?;
-    let map: PlacementMap = read_map_required(ctx, &sp)?;
+    let mut map: PlacementMap = read_map_required(ctx, &sp)?;
     let name = lock.name.clone();
-
-    // A never-received followed skill (the first-receive baseline the reconcile lays: nothing observed
-    // yet, no placement). It applies like any other pending version — the recipe row IS the consent —
-    // so this only decides how the run READS: an `installed` row rather than a fast-forward, plus the
-    // adoption-lapse correction below. Captured BEFORE checkForUpdates mutates `observed`.
-    let first_receive = is_never_received(&sync);
-
-    // The conditional-GET validator: what the client currently holds (its observed generation AND the commit
-    // it names) — so a record reusing `(epoch,seq)` for a different commit is returned, not 304'd. `None`
-    // for the never-received baseline (no observed commit yet) → an unconditional first GET.
-    let known = known_current(&sync)?;
 
     // An unresolved conflict is on record. A sync heals a crashed materialization and re-discloses
     // the block WITHOUT re-merging (the conflict draft already consumed `current`). The escape that
     // RESOLVES it is [`escape_one`], which never enters here.
     if let Some(cs) = doc::read_doc::<topos_types::persisted::ConflictState>(ctx.fs, &sp.conflict)?
     {
-        // FIRST: a record that outlived its own resolution (an exit crashed between its placement
-        // write and the record's removal) is not a block at all — finish that clear and pull
-        // normally. Before the re-disclosure, which would otherwise name a work tree that exists
-        // nowhere.
-        if !super::merge_resolve::heal_landed_resolution(ctx, &sp, &sync, &map, &cs)? {
+        // FIRST: a record an exit already MARKED concluded is not a block at all — finish that
+        // exit and go on. Before the re-disclosure, which would otherwise re-settle the docs to a
+        // work tree the landed conclusion has already replaced. A marked Escape finishes to its
+        // own `Merged` row (this sweep's answer for the bundle); a marked Reset/Merge finishes to
+        // an unblocked bundle and the sweep proceeds over it normally. The mark is the ONLY thing
+        // read here: an unmarked record is a live block whatever the other documents say.
+        if cs.concluded.is_some() {
+            if let Some(row) = super::merge_resolve::finish_concluded(
+                DivergedWitness(()),
+                ctx,
+                skill_id,
+                &sp,
+                &sync,
+                &lock,
+                &map,
+                &cs,
+            )? {
+                return Ok(row);
+            }
+            // The finisher moved the docs (a reset converges placements and rewrites sync/map) —
+            // re-read what the rest of this run stands on. The lock is untouched by both
+            // finishing arms that reach here.
+            sync = read_required(ctx, &sp.sync, "sync.json")?;
+            map = read_map_required(ctx, &sp)?;
+        } else {
             // A record from a build that materialized the marked-up tree ONTO the placements is
             // converted here — the author's own version back in every agent folder, the marked-up
             // tree into the workbench — and the ordinary blocked flow then proceeds over it.
@@ -239,6 +264,17 @@ pub(crate) fn sync_one_planned(
             return Ok(row);
         }
     }
+
+    // A never-received followed skill (the first-receive baseline the reconcile lays: nothing observed
+    // yet, no placement). It applies like any other pending version — the recipe row IS the consent —
+    // so this only decides how the run READS: an `installed` row rather than a fast-forward, plus the
+    // adoption-lapse correction below. Captured BEFORE checkForUpdates mutates `observed`.
+    let first_receive = is_never_received(&sync);
+
+    // The conditional-GET validator: what the client currently holds (its observed generation AND the commit
+    // it names) — so a record reusing `(epoch,seq)` for a different commit is returned, not 304'd. `None`
+    // for the never-received baseline (no observed commit yet) → an unconditional first GET.
+    let known = known_current(&sync)?;
 
     // ---- checkForUpdates ----
     let fetched = match target {
@@ -824,8 +860,12 @@ pub(crate) fn reset_to_base(
     };
 
     let base = super::parse_hex32(&lock.base_commit)?;
-    let base_digest = super::parse_hex32(&lock.bundle_digest)?;
-    let base_digest_hex = lock.bundle_digest.clone();
+
+    // The record this reset may CONCLUDE, read once under the flock. Unreadable reads as none —
+    // an unreadable record cannot be marked, and the clear below still removes the file either
+    // way (it names no folder, so it removes none).
+    let recorded: Option<topos_types::persisted::ConflictState> =
+        doc::read_doc(ctx.fs, &sp.conflict).ok().flatten();
 
     // Snapshot-on-touch FIRST — a reset OVERWRITES the placements, so EVERY distinct edited copy is
     // committed to the store (recoverable) before any swap. `update --reset` is also the disclosed
@@ -833,41 +873,24 @@ pub(crate) fn reset_to_base(
     // converges them all back to base. An unreadable placement fails closed rather than risk a clobber.
     snapshot_all_modified(ctx, &sp, &lock, &map, "a reset")?;
 
-    let store = Store::open(&sp.store)?;
-    let bundle = store.render_verified(base, base_digest)?;
-    fsync_batch(ctx, &store.version_durability(&base)?)?;
+    // A FULL reset CONCLUDES a stopped merge, and the record says so BEFORE any placement moves
+    // (the mark discipline — see [`super::merge_resolve`]'s crash-safety doc): the snapshots
+    // above are content-addressed store writes, harmless; from here on a crash reads as "finish
+    // the reset", never as a live block. The person's newest instruction wins, so a record a
+    // crashed exit already marked is simply re-marked. A NARROWED reset concludes nothing while
+    // other copies keep their edits, so it writes no mark here.
+    if sel.is_empty()
+        && let Some(cs) = &recorded
+    {
+        super::merge_resolve::mark_concluded(
+            ctx,
+            &sp,
+            cs,
+            topos_types::persisted::ConcludedExit::Reset,
+        )?;
+    }
 
-    // The restored state: base bytes on the placements, work_hash back at the base digest, held cleared,
-    // observed/applied unchanged (the team's current never moved).
-    let next_sync = SyncState {
-        schema_version: sync.schema_version,
-        observed: sync.observed,
-        observed_version_id: sync.observed_version_id.clone(),
-        applied: sync.applied,
-        base_commit: lock.base_commit.clone(),
-        work_hash: base_digest_hex.clone(),
-        held: false,
-        draft_observed: None,
-    };
-    let report = materialize::materialize(
-        ctx.fs,
-        &MaterializeReq {
-            skill_id: sid,
-            target_indices: &managed,
-            bundle: &bundle,
-            next_map: next_map(&map, base, &base_digest_hex),
-            next_lock: &lock,
-            next_sync: &next_sync,
-            sp: &sp,
-            snapshot: Some(&|scanned: &ScannedBundle| {
-                snapshot_draft(ctx, &sp, &lock, scanned).map(|_| ())
-            }),
-            takeover: None,
-            self_ignore: ctx.layout.is_project_scope(),
-            expected: None,
-            project_root: ctx.layout.project_root(),
-        },
-    )?;
+    let report = materialize_reset(ctx, &sp, sid, &lock, &sync, &map, &managed)?;
     // A recorded merge conflict describes the divergence this reset just DISCARDED — clear the
     // block and the marked-up copy it named (idempotent; absent is fine), or publish would stay
     // refused by a conflict whose draft no longer exists. Cleared AFTER the placements landed,
@@ -883,6 +906,21 @@ pub(crate) fn reset_to_base(
     // The removal is `Unread`: this command never looked inside the workbench, so a hand merge in
     // it is left where the person can see it and named on the receipt.
     let hand_merge = if every_copy_settled(ctx, &sp) {
+        // A narrowed reset that settled the LAST copy concluded the merge after all — mark it now,
+        // before the clear, so a crash between the two still reads as a conclusion to finish. It
+        // leaves a mark it finds as it found it (a crashed exit's own conclusion is not this
+        // narrowed command's to rewrite).
+        if !sel.is_empty()
+            && let Some(cs) = &recorded
+            && cs.concluded.is_none()
+        {
+            super::merge_resolve::mark_concluded(
+                ctx,
+                &sp,
+                cs,
+                topos_types::persisted::ConcludedExit::Reset,
+            )?;
+        }
         super::merge_resolve::clear_conflict(ctx, &sp, super::merge_resolve::Workbench::Unread)?
     } else {
         None
@@ -891,10 +929,65 @@ pub(crate) fn reset_to_base(
     Ok(hand_merge)
 }
 
+/// The reset's placement write, shared between [`reset_to_base`] and the concluded-reset finisher
+/// ([`super::merge_resolve::finish_concluded`]) so the two can never disagree about what a
+/// finished reset looks like on disk: materialize the LOCK's base over `managed`, recording the
+/// restored state — base bytes on the placements, `work_hash` back at the base digest, `held`
+/// cleared, `observed`/`applied` unchanged (the team's current never moved). Snapshot-on-touch
+/// stays armed for the crash window between the caller's pre-verb snapshots and the swap.
+///
+/// Runs under the CALLER's per-skill flock and takes none itself — flock does not nest, and both
+/// callers already hold it.
+pub(crate) fn materialize_reset(
+    ctx: &Ctx<'_>,
+    sp: &sidecar::SkillPaths,
+    sid: &str,
+    lock: &Lock,
+    sync: &SyncState,
+    map: &PlacementMap,
+    managed: &[usize],
+) -> Result<MaterializeReport, ClientError> {
+    let base = super::parse_hex32(&lock.base_commit)?;
+    let base_digest = super::parse_hex32(&lock.bundle_digest)?;
+    let store = Store::open(&sp.store)?;
+    let bundle = store.render_verified(base, base_digest)?;
+    fsync_batch(ctx, &store.version_durability(&base)?)?;
+    let next_sync = SyncState {
+        schema_version: sync.schema_version,
+        observed: sync.observed,
+        observed_version_id: sync.observed_version_id.clone(),
+        applied: sync.applied,
+        base_commit: lock.base_commit.clone(),
+        work_hash: lock.bundle_digest.clone(),
+        held: false,
+        draft_observed: None,
+    };
+    materialize::materialize(
+        ctx.fs,
+        &MaterializeReq {
+            skill_id: sid,
+            target_indices: managed,
+            bundle: &bundle,
+            next_map: next_map(map, base, &lock.bundle_digest),
+            next_lock: lock,
+            next_sync: &next_sync,
+            sp,
+            snapshot: Some(&|scanned: &ScannedBundle| {
+                snapshot_draft(ctx, sp, lock, scanned).map(|_| ())
+            }),
+            takeover: None,
+            self_ignore: ctx.layout.is_project_scope(),
+            expected: None,
+            project_root: ctx.layout.project_root(),
+        },
+    )
+}
+
 /// Whether every copy this bundle records now sits at its own recorded baseline — the reset's
 /// "nothing is left unresolved" test, read from disk after the placements landed. An unreadable
 /// map or an unscannable copy answers NO: a block that cannot be proven finished stands.
-fn every_copy_settled(ctx: &Ctx<'_>, sp: &sidecar::SkillPaths) -> bool {
+/// `pub(crate)` — the concluded-reset finisher runs the same proof before it clears.
+pub(crate) fn every_copy_settled(ctx: &Ctx<'_>, sp: &sidecar::SkillPaths) -> bool {
     let Ok(Some(map)) = doc::read_map(ctx.fs, &sp.map) else {
         return false;
     };
@@ -1310,7 +1403,8 @@ fn rendered_from_scanned(b: &ScannedBundle) -> topos_gitstore::RenderedBundle {
 /// Snapshot EVERY distinct edited copy into the sidecar store (the explicit-overwrite verbs' rail:
 /// go-back / reset converge divergent copies rather than freezing, so each distinct edit is retained
 /// first). Fails closed on an unscannable placement — `what` names the refusing verb.
-fn snapshot_all_modified(
+/// `pub(crate)` — the concluded-reset finisher arms the same rail before it re-materializes.
+pub(crate) fn snapshot_all_modified(
     ctx: &Ctx<'_>,
     sp: &sidecar::SkillPaths,
     lock: &Lock,
