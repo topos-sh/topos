@@ -186,8 +186,9 @@ own store, for the rare folder that is still there but damaged. Each receipt nam
 acted on.
 
 New files are verified against the workspace's records before anything lands, and **your local
-edits are never overwritten** — updates merge around them, and a genuine conflict is frozen with a
-named way out. Details: [Review, protect, roll back](/docs/review#your-edits-are-safe).
+edits are never overwritten** — updates merge around them, and a genuine conflict stops the merge,
+with both ways out named on the receipt. Details:
+[Review, protect, roll back](/docs/review#your-edits-are-safe).
 
 One thing deliberately does **not** move on its own: a pinned version. Everything else is kept
 current for you, GitHub lines included — those are checked a few times a day rather than at every

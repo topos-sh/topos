@@ -207,7 +207,7 @@ fn resolve_diverged_draft(argv: &[String]) -> Safety {
             Some(false),
             Some(
                 "describes the discard; applying it drops your local draft so the team's version \
-                 wins (a snapshot is kept on this machine)",
+                 wins",
             ),
         );
     }
@@ -305,10 +305,9 @@ fn apply_described(argv: &[String], subject: Subject) -> Safety {
             Some("ends the session server-side; skills and manifests stay"),
         ),
         // `update --reset --yes` is the loss-led local discard; a plain `update … --yes` syncs.
-        Some("update") if has_flag(argv, "--reset") => (
-            Some(false),
-            Some("discards your local edits (a snapshot is kept on this machine)"),
-        ),
+        Some("update") if has_flag(argv, "--reset") => {
+            (Some(false), Some("discards your local edits"))
+        }
         Some("update") => (Some(true), None),
         // `remove --yes`: dropping a manifest row is offline, while an `off` row's resolution may
         // read the feed. The argv cannot tell them apart → network unknown.
