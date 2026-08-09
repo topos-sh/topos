@@ -145,7 +145,7 @@ describe("the password arm", () => {
       intent: "password",
       email: "a@b.test",
       password: "secret-password",
-      next: "/verify?device=" + DEVICE,
+      next: `/verify?device=${DEVICE}`,
     });
     expect(result).toBeInstanceOf(Response);
     const response = result as Response;

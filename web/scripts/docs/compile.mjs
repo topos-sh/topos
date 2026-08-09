@@ -120,7 +120,7 @@ function assertNavMatchesFiles(nav, discovered) {
 /** Compile one page: frontmatter, the CLI expansion, the HTML, and the markdown twin. */
 async function compilePage(root, id, cliReference) {
   const file = `${id}.mdx`;
-  const source = await readFile(join(root, ...id.split("/")) + ".mdx", "utf8");
+  const source = await readFile(`${join(root, ...id.split("/"))}.mdx`, "utf8");
   const meta = parseFrontmatter(source, file);
 
   let body = meta.body;
