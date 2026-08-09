@@ -26,7 +26,7 @@ use topos_types::results::{ForgeSource, ListDetail, StatusItemState, StatusRegim
 
 use crate::ctx::Ctx;
 use crate::error::ClientError;
-use crate::manifest::document::EntryValue;
+use crate::manifest::document::{EntryValue, ManifestScope};
 use crate::manifest::keys::{self, KeyShape};
 use crate::manifest::scopes::{self, ScopePlan};
 use crate::sessions::Sessions;
@@ -119,6 +119,9 @@ pub(crate) struct Row {
     /// For an `mcp` line: the per-agent config states the last converge cached (agent + state +
     /// placed file) — the deep dive shows them instead of placement dirs.
     pub harness_states: Vec<topos_types::results::McpAgentState>,
+    /// For an `mcp` line whose row freezes a `dest` naming no config file topos can edit: why the
+    /// bundle reaches NO agent. `None` whenever it reaches at least one.
+    pub mcp_unreachable: Option<String>,
 }
 
 /// One scope's whole resolution: its label, its governing file, its lines, and the disclosure
@@ -259,9 +262,23 @@ pub(crate) fn resolve(
     let mut project_out = ScopeOut::default();
     if let Some((dir, plan)) = &project {
         let project_store = crate::sidecar::existing_project_store(ctx.fs, dir);
-        project_out = scope_rows(ctx, plan, project_store.as_ref(), cache, all);
+        project_out = scope_rows(
+            ctx,
+            plan,
+            ManifestScope::Project,
+            project_store.as_ref(),
+            cache,
+            all,
+        );
     }
-    let mut person_out = scope_rows(ctx, &person_plan, Some(&ctx.layout), cache, all);
+    let mut person_out = scope_rows(
+        ctx,
+        &person_plan,
+        ManifestScope::Global,
+        Some(&ctx.layout),
+        cache,
+        all,
+    );
 
     // The REGIMES — one sentence per connected workspace, over the person plan.
     let mut regimes = Vec::new();
@@ -420,6 +437,7 @@ pub(crate) fn resolve(
 fn scope_rows(
     ctx: &Ctx<'_>,
     plan: &ScopePlan,
+    scope: ManifestScope,
     layout: Option<&Layout>,
     cache: &SyncStatus,
     all: &Sessions,
@@ -506,6 +524,17 @@ fn scope_rows(
         if kind.as_deref() == Some("mcp") && harness_states.is_empty() {
             harness_states = ledger_states(&ledger, &ledger_ids);
         }
+        // A frozen `dest` that names no config file topos can edit costs the bundle every agent.
+        // The deep dive resolves it here rather than reading it off the cache: the row is right in
+        // front of it, and the fact must be told whether or not a sweep has run since the typo.
+        let mcp_unreachable = (kind.as_deref() == Some("mcp"))
+            .then(|| {
+                let narrowing = super::reconcile::mcp_dest_narrowing(row.fields().dest, scope);
+                narrowing.reaches_nothing().then(|| {
+                    crate::manifest::dest::dest_names_no_mcp_file(&narrowing.unknown, scope)
+                })
+            })
+            .flatten();
         out.rows.push(Row {
             name,
             reference: identity,
@@ -525,6 +554,7 @@ fn scope_rows(
             bundle: true,
             kind,
             harness_states,
+            mcp_unreachable,
         });
     }
 
@@ -571,6 +601,7 @@ fn scope_rows(
                     // A repo-set member is always a skill: `kind = "mcp"` on GitHub rows refuses.
                     kind: None,
                     harness_states: Vec::new(),
+                    mcp_unreachable: None,
                 });
             }
             continue;
@@ -628,6 +659,7 @@ fn scope_rows(
                 bundle: true,
                 kind: ds.kind.clone(),
                 harness_states: ds.harness_states.clone(),
+                mcp_unreachable: None,
             });
             itemized += 1;
         }
@@ -687,6 +719,7 @@ fn scope_rows(
                 bundle: true,
                 kind: ds.kind.clone(),
                 harness_states: ds.harness_states.clone(),
+                mcp_unreachable: None,
             });
             itemized += 1;
         }
@@ -756,6 +789,7 @@ fn scope_rows(
             bundle: false,
             kind: None,
             harness_states: Vec::new(),
+            mcp_unreachable: None,
         });
     }
     out
@@ -854,6 +888,7 @@ pub(crate) fn detail_for(
             // For an mcp line: the cached per-agent config entries (placed file + state) — the
             // deep dive's answer instead of placement dirs.
             harnesses: row.harness_states.clone(),
+            mcp_unreachable: row.mcp_unreachable.clone(),
             managed: true,
             folders: Vec::new(),
             // The competing copies, when the row's own classification found some — the question

@@ -79,6 +79,18 @@ pub(crate) const SHELL_SWEEP_LINE: &str =
 /// try/catch is the exit-0 tail's analog). Unmarked, so the conservative dialect applies.
 pub(crate) const PLAIN_SWEEP: &str = "topos update --quiet";
 
+/// Whether a command a person wrote themselves is a topos auto-update sweep — the
+/// hand-rolled-hook probe every trigger engine runs on a command carrying NO [`SENTINEL`], so such
+/// an entry is adopted-or-left rather than duplicated beside.
+///
+/// It recognizes BOTH verb spellings. The current one is what a person copies out of the docs
+/// today; the legacy one is what earlier builds taught, and a machine still carrying it must not
+/// grow a second, managed entry the moment it is re-armed. Ownership is never decided here — that
+/// keys on the sentinel alone.
+pub(crate) fn is_hand_rolled_sweep(cmd: &str) -> bool {
+    cmd.contains("topos update") || cmd.contains("topos pull")
+}
+
 /// One trigger (un)install outcome for a registry-slug harness. The big-three adapters keep
 /// their own [`HarnessAdapter`](crate::HarnessAdapter) `TriggerReport`s; this is the breadth
 /// surface's receipt.

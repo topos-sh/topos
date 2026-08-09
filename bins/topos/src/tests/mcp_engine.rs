@@ -474,7 +474,6 @@ static SYNTHETIC: &[McpHarness] = &[
             dialect: McpDialect::ClaudePluginDir,
         }),
         project_surface: Some((".mcp.json", McpDialect::ClaudeProjectJson)),
-        oauth_capable: true,
         reload_note: "reload claude",
     },
     McpHarness {
@@ -486,7 +485,6 @@ static SYNTHETIC: &[McpHarness] = &[
             dialect: McpDialect::CodexToml,
         }),
         project_surface: Some((".codex/config.toml", McpDialect::CodexToml)),
-        oauth_capable: true,
         reload_note: "restart codex",
     },
     McpHarness {
@@ -498,7 +496,6 @@ static SYNTHETIC: &[McpHarness] = &[
             dialect: McpDialect::CursorJson,
         }),
         project_surface: Some((".cursor/mcp.json", McpDialect::CursorJson)),
-        oauth_capable: true,
         reload_note: "restart cursor",
     },
     McpHarness {
@@ -510,7 +507,6 @@ static SYNTHETIC: &[McpHarness] = &[
             dialect: McpDialect::OpencodeJson,
         }),
         project_surface: Some((".opencode/opencode.json", McpDialect::OpencodeJson)),
-        oauth_capable: true,
         reload_note: "restart opencode",
     },
     McpHarness {
@@ -522,7 +518,6 @@ static SYNTHETIC: &[McpHarness] = &[
             dialect: McpDialect::OpenclawJson,
         }),
         project_surface: None,
-        oauth_capable: true,
         reload_note: "picked up automatically",
     },
     McpHarness {
@@ -534,7 +529,6 @@ static SYNTHETIC: &[McpHarness] = &[
             dialect: McpDialect::HermesYaml,
         }),
         project_surface: None,
-        oauth_capable: true,
         reload_note: "/reload-mcp",
     },
 ];
@@ -868,57 +862,6 @@ fn a_foreign_topos_prefixed_entry_is_never_touched_or_claimed() {
 }
 
 #[test]
-fn the_oauth_capability_filter_withholds_unknown_and_oauth_servers() {
-    let home = Scratch::new("oauth");
-    let fs = RealFs;
-    let layout = Layout::new(&home.0.join(".topos"));
-    static NO_OAUTH: &[McpHarness] = &[McpHarness {
-        slug: "plainbot",
-        display_name: "PlainBot",
-        user_surface: Some(McpSurface {
-            root: SurfaceRoot::Home,
-            suffix: ".plainbot/mcp.json",
-            dialect: McpDialect::CursorJson,
-        }),
-        project_surface: None,
-        oauth_capable: false,
-        reload_note: "restart plainbot",
-    }];
-    let detected: BTreeSet<String> = ["plainbot".to_owned()].into();
-    let io = person_io(&fs, &layout, &home.0);
-    // Unknown auth (no hint) and explicit oauth are both withheld; explicit none places.
-    let unknown = demand("s_u", "u", Some("eng"), &server_json("https://u.example"));
-    let oauth = {
-        let mut d = demand("s_o", "o", Some("eng"), "");
-        d.server_json = br#"{"name":"io.test/o","description":"O.","version":"1.0.0","remotes":[{"type":"streamable-http","url":"https://o.example"}],"_meta":{"sh.topos/auth":"oauth"}}"#
-            .to_vec();
-        d
-    };
-    let none = {
-        let mut d = demand("s_n", "n", Some("eng"), "");
-        d.server_json = br#"{"name":"io.test/n","description":"N.","version":"1.0.0","remotes":[{"type":"streamable-http","url":"https://n.example"}],"_meta":{"sh.topos/auth":"none"}}"#
-            .to_vec();
-        d
-    };
-    let out = mcp_engine::converge(
-        &io,
-        &[unknown, oauth, none],
-        NO_OAUTH,
-        &detected,
-        &no_hold(),
-        true,
-    );
-    assert_eq!(state_of(&out, "s_u", "plainbot").state, "not-supported");
-    assert_eq!(state_of(&out, "s_o", "plainbot").state, "not-supported");
-    assert_eq!(state_of(&out, "s_n", "plainbot").state, "placed");
-    let text = std::fs::read_to_string(home.0.join(".plainbot/mcp.json")).unwrap();
-    assert!(
-        text.contains("https://n.example") && !text.contains("o.example"),
-        "{text}"
-    );
-}
-
-#[test]
 fn a_suspect_header_fails_the_demand_closed_with_a_warning() {
     let home = Scratch::new("gate");
     let fs = RealFs;
@@ -1234,7 +1177,6 @@ fn a_moved_surface_path_discloses_the_stale_row_and_never_drops_it() {
             dialect: McpDialect::CursorJson,
         }),
         project_surface: None,
-        oauth_capable: true,
         reload_note: "restart cursor",
     }];
     // An undemanded removal run over the moved surface: the row is NOT dropped, the old file is
@@ -2381,6 +2323,156 @@ fn a_rows_dest_files_narrow_the_placement_and_unknown_files_warn_once() {
     );
 }
 
+/// A dest row is FROZEN to what it names — so a row that names ONLY files no harness claims
+/// (one typo) costs the bundle every agent. That is fail-closed and stays fail-closed: nothing is
+/// placed anywhere. What must not stay is the SILENCE. It is a counted warning naming the entry
+/// and the files that would have worked, the receipt row says the bundle reaches no agent instead
+/// of printing a bare install, and `list` says the same rather than "no entries recorded yet" —
+/// which would promise entries that are never coming.
+#[test]
+fn a_dest_naming_only_unknown_files_reaches_no_agent_and_says_so() {
+    let rig = Rig::new("dest-none");
+    rig.seed_session();
+    seed_harness_dirs(&rig.home.0);
+    let v = mk_version(&[(
+        "server.json",
+        server_json("https://mcp.example/a").as_bytes(),
+    )]);
+    let plane = FakePlane::new().with_version("s_a", &v);
+    let dir = FakeDirectory {
+        skills: vec![mcp_catalog_entry("s_a", "alpha", &v)],
+        channels: Vec::new(),
+    };
+    rig.write_global(&format!(
+        "[bundles]\n\"{HOST}/{WS_NAME}/alpha\" = {{ version = \"*\", dest = [\"~/.codex/config.yaml\"] }}\n"
+    ));
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    let out = sweep(&ctx, &plane, &dir);
+
+    // Fail-closed: not one config file was written, detected agents and all.
+    assert!(!rig.home.0.join(".cursor/mcp.json").exists());
+    assert!(!rig.home.0.join(".openclaw/openclaw.json").exists());
+    assert!(!rig.home.0.join(".codex/config.toml").exists());
+
+    // LOUD: the counted channel, not the advisory one — the bundle delivered nowhere.
+    let loud: Vec<&String> = out
+        .warnings
+        .iter()
+        .filter(|w| w.contains("MCP_DEST_NO_AGENT"))
+        .collect();
+    assert_eq!(loud.len(), 1, "{:?}", out.warnings);
+    assert!(loud[0].contains("\"alpha\" reaches no agent"), "{loud:?}");
+    assert!(
+        loud[0].contains("\"~/.codex/config.yaml\" is not a known MCP config file"),
+        "{loud:?}"
+    );
+    assert!(
+        loud[0].contains("~/.codex/config.toml") && loud[0].contains("~/.cursor/mcp.json"),
+        "the line teaches the files that would have worked: {loud:?}"
+    );
+    assert!(
+        !out.advisories.iter().any(|w| w.contains("MCP_DEST")),
+        "a bundle reaching nothing is never filed as an advisory: {:?}",
+        out.advisories
+    );
+
+    // The ROW says it too — on the settled sweep, where the row is otherwise up to date and a
+    // compact receipt would have dropped it entirely.
+    let clean = sweep(&ctx, &plane, &dir);
+    let receipt = crate::render::pull_tty(
+        &clean.data,
+        &clean.decisions,
+        &clean.warnings,
+        &clean.advisories,
+        &clean.disclosures,
+    );
+    assert!(
+        receipt.contains("alpha") && receipt.contains("reaches no agent"),
+        "{receipt}"
+    );
+
+    // And so does the deep dive, offline.
+    let list = ops::list_with(
+        &ctx,
+        &ops::ListRequest {
+            name: Some("alpha".into()),
+            ..Default::default()
+        },
+        None,
+        None,
+        ops::RowPage::unlimited(),
+    )
+    .unwrap();
+    let detail = list.data.detail.clone().unwrap();
+    assert!(
+        detail
+            .mcp_unreachable
+            .as_deref()
+            .is_some_and(|w| w.contains("~/.codex/config.yaml")),
+        "{detail:?}"
+    );
+    let text = crate::render::list_tty(&list);
+    assert!(
+        text.contains("an MCP server bundle that reaches no agent"),
+        "{text}"
+    );
+    assert!(
+        !text.contains("no agent config entries recorded yet"),
+        "nothing is coming — the line must not promise entries: {text}"
+    );
+}
+
+/// Two bundles, ONE typo'd spelling: the first still delivers (the typo is an advisory beside a
+/// working row), the second reaches nothing. The once-per-run dedupe must not let the first one's
+/// advisory swallow the second one's warning — they answer different questions about different
+/// bundles, and the swallowed one is the one that means "this reaches nobody".
+#[test]
+fn one_bundles_dest_advisory_never_swallows_anothers_reaches_no_agent() {
+    let rig = Rig::new("dest-dedupe");
+    rig.seed_session();
+    seed_harness_dirs(&rig.home.0);
+    let va = mk_version(&[(
+        "server.json",
+        server_json("https://mcp.example/a").as_bytes(),
+    )]);
+    let vb = mk_version(&[(
+        "server.json",
+        server_json("https://mcp.example/b").as_bytes(),
+    )]);
+    let plane = FakePlane::new()
+        .with_version("s_a", &va)
+        .with_version("s_b", &vb);
+    let dir = FakeDirectory {
+        skills: vec![
+            mcp_catalog_entry("s_a", "alpha", &va),
+            mcp_catalog_entry("s_b", "beta", &vb),
+        ],
+        channels: Vec::new(),
+    };
+    rig.write_global(&format!(
+        "[bundles]\n\
+         \"{HOST}/{WS_NAME}/alpha\" = {{ dest = [\"~/.cursor/mcp.json\", \"~/.typo/mcp.json\"] }}\n\
+         \"{HOST}/{WS_NAME}/beta\" = {{ dest = [\"~/.typo/mcp.json\"] }}\n"
+    ));
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    let out = sweep(&ctx, &plane, &dir);
+
+    assert!(
+        out.advisories
+            .iter()
+            .any(|w| w.contains("MCP_DEST_UNKNOWN") && w.contains("\"alpha\"")),
+        "the delivering bundle's dropped entry stays an advisory: {:?}",
+        out.advisories
+    );
+    assert!(
+        out.warnings
+            .iter()
+            .any(|w| w.contains("MCP_DEST_NO_AGENT") && w.contains("\"beta\" reaches no agent")),
+        "the bundle reaching nothing is warned in its own right: {:?}",
+        out.warnings
+    );
+}
+
 /// A workspace SKILL row whose `dest` names a skills FOLDER — exactly what
 /// `add -g @ws/skill -a codex` writes (`dest = ["~/.codex/skills"]`) — is not an MCP demand:
 /// no MCP_DEST_UNKNOWN warning, no failure count, and the untouched update reads exactly clean.
@@ -2504,8 +2596,11 @@ fn a_tampered_local_row_is_held_with_the_typed_refusal_and_prior_entries_stay() 
     }
 }
 
+/// A repo row tagged `kind = "mcp"` never becomes a demand: the grammar refuses it when the file
+/// LOADS, exactly like any other field the shape does not take — so the update refuses with the
+/// teaching instead of syncing a row whose bytes no config converge could ever place.
 #[test]
-fn a_github_sourced_mcp_row_is_refused_with_the_typed_constraint() {
+fn a_github_sourced_mcp_row_refuses_when_the_manifest_loads() {
     let rig = Rig::new("ghmcp");
     rig.seed_session();
     let plane = FakePlane::new();
@@ -2515,13 +2610,18 @@ fn a_github_sourced_mcp_row_is_refused_with_the_typed_constraint() {
     };
     rig.write_global("[bundles]\n\"github.com/o/r/tool\" = { version = \"*\", kind = \"mcp\" }\n");
     let ctx = rig.ctx_at(Some(&rig.work.0));
-    let out = sweep(&ctx, &plane, &dir);
+    let err = ops::manifest_update(
+        &ctx,
+        &connect(&plane, &dir),
+        None,
+        &ops::ManifestUpdateOpts::default(),
+    )
+    .unwrap_err();
+    let msg = err.to_string();
     assert!(
-        out.warnings
-            .iter()
-            .any(|w| w.contains("MCP_GITHUB_UNSUPPORTED")),
-        "{:?}",
-        out.warnings
+        msg.contains("`github.com/o/r/tool` cannot deliver an MCP server")
+            && msg.contains("publish the bundle to a workspace"),
+        "{msg}"
     );
 }
 
@@ -3160,4 +3260,56 @@ fn a_bare_diff_of_a_config_placed_bundle_answers_the_empty_no_draft_shape() {
     assert_eq!(d.version_id, topos_core::digest::to_hex(&v.id));
     assert_eq!(d.bundle_digest, topos_core::digest::to_hex(&v.digest));
     assert!(d.files.is_empty());
+}
+
+/// **An offline sweep never WIDENS a dest-narrowed bundle.** A row's `dest` freezes which config
+/// files it reaches; a run that cannot dial still heals those files from the store, and the
+/// narrowing must survive the round-trip through the offline path — otherwise one lost network
+/// call quietly fans a server out to every MCP-capable agent on the machine, with the person's
+/// stated destinations overruled. Held with a feed row present too: the cached-delivery arm the
+/// feed falls back to must not pick this bundle up behind its own row's back.
+#[test]
+fn an_offline_sweep_keeps_a_dest_narrowed_bundle_narrow() {
+    let rig = Rig::new("offline-narrow");
+    rig.seed_session();
+    seed_harness_dirs(&rig.home.0);
+    let v = mk_version(&[(
+        "server.json",
+        server_json("https://mcp.example/a").as_bytes(),
+    )]);
+    let plane = FakePlane::new().with_version("s_a", &v);
+    plane.serves(vec![delivered_mcp("s_a", "alpha", &v)]);
+    let dir = FakeDirectory {
+        skills: vec![mcp_catalog_entry("s_a", "alpha", &v)],
+        channels: Vec::new(),
+    };
+    rig.write_global(&format!(
+        "[bundles]\n\"{HOST}/{WS_NAME}\" = \"*\"\n\
+         \"{HOST}/{WS_NAME}/alpha\" = {{ dest = [\"~/.cursor/mcp.json\"] }}\n"
+    ));
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    sweep(&ctx, &plane, &dir);
+    let cursor = rig.home.0.join(".cursor/mcp.json");
+    let elsewhere = [
+        rig.home.0.join(".openclaw/openclaw.json"),
+        rig.home.0.join(".codex/config.toml"),
+        rig.home.0.join(".hermes/config.yaml"),
+    ];
+    assert!(cursor.exists(), "the named file got the entry");
+    for p in &elsewhere {
+        assert!(!p.exists(), "a dest row reaches only what it names: {p:?}");
+    }
+
+    // The network dies, and the entry is lost locally: the sweep heals it from the store — into
+    // the SAME one file.
+    std::fs::remove_file(&cursor).unwrap();
+    plane.serve_unreachable();
+    sweep(&ctx, &plane, &dir);
+    assert!(
+        std::fs::read_to_string(&cursor).is_ok_and(|t| t.contains("https://mcp.example/a")),
+        "healed offline"
+    );
+    for p in &elsewhere {
+        assert!(!p.exists(), "offline widened the row into {p:?}");
+    }
 }

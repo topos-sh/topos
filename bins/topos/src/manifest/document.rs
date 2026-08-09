@@ -341,6 +341,11 @@ fn fields_check(
             return Err(illegal_field(reference, shape, field));
         }
     }
+    // A repo row cannot carry an MCP bundle: an MCP server is delivered from a workspace catalog,
+    // so the row refuses at LOAD rather than parsing into a demand nothing could ever converge.
+    if matches!(shape, KeyShape::RepoSkill { .. }) && f.kind.as_deref() == Some("mcp") {
+        return Err(mcp_needs_a_workspace(reference));
+    }
     if let Some(v) = &f.version {
         if v == "off" {
             return Err(off_in_table(reference));
@@ -435,6 +440,19 @@ fn illegal_field(reference: &str, shape: &KeyShape, field: &str) -> ManifestErro
             "`{field}` does not fit a {} — `{reference}` takes {}",
             shape.noun(),
             legal_list(legal)
+        ),
+    )
+}
+
+/// The refusal a repo row tagged `kind = "mcp"` earns — the one place that teaches where an MCP
+/// bundle comes from.
+fn mcp_needs_a_workspace(reference: &str) -> ManifestError {
+    at(
+        reference,
+        format!(
+            "`kind = \"mcp\"` does not fit a repo skill — `{reference}` cannot deliver an MCP \
+             server; publish the bundle to a workspace and name it here as \
+             `<host>/<workspace>/<bundle>`"
         ),
     )
 }
@@ -1787,6 +1805,35 @@ db-conventions = { dest = ["~/.agents/skills", "~/.claude/knowledge"] }
         .unwrap();
         // A skill folder is fine on a NON-mcp local row (free-form folders are legal).
         parse_global("[bundles]\n\"./tools/notes\" = { dest = [\"~/anywhere/at/all\"] }\n");
+    }
+
+    #[test]
+    fn a_repo_row_cannot_carry_an_mcp_bundle() {
+        // A repo SKILL row: `kind` is a legal field there, so the refusal is the kind VALUE's, and
+        // it teaches where an MCP bundle comes from.
+        for scope in [ManifestScope::Global, ManifestScope::Project] {
+            let e = parse_manifest(
+                "[bundles]\n\"github.com/o/r/tool\" = { version = \"*\", kind = \"mcp\" }\n",
+                scope,
+            )
+            .unwrap_err();
+            assert_eq!(e.key.as_deref(), Some("github.com/o/r/tool"), "{e}");
+            assert!(
+                e.message
+                    .contains("`kind = \"mcp\"` does not fit a repo skill")
+                    && e.message.contains("publish the bundle to a workspace"),
+                "{e}"
+            );
+        }
+        // A repo SET takes no `kind` at all — the field-legality refusal, unchanged.
+        let e = parse_manifest(
+            "[bundles]\n\"github.com/o/r\" = { kind = \"mcp\" }\n",
+            ManifestScope::Global,
+        )
+        .unwrap_err();
+        assert!(e.message.contains("`kind` does not fit a repo set"), "{e}");
+        // Every other kind on a repo skill still parses.
+        parse_global("[bundles]\n\"github.com/o/r/tool\" = { kind = \"knowledge\" }\n");
     }
 
     // -- the retired spellings ----------------------------------------------

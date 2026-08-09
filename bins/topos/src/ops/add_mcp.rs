@@ -545,16 +545,9 @@ fn fetch_arm(
     let filter = if dest_entries.is_empty() {
         row_narrowing(ctx, &target, &slug).0
     } else {
-        let mut warned = std::collections::HashSet::new();
-        super::reconcile::mcp_dest_narrowing(
-            Some(dest_entries.clone()),
-            target.scope,
-            "add",
-            &slug,
-            false,
-            &mut warned,
-            &mut Vec::new(),
-        )
+        // The selection was validated against the grammar before this point, so an entry that
+        // maps nowhere cannot reach here; the narrowing is read for reach alone.
+        super::reconcile::mcp_dest_narrowing(Some(dest_entries.clone()), target.scope).filter
     };
     let agents = engaged_agents(ctx, &target, global, filter.as_deref());
 
@@ -1005,18 +998,31 @@ fn row_narrowing(
             })
             .flatten()
     });
-    let mut warned = HashSet::new();
-    let mut warnings = Vec::new();
-    let filter = super::reconcile::mcp_dest_narrowing(
-        row_dest,
-        target.scope,
-        &target.path.display().to_string(),
-        name,
-        true,
-        &mut warned,
-        &mut warnings,
-    );
-    (filter, warnings)
+    let narrowing = super::reconcile::mcp_dest_narrowing(row_dest, target.scope);
+    // A row whose dest names SOME unknown file still delivers to the rest; one that maps NOTHING
+    // delivers nowhere, and the line says which it is — the same split the sweep reports.
+    let warnings = if narrowing.unknown.is_empty() {
+        Vec::new()
+    } else if narrowing.reaches_nothing() {
+        vec![format!(
+            "{}: \"{name}\" reaches no agent — {}",
+            target.path.display(),
+            crate::manifest::dest::dest_names_no_mcp_file(&narrowing.unknown, target.scope)
+        )]
+    } else {
+        narrowing
+            .unknown
+            .iter()
+            .map(|entry| {
+                format!(
+                    "{}: \"{name}\" — {}",
+                    target.path.display(),
+                    crate::manifest::dest::unknown_mcp_file(entry, target.scope)
+                )
+            })
+            .collect()
+    };
+    (narrowing.filter, warnings)
 }
 
 /// The MCP-capable agents this scope's converge would engage — the same predicate the engine uses

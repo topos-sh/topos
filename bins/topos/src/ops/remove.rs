@@ -174,10 +174,15 @@ pub(crate) fn remove(
     // instead of the immediate re-attach only a local marker routes to.
     // The APPLIED items re-derive so an orphan's note speaks in the right tense (the describe's
     // "doing nothing also resolves this" would be false on a receipt for an act just performed).
-    let items: Vec<RemoveItem> = removals.iter().map(|r| describe_item(r, true)).collect();
-    for removal in &removals {
+    let mut items: Vec<RemoveItem> = removals.iter().map(|r| describe_item(r, true)).collect();
+    for (removal, item) in removals.iter().zip(items.iter_mut()) {
         match removal {
             Removal::TrackedLocal { skill_id, dirs, .. } => {
+                // A config-placed bundle's reach is not these dirs — it is the entries it wrote
+                // into agents' MCP configs. They go FIRST, while the record that names them still
+                // exists: retired afterwards there would be nothing left to prove which entries
+                // were ever this bundle's, and they would sit in those files forever.
+                retire_mcp_entries(ctx, skill_id, item);
                 for dir in dirs {
                     if ctx.fs.exists(dir) {
                         ctx.fs.remove_dir_all(dir)?;
@@ -219,6 +224,85 @@ pub(crate) fn remove(
         undo,
         uninstalled: Vec::new(),
     }))
+}
+
+/// Retire this scope's MCP config entries for a record the classic delete is about to erase — the
+/// same convergence the manifest arm runs when a row drops ([`super::manifest_edit`]), so the two
+/// removal routes leave the machine in the same state. A record that does not classify as MCP, a
+/// scope that never config-placed anything, and a machine with no agent roots are all no-ops.
+///
+/// [`crate::mcp_engine::remove_bundle`] takes the scope's converge lock itself, so this runs under
+/// the same serialization every other config write does; a lock it cannot take becomes a receipt
+/// line, never a silent skip. The per-agent outcomes fold into the item's note for the same reason
+/// the manifest arm folds them: a removal that touched somebody's agent config says which files it
+/// touched.
+fn retire_mcp_entries(ctx: &Ctx<'_>, skill_id: &str, item: &mut RemoveItem) {
+    let Some(roots) = ctx.roots.clone() else {
+        return;
+    };
+    if !ctx.fs.exists(&ctx.layout.mcp_ledger_path()) {
+        return; // nothing was ever config-placed in this scope
+    }
+    let Ok(sid) = SkillId::parse(skill_id) else {
+        return;
+    };
+    // `record_kind`'s middle rung reads the record's placements; with no readable map document
+    // there are none to read, and its LAST rung — this scope's own ledger, which is exactly the
+    // record the removal below acts on — still answers.
+    let mcp = match doc::read_map(ctx.fs, &ctx.layout.published(&sid).map) {
+        Ok(Some(map)) => {
+            crate::mcp_engine::record_kind(ctx, skill_id, &map)
+                == crate::mcp_engine::RecordKind::Mcp
+        }
+        _ => crate::mcp_engine::is_mcp_record(ctx, skill_id),
+    };
+    if !mcp {
+        return;
+    }
+    let project_root = ctx.layout.project_root().map(std::path::Path::to_path_buf);
+    let detected: std::collections::BTreeSet<String> = topos_harness::registry::detected_harnesses(
+        &roots.home,
+        project_root.as_deref().or(roots.cwd.as_deref()),
+    )
+    .iter()
+    .map(|h| h.slug.to_owned())
+    .collect();
+    let io = crate::mcp_engine::ScopeIo {
+        fs: ctx.fs,
+        layout: &ctx.layout,
+        home: roots.home.clone(),
+        project_root,
+    };
+    let outcome = crate::mcp_engine::remove_bundle(
+        &io,
+        topos_harness::mcp::descriptor::mcp_harnesses(),
+        &detected,
+        skill_id,
+    );
+    // Keyed by the config FILE the entry lived in — receipts speak in destinations, never agents.
+    let mut lines: Vec<String> = outcome
+        .removed
+        .iter()
+        .map(|removed| {
+            let file = removed.state.file.as_deref().map_or_else(
+                || "its config".to_owned(),
+                |f| super::inventory::pretty(ctx, std::path::Path::new(f)),
+            );
+            match removed.state.state.as_str() {
+                "drifted" => format!("{file}: hand-edited entry left in place"),
+                _ => format!("{file}: server entry removed"),
+            }
+        })
+        .collect();
+    lines.extend(outcome.warnings.iter().cloned());
+    if lines.is_empty() {
+        return;
+    }
+    let folded = lines.join(" · ");
+    item.note = Some(match item.note.take() {
+        Some(prev) => format!("{prev} · {folded}"),
+        None => folded,
+    });
 }
 
 /// The verbatim demand-refusal: a workspace-delivered skill whose demand still STANDS is removed

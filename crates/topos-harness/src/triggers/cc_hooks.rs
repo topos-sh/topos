@@ -27,11 +27,6 @@ use crate::ConfigStore;
 
 use super::{SENTINEL, SHELL_SWEEP_LINE, TriggerAdapter, TriggerOutcome, outcome};
 
-/// The command-identity substring marking a HAND-ROLLED auto-update hook — a `topos pull` command
-/// present WITHOUT our sentinel, which we adopt-or-leave (never blind-touch, never blind-append
-/// beside). Not part of the managed-ours check: ownership keys on [`SENTINEL`] alone.
-const COMMAND_IDENTITY: &str = "topos pull";
-
 /// One instance's parameterization of the shared JSON-hooks machinery.
 pub(crate) struct JsonHooksSpec {
     /// The registry slug.
@@ -341,7 +336,7 @@ fn classify(spec: &JsonHooksSpec, entries: &[Value]) -> Classification {
         if is_managed_command(cmd) {
             return Classification::Managed;
         }
-        if cmd.contains(COMMAND_IDENTITY) {
+        if super::is_hand_rolled_sweep(cmd) {
             unmanaged = true;
         }
     }
@@ -559,6 +554,32 @@ mod tests {
             Classification::Managed,
             "our hook was added"
         );
+    }
+
+    /// Adopt-or-leave recognizes the hook a person would write TODAY, not only the verb an older
+    /// build taught: either spelling, sentinel-free, is somebody else's hook — left alone, never
+    /// joined by a managed second copy that would sweep twice per session.
+    #[test]
+    fn a_hand_rolled_sweep_is_adopt_or_leave_in_either_verb() {
+        for hand_rolled in ["topos update --quiet", "topos pull"] {
+            let cfg = MemConfig::with_file(
+                CONFIG,
+                &format!(
+                    "{{\"hooks\":{{\"SessionStart\":[{{\"hooks\":[{{\"type\":\"command\",\"command\":\"{hand_rolled}\"}}]}}]}}}}"
+                ),
+            );
+            let report = adapter(&cfg).install();
+            assert_eq!(
+                report.state,
+                TriggerState::AlreadyPresentUnmanaged,
+                "{hand_rolled}"
+            );
+            assert_eq!(
+                cfg.writes(),
+                0,
+                "{hand_rolled}: never blind-append next to a user's own hook"
+            );
+        }
     }
 
     #[test]

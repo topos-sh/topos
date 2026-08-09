@@ -168,6 +168,22 @@ pub(crate) fn unknown_mcp_file(entry: &str, scope: ManifestScope) -> String {
     )
 }
 
+/// The clause a `dest` that names ONLY unknown files earns — the row is frozen to what it names,
+/// so the bundle reaches NO agent at all. Teaches the same known-file set [`unknown_mcp_file`]
+/// does, from the same source, so the two lines can never name different files.
+pub(crate) fn dest_names_no_mcp_file(unknown: &[String], scope: ManifestScope) -> String {
+    let (noun, verb) = if unknown.len() == 1 {
+        ("dest entry", "is")
+    } else {
+        ("dest entries", "are")
+    };
+    format!(
+        "{noun} {} {verb} not a known MCP config file; the known files here are {}",
+        quoted_list(unknown),
+        known_mcp_files(scope).join(", ")
+    )
+}
+
 /// Which MCP-capable harness a dest entry's config file belongs to at `scope` — matched against
 /// the descriptor's DEFAULT spelling, and against the resolved env-override path (a moved
 /// `$CODEX_HOME` still names a known file). `None` when no harness claims the file.

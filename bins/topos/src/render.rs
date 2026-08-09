@@ -2206,7 +2206,13 @@ fn list_detail_tty(detail: &topos_types::results::ListDetail) -> String {
     // An mcp bundle's "where": per-agent config entries (placed file + state), instead of
     // placement dirs.
     if detail.kind.as_deref() == Some("mcp") {
-        if detail.harnesses.is_empty() {
+        if let Some(why) = &detail.mcp_unreachable {
+            // "not recorded yet" would be a lie of omission here: nothing is coming. The row's own
+            // dest is what withholds it, so the line names the cause and the files that would work.
+            s.push_str(&format!(
+                "\n  an MCP server bundle that reaches no agent — {why}"
+            ));
+        } else if detail.harnesses.is_empty() {
             s.push_str("\n  an MCP server bundle — no agent config entries recorded yet");
         } else {
             // "as of the last converge": these entries are what the ledger / delivery cache
@@ -3224,11 +3230,14 @@ pub(crate) fn pull_tty(
             // An up-to-date row stays out of the table — UNLESS it is an mcp bundle with a
             // per-agent state that needs eyes (drift, a conflict, an unprovable surface): a
             // compact receipt must not swallow those. A file this run wrote (`placed`) is not
-            // one of them: a row that moved bytes has already earned its own verb.
-            let noteworthy = s
-                .harnesses
-                .iter()
-                .any(|h| !matches!(h.state.as_str(), "current" | "placed"));
+            // one of them: a row that moved bytes has already earned its own verb. A row that
+            // carries a NOTE has something to say by construction (an mcp bundle whose dest
+            // reaches no agent has no per-agent state to speak for it), so it is never swallowed
+            // either — a healthy row carries none.
+            let noteworthy = s.note.is_some()
+                || s.harnesses
+                    .iter()
+                    .any(|h| !matches!(h.state.as_str(), "current" | "placed"));
             if matches!(s.action, PullAction::UpToDate) && !noteworthy {
                 return None;
             }
@@ -6007,6 +6016,7 @@ mod tests {
                     state: StatusItemState::LocalEdits,
                     kind: None,
                     harnesses: Vec::new(),
+                    mcp_unreachable: None,
                     managed: true,
                     folders: Vec::new(),
                     diverged: vec![
@@ -6063,6 +6073,7 @@ mod tests {
                     state: StatusItemState::LocalEdits,
                     kind: None,
                     harnesses: Vec::new(),
+                    mcp_unreachable: None,
                     managed: true,
                     folders: Vec::new(),
                     diverged: vec![DivergedCopy {
@@ -6117,6 +6128,7 @@ mod tests {
             state,
             kind: None,
             harnesses: Vec::new(),
+            mcp_unreachable: None,
             managed: true,
             folders: Vec::new(),
             diverged: Vec::new(),
@@ -6175,6 +6187,7 @@ mod tests {
             state: StatusItemState::Unknown,
             kind: None,
             harnesses: Vec::new(),
+            mcp_unreachable: None,
             managed: false,
             folders,
             diverged: Vec::new(),
@@ -6227,6 +6240,7 @@ mod tests {
                     state: StatusItemState::Unknown,
                     kind: None,
                     harnesses: Vec::new(),
+                    mcp_unreachable: None,
                     managed: false,
                     folders: vec!["/home/u/.claude/skills/frontend-design".to_owned()],
                     diverged: Vec::new(),
@@ -6821,6 +6835,7 @@ mod tests {
                     state: S::Applied,
                     kind: None,
                     harnesses: Vec::new(),
+                    mcp_unreachable: None,
                     managed: true,
                     folders: Vec::new(),
                     diverged: Vec::new(),

@@ -715,6 +715,7 @@ fn builtin_detail(ctx: &Ctx<'_>, token: &str) -> Option<ListDetail> {
         state: StatusItemState::Applied,
         kind: None,
         harnesses: Vec::new(),
+        mcp_unreachable: None,
         managed: true,
         folders: Vec::new(),
         // Engine custody re-syncs every copy to the binary on the next sweep, so copies never
@@ -769,6 +770,7 @@ fn unmanaged_detail(ctx: &Ctx<'_>, token: &str, roots: Option<&DiscoveryRoots>) 
         state: StatusItemState::Unknown,
         kind: None,
         harnesses: Vec::new(),
+        mcp_unreachable: None,
         managed: false,
         folders,
         diverged: Vec::new(),
@@ -3446,6 +3448,7 @@ mod tests {
                     state: StatusItemState::Applied,
                     kind: None,
                     harnesses: Vec::new(),
+                    mcp_unreachable: None,
                     managed: true,
                     folders: Vec::new(),
                     diverged: Vec::new(),

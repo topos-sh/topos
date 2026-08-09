@@ -146,7 +146,8 @@ bundle, and it lands as an entry in each agent's MCP config rather than as a ski
 **A workspace row never spells a kind.** `"topos.sh/acme/weather" = "*"` is the same line whether
 the bundle is a skill or a server: the catalog already records what it is, and a publish of the
 local folder above rewrites the row to exactly that spelling, kind field and all dropped. A GitHub
-row tagged `kind = "mcp"` parses but is not delivered — the update warns and moves on.
+row tagged `kind = "mcp"` refuses when the file loads: an MCP server is delivered from a workspace,
+so publish the bundle there and name it by its workspace address instead.
 
 An MCP line's `dest` entries are config FILES, and they must come from the set topos knows how to
 edit — `~/.claude/skills/topos-mcp`, `~/.codex/config.toml`, `~/.cursor/mcp.json`,

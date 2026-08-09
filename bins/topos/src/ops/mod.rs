@@ -795,8 +795,6 @@ mod tests {
                     mode: FollowMode::Auto,
                     review_required: false,
                     following: true,
-                    agents: Vec::new(),
-                    excluded_agents: Vec::new(),
                 },
             )
         }

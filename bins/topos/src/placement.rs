@@ -1,25 +1,22 @@
 //! The **placement engine** — WHERE a followed skill's bytes land on this machine, computed from the
-//! machine (which agents are detected, which read the shared `~/.agents/skills` convention dir) and
-//! the skill's device-local agent scope (`follow --agent` / `unfollow --agent`).
+//! machine alone: which agents are detected, and which of them read the shared `~/.agents/skills`
+//! convention dir. A row that names its own destinations bypasses detection entirely
+//! ([`dest_plan`]).
 //!
 //! ## The policy: shared-dir-first
 //!
-//! - An **UNSCOPED** skill (no include-list, no per-agent exclusions) lands ONE copy in the shared
-//!   cross-agent dir when at least one detected harness is covered by it
-//!   ([`topos_harness::coverage`]), PLUS one native copy per detected harness the shared dir does
-//!   NOT cover. With no harness detected at all (or no machine roots injected), the classic behavior
-//!   holds: the active adapter's single placement.
-//! - A **SCOPED** skill (a non-empty include-list and/or per-agent exclusions) lands native copies in
-//!   exactly the scoped-and-not-excluded DETECTED harnesses — NEVER the shared dir (a shared dir
-//!   cannot express narrowing).
+//! A skill lands ONE copy in the shared cross-agent dir when at least one detected harness is
+//! covered by it ([`topos_harness::coverage`]), PLUS one native copy per detected harness the shared
+//! dir does NOT cover. With no harness detected at all (or no machine roots injected), the classic
+//! behavior holds: the active adapter's single placement.
 //!
 //! ## Target-set reconciliation
 //!
-//! Targets are recomputed each sync. A NEW target (a newly detected harness, newly true coverage, a
-//! scope change) is APPENDED to the map with no materialized bytes yet and lands on the next apply. A
-//! placement LEAVES the record only through an explicit verb (`remove --agent` / `unfollow --agent` /
-//! a scope change), which cleans its dir snapshot-first; detection loss alone never deletes a byte —
-//! the recorded copy freezes in place, unmanaged (skipped by the apply, kept on disk).
+//! Targets are recomputed each sync. A NEW target (a newly detected harness, newly true coverage) is
+//! APPENDED to the map with no materialized bytes yet and lands on the next apply. A placement
+//! LEAVES the record only through an explicit verb (a `remove`, a `dest` edit), which cleans its dir
+//! snapshot-first; detection loss alone never deletes a byte — the recorded copy freezes in place,
+//! unmanaged (skipped by the apply, kept on disk).
 //!
 //! ## Naming + never-clobber
 //!
@@ -74,33 +71,6 @@ pub(crate) struct PlacementPlan {
     pub refused: Vec<String>,
 }
 
-/// The device-local agent scope a plan narrows by (the skill's `follows.json` fields).
-#[derive(Debug, Clone, Copy, Default)]
-pub(crate) struct AgentScope<'a> {
-    /// The include-list (`follow --agent`); empty = unscoped.
-    pub agents: &'a [String],
-    /// The per-agent exclusions (`unfollow --agent` / `remove --agent`).
-    pub excluded: &'a [String],
-}
-
-impl AgentScope<'_> {
-    /// Whether this scope narrows placement at all (either list non-empty ⇒ native-only mode).
-    pub(crate) fn narrows(&self) -> bool {
-        !self.agents.is_empty() || !self.excluded.is_empty()
-    }
-}
-
-/// The device-local agent scope recorded for `skill_id`, from the follow-state seam (empty scope for
-/// a purely local / unfollowed skill).
-pub(crate) fn scope_of(ctx: &Ctx<'_>, skill_id: &str) -> (Vec<String>, Vec<String>) {
-    ctx.follow
-        .followed()
-        .into_iter()
-        .find(|(id, _)| id == skill_id)
-        .map(|(_, fc)| (fc.agents, fc.excluded_agents))
-        .unwrap_or_default()
-}
-
 /// Compute the placement plan for one skill. `naming` carries the untrusted display name + workspace
 /// slug (the collision namespace); `prior` is the durable record whose dirs are kept verbatim for
 /// already-recorded targets; `adopt` is the INCOMING version's bundle digest, arming adopt-in-place
@@ -113,7 +83,6 @@ pub(crate) fn plan_targets(
     ctx: &Ctx<'_>,
     skill_id: &str,
     naming: PlacementNaming<'_>,
-    scope: AgentScope<'_>,
     prior: Option<&PlacementMap>,
     adopt: Option<[u8; 32]>,
 ) -> PlacementPlan {
@@ -131,15 +100,6 @@ pub(crate) fn plan_targets(
         .home;
     let cwd = ctx.roots.as_ref().and_then(|r| r.cwd.as_deref());
 
-    // The eligible slugs: detected, narrowed by the include-list, minus the exclusions. A slug the
-    // include-list names but the machine does not detect contributes no target (the verb surface
-    // already disclosed "placement engages when the harness is detected").
-    let eligible: Vec<&'static registry::KnownHarness> = detected
-        .into_iter()
-        .filter(|h| scope.agents.is_empty() || scope.agents.iter().any(|a| a == h.slug))
-        .filter(|h| !scope.excluded.iter().any(|a| a == h.slug))
-        .collect();
-
     let owned = owned_predicate(prior);
     // The CLI's taken-probe: a path is unavailable when a filesystem entry holds it (lstat, so a
     // dangling symlink counts) OR when ANOTHER tracked skill's record names it — an absent-on-disk
@@ -149,46 +109,41 @@ pub(crate) fn plan_targets(
         |p: &Path| topos_harness::dir_taken(p) || recorded_by_another_skill(ctx, skill_id, p);
     let mut plan = PlacementPlan::default();
 
-    // Shared-dir-first — but ONLY for an unscoped skill: a shared dir cannot express narrowing, so
-    // any include-list or exclusion forces native-only placement.
+    // Shared-dir-first: the covered detected harnesses ride ONE copy in the convention dir, and
+    // every uncovered one takes a native copy of its own.
     let mut native: Vec<&'static registry::KnownHarness> = Vec::new();
-    if scope.narrows() {
-        native = eligible;
-    } else {
-        for h in eligible {
-            let support = coverage::shared_dir_support(h.slug);
-            if support.covered() {
-                plan.shared_covers.push(CoveredAgent {
-                    slug: h.slug.to_owned(),
-                    docs_level: support.docs_level(),
-                });
-            } else {
-                native.push(h);
-            }
-        }
-        if !plan.shared_covers.is_empty() {
-            let dir =
-                prior_dir(ctx, prior, PlacementKind::Shared, None, adopt).unwrap_or_else(|| {
-                    adopt_override(
-                        ctx,
-                        topos_harness::choose_skill_dir(
-                            &coverage::shared_skills_dir(home),
-                            skill_id,
-                            naming,
-                            &taken,
-                            &owned,
-                        ),
-                        skill_id,
-                        naming,
-                        adopt,
-                    )
-                });
-            plan.targets.push(PlannedTarget {
-                dir,
-                kind: PlacementKind::Shared,
-                agent: None,
+    for h in detected {
+        let support = coverage::shared_dir_support(h.slug);
+        if support.covered() {
+            plan.shared_covers.push(CoveredAgent {
+                slug: h.slug.to_owned(),
+                docs_level: support.docs_level(),
             });
+        } else {
+            native.push(h);
         }
+    }
+    if !plan.shared_covers.is_empty() {
+        let dir = prior_dir(ctx, prior, PlacementKind::Shared, None, adopt).unwrap_or_else(|| {
+            adopt_override(
+                ctx,
+                topos_harness::choose_skill_dir(
+                    &coverage::shared_skills_dir(home),
+                    skill_id,
+                    naming,
+                    &taken,
+                    &owned,
+                ),
+                skill_id,
+                naming,
+                adopt,
+            )
+        });
+        plan.targets.push(PlannedTarget {
+            dir,
+            kind: PlacementKind::Shared,
+            agent: None,
+        });
     }
 
     let active_slug = ctx.harness.id().slug();
@@ -231,7 +186,7 @@ pub(crate) fn plan_targets(
 
     // The AGENT-LESS recorded placements — an adopt-in-place source dir, a plain tracked dir with no
     // known harness — are ALWAYS managed: they are the user's own chosen location (often the author's
-    // working copy), and neither detection nor an agent scope speaks for them.
+    // working copy), and detection does not speak for them.
     if let Some(map) = prior {
         for (dir, st) in map.placements.iter().zip(&map.placement_state) {
             if st.kind == PlacementKind::Native
@@ -248,13 +203,10 @@ pub(crate) fn plan_targets(
     }
 
     if plan.targets.is_empty() {
-        // Nothing eligible (everything excluded / an include-list of undetected slugs): the skill
-        // keeps its record but nothing is managed — the caller's apply set is empty. The classic
-        // fallback deliberately does NOT engage here: an explicit scope that excludes everything
-        // must not resurrect the active adapter's copy.
-        if !scope.narrows() {
-            return classic_plan(ctx, skill_id, naming, prior, adopt);
-        }
+        // Detection found harnesses but none of them resolves to a dir here (every uncovered one is
+        // cwd-only, with no user-scope skills root): the classic single placement stands in, so a
+        // followed skill is never left with nowhere to land.
+        return classic_plan(ctx, skill_id, naming, prior, adopt);
     }
     plan
 }
@@ -619,8 +571,9 @@ fn adapter_choice(
 /// Adopt-in-place override on a chosen placement dir: when the by-name candidate under the same
 /// root is OCCUPIED by a byte-identical copy of the incoming version — and no OTHER tracked
 /// skill's record already owns that dir — that dir IS the placement, never a second namespaced/id
-/// copy. The reserved built-in dir name is never overridden. When the naming discipline already
-/// chose the by-name dir (free, or owned), the candidate equals the choice and nothing changes.
+/// copy. A dir name topos reserves for itself is never overridden. When the naming discipline
+/// already chose the by-name dir (free, or owned), the candidate equals the choice and nothing
+/// changes.
 fn adopt_override(
     ctx: &Ctx<'_>,
     dir: PathBuf,
@@ -634,7 +587,7 @@ fn adopt_override(
     let Some(name) = naming.name.and_then(topos_harness::sanitize_skill_dir) else {
         return dir;
     };
-    if name == topos_harness::RESERVED_SKILL_DIR && skill_id != topos_harness::RESERVED_SKILL_DIR {
+    if topos_harness::is_reserved_skill_dir(&name, skill_id) {
         return dir;
     }
     let Some(parent) = dir.parent() else {
@@ -1386,7 +1339,6 @@ pub(crate) fn plan_for_skill(
             None,
         );
     }
-    let (agents, excluded) = scope_of(ctx, skill_id);
     // No adopt probe here: a tracked skill's adoption continuity rides the record — the baseline's
     // adoption reservation (`pre_existing_sha`) keeps [`prior_dir`] answering the adopted dir.
     plan_targets(
@@ -1395,10 +1347,6 @@ pub(crate) fn plan_for_skill(
         PlacementNaming {
             name: Some(&lock.name),
             workspace_slug: slug.as_deref(),
-        },
-        AgentScope {
-            agents: &agents,
-            excluded: &excluded,
         },
         Some(prior),
         None,

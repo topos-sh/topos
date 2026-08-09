@@ -32,7 +32,7 @@ use crate::ctx::Ctx;
 use crate::error::ClientError;
 use crate::id::SkillId;
 use crate::materialize::{self, MaterializeReq};
-use crate::placement::{self, AgentScope, ScanStatus};
+use crate::placement::{self, ScanStatus};
 use crate::scan::{ScannedBundle, ScannedFile};
 use crate::{doc, sidecar};
 
@@ -124,8 +124,11 @@ fn builtin_sid() -> Result<SkillId, ClientError> {
 }
 
 // ---------------------------------------------------------------------------------------------
-// The durable device-local state (`state/builtin.json`) — the opt-out + the agent scope. NOT a
-// `follows.json` row: the built-in is not a subscription.
+// The durable device-local state (`state/builtin.json`) — the opt-out. NOT a `follows.json` row:
+// the built-in is not a subscription.
+//
+// Unknown keys are IGNORED on read (serde's default): a state file written by an older binary,
+// carrying fields this shape no longer has, still loads — the opt-out survives, nothing crashes.
 // ---------------------------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -134,12 +137,6 @@ pub(crate) struct BuiltinState {
     /// `topos remove topos` — the durable opt-out; no sweep re-places while set.
     #[serde(default)]
     pub removed: bool,
-    /// The `--agent` include-list (empty = unscoped).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub agents: Vec<String>,
-    /// The per-agent exclusions.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub excluded_agents: Vec<String>,
 }
 
 impl Default for BuiltinState {
@@ -147,8 +144,6 @@ impl Default for BuiltinState {
         Self {
             schema_version: PERSISTED_SCHEMA_VERSION,
             removed: false,
-            agents: Vec::new(),
-            excluded_agents: Vec::new(),
         }
     }
 }
@@ -321,18 +316,14 @@ fn ensure_inner(
         };
     }
 
-    // Plan through the ONE engine (shared-dir-first; the state doc's agent scope), reconcile, and
-    // land the bytes on every managed target that is absent or divergent — force-sync.
+    // Plan through the ONE engine (shared-dir-first), reconcile, and land the bytes on every
+    // managed target that is absent or divergent — force-sync.
     let plan = placement::plan_targets(
         ctx,
         sid.as_str(),
         topos_harness::PlacementNaming {
             name: Some(BUILTIN_NAME),
             workspace_slug: None,
-        },
-        AgentScope {
-            agents: &state.agents,
-            excluded: &state.excluded_agents,
         },
         Some(&map),
         None,

@@ -593,6 +593,11 @@ pub struct ListDetail {
     /// state), shown instead of placement dirs. **INFERRED** (additive).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub harnesses: Vec<McpAgentState>,
+    /// For an `mcp` bundle whose row freezes a `dest` that names no config file topos can edit:
+    /// why the bundle reaches NO agent. Absent whenever it reaches at least one — a row with
+    /// somewhere to land says nothing here. **INFERRED** (additive).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mcp_unreachable: Option<String>,
     /// `false` = NO row in any visible scope manages this name (and it is not the built-in): the
     /// answer is the not-managed headline plus `folders`, and every managed-only field above is
     /// absent/at its baseline. Omits when `true` (the pre-existing managed shape). **INFERRED**

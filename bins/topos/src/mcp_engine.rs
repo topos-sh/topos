@@ -405,28 +405,12 @@ pub(crate) fn converge(
             continue;
         }
 
-        // The desired set for this harness: the placeable demands that pass the row narrowing and
-        // the capability filter.
+        // The desired set for this harness: the placeable demands that pass the row narrowing.
         let mut desired: Vec<McpEntry> = Vec::new();
         let mut desired_bundles: BTreeMap<String, usize> = BTreeMap::new();
         for (i, p) in &parsed {
             let d = &demands[*i];
             if !filter_admits(d, h.slug) {
-                continue;
-            }
-            if !h.oauth_capable && p.auth != AuthHint::None {
-                // The capability filter: a server that may need an OAuth sign-in is withheld from
-                // an agent that cannot run one.
-                push_state(
-                    &mut states,
-                    *i,
-                    agent_state(
-                        h.slug,
-                        "not-supported",
-                        Some("needs an OAuth sign-in this agent cannot run"),
-                        None,
-                    ),
-                );
                 continue;
             }
             let key = minted[i].clone();

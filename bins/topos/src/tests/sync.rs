@@ -354,8 +354,6 @@ fn follow(skill_id: &str, mode: FollowMode) -> FixtureFollow {
                 mode,
                 review_required: false,
                 following: true,
-                agents: Vec::new(),
-                excluded_agents: Vec::new(),
             },
         )],
     }
@@ -3944,9 +3942,8 @@ fn a_reset_that_cannot_settle_every_copy_leaves_the_merge_live() {
     let copy = rig.conflict_copy(&id);
 
     // Two copies holding the same un-merged draft, each recorded for its own agent — and the machine
-    // detects only one of them. With the skill scoped to the detected agent, the plan names that
-    // copy alone; the other is outside it (`placement::managed_indices`: frozen in place, never
-    // written, never deleted).
+    // detects only one of them. The plan names the detected agent's copy alone; the other is outside
+    // it (`placement::managed_indices`: frozen in place, never written, never deleted).
     let replica = rig.work.0.join("replica");
     add_replica(&rig, &id, &replica, mine);
     rig.patch_map(&id, |m| {
@@ -3954,31 +3951,21 @@ fn a_reset_that_cannot_settle_every_copy_leaves_the_merge_live() {
         m.placement_state[1].agent = Some("cursor".to_owned());
     });
     std::fs::create_dir_all(rig.home.0.join(".claude")).unwrap();
+    let detected = topos_harness::registry::detected_harnesses(&rig.home.0, None);
     assert!(
-        topos_harness::registry::detected_harnesses(&rig.home.0, None)
-            .iter()
-            .any(|h| h.slug == "claude-code"),
-        "the rig's home must detect the agent the plan is scoped to"
+        detected.iter().any(|h| h.slug == "claude-code"),
+        "the rig's home must detect the agent whose copy the plan names"
     );
-    let scoped = FixtureFollow {
-        entries: vec![(
-            id.clone(),
-            FollowContext {
-                workspace_id: WS.to_owned(),
-                mode: FollowMode::Auto,
-                review_required: false,
-                following: true,
-                agents: vec!["claude-code".to_owned()],
-                excluded_agents: Vec::new(),
-            },
-        )],
-    };
+    assert!(
+        !detected.iter().any(|h| h.slug == "cursor"),
+        "and must NOT detect the one holding the copy outside the plan"
+    );
     let ctx = Ctx {
         roots: Some(crate::ctx::AgentRoots {
             home: rig.home.0.clone(),
             cwd: None,
         }),
-        ..rig.ctx(&plane, &scoped)
+        ..rig.ctx(&plane, &foll)
     };
 
     // The FULL reset — no selector, so it means "every copy" — but it can only reach the copy the
@@ -4376,8 +4363,6 @@ fn follow_n(skill_id: &str, n: usize) -> FixtureFollow {
                         mode: FollowMode::Auto,
                         review_required: false,
                         following: true,
-                        agents: Vec::new(),
-                        excluded_agents: Vec::new(),
                     },
                 )
             })
@@ -4476,8 +4461,6 @@ fn sweep_surfaces_an_isolated_per_skill_failure_as_an_envelope_warning() {
                     mode: FollowMode::Auto,
                     review_required: false,
                     following: true,
-                    agents: Vec::new(),
-                    excluded_agents: Vec::new(),
                 },
             ),
             (
@@ -4487,8 +4470,6 @@ fn sweep_surfaces_an_isolated_per_skill_failure_as_an_envelope_warning() {
                     mode: FollowMode::Auto,
                     review_required: false,
                     following: true,
-                    agents: Vec::new(),
-                    excluded_agents: Vec::new(),
                 },
             ),
         ],
@@ -4580,8 +4561,6 @@ fn sweep_refuses_a_traversal_follow_id_as_a_warning_never_a_join() {
                 mode: FollowMode::Auto,
                 review_required: false,
                 following: true,
-                agents: Vec::new(),
-                excluded_agents: Vec::new(),
             },
         )],
     };

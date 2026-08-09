@@ -88,11 +88,6 @@ const HOOK_TIMEOUT_SECS: u64 = 30;
 // substitutes its default, and the written entry would lie about the effective bound.
 const _: () = assert!(HOOK_TIMEOUT_SECS >= 1 && HOOK_TIMEOUT_SECS <= 300);
 
-/// The command-identity substring marking a HAND-ROLLED `topos pull` hook — one present WITHOUT our
-/// sentinel, which we adopt-or-leave. It is NOT part of the managed-ours check: ownership keys on the
-/// sentinel alone (see [`SENTINEL`]), so our own current `topos update` entry is recognized regardless.
-const COMMAND_IDENTITY: &str = "topos pull";
-
 /// The version-agnostic ownership sentinel — a trailing YAML comment topos writes on its managed entry
 /// line (outside the mapping, so Hermes parses the command as exactly [`HOOK_COMMAND`]). The
 /// managed-entry recognizer keys on THIS alone (never the command text or entry shape), so a re-arm
@@ -439,9 +434,9 @@ struct HooksRegion {
     region_end: usize,
     /// The recognized event blocks, in file order.
     events: Vec<EventBlock>,
-    /// A `topos pull` command entry exists in the region that is not provably ours (hand-rolled,
+    /// A topos sweep command entry exists in the region that is not provably ours (hand-rolled,
     /// or ours after a comment-stripping config rewrite) — adopt-or-leave.
-    unmanaged_topos_pull: bool,
+    unmanaged_topos_sweep: bool,
 }
 
 impl HooksRegion {
@@ -661,22 +656,22 @@ fn analyze(text: &str) -> Analysis {
     if names.len() != unique {
         return Analysis::Unprovable;
     }
-    // A topos-pull command entry anywhere in the region that is NOT a claimed managed line (any
-    // event, any indent — incl. our old entry after a comment-stripping rewrite) is
-    // adopt-or-leave — never blind-append a second one, never claim it.
+    // A topos sweep command entry anywhere in the region that is NOT a claimed managed line (any
+    // event, any indent, either verb spelling — incl. our old entry after a comment-stripping
+    // rewrite) is adopt-or-leave — never blind-append a second one, never claim it.
     let claimed: std::collections::HashSet<usize> = events
         .iter()
         .flat_map(|e| e.managed_lines.iter().copied())
         .collect();
-    let unmanaged_topos_pull = (hooks_idx + 1..end).any(|j| {
+    let unmanaged_topos_sweep = (hooks_idx + 1..end).any(|j| {
         let t = lines[j].trim();
-        !claimed.contains(&j) && is_command_line(t) && t.contains(COMMAND_IDENTITY)
+        !claimed.contains(&j) && is_command_line(t) && crate::triggers::is_hand_rolled_sweep(t)
     });
     Analysis::Region(HooksRegion {
         hooks_idx,
         region_end: end,
         events,
-        unmanaged_topos_pull,
+        unmanaged_topos_sweep,
     })
 }
 
@@ -796,7 +791,7 @@ fn plan_install(current: Option<&[u8]>, live: bool) -> EditPlan {
                     Some(bytes) => EditPlan::Write(bytes, install_state(live)),
                     None => EditPlan::Leave(TriggerState::Degraded),
                 }
-            } else if region.unmanaged_topos_pull {
+            } else if region.unmanaged_topos_sweep {
                 EditPlan::Leave(TriggerState::AlreadyPresentUnmanaged)
             } else {
                 // A populated hooks block with no topos entry — never guess an insertion point.
@@ -825,7 +820,7 @@ fn plan_remove(current: Option<&[u8]>) -> EditPlan {
                     scrub_managed(text, &region).into_bytes(),
                     TriggerState::Inactive,
                 )
-            } else if region.unmanaged_topos_pull {
+            } else if region.unmanaged_topos_sweep {
                 EditPlan::Leave(TriggerState::AlreadyPresentUnmanaged)
             } else {
                 EditPlan::Leave(TriggerState::Inactive)
@@ -1201,12 +1196,27 @@ personalities: {}
         assert_eq!(report.state, TriggerState::AlreadyPresentUnmanaged);
         assert_eq!(cfg.writes(), 0);
 
-        // A topos-pull entry under any other event is also adopt-or-leave.
+        // A topos sweep entry under any other event is also adopt-or-leave.
         let cfg =
             MemConfig::with_config("hooks:\n  post_llm_call:\n  - command: topos pull --quiet\n");
         let report = adapter(&cfg).install_currency_trigger();
         assert_eq!(report.state, TriggerState::AlreadyPresentUnmanaged);
         assert_eq!(cfg.writes(), 0);
+
+        // …and so is the CURRENT verb — the spelling a person copies out of the docs today. A
+        // managed second entry beside it would sweep twice at every session start.
+        for event in ["on_session_start", "post_llm_call"] {
+            let cfg = MemConfig::with_config(&format!(
+                "hooks:\n  {event}:\n  - command: topos update --quiet\n"
+            ));
+            let report = adapter(&cfg).install_currency_trigger();
+            assert_eq!(
+                report.state,
+                TriggerState::AlreadyPresentUnmanaged,
+                "{event}"
+            );
+            assert_eq!(cfg.writes(), 0, "{event}");
+        }
     }
 
     #[test]

@@ -21,8 +21,6 @@ pub struct McpHarness {
     pub user_surface: Option<McpSurface>,
     /// Project-relative config path + dialect (`None` = no project surface).
     pub project_surface: Option<(&'static str, McpDialect)>,
-    /// Whether the harness can complete an OAuth sign-in for a remote server itself.
-    pub oauth_capable: bool,
     /// Receipt copy: how config changes get picked up.
     pub reload_note: &'static str,
 }
@@ -88,7 +86,6 @@ static MCP_HARNESSES: &[McpHarness] = &[
             dialect: McpDialect::ClaudePluginDir,
         }),
         project_surface: Some((".mcp.json", McpDialect::ClaudeProjectJson)),
-        oauth_capable: true,
         reload_note: "loads next session; /reload-plugins reloads live; sign in with /mcp",
     },
     McpHarness {
@@ -101,7 +98,6 @@ static MCP_HARNESSES: &[McpHarness] = &[
         }),
         // Codex honors a project config only once the user trusts the repo in Codex.
         project_surface: Some((".codex/config.toml", McpDialect::CodexToml)),
-        oauth_capable: true,
         reload_note: "restart codex; sign in with `codex mcp login <name>`",
     },
     McpHarness {
@@ -113,7 +109,6 @@ static MCP_HARNESSES: &[McpHarness] = &[
             dialect: McpDialect::CursorJson,
         }),
         project_surface: Some((".cursor/mcp.json", McpDialect::CursorJson)),
-        oauth_capable: true,
         reload_note: "restart Cursor",
     },
     McpHarness {
@@ -127,7 +122,6 @@ static MCP_HARNESSES: &[McpHarness] = &[
         // The project config sits at the checkout root, not under a dot-dir.
         project_surface: Some(("opencode.json", McpDialect::OpencodeJson)),
         // Automatic on 401 + dynamic client registration.
-        oauth_capable: true,
         reload_note: "restart opencode",
     },
     McpHarness {
@@ -139,7 +133,6 @@ static MCP_HARNESSES: &[McpHarness] = &[
             dialect: McpDialect::OpenclawJson,
         }),
         project_surface: None,
-        oauth_capable: true,
         reload_note: "picked up automatically; sign in with `openclaw mcp login <name>`",
     },
     McpHarness {
@@ -151,7 +144,6 @@ static MCP_HARNESSES: &[McpHarness] = &[
             dialect: McpDialect::HermesYaml,
         }),
         project_surface: None,
-        oauth_capable: true,
         reload_note: "/reload-mcp in a session, or next session",
     },
 ];
@@ -199,7 +191,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn six_rows_all_oauth_capable_and_every_slug_is_a_registry_slug() {
+    fn six_rows_and_every_slug_is_a_registry_slug() {
         let all = mcp_harnesses();
         assert_eq!(all.len(), 6);
         let registry_slugs: Vec<&str> = crate::registry::known_harnesses()
@@ -212,7 +204,6 @@ mod tests {
                 "{} must be a registry slug",
                 h.slug
             );
-            assert!(h.oauth_capable, "{}", h.slug);
             assert!(!h.reload_note.is_empty(), "{}", h.slug);
         }
         let slugs: Vec<&str> = all.iter().map(|h| h.slug).collect();

@@ -24,12 +24,6 @@ pub(crate) const LAYER_USER: &str = "user";
 /// topos still recognizes (and could migrate) an entry an earlier build wrote.
 const SENTINEL: &str = "# topos:currency";
 
-/// The command identity that marks a HAND-ROLLED auto-update hook — a `topos pull` command present
-/// WITHOUT our sentinel, which we adopt-or-leave (never blind-touch). This is NOT part of the
-/// managed-ours check any more: ownership keys on the sentinel alone (see [`is_managed_command`]), so
-/// our own current `topos update` hook is recognized without enumerating every command spelling here.
-const COMMAND_IDENTITY: &str = "topos pull";
-
 /// The structured marker identity reported in [`TriggerReport::marker_id`] — topos + harness id +
 /// schema version + command identity. Schema 2 = the async, every-SessionStart-source entry.
 const MARKER_ID: &str = "topos:claude-code:currency:2";
@@ -278,7 +272,7 @@ enum EditPlan {
 enum Classification {
     /// Our marked hook is present.
     Managed,
-    /// A `topos pull` hook exists WITHOUT our marker (hand-rolled) — adopt-or-leave.
+    /// A topos sweep hook exists WITHOUT our marker (hand-rolled) — adopt-or-leave.
     Unmanaged,
     /// No topos auto-update hook at all.
     Absent,
@@ -429,7 +423,7 @@ fn classify(session_start: &[Value]) -> Classification {
             if is_managed_command(cmd) {
                 return Classification::Managed;
             }
-            if cmd.contains(COMMAND_IDENTITY) {
+            if crate::triggers::is_hand_rolled_sweep(cmd) {
                 unmanaged = true;
             }
         }
@@ -892,19 +886,28 @@ mod tests {
         );
     }
 
+    /// Adopt-or-leave recognizes the hook a person would write TODAY, not only the verb an older
+    /// build taught: either spelling, sentinel-free, is somebody else's hook — left alone, never
+    /// joined by a managed second copy that would sweep twice per session.
     #[test]
-    fn install_leaves_a_hand_rolled_topos_pull_unmanaged() {
-        let cfg = MemConfig::with(
-            "{\"hooks\":{\"SessionStart\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"topos pull\"}]}]}}",
-        );
-        let report = adapter(&PathBuf::from("/h"), &cfg).install_currency_trigger();
-        assert_eq!(report.state, TriggerState::AlreadyPresentUnmanaged);
-        assert!(report.touched_path.is_none());
-        assert_eq!(
-            cfg.writes(),
-            0,
-            "never blind-append next to a user's own hook"
-        );
+    fn install_leaves_a_hand_rolled_sweep_unmanaged_in_either_verb() {
+        for hand_rolled in ["topos update --quiet", "topos pull"] {
+            let cfg = MemConfig::with(&format!(
+                "{{\"hooks\":{{\"SessionStart\":[{{\"hooks\":[{{\"type\":\"command\",\"command\":\"{hand_rolled}\"}}]}}]}}}}"
+            ));
+            let report = adapter(&PathBuf::from("/h"), &cfg).install_currency_trigger();
+            assert_eq!(
+                report.state,
+                TriggerState::AlreadyPresentUnmanaged,
+                "{hand_rolled}"
+            );
+            assert!(report.touched_path.is_none(), "{hand_rolled}");
+            assert_eq!(
+                cfg.writes(),
+                0,
+                "{hand_rolled}: never blind-append next to a user's own hook"
+            );
+        }
     }
 
     #[test]

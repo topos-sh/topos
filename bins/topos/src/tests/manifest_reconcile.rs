@@ -10936,6 +10936,93 @@ fn mcp_server_json(url: &str) -> String {
     )
 }
 
+/// **The classic delete takes an MCP bundle's config ENTRIES with it.** This arm deletes recorded
+/// dirs and the store record — and a config-placed bundle has neither of those where its reach
+/// lives: its reach is the `topos-…` entries it wrote into agents' MCP config files. Deleting the
+/// record that names them without retiring them first strands them in those files forever, with
+/// nothing left on the machine that could ever prove whose they were. So the same convergence the
+/// manifest arm runs on a dropped row runs here, and the receipt says which files it touched.
+#[test]
+fn a_classic_delete_of_an_mcp_record_takes_its_config_entries_with_it() {
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let rig = Rig::new("mcp-classic-rm");
+    rig.seed_session();
+    // cursor + openclaw both detect off the fake home, so the reach is hermetic.
+    std::fs::create_dir_all(rig.home.0.join(".cursor")).unwrap();
+    std::fs::create_dir_all(rig.home.0.join(".openclaw")).unwrap();
+
+    let v = mk_version(&[(
+        "server.json",
+        FileMode::Regular,
+        mcp_server_json("https://mcp.example/linear").as_bytes(),
+    )]);
+    let plane = FakePlane::new(log).with_version("s_linear", &v);
+    let mut ds = delivered("s_linear", "linear", &v);
+    ds.kind = "mcp".into();
+    plane.serves(vec![ds]);
+    let mut entry = catalog_entry("s_linear", "linear", &v);
+    entry.kind = "mcp".into();
+    let dir = FakeDirectory::new(vec![entry], Vec::new());
+    rig.write_global(&format!(
+        "[bundles]\n\"{HOST}/{WS_NAME}/linear\" = {{ dest = [\"~/.cursor/mcp.json\", \"~/.openclaw/openclaw.json\"] }}\n"
+    ));
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    sweep(&ctx, &plane, &dir);
+    let cursor = rig.home.0.join(".cursor/mcp.json");
+    let claw = rig.home.0.join(".openclaw/openclaw.json");
+    for f in [&cursor, &claw] {
+        assert!(
+            std::fs::read_to_string(f)
+                .unwrap()
+                .contains("topos-eng-linear"),
+            "the entry landed in {f:?}"
+        );
+    }
+
+    // The row leaves by hand: the record and its config entries are now nobody's demand, so the
+    // name falls through to the classic ladder's permanent delete.
+    rig.write_global("[bundles]\n");
+    let named = NamedDirectory(dir.clone());
+    let named_connect = |_s: &Session| ops::SessionTransports {
+        plane: Box::new(plane.clone()),
+        directory: Box::new(named.clone()),
+        contribute: Box::new(NoContribute),
+        governance: Box::new(NoGovernance),
+    };
+    let dir_connect = |_: &str| -> Box<dyn DirectorySource> { Box::new(dir.clone()) };
+    let connectors = ops::RemoveConnectors {
+        session: &named_connect,
+        directory: &dir_connect,
+    };
+    let outcome = ops::remove(&ctx, &connectors, &["linear".to_owned()], &[], None, true)
+        .expect("the consented apply");
+    let ops::RemoveOutcome::Applied(data) = outcome else {
+        panic!("--yes applies");
+    };
+
+    for f in [&cursor, &claw] {
+        let text = std::fs::read_to_string(f).unwrap_or_default();
+        assert!(
+            !text.contains("topos-eng-linear"),
+            "the entry outlived the record it belonged to, in {f:?}: {text}"
+        );
+    }
+    // The ledger retires the key rather than forgetting it — a retired key is never re-minted.
+    let ledger = crate::mcp_ledger::read(&rig.fs, &rig.layout()).unwrap();
+    assert!(!ledger.has_entries_for("s_linear"));
+    assert_eq!(
+        ledger.retired.get("topos-eng-linear").map(String::as_str),
+        Some("s_linear")
+    );
+    // And the receipt names the files it touched — a removal that edited somebody's agent config
+    // says so.
+    let note = data.items[0].note.clone().unwrap_or_default();
+    assert!(
+        note.contains("server entry removed") && note.contains("cursor"),
+        "{note}"
+    );
+}
+
 /// TWO bundles of the SAME NAME in one scope — the workspace `linear` a feed delivers and a local
 /// `linear` folder a row adopts — each keep their OWN per-agent config states on the receipt. The
 /// converge's outcomes join to a row by the bundle's identity: matching on the display name handed

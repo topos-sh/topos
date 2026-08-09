@@ -280,8 +280,6 @@ impl CacheFollow {
                         mode: FollowMode::Auto,
                         review_required: ds.review_required,
                         following: true,
-                        agents: Vec::new(),
-                        excluded_agents: Vec::new(),
                     },
                 ));
             }
@@ -507,7 +505,16 @@ impl Sweep {
     /// File a bundle's receipt row under its identity in this scope. `None` = the bundle produced
     /// no row this run (a sync that failed, a governance converge that spoke for it), which simply
     /// leaves the converge's states off the receipt.
-    fn note_mcp_row(&mut self, label: &str, bundle_id: &str, index: Option<usize>) {
+    /// `unreachable` is the clause a row states when its own `dest` narrowed the bundle down to no
+    /// agent at all: without it the row would print the ordinary install line and read as healthy
+    /// while nothing was placed anywhere.
+    fn note_mcp_row(
+        &mut self,
+        label: &str,
+        bundle_id: &str,
+        index: Option<usize>,
+        unreachable: Option<&str>,
+    ) {
         if let Some(index) = index {
             self.mcp_rows
                 .insert((label.to_owned(), bundle_id.to_owned()), index);
@@ -516,6 +523,9 @@ impl Sweep {
             // empty, so a summary counting these rows never calls a server a skill.
             if let Some(row) = self.rows.get_mut(index) {
                 row.kind = Some("mcp".to_owned());
+                if let Some(clause) = unreachable {
+                    row.note = Some(format!("reaches no agent — {clause}"));
+                }
             }
         }
     }
@@ -1305,8 +1315,6 @@ pub(crate) fn manifest_update(
                         mode: FollowMode::Auto,
                         review_required: ds.review_required,
                         following: true,
-                        agents: Vec::new(),
-                        excluded_agents: Vec::new(),
                     },
                 );
             }
@@ -1965,18 +1973,21 @@ fn reconcile_thing<'a>(
                     picked: false,
                 },
             ));
+            // `warn_unknown` rides the row's KIND: a SKILL row's dest entries are placement
+            // FOLDERS (`~/.codex/skills`), not MCP config files — only an mcp row's dest can
+            // mean config files, so only it may warn about an unknown one.
+            let narrowing = mcp_filter(
+                sc,
+                Some(row),
+                &display,
+                mcp,
+                &mut sweep.mcp_warned_dests,
+                &mut sweep.advisories,
+                &mut sweep.warnings,
+            );
             let st = SyncTarget {
-                // `warn_unknown` rides the row's KIND: a SKILL row's dest entries are placement
-                // FOLDERS (`~/.codex/skills`), not MCP config files — only an mcp row's dest can
-                // mean config files, so only it may warn about an unknown one.
-                mcp_dest_filter: mcp_filter(
-                    sc,
-                    Some(row),
-                    &display,
-                    mcp,
-                    &mut sweep.mcp_warned_dests,
-                    &mut sweep.advisories,
-                ),
+                mcp_dest_filter: narrowing.filter,
+                mcp_unreachable: narrowing.unreachable,
                 target,
                 pin: row.pin(),
                 display: display.clone(),
@@ -1991,16 +2002,6 @@ fn reconcile_thing<'a>(
             repo,
             skill,
         } => {
-            // GitHub-sourced MCP bundles are not yet supported: the typed refusal names the
-            // constraint instead of silently placing nothing.
-            if row.fields().kind.as_deref() == Some("mcp") {
-                sweep.warnings.push(format!(
-                    "MCP_GITHUB_UNSUPPORTED {}: \"{}\" — GitHub-sourced MCP bundles are not yet \
-                     supported; publish the bundle to a workspace and add it from there",
-                    sc.label, row.reference
-                ));
-                return;
-            }
             reconcile_repo_skill(env, sc, row, host, owner, repo, skill, sweep);
         }
         KeyShape::LocalPath { raw } => {
@@ -2047,13 +2048,17 @@ fn reconcile_thing<'a>(
     }
 }
 
-/// The MCP config-file narrowing one demand carries: the row's `dest` entries mapped back to
-/// the harnesses whose config files they name. `None` = the row has no `dest` (every
-/// MCP-capable agent, now and later); `Some` = exactly the named files' agents — possibly
-/// empty, because a dest row is FROZEN to what it names. `warn_unknown` is true only for rows
-/// whose dest can ONLY mean config files (an mcp bundle row, a local mcp row); a SKILL row's
-/// dest names placement folders and a CHANNEL's dest may name folders for its skill members, so
-/// their unmapped entries stay silent. `bundle` is the display name the warning leads with.
+/// Resolve one demand's MCP config-file narrowing AND say what it cost. `warn_unknown` is true
+/// only for rows whose dest can ONLY mean config files (an mcp bundle row, a local mcp row); a
+/// SKILL row's dest names placement folders and a CHANNEL's dest may name folders for its skill
+/// members, so their unmapped entries stay silent. `bundle` is the display name every line leads
+/// with.
+///
+/// The two outcomes are told apart because they are not the same news. A dest that maps SOME of
+/// its entries still delivers, so the dropped entries are an advisory beside a working row. A dest
+/// that maps NONE of them delivers nowhere at all — a typo silently costing the bundle every
+/// agent — so it is a warning, and the row it belongs to carries the same clause (returned here as
+/// `unreachable`) rather than reading like a healthy install.
 fn mcp_filter(
     sc: &ScopeCtx<'_>,
     row: Option<&PlanRow>,
@@ -2061,16 +2066,52 @@ fn mcp_filter(
     warn_unknown: bool,
     warned: &mut HashSet<String>,
     advisories: &mut Vec<String>,
-) -> Option<Vec<String>> {
-    mcp_dest_narrowing(
-        row.and_then(|r| r.fields().dest),
-        manifest_scope_of(sc),
-        &sc.label,
-        bundle,
-        warn_unknown,
-        warned,
-        advisories,
-    )
+    warnings: &mut Vec<String>,
+) -> McpNarrowing {
+    let scope = manifest_scope_of(sc);
+    let narrowing = mcp_dest_narrowing(row.and_then(|r| r.fields().dest), scope);
+    let label = &sc.label;
+    if !warn_unknown || narrowing.unknown.is_empty() {
+        return McpNarrowing {
+            filter: narrowing.filter,
+            unreachable: None,
+        };
+    }
+    if narrowing.reaches_nothing() {
+        let clause = crate::manifest::dest::dest_names_no_mcp_file(&narrowing.unknown, scope);
+        // Deduped per BUNDLE, not per entry: this line is about a bundle that reaches nothing, and
+        // keying it on the entry would let an advisory raised for some OTHER bundle's typo of the
+        // same spelling swallow it — the exact silence this warning exists to end. (Its own key
+        // space, so it can never collide with the per-entry advisory keys either.)
+        if warned.insert(format!("no-agent\u{1f}{label}\u{1f}{bundle}")) {
+            warnings.push(format!(
+                "MCP_DEST_NO_AGENT {label}: \"{bundle}\" reaches no agent — {clause}"
+            ));
+        }
+        return McpNarrowing {
+            filter: narrowing.filter,
+            unreachable: Some(clause),
+        };
+    }
+    for entry in &narrowing.unknown {
+        if warned.insert(entry.clone()) {
+            advisories.push(format!(
+                "MCP_DEST_UNKNOWN {label}: \"{bundle}\" — {}",
+                crate::manifest::dest::unknown_mcp_file(entry, scope)
+            ));
+        }
+    }
+    McpNarrowing {
+        filter: narrowing.filter,
+        unreachable: None,
+    }
+}
+
+/// What [`mcp_filter`] hands one demand: the harness narrowing itself, plus the clause the row
+/// must state when that narrowing leaves the bundle reaching NOTHING.
+struct McpNarrowing {
+    filter: Option<Vec<String>>,
+    unreachable: Option<String>,
 }
 
 /// The grammar scope a resolved scope reads/writes in.
@@ -2081,23 +2122,43 @@ fn manifest_scope_of(sc: &ScopeCtx<'_>) -> crate::manifest::document::ManifestSc
     }
 }
 
+/// One demand's resolved dest-file narrowing.
+pub(crate) struct DestNarrowing {
+    /// The harnesses to place into. `None` = the row has no `dest` (every MCP-capable agent, now
+    /// and later); `Some` = exactly the named files' agents — possibly EMPTY, because a dest row
+    /// is FROZEN to what it names.
+    pub filter: Option<Vec<String>>,
+    /// The dest entries no MCP-capable harness claims, in row order.
+    pub unknown: Vec<String>,
+}
+
+impl DestNarrowing {
+    /// Whether the narrowing leaves the bundle no agent at all to reach — a dest naming only
+    /// files topos cannot edit. Never true of a row carrying no `dest`, which reaches every
+    /// MCP-capable agent.
+    pub(crate) fn reaches_nothing(&self) -> bool {
+        self.filter.as_ref().is_some_and(Vec::is_empty)
+    }
+}
+
 /// The ONE resolution of an MCP demand's dest-file narrowing — shared by the sweep (through
 /// [`mcp_filter`]) and `add --mcp`'s inline converge, so the add can never fan out past what
 /// the next sweep would keep. Each entry is matched against the descriptor table's config-file
 /// spellings for the scope (default spelling, or the resolved env-override path); an entry no
-/// harness claims is dropped, warned ONCE per run with the same message shape the load refusal
-/// uses (when `warn_unknown`), the line naming the BUNDLE the row delivers.
+/// harness claims is dropped from the narrowing and reported back in `unknown` — this resolution
+/// decides reach, never wording.
 pub(crate) fn mcp_dest_narrowing(
     row_dest: Option<Vec<String>>,
     scope: crate::manifest::document::ManifestScope,
-    label: &str,
-    bundle: &str,
-    warn_unknown: bool,
-    warned: &mut HashSet<String>,
-    warnings: &mut Vec<String>,
-) -> Option<Vec<String>> {
-    let dest = row_dest?;
+) -> DestNarrowing {
+    let Some(dest) = row_dest else {
+        return DestNarrowing {
+            filter: None,
+            unknown: Vec::new(),
+        };
+    };
     let mut mapped: Vec<String> = Vec::new();
+    let mut unknown: Vec<String> = Vec::new();
     for entry in &dest {
         match crate::manifest::dest::mcp_slug_for_dest(entry, scope) {
             Some(slug) => {
@@ -2106,16 +2167,16 @@ pub(crate) fn mcp_dest_narrowing(
                 }
             }
             None => {
-                if warn_unknown && warned.insert(entry.clone()) {
-                    warnings.push(format!(
-                        "MCP_DEST_UNKNOWN {label}: \"{bundle}\" — {}",
-                        crate::manifest::dest::unknown_mcp_file(entry, scope)
-                    ));
+                if !unknown.contains(entry) {
+                    unknown.push(entry.clone());
                 }
             }
         }
     }
-    Some(mapped)
+    DestNarrowing {
+        filter: Some(mapped),
+        unknown,
+    }
 }
 
 /// The ledger identity of a LOCAL `kind = "mcp"` row: the tracked skill id when THIS SCOPE'S
@@ -2159,15 +2220,21 @@ fn local_mcp_demand(
     let bundle_id = local_bundle_identity(env, sc, dir, display);
     match env.ctx.fs.read_opt(&dir.join("server.json")) {
         Ok(Some(bytes)) => {
-            let filter = mcp_filter(
+            let narrowing = mcp_filter(
                 sc,
                 Some(row),
                 display,
                 true,
                 &mut sweep.mcp_warned_dests,
                 &mut sweep.advisories,
+                &mut sweep.warnings,
             );
-            sweep.note_mcp_row(&sc.label, &bundle_id, row_index);
+            sweep.note_mcp_row(
+                &sc.label,
+                &bundle_id,
+                row_index,
+                narrowing.unreachable.as_deref(),
+            );
             sweep.mcp_demands.entry(sc.label.clone()).or_default().push(
                 crate::mcp_engine::McpDemand {
                     bundle_id,
@@ -2175,7 +2242,7 @@ fn local_mcp_demand(
                     workspace_slug: None,
                     version_id: String::new(),
                     server_json: bytes,
-                    harness_filter: filter,
+                    harness_filter: narrowing.filter,
                 },
             );
         }
@@ -2310,15 +2377,18 @@ fn reconcile_set<'a>(
                 // members, folders freeze its skill members' placement (a folder entry is not
                 // an unknown FILE on a channel, so no warning fires for it).
                 let dest = if mcp { None } else { row.fields().dest };
+                let narrowing = mcp_filter(
+                    sc,
+                    Some(row),
+                    &display,
+                    false,
+                    &mut sweep.mcp_warned_dests,
+                    &mut sweep.advisories,
+                    &mut sweep.warnings,
+                );
                 let st = SyncTarget {
-                    mcp_dest_filter: mcp_filter(
-                        sc,
-                        Some(row),
-                        &display,
-                        false,
-                        &mut sweep.mcp_warned_dests,
-                        &mut sweep.advisories,
-                    ),
+                    mcp_dest_filter: narrowing.filter,
+                    mcp_unreachable: narrowing.unreachable,
                     target,
                     pin: None,
                     display,
@@ -2332,16 +2402,6 @@ fn reconcile_set<'a>(
             }
         }
         KeyShape::RepoSet { host, owner, repo } => {
-            // The same typed refusal as the repo-skill arm: GitHub-sourced MCP bundles are not
-            // yet supported.
-            if row.fields().kind.as_deref() == Some("mcp") {
-                sweep.warnings.push(format!(
-                    "MCP_GITHUB_UNSUPPORTED {}: \"{}\" — GitHub-sourced MCP bundles are not yet \
-                     supported; publish the bundle to a workspace and add it from there",
-                    sc.label, row.reference
-                ));
-                return;
-            }
             reconcile_repo_set(env, sc, row, host, owner, repo, targets, sweep);
         }
         _ => {}
@@ -2419,6 +2479,7 @@ fn reconcile_feed<'a>(
                 let st = SyncTarget {
                     // A feed item has no row — no dest, no narrowing: the default placement.
                     mcp_dest_filter: None,
+                    mcp_unreachable: None,
                     target: CatalogTarget {
                         skill_id: ds.skill_id.clone(),
                         name: ds.name.clone(),
@@ -2475,8 +2536,6 @@ fn reconcile_feed<'a>(
                     mode: FollowMode::Auto,
                     review_required: ds.review_required,
                     following: true,
-                    agents: Vec::new(),
-                    excluded_agents: Vec::new(),
                 };
                 let run_ctx = super::pull::ctx_with_plane_and_follow(
                     env.ctx,
@@ -2537,6 +2596,7 @@ fn reconcile_feed<'a>(
                         &ds.name,
                         Some(&run.session.workspace_name),
                         None,
+                        None,
                         row_index,
                         sweep,
                     );
@@ -2590,6 +2650,9 @@ struct SyncTarget {
     /// For an `"mcp"` target: the harnesses whose config files the row's `dest` names —
     /// carried onto the scope's [`mcp_engine::McpDemand`]. `None` = every MCP harness.
     mcp_dest_filter: Option<Vec<String>>,
+    /// For an `"mcp"` target whose `dest` names NO config file topos can edit: why the bundle
+    /// reaches no agent, so the receipt row says it instead of printing a healthy install.
+    mcp_unreachable: Option<String>,
     /// Where this bundle sits in the BATCH its source is converging — what turns the activity line
     /// into "updating docs (2 of 7)". `None` for a lone explicit row, which is a batch of one and
     /// says so by not counting.
@@ -2665,8 +2728,6 @@ fn sync_workspace_skill<'a>(
         mode: FollowMode::Auto,
         review_required: target.review_required,
         following: true,
-        agents: Vec::new(),
-        excluded_agents: Vec::new(),
     };
     // The scope decides BOTH the placement plan and the STORE the engine runs against: person → the
     // home layout + home engine; project → the project's own store (`<project>/.topos/state/<user>/`)
@@ -2895,6 +2956,7 @@ fn sync_workspace_skill<'a>(
             &target.name,
             Some(&run.session.workspace_name),
             st.mcp_dest_filter.clone(),
+            st.mcp_unreachable.as_deref(),
             row_index,
             sweep,
         );
@@ -3179,12 +3241,13 @@ fn push_stored_mcp_demand(
     name: &str,
     workspace_slug: Option<&str>,
     harness_filter: Option<Vec<String>>,
+    unreachable: Option<&str>,
     row_index: Option<usize>,
     sweep: &mut Sweep,
 ) {
     match crate::mcp_engine::stored_server_json(run_ctx, sid) {
         Ok(Some((version_id, server_json))) => {
-            sweep.note_mcp_row(&sc.label, sid.as_str(), row_index);
+            sweep.note_mcp_row(&sc.label, sid.as_str(), row_index, unreachable);
             sweep.mcp_demands.entry(sc.label.clone()).or_default().push(
                 crate::mcp_engine::McpDemand {
                     bundle_id: sid.as_str().to_owned(),

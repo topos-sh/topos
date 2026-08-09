@@ -3,7 +3,7 @@
 //! refreshes every copy), the Foreign freeze (the sweep never writes a pre-existing dir — marked
 //! or not; only the consented `follow topos --yes` adopts a MARKED downloaded copy,
 //! snapshot-first), the provenance matcher's fail-closed shapes, the durable `remove topos`
-//! opt-out (+ `follow topos` back), the `--agent` exclusion route, `list`'s `built-in` row, and
+//! opt-out (+ `follow topos` back), the forward-compatible state doc, `list`'s `built-in` row, and
 //! the end-to-end name reservation (`add`). All over a real fs + a temp fake `$HOME` — the
 //! developer's machine is never probed.
 
@@ -253,6 +253,35 @@ fn ensure_places_the_bundle_and_lists_it_as_built_in() {
         })
         .any(|lock| lock.name == "topos" && crate::ops::is_builtin(&lock.skill_id));
     assert!(held, "the built-in's store record stands");
+}
+
+/// **A state doc written by another binary still loads.** `state/builtin.json` is durable and
+/// carries the ONE thing a person decided — the opt-out — so a file holding keys this shape no
+/// longer has must read as the opt-out it recorded, never as a parse failure that bricks the sweep.
+#[test]
+fn a_state_doc_carrying_unknown_keys_still_loads_the_opt_out() {
+    let rig = Rig::new("state-fwd");
+    rig.detect(".cline");
+    let inert_f = InertFollow;
+    let inert_p = InertPlane;
+    let ctx = rig.ctx(&inert_f, &inert_p);
+    let path = rig.layout().builtin_state_path();
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(
+        &path,
+        format!(
+            "{{\n  \"schema_version\": {},\n  \"removed\": true,\n  \"agents\": [\"claude-code\"],\
+             \n  \"excluded_agents\": [\"cursor\"]\n}}\n",
+            topos_types::PERSISTED_SCHEMA_VERSION
+        ),
+    )
+    .unwrap();
+
+    let sync = ops::ensure_builtin(&ctx).unwrap();
+    assert!(
+        !sync.changed && !rig.shared_copy().exists(),
+        "the recorded opt-out is honored — the sweep re-places nothing"
+    );
 }
 
 #[test]

@@ -89,6 +89,21 @@ pub fn sanitize_skill_dir(raw: &str) -> Option<String> {
 /// an occupied-dir collision (workspace suffix, then the id).
 pub const RESERVED_SKILL_DIR: &str = "topos";
 
+/// The dir name topos's own MCP surface OWNS: Claude Code reads server config from a plugin
+/// DIRECTORY that sits inside the very skills root the placement engine writes into
+/// ([`mcp::descriptor`] pins the spelling; a test here holds the two in agreement). It belongs to
+/// no skill, so unlike [`RESERVED_SKILL_DIR`] there is no id that claims it.
+pub const RESERVED_MCP_PLUGIN_DIR: &str = "topos-mcp";
+
+/// Whether `name` is a placement dir topos keeps for itself — the ONE reservation rule
+/// [`choose_skill_dir`] and its callers share. A skill whose display name sanitizes to a reserved
+/// dir is not refused: it disambiguates down the ladder exactly like an occupied dir.
+#[must_use]
+pub fn is_reserved_skill_dir(name: &str, skill_id: &str) -> bool {
+    (name == RESERVED_SKILL_DIR && skill_id != RESERVED_SKILL_DIR)
+        || name == RESERVED_MCP_PLUGIN_DIR
+}
+
 /// The DEFAULT taken-probe for [`choose_skill_dir`]: lstat-based occupancy. A DANGLING symlink is a
 /// real filesystem entry a placement cannot claim, but `Path::exists()` traverses it and reads
 /// "free" — the ladder must move past it. Callers with richer knowledge (the CLI knows which paths
@@ -111,9 +126,8 @@ pub fn dir_taken(p: &Path) -> bool {
 /// record), is ever chosen, so a placement can never clobber another skill's (or the user's)
 /// directory. The one residual: with EVERY rung taken (astronomically unlikely — four distinct
 /// foreign dirs shadowing one skill), the bare id is still returned; the CLI's materializer refuses
-/// to overwrite an occupied dir it never placed, so even that names but never clobbers. The name
-/// [`RESERVED_SKILL_DIR`] is additionally reserved for the built-in skill (the one skill whose ID
-/// equals it).
+/// to overwrite an occupied dir it never placed, so even that names but never clobbers. The dirs
+/// topos keeps for itself ([`is_reserved_skill_dir`]) are additionally never chosen by name.
 ///
 /// `naming`'s strings are UNTRUSTED and are sanitized to a single safe path component before any join;
 /// `skill_id` must be an already-validated single component (the trait-wide id contract). The crate
@@ -127,7 +141,7 @@ pub fn choose_skill_dir(
     is_owned: &dyn Fn(&Path) -> bool,
 ) -> PathBuf {
     if let Some(name) = naming.name.and_then(sanitize_skill_dir) {
-        let reserved = name == RESERVED_SKILL_DIR && skill_id != RESERVED_SKILL_DIR;
+        let reserved = is_reserved_skill_dir(&name, skill_id);
         let by_name = skills_root.join(&name);
         if !reserved && (!is_taken(&by_name) || is_owned(&by_name)) {
             return by_name;
@@ -319,5 +333,67 @@ mod ladder_tests {
             &|_| false,
         );
         assert_eq!(d, root.join("deploy-acme-3"));
+    }
+
+    /// **A skill display-named after a dir topos owns never gets that dir**, free or not. The
+    /// built-in's own name is claimed by the one skill whose id equals it; the Claude Code MCP
+    /// plugin dir lives in the same skills root and is claimed by no skill at all, so a workspace
+    /// skill called `topos-mcp` would otherwise take the surface out from under the MCP converge.
+    /// Both degrade down the ordinary ladder — the suffixed form, exactly like an occupied dir.
+    #[test]
+    fn a_dir_topos_owns_is_never_chosen_by_a_skills_display_name() {
+        let root = PathBuf::from("/skills");
+        let free = taken(&[]);
+        for reserved in [RESERVED_SKILL_DIR, RESERVED_MCP_PLUGIN_DIR] {
+            let naming = PlacementNaming {
+                name: Some(reserved),
+                workspace_slug: Some("acme"),
+            };
+            let d = choose_skill_dir(&root, "topos_aabbccdd", naming, &free, &|_| false);
+            assert_eq!(
+                d,
+                root.join(format!("{reserved}-acme")),
+                "{reserved}: a free reserved dir is still not the placement"
+            );
+            // With no workspace to namespace by, the ladder falls to the opaque id — never the
+            // reserved dir.
+            let d = choose_skill_dir(
+                &root,
+                "topos_aabbccdd",
+                PlacementNaming {
+                    name: Some(reserved),
+                    workspace_slug: None,
+                },
+                &free,
+                &|_| false,
+            );
+            assert_eq!(d, root.join("topos_aabbccdd"), "{reserved}");
+        }
+        // The built-in itself — the one skill whose id IS the name — still claims its own dir.
+        let d = choose_skill_dir(
+            &root,
+            RESERVED_SKILL_DIR,
+            PlacementNaming {
+                name: Some(RESERVED_SKILL_DIR),
+                workspace_slug: None,
+            },
+            &free,
+            &|_| false,
+        );
+        assert_eq!(d, root.join(RESERVED_SKILL_DIR));
+    }
+
+    /// The reservation is only worth anything while it names the dir the MCP surface actually
+    /// writes: the descriptor table's Claude Code user surface is a suffix under the skills root,
+    /// and its LAST component is the reserved name.
+    #[test]
+    fn the_reserved_plugin_dir_is_the_claude_code_mcp_surfaces_own_component() {
+        let surface = mcp::descriptor::mcp_harness("claude-code")
+            .and_then(|h| h.user_surface)
+            .expect("claude-code has a user MCP surface");
+        assert_eq!(
+            surface.suffix.rsplit('/').next(),
+            Some(RESERVED_MCP_PLUGIN_DIR)
+        );
     }
 }

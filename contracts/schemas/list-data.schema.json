@@ -348,6 +348,13 @@
           "description": "`false` = NO row in any visible scope manages this name (and it is not the built-in): the\nanswer is the not-managed headline plus `folders`, and every managed-only field above is\nabsent/at its baseline. Omits when `true` (the pre-existing managed shape). **INFERRED**\n(additive).",
           "type": "boolean"
         },
+        "mcp_unreachable": {
+          "description": "For an `mcp` bundle whose row freezes a `dest` that names no config file topos can edit:\nwhy the bundle reaches NO agent. Absent whenever it reaches at least one — a row with\nsomewhere to land says nothing here. **INFERRED** (additive).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "name": {
           "description": "The bundle's name.",
           "type": "string"

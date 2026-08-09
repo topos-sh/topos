@@ -173,13 +173,6 @@ pub(crate) struct FollowContext {
     pub review_required: bool,
     /// Whether the skill is currently delivered (a `false` skill is inventoried but not pulled).
     pub following: bool,
-    /// A placement include-list of harness-registry slugs this skill's bytes are scoped to. Empty =
-    /// unscoped (every detected agent) — the ordinary case; only the BUILT-IN skill's own state
-    /// narrows it today. Never told to the plane.
-    pub agents: Vec<String>,
-    /// Placement-excluded harness slugs — agents whose placement the engine cleans and stops
-    /// maintaining. Empty for everything the reconcile feeds. Never told to the plane.
-    pub excluded_agents: Vec<String>,
 }
 
 /// The durable delivery-state source. The production impl is the reconcile's cache-backed
