@@ -353,7 +353,7 @@ fn the_mcp_bundle_loop_across_six_agents() {
         "every MCP-capable agent reports: {swept}"
     );
     for (agent, state) in &states {
-        assert_eq!(state, "current", "{agent} placed the entry: {swept}");
+        assert_eq!(state, "placed", "{agent} placed the entry: {swept}");
     }
 
     // Claude Code — a wholly topos-owned plugin DIR, both files rendered whole.
@@ -451,7 +451,8 @@ fn the_mcp_bundle_loop_across_six_agents() {
             .expect("a per-harness list")
             .iter()
             .all(|h| h["state"] == "current"),
-        "every reported state is current: {reported}"
+        "the fleet's STANDING picture — where the entries live, not what the last sweep did to \
+         them: {reported}"
     );
 
     // ── 3. removal converges: every surface returns to the person's own bytes ───────────────────
@@ -509,7 +510,8 @@ fn the_mcp_bundle_loop_across_six_agents() {
     assert_eq!(
         state_of(&swept, BUNDLE, "cursor").as_deref(),
         Some("current"),
-        "the entry is back: {swept}"
+        "the entry is back — the `add` converged it inline, so this sweep found it in order: \
+         {swept}"
     );
     let cursor_path = home.join(".cursor").join("mcp.json");
     assert_eq!(
@@ -641,7 +643,8 @@ fn the_mcp_bundle_loop_across_six_agents() {
         assert_eq!(
             state_of(&swept, BUNDLE, agent).as_deref(),
             Some("current"),
-            "{agent} took the project surface: {swept}"
+            "{agent} took the project surface (the `add` placed it; this sweep found it in \
+             order): {swept}"
         );
     }
 

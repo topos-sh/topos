@@ -928,8 +928,9 @@ fn agent_line(state: &topos_types::results::McpAgentState) -> String {
     match state.state.as_str() {
         // A fresh/updated placement carries the harness's reload note (how the change goes live —
         // "restart Cursor", "sign in with /mcp"), exactly as the update path's receipt does; an
-        // already-current entry carries none.
-        "current" => match &state.note {
+        // already-current entry carries none. Both are a server entry sitting in that file, which
+        // is what this receipt reports — the states differ only in whether THIS run wrote it.
+        "placed" | "current" => match &state.note {
             Some(note) => format!("{where_}: server entry — {note}"),
             None => format!("{where_}: server entry"),
         },
@@ -1302,7 +1303,7 @@ mod tests {
         };
         assert_eq!(
             agent_line(&withheld),
-            crate::render::mcp_agent_line(&withheld)
+            crate::render::mcp_agent_line(&withheld, false)
         );
         assert_eq!(
             agent_line(&withheld),
@@ -1318,7 +1319,11 @@ mod tests {
                 note: None,
                 file: None,
             };
-            assert_eq!(agent_line(&s), crate::render::mcp_agent_line(&s), "{state}");
+            assert_eq!(
+                agent_line(&s),
+                crate::render::mcp_agent_line(&s, false),
+                "{state}"
+            );
         }
     }
 

@@ -185,7 +185,7 @@
       ]
     },
     "McpAgentState": {
-      "description": "One agent's (harness's) state for a config-placed (`mcp`) bundle on this installation.\n`state` is an OPEN vocabulary — `current` / `drifted` / `not-supported` / `unprovable` /\n`conflicting` / `removed`; a reader ignores a state it does not recognize. **INFERRED**\n(additive).",
+      "description": "One agent's (harness's) state for a config-placed (`mcp`) bundle on this installation.\n`state` is an OPEN vocabulary — `placed` (this run WROTE the entry into that file: a first\nplacement, an update, or a repair) / `current` (found already in order, nothing written) /\n`drifted` / `not-supported` / `unprovable` / `conflicting` / `removed`; a reader ignores a\nstate it does not recognize. **INFERRED** (additive).",
       "type": "object",
       "properties": {
         "agent": {

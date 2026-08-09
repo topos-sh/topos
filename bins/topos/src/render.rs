@@ -2216,7 +2216,10 @@ fn list_detail_tty(detail: &topos_types::results::ListDetail) -> String {
             for h in &detail.harnesses {
                 let file = h.file.as_deref().unwrap_or("(no file recorded)");
                 match (h.state.as_str(), h.note.as_deref()) {
-                    ("current", _) => s.push_str(&format!("\n    {}: {file}", h.agent)),
+                    // `placed` is what the LAST converge did, not a standing property of the
+                    // entry — this heading speaks about where entries live, so both healthy
+                    // states read the same way here.
+                    ("current" | "placed", _) => s.push_str(&format!("\n    {}: {file}", h.agent)),
                     (state, Some(note)) => {
                         s.push_str(&format!("\n    {}: {file} — {state} ({note})", h.agent));
                     }
@@ -3220,8 +3223,12 @@ pub(crate) fn pull_tty(
             }
             // An up-to-date row stays out of the table — UNLESS it is an mcp bundle with a
             // per-agent state that needs eyes (drift, a conflict, an unprovable surface): a
-            // compact receipt must not swallow those.
-            let noteworthy = s.harnesses.iter().any(|h| h.state != "current");
+            // compact receipt must not swallow those. A file this run wrote (`placed`) is not
+            // one of them: a row that moved bytes has already earned its own verb.
+            let noteworthy = s
+                .harnesses
+                .iter()
+                .any(|h| !matches!(h.state.as_str(), "current" | "placed"));
             if matches!(s.action, PullAction::UpToDate) && !noteworthy {
                 return None;
             }
@@ -3240,7 +3247,11 @@ pub(crate) fn pull_tty(
                 _ => s.skill.clone(),
             };
             let (line, mut extra) = pull_row(s, &scope);
-            extra.extend(s.harnesses.iter().map(mcp_agent_line));
+            // A row that WROTE a config file this run reads its untouched files as `unchanged`
+            // beside the ones it placed — two words that answer the same question. A row that
+            // wrote nothing has nothing to contrast with, so its files stay `current`.
+            let wrote = s.harnesses.iter().any(|h| h.state == "placed");
+            extra.extend(s.harnesses.iter().map(|h| mcp_agent_line(h, wrote)));
             Some((lead, line, extra))
         })
         .collect();
@@ -3461,9 +3472,15 @@ fn notice_line(n: &topos_types::requests::WireNotice) -> String {
 /// in no file at all (not supported, unprovable). The phrase for every state comes from the ONE
 /// shared vocabulary ([`crate::mcp_engine::state_phrase`]), which `add`'s own receipt reads too;
 /// an unrecognized state renders verbatim with its note.
-pub(crate) fn mcp_agent_line(h: &topos_types::results::McpAgentState) -> String {
+///
+/// `row_wrote` is whether THIS row wrote any config file this run: beside a `placed` line, a file
+/// left alone reads `unchanged` — the answer to the question the placed line just raised — where
+/// on a row that wrote nothing the same state reads `current`, a standing fact about the file
+/// rather than a comparison with a sibling.
+pub(crate) fn mcp_agent_line(h: &topos_types::results::McpAgentState, row_wrote: bool) -> String {
     let key = h.file.as_deref().unwrap_or(&h.agent);
     match (h.state.as_str(), h.note.as_deref()) {
+        ("current", _) if row_wrote => format!("{key}: unchanged"),
         ("current", None) => format!("{key}: current"),
         ("drifted", _) => format!("{key}: hand-edited — left in place"),
         (state, Some(note)) => {
@@ -3639,15 +3656,22 @@ fn pull_action_row(s: &PullSkill, scope: &PullReceiptScope) -> (String, Vec<Stri
                 // The marked-up tree gets its own line for the opposite reason: it is the one
                 // thing in a folder that is nobody's version, so calling it "your newer edits"
                 // would hand a person topos's own writing as their work.
-                Some(mixed) => extra.extend(mixed.iter().map(|p| match p.holds {
-                    ConflictHolds::Yours => format!("  {} still holds your version", p.dir),
-                    ConflictHolds::Theirs => format!("  {} holds the team's version", p.dir),
-                    ConflictHolds::MarkedUp => format!(
-                        "  {} holds both versions marked up — run one of the ways out below",
-                        p.dir
-                    ),
-                    ConflictHolds::NewerEdits => format!("  {} holds your newer edits", p.dir),
-                })),
+                Some(mixed) => {
+                    // The one lead-in a mixed set can honestly carry: it says what the lines
+                    // under it ARE, and claims nothing about any folder. Without it the list
+                    // starts mid-sentence, under a line about the team's version, and a reader
+                    // has to infer that these are their own folders being described.
+                    extra.push("what each folder holds:".to_owned());
+                    extra.extend(mixed.iter().map(|p| match p.holds {
+                        ConflictHolds::Yours => format!("  {} still holds your version", p.dir),
+                        ConflictHolds::Theirs => format!("  {} holds the team's version", p.dir),
+                        ConflictHolds::MarkedUp => format!(
+                            "  {} holds both versions marked up — run one of the ways out below",
+                            p.dir
+                        ),
+                        ConflictHolds::NewerEdits => format!("  {} holds your newer edits", p.dir),
+                    }));
+                }
                 // No merge report at all: nothing provable about disk, so nothing claimed.
                 None => {}
             }
@@ -3734,7 +3758,14 @@ fn destination_column(verb: &str, s: &PullSkill) -> String {
 /// The destinations a counted row spells out beneath itself — one per line, in the order the
 /// placement map holds them. Empty for a row whose column already named its single destination
 /// (saying it twice is noise) and for a row with none at all.
+///
+/// A config-placed (mcp) row that carries per-agent lines spells nothing out here either: those
+/// lines name the very same files AND say what happened in each, so the bare list beside them is
+/// the same list twice. (A removal carries no per-agent lines and keeps its list.)
 fn sub_destinations(s: &PullSkill) -> Vec<String> {
+    if s.kind.as_deref() == Some("mcp") && !s.harnesses.is_empty() {
+        return Vec::new();
+    }
     match s.destinations.as_slice() {
         [] | [_] => Vec::new(),
         many => many.to_vec(),
@@ -6471,7 +6502,8 @@ mod tests {
         );
         assert!(
             mixed.contains(
-                "      ~/.claude/skills/coolify-deploy still holds your version\n\
+                "    what each folder holds:\n\
+                 \x20     ~/.claude/skills/coolify-deploy still holds your version\n\
                  \x20     ~/.codex/skills/coolify-deploy holds the team's version\n\
                  \x20     ~/.cursor/skills/coolify-deploy holds your newer edits\n\
                  \x20     ~/.agents/skills/coolify-deploy holds both versions marked up — run one \

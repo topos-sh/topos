@@ -1975,15 +1975,19 @@ fn destination_paths(ctx: &Ctx<'_>, map: &PlacementMap, indices: &[usize]) -> Ve
         .collect()
 }
 
-/// The config FILES a converge's per-agent states landed in (`current` entries only), deduped —
-/// what a config-placed bundle's `installed (…)` column counts. `~`-abbreviated.
+/// The config FILES this converge WROTE (the `placed` states), deduped — what a config-placed
+/// bundle's `installed (…)` / `updated (…)` column counts and spells out. `~`-abbreviated.
+///
+/// Written, never merely holding: a destination column answers "what did this run do to my
+/// machine", so a file that already held the entry byte-for-byte is not counted among the ones
+/// the run landed. The per-agent lines beside the row still name it — as `unchanged`.
 pub(crate) fn config_destinations(
     ctx: &Ctx<'_>,
     states: &[topos_types::results::McpAgentState],
 ) -> Vec<String> {
     let mut out: Vec<String> = states
         .iter()
-        .filter(|s| s.state == "current")
+        .filter(|s| s.state == "placed")
         .filter_map(|s| s.file.as_deref())
         .map(|f| super::inventory::pretty(ctx, Path::new(f)))
         .collect();

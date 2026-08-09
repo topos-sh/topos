@@ -144,9 +144,10 @@ pub struct PullSkill {
 }
 
 /// One agent's (harness's) state for a config-placed (`mcp`) bundle on this installation.
-/// `state` is an OPEN vocabulary — `current` / `drifted` / `not-supported` / `unprovable` /
-/// `conflicting` / `removed`; a reader ignores a state it does not recognize. **INFERRED**
-/// (additive).
+/// `state` is an OPEN vocabulary — `placed` (this run WROTE the entry into that file: a first
+/// placement, an update, or a repair) / `current` (found already in order, nothing written) /
+/// `drifted` / `not-supported` / `unprovable` / `conflicting` / `removed`; a reader ignores a
+/// state it does not recognize. **INFERRED** (additive).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
 pub struct McpAgentState {

@@ -649,10 +649,11 @@ fn converge_places_into_all_six_dialects_byte_identical_to_the_drivers() {
         rendered[1].1
     );
 
-    // Six states, all current, each carrying its reload note (a fresh placement).
+    // Six states, all `placed` — this converge wrote every one of them — each carrying its
+    // reload note (a fresh placement).
     for h in SYNTHETIC {
         let st = state_of(&out, "s_linear", h.slug);
-        assert_eq!(st.state, "current", "{}", h.slug);
+        assert_eq!(st.state, "placed", "{}", h.slug);
         assert_eq!(st.note.as_deref(), Some(h.reload_note), "{}", h.slug);
     }
     // The ledger: one key, six entries, every fingerprint matching what the file provably holds.
@@ -909,7 +910,7 @@ fn the_oauth_capability_filter_withholds_unknown_and_oauth_servers() {
     );
     assert_eq!(state_of(&out, "s_u", "plainbot").state, "not-supported");
     assert_eq!(state_of(&out, "s_o", "plainbot").state, "not-supported");
-    assert_eq!(state_of(&out, "s_n", "plainbot").state, "current");
+    assert_eq!(state_of(&out, "s_n", "plainbot").state, "placed");
     let text = std::fs::read_to_string(home.0.join(".plainbot/mcp.json")).unwrap();
     assert!(
         text.contains("https://n.example") && !text.contains("o.example"),
@@ -1062,7 +1063,7 @@ fn a_hand_edited_plugin_manifest_survives_update_and_removal_disclosed() {
         &no_hold(),
         true,
     );
-    assert_eq!(state_of(&out, "s_a", "claude-code").state, "current");
+    assert_eq!(state_of(&out, "s_a", "claude-code").state, "placed");
     let mcp_path = home.0.join(".claude/skills/topos-mcp/.mcp.json");
     assert!(
         std::fs::read_to_string(&mcp_path).unwrap().contains("/v2"),
@@ -1192,7 +1193,7 @@ fn converges_serialize_on_the_per_scope_mcp_lock() {
         .expect("the released lock lets the converge finish");
     worker.join().unwrap();
     assert!(out.warnings.is_empty(), "{:?}", out.warnings);
-    assert_eq!(state_of(&out, "s_a", "cursor").state, "current");
+    assert_eq!(state_of(&out, "s_a", "cursor").state, "placed");
     assert!(home.0.join(".cursor/mcp.json").exists());
 }
 
@@ -1476,7 +1477,7 @@ fn the_engine_places_the_remote_the_gate_approved_not_the_first_typed_one() {
     d.harness_filter = Some(vec!["cursor".into()]);
     let out = mcp_engine::converge(&io, &[d], SYNTHETIC, &all_slugs(), &no_hold(), true);
     assert!(out.warnings.is_empty(), "{:?}", out.warnings);
-    assert_eq!(state_of(&out, "s_two", "cursor").state, "current");
+    assert_eq!(state_of(&out, "s_two", "cursor").state, "placed");
     let text = std::fs::read_to_string(home.0.join(".cursor/mcp.json")).unwrap();
     assert!(text.contains("https://second.example/mcp"), "{text}");
 }
@@ -1686,9 +1687,14 @@ fn a_fault_at_any_write_never_tears_state_and_the_next_converge_heals() {
             &no_hold(),
             true,
         );
-        assert_eq!(
-            state_of(&out, "s_a", "cursor").state,
-            "current",
+        // Fully placed either way: `placed` where this clean re-run did the writing, `current`
+        // where the faulted run had already landed the entry and recovery promoted it. The
+        // file-vs-ledger check below is what proves the placement itself.
+        assert!(
+            matches!(
+                state_of(&out, "s_a", "cursor").state.as_str(),
+                "placed" | "current"
+            ),
             "fail_at={fail_at}: {out:?}"
         );
         let bytes = std::fs::read(home.0.join(".cursor/mcp.json")).unwrap();
@@ -1785,11 +1791,13 @@ fn a_workspace_mcp_bundle_lands_in_configs_reports_harnesses_and_caches_kind() {
     let agents: BTreeSet<&str> = row.harnesses.iter().map(|h| h.agent.as_str()).collect();
     assert_eq!(agents, ["cursor", "openclaw"].into());
     assert!(
-        row.harnesses.iter().all(|h| h.state == "current"),
-        "{row:?}"
+        row.harnesses.iter().all(|h| h.state == "placed"),
+        "a fresh placement: this run wrote every one of them — {row:?}"
     );
 
-    // The applied report carried the same states over the wire.
+    // The applied report carried the states over the wire — as the STANDING answer both it and
+    // the cache exist to give: where the entries live, one word for a file whatever sweep last
+    // touched it (`placed` is the RUN's own word, and stays on the receipt above).
     let reported = plane.reported.lock().unwrap().clone();
     let (_, version, harnesses) = reported
         .iter()
@@ -1797,12 +1805,20 @@ fn a_workspace_mcp_bundle_lands_in_configs_reports_harnesses_and_caches_kind() {
         .unwrap_or_else(|| panic!("reported: {reported:?}"));
     assert_eq!(version, &topos_core::digest::to_hex(&v.id));
     assert_eq!(harnesses.len(), 2, "{harnesses:?}");
+    assert!(
+        harnesses.iter().all(|h| h.state == "current"),
+        "the fleet's standing picture: {harnesses:?}"
+    );
 
-    // The offline cache carries the kind + the per-agent states.
+    // The offline cache carries the kind + the same per-agent standing states.
     let cache = sync_status::read(&rig.fs, &rig.layout()).unwrap();
     let ds = &cache.workspaces[WS].delivered["s_linear"];
     assert_eq!(ds.kind.as_deref(), Some("mcp"));
     assert_eq!(ds.harness_states.len(), 2, "{ds:?}");
+    assert!(
+        ds.harness_states.iter().all(|h| h.state == "current"),
+        "{ds:?}"
+    );
 
     // And `list` answers the kind + the per-agent detail offline.
     let list = ops::list_with(
@@ -1921,16 +1937,22 @@ fn offline_sweeps_still_heal_configs_from_the_store() {
     assert!(
         row.harnesses
             .iter()
-            .any(|h| h.agent == "cursor" && h.state == "current"),
-        "{row:?}"
+            .any(|h| h.agent == "cursor" && h.state == "placed"),
+        "the repaired entry says this run wrote it: {row:?}"
     );
 }
 
-/// THE RECEIPT'S OWN VERB. A run that puts a hand-deleted config entry back CHANGED this machine,
-/// and the header must say so: the store never moved (the sync reads "up to date"), so a header
-/// built from the sync's answer alone said `checked` over a run that rewrote a person's agent
-/// config. A genuinely idle sweep still says `checked`, and the repaired row reads as the ordinary
-/// catch-up it is, naming the config file it wrote.
+/// THE RECEIPT'S OWN VERB, AND WHAT IT COUNTS. A run that puts a hand-deleted config entry back
+/// CHANGED this machine, and the header must say so: the store never moved (the sync reads "up to
+/// date"), so a header built from the sync's answer alone said `checked` over a run that rewrote a
+/// person's agent config. A genuinely idle sweep still says `checked`, and the repaired row reads
+/// as the ordinary catch-up it is.
+///
+/// The row is then held to ONE truth on both channels, over TWO config files of which this run
+/// wrote exactly one: the destination column and `destinations` name that ONE file (never the one
+/// that merely already held the entry), the file list prints ONCE (the per-agent lines carry it,
+/// and say what happened in each), and the JSON tells the two files apart exactly as the TTY does
+/// — `placed` beside `current`, never one word for both.
 #[test]
 fn a_repaired_config_entry_makes_the_run_an_update_not_a_check() {
     let rig = Rig::new("repair");
@@ -1946,9 +1968,10 @@ fn a_repaired_config_entry_makes_the_run_an_update_not_a_check() {
         skills: vec![mcp_catalog_entry("s_a", "alpha", &v)],
         channels: Vec::new(),
     };
-    // ONE hermetic config file, so the row's destination column names it outright.
+    // TWO hermetic config files: only one of them is deleted below, so the receipt has something
+    // to be wrong about.
     rig.write_global(&format!(
-        "[bundles]\n\"{HOST}/{WS_NAME}/alpha\" = {{ dest = [\"~/.cursor/mcp.json\"] }}\n"
+        "[bundles]\n\"{HOST}/{WS_NAME}/alpha\" = {{ {SAFE} }}\n"
     ));
     let ctx = rig.ctx_at(Some(&rig.work.0));
     let tty = |out: &ops::PullOutcome| {
@@ -1968,7 +1991,7 @@ fn a_repaired_config_entry_makes_the_run_an_update_not_a_check() {
     let idle = tty(&sweep(&ctx, &plane, &dir));
     assert!(idle.starts_with("checked "), "{idle}");
 
-    // The entry is deleted by hand; the next sweep writes it back.
+    // ONE entry is deleted by hand; the next sweep writes THAT ONE back.
     std::fs::remove_file(&cursor).unwrap();
     let out = sweep(&ctx, &plane, &dir);
     assert!(cursor.exists(), "the config was not repaired");
@@ -1978,9 +2001,105 @@ fn a_repaired_config_entry_makes_the_run_an_update_not_a_check() {
         topos_types::results::PullAction::Refreshed,
         "{row:?}"
     );
-    let repaired = tty(&out);
-    assert!(repaired.starts_with("updated "), "{repaired}");
-    assert!(repaired.contains("alpha   updated ("), "{repaired}");
+    // THE ROW BLOCK, byte for byte: one file list, the written file named inline, and the
+    // untouched file's own line saying it was left alone.
+    assert_eq!(
+        tty(&out),
+        "updated machine-wide\n\
+         alpha   updated (~/.cursor/mcp.json)\n    \
+             ~/.cursor/mcp.json: placed — restart Cursor\n    \
+             ~/.openclaw/openclaw.json: unchanged\n\
+         Checked 1 bundle: 1 updated."
+    );
+    // The wire says the same thing the receipt does: the written file, and only it, is the
+    // destination — and the two files' states differ.
+    assert_eq!(row.destinations, vec!["~/.cursor/mcp.json".to_owned()]);
+    let states: Vec<(&str, &str)> = row
+        .harnesses
+        .iter()
+        .map(|h| (h.agent.as_str(), h.state.as_str()))
+        .collect();
+    assert_eq!(
+        states,
+        vec![("cursor", "placed"), ("openclaw", "current")],
+        "the rewritten file and the merely-found one are distinguishable: {row:?}"
+    );
+}
+
+/// A FIRST-EVER PLACEMENT IS AN INSTALL. A brand-new `kind = "mcp"` manifest line syncs
+/// store-only — nothing to place, so the sync answers `up to date` — and the converge then writes
+/// the config entries for the first time. That is not a repair of anything: the row must lead
+/// with `+` and read `installed`, exactly as a delivered mcp bundle's first row does. The scope's
+/// ledger is the durable signal, so the SAME bundle re-healed later reads `updated` instead.
+#[test]
+fn a_first_ever_mcp_placement_reads_installed_not_a_repair() {
+    let rig = Rig::new("first");
+    seed_harness_dirs(&rig.home.0);
+    let src = rig.home.0.join("weather");
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::write(
+        src.join("server.json"),
+        server_json("https://w.example/mcp").as_bytes(),
+    )
+    .unwrap();
+    rig.write_global(&format!(
+        "[bundles]\n\"{}\" = {{ kind = \"mcp\", {SAFE} }}\n",
+        src.display()
+    ));
+    let plane = FakePlane::new();
+    let dir = FakeDirectory {
+        skills: Vec::new(),
+        channels: Vec::new(),
+    };
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    let tty = |out: &ops::PullOutcome| {
+        crate::render::pull_tty(
+            &out.data,
+            &out.decisions,
+            &out.warnings,
+            &out.advisories,
+            &out.disclosures,
+        )
+    };
+
+    let out = sweep(&ctx, &plane, &dir);
+    let row = out
+        .data
+        .skills
+        .iter()
+        .find(|s| s.skill == "weather")
+        .unwrap();
+    assert_eq!(
+        row.action,
+        topos_types::results::PullAction::Installed,
+        "{row:?}"
+    );
+    assert_eq!(
+        tty(&out),
+        "updated machine-wide\n\
+         + weather   installed (2 config files)\n    \
+             ~/.cursor/mcp.json: placed — restart Cursor\n    \
+             ~/.openclaw/openclaw.json: placed — picked up automatically; sign in with \
+             `openclaw mcp login <name>`\n\
+         Checked 1 bundle: 1 installed."
+    );
+
+    // The next sweep has nothing to do at all, and a later re-heal of the SAME bundle is the
+    // repair — `updated`, never a second install.
+    assert!(tty(&sweep(&ctx, &plane, &dir)).starts_with("checked "));
+    std::fs::remove_file(rig.home.0.join(".cursor/mcp.json")).unwrap();
+    let healed = sweep(&ctx, &plane, &dir);
+    let row = healed
+        .data
+        .skills
+        .iter()
+        .find(|s| s.skill == "weather")
+        .unwrap();
+    assert_eq!(
+        row.action,
+        topos_types::results::PullAction::Refreshed,
+        "a bundle this scope had already placed re-heals as a repair: {row:?}"
+    );
 }
 
 #[test]

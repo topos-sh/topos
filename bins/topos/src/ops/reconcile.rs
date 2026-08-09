@@ -4774,21 +4774,36 @@ fn run_mcp_converge(
                 if row.action == PullAction::Installed {
                     row.destinations = sync_engine::config_destinations(env.ctx, &states);
                 }
-                // The REPAIR: the store held the right bytes all along, so the sync said "up to
-                // date" — but a config entry was gone (or hand-changed) and this run wrote it
-                // back. Disk moved, and a row that still read `up to date` would leave the
-                // receipt's own verb saying the run only looked. It is the ordinary catch-up:
-                // no version moved, only bytes on disk.
+                // The store held the right bytes all along, so the sync said "up to date" — but
+                // this run WROTE a config entry, so disk moved, and a row that still read `up to
+                // date` would leave the receipt's own verb saying the run only looked. THE RULE:
+                // a bundle whose config entries this scope had never placed before is an INSTALL
+                // (the first-ever placement of a manifest line, whose store side is a no-op
+                // sync); a write over entries the ledger already recorded is the ordinary
+                // catch-up — a repair, where no version moved and only bytes on disk did.
                 else if row.action == PullAction::UpToDate && bundle.wrote {
-                    row.action = PullAction::Refreshed;
+                    row.action = if bundle.first_placement {
+                        PullAction::Installed
+                    } else {
+                        PullAction::Refreshed
+                    };
                     row.destinations = sync_engine::config_destinations(env.ctx, &states);
                 }
                 row.harnesses = states;
             }
             // The merged map (the applied report + the delivery cache): person wins per slug,
             // the project fills slugs the person scope did not touch.
+            //
+            // Both of those answer a STANDING question — where this installation's entries live —
+            // not "what did this run do", so `placed` settles back to `current` on the way in: a
+            // fleet row (and the offline deep dive) would otherwise say a different word about
+            // the same unchanged file depending on which sweep last touched it. The RUN's own
+            // receipt above keeps the distinction, which is where it means something.
             let entry = merged.entry(bundle.bundle_id).or_default();
-            for state in bundle.states {
+            for mut state in bundle.states {
+                if state.state == "placed" {
+                    state.state = "current".to_owned();
+                }
                 let replace = person_scope || !entry.iter().any(|s| s.agent == state.agent);
                 if replace {
                     entry.retain(|s| s.agent != state.agent);

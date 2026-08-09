@@ -31,11 +31,16 @@
 //! The engine is OFFLINE by construction: demands carry the stored `server.json` bytes, so a dead
 //! network still heals config files from the store + ledger.
 //!
-//! Wire states (an OPEN vocabulary, kept small): `current` (placed / updated / already there) ·
-//! `drifted` (hand-edited since topos wrote it — untouched) · `not-supported` (withheld:
-//! capability or no surface at this scope) · `unprovable` (the surface cannot be safely edited) ·
-//! `conflicting` (the desired config key is occupied by an entry topos does not own) · `removed`
-//! (removal receipts only).
+//! Wire states (an OPEN vocabulary, kept small): `placed` (THIS run wrote the entry — a first
+//! placement, an update to it, or the repair of one that was gone) · `current` (found already in
+//! order; nothing written) · `drifted` (hand-edited since topos wrote it — untouched) ·
+//! `not-supported` (withheld: capability or no surface at this scope) · `unprovable` (the surface
+//! cannot be safely edited) · `conflicting` (the desired config key is occupied by an entry topos
+//! does not own) · `removed` (removal receipts only).
+//!
+//! `placed` vs `current` is the ONE fact both channels answer with: the JSON state and the words a
+//! person reads come from the same [`EntryState`], so a receipt can never say a file was written
+//! while the wire calls it merely current.
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
@@ -96,8 +101,14 @@ pub(crate) struct BundleStates {
     /// only honest answer to "did the disk move for this bundle": a store that is already
     /// current says nothing about the config files, and the receipt's own verb depends on the
     /// difference. The scope's ledger is topos's own bookkeeping, so a run that only rewrote
-    /// THAT wrote nothing here.
+    /// THAT wrote nothing here. The `placed` states in `states` name the FILES those writes
+    /// landed in.
     pub wrote: bool,
+    /// Whether those writes are this scope's FIRST config entries for the bundle — the durable
+    /// signal being the ledger, which held no entry for it when this converge began. A first
+    /// placement is an INSTALL however the store got its bytes; a write over a bundle the ledger
+    /// already placed is a repair. False whenever `wrote` is.
+    pub first_placement: bool,
 }
 
 /// One removed placement (removal convergence / the `remove` verb's inline converge).
@@ -263,6 +274,16 @@ pub(crate) fn converge(
         ));
         return out;
     }
+
+    // The bundles this scope had ALREADY placed when the converge began — read off the ledger
+    // after recovery, so it is the durable record and not a guess. A bundle absent here whose
+    // entry this run writes is being placed for the FIRST time in this scope (see
+    // [`BundleStates::first_placement`]).
+    let placed_before: HashSet<String> = ledger
+        .entries
+        .values()
+        .map(|e| e.bundle_id.clone())
+        .collect();
 
     // Parse every demand once. The FULL server-document gate (`mcp_validate`) re-runs on the
     // demand bytes here, fail-closed, BEFORE the placement parse: a local row's `server.json` is
@@ -515,6 +536,7 @@ pub(crate) fn converge(
             bundle_id: d.bundle_id.clone(),
             states: states.remove(&i).unwrap_or_default(),
             wrote: wrote.contains(&i),
+            first_placement: wrote.contains(&i) && !placed_before.contains(&d.bundle_id),
         })
         .collect();
     out
@@ -670,7 +692,7 @@ fn push_state(states: &mut BTreeMap<usize, Vec<McpAgentState>>, i: usize, s: Mcp
 /// wrong one.
 pub(crate) fn state_phrase(state: &str) -> &str {
     match state {
-        "current" => "placed",
+        "placed" => "placed",
         "not-supported" => "not placed",
         other => other,
     }
@@ -885,6 +907,17 @@ fn converge_surface(
                 && crate::config_io::replace_config(io.fs, &manifest, &plugin_dir::manifest_bytes())
                     .is_ok()
             {
+                // ONE truth on both channels: the keys that count as written say `placed`, the
+                // state every reader joins on — a row whose verb reports a write while its own
+                // per-agent line reads `current` has told a person two things.
+                for (key, state) in &mut surface.states {
+                    if state.state == "current"
+                        && outcome.fingerprints.iter().any(|(k, _)| k == key)
+                    {
+                        state.state = "placed".to_owned();
+                        state.note = Some(h.reload_note.to_owned());
+                    }
+                }
                 surface
                     .wrote
                     .extend(outcome.fingerprints.iter().map(|(k, _)| k.clone()));
@@ -1165,13 +1198,13 @@ fn fold_states(
     for (key, st) in states {
         let mapped = match st {
             // A NEW or CHANGED placement carries the harness's reload note — how the change goes
-            // live. These two are also the whole of what "topos wrote this entry" means, so the
-            // key is recorded: the wire state that comes out of both is `current`, and a receipt
-            // reading only that could not tell a placement it just repaired from one it merely
-            // found in order.
+            // live. These two are also the whole of what "topos wrote this entry" means, so they
+            // get their OWN wire state: a reader (the receipt, the fleet page, `--json`) can tell
+            // a file this run wrote from one it merely found in order, and both channels say it
+            // with the same word.
             EntryState::PlacedNew | EntryState::Updated => {
                 out.wrote.insert(key.clone());
-                agent_state(h.slug, "current", Some(h.reload_note), Some(path))
+                agent_state(h.slug, "placed", Some(h.reload_note), Some(path))
             }
             EntryState::Current => agent_state(h.slug, "current", None, Some(path)),
             EntryState::Drifted => agent_state(
