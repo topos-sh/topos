@@ -107,6 +107,11 @@ pub(crate) struct Row {
     pub placements: Vec<String>,
     /// Where this row's local EDITS sit, when it has any (see [`DraftCopies`]).
     pub draft_in: DraftCopies,
+    /// The scope-store record this row's applied state was read from, when one answered — what a
+    /// reader who needs another of that record's documents opens, instead of walking the store
+    /// for a matching name. Two non-retired records in one scope can hold ONE display name (two
+    /// workspaces, or a workspace copy beside a local one), so a name is not an identity.
+    pub record: Option<crate::id::SkillId>,
     /// A BUNDLE line (not an `"off"` switch) — what the inventory counts as a delivered skill.
     pub bundle: bool,
     /// The cached bundle kind (`Some("mcp")` for a config-placed bundle; `None` = a skill).
@@ -513,6 +518,7 @@ fn scope_rows(
             pin: row.pin(),
             placements: applied.placements,
             draft_in: applied.draft_in,
+            record: applied.record,
             bundle: true,
             kind,
             harness_states,
@@ -557,6 +563,7 @@ fn scope_rows(
                     pin: row.pin(),
                     placements: member.applied.placements,
                     draft_in: member.applied.draft_in,
+                    record: member.applied.record,
                     bundle: true,
                     // A repo-set member is always a skill: `kind = "mcp"` on GitHub rows refuses.
                     kind: None,
@@ -614,6 +621,7 @@ fn scope_rows(
                 pin: None,
                 placements: applied.placements,
                 draft_in: applied.draft_in,
+                record: applied.record,
                 bundle: true,
                 kind: ds.kind.clone(),
                 harness_states: ds.harness_states.clone(),
@@ -672,6 +680,7 @@ fn scope_rows(
                 pin: None,
                 placements: applied.placements,
                 draft_in: applied.draft_in,
+                record: applied.record,
                 bundle: true,
                 kind: ds.kind.clone(),
                 harness_states: ds.harness_states.clone(),
@@ -737,8 +746,10 @@ fn scope_rows(
             feed: None,
             pin: None,
             placements: Vec::new(),
-            // An `"off"` switch is a statement of the file, never a placed copy — nothing to edit.
+            // An `"off"` switch is a statement of the file, never a placed copy — nothing to edit,
+            // and no store record was read for it.
             draft_in: DraftCopies::None,
+            record: None,
             bundle: false,
             kind: None,
             harness_states: Vec::new(),
@@ -776,6 +787,17 @@ fn quiet_set_line(reference: &str, state: StatusItemState) -> String {
     }
 }
 
+/// The deep dive's answer: the wire detail the caller renders, and the store RECORD the answering
+/// row's state was read from. The identity stays internal — a reader never types an opaque id, so
+/// it is no field of the detail — but a caller that needs another of that record's documents must
+/// open THAT record, never one a name-walk happens to find first.
+#[derive(Debug)]
+pub(crate) struct Dive {
+    pub detail: ListDetail,
+    /// The answering row's record, when a store record answered (see [`Row::record`]).
+    pub record: Option<crate::id::SkillId>,
+}
+
 /// The deep single-skill answer (`topos list <name>`): the token resolved against the SAME lines
 /// the inventory renders (a row reference, a leaf name, or a cached feed name; `@ws/…` and the
 /// canonical spellings ride [`keys::parse_input`] with the one connected host as the default).
@@ -791,7 +813,7 @@ pub(crate) fn detail_for(
     sections: &[&ScopeResolution],
     all: &Sessions,
     token: &str,
-) -> Result<ListDetail, ClientError> {
+) -> Result<Dive, ClientError> {
     let hosts: BTreeSet<&str> = all.live().map(|s| s.host.as_str()).collect();
     let default_host = if hosts.len() == 1 {
         hosts.iter().copied().next()
@@ -812,40 +834,44 @@ pub(crate) fn detail_for(
             target: token.to_owned(),
         });
     };
-    Ok(ListDetail {
-        name: row.name.clone(),
-        scope: Some(scope.to_owned()),
-        source_file: row.source_file.clone(),
-        source_key: row.source_key.clone(),
-        feed: row.feed.clone(),
-        attribution: row.attribution.clone(),
-        version: row.version.clone(),
-        pin: row.pin.clone(),
-        placements: row.placements.clone(),
-        state: row.state,
-        kind: row.kind.clone(),
-        // For an mcp line: the cached per-agent config entries (placed file + state) — the deep
-        // dive's answer instead of placement dirs.
-        harnesses: row.harness_states.clone(),
-        managed: true,
-        folders: Vec::new(),
-        // The competing copies, when the row's own classification found some — the question the
-        // row's `draft in N folders that disagree (see: topos list <name>)` line sends here.
-        diverged: match &row.draft_in {
-            DraftCopies::Diverged(copies) => copies
-                .iter()
-                .map(|c| topos_types::results::DivergedCopy {
-                    display: c.display.clone(),
-                    dest: c.dest.clone(),
-                })
-                .collect(),
-            DraftCopies::None | DraftCopies::In(_) => Vec::new(),
+    Ok(Dive {
+        record: row.record.clone(),
+        detail: ListDetail {
+            name: row.name.clone(),
+            scope: Some(scope.to_owned()),
+            source_file: row.source_file.clone(),
+            source_key: row.source_key.clone(),
+            feed: row.feed.clone(),
+            attribution: row.attribution.clone(),
+            version: row.version.clone(),
+            pin: row.pin.clone(),
+            placements: row.placements.clone(),
+            state: row.state,
+            kind: row.kind.clone(),
+            // For an mcp line: the cached per-agent config entries (placed file + state) — the
+            // deep dive's answer instead of placement dirs.
+            harnesses: row.harness_states.clone(),
+            managed: true,
+            folders: Vec::new(),
+            // The competing copies, when the row's own classification found some — the question
+            // the row's `draft in N folders that disagree (see: topos list <name>)` line sends
+            // here.
+            diverged: match &row.draft_in {
+                DraftCopies::Diverged(copies) => copies
+                    .iter()
+                    .map(|c| topos_types::results::DivergedCopy {
+                        display: c.display.clone(),
+                        dest: c.dest.clone(),
+                    })
+                    .collect(),
+                DraftCopies::None | DraftCopies::In(_) => Vec::new(),
+            },
+            // The blocked line's workbench folder is filled by the dive's caller, which knows
+            // which scope answered — the folder is that scope's store's, and it is spelled from
+            // where the reader stands like every other path the dive prints.
+            conflict_copy: None,
+            conflict_reason: None,
         },
-        // The blocked line's workbench folder is filled by the dive's caller, which knows which
-        // scope answered — the folder is that scope's store's, and it is spelled from where the
-        // reader stands like every other path the dive prints.
-        conflict_copy: None,
-        conflict_reason: None,
     })
 }
 
@@ -935,6 +961,11 @@ struct Applied {
     digest: Option<String>,
     placements: Vec<String>,
     draft_in: DraftCopies,
+    /// The store record every field above was read from, when one answered — the identity a
+    /// later reader needs to open the SAME record's other documents. Carried rather than
+    /// re-derived from the name: two non-retired records in one scope can hold ONE display name
+    /// (two workspaces, or a workspace copy beside a local one), so a name is not an identity.
+    record: Option<crate::id::SkillId>,
 }
 
 impl Applied {
@@ -945,6 +976,7 @@ impl Applied {
             digest: None,
             placements: Vec::new(),
             draft_in: DraftCopies::None,
+            record: None,
         }
     }
 
@@ -1055,6 +1087,7 @@ fn applied_for_id(
             digest,
             placements,
             draft_in: DraftCopies::None,
+            record: Some(sid),
         };
     }
     if edited {
@@ -1064,6 +1097,7 @@ fn applied_for_id(
             digest,
             placements,
             draft_in,
+            record: Some(sid),
         };
     }
     if !served_version.is_empty() && served_version != lock.base_commit {
@@ -1073,6 +1107,7 @@ fn applied_for_id(
             digest,
             placements,
             draft_in: DraftCopies::None,
+            record: Some(sid),
         };
     }
     Applied {
@@ -1081,6 +1116,7 @@ fn applied_for_id(
         digest,
         placements,
         draft_in: DraftCopies::None,
+        record: Some(sid),
     }
 }
 
@@ -2461,7 +2497,9 @@ mod tests {
             let sections: Vec<&ScopeResolution> = r.scopes.iter().collect();
 
             // The row-delivered bundle: the file + the spelled key.
-            let detail = detail_for(&sections, &all, "deploy").expect("the deep answer");
+            let detail = detail_for(&sections, &all, "deploy")
+                .expect("the deep answer")
+                .detail;
             assert_eq!(detail.name, "deploy");
             assert!(
                 detail
@@ -2476,7 +2514,9 @@ mod tests {
             assert_eq!(detail.attribution.as_deref(), Some("assigned by Dana"));
 
             // The feed-delivered one: the feed, not a file. The `@ws/name` spelling resolves too.
-            let detail = detail_for(&sections, &all, "@acme/notes").expect("the deep answer");
+            let detail = detail_for(&sections, &all, "@acme/notes")
+                .expect("the deep answer")
+                .detail;
             assert_eq!(detail.name, "notes");
             assert_eq!(detail.source_file, None);
             assert_eq!(detail.source_key, None);
@@ -2535,7 +2575,9 @@ mod tests {
             let (all, cache) = read_sources(ctx).unwrap();
             let r = resolve(ctx, &all, &cache).unwrap();
             let sections: Vec<&ScopeResolution> = r.scopes.iter().collect();
-            let detail = detail_for(&sections, &all, "weather").expect("the deep answer");
+            let detail = detail_for(&sections, &all, "weather")
+                .expect("the deep answer")
+                .detail;
             assert_eq!(detail.kind.as_deref(), Some("mcp"));
             let agents: Vec<(&str, &str, &str)> = detail
                 .harnesses

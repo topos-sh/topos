@@ -2789,11 +2789,11 @@ fn escape_crash_gate_keeps_one_coherent_bundle_and_never_eats_the_hand_merge() {
 
 /// The `--reset` half of the same gate: this exit DISCARDS, so what it must never do under a fault
 /// is leave a folder holding half of anything, or take the workbench with it before the record.
-/// The full reset marks the record CONCLUDED before it materializes, so a standing record after a
-/// fault is either still unmarked (nothing placed yet) or a marked conclusion the next run
-/// finishes — and in BOTH shapes the workbench must be intact (the finisher's removal still runs
-/// through the record-first clear, which spares an edited folder). A clean re-run always
-/// converges on the team's version with no block and no workbench left.
+/// The reset marks the record CONCLUDED only once every copy has proven settled, so a standing
+/// record after a fault is either still unmarked (a live block, whatever the placements hold) or a
+/// marked conclusion whose clear the next run finishes — and in BOTH shapes the workbench must be
+/// intact (the removal runs through the record-first clear, which spares an edited folder). A clean
+/// re-run always converges on the team's version with no block and no workbench left.
 #[test]
 fn reset_crash_gate_converges_and_never_takes_the_workbench_before_the_record() {
     let mine: FileSet = MINE_OVER_BASE;
@@ -3559,15 +3559,16 @@ fn an_unmarked_record_matching_the_old_landed_pair_is_still_live() {
     assert!(!rig.conflict_exists(&id));
 }
 
-/// A full `--reset` marks the record CONCLUDED before it touches any placement, so a crash right
-/// after the mark leaves every folder still holding the draft under a marked-Reset record. The
-/// next bare sweep FINISHES that reset — the team's version lands everywhere, the record and the
-/// untouched workbench go with the landed conclusion, the draft's bytes survive as a
-/// content-addressed store snapshot — and the sweep then reads an ordinary current bundle.
+/// A `--reset` marks the record CONCLUDED only once every copy has PROVEN settled, so a marked-Reset
+/// record describes exactly one state: the reset's placements landed and the clear did not. The next
+/// bare sweep FINISHES it — the record and the untouched workbench go, the team's version stays on
+/// disk, the discarded draft survives as a content-addressed store snapshot — and the sweep then
+/// reads an ordinary current bundle. An edit made between the mark and the recovery is an ordinary
+/// draft on the reset state: the clear still lands, and the edit is left exactly where it is.
 #[test]
 fn a_marked_reset_record_is_finished_by_the_next_sweep() {
     let rig = Rig::new("marked-reset-finish");
-    let (id, _name, genesis) = rig.adopt(BASE);
+    let (id, name, genesis) = rig.adopt(BASE);
     write_tree(&rig.placement(), MINE_OVER_BASE);
     let v1 = mk_version(&[genesis], V1, "d_pub", "v1");
     let mut plane = FixturePlane::default();
@@ -3579,20 +3580,41 @@ fn a_marked_reset_record_is_finished_by_the_next_sweep() {
         PullAction::Conflicted
     );
 
-    // The crash state a full reset leaves when it dies right after its mark: the record concluded,
-    // nothing placed yet, the placement still holding the draft.
+    // The workbench as topos wrote it, kept aside so the crash state can be re-planted byte for byte
+    // (the copy carries the modes, so the restored folder still reads as UNTOUCHED).
     let cs = rig.conflict_state(&id);
-    doc::write_doc(
-        &rig.fs,
-        &rig.layout().published(&sid(&id)).conflict,
-        &topos_types::persisted::ConflictState {
-            concluded: Some(topos_types::persisted::ConcludedExit::Reset),
-            ..cs
-        },
+    let copy = rig.conflict_copy(&id);
+    let kept = rig.work.0.join("kept-workbench");
+    copy_tree(&copy, &kept);
+
+    // A REAL full reset first: the placements land, the settle proof passes, the mark goes down and
+    // the clear takes the record with it. Re-planting that record marked is then exactly the state a
+    // crash between those last two writes leaves — and the ONLY state a marked-Reset record can be in.
+    ops::reset(
+        &rig.ctx(&plane, &foll),
+        std::slice::from_ref(&name),
+        true,
+        ops::StoreScope::Here,
+        &ops::Selection::default(),
     )
     .unwrap();
-    let copy = rig.conflict_copy(&id);
+    assert_eq!(snapshot(&rig.placement()), Some(expect(V1)));
+    assert!(!rig.conflict_exists(&id));
+    let marked = topos_types::persisted::ConflictState {
+        concluded: Some(topos_types::persisted::ConcludedExit::Reset),
+        ..cs
+    };
+    let replant = || {
+        copy_tree(&kept, &copy);
+        doc::write_doc(
+            &rig.fs,
+            &rig.layout().published(&sid(&id)).conflict,
+            &marked,
+        )
+        .unwrap();
+    };
 
+    replant();
     let row =
         only(&pull_data(&rig.ctx(&plane, &foll), ops::PullScope::AllFollowed).unwrap()).clone();
     assert_eq!(
@@ -3603,23 +3625,157 @@ fn a_marked_reset_record_is_finished_by_the_next_sweep() {
     assert_eq!(
         snapshot(&rig.placement()),
         Some(expect(V1)),
-        "the team's version landed"
+        "the team's version stands"
     );
     assert!(
         !rig.conflict_exists(&id),
         "the finished reset clears the block"
     );
     assert!(!copy.exists(), "and the untouched workbench with it");
-    // The draft is never lost: the finisher's snapshot rail commits it on the post-conflict base
+    // The draft is never lost: the reset's snapshot rail committed it on the post-conflict base
     // (the team's version — what the conflict made the draft's recorded base).
-    let saved = mk_version(&[v1.id], MINE_OVER_BASE, DEVICE, "topos: draft snapshot");
+    let stored = mk_version(&[v1.id], MINE_OVER_BASE, DEVICE, "topos: draft snapshot");
     assert!(
         rig.open_store(&id)
             .list_versions()
             .unwrap()
-            .contains(&saved.id),
+            .contains(&stored.id),
         "the discarded draft survives as a store snapshot"
     );
+
+    // The same leftover, with the person back at work in the folder: the finish is a CLEAR and
+    // nothing else, so an edit made after the mark is never overwritten and never lost.
+    replant();
+    let after: FileSet = &[
+        ("SKILL.md", FileMode::Regular, b"# after the reset\n"),
+        ("run.sh", FileMode::Executable, b"#!/bin/sh\necho v1\n"),
+        ("ref/notes.md", FileMode::Regular, b"new in v1\n"),
+    ];
+    write_tree(&rig.placement(), after);
+    let row =
+        only(&pull_data(&rig.ctx(&plane, &foll), ops::PullScope::AllFollowed).unwrap()).clone();
+    assert_eq!(row.action, PullAction::UpToDate);
+    assert!(
+        !rig.conflict_exists(&id),
+        "the clear lands over a re-edited folder too"
+    );
+    assert_eq!(
+        snapshot(&rig.placement()),
+        Some(expect(after)),
+        "an edit made after the mark is an ordinary draft — left exactly where it is"
+    );
+}
+
+/// **A reset that cannot settle every copy leaves the merge LIVE.** The reset WRITES the current
+/// plan's placements while the settled proof READS every recorded copy — so a copy the plan omits
+/// (here one recorded for a harness this machine does not place into) keeps its edits through the
+/// reset and the proof fails. Concluding the record before that proof would strand it: no later run
+/// re-plans the omitted copy either, so nothing could ever settle it, and `--keep-mine` — which
+/// routes a marked record through the finisher — could no longer end the merge. So an unproven reset
+/// writes no mark at all: the record stays a LIVE stopped merge, re-disclosed by the sweep, with
+/// both ways out still open.
+#[test]
+fn a_reset_that_cannot_settle_every_copy_leaves_the_merge_live() {
+    let rig = Rig::new("reset-unsettled-live");
+    let (id, name, genesis) = rig.adopt(BASE);
+    let mine: FileSet = MINE_OVER_BASE;
+    write_tree(&rig.placement(), mine);
+    let v1 = mk_version(&[genesis], V1, "d_pub", "v1");
+    let mut plane = FixturePlane::default();
+    plane.add_version(&id, &v1);
+    plane.set_current(&id, served(WS, &id, v1.id, 1));
+    let foll = follow(&id, FollowMode::Auto);
+    assert_eq!(
+        only(&pull_data(&rig.ctx(&plane, &foll), ops::PullScope::AllFollowed).unwrap()).action,
+        PullAction::Conflicted
+    );
+    let copy = rig.conflict_copy(&id);
+
+    // Two copies holding the same un-merged draft, each recorded for its own agent — and the machine
+    // detects only one of them. With the skill scoped to the detected agent, the plan names that
+    // copy alone; the other is outside it (`placement::managed_indices`: frozen in place, never
+    // written, never deleted).
+    let replica = rig.work.0.join("replica");
+    add_replica(&rig, &id, &replica, mine);
+    rig.patch_map(&id, |m| {
+        m.placement_state[0].agent = Some("claude-code".to_owned());
+        m.placement_state[1].agent = Some("cursor".to_owned());
+    });
+    std::fs::create_dir_all(rig.home.0.join(".claude")).unwrap();
+    assert!(
+        topos_harness::registry::detected_harnesses(&rig.home.0, None)
+            .iter()
+            .any(|h| h.slug == "claude-code"),
+        "the rig's home must detect the agent the plan is scoped to"
+    );
+    let scoped = FixtureFollow {
+        entries: vec![(
+            id.clone(),
+            FollowContext {
+                workspace_id: WS.to_owned(),
+                mode: FollowMode::Auto,
+                review_required: false,
+                following: true,
+                agents: vec!["claude-code".to_owned()],
+                excluded_agents: Vec::new(),
+            },
+        )],
+    };
+    let ctx = Ctx {
+        roots: Some(crate::ctx::AgentRoots {
+            home: rig.home.0.clone(),
+            cwd: None,
+        }),
+        ..rig.ctx(&plane, &scoped)
+    };
+
+    // The FULL reset — no selector, so it means "every copy" — but it can only reach the copy the
+    // plan names.
+    ops::reset(
+        &ctx,
+        std::slice::from_ref(&name),
+        true,
+        ops::StoreScope::Here,
+        &ops::Selection::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        snapshot(&rig.placement()),
+        Some(expect(V1)),
+        "the planned copy is back at the team's version"
+    );
+    assert_eq!(
+        snapshot(&replica),
+        Some(expect(mine)),
+        "the copy outside the plan is untouched — which is what the proof then reads"
+    );
+    assert!(
+        rig.conflict_exists(&id),
+        "a copy still holds the merge, so the record — the publish guard — must stand"
+    );
+    assert!(
+        rig.conflict_state(&id).concluded.is_none(),
+        "and it stands as a LIVE record: an unproven reset concludes nothing"
+    );
+    assert!(copy.exists(), "the workbench stands with it");
+
+    // Live means live: the sweep re-discloses the block…
+    assert_eq!(
+        only(&pull_data(&ctx, ops::PullScope::AllFollowed).unwrap()).action,
+        PullAction::Conflicted,
+        "an unmarked record is re-disclosed, never finished away"
+    );
+    assert!(rig.conflict_exists(&id));
+
+    // …and the `--keep-mine` the receipt names still FINISHES the merge, taking the record and the
+    // workbench with the real conclusion.
+    let escaped = pull_data(&ctx, keep_mine_scope(name)).unwrap();
+    assert_eq!(only(&escaped).action, PullAction::Merged);
+    assert!(
+        !rig.conflict_exists(&id),
+        "the escape ends what the reset could not"
+    );
+    assert!(!copy.exists());
 }
 
 // --- upgrading while a merge is stopped ---

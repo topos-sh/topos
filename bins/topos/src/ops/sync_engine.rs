@@ -805,8 +805,10 @@ pub(crate) fn go_back(
 /// narrows is only which folders are written back to base: every edited copy is STILL snapshotted
 /// into the store first (the loss rail is not a per-copy thing — bytes that survive on disk are
 /// still bytes nobody wrote down), and the surviving copy stays exactly as it is, which makes it
-/// the single ordinary draft once the reset lands. A narrowed reset therefore does NOT end a
-/// stopped merge: the record stands while any copy still holds edits (see [`every_copy_settled`]).
+/// the single ordinary draft once the reset lands. A narrowed reset therefore does not usually end
+/// a stopped merge — but that is the settled state talking, not the selector: ANY reset concludes
+/// the merge exactly when every recorded copy proves settled (see [`every_copy_settled`]), and
+/// leaves the record live when one does not.
 ///
 /// Returns the workbench folder LEFT BEHIND — a hand merge this reset did not read and so does not
 /// delete — for the receipt to name; `None` when nothing survives.
@@ -860,6 +862,8 @@ pub(crate) fn reset_to_base(
     };
 
     let base = super::parse_hex32(&lock.base_commit)?;
+    let base_digest = super::parse_hex32(&lock.bundle_digest)?;
+    let base_digest_hex = lock.bundle_digest.clone();
 
     // The record this reset may CONCLUDE, read once under the flock. Unreadable reads as none —
     // an unreadable record cannot be marked, and the clear below still removes the file either
@@ -873,24 +877,41 @@ pub(crate) fn reset_to_base(
     // converges them all back to base. An unreadable placement fails closed rather than risk a clobber.
     snapshot_all_modified(ctx, &sp, &lock, &map, "a reset")?;
 
-    // A FULL reset CONCLUDES a stopped merge, and the record says so BEFORE any placement moves
-    // (the mark discipline — see [`super::merge_resolve`]'s crash-safety doc): the snapshots
-    // above are content-addressed store writes, harmless; from here on a crash reads as "finish
-    // the reset", never as a live block. The person's newest instruction wins, so a record a
-    // crashed exit already marked is simply re-marked. A NARROWED reset concludes nothing while
-    // other copies keep their edits, so it writes no mark here.
-    if sel.is_empty()
-        && let Some(cs) = &recorded
-    {
-        super::merge_resolve::mark_concluded(
-            ctx,
-            &sp,
-            cs,
-            topos_types::persisted::ConcludedExit::Reset,
-        )?;
-    }
+    let store = Store::open(&sp.store)?;
+    let bundle = store.render_verified(base, base_digest)?;
+    fsync_batch(ctx, &store.version_durability(&base)?)?;
 
-    let report = materialize_reset(ctx, &sp, sid, &lock, &sync, &map, &managed)?;
+    // The restored state: base bytes on the placements, work_hash back at the base digest, held cleared,
+    // observed/applied unchanged (the team's current never moved).
+    let next_sync = SyncState {
+        schema_version: sync.schema_version,
+        observed: sync.observed,
+        observed_version_id: sync.observed_version_id.clone(),
+        applied: sync.applied,
+        base_commit: lock.base_commit.clone(),
+        work_hash: base_digest_hex.clone(),
+        held: false,
+        draft_observed: None,
+    };
+    let report = materialize::materialize(
+        ctx.fs,
+        &MaterializeReq {
+            skill_id: sid,
+            target_indices: &managed,
+            bundle: &bundle,
+            next_map: next_map(&map, base, &base_digest_hex),
+            next_lock: &lock,
+            next_sync: &next_sync,
+            sp: &sp,
+            snapshot: Some(&|scanned: &ScannedBundle| {
+                snapshot_draft(ctx, &sp, &lock, scanned).map(|_| ())
+            }),
+            takeover: None,
+            self_ignore: ctx.layout.is_project_scope(),
+            expected: None,
+            project_root: ctx.layout.project_root(),
+        },
+    )?;
     // A recorded merge conflict describes the divergence this reset just DISCARDED — clear the
     // block and the marked-up copy it named (idempotent; absent is fine), or publish would stay
     // refused by a conflict whose draft no longer exists. Cleared AFTER the placements landed,
@@ -906,12 +927,16 @@ pub(crate) fn reset_to_base(
     // The removal is `Unread`: this command never looked inside the workbench, so a hand merge in
     // it is left where the person can see it and named on the receipt.
     let hand_merge = if every_copy_settled(ctx, &sp) {
-        // A narrowed reset that settled the LAST copy concluded the merge after all — mark it now,
-        // before the clear, so a crash between the two still reads as a conclusion to finish. It
-        // leaves a mark it finds as it found it (a crashed exit's own conclusion is not this
-        // narrowed command's to rewrite).
-        if !sel.is_empty()
-            && let Some(cs) = &recorded
+        // The reset CONCLUDED the merge, and only here is that true — the proof just passed, so
+        // the mark goes down before the clear and a crash between the two still reads as a
+        // conclusion to finish. Full and narrowed resets are identical in this: what ends a merge
+        // is the settled state, never the shape of the command. A reset that does NOT settle
+        // every copy writes no mark at all, so the record stays LIVE — re-disclosed, and both
+        // ways out still work — rather than becoming a conclusion nothing can finish (the apply
+        // set is the current PLAN's, and a recorded copy outside the plan is never written, so a
+        // pre-materialize mark could strand a block no run could clear). A mark already there is
+        // left as it is: a crashed exit's own conclusion is not this command's to rewrite.
+        if let Some(cs) = &recorded
             && cs.concluded.is_none()
         {
             super::merge_resolve::mark_concluded(
@@ -929,65 +954,10 @@ pub(crate) fn reset_to_base(
     Ok(hand_merge)
 }
 
-/// The reset's placement write, shared between [`reset_to_base`] and the concluded-reset finisher
-/// ([`super::merge_resolve::finish_concluded`]) so the two can never disagree about what a
-/// finished reset looks like on disk: materialize the LOCK's base over `managed`, recording the
-/// restored state — base bytes on the placements, `work_hash` back at the base digest, `held`
-/// cleared, `observed`/`applied` unchanged (the team's current never moved). Snapshot-on-touch
-/// stays armed for the crash window between the caller's pre-verb snapshots and the swap.
-///
-/// Runs under the CALLER's per-skill flock and takes none itself — flock does not nest, and both
-/// callers already hold it.
-pub(crate) fn materialize_reset(
-    ctx: &Ctx<'_>,
-    sp: &sidecar::SkillPaths,
-    sid: &str,
-    lock: &Lock,
-    sync: &SyncState,
-    map: &PlacementMap,
-    managed: &[usize],
-) -> Result<MaterializeReport, ClientError> {
-    let base = super::parse_hex32(&lock.base_commit)?;
-    let base_digest = super::parse_hex32(&lock.bundle_digest)?;
-    let store = Store::open(&sp.store)?;
-    let bundle = store.render_verified(base, base_digest)?;
-    fsync_batch(ctx, &store.version_durability(&base)?)?;
-    let next_sync = SyncState {
-        schema_version: sync.schema_version,
-        observed: sync.observed,
-        observed_version_id: sync.observed_version_id.clone(),
-        applied: sync.applied,
-        base_commit: lock.base_commit.clone(),
-        work_hash: lock.bundle_digest.clone(),
-        held: false,
-        draft_observed: None,
-    };
-    materialize::materialize(
-        ctx.fs,
-        &MaterializeReq {
-            skill_id: sid,
-            target_indices: managed,
-            bundle: &bundle,
-            next_map: next_map(map, base, &lock.bundle_digest),
-            next_lock: lock,
-            next_sync: &next_sync,
-            sp,
-            snapshot: Some(&|scanned: &ScannedBundle| {
-                snapshot_draft(ctx, sp, lock, scanned).map(|_| ())
-            }),
-            takeover: None,
-            self_ignore: ctx.layout.is_project_scope(),
-            expected: None,
-            project_root: ctx.layout.project_root(),
-        },
-    )
-}
-
 /// Whether every copy this bundle records now sits at its own recorded baseline — the reset's
 /// "nothing is left unresolved" test, read from disk after the placements landed. An unreadable
 /// map or an unscannable copy answers NO: a block that cannot be proven finished stands.
-/// `pub(crate)` — the concluded-reset finisher runs the same proof before it clears.
-pub(crate) fn every_copy_settled(ctx: &Ctx<'_>, sp: &sidecar::SkillPaths) -> bool {
+fn every_copy_settled(ctx: &Ctx<'_>, sp: &sidecar::SkillPaths) -> bool {
     let Ok(Some(map)) = doc::read_map(ctx.fs, &sp.map) else {
         return false;
     };
@@ -1403,8 +1373,7 @@ fn rendered_from_scanned(b: &ScannedBundle) -> topos_gitstore::RenderedBundle {
 /// Snapshot EVERY distinct edited copy into the sidecar store (the explicit-overwrite verbs' rail:
 /// go-back / reset converge divergent copies rather than freezing, so each distinct edit is retained
 /// first). Fails closed on an unscannable placement — `what` names the refusing verb.
-/// `pub(crate)` — the concluded-reset finisher arms the same rail before it re-materializes.
-pub(crate) fn snapshot_all_modified(
+fn snapshot_all_modified(
     ctx: &Ctx<'_>,
     sp: &sidecar::SkillPaths,
     lock: &Lock,

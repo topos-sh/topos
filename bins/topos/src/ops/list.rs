@@ -239,10 +239,17 @@ pub(crate) fn list_with(
     // way — "nothing manages it" is the whole answer, never an error.
     if let Some(name) = &req.name {
         let dive = dive_sections(&resolved, req.view);
-        let mut detail = match inventory::detail_for(&dive, &all, name) {
-            Ok(detail) => detail,
-            Err(_) => builtin_detail(ctx, name)
-                .unwrap_or_else(|| unmanaged_detail(ctx, name, discover.as_ref())),
+        // The answering record rides along with the detail: it is the identity — never the display
+        // name — the blocked fill below reads the stopped merge from. Neither fallback answer has
+        // one (no manifest row names the built-in; nothing manages an unmanaged copy), and neither
+        // is ever blocked.
+        let (mut detail, record) = match inventory::detail_for(&dive, &all, name) {
+            Ok(answer) => (answer.detail, answer.record),
+            Err(_) => (
+                builtin_detail(ctx, name)
+                    .unwrap_or_else(|| unmanaged_detail(ctx, name, discover.as_ref())),
+                None,
+            ),
         };
         // Every path the deep dive prints is spelled the way the rest of this command family
         // spells one: `project/<rest>` under the checkout the answering scope's manifest governs,
@@ -267,9 +274,11 @@ pub(crate) fn list_with(
             // recover. The update receipt named that folder once; a person who scrolled past it
             // (or whose block was raised by a silent session-start sweep, which prints no receipt
             // at all) had no surface left that could tell them where to edit. Filled only for a
-            // blocked line, and only when the record itself names a folder.
+            // blocked line, from the record that PRODUCED that line, and only when the record
+            // itself names a folder.
             if matches!(detail.state, StatusItemState::Blocked)
-                && let Some((dir, reason)) = conflict_workbench(ctx, section, &detail.name)
+                && let Some(id) = record.as_ref()
+                && let Some((dir, reason)) = conflict_workbench(ctx, section, id)
             {
                 detail.conflict_copy = Some(dir);
                 detail.conflict_reason = Some(reason);
@@ -589,22 +598,26 @@ fn detail_forge_origin(detail: &ListDetail) -> Option<String> {
 
 /// Where a BLOCKED bundle's stopped merge sits, and WHY it stopped — the pair the deep dive's
 /// blocked answer prints. `None` whenever nothing can be proven: no store for the answering scope,
-/// no conflict record under this name, or a record that names no folder.
+/// no LIVE conflict record under the answering identity, or a record that names no folder.
+///
+/// `record` is the store record the ANSWERING ROW's state was read from — the identity, never the
+/// display name. Two non-retired records in one scope can hold one name (two workspaces, or a
+/// workspace copy beside a local one), and if both stopped mid-merge a walk by name could answer
+/// with the OTHER one's folder and the other one's reason: the wrong workbench, described wrong.
+/// The row that answered the dive already picked the record; this reads that same one.
 ///
 /// The folder is the record's OWN `copy_dir`, parsed through [`sidecar::ConflictDir`] and joined
 /// onto the answering scope's `conflicts/` — the same derivation every other reader of a workbench
 /// folder goes through, so the folder this prints is the folder the merge's exits act on. Parsed
 /// rather than trusted because a project store travels with its checkout: whoever wrote the clone
-/// wrote the document this reads. And there is deliberately NO fallback to the bundle's display
-/// name — two bundles can legitimately share one (two workspaces, or a workspace copy beside a
-/// local one), so a guessed folder could send a person to edit another bundle's hand merge.
+/// wrote the document this reads.
 fn conflict_workbench(
     ctx: &Ctx<'_>,
     section: &ScopeResolution,
-    name: &str,
+    record: &crate::id::SkillId,
 ) -> Option<(String, ConflictReason)> {
     let layout = scope_layout(ctx, section)?;
-    let cs = conflict_record(ctx, &layout, name)?;
+    let cs = conflict_record(ctx, &layout, record)?;
     let dir = sidecar::ConflictDir::parse(cs.copy_dir.as_deref()?)
         .map(|d| layout.conflict_copy_dir(&d))?;
     Some((scoped_folder(ctx, section, &dir), cs.reason))
@@ -621,38 +634,29 @@ fn scope_layout(ctx: &Ctx<'_>, section: &ScopeResolution) -> Option<sidecar::Lay
     sidecar::existing_project_store(ctx.fs, root)
 }
 
-/// The stopped-merge record one store holds for a NAME, when it holds one. The store is walked the
-/// way every other read here walks it (retired records answer for nothing; a record's `lock` names
-/// the bundle it holds), and a record carrying no such document is not the blocked one, so the
-/// walk keeps looking — which is what makes the answer the BLOCKED record's, whichever opaque
-/// identity that record happens to be filed under.
+/// The LIVE stopped merge one store holds under ONE record identity, when it holds one — a direct
+/// read of that record's document, never a walk (see [`conflict_workbench`]). Retired records
+/// answer for nothing here either, the same probe every store walker gates on.
+///
+/// A record whose `concluded` mark names an exit is NOT one: the choice was already made and
+/// written durably, and only the final clear is missing — the crash state the mark exists to make
+/// recoverable, which the very next sweep finishes. Advertising a hand-merge surface there would
+/// send a person to a folder that may be mid-removal, to redo a decision that has already landed.
+/// The blocked line itself stands (the record still gates `publish`); it just stops claiming a
+/// live workbench it cannot prove.
 fn conflict_record(
     ctx: &Ctx<'_>,
     layout: &sidecar::Layout,
-    name: &str,
+    record: &crate::id::SkillId,
 ) -> Option<topos_types::persisted::ConflictState> {
-    for entry in ctx.fs.read_dir(&layout.skills_dir()).ok()? {
-        let Some(id) = entry.file_name().and_then(|n| n.to_str()) else {
-            continue;
-        };
-        let Ok(id) = crate::id::SkillId::parse(id) else {
-            continue;
-        };
-        if sidecar::record_retired(ctx.fs, layout, &id) {
-            continue;
-        }
-        let sp = layout.published(&id);
-        let Ok(Some(lock)) = doc::read_doc::<Lock>(ctx.fs, &sp.lock) else {
-            continue;
-        };
-        if lock.name != name {
-            continue;
-        }
-        if let Ok(Some(cs)) = doc::read_doc(ctx.fs, &sp.conflict) {
-            return Some(cs);
-        }
+    if sidecar::record_retired(ctx.fs, layout, record) {
+        return None;
     }
-    None
+    let cs: topos_types::persisted::ConflictState =
+        doc::read_doc(ctx.fs, &layout.published(record).conflict)
+            .ok()
+            .flatten()?;
+    cs.concluded.is_none().then_some(cs)
 }
 
 /// The placed BUILT-IN meta-skill's inventory row — read from its own record in the MACHINE store
@@ -1886,6 +1890,213 @@ mod tests {
             ),
             "{text}"
         );
+    }
+
+    /// The workbench the dive names belongs to the record that ANSWERED it. Two non-retired
+    /// records in one scope can hold one display name — here two workspaces each publish `notes` —
+    /// and when both stopped mid-merge, a store walk by name answers with whichever record it
+    /// reaches first: the wrong folder, under the wrong reason. The row picked a record; the
+    /// folder is that record's, whatever the other one is called on disk.
+    #[test]
+    fn the_blocked_deep_dive_names_the_workbench_of_the_record_that_answered() {
+        use topos_types::persisted::{ConflictReason, ConflictState};
+
+        let home = TempHome::new();
+        let cwd = home.0.join("plain");
+        std::fs::create_dir_all(&cwd).unwrap();
+        for (id, ws) in [("w_acme", "acme"), ("w_globex", "globex")] {
+            home.session("topos.sh", id, ws, crate::sessions::SESSION_ACTIVE);
+        }
+        // One display name, two workspaces — each delivery filed under its OWN record id.
+        let delivered = |id: &str| vec![(id.to_owned(), assigned("notes", None).1)];
+        home.cache(
+            "w_acme",
+            "topos.sh",
+            "acme",
+            delivered("topos_acme_notes"),
+            Vec::new(),
+        );
+        home.cache(
+            "w_globex",
+            "topos.sh",
+            "globex",
+            delivered("topos_globex_notes"),
+            Vec::new(),
+        );
+        home.global(
+            "[bundles]\n\"topos.sh/acme/notes\" = \"*\"\n\"topos.sh/globex/notes\" = \"*\"\n",
+        );
+
+        // Both merges stopped. The workbench folders differ — the second bundle to stop took the
+        // disambiguated one — so the answer proves WHICH record it was read from.
+        let stop = |id: &str, copy_dir: &str, placed: &Path| {
+            lay_copy(placed, "# my version\n");
+            home.store_applied(
+                id,
+                "notes",
+                &"d".repeat(64),
+                &[placed.to_string_lossy().as_ref()],
+            );
+            let sid = crate::id::SkillId::parse(id).unwrap();
+            crate::doc::write_doc(
+                &crate::fs_seam::RealFs,
+                &home.layout().published(&sid).conflict,
+                &ConflictState {
+                    schema_version: topos_types::PERSISTED_SCHEMA_VERSION,
+                    base_commit: "0".repeat(64),
+                    base_digest: "0".repeat(64),
+                    current_commit: "d".repeat(64),
+                    current_digest: "3".repeat(64),
+                    draft_commit: "1".repeat(64),
+                    draft_digest: "2".repeat(64),
+                    result_commit: "4".repeat(64),
+                    conflicted_digest: "5".repeat(64),
+                    copy_dir: Some(copy_dir.to_owned()),
+                    reason: ConflictReason::ThreeWay,
+                    concluded: None,
+                    paths: Vec::new(),
+                },
+            )
+            .unwrap();
+        };
+        stop(
+            "topos_acme_notes",
+            "notes-2",
+            &home.0.join(".claude/skills/notes"),
+        );
+        stop(
+            "topos_globex_notes",
+            "notes",
+            &home.0.join(".codex/skills/notes"),
+        );
+
+        let dive = |token: &str| {
+            let out = run(
+                &home,
+                &cwd,
+                &ListRequest {
+                    name: Some(token.to_owned()),
+                    ..request()
+                },
+            )
+            .unwrap();
+            let detail = out.data.detail.clone().expect("a detail");
+            (detail, crate::render::list_tty(&out))
+        };
+
+        // The bare name answers with the first row spelling it — and its OWN record's folder.
+        let (detail, text) = dive("notes");
+        assert_eq!(
+            detail.source_key.as_deref(),
+            Some("topos.sh/acme/notes"),
+            "{detail:?}"
+        );
+        assert!(
+            matches!(detail.state, StatusItemState::Blocked),
+            "{detail:?}"
+        );
+        assert_eq!(
+            detail.conflict_copy.as_deref(),
+            Some("~/.topos/conflicts/notes-2"),
+            "{detail:?}"
+        );
+        assert!(text.contains("~/.topos/conflicts/notes-2/"), "{text}");
+        // The other bundle's workbench belongs to the other bundle — never named here.
+        assert!(!text.contains("~/.topos/conflicts/notes/"), "{text}");
+
+        // ...and the other workspace's bundle, dived by its own reference, answers with the OTHER
+        // folder. One walk by display name cannot answer both dives — it holds one record.
+        let (detail, text) = dive("@globex/notes");
+        assert_eq!(
+            detail.source_key.as_deref(),
+            Some("topos.sh/globex/notes"),
+            "{detail:?}"
+        );
+        assert_eq!(
+            detail.conflict_copy.as_deref(),
+            Some("~/.topos/conflicts/notes"),
+            "{detail:?}"
+        );
+        assert!(text.contains("~/.topos/conflicts/notes/"), "{text}");
+        assert!(!text.contains("~/.topos/conflicts/notes-2/"), "{text}");
+    }
+
+    /// A record whose `concluded` mark names an exit is a merge that already ENDED: the exit wrote
+    /// its mark durably and crashed before the final clear, and the next sweep finishes it. There
+    /// is no hand merge left to send anyone to — the folder may be mid-removal and the choice is
+    /// already made — so the dive names no workbench. The blocked line itself stands: the record
+    /// still gates `publish` until the sweep takes it away.
+    #[test]
+    fn a_concluded_merge_record_names_no_workbench() {
+        use topos_types::persisted::{ConcludedExit, ConflictReason, ConflictState};
+
+        let home = TempHome::new();
+        let cwd = home.0.join("plain");
+        std::fs::create_dir_all(&cwd).unwrap();
+        home.session(
+            "topos.sh",
+            "w_acme",
+            "acme",
+            crate::sessions::SESSION_ACTIVE,
+        );
+        home.cache(
+            "w_acme",
+            "topos.sh",
+            "acme",
+            vec![assigned("notes", None)],
+            Vec::new(),
+        );
+        home.global("[bundles]\n\"topos.sh/acme\" = \"*\"\n");
+        let placed = home.0.join(".claude/skills/notes");
+        lay_copy(&placed, "# my version\n");
+        home.store_applied(
+            &skill_id_of("notes"),
+            "notes",
+            &"d".repeat(64),
+            &[placed.to_string_lossy().as_ref()],
+        );
+        let sid = crate::id::SkillId::parse(&skill_id_of("notes")).unwrap();
+        crate::doc::write_doc(
+            &crate::fs_seam::RealFs,
+            &home.layout().published(&sid).conflict,
+            &ConflictState {
+                schema_version: topos_types::PERSISTED_SCHEMA_VERSION,
+                base_commit: "0".repeat(64),
+                base_digest: "0".repeat(64),
+                current_commit: "d".repeat(64),
+                current_digest: "3".repeat(64),
+                draft_commit: "1".repeat(64),
+                draft_digest: "2".repeat(64),
+                result_commit: "4".repeat(64),
+                conflicted_digest: "5".repeat(64),
+                copy_dir: Some("notes".to_owned()),
+                reason: ConflictReason::ThreeWay,
+                concluded: Some(ConcludedExit::Escape),
+                paths: Vec::new(),
+            },
+        )
+        .unwrap();
+
+        let out = run(
+            &home,
+            &cwd,
+            &ListRequest {
+                name: Some("notes".to_owned()),
+                ..request()
+            },
+        )
+        .unwrap();
+        let detail = out.data.detail.clone().expect("a detail");
+        assert!(
+            matches!(detail.state, StatusItemState::Blocked),
+            "{detail:?}"
+        );
+        let json = serde_json::to_value(&detail).expect("the detail serializes");
+        assert!(json.get("conflict_copy").is_none(), "{json}");
+        assert!(json.get("conflict_reason").is_none(), "{json}");
+        let text = crate::render::list_tty(&out);
+        assert!(!text.contains("to merge by hand"), "{text}");
+        assert!(!text.contains("~/.topos/conflicts/notes"), "{text}");
     }
 
     /// A MACHINE-scope draft keeps the `~/` spelling — the `project/` token means the checkout

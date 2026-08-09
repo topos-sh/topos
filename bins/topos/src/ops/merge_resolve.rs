@@ -39,7 +39,9 @@
 //! re-commits the docs when they lag.
 //!
 //! The record is the `MERGE_HEAD` analog: written when the merge STOPS, marked `concluded` by the
-//! chosen exit BEFORE that exit mutates any placement, removed only when the conclusion has landed.
+//! chosen exit at the moment that exit's conclusion becomes certain — before it mutates any
+//! placement, or, where the conclusion is the disk state itself, at the proof of it — and removed
+//! only when the conclusion has landed.
 //! Recovery reads the mark and nothing else: a marked record is finished idempotently
 //! ([`finish_concluded`] — re-run the escape, finish the reset, or clear after a clean re-merge),
 //! and an UNMARKED record is a live stopped merge, full stop — no comparison of the durable
@@ -48,10 +50,13 @@
 //!
 //! - **escape** — commit the resolution (a content-addressed store write, harmless) → mark
 //!   `Escape` → converge the placements → clear;
-//! - **full reset** — snapshot every edited copy (store writes, harmless) → mark `Reset` →
-//!   materialize base → clear once every copy proves settled;
-//! - **narrowed reset** — no pre-mark (it concludes nothing while other copies hold edits);
-//!   only when the settle proof passes after the write does it mark `Reset` and clear;
+//! - **reset**, narrowed or not — snapshot every edited copy (store writes, harmless) →
+//!   materialize base → mark `Reset` ONLY once every copy proves settled → clear. A reset marks
+//!   at its proof, never before it: the write covers the current PLAN's placements while the
+//!   proof reads every RECORDED copy, so a copy outside the plan (a lost detection, an excluded
+//!   agent) would leave an earlier mark standing over a state no run can settle — a block no exit
+//!   could clear. Unproven, the reset simply leaves the record LIVE: re-disclosed, and both ways
+//!   out still open;
 //! - **clean re-merge** — mark `Merge` → clear → place (the clear stays before the place: a
 //!   record standing across the swap would describe a divergence this merge just resolved).
 //!
@@ -903,9 +908,10 @@ pub(crate) fn recover_resolution(
 
 /// Mark the recorded conflict CONCLUDED by `exit` — the durable fact every later liveness read
 /// stands on. Written through the same atomic doc writer that wrote the record (temp → fsync →
-/// rename), BEFORE the exit mutates any placement, so whatever the crash window, the record either
-/// still reads as live or names the exit that must be finished. Idempotent: re-marking with the
-/// exit already recorded rewrites nothing.
+/// rename) at the point the exit's conclusion is certain and always before the [`clear_conflict`]
+/// that ends it, so whatever the crash window, the record either still reads as live or names the
+/// exit that must be finished. Idempotent: re-marking with the exit already recorded rewrites
+/// nothing.
 ///
 /// # Errors
 /// The [`crate::fs_seam::FsOps`] failure writing the record.
@@ -938,14 +944,12 @@ pub(crate) fn mark_concluded(
 ///   dir with no second swap; and a workbench edited between crash and recovery is committed as
 ///   the hand resolution — exactly the "git commits the working tree" model. Returns the finished
 ///   `Merged` row.
-/// - **`Reset`** — finish the reset: placements already settled clear the record now; otherwise
-///   the lock's base is materialized over every managed placement (snapshot rail armed — the same
-///   write [`super::sync_engine::reset_to_base`] makes, shared through
-///   [`super::sync_engine::materialize_reset`]) and the record clears only once every copy proves
-///   settled. A state that cannot be proven settled leaves the marked record standing for the next
-///   run — fail toward the gate, never through it. Returns `None`; the caller proceeds normally.
-/// - **`Merge`** — the clean re-merge's clear was interrupted after the mark; finish it. Returns
-///   `None`.
+/// - **`Reset` / `Merge`** — the clear was interrupted after the mark; finish it. Nothing else is
+///   left to do: [`super::sync_engine::reset_to_base`] marks only AFTER every copy has proven
+///   settled, so a marked-`Reset` record exists only over a state whose placements already landed
+///   — and a state that cannot prove it is never marked at all, staying a live block instead. An
+///   edit made between the mark and this run is an ordinary draft on the reset state, left exactly
+///   where it is. Returns `None`; the caller proceeds normally.
 ///
 /// An UNMARKED record is a LIVE stopped merge and never reaches here — the two callers dispatch on
 /// the mark — and this fn refuses to clear one rather than infer anything about it.
@@ -969,25 +973,7 @@ pub(crate) fn finish_concluded(
         Some(ConcludedExit::Escape) => {
             escape_recorded(witness, ctx, skill_id, sp, sync, lock, map, cs).map(Some)
         }
-        Some(ConcludedExit::Reset) => {
-            if !super::sync_engine::every_copy_settled(ctx, sp) {
-                // The reset's placement write did not (fully) land — run it again, whole: the
-                // materializer skips dirs already at base, and the snapshot rail retains any edit
-                // made between crash and recovery before it is overwritten.
-                let plan = placement::plan_for_skill(ctx, skill_id, lock, map);
-                let map = placement::reconcile_map(map, &plan);
-                let managed = placement::managed_indices(&map, &plan);
-                super::sync_engine::snapshot_all_modified(ctx, sp, lock, &map, "a reset")?;
-                super::sync_engine::materialize_reset(
-                    ctx, sp, skill_id, lock, sync, &map, &managed,
-                )?;
-            }
-            if super::sync_engine::every_copy_settled(ctx, sp) {
-                clear_conflict(ctx, sp, Workbench::Unread)?;
-            }
-            Ok(None)
-        }
-        Some(ConcludedExit::Merge) => {
+        Some(ConcludedExit::Reset) | Some(ConcludedExit::Merge) => {
             clear_conflict(ctx, sp, Workbench::Unread)?;
             Ok(None)
         }
