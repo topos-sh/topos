@@ -202,6 +202,21 @@
         "total"
       ]
     },
+    "ConflictReason": {
+      "description": "Why a merge could not be applied cleanly. **INFERRED value set.**",
+      "oneOf": [
+        {
+          "description": "A genuine three-way merge with at least one unresolved path.",
+          "type": "string",
+          "const": "three_way"
+        },
+        {
+          "description": "Unrelated histories — no recorded base; a 2-way manual choice is required.",
+          "type": "string",
+          "const": "no_base"
+        }
+      ]
+    },
     "DivergedCopy": {
       "description": "ONE copy of a bundle whose edits disagree with another copy's, in the two spellings every\nsurface that names such a copy uses: the folder as a person reads it, and the `--dest` value\nthat names it back on a command line. The same pair the placement freeze's refusal prints —\none vocabulary, so the deep dive and the refusal never describe one state two ways.",
       "type": "object",
@@ -274,6 +289,24 @@
           "type": [
             "string",
             "null"
+          ]
+        },
+        "conflict_copy": {
+          "description": "For a BLOCKED bundle: the workbench folder holding the stopped merge, spelled the way the\ndeep dive prints it. The receipt that stopped the merge named this folder once; this is\nwhere a reader gets it back after that receipt has scrolled away — or after a silent\nsession-start sweep raised the block with no receipt to read at all. Present only when the\nconflict record itself names a folder (never derived from the bundle's name, which two\nbundles can share). **INFERRED** (additive).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "conflict_reason": {
+          "description": "Why that merge stopped — the recorded reason, so the folder above is described the one way\nthe receipt already described it (`three_way`: both versions marked up in it; `no_base`:\nthis person's files with the team's beside them). Absent exactly when `conflict_copy` is.\n**INFERRED** (additive).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ConflictReason"
+            },
+            {
+              "type": "null"
+            }
           ]
         },
         "diverged": {

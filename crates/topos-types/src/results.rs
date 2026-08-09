@@ -573,6 +573,20 @@ pub struct ListDetail {
     /// **INFERRED** (additive).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub diverged: Vec<DivergedCopy>,
+    /// For a BLOCKED bundle: the workbench folder holding the stopped merge, spelled the way the
+    /// deep dive prints it. The receipt that stopped the merge named this folder once; this is
+    /// where a reader gets it back after that receipt has scrolled away — or after a silent
+    /// session-start sweep raised the block with no receipt to read at all. Present only when the
+    /// conflict record itself names a folder (never derived from the bundle's name, which two
+    /// bundles can share). **INFERRED** (additive).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conflict_copy: Option<String>,
+    /// Why that merge stopped — the recorded reason, so the folder above is described the one way
+    /// the receipt already described it (`three_way`: both versions marked up in it; `no_base`:
+    /// this person's files with the team's beside them). Absent exactly when `conflict_copy` is.
+    /// **INFERRED** (additive).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conflict_reason: Option<crate::persisted::ConflictReason>,
 }
 
 /// ONE copy of a bundle whose edits disagree with another copy's, in the two spellings every

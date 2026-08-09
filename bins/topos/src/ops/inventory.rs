@@ -841,6 +841,11 @@ pub(crate) fn detail_for(
                 .collect(),
             DraftCopies::None | DraftCopies::In(_) => Vec::new(),
         },
+        // The blocked line's workbench folder is filled by the dive's caller, which knows which
+        // scope answered — the folder is that scope's store's, and it is spelled from where the
+        // reader stands like every other path the dive prints.
+        conflict_copy: None,
+        conflict_reason: None,
     })
 }
 

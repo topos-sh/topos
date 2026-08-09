@@ -113,7 +113,8 @@ pub(crate) enum Command {
         /// folder to keep your wording on those lines and take the team's other changes. Either
         /// way you get an ordinary draft on top of the team's version, which `topos publish`
         /// ships like any other. Only for a merge that has actually stopped — with nothing
-        /// waiting, `topos update <skill>` is the command. Takes exactly one skill.
+        /// waiting, `topos update <skill>` is the command (add `-g` when the merge is in your
+        /// machine-wide set). Takes exactly one skill.
         // `--onto-current` is the prior spelling, kept as a HIDDEN alias (clap's `alias` never
         // reaches the help or the generated reference) so anything already in flight keeps working.
         #[arg(long = "keep-mine", alias = "onto-current")]
@@ -814,7 +815,8 @@ mod tests {
              folder to keep your wording on those lines and take the team's other changes. Either \
              way you get an ordinary draft on top of the team's version, which `topos publish` \
              ships like any other. Only for a merge that has actually stopped — with nothing \
-             waiting, `topos update <skill>` is the command. Takes exactly one skill"
+             waiting, `topos update <skill>` is the command (add `-g` when the merge is in your \
+             machine-wide set). Takes exactly one skill"
         );
         assert_eq!(
             flat(

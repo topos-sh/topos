@@ -169,10 +169,13 @@ pub(crate) fn next_actions(command: &str, argv: &[String], err: &ClientError) ->
             update_at_scope(*global, skill, &[]),
         )],
         // No merge stopped, so the fix is the merge itself — the one that lands the team's
-        // non-conflicting changes and stops only where the two sides really collide.
-        ClientError::NoStoppedMerge { skill, .. } => vec![crate::actions::next_action(
+        // non-conflicting changes and stops only where the two sides really collide. Spelled for
+        // the scope the REFUSAL names (the copy `--keep-mine` was aimed at), the same way the
+        // sentence spells it: a merge waiting machine-wide, offered without `-g`, drives the
+        // project's copy from inside a checkout and refuses all over again.
+        ClientError::NoStoppedMerge { skill, global } => vec![crate::actions::next_action(
             ActionCode::ApplyWaitingUpdate,
-            update_rebuild(command, argv, skill, &[]),
+            update_at_scope(*global, skill, &[]),
         )],
         // A denial is not self-service (ask an owner to invite/roster you, or contact an admin) — the
         // codes carry no executable argv.
@@ -2186,13 +2189,9 @@ fn list_detail_tty(detail: &topos_types::results::ListDetail) -> String {
         }
         StatusItemState::LocalEdits => "local edits ahead of the applied version".to_owned(),
         // The SAME two lines the inventory row prints, indented into the dive's own body: one
-        // bundle, one answer, whichever command asked.
-        StatusItemState::Blocked => format!(
-            "the team's version needs merging — you cannot publish until you pick one\n  to keep \
-             yours:  topos update{flag} {} --keep-mine\n  to take theirs: topos update{flag} {} \
-             --reset",
-            detail.name, detail.name
-        ),
+        // bundle, one answer, whichever command asked — plus the folder the merge stopped in,
+        // which only this surface can still name once the update's receipt has scrolled away.
+        StatusItemState::Blocked => blocked_detail_block(detail, flag),
         StatusItemState::Excluded => "excluded here".to_owned(),
         StatusItemState::Off => "off — withheld here by your global manifest".to_owned(),
         StatusItemState::NotAvailable => "not available with your current access".to_owned(),
@@ -2206,6 +2205,40 @@ fn list_detail_tty(detail: &topos_types::results::ListDetail) -> String {
     };
     s.push_str(&format!("\n  {state}"));
     s
+}
+
+/// What the deep dive says about a BLOCKED bundle: the block, the folder the stopped merge is
+/// waiting in when the record names one, then the merge's two exits.
+///
+/// The folder lines are the update receipt's own sentences, word for word (the conflict row in
+/// [`pull_action_row`]) — one state, one vocabulary, whichever surface a person meets it on — and
+/// they are discriminated on the RECORDED reason exactly as the receipt discriminates, so a block
+/// re-read here says what its first disclosure said. This is also the ONLY surface that can still
+/// answer "which folder?" after that receipt has scrolled off, or when a silent sweep raised the
+/// block and printed no receipt at all.
+///
+/// A detail that names no folder prints no folder line: the record is the one thing that knows
+/// which folder is this bundle's, and an answer never claims a place it cannot prove.
+fn blocked_detail_block(detail: &topos_types::results::ListDetail, flag: &str) -> String {
+    let name = &detail.name;
+    let mut out =
+        "the team's version needs merging — you cannot publish until you pick one".to_owned();
+    if let Some(dir) = &detail.conflict_copy {
+        if detail.conflict_reason == Some(topos_types::persisted::ConflictReason::NoBase) {
+            out.push_str(
+                "\n  to merge by hand, your files are here with the team's beside them \
+                 (.topos-theirs):",
+            );
+        } else {
+            out.push_str("\n  to merge by hand, both versions are marked up here:");
+        }
+        out.push_str(&format!("\n    {dir}/"));
+    }
+    out.push_str(&format!(
+        "\n  to keep yours:  topos update{flag} {name} --keep-mine\n  to take theirs: topos \
+         update{flag} {name} --reset"
+    ));
+    out
 }
 
 /// What the deep dive says about copies whose edits DISAGREE: the count, then one block per copy —
@@ -5818,6 +5851,8 @@ mod tests {
                         copy("~/.claude/skills/coolify-deploy", "~/.claude/skills"),
                         copy("~/.agents/skills/coolify-deploy", "~/.agents/skills"),
                     ],
+                    conflict_copy: None,
+                    conflict_reason: None,
                 }),
                 signed_in: false,
                 ..ListData::default()
@@ -5872,6 +5907,8 @@ mod tests {
                         display: "project/.claude/skills/coolify-deploy".to_owned(),
                         dest: ".claude/skills".to_owned(),
                     }],
+                    conflict_copy: None,
+                    conflict_reason: None,
                 }),
                 signed_in: false,
                 ..ListData::default()
@@ -5921,6 +5958,8 @@ mod tests {
             managed: true,
             folders: Vec::new(),
             diverged: Vec::new(),
+            conflict_copy: None,
+            conflict_reason: None,
         };
         let render = |d| {
             list_tty(&ListOutcome {
@@ -5977,6 +6016,8 @@ mod tests {
             managed: false,
             folders,
             diverged: Vec::new(),
+            conflict_copy: None,
+            conflict_reason: None,
         };
         let render = |d| {
             list_tty(&ListOutcome {
@@ -6027,6 +6068,8 @@ mod tests {
                     managed: false,
                     folders: vec!["/home/u/.claude/skills/frontend-design".to_owned()],
                     diverged: Vec::new(),
+                    conflict_copy: None,
+                    conflict_reason: None,
                 }),
                 signed_in: false,
                 ..ListData::default()
@@ -6542,6 +6585,8 @@ mod tests {
                     managed: true,
                     folders: Vec::new(),
                     diverged: Vec::new(),
+                    conflict_copy: None,
+                    conflict_reason: None,
                 }),
                 signed_in: true,
                 ..ListData::default()
@@ -7435,6 +7480,65 @@ mod tests {
             actions[0].argv,
             vec!["topos", "update", "-g", "coolify-deploy", "--json"]
         );
+    }
+
+    /// The offered merge is spelled for the scope the REFUSAL names, never the one the invocation
+    /// happened to stand in: a merge waiting machine-wide, offered bare from inside a checkout,
+    /// drives the project's copy and refuses all over again — a loop the reader leaves only by
+    /// guessing `-g`. Both surfaces carry the one scope, and the TTY says it exactly once.
+    #[test]
+    fn the_offered_merge_carries_the_scope_the_refusal_names() {
+        let machine = crate::error::ClientError::NoStoppedMerge {
+            skill: "coolify-deploy".to_owned(),
+            global: true,
+        };
+        let here = crate::error::ClientError::NoStoppedMerge {
+            skill: "coolify-deploy".to_owned(),
+            global: false,
+        };
+        // The invocation stood in a project scope and spelled no flag: the machine-wide refusal
+        // offers `-g` anyway, and the project-scoped one still offers none.
+        let argv = typed(&["update", "coolify-deploy", "--keep-mine"]);
+        assert_eq!(
+            super::next_actions("update", &argv, &machine)[0].argv,
+            typed(&["topos", "update", "-g", "coolify-deploy", "--json"])
+        );
+        assert_eq!(
+            super::next_actions("update", &argv, &here)[0].argv,
+            typed(&["topos", "update", "coolify-deploy", "--json"])
+        );
+        // And the fact wins in the other direction too — a `-g` in the argv never re-scopes an
+        // offer for a copy the refusal itself places in this folder's scope.
+        assert_eq!(
+            super::next_actions(
+                "update",
+                &typed(&["update", "-g", "coolify-deploy", "--keep-mine"]),
+                &here
+            )[0]
+            .argv,
+            typed(&["topos", "update", "coolify-deploy", "--json"])
+        );
+        // The TTY half is the SAME command, and the sentence has already said it — so the `try:`
+        // block stays empty rather than repeating it. That silence is the proof the two surfaces
+        // agree byte for byte: an offer at the other scope would not match the sentence, and would
+        // print under it as a second, contradicting command.
+        for (err, line) in [
+            (&machine, "topos update -g coolify-deploy"),
+            (&here, "topos update coolify-deploy"),
+        ] {
+            let offered = super::hint_line(&super::next_actions("update", &argv, err)[0].argv);
+            assert_eq!(offered, line);
+            let message = super::safe_message(err);
+            assert!(
+                super::backtick_spans(&message).contains(&line),
+                "the sentence must name the offered command verbatim: {message}"
+            );
+            assert_eq!(
+                super::err_hint_tty("update", &argv, err),
+                None,
+                "the sentence already carries this command: {message}"
+            );
+        }
     }
 
     /// The behind refusal is two lines: the fact, then the one command that resolves it. It carries

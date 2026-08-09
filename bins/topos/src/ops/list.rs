@@ -31,7 +31,7 @@ use std::path::{Path, PathBuf};
 
 use topos_harness::coverage;
 use topos_harness::registry::{self, SkillScope};
-use topos_types::persisted::{Lock, PlacementMap};
+use topos_types::persisted::{ConflictReason, Lock, PlacementMap};
 use topos_types::results::{
     AgentView, AgentViewDir, AgentViewEntry, BucketTruncation, ListData, ListDetail, ListScope,
     ListScopeSummary, RemoteAdoption, RemoteChannel, RemoteSkill, RemoteWorkspace, SkillEntry,
@@ -262,6 +262,17 @@ pub(crate) fn list_with(
                 && let Some(file) = section.manifest_path.as_deref()
             {
                 detail.source_file = Some(scoped_folder(ctx, section, file));
+            }
+            // A stopped merge's workbench folder — the ONE thing a blocked answer could not
+            // recover. The update receipt named that folder once; a person who scrolled past it
+            // (or whose block was raised by a silent session-start sweep, which prints no receipt
+            // at all) had no surface left that could tell them where to edit. Filled only for a
+            // blocked line, and only when the record itself names a folder.
+            if matches!(detail.state, StatusItemState::Blocked)
+                && let Some((dir, reason)) = conflict_workbench(ctx, section, &detail.name)
+            {
+                detail.conflict_copy = Some(dir);
+                detail.conflict_reason = Some(reason);
             }
         }
         // A one-skill answer names THIS skill's external source and NO other. Every line above it
@@ -576,6 +587,74 @@ fn detail_forge_origin(detail: &ListDetail) -> Option<String> {
     }
 }
 
+/// Where a BLOCKED bundle's stopped merge sits, and WHY it stopped — the pair the deep dive's
+/// blocked answer prints. `None` whenever nothing can be proven: no store for the answering scope,
+/// no conflict record under this name, or a record that names no folder.
+///
+/// The folder is the record's OWN `copy_dir`, parsed through [`sidecar::ConflictDir`] and joined
+/// onto the answering scope's `conflicts/` — the same derivation every other reader of a workbench
+/// folder goes through, so the folder this prints is the folder the merge's exits act on. Parsed
+/// rather than trusted because a project store travels with its checkout: whoever wrote the clone
+/// wrote the document this reads. And there is deliberately NO fallback to the bundle's display
+/// name — two bundles can legitimately share one (two workspaces, or a workspace copy beside a
+/// local one), so a guessed folder could send a person to edit another bundle's hand merge.
+fn conflict_workbench(
+    ctx: &Ctx<'_>,
+    section: &ScopeResolution,
+    name: &str,
+) -> Option<(String, ConflictReason)> {
+    let layout = scope_layout(ctx, section)?;
+    let cs = conflict_record(ctx, &layout, name)?;
+    let dir = sidecar::ConflictDir::parse(cs.copy_dir.as_deref()?)
+        .map(|d| layout.conflict_copy_dir(&d))?;
+    Some((scoped_folder(ctx, section, &dir), cs.reason))
+}
+
+/// The store a section's rows were resolved against: the machine store for the machine scope, the
+/// checkout's OWN store for a project one — never minted here, so a checkout that has no store
+/// answers `None` rather than growing one on a read.
+fn scope_layout(ctx: &Ctx<'_>, section: &ScopeResolution) -> Option<sidecar::Layout> {
+    if section.scope != "project" {
+        return Some(ctx.layout.clone());
+    }
+    let root = section.manifest_path.as_deref()?.parent()?;
+    sidecar::existing_project_store(ctx.fs, root)
+}
+
+/// The stopped-merge record one store holds for a NAME, when it holds one. The store is walked the
+/// way every other read here walks it (retired records answer for nothing; a record's `lock` names
+/// the bundle it holds), and a record carrying no such document is not the blocked one, so the
+/// walk keeps looking — which is what makes the answer the BLOCKED record's, whichever opaque
+/// identity that record happens to be filed under.
+fn conflict_record(
+    ctx: &Ctx<'_>,
+    layout: &sidecar::Layout,
+    name: &str,
+) -> Option<topos_types::persisted::ConflictState> {
+    for entry in ctx.fs.read_dir(&layout.skills_dir()).ok()? {
+        let Some(id) = entry.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        let Ok(id) = crate::id::SkillId::parse(id) else {
+            continue;
+        };
+        if sidecar::record_retired(ctx.fs, layout, &id) {
+            continue;
+        }
+        let sp = layout.published(&id);
+        let Ok(Some(lock)) = doc::read_doc::<Lock>(ctx.fs, &sp.lock) else {
+            continue;
+        };
+        if lock.name != name {
+            continue;
+        }
+        if let Ok(Some(cs)) = doc::read_doc(ctx.fs, &sp.conflict) {
+            return Some(cs);
+        }
+    }
+    None
+}
+
 /// The placed BUILT-IN meta-skill's inventory row — read from its own record in the MACHINE store
 /// (engine custody: `ops::builtin` places and force-syncs it with no manifest row anywhere). It
 /// originates from disk, so the inventory shows it — hiding it would make `remove topos`'s own
@@ -637,6 +716,8 @@ fn builtin_detail(ctx: &Ctx<'_>, token: &str) -> Option<ListDetail> {
         // Engine custody re-syncs every copy to the binary on the next sweep, so copies never
         // compete here — and the per-copy acts a competition offers reach nothing the built-in has.
         diverged: Vec::new(),
+        conflict_copy: None,
+        conflict_reason: None,
     })
 }
 
@@ -687,6 +768,8 @@ fn unmanaged_detail(ctx: &Ctx<'_>, token: &str, roots: Option<&DiscoveryRoots>) 
         managed: false,
         folders,
         diverged: Vec::new(),
+        conflict_copy: None,
+        conflict_reason: None,
     }
 }
 
@@ -1660,10 +1743,18 @@ mod tests {
             "{detail:?}"
         );
         assert_eq!(detail.version.as_deref(), Some(mine_commit.as_str()));
+        // ...and it carries the folder the merge stopped in, which no other surface still names
+        // once the update's receipt has scrolled away.
+        assert_eq!(
+            detail.conflict_copy.as_deref(),
+            Some("~/.topos/conflicts/notes")
+        );
         let deep_text = crate::render::list_tty(&deep);
         assert!(
             deep_text.contains(
                 "  the team's version needs merging — you cannot publish until you pick one\n\
+                 \x20 to merge by hand, both versions are marked up here:\n\
+                 \x20   ~/.topos/conflicts/notes/\n\
                  \x20 to keep yours:  topos update -g notes --keep-mine\n\
                  \x20 to take theirs: topos update -g notes --reset"
             ),
@@ -1683,6 +1774,117 @@ mod tests {
         assert!(
             status_text.contains("1 merge waiting on you"),
             "{status_text}"
+        );
+    }
+
+    /// The blocked deep dive hands back the one thing a scrolled-away receipt took with it: the
+    /// folder the stopped merge is waiting in — in the receipt's OWN sentence for the reason that
+    /// was recorded, so a person who reads it here and a person who read it there are looking at
+    /// one folder described one way. And a record that names no folder says nothing about one:
+    /// the record is the only thing that knows which folder is this bundle's.
+    #[test]
+    fn the_blocked_deep_dive_names_the_workbench_folder_only_when_the_record_does() {
+        use topos_types::persisted::{ConflictReason, ConflictState};
+
+        let dive = |reason: ConflictReason, copy_dir: Option<&str>| {
+            let home = TempHome::new();
+            let cwd = home.0.join("plain");
+            std::fs::create_dir_all(&cwd).unwrap();
+            home.session(
+                "topos.sh",
+                "w_acme",
+                "acme",
+                crate::sessions::SESSION_ACTIVE,
+            );
+            home.cache(
+                "w_acme",
+                "topos.sh",
+                "acme",
+                vec![assigned("notes", None)],
+                Vec::new(),
+            );
+            home.global("[bundles]\n\"topos.sh/acme\" = \"*\"\n");
+            let placed = home.0.join(".claude/skills/notes");
+            lay_copy(&placed, "# my version\n");
+            home.store_applied(
+                &skill_id_of("notes"),
+                "notes",
+                &"d".repeat(64),
+                &[placed.to_string_lossy().as_ref()],
+            );
+            let sid = crate::id::SkillId::parse(&skill_id_of("notes")).unwrap();
+            crate::doc::write_doc(
+                &crate::fs_seam::RealFs,
+                &home.layout().published(&sid).conflict,
+                &ConflictState {
+                    schema_version: topos_types::PERSISTED_SCHEMA_VERSION,
+                    base_commit: "0".repeat(64),
+                    base_digest: "0".repeat(64),
+                    current_commit: "d".repeat(64),
+                    current_digest: "3".repeat(64),
+                    draft_commit: "1".repeat(64),
+                    draft_digest: "2".repeat(64),
+                    result_commit: "4".repeat(64),
+                    conflicted_digest: "5".repeat(64),
+                    copy_dir: copy_dir.map(str::to_owned),
+                    reason,
+                    concluded: None,
+                    paths: Vec::new(),
+                },
+            )
+            .unwrap();
+            let out = run(
+                &home,
+                &cwd,
+                &ListRequest {
+                    name: Some("notes".to_owned()),
+                    ..request()
+                },
+            )
+            .unwrap();
+            let detail = out.data.detail.clone().expect("a detail");
+            (detail, crate::render::list_tty(&out))
+        };
+
+        // A real fork point: both versions marked up in the folder the record named.
+        let (detail, text) = dive(ConflictReason::ThreeWay, Some("notes"));
+        let json = serde_json::to_value(&detail).expect("the detail serializes");
+        assert_eq!(json["conflict_copy"], "~/.topos/conflicts/notes", "{json}");
+        assert_eq!(json["conflict_reason"], "three_way", "{json}");
+        assert!(
+            text.contains(
+                "  to merge by hand, both versions are marked up here:\n\
+                 \x20   ~/.topos/conflicts/notes/\n"
+            ),
+            "{text}"
+        );
+
+        // Unrelated histories: no markers were written, so the line names the convention that WAS
+        // — the same sentence the receipt printed for this reason.
+        let (detail, text) = dive(ConflictReason::NoBase, Some("notes"));
+        let json = serde_json::to_value(&detail).expect("the detail serializes");
+        assert_eq!(json["conflict_reason"], "no_base", "{json}");
+        assert!(
+            text.contains(
+                "  to merge by hand, your files are here with the team's beside them \
+                 (.topos-theirs):\n\
+                 \x20   ~/.topos/conflicts/notes/\n"
+            ),
+            "{text}"
+        );
+
+        // A record naming NO folder: no field, no line — and the two exits still answer.
+        let (detail, text) = dive(ConflictReason::ThreeWay, None);
+        let json = serde_json::to_value(&detail).expect("the detail serializes");
+        assert!(json.get("conflict_copy").is_none(), "{json}");
+        assert!(json.get("conflict_reason").is_none(), "{json}");
+        assert!(!text.contains("to merge by hand"), "{text}");
+        assert!(
+            text.contains(
+                "  the team's version needs merging — you cannot publish until you pick one\n\
+                 \x20 to keep yours:  topos update -g notes --keep-mine\n"
+            ),
+            "{text}"
         );
     }
 
@@ -2966,6 +3168,8 @@ mod tests {
                     managed: true,
                     folders: Vec::new(),
                     diverged: Vec::new(),
+                    conflict_copy: None,
+                    conflict_reason: None,
                 }),
                 footprint: footprint.clone(),
                 ..ListData::default()
