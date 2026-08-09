@@ -2314,7 +2314,12 @@ fn finish_reset(
         Ok(ops::ResetOutcome::Applied(items)) => {
             if json {
                 let value = serde_json::json!({ "items": items });
-                println!("{}", render::to_json(&render::ok_envelope(command, value)));
+                let mut envelope = render::ok_envelope(command, value);
+                // A merge this reset left STANDING carries its two ways out, exactly as the
+                // conflicted row does — the state that still asks for a decision must offer that
+                // decision on the machine surface too.
+                envelope.next_actions = render::reset_next_actions(&items);
+                println!("{}", render::to_json(&envelope));
             } else {
                 println!("{}", render::reset_applied_tty(&items));
             }

@@ -1,9 +1,9 @@
 /**
  * Pure first-parent history walk. Zero IO: the fetcher is injected, so the walk is unit-testable
  * with plain stubs and the caller decides how metadata is actually fetched (in production the
- * skill page binds reads.custodyVersionMeta over its workspace + bundle id). Merge commits are
- * traversed along their FIRST parent (the spine); the full parent set still rides on each step
- * so the UI can mark merges.
+ * skill page binds reads.custodyVersionMeta over its workspace + bundle id). The walk follows the
+ * FIRST parent (the spine); the full parent set still rides on each step, so a version with more
+ * than one parent stays readable rather than truncating the walk.
  */
 
 /** The minimal metadata shape the walk needs — structurally satisfied by CustodyVersionMeta. */
@@ -23,7 +23,11 @@ export interface HistoryStep {
   versionId: string;
   author: string;
   message: string;
-  /** The COMPLETE parent set (2 entries marks a merge); the walk follows parents[0]. */
+  /**
+   * The COMPLETE parent set; the walk follows parents[0]. A published version commits ONE parent
+   * — a resolved merge arrives as a single forward commit on the team's version — so the spine is
+   * the whole history.
+   */
   parents: string[];
   fileCount: number;
 }

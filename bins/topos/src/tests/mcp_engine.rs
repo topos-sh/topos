@@ -1926,6 +1926,63 @@ fn offline_sweeps_still_heal_configs_from_the_store() {
     );
 }
 
+/// THE RECEIPT'S OWN VERB. A run that puts a hand-deleted config entry back CHANGED this machine,
+/// and the header must say so: the store never moved (the sync reads "up to date"), so a header
+/// built from the sync's answer alone said `checked` over a run that rewrote a person's agent
+/// config. A genuinely idle sweep still says `checked`, and the repaired row reads as the ordinary
+/// catch-up it is, naming the config file it wrote.
+#[test]
+fn a_repaired_config_entry_makes_the_run_an_update_not_a_check() {
+    let rig = Rig::new("repair");
+    rig.seed_session();
+    seed_harness_dirs(&rig.home.0);
+    let v = mk_version(&[(
+        "server.json",
+        server_json("https://mcp.example/a").as_bytes(),
+    )]);
+    let plane = FakePlane::new().with_version("s_a", &v);
+    plane.serves(vec![delivered_mcp("s_a", "alpha", &v)]);
+    let dir = FakeDirectory {
+        skills: vec![mcp_catalog_entry("s_a", "alpha", &v)],
+        channels: Vec::new(),
+    };
+    // ONE hermetic config file, so the row's destination column names it outright.
+    rig.write_global(&format!(
+        "[bundles]\n\"{HOST}/{WS_NAME}/alpha\" = {{ dest = [\"~/.cursor/mcp.json\"] }}\n"
+    ));
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    let tty = |out: &ops::PullOutcome| {
+        crate::render::pull_tty(
+            &out.data,
+            &out.decisions,
+            &out.warnings,
+            &out.advisories,
+            &out.disclosures,
+        )
+    };
+    sweep(&ctx, &plane, &dir);
+    let cursor = rig.home.0.join(".cursor/mcp.json");
+    assert!(cursor.exists());
+
+    // A sweep that finds everything in place only LOOKED.
+    let idle = tty(&sweep(&ctx, &plane, &dir));
+    assert!(idle.starts_with("checked "), "{idle}");
+
+    // The entry is deleted by hand; the next sweep writes it back.
+    std::fs::remove_file(&cursor).unwrap();
+    let out = sweep(&ctx, &plane, &dir);
+    assert!(cursor.exists(), "the config was not repaired");
+    let row = out.data.skills.iter().find(|s| s.skill == "alpha").unwrap();
+    assert_eq!(
+        row.action,
+        topos_types::results::PullAction::Refreshed,
+        "{row:?}"
+    );
+    let repaired = tty(&out);
+    assert!(repaired.starts_with("updated "), "{repaired}");
+    assert!(repaired.contains("alpha   updated ("), "{repaired}");
+}
+
 #[test]
 fn a_channel_drop_removes_the_entries_everywhere() {
     let rig = Rig::new("chdrop");

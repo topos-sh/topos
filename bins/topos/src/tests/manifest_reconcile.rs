@@ -4309,6 +4309,27 @@ fn rebuild_leaves_a_blocked_bundle_alone_and_names_both_exits() {
     );
     assert!(tty.contains("waiting on you"), "{tty}");
     assert!(!tty.contains("failed"), "{tty}");
+    // ONE pair of exits on the machine surface. The bundle is re-disclosed as a conflicted row in
+    // this same run, and that row's typed pair IS the decision — a second, differently-spelled
+    // pair from the rebuild itself handed an agent four actions for two choices.
+    let actions: Vec<(String, String)> = crate::render::conflict_next_actions(&out.data)
+        .into_iter()
+        .chain(crate::render::decision_next_actions(&out.decisions))
+        .map(|a| (a.code.as_str().to_owned(), a.argv.join(" ")))
+        .collect();
+    assert_eq!(
+        actions,
+        vec![
+            (
+                "RESOLVE_DIVERGED_DRAFT".to_owned(),
+                "topos update -g deploy --keep-mine --json".to_owned()
+            ),
+            (
+                "RESOLVE_DIVERGED_DRAFT".to_owned(),
+                "topos update -g deploy --reset --json".to_owned()
+            ),
+        ]
+    );
     // And the HEADER says what the run did: it checked. Nothing moved here — the whole point of
     // the assertions above is that the folders were left as they are — so `updated machine-wide`
     // was a claim the rows under it contradicted.

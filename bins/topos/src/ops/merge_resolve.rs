@@ -625,7 +625,7 @@ pub(crate) fn escape_recorded(
     let base_commit = super::parse_hex32(&cs.base_commit)?;
     // Read the folders BEFORE the escape converges them: they are what this exit stands on, and
     // they are also what it is about to overwrite (see [`live_copies`]).
-    let live = live_copies(ctx, sp, lock, map);
+    let live = live_copies(ctx, sp, lock, map, cs);
     let resolution = match read_hand_resolution(ctx, lock, cs)? {
         // The person's own tree. It needs NEITHER the stored draft nor the fork point, and it must
         // not be made to depend on them: an exit that always works cannot start by re-rendering
@@ -719,7 +719,23 @@ struct LiveCopies {
 /// idempotent, so this is the same commit the materializer's rail makes moments later, and the id
 /// is simply learned early enough to print. Best-effort by construction: a scan or a snapshot that
 /// fails says nothing rather than failing an escape that must never deadlock.
-fn live_copies(ctx: &Ctx<'_>, sp: &SkillPaths, lock: &Lock, map: &PlacementMap) -> LiveCopies {
+///
+/// ONE tree is never read as a person's work, whichever folder holds it: the MARKED-UP one
+/// (`conflicted_digest` — both versions with markers through them). Those bytes are topos's own
+/// writing, and git never commits what it wrote into your tree as if you wrote it. Current builds
+/// write markers to the workbench alone, but a folder can still hold that tree — an install that
+/// upgraded mid-merge, or a person who copied the workbench over a placement — and committing it
+/// would publish the markers as the person's version. So a copy scanning to that digest is not a
+/// draft here, and the escape falls back to the recorded snapshot: exactly what
+/// [`read_hand_resolution`] already answers when the WORKBENCH scans to it ("untouched — keep my
+/// version").
+fn live_copies(
+    ctx: &Ctx<'_>,
+    sp: &SkillPaths,
+    lock: &Lock,
+    map: &PlacementMap,
+    cs: &ConflictState,
+) -> LiveCopies {
     let none = LiveCopies {
         mine: None,
         collapsed: None,
@@ -727,6 +743,8 @@ fn live_copies(ctx: &Ctx<'_>, sp: &SkillPaths, lock: &Lock, map: &PlacementMap) 
     let Ok(scans) = placement::scan_placements(ctx, map) else {
         return none;
     };
+    // The one comparison the rule above needs — the marker tree, wherever it turns up.
+    let marked = |digest: &[u8; 32]| to_hex(digest) == cs.conflicted_digest;
     match placement::classify_draft(&scans, map) {
         // Several copies genuinely disagree: there is no single working tree to conclude from, so
         // the escape falls back to the snapshot — and every one of them is named.
@@ -736,6 +754,9 @@ fn live_copies(ctx: &Ctx<'_>, sp: &SkillPaths, lock: &Lock, map: &PlacementMap) 
                 let crate::placement::ScanStatus::Modified { scanned } = &s.status else {
                     continue; // a competitor is a Modified copy by construction
                 };
+                if marked(&scanned.bundle_digest) {
+                    continue; // topos's own marked-up tree — not work of theirs to save
+                }
                 let Ok(version) = snapshot_draft(ctx, sp, lock, scanned) else {
                     return none;
                 };
@@ -750,13 +771,16 @@ fn live_copies(ctx: &Ctx<'_>, sp: &SkillPaths, lock: &Lock, map: &PlacementMap) 
             }
         }
         // ONE advanced copy — the working tree, bytes already in hand (a Modified scan always
-        // carries them).
+        // carries them) unless what advanced it was topos's own markers.
         placement::DraftVerdict::One { idx, .. } => {
             let Some(crate::placement::ScanStatus::Modified { scanned }) =
                 scans.get(idx).map(|s| &s.status)
             else {
                 return none;
             };
+            if marked(&scanned.bundle_digest) {
+                return none;
+            }
             LiveCopies {
                 mine: scanned_to_bundle(scanned).ok(),
                 collapsed: None,
@@ -770,6 +794,7 @@ fn live_copies(ctx: &Ctx<'_>, sp: &SkillPaths, lock: &Lock, map: &PlacementMap) 
                 .iter()
                 .find(|s| matches!(s.status, crate::placement::ScanStatus::Clean { .. }))
                 .and_then(|s| crate::scan::scan(&s.dir).ok())
+                .filter(|s| !marked(&s.bundle_digest))
                 .and_then(|s| scanned_to_bundle(&s).ok());
             LiveCopies {
                 mine,
@@ -1970,8 +1995,11 @@ fn merged_row(
 /// the record's own two pins. The person's draft (`draft_digest`) is what a stop leaves everywhere,
 /// because a conflict writes to no placement. The team's version (`current_digest`) is what a
 /// `--dest`-narrowed `--reset` puts in ONE copy — `settle_conflict_docs` advanced the lock to
-/// theirs when the merge stopped, so the base a reset re-materializes IS that digest. Anything else
-/// is this person, still working in that folder after the stop.
+/// theirs when the merge stopped, so the base a reset re-materializes IS that digest. The
+/// marked-up tree (`conflicted_digest`) is topos's OWN writing and the one thing in a folder that
+/// is nobody's version — [`live_copies`] refuses to commit it as the person's work, and this line
+/// refuses to call it their edits. Anything else is this person, still working in that folder
+/// after the stop.
 fn conflict_disclosure(
     ctx: &Ctx<'_>,
     map: &PlacementMap,
@@ -1993,6 +2021,8 @@ fn conflict_disclosure(
                 ConflictHolds::Yours
             } else if digest == cs.current_digest {
                 ConflictHolds::Theirs
+            } else if digest == cs.conflicted_digest {
+                ConflictHolds::MarkedUp
             } else {
                 ConflictHolds::NewerEdits
             };

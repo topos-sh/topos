@@ -195,13 +195,19 @@ one copy was edited.
 reset took and `others_kept` names the copies that kept their edits.
 
 A merge conflict never reaches a folder an agent reads. A `conflicted` row's `merge` object names
-both halves: `placements` — the folders that still hold the author's own version, byte for byte,
-untouched by the conflict — and `copy_dir`, the one folder holding a marked-up copy of both
-versions. Never look for markers in a placement; there are none. Resolve by editing that copy and
-running `topos update <skill> --keep-mine`, which commits it (leaving the folder alone keeps your
-wording on the contested lines), or `topos update <skill> --reset --yes` to take the team's version
-instead. Either one clears the block. The folder goes with it, except where a reset finds it
-edited — a reset never reads it, so it is left in place and named on the receipt.
+both halves: `placements` — one entry per folder the bundle sits in, `{dir, holds}` — and
+`copy_dir`, the one folder holding a marked-up copy of both versions. `holds` says what is in that
+folder right now, read from the folder itself. `yours` is the author's own version, which is what
+every folder holds the moment a merge stops. `theirs` is the team's version, in a copy a
+`--dest`-narrowed `--reset` already took. `newer_edits` is work done in that folder since the merge
+stopped. `marked_up` is topos's own comparison tree — both versions with markers through them —
+which reaches a folder only if someone copied the workbench over it; it is nobody's version, and
+both ways out replace it. Never look for markers in a placement; a stopped merge writes none
+there. Resolve by editing that copy and running `topos update <skill> --keep-mine`, which commits
+it (leaving the folder alone keeps your wording on the contested lines), or `topos update <skill>
+--reset --yes` to take the team's version instead. Either one clears the block. The folder goes
+with it, except where a reset finds it edited — a reset never reads it, so it is left in place and
+named on the receipt.
 
 The `merged` row's `merge.resolved` says which of the two exits ran, because they say different
 things about whose wording landed. `keep_mine` — the folder was left alone — is `git merge -X ours`:

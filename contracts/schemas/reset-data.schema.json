@@ -31,7 +31,7 @@
       ]
     },
     "merge": {
-      "description": "Where this reset leaves a merge that had STOPPED on the bundle. Absent when none had —\nthe ordinary reset says nothing about merges. **INFERRED** (additive-only).",
+      "description": "Where this reset leaves a merge that had STOPPED on the bundle. Absent when none had —\nthe ordinary reset says nothing about merges — and absent from every DESCRIBE: where the\nmerge ends up is settled by the apply, so the preview would be predicting it. **INFERRED**\n(additive-only).",
       "anyOf": [
         {
           "$ref": "#/$defs/ResetMergeOutcome"

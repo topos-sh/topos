@@ -205,8 +205,10 @@ pub enum PullAction {
     Installed,
     /// A managed copy that stood BEHIND the version this machine already holds was rewritten to it
     /// — no version moved (`observed`/`applied` are unchanged), only bytes on disk caught up (a
-    /// crash-window residue, a copy left at an older version). `destinations` names the folders. A
-    /// catch-up is not a first materialization, so it never reads `installed`. **Additive.**
+    /// crash-window residue, a copy left at an older version, a config-placed bundle's entry
+    /// deleted or edited by hand and put back). `destinations` names the folders (config files,
+    /// for a config-placed bundle). A catch-up is not a first materialization, so it never reads
+    /// `installed`. **Additive.**
     ///
     /// Serialized as `updated` — the word every human surface prints for it. A wire token and a
     /// terminal line naming one outcome two ways is one vocabulary too many.
@@ -334,7 +336,12 @@ pub enum ConflictHolds {
     /// The team's version: a `--dest`-narrowed reset took this one copy while the merge stayed
     /// stopped over the others.
     Theirs,
-    /// Neither of the two — the person kept working in this folder after the merge stopped.
+    /// Both versions, marked up — topos's OWN comparison tree, which a receipt must never read as
+    /// work of the person's. A merge writes it to the workbench, so a placement holds it only
+    /// where one was copied over it (or an install upgraded mid-merge); either way the bytes are
+    /// not a version anybody chose, and both ways out replace them.
+    MarkedUp,
+    /// None of the three — the person kept working in this folder after the merge stopped.
     NewerEdits,
 }
 
@@ -1819,7 +1826,9 @@ pub struct ResetData {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hand_merge: Option<String>,
     /// Where this reset leaves a merge that had STOPPED on the bundle. Absent when none had —
-    /// the ordinary reset says nothing about merges. **INFERRED** (additive-only).
+    /// the ordinary reset says nothing about merges — and absent from every DESCRIBE: where the
+    /// merge ends up is settled by the apply, so the preview would be predicting it. **INFERRED**
+    /// (additive-only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub merge: Option<ResetMergeOutcome>,
 }

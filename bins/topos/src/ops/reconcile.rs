@@ -4774,6 +4774,15 @@ fn run_mcp_converge(
                 if row.action == PullAction::Installed {
                     row.destinations = sync_engine::config_destinations(env.ctx, &states);
                 }
+                // The REPAIR: the store held the right bytes all along, so the sync said "up to
+                // date" — but a config entry was gone (or hand-changed) and this run wrote it
+                // back. Disk moved, and a row that still read `up to date` would leave the
+                // receipt's own verb saying the run only looked. It is the ordinary catch-up:
+                // no version moved, only bytes on disk.
+                else if row.action == PullAction::UpToDate && bundle.wrote {
+                    row.action = PullAction::Refreshed;
+                    row.destinations = sync_engine::config_destinations(env.ctx, &states);
+                }
                 row.harnesses = states;
             }
             // The merged map (the applied report + the delivery cache): person wins per slug,
@@ -5786,18 +5795,14 @@ fn rebuild_skill(
 /// The bundle leads its own line and the way out sits under it, one command per line — the shape
 /// every other per-bundle answer takes. No internal code prefixes it: the reader is being told what
 /// happened to a folder of theirs, and a code says nothing they can act on.
+///
+/// It carries NO argv of its own. The blocked bundle is re-disclosed as a conflicted ROW in the
+/// same run, and that row already offers the two acts that end the merge as typed
+/// `RESOLVE_DIVERGED_DRAFT` actions. Two spellings of one decision on one machine surface is one
+/// too many: an agent reading four actions for two choices has to work out that half of them are
+/// the same commands.
 fn rebuild_blocked_decision(ctx: &Ctx<'_>, name: &str) -> super::PendingDecision {
-    let global = !ctx.layout.is_project_scope();
-    let g = crate::error::scope_flag(global);
-    let argv = |flag: &str| -> Vec<String> {
-        let mut v = vec!["topos".to_owned(), "update".to_owned()];
-        if global {
-            v.push("-g".to_owned());
-        }
-        v.push(name.to_owned());
-        v.push(flag.to_owned());
-        v
-    };
+    let g = crate::error::scope_flag(!ctx.layout.is_project_scope());
     super::PendingDecision {
         name: name.to_owned(),
         line: "waiting on a merge decision, so its folders were left as they are".to_owned(),
@@ -5806,7 +5811,7 @@ fn rebuild_blocked_decision(ctx: &Ctx<'_>, name: &str) -> super::PendingDecision
             format!("  topos update{g} {name} --keep-mine"),
             format!("  topos update{g} {name} --reset"),
         ],
-        ways_out: vec![argv("--keep-mine"), argv("--reset")],
+        ways_out: Vec::new(),
     }
 }
 

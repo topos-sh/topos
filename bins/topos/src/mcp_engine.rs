@@ -91,6 +91,13 @@ pub(crate) struct ScopeIo<'a> {
 pub(crate) struct BundleStates {
     pub bundle_id: String,
     pub states: Vec<McpAgentState>,
+    /// Whether this converge WROTE this bundle's entry into some agent's config — a first
+    /// placement, an update to it, or the repair of one a person deleted by hand. It is the
+    /// only honest answer to "did the disk move for this bundle": a store that is already
+    /// current says nothing about the config files, and the receipt's own verb depends on the
+    /// difference. The scope's ledger is topos's own bookkeeping, so a run that only rewrote
+    /// THAT wrote nothing here.
+    pub wrote: bool,
 }
 
 /// One removed placement (removal convergence / the `remove` verb's inline converge).
@@ -306,6 +313,8 @@ pub(crate) fn converge(
 
     // Per-bundle state collector, keyed by demand index (order preserved for the receipt).
     let mut states: BTreeMap<usize, Vec<McpAgentState>> = BTreeMap::new();
+    // The demands whose config entries this run WROTE somewhere — see [`BundleStates::wrote`].
+    let mut wrote: BTreeSet<usize> = BTreeSet::new();
 
     for h in descriptors {
         // The scope surface. A PROJECT scope never falls back to the user surface.
@@ -455,6 +464,11 @@ pub(crate) fn converge(
         );
         ledger_dirty |= surface_out.ledger_dirty;
         out.warnings.extend(surface_out.warnings);
+        for key in &surface_out.wrote {
+            if let Some(i) = desired_bundles.get(key) {
+                wrote.insert(*i);
+            }
+        }
         for (key, state) in surface_out.states {
             match desired_bundles.get(&key) {
                 Some(i) => push_state(&mut states, *i, state),
@@ -500,6 +514,7 @@ pub(crate) fn converge(
         .map(|(i, d)| BundleStates {
             bundle_id: d.bundle_id.clone(),
             states: states.remove(&i).unwrap_or_default(),
+            wrote: wrote.contains(&i),
         })
         .collect();
     out
@@ -666,9 +681,13 @@ pub(crate) fn state_phrase(state: &str) -> &str {
 // =================================================================================================
 
 /// What one surface's converge decided: per-KEY states (the caller joins keys back onto bundles),
-/// whether the ledger moved, and the surface's warnings.
+/// the keys whose bytes this run actually WROTE into the config, whether the ledger moved, and the
+/// surface's warnings.
 struct SurfaceOutcome {
     states: Vec<(String, McpAgentState)>,
+    /// The keys this surface WROTE this run — placed, updated, or repaired. Empty on a surface
+    /// left byte-identical, which is what makes it an answer rather than a guess.
+    wrote: BTreeSet<String>,
     ledger_dirty: bool,
     warnings: Vec<String>,
 }
@@ -677,6 +696,7 @@ impl SurfaceOutcome {
     fn empty() -> Self {
         Self {
             states: Vec::new(),
+            wrote: BTreeSet::new(),
             ledger_dirty: false,
             warnings: Vec::new(),
         }
@@ -692,6 +712,7 @@ impl SurfaceOutcome {
                     )
                 })
                 .collect(),
+            wrote: BTreeSet::new(),
             ledger_dirty: false,
             warnings: vec![format!("MCP_SURFACE_UNPROVABLE {}: {reason}", h.slug)],
         }
@@ -854,17 +875,19 @@ fn converge_surface(
                 surface.ledger_dirty |= clear_owns_file(ledger, h.slug, path);
             }
             // The plugin manifest is constant and carries no entry state: re-heal a hand-deleted
-            // one beside entries that remain (best-effort, no journal needed).
+            // one beside entries that remain (best-effort, no journal needed). Healing it IS a
+            // write — the entries beside it did not load until it was back — so every key on the
+            // surface counts as written, exactly as it would had the entries file gone too.
             if is_plugin
                 && !outcome.fingerprints.is_empty()
                 && let Some(manifest) = plugin_manifest_path(path)
                 && !io.fs.exists(&manifest)
+                && crate::config_io::replace_config(io.fs, &manifest, &plugin_dir::manifest_bytes())
+                    .is_ok()
             {
-                let _ = crate::config_io::replace_config(
-                    io.fs,
-                    &manifest,
-                    &plugin_dir::manifest_bytes(),
-                );
+                surface
+                    .wrote
+                    .extend(outcome.fingerprints.iter().map(|(k, _)| k.clone()));
             }
             surface
         }
@@ -1142,8 +1165,12 @@ fn fold_states(
     for (key, st) in states {
         let mapped = match st {
             // A NEW or CHANGED placement carries the harness's reload note — how the change goes
-            // live.
+            // live. These two are also the whole of what "topos wrote this entry" means, so the
+            // key is recorded: the wire state that comes out of both is `current`, and a receipt
+            // reading only that could not tell a placement it just repaired from one it merely
+            // found in order.
             EntryState::PlacedNew | EntryState::Updated => {
+                out.wrote.insert(key.clone());
                 agent_state(h.slug, "current", Some(h.reload_note), Some(path))
             }
             EntryState::Current => agent_state(h.slug, "current", None, Some(path)),

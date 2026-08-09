@@ -250,8 +250,9 @@ fits, sectioned "When to Use / Procedure / Pitfalls / Verification"; the frontma
 Draft locally without asking (drafts and `topos add` have no org effect). Anything org-bound
 needs the user's explicit yes: re-read for secrets, tokens, internal hostnames/URLs, or code
 that must not leave the machine — strip or stop; run the bare `topos publish <skill>` describe,
-show its reach and gate line, apply `--yes` only after they agree, with `-m` carrying one honest
-provenance line ("Distilled by <agent> while <what was solved>").
+show the workspace it would land in and the review line under it, apply `--yes` only after they
+agree, with `-m` carrying one honest provenance line ("Distilled by <agent> while <what was
+solved>").
 
 ## Sessions (logging in)
 

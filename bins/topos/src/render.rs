@@ -1066,19 +1066,39 @@ pub(crate) fn conflict_next_actions(data: &PullData) -> Vec<NextAction> {
     data.skills
         .iter()
         .filter(|s| s.action == topos_types::results::PullAction::Conflicted)
-        .flat_map(|s| {
-            let g = row_takes_g(s, &scope);
-            [
-                crate::actions::next_action(
-                    ActionCode::ResolveDivergedDraft,
-                    update_at_scope(g, &s.skill, &["--keep-mine"]),
-                ),
-                crate::actions::next_action(
-                    ActionCode::ResolveDivergedDraft,
-                    update_at_scope(g, &s.skill, &["--reset"]),
-                ),
-            ]
-        })
+        .flat_map(|s| stopped_merge_actions(row_takes_g(s, &scope), &s.skill))
+        .collect()
+}
+
+/// The two acts that END a stopped merge, as runnable argv — keep your version, or take the
+/// team's. Written ONCE because every surface that meets a stopped merge owes the same pair: the
+/// conflicted row above, and a `--reset` that took one copy and left the merge standing
+/// ([`reset_next_actions`]). `global` is the SCOPE the stopped copy lives in, never the one the
+/// invocation stood in.
+fn stopped_merge_actions(global: bool, skill: &str) -> [NextAction; 2] {
+    [
+        crate::actions::next_action(
+            ActionCode::ResolveDivergedDraft,
+            update_at_scope(global, skill, &["--keep-mine"]),
+        ),
+        crate::actions::next_action(
+            ActionCode::ResolveDivergedDraft,
+            update_at_scope(global, skill, &["--reset"]),
+        ),
+    ]
+}
+
+/// What a `--reset` leaves an agent to do. A narrowed reset settles the ONE copy it took, so a
+/// merge over the other copies is still stopped when it returns — the TTY says so in a sentence,
+/// and without this the `--json` half of that state carried no action at all: an agent that just
+/// reset a copy read `still_stopped` and had nothing to run. It is the same pair a conflicted row
+/// offers, spelled for the scope the reset ran in. A merge this reset CONCLUDED (and a reset that
+/// met no merge) leaves nothing to decide, and offers nothing.
+pub(crate) fn reset_next_actions(items: &[topos_types::results::ResetData]) -> Vec<NextAction> {
+    items
+        .iter()
+        .filter(|i| i.merge == Some(topos_types::results::ResetMergeOutcome::StillStopped))
+        .flat_map(|i| stopped_merge_actions(i.global, &i.skill))
         .collect()
 }
 
@@ -3097,6 +3117,13 @@ impl PullReceiptScope {
     /// already current, a merge still waiting on a person, a pinned hold. Failures, decisions,
     /// advisories and disclosures are all "looked and reported" too, so none of them makes a
     /// run a change either.
+    ///
+    /// The rule is about DISK, not about versions — which is why an MCP bundle whose store was
+    /// already current but whose config entry this run put back reaches here as `updated`
+    /// rather than `up to date`: the converge answers for what it wrote
+    /// ([`crate::mcp_engine::BundleStates::wrote`]), and the sweep re-reads the row as the
+    /// ordinary catch-up it is. A converge that only rewrote topos's own ledger wrote nothing
+    /// a person's agent reads, and moves no row.
     fn moved_anything(skills: &[PullSkill]) -> bool {
         use topos_types::results::PullAction as A;
         skills.iter().any(|s| match s.action {
@@ -3605,18 +3632,27 @@ fn pull_action_row(s: &PullSkill, scope: &PullReceiptScope) -> (String, Vec<Stri
                     }
                 },
                 // A MIXED set — no sentence can speak for all of it, so none tries: one line per
-                // folder, each saying what is in that folder and nothing about any other.
+                // folder, each saying what is in that folder and nothing about any other. Each
+                // says only what the bytes prove: a folder holding the team's version got there
+                // by a reset in every case topos knows of, but a person can put the team's
+                // version somewhere themselves, and a line that states the cause states a guess.
+                // The marked-up tree gets its own line for the opposite reason: it is the one
+                // thing in a folder that is nobody's version, so calling it "your newer edits"
+                // would hand a person topos's own writing as their work.
                 Some(mixed) => extra.extend(mixed.iter().map(|p| match p.holds {
                     ConflictHolds::Yours => format!("  {} still holds your version", p.dir),
-                    ConflictHolds::Theirs => {
-                        format!("  {} holds the team's version (you reset this copy)", p.dir)
-                    }
+                    ConflictHolds::Theirs => format!("  {} holds the team's version", p.dir),
+                    ConflictHolds::MarkedUp => format!(
+                        "  {} holds both versions marked up — run one of the ways out below",
+                        p.dir
+                    ),
                     ConflictHolds::NewerEdits => format!("  {} holds your newer edits", p.dir),
                 })),
                 // No merge report at all: nothing provable about disk, so nothing claimed.
                 None => {}
             }
-            if let Some(dir) = s.merge.as_ref().and_then(|m| m.copy_dir.as_deref()) {
+            let workbench = s.merge.as_ref().and_then(|m| m.copy_dir.as_deref());
+            if let Some(dir) = workbench {
                 // The no-base fallback has no shared fork point, so it writes no markers — the
                 // workbench holds your files with the team's beside them instead, and the line
                 // names that convention rather than sending a reader to look for markers that
@@ -3635,10 +3671,14 @@ fn pull_action_row(s: &PullSkill, scope: &PullReceiptScope) -> (String, Vec<Stri
                 }
                 extra.push(format!("  {dir}/"));
             }
-            extra.push(
-                "commit your merge — or keep your version, by leaving that folder alone:"
-                    .to_owned(),
-            );
+            // The lead-in for the first exit points AT the workbench line above it — so it is
+            // only written when that line printed. With no folder named, "that folder" referred
+            // to nothing, and the exit says what it does on its own instead.
+            extra.push(if workbench.is_some() {
+                "commit your merge — or keep your version, by leaving that folder alone:".to_owned()
+            } else {
+                "keep your version:".to_owned()
+            });
             extra.push(format!("  topos update{g} {name} --keep-mine"));
             extra.push("take the team's version instead, dropping yours:".to_owned());
             extra.push(format!("  topos update{g} {name} --reset"));
@@ -6412,9 +6452,10 @@ mod tests {
             "{many}"
         );
 
-        // A MIXED set — a `--dest` reset took one copy, the person kept working in another, and
-        // the third is untouched. The aggregate sentence is FALSE of two of the three, so it is
-        // not spoken at all: each folder answers for itself.
+        // A MIXED set — a `--dest` reset took one copy, the person kept working in another, one
+        // holds topos's own marked-up tree, and the last is untouched. The aggregate sentence is
+        // FALSE of three of the four, so it is not spoken at all: each folder answers for itself,
+        // and each line says only what the bytes prove.
         let mixed = receipt(
             conflicted(
                 "person",
@@ -6422,6 +6463,7 @@ mod tests {
                     ("~/.claude/skills/coolify-deploy", ConflictHolds::Yours),
                     ("~/.codex/skills/coolify-deploy", ConflictHolds::Theirs),
                     ("~/.cursor/skills/coolify-deploy", ConflictHolds::NewerEdits),
+                    ("~/.agents/skills/coolify-deploy", ConflictHolds::MarkedUp),
                 ],
                 "~/.topos/conflicts/coolify-deploy",
             ),
@@ -6430,9 +6472,10 @@ mod tests {
         assert!(
             mixed.contains(
                 "      ~/.claude/skills/coolify-deploy still holds your version\n\
-                 \x20     ~/.codex/skills/coolify-deploy holds the team's version (you reset this \
-                 copy)\n\
-                 \x20     ~/.cursor/skills/coolify-deploy holds your newer edits\n"
+                 \x20     ~/.codex/skills/coolify-deploy holds the team's version\n\
+                 \x20     ~/.cursor/skills/coolify-deploy holds your newer edits\n\
+                 \x20     ~/.agents/skills/coolify-deploy holds both versions marked up — run one \
+                 of the ways out below\n"
             ),
             "{mixed}"
         );
@@ -6464,6 +6507,40 @@ mod tests {
         assert!(
             none.contains("      topos update -g coolify-deploy --reset\n"),
             "{none}"
+        );
+
+        // NO WORKBENCH NAMED. The first exit's usual lead-in points at the folder the line above
+        // it names — with no such line, "that folder" pointed at nothing, so the exit says what it
+        // does on its own.
+        let workbenchless = pull_tty(
+            &PullData {
+                skills: vec![PullSkill {
+                    merge: Some(MergeReport {
+                        copy_dir: None,
+                        ..conflicted("person", &[], "unused").merge.unwrap()
+                    }),
+                    ..conflicted("person", &[], "unused")
+                }],
+                proposals_awaiting: 0,
+                notices: Vec::new(),
+                sync: Vec::new(),
+                behind_elsewhere: Vec::new(),
+                scope: Some("machine".to_owned()),
+            },
+            &[],
+            &[],
+            &[],
+            &[],
+        );
+        assert!(!workbenchless.contains("that folder"), "{workbenchless}");
+        assert!(
+            workbenchless.contains(
+                "    keep your version:\n\
+                 \x20     topos update -g coolify-deploy --keep-mine\n\
+                 \x20   take the team's version instead, dropping yours:\n\
+                 \x20     topos update -g coolify-deploy --reset\n"
+            ),
+            "{workbenchless}"
         );
     }
 
@@ -7551,7 +7628,7 @@ mod tests {
         assert_eq!(
             super::reset_applied_tty(&[topos_types::results::ResetData {
                 global: true,
-                ..narrowed
+                ..narrowed.clone()
             }])
             .lines()
             .last()
@@ -7566,6 +7643,50 @@ mod tests {
             }]),
             "Reset 'coolify-deploy' to abc1234def56 — local edits discarded.\n  that was the last \
              copy holding the merge — the team's version stands everywhere"
+        );
+
+        // THE MACHINE HALF of the same sentence: a merge left standing carries the two acts that
+        // end it, scope-exact and runnable as printed. Without them an agent that reset one copy
+        // read `still_stopped` and had nothing to act on.
+        assert_eq!(
+            super::reset_next_actions(std::slice::from_ref(&narrowed))
+                .iter()
+                .map(|a| (a.code.as_str().to_owned(), a.argv.join(" ")))
+                .collect::<Vec<_>>(),
+            vec![
+                (
+                    "RESOLVE_DIVERGED_DRAFT".to_owned(),
+                    "topos update coolify-deploy --keep-mine --json".to_owned()
+                ),
+                (
+                    "RESOLVE_DIVERGED_DRAFT".to_owned(),
+                    "topos update coolify-deploy --reset --json".to_owned()
+                ),
+            ]
+        );
+        assert_eq!(
+            super::reset_next_actions(&[topos_types::results::ResetData {
+                global: true,
+                ..narrowed
+            }])
+            .iter()
+            .map(|a| a.argv.join(" "))
+            .collect::<Vec<_>>(),
+            vec![
+                "topos update -g coolify-deploy --keep-mine --json".to_owned(),
+                "topos update -g coolify-deploy --reset --json".to_owned(),
+            ]
+        );
+        // Nothing left to decide — nothing offered.
+        assert!(
+            super::reset_next_actions(&[
+                topos_types::results::ResetData {
+                    merge: Some(ResetMergeOutcome::Concluded),
+                    ..item(None, &[], None)
+                },
+                item(None, &[], None),
+            ])
+            .is_empty()
         );
     }
 

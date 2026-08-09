@@ -2152,6 +2152,98 @@ fn a_deleted_conflict_copy_is_re_rendered_and_still_reads_as_untouched() {
     assert!(!copy.exists());
 }
 
+/// **A folder holding topos's OWN marked-up tree is never read as the person's work.** The
+/// workbench is where markers go; a placement can still end up holding that exact tree — an
+/// install that upgraded mid-merge, a person who copied the workbench over their agent folder —
+/// and the escape reads the working tree from the placements. Committing what it found there would
+/// publish the conflict markers as this person's version, under a row that says `merged`.
+///
+/// So the marked-up tree is not a draft: the escape falls back to the recorded draft snapshot (the
+/// same answer [`super::super::ops::merge_resolve`] gives when the WORKBENCH is untouched), and the
+/// re-disclosure gives that folder its own line instead of calling it newer edits of theirs.
+#[test]
+fn a_placement_holding_the_marker_tree_is_never_committed_as_the_persons_work() {
+    let rig = Rig::new("marker-tree-placement");
+    let (id, name, genesis) = rig.adopt(BASE);
+    write_tree(&rig.placement(), MINE_OVER_BASE);
+    let v1 = mk_version(&[genesis], V1, "d_pub", "v1");
+    let mut plane = FixturePlane::default();
+    plane.add_version(&id, &v1);
+    plane.set_current(&id, served(WS, &id, v1.id, 1));
+    let foll = follow(&id, FollowMode::Auto);
+    assert_eq!(
+        only(&pull_data(&rig.ctx(&plane, &foll), ops::PullScope::AllFollowed).unwrap()).action,
+        PullAction::Conflicted
+    );
+
+    // Plant it: the workbench tree, byte for byte (modes included), in the agent folder.
+    fn copy_tree(from: &std::path::Path, to: &std::path::Path) {
+        std::fs::create_dir_all(to).unwrap();
+        for e in std::fs::read_dir(from).unwrap().flatten() {
+            let (src, dest) = (e.path(), to.join(e.file_name()));
+            if src.is_dir() {
+                copy_tree(&src, &dest);
+            } else {
+                std::fs::copy(&src, &dest).unwrap();
+            }
+        }
+    }
+    let copy = rig.conflict_copy(&id);
+    std::fs::remove_dir_all(rig.placement()).unwrap();
+    copy_tree(&copy, &rig.placement());
+    assert_eq!(
+        to_hex(&crate::scan::scan(&rig.placement()).unwrap().bundle_digest),
+        rig.conflict_state(&id).conflicted_digest,
+        "the placement really holds the marked-up tree"
+    );
+
+    // THE DISCLOSURE: that folder gets its own line — never "your newer edits".
+    let data = pull_data(&rig.ctx(&plane, &foll), ops::PullScope::AllFollowed).unwrap();
+    let row = only(&data);
+    assert_eq!(row.action, PullAction::Conflicted);
+    assert_eq!(
+        row.merge
+            .as_ref()
+            .expect("a merge report")
+            .placements
+            .iter()
+            .map(|p| p.holds)
+            .collect::<Vec<_>>(),
+        vec![topos_types::results::ConflictHolds::MarkedUp]
+    );
+    let tty = crate::render::pull_tty(&data, &[], &[], &[], &[]);
+    let leaf = rig
+        .placement()
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    assert!(
+        tty.lines().any(|l| l.starts_with("      ")
+            && l.contains(&leaf)
+            && l.ends_with("holds both versions marked up — run one of the ways out below")),
+        "{tty}"
+    );
+    assert!(!tty.contains("newer edits"), "{tty}");
+
+    // THE EXIT: `--keep-mine` commits the recorded DRAFT against the team's version — the ordinary
+    // keep-mine result — and every folder converges on it. No markers reach disk, and no marked-up
+    // tree reaches the store as a version.
+    let escaped = pull_data(
+        &rig.ctx(&plane, &foll),
+        ops::PullScope::One {
+            store: ops::StoreScope::Here,
+            name: name.clone(),
+            workspace: None,
+            mode: ops::TargetMode::KeepMine,
+        },
+    )
+    .unwrap();
+    assert_eq!(only(&escaped).action, PullAction::Merged);
+    assert_eq!(snapshot(&rig.placement()), Some(expect(KEPT_OVER_V1)));
+    assert!(!copy.exists(), "the workbench goes with the block");
+}
+
 /// The escape writes its committed bytes over EVERY managed placement, so copies that held
 /// DIFFERENT edits are collapsed into one. The recorded-conflict entry runs before the work-tree
 /// classification, so the typed competitor freeze never fires here — deliberately, since freezing
@@ -2442,10 +2534,7 @@ fn a_narrowed_reset_leaves_per_folder_truth_on_both_surfaces() {
         "the aggregate promise is false here: {tty}"
     );
     for (dir, said) in [
-        (
-            rig.placement(),
-            "holds the team's version (you reset this copy)",
-        ),
+        (rig.placement(), "holds the team's version"),
         (untouched.clone(), "still holds your version"),
         (worked_on.clone(), "holds your newer edits"),
     ] {

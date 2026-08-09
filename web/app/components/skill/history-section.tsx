@@ -1,7 +1,7 @@
 import { Link } from "react-router";
 import { firstLine } from "@/components/format";
 import { RevertControl } from "@/components/skill/revert-control";
-import { Card, Chip, SectionHeading, ShortId } from "@/components/ui";
+import { Card, SectionHeading, ShortId } from "@/components/ui";
 import { bundlePath, useBundleBase } from "@/lib/bundle-base";
 import { useWsPath } from "@/lib/ws-path";
 
@@ -14,7 +14,11 @@ export interface HistoryStepView {
   versionId: string;
   author: string;
   message: string;
-  /** The COMPLETE parent set (2 entries marks a merge); the spine follows parents[0]. */
+  /**
+   * The COMPLETE parent set; the spine follows parents[0]. Every version a client can publish
+   * commits ONE parent — a resolved merge lands as a single forward commit on the team's version
+   * — so this is a one-element list in practice, and history renders as a straight line.
+   */
   parents: string[];
   fileCount: number;
 }
@@ -84,19 +88,6 @@ export function HistorySection({ skill, data }: { skill: string; data: HistorySe
                 <span className="min-w-0 flex-1 truncate text-sm text-dim">
                   {firstLine(step.message)}
                 </span>
-                {step.parents.length === 2 && (
-                  <span className="flex items-center gap-1.5">
-                    <Chip tone="neutral">merge</Chip>
-                    {step.parents[1] !== undefined && (
-                      <Link
-                        to={`${historyPath}?from=${step.parents[1]}`}
-                        className="text-xs text-faint underline decoration-hairline hover:text-ink focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-2"
-                      >
-                        second parent
-                      </Link>
-                    )}
-                  </span>
-                )}
                 <span className="text-xs text-faint">
                   {step.fileCount === 1 ? "1 file" : `${step.fileCount} files`}
                 </span>

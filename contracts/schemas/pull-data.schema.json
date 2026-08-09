@@ -84,7 +84,12 @@
           "const": "theirs"
         },
         {
-          "description": "Neither of the two — the person kept working in this folder after the merge stopped.",
+          "description": "Both versions, marked up — topos's OWN comparison tree, which a receipt must never read as\nwork of the person's. A merge writes it to the workbench, so a placement holds it only\nwhere one was copied over it (or an install upgraded mid-merge); either way the bytes are\nnot a version anybody chose, and both ways out replace them.",
+          "type": "string",
+          "const": "marked_up"
+        },
+        {
+          "description": "None of the three — the person kept working in this folder after the merge stopped.",
           "type": "string",
           "const": "newer_edits"
         }
@@ -339,7 +344,7 @@
           "const": "installed"
         },
         {
-          "description": "A managed copy that stood BEHIND the version this machine already holds was rewritten to it\n— no version moved (`observed`/`applied` are unchanged), only bytes on disk caught up (a\ncrash-window residue, a copy left at an older version). `destinations` names the folders. A\ncatch-up is not a first materialization, so it never reads `installed`. **Additive.**\n\nSerialized as `updated` — the word every human surface prints for it. A wire token and a\nterminal line naming one outcome two ways is one vocabulary too many.",
+          "description": "A managed copy that stood BEHIND the version this machine already holds was rewritten to it\n— no version moved (`observed`/`applied` are unchanged), only bytes on disk caught up (a\ncrash-window residue, a copy left at an older version, a config-placed bundle's entry\ndeleted or edited by hand and put back). `destinations` names the folders (config files,\nfor a config-placed bundle). A catch-up is not a first materialization, so it never reads\n`installed`. **Additive.**\n\nSerialized as `updated` — the word every human surface prints for it. A wire token and a\nterminal line naming one outcome two ways is one vocabulary too many.",
           "type": "string",
           "const": "updated"
         },
