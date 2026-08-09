@@ -178,12 +178,15 @@ impl ScopeResolution {
     }
 
     /// Rows whose merge is undecided — the one count that names a DECISION rather than an update
-    /// that would apply itself.
-    pub(crate) fn waiting_on_you(&self) -> u64 {
+    /// that would apply itself. Their NAMES, because the count's pointer is only useful if it
+    /// reaches the workbench: `topos list` says a merge waits, `topos list <name>` says where it
+    /// is and how to end it, and one waiting merge has a name to spell.
+    pub(crate) fn waiting_on_you(&self) -> Vec<&str> {
         self.rows
             .iter()
             .filter(|r| r.bundle && matches!(r.state, StatusItemState::Blocked))
-            .count() as u64
+            .map(|r| r.name.as_str())
+            .collect()
     }
 }
 

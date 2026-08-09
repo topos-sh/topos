@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "PublishDescribeData",
-  "description": "`publish` (bare, no `--yes`) — the describe: where it lands, the gate outcome, the audience, the\nshare line, and the undo path. **INFERRED.**",
+  "description": "`publish` (bare, no `--yes`) — the describe: where it lands, the gate outcome, the share line,\nand the undo path. **INFERRED.**",
   "type": "object",
   "properties": {
     "bundle_digest": {
@@ -90,15 +90,6 @@
       "items": {
         "type": "string"
       }
-    },
-    "reach": {
-      "description": "The audience the change reaches (people entitled to the skill), when the plane discloses it.",
-      "type": [
-        "integer",
-        "null"
-      ],
-      "format": "uint64",
-      "minimum": 0
     },
     "reference": {
       "description": "The canonical workspace reference the manifest would store. **INFERRED** (additive-only).",

@@ -487,7 +487,9 @@ async fn move_pointer_txn(
     // the same typed CONFLICT (carrying the live pointer) a stale generation raises — the
     // reviewer's remedy is identical: re-review against the moved current. The parent is read from
     // the row (persisted at commit); a genesis candidate (NULL parent) may only promote onto an
-    // empty pointer.
+    // empty pointer. One column is enough because the linearity fence (`custody/lifecycle.rs`)
+    // refused any frame with a second parent at MINT time — so `first_parent` is the version's
+    // whole parent set here, never the first of several.
     let parent_hex = sqlx::query_scalar!(
         "SELECT first_parent FROM version \
          WHERE workspace_id = $1 AND bundle_id = $2 AND version_id = $3",

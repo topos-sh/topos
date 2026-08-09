@@ -371,22 +371,6 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/v1/workspaces/{ws}/skills/{skill}/reach": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get: operations["get_reach"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
     "/v1/workspaces/{ws}/skills/{skill}/versions/{version_id}": {
         parameters: {
             query?: never;
@@ -1158,9 +1142,10 @@ export interface components {
             /** @description The commit message (title + body composed into one string). */
             message: string;
             /**
-             * @description The candidate commit's declared parents, each a 64-char lowercase-hex `version_id` (`0` parents for a
-             *     genesis publish, `1` for a normal publish / propose, `2` for an author merge). Each must already be
-             *     present in the workspace; a lie changes the recomputed commit id, so the server need not trust it.
+             * @description The candidate commit's declared parents, each a 64-char lowercase-hex `version_id`: `0` parents for a
+             *     genesis publish, `1` for a normal publish / propose. More than one is REFUSED — a bundle's history is
+             *     a list, never a DAG. Each must already be present in the workspace; a lie changes the recomputed
+             *     commit id, so the server need not trust it.
              */
             parents: string[];
         };
@@ -1554,22 +1539,6 @@ export interface components {
             server_version?: string | null;
         };
         /**
-         * @description `GET /v1/workspaces/{ws}/skills/{skill}/reach` response — the audience a change to this skill
-         *     reaches (the describe number behind `publish` and `protect`). Member-scoped.
-         */
-        WireReach: {
-            /**
-             * Format: int64
-             * @description How many people are entitled to the skill.
-             */
-            persons: number;
-            /**
-             * Format: int64
-             * @description How many live (active, unexpired) CLI sessions those people hold here.
-             */
-            sessions: number;
-        };
-        /**
          * @description `GET /v1/workspaces/{ws}/skills` response body — the workspace catalog (every skill holding a `current`),
          *     authorized by workspace membership (the `Authorization: Bearer` workspace credential names the
          *     device; catalog
@@ -1718,8 +1687,9 @@ export interface components {
             /** @description The commit message (title + body as one string). */
             message: string;
             /**
-             * @description The COMPLETE parent set, each a 64-char lowercase-hex commit id (`0` for genesis, `1` normally, `2`
-             *     for an author merge).
+             * @description The COMPLETE parent set, each a 64-char lowercase-hex commit id: `0` entries for a bundle's genesis
+             *     version, `1` for every other version. A bundle's history is a LIST by construction — the server
+             *     refuses any candidate frame declaring more than one parent — so this never carries two.
              */
             parents: string[];
             /** @description This version's commit id (64-char lowercase hex). */
@@ -3330,70 +3300,6 @@ export interface operations {
                 };
             };
             /** @description Missing/blank credential, unknown/revoked one, or non-member (indistinguishable). */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["JsonEnvelope"];
-                };
-            };
-            /** @description The caller's topos release is below this server's floor — the envelope names the floor and carries the `self-update` next action. */
-            426: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["JsonEnvelope"];
-                };
-            };
-            /** @description Rate limited (Retry-After header). */
-            429: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["JsonEnvelope"];
-                };
-            };
-            /** @description Integrity / internal store fault. */
-            500: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["JsonEnvelope"];
-                };
-            };
-        };
-    };
-    get_reach: {
-        parameters: {
-            query?: never;
-            header: {
-                /** @description `Bearer <workspace credential>`. */
-                Authorization: string;
-            };
-            path: {
-                /** @description Workspace id. */
-                ws: string;
-                /** @description The skill's immutable id. */
-                skill: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description The skill's audience (entitled members + their live sessions). */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["WireReach"];
-                };
-            };
-            /** @description Missing/blank credential, non-member, or unknown skill (indistinguishable). */
             404: {
                 headers: {
                     [name: string]: unknown;

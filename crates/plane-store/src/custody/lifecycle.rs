@@ -62,6 +62,49 @@ pub(crate) struct StagedCandidate {
     pub message: String,
 }
 
+/// The linearity fence: a version has **at most one parent** — `0` for a bundle's genesis, exactly
+/// `1` for every other version — so a bundle's remote history is a LIST, never a DAG. The kernel
+/// frame and the git store both stay general (they accept any parent slice); the AUTHORITY is what
+/// refuses, which is where every other custody rule already lives.
+///
+/// It fences the COUNT at the commit FRAME, the earliest point a candidate's full parent set is
+/// known — before a byte is staged and long before any pointer moves — and that is what covers
+/// BOTH pointer lanes with one check. The direct publish CASes right after its frame is minted
+/// here; the proposal's frame is minted here too, but its pointer move happens later, on the
+/// approve path, which re-reads the version row's persisted `first_parent` (`db/custody/pointer.rs`)
+/// — a single column that is a faithful summary of the whole frame ONLY because the frame that
+/// wrote it could not have carried a second parent. Fencing at the CAS instead would leave a
+/// multi-parent proposal committable and therefore approvable.
+fn fence_linear_lineage(parents: &[[u8; 32]]) -> Result<()> {
+    if parents.len() > 1 {
+        return Err(AuthorityError::RejectedUpload(
+            "a candidate must declare at most one parent".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+/// Mint a candidate frame's `version_id` — the ONE place the vault turns `(parents, tree, author,
+/// message)` into a version id, so [`fence_linear_lineage`] cannot be bypassed by a new caller. The
+/// id BINDS the parent set (the store re-derives it from the frame and refuses a lying ref), so a
+/// frame minted here can never gain a parent on its way to the durable commit.
+pub(crate) fn frame_version_id(
+    parents: &[[u8; 32]],
+    tree: [u8; 32],
+    author: &str,
+    message: &str,
+) -> Result<CommitId> {
+    fence_linear_lineage(parents)?;
+    identity::commit_id(&Commit {
+        parents,
+        tree,
+        author,
+        message,
+    })
+    .map(CommitId)
+    .map_err(|e| AuthorityError::RejectedUpload(format!("invalid commit frame: {e:?}")))
+}
+
 /// Step A + B: record the `upload` staging row, open a GC-excluded quarantine, stage the candidate's full
 /// tree into it (server rehash), and reject any blob on the denylist (a best-effort early guard; the
 /// serializing check is the install CAS + the commit transaction). Recomputes the `version_id` from the
@@ -138,13 +181,7 @@ pub(crate) async fn ingest(
     .await?;
 
     let parent_ids: Vec<[u8; 32]> = parent.iter().map(|c| c.0).collect();
-    let version_id = identity::commit_id(&Commit {
-        parents: &parent_ids,
-        tree: staged.bundle_digest,
-        author: &attribution,
-        message: &message,
-    })
-    .map_err(|e| AuthorityError::RejectedUpload(format!("invalid commit frame: {e:?}")))?;
+    let version_id = frame_version_id(&parent_ids, staged.bundle_digest, &attribution, &message)?;
 
     // The stage completed — flip the audit row to 'quarantined' and record the recomputed digest.
     authority
@@ -155,7 +192,7 @@ pub(crate) async fn ingest(
     Ok(StagedCandidate {
         op_id: op_id.clone(),
         quarantine_dir,
-        version_id: CommitId(version_id),
+        version_id,
         bundle_digest: staged.bundle_digest,
         entries: staged.entries,
         parent,
@@ -280,6 +317,12 @@ pub(crate) async fn stage_forward_commit(
     message: &str,
     now: i64,
 ) -> Result<()> {
+    // This frame arrives already minted (the caller pre-derived its id), so it is the one parent
+    // SLICE the crate does not build itself — the linearity fence runs on it here, before the lease
+    // and before any commit object reaches the workspace repo.
+    let parent_bytes: Vec<[u8; 32]> = parents.iter().map(|c| c.0).collect();
+    fence_linear_lineage(&parent_bytes)?;
+
     // Lease the object set BEFORE recording the commit (the commit transaction's lease gate requires the
     // committed lease, and the GC keep-set protects the objects meanwhile — exactly as migrate does).
     authority
@@ -292,7 +335,6 @@ pub(crate) async fn stage_forward_commit(
     {
         let git_dir = authority.workspace_git_dir(ws);
         let entries = entries.to_vec();
-        let parent_bytes: Vec<[u8; 32]> = parents.iter().map(|c| c.0).collect();
         let (attribution, message) = (attribution.to_owned(), message.to_owned());
         crate::authority::run_blocking(move || {
             let main = crate::authority::open_or_init_store(&git_dir)?;

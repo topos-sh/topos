@@ -28,8 +28,8 @@ use topos_types::requests::{
     DeviceAuthStartResponse, DeviceAuthWorkspace, InvitationData, InvitationRequest,
     LoginConnectRequest, LoginConnectResponse, NoticeAckRequest, ProposeRequest,
     ProtectionSetRequest, PublishRequest, RevertRequest, ReviewRequest, WireChannelIndex,
-    WireFileMode, WireMe, WireProposalIndex, WireProposalList, WireProtocolCard, WireReach,
-    WireSkillIndex, WireSkillLog, WireVersionMeta,
+    WireFileMode, WireMe, WireProposalIndex, WireProposalList, WireProtocolCard, WireSkillIndex,
+    WireSkillLog, WireVersionMeta,
 };
 use topos_types::{JsonEnvelope, TerminalOutcome, WireCurrentRecord};
 
@@ -1548,16 +1548,6 @@ impl DirectorySource for UreqDeviceClient {
             workspace_id,
             &format!("/v1/workspaces/{workspace_id}/skills/{skill_id}/log"),
             "skill log",
-            skill_id,
-        )
-    }
-
-    fn reach(&self, workspace_id: &str, skill_id: &str) -> Result<WireReach, ClientError> {
-        ensure_safe_ids_client(skill_id, workspace_id)?;
-        self.get_typed(
-            workspace_id,
-            &format!("/v1/workspaces/{workspace_id}/skills/{skill_id}/reach"),
-            "reach",
             skill_id,
         )
     }

@@ -2138,95 +2138,6 @@
         }
       }
     },
-    "/v1/workspaces/{ws}/skills/{skill}/reach": {
-      "get": {
-        "tags": [
-          "reads"
-        ],
-        "operationId": "get_reach",
-        "parameters": [
-          {
-            "name": "ws",
-            "in": "path",
-            "description": "Workspace id.",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "skill",
-            "in": "path",
-            "description": "The skill's immutable id.",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "Authorization",
-            "in": "header",
-            "description": "`Bearer <workspace credential>`.",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "The skill's audience (entitled members + their live sessions).",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/WireReach"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "Missing/blank credential, non-member, or unknown skill (indistinguishable).",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/JsonEnvelope"
-                }
-              }
-            }
-          },
-          "426": {
-            "description": "The caller's topos release is below this server's floor — the envelope names the floor and carries the `self-update` next action.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/JsonEnvelope"
-                }
-              }
-            }
-          },
-          "429": {
-            "description": "Rate limited (Retry-After header).",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/JsonEnvelope"
-                }
-              }
-            }
-          },
-          "500": {
-            "description": "Integrity / internal store fault.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/JsonEnvelope"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
     "/v1/workspaces/{ws}/skills/{skill}/versions/{version_id}": {
       "get": {
         "tags": [
@@ -3565,7 +3476,7 @@
             "items": {
               "type": "string"
             },
-            "description": "The candidate commit's declared parents, each a 64-char lowercase-hex `version_id` (`0` parents for a\ngenesis publish, `1` for a normal publish / propose, `2` for an author merge). Each must already be\npresent in the workspace; a lie changes the recomputed commit id, so the server need not trust it."
+            "description": "The candidate commit's declared parents, each a 64-char lowercase-hex `version_id`: `0` parents for a\ngenesis publish, `1` for a normal publish / propose. More than one is REFUSED — a bundle's history is\na list, never a DAG. Each must already be present in the workspace; a lie changes the recomputed\ncommit id, so the server need not trust it."
           }
         }
       },
@@ -4285,28 +4196,6 @@
           }
         }
       },
-      "WireReach": {
-        "type": "object",
-        "description": "`GET /v1/workspaces/{ws}/skills/{skill}/reach` response — the audience a change to this skill\nreaches (the describe number behind `publish` and `protect`). Member-scoped.",
-        "required": [
-          "persons",
-          "sessions"
-        ],
-        "properties": {
-          "persons": {
-            "type": "integer",
-            "format": "int64",
-            "description": "How many people are entitled to the skill.",
-            "minimum": 0
-          },
-          "sessions": {
-            "type": "integer",
-            "format": "int64",
-            "description": "How many live (active, unexpired) CLI sessions those people hold here.",
-            "minimum": 0
-          }
-        }
-      },
       "WireSkillIndex": {
         "type": "object",
         "description": "`GET /v1/workspaces/{ws}/skills` response body — the workspace catalog (every skill holding a `current`),\nauthorized by workspace membership (the `Authorization: Bearer` workspace credential names the\ndevice; catalog\nvisibility == membership, on both cloud and self-host). Metadata only, no bytes; a possibly-empty list\nordered by `skill_id`.",
@@ -4563,7 +4452,7 @@
             "items": {
               "type": "string"
             },
-            "description": "The COMPLETE parent set, each a 64-char lowercase-hex commit id (`0` for genesis, `1` normally, `2`\nfor an author merge)."
+            "description": "The COMPLETE parent set, each a 64-char lowercase-hex commit id: `0` entries for a bundle's genesis\nversion, `1` for every other version. A bundle's history is a LIST by construction — the server\nrefuses any candidate frame declaring more than one parent — so this never carries two."
           },
           "version_id": {
             "type": "string",
@@ -4615,7 +4504,7 @@
     },
     {
       "name": "reads",
-      "description": "Session-credential reads (current / bundles / versions / proposals / catalog / delivery / me / channels / log / reach) plus the body-light applied-state report."
+      "description": "Session-credential reads (current / bundles / versions / proposals / catalog / delivery / me / channels / log) plus the body-light applied-state report."
     },
     {
       "name": "enrollment",

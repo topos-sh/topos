@@ -16,8 +16,8 @@ fixture, and the contract generator link.
   `credential` field carries it back), the write bodies (`PublishRequest` / `ProposeRequest` /
   `RevertRequest` / `ReviewRequest` + `WireCandidate`/`WireFile`), the read bodies
   (`WireCurrentRecord`, `WireVersionMeta`, `WireProposalList`, `WireSkillIndex`, `WireDelivery` +
-  `WireAppliedReport`, `WireMe`/`WireChannelIndex`/`WireProposalIndex`/`WireSkillLog`/
-  `WireReach`), the row-op bodies (`ProtectionSetRequest`, `NoticeAckRequest`,
+  `WireAppliedReport`, `WireMe`/`WireChannelIndex`/`WireProposalIndex`/`WireSkillLog`),
+  the row-op bodies (`ProtectionSetRequest`, `NoticeAckRequest`,
   `InvitationRequest`), and the constant `WireProtocolCard`. `session_status`
   ("active"/"pending") rides `WireMe`, `WireDelivery`, and the granted poll;
   `DELETE /v1/session` is the self-end.

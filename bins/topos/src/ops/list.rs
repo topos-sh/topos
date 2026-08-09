@@ -1133,7 +1133,7 @@ mod tests {
     use std::collections::HashMap;
 
     use topos_types::requests::{
-        WireChannelEntry, WireChannelIndex, WireMe, WireProposalIndex, WireReach, WireSkillIndex,
+        WireChannelEntry, WireChannelIndex, WireMe, WireProposalIndex, WireSkillIndex,
         WireSkillIndexEntry, WireSkillLog,
     };
 
@@ -1765,7 +1765,10 @@ mod tests {
             "{deep_text}"
         );
 
-        // `status` counts it as a DECISION, not as a draft that a command would apply for you.
+        // `status` counts it as a DECISION, not as a draft that a command would apply for you —
+        // and it points at the bundle's OWN `list`, which is the surface that names the workbench
+        // and both exits (the lines asserted above). The bare `topos list` is one hop short of the
+        // thing a person is being asked to decide.
         let snapshot = with_ctx(&home, Some(cwd.as_path()), |ctx| {
             crate::ops::status_snapshot(ctx, ScopeView::Here).expect("a status snapshot")
         });
@@ -1773,11 +1776,81 @@ mod tests {
         assert_eq!(attention.len(), 1, "{attention:?}");
         assert_eq!(attention[0].kind, "waiting-on-you");
         assert_eq!(attention[0].count, 1);
-        assert_eq!(attention[0].command, "topos list");
+        assert_eq!(attention[0].command, "topos list notes");
         let status_text = crate::render::status_tty(&snapshot);
         assert!(
-            status_text.contains("1 merge waiting on you"),
+            status_text.contains("1 merge waiting on you — `topos list notes`"),
             "{status_text}"
+        );
+    }
+
+    /// SEVERAL merges waiting keep the bare `topos list`: there is no one bundle to name, and the
+    /// listing is where the reader picks which decision to make first. The named form is a
+    /// one-merge answer, not a general shortcut.
+    #[test]
+    fn several_waiting_merges_keep_the_plain_list_pointer() {
+        use topos_types::persisted::{ConflictReason, ConflictState};
+
+        let home = TempHome::new();
+        let cwd = home.0.join("plain");
+        std::fs::create_dir_all(&cwd).unwrap();
+        home.session(
+            "topos.sh",
+            "w_acme",
+            "acme",
+            crate::sessions::SESSION_ACTIVE,
+        );
+        home.cache(
+            "w_acme",
+            "topos.sh",
+            "acme",
+            vec![assigned("notes", None), assigned("deploy", None)],
+            Vec::new(),
+        );
+        home.global("[bundles]\n\"topos.sh/acme\" = \"*\"\n");
+        for name in ["notes", "deploy"] {
+            let placed = home.0.join(".claude/skills").join(name);
+            lay_copy(&placed, "# my version\n");
+            let theirs = "d".repeat(64);
+            home.store_applied(
+                &skill_id_of(name),
+                name,
+                &theirs,
+                &[placed.to_string_lossy().as_ref()],
+            );
+            let sid = crate::id::SkillId::parse(&skill_id_of(name)).unwrap();
+            crate::doc::write_doc(
+                &crate::fs_seam::RealFs,
+                &home.layout().published(&sid).conflict,
+                &ConflictState {
+                    schema_version: topos_types::PERSISTED_SCHEMA_VERSION,
+                    base_commit: "0".repeat(64),
+                    base_digest: "0".repeat(64),
+                    current_commit: theirs,
+                    current_digest: "3".repeat(64),
+                    draft_commit: "1".repeat(64),
+                    draft_digest: "2".repeat(64),
+                    result_commit: "4".repeat(64),
+                    conflicted_digest: "5".repeat(64),
+                    copy_dir: Some(name.to_owned()),
+                    reason: ConflictReason::ThreeWay,
+                    concluded: None,
+                    paths: Vec::new(),
+                },
+            )
+            .unwrap();
+        }
+
+        let snapshot = with_ctx(&home, Some(cwd.as_path()), |ctx| {
+            crate::ops::status_snapshot(ctx, ScopeView::Here).expect("a status snapshot")
+        });
+        let attention = &snapshot.scopes[0].attention;
+        assert_eq!(attention[0].kind, "waiting-on-you", "{attention:?}");
+        assert_eq!(attention[0].count, 2);
+        assert_eq!(attention[0].command, "topos list");
+        assert!(
+            crate::render::status_tty(&snapshot).contains("2 merges waiting on you — `topos list`"),
+            "{snapshot:?}"
         );
     }
 
@@ -2974,9 +3047,6 @@ mod tests {
             unreachable!()
         }
         fn skill_log(&self, _w: &str, _s: &str) -> Result<WireSkillLog, ClientError> {
-            unreachable!()
-        }
-        fn reach(&self, _w: &str, _s: &str) -> Result<WireReach, ClientError> {
             unreachable!()
         }
         fn channel_place(&self, _w: &str, _c: &str, _s: &str) -> Result<(), ClientError> {

@@ -4,7 +4,6 @@
   "ok": true,
   "data": {
     "applied": false,
-    "audience": 12,
     "kind": "skill",
     "level": "reviewed",
     "loosening": false,

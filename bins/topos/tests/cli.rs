@@ -728,13 +728,6 @@ fn update_keep_mine_flag_shapes_are_usage_errors() {
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("JSON stdout");
     assert_eq!(v["error"]["code"], "INVALID_ARGUMENT");
 
-    // The prior spelling is a HIDDEN alias of the same flag, so it reaches the same refusals —
-    // anything already scripted against it keeps working, and keeps failing the same way.
-    let out = run_raw(&home, &["pull", "--onto-current", "--json"], false);
-    assert!(!out.status.success());
-    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("JSON stdout");
-    assert_eq!(v["error"]["code"], "INVALID_ARGUMENT");
-
     let _ = std::fs::remove_dir_all(&home);
 }
 

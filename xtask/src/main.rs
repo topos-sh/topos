@@ -94,10 +94,6 @@ fn schemas() -> Vec<(&'static str, String)> {
             "wire-skill-log",
             emit(schemars::schema_for!(topos_types::requests::WireSkillLog)),
         ),
-        (
-            "wire-reach",
-            emit(schemars::schema_for!(topos_types::requests::WireReach)),
-        ),
         // The gh-style device-auth flow (the app serves it; the CLI speaks it).
         (
             "device-auth-start-request",
@@ -421,12 +417,12 @@ fn fixtures() -> Vec<(&'static str, String)> {
     use topos_types::persisted::{ConflictPathKind, ConflictReason};
     use topos_types::requests::{WireDelivery, WireDeliverySkill, WireNotice, WireVia};
     use topos_types::results::{
-        AddData, ConflictPathReport, DiffData, DiffPatchInfo, DiffSource, EnrollmentPending,
-        InviteReadData, ListData, LogData, LoginData, LogoutData, MergeReport, ProtectData,
-        PublishData, PublishDescribeData, PublishGate, PublishedMatch, PullAction, PullData,
-        PullSkill, RemoveData, RemoveItem, RemoveKind, ReviewIndexData, ReviewIndexEntry,
-        SkillEntry, SkillStatus, StatusData, StatusScope, StatusScopeSummary, StatusTrigger,
-        WorkspaceSyncReport,
+        AddData, ConflictHolds, ConflictPathReport, ConflictPlacement, DiffData, DiffPatchInfo,
+        DiffSource, EnrollmentPending, InviteReadData, ListData, LogData, LoginData, LogoutData,
+        MergeReport, ProtectData, PublishData, PublishDescribeData, PublishGate, PublishedMatch,
+        PullAction, PullData, PullSkill, RemoveData, RemoveItem, RemoveKind, ReviewIndexData,
+        ReviewIndexEntry, SkillEntry, SkillStatus, StatusData, StatusScope, StatusScopeSummary,
+        StatusTrigger, WorkspaceSyncReport,
     };
     use topos_types::results::{AttentionCount, ListScope, McpServerSummary};
     use topos_types::{ActionCode, Affected, JsonEnvelope, Receipt, TerminalOutcome, WireError};
@@ -823,9 +819,13 @@ fn fixtures() -> Vec<(&'static str, String)> {
                     // A block is finished by neither exit, so it takes nothing.
                     resolved: None,
                     took: vec![],
-                    // The folder that still holds the author's own version (a conflict writes to
-                    // none), and the workbench the marked-up copy of both versions went to.
-                    placements: vec!["~/.claude/skills/pr-describe".to_owned()],
+                    // Each agent folder and WHAT IS IN IT, read from the folder itself: a stop
+                    // writes to none of them, so a freshly stopped merge reads `yours` across the
+                    // set. Beside it, the workbench the marked-up copy of both versions went to.
+                    placements: vec![ConflictPlacement {
+                        dir: "~/.claude/skills/pr-describe".to_owned(),
+                        holds: ConflictHolds::Yours,
+                    }],
                     copy_dir: Some("~/.topos/conflicts/pr-describe".to_owned()),
                 }),
                 synced_placements: None,
@@ -841,7 +841,26 @@ fn fixtures() -> Vec<(&'static str, String)> {
         })
         .expect("PullData serializes"),
         warnings: vec![],
-        next_actions: vec![],
+        // The two ways out, per stopped row — the same pair the receipt prints under it, spelled
+        // for the row's own scope (`person` → `-g`). The one state that asks for a decision must
+        // offer that decision on the machine surface too.
+        next_actions: vec![
+            topos::actions::next_action(
+                ActionCode::ResolveDivergedDraft,
+                argv(&[
+                    "topos",
+                    "update",
+                    "-g",
+                    "pr-describe",
+                    "--keep-mine",
+                    "--json",
+                ]),
+            ),
+            topos::actions::next_action(
+                ActionCode::ResolveDivergedDraft,
+                argv(&["topos", "update", "-g", "pr-describe", "--reset", "--json"]),
+            ),
+        ],
         receipt: None,
         error: None,
     };
@@ -1172,8 +1191,8 @@ fn fixtures() -> Vec<(&'static str, String)> {
         error: None,
     };
 
-    // `protect <skill>` (bare) — the DESCRIBE of TIGHTENING a skill to `reviewed`, carrying the audience
-    // (people reached). `applied: false`, `loosening: false` (tightening takes reviewer+).
+    // `protect <skill>` (bare) — the DESCRIBE of TIGHTENING a skill to `reviewed`.
+    // `applied: false`, `loosening: false` (tightening takes reviewer+).
     let protect_describe = JsonEnvelope {
         schema_version: 1,
         command: "protect".to_owned(),
@@ -1184,7 +1203,6 @@ fn fixtures() -> Vec<(&'static str, String)> {
             workspace_id: "w_acme".to_owned(),
             level: "reviewed".to_owned(),
             loosening: false,
-            audience: Some(12),
             note: None,
             applied: false,
         })
@@ -1242,7 +1260,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
     };
 
     // `publish <skill>` (bare, enrolled) — the DESCRIBE: where it lands, the gate outcome (an `open`
-    // bundle lands directly), the audience, the share line, and the undo path. Nothing shipped yet.
+    // bundle lands directly), the share line, and the undo path. Nothing shipped yet.
     // The TTY prints only the destination + the gate; the rest of these fields are the envelope's
     // (an agent reads them, a person reads them on the receipt).
     let publish_describe = JsonEnvelope {
@@ -1262,7 +1280,6 @@ fn fixtures() -> Vec<(&'static str, String)> {
             other_edited: Vec::new(),
             gate: PublishGate::Lands,
             is_revert: false,
-            reach: Some(12),
             share_line: Some("https://topos.sh/acme/skills/deploy".to_owned()),
             invite_line: Some(
                 "Ask your agent: \"Set up Topos for us: fetch https://topos.sh/agent and follow \

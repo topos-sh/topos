@@ -1837,6 +1837,10 @@ fn finish_pull(
                         ],
                     ));
                 }
+                // A merge that STOPPED carries its two ways out — the same pair the TTY prints
+                // under the row. The TTY named them and the envelope did not, which left an
+                // agent reading the one state that asks for a decision with nothing to act on.
+                next_actions.extend(render::conflict_next_actions(&out.data));
                 // A merge that a `--keep-mine` just FINISHED carries the one command left to run on
                 // it: the ordinary publish. It replaces a state an agent could not ship at all.
                 next_actions.extend(render::resolution_next_actions(&out.data));
@@ -2444,24 +2448,14 @@ fn finish_protect(
     diag: &Diag<'_>,
 ) -> ExitCode {
     match result {
-        Ok(ops::ProtectOutcome::Described {
-            data,
-            yes_argv,
-            warnings,
-        }) => {
+        Ok(ops::ProtectOutcome::Described { data, yes_argv }) => {
             if json {
                 let value = serde_json::json!({ "describe": data });
                 let mut envelope = render::ok_envelope(command, value);
-                envelope.warnings = warnings;
                 envelope.next_actions = render::describe_next_actions(vec![yes_argv.clone()]);
                 println!("{}", render::to_json(&envelope));
             } else {
-                let mut text = String::new();
-                for w in &warnings {
-                    text.push_str(&format!("warning: {w}\n"));
-                }
-                text.push_str(&render::protect_describe_tty(&data, &yes_argv));
-                println!("{text}");
+                println!("{}", render::protect_describe_tty(&data, &yes_argv));
             }
             ExitCode::SUCCESS
         }
@@ -2904,25 +2898,19 @@ fn block_on_pending<T>(
 fn finish_publish_describe(
     json: bool,
     command: &str,
-    result: Result<(topos_types::results::PublishDescribeData, Vec<String>), ClientError>,
+    result: Result<topos_types::results::PublishDescribeData, ClientError>,
     yes_argv: Vec<String>,
     diag: &Diag<'_>,
 ) -> ExitCode {
     match result {
-        Ok((data, warnings)) => {
+        Ok(data) => {
             if json {
                 let value = serde_json::json!({ "describe": data });
                 let mut envelope = render::ok_envelope(command, value);
-                envelope.warnings = warnings;
                 envelope.next_actions = render::describe_next_actions(vec![yes_argv.clone()]);
                 println!("{}", render::to_json(&envelope));
             } else {
-                let mut text = String::new();
-                for w in &warnings {
-                    text.push_str(&format!("warning: {w}\n"));
-                }
-                text.push_str(&render::publish_describe_tty(&data, &yes_argv));
-                println!("{text}");
+                println!("{}", render::publish_describe_tty(&data, &yes_argv));
             }
             ExitCode::SUCCESS
         }

@@ -3,8 +3,8 @@
 
 use topos_types::requests::InvitationData;
 use topos_types::results::{
-    AddData, AddedNote, AgentView, DiffData, LogData, ProposeData, PublishData, PullData,
-    PullSkill, RemoteSkill, RemoveData, RemoveItem, RemoveKind, RevertData, ReviewData,
+    AddData, AddedNote, AgentView, ConflictHolds, DiffData, LogData, ProposeData, PublishData,
+    PullData, PullSkill, RemoteSkill, RemoveData, RemoveItem, RemoveKind, RevertData, ReviewData,
     ReviewDecision, SkillEntry, UntrackedEntry,
 };
 use topos_types::{
@@ -1056,6 +1056,32 @@ pub(crate) fn resolution_next_actions(data: &PullData) -> Vec<NextAction> {
         .collect()
 }
 
+/// The two ways out of a STOPPED merge, per conflicted row — the same pair the TTY prints under
+/// the row, as runnable argv. Without them the `--json` half of the one state that asks for a
+/// decision carried no next action at all: an agent read a conflicted row, found nothing to do,
+/// and left the bundle stuck. Spelled for the ROW's own scope, so the offered command drives the
+/// copy that actually stopped rather than the other scope's.
+pub(crate) fn conflict_next_actions(data: &PullData) -> Vec<NextAction> {
+    let scope = PullReceiptScope::read(data.scope.as_deref());
+    data.skills
+        .iter()
+        .filter(|s| s.action == topos_types::results::PullAction::Conflicted)
+        .flat_map(|s| {
+            let g = row_takes_g(s, &scope);
+            [
+                crate::actions::next_action(
+                    ActionCode::ResolveDivergedDraft,
+                    update_at_scope(g, &s.skill, &["--keep-mine"]),
+                ),
+                crate::actions::next_action(
+                    ActionCode::ResolveDivergedDraft,
+                    update_at_scope(g, &s.skill, &["--reset"]),
+                ),
+            ]
+        })
+        .collect()
+}
+
 /// One line per bundle waiting on a decision, for the `--json` envelope's one stable line channel:
 /// the bundle, then what is waiting. NO internal code leads it — the codes on that channel name a
 /// fault to look up, and there is no fault here; what the reader (or the agent) needs is the two
@@ -1082,17 +1108,6 @@ fn counted(n: u64, noun: &str) -> String {
         format!("{n} {noun}")
     } else {
         format!("{n} {noun}s")
-    }
-}
-
-/// An AUDIENCE count with its irregular noun (`1 person`, `4 people`) — the `s`-suffix rule
-/// [`counted`] applies never reaches this pair, and "reaches 1 people" is the line a person sees
-/// on the very first publish of a one-person workspace.
-fn persons(n: u64) -> String {
-    if n == 1 {
-        "1 person".to_owned()
-    } else {
-        format!("{n} people")
     }
 }
 
@@ -1578,6 +1593,22 @@ pub(crate) fn reset_applied_tty(items: &[topos_types::results::ResetData]) -> St
         // else, so the folder is named.
         if let Some(folder) = &item.hand_merge {
             s.push_str(&format!("your hand merge is still in {folder}\n"));
+        }
+        // WHERE that leaves the merge, when one had stopped here. A narrowed reset settles the
+        // copy it took and nothing else, so the block usually stands — and the reader who just
+        // watched one folder go back to the team's version is exactly the one who would assume
+        // otherwise. The pointer is scope-exact, like every other command this CLI offers.
+        let g = if item.global { " -g" } else { "" };
+        match item.merge {
+            Some(topos_types::results::ResetMergeOutcome::StillStopped) => s.push_str(&format!(
+                "  the merge on '{}' is still stopped (see: topos list{g} {})\n",
+                item.skill, item.skill
+            )),
+            Some(topos_types::results::ResetMergeOutcome::Concluded) => s.push_str(
+                "  that was the last copy holding the merge — the team's version stands \
+                 everywhere\n",
+            ),
+            None => {}
         }
     }
     s.trim_end().to_owned()
@@ -2523,7 +2554,7 @@ fn uninstalled_column(u: &topos_types::results::UninstalledBundle) -> String {
     out
 }
 
-/// The `protect` DESCRIBE's TTY — the level being set, the audience it governs, and the standing note.
+/// The `protect` DESCRIBE's TTY — the level being set, the role it takes, and the standing note.
 pub(crate) fn protect_describe_tty(
     data: &topos_types::results::ProtectData,
     yes_argv: &[String],
@@ -2533,14 +2564,6 @@ pub(crate) fn protect_describe_tty(
         "{direction} {} '{}' to `{}`",
         data.kind, data.target, data.level
     );
-    if let Some(n) = data.audience {
-        let audience = if data.kind == "channel" {
-            counted(n, "member")
-        } else {
-            persons(n)
-        };
-        s.push_str(&format!(" — reaches {audience}"));
-    }
     if data.loosening {
         s.push_str(" (an owner act)");
     } else {
@@ -2630,10 +2653,10 @@ fn added_line(added: &AddedNote) -> String {
 /// The bare enrolled `publish` DESCRIBE — where it lands and what the gate does with it. Nothing has
 /// landed on the plane yet.
 ///
-/// The TTY is deliberately NARROWER than the `--json` payload: the digest, the audience count, the
-/// share/handoff lines, and the undo describe a publish that has not happened, so they say nothing a
-/// reader can act on BEFORE `--yes`. They ride the envelope untouched — every one of them prints on
-/// the receipt, where they are facts rather than predictions.
+/// The TTY is deliberately NARROWER than the `--json` payload: the digest, the share/handoff lines,
+/// and the undo describe a publish that has not happened, so they say nothing a reader can act on
+/// BEFORE `--yes`. They ride the envelope untouched — every one of them prints on the receipt,
+/// where they are facts rather than predictions.
 pub(crate) fn publish_describe_tty(
     data: &topos_types::results::PublishDescribeData,
     yes_argv: &[String],
@@ -3052,12 +3075,41 @@ impl PullReceiptScope {
     /// The receipt's opening line, when there is one to say. The project form NAMES the folder
     /// once, and by doing so DEFINES the `project` token every path below it is written against
     /// (see [`PullReceiptScope::relative`]).
-    fn lead(&self) -> Option<String> {
+    ///
+    /// The VERB is the run's own answer to "did anything move here": a sweep whose only row is a
+    /// stopped merge's re-disclosure, or an mcp bundle with drift worth eyes, changed nothing —
+    /// and a header claiming it updated the set is a claim its own rows contradict. `checked` is
+    /// what such a run did. See [`PullReceiptScope::moved_anything`] for the rule.
+    fn lead(&self, changed: bool) -> Option<String> {
+        let verb = if changed { "updated" } else { "checked" };
         match self {
-            PullReceiptScope::Project(dir) => Some(format!("updated project ({dir})")),
-            PullReceiptScope::Machine => Some("updated machine-wide".to_owned()),
+            PullReceiptScope::Project(dir) => Some(format!("{verb} project ({dir})")),
+            PullReceiptScope::Machine => Some(format!("{verb} machine-wide")),
             PullReceiptScope::Unstated => None,
         }
+    }
+
+    /// Whether a run's rows moved anything on this machine. A row COUNTS when the run wrote
+    /// something durable for it: bytes landed, were rewritten, were fanned out, or left (the
+    /// four `updated` outcomes plus `installed`, `removed` and upstream's `withdrawn`), or a
+    /// record retired for good (`released` — nothing on disk moved, but the sweep will never
+    /// report that record again). A row does NOT count when the run only looked and reported:
+    /// already current, a merge still waiting on a person, a pinned hold. Failures, decisions,
+    /// advisories and disclosures are all "looked and reported" too, so none of them makes a
+    /// run a change either.
+    fn moved_anything(skills: &[PullSkill]) -> bool {
+        use topos_types::results::PullAction as A;
+        skills.iter().any(|s| match s.action {
+            A::UpToDate | A::Conflicted | A::Held => false,
+            A::FastForwarded
+            | A::Installed
+            | A::Refreshed
+            | A::Removed
+            | A::Merged
+            | A::DraftSynced
+            | A::Withdrawn
+            | A::Released => true,
+        })
     }
 
     /// One body line with every in-project path rewritten against the folder the lead line named:
@@ -3175,7 +3227,7 @@ pub(crate) fn pull_tty(
     );
 
     let mut out = String::new();
-    if let Some(lead) = scope.lead() {
+    if let Some(lead) = scope.lead(PullReceiptScope::moved_anything(&data.skills)) {
         out.push_str(&format!("{lead}\n"));
     }
     let pad = rows.iter().map(|(n, ..)| n.len()).max().unwrap_or(0);
@@ -3525,18 +3577,6 @@ fn pull_action_row(s: &PullSkill, scope: &PullReceiptScope) -> (String, Vec<Stri
             let g = if row_takes_g(s, scope) { " -g" } else { "" };
             let mut extra: Vec<String> = Vec::new();
             match s.merge.as_ref().map(|m| m.placements.as_slice()) {
-                // The destination convention: one folder is named inline; several are counted and
-                // then spelled out, because a bare "2 folders" is not a place anyone can look.
-                Some([one]) => extra.push(format!(
-                    "your agents are unaffected — {one} still holds your version"
-                )),
-                Some(many @ [_, _, ..]) => {
-                    extra.push(format!(
-                        "your agents are unaffected — {} folders still hold your version:",
-                        many.len()
-                    ));
-                    extra.extend(many.iter().map(|p| format!("  {p}")));
-                }
                 // No folder holds it any more. The reassuring line is the ONE thing this row must
                 // not say by omission: a reader who saw "your agents are unaffected" last time
                 // would read its absence as nothing having changed. Both exits below re-materialize
@@ -3546,6 +3586,33 @@ fn pull_action_row(s: &PullSkill, scope: &PullReceiptScope) -> (String, Vec<Stri
                      back"
                         .to_owned(),
                 ),
+                // The reassurance is only reassuring while it is TRUE of every folder — and it is
+                // not, once a `--dest` reset has taken one copy or the person has kept working in
+                // another. So the aggregate sentence is spoken only over a set that is wholly this
+                // person's version: one folder named inline, several counted and then spelled out
+                // (a bare "2 folders" is not a place anyone can look).
+                Some(all) if all.iter().all(|p| p.holds == ConflictHolds::Yours) => match all {
+                    [one] => extra.push(format!(
+                        "your agents are unaffected — {} still holds your version",
+                        one.dir
+                    )),
+                    many => {
+                        extra.push(format!(
+                            "your agents are unaffected — {} folders still hold your version:",
+                            many.len()
+                        ));
+                        extra.extend(many.iter().map(|p| format!("  {}", p.dir)));
+                    }
+                },
+                // A MIXED set — no sentence can speak for all of it, so none tries: one line per
+                // folder, each saying what is in that folder and nothing about any other.
+                Some(mixed) => extra.extend(mixed.iter().map(|p| match p.holds {
+                    ConflictHolds::Yours => format!("  {} still holds your version", p.dir),
+                    ConflictHolds::Theirs => {
+                        format!("  {} holds the team's version (you reset this copy)", p.dir)
+                    }
+                    ConflictHolds::NewerEdits => format!("  {} holds your newer edits", p.dir),
+                })),
                 // No merge report at all: nothing provable about disk, so nothing claimed.
                 None => {}
             }
@@ -3908,9 +3975,9 @@ pub(crate) fn short(hex: &str) -> &str {
 mod tests {
     use topos_types::persisted::ConflictPathKind;
     use topos_types::results::{
-        AgentView, BehindElsewhere, ConflictPathReport, ListData, LogData, MergeReport,
-        MergeResolution, ProposeData, PublishData, PullAction, PullData, PullSkill, RemoteSkill,
-        RemoveData, RemoveItem, RemoveKind, SkillEntry, UntrackedEntry,
+        AgentView, BehindElsewhere, ConflictHolds, ConflictPathReport, ListData, LogData,
+        MergeReport, MergeResolution, ProposeData, PublishData, PullAction, PullData, PullSkill,
+        RemoteSkill, RemoveData, RemoveItem, RemoveKind, SkillEntry, UntrackedEntry,
     };
 
     use crate::ops::ListOutcome;
@@ -4417,7 +4484,6 @@ mod tests {
             other_edited: Vec::new(),
             gate,
             is_revert: false,
-            reach: Some(12),
             share_line: Some("https://topos.sh/ideamotive/skills/coolify-deploy".to_owned()),
             invite_line: Some(INVITE.to_owned()),
             undo: Some(format!(
@@ -4467,17 +4533,10 @@ mod tests {
         // preview: they describe a publish that has not happened. The envelope keeps them all.
         let data = describing(PublishGate::Lands);
         let s = super::publish_describe_tty(&data, &yes_argv());
-        for withheld in [
-            "digest",
-            "reaches",
-            "share:",
-            "bring a teammate:",
-            "undo:",
-            "gate:",
-        ] {
+        for withheld in ["digest", "share:", "bring a teammate:", "undo:", "gate:"] {
             assert!(!s.contains(withheld), "{withheld:?} still prints: {s}");
         }
-        assert!(data.reach.is_some() && data.undo.is_some() && data.share_line.is_some());
+        assert!(data.undo.is_some() && data.share_line.is_some());
     }
 
     #[test]
@@ -4497,6 +4556,38 @@ mod tests {
         assert!(
             s.starts_with("Publish 'coolify-deploy' to w_ideamotive:"),
             "{s}"
+        );
+    }
+
+    #[test]
+    fn protect_describe_tty_states_the_level_and_the_role_it_takes() {
+        // The whole headline, both directions: the level being set and WHO can set it. No people
+        // count — a number the client cannot know is not a fact a preview may state.
+        let argv: Vec<String> = ["topos", "protect", "deploy", "--yes"]
+            .iter()
+            .map(|s| (*s).to_owned())
+            .collect();
+        let mut data = topos_types::results::ProtectData {
+            target: "deploy".to_owned(),
+            kind: "skill".to_owned(),
+            workspace_id: "w_acme".to_owned(),
+            level: "reviewed".to_owned(),
+            loosening: false,
+            note: None,
+            applied: false,
+        };
+        assert_eq!(
+            super::protect_describe_tty(&data, &argv),
+            "Tighten skill 'deploy' to `reviewed` (reviewer or owner)\nNothing has changed yet — \
+             apply with:\n  topos protect deploy --yes"
+        );
+        data.level = "open".to_owned();
+        data.loosening = true;
+        data.note = Some("pending proposals survive a loosening".to_owned());
+        assert_eq!(
+            super::protect_describe_tty(&data, &argv),
+            "Loosen skill 'deploy' to `open` (an owner act)\nnote: pending proposals survive a \
+             loosening\nNothing has changed yet — apply with:\n  topos protect deploy --yes"
         );
     }
 
@@ -6203,22 +6294,29 @@ mod tests {
     /// folder the lead line named.
     #[test]
     fn the_conflict_row_names_the_untouched_folder_the_copy_and_both_ways_out() {
-        let conflicted = |scope: &str, placements: &[&str], copy_dir: &str| PullSkill {
-            merge: Some(MergeReport {
-                theirs_version_id: format!("fed180d80b8a{}", "0".repeat(52)),
-                placements: placements.iter().map(|p| (*p).to_owned()).collect(),
-                copy_dir: Some(copy_dir.to_owned()),
-                ..merge_report(
-                    false,
-                    vec![ConflictPathReport {
-                        path: "SKILL.md".to_owned(),
-                        kind: ConflictPathKind::Content,
-                    }],
-                )
-            }),
-            scope: Some(scope.to_owned()),
-            ..row("coolify-deploy", PullAction::Conflicted)
-        };
+        let conflicted =
+            |scope: &str, placements: &[(&str, ConflictHolds)], copy_dir: &str| PullSkill {
+                merge: Some(MergeReport {
+                    theirs_version_id: format!("fed180d80b8a{}", "0".repeat(52)),
+                    placements: placements
+                        .iter()
+                        .map(|(dir, holds)| topos_types::results::ConflictPlacement {
+                            dir: (*dir).to_owned(),
+                            holds: *holds,
+                        })
+                        .collect(),
+                    copy_dir: Some(copy_dir.to_owned()),
+                    ..merge_report(
+                        false,
+                        vec![ConflictPathReport {
+                            path: "SKILL.md".to_owned(),
+                            kind: ConflictPathKind::Content,
+                        }],
+                    )
+                }),
+                scope: Some(scope.to_owned()),
+                ..row("coolify-deploy", PullAction::Conflicted)
+            };
         let receipt = |skill: PullSkill, scope: &str| {
             pull_tty(
                 &PullData {
@@ -6243,12 +6341,15 @@ mod tests {
             receipt(
                 conflicted(
                     project,
-                    &["~/Forward/labs/api/.claude/skills/coolify-deploy"],
+                    &[(
+                        "~/Forward/labs/api/.claude/skills/coolify-deploy",
+                        ConflictHolds::Yours,
+                    )],
                     "~/Forward/labs/api/.topos/state/robertkrajewski/conflicts/coolify-deploy",
                 ),
                 "project ~/Forward/labs/api"
             ),
-            "updated project (~/Forward/labs/api)\n\
+            "checked project (~/Forward/labs/api)\n\
              coolify-deploy   the team published fed180d80b8a, and it changes lines you also \
              changed\n\
              \x20   your agents are unaffected — project/.claude/skills/coolify-deploy still holds \
@@ -6269,12 +6370,12 @@ mod tests {
             receipt(
                 conflicted(
                     "person",
-                    &["~/.claude/skills/coolify-deploy"],
+                    &[("~/.claude/skills/coolify-deploy", ConflictHolds::Yours)],
                     "~/.topos/conflicts/coolify-deploy",
                 ),
                 "machine"
             ),
-            "updated machine-wide\n\
+            "checked machine-wide\n\
              coolify-deploy   the team published fed180d80b8a, and it changes lines you also \
              changed\n\
              \x20   your agents are unaffected — ~/.claude/skills/coolify-deploy still holds your \
@@ -6295,8 +6396,8 @@ mod tests {
             conflicted(
                 "person",
                 &[
-                    "~/.claude/skills/coolify-deploy",
-                    "~/.codex/skills/coolify-deploy",
+                    ("~/.claude/skills/coolify-deploy", ConflictHolds::Yours),
+                    ("~/.codex/skills/coolify-deploy", ConflictHolds::Yours),
                 ],
                 "~/.topos/conflicts/coolify-deploy",
             ),
@@ -6309,6 +6410,35 @@ mod tests {
                  \x20     ~/.codex/skills/coolify-deploy\n"
             ),
             "{many}"
+        );
+
+        // A MIXED set — a `--dest` reset took one copy, the person kept working in another, and
+        // the third is untouched. The aggregate sentence is FALSE of two of the three, so it is
+        // not spoken at all: each folder answers for itself.
+        let mixed = receipt(
+            conflicted(
+                "person",
+                &[
+                    ("~/.claude/skills/coolify-deploy", ConflictHolds::Yours),
+                    ("~/.codex/skills/coolify-deploy", ConflictHolds::Theirs),
+                    ("~/.cursor/skills/coolify-deploy", ConflictHolds::NewerEdits),
+                ],
+                "~/.topos/conflicts/coolify-deploy",
+            ),
+            "machine",
+        );
+        assert!(
+            mixed.contains(
+                "      ~/.claude/skills/coolify-deploy still holds your version\n\
+                 \x20     ~/.codex/skills/coolify-deploy holds the team's version (you reset this \
+                 copy)\n\
+                 \x20     ~/.cursor/skills/coolify-deploy holds your newer edits\n"
+            ),
+            "{mixed}"
+        );
+        assert!(
+            !mixed.contains("your agents are unaffected"),
+            "no sentence may speak for a set it is false of: {mixed}"
         );
 
         // NO folder holds it. The reassuring line's ABSENCE is what a reader would misread — it
@@ -7360,6 +7490,7 @@ mod tests {
     /// discards changes, and only names a recovery when it can hand you something to run.
     #[test]
     fn the_reset_receipt_names_what_it_discarded_and_promises_no_recovery() {
+        use topos_types::results::ResetMergeOutcome;
         let item = |dest: Option<&str>,
                     others: &[&str],
                     hand_merge: Option<&str>|
@@ -7374,6 +7505,7 @@ mod tests {
                 others_kept: others.iter().map(|s| (*s).to_owned()).collect(),
                 global: false,
                 hand_merge: hand_merge.map(str::to_owned),
+                merge: None,
             }
         };
 
@@ -7396,6 +7528,44 @@ mod tests {
             super::reset_applied_tty(&[item(None, &[], Some("~/.topos/conflicts/coolify-deploy"))]),
             "Reset 'coolify-deploy' to abc1234def56 — local edits discarded.\nyour hand merge is \
              still in ~/.topos/conflicts/coolify-deploy"
+        );
+
+        // A NARROWED reset that met a stopped merge and did not end it. The per-copy lines say
+        // what this copy lost and what the others keep; the merge line says the thing none of them
+        // can — that the decision is still open — and names where to read it.
+        let narrowed = topos_types::results::ResetData {
+            dest: Some("~/.claude/skills/coolify-deploy".to_owned()),
+            others_kept: vec!["~/.agents/skills/coolify-deploy".to_owned()],
+            merge: Some(ResetMergeOutcome::StillStopped),
+            ..item(None, &[], None)
+        };
+        assert_eq!(
+            super::reset_applied_tty(std::slice::from_ref(&narrowed)),
+            "Reset 'coolify-deploy' in ~/.claude/skills/coolify-deploy to abc1234def56 — that \
+             copy's local edits discarded.\nyour other copy in ~/.agents/skills/coolify-deploy \
+             keeps its edits\n  the merge on 'coolify-deploy' is still stopped (see: topos list \
+             coolify-deploy)"
+        );
+        // Scope-exact, like every other command this CLI prints: a machine-scope reset points at
+        // the machine-scope `list`, which is the one that answers about the copy it just took.
+        assert_eq!(
+            super::reset_applied_tty(&[topos_types::results::ResetData {
+                global: true,
+                ..narrowed
+            }])
+            .lines()
+            .last()
+            .unwrap(),
+            "  the merge on 'coolify-deploy' is still stopped (see: topos list -g coolify-deploy)"
+        );
+        // The reset that DID end it. No pointer — there is nothing left to decide.
+        assert_eq!(
+            super::reset_applied_tty(&[topos_types::results::ResetData {
+                merge: Some(ResetMergeOutcome::Concluded),
+                ..item(None, &[], None)
+            }]),
+            "Reset 'coolify-deploy' to abc1234def56 — local edits discarded.\n  that was the last \
+             copy holding the merge — the team's version stands everywhere"
         );
     }
 

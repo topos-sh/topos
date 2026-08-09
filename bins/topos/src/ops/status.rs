@@ -130,13 +130,19 @@ fn attention(
     let mut out = Vec::new();
     // A merge nobody has decided leads: every other count names something a command applies for
     // you, this one names a choice only the person can make. `list` is where the two exits are
-    // spelled per bundle, so that is the command it ends in.
+    // spelled per bundle, so that is the command it ends in — and when exactly ONE merge waits,
+    // it ends in the bundle's own `list`, which is the surface that names the workbench. The bare
+    // `topos list` is one hop short of that, and a person told to make a decision should not have
+    // to find the thing to decide.
     let waiting = sr.waiting_on_you();
-    if waiting > 0 {
+    if !waiting.is_empty() {
         out.push(AttentionCount {
             kind: "waiting-on-you".to_owned(),
-            count: waiting,
-            command: format!("topos list{flag}"),
+            count: waiting.len() as u64,
+            command: match waiting.as_slice() {
+                [one] => format!("topos list{flag} {one}"),
+                _ => format!("topos list{flag}"),
+            },
         });
     }
     let updates = sr.updates_pending();

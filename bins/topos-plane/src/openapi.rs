@@ -16,7 +16,7 @@ use topos_types::requests::{
     WireAppliedSkill, WireCandidate, WireChannelEntry, WireChannelIndex, WireChannelSkill,
     WireDelivery, WireDeliverySkill, WireFile, WireFileMode, WireLogProposal, WireLogVersion,
     WireMe, WireNotice, WireOpenProposal, WireProposalEntry, WireProposalIndex, WireProposalList,
-    WireProtocolCard, WireReach, WireSkillIndex, WireSkillIndexEntry, WireSkillLog, WireUpstream,
+    WireProtocolCard, WireSkillIndex, WireSkillIndexEntry, WireSkillLog, WireUpstream,
     WireVersionFile, WireVersionMeta, WireVia,
 };
 use topos_types::results::{ProposeData, PublishData, RevertData, ReviewData, ReviewDecision};
@@ -51,7 +51,6 @@ use topos_types::{
         crate::routes::door::get_channels,
         crate::routes::door::get_proposals,
         crate::routes::door::get_log,
-        crate::routes::door::get_reach,
         // Row ops.
         crate::routes::door::channel_place,
         crate::routes::door::channel_unplace,
@@ -113,7 +112,6 @@ use topos_types::{
         WireSkillLog,
         WireLogVersion,
         WireLogProposal,
-        WireReach,
         // The member-lane row-op write bodies.
         ProtectionSetRequest,
         NoticeAckRequest,
@@ -142,7 +140,7 @@ use topos_types::{
     )),
     tags(
         (name = "writes", description = "Session-credential writes (publish / propose / revert / review) and the member-lane row ops (channel curation / protection / notices-ack)."),
-        (name = "reads", description = "Session-credential reads (current / bundles / versions / proposals / catalog / delivery / me / channels / log / reach) plus the body-light applied-state report."),
+        (name = "reads", description = "Session-credential reads (current / bundles / versions / proposals / catalog / delivery / me / channels / log) plus the body-light applied-state report."),
         (name = "enrollment", description = "The RFC-8628-shaped login flow (start / poll; the workspace is chosen at the browser approval, and the poll's exchange mints the SESSION and promotes the flow code to its workspace-scoped bearer credential), the lane-side second connect for an already-credentialed machine, and the session self-end."),
         (name = "governance", description = "The member-lane invitation (a roster write)."),
     ),

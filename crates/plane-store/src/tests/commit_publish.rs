@@ -256,6 +256,152 @@ async fn the_lineage_fence_and_the_parent_probe_refuse_typed(pool: PgPool) {
 }
 
 #[sqlx::test]
+async fn the_linearity_fence_refuses_a_two_parent_frame_on_the_publish_lane(pool: PgPool) {
+    // The publish lane's candidate carries AT MOST ONE parent by type (`CandidateUpload::parent`),
+    // so a merge is built here the only way it could ever reach custody: at the commit-frame mint
+    // every write lane crosses (`lifecycle::frame_version_id`). Its FIRST parent is exactly the
+    // pointed version, so the lineage fence would wave it through — the linearity fence is what
+    // refuses it, and refuses it before a byte is staged.
+    let fx = Fixture::new(pool, "linear-publish");
+    let (w, b) = (ws("w1"), bundle("b1"));
+
+    let (v1, _) = fx
+        .authority
+        .publish(&w, &b, candidate("GUIDE.md", b"one", None), None, NOW)
+        .await
+        .expect("genesis");
+    let (v2, p2) = fx
+        .authority
+        .publish(
+            &w,
+            &b,
+            candidate("GUIDE.md", b"two", Some(v1.version_id)),
+            Some(1),
+            NOW + 1,
+        )
+        .await
+        .expect("child");
+    assert_eq!(p2.generation, 2);
+
+    let tree = topos_core::digest::bundle_digest(&[topos_core::digest::ManifestEntry {
+        path: "GUIDE.md".into(),
+        mode: crate::FileMode::Regular,
+        content_sha256: topos_core::digest::sha256(b"merged"),
+    }])
+    .expect("digest");
+    let err = crate::lifecycle::frame_version_id(
+        &[v2.version_id.0, v1.version_id.0],
+        tree,
+        "Alice (test)",
+        "test: candidate",
+    )
+    .expect_err("a two-parent frame must be refused");
+    match err {
+        AuthorityError::RejectedUpload(msg) => {
+            assert_eq!(msg, "a candidate must declare at most one parent");
+        }
+        other => panic!("expected RejectedUpload, got {other:?}"),
+    }
+
+    // Only the COUNT was the fault: the same frame with the same first parent mints normally.
+    crate::lifecycle::frame_version_id(&[v2.version_id.0], tree, "Alice (test)", "test: candidate")
+        .expect("a one-parent frame mints");
+
+    // Nothing moved.
+    let current = fx
+        .authority
+        .read_current(&w, &b)
+        .await
+        .expect("read current")
+        .expect("pointer exists");
+    assert_eq!(current.generation, 2);
+    assert_eq!(current.version_id, v2.version_id);
+}
+
+#[sqlx::test]
+async fn a_two_parent_frame_never_becomes_a_version_so_approve_cannot_promote_it(pool: PgPool) {
+    // The propose→approve lane: `move_pointer` promotes an EXISTING version and trusts the row's
+    // persisted `first_parent`, so the count has to be fenced earlier — at staging/mint. Here the
+    // merge id is pre-derived OUTSIDE the vault (the kernel frame accepts two parents; the
+    // AUTHORITY is what refuses), then offered to the staging path a server-built frame uses.
+    let fx = Fixture::new(pool, "linear-approve");
+    let (w, b) = (ws("w1"), bundle("b1"));
+
+    let (v1, _) = fx
+        .authority
+        .publish(&w, &b, candidate("GUIDE.md", b"one", None), None, NOW)
+        .await
+        .expect("genesis");
+    let (v2, _) = fx
+        .authority
+        .publish(
+            &w,
+            &b,
+            candidate("GUIDE.md", b"two", Some(v1.version_id)),
+            Some(1),
+            NOW + 1,
+        )
+        .await
+        .expect("child");
+
+    let merge_id = crate::CommitId(
+        topos_core::identity::commit_id(&topos_core::identity::Commit {
+            parents: &[v2.version_id.0, v1.version_id.0],
+            tree: v2.bundle_digest,
+            author: "Alice (test)",
+            message: "test: candidate",
+        })
+        .expect("kernel id"),
+    );
+
+    // The fence runs before the lease and before any commit object reaches the repo, so the empty
+    // entry/object slices are never read — a refusal must leave no trace at all.
+    let op_id = crate::OpId::parse("cafebabecafebabecafebabecafebabe").expect("op id");
+    let err = crate::lifecycle::stage_forward_commit(
+        &fx.authority,
+        &w,
+        &op_id,
+        merge_id,
+        v2.bundle_digest,
+        &[],
+        &[v2.version_id, v1.version_id],
+        &[],
+        "Alice (test)",
+        "test: candidate",
+        NOW + 2,
+    )
+    .await
+    .expect_err("a two-parent frame must never be staged");
+    match err {
+        AuthorityError::RejectedUpload(msg) => {
+            assert_eq!(msg, "a candidate must declare at most one parent");
+        }
+        other => panic!("expected RejectedUpload, got {other:?}"),
+    }
+
+    // No version row exists for the merge — so the approve path has nothing to promote (the uniform
+    // NotFound, never a pointer move), and current still names v2.
+    assert!(matches!(
+        fx.authority.read_version(&w, &b, merge_id).await,
+        Err(AuthorityError::NotFound)
+    ));
+    assert!(matches!(
+        fx.authority
+            .move_pointer(&w, &b, merge_id, Some(2), "Reviewer", NOW + 3)
+            .await,
+        Err(AuthorityError::NotFound)
+    ));
+    let current = fx
+        .authority
+        .read_current(&w, &b)
+        .await
+        .expect("read current")
+        .expect("pointer exists");
+    assert_eq!(current.generation, 2);
+    assert_eq!(current.version_id, v2.version_id);
+}
+
+#[sqlx::test]
 async fn move_pointer_serves_the_approve_path(pool: PgPool) {
     let fx = Fixture::new(pool, "approve");
     let (w, b) = (ws("w1"), bundle("b1"));

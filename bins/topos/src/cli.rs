@@ -115,9 +115,7 @@ pub(crate) enum Command {
         /// ships like any other. Only for a merge that has actually stopped — with nothing
         /// waiting, `topos update <skill>` is the command (add `-g` when the merge is in your
         /// machine-wide set). Takes exactly one skill.
-        // `--onto-current` is the prior spelling, kept as a HIDDEN alias (clap's `alias` never
-        // reaches the help or the generated reference) so anything already in flight keeps working.
-        #[arg(long = "keep-mine", alias = "onto-current")]
+        #[arg(long = "keep-mine")]
         keep_mine: bool,
         /// Print nothing on stdout — the mode the session-start hook uses. The hook sweep always
         /// covers both scopes (this folder's and your machine-wide set), so `-g` has no effect
@@ -670,20 +668,10 @@ mod tests {
     }
 
     #[test]
-    fn update_keep_mine_parses_under_both_spellings() {
-        // The disclosed name.
+    fn update_keep_mine_parses() {
         let out = Cli::try_parse_from(["topos", "update", "docs", "--keep-mine"]).unwrap();
         assert!(matches!(
             out.command,
-            Some(Command::Update {
-                keep_mine: true,
-                ..
-            })
-        ));
-        // …and the prior spelling, which stays a working (hidden) alias so nothing in flight breaks.
-        let aliased = Cli::try_parse_from(["topos", "update", "docs", "--onto-current"]).unwrap();
-        assert!(matches!(
-            aliased.command,
             Some(Command::Update {
                 keep_mine: true,
                 ..
@@ -860,7 +848,6 @@ mod tests {
         for argv in [
             ["topos", "update", "docs", "--keep-mine", "--reset"],
             ["topos", "update", "docs", "--reset", "--keep-mine"],
-            ["topos", "update", "docs", "--onto-current", "--reset"],
         ] {
             let err = Cli::try_parse_from(argv).expect_err("the pair is refused");
             assert_eq!(

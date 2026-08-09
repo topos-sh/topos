@@ -28,14 +28,6 @@
 //! already held the file they added — so what the hop proves is that the PUBLISHED tree still
 //! carries both, since a fast-forward rewrites the whole folder from it.
 //!
-//! **And the third: an upgrade never leaves markers behind.** A release before the workbench put
-//! the marked-up tree INTO every agent folder, so a machine upgrading mid-merge holds markers in
-//! several folders and a record naming no workbench. One bundle here is rewound by hand to exactly
-//! that on-disk shape — the marked tree copied over every placement, the workbench deleted, the
-//! three records rewritten to say so — and the first ordinary sweep after the upgrade has to read
-//! it as a LIVE stopped merge and move both halves where this build keeps them: the person's own
-//! version back into every folder, the marked tree into the workbench, the block still standing.
-//!
 //! A last arm covers the OTHER refusal this touches: a copy deliberately put behind (a go-back)
 //! cannot publish directly — the plane's lineage fence would refuse the candidate anyway — but its
 //! `--propose` lands, because a proposal moves no pointer and asking the team to look is the safest
@@ -55,7 +47,7 @@ use common::{CliOut, OWNER_EMAIL, Session, Stack, cli_binary, run_cli, start_sta
 use serde_json::Value;
 use topos::test_support::SessionInstall;
 
-// ── the four bundles, one per exit ──────────────────────────────────────────────────────────────
+// ── the three bundles, one per exit ─────────────────────────────────────────────────────────────
 
 /// Resolved by leaving the workbench ALONE — `--keep-mine` keeps this person's version.
 const KEEP: &str = "deploy-guide";
@@ -63,11 +55,8 @@ const KEEP: &str = "deploy-guide";
 const HAND: &str = "release-runbook";
 /// Resolved by `--reset` — the team's version lands and this person's edits are dropped.
 const TAKE: &str = "oncall-rota";
-/// Rewound to the shape a PRE-WORKBENCH release left on disk — markers in the agent folders, a
-/// record naming no workbench — and converted by the first sweep after the upgrade.
-const OLD: &str = "incident-drill";
-/// All four, in the order the scenario publishes them.
-const BUNDLES: [&str; 4] = [KEEP, HAND, TAKE, OLD];
+/// All three, in the order the scenario publishes them.
+const BUNDLES: [&str; 3] = [KEEP, HAND, TAKE];
 
 /// The version the author publishes first, and the bytes both later sides diverge from. The two
 /// numbered steps sit far enough apart to be separate hunks — adjacent lines are ONE conflict to
@@ -306,75 +295,6 @@ fn marked_up_files(dir: &Path) -> Vec<PathBuf> {
     out
 }
 
-// ── rewinding one bundle to the shape an OLDER release left on disk ─────────────────────────────
-
-/// Copy a whole tree over another, modes included — the rewind below plants an on-disk state no
-/// build in this repo produces, so it is written with plain file operations.
-fn copy_tree(from: &Path, to: &Path) {
-    let _ = std::fs::remove_dir_all(to);
-    std::fs::create_dir_all(to).unwrap_or_else(|e| panic!("create {} ({e})", to.display()));
-    for entry in std::fs::read_dir(from)
-        .unwrap_or_else(|e| panic!("read {} ({e})", from.display()))
-        .flatten()
-    {
-        let dest = to.join(entry.file_name());
-        if entry.path().is_dir() {
-            copy_tree(&entry.path(), &dest);
-        } else {
-            std::fs::copy(entry.path(), &dest)
-                .unwrap_or_else(|e| panic!("copy to {} ({e})", dest.display()));
-        }
-    }
-}
-
-/// Read one of the store's JSON documents, hand it to `edit`, write it back.
-fn patch_json(path: &Path, edit: impl FnOnce(&mut Value)) {
-    let bytes = std::fs::read(path).unwrap_or_else(|e| panic!("read {} ({e})", path.display()));
-    let mut doc: Value = serde_json::from_slice(&bytes)
-        .unwrap_or_else(|e| panic!("{} is JSON ({e})", path.display()));
-    edit(&mut doc);
-    let out = serde_json::to_vec(&doc).expect("serialize the patched document");
-    std::fs::write(path, out).unwrap_or_else(|e| panic!("write {} ({e})", path.display()));
-}
-
-/// Rewind ONE recorded conflict to the state a PRE-WORKBENCH release left on disk: that release
-/// materialized the marked-up tree onto EVERY placement and recorded it as placed at `current`,
-/// and its `conflict.json` named no workbench (the field did not exist). Every value written here
-/// is one that release really wrote — the markers in each agent folder, the map naming them
-/// (map-level AND per-placement) and `sync.json` naming them, and no workbench folder anywhere.
-fn rewind_to_pre_workbench(rec: &Record, workbench: &Path) {
-    let bytes = std::fs::read(rec.conflict_json()).expect("the recorded conflict");
-    let conflict: Value = serde_json::from_slice(&bytes).expect("conflict.json is JSON");
-    let marked = conflict["conflicted_digest"]
-        .as_str()
-        .expect("the marked-up tree's digest")
-        .to_owned();
-    let at = conflict["current_commit"]
-        .as_str()
-        .expect("the version the merge stopped against")
-        .to_owned();
-
-    for dir in &rec.placements {
-        copy_tree(workbench, dir);
-    }
-    std::fs::remove_dir_all(workbench).expect("that release kept no workbench");
-    patch_json(&rec.conflict_json(), |doc| {
-        doc.as_object_mut()
-            .expect("conflict.json is an object")
-            .remove("copy_dir");
-    });
-    patch_json(&rec.store_dir.join("map.json"), |doc| {
-        doc["applied_commit"] = Value::String(at);
-        doc["materialized_sha"] = Value::String(marked.clone());
-        for state in doc["placement_state"].as_array_mut().into_iter().flatten() {
-            state["materialized_sha"] = Value::String(marked.clone());
-        }
-    });
-    patch_json(&rec.store_dir.join("sync.json"), |doc| {
-        doc["work_hash"] = Value::String(marked);
-    });
-}
-
 /// One placement dir's whole content, as `(rel path, exec bits, bytes)`.
 type Snapshot = Vec<(String, u32, Vec<u8>)>;
 
@@ -504,7 +424,8 @@ fn a_merge_conflict_never_reaches_a_folder_an_agent_reads() {
     }
 
     // ── 4. the ordinary sweep merges — and all three conflict ───────────────────────────────────
-    let swept = dev.run(&["update", "--json"]).data("the merging sweep");
+    let swept_envelope = dev.run(&["update", "--json"]).envelope("the merging sweep");
+    let swept = swept_envelope["data"].clone();
     for name in BUNDLES {
         let r = row(&swept, name);
         assert_eq!(r["action"], "conflicted", "{name}: {swept}");
@@ -581,26 +502,65 @@ fn a_merge_conflict_never_reaches_a_folder_an_agent_reads() {
             Some(canon(&workbench)),
             "{name}: the receipt names the workbench: {swept}"
         );
-        let named: Vec<String> = r["merge"]["placements"]
+        // Each folder is named WITH what is in it, read from the folder itself. Nothing has moved
+        // any of them since the stop, so every one reads `yours` — the state the aggregate
+        // "your agents are unaffected" sentence is the true summary of.
+        let named: Vec<(String, String)> = r["merge"]["placements"]
             .as_array()
             .into_iter()
             .flatten()
-            .filter_map(Value::as_str)
-            .map(|p| from_receipt(&dev.home(), p))
+            .map(|p| {
+                (
+                    from_receipt(&dev.home(), p["dir"].as_str().expect("a dir")),
+                    p["holds"].as_str().expect("a holds").to_owned(),
+                )
+            })
             .collect();
         assert_eq!(
             named,
             record(&placed, name)
                 .placements
                 .iter()
-                .map(|p| canon(p))
+                .map(|p| (canon(p), "yours".to_owned()))
                 .collect::<Vec<_>>(),
-            "{name}: the receipt names the folders that still hold this person's version: {swept}"
+            "{name}: the receipt names the folders and what each holds: {swept}"
         );
         assert!(
             record(&placed, name).conflict_json().is_file(),
             "{name}: the block is on record"
         );
+    }
+
+    // ── ASSERTION 3b: the `--json` half offers the SAME two exits, as runnable argv ─────────────
+    // The one state that asks for a decision is the one an agent most needs a next action for, and
+    // the envelope used to carry an empty list — the two ways out were terminal prose only.
+    let offered: Vec<Vec<String>> = swept_envelope["next_actions"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|a| a["code"] == "RESOLVE_DIVERGED_DRAFT")
+        .map(|a| {
+            a["argv"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .map(str::to_owned)
+                .collect()
+        })
+        .collect();
+    for name in BUNDLES {
+        for exit in ["--keep-mine", "--reset"] {
+            let want: Vec<String> = ["topos", "update", "-g", name, exit, "--json"]
+                .iter()
+                .map(|s| (*s).to_owned())
+                .collect();
+            assert!(
+                offered.contains(&want),
+                "{name} {exit}: the envelope offers the exits the receipt prints: \
+                 {swept_envelope}"
+            );
+        }
     }
 
     // ── ASSERTION 4: publish is refused while the block stands ──────────────────────────────────
@@ -826,105 +786,6 @@ fn a_merge_conflict_never_reaches_a_folder_an_agent_reads() {
             .is_some_and(|p| p.starts_with(TAKE)),
         "asking the team to look is never refused: {proposed}"
     );
-
-    // ── ASSERTION 9: a merge an OLDER release left IN the agent folders is converted ────────────
-    // That release put the marked-up tree into every placement and recorded it as placed there, and
-    // its record named no workbench — so an upgrade mid-merge finds markers in folders agents read.
-    // This bundle's on-disk state is rewound to exactly that, by hand, through the record files.
-    let old = record(&placed, OLD);
-    let workbench = dev.topos_home().join("conflicts").join(OLD);
-    rewind_to_pre_workbench(old, &workbench);
-    for dir in &old.placements {
-        assert!(
-            holds_a_marker(&std::fs::read(dir.join("SKILL.md")).expect("the rewound copy")),
-            "the rewind must really leave markers in {}",
-            dir.display()
-        );
-    }
-
-    // The first ordinary sweep after the upgrade. Read naively, that record's documents are
-    // indistinguishable from a resolution that already landed — so this run's job is to recognise a
-    // LIVE stopped merge and move both halves where this build keeps them, rather than delete it.
-    let upgraded = dev
-        .run(&["update", "-g", "--json"])
-        .data("the first sweep after the upgrade");
-    let r = row(&upgraded, OLD);
-    assert_eq!(
-        r["action"], "conflicted",
-        "the block still stands: {upgraded}"
-    );
-    // The receipt states the one fact a reader cannot see for themselves: their agent folders
-    // changed under them, and why.
-    assert_eq!(
-        r["note"],
-        "an older version of topos left this merge in your agent folders — they hold your version \
-         again",
-        "{upgraded}"
-    );
-
-    // ── 9a: nothing an agent reads holds a marker any more — the whole fake $HOME ───────────────
-    assert_eq!(
-        marked_up_files(&dev.home()),
-        Vec::<PathBuf>::new(),
-        "the conversion takes the markers out of every folder an agent can read"
-    );
-    // ── 9b: every folder holds this person's OWN version, byte for byte what stood there ────────
-    for (dir, was) in &before[OLD] {
-        assert_eq!(
-            &snapshot(dir),
-            was,
-            "{OLD}: {} holds this person's own bytes again",
-            dir.display()
-        );
-        assert_eq!(placed_text(dir), mine(OLD), "{OLD} in {}", dir.display());
-    }
-    // ── 9c: the workbench is where this build keeps it, and carries both sides ──────────────────
-    assert!(
-        workbench.is_dir(),
-        "the marked-up tree is written to the workbench ({})",
-        workbench.display()
-    );
-    let marked = std::fs::read_to_string(workbench.join("SKILL.md")).expect("the marked-up copy");
-    assert!(
-        marked.contains(MARKER)
-            && marked.contains("check the region twice")
-            && marked.contains("check the region and the account"),
-        "{OLD}: both sides survive inside the markers: {marked}"
-    );
-    assert_eq!(
-        r["merge"]["copy_dir"]
-            .as_str()
-            .map(|p| from_receipt(&dev.home(), p)),
-        Some(canon(&workbench)),
-        "{OLD}: the receipt names the workbench the conversion wrote: {upgraded}"
-    );
-    // ── 9d: the block is a block — publish is still refused ─────────────────────────────────────
-    let refused = dev
-        .run(&["publish", OLD, "--yes", "--json"])
-        .refusal("publish while the converted block stands");
-    assert_eq!(refused["error"]["code"], "PUBLISH_BLOCKED", "{refused}");
-    // ── 9e: and the ordinary exit finishes it, in every folder ──────────────────────────────────
-    let finished = dev
-        .run(&["update", "-g", OLD, "--keep-mine", "--json"])
-        .data("--keep-mine on a converted block");
-    assert_eq!(row(&finished, OLD)["action"], "merged", "{finished}");
-    for dir in &old.placements {
-        assert_eq!(
-            placed_text(dir),
-            kept(OLD),
-            "the exit resolved the converted merge in {}",
-            dir.display()
-        );
-    }
-    assert!(!workbench.exists(), "the exit deletes the workbench");
-    assert!(
-        !old.conflict_json().exists(),
-        "the exit clears the converted block"
-    );
-    let landed = dev
-        .run(&["publish", OLD, "--yes", "-m", "converted", "--json"])
-        .data("publishing once the converted block is gone");
-    assert!(landed["version_id"].as_str().is_some(), "{landed}");
 
     // ── the aftermath: a settled bundle stays settled, and no marker ever reached an agent ──────
     // ALL THREE, including KEEP: a decision that stands is a decision that stops being asked. The

@@ -1532,7 +1532,7 @@ export interface SessionActorRow {
  * `cli_session` / `workspace` table aliases: TRUE while the session is within the workspace's
  * owner-set expiry (`session_max_age_ms`), or always when the policy is unset. Every surface
  * that treats a session as LIVE — the lane guard, the self-logout lookup, the owner approve,
- * the session counts, delivery reach — reuses THIS fragment, so no page or route can call a
+ * the session counts — reuses THIS fragment, so no page or route can call a
  * session live after its credential stopped resolving. The aliases are compile-time constants
  * at every call site, never user input.
  */
@@ -2088,9 +2088,9 @@ export async function seatOf(
  *
  * This is the demand HALF of demand ∩ entitlement — the seat itself is the entitlement
  * (whole-catalog), so delivery = this set, and callers add the has-current join as their
- * surface needs. Kept HERE so the delivery query and every reach count share one predicate.
+ * surface needs. Kept HERE so every demand-shaped read shares one predicate.
  * Params bind as values when strings, or inline as SQL fragments (a correlated column
- * reference, for set-level consumers like the reach counts).
+ * reference, for set-level consumers).
  */
 export const feedDemandSql = (
   userId: string | ReturnType<typeof sql>,

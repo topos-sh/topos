@@ -8,15 +8,6 @@
       "description": "`true` on the `--yes` apply, `false` on the describe.",
       "type": "boolean"
     },
-    "audience": {
-      "description": "The audience this protection governs: the reach (people) for a skill, the member count for a\nchannel.",
-      "type": [
-        "integer",
-        "null"
-      ],
-      "format": "uint64",
-      "minimum": 0
-    },
     "kind": {
       "description": "`skill` or `channel`.",
       "type": "string"

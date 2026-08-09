@@ -383,7 +383,7 @@ export async function reportApplied(
   });
 }
 
-// ── The describe reads (me / channels / reach) ──────────────────────────────────────────────
+// ── The describe reads (me / channels) ──────────────────────────────────────────────────
 
 export interface LaneMe {
   name: string;
@@ -475,44 +475,6 @@ export async function laneChannels(actor: FeedActor): Promise<LaneChannel[]> {
     },
     { isolationLevel: "repeatable read", accessMode: "read only" },
   );
-}
-
-/** A bundle's audience (`GET /skills/{skill}/reach`): the people whose feed carries it + their
- * live sessions. */
-export async function laneReach(
-  actor: SessionActor,
-  bundleId: string,
-): Promise<{ persons: number; sessions: number } | null> {
-  const ws = actor.workspaceId;
-  const db = getDb();
-  const exists = await db
-    .select({ id: bundle.id })
-    .from(bundle)
-    .where(and(eq(bundle.workspaceId, ws), eq(bundle.id, bundleId)))
-    .limit(1);
-  if (exists.length === 0) {
-    return null;
-  }
-  const persons = await db.execute(sql`
-    SELECT COUNT(*) AS n FROM web.seat s
-    WHERE s.workspace_id = ${ws}
-      AND EXISTS (SELECT 1 FROM (${feedDemandSql(sql`s.user_id`, ws)}) e
-                  WHERE e.bundle_id = ${bundleId})
-  `);
-  // A session counts toward reach only while ACTIVE and within the owner-set expiry — a
-  // pending or expired session cannot receive delivery here, whatever its owner's seat says.
-  const sessions = await db.execute(sql`
-    SELECT COUNT(*) AS n FROM web.cli_session cs
-    JOIN web.workspace w ON w.id = cs.workspace_id
-    WHERE cs.workspace_id = ${ws} AND cs.status = 'active'
-      AND ${sessionUnexpiredSql("cs", "w")}
-      AND EXISTS (SELECT 1 FROM (${feedDemandSql(sql`cs.user_id`, ws)}) e
-                  WHERE e.bundle_id = ${bundleId})
-  `);
-  return {
-    persons: Number((persons.rows[0] as { n: string | number }).n),
-    sessions: Number((sessions.rows[0] as { n: string | number }).n),
-  };
 }
 
 // ── The feed actor (the shape every feed-shaped read takes) ────────────────────────────────

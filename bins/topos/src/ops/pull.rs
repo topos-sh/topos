@@ -506,6 +506,7 @@ pub(crate) fn reset(
                 .unwrap_or_default(),
             global: store == super::StoreScope::Machine,
             hand_merge: None,
+            merge: None,
         });
     }
 
@@ -528,7 +529,19 @@ pub(crate) fn reset(
     // ---- APPLY (`--yes`) ---- discard each draft back to its base (the draft is snapshotted first),
     // each through ITS owning store — the same copy the describe above measured the loss against.
     for ((layout, id, _lock), item) in resolved.iter().zip(items.iter_mut()) {
-        item.hand_merge = sync_engine::reset_to_base(&ctx_with_layout(ctx, layout), id, sel)?;
+        let landed = sync_engine::reset_to_base(&ctx_with_layout(ctx, layout), id, sel)?;
+        item.hand_merge = landed.hand_merge;
+        // Whether the merge this reset met is over or still standing — the settled-state proof ran
+        // inside the reset, so this is the only place that fact can be read from.
+        item.merge = match landed.merge {
+            sync_engine::ResetMerge::NoneStood => None,
+            sync_engine::ResetMerge::StillStopped => {
+                Some(topos_types::results::ResetMergeOutcome::StillStopped)
+            }
+            sync_engine::ResetMerge::Concluded => {
+                Some(topos_types::results::ResetMergeOutcome::Concluded)
+            }
+        };
         item.applied = true;
     }
     Ok(ResetOutcome::Applied(items))

@@ -70,6 +70,26 @@
         "bundle"
       ]
     },
+    "ConflictHolds": {
+      "description": "What a folder holds while a merge stands (see [`ConflictPlacement`]). **INFERRED** (additive).",
+      "oneOf": [
+        {
+          "description": "This person's own version — the draft the merge stopped on. Every folder reads this the\nmoment a merge stops, because a conflict writes to none of them.",
+          "type": "string",
+          "const": "yours"
+        },
+        {
+          "description": "The team's version: a `--dest`-narrowed reset took this one copy while the merge stayed\nstopped over the others.",
+          "type": "string",
+          "const": "theirs"
+        },
+        {
+          "description": "Neither of the two — the person kept working in this folder after the merge stopped.",
+          "type": "string",
+          "const": "newer_edits"
+        }
+      ]
+    },
     "ConflictPathKind": {
       "description": "How a single path conflicts. **INFERRED value set.**",
       "oneOf": [
@@ -124,6 +144,24 @@
       "required": [
         "path",
         "kind"
+      ]
+    },
+    "ConflictPlacement": {
+      "description": "One folder a stopped merge's bundle sits in, and what that folder holds RIGHT NOW. The pair is\nwhat lets a re-disclosure tell per-folder truth: a merge can stand for days while a narrowed\nreset takes one copy and the person keeps working in another. **INFERRED** (additive).",
+      "type": "object",
+      "properties": {
+        "dir": {
+          "description": "The folder, as a receipt spells it (`~`-abbreviated display path).",
+          "type": "string"
+        },
+        "holds": {
+          "description": "What is in it.",
+          "$ref": "#/$defs/ConflictHolds"
+        }
+      },
+      "required": [
+        "dir",
+        "holds"
       ]
     },
     "ConflictReason": {
@@ -208,10 +246,10 @@
           ]
         },
         "placements": {
-          "description": "The folders that still hold the AUTHOR'S OWN version — a conflict writes to none of them, so\nevery agent reads exactly what it read before the update. Display paths (`~`-abbreviated).\nEmpty for a clean merge (which rewrites its placements). **INFERRED** (additive).",
+          "description": "Every folder this bundle sits in while the merge stands, each with WHAT IS IN IT — read\nfrom the folder itself, never assumed. A conflict writes to no folder, so the whole set\nreads `yours` the moment it stops; a copy taken by a narrowed reset, or edited on after the\nstop, says so instead. Folders that are gone (or unreadable) are absent: an unverifiable\nfolder must never become a claim. Empty for a clean merge (which rewrites its placements).\n**INFERRED** (additive).",
           "type": "array",
           "items": {
-            "type": "string"
+            "$ref": "#/$defs/ConflictPlacement"
           }
         },
         "reason": {

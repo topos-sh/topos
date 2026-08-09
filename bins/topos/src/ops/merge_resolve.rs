@@ -107,7 +107,8 @@ use topos_types::persisted::{
     PlacementMap, SyncState,
 };
 use topos_types::results::{
-    ConflictPathReport, MergePreview, MergePreviewVerdict, MergeReport, PullAction, PullSkill,
+    ConflictHolds, ConflictPathReport, ConflictPlacement, MergePreview, MergePreviewVerdict,
+    MergeReport, PullAction, PullSkill,
 };
 
 use crate::ctx::Ctx;
@@ -983,163 +984,6 @@ pub(crate) fn finish_concluded(
     }
 }
 
-/// A pre-workbench conflict record, converted — the documents as they now stand, plus what the
-/// receipt owes the reader about it.
-pub(crate) struct ConvertedConflict {
-    pub state: ConflictState,
-    pub sync: SyncState,
-    pub map: PlacementMap,
-    /// The row's second fact: an older build had put this merge into the agent folders, and what
-    /// that cost if a folder had been edited since.
-    pub note: Option<String>,
-}
-
-/// Turn a conflict recorded by a PRE-WORKBENCH build into one this build can resolve, and say so.
-/// `Ok(None)` when the record already carries a `copy_dir` (every record this build writes does),
-/// which is the ordinary case and costs one field read.
-///
-/// The build being upgraded FROM materialized the marked-up tree onto every placement, so the
-/// markers are sitting in folders agents read: a diff3 marker is not an instruction, and the whole
-/// point of this module is that no folder an agent reads ever holds one. The absent `copy_dir` is
-/// an honest signal of which SHAPE the record is in — never of whether the merge is over — and
-/// recognising the shape only stops the wrong exits running over it; the bytes still have to move.
-/// So the conversion puts each half where this build keeps it —
-///
-/// - **the placements** get the author's OWN version back (the `draft_commit` snapshot the old
-///   build committed before it merged), so every agent folder holds one coherent bundle again;
-/// - **the marked-up tree** goes to the scope's workbench, exactly where a conflict recorded today
-///   would have written it, and the record is rewritten with the `copy_dir` that names it.
-///
-/// The block itself is untouched: the ordinary blocked flow proceeds from here, both exits work,
-/// and `publish` stays refused.
-///
-/// ## Order, and why a crash cannot strand the markers
-///
-/// Placements FIRST, then the record, then the copy. A crash before the record is written leaves
-/// an old-format record over already-converted folders — the conversion simply runs again, and the
-/// placement write is idempotent (the materializer heals a dir that already holds the target with
-/// no second swap). A crash after it leaves a new-format record whose workbench is absent, which
-/// is precisely the state [`recover_resolution`] re-renders. The reverse order would leave a
-/// converted RECORD over unconverted FOLDERS, and nothing would ever come back for them.
-pub(crate) fn convert_pre_workbench_record(
-    ctx: &Ctx<'_>,
-    skill_id: &str,
-    sp: &SkillPaths,
-    sync: &SyncState,
-    lock: &Lock,
-    map: &PlacementMap,
-    cs: &ConflictState,
-) -> Result<Option<ConvertedConflict>, ClientError> {
-    if cs.copy_dir.is_some() {
-        return Ok(None);
-    }
-    let copy_leaf = choose_conflict_dir(ctx, skill_id, lock).ok_or_else(|| {
-        ClientError::Corrupt(
-            "this bundle's conflict workbench folder cannot be named safely".into(),
-        )
-    })?;
-    let store = Store::open(&sp.store)?;
-    let draft_commit = super::parse_hex32(&cs.draft_commit)?;
-    let draft = store.render_verified(draft_commit, super::parse_hex32(&cs.draft_digest)?)?;
-    let theirs_commit = super::parse_hex32(&cs.current_commit)?;
-    let theirs = store.render_verified(theirs_commit, super::parse_hex32(&cs.current_digest)?)?;
-    let marked = store.render_verified(
-        super::parse_hex32(&cs.result_commit)?,
-        super::parse_hex32(&cs.conflicted_digest)?,
-    )?;
-
-    // Read the folders BEFORE the placement write converges them, so the row can say what it is
-    // about to replace — the same early snapshot [`live_copies`] takes, for the same reason.
-    let replaced = replaced_copies(ctx, sp, lock, map, &cs.draft_digest);
-
-    // ① the folders: the author's own version, and the map naming that snapshot as what is
-    //    realized there. `lock`/`sync` land exactly where a conflict recorded today leaves them.
-    let next_lock = lock_from_bundle(lock, theirs_commit, &theirs);
-    let next_sync = forwarded_sync(sync, theirs_commit, &cs.draft_digest);
-    place_bundle(
-        ctx,
-        skill_id,
-        sp,
-        lock,
-        map,
-        &draft,
-        draft_commit,
-        &next_lock,
-        &next_sync,
-    )?;
-    // ② the record, now naming the workbench; ③ the marked-up tree in it.
-    let state = ConflictState {
-        copy_dir: Some(copy_leaf.as_str().to_owned()),
-        ..cs.clone()
-    };
-    doc::write_doc(ctx.fs, &sp.conflict, &state)?;
-    write_conflict_copy(ctx, &copy_leaf, &marked)?;
-
-    let next_map = doc::read_map(ctx.fs, &sp.map)?
-        .ok_or_else(|| ClientError::Corrupt("missing placement map".into()))?;
-    Ok(Some(ConvertedConflict {
-        state,
-        sync: next_sync,
-        map: next_map,
-        note: Some(converted_note(ctx, &lock.name, &replaced)),
-    }))
-}
-
-/// The copies the conversion is about to REPLACE: every edited folder whose bytes are neither what
-/// the old build wrote there nor the author's own version going back into it. Each is snapshotted
-/// (content-addressed and idempotent — the same commit the materializer's rail makes moments
-/// later) so the note can hand back a runnable way to read it again.
-///
-/// Best-effort by construction: a scan or a snapshot that fails says nothing rather than failing a
-/// conversion the whole upgrade depends on.
-fn replaced_copies(
-    ctx: &Ctx<'_>,
-    sp: &SkillPaths,
-    lock: &Lock,
-    map: &PlacementMap,
-    draft_digest: &str,
-) -> Vec<SavedCopy> {
-    let Ok(scans) = placement::scan_placements(ctx, map) else {
-        return Vec::new();
-    };
-    let mut out = Vec::new();
-    for s in &scans {
-        let crate::placement::ScanStatus::Modified { scanned } = &s.status else {
-            continue;
-        };
-        if to_hex(&scanned.bundle_digest) == draft_digest {
-            continue; // already the author's own version — nothing is replaced
-        }
-        let Ok(version) = snapshot_draft(ctx, sp, lock, scanned) else {
-            continue;
-        };
-        out.push(SavedCopy {
-            display: super::inventory::pretty(ctx, &s.dir),
-            version,
-        });
-    }
-    out
-}
-
-/// What a converted record's receipt says: the one fact a reader cannot see for themselves (their
-/// agent folders changed, and why), then — only when it happened — one runnable line per folder
-/// whose own edits the conversion replaced, each naming the folder it came from.
-fn converted_note(ctx: &Ctx<'_>, name: &str, replaced: &[SavedCopy]) -> String {
-    let g = crate::error::scope_flag(!ctx.layout.is_project_scope());
-    let mut out =
-        "an older version of topos left this merge in your agent folders — they hold your version \
-         again"
-            .to_owned();
-    for c in replaced {
-        out.push_str(&format!(
-            "\nedits in {} were replaced — read that copy again:\n  topos update{g} {name}@{}",
-            c.display,
-            crate::render::short(&c.version),
-        ));
-    }
-    out
-}
-
 // --------------------------------------------------------------------------------------------------
 // The in-memory merge PREVIEW (no witness, no writes).
 // --------------------------------------------------------------------------------------------------
@@ -1591,11 +1435,9 @@ fn place_draft_on_current(
 /// the version the map now names on disk. The one placement write the merge paths make; the
 /// caller decides what the docs say about it.
 ///
-/// `realized` is deliberately a parameter rather than derived from `next_sync`: a resolution
-/// realizes the version it committed on, while the pre-workbench conversion
-/// ([`convert_pre_workbench_record`]) realizes the author's own DRAFT snapshot while the block
-/// still stands — and the map has to name what it really wrote, or the never-a-lost-byte rail
-/// compares the next overwrite against a baseline no folder holds.
+/// The map has to name what was REALLY written — a resolution realizes the version it committed
+/// on — or the never-a-lost-byte rail compares the next overwrite against a baseline no folder
+/// holds.
 #[allow(clippy::too_many_arguments)]
 fn place_bundle(
     ctx: &Ctx<'_>,
@@ -2112,32 +1954,53 @@ fn merged_row(
     }
 }
 
-/// The two facts a conflict row states about disk, read where they are true: the folders that still
-/// hold the author's own version (the recorded map — a conflict wrote to none of them), and the one
-/// folder the marked-up copy went to (the record's own `copy_dir`, never recomputed, so the receipt
-/// names the folder every exit reads).
+/// The two facts a conflict row states about disk, read where they are true: what each of this
+/// bundle's folders holds right now, and the one folder the marked-up copy went to (the record's
+/// own `copy_dir`, never recomputed, so the receipt names the folder every exit reads).
 ///
 /// The map is what the placements were RECORDED as, which is not the same as what is there now: a
 /// folder deleted since the block was raised is still in it, and the row that reads this list goes
 /// on to promise the reader that folder holds their version. So the list is filtered to the
-/// directories that are actually present, and a path that cannot be read at all is dropped for the
-/// same reason — an unverifiable folder must not become a claim. Filtering to nothing is a state
-/// the row already has words for, and both of its exits put the bytes back.
+/// directories that are actually present, and a path that cannot be READ is dropped for the same
+/// reason — an unverifiable folder must not become a claim. Filtering to nothing is a state the row
+/// already has words for, and both of its exits put the bytes back.
+///
+/// A merge can stand for days, and neither the record nor the map moves while it does. So the
+/// contents are not assumed either: each present folder is scanned and its digest compared against
+/// the record's own two pins. The person's draft (`draft_digest`) is what a stop leaves everywhere,
+/// because a conflict writes to no placement. The team's version (`current_digest`) is what a
+/// `--dest`-narrowed `--reset` puts in ONE copy — `settle_conflict_docs` advanced the lock to
+/// theirs when the merge stopped, so the base a reset re-materializes IS that digest. Anything else
+/// is this person, still working in that folder after the stop.
 fn conflict_disclosure(
     ctx: &Ctx<'_>,
     map: &PlacementMap,
     cs: &ConflictState,
-) -> (Vec<String>, Option<String>) {
+) -> (Vec<ConflictPlacement>, Option<String>) {
     let placements = map
         .placements
         .iter()
-        .filter(|p| {
-            matches!(
-                ctx.fs.path_kind(std::path::Path::new(p.as_str())),
+        .filter_map(|p| {
+            let dir = std::path::Path::new(p.as_str());
+            if !matches!(
+                ctx.fs.path_kind(dir),
                 Ok(Some(crate::fs_seam::PathKind::Dir))
-            )
+            ) {
+                return None;
+            }
+            let digest = to_hex(&crate::scan::scan(dir).ok()?.bundle_digest);
+            let holds = if digest == cs.draft_digest {
+                ConflictHolds::Yours
+            } else if digest == cs.current_digest {
+                ConflictHolds::Theirs
+            } else {
+                ConflictHolds::NewerEdits
+            };
+            Some(ConflictPlacement {
+                dir: super::inventory::pretty(ctx, dir),
+                holds,
+            })
         })
-        .map(|p| super::inventory::pretty(ctx, std::path::Path::new(p)))
         .collect();
     let copy = conflict_copy_path(ctx, cs).map(|p| super::inventory::pretty(ctx, &p));
     (placements, copy)
@@ -2165,7 +2028,7 @@ fn conflicted_row(
     conflicts: Vec<ConflictPathReport>,
     drop_diff: Option<String>,
     reason: ConflictReason,
-    disclosure: (Vec<String>, Option<String>),
+    disclosure: (Vec<ConflictPlacement>, Option<String>),
 ) -> PullSkill {
     let (placements, copy_dir) = disclosure;
     PullSkill {

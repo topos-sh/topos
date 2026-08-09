@@ -10,7 +10,6 @@
     "placements": [
       "everyone"
     ],
-    "reach": 12,
     "share_line": "https://topos.sh/acme/skills/deploy",
     "skill": "deploy",
     "skill_id": "s_deploy",

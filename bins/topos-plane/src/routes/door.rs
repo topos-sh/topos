@@ -9,7 +9,7 @@
 //! approval; the poll's exchange mints the SESSION and promotes the flow code to its
 //! workspace-scoped bearer credential), the lane-side second connect, the session self-end, the
 //! publish/propose/revert/review writes, the current/version/object/catalog/proposals reads, the
-//! delivery + applied-state report, the describe reads (me / channels / reach / review inbox /
+//! delivery + applied-state report, the describe reads (me / channels / review inbox /
 //! log), and the row ops (channel curation / protection / notices-ack
 //! / invitations).
 
@@ -19,8 +19,8 @@ use topos_types::requests::{
     DeviceAuthPollRequest, DeviceAuthPollResponse, DeviceAuthStartRequest, DeviceAuthStartResponse,
     InvitationRequest, LoginConnectRequest, LoginConnectResponse, NoticeAckRequest, ProposeRequest,
     ProtectionSetRequest, PublishRequest, RevertRequest, ReviewRequest, WireAppliedReport,
-    WireChannelIndex, WireDelivery, WireMe, WireProposalIndex, WireProposalList, WireReach,
-    WireSkillIndex, WireSkillLog, WireVersionMeta,
+    WireChannelIndex, WireDelivery, WireMe, WireProposalIndex, WireProposalList, WireSkillIndex,
+    WireSkillLog, WireVersionMeta,
 };
 use topos_types::{JsonEnvelope, WireCurrentRecord};
 
@@ -59,25 +59,6 @@ pub(crate) fn get_me() {}
     ),
 )]
 pub(crate) fn get_channels() {}
-
-#[utoipa::path(
-    get,
-    path = "/v1/workspaces/{ws}/skills/{skill}/reach",
-    tag = "reads",
-    params(
-        ("ws" = String, Path, description = "Workspace id."),
-        ("skill" = String, Path, description = "The skill's immutable id."),
-        ("Authorization" = String, Header, description = "`Bearer <workspace credential>`."),
-    ),
-    responses(
-        (status = 200, description = "The skill's audience (entitled members + their live sessions).", body = WireReach),
-        (status = 404, description = "Missing/blank credential, non-member, or unknown skill (indistinguishable).", body = JsonEnvelope),
-        (status = 426, description = "The caller's topos release is below this server's floor — the envelope names the floor and carries the `self-update` next action.", body = JsonEnvelope),
-        (status = 429, description = "Rate limited (Retry-After header).", body = JsonEnvelope),
-        (status = 500, description = "Integrity / internal store fault.", body = JsonEnvelope),
-    ),
-)]
-pub(crate) fn get_reach() {}
 
 #[utoipa::path(
     put,

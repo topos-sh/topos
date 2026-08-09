@@ -30,6 +30,17 @@
         "null"
       ]
     },
+    "merge": {
+      "description": "Where this reset leaves a merge that had STOPPED on the bundle. Absent when none had —\nthe ordinary reset says nothing about merges. **INFERRED** (additive-only).",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ResetMergeOutcome"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "others_kept": {
       "description": "The bundle's OTHER edited copies — the ones this reset leaves untouched, still holding\ntheir edits. Always empty for a whole-bundle reset (it takes them all). **INFERRED**\n(additive-only).",
       "type": "array",
@@ -57,5 +68,22 @@
     "to_version",
     "drop_diff",
     "applied"
-  ]
+  ],
+  "$defs": {
+    "ResetMergeOutcome": {
+      "description": "What a `--reset` did to a stopped merge (see [`ResetData::merge`]). A narrowed reset takes ONE\ncopy, and a merge ends only when every copy is settled — so the two are genuinely different\nanswers and a receipt must not print one for the other. **INFERRED** (additive).",
+      "oneOf": [
+        {
+          "description": "The merge is STILL stopped: another copy still holds it, and both ways out remain live.",
+          "type": "string",
+          "const": "still_stopped"
+        },
+        {
+          "description": "The merge is over — this was the last copy holding it, resolved the team's way.",
+          "type": "string",
+          "const": "concluded"
+        }
+      ]
+    }
+  }
 }

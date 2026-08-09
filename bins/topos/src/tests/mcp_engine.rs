@@ -22,7 +22,7 @@ use topos_harness::mcp::{
 };
 use topos_harness::{DiscoveredPlacement, HarnessAdapter, PlacementTarget};
 use topos_types::requests::{
-    WireChannelEntry, WireChannelIndex, WireChannelSkill, WireMe, WireProposalIndex, WireReach,
+    WireChannelEntry, WireChannelIndex, WireChannelSkill, WireMe, WireProposalIndex,
     WireSkillIndex, WireSkillIndexEntry, WireSkillLog,
 };
 use topos_types::{CurrencyKind, HarnessId, TriggerReport, TriggerState};
@@ -383,9 +383,6 @@ impl DirectorySource for FakeDirectory {
         unreachable!()
     }
     fn skill_log(&self, _ws: &str, _s: &str) -> Result<WireSkillLog, ClientError> {
-        unreachable!()
-    }
-    fn reach(&self, _ws: &str, _s: &str) -> Result<WireReach, ClientError> {
         unreachable!()
     }
     fn channel_place(&self, _ws: &str, _c: &str, _s: &str) -> Result<(), ClientError> {
@@ -2263,7 +2260,7 @@ fn a_skill_rows_folder_dest_never_warns_mcp_dest_unknown() {
             &clean.advisories,
             &clean.disclosures
         ),
-        "updated machine-wide\nChecked 1 skill: all up to date."
+        "checked machine-wide\nChecked 1 skill: all up to date."
     );
 }
 

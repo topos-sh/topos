@@ -188,10 +188,9 @@ fn safety(code: &ActionCode, argv: &[String], subject: Subject) -> Safety {
 /// this action is emitted for); a bare `--reset` only DESCRIBES the loss-led discard (its own
 /// describe carries the `--yes`); the plain targeted update runs the three-way merge.
 fn resolve_diverged_draft(argv: &[String]) -> Safety {
-    // Both spellings, because an argv is whatever was TYPED: `--onto-current` is still a working
-    // (hidden) alias, and a command classified as "the plain merge" when it is in fact the escape
-    // would carry the wrong caution.
-    if has_flag(argv, "--keep-mine") || has_flag(argv, "--onto-current") {
+    // Read off the argv, because an argv is whatever was TYPED: a command classified as "the plain
+    // merge" when it is in fact the escape would carry the wrong caution.
+    if has_flag(argv, "--keep-mine") {
         return Safety::new(
             Some(true),
             Some(false),

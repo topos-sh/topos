@@ -183,17 +183,6 @@ fn the_session_manifest_hero_loop() {
 
     // ── v2 fast-forwards silently (login was the acceptance — no offer step) ────────────────────
     write_skill(&src, "# deploy v2\nDeploy the service, faster.\n");
-    // The PUBLISH describe's audience line is REAL end-to-end: the reach body the web app serves
-    // deserializes through the Rust wire type, warning-free — and a read that failed would WARN
-    // now, never silently omit the line.
-    let (reach, reach_warnings) = author
-        .publish_describe_reach("deploy", Some(&cwd))
-        .expect("the publish describe");
-    assert!(reach_warnings.is_empty(), "{reach_warnings:?}");
-    assert!(
-        reach.is_some_and(|n| n >= 1),
-        "the publish describe carries the web-served reach: {reach:?}"
-    );
     author
         .publish("deploy", false, None, Some("v2"), Some(&cwd))
         .expect("publish v2");
@@ -216,15 +205,6 @@ fn the_session_manifest_hero_loop() {
     );
 
     // ── protection: the member's direct publish DOWNGRADES to a proposal; approve lands it ──────
-    // The describe's audience line is REAL: the reach body the web app serves deserializes
-    // through the Rust wire type (a field mismatch would degrade it to `None` silently).
-    let audience = author
-        .protect_describe_audience("deploy")
-        .expect("the protect describe");
-    assert!(
-        audience.is_some_and(|n| n >= 1),
-        "the audience line carries the web-served reach: {audience:?}"
-    );
     author.protect("deploy", None).expect("tighten to reviewed");
     let doc = placed.join("SKILL.md");
     let mut body = std::fs::read_to_string(&doc).expect("read the draft base");

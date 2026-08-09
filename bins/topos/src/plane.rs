@@ -14,7 +14,7 @@
 use topos_core::digest::FileMode;
 use topos_types::requests::{
     ProposeRequest, PublishRequest, RevertRequest, ReviewRequest, WireChannelIndex, WireMe,
-    WireNotice, WireProposalIndex, WireProtocolCard, WireReach, WireSkillIndex, WireSkillLog,
+    WireNotice, WireProposalIndex, WireProtocolCard, WireSkillIndex, WireSkillLog,
 };
 use topos_types::{Receipt, TerminalOutcome, WireCurrentRecord, WireError};
 
@@ -347,12 +347,6 @@ pub(crate) trait DirectorySource {
     /// # Errors
     /// As [`me`](Self::me).
     fn skill_log(&self, workspace_id: &str, skill_id: &str) -> Result<WireSkillLog, ClientError>;
-
-    /// `GET /v1/workspaces/{ws}/skills/{skill}/reach` — the audience a change reaches.
-    ///
-    /// # Errors
-    /// As [`me`](Self::me).
-    fn reach(&self, workspace_id: &str, skill_id: &str) -> Result<WireReach, ClientError>;
 
     /// `PUT /v1/workspaces/{ws}/channels/{ch}/skills/{skill}` — place a skill's reference into a
     /// channel (created on first placement; a curated channel gates by role).

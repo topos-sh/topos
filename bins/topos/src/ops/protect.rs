@@ -3,9 +3,8 @@
 //! Dual-kind target: a SKILL bundle tightens to `reviewed` (its members' publishes reroute into
 //! proposals) and loosens back to `open`; a CHANNEL tightens to `curated` (placement takes reviewer+)
 //! and loosens back to `open`. Bare (no level) TIGHTENS to the kind's protected level; an explicit
-//! `open` LOOSENS it (an owner act). The describe carries the audience the protection governs — the
-//! reach (people) for a skill, the member count for a channel — and, when LOOSENING a skill, the note
-//! that pending proposals survive and still await their verdict. `--yes` applies via the protection
+//! `open` LOOSENS it (an owner act). The describe carries, when LOOSENING a skill, the note that
+//! pending proposals survive and still await their verdict. `--yes` applies via the protection
 //! routes; a role refusal (`OWNER_ROLE_REQUIRED` / `REVIEWER_ROLE_REQUIRED`) surfaces typed, naming the
 //! role that can.
 
@@ -17,8 +16,8 @@ use crate::ctx::Ctx;
 use crate::error::ClientError;
 use crate::resolve::{self, Resolution, ResourceKind};
 
-/// The seams `protect` needs — the directory connector builds the universe, reads the audience, and
-/// writes the protection level.
+/// The seams `protect` needs — the directory connector builds the universe and writes the
+/// protection level.
 pub(crate) struct ProtectConnectors<'a> {
     #[allow(dead_code)]
     pub directory: &'a DirectoryConnect<'a>,
@@ -26,14 +25,12 @@ pub(crate) struct ProtectConnectors<'a> {
     pub session: &'a SessionConnect<'a>,
 }
 
-/// The verb's outcome — the two-phase pair. The describe carries WARNINGS (stable-shape envelope
-/// lines): a best-effort read that failed must say so visibly, never leave its line missing.
+/// The verb's outcome — the two-phase pair.
 #[derive(Debug)]
 pub(crate) enum ProtectOutcome {
     Described {
         data: ProtectData,
         yes_argv: Vec<String>,
-        warnings: Vec<String>,
     },
     Applied(ProtectData),
 }
@@ -96,11 +93,6 @@ pub(crate) fn protect(
                     "no session for this workspace — run `topos login <workspace-address>` first"
                         .into(),
             })?;
-    // The audience the protection governs (best-effort — a read fault degrades the describe, never
-    // the op) — but never SILENTLY: the failure is a visible warning, not a missing line.
-    let (audience, warnings) =
-        read_audience(directory, &workspace_id, kind, &name, skill_id.as_deref());
-
     let note = match (kind, loosening) {
         (ResourceKind::Skill, true) => {
             Some("pending proposals survive a loosening and still await their verdict".to_owned())
@@ -114,7 +106,6 @@ pub(crate) fn protect(
         workspace_id: workspace_id.clone(),
         level: level.clone(),
         loosening,
-        audience,
         note,
         applied: false,
     };
@@ -125,11 +116,7 @@ pub(crate) fn protect(
             yes_argv.push(l);
         }
         yes_argv.push("--yes".to_owned());
-        return Ok(ProtectOutcome::Described {
-            data,
-            yes_argv,
-            warnings,
-        });
+        return Ok(ProtectOutcome::Described { data, yes_argv });
     }
 
     // ---- APPLY (`--yes`) ----
@@ -185,34 +172,6 @@ fn level_argv(kind: ResourceKind, level: &str) -> Option<String> {
         ResourceKind::Channel => "curated",
     };
     (level != default).then(|| level.to_owned())
-}
-
-/// The audience the protection governs — the reach (people) for a skill. A channel's audience is
-/// not on the session wire (delivery is profile math, not membership rows) — the describe simply
-/// omits it, silently and deliberately. A SKILL's failed read is different: best-effort still (the
-/// describe degrades, the op does not), but the fault comes back as a visible warning — a
-/// wordlessly missing audience line is how a wire mismatch once hid for a week.
-fn read_audience(
-    directory: &dyn crate::plane::DirectorySource,
-    workspace_id: &str,
-    kind: ResourceKind,
-    name: &str,
-    skill_id: Option<&str>,
-) -> (Option<u64>, Vec<String>) {
-    match kind {
-        ResourceKind::Skill => {
-            let Some(id) = skill_id else {
-                return (None, Vec::new());
-            };
-            match directory.reach(workspace_id, id) {
-                Ok(r) => (Some(r.persons), Vec::new()),
-                // Worded by publish's ONE producer — same sentence, same discipline: the reason
-                // names the skill, never the internal bundle id the 404 echoes back.
-                Err(e) => (None, vec![super::publish::reach_unavailable(name, id, &e)]),
-            }
-        }
-        ResourceKind::Channel => (None, Vec::new()),
-    }
 }
 
 /// Reword a role refusal into a typed answer naming the role that can act; everything else passes

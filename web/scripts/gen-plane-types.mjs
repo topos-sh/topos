@@ -61,7 +61,6 @@ const PUBLIC_ROUTES = [
   { method: "get", path: "/v1/workspaces/{ws}/skills/{skill}/log" },
   { method: "get", path: "/v1/workspaces/{ws}/skills/{skill}/proposals" },
   { method: "put", path: "/v1/workspaces/{ws}/skills/{skill}/protection" },
-  { method: "get", path: "/v1/workspaces/{ws}/skills/{skill}/reach" },
   { method: "get", path: "/v1/workspaces/{ws}/skills/{skill}/versions/{version_id}" },
 ];
 

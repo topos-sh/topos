@@ -17,7 +17,7 @@ use topos_core::digest::{self, FileMode, ManifestEntry};
 use topos_core::identity::Commit;
 use topos_harness::{DiscoveredPlacement, HarnessAdapter, PlacementTarget};
 use topos_types::requests::{
-    WireChannelEntry, WireChannelIndex, WireChannelSkill, WireMe, WireProposalIndex, WireReach,
+    WireChannelEntry, WireChannelIndex, WireChannelSkill, WireMe, WireProposalIndex,
     WireSkillIndex, WireSkillIndexEntry, WireSkillLog,
 };
 use topos_types::results::{ExchangeFault, PullAction};
@@ -492,9 +492,6 @@ impl DirectorySource for FakeDirectory {
         unreachable!()
     }
     fn skill_log(&self, _ws: &str, _s: &str) -> Result<WireSkillLog, ClientError> {
-        unreachable!()
-    }
-    fn reach(&self, _ws: &str, _s: &str) -> Result<WireReach, ClientError> {
         unreachable!()
     }
     fn channel_place(&self, _ws: &str, _c: &str, _s: &str) -> Result<(), ClientError> {
@@ -4312,6 +4309,10 @@ fn rebuild_leaves_a_blocked_bundle_alone_and_names_both_exits() {
     );
     assert!(tty.contains("waiting on you"), "{tty}");
     assert!(!tty.contains("failed"), "{tty}");
+    // And the HEADER says what the run did: it checked. Nothing moved here — the whole point of
+    // the assertions above is that the folders were left as they are — so `updated machine-wide`
+    // was a claim the rows under it contradicted.
+    assert!(tty.starts_with("checked machine-wide\n"), "{tty}");
     // The row in the SAME receipt still names the untouched folder — the rebuild changed nothing
     // about what the conflict row can promise.
     let row = out
@@ -9598,9 +9599,6 @@ impl DirectorySource for NamedDirectory {
     fn skill_log(&self, ws: &str, s: &str) -> Result<WireSkillLog, ClientError> {
         self.0.skill_log(ws, s)
     }
-    fn reach(&self, ws: &str, s: &str) -> Result<WireReach, ClientError> {
-        self.0.reach(ws, s)
-    }
     fn channel_place(&self, ws: &str, c: &str, s: &str) -> Result<(), ClientError> {
         self.0.channel_place(ws, c, s)
     }
@@ -10909,350 +10907,6 @@ fn a_ghost_remove_falls_through_and_a_still_claimed_name_keeps_the_refusal() {
     );
 }
 
-/// What the plane answers an audience probe with.
-#[derive(Clone)]
-enum FakeReach {
-    /// A live-shaped payload.
-    Persons(u64),
-    /// A body that fails to parse — the typed transport failure.
-    Malformed(String),
-    /// The uniform NOT-FOUND, echoing back the OPAQUE bundle id the client sent, exactly as the
-    /// real transport's 404 arm does. This is what a bundle with no catalog row always meets.
-    NotFound,
-}
-
-/// [`FakeDirectory`] that answers `me` (the resolver universe's read) AND `reach` — the audience
-/// read the publish/protect describes make.
-#[derive(Clone)]
-struct ReachDirectory {
-    inner: NamedDirectory,
-    reach: FakeReach,
-}
-impl DirectorySource for ReachDirectory {
-    fn me(&self, ws: &str) -> Result<WireMe, ClientError> {
-        self.inner.me(ws)
-    }
-    fn channels_index(&self, ws: &str) -> Result<WireChannelIndex, ClientError> {
-        self.inner.channels_index(ws)
-    }
-    fn skills_index(&self, ws: &str) -> Result<WireSkillIndex, ClientError> {
-        self.inner.skills_index(ws)
-    }
-    fn proposals_index(&self, ws: &str) -> Result<WireProposalIndex, ClientError> {
-        self.inner.proposals_index(ws)
-    }
-    fn skill_log(&self, ws: &str, s: &str) -> Result<WireSkillLog, ClientError> {
-        self.inner.skill_log(ws, s)
-    }
-    fn reach(&self, _ws: &str, s: &str) -> Result<WireReach, ClientError> {
-        match &self.reach {
-            FakeReach::Persons(p) => Ok(WireReach {
-                persons: *p,
-                sessions: p + 1,
-            }),
-            FakeReach::Malformed(m) => Err(ClientError::WireInvalid(m.clone())),
-            FakeReach::NotFound => Err(ClientError::TargetNotFound {
-                target: s.to_owned(),
-            }),
-        }
-    }
-    fn channel_place(&self, ws: &str, c: &str, s: &str) -> Result<(), ClientError> {
-        self.inner.channel_place(ws, c, s)
-    }
-    fn channel_unplace(&self, ws: &str, c: &str, s: &str) -> Result<(), ClientError> {
-        self.inner.channel_unplace(ws, c, s)
-    }
-    fn protect_skill(&self, ws: &str, s: &str, l: &str) -> Result<(), ClientError> {
-        self.inner.protect_skill(ws, s, l)
-    }
-    fn protect_channel(&self, ws: &str, c: &str, l: &str) -> Result<(), ClientError> {
-        self.inner.protect_channel(ws, c, l)
-    }
-    fn ack_notices(&self, ws: &str, ids: &[String]) -> Result<(), ClientError> {
-        self.inner.ack_notices(ws, ids)
-    }
-}
-
-/// The FIRST publish of a brand-new skill asks the plane NOTHING about its audience: the bundle
-/// has no catalog row yet, so the only answer the probe can get is the uniform not-found — which
-/// echoes back the opaque bundle id the client sent. Asking it opened the happy genesis path with
-/// a warning quoting an internal `topos_…` id nobody typed, and advising the person to check an
-/// address that was never wrong.
-#[test]
-fn a_genesis_publish_describe_never_asks_for_an_audience_that_cannot_exist() {
-    let rig = Rig::new("zq-genreach");
-    rig.seed_session();
-    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
-    let plane = FakePlane::new(log);
-    plane.serves(Vec::new());
-    let src = rig.work.0.join("deploy");
-    skill_source(&src, b"# deploy\n");
-    let ctx = rig.ctx_at(Some(&rig.work.0));
-    ops::add(&ctx, &src).unwrap();
-
-    let fake = FakeDirectory::new(Vec::new(), Vec::new());
-    let dc = |_: &str| -> Box<dyn DirectorySource> {
-        Box::new(FakeDirectory::new(Vec::new(), Vec::new()))
-    };
-    let del = |_: &str| -> Box<dyn crate::plane::ReconcileTransport> {
-        let p = FakePlane::new(Arc::new(Mutex::new(Vec::new())));
-        p.serves(Vec::new());
-        Box::new(p)
-    };
-    let connectors = ops::PublishDescribeConnectors {
-        directory: &dc,
-        delivery: &del,
-    };
-    let rd = ReachDirectory {
-        inner: NamedDirectory(fake.clone()),
-        reach: FakeReach::NotFound,
-    };
-    let session_connect = |_s: &Session| ops::SessionTransports {
-        plane: Box::new(plane.clone()),
-        directory: Box::new(rd.clone()),
-        contribute: Box::new(NoContribute),
-        governance: Box::new(NoGovernance),
-    };
-    let (data, warnings) = ops::publish_describe(
-        &ctx,
-        &connectors,
-        Some(&session_connect),
-        None,
-        "deploy",
-        false,
-        None,
-        None,
-        &ops::Selection::default(),
-    )
-    .unwrap();
-    assert_eq!(data.reach, None, "no audience is claimed");
-    assert!(
-        warnings.is_empty(),
-        "a first publish is the happy path — it warns about nothing: {warnings:?}"
-    );
-    let argv = vec!["topos".to_owned(), "publish".to_owned(), "--yes".to_owned()];
-    let tty = crate::render::publish_describe_tty(&data, &argv);
-    assert!(!tty.contains("reaches"), "{tty}");
-    assert!(
-        !tty.contains(&data.skill_id),
-        "the internal bundle id never reaches a human line: {tty}"
-    );
-    // What the describe DOES say about where these bytes go — the placement line, unchanged.
-    assert_eq!(data.placements, vec!["everyone".to_owned()]);
-}
-
-/// The audience rides the ENVELOPE against a live-shaped reach payload — and a reach that FAILS
-/// surfaces as a visible warning, never as a wordlessly missing field (the swallow that hid the
-/// wire mismatch for a week is gone). All of it on a SECOND publish: an audience is a question only
-/// a bundle the plane already holds a row for can answer. The failure reason names the SKILL, never
-/// the internal id the plane's 404 echoes back.
-#[test]
-fn the_publish_describe_audience_line_prints_and_a_failed_reach_warns() {
-    let rig = Rig::new("zq-reach");
-    rig.seed_session();
-    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
-    let plane = FakePlane::new(log);
-    plane.serves(Vec::new());
-    let src = rig.work.0.join("deploy");
-    skill_source(&src, b"# deploy\n");
-    let ctx = rig.ctx_at(Some(&rig.work.0));
-    ops::add(&ctx, &src).unwrap();
-
-    let fake = FakeDirectory::new(Vec::new(), Vec::new());
-    let dc = |_: &str| -> Box<dyn DirectorySource> {
-        Box::new(FakeDirectory::new(Vec::new(), Vec::new()))
-    };
-    let del = |_: &str| -> Box<dyn crate::plane::ReconcileTransport> {
-        let p = FakePlane::new(Arc::new(Mutex::new(Vec::new())));
-        p.serves(Vec::new());
-        Box::new(p)
-    };
-    let connectors = ops::PublishDescribeConnectors {
-        directory: &dc,
-        delivery: &del,
-    };
-
-    // The first publish LANDS (`observed` advances past GENESIS, read-your-writes) and the draft
-    // moves on — every describe below is a republish of a bundle the plane knows. The apply's own
-    // directory answers no reach at all (`FakeDirectory::reach` is `unreachable!`): the audience
-    // is a describe-only read.
-    let named = NamedDirectory(fake.clone());
-    let session_apply = |_s: &Session| ops::SessionTransports {
-        plane: Box::new(plane.clone()),
-        directory: Box::new(named.clone()),
-        contribute: Box::new(OkPublish),
-        governance: Box::new(NoGovernance),
-    };
-    let cc = |_base: &str, _tok: Option<&str>| -> Box<dyn crate::plane::ContributeSource> {
-        Box::new(NoContribute)
-    };
-    let outcome = ops::publish(
-        &ctx,
-        &cc,
-        None,
-        Some(&session_apply),
-        None,
-        "deploy",
-        false,
-        None,
-        None,
-        None,
-        &ops::Selection::default(),
-    )
-    .unwrap();
-    assert!(
-        matches!(outcome, ops::PublishOutcome::Published(_)),
-        "the first publish lands: {outcome:?}"
-    );
-    skill_source(&src, b"# deploy v2\n");
-
-    let argv = vec!["topos".to_owned(), "publish".to_owned(), "--yes".to_owned()];
-    let describe = |reach: FakeReach| {
-        let rd = ReachDirectory {
-            inner: NamedDirectory(fake.clone()),
-            reach,
-        };
-        let session_connect = |_s: &Session| ops::SessionTransports {
-            plane: Box::new(plane.clone()),
-            directory: Box::new(rd.clone()),
-            contribute: Box::new(NoContribute),
-            governance: Box::new(NoGovernance),
-        };
-        ops::publish_describe(
-            &ctx,
-            &connectors,
-            Some(&session_connect),
-            None,
-            "deploy",
-            false,
-            None,
-            None,
-            &ops::Selection::default(),
-        )
-        .unwrap()
-    };
-
-    // A LIVE-shaped payload: the count reaches the envelope. It stays OFF the describe's TTY —
-    // an audience is a prediction, and the preview only says where these bytes go and what the
-    // gate does with them.
-    let (data, warnings) = describe(FakeReach::Persons(4));
-    assert_eq!(data.reach, Some(4));
-    assert!(warnings.is_empty(), "{warnings:?}");
-    let tty = crate::render::publish_describe_tty(&data, &argv);
-    assert!(!tty.contains("reaches"), "{tty}");
-    assert!(!tty.contains('4'), "{tty}");
-
-    // A reach that fails to parse: the field is absent AND a warning says why.
-    let (data, warnings) = describe(FakeReach::Malformed("missing field `sessions`".to_owned()));
-    assert_eq!(data.reach, None);
-    assert_eq!(warnings.len(), 1, "{warnings:?}");
-    // The whole line: what could not be read, and why. It stops there — the preview withholds the
-    // audience whether or not the reach was readable, so "the audience line is omitted" was a
-    // consequence that was never a consequence of this failure.
-    assert_eq!(
-        warnings[0],
-        "REACH_UNAVAILABLE deploy: the server sent a response topos could not read — how many \
-         people this reaches could not be read"
-    );
-    let tty = crate::render::publish_describe_tty(&data, &argv);
-    assert!(!tty.contains("reaches"), "{tty}");
-
-    // A real not-found on a bundle the plane SHOULD know (access lost, catalog row archived): the
-    // warning stands — worded around the name the person typed, never the id the 404 echoed.
-    let (data, warnings) = describe(FakeReach::NotFound);
-    assert_eq!(data.reach, None);
-    assert_eq!(warnings.len(), 1, "{warnings:?}");
-    assert!(
-        warnings[0].starts_with("REACH_UNAVAILABLE deploy: 'deploy' was not found"),
-        "{warnings:?}"
-    );
-    assert!(
-        !warnings[0].contains(&data.skill_id),
-        "the internal bundle id never reaches a human line: {warnings:?}"
-    );
-}
-
-/// The `protect` describe holds the same rule: a failed reach is a visible warning on the
-/// described outcome, never a silently absent audience.
-#[test]
-fn a_protect_describe_reach_failure_warns_instead_of_vanishing() {
-    let rig = Rig::new("zq-preach");
-    rig.seed_session();
-    let v = one_file(b"# deploy\n");
-    let fake = FakeDirectory::new(vec![catalog_entry("s_deploy", "deploy", &v)], Vec::new());
-    let ctx = rig.ctx_at(Some(&rig.work.0));
-
-    let run = |reach: FakeReach| {
-        let rd = ReachDirectory {
-            inner: NamedDirectory(fake.clone()),
-            reach,
-        };
-        let log: CallLog = Arc::new(Mutex::new(Vec::new()));
-        let plane = FakePlane::new(log);
-        let session_connect = move |_s: &Session| ops::SessionTransports {
-            plane: Box::new(plane.clone()),
-            directory: Box::new(rd.clone()),
-            contribute: Box::new(NoContribute),
-            governance: Box::new(NoGovernance),
-        };
-        let dir_connect = |_: &str| -> Box<dyn DirectorySource> {
-            Box::new(FakeDirectory::new(Vec::new(), Vec::new()))
-        };
-        let connectors = ops::ProtectConnectors {
-            directory: &dir_connect,
-            session: &session_connect,
-        };
-        ops::protect(&ctx, &connectors, "deploy", None, None, false).unwrap()
-    };
-
-    let argv = vec!["topos".to_owned(), "protect".to_owned(), "--yes".to_owned()];
-    match run(FakeReach::Persons(9)) {
-        ops::ProtectOutcome::Described { data, warnings, .. } => {
-            assert_eq!(data.audience, Some(9));
-            assert!(warnings.is_empty(), "{warnings:?}");
-            let tty = crate::render::protect_describe_tty(&data, &argv);
-            assert!(tty.contains("reaches 9 people"), "{tty}");
-        }
-        other => panic!("a bare protect describes: {other:?}"),
-    }
-    // The same irregular noun rule the publish describe holds: one person, never "1 people".
-    match run(FakeReach::Persons(1)) {
-        ops::ProtectOutcome::Described { data, warnings, .. } => {
-            assert_eq!(data.audience, Some(1));
-            assert!(warnings.is_empty(), "{warnings:?}");
-            let tty = crate::render::protect_describe_tty(&data, &argv);
-            assert!(tty.contains("reaches 1 person"), "{tty}");
-        }
-        other => panic!("a bare protect describes: {other:?}"),
-    }
-    match run(FakeReach::Malformed("missing field `sessions`".to_owned())) {
-        ops::ProtectOutcome::Described { data, warnings, .. } => {
-            assert_eq!(data.audience, None);
-            assert_eq!(warnings.len(), 1, "{warnings:?}");
-            // One wording, both verbs — the whole line, not a prefix of it.
-            assert_eq!(
-                warnings[0],
-                "REACH_UNAVAILABLE deploy: the server sent a response topos could not read — how \
-                 many people this reaches could not be read"
-            );
-        }
-        other => panic!("a bare protect describes: {other:?}"),
-    }
-    // A protect whose reach 404s: the id the plane echoed back never reaches the warning.
-    match run(FakeReach::NotFound) {
-        ops::ProtectOutcome::Described { data, warnings, .. } => {
-            assert_eq!(data.audience, None);
-            assert_eq!(warnings.len(), 1, "{warnings:?}");
-            assert!(
-                warnings[0].starts_with("REACH_UNAVAILABLE deploy: 'deploy' was not found"),
-                "{warnings:?}"
-            );
-            assert!(!warnings[0].contains("s_deploy"), "{warnings:?}");
-        }
-        other => panic!("a bare protect describes: {other:?}"),
-    }
-}
-
 /// A gate-valid `server.json` for the MCP rows below (the converge re-runs the whole gate).
 fn mcp_server_json(url: &str) -> String {
     format!(
@@ -11715,9 +11369,6 @@ impl DirectorySource for ChannelsDropAfterFirst {
     }
     fn skill_log(&self, ws: &str, s: &str) -> Result<WireSkillLog, ClientError> {
         self.inner.skill_log(ws, s)
-    }
-    fn reach(&self, ws: &str, s: &str) -> Result<WireReach, ClientError> {
-        self.inner.reach(ws, s)
     }
     fn channel_place(&self, ws: &str, c: &str, s: &str) -> Result<(), ClientError> {
         self.inner.channel_place(ws, c, s)
@@ -13057,7 +12708,8 @@ fn healing_a_deleted_placement_reads_installed_never_all_up_to_date() {
     let dir = FakeDirectory::new(vec![catalog_entry("s_deploy", "deploy", &v)], Vec::new());
     let ctx = rig.ctx_at(Some(&rig.work.0));
 
-    // First sweep installs; the second is genuinely untouched and pins the exact summary.
+    // First sweep installs; the second is genuinely untouched and pins the exact summary — down to
+    // the header's verb, which says what the run DID: it checked, it did not update.
     sweep(&ctx, &plane, &dir);
     let placed = rig.work.0.join("skills/deploy");
     assert!(placed.join("SKILL.md").exists());
@@ -13070,7 +12722,7 @@ fn healing_a_deleted_placement_reads_installed_never_all_up_to_date() {
             &clean.advisories,
             &clean.disclosures
         ),
-        "updated machine-wide\nChecked 1 skill: all up to date."
+        "checked machine-wide\nChecked 1 skill: all up to date."
     );
 
     // The placement folder vanishes (a hand-delete, an agent cleanup). The next update re-creates
@@ -13117,7 +12769,7 @@ fn healing_a_deleted_placement_reads_installed_never_all_up_to_date() {
             &again.advisories,
             &again.disclosures
         ),
-        "updated machine-wide\nChecked 1 skill: all up to date."
+        "checked machine-wide\nChecked 1 skill: all up to date."
     );
 }
 

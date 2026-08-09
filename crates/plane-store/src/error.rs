@@ -37,8 +37,8 @@ pub enum AuthorityError {
     InvalidId(#[from] crate::id::IdError),
 
     /// A candidate was refused: it violated the canonical rules (a rejected path/mode/collision),
-    /// referenced a parent this bundle does not hold, exceeded the per-blob cap, carried a
-    /// denylisted (purged) blob, or broke the same-bundle lineage rule.
+    /// declared more than one parent, referenced a parent this bundle does not hold, exceeded the
+    /// per-blob cap, carried a denylisted (purged) blob, or broke the same-bundle lineage rule.
     #[error("rejected candidate: {0}")]
     RejectedUpload(String),
 

@@ -19,7 +19,10 @@
           ],
           "copy_dir": "~/.topos/conflicts/pr-describe",
           "placements": [
-            "~/.claude/skills/pr-describe"
+            {
+              "dir": "~/.claude/skills/pr-describe",
+              "holds": "yours"
+            }
           ],
           "reason": "three_way",
           "result_digest": "1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f",
@@ -34,5 +37,34 @@
     ]
   },
   "warnings": [],
-  "next_actions": []
+  "next_actions": [
+    {
+      "code": "RESOLVE_DIVERGED_DRAFT",
+      "argv": [
+        "topos",
+        "update",
+        "-g",
+        "pr-describe",
+        "--keep-mine",
+        "--json"
+      ],
+      "mutates": true,
+      "needs_network": false,
+      "risk_note": "drops the team's side of the lines you both changed; their other changes are kept"
+    },
+    {
+      "code": "RESOLVE_DIVERGED_DRAFT",
+      "argv": [
+        "topos",
+        "update",
+        "-g",
+        "pr-describe",
+        "--reset",
+        "--json"
+      ],
+      "mutates": false,
+      "needs_network": false,
+      "risk_note": "describes the discard; applying it drops your local draft so the team's version wins"
+    }
+  ]
 }

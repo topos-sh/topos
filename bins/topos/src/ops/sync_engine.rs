@@ -127,18 +127,10 @@ pub(crate) fn escape_one(
                 return Ok(row);
             }
         } else {
-            // A record from a build that put the marked-up tree INTO the agent folders is
-            // converted first — before this exit reads a folder, since under that record the
-            // folders hold markers and the exit stands on what they hold.
-            let (cs, sync, map, note) = match super::merge_resolve::convert_pre_workbench_record(
-                ctx, skill_id, &sp, &sync, &lock, &map, &cs,
-            )? {
-                Some(c) => (c.state, c.sync, c.map, c.note),
-                None => (cs, sync, map, None),
-            };
+            // An UNMARKED record is a live stopped merge: this exit acts on it as it stands.
             // A witness mint site — guarded: a `conflict.json` only ever exists for an author
             // who diverged (a follower never reaches merge code, so never records one).
-            let mut row = super::merge_resolve::escape_recorded(
+            return super::merge_resolve::escape_recorded(
                 DivergedWitness(()),
                 ctx,
                 skill_id,
@@ -147,13 +139,7 @@ pub(crate) fn escape_one(
                 &lock,
                 &map,
                 &cs,
-            )?;
-            // Two facts can both be owed here; neither may swallow the other.
-            row.note = match (row.note.take(), note) {
-                (Some(a), Some(b)) => Some(format!("{b}\n{a}")),
-                (a, b) => a.or(b),
-            };
-            return Ok(row);
+            );
         }
     }
     Err(ClientError::NoStoppedMerge {
@@ -248,20 +234,10 @@ pub(crate) fn sync_one_planned(
             sync = read_required(ctx, &sp.sync, "sync.json")?;
             map = read_map_required(ctx, &sp)?;
         } else {
-            // A record from a build that materialized the marked-up tree ONTO the placements is
-            // converted here — the author's own version back in every agent folder, the marked-up
-            // tree into the workbench — and the ordinary blocked flow then proceeds over it.
-            let (cs, sync, map, note) = match super::merge_resolve::convert_pre_workbench_record(
-                ctx, skill_id, &sp, &sync, &lock, &map, &cs,
-            )? {
-                Some(c) => (c.state, c.sync, c.map, c.note),
-                None => (cs, sync, map, None),
-            };
+            // An UNMARKED record is a live block: heal whatever the recording crash left and
+            // re-disclose it as it stands.
             super::merge_resolve::recover_resolution(ctx, &sp, &sync, &lock, &map, &cs)?;
-            let mut row =
-                super::merge_resolve::conflicted_row_from_state(ctx, &name, &sync, &map, &cs)?;
-            row.note = note;
-            return Ok(row);
+            return super::merge_resolve::conflicted_row_from_state(ctx, &name, &sync, &map, &cs);
         }
     }
 
@@ -810,8 +786,9 @@ pub(crate) fn go_back(
 /// the merge exactly when every recorded copy proves settled (see [`every_copy_settled`]), and
 /// leaves the record live when one does not.
 ///
-/// Returns the workbench folder LEFT BEHIND — a hand merge this reset did not read and so does not
-/// delete — for the receipt to name; `None` when nothing survives.
+/// Returns what the receipt needs to say about what this reset LEFT: the workbench folder a hand
+/// merge survives in (this command never read it, so it never deletes it), and where the reset
+/// leaves any merge that was stopped here.
 ///
 /// # Errors
 /// [`ClientError::PlacementUnsupported`] on an unscannable placement; a store / io / integrity
@@ -820,7 +797,7 @@ pub(crate) fn reset_to_base(
     ctx: &Ctx<'_>,
     skill_id: &crate::id::SkillId,
     sel: &super::Selection,
-) -> Result<Option<String>, ClientError> {
+) -> Result<ResetLanded, ClientError> {
     let _guard = sidecar::lock_skill(ctx.fs, &ctx.layout, skill_id)?;
     let sp = ctx.layout.published(skill_id);
     let sid = skill_id.as_str();
@@ -926,7 +903,8 @@ pub(crate) fn reset_to_base(
     //
     // The removal is `Unread`: this command never looked inside the workbench, so a hand merge in
     // it is left where the person can see it and named on the receipt.
-    let hand_merge = if every_copy_settled(ctx, &sp) {
+    let settled = every_copy_settled(ctx, &sp);
+    let hand_merge = if settled {
         // The reset CONCLUDED the merge, and only here is that true — the proof just passed, so
         // the mark goes down before the clear and a crash between the two still reads as a
         // conclusion to finish. Full and narrowed resets are identical in this: what ends a merge
@@ -951,7 +929,40 @@ pub(crate) fn reset_to_base(
         None
     };
     log_apply(ctx, sid, "update-reset", base, &report);
-    Ok(hand_merge)
+    // WHERE this leaves the merge, for the receipt to say out loud. A narrowed reset that settled
+    // only its own copy leaves the block STANDING — the person who just watched one folder go back
+    // to the team's version is the reader most likely to believe the whole thing is over.
+    Ok(ResetLanded {
+        hand_merge,
+        merge: match (&recorded, settled) {
+            (None, _) => ResetMerge::NoneStood,
+            (Some(_), true) => ResetMerge::Concluded,
+            (Some(_), false) => ResetMerge::StillStopped,
+        },
+    })
+}
+
+/// What a [`reset_to_base`] left behind, for its receipt.
+#[derive(Debug)]
+pub(crate) struct ResetLanded {
+    /// The folder holding a by-hand merge this reset did NOT read and so did not delete, as a
+    /// receipt spells it. `None` when nothing survived there.
+    pub hand_merge: Option<String>,
+    /// Where the reset leaves a merge that had stopped on this bundle.
+    pub merge: ResetMerge,
+}
+
+/// Where a reset leaves a stopped merge — the fact only the command that ran the settled-state
+/// proof can state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ResetMerge {
+    /// No merge was recorded here at all: the ordinary reset, and the receipt says nothing.
+    NoneStood,
+    /// A record stood and STILL stands — this reset settled its own copy and left another
+    /// unsettled, so both ways out are still live.
+    StillStopped,
+    /// This reset CONCLUDED the merge: every recorded copy proved settled, and the record is gone.
+    Concluded,
 }
 
 /// Whether every copy this bundle records now sits at its own recorded baseline — the reset's

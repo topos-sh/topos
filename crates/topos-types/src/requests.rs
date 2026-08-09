@@ -72,9 +72,10 @@ pub struct WireFile {
 pub struct WireCandidate {
     /// Every file in the candidate bundle (each server-rehashed).
     pub files: Vec<WireFile>,
-    /// The candidate commit's declared parents, each a 64-char lowercase-hex `version_id` (`0` parents for a
-    /// genesis publish, `1` for a normal publish / propose, `2` for an author merge). Each must already be
-    /// present in the workspace; a lie changes the recomputed commit id, so the server need not trust it.
+    /// The candidate commit's declared parents, each a 64-char lowercase-hex `version_id`: `0` parents for a
+    /// genesis publish, `1` for a normal publish / propose. More than one is REFUSED — a bundle's history is
+    /// a list, never a DAG. Each must already be present in the workspace; a lie changes the recomputed
+    /// commit id, so the server need not trust it.
     pub parents: Vec<String>,
     /// The author device id recorded in the commit frame.
     pub author: String,
@@ -281,8 +282,9 @@ pub struct WireVersionMeta {
     /// This version's commit id (64-char lowercase hex).
     #[cfg_attr(feature = "contract-derives", schemars(extend("pattern" = "^[0-9a-f]{64}$")))]
     pub version_id: String,
-    /// The COMPLETE parent set, each a 64-char lowercase-hex commit id (`0` for genesis, `1` normally, `2`
-    /// for an author merge).
+    /// The COMPLETE parent set, each a 64-char lowercase-hex commit id: `0` entries for a bundle's genesis
+    /// version, `1` for every other version. A bundle's history is a LIST by construction — the server
+    /// refuses any candidate frame declaring more than one parent — so this never carries two.
     pub parents: Vec<String>,
     /// The author device id from the commit frame.
     pub author: String,
@@ -1161,20 +1163,6 @@ pub struct WireSkillLog {
     pub versions: Vec<WireLogVersion>,
     /// The proposal events, newest first.
     pub proposals: Vec<WireLogProposal>,
-}
-
-/// `GET /v1/workspaces/{ws}/skills/{skill}/reach` response — the audience a change to this skill
-/// reaches (the describe number behind `publish` and `protect`). Member-scoped.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(
-    feature = "contract-derives",
-    derive(schemars::JsonSchema, utoipa::ToSchema)
-)]
-pub struct WireReach {
-    /// How many people are entitled to the skill.
-    pub persons: u64,
-    /// How many live (active, unexpired) CLI sessions those people hold here.
-    pub sessions: u64,
 }
 
 #[cfg(test)]

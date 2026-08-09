@@ -330,14 +330,7 @@ pub(crate) async fn revert(
 
     let parents = [parent];
     let parent_ids: Vec<[u8; 32]> = parents.iter().map(|c| c.0).collect();
-    let forward_id = topos_core::identity::commit_id(&topos_core::identity::Commit {
-        parents: &parent_ids,
-        tree: target_digest,
-        author: attribution,
-        message,
-    })
-    .map_err(|e| AuthorityError::RejectedUpload(format!("invalid commit frame: {e:?}")))?;
-    let forward = CommitId(forward_id);
+    let forward = lifecycle::frame_version_id(&parent_ids, target_digest, attribution, message)?;
 
     let op_id = mint_op_id()?;
     lifecycle::stage_forward_commit(

@@ -227,22 +227,8 @@ pub(crate) fn check_channel_exists(
     Ok(())
 }
 
-/// The `REACH_UNAVAILABLE` warning every audience reader raises — worded ONCE, and never carrying
-/// the internal bundle id. The plane's uniform not-found echoes the opaque `topos_…` handle the
-/// client sent, so a raw error message hands a person an identifier they never typed and cannot
-/// act on; the skill's own NAME replaces it wherever it appears in the reason.
-pub(crate) fn reach_unavailable(name: &str, skill_id: &str, e: &ClientError) -> String {
-    let reason = crate::render::safe_message(e);
-    let reason = if skill_id.is_empty() {
-        reason
-    } else {
-        reason.replace(skill_id, name)
-    };
-    format!("REACH_UNAVAILABLE {name}: {reason} — how many people this reaches could not be read")
-}
-
 /// The seams `publish`'s describe needs, both read only AFTER the local scan: the directory connector
-/// reads the audience (reach) + the workspace address (the share line); the delivery connector reads the
+/// reads the workspace address (the share line); the delivery connector reads the
 /// FRESH per-skill protection the gate turns on — the one server fact the sidecar's cached follow-state
 /// (stamped at the last delivery reconcile) can misreport in either direction after an owner re-protects.
 pub(crate) struct PublishDescribeConnectors<'a> {
@@ -251,15 +237,12 @@ pub(crate) struct PublishDescribeConnectors<'a> {
 }
 
 /// The bare (no `--yes`) ENROLLED publish describe — what shipping this draft WOULD do: where it lands,
-/// the gate outcome, the audience, the share line, and the undo path. Mutates NOTHING at all — an
+/// the gate outcome, the share line, and the undo path. Mutates NOTHING at all — an
 /// untracked source is NOT adopted here (adopting mints a sidecar and arms the session-start hook, a
 /// durable change the human has not confirmed); it is refused toward `topos add` / `publish --yes`, which
 /// is where the apply performs that adoption. The network is read only AFTER the local scan; the genesis /
 /// WAL apply paths are untouched (this runs only for an enrolled `!yes` invocation, dispatched in the
 /// composition root).
-///
-/// Returns the describe plus its WARNINGS (stable-shape envelope lines) — a best-effort read that
-/// failed must say so visibly, never leave its line wordlessly missing.
 ///
 /// # Errors
 /// [`ClientError::Enrollment`] if not enrolled; [`ClientError::NoChanges`] when the draft equals current;
@@ -276,7 +259,7 @@ pub(crate) fn publish_describe(
     channel: Option<&str>,
     workspace: Option<&str>,
     sel: &super::Selection,
-) -> Result<(PublishDescribeData, Vec<String>), ClientError> {
+) -> Result<PublishDescribeData, ClientError> {
     let (source_str, pin) = parse_target(target);
     let _ = roots;
     // A describe MUTATES NOTHING (the consent contract). An already-tracked target is scanned in place;
@@ -420,12 +403,10 @@ pub(crate) fn publish_describe(
     };
 
     // GENESIS = no published `current` exists — the same signal the NO_CHANGES guard above keys
-    // on (never followed AND never published from here). Read HERE, before the network block: it
-    // decides which questions the plane can even be asked (a bundle it has no row for cannot have
-    // an audience), as well as the default placement below.
+    // on (never followed AND never published from here). It decides the default placement below.
     let genesis = !followed && sync.observed == GENESIS;
 
-    // Network reads AFTER the local scan: the audience (reach) + the workspace address (the share line).
+    // Network reads AFTER the local scan: the workspace address (the share line).
     let legacy_dir;
     let directory: &dyn crate::plane::DirectorySource = match &lane {
         Some(l) => &*l.transports.directory,
@@ -439,26 +420,6 @@ pub(crate) fn publish_describe(
     if let Some(l) = &lane {
         check_channel_exists(directory, l, channel)?;
     }
-    // The audience read is best-effort, but NEVER a silent one: a reach that fails to arrive (or
-    // to parse) surfaces as a visible warning — a wordlessly missing line is how a wire mismatch
-    // once hid for a week.
-    //
-    // A GENESIS publish is not asked at all. Its bundle has no catalog row yet, so the plane's
-    // only possible answer is the uniform not-found — a question whose answer cannot exist. Asking
-    // it opened every FIRST publish with a warning about a bundle id nobody typed, on the one path
-    // where nothing is wrong; the placement line below already says where these bytes go.
-    let mut warnings: Vec<String> = Vec::new();
-    let reach = if genesis {
-        None
-    } else {
-        match directory.reach(&workspace_id, id.as_str()) {
-            Ok(r) => Some(r.persons),
-            Err(e) => {
-                warnings.push(reach_unavailable(&skill_name, id.as_str(), &e));
-                None
-            }
-        }
-    };
     let me = directory.me(&workspace_id).ok();
 
     // Only a genesis apply creates the DEFAULT `everyone` placement server-side; a bare
@@ -477,7 +438,7 @@ pub(crate) fn publish_describe(
     // MEMBER's placement into a curated channel, disclosed on its receipt) — so the describe says
     // so up front whenever the target resolves CURATED against a member caller. The mode rides
     // the channel index the client already reads (`/channels`); a failed read degrades to the
-    // plain placement line — same as the reach/share reads, the describe keeps working offline.
+    // plain placement line — same as the share read, the describe keeps working offline.
     // (A `--to` naming a channel absent from the index was already refused above — publish
     // never silently mints a channel.)
     let placement_note = placement_target
@@ -563,36 +524,32 @@ pub(crate) fn publish_describe(
     };
 
     let (from_placement, other_edited) = from_disclosure(picked.as_ref());
-    Ok((
-        PublishDescribeData {
-            skill: skill_name,
-            skill_id: id.into_string(),
-            workspace_id,
-            workspace_display_name: me.map(|m| m.display_name),
-            workspace_address,
-            bundle_digest: digest_hex,
-            placements,
-            from_placement,
-            other_edited,
-            gate,
-            // The full ancestor-bytes revert detection is the apply path's (the server treats a
-            // revert-shaped publish as a forward move); the describe reports the gate + placements
-            // without pre-judging it.
-            is_revert: false,
-            reach,
-            share_line,
-            invite_line,
-            undo,
-            origin_note,
-            placement_note,
-            merge_preview,
-            manifest: transfer_manifest,
-            reference: transfer_reference,
-            converted_from: transfer_from,
-            kind: bundle_kind,
-        },
-        warnings,
-    ))
+    Ok(PublishDescribeData {
+        skill: skill_name,
+        skill_id: id.into_string(),
+        workspace_id,
+        workspace_display_name: me.map(|m| m.display_name),
+        workspace_address,
+        bundle_digest: digest_hex,
+        placements,
+        from_placement,
+        other_edited,
+        gate,
+        // The full ancestor-bytes revert detection is the apply path's (the server treats a
+        // revert-shaped publish as a forward move); the describe reports the gate + placements
+        // without pre-judging it.
+        is_revert: false,
+        share_line,
+        invite_line,
+        undo,
+        origin_note,
+        placement_note,
+        merge_preview,
+        manifest: transfer_manifest,
+        reference: transfer_reference,
+        converted_from: transfer_from,
+        kind: bundle_kind,
+    })
 }
 
 /// The ONE copy a `-a`/`--dest` selection named, or `None` for a bare publish (which resolves the

@@ -1216,13 +1216,6 @@ mod tests {
         ) -> Result<topos_types::requests::WireSkillLog, ClientError> {
             unreachable!()
         }
-        fn reach(
-            &self,
-            _w: &str,
-            _s: &str,
-        ) -> Result<topos_types::requests::WireReach, ClientError> {
-            unreachable!()
-        }
         fn channel_place(&self, _w: &str, _c: &str, _s: &str) -> Result<(), ClientError> {
             unreachable!()
         }

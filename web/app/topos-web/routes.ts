@@ -153,7 +153,6 @@ export function ossRoutes(options: OssRoutesOptions = {}): RouteConfigEntry[] {
       // from. The retired `profile*` paths fall through to the splat's uniform 404.
       route("channels/:channel/skills/:skill", file("api.v1.curation.ts")),
       route("channels/:channel/protection", file("api.v1.channel-protection.ts")),
-      route("skills/:skill/reach", file("api.v1.skill-reach.ts")),
       route("skills/:skill/protection", file("api.v1.skill-protection.ts")),
       route("skills/:skill/current", file("api.v1.skill-current.ts")),
       route("skills/:skill/log", file("api.v1.skill-log.ts")),

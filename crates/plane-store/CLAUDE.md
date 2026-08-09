@@ -33,6 +33,11 @@ the vault validates SHAPE (charset/length), never meaning.
 
 - **A version IS the hash of its bytes:** `version_id` = the kernel commit id, recomputed
   server-side from rehashed bytes; committing an identical candidate converges (`deduped`).
+- **History is a LIST, not a DAG:** a version has at most one parent (0 for genesis, 1 otherwise).
+  The count is fenced at the commit-frame mint — before any byte is staged and before any pointer
+  moves — so both lanes are covered: a multi-parent candidate never becomes a version row, hence
+  can never be published OR approved. The kernel frame and the git store stay general; the
+  authority refuses.
 - **The generation-fenced pointer:** one movable `current_pointer` per bundle; every move CASes a
   single `generation`. Idempotent-CAS rule: a pointer already at `expected + 1` naming the exact
   target answers `replayed` (crash retries are safe); any other mismatch is the typed `Conflict`

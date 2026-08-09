@@ -17,7 +17,6 @@ import { action as noticesAction } from "@/routes/api.v1.notices-ack";
 import { action as reportAction, loader as reportWrongMethod } from "@/routes/api.v1.report";
 import { loader as skillCurrentLoader } from "@/routes/api.v1.skill-current";
 import { action as skillProtAction } from "@/routes/api.v1.skill-protection";
-import { loader as reachLoader } from "@/routes/api.v1.skill-reach";
 import { loader as skillsIndexLoader } from "@/routes/api.v1.skills-index";
 import {
   assignBundleRow,
@@ -321,7 +320,7 @@ beforeAll(async () => {
   await seedChannel(db, wsId, "c_locked", "locked", "curated");
   await placeBundle(db, wsId, "c_eng", "s_alpha");
   // The member carries `eng` (a self-assignment of the set); the owner is assigned alpha
-  // directly — so alpha's reach counts two people through two different kinds of row.
+  // directly — two people reach it through two different kinds of row.
   await assignChannelRow(db, wsId, "c_eng", "u_mem");
   await assignBundleRow(db, wsId, "s_alpha", "u_owner");
   // An unacked verdict notice for the member.
@@ -413,25 +412,6 @@ describe("describe reads", () => {
       ],
     });
   });
-
-  it("GET /skills/{skill}/reach — alpha reaches two people, two live devices", async () => {
-    const res = await drive(
-      reachLoader,
-      req("GET", `/api/v1/workspaces/${wsId}/skills/s_alpha/reach`, { cred: CREDS.mem }),
-      { ws: wsId, skill: "s_alpha" },
-    );
-    expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ persons: 2, sessions: 2 });
-  });
-
-  it("GET /skills/{skill}/reach — an unknown skill id is the uniform 404", async () => {
-    const res = await drive(
-      reachLoader,
-      req("GET", `/api/v1/workspaces/${wsId}/skills/s_nope/reach`, { cred: CREDS.mem }),
-      { ws: wsId, skill: "s_nope" },
-    );
-    await expectUniform404(res);
-  });
 });
 
 // ── (b) the uniform 404 on EVERY route ───────────────────────────────────────────────────────
@@ -456,13 +436,6 @@ const ALL_ROUTES: RouteCase[] = [
     method: "GET",
     params: { skill: "s_alpha" },
     path: "/skills/s_alpha/current",
-  },
-  {
-    name: "reach",
-    h: reachLoader,
-    method: "GET",
-    params: { skill: "s_alpha" },
-    path: "/skills/s_alpha/reach",
   },
   {
     name: "report",

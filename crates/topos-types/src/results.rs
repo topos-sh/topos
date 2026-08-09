@@ -281,11 +281,14 @@ pub struct MergeReport {
     /// as taken from the team). **INFERRED** (additive).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub took: Vec<String>,
-    /// The folders that still hold the AUTHOR'S OWN version — a conflict writes to none of them, so
-    /// every agent reads exactly what it read before the update. Display paths (`~`-abbreviated).
-    /// Empty for a clean merge (which rewrites its placements). **INFERRED** (additive).
+    /// Every folder this bundle sits in while the merge stands, each with WHAT IS IN IT — read
+    /// from the folder itself, never assumed. A conflict writes to no folder, so the whole set
+    /// reads `yours` the moment it stops; a copy taken by a narrowed reset, or edited on after the
+    /// stop, says so instead. Folders that are gone (or unreadable) are absent: an unverifiable
+    /// folder must never become a claim. Empty for a clean merge (which rewrites its placements).
+    /// **INFERRED** (additive).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub placements: Vec<String>,
+    pub placements: Vec<ConflictPlacement>,
     /// Where the marked-up copy of BOTH versions was written: the scope's own conflict workbench,
     /// never a folder an agent reads. A hand resolution left there is what `update <skill>
     /// --keep-mine` commits. Display path (`~`-abbreviated). Absent for a clean merge.
@@ -306,6 +309,33 @@ pub enum MergeResolution {
     /// The workbench was EDITED: those files are the person's own reconciliation, committed
     /// unexamined (`git commit` after resolving by hand). Nothing here is topos's choice.
     ByHand,
+}
+
+/// One folder a stopped merge's bundle sits in, and what that folder holds RIGHT NOW. The pair is
+/// what lets a re-disclosure tell per-folder truth: a merge can stand for days while a narrowed
+/// reset takes one copy and the person keeps working in another. **INFERRED** (additive).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
+pub struct ConflictPlacement {
+    /// The folder, as a receipt spells it (`~`-abbreviated display path).
+    pub dir: String,
+    /// What is in it.
+    pub holds: ConflictHolds,
+}
+
+/// What a folder holds while a merge stands (see [`ConflictPlacement`]). **INFERRED** (additive).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
+pub enum ConflictHolds {
+    /// This person's own version — the draft the merge stopped on. Every folder reads this the
+    /// moment a merge stops, because a conflict writes to none of them.
+    Yours,
+    /// The team's version: a `--dest`-narrowed reset took this one copy while the merge stayed
+    /// stopped over the others.
+    Theirs,
+    /// Neither of the two — the person kept working in this folder after the merge stopped.
+    NewerEdits,
 }
 
 /// One conflicting path in a [`MergeReport`]. **INFERRED** — `kind` reuses the persisted vocabulary.
@@ -1661,10 +1691,6 @@ pub struct ProtectData {
     pub level: String,
     /// `true` when the level LOOSENS protection (`open`) — the owner-gated direction.
     pub loosening: bool,
-    /// The audience this protection governs: the reach (people) for a skill, the member count for a
-    /// channel.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub audience: Option<u64>,
     /// A standing note the describe carries (e.g. "pending proposals survive a loosening").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
@@ -1792,10 +1818,27 @@ pub struct ResetData {
     /// whenever nothing survived. **INFERRED** (additive-only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hand_merge: Option<String>,
+    /// Where this reset leaves a merge that had STOPPED on the bundle. Absent when none had —
+    /// the ordinary reset says nothing about merges. **INFERRED** (additive-only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub merge: Option<ResetMergeOutcome>,
 }
 
-/// `publish` (bare, no `--yes`) — the describe: where it lands, the gate outcome, the audience, the
-/// share line, and the undo path. **INFERRED.**
+/// What a `--reset` did to a stopped merge (see [`ResetData::merge`]). A narrowed reset takes ONE
+/// copy, and a merge ends only when every copy is settled — so the two are genuinely different
+/// answers and a receipt must not print one for the other. **INFERRED** (additive).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
+pub enum ResetMergeOutcome {
+    /// The merge is STILL stopped: another copy still holds it, and both ways out remain live.
+    StillStopped,
+    /// The merge is over — this was the last copy holding it, resolved the team's way.
+    Concluded,
+}
+
+/// `publish` (bare, no `--yes`) — the describe: where it lands, the gate outcome, the share line,
+/// and the undo path. **INFERRED.**
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
 pub struct PublishDescribeData {
@@ -1831,9 +1874,6 @@ pub struct PublishDescribeData {
     /// `from_placement`. **INFERRED** (additive-only).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub other_edited: Vec<String>,
-    /// The audience the change reaches (people entitled to the skill), when the plane discloses it.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub reach: Option<u64>,
     /// The paste-able share line (`<address>/skills/<name>`), when the workspace address is known.
     /// A members' deep link — it answers only for people already in the workspace.
     #[serde(default, skip_serializing_if = "Option::is_none")]
