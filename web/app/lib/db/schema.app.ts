@@ -362,6 +362,9 @@ export const bundle = webSchema.table(
       "bundle_name_check",
       sql`${table.name} ~ '^[a-z0-9][a-z0-9-]*$' and length(${table.name}) <= 200`,
     ),
+    // The closed kind vocabulary — mirrors BUNDLE_KINDS in api/candidate.server.ts, so a kind no
+    // client knows how to deliver cannot land in the catalog even past the door.
+    check("bundle_kind_check", sql`${table.kind} in ('skill', 'mcp')`),
     check("bundle_status_check", sql`${table.status} in ('active', 'archived', 'deleted')`),
     check(
       "bundle_protection_check",

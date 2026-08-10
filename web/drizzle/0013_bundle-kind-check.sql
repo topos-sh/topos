@@ -1,0 +1,1 @@
+ALTER TABLE "web"."bundle" ADD CONSTRAINT "bundle_kind_check" CHECK ("web"."bundle"."kind" in ('skill', 'mcp'));

@@ -583,7 +583,7 @@ export async function startLoginFlow(
 }
 
 /** The first-destination hint an accepted invitation carried, decorated onto a granted poll
- * (`kind` is the bundle catalog's own tag — 'skill' today — or the literal 'channel'). */
+ * (`kind` is the bundle catalog's own kind tag, or the literal 'channel'). */
 export interface LoginGrantHint {
   kind: string;
   name: string;
@@ -824,8 +824,10 @@ async function inviteHintByHash(
   if (!row) {
     return null;
   }
-  if (row.bundle_name !== null) {
-    return { kind: row.bundle_kind ?? "skill", name: row.bundle_name };
+  // Both bundle columns ride the SAME left join, so they stand or fall together; the catalog's
+  // kind column is NOT NULL, which is why the hint reports it rather than assuming one.
+  if (row.bundle_kind !== null && row.bundle_name !== null) {
+    return { kind: row.bundle_kind, name: row.bundle_name };
   }
   if (row.channel_name !== null) {
     return { kind: "channel", name: row.channel_name };
@@ -1393,8 +1395,8 @@ export async function pendingInvitationsFor(
           r.session_approval ?? "off",
         ) === "pending",
       hint:
-        r.bundle_name !== null
-          ? { kind: r.bundle_kind ?? "skill", name: r.bundle_name }
+        r.bundle_kind !== null && r.bundle_name !== null
+          ? { kind: r.bundle_kind, name: r.bundle_name }
           : r.channel_name !== null
             ? { kind: "channel", name: r.channel_name }
             : null,
@@ -1739,8 +1741,8 @@ export async function invitationByToken(token: string): Promise<InvitationView |
     role: row.role,
     inviterDisplay: row.inviter_display,
     hint:
-      row.bundle_name !== null
-        ? { kind: row.bundle_kind ?? "skill", name: row.bundle_name }
+      row.bundle_kind !== null && row.bundle_name !== null
+        ? { kind: row.bundle_kind, name: row.bundle_name }
         : row.channel_name !== null
           ? { kind: "channel", name: row.channel_name }
           : null,

@@ -2,8 +2,10 @@ import { readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
+  BUNDLE_KINDS,
   HEX_64,
   OP_ID,
+  parseBundleKind,
   parseCandidate,
   parsePublishHead,
   receiptNow,
@@ -261,6 +263,33 @@ describe("parsePublishHead (the shared head fields)", () => {
     expect(parsePublishHead({ ...good, expected: { epoch: 1, seq: 2 } })).toBe(
       "malformed expected generation",
     );
+  });
+});
+
+describe("parseBundleKind (the closed catalog vocabulary)", () => {
+  it("takes the kinds this server implements, and reads absence as 'declared nothing'", () => {
+    expect(parseBundleKind("skill")).toEqual({ kind: "skill" });
+    expect(parseBundleKind("mcp")).toEqual({ kind: "mcp" });
+    expect(parseBundleKind(undefined)).toEqual({ kind: null });
+    expect(parseBundleKind(null)).toEqual({ kind: null });
+    // The accepted set IS the exported list — a kind added to one without the other is caught
+    // here rather than at some client that cannot deliver it.
+    for (const kind of BUNDLE_KINDS) {
+      expect(parseBundleKind(kind)).toEqual({ kind });
+    }
+  });
+
+  it("REFUSES a kind outside the vocabulary, however well-formed the slug", () => {
+    const refusal = "unknown kind — known kinds: 'skill', 'mcp'";
+    // 'knowledge' is a slug the old shape check waved through: it would have been stored as a
+    // kind nothing on any machine knows how to deliver.
+    expect(parseBundleKind("knowledge")).toBe(refusal);
+    expect(parseBundleKind("agent")).toBe(refusal);
+    expect(parseBundleKind("")).toBe(refusal);
+    expect(parseBundleKind("Skill")).toBe(refusal);
+    expect(parseBundleKind(" mcp")).toBe(refusal);
+    expect(parseBundleKind(7)).toBe(refusal);
+    expect(parseBundleKind(["skill"])).toBe(refusal);
   });
 });
 

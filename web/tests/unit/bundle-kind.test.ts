@@ -266,7 +266,10 @@ describe("an existing bundle's kind is fixed at birth", () => {
   });
 });
 
-describe("the door refuses a malformed kind — before the credential resolve", () => {
+describe("the door refuses an unknown kind — before the credential resolve", () => {
+  /** The one refusal an out-of-vocabulary kind earns, whatever made it out of vocabulary. */
+  const REFUSAL = "unknown kind — known kinds: 'skill', 'mcp'";
+
   /** A publish-family body that is valid but for whatever `kind` the case names. */
   function body(kind: unknown): Record<string, unknown> {
     return {
@@ -306,6 +309,11 @@ describe("the door refuses a malformed kind — before the credential resolve", 
   }
 
   it.each([
+    // The one that matters: a well-formed slug for a kind NOTHING implements. The door used to
+    // wave this through on shape alone, and the catalog would have stored a bundle no machine
+    // knows how to deliver.
+    ["a kind no client implements", "knowledge"],
+    ["a plausible future kind", "agent"],
     ["an uppercase spelling", "MCP"],
     ["a leading digit", "1mcp"],
     ["an underscore", "mcp_server"],
@@ -315,15 +323,16 @@ describe("the door refuses a malformed kind — before the credential resolve", 
   ])("publish: %s is a 400", async (_label, kind) => {
     const { status, json } = await post("publish", kind);
     expect(status).toBe(400);
-    expect((json.error as { context: { message: string } }).context.message).toBe("malformed kind");
-    // The refusal is a pure shape check at the door — nothing was ingested.
+    expect((json.error as { context: { message: string } }).context.message).toBe(REFUSAL);
+    // The refusal is decided at the door — nothing was ingested.
     expect(vault.publish).toEqual([]);
   });
 
   it("propose refuses byte-identically", async () => {
-    const { status, json } = await post("propose", "Not A Kind");
+    const { status, json } = await post("propose", "knowledge");
     expect(status).toBe(400);
-    expect((json.error as { context: { message: string } }).context.message).toBe("malformed kind");
+    expect((json.error as { context: { message: string } }).context.message).toBe(REFUSAL);
+    expect(vault.commit).toEqual([]);
   });
 
   it("an explicit null is ABSENT, not malformed (the wire's optional spelling)", async () => {
@@ -331,5 +340,30 @@ describe("the door refuses a malformed kind — before the credential resolve", 
     // uniform miss is the honest proof that the parse let it through.
     const { status } = await post("publish", null);
     expect(status).not.toBe(400);
+  });
+});
+
+describe("the vocabulary is a CHECK in the schema, not only a door", () => {
+  /** The catalog's own answer to a write that skipped the door — a bug, a script, a fat finger. */
+  async function insertKind(id: string, name: string, kind: string): Promise<unknown> {
+    return await db
+      .q(`INSERT INTO web.bundle (id, workspace_id, name, kind) VALUES ($1, $2, $3, $4)`, [
+        id,
+        wsId,
+        name,
+        kind,
+      ])
+      .then(() => undefined)
+      .catch((e: unknown) => e);
+  }
+
+  it("a row naming an unknown kind is refused by bundle_kind_check", async () => {
+    const error = await insertKind("s_alien", "alien", "knowledge");
+    expect((error as { constraint?: string } | undefined)?.constraint).toBe("bundle_kind_check");
+  });
+
+  it("both known kinds land", async () => {
+    expect(await insertKind("s_chk_skill", "chk-skill", "skill")).toBeUndefined();
+    expect(await insertKind("s_chk_mcp", "chk-mcp", "mcp")).toBeUndefined();
   });
 });
