@@ -1151,6 +1151,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
                 manifest: None,
                 workspace_id: None,
                 agent_dirs: vec!["~/.claude/skills/deploy".to_owned()],
+                kept_dirs: Vec::new(),
                 bytes_kept: false,
                 note: Some(
                     "'deploy' was never published — no other copy exists, so removing deletes it \
@@ -1187,6 +1188,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
                 manifest: Some("./topos.toml".to_owned()),
                 workspace_id: None,
                 agent_dirs: Vec::new(),
+                kept_dirs: Vec::new(),
                 bytes_kept: true,
                 note: None,
             }],

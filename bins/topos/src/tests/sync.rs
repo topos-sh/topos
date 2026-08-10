@@ -5344,6 +5344,13 @@ fn a_settled_draft_spreads_and_advances_the_sibling_baselines() {
     let row = only(&out.data);
     assert_eq!(row.action, PullAction::DraftSynced);
     assert_eq!(row.synced_placements, Some(1));
+    // THE EDITS STILL STAND, and the row says so. The draft flag was attached below this arm's
+    // early returns, so the two rows that leave early — a settled draft fanning out, and a folder
+    // this run re-created — reported `draft: false` about a machine `list` was calling drafted.
+    assert!(
+        row.draft,
+        "a fan-out moves the draft around; it does not end it: {row:?}"
+    );
     assert_eq!(
         row.destinations,
         vec![replica.display().to_string()],
@@ -5666,6 +5673,31 @@ fn an_unsettled_draft_never_spreads() {
         std::fs::read(replica.join("SKILL.md")).unwrap(),
         b"# edit two\n"
     );
+}
+
+/// The OTHER early return out of the no-pending-update arm: a folder this run RE-CREATED. Healing
+/// a hand-deleted copy is an install, and the row said so — while dropping the fact that the
+/// person's edits are still sitting in the copy that survived. A receipt that reports an install
+/// and denies the draft sends an agent to `update` when the answer is `publish`.
+#[test]
+fn a_healed_folder_still_reports_the_draft_standing_beside_it() {
+    let (rig, id, plane, foll, replica) = fanout_rig("healed-draft");
+    let ctx = rig.ctx(&plane, &foll);
+
+    // The draft, unsettled (first sighting — the fan-out deliberately does not run).
+    std::fs::write(rig.placement().join("SKILL.md"), b"# my draft\n").unwrap();
+    // …and the sibling copy is hand-deleted, so the same sweep must re-create it.
+    std::fs::remove_dir_all(&replica).unwrap();
+
+    let out = ops::pull(&ctx, ops::PullScope::AllFollowed).unwrap();
+    let row = only(&out.data);
+    assert_eq!(row.action, PullAction::Installed, "{row:?}");
+    assert!(replica.is_dir(), "the hand-deleted folder is healed");
+    assert!(
+        row.draft,
+        "the heal is not the whole news — the edits still stand: {row:?}"
+    );
+    let _ = id;
 }
 
 #[test]

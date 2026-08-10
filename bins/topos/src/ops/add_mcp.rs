@@ -140,13 +140,13 @@ pub(crate) fn add_mcp(
         // to the workspace ONCE, on the web, and every machine gets the governed copy by name.
         McpSourceShape::RegistryName => Err(ClientError::InvalidArgument(format!(
             "`{source}` is a registry server name — topos does not fetch from the MCP registry; \
-             add the server to your workspace on the web (its MCP servers page takes a registry \
+             add the server to your workspace on the web (\"Add an MCP server\" takes a registry \
              name, a URL, or the pasted server.json), then add it here by the name it gets there"
         ))),
         McpSourceShape::DocumentUrl => Err(ClientError::InvalidArgument(format!(
             "`{source}` links to a server document — topos does not fetch one; add the server to \
-             your workspace on the web (its MCP servers page takes a URL like this one), then add \
-             it here by the name it gets there"
+             your workspace on the web (\"Add an MCP server\" takes a URL like this one), then \
+             add it here by the name it gets there"
         ))),
         McpSourceShape::Reference => Err(ClientError::InvalidArgument(format!(
             "`{source}` names a workspace bundle — a workspace already records what each bundle \
@@ -227,7 +227,8 @@ fn adopt_local(
         .iter()
         .map(|f| (f.path.as_str(), f.bytes.as_slice()))
         .collect();
-    let summary = mcp_validate::validate_candidate_files(&files)?;
+    let summary = mcp_validate::validate_candidate_files(&files)
+        .map_err(|r| ClientError::mcp_refused_about(r, &dir.display().to_string()))?;
 
     let scope = medit::add_scope(ctx, global)?;
     // The `-a`/`--dest` selection resolves to config FILES at this scope — refused whole before
@@ -278,7 +279,7 @@ fn converge_one(
     };
     // The dir the row points at IS the bundle; read its document back from disk, so what gets
     // placed is exactly what a later `update` will read.
-    let Some(dir) = row_dir_of(ctx, target, bundle_id, name) else {
+    let Some(dir) = row_dir_of(ctx, target, name) else {
         return (Vec::new(), Vec::new());
     };
     let Ok(Some(server_json)) = ctx.fs.read_opt(&dir.join("server.json")) else {
@@ -376,10 +377,10 @@ fn agent_line(state: &topos_types::results::McpAgentState) -> String {
     }
 }
 
-/// The folder the row just written points at. The adopt arm knows it from the tracked record; the
-/// fetched arm's `local:<slug>` identity resolves through the row itself.
-fn row_dir_of(ctx: &Ctx<'_>, target: &EditTarget, bundle_id: &str, name: &str) -> Option<PathBuf> {
-    let _ = (bundle_id, name);
+/// The folder the row just written points at, found by matching the row's leaf against `name`
+/// under the file that was just edited. There is one arm now — the local adopt — so this reads the
+/// manifest rather than a record: the row is the thing that was definitely written.
+fn row_dir_of(ctx: &Ctx<'_>, target: &EditTarget, name: &str) -> Option<PathBuf> {
     // The row-write stamped `data.reference`, but the caller has already moved on; re-resolve the
     // one local-path row whose leaf matches, under the file that was just edited.
     let text = medit::read_text(ctx, &target.path).ok()??;
@@ -531,10 +532,11 @@ fn fold_receipt(
     resolved: &[String],
 ) {
     let nobody = agents.is_empty();
-    // Only when it actually MOVED. Where the row's spelling already names the file the bytes
-    // reached, the field stays empty and the headline keeps the spelling a person can find in
-    // their own manifest.
-    if !resolved.is_empty() && resolved != data.dest {
+    // Only when it actually MOVED. The field's whole meaning is "your row says one thing and this
+    // machine put it somewhere else", so it needs a row spelling to differ FROM: on a bare add
+    // there is no `dest`, every resolved file trivially differs from the empty list, and the guard
+    // let the receipt claim a move that the row never proposed. No `dest` ⇒ nothing to contradict.
+    if !data.dest.is_empty() && !resolved.is_empty() && resolved != data.dest {
         data.dest_resolved = resolved.to_vec();
     }
     data.mcp = Some(summarize(summary, bundle_dir, agents));

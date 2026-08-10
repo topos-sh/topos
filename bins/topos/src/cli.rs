@@ -201,7 +201,8 @@ pub(crate) enum Command {
     /// `add topos` restores the built-in topos skill. `--kind mcp` says the source is an MCP
     /// SERVER instead — a folder whose root holds a `server.json` — and your agents get it as a
     /// tool endpoint in their own MCP config rather than as a skill folder; it applies
-    /// immediately, and the receipt leads with the undo (`topos remove <name>`). A folder that is
+    /// immediately, and the receipt leads with the undo, which names the folder you added
+    /// (`topos remove -g <folder>` for a machine-wide add). A folder that is
     /// plainly a server bundle refuses without the flag rather than landing as a skill, and
     /// `--kind skill` on one adopts it as a skill anyway. Anything your workspace publishes needs
     /// no flag at all — the catalog already records what each bundle is. By default a skill

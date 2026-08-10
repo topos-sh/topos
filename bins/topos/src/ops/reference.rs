@@ -59,6 +59,7 @@ pub(crate) enum AddRefOutcome {
 /// [`ClientError::UnknownAgent`] / [`ClientError::SelectionRefused`] from the `-a`/`--dest`
 /// selection; [`ClientError::NotAvailable`] / [`ClientError::Plane`] from the catalog read; the
 /// remote-import family from a git source; a filesystem failure.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn add_reference(
     ctx: &Ctx<'_>,
     connect: &SessionConnect<'_>,
@@ -67,6 +68,7 @@ pub(crate) fn add_reference(
     global: bool,
     yes: bool,
     selection: &super::dest_select::Selection,
+    declared: Option<BundleKind>,
 ) -> Result<AddRefOutcome, ClientError> {
     let host = medit::default_host(ctx);
     let parsed = match keys::parse_input(raw, host.as_deref()) {
@@ -95,7 +97,7 @@ pub(crate) fn add_reference(
             add_feed(ctx, &host, &workspace, global)
         }
         KeyShape::WorkspaceBundle { .. } | KeyShape::Channel { .. } => {
-            add_workspace(ctx, connect, &parsed, global, selection)
+            add_workspace(ctx, connect, &parsed, global, selection, declared)
         }
         KeyShape::RepoSet { .. } | KeyShape::RepoSkill { .. } => {
             add_forge(ctx, git, &parsed, raw, global, yes, selection)
@@ -196,6 +198,7 @@ fn add_workspace(
     parsed: &InputRef,
     global: bool,
     selection: &super::dest_select::Selection,
+    declared: Option<BundleKind>,
 ) -> Result<AddRefOutcome, ClientError> {
     let resolved = resolve_workspace(ctx, connect, &parsed.shape)?;
     // The `-a`/`--dest` selection, resolved at the scope the row lands in — config FILES for an
@@ -212,6 +215,24 @@ fn add_workspace(
         Some(e) => Some(add_kind(&e.kind, &resolved.name)?),
         None => None,
     };
+    // A `--kind` word that CONTRADICTS the catalog is refused, never quietly overruled. The
+    // catalog is the authority on what a workspace bundle is, so the flag can only ever agree with
+    // it or be wrong — and being wrong mattered: `--kind skill` on a server bundle used to deliver
+    // a tool endpoint into the person's agents without a word, while the local-folder door refuses
+    // the same mistake by name. Silence still means "whatever the catalog says", which is why the
+    // flag is unnecessary here at all.
+    if let (Some(said), Some(actual)) = (declared, kind)
+        && said != actual
+    {
+        return Err(ClientError::InvalidArgument(format!(
+            "`{}` is {} in the catalog, not {} — a workspace already records what each bundle \
+             is, so `topos add {}` needs no `--kind` at all; drop it",
+            resolved.name,
+            actual.noun_phrase(),
+            said.noun_phrase(),
+            parsed.shape.canonical(),
+        )));
+    }
     let mcp_kind = kind.is_some_and(BundleKind::is_mcp);
     let dest_entries = if selection.is_empty() {
         Vec::new()

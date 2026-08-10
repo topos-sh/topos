@@ -46,28 +46,34 @@ pub(crate) enum KindDeclared {
     Yes,
 }
 
-/// Whether `dir`'s root holds a `server.json` and no `SKILL.md` — the MCP bundle shape. The plain
-/// skill doors ([`add`], an undeclared [`adopt_path`], publish's auto-add) refuse it toward
-/// `topos add --kind mcp` ([`ClientError::McpFlagRequired`]) instead of silently adopting a server
-/// document as a SKILL and delivering raw JSON into skills dirs.
+/// Whether `dir`'s root carries a `server.json` the plain skill doors ([`add`], an undeclared
+/// [`adopt_path`], publish's auto-add) must not read as a skill. Two shapes refuse, both toward
+/// the `--kind` word ([`ClientError::KindRequired`]): a `server.json` with NO `SKILL.md` is an MCP
+/// bundle the skill door would mis-kind, delivering raw JSON into skills dirs; a folder with BOTH
+/// markers says nothing about which it is, and adopting it as a skill drops the server silently.
 ///
 /// # Errors
-/// [`ClientError::McpFlagRequired`] naming the `--kind mcp` spelling.
+/// [`ClientError::KindRequired`] naming the `--kind` word(s) that resolve it.
 pub(crate) fn refuse_unflagged_mcp_dir(ctx: &Ctx<'_>, source: &Path) -> Result<(), ClientError> {
     let has_server = matches!(ctx.fs.read_opt(&source.join("server.json")), Ok(Some(_)));
-    if has_server && !ctx.fs.exists(&source.join("SKILL.md")) {
-        return Err(ClientError::McpFlagRequired {
-            dir: source.display().to_string(),
-        });
+    if !has_server {
+        return Ok(());
     }
-    Ok(())
+    let dir = source.display().to_string();
+    // BOTH markers: the folder itself does not say which kind it is, and the skill door's answer
+    // was to take the SKILL.md and drop the server without a word — half of what the person
+    // pointed at, silently. Neither word is guessable from the bytes, so both are offered.
+    if ctx.fs.exists(&source.join("SKILL.md")) {
+        return Err(ClientError::kind_ambiguous(&dir));
+    }
+    Err(ClientError::kind_required(&dir))
 }
 
 /// Adopt the skill rooted at `source`, naming it from the source itself (a recognized harness dir's name,
 /// else frontmatter-then-basename) — the direct-path entry point (a path-shaped positional).
 ///
 /// # Errors
-/// [`ClientError::McpFlagRequired`] for an MCP server bundle named without `--kind`;
+/// [`ClientError::KindRequired`] for a server bundle (or a both-marker folder) named without `--kind`;
 /// [`ClientError::SourceOverlap`] if `source` overlaps `~/.topos/`; [`ClientError::EmptyBundle`] /
 /// [`ClientError::Scan`] from the scan; [`ClientError::SkillExists`] on an id collision; otherwise a
 /// store/io failure.

@@ -164,8 +164,10 @@ pub struct PullSkill {
 ///
 /// Every variant is DERIVED, never chosen at a render site: from the drift vocabulary the
 /// ownership record is scanned into (absent / clean / modified / foreign / unscannable) plus the
-/// one bit the record cannot hold — whether this run WROTE the target. **INFERRED** (additive
-/// value set).
+/// one bit the record cannot hold — whether this run WROTE the target. **INFERRED**, and the value
+/// set is CLOSED: every consumer matches it exhaustively and there is no unknown arm, so a new
+/// outcome is a deliberate change that ships with a release — never a value a running client is
+/// expected to tolerate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
 #[serde(rename_all = "kebab-case")]
@@ -1006,8 +1008,8 @@ pub struct SkillOrigin {
 #[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
 pub struct AddData {
     /// The local sidecar record this add minted, when it minted one. ABSENT for a row that has no
-    /// bytes of its own here (a feed, a channel, a whole repo) and for an imported MCP server
-    /// pointer — a row-only add mints no version history, and a zeroed id would claim one.
+    /// bytes of its own here — a feed, a channel, a whole repo: a row-only add mints no version
+    /// history, and a zeroed id would claim one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub skill_id: Option<String>,
     pub name: String,
@@ -1016,8 +1018,8 @@ pub struct AddData {
     #[cfg_attr(feature = "contract-derives", schemars(extend("pattern" = "^[0-9a-f]{64}$")))]
     pub version_id: Option<String>,
     /// The kernel digest of the bytes this add landed. Present whenever bytes landed — including
-    /// the MCP import, whose folder IS the bundle even though no version history is minted — and
-    /// absent for a row that points at somebody else's bytes.
+    /// an adopted MCP folder, which IS the bundle — and absent for a row that points at somebody
+    /// else's bytes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "contract-derives", schemars(extend("pattern" = "^[0-9a-f]{64}$")))]
     pub bundle_digest: Option<String>,
@@ -1128,8 +1130,9 @@ pub struct AddDescribeData {
 }
 
 /// What an MCP `server.json` says, after the gate accepted it — the facts an applied `add`
-/// receipt carries beside the undo, whether the document was fetched, adopted, or delivered by
-/// a workspace subscribe. DERIVED from the document; the document itself is never echoed whole.
+/// receipt carries beside the undo, whether the document was adopted from a folder here or
+/// delivered by a workspace subscribe. DERIVED from the document; the document itself is never
+/// echoed whole.
 /// **INFERRED** (additive-only).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
@@ -1753,6 +1756,11 @@ pub struct RemoveItem {
     /// The agent directories cleaned (or, on the describe, that would be cleaned).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub agent_dirs: Vec<String>,
+    /// The directories the removal LEAVES STANDING — a folder the person adopted in place, which
+    /// topos never created and therefore never deletes. Disjoint from [`Self::agent_dirs`], which
+    /// names only what is emptied. **Additive.**
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub kept_dirs: Vec<String>,
     /// Whether the sidecar bytes are kept (a manifest edit keeps the tracked bytes as a frozen
     /// copy; an untracked-local delete removes the only copy there is).
     pub bytes_kept: bool,
@@ -1783,6 +1791,14 @@ pub enum RemoveKind {
     UntrackedLocal,
     /// A tracked, never-published local skill → permanent delete (the sidecar entry drops too).
     TrackedLocalPermanent,
+    /// A tracked local bundle whose bytes live in a folder the person ADOPTED IN PLACE. The topos
+    /// record and any config entries it placed retire; the folder itself stays, because topos
+    /// never created it ([`RemoveItem::kept_dirs`] names it, and `bytes_kept` is `true`).
+    /// **Additive.**
+    TrackedLocalRetired,
+    /// The built-in `topos` bundle → the durable device opt-out. Not a permanent delete: the bytes
+    /// ship inside the binary and `topos add topos` places them again. **Additive.**
+    BuiltinOptOut,
 }
 
 /// `protect <target> [<level>]` — set a skill's or channel's protection level. **INFERRED.**

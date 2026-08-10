@@ -203,12 +203,12 @@ fn project(tag: &str, body: &str) -> Scratch {
 }
 
 /// A version whose bytes reproduce a REAL commit id (the engine re-verifies on apply).
-struct Version {
+pub(super) struct Version {
     id: [u8; 32],
     digest: [u8; 32],
     fetched: FetchedVersion,
 }
-fn mk_version(files: &[(&str, FileMode, &[u8])]) -> Version {
+pub(super) fn mk_version(files: &[(&str, FileMode, &[u8])]) -> Version {
     let entries: Vec<ManifestEntry> = files
         .iter()
         .map(|(p, m, b)| ManifestEntry {
@@ -455,7 +455,7 @@ impl FakeDirectory {
         Ok(())
     }
 }
-fn catalog_entry(skill_id: &str, name: &str, v: &Version) -> WireSkillIndexEntry {
+pub(super) fn catalog_entry(skill_id: &str, name: &str, v: &Version) -> WireSkillIndexEntry {
     WireSkillIndexEntry {
         skill_id: skill_id.into(),
         name: name.into(),
@@ -1940,6 +1940,7 @@ fn gate_add(ctx: &Ctx<'_>, plane: &FakePlane, dir: &FakeDirectory, git: &FakeGit
         true,
         true,
         &Default::default(),
+        None,
     )
     .unwrap()
     {
@@ -2278,6 +2279,7 @@ fn a_machine_with_no_prior_grant_auto_updates_a_cloned_projects_row() {
         false,
         false,
         &Default::default(),
+        None,
     )
     .unwrap();
     match outcome {
@@ -4779,6 +4781,7 @@ fn project_checkouts_keep_their_own_forge_stores() {
         false,
         true,
         &Default::default(),
+        None,
     )
     .unwrap()
     {
@@ -4801,6 +4804,7 @@ fn project_checkouts_keep_their_own_forge_stores() {
         false,
         true,
         &Default::default(),
+        None,
     )
     .unwrap()
     {
@@ -5170,6 +5174,7 @@ fn a_failed_member_install_leaves_the_row_and_the_next_update_converges() {
         false,
         true,
         &Default::default(),
+        None,
     )
     .unwrap()
     {
@@ -5239,6 +5244,7 @@ fn applied_add(
         true,
         false,
         &Default::default(),
+        None,
     )
     .unwrap()
     {
@@ -6566,6 +6572,7 @@ fn an_interactive_add_of_a_git_source_always_describes_first() {
         false,
         false,
         &Default::default(),
+        None,
     )
     .unwrap();
     match outcome {
@@ -6594,6 +6601,7 @@ fn an_interactive_add_of_a_git_source_always_describes_first() {
         false,
         true,
         &Default::default(),
+        None,
     )
     .unwrap()
     {
@@ -6613,6 +6621,7 @@ fn an_interactive_add_of_a_git_source_always_describes_first() {
         false,
         false,
         &Default::default(),
+        None,
     )
     .unwrap()
     {
@@ -6704,6 +6713,7 @@ fn a_selector_import_describes_first_then_installs() {
         true,
         false,
         &Default::default(),
+        None,
     )
     .unwrap()
     {
@@ -7511,6 +7521,7 @@ fn two_manifest_edits_through_the_locked_path_both_land() {
             true,
             false,
             &Default::default(),
+            None,
         )
         .unwrap()
         {
@@ -8286,6 +8297,7 @@ fn a_manifest_birth_racing_an_outside_writer_refuses_manifest_exists() {
         true,
         false,
         &Default::default(),
+        None,
     ) {
         Err(e) => e,
         Ok(_) => panic!("the racing birth must refuse, never land over the outside file"),
@@ -8383,6 +8395,7 @@ fn a_subtree_url_records_a_skill_row_carrying_the_literal_path() {
         true,
         true,
         &Default::default(),
+        None,
     )
     .unwrap()
     {
@@ -8440,6 +8453,7 @@ fn a_subtree_url_naming_several_skills_writes_nothing() {
         true,
         true,
         &Default::default(),
+        None,
     ) {
         Err(e) => e,
         Ok(_) => panic!("a subtree naming several skills names none of them"),
@@ -9448,6 +9462,7 @@ fn a_bare_name_subscribe_records_the_canonical_row_and_its_inverse() {
         false,
         false,
         &Default::default(),
+        None,
     ) {
         Err(e) => assert_eq!(e.code(), "NO_MANIFEST"),
         Ok(_) => panic!("no topos.toml covers this folder — the subscribe must refuse"),
@@ -9464,6 +9479,7 @@ fn a_bare_name_subscribe_records_the_canonical_row_and_its_inverse() {
         false,
         false,
         &Default::default(),
+        None,
     )
     .unwrap()
     {
@@ -9896,6 +9912,7 @@ fn a_reference_verb_with_no_manifest_refuses_while_a_bare_name_falls_through() {
         false,
         false,
         &Default::default(),
+        None,
     ) {
         Err(e) => assert_eq!(e.code(), "NO_MANIFEST"),
         Ok(_) => panic!("no topos.toml covers this folder"),
@@ -9909,6 +9926,7 @@ fn a_reference_verb_with_no_manifest_refuses_while_a_bare_name_falls_through() {
         true,
         false,
         &Default::default(),
+        None,
     ) {
         Ok(ops::AddRefOutcome::Applied(d)) => {
             assert_eq!(
@@ -11110,10 +11128,21 @@ fn a_classic_delete_of_an_mcp_record_takes_its_config_entries_with_it() {
     );
     let described_tty = crate::render::remove_describe_tty(&data, &["topos".to_owned()]);
     assert!(
-        described_tty.contains("Would remove 'linear' — ")
+        described_tty.contains("Would delete 'linear' PERMANENTLY")
             && described_tty.contains(".cursor/mcp.json")
             && described_tty.contains(".openclaw/openclaw.json"),
         "the gate names the config entries, with no invented folder: {described_tty}"
+    );
+    // AND IT STILL SAYS THE WORD. A config-placed bundle always carries per-file note clauses, and
+    // a note used to REPLACE the kind's sentence — so this gate, the one asking consent for an
+    // irreversible delete, was the one gate that never said `PERMANENTLY`. The permanence leads
+    // now and the per-file clauses indent under it.
+    assert!(
+        described_tty
+            .lines()
+            .next()
+            .is_some_and(|l| l.contains("PERMANENTLY")),
+        "the permanence is the headline, not a clause the note can swallow: {described_tty}"
     );
 
     let outcome = ops::remove(&ctx, &connectors, &["linear".to_owned()], &[], None, true)
@@ -11397,6 +11426,7 @@ fn a_repo_set_rows_dest_aims_its_members_at_the_named_folder() {
         true,
         true,
         &Default::default(),
+        None,
     )
     .unwrap()
     {
@@ -11457,6 +11487,7 @@ fn an_agent_selected_add_freezes_the_row_and_prints_the_destination_receipt() {
         true,
         false,
         &sel(&["codex"], &[]),
+        None,
     )
     .unwrap()
     {
@@ -11506,6 +11537,7 @@ fn an_agent_selected_add_whose_delivery_fails_does_not_claim_installed() {
         true,
         false,
         &sel(&["codex"], &[]),
+        None,
     )
     .unwrap()
     {
@@ -11558,6 +11590,7 @@ fn a_same_named_local_rows_report_does_not_prove_the_workspace_add() {
         true,
         false,
         &sel(&["codex"], &[]),
+        None,
     )
     .unwrap()
     {
@@ -11677,6 +11710,7 @@ fn a_channel_add_whose_expansion_fails_does_not_borrow_the_feeds_proof() {
         true,
         false,
         &sel(&["codex"], &[]),
+        None,
     )
     .unwrap()
     {
@@ -11725,6 +11759,7 @@ fn an_agent_selected_add_whose_reconcile_merges_keeps_the_destination_receipt() 
         true,
         false,
         &sel(&["codex"], &[]),
+        None,
     )
     .unwrap()
     {
@@ -11749,6 +11784,7 @@ fn an_agent_selected_add_whose_reconcile_merges_keeps_the_destination_receipt() 
         true,
         false,
         &sel(&["codex"], &[]),
+        None,
     )
     .unwrap()
     {
@@ -11791,6 +11827,7 @@ fn an_agent_selected_add_whose_reconcile_conflicts_names_the_standing_state() {
         true,
         false,
         &sel(&["codex"], &[]),
+        None,
     )
     .unwrap()
     {
@@ -11814,6 +11851,7 @@ fn an_agent_selected_add_whose_reconcile_conflicts_names_the_standing_state() {
         true,
         false,
         &sel(&["codex"], &[]),
+        None,
     )
     .unwrap()
     {
@@ -12202,6 +12240,7 @@ fn an_unknown_agent_refuses_with_the_registry_list_and_nothing_changed() {
         true,
         false,
         &sel(&["codx"], &[]),
+        None,
     )
     .unwrap_err();
     assert_eq!(err.code(), "UNKNOWN_AGENT");
@@ -12238,6 +12277,7 @@ fn a_selection_over_a_feed_refuses_whole() {
         true,
         false,
         &sel(&["codex"], &[]),
+        None,
     )
     .unwrap_err();
     assert_eq!(err.code(), "INVALID_ARGUMENT");
@@ -12263,6 +12303,7 @@ fn a_feed_add_states_what_this_machine_now_takes_exactly_once() {
         true,
         false,
         &Default::default(),
+        None,
     )
     .unwrap()
     {
@@ -13688,6 +13729,7 @@ fn adding_a_kind_this_build_cannot_deliver_refuses_with_the_same_teaching() {
         true,
         true,
         &Default::default(),
+        None,
     )
     .expect_err("a kind this build cannot deliver is refused");
     let msg = err.to_string();
@@ -13835,6 +13877,69 @@ fn path_missing_names_the_scope_exact_drop_and_it_clears_the_row() {
         warning.contains(&offered),
         "the drop is spelled for the file that HOLDS the row: {warning}"
     );
+    // THE SCOPE IN THE PERSON'S WORDS. `person` is the resolver's internal name for the
+    // machine-wide scope and it shipped verbatim to anyone who deleted a folder a row still asks
+    // for. The machine lane keeps the code; the TTY prints the sentence without it.
+    assert!(
+        warning.contains("demanded machine-wide") && !warning.contains("person"),
+        "the scope is named in user vocabulary: {warning}"
+    );
+    let warn_tty = crate::render::pull_tty(
+        &out.data,
+        &out.decisions,
+        &out.warnings,
+        &out.advisories,
+        &out.disclosures,
+        out.failed_bundles.len(),
+    );
+    assert!(
+        warn_tty.contains("is demanded machine-wide but the folder is gone")
+            && !warn_tty.contains("PATH_MISSING"),
+        "the TTY reads as English: {warn_tty}"
+    );
+    assert!(
+        out.warnings.iter().any(|w| w.starts_with("PATH_MISSING")),
+        "the machine lane keeps the code: {:?}",
+        out.warnings
+    );
+    // THE SUMMARY AND THE STATUS AGREE. The fault is about a BUNDLE, so the bundle is counted:
+    // the run used to push a line and nothing else, which printed "Checked 0 skills" beside a
+    // non-zero exit — a receipt reporting nothing wrong under a status saying otherwise.
+    assert_eq!(
+        out.failed_bundles.len(),
+        1,
+        "the bundle that could not be carried forward is counted: {:?}",
+        out.failed_bundles
+    );
+    let tty = crate::render::pull_tty(
+        &out.data,
+        &out.decisions,
+        &out.warnings,
+        &out.advisories,
+        &out.disclosures,
+        out.failed_bundles.len(),
+    );
+    assert!(
+        !tty.contains("Checked 0 skills"),
+        "a run with a failed bundle never summarises as having checked none: {tty}"
+    );
+    // …and an agent reading `--json` gets the SAME way out the prose line spells, as argv.
+    let action = out
+        .fault_actions
+        .iter()
+        .find(|a| a.code.as_str() == "REMOVE_MISSING_ROW")
+        .unwrap_or_else(|| panic!("the fault carries its remedy: {:?}", out.fault_actions));
+    assert_eq!(
+        action.argv,
+        vec![
+            "topos".to_owned(),
+            "remove".to_owned(),
+            "-g".to_owned(),
+            canonical.display().to_string(),
+            "--json".to_owned(),
+        ],
+        "the machine channel spells the same scope the prose did"
+    );
 
     // The offered command runs, and the next sweep has nothing left to warn about.
     let named_connect = |_s: &Session| ops::SessionTransports {
@@ -13932,12 +14037,26 @@ fn an_update_never_calls_a_drafted_bundle_all_up_to_date() {
         "{tty}"
     );
     assert!(tty.ends_with("Checked 1 skill: 1 draft ahead."), "{tty}");
+    // …AND THE MACHINE LANE OFFERS THE SAME ACT. The row told an agent, in the payload, that its
+    // edits are unshared and then handed it nothing to do about that; the TTY had been printing
+    // `topos publish <name>` all along.
+    let actions = crate::render::draft_next_actions(&out.data);
+    assert_eq!(actions.len(), 1, "{actions:?}");
+    assert_eq!(
+        actions[0].argv,
+        vec!["topos".to_owned(), "publish".to_owned(), row.skill.clone(),],
+        "the offered argv is the command the row prints"
+    );
 }
 
-/// THE ARM STILL EXISTS. A record no visible scope demands is still the classic ladder's business:
-/// the guard is about a STANDING demand, not about local records in general.
+/// THE ARM STILL EXISTS — and it takes the RECORD, not the person's folder. A record no visible
+/// scope demands is still the classic ladder's business (the guard is about a STANDING demand, not
+/// about local records in general), but `add ./weather` adopted that folder IN PLACE: topos wrote
+/// nothing into it and never created it. Deleting it here would make this the one arm in the CLI
+/// where a `remove` destroys the user's own working directory — while the manifest arm, the retire
+/// sweep and the `--force` rebuild all spare it. One rule now: topos deletes only what topos made.
 #[test]
-fn a_record_no_row_demands_still_takes_the_classic_delete() {
+fn a_record_no_row_demands_takes_the_classic_delete_and_spares_the_adopted_folder() {
     let rig = Rig::new("orphan-name");
     let log: CallLog = Arc::new(Mutex::new(Vec::new()));
     let plane = FakePlane::new(log);
@@ -13948,7 +14067,9 @@ fn a_record_no_row_demands_still_takes_the_classic_delete() {
     std::fs::create_dir_all(&src).unwrap();
     std::fs::write(src.join("SKILL.md"), b"# weather\n").unwrap();
     let ctx = rig.ctx_at(Some(&rig.work.0));
-    ops::add(&ctx, &src).unwrap();
+    let added = ops::add(&ctx, &src).unwrap();
+    let sid = crate::id::SkillId::parse(&added.skill_id.expect("the adopt minted a record"))
+        .expect("a minted id parses");
     // NO row anywhere demands it.
     rig.write_global("[bundles]\n");
 
@@ -13963,7 +14084,128 @@ fn a_record_no_row_demands_still_takes_the_classic_delete() {
         session: &named_connect,
         directory: &dir_connect,
     };
-    ops::remove(&ctx, &connectors, &["weather".to_owned()], &[], None, true)
+    let outcome = ops::remove(&ctx, &connectors, &["weather".to_owned()], &[], None, true)
         .expect("an undemanded record is the classic ladder's business");
-    assert!(!src.exists(), "the copy is gone");
+    // The RECORD is what ends.
+    assert!(
+        !rig.layout().skill_dir(&sid).exists(),
+        "the store record is gone"
+    );
+    // The FOLDER is theirs.
+    assert!(
+        src.is_dir() && src.join("SKILL.md").is_file(),
+        "the adopted source folder survives the removal"
+    );
+    let ops::RemoveOutcome::Applied(data) = outcome else {
+        panic!("--yes applies");
+    };
+    assert!(
+        data.items[0].bytes_kept && data.items[0].agent_dirs.is_empty(),
+        "nothing is claimed deleted: {data:?}"
+    );
+    assert_eq!(
+        data.items[0].kept_dirs,
+        vec![src.display().to_string()],
+        "the receipt names the folder it left alone"
+    );
+    let tty = crate::render::remove_applied_tty(&data);
+    assert!(
+        tty.contains("stays where it is") && !tty.contains("PERMANENTLY"),
+        "a receipt that kept every byte never says the word: {tty}"
+    );
+}
+
+/// **A PARENT CHECKOUT'S ROW IS A STANDING DEMAND TOO.** The classic arm resolves a name in the
+/// store you STAND in — nearest checkout first, then the machine — which is what lets a bare
+/// `remove` reach a project record at all. But its demand guard only ever read the MACHINE's rows,
+/// so from a checkout nested inside another one the ladder found the OUTER checkout's record,
+/// found no machine row claiming the name, and called it an ended workspace delivery: a gated
+/// permanent delete of a record whose row is sitting in the parent's `topos.toml`, described to
+/// the person as a leftover. The guard asks the scope that OWNS the record now, and refuses toward
+/// the file that carries the row.
+#[test]
+fn a_parent_checkouts_row_refuses_the_nested_classic_delete() {
+    let rig = Rig::new("zq-nested");
+    rig.seed_session();
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let plane = FakePlane::new(log);
+    plane.serves(Vec::new());
+    let dir = FakeDirectory::new(Vec::new(), Vec::new());
+    rig.write_global("[bundles]\n");
+
+    // The OUTER checkout adopts `quaggamap` and keeps the row.
+    let outer = project("zq-nested-outer", "[bundles]\n");
+    let src = outer.0.join("skills/quaggamap");
+    skill_source(&src, b"# quaggamap\n");
+    let outer_ctx = rig.ctx_at(Some(&outer.0));
+    scoped_path_add(&outer_ctx, &src, false).unwrap();
+    let outer_manifest = outer.0.join(crate::manifest::MANIFEST_FILE);
+    assert!(
+        std::fs::read_to_string(&outer_manifest)
+            .unwrap()
+            .contains("quaggamap"),
+        "the outer file carries the row"
+    );
+
+    // A checkout NESTED inside it, whose own file demands nothing.
+    let inner = outer.0.join("packages/inner");
+    std::fs::create_dir_all(inner.join(".git")).unwrap();
+    std::fs::write(inner.join(crate::manifest::MANIFEST_FILE), "[bundles]\n").unwrap();
+    let ctx = rig.ctx_at(Some(&inner));
+
+    // The resolver universe needs a directory that ANSWERS `me`.
+    let named = NamedDirectory(dir.clone());
+    let named_connect = |_s: &Session| ops::SessionTransports {
+        plane: Box::new(plane.clone()),
+        directory: Box::new(named.clone()),
+        contribute: Box::new(NoContribute),
+        governance: Box::new(NoGovernance),
+    };
+    let dir_connect = |_: &str| -> Box<dyn DirectorySource> { Box::new(dir.clone()) };
+    let connectors = ops::RemoveConnectors {
+        session: &named_connect,
+        directory: &dir_connect,
+    };
+
+    // (a) STANDING: the refusal names the file that actually carries the row.
+    let err = ops::remove(
+        &ctx,
+        &connectors,
+        &["quaggamap".to_owned()],
+        &[],
+        None,
+        true,
+    )
+    .expect_err("a row in the parent checkout is a standing demand");
+    let msg = crate::render::safe_message(&err);
+    assert!(
+        msg.contains("quaggamap") && msg.contains("topos.toml"),
+        "the refusal names the file that carries the row: {msg}"
+    );
+    assert!(
+        std::fs::read_to_string(src.join("SKILL.md")).is_ok(),
+        "nothing of the person's was deleted"
+    );
+
+    // (b) GENUINELY ORPHANED — no row in ANY scope's file — still takes the classic arm.
+    std::fs::write(&outer_manifest, "[bundles]\n").unwrap();
+    let outcome = ops::remove(
+        &ctx,
+        &connectors,
+        &["quaggamap".to_owned()],
+        &[],
+        None,
+        true,
+    )
+    .expect("with no row anywhere the classic ladder owns it");
+    let ops::RemoveOutcome::Applied(data) = outcome else {
+        panic!("--yes applies");
+    };
+    // Its dir was adopted in place, so the folder stays and the record retires.
+    assert_eq!(
+        data.items[0].kind,
+        topos_types::results::RemoveKind::TrackedLocalRetired,
+        "{data:?}"
+    );
+    assert!(src.is_dir(), "the adopted folder is still the person's");
 }

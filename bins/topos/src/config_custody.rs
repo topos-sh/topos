@@ -102,8 +102,9 @@ pub(crate) struct ConfigCustody {
     #[serde(default)]
     pub pending: BTreeMap<String, PendingIntent>,
     /// Entry custody for demands whose bundle has NO record of its own to carry it — a folder this
-    /// scope's store does not track (the `local:` identities the registry/URL fetch door mints, and
-    /// a hand-written local row pointing outside the store). There is no `map.json` to hold their
+    /// scope's store does not track. Its identity is a `local:<name>` spelling, minted by whichever
+    /// reader could not resolve the row to a record (the manifest editor's blast-radius read and
+    /// its arm resolution, the inventory, the reconcile). There is no `map.json` to hold their
     /// rows, so they ride here under the bundle identity, in exactly the shape a recorded bundle
     /// keeps. Every recorded bundle's rows live in ITS record and never here — this map is empty on
     /// a machine that only ever adopted or subscribed.
@@ -646,8 +647,8 @@ impl ScopeEntries {
 
 /// Whether this scope's store holds a RECORD DIRECTORY for `bundle_id` — the one predicate that
 /// decides where its rows live, asked identically by every reader and writer. A record dir is the
-/// home of `entries.json`; anything else (an identity that is not a record id at all — the fetch
-/// door's `local:` spellings — or a record removed under us) rides the scope document's
+/// home of `entries.json`; anything else (an identity that is not a record id at all — a
+/// `local:<name>` spelling — or a record removed under us) rides the scope document's
 /// [`ConfigCustody::unrecorded`] map.
 fn record_home(
     fs: &dyn FsOps,
@@ -696,7 +697,7 @@ fn write_rows(
     rows: Vec<EntryPlacement>,
 ) -> Result<(), ClientError> {
     let Some(sp) = record_home(fs, layout, bundle_id) else {
-        // No record to carry them (a fetch door's `local:` identity, a hand-written row, or a
+        // No record to carry them (a `local:<name>` identity, a hand-written row, or a
         // record removed under us): keep the rows where they can still be found rather than
         // dropping custody of live entries.
         if rows.is_empty() {
@@ -901,7 +902,7 @@ mod tests {
         ));
     }
 
-    /// An UNRECORDED bundle (the fetch door's `local:` identity — no store record to carry its
+    /// An UNRECORDED bundle (a `local:<name>` identity — no store record to carry its
     /// rows) round-trips through the scope document, and clearing its rows drops the map entry
     /// rather than leaving an empty list behind.
     #[test]

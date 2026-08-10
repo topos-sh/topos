@@ -191,6 +191,12 @@ pub(crate) struct ConvergeOutcome {
     /// when its last entry left). A line describing something that worked belongs here: routed
     /// into the warning channel it would make a clean run report itself broken.
     pub notices: Vec<String>,
+    /// The BUNDLE NAMES this converge could not place — a `server.json` the gate refused, a
+    /// document that would not parse. Each already has a line in `warnings`, but a line is not a
+    /// bundle: the sweep counts BUNDLES, and a gate failure that rode only the line channel exited
+    /// non-zero under a summary saying "1 already up to date". The caller folds these into the
+    /// count so the summary and the status describe the same run.
+    pub failed_bundles: Vec<String>,
 }
 
 // =================================================================================================
@@ -385,6 +391,11 @@ pub(crate) fn converge(
                     "{code} {}: {reason} — nothing is placed for it",
                     d.name
                 ));
+                // The bundle could not be carried forward — so it is counted as one. The line
+                // alone left the sweep exiting non-zero under a summary that named no failure.
+                if !out.failed_bundles.contains(&d.name) {
+                    out.failed_bundles.push(d.name.clone());
+                }
                 failed.insert(i, reason);
             }
         }

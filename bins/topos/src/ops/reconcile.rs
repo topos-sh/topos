@@ -404,6 +404,12 @@ impl PlaneSource for SessionRoutedPlane {
 #[derive(Default)]
 struct Sweep {
     rows: Vec<PullSkill>,
+    /// The RUNNABLE fix for a fault this sweep reported, when the fault has one. A warning line
+    /// tells a person what to do; an agent reading `--json` acts on `next_actions` and nothing
+    /// else, so a fault whose remedy lived only in prose left the machine channel offering
+    /// whatever generic advice happened to apply — or nothing at all. Written only beside the
+    /// warning it belongs to.
+    fault_actions: Vec<topos_types::NextAction>,
     /// FAILURES only — the isolated per-skill faults the receipt counts and the renderer calls
     /// failed, and the one channel that makes the run exit non-zero. A line that describes
     /// something that WORKED belongs in `disclosures`, or a clean run reports itself as broken;
@@ -424,6 +430,14 @@ struct Sweep {
     /// bundle: a scope-level fault (an unavailable lock, an unreadable custody document) is one
     /// line about no bundle at all, and counting lines made the summary invent bundles that do
     /// not exist and then report them failed.
+    ///
+    /// KNOWN COLLAPSE, deliberately left: the key is the DISPLAY NAME, so two same-named bundles
+    /// from different workspaces that BOTH fail in one sweep are counted once and the summary
+    /// undercounts by one. Every other channel still reports both (a warning line each, and each
+    /// bundle's own row), so nothing is hidden — only the tally is short. The same name-keying
+    /// costs one more thing, in the converge fold: the row RETAIN that stands a failed bundle's
+    /// row down matches on name+scope, so a same-named healthy twin in that scope loses its row
+    /// alongside the failed one. Both are the one re-key by scope+identity, and it is a follow-up.
     failed_bundles: std::collections::BTreeSet<String>,
     /// ADVISORIES — real `warning:` lines about a row that still DELIVERED (an unknown MCP dest
     /// entry dropped from a bundle's narrowing). They ride the same `--json` `warnings` array and
@@ -1733,6 +1747,7 @@ pub(crate) fn manifest_update(
         },
         warnings: sweep.warnings,
         failed_bundles: sweep.failed_bundles,
+        fault_actions: sweep.fault_actions,
         decisions: sweep.decisions,
         advisories: sweep.advisories,
         disclosures: sweep.disclosures,
@@ -2063,15 +2078,35 @@ fn reconcile_thing<'a>(
                 // command used to be spelled the same whichever file carried the row, so on the
                 // machine-wide file it refused — leaving the only named way out of a permanent
                 // warning as a command that could not clear it.
-                let g = if matches!(sc.scope, ResolvedScope::Person) {
-                    " -g"
+                let (g, whose) = if matches!(sc.scope, ResolvedScope::Person) {
+                    (" -g", "machine-wide")
                 } else {
-                    ""
+                    ("", "by this project")
                 };
+                // The scope is named in the PERSON'S vocabulary, not the resolver's: `person` is
+                // an internal word for the machine-wide scope, and it shipped verbatim to anyone
+                // who deleted a folder a row still asks for. The sentence also reads whole with
+                // the leading code removed, which is how the TTY prints it.
                 sweep.warnings.push(format!(
-                    "PATH_MISSING {}: \"{raw}\" — the folder is gone; `topos remove{g} {raw}` \
-                     drops the row",
-                    sc.label
+                    "PATH_MISSING \"{raw}\" is demanded {whose} but the folder is gone — \
+                     `topos remove{g} {raw}` drops the row"
+                ));
+                // The BUNDLE is what could not be carried forward, so the bundle is what the
+                // summary counts. Pushing only a line left a one-row failing sweep printing
+                // "Checked 0 skills" and exiting 1 — a receipt that reported nothing wrong beside
+                // a status that said something was.
+                sweep.failed_bundles.insert(display.clone());
+                // …and the way out rides the machine channel too, spelled for the file that
+                // actually carries the row.
+                let mut argv = vec!["topos".to_owned(), "remove".to_owned()];
+                if !g.is_empty() {
+                    argv.push("-g".to_owned());
+                }
+                argv.push(raw.to_string());
+                argv.push("--json".to_owned());
+                sweep.fault_actions.push(crate::actions::next_action(
+                    topos_types::ActionCode::from("REMOVE_MISSING_ROW".to_owned()),
+                    argv,
                 ));
                 if row.value.declared_kind() == Some(BundleKind::Mcp) {
                     // The bundle cannot be read this run: hold its config entries in place.
@@ -4989,6 +5024,22 @@ fn run_mcp_converge(
             allow_removals,
         );
         sweep.warnings.extend(outcome.warnings);
+        // A bundle the converge could not place is a FAILED BUNDLE, not merely a warning line —
+        // the summary counts bundles, and a gate refusal that rode only the line channel printed
+        // "1 already up to date" on a run that exited non-zero.
+        //
+        // ONE BUNDLE, ONE BUCKET. The store half of a config-placed bundle can succeed while its
+        // config half is refused, which left the same bundle holding a row that said `up to date`
+        // AND a place in the failed count — `Checked 2 bundles` over a machine holding one, with
+        // the two clauses contradicting each other. The failure is the load-bearing fact (nothing
+        // was placed for it, and the warning line says why), so it takes the bundle and the row
+        // stands down.
+        for name in &outcome.failed_bundles {
+            sweep
+                .rows
+                .retain(|r| &r.skill != name || r.scope.as_deref() != Some(label.as_str()));
+        }
+        sweep.failed_bundles.extend(outcome.failed_bundles);
         // Work that SUCCEEDED belongs in disclosures: a wholly-owned config file deleted when its
         // last entry left is the removal working, and counted as a fault it makes a clean sweep
         // report itself failed and exit non-zero.

@@ -801,15 +801,23 @@ pub(crate) enum ClientError {
         code: crate::mcp_validate::McpRefusalCode,
         message: String,
     },
-    /// A plain `add`/`publish` named a folder whose root holds a `server.json` and no `SKILL.md`
-    /// — an MCP server bundle, which the skill door would silently mis-kind (raw JSON delivered
-    /// into skills dirs). The refusal names the flag that adds it as what it is; `dir` is the
-    /// user's own spelling, shown VERBATIM.
-    #[error(
-        "{dir} looks like an MCP server (its root holds server.json and no SKILL.md) — \
-         `topos add --kind mcp {dir}` adds it as one, and `--kind skill` adds it as a skill"
-    )]
-    McpFlagRequired { dir: String },
+    /// A plain `add`/`publish` named a folder whose kind the door cannot read off it, in either
+    /// of the two ways that happens: the root holds a `server.json` and no `SKILL.md` (a server
+    /// bundle the skill door would silently mis-kind, delivering raw JSON into skills dirs), or it
+    /// holds BOTH markers (nothing in the folder says which one it is). Each carries its own
+    /// sentence and both name the `--kind` words; `dir` is the user's own spelling, shown
+    /// VERBATIM. Constructed only by [`ClientError::kind_required`] / [`ClientError::kind_ambiguous`].
+    ///
+    /// The refusal ARMS ON SILENCE only — an explicit `--kind` word always wins, because the guard
+    /// exists to stop a silent mis-kind, not to overrule someone who said what they meant.
+    #[error("{message}")]
+    KindRequired {
+        dir: String,
+        message: String,
+        /// Whether BOTH markers stand (the ambiguous shape) — the renderer offers both `--kind`
+        /// words for it, and one for the server-folder shape.
+        ambiguous: bool,
+    },
     /// A manifest spells a RETIRED placement field (`path` / `harness` / a `[defaults.<kind>]`
     /// table) — the load refuses and the message teaches the exact per-row `dest` rewrite. Shown
     /// VERBATIM (the message is this code's own teaching over the user's own file content, like
@@ -857,6 +865,56 @@ impl From<crate::mcp_validate::McpRefusal> for ClientError {
         ClientError::McpRefused {
             code: r.code,
             message: r.message,
+        }
+    }
+}
+
+impl ClientError {
+    /// A folder whose root holds a `server.json` and no `SKILL.md`: it is a server bundle, and the
+    /// skill door would deliver raw JSON into skills dirs. The answer is definite, so the sentence
+    /// leads with it.
+    pub(crate) fn kind_required(dir: &str) -> ClientError {
+        ClientError::KindRequired {
+            dir: dir.to_owned(),
+            message: format!(
+                "{dir} looks like an MCP server (its root holds server.json and no SKILL.md) — \
+                 `topos add --kind mcp {dir}` adds it as one, and `--kind skill` adds it as a skill"
+            ),
+            ambiguous: false,
+        }
+    }
+
+    /// A folder holding BOTH markers. Its sibling above can say what the folder is; this one
+    /// cannot, and must not guess: adopting it as a skill (which is what silence used to do) lands
+    /// the SKILL.md and quietly drops the server — a person gets half of what they pointed at and
+    /// no line saying so. Both words are named because both are real answers here.
+    pub(crate) fn kind_ambiguous(dir: &str) -> ClientError {
+        ClientError::KindRequired {
+            dir: dir.to_owned(),
+            message: format!(
+                "{dir} holds both a SKILL.md and a root server.json, so nothing in the folder \
+                 says which one it is — `topos add --kind skill {dir}` adopts it as a skill, and \
+                 `topos add --kind mcp {dir}` adds it as an MCP server"
+            ),
+            ambiguous: true,
+        }
+    }
+
+    /// The gate's refusal, told with the SUBJECT it judged in front of it — the folder or bundle
+    /// name, in the same `<subject>: <sentence>` shape every other coded line in this CLI uses.
+    ///
+    /// The gate's sentences are about a document ("description is required and must be 1–500
+    /// characters") and never about WHICH document, because the validator is shared with the web
+    /// tier and knows only bytes. On the CLI that left a person staring at a rule with no way to
+    /// tell which of their folders broke it. The sentence itself is still verbatim — nothing is
+    /// reworded, and the document is still never quoted.
+    pub(crate) fn mcp_refused_about(
+        r: crate::mcp_validate::McpRefusal,
+        subject: &str,
+    ) -> ClientError {
+        ClientError::McpRefused {
+            code: r.code,
+            message: format!("{subject}: {}", r.message),
         }
     }
 }
@@ -961,8 +1019,10 @@ impl ClientError {
             // The MCP gate's own vocabulary, carried through unflattened — the client and the web
             // tier refuse the same document with the same word.
             ClientError::McpRefused { code, .. } => code.as_str(),
-            // A server bundle at a skill door: the fix is the `--kind` word, machine-runnable.
-            ClientError::McpFlagRequired { .. } => "MCP_FLAG_REQUIRED",
+            // A folder whose kind the door cannot read: the fix is the `--kind` word,
+            // machine-runnable. The code names the WORD that is missing, not the flag spelling
+            // that used to carry it.
+            ClientError::KindRequired { .. } => "KIND_REQUIRED",
             // A retired manifest spelling: the fix is the row's `dest` rewrite in the message.
             ClientError::ManifestMigration(_) => "MANIFEST_FIELD_RETIRED",
             // A user-authored manifest the grammar refuses: the message names the file, the

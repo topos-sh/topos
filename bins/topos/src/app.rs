@@ -734,6 +734,7 @@ fn run_command(
                         global,
                         yes,
                         &selection,
+                        kind,
                     );
                     let result = result.map(|outcome| match outcome {
                         // The breadth arming sweep + the built-in ride an APPLIED add exactly as
@@ -891,6 +892,7 @@ fn run_command(
                                     global,
                                     yes,
                                     &selection,
+                                    kind,
                                 );
                                 let result = result.map(|outcome| match outcome {
                                     ops::AddRefOutcome::Applied(mut data) => {
@@ -1872,7 +1874,12 @@ fn finish_pull(
             // The UNENROLLED empty sweep is a dead-end without a pointer: nothing is followed
             // because nothing CAN be — state the join fix in prose and mirror it structurally
             // (the argv template's `needs` names the workspace address).
-            let unenrolled_dead_end = !enrolled && out.data.skills.is_empty();
+            // A DEAD END is a run with nothing to say and no way to have anything: no sessions,
+            // no rows, no faults. A run that FAILED on a row is none of those — it had work and
+            // could not finish it — and offering `login` there answered a question nobody asked
+            // while the fault's own remedy went unmentioned.
+            let unenrolled_dead_end =
+                !enrolled && out.data.skills.is_empty() && out.warnings.is_empty();
             // ONE binding answers both surfaces — the envelope's `ok` and the process's exit
             // status. They were computed apart, and a partial failure printed `ok: true` on the
             // very run it exited non-zero; deriving them from one value makes that disagreement
@@ -1899,10 +1906,16 @@ fn finish_pull(
                 // A merge that a `--keep-mine` just FINISHED carries the one command left to run on
                 // it: the ordinary publish. It replaces a state an agent could not ship at all.
                 next_actions.extend(render::resolution_next_actions(&out.data));
+                // A bundle carrying unshared edits gets the same `publish` the TTY row prints.
+                next_actions.extend(render::draft_next_actions(&out.data));
                 // A bundle waiting on a decision carries its ways out as runnable argv — the same
                 // structured channel every other "what do I do now" answer uses, so an agent acts
                 // on the choice instead of parsing a sentence about it.
                 next_actions.extend(render::decision_next_actions(&out.decisions));
+                // The faults' own remedies — the same fix the warning line spells in prose, as
+                // argv. They lead nothing and follow nothing; they are simply the answer to the
+                // one question an agent reading a failing run has.
+                next_actions.extend(out.fault_actions.iter().cloned());
                 let value = serde_json::to_value(&out.data).unwrap_or_default();
                 let mut envelope = render::ok_envelope(command, value);
                 // `ok` says what the EXIT STATUS says. A sweep that could not carry a bundle
@@ -3488,6 +3501,7 @@ mod tests {
                 failed_bundles: warnings.iter().cloned().collect(),
                 data: empty(),
                 warnings,
+                fault_actions: Vec::new(),
                 decisions,
                 advisories: Vec::new(),
                 disclosures: Vec::new(),

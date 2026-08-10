@@ -2523,6 +2523,11 @@ fn apply_arms(
             manifest: Some(target.path.display().to_string()),
             workspace_id: None,
             agent_dirs: Vec::new(),
+            // A row edit names no folders in either direction — what left rides
+            // `RemoveData::uninstalled`, and what stayed is an edited copy the uninstall reports
+            // as kept. The adopted-source disclosure belongs to the classic arm, which is the one
+            // that deletes folders at all.
+            kept_dirs: Vec::new(),
             bytes_kept: true,
             note: note.clone(),
         })

@@ -341,11 +341,13 @@ pub(crate) fn list_with(
         }
         // Records nothing demands whose entries or folders still STAND. Deliberately not part of
         // the row set — they are not inventory — and deliberately not shown under a filter, which
-        // is a question about named rows.
+        // is a question about named rows. It reads the section's OWN rows, never the `rows` vector
+        // above: that one has been narrowed by `keeps` and cut by `page.apply`, and "is anything
+        // still demanding this record?" is a question about the scope, not about the page.
         let orphans = if narrowed {
             Vec::new()
         } else {
-            standing_orphans(ctx, section, &rows)
+            standing_orphans(ctx, section)
         };
         data.scopes.push(ListScope {
             scope: section.scope.to_owned(),
@@ -693,15 +695,31 @@ fn conflict_record(
 ///
 /// Read-only and best-effort: an unreadable store, record or custody document yields nothing —
 /// a listing must not fail because of a record it was only checking on.
-fn standing_orphans(
-    ctx: &Ctx<'_>,
-    section: &ScopeResolution,
-    rows: &[SkillEntry],
-) -> Vec<OrphanRecord> {
+fn standing_orphans(ctx: &Ctx<'_>, section: &ScopeResolution) -> Vec<OrphanRecord> {
     let Some(layout) = scope_store(ctx, section) else {
         return Vec::new();
     };
-    let shown: HashSet<&str> = rows.iter().map(|r| r.skill.as_str()).collect();
+    // WHAT THIS SCOPE STILL DEMANDS, by RECORD — the whole resolution, never a page of it.
+    //
+    // A name is not an identity here: two non-retired records in one scope can carry one display
+    // name (the same bundle followed in two workspaces, or a workspace copy beside a local one),
+    // so keying suppression on the name let a demanded `deploy` silence an abandoned `deploy` that
+    // no row had claimed for weeks. A row that resolved its applied state names its record, and
+    // that is the key. A row that never applied has no record to name — it falls back to the name,
+    // which over-suppresses rather than inventing a line, and is the safe direction: a record the
+    // person may still be about to receive is not a leftover.
+    let mut claimed_records: HashSet<&str> = HashSet::new();
+    let mut claimed_names: HashSet<&str> = HashSet::new();
+    for row in section.inventory_rows() {
+        match &row.record {
+            Some(id) => {
+                claimed_records.insert(id.as_str());
+            }
+            None => {
+                claimed_names.insert(row.name.as_str());
+            }
+        }
+    }
     let Ok(entries) = ctx.fs.read_dir(&layout.skills_dir()) else {
         return Vec::new();
     };
@@ -725,8 +743,8 @@ fn standing_orphans(
         let Ok(Some(lock)) = doc::read_doc::<Lock>(ctx.fs, &sp.lock) else {
             continue; // an unreadable record is never judged
         };
-        if shown.contains(lock.name.as_str()) {
-            continue; // a row in this very listing demands it
+        if claimed_records.contains(id) || claimed_names.contains(lock.name.as_str()) {
+            continue; // a row in this scope demands THIS record
         }
         // WHAT IS STILL THERE — the config files its entries sit in, then the folders holding
         // copies. A record with nothing standing needs no line: the next sweep retires it and

@@ -146,8 +146,8 @@ generated `docs/cli.md` (`cargo xtask gen-cli-ref`).
   joins the scope document onto every bundle's rows as the one index the converge asks its
   ownership questions of; a record write that fails puts its intents BACK in the journal, so the
   durable journal always describes exactly the work that has not landed. A bundle with no record
-  of its own — the fetch door's `local:` identities, and a bundle whose drifted entries outlived
-  the record a `remove` deleted — rides the scope document's `unrecorded` map.
+  of its own — a row no reader could resolve to one (`local:<name>`), and a bundle whose drifted
+  entries outlived the record a `remove` deleted — rides the scope document's `unrecorded` map.
 - `bundle_kind` — WHAT A BUNDLE IS: the closed kind vocabulary (`skill` · `mcp`) and the ONE parse
   of a kind word. A word this build does not own is refused at every door it can enter — the sweep
   (the row is skipped whole, warned, never cached), `add`, and a hand-written manifest at LOAD

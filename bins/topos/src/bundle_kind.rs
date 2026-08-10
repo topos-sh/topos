@@ -56,6 +56,15 @@ impl BundleKind {
         }
     }
 
+    /// The kind as a REFUSAL reads it aloud — the indefinite noun phrase, so a sentence about two
+    /// kinds ("is an MCP server, not a skill") reads as English rather than as two enum words.
+    pub(crate) const fn noun_phrase(self) -> &'static str {
+        match self {
+            Self::Skill => "a skill",
+            Self::Mcp => "an MCP server",
+        }
+    }
+
     /// Every kind this build delivers, in the order refusals list them — the ONE source for
     /// "known kinds: …" wherever a door has to teach the vocabulary.
     pub(crate) const ALL: [Self; 2] = [Self::Skill, Self::Mcp];

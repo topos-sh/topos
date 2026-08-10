@@ -5,7 +5,7 @@
   "type": "object",
   "properties": {
     "bundle_digest": {
-      "description": "The kernel digest of the bytes this add landed. Present whenever bytes landed — including\nthe MCP import, whose folder IS the bundle even though no version history is minted — and\nabsent for a row that points at somebody else's bytes.",
+      "description": "The kernel digest of the bytes this add landed. Present whenever bytes landed — including\nan adopted MCP folder, which IS the bundle — and absent for a row that points at somebody\nelse's bytes.",
       "type": [
         "string",
         "null"
@@ -131,7 +131,7 @@
       ]
     },
     "skill_id": {
-      "description": "The local sidecar record this add minted, when it minted one. ABSENT for a row that has no\nbytes of its own here (a feed, a channel, a whole repo) and for an imported MCP server\npointer — a row-only add mints no version history, and a zeroed id would claim one.",
+      "description": "The local sidecar record this add minted, when it minted one. ABSENT for a row that has no\nbytes of its own here — a feed, a channel, a whole repo: a row-only add mints no version\nhistory, and a zeroed id would claim one.",
       "type": [
         "string",
         "null"
@@ -225,7 +225,7 @@
       ]
     },
     "McpServerSummary": {
-      "description": "What an MCP `server.json` says, after the gate accepted it — the facts an applied `add`\nreceipt carries beside the undo, whether the document was fetched, adopted, or delivered by\na workspace subscribe. DERIVED from the document; the document itself is never echoed whole.\n**INFERRED** (additive-only).",
+      "description": "What an MCP `server.json` says, after the gate accepted it — the facts an applied `add`\nreceipt carries beside the undo, whether the document was adopted from a folder here or\ndelivered by a workspace subscribe. DERIVED from the document; the document itself is never\nechoed whole.\n**INFERRED** (additive-only).",
       "type": "object",
       "properties": {
         "agents": {

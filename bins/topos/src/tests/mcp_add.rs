@@ -4,11 +4,11 @@
 //!
 //! What is under test here:
 //!
-//! - the FETCHED door applies immediately — the canonical document, the row, the converge — with
-//!   an undo-led receipt whose `remove` is the verifiable FULL inverse (the folder the import
-//!   wrote leaves with the row when its bytes still match; anything else is kept, disclosed);
-//! - the LOCAL door applies immediately, and its row is `add`/`remove`'s exact file inverse even
-//!   carrying `{ kind = "mcp" }` — an adopted folder is never deleted;
+//! - the LOCAL door — the ONLY door — applies immediately, and its row is `add`/`remove`'s exact
+//!   file inverse even carrying `{ kind = "mcp" }`; an adopted folder is never deleted, by any arm
+//!   of `remove`, because topos never created it;
+//! - a folder whose kind is not readable off it refuses toward the `--kind` word rather than
+//!   landing as the nearest guess;
 //! - a registry-shaped name resolves WORKSPACE-FIRST: a connected catalog EMBEDDING it
 //!   subscribes to that bundle by its catalog name (source disclosed, registry never dialed),
 //!   several embedding it refuse toward `--workspace`, and a miss falls through to the
@@ -447,7 +447,7 @@ fn a_server_bundle_at_a_skill_door_refuses_toward_the_mcp_flag() {
 
     // The plain add door.
     let err = ops::add(&ctx, &dir).expect_err("refused");
-    assert_eq!(err.code(), "MCP_FLAG_REQUIRED");
+    assert_eq!(err.code(), "KIND_REQUIRED");
     assert!(err.detail().contains("--kind mcp"), "{}", err.detail());
     assert!(err.detail().contains("SKILL.md"), "{}", err.detail());
     assert!(
@@ -459,18 +459,28 @@ fn a_server_bundle_at_a_skill_door_refuses_toward_the_mcp_flag() {
     // The publish door's auto-add pre-step refuses the same way, before anything lands.
     let err =
         ops::ensure_tracked(&ctx, None, dir.to_str().unwrap()).expect_err("publish refuses too");
-    assert_eq!(err.code(), "MCP_FLAG_REQUIRED");
+    assert_eq!(err.code(), "KIND_REQUIRED");
 
     // The `--kind mcp` door still adopts that exact folder.
     ops::add_mcp(&ctx, dir.to_str().unwrap(), true, &Default::default())
         .expect("the flagged door adopts");
 
-    // A SKILL.md beside a server.json reads as a skill — the guard never fires on it.
-    let skill = rig.work.0.join("notes");
-    std::fs::create_dir_all(&skill).unwrap();
-    std::fs::write(skill.join("SKILL.md"), b"# notes\n").unwrap();
-    std::fs::write(skill.join("server.json"), b"{}\n").unwrap();
-    ops::add(&ctx, &skill).expect("a SKILL.md dir adopts as a skill");
+    // A SKILL.md BESIDE a server.json used to read as a skill — the guard armed only on the
+    // absence of SKILL.md, so the folder was adopted silently and the server never landed. Two
+    // markers name two kinds, so the door asks instead of guessing (the full shape, and that an
+    // explicit word still wins, is `a_folder_holding_both_markers_refuses_and_names_both_kinds`).
+    let both = rig.work.0.join("notes");
+    std::fs::create_dir_all(&both).unwrap();
+    std::fs::write(both.join("SKILL.md"), b"# notes\n").unwrap();
+    std::fs::write(both.join("server.json"), b"{}\n").unwrap();
+    let err = ops::add(&ctx, &both).expect_err("two markers name two kinds");
+    assert_eq!(err.code(), "KIND_REQUIRED");
+    assert!(
+        err.detail()
+            .contains("holds both a SKILL.md and a root server.json"),
+        "{}",
+        err.detail()
+    );
 }
 
 /// `--kind skill` on a `server.json`-rooted folder ADOPTS IT AS A SKILL. The guard exists to stop
@@ -488,7 +498,7 @@ fn an_explicit_skill_word_adopts_a_server_folder_as_a_skill() {
     // Silence still refuses — the guard's whole reason for standing.
     let err = ops::adopt_path(&ctx, &scope.target, &dir, ops::KindDeclared::No)
         .expect_err("unflagged, the server folder refuses");
-    assert_eq!(err.code(), "MCP_FLAG_REQUIRED");
+    assert_eq!(err.code(), "KIND_REQUIRED");
 
     // The person's own word wins.
     let data = ops::adopt_path(&ctx, &scope.target, &dir, ops::KindDeclared::Yes)
@@ -690,6 +700,14 @@ fn a_stray_sibling_refuses_at_the_adopt_gate() {
     assert!(
         err.detail().contains("server.json, README.md"),
         "{}",
+        err.detail()
+    );
+    // AND IT SAYS WHICH FOLDER. The gate's sentences are shared with the web tier and speak only
+    // about a document, so on the CLI the refusal used to name no folder at all — a rule with
+    // nothing to apply it to, on a machine that may hold several server bundles.
+    assert!(
+        err.detail().starts_with(&format!("{}: ", dir.display())),
+        "the refusal leads with the folder it judged: {}",
         err.detail()
     );
     assert_eq!(rig.global_text(), "[bundles]\n", "nothing was recorded");
@@ -1328,4 +1346,114 @@ fn an_mcp_record_cannot_be_re_linked_as_a_skill() {
     );
     assert!(detail.contains("skill bundle"), "{detail}");
     assert_eq!(rig.global_text(), "[bundles]\n", "nothing was recorded");
+}
+
+/// A `--kind` WORD THAT CONTRADICTS THE CATALOG IS REFUSED. The local-folder door already refuses
+/// a server bundle named without the word — but the workspace door read the word and threw it
+/// away, so `add --kind skill <a workspace's MCP bundle>` delivered a tool endpoint into the
+/// person's agents without a syllable about it. The catalog is the authority on what a bundle is,
+/// which is exactly why the flag can only agree with it or be wrong.
+#[test]
+fn a_kind_word_contradicting_the_catalog_refuses_at_the_workspace_door() {
+    use super::manifest_reconcile::{catalog_entry, mk_version};
+    let rig = Rig::new("kind-contradict");
+    rig.seed_session();
+    rig.write_global("[bundles]\n");
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+
+    let v = mk_version(&[("server.json", FileMode::Regular, good_server().as_bytes())]);
+    let mut entry = catalog_entry("s_linear", "linear", &v);
+    entry.kind = "mcp".into();
+    let fdir = FakeDirectory::new(vec![entry], Vec::new());
+    let session_connect = |_s: &Session| ops::SessionTransports {
+        plane: Box::new(NoDelivery),
+        directory: Box::new(fdir.clone()),
+        contribute: Box::new(RecordingPublish::default()),
+        governance: Box::new(NoGovernance),
+    };
+
+    let add = |declared: Option<crate::bundle_kind::BundleKind>| {
+        ops::add_reference(
+            &ctx,
+            &session_connect,
+            None,
+            &format!("{HOST}/{WS_NAME}/linear"),
+            true,
+            true,
+            &Default::default(),
+            declared,
+        )
+    };
+
+    // The contradiction refuses — naming both kinds, and the flag as the thing to drop.
+    let err = add(Some(crate::bundle_kind::BundleKind::Skill))
+        .expect_err("`--kind skill` on a catalog MCP bundle refuses");
+    let msg = crate::render::safe_message(&err);
+    assert!(
+        msg.contains("is an MCP server in the catalog, not a skill")
+            && msg.contains("needs no `--kind` at all"),
+        "{msg}"
+    );
+    assert_eq!(
+        rig.global_text(),
+        "[bundles]\n",
+        "nothing was written: {msg}"
+    );
+
+    // The word that AGREES passes this gate — the flag is redundant here, never wrong. (What the
+    // add then does with it is the ordinary subscribe path, covered elsewhere.)
+    let agreed = add(Some(crate::bundle_kind::BundleKind::Mcp));
+    let agreed_msg = agreed
+        .err()
+        .map(|e| crate::render::safe_message(&e))
+        .unwrap_or_default();
+    assert!(
+        !agreed_msg.contains("in the catalog, not"),
+        "the word that matches the catalog is never the thing refused: {agreed_msg}"
+    );
+}
+
+/// A FOLDER THAT IS BOTH. The server-folder guard armed only when there was NO `SKILL.md` — so a
+/// folder holding both markers sailed past it, was adopted as a skill, and the server never
+/// landed: half of what the person pointed at, with nothing said about the other half. Nothing in
+/// the bytes says which kind it is, so the door refuses and names both words rather than picking
+/// one. An explicit `--kind` still wins, because the guard exists to stop a SILENT mis-kind.
+#[test]
+fn a_folder_holding_both_markers_refuses_and_names_both_kinds() {
+    let rig = Rig::new("both-markers");
+    rig.write_global("[bundles]\n");
+    let dir = rig.work.0.join("weather");
+    write_bundle(&dir, &good_server());
+    std::fs::write(dir.join("SKILL.md"), b"# weather\n").unwrap();
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+
+    let err = ops::add(&ctx, &dir).expect_err("neither kind is guessable");
+    assert_eq!(err.code(), "KIND_REQUIRED");
+    let detail = err.detail();
+    assert!(
+        detail.contains("holds both a SKILL.md and a root server.json")
+            && detail.contains("--kind skill")
+            && detail.contains("--kind mcp"),
+        "the refusal names both real answers: {detail}"
+    );
+    assert_eq!(rig.global_text(), "[bundles]\n", "nothing was recorded");
+    // The machine channel offers both, in the same order the sentence does.
+    let actions = crate::render::next_actions("add", &[], &err);
+    let kinds: Vec<&str> = actions
+        .iter()
+        .map(|a| {
+            let i = a
+                .argv
+                .iter()
+                .position(|w| w == "--kind")
+                .expect("each offered command names a kind");
+            a.argv[i + 1].as_str()
+        })
+        .collect();
+    assert_eq!(kinds, vec!["skill", "mcp"], "{actions:?}");
+
+    // The declared word still wins — silence was the only thing being guarded.
+    let scope = ops::add_scope(&ctx, true).unwrap();
+    ops::adopt_path(&ctx, &scope.target, &dir, ops::KindDeclared::Yes)
+        .expect("an explicit kind adopts the folder");
 }

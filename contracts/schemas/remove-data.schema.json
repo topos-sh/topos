@@ -49,6 +49,13 @@
           "description": "Whether the sidecar bytes are kept (a manifest edit keeps the tracked bytes as a frozen\ncopy; an untracked-local delete removes the only copy there is).",
           "type": "boolean"
         },
+        "kept_dirs": {
+          "description": "The directories the removal LEAVES STANDING — a folder the person adopted in place, which\ntopos never created and therefore never deletes. Disjoint from [`Self::agent_dirs`], which\nnames only what is emptied. **Additive.**",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
         "kind": {
           "description": "How the removal behaves for this skill.",
           "$ref": "#/$defs/RemoveKind"
@@ -116,6 +123,16 @@
           "description": "A tracked, never-published local skill → permanent delete (the sidecar entry drops too).",
           "type": "string",
           "const": "tracked-local-permanent"
+        },
+        {
+          "description": "A tracked local bundle whose bytes live in a folder the person ADOPTED IN PLACE. The topos\nrecord and any config entries it placed retire; the folder itself stays, because topos\nnever created it ([`RemoveItem::kept_dirs`] names it, and `bytes_kept` is `true`).\n**Additive.**",
+          "type": "string",
+          "const": "tracked-local-retired"
+        },
+        {
+          "description": "The built-in `topos` bundle → the durable device opt-out. Not a permanent delete: the bytes\nship inside the binary and `topos add topos` places them again. **Additive.**",
+          "type": "string",
+          "const": "builtin-opt-out"
         }
       ]
     },

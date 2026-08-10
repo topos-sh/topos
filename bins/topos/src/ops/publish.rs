@@ -607,7 +607,8 @@ fn gate_mcp_bundle(scanned: &scan::ScannedBundle, skill_name: &str) -> Result<()
         .iter()
         .map(|f| (f.path.as_str(), f.bytes.as_slice()))
         .collect();
-    crate::mcp_validate::validate_candidate_files(&files)?;
+    crate::mcp_validate::validate_candidate_files(&files)
+        .map_err(|r| ClientError::mcp_refused_about(r, skill_name))?;
     Ok(())
 }
 

@@ -382,9 +382,10 @@ pub struct WireSkillIndexEntry {
     pub upstream_path: Option<String>,
     /// The EMBEDDED server name (`server.name`) the bundle's `current` document declares — the
     /// identity the MCP read API keys on, distinct from the catalog `name` above. Present only
-    /// for an active `kind = "mcp"` entry whose document could be read; lets a client resolve a
-    /// registry-shaped name against the workspaces it is connected to before the official
-    /// registry. **Additive.**
+    /// for an active `kind = "mcp"` entry whose document could be read; it is what lets a
+    /// registry-shaped token be recognized as a bundle a connected workspace already publishes.
+    /// The client dials no registry of its own — a registry-shaped name it cannot match here is
+    /// refused toward the workspace, never fetched. **Additive.**
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mcp_server_name: Option<String>,
 }

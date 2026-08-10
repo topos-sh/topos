@@ -725,13 +725,28 @@ fn a_dest_move_is_a_clean_sweep_that_names_the_bundle_it_moved() {
     assert!(!cursor.exists(), "the wholly-owned old file was deleted");
     // NOTHING failed — the whole point: a successful move exits 0.
     assert!(out.warnings.is_empty(), "{:?}", out.warnings);
-    // The deletion is a DISCLOSURE, and it still names the file it deleted.
+    // The deletion is a DISCLOSURE, and it still names the file it deleted. The MACHINE lane keeps
+    // the code (an agent branches on it); the TTY prints the sentence, because a person reading a
+    // receipt should not have to skip a machine word to reach English.
     assert!(
         out.disclosures
             .iter()
             .any(|d| d.starts_with("MCP_FILE_REMOVED") && d.contains("mcp.json")),
         "{:?}",
         out.disclosures
+    );
+    let note_tty = crate::render::pull_tty(
+        &out.data,
+        &out.decisions,
+        &out.warnings,
+        &out.advisories,
+        &out.disclosures,
+        out.failed_bundles.len(),
+    );
+    assert!(
+        note_tty.contains("held only topos entries and was deleted")
+            && !note_tty.contains("MCP_FILE_REMOVED"),
+        "the note reads as English on the TTY: {note_tty}"
     );
     // The row for the surfaces the bundle left names `demo` — never the store's id for it.
     let left = out
@@ -741,6 +756,32 @@ fn a_dest_move_is_a_clean_sweep_that_names_the_bundle_it_moved() {
         .find(|r| r.action == topos_types::results::PullAction::Removed)
         .unwrap_or_else(|| panic!("{:?}", out.data.skills));
     assert_eq!(left.skill, "demo", "{left:?}");
+
+    // BOTH ROWS STAND — the move and the surface it vacated are each true, and each worth seeing.
+    let for_demo: Vec<_> = out
+        .data
+        .skills
+        .iter()
+        .filter(|r| r.skill == "demo")
+        .collect();
+    assert_eq!(for_demo.len(), 2, "{for_demo:?}");
+
+    // …AND THE SUMMARY COUNTS ONE BUNDLE. The tally used to count rows, so one bundle moving
+    // destinations reported "Checked 2 bundles" over a machine holding one — the receipt above it
+    // naming that single bundle twice. Distinct bundles are counted once now, under the primary
+    // outcome: the bundle was UPDATED, and the vacated surface is a detail of the move.
+    let tty = crate::render::pull_tty(
+        &out.data,
+        &out.decisions,
+        &out.warnings,
+        &out.advisories,
+        &out.disclosures,
+        out.failed_bundles.len(),
+    );
+    assert!(
+        tty.contains("Checked 1 bundle: 1 updated."),
+        "one bundle, counted once, under what happened to it: {tty}"
+    );
 }
 
 /// **The entries plan is what decides reach — and what says what reach COST.** Four facts, over
@@ -2782,6 +2823,7 @@ fn a_workspace_mcp_subscribe_receipt_carries_the_typed_block() {
         false,
         false,
         &Default::default(),
+        None,
     )
     .unwrap();
     let ops::AddRefOutcome::Applied(data) = outcome else {
@@ -3644,6 +3686,27 @@ fn a_tampered_local_row_is_held_with_the_typed_refusal_and_prior_entries_stay() 
                 .has_entries_for("local:weather"),
             "{code}: the standing entry is held, not dropped"
         );
+        // AND THE SUMMARY AGREES WITH THE STATUS. The refused bundle is a bundle that could not
+        // be carried forward, so it is counted as one: the gate's line alone left the run exiting
+        // non-zero while the receipt said "1 already up to date".
+        assert_eq!(
+            out.failed_bundles.len(),
+            1,
+            "{code}: the refused bundle is counted: {:?}",
+            out.failed_bundles
+        );
+        let tty = crate::render::pull_tty(
+            &out.data,
+            &out.decisions,
+            &out.warnings,
+            &out.advisories,
+            &out.disclosures,
+            out.failed_bundles.len(),
+        );
+        assert!(
+            !tty.contains("already up to date"),
+            "{code}: a run that placed nothing never claims it was already current: {tty}"
+        );
     }
 }
 
@@ -3729,7 +3792,7 @@ fn an_orphaned_record_whose_entries_still_stand_gets_one_line_in_list() {
         governance: Box::new(NoGovernance),
     };
     let dir_connect = |_: &str| -> Box<dyn DirectorySource> { Box::new(fdir.clone()) };
-    ops::remove(
+    let outcome = ops::remove(
         &ctx,
         &ops::RemoveConnectors {
             session: &named,
@@ -3745,6 +3808,293 @@ fn an_orphaned_record_whose_entries_still_stand_gets_one_line_in_list() {
         listing(&ctx).data.scopes[0].orphans.is_empty(),
         "{:?}",
         listing(&ctx).data.scopes[0].orphans
+    );
+    // AND IT COSTS NO BYTES OF THEIRS. The folder is the one the person named to `add` — topos
+    // adopted it in place and never created it, so the record and the config entry are the whole
+    // of what this command may end. A line that offered `remove` and deleted the source folder
+    // would be the listing talking somebody into losing their own work.
+    assert!(
+        dir.is_dir() && dir.join("server.json").is_file(),
+        "the adopted source folder survives the command the listing offered"
+    );
+    let ops::RemoveOutcome::Applied(data) = outcome else {
+        panic!("--yes applies");
+    };
+    assert!(
+        data.items[0].bytes_kept,
+        "…and the receipt says so: {data:?}"
+    );
+    let tty = crate::render::remove_applied_tty(&data);
+    assert!(
+        tty.contains("stays") && tty.contains("wx"),
+        "the receipt names the folder it left alone: {tty}"
+    );
+}
+
+/// Adopt `name` as an MCP bundle rooted in the home dir, machine-wide — the ordinary door: a row,
+/// a record, and a config entry in every detected agent.
+fn adopt_mcp(rig: &Rig, ctx: &Ctx<'_>, name: &str) -> PathBuf {
+    let dir = rig.home.0.join(name);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("server.json"),
+        server_json(&format!("https://{name}.example/mcp")),
+    )
+    .unwrap();
+    ops::add_mcp(ctx, dir.to_str().unwrap(), true, &Default::default()).unwrap();
+    dir
+}
+
+/// A PAGE IS NOT A DEMAND. The orphan pass asks "does anything still demand this record?" and it
+/// was asking the row vector the listing had already narrowed and CUT — so `--limit`/`--offset`,
+/// which exist only to shorten output, turned every row that fell off the page into a record
+/// reported as abandoned, under a line offering `topos remove <name>`. Following that on a
+/// perfectly healthy bundle would have retired its config entries. The question is about the
+/// scope's whole resolution now, and paging cannot reach it.
+#[test]
+fn paging_the_rows_never_invents_an_orphan() {
+    let rig = Rig::new("orphan-paged");
+    seed_harness_dirs(&rig.home.0);
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    adopt_mcp(&rig, &ctx, "aaa");
+    adopt_mcp(&rig, &ctx, "zzz");
+
+    let listing = |page: ops::RowPage| {
+        ops::list_with(
+            &ctx,
+            &ops::ListRequest {
+                view: ops::ScopeView::Machine,
+                ..Default::default()
+            },
+            None,
+            None,
+            page,
+        )
+        .unwrap()
+    };
+    // Both rows demanded, both records live: nothing is abandoned at any page size.
+    let full = listing(ops::RowPage::unlimited());
+    assert_eq!(full.data.scopes[0].rows.len(), 2, "{:?}", full.data.scopes);
+    assert!(
+        full.data.scopes[0].orphans.is_empty(),
+        "{:?}",
+        full.data.scopes[0].orphans
+    );
+    for page in [
+        ops::RowPage {
+            offset: 0,
+            limit: Some(1),
+        },
+        ops::RowPage {
+            offset: 1,
+            limit: Some(1),
+        },
+    ] {
+        let listed = listing(page);
+        assert_eq!(listed.data.scopes[0].rows.len(), 1, "the page cut one row");
+        assert!(
+            listed.data.scopes[0].orphans.is_empty(),
+            "the row that fell off the page is still demanded, not abandoned: {:?}",
+            listed.data.scopes[0].orphans
+        );
+    }
+}
+
+/// A NAME IS NOT A RECORD. Two non-retired records in one scope can carry one display name — a
+/// workspace copy beside a local one is the everyday case — and the orphan pass suppressed by
+/// name, so a healthy `wx` silenced an ABANDONED `wx` whose config entry was sitting live in
+/// Cursor with nothing naming it. Suppression keys on the record the row actually resolved.
+#[test]
+fn a_same_named_healthy_record_never_silences_an_abandoned_one() {
+    let rig = Rig::new("orphan-twin");
+    rig.seed_session();
+    seed_harness_dirs(&rig.home.0);
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    let mcp_dir = adopt_mcp(&rig, &ctx, "wx");
+    let cursor = rig.home.0.join(".cursor/mcp.json");
+    let placed = std::fs::read_to_string(&cursor).unwrap();
+    std::fs::write(&cursor, placed.replace("wx.example", "edited.example")).unwrap();
+
+    // The local MCP row goes — its record is now abandoned with a live, hand-edited entry. A
+    // WORKSPACE bundle of the same name is demanded in its place; its row names its OWN record
+    // (the delivery carries the id), which is the whole point: one name, two records.
+    let v = mk_version(&[("SKILL.md", b"# wx\n")]);
+    let plane = FakePlane::new().with_version("s_wx", &v);
+    let mut ds = delivered_mcp("s_wx", "wx", &v);
+    ds.kind = "skill".into();
+    plane.serves(vec![ds]);
+    let mut ce = mcp_catalog_entry("s_wx", "wx", &v);
+    ce.kind = "skill".into();
+    let fdir = FakeDirectory {
+        skills: vec![ce],
+        channels: Vec::new(),
+    };
+    rig.write_global(&format!("[bundles]\n\"{HOST}/{WS_NAME}/wx\" = \"*\"\n"));
+    let _ = sweep(&ctx, &plane, &fdir);
+
+    let listed = ops::list_with(
+        &ctx,
+        &ops::ListRequest {
+            view: ops::ScopeView::Machine,
+            ..Default::default()
+        },
+        None,
+        None,
+        ops::RowPage::unlimited(),
+    )
+    .unwrap();
+    let scope = &listed.data.scopes[0];
+    assert!(
+        scope.rows.iter().any(|r| r.skill == "wx"),
+        "the healthy twin is demanded: {:?}",
+        scope.rows
+    );
+    let orphans = &scope.orphans;
+    assert_eq!(
+        orphans.len(),
+        1,
+        "the abandoned twin earns its own line: {orphans:?}"
+    );
+    assert_eq!(orphans[0].name, "wx");
+    assert!(
+        orphans[0].standing.iter().any(|p| p.contains("mcp.json")),
+        "it names the live entry: {orphans:?}"
+    );
+    assert!(
+        mcp_dir.is_dir(),
+        "the adopted folder is untouched by a read"
+    );
+}
+
+/// THE OFFERED COMMAND HAS TO RUN — and hit the record the line was about. A project store's
+/// orphan printed `topos remove <name>` like any other, but the classic arm resolved names in the
+/// HOME store alone: from inside the checkout the command answered "no such skill", and on a
+/// machine that happened to hold a same-named record it described THAT one instead — a listing
+/// line about one bundle offering a delete of another. `remove` resolves where you stand now, and
+/// runs every per-record read and write against the store that answered.
+#[test]
+fn a_project_orphans_offered_command_reaches_the_project_record() {
+    let rig = Rig::new("orphan-proj");
+    seed_harness_dirs(&rig.home.0);
+    rig.write_global("[bundles]\n");
+    let proj = Scratch::new("orphan-proj-checkout");
+    std::fs::create_dir_all(proj.0.join(".git")).unwrap();
+    std::fs::write(proj.0.join(crate::manifest::MANIFEST_FILE), "[bundles]\n").unwrap();
+    let ctx = rig.ctx_at(Some(&proj.0));
+
+    // A MACHINE record of the same name stands beside it — the twin the home-only resolver used
+    // to answer with. Its row is dropped so no demand-guard stands between the test and the
+    // resolution being proven; the RECORD is what must come through untouched.
+    let machine_dir = adopt_mcp(&rig, &ctx, "wx");
+    let machine_records: Vec<PathBuf> = std::fs::read_dir(rig.layout().skills_dir())
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .collect();
+    assert_eq!(machine_records.len(), 1, "{machine_records:?}");
+    rig.write_global("[bundles]\n");
+
+    // The project adopt: the checkout's own store, its own row, its own config entry.
+    let proj_dir = proj.0.join("wx");
+    std::fs::create_dir_all(&proj_dir).unwrap();
+    std::fs::write(
+        proj_dir.join("server.json"),
+        server_json("https://wx-proj.example/mcp"),
+    )
+    .unwrap();
+    ops::add_mcp(&ctx, proj_dir.to_str().unwrap(), false, &Default::default())
+        .expect("project adopt");
+    let playout = crate::sidecar::existing_project_store(&rig.fs, &proj.0)
+        .expect("the project adopt minted the checkout's store");
+    let cursor = proj.0.join(".cursor/mcp.json");
+    let placed = std::fs::read_to_string(&cursor).unwrap();
+    std::fs::write(&cursor, placed.replace("wx-proj.example", "edited.example")).unwrap();
+
+    // The project row goes; the hand-edited entry stays, so the record sticks — an orphan.
+    std::fs::write(proj.0.join(crate::manifest::MANIFEST_FILE), "[bundles]\n").unwrap();
+    let plane = FakePlane::new();
+    let fdir = FakeDirectory {
+        skills: Vec::new(),
+        channels: Vec::new(),
+    };
+    let _ = sweep(&ctx, &plane, &fdir);
+
+    let listing = || {
+        ops::list_with(
+            &ctx,
+            &ops::ListRequest {
+                view: ops::ScopeView::Here,
+                ..Default::default()
+            },
+            None,
+            None,
+            ops::RowPage::unlimited(),
+        )
+        .unwrap()
+    };
+    let listed = listing();
+    let project_scope = listed
+        .data
+        .scopes
+        .iter()
+        .find(|s| s.scope == "project")
+        .expect("a project scope");
+    assert_eq!(
+        project_scope.orphans.len(),
+        1,
+        "{:?}",
+        project_scope.orphans
+    );
+    assert_eq!(project_scope.orphans[0].name, "wx");
+    let tty = crate::render::list_tty(&listed);
+    assert!(tty.contains("`topos remove wx` ends it"), "{tty}");
+
+    // RUN EXACTLY WHAT IT OFFERED, standing where the listing was read.
+    let named = |_s: &Session| ops::SessionTransports {
+        plane: Box::new(plane.clone()),
+        directory: Box::new(fdir.clone()),
+        contribute: Box::new(NoContribute),
+        governance: Box::new(NoGovernance),
+    };
+    let dir_connect = |_: &str| -> Box<dyn DirectorySource> { Box::new(fdir.clone()) };
+    ops::remove(
+        &ctx,
+        &ops::RemoveConnectors {
+            session: &named,
+            directory: &dir_connect,
+        },
+        &["wx".to_owned()],
+        &[],
+        None,
+        true,
+    )
+    .expect("the offered command is runnable from inside the checkout");
+
+    // The PROJECT record is what ended.
+    let after = listing();
+    let project_scope = after
+        .data
+        .scopes
+        .iter()
+        .find(|s| s.scope == "project")
+        .expect("a project scope");
+    assert!(
+        project_scope.orphans.is_empty(),
+        "{:?}",
+        project_scope.orphans
+    );
+    assert!(
+        std::fs::read_dir(playout.skills_dir())
+            .map(|d| d.count())
+            .unwrap_or(0)
+            == 0,
+        "the project store's record is gone"
+    );
+    // Both folders are the person's own; neither was ever topos's to delete.
+    assert!(proj_dir.is_dir() && machine_dir.is_dir());
+    // And the MACHINE twin — the record the home-only resolver would have hit — still stands.
+    assert!(
+        machine_records.iter().all(|p| p.is_dir()),
+        "the machine record was not the one deleted: {machine_records:?}"
     );
 }
 
@@ -4617,6 +4967,7 @@ fn a_workspace_mcp_add_leaves_the_marker_behind_before_it_returns() {
         false,
         false,
         &Default::default(),
+        None,
     )
     .unwrap();
 
@@ -4670,6 +5021,7 @@ fn an_mcp_row_never_stands_without_its_marker_even_when_the_feed_is_dark() {
         true,
         true,
         &Default::default(),
+        None,
     )
     .expect("an explicit row resolves against the catalog, not the feed");
 
@@ -4695,6 +5047,7 @@ fn an_mcp_row_never_stands_without_its_marker_even_when_the_feed_is_dark() {
         true,
         true,
         &Default::default(),
+        None,
     )
     .expect_err("no catalog answer, no row");
     let manifest =

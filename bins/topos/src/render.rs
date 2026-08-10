@@ -285,18 +285,30 @@ pub(crate) fn next_actions(command: &str, argv: &[String], err: &ClientError) ->
                 readd_argv.clone(),
             ),
         ],
-        // A server bundle at a skill door: the fix is the `--kind` word, runnable as-is.
-        ClientError::McpFlagRequired { dir } => vec![crate::actions::next_action(
-            ActionCode::from("RUN_COMMAND".to_owned()),
-            vec![
-                "topos".into(),
-                "add".into(),
-                "--kind".into(),
-                "mcp".into(),
-                dir.clone(),
-                "--json".into(),
-            ],
-        )],
+        // A folder whose kind the door could not read: the fix is the `--kind` word, runnable as
+        // is. A folder carrying BOTH markers gets BOTH words — an agent must not have to pick
+        // between a real choice and a guess, and offering only one would be this refusal making
+        // the very decision it just declined to make.
+        ClientError::KindRequired { dir, ambiguous, .. } => {
+            let run = |kind: &str| {
+                crate::actions::next_action(
+                    ActionCode::from("RUN_COMMAND".to_owned()),
+                    vec![
+                        "topos".into(),
+                        "add".into(),
+                        "--kind".into(),
+                        kind.into(),
+                        dir.clone(),
+                        "--json".into(),
+                    ],
+                )
+            };
+            if *ambiguous {
+                vec![run("skill"), run("mcp")]
+            } else {
+                vec![run("mcp")]
+            }
+        }
         ClientError::AlreadyTrackedName { name } => vec![crate::actions::next_action(
             ActionCode::from("RUN_COMMAND".to_owned()),
             vec!["topos".into(), "diff".into(), name.clone(), "--json".into()],
@@ -1002,6 +1014,26 @@ pub(crate) fn resolution_next_actions(data: &PullData) -> Vec<NextAction> {
     data.skills
         .iter()
         .filter(|s| s.merge.as_ref().is_some_and(|m| m.resolved.is_some()))
+        .map(|s| {
+            crate::actions::next_action(
+                ActionCode::from("RUN_COMMAND".to_owned()),
+                vec!["topos".to_owned(), "publish".to_owned(), s.skill.clone()],
+            )
+        })
+        .collect()
+}
+
+/// The per-row next-action a DRAFT surfaces: the ordinary publish. The TTY row already says it
+/// ("your edits are not shared yet (topos publish <name>)") and the `--json` lane said nothing at
+/// all — so an agent that had just been told, in the payload, that a bundle carries unshared edits
+/// had no offered act to make on that fact. `publish` resolves the name across scopes itself, so
+/// the argv takes no scope flag, exactly like the printed command.
+pub(crate) fn draft_next_actions(data: &PullData) -> Vec<NextAction> {
+    data.skills
+        .iter()
+        // A row whose merge just RESOLVED is already offered the same publish by
+        // `resolution_next_actions`; offering it twice would put one act on the list twice.
+        .filter(|s| s.draft && s.merge.as_ref().is_none_or(|m| m.resolved.is_none()))
         .map(|s| {
             crate::actions::next_action(
                 ActionCode::from("RUN_COMMAND".to_owned()),
@@ -2403,6 +2435,55 @@ pub(crate) fn auth_status_tty(d: &crate::ops::AuthStatusData) -> String {
     s
 }
 
+/// Which of a bundle's several rows speaks for it in the SUMMARY. Higher wins.
+///
+/// The ordering is "what would a person say happened to this bundle?", and only one pair of it
+/// fires in practice today: a dest move produces an updated row and a removed-surface row for one
+/// bundle, and the bundle was UPDATED — it moved, and the surface it vacated is a detail of the
+/// move, visible on its own row underneath. The rest of the ladder is written down so a future
+/// multi-row shape lands somewhere deliberate instead of on whichever row was pushed first.
+fn primary_rank(s: &PullSkill) -> u8 {
+    use topos_types::results::PullAction as A;
+    match s.action {
+        // A decision owed outranks everything: it is the only outcome that needs a person.
+        A::Conflicted => 6,
+        // Bytes moved.
+        A::Installed | A::FastForwarded | A::Refreshed | A::Merged | A::DraftSynced => 5,
+        A::Removed => 4,
+        A::Withdrawn | A::Released => 3,
+        A::Held => 2,
+        A::UpToDate => 1,
+    }
+}
+
+/// The codes whose line is written to read as ENGLISH once the code is taken off the front — the
+/// TTY prints them that way, and the `--json` `warnings` array keeps the coded string it always
+/// carried. Two entries, not a policy: a person reading a receipt should not have to skip a
+/// machine word to reach the sentence, and these are the two that shipped one into prose.
+///
+/// This is deliberately an ALLOWLIST rather than "strip any leading SCREAMING_SNAKE token". Most
+/// coded lines do not read whole without their code (the code IS the subject of the sentence), so
+/// a blanket rule would mangle them. Settling one convention for every coded line — which channel
+/// carries the code, and how prose is written around it — is the message-contract follow-up.
+const PLAIN_ON_TTY: [&str; 2] = ["MCP_FILE_REMOVED", "PATH_MISSING"];
+
+/// A coded line as the TTY says it: the code taken off the front for the allowlisted codes above,
+/// verbatim for everything else.
+pub(crate) fn plain_coded_line(line: &str) -> &str {
+    for code in PLAIN_ON_TTY {
+        // The SEPARATOR is the whole-token test: a code is only a code when a space follows it.
+        // Testing the remainder's length instead proved nothing — stripping a non-empty prefix
+        // always shortens the line — so any longer word starting with an allowlisted code
+        // (`PATH_MISSINGFOO …`) had its first eleven characters eaten.
+        if let Some(rest) = line.strip_prefix(code)
+            && let Some(rest) = rest.strip_prefix(' ')
+        {
+            return rest;
+        }
+    }
+    line
+}
+
 /// One `remove` item line for the describe/apply — the boundary a followed removal keeps vs the
 /// permanence of a local delete.
 fn remove_item_line(item: &RemoveItem, applied: bool) -> String {
@@ -2416,20 +2497,42 @@ fn remove_item_line(item: &RemoveItem, applied: bool) -> String {
     // one producer now; here the FIRST is the headline and the rest are indented under it, which
     // is what every other multi-fact receipt in this CLI already does.
     if let Some(note) = &item.note {
-        let verb = if applied { "Removed" } else { "Would remove" };
-        let mut clauses = note.lines();
-        let head = clauses.next().unwrap_or_default();
-        let mut out = format!("{verb} '{}'{} — {head}", item.name, from_dirs(item));
-        let rest: Vec<&str> = clauses.collect();
-        if rest.is_empty() {
-            out.push('.');
-        } else {
-            for line in rest {
-                out.push_str(&format!("\n    {line}"));
+        // THE ONE THING A NOTE MAY NOT SWALLOW: what happens to the bytes. Replacing the stock
+        // line is harmless while that line only re-words the kind — but the three LOCAL shapes
+        // state the byte outcome itself (`PERMANENTLY` for the two that destroy, "the folder
+        // stays" for the one that does not), and a config-placed bundle's note is ALWAYS populated
+        // by the per-file convergence lines. So the gate for an irreversible delete was asking
+        // consent in a sentence about config files. For those three the stock line is the
+        // headline and every note clause indents under it; for the rest the note still leads.
+        let (mut out, clauses): (String, Vec<&str>) = match item.kind {
+            RemoveKind::TrackedLocalPermanent
+            | RemoveKind::UntrackedLocal
+            | RemoveKind::TrackedLocalRetired => {
+                (remove_kind_line(item, applied), note.lines().collect())
             }
+            _ => {
+                let verb = if applied { "Removed" } else { "Would remove" };
+                let mut lines = note.lines();
+                let head = lines.next().unwrap_or_default();
+                let mut lead = format!("{verb} '{}'{} — {head}", item.name, from_dirs(item));
+                let rest: Vec<&str> = lines.collect();
+                if rest.is_empty() {
+                    lead.push('.');
+                }
+                (lead, rest)
+            }
+        };
+        for line in clauses {
+            out.push_str(&format!("\n    {line}"));
         }
         return out;
     }
+    remove_kind_line(item, applied)
+}
+
+/// The stock sentence one `remove` kind speaks in — the byte outcome in the verb's own words,
+/// before any per-file note the apply folded on.
+fn remove_kind_line(item: &RemoveItem, applied: bool) -> String {
     match item.kind {
         RemoveKind::ManifestRemoved => {
             let manifest = item.manifest.as_deref().unwrap_or("topos.toml");
@@ -2486,6 +2589,49 @@ fn remove_item_line(item: &RemoveItem, applied: bool) -> String {
             let verb = if applied { "Deleted" } else { "Would delete" };
             format!(
                 "{verb} '{}'{} PERMANENTLY — an untracked local copy; no other copy exists.",
+                item.name,
+                from_dirs(item)
+            )
+        }
+        // The folder is the person's own — they named it to `add`, and topos recorded it without
+        // ever creating it. So the sentence leads with what actually ends (the record, and with it
+        // whatever it placed elsewhere) and states plainly that the folder is not part of that.
+        // Saying WHY it stays is the difference between a receipt someone trusts and one they
+        // re-check against the filesystem.
+        RemoveKind::TrackedLocalRetired => {
+            let (verb, manages) = if applied {
+                ("Removed", "topos no longer manages it")
+            } else {
+                ("Would remove", "topos would stop managing it")
+            };
+            let (stays, they, them) = if item.kept_dirs.len() == 1 {
+                ("stays where it is", "that folder", "it")
+            } else {
+                ("stay where they are", "those folders", "them")
+            };
+            // A record can hold BOTH shapes — a copy topos materialized somewhere and the source
+            // folder it adopted. The permanent half keeps the word; the kept half comes last,
+            // because "what survives" is the clause a person scans a removal receipt for.
+            let deleted = if item.agent_dirs.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    "; the copies in {} are deleted PERMANENTLY",
+                    item.agent_dirs.join(", ")
+                )
+            };
+            format!(
+                "{verb} '{}' — {manages}{deleted}; {} {stays} (you added {they} in place, so \
+                 topos never created {them}).",
+                item.name,
+                item.kept_dirs.join(", "),
+            )
+        }
+        RemoveKind::BuiltinOptOut => {
+            let verb = if applied { "Removed" } else { "Would remove" };
+            format!(
+                "{verb} '{}'{} — the built-in skill's opt-out is durable (no sweep re-places it); \
+                 `topos add topos` brings it back.",
                 item.name,
                 from_dirs(item)
             )
@@ -3231,11 +3377,37 @@ pub(crate) fn pull_tty(
     use topos_types::results::PullAction;
     let mut kept_lines: Vec<String> = Vec::new();
     let mut tally = PullTally::default();
+    // ONE BUNDLE, ONE COUNT — the rows STAY, the tally does not double.
+    //
+    // A single bundle can earn several rows in one run and every one of them is true: a dest move
+    // both updates the bundle and removes the surface it left, so the receipt shows an updated row
+    // AND a removed-surface row, which is what a person needs to see. The SUMMARY is a different
+    // question — how many bundles did this run touch — and counting rows answered it wrong
+    // ("Checked 2 bundles" over a machine holding one). Each distinct bundle is counted once now,
+    // under its PRIMARY outcome ([`primary_rank`]), so the clauses still sum to the total.
+    let primary: std::collections::HashSet<usize> = {
+        let mut best: std::collections::BTreeMap<(&str, &str), (usize, u8)> =
+            std::collections::BTreeMap::new();
+        for (i, s) in data.skills.iter().enumerate() {
+            let key = (s.scope.as_deref().unwrap_or(""), s.skill.as_str());
+            let rank = primary_rank(s);
+            match best.get(&key) {
+                Some(&(_, held)) if held >= rank => {}
+                _ => {
+                    best.insert(key, (i, rank));
+                }
+            }
+        }
+        best.values().map(|&(i, _)| i).collect()
+    };
     let mut rows: Vec<(String, String, Vec<String>)> = data
         .skills
         .iter()
-        .filter_map(|s| {
-            tally.count(s);
+        .enumerate()
+        .filter_map(|(i, s)| {
+            if primary.contains(&i) {
+                tally.count(s);
+            }
             // The name a receipt row leads with: the workspace-qualified display where one is
             // recorded, `+`/`-`-led for the rows that moved bytes in or out.
             let shown = s.display.as_deref().unwrap_or(&s.skill);
@@ -3306,10 +3478,10 @@ pub(crate) fn pull_tty(
         out.push_str(&scope.relative(&format!("{k}\n")));
     }
     for w in warnings.iter().chain(advisories) {
-        out.push_str(&format!("warning: {w}\n"));
+        out.push_str(&format!("warning: {}\n", plain_coded_line(w)));
     }
     for d in disclosures {
-        out.push_str(&format!("note: {d}\n"));
+        out.push_str(&format!("note: {}\n", plain_coded_line(d)));
     }
 
     // The delivered notices (verdicts first) — an interactive `update` MARKED these read server-side,
@@ -3331,7 +3503,7 @@ pub(crate) fn pull_tty(
     // document) is one line about no bundle at all, and two lines can be about one bundle. Counting
     // lines invented bundles that do not exist and then reported them failed — `Checked 3 skills:
     // 2 already up to date, 1 failed` over a machine holding two.
-    let total = data.skills.len() + failed + decisions.len();
+    let total = primary.len() + failed + decisions.len();
     let noun = managed_noun(&data.skills, total);
     tally.failed = failed;
     tally.waiting += decisions.len();
@@ -4370,6 +4542,35 @@ mod tests {
     /// 'demo' PERMANENTLY" asked a person to approve bytes it declined to show — while the APPLY
     /// receipt afterwards named the path. Both tenses name it now, and both permanent shapes do.
     #[test]
+    fn a_coded_line_loses_its_code_only_on_a_whole_token() {
+        // The two allowlisted codes read as English without them.
+        assert_eq!(
+            super::plain_coded_line("PATH_MISSING \"~/x\" is demanded machine-wide"),
+            "\"~/x\" is demanded machine-wide"
+        );
+        assert_eq!(
+            super::plain_coded_line(
+                "MCP_FILE_REMOVED ~/.codex/config.toml held only topos entries"
+            ),
+            "~/.codex/config.toml held only topos entries"
+        );
+        // A LONGER WORD that merely starts with a code is not that code. The guard used to test
+        // the remainder's length — which a non-empty prefix always shortens — so this line came
+        // out with its first eleven characters eaten.
+        for line in [
+            "PATH_MISSINGFOO something happened",
+            "MCP_FILE_REMOVEDX something happened",
+            "PATH_MISSING_EXTRA: something happened",
+        ] {
+            assert_eq!(super::plain_coded_line(line), line, "{line}");
+        }
+        // A code with nothing after it is left alone too — there is no sentence to promote.
+        assert_eq!(super::plain_coded_line("PATH_MISSING"), "PATH_MISSING");
+        // Anything uncoded passes through untouched.
+        assert_eq!(super::plain_coded_line("plain english"), "plain english");
+    }
+
+    #[test]
     fn a_permanent_delete_names_its_folders_in_both_tenses() {
         let item = |kind| RemoveItem {
             name: "demo".to_owned(),
@@ -4377,6 +4578,7 @@ mod tests {
             manifest: None,
             workspace_id: None,
             agent_dirs: vec!["~/work/demo".to_owned()],
+            kept_dirs: Vec::new(),
             bytes_kept: false,
             note: None,
         };
@@ -4417,6 +4619,7 @@ mod tests {
             manifest: Some("~/.topos/topos.toml".to_owned()),
             workspace_id: None,
             agent_dirs,
+            kept_dirs: Vec::new(),
             bytes_kept: true,
             note: None,
         };
@@ -5165,6 +5368,7 @@ mod tests {
                 manifest: Some("~/.topos/topos.toml".to_owned()),
                 workspace_id: None,
                 agent_dirs: Vec::new(),
+                kept_dirs: Vec::new(),
                 bytes_kept: true,
                 note: None,
             }],

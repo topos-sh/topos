@@ -350,6 +350,13 @@ pub(crate) fn sync_one_planned(
             let converged =
                 converge_placements(ctx, &sp, skill_id, &lock, &sync, &map, &managed, &work)?;
             let map = converged.map;
+            // A LOCAL DRAFT rides EVERY row this arm produces, and the flag is computed HERE —
+            // above the arm's early returns — because it used to be computed below them. A settled
+            // draft that fanned out, and a bundle whose folder this run re-created, both returned
+            // `draft: false` while the person's edits stood: `list` called them drafts, `status`
+            // counted them, and the update receipt said otherwise about the same machine. The
+            // three surfaces read one machine and now say one thing about it.
+            let drafted = matches!(work.state, WorkState::Draft { .. });
             // The SETTLED-DRAFT fan-out: a draft whose content is unchanged since the previous
             // run's observation is copied onto the bundle's other placements in this scope (their
             // baselines advance with it); an unsettled draft only updates the observation — a
@@ -373,6 +380,7 @@ pub(crate) fn sync_one_planned(
                     if !converged.created.is_empty() {
                         row.note = Some(also_line("installed", &converged.created));
                     }
+                    row.draft = drafted;
                     return Ok(row);
                 }
             } else if sync.draft_observed.is_some() {
@@ -398,14 +406,9 @@ pub(crate) fn sync_one_planned(
                 if !converged.refreshed.is_empty() {
                     row.note = Some(also_line("updated", &converged.refreshed));
                 }
+                row.draft = drafted;
                 return Ok(row);
             }
-            // A LOCAL DRAFT rides every row this arm produces. Delivery had nothing to do for a
-            // drafted bundle, so its action is `up_to_date` — and the fact was discarded here,
-            // which is how a receipt came to announce "all up to date" about the very bundles
-            // `list` was calling drafts and `status` was counting as drafts ahead. The three
-            // surfaces read one machine; they now say the same thing about it.
-            let drafted = matches!(work.state, WorkState::Draft { .. });
             if !converged.refreshed.is_empty() {
                 let mut row = state_row(&name, &sync, PullAction::Refreshed);
                 // Every folder holding the applied version, not only the ones rewritten — a

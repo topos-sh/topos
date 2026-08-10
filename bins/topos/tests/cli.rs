@@ -206,10 +206,10 @@ fn json_envelope_apply_receipt_on_ungated_arms_describe_on_gated() {
     assert!(ok, "the gated describe exits 0: {v}");
     assert_eq!(v["command"], "remove");
     assert_eq!(v["data"]["describe"]["applied"], false);
-    assert_eq!(
-        v["data"]["describe"]["items"][0]["kind"],
-        "tracked-local-permanent"
-    );
+    // The built-in's own kind, not the local-delete one it used to borrow: its bytes ship inside
+    // the binary and `topos add topos` places them again, so calling this a permanent delete was
+    // the receipt telling a person their only copy was going.
+    assert_eq!(v["data"]["describe"]["items"][0]["kind"], "builtin-opt-out");
     assert_eq!(v["next_actions"][0]["code"], "APPLY_DESCRIBED");
     let argv = v["next_actions"][0]["argv"].as_array().expect("argv");
     assert_eq!(argv.last().and_then(|t| t.as_str()), Some("--yes"));
@@ -1101,4 +1101,36 @@ fn a_person_facing_line_reaches_every_dialect_as_an_injectable_document() {
         let _ = std::fs::remove_dir_all(&disc);
         let _ = std::fs::remove_dir_all(&claude);
     }
+}
+
+/// `-s` picks WHICH skills to take from a repository that holds several. An MCP server bundle is
+/// ONE document with nothing to select from, so the pair is refused by name — the refusal moved
+/// out of clap (where the argument grammar could state it) into the runtime dispatch, and its
+/// coverage did not move with it. Asserted through real argv, which is the only place the pairing
+/// exists at all.
+#[test]
+fn selecting_members_of_an_mcp_source_is_refused_by_name() {
+    let home = scratch("mcp-select");
+    let (ok, v) = run(
+        &home,
+        &[
+            "add",
+            "-s",
+            "weather",
+            "--kind",
+            "mcp",
+            "./anything",
+            "--json",
+        ],
+    );
+    assert!(!ok, "the pairing exits nonzero: {v}");
+    assert_eq!(v["error"]["code"], "INVALID_ARGUMENT");
+    let msg = v["error"]["context"]["message"]
+        .as_str()
+        .unwrap_or_default();
+    assert!(
+        msg.contains("-s") && msg.contains("one document") && msg.contains("drop `-s`"),
+        "the refusal names the flag and why it cannot apply: {msg}"
+    );
+    let _ = std::fs::remove_dir_all(&home);
 }

@@ -4,6 +4,11 @@
 //!
 //! - a TRACKED, never-published LOCAL skill → the agent dirs AND the sidecar entry go (no other
 //!   copy exists).
+//! - the same skill when its bytes live in a folder the person ADOPTED IN PLACE → the record and
+//!   its config entries retire and the FOLDER STAYS. One rule decides, everywhere in this file:
+//!   topos deletes only what topos created. An adopted source existed before the row and belongs
+//!   to the person after it, so no arm here — not the orphan fall-through, not `--yes` — is a
+//!   route to losing it.
 //! - an UNTRACKED local copy sitting in an agent dir (`<name>@<agent>`) → a permanent delete of
 //!   that directory (topos never adopted it — deleting it is the only removal there is).
 //! - the built-in `topos` skill → the durable device opt-out (`topos add topos` brings it back).
@@ -55,10 +60,24 @@ enum Removal {
     /// ORPHAN — a retained workspace-delivered copy whose demand already ended, which the next
     /// `topos update` resolves once — the notes carry the honest disclosure (describe-tense and
     /// applied-tense; receipts must stay true in both).
+    ///
+    /// `dirs` and `kept_dirs` split the record's placements by ONE question: did topos create this
+    /// folder? `dirs` are topos's own, and the delete is permanent. `kept_dirs` are the person's —
+    /// an ADOPTED SOURCE, a folder that existed before the row and belongs to them after it — and
+    /// no removal deletes one. It is the same boundary every sweep already holds
+    /// ([`super::reconcile`] spares an adopted source from every clean); this arm holds it too,
+    /// because a verb reachable from a listing's suggested command must not be the one place a
+    /// person's own directory can be destroyed.
     TrackedLocal {
+        /// The store the record lives in — the machine's, or the checkout's own. Every per-record
+        /// read and write below rides THIS layout, never `ctx.layout`: a project record resolved
+        /// by a home-store layout is a delete aimed at whatever same-named machine record the walk
+        /// happened to find first.
+        layout: crate::sidecar::Layout,
         skill_id: String,
         name: String,
         dirs: Vec<PathBuf>,
+        kept_dirs: Vec<PathBuf>,
         note: Option<OrphanNote>,
     },
     /// An untracked copy in an agent dir → a permanent delete of that directory.
@@ -132,9 +151,11 @@ pub(crate) fn remove(
             // A config-placed bundle's blast radius is not its dirs — the `--yes` gate must name
             // the agent configs the apply will edit BEFORE consent, not only on the receipt after
             // it. The list is knowable now: the bundle's own record names every entry topos placed.
-            Removal::TrackedLocal { skill_id, .. } => {
+            Removal::TrackedLocal {
+                layout, skill_id, ..
+            } => {
                 gated = true;
-                let files = mcp_entry_files(ctx, skill_id);
+                let files = mcp_entry_files(ctx, layout, skill_id);
                 if let Some(line) = also_removes_line(&files) {
                     item.note = Some(match item.note.take() {
                         Some(prev) => format!("{prev} · {line}"),
@@ -189,12 +210,20 @@ pub(crate) fn remove(
     let mut items: Vec<RemoveItem> = removals.iter().map(|r| describe_item(r, true)).collect();
     for (removal, item) in removals.iter().zip(items.iter_mut()) {
         match removal {
-            Removal::TrackedLocal { skill_id, dirs, .. } => {
+            Removal::TrackedLocal {
+                layout,
+                skill_id,
+                dirs,
+                ..
+            } => {
                 // A config-placed bundle's reach is not these dirs — it is the entries it wrote
                 // into agents' MCP configs. They go FIRST, while the record that names them still
                 // exists: retired afterwards there would be nothing left to prove which entries
                 // were ever this bundle's, and they would sit in those files forever.
-                retire_mcp_entries(ctx, skill_id, item);
+                retire_mcp_entries(ctx, layout, skill_id, item);
+                // ONLY the folders topos made. `kept_dirs` is deliberately not iterated here —
+                // an adopted source is the person's directory, and the record retiring is the
+                // whole of what this verb ends for it.
                 for dir in dirs {
                     if ctx.fs.exists(dir) {
                         ctx.fs.remove_dir_all(dir)?;
@@ -202,7 +231,7 @@ pub(crate) fn remove(
                 }
                 // Drop the sidecar entry — a never-published local has no other copy.
                 let sid = SkillId::parse(skill_id)?;
-                let skill_dir = ctx.layout.skill_dir(&sid);
+                let skill_dir = layout.skill_dir(&sid);
                 if ctx.fs.exists(&skill_dir) {
                     ctx.fs.remove_dir_all(&skill_dir)?;
                 }
@@ -241,9 +270,9 @@ pub(crate) fn remove(
 /// The config files this bundle's own record carries standing entries in, `~`-abbreviated, in
 /// record order and deduped — what the describe names before consent and what the apply will edit.
 /// Empty for an ordinary skill record (no config entries) and for a scope that never config-placed.
-fn mcp_entry_files(ctx: &Ctx<'_>, skill_id: &str) -> Vec<String> {
+fn mcp_entry_files(ctx: &Ctx<'_>, layout: &crate::sidecar::Layout, skill_id: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
-    for entry in crate::config_custody::entries_of(ctx.fs, &ctx.layout, skill_id) {
+    for entry in crate::config_custody::entries_of(ctx.fs, layout, skill_id) {
         let file = super::inventory::pretty(ctx, std::path::Path::new(&entry.file));
         if !out.contains(&file) {
             out.push(file);
@@ -276,11 +305,16 @@ fn also_removes_line(files: &[String]) -> Option<String> {
 /// line, never a silent skip. The per-agent outcomes fold into the item's note for the same reason
 /// the manifest arm folds them: a removal that touched somebody's agent config says which files it
 /// touched.
-fn retire_mcp_entries(ctx: &Ctx<'_>, skill_id: &str, item: &mut RemoveItem) {
+fn retire_mcp_entries(
+    ctx: &Ctx<'_>,
+    layout: &crate::sidecar::Layout,
+    skill_id: &str,
+    item: &mut RemoveItem,
+) {
     let Some(roots) = ctx.roots.clone() else {
         return;
     };
-    if !ctx.fs.exists(&ctx.layout.config_custody_path()) {
+    if !ctx.fs.exists(&layout.config_custody_path()) {
         return; // nothing was ever config-placed in this scope
     }
     let Ok(sid) = SkillId::parse(skill_id) else {
@@ -288,15 +322,19 @@ fn retire_mcp_entries(ctx: &Ctx<'_>, skill_id: &str, item: &mut RemoveItem) {
     };
     // Classification does not need the placement map: the durable marker answers first, and an
     // unreadable map only costs the manifest-row rung below it.
-    let placements = doc::read_map(ctx.fs, &ctx.layout.published(&sid).map)
+    let placements = doc::read_map(ctx.fs, &layout.published(&sid).map)
         .ok()
         .flatten()
         .map(|m| m.placements)
         .unwrap_or_default();
-    if !crate::bundle_kind::classify(ctx, skill_id, &placements).is_mcp() {
+    // The kind marker and the scope's project root are BOTH per-store facts, so they are asked of
+    // the owning store — a project record classified against the home layout reads whatever marker
+    // a same-named machine record happens to carry.
+    let sctx = super::pull::ctx_with_layout(ctx, layout);
+    if !crate::bundle_kind::classify(&sctx, skill_id, &placements).is_mcp() {
         return;
     }
-    let project_root = ctx.layout.project_root().map(std::path::Path::to_path_buf);
+    let project_root = layout.project_root().map(std::path::Path::to_path_buf);
     let detected: std::collections::BTreeSet<String> = topos_harness::registry::detected_harnesses(
         &roots.home,
         project_root.as_deref().or(roots.cwd.as_deref()),
@@ -306,7 +344,7 @@ fn retire_mcp_entries(ctx: &Ctx<'_>, skill_id: &str, item: &mut RemoveItem) {
     .collect();
     let io = crate::mcp_engine::ScopeIo {
         fs: ctx.fs,
-        layout: &ctx.layout,
+        layout,
         home: roots.home.clone(),
         project_root,
     };
@@ -342,7 +380,15 @@ fn retire_mcp_entries(ctx: &Ctx<'_>, skill_id: &str, item: &mut RemoveItem) {
         }
     }
     lines.extend(gone);
-    lines.extend(outcome.notices.iter().cloned());
+    // The notices land in a person's RECEIPT here, not in the sweep's machine channel — so they
+    // arrive as prose, with the leading code taken off ("~/.codex/config.toml held only topos
+    // entries and was deleted"). The coded spelling still rides the sweep's warnings array.
+    lines.extend(
+        outcome
+            .notices
+            .iter()
+            .map(|n| crate::render::plain_coded_line(n).to_owned()),
+    );
     lines.extend(outcome.warnings.iter().cloned());
     // A detach that could not take the lock or write the scope document has LOST custody of a
     // drifted row the record is about to take with it. That is the person's business, not a silent
@@ -373,6 +419,18 @@ fn standing_row_refusal(name: &str) -> ClientError {
     ))
 }
 
+/// A record a CHECKOUT'S OWN file still demands, named from somewhere that file is not the nearest
+/// one (a nested checkout, most often). The machine twin above can offer `-g`; here the row lives
+/// in a specific file, and the verb that edits it is the same `remove` run from the folder that
+/// file governs — so the refusal names both.
+fn standing_project_row_refusal(name: &str, file: &str, dir: &str) -> ClientError {
+    ClientError::InvalidArgument(format!(
+        "'{name}' is demanded by {file} — deleting the copy would leave that row standing (every \
+         later `topos update` there would fail on the missing folder); run `topos remove {name}` \
+         from {dir} to drop the row and the copy together"
+    ))
+}
+
 fn delivered_refusal(name: &str) -> ClientError {
     ClientError::InvalidArgument(format!(
         "'{name}' is delivered from a workspace — remove the DEMAND, not the copy: `topos \
@@ -383,10 +441,13 @@ fn delivered_refusal(name: &str) -> ClientError {
 }
 
 /// Every name (and reference) the MACHINE scope still demands — the rows (bundle or `"off"`) of
-/// the same offline resolution `list` and `status` render. This is the demand-guard's key: the
-/// classic ladder only ever deletes HOME-store records, and a workspace-provenance record whose
-/// name none of these rows claim is an ORPHAN — its demand already ended, so refusing toward a row
-/// that does not exist would be false. Offline by construction (no dial).
+/// the same offline resolution `list` and `status` render. Half of the demand-guard's key: a
+/// record whose name no row claims is an ORPHAN — its demand already ended, so refusing toward a
+/// row that does not exist would be false. Offline by construction (no dial).
+///
+/// This is the MACHINE half only. The classic ladder resolves where you STAND, so it also reaches
+/// records held in a checkout's own store, and a row in THAT checkout's file is just as standing a
+/// demand as a machine-wide one — [`project_demand`] asks the scope that owns the record.
 fn machine_demand(ctx: &Ctx<'_>) -> Result<HashSet<String>, ClientError> {
     let (all, cache) = super::inventory::read_sources(ctx)?;
     let resolved = super::inventory::resolve(ctx, &all, &cache)?;
@@ -396,6 +457,53 @@ fn machine_demand(ctx: &Ctx<'_>) -> Result<HashSet<String>, ClientError> {
         out.insert(row.reference.clone());
     }
     Ok(out)
+}
+
+/// What ONE checkout's own file still demands, and which file that is — the same offline
+/// resolution, asked from inside `dir` so the checkout's own `topos.toml` is the nearest one.
+///
+/// It exists because "where you stand" and "what is demanded" were answered by different scopes. A
+/// checkout NESTED inside another resolves its own file as nearest, while the record ladder walks
+/// out to the parent — so a bare `remove` from the inner folder found the parent's record, asked
+/// only the machine's rows, and read a live parent row as an ended delivery. Resolving at the
+/// OWNING checkout is what makes the two answers the same question.
+///
+/// Full row resolution rather than a plain read of the file's keys: a channel line demands its
+/// MEMBERS by name, and a guard that only saw the literal rows would miss every one of them.
+fn project_demand(
+    ctx: &Ctx<'_>,
+    dir: &std::path::Path,
+) -> Result<(HashSet<String>, Option<PathBuf>), ClientError> {
+    let mut roots = ctx.roots.clone();
+    match roots.as_mut() {
+        Some(r) => r.cwd = Some(dir.to_path_buf()),
+        // No discovery roots means no cwd chain was ever walked, so no project store could have
+        // answered — nothing to ask.
+        None => return Ok((HashSet::new(), None)),
+    }
+    let at = Ctx {
+        fs: ctx.fs,
+        ids: ctx.ids,
+        clock: ctx.clock,
+        device_id: ctx.device_id.clone(),
+        layout: ctx.layout.clone(),
+        harness: ctx.harness,
+        plane: ctx.plane,
+        follow: ctx.follow,
+        roots,
+        progress: ctx.progress,
+    };
+    let (all, cache) = super::inventory::read_sources(&at)?;
+    let resolved = super::inventory::resolve(&at, &all, &cache)?;
+    let Some(section) = resolved.project() else {
+        return Ok((HashSet::new(), None));
+    };
+    let mut out = HashSet::new();
+    for row in &section.rows {
+        out.insert(row.name.clone());
+        out.insert(row.reference.clone());
+    }
+    Ok((out, section.manifest_path.clone()))
 }
 
 /// Classify ONE target: a followed catalog skill (exclusion), a tracked-local (permanent), or an
@@ -434,8 +542,10 @@ fn classify(
             if demanded.contains(&name) || demanded.contains(token) {
                 return Err(delivered_refusal(&name));
             }
-            match super::resolve_skill(ctx, &name) {
-                Ok((sid, lock)) => tracked_or_followed(ctx, demanded, sid, lock.name),
+            match super::resolve_skill_here(ctx, &name, None) {
+                Ok((layout, sid, lock)) => {
+                    tracked_or_followed(ctx, demanded, layout, sid, lock.name)
+                }
                 Err(ClientError::NoSuchSkill { .. }) => {
                     untracked(ctx, demanded, roots, agent_filter, &name)
                 }
@@ -450,8 +560,8 @@ fn classify(
         }
         // Not a plane resource: the local paths — a tracked skill you `add`ed, or an untracked agent-dir
         // copy discovery knows.
-        None => match super::resolve_skill(ctx, token) {
-            Ok((sid, lock)) => tracked_or_followed(ctx, demanded, sid, lock.name),
+        None => match super::resolve_skill_here(ctx, token, None) {
+            Ok((layout, sid, lock)) => tracked_or_followed(ctx, demanded, layout, sid, lock.name),
             Err(ClientError::NoSuchSkill { .. }) => {
                 untracked(ctx, demanded, roots, agent_filter, token)
             }
@@ -475,6 +585,7 @@ struct OrphanNote {
 fn tracked_or_followed(
     ctx: &Ctx<'_>,
     demanded: &HashSet<String>,
+    layout: crate::sidecar::Layout,
     sid: SkillId,
     name: String,
 ) -> Result<Removal, ClientError> {
@@ -484,38 +595,58 @@ fn tracked_or_followed(
     // editing the demand, never by deleting the copy: the classic arm would delete the bytes and
     // leave the row, and every later sweep for that row fails on a path that is gone. Which
     // refusal depends only on WHERE the demand lives, not on how the copy got here.
-    if demanded.contains(&name) {
+    //
+    // ASK THE SCOPE THAT OWNS THE RECORD. The ladder resolved this record in a particular store,
+    // and that store's own file is the one that can still be claiming it — which is not the
+    // machine's file whenever the record came from a checkout, and not even the NEAREST checkout's
+    // when you are standing in one nested inside it.
+    if layout.is_project_scope()
+        && let Some(dir) = layout.project_root()
+    {
+        let (claimed, file) = project_demand(ctx, dir)?;
+        if claimed.contains(&name) {
+            return Err(if followed {
+                delivered_refusal(&name)
+            } else {
+                let spelled = file.as_deref().map_or_else(
+                    || "that checkout's topos.toml".to_owned(),
+                    |f| super::inventory::pretty(ctx, f),
+                );
+                standing_project_row_refusal(&name, &spelled, &super::inventory::pretty(ctx, dir))
+            });
+        }
+    } else if demanded.contains(&name) {
         return Err(if followed {
             delivered_refusal(&name)
         } else {
             standing_row_refusal(&name)
         });
     }
-    // The placement dirs to delete come from the record's map.
-    let sp = ctx.layout.published(&sid);
+    // The placement dirs come from the record's map, SPLIT by the never-deletable marker: a slot
+    // carrying `adopted_source` is the folder the person named to `add`, which topos recorded
+    // without ever writing into. Everything else topos materialized and may retire.
+    let sp = layout.published(&sid);
     let map = doc::read_map(ctx.fs, &sp.map)?;
-    let dirs: Vec<PathBuf> = map
-        .as_ref()
-        .map(|m| m.placements.iter().map(PathBuf::from).collect())
-        .unwrap_or_default();
+    let mut dirs: Vec<PathBuf> = Vec::new();
+    let mut kept_dirs: Vec<PathBuf> = Vec::new();
+    if let Some(m) = map.as_ref() {
+        for (i, dir) in m.placements.iter().enumerate() {
+            // A slot with NO recorded state is unproven, not proven-topos's: it falls to the
+            // permanent arm exactly as it always has, because the marker is what buys the
+            // exemption and an absent record buys nothing.
+            if m.placement_state.get(i).is_some_and(|st| st.adopted_source) {
+                kept_dirs.push(PathBuf::from(dir));
+            } else {
+                dirs.push(PathBuf::from(dir));
+            }
+        }
+    }
     // The orphan's honest note. When the next update would retire the copy anyway, the describe
     // says so (doing nothing also resolves it); an adopted-in-place source dir is exactly what no
-    // update deletes, so that claim is withheld and the explicit-remove boundary named instead.
+    // update deletes AND what this verb will not delete either, so both claims are withheld and
+    // the record — the whole of what is actually ending — is named instead.
     let note = followed.then(|| {
-        let adopted = map
-            .as_ref()
-            .is_some_and(|m| m.placement_state.iter().any(|s| s.adopted_source));
-        if adopted {
-            OrphanNote {
-                describe: "a retained copy of an ended workspace delivery; its dir was adopted \
-                           in place, so no sweep deletes it — only an explicit remove does \
-                           (record included)"
-                    .to_owned(),
-                applied: "a retained copy of an ended workspace delivery — deleted with its \
-                          record"
-                    .to_owned(),
-            }
-        } else {
+        if kept_dirs.is_empty() {
             OrphanNote {
                 describe: "a retained copy of an ended workspace delivery; the next `topos \
                            update` retires it anyway, so doing nothing also resolves this — \
@@ -525,12 +656,19 @@ fn tracked_or_followed(
                           record"
                     .to_owned(),
             }
+        } else {
+            OrphanNote {
+                describe: "a retained record of an ended workspace delivery".to_owned(),
+                applied: "a retained record of an ended workspace delivery".to_owned(),
+            }
         }
     });
     Ok(Removal::TrackedLocal {
+        layout,
         skill_id,
         name,
         dirs,
+        kept_dirs,
         note,
     })
 }
@@ -559,10 +697,14 @@ fn untracked(
         }),
         // The resolver's "already tracked" answer means the name IS a tracked skill — reclassify it as a
         // local delete (a bare `remove <name>` of an adopted-but-never-followed skill lands here).
-        Err(ClientError::AlreadyTrackedName { .. }) => match super::resolve_skill(ctx, name) {
-            Ok((sid, lock)) => tracked_or_followed(ctx, demanded, sid, lock.name),
-            Err(_) => Err(resolve::not_found(name)),
-        },
+        Err(ClientError::AlreadyTrackedName { .. }) => {
+            match super::resolve_skill_here(ctx, name, None) {
+                Ok((layout, sid, lock)) => {
+                    tracked_or_followed(ctx, demanded, layout, sid, lock.name)
+                }
+                Err(_) => Err(resolve::not_found(name)),
+            }
+        }
         Err(ClientError::NoUntrackedSkill { .. }) | Err(ClientError::HarnessNotFound(_)) => {
             Err(resolve::not_found(name))
         }
@@ -575,14 +717,25 @@ fn untracked(
 fn describe_item(removal: &Removal, applied: bool) -> RemoveItem {
     match removal {
         Removal::TrackedLocal {
-            name, dirs, note, ..
+            name,
+            dirs,
+            kept_dirs,
+            note,
+            ..
         } => RemoveItem {
             name: name.clone(),
-            kind: RemoveKind::TrackedLocalPermanent,
+            // The kind IS the promise about bytes: an adopted source standing means the record
+            // (and its config entries) retire while the folder keeps living where it always did.
+            kind: if kept_dirs.is_empty() {
+                RemoveKind::TrackedLocalPermanent
+            } else {
+                RemoveKind::TrackedLocalRetired
+            },
             manifest: None,
             workspace_id: None,
             agent_dirs: dirs.iter().map(|d| d.display().to_string()).collect(),
-            bytes_kept: false,
+            kept_dirs: kept_dirs.iter().map(|d| d.display().to_string()).collect(),
+            bytes_kept: !kept_dirs.is_empty(),
             note: note.as_ref().map(|n| {
                 if applied {
                     n.applied.clone()
@@ -597,21 +750,21 @@ fn describe_item(removal: &Removal, applied: bool) -> RemoveItem {
             manifest: None,
             workspace_id: None,
             agent_dirs: vec![dir.display().to_string()],
+            kept_dirs: Vec::new(),
             bytes_kept: false,
             note: None,
         },
         Removal::Builtin { dirs } => RemoveItem {
             name: super::builtin::BUILTIN_NAME.to_owned(),
-            kind: RemoveKind::TrackedLocalPermanent,
+            kind: RemoveKind::BuiltinOptOut,
             manifest: None,
             workspace_id: None,
             agent_dirs: dirs.iter().map(|d| d.display().to_string()).collect(),
+            kept_dirs: Vec::new(),
             bytes_kept: false,
-            note: Some(
-                "the built-in topos skill — the opt-out is durable (no sweep re-places it); \
-                 `topos add topos` brings it back"
-                    .to_owned(),
-            ),
+            // The kind now carries this shape's whole sentence (`RemoveKind::BuiltinOptOut`), so
+            // the note that used to smuggle it in is gone: one producer per line of copy.
+            note: None,
         },
     }
 }

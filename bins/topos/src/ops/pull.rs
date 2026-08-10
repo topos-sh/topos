@@ -94,7 +94,14 @@ pub(crate) struct PullOutcome {
     /// not a bundle — a scope-level fault (an unavailable lock, an unreadable custody document)
     /// is one line about no bundle at all — so the receipt's arithmetic counts THIS, and the
     /// summary can no longer invent bundles that never existed and report them failed.
+    ///
+    /// KNOWN COLLAPSE, deliberately left: keyed by DISPLAY NAME, so two same-named bundles from
+    /// different workspaces both failing in one sweep count once (the tally is short by one; every
+    /// other channel still reports both). Keying by scope+identity is a follow-up.
     pub failed_bundles: std::collections::BTreeSet<String>,
+    /// The RUNNABLE fixes for the faults in `warnings`, for the faults that have one — the
+    /// `--json` lane's share of what the prose line already tells a person. Empty on a clean run.
+    pub fault_actions: Vec<topos_types::NextAction>,
     /// Bundles waiting on a DECISION only the person can make (see [`PendingDecision`]). They are
     /// not failures: the run exits 0 and the receipt counts them under `waiting on you`.
     pub decisions: Vec<PendingDecision>,
@@ -253,6 +260,7 @@ impl PullOutcome {
             data,
             warnings,
             failed_bundles,
+            fault_actions: Vec::new(),
             decisions: Vec::new(),
             advisories: Vec::new(),
             disclosures: Vec::new(),
