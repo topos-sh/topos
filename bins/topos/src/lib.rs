@@ -18,6 +18,7 @@
 pub mod actions;
 mod app;
 pub(crate) mod atomic;
+pub(crate) mod bundle_kind;
 pub(crate) mod cli;
 mod cli_ref;
 pub(crate) mod compat;

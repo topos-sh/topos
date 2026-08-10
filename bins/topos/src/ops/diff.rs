@@ -201,8 +201,7 @@ fn diff_draft_vs_current(
     // whose endpoint IS the held current (never the "map has no placement" corruption error a
     // store-only record would otherwise trip).
     if map.placements.is_empty()
-        && crate::mcp_engine::record_kind(ctx, &lock.skill_id, &map)
-            == crate::mcp_engine::RecordKind::Mcp
+        && crate::bundle_kind::classify(ctx, &lock.skill_id, &map.placements).is_mcp()
     {
         return Ok(DiffData {
             source: DiffSource::Local,

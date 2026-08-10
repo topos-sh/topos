@@ -99,13 +99,10 @@ generated `docs/cli.md` (`cargo xtask gen-cli-ref`).
   an undo-led receipt
   (the canonical document written, the row recorded, the scope's config converged; the per-scope
   `state/mcp_imports.json` record is what lets `remove` delete the written folder only when its
-  bytes still match). `publish` reads the kind
-  (ledger → delivery cache → the manifest row, the last only when the draft carries a root
-  `server.json`), re-runs the gate BEFORE the op WAL, and threads it onto the wire.
+  bytes still match). `publish` reads the kind through the one classifier (`bundle_kind`),
+  re-runs the gate BEFORE the op WAL, and threads it onto the wire.
 - `mcp_engine` + `mcp_ledger` — the `kind = "mcp"` bundle's delivery half: a store-only sync
-  (lock custody, no dir placement; a durable per-skill `kind.json` marker written at first sync
-  keeps kind classification alive if the ledger is lost — marker → delivery cache → manifest row
-  → ledger, failing CLOSED over an empty placement map) feeds a per-scope config CONVERGE over
+  (lock custody, no dir placement) feeds a per-scope config CONVERGE over
   `topos-harness::mcp`'s pure drivers — server.json parsed fail-closed, per-harness surfaces
   joined onto detection (project surfaces containment-proven) and narrowed by ONE shared
   resolution (the row's `dest` config-file entries mapped to the harnesses that claim them;
@@ -119,6 +116,14 @@ generated `docs/cli.md` (`cargo xtask gen-cli-ref`).
   scoped to the FILE they were written into (a surface path that moves leaves a disclosed stale
   class rather than re-pointed custody), and the intent journal every config write rides (crash
   recovery promotes or drops by OBSERVING the file; an unreadable file keeps the standing entry).
+- `bundle_kind` — WHAT A BUNDLE IS: the closed kind vocabulary (`skill` · `mcp`) and the ONE parse
+  of a kind word. A word this build does not own is refused at every door it can enter — the sweep
+  (the row is skipped whole, warned, never cached), `add`, and a hand-written manifest at LOAD
+  (`manifest/document`, naming the known kinds) — never guessed into the nearest kind. The durable
+  per-record `kind.json` marker is written at every bundle's first sync/adopt, and is the first
+  rung of the ONE classification chain every delivery path asks: marker → the manifest local-path
+  row that demands the placements → indeterminate, which over an EMPTY placement map is a REFUSAL,
+  not a default.
 - `plane_http` — the blocking `ureq` transports; one `SessionTransports` set per session;
   `resolve_session_lane` picks a write verb's lane. `scan` — the bundle scanner (rejects
   fs-level hazards before the kernel digest). `config_io` + `ctx` — the injected

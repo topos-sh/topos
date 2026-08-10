@@ -12,6 +12,7 @@ use topos_types::{
     WIRE_SCHEMA_VERSION, WireError,
 };
 
+use crate::bundle_kind::BundleKind;
 use crate::error::ClientError;
 use crate::ops::ListOutcome;
 
@@ -2205,7 +2206,7 @@ fn list_detail_tty(detail: &topos_types::results::ListDetail) -> String {
     }
     // An mcp bundle's "where": per-agent config entries (placed file + state), instead of
     // placement dirs.
-    if detail.kind.as_deref() == Some("mcp") {
+    if BundleKind::of_tag(detail.kind.as_deref()) == Some(BundleKind::Mcp) {
         if let Some(why) = &detail.mcp_unreachable {
             // "not recorded yet" would be a lie of omission here: nothing is coming. The row's own
             // dest is what withholds it, so the line names the cause and the files that would work.
@@ -2571,7 +2572,7 @@ pub(crate) fn remove_applied_tty(data: &RemoveData) -> String {
 /// receipt's removed rows use. A NARROWED removal appends what the row still names
 /// (`— 2 folders remain` / `— 1 config file remains`).
 fn uninstalled_column(u: &topos_types::results::UninstalledBundle) -> String {
-    let (noun_one, noun_many) = if u.kind.as_deref() == Some("mcp") {
+    let (noun_one, noun_many) = if BundleKind::of_tag(u.kind.as_deref()) == Some(BundleKind::Mcp) {
         ("config file", "config files")
     } else {
         ("folder", "folders")
@@ -3760,7 +3761,7 @@ fn pull_action_row(s: &PullSkill, scope: &PullReceiptScope) -> (String, Vec<Stri
 /// (`installed (~/.codex/skills)`), several print a count in the bundle's own noun (`installed
 /// (2 folders)` / `(2 config files)`), none prints the bare verb.
 fn destination_column(verb: &str, s: &PullSkill) -> String {
-    let noun = if s.kind.as_deref() == Some("mcp") {
+    let noun = if BundleKind::of_tag(s.kind.as_deref()) == Some(BundleKind::Mcp) {
         "config files"
     } else {
         "folders"
@@ -3780,7 +3781,7 @@ fn destination_column(verb: &str, s: &PullSkill) -> String {
 /// lines name the very same files AND say what happened in each, so the bare list beside them is
 /// the same list twice. (A removal carries no per-agent lines and keeps its list.)
 fn sub_destinations(s: &PullSkill) -> Vec<String> {
-    if s.kind.as_deref() == Some("mcp") && !s.harnesses.is_empty() {
+    if BundleKind::of_tag(s.kind.as_deref()) == Some(BundleKind::Mcp) && !s.harnesses.is_empty() {
         return Vec::new();
     }
     match s.destinations.as_slice() {

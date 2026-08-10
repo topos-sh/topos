@@ -38,6 +38,7 @@ use topos_types::requests::{WireChannelIndex, WireSkillIndex, WireSkillIndexEntr
 use topos_types::results::{ExchangeFault, PullAction, PullData, PullSkill, WorkspaceSyncReport};
 use topos_types::{CurrentRecord, PointerScope, WIRE_SCHEMA_VERSION, WireCurrentRecord};
 
+use crate::bundle_kind::BundleKind;
 use crate::ctx::Ctx;
 use crate::error::{ClientError, FetchFault};
 use crate::forge_check::{self, CheckFailure, SourceCheck};
@@ -522,7 +523,7 @@ impl Sweep {
             // survives a scope where NO agent was engaged and the per-agent states came back
             // empty, so a summary counting these rows never calls a server a skill.
             if let Some(row) = self.rows.get_mut(index) {
-                row.kind = Some("mcp".to_owned());
+                row.kind = BundleKind::Mcp.tag();
                 if let Some(clause) = unreachable {
                     row.note = Some(format!("reaches no agent — {clause}"));
                 }
@@ -1567,6 +1568,12 @@ pub(crate) fn manifest_update(
         }
         let mut delivered_cache: BTreeMap<String, DeliveredSkill> = BTreeMap::new();
         for ds in &snap.skills {
+            // The per-scope batches already WARNED about a kind this build cannot deliver; the
+            // cache must not record it either, or the next offline sweep would read the row back
+            // and place it as a skill.
+            let Some(kind) = BundleKind::parse(&ds.kind) else {
+                continue;
+            };
             delivered_cache.insert(
                 ds.skill_id.clone(),
                 DeliveredSkill {
@@ -1577,7 +1584,7 @@ pub(crate) fn manifest_update(
                     via_channels: ds.via_channels.clone(),
                     via_manifest: false,
                     assigned_by: ds.assigned_by.clone(),
-                    kind: (ds.kind != "skill").then(|| ds.kind.clone()),
+                    kind: kind.tag(),
                     harness_states: Vec::new(),
                     picked: ds.picked,
                 },
@@ -1949,8 +1956,12 @@ fn reconcile_thing<'a>(
                 ));
                 return;
             };
-            let mcp = entry.kind == "mcp";
-            let target = CatalogTarget::from_entry(entry);
+            let Some(kind) = served_kind(&entry.kind, &entry.name, &sc.label, &mut sweep.warnings)
+            else {
+                return;
+            };
+            let mcp = kind.is_mcp();
+            let target = CatalogTarget::from_entry(entry, kind);
             // A config-placed bundle has no placement dirs — its dest entries are config FILES
             // and ride the demand's narrowing; a skill row's dest is its frozen placement plan.
             let dest = if mcp { None } else { row.fields().dest };
@@ -1968,7 +1979,7 @@ fn reconcile_thing<'a>(
                     via_channels: Vec::new(),
                     via_manifest: true,
                     assigned_by: None,
-                    kind: mcp.then(|| target.kind.clone()),
+                    kind: kind.tag(),
                     harness_states: Vec::new(),
                     picked: false,
                 },
@@ -2018,7 +2029,7 @@ fn reconcile_thing<'a>(
                 // A `kind = "mcp"` path row: the dir IS the bundle (`server.json` at its root) —
                 // adopted-path custody as ever, no skill placement; the demand feeds the scope's
                 // MCP converge with `workspace_slug: None`.
-                if row.fields().kind.as_deref() == Some("mcp") {
+                if row.value.declared_kind() == Some(BundleKind::Mcp) {
                     local_mcp_demand(env, sc, row, &dir, &display, row_index, sweep);
                 } else if let Some(dest) = row.fields().dest.filter(|d| !d.is_empty()) {
                     // A SKILL path row with `dest = [...]`: the adopted folder stays the
@@ -2033,7 +2044,7 @@ fn reconcile_thing<'a>(
                      the row",
                     sc.label
                 ));
-                if row.fields().kind.as_deref() == Some("mcp") {
+                if row.value.declared_kind() == Some(BundleKind::Mcp) {
                     // The bundle cannot be read this run: hold its config entries in place.
                     sweep
                         .mcp_hold
@@ -2352,8 +2363,13 @@ fn reconcile_set<'a>(
                 .collect();
             let total = batch.len();
             for (position, entry) in batch.into_iter().enumerate() {
-                let mcp = entry.kind == "mcp";
-                let target = CatalogTarget::from_entry(entry);
+                let Some(kind) =
+                    served_kind(&entry.kind, &entry.name, &sc.label, &mut sweep.warnings)
+                else {
+                    continue;
+                };
+                let mcp = kind.is_mcp();
+                let target = CatalogTarget::from_entry(entry, kind);
                 // Book the provenance BEFORE the sync (a per-item failure does not unmake the fact
                 // that this channel provides the name).
                 sweep.delivered.push((
@@ -2367,7 +2383,7 @@ fn reconcile_set<'a>(
                         via_channels: vec![channel.clone()],
                         via_manifest: true,
                         assigned_by: None,
-                        kind: mcp.then(|| target.kind.clone()),
+                        kind: kind.tag(),
                         harness_states: Vec::new(),
                         picked: false,
                     },
@@ -2471,6 +2487,11 @@ fn reconcile_feed<'a>(
                             .push(format!("BAD_ID {}: served an invalid skill id", ds.name));
                         return false;
                     }
+                    // A kind this build cannot deliver is refused at the door, before anything
+                    // is synced or cached for it.
+                    if served_kind(&ds.kind, &ds.name, &sc.label, &mut sweep.warnings).is_none() {
+                        return false;
+                    }
                     picked.insert(ds.skill_id.as_str())
                 })
                 .collect();
@@ -2483,7 +2504,8 @@ fn reconcile_feed<'a>(
                     target: CatalogTarget {
                         skill_id: ds.skill_id.clone(),
                         name: ds.name.clone(),
-                        kind: ds.kind.clone(),
+                        // Parsed by the batch filter above; an unknown kind never reaches here.
+                        kind: BundleKind::parse(&ds.kind).unwrap_or_default(),
                         version_id: to_hex(&ds.version_id),
                         generation: ds.generation,
                         bundle_digest: Some(ds.bundle_digest),
@@ -2545,12 +2567,19 @@ fn reconcile_feed<'a>(
                 // OFFLINE MCP convergence: the store's held bytes still feed the config engine
                 // (config files heal without a network), through the same store-only route the
                 // online path takes — never the dir-placement planner.
-                let mcp = ds.kind.as_deref() == Some("mcp");
+                let Some(kind) = BundleKind::of_tag(ds.kind.as_deref()) else {
+                    served_kind(
+                        ds.kind.as_deref().unwrap_or_default(),
+                        &ds.name,
+                        &sc.label,
+                        &mut sweep.warnings,
+                    );
+                    continue;
+                };
+                let mcp = kind.is_mcp();
                 // The marker back-fills offline too: a store synced before the marker existed
                 // gains it from the cache's word, so the cache row's loss stops mattering.
-                if mcp {
-                    crate::mcp_engine::write_kind_marker(&run_ctx, &sid);
-                }
+                crate::bundle_kind::write_kind_marker(&run_ctx, &sid, kind);
                 let plan_fn: Option<&sync_engine::PlanFn<'_>> = if mcp {
                     Some(&|_: &Ctx<'_>, _: &str, _: &Lock, _: &PlacementMap| {
                         crate::placement::PlacementPlan::default()
@@ -2611,12 +2640,34 @@ fn reconcile_feed<'a>(
 // =================================================================================================
 
 /// The one target shape the delivery and the catalog both resolve to.
+/// The kind a served catalog/delivery row names, or the sweep's REFUSAL for a kind this build
+/// cannot deliver — a bundle published by a newer server. The row is skipped WHOLE: no store
+/// sync, no placement, no cache entry, so nothing on this machine is left claiming to be a
+/// bundle nobody here knows how to place. One warning line names the bundle, the kind, and the
+/// way out.
+fn served_kind(
+    word: &str,
+    bundle: &str,
+    label: &str,
+    warnings: &mut Vec<String>,
+) -> Option<BundleKind> {
+    let kind = BundleKind::parse(word);
+    if kind.is_none() {
+        warnings.push(format!(
+            "UNKNOWN_KIND {label}: \"{bundle}\" is a \"{word}\" bundle — this topos does not \
+             know how to deliver that kind; run `topos self-update`"
+        ));
+    }
+    kind
+}
+
 struct CatalogTarget {
     skill_id: String,
     name: String,
-    /// The catalog's bundle kind (`"skill"` / `"mcp"`) — an `"mcp"` target takes the STORE-ONLY
-    /// sync (no dir placement) and feeds the scope's MCP demand list.
-    kind: String,
+    /// The catalog's bundle kind — an MCP target takes the STORE-ONLY sync (no dir placement)
+    /// and feeds the scope's MCP demand list. Parsed at the sweep's door ([`served_kind`]), so
+    /// nothing past it carries a kind this build cannot place.
+    kind: BundleKind,
     version_id: String,
     generation: u64,
     bundle_digest: Option<[u8; 32]>,
@@ -2624,11 +2675,11 @@ struct CatalogTarget {
 }
 
 impl CatalogTarget {
-    fn from_entry(e: &WireSkillIndexEntry) -> Self {
+    fn from_entry(e: &WireSkillIndexEntry, kind: BundleKind) -> Self {
         Self {
             skill_id: e.skill_id.clone(),
             name: e.name.clone(),
-            kind: e.kind.clone(),
+            kind,
             version_id: e.version_id.clone(),
             generation: e.generation,
             bundle_digest: super::parse_hex32(&e.bundle_digest).ok(),
@@ -2759,7 +2810,7 @@ fn sync_workspace_skill<'a>(
     // placement plan: no dir placement, no baselines, no drafts, no diff3. The engine over zero
     // placements degenerates to pure store/lock/sync advancement; the bundle's bytes reach agents
     // only through the scope's config converge (`mcp_engine`), fed below.
-    let mcp = target.kind == "mcp";
+    let mcp = target.kind.is_mcp();
     // A project root the containment rail refused is a placement that DID NOT HAPPEN — collected
     // from wherever the engine computes the plan, so the receipt says so instead of the bundle
     // quietly landing nowhere.
@@ -2844,11 +2895,10 @@ fn sync_workspace_skill<'a>(
             return;
         }
     }
-    // The DURABLE kind marker, laid the moment the scope store exists: kind classification for
-    // every later targeted verb must not hang on the deletable ledger or a delivery cache row.
-    if mcp {
-        crate::mcp_engine::write_kind_marker(&run_ctx, &sid);
-    }
+    // The DURABLE kind marker, laid the moment the scope store exists — for EVERY bundle, not
+    // just the config-placed ones: kind classification for every later targeted verb reads this
+    // and nothing else, so it must not hang on a delivery cache row a sweep can drop.
+    crate::bundle_kind::write_kind_marker(&run_ctx, &sid, target.kind);
     run.transports
         .plane
         .as_delivery()
@@ -4815,7 +4865,7 @@ fn run_mcp_converge(
                 ),
             };
             let mut row = plain_row(&name, PullAction::Removed, ws_id, &label);
-            row.kind = Some("mcp".to_owned());
+            row.kind = BundleKind::Mcp.tag();
             row.display = display;
             row.destinations = files;
             row.kept = kept;

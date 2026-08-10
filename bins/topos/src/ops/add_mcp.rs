@@ -40,6 +40,7 @@ use std::path::{Path, PathBuf};
 
 use topos_types::results::{AddData, McpServerSummary};
 
+use crate::bundle_kind::BundleKind;
 use crate::ctx::Ctx;
 use crate::error::ClientError;
 use crate::manifest::document::ManifestScope;
@@ -304,7 +305,7 @@ fn workspace_server_matches(
             // The KIND guard: only an `mcp` bundle participates — a skill whose catalog name
             // happens to look registry-shaped never matches (and a well-behaved server never
             // stamps the embedded field on one; both ends hold the line).
-            if e.kind != "mcp"
+            if BundleKind::parse(&e.kind) != Some(BundleKind::Mcp)
                 || e.status != "active"
                 || e.mcp_server_name.as_deref() != Some(server)
             {
@@ -448,22 +449,17 @@ fn adopt_local(
     // the adopt when an entry names no known file.
     let dest_entries = selection.mcp_entries(scope.target.scope)?;
     let sctx = super::ctx_with_layout(ctx, &scope.layout);
-    let mut data = super::adopt_path_any_kind(&sctx, &scope.target, dir)?;
+    let mut data = super::adopt_path_any_kind(&sctx, &scope.target, dir, BundleKind::Mcp)?;
     medit::note_added_path_kind_dest_in(
         ctx,
         &mut data,
         &scope.target,
         dir,
-        Some("mcp"),
+        Some(BundleKind::Mcp),
         &dest_entries,
     )?;
     if !dest_entries.is_empty() {
         data.dest = dest_entries;
-    }
-    // The durable kind marker, beside the adopted store's docs — what keeps this record
-    // classifying as config-placed even if the scope's ledger is ever lost.
-    if let Some(Ok(sid)) = data.skill_id.as_deref().map(crate::id::SkillId::parse) {
-        crate::mcp_engine::write_kind_marker(&sctx, &sid);
     }
     let (filter, _) = row_narrowing(ctx, &scope.target, &data.name);
     let agents = engaged_agents(ctx, &scope.target, global, filter.as_deref());
@@ -577,7 +573,7 @@ fn fetch_arm(
         &mut data,
         &scope.target,
         &bundle_dir,
-        Some("mcp"),
+        Some(BundleKind::Mcp),
         &dest_entries,
     )?;
     if !dest_entries.is_empty() {

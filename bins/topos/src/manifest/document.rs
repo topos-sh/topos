@@ -86,6 +86,18 @@ pub(crate) enum EntryValue {
     Fields(EntryFields),
 }
 
+impl EntryValue {
+    /// The bundle kind this value DECLARES, against the closed vocabulary: an absent `kind` field
+    /// (and every non-table spelling) is the default skill; `None` means the row names a kind this
+    /// build does not own, which is not a skill either.
+    pub(crate) fn declared_kind(&self) -> Option<crate::bundle_kind::BundleKind> {
+        match self {
+            EntryValue::Fields(f) => crate::bundle_kind::BundleKind::of_tag(f.kind.as_deref()),
+            _ => Some(crate::bundle_kind::BundleKind::Skill),
+        }
+    }
+}
+
 /// What the editor writes for a row — the same shapes the parser reads back, rendered
 /// deterministically (canonical field order, single-line inline tables).
 pub(crate) type EntryValueSpelling = EntryValue;
@@ -343,8 +355,18 @@ fn fields_check(
     }
     // A repo row cannot carry an MCP bundle: an MCP server is delivered from a workspace catalog,
     // so the row refuses at LOAD rather than parsing into a demand nothing could ever converge.
-    if matches!(shape, KeyShape::RepoSkill { .. }) && f.kind.as_deref() == Some("mcp") {
+    if matches!(shape, KeyShape::RepoSkill { .. })
+        && f.kind.as_deref() == Some(crate::bundle_kind::BundleKind::Mcp.as_str())
+    {
         return Err(mcp_needs_a_workspace(reference));
+    }
+    // The kind VOCABULARY is closed in a hand-written file exactly as it is at the server door: a
+    // word no kind of this build owns names delivery mechanics nothing here can run, so it refuses
+    // at LOAD rather than parsing into a demand that would be placed as a skill.
+    if let Some(word) = f.kind.as_deref()
+        && crate::bundle_kind::BundleKind::parse(word).is_none()
+    {
+        return Err(unknown_kind(reference, word));
     }
     if let Some(v) = &f.version {
         if v == "off" {
@@ -367,7 +389,9 @@ fn fields_check(
         // A local MCP row's kind is knowable at load — its dest entries are config FILES and
         // must come from the descriptor table (an unknown file's format cannot be edited).
         // Workspace rows learn their kind at delivery; the reconcile enforces the same rule.
-        if matches!(shape, KeyShape::LocalPath { .. }) && f.kind.as_deref() == Some("mcp") {
+        if matches!(shape, KeyShape::LocalPath { .. })
+            && f.kind.as_deref() == Some(crate::bundle_kind::BundleKind::Mcp.as_str())
+        {
             for entry in dest {
                 if super::dest::mcp_slug_for_dest(entry, scope).is_none() {
                     return Err(at(reference, super::dest::unknown_mcp_file(entry, scope)));
@@ -453,6 +477,18 @@ fn mcp_needs_a_workspace(reference: &str) -> ManifestError {
             "`kind = \"mcp\"` does not fit a repo skill — `{reference}` cannot deliver an MCP \
              server; publish the bundle to a workspace and name it here as \
              `<host>/<workspace>/<bundle>`"
+        ),
+    )
+}
+
+/// The refusal a row naming a kind topos does not deliver earns — the same teaching the server
+/// door gives, in this file's idiom: what was written, and the whole vocabulary that exists.
+fn unknown_kind(reference: &str, word: &str) -> ManifestError {
+    at(
+        reference,
+        format!(
+            "`kind = \"{word}\"` is not a kind topos delivers — known kinds: {}",
+            crate::bundle_kind::BundleKind::known_list()
         ),
     )
 }
@@ -560,7 +596,7 @@ fn defaults_migration(item: &Item, scope: ManifestScope, rows: &[BundleRow]) -> 
     // ONE refusal at a time: the first kind the table spells carries the teaching.
     if let Some((kind, node)) = pairs.into_iter().next() {
         let key = format!("defaults.{kind}");
-        if kind == "mcp"
+        if kind == crate::bundle_kind::BundleKind::Mcp.as_str()
             && let Some(kpairs) = node.pairs()
             && let Some((_, hv)) = kpairs.into_iter().find(|(k, _)| *k == "harness")
         {
@@ -578,7 +614,7 @@ fn defaults_migration(item: &Item, scope: ManifestScope, rows: &[BundleRow]) -> 
                 .iter()
                 .filter(|r| {
                     matches!(r.shape, KeyShape::LocalPath { .. })
-                        && matches!(&r.value, EntryValue::Fields(f) if f.kind.as_deref() == Some("mcp"))
+                        && r.value.declared_kind() == Some(crate::bundle_kind::BundleKind::Mcp)
                 })
                 .map(|r| r.reference.as_str())
                 .collect();
@@ -921,7 +957,8 @@ fn retired_field(
     let mcp_shaped = matches!(
         shape,
         KeyShape::WorkspaceBundle { .. } | KeyShape::Channel { .. }
-    ) || (matches!(shape, KeyShape::LocalPath { .. }) && row_kind == Some("mcp"));
+    ) || (matches!(shape, KeyShape::LocalPath { .. })
+        && row_kind == Some(crate::bundle_kind::BundleKind::Mcp.as_str()));
     let map_slug = |s: &str| -> Option<String> {
         if forge {
             super::dest::skills_dest_spelling(s, scope)
@@ -1395,7 +1432,7 @@ mod tests {
 "topos.example.com/platform" = "*"
 "github.com/vercel-labs/skills" = "*"
 "github.com/anthropics/skills/pdf-tools" = "8c1f0a2"
-"~/dev/notes" = { kind = "knowledge" }
+"~/dev/weather-server" = { kind = "mcp" }
 
 [bundles."topos.sh/acme"]
 perf-review = "*"
@@ -1421,7 +1458,7 @@ db-conventions = { dest = ["~/.agents/skills", "~/.claude/knowledge"] }
                 "topos.example.com/platform",
                 "github.com/vercel-labs/skills",
                 "github.com/anthropics/skills/pdf-tools",
-                "~/dev/notes",
+                "~/dev/weather-server",
                 "topos.sh/acme/perf-review",
                 "topos.sh/acme/channels/frontend",
                 "topos.sh/acme/noisy-skill",
@@ -1444,12 +1481,13 @@ db-conventions = { dest = ["~/.agents/skills", "~/.claude/knowledge"] }
             KeyShape::RepoSkill { skill, .. } if skill == "pdf-tools"
         ));
         assert_eq!(doc.rows[3].value, EntryValue::Pin("8c1f0a2".into()));
-        // The local folder carries its kind.
+        // The local folder carries its kind — the one place the manifest records what a local
+        // folder IS, and a closed vocabulary: `skill`, `mcp`.
         assert!(matches!(doc.rows[4].shape, KeyShape::LocalPath { .. }));
         assert_eq!(
             doc.rows[4].value,
             EntryValue::Fields(EntryFields {
-                kind: Some("knowledge".into()),
+                kind: Some("mcp".into()),
                 ..EntryFields::default()
             })
         );
@@ -1832,8 +1870,48 @@ db-conventions = { dest = ["~/.agents/skills", "~/.claude/knowledge"] }
         )
         .unwrap_err();
         assert!(e.message.contains("`kind` does not fit a repo set"), "{e}");
-        // Every other kind on a repo skill still parses.
-        parse_global("[bundles]\n\"github.com/o/r/tool\" = { kind = \"knowledge\" }\n");
+        // The mcp arm is reached FIRST, so its teaching survives; a repo skill naming any OTHER
+        // unknown kind takes the vocabulary refusal below.
+        let e = parse_manifest(
+            "[bundles]\n\"github.com/o/r/tool\" = { kind = \"knowledge\" }\n",
+            ManifestScope::Global,
+        )
+        .unwrap_err();
+        assert!(e.message.contains("known kinds: `skill`, `mcp`"), "{e}");
+    }
+
+    /// The kind VOCABULARY is closed in a hand-written file exactly as it is at the server door.
+    /// A word this build does not own would otherwise parse into a demand and be delivered as a
+    /// skill — the closed set is what makes that impossible, and the refusal names the whole
+    /// vocabulary so the fix is readable without opening the docs.
+    #[test]
+    fn a_row_naming_a_kind_topos_does_not_deliver_refuses_at_load() {
+        for scope in [ManifestScope::Global, ManifestScope::Project] {
+            let e = parse_manifest(
+                "[bundles]\n\"./tools/notes\" = { kind = \"knowledge\" }\n",
+                scope,
+            )
+            .unwrap_err();
+            assert_eq!(e.key.as_deref(), Some("./tools/notes"), "{e}");
+            assert_eq!(
+                e.message,
+                "`kind = \"knowledge\"` is not a kind topos delivers — known kinds: `skill`, `mcp`",
+                "{e}"
+            );
+        }
+        // Near-misses are words too: case and plurals name no kind either.
+        for word in ["Skill", "MCP", "skills", ""] {
+            parse_manifest(
+                &format!("[bundles]\n\"./tools/notes\" = {{ kind = \"{word}\" }}\n"),
+                ManifestScope::Global,
+            )
+            .expect_err(word);
+        }
+        // Both known kinds parse, and so does a row that spells no kind at all.
+        parse_global("[bundles]\n\"./tools/notes\" = { kind = \"mcp\" }\n");
+        parse_global("[bundles]\n\"./tools/notes\" = { kind = \"skill\" }\n");
+        parse_global("[bundles]\n\"./tools/notes\" = \"*\"\n");
+        parse_global("[bundles]\n\"./tools/notes\" = { dest = [\"~/.claude/skills\"] }\n");
     }
 
     // -- the retired spellings ----------------------------------------------

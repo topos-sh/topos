@@ -9133,7 +9133,14 @@ fn a_local_directory_wins_and_the_receipt_names_the_workspace_spelling() {
     };
     // The receipt judges the workspace's current version against the bytes that just landed —
     // the ONE confirming catalog read carried the digest.
-    let data = ops::add_with_name(&ctx, &path, Some(BARE), true).unwrap();
+    let data = ops::add_with_name(
+        &ctx,
+        &path,
+        Some(BARE),
+        true,
+        crate::bundle_kind::BundleKind::Skill,
+    )
+    .unwrap();
     let same = published.suggestion(data.bundle_digest.as_deref().unwrap_or_default());
     assert_eq!(same.reference, format!("{HOST}/{WS_NAME}/{BARE}"));
     assert_eq!(same.workspace, WS_NAME);
@@ -9150,7 +9157,14 @@ fn a_local_directory_wins_and_the_receipt_names_the_workspace_spelling() {
         ops::BareAddPlan::Adopt { published, .. } => published.expect("still disclosed"),
         other => panic!("a local copy adopts in place: {other:?}"),
     };
-    let data2 = ops::add_with_name(&ctx2, &drifted, Some(BARE), true).unwrap();
+    let data2 = ops::add_with_name(
+        &ctx2,
+        &drifted,
+        Some(BARE),
+        true,
+        crate::bundle_kind::BundleKind::Skill,
+    )
+    .unwrap();
     assert!(
         !published2
             .suggestion(data2.bundle_digest.as_deref().unwrap_or_default())
@@ -9351,7 +9365,14 @@ fn a_cache_only_match_subscribes_and_an_unanswering_session_is_skipped() {
         ops::BareAddPlan::Adopt { published, .. } => published.expect("disclosed"),
         other => panic!("a local copy adopts in place: {other:?}"),
     };
-    let data = ops::add_with_name(&ctx, &path, Some(BARE), true).unwrap();
+    let data = ops::add_with_name(
+        &ctx,
+        &path,
+        Some(BARE),
+        true,
+        crate::bundle_kind::BundleKind::Skill,
+    )
+    .unwrap();
     assert!(
         !published
             .suggestion(data.bundle_digest.as_deref().unwrap_or_default())
@@ -13490,4 +13511,132 @@ fn zz_a_per_copy_publish_leaves_the_other_copy_alone_and_resolves_the_freeze() {
     )
     .expect("the survivor is the single draft");
     assert!(d.diff.contains("native edit"), "{}", d.diff);
+}
+
+// =================================================================================================
+// A kind this build does not know: refused at both doors, never guessed into one it does.
+// =================================================================================================
+
+/// THE SWEEP DOOR. A workspace on a newer server serves a bundle whose `kind` this binary predates.
+/// The row is skipped WHOLE — nothing fetched, no store record minted, nothing placed — and the run
+/// says why in one line that names the bundle, the kind, and the way out. Guessing here would
+/// materialize a bundle of unknown mechanics into skill folders; the point of the closed vocabulary
+/// is that the guess is impossible.
+#[test]
+fn a_served_kind_this_build_cannot_deliver_is_skipped_and_named() {
+    let rig = Rig::new("alien-kind-sweep");
+    rig.seed_session();
+    rig.seed_feed();
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let v = one_file(b"# not a skill\n");
+    let plane = FakePlane::new(log).with_version("s_alien", &v);
+    let mut ds = delivered("s_alien", "runbook", &v);
+    ds.kind = "knowledge".into();
+    plane.serves(vec![ds]);
+    let mut entry = catalog_entry("s_alien", "runbook", &v);
+    entry.kind = "knowledge".into();
+    let dir = FakeDirectory::new(vec![entry], Vec::new());
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    let out = sweep(&ctx, &plane, &dir);
+
+    // ONE line, and it teaches: the bundle, the kind, and the command that makes this machine able
+    // to take it.
+    let w = out
+        .warnings
+        .iter()
+        .find(|w| w.starts_with("UNKNOWN_KIND"))
+        .unwrap_or_else(|| panic!("the refusal line; got {:?}", out.warnings));
+    assert!(w.contains("runbook"), "{w}");
+    assert!(w.contains("knowledge"), "{w}");
+    assert!(w.contains("topos self-update"), "{w}");
+
+    // The STORE is untouched: no record, no placement, and no receipt row claiming otherwise.
+    let sid = crate::id::SkillId::parse("s_alien").unwrap();
+    assert!(
+        !rig.layout().skill_dir(&sid).exists(),
+        "no store record is minted for a kind this build cannot place"
+    );
+    assert!(!rig.home.0.join(".claude/skills/runbook").exists());
+    assert!(
+        !out.data.skills.iter().any(|s| s.skill == "runbook"),
+        "no receipt row: {:?}",
+        out.data.skills
+    );
+
+    // And the OFFLINE cache does not learn it either — a cached row would be read back next sweep
+    // and placed as a skill, which is the exact corruption the refusal exists to prevent.
+    let cache = sync_status::read(&rig.fs, &rig.layout()).unwrap();
+    assert!(
+        cache
+            .workspaces
+            .values()
+            .all(|ws| !ws.delivered.contains_key("s_alien")),
+        "the delivery cache stays clean"
+    );
+}
+
+/// THE `add` DOOR. Naming that same bundle refuses with the same teaching, before a row is written
+/// for something no sweep could ever converge.
+#[test]
+fn adding_a_kind_this_build_cannot_deliver_refuses_with_the_same_teaching() {
+    let rig = Rig::new("alien-kind-add");
+    rig.seed_session();
+    rig.write_global("[bundles]\n");
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let v = one_file(b"# not a skill\n");
+    let plane = FakePlane::new(log).with_version("s_alien", &v);
+    plane.serves(Vec::new());
+    let mut entry = catalog_entry("s_alien", "runbook", &v);
+    entry.kind = "knowledge".into();
+    let dir = FakeDirectory::new(vec![entry], Vec::new());
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+
+    let err = ops::add_reference(
+        &ctx,
+        &connect(&plane, &dir),
+        None,
+        &format!("{HOST}/{WS_NAME}/runbook"),
+        true,
+        true,
+        &Default::default(),
+    )
+    .expect_err("a kind this build cannot deliver is refused");
+    let msg = err.to_string();
+    assert!(msg.contains("runbook"), "{msg}");
+    assert!(msg.contains("knowledge"), "{msg}");
+    assert!(msg.contains("topos self-update"), "{msg}");
+
+    // Refusal-first: nothing was written for it.
+    let manifest =
+        std::fs::read_to_string(rig.layout().home().join(crate::manifest::MANIFEST_FILE)).unwrap();
+    assert!(!manifest.contains("runbook"), "{manifest}");
+}
+
+/// THE UNIVERSAL MARKER. The first sync of an ORDINARY SKILL writes its kind marker too — the one
+/// durable rung the classifier reads. Before this the marker was minted only on the MCP divert, and
+/// a skill's kind was re-derived from the delivery cache, which any sweep may drop.
+#[test]
+fn the_first_sync_of_a_skill_records_its_kind_durably() {
+    let rig = Rig::new("skill-marker");
+    rig.seed_session();
+    rig.seed_feed();
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let v = one_file(b"# deploy\n");
+    let plane = FakePlane::new(log).with_version("s_deploy", &v);
+    plane.serves(vec![delivered("s_deploy", "deploy", &v)]);
+    let dir = FakeDirectory::new(vec![catalog_entry("s_deploy", "deploy", &v)], Vec::new());
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    sweep(&ctx, &plane, &dir);
+
+    let sid = crate::id::SkillId::parse("s_deploy").unwrap();
+    let marker = std::fs::read_to_string(rig.layout().published(&sid).kind).expect("kind.json");
+    assert!(marker.contains("\"skill\""), "{marker}");
+
+    // Which is what lets the chain answer with the delivery cache GONE — the rung this increment
+    // deletes. Without the marker this record would classify as indeterminate.
+    std::fs::remove_file(rig.layout().sync_status_path()).ok();
+    assert_eq!(
+        crate::bundle_kind::classify(&ctx, "s_deploy", &[]),
+        crate::bundle_kind::RecordKind::Known(crate::bundle_kind::BundleKind::Skill),
+    );
 }

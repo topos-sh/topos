@@ -20,6 +20,7 @@ use std::path::{Path, PathBuf};
 
 use topos_types::persisted::PlacementMap;
 
+use crate::bundle_kind::BundleKind;
 use crate::ctx::Ctx;
 use crate::error::ClientError;
 use crate::manifest::document::ManifestScope;
@@ -77,7 +78,7 @@ impl Selection {
     /// [`ClientError::SelectionRefused`] for a known slug with no folder at this scope, or a
     /// literal folder the scope's dialect refuses.
     pub(crate) fn skill_entries(&self, scope: ManifestScope) -> Result<Vec<String>, ClientError> {
-        self.entries(scope, false)
+        self.entries(scope, BundleKind::Skill)
     }
 
     /// The destination set for an MCP source: each `-a` slug's scope-correct config FILE plus the
@@ -86,7 +87,7 @@ impl Selection {
     /// # Errors
     /// As [`Selection::skill_entries`], over the MCP descriptor table.
     pub(crate) fn mcp_entries(&self, scope: ManifestScope) -> Result<Vec<String>, ClientError> {
-        self.entries(scope, true)
+        self.entries(scope, BundleKind::Mcp)
     }
 
     /// The tokens this selection names an EXISTING copy by: each `-a` slug's scope-correct skills
@@ -128,8 +129,16 @@ impl Selection {
         Ok(out)
     }
 
-    fn entries(&self, scope: ManifestScope, mcp: bool) -> Result<Vec<String>, ClientError> {
+    /// The destination set a bundle of `kind` resolves to at `scope` — the ONE resolution both
+    /// public spellings ride, dispatching on the kind rather than on a caller's boolean.
+    fn entries(&self, scope: ManifestScope, kind: BundleKind) -> Result<Vec<String>, ClientError> {
         let mut out: Vec<String> = Vec::new();
+        // MATCHED, not tested: a kind added later has no destination vocabulary until someone
+        // writes one here, and the compiler is what says so.
+        let mcp = match kind {
+            BundleKind::Mcp => true,
+            BundleKind::Skill => false,
+        };
         for slug in &self.agents {
             let entry = if mcp {
                 let known = crate::manifest::dest::mcp_dest_spelling(slug, scope);
@@ -431,13 +440,12 @@ pub(crate) fn slug_for_mcp_entry(entry: &str, scope: ManifestScope) -> Option<St
 /// entry maps back to EXACTLY ONE slug in the table for this scope, `--dest <entry>` otherwise —
 /// entry order preserved. An undo must name what the person can verify, so a folder several
 /// agents share is spelled as the folder rather than as one arbitrary slug of the set.
-pub(crate) fn undo_tail(entries: &[String], scope: ManifestScope, mcp: bool) -> Vec<String> {
+pub(crate) fn undo_tail(entries: &[String], scope: ManifestScope, kind: BundleKind) -> Vec<String> {
     let mut out = Vec::new();
     for entry in entries {
-        let slug = if mcp {
-            slug_for_mcp_entry(entry, scope)
-        } else {
-            slug_for_skill_entry(entry, scope)
+        let slug = match kind {
+            BundleKind::Mcp => slug_for_mcp_entry(entry, scope),
+            BundleKind::Skill => slug_for_skill_entry(entry, scope),
         };
         match slug {
             Some(s) => {
@@ -577,19 +585,19 @@ mod tests {
         let tail = undo_tail(
             &["~/.claude/skills".to_owned(), "~/.codex/skills".to_owned()],
             ManifestScope::Global,
-            false,
+            BundleKind::Skill,
         );
         assert_eq!(tail, vec!["-a", "claude-code", "-a", "codex"]);
         let tail = undo_tail(
             &["~/somewhere/else".to_owned()],
             ManifestScope::Global,
-            false,
+            BundleKind::Skill,
         );
         assert_eq!(tail, vec!["--dest", "~/somewhere/else"]);
         let tail = undo_tail(
             &["~/.codex/config.toml".to_owned()],
             ManifestScope::Global,
-            true,
+            BundleKind::Mcp,
         );
         assert_eq!(tail, vec!["-a", "codex"]);
     }
@@ -688,14 +696,14 @@ mod tests {
         assert!(claimants > 1, "the premise: {claimants} slugs share it");
 
         assert_eq!(
-            undo_tail(&entries, ManifestScope::Project, false),
+            undo_tail(&entries, ManifestScope::Project, BundleKind::Skill),
             vec!["--dest", ".agents/skills"]
         );
         assert_eq!(
             undo_tail(
                 &["~/.agents/skills".to_owned()],
                 ManifestScope::Global,
-                false
+                BundleKind::Skill
             ),
             vec!["--dest", "~/.agents/skills"]
         );
@@ -704,7 +712,7 @@ mod tests {
             undo_tail(
                 &[".claude/skills".to_owned()],
                 ManifestScope::Project,
-                false
+                BundleKind::Skill
             ),
             vec!["-a", "claude-code"]
         );

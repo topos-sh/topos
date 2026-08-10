@@ -26,6 +26,7 @@ use topos_gitstore::{ImportFile, Store, WriteBatch};
 use topos_types::persisted::{Lock, LockedFile, PlacementMap, SyncState};
 use topos_types::results::{PullAction, PullSkill};
 
+use crate::bundle_kind::{BundleKind, RecordKind};
 use crate::ctx::Ctx;
 use crate::error::ClientError;
 use crate::materialize::{self, MaterializeReport, MaterializeReq};
@@ -310,19 +311,8 @@ pub(crate) fn sync_one_planned(
     let applied_eq_observed = sync.applied == sync.observed;
     // A CONFIG-PLACED (mcp) record reached without an injected planner (a targeted accept, a
     // resume) keeps its EMPTY plan: skill-dir placement must never engage for it — its bytes
-    // reach agents through the config converge alone. The classification is the DURABLE chain
-    // (marker → delivery cache → manifest row → ledger); over an EMPTY map with no answer it
-    // fails CLOSED — a store-only record whose kind evidence is lost must never have its bytes
-    // materialized into skill dirs on a guess.
-    let mcp_record = plan_fn.is_none()
-        && match crate::mcp_engine::record_kind(ctx, skill_id, &map) {
-            crate::mcp_engine::RecordKind::Mcp => true,
-            crate::mcp_engine::RecordKind::Skill => false,
-            crate::mcp_engine::RecordKind::Indeterminate if map.placements.is_empty() => {
-                return Err(kind_indeterminate(&name));
-            }
-            crate::mcp_engine::RecordKind::Indeterminate => false,
-        };
+    // reach agents through the config converge alone.
+    let mcp_record = plan_fn.is_none() && planning_kind(ctx, skill_id, &map, &name)?.is_mcp();
     let make_plan = |map: &PlacementMap| match plan_fn {
         Some(f) => f(ctx, skill_id, &lock, map),
         None if mcp_record => crate::placement::PlacementPlan::default(),
@@ -505,7 +495,7 @@ pub(crate) fn sync_one_planned(
             heal_forward(ctx, &sp, &map, &managed, &lock, &sync, &t)?;
             let mut row = applied_row(&name, &sync, target_commit);
             row.harnesses = converge_explicit_mcp(ctx, mcp_record && explicit, skill_id, &name);
-            row.kind = mcp_record.then(|| "mcp".to_owned());
+            row.kind = mcp_record.then(|| BundleKind::Mcp.as_str().to_owned());
             mark_installed(ctx, &mut row, first_receive, &map, &managed);
             Ok(row)
         }
@@ -527,7 +517,7 @@ pub(crate) fn sync_one_planned(
             apply_forward(ctx, &sp, &map, &managed, &lock, &sync, skill_id, &t)?;
             let mut row = applied_row(&name, &sync, target_commit);
             row.harnesses = converge_explicit_mcp(ctx, mcp_record && explicit, skill_id, &name);
-            row.kind = mcp_record.then(|| "mcp".to_owned());
+            row.kind = mcp_record.then(|| BundleKind::Mcp.as_str().to_owned());
             mark_installed(ctx, &mut row, first_receive, &map, &managed);
             Ok(row)
         }
@@ -601,6 +591,27 @@ pub(crate) fn prettify_state_files(
     }
 }
 
+/// The record's kind for every path that PLANS PLACEMENT — the durable chain
+/// ([`crate::bundle_kind::classify`]) with this engine's fail-closed rule applied ONCE, here, so
+/// the three planning sites cannot drift apart on the arm that matters.
+///
+/// # Errors
+/// [`ClientError::PlacementUnsupported`] when nothing answers over an EMPTY placement map (see
+/// [`kind_indeterminate`]). Over a map that already holds placements the record is provably
+/// dir-placed, so an unanswered chain reads as an ordinary skill.
+fn planning_kind(
+    ctx: &Ctx<'_>,
+    skill_id: &str,
+    map: &PlacementMap,
+    name: &str,
+) -> Result<BundleKind, ClientError> {
+    match crate::bundle_kind::classify(ctx, skill_id, &map.placements) {
+        RecordKind::Known(kind) => Ok(kind),
+        RecordKind::Indeterminate if map.placements.is_empty() => Err(kind_indeterminate(name)),
+        RecordKind::Indeterminate => Ok(BundleKind::Skill),
+    }
+}
+
 /// The typed refusal every empty-map + unknowable-kind path answers: the record may be a
 /// config-placed (mcp) bundle whose kind evidence was lost, and materializing its bytes into
 /// skill dirs on a guess is exactly the corruption the marker exists to prevent.
@@ -608,9 +619,9 @@ fn kind_indeterminate(name: &str) -> ClientError {
     ClientError::PlacementUnsupported {
         reason: format!(
             "{name}'s store records no placements and its bundle kind cannot be determined (no \
-             kind marker, no delivery record, no config ledger) — refusing to plan skill \
-             placement for what may be a config-placed MCP bundle; a full `topos update` sweep \
-             restores the record"
+             kind marker, and no manifest row declares one) — refusing to plan skill placement \
+             for what may be a config-placed MCP bundle; a full `topos update` sweep restores \
+             the record"
         ),
     }
 }
@@ -634,15 +645,7 @@ pub(crate) fn go_back(
     let name = lock.name.clone();
     // An mcp record's go-back moves the STORE state only — no skill-dir placement may be planned
     // for it (the converge below re-renders configs from the restored version's server.json).
-    // Same durable classification + fail-closed rule as the targeted sync above.
-    let mcp_record = match crate::mcp_engine::record_kind(ctx, skill_id, &map) {
-        crate::mcp_engine::RecordKind::Mcp => true,
-        crate::mcp_engine::RecordKind::Skill => false,
-        crate::mcp_engine::RecordKind::Indeterminate if map.placements.is_empty() => {
-            return Err(kind_indeterminate(&name));
-        }
-        crate::mcp_engine::RecordKind::Indeterminate => false,
-    };
+    let mcp_record = planning_kind(ctx, skill_id, &map, &name)?.is_mcp();
     let plan = if mcp_record {
         crate::placement::PlacementPlan::default()
     } else {
@@ -762,7 +765,7 @@ pub(crate) fn go_back(
         harnesses,
         // The go-back's own row: a config-placed bundle says so, so the receipt that follows
         // names what it moved rather than calling every row a skill.
-        kind: mcp_record.then(|| "mcp".to_owned()),
+        kind: mcp_record.then(|| BundleKind::Mcp.as_str().to_owned()),
     })
 }
 
@@ -806,14 +809,10 @@ pub(crate) fn reset_to_base(
     let map: PlacementMap = read_map_required(ctx, &sp)?;
     // Same rule as the go-back: an mcp record never gets skill-dir placements planned, and an
     // empty-map record with no kind evidence fails CLOSED rather than materializing on a guess.
-    let plan = match crate::mcp_engine::record_kind(ctx, sid, &map) {
-        crate::mcp_engine::RecordKind::Mcp => crate::placement::PlacementPlan::default(),
-        crate::mcp_engine::RecordKind::Indeterminate if map.placements.is_empty() => {
-            return Err(kind_indeterminate(&lock.name));
-        }
-        crate::mcp_engine::RecordKind::Skill | crate::mcp_engine::RecordKind::Indeterminate => {
-            placement::plan_for_skill(ctx, sid, &lock, &map)
-        }
+    let plan = if planning_kind(ctx, sid, &map, &lock.name)?.is_mcp() {
+        crate::placement::PlacementPlan::default()
+    } else {
+        placement::plan_for_skill(ctx, sid, &lock, &map)
     };
     // The selection is resolved against the RECORDED map, before reconcile: a reconcile only ever
     // appends targets or replaces never-materialized reservations, so an EDITED copy keeps its

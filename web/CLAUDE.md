@@ -23,7 +23,8 @@ caller.
   written twice in lockstep: `app/lib/person-display.ts` (TS) +
   `app/lib/db/person-display.server.ts` (SQL).
 - **The directory** (schema `web`): Better Auth tables, seats, `cli_session` + login-flow rows,
-  invitations, the bundle catalog (a `kind` tag — displayed, never branched on), channels (pure
+  invitations, the bundle catalog (a `kind` tag — a CLOSED vocabulary here, and clients branch on
+  it to pick a bundle's delivery mechanics), channels (pure
   curated bundle sets, incl. the implicit default `everyone`), **assignment** + **decline** rows
   (the whole delivery predicate: assigned to you or to everyone, minus your declines — one
   positive row per provenance with a `self` flag, one negative per person per bundle; the

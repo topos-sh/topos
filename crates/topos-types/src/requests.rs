@@ -343,8 +343,10 @@ pub struct WireSkillIndexEntry {
     pub skill_id: String,
     /// The catalog's user-facing name (a pre-catalog seeded pointer falls back to the skill id).
     pub name: String,
-    /// The catalog's bundle kind — `"skill"` for everything that exists today. Display metadata
-    /// only: clients render it and never branch on it (an OPEN vocabulary, like `status`).
+    /// The catalog's bundle kind (`"skill"` · `"mcp"`). An OPEN string on the wire and a CLOSED
+    /// vocabulary at the server that mints it. Clients BRANCH on it: the kind chooses the delivery
+    /// mechanics — skill-dir placement, or the MCP config converge — so a client that does not
+    /// know the kind a row names refuses that row rather than placing it as something else.
     /// Additive: an older producer that omits it is serving skills.
     #[serde(default = "default_bundle_kind")]
     pub kind: String,
@@ -438,8 +440,10 @@ pub struct WireDeliverySkill {
     pub skill_id: String,
     /// The catalog's user-facing name (the on-disk directory name for a fresh install).
     pub name: String,
-    /// The catalog's bundle kind — `"skill"` for everything that exists today. Display metadata
-    /// only: clients render it and never branch on it (an OPEN vocabulary, like `protection`).
+    /// The catalog's bundle kind (`"skill"` · `"mcp"`). An OPEN string on the wire and a CLOSED
+    /// vocabulary at the server that mints it. Clients BRANCH on it: the kind chooses the delivery
+    /// mechanics — skill-dir placement, or the MCP config converge — so a client that does not
+    /// know the kind a row names refuses that row rather than placing it as something else.
     /// Additive: an older producer that omits it is serving skills.
     #[serde(default = "default_bundle_kind")]
     pub kind: String,
@@ -1149,8 +1153,10 @@ pub struct WireSkillLog {
     pub skill_id: String,
     /// The skill's current catalog name (the archived spelling once archived).
     pub name: String,
-    /// The catalog's bundle kind — `"skill"` for everything that exists today. Display metadata
-    /// only: clients render it and never branch on it. Additive: an older producer omits it.
+    /// The catalog's bundle kind (`"skill"` · `"mcp"`) — the same fact the catalog and delivery
+    /// carry: an OPEN string on the wire, a CLOSED vocabulary at the server that mints it. A log
+    /// read renders it; the rows that DELIVER a bundle branch on it. Additive: an older producer
+    /// omits it.
     #[serde(default = "default_bundle_kind")]
     pub kind: String,
     /// The skill's lifecycle status (`active` / `archived` / `deleted`).

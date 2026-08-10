@@ -1393,7 +1393,11 @@ fn row_dest_for(
         let entry = cache.workspaces.get(ws_id)?;
         let (host, workspace) = (entry.host.clone()?, entry.workspace_name.clone()?);
         let ds = entry.delivered.get(skill_id)?;
-        if ds.kind.as_deref() == Some("mcp") {
+        // A CONFIG-PLACED bundle's `dest` names config files, not placement folders — and a
+        // kind this build does not own places nothing here either.
+        if crate::bundle_kind::BundleKind::of_tag(ds.kind.as_deref())
+            != Some(crate::bundle_kind::BundleKind::Skill)
+        {
             return None;
         }
         let canonical = format!("{host}/{workspace}/{}", ds.name);
@@ -1427,7 +1431,7 @@ fn row_dest_for(
         let member = format!("{}/{}", origin.origin.source, lock.name);
         for row in &doc.rows {
             if row.shape.canonical() == member {
-                if value_kind_is_mcp(&row.value) {
+                if row.value.declared_kind() != Some(crate::bundle_kind::BundleKind::Skill) {
                     return None;
                 }
                 return value_dest(&row.value);
@@ -1445,7 +1449,7 @@ fn row_dest_for(
         let KeyShape::LocalPath { raw } = &row.shape else {
             continue;
         };
-        if value_kind_is_mcp(&row.value) {
+        if row.value.declared_kind() != Some(crate::bundle_kind::BundleKind::Skill) {
             continue;
         }
         let base = match ctx.layout.project_root() {
@@ -1485,14 +1489,6 @@ fn value_dest(value: &crate::manifest::document::EntryValue) -> Option<Vec<Strin
         }
         _ => None,
     }
-}
-
-/// Whether a parsed row value declares `kind = "mcp"`.
-fn value_kind_is_mcp(value: &crate::manifest::document::EntryValue) -> bool {
-    matches!(
-        value,
-        crate::manifest::document::EntryValue::Fields(f) if f.kind.as_deref() == Some("mcp")
-    )
 }
 
 #[cfg(test)]

@@ -48,6 +48,7 @@ use std::path::{Path, PathBuf};
 
 use topos_types::results::{AddData, RemoveData, RemoveItem, RemoveKind};
 
+use crate::bundle_kind::BundleKind;
 use crate::ctx::Ctx;
 use crate::error::{ClientError, TargetCandidate};
 use crate::id::SkillId;
@@ -631,9 +632,9 @@ pub(crate) fn note_added_path_dest_in(
 }
 
 /// [`note_added_path_in`] carrying a BUNDLE KIND. `kind` is `None` for the ordinary skill adopt
-/// (the row's value stays the bare `"*"`, exactly as before) and `Some("mcp")` for an MCP server
-/// folder, whose row becomes the inline table `{ kind = "mcp" }` — the one place the manifest
-/// records what a local folder IS, because a local path has no catalog to ask.
+/// (the row's value stays the bare `"*"`, exactly as before) and `Some(BundleKind::Mcp)` for an
+/// MCP server folder, whose row becomes the inline table `{ kind = "mcp" }` — the one place the
+/// manifest records what a local folder IS, because a local path has no catalog to ask.
 ///
 /// The value is still ONE row at ONE key, so `remove` stays `add`'s exact file inverse: it drops
 /// the whole row, kind and all.
@@ -645,7 +646,7 @@ pub(crate) fn note_added_path_kind_in(
     data: &mut AddData,
     target: &EditTarget,
     source: &Path,
-    kind: Option<&str>,
+    kind: Option<BundleKind>,
 ) -> Result<(), ClientError> {
     note_added_path_row_in(ctx, data, target, source, kind, None)
 }
@@ -660,7 +661,7 @@ pub(crate) fn note_added_path_kind_dest_in(
     data: &mut AddData,
     target: &EditTarget,
     source: &Path,
-    kind: Option<&str>,
+    kind: Option<BundleKind>,
     dest: &[String],
 ) -> Result<(), ClientError> {
     let dest = (!dest.is_empty()).then_some(dest);
@@ -676,7 +677,7 @@ fn note_added_path_row_in(
     data: &mut AddData,
     target: &EditTarget,
     source: &Path,
-    kind: Option<&str>,
+    kind: Option<BundleKind>,
     dest: Option<&[String]>,
 ) -> Result<(), ClientError> {
     // Canonicalize best-effort (symlinks resolve; a vanished dir keeps the typed spelling).
@@ -703,7 +704,7 @@ fn note_added_path_row_in(
     let value = match (kind, dest) {
         (None, None) => EntryValue::Star,
         (kind, dest) => EntryValue::Fields(crate::manifest::document::EntryFields {
-            kind: kind.map(str::to_owned),
+            kind: kind.map(|k| k.as_str().to_owned()),
             dest: dest.map(<[String]>::to_vec),
             ..crate::manifest::document::EntryFields::default()
         }),
@@ -994,7 +995,8 @@ enum Arm {
         remaining: usize,
         /// Whether the row named no `dest` before (the materialize disclosure).
         materialized: bool,
-        mcp: bool,
+        /// What the bundle IS — the vocabulary its destinations are spelled in.
+        kind: BundleKind,
     },
 }
 
@@ -1574,15 +1576,15 @@ fn narrow_one(
                 } => Some((host.clone(), workspace.clone())),
                 _ => None,
             };
-            let mcp = row_is_mcp(ctx, &row, ws.as_ref(), &name);
-            let entries = if mcp {
+            let kind = row_kind(ctx, target, Some(&row), &name);
+            let entries = if kind.is_mcp() {
                 selection.mcp_entries(target.scope)?
             } else {
                 selection.skill_entries(target.scope)?
             };
             let (row_dest, materialized) = match row.fields().dest {
                 Some(d) => (d, false),
-                None => (current_dest_roots(ctx, target, &name, mcp)?, true),
+                None => (current_dest_roots(ctx, target, &name, kind)?, true),
             };
             let (subtract, remaining) = split_dest(
                 ctx,
@@ -1620,7 +1622,7 @@ fn narrow_one(
                 subtract,
                 remaining: remaining.len(),
                 materialized,
-                mcp,
+                kind,
             })
         }
         Arm::OffWrite {
@@ -1639,13 +1641,13 @@ fn narrow_one(
                 })
                 .unwrap_or_default();
             let ws = Some((host, workspace.clone()));
-            let mcp = cached_kind_is_mcp(ctx, ws.as_ref(), &name);
-            let entries = if mcp {
+            let kind = row_kind(ctx, target, None, &name);
+            let entries = if kind.is_mcp() {
                 selection.mcp_entries(target.scope)?
             } else {
                 selection.skill_entries(target.scope)?
             };
-            let current = current_dest_roots(ctx, target, &name, mcp)?;
+            let current = current_dest_roots(ctx, target, &name, kind)?;
             // NO recorded copies at all: nothing to subtract FROM. This arm is FEED-delivered —
             // no row exists, so `split_dest`'s "its row was added" zero-state would be a
             // fabrication here; the honest variant names what stands (the feed delivers it) and
@@ -1689,7 +1691,7 @@ fn narrow_one(
                 subtract,
                 remaining: remaining.len(),
                 materialized: true,
-                mcp,
+                kind,
             })
         }
         narrowed @ Arm::DestNarrow { .. } => Ok(narrowed),
@@ -1855,8 +1857,14 @@ fn current_dest_roots(
     ctx: &Ctx<'_>,
     target: &EditTarget,
     name: &str,
-    mcp: bool,
+    kind: BundleKind,
 ) -> Result<Vec<String>, ClientError> {
+    // MATCHED, not tested: a third kind's "where do its copies live" answer is a hole the
+    // compiler names, not a silent fall into the skills-folder branch.
+    let mcp = match kind {
+        BundleKind::Mcp => true,
+        BundleKind::Skill => false,
+    };
     if mcp {
         // The scope's ledger names the config files THIS bundle's entries live in — filtered by
         // every identity the bundle may be filed under (its cached skill id, the scope store's
@@ -1947,27 +1955,33 @@ fn scope_store_ctx<'a>(ctx: &'a Ctx<'a>, target: &EditTarget) -> Option<Ctx<'a>>
     }
 }
 
-/// Whether a ROW's bundle is an MCP one: the row's own `kind` field, else the delivery cache's.
-fn row_is_mcp(ctx: &Ctx<'_>, row: &PlanRow, ws: Option<&(String, String)>, name: &str) -> bool {
-    if row.fields().kind.as_deref() == Some("mcp") {
-        return true;
+/// What the bundle a manifest arm acts on IS — the answer that picks a destination VOCABULARY
+/// (config files vs skills folders) and the noun a receipt uses. The row's own `kind` field
+/// answers first: a locally declared server folder has no catalog to ask, and a fetched
+/// `add --mcp` bundle has no store record at all. Otherwise the scope store's record answers
+/// through THE chain ([`crate::bundle_kind::classify`]).
+///
+/// Nothing answering is the ordinary skill. No bytes move on this answer — an arm that would
+/// place or destroy them asks the engine, which refuses rather than guesses.
+fn row_kind(ctx: &Ctx<'_>, target: &EditTarget, row: Option<&PlanRow>, name: &str) -> BundleKind {
+    if let Some(kind) = row
+        .and_then(|r| r.fields().kind)
+        .and_then(|word| BundleKind::parse(&word))
+    {
+        return kind;
     }
-    cached_kind_is_mcp(ctx, ws, name)
-}
-
-/// Whether the delivery cache knows this workspace bundle as `kind = "mcp"`.
-fn cached_kind_is_mcp(ctx: &Ctx<'_>, ws: Option<&(String, String)>, name: &str) -> bool {
-    let Some((host, workspace)) = ws else {
-        return false;
+    let Some(sctx) = scope_store_ctx(ctx, target) else {
+        return BundleKind::Skill;
     };
-    let cache = crate::sync_status::read(ctx.fs, &ctx.layout).unwrap_or_default();
-    cache.workspaces.values().any(|e| {
-        e.host.as_deref() == Some(host)
-            && e.workspace_name.as_deref() == Some(workspace)
-            && e.delivered
-                .values()
-                .any(|d| d.name == *name && d.kind.as_deref() == Some("mcp"))
-    })
+    let Ok((sid, _)) = super::resolve_skill(&sctx, name) else {
+        return BundleKind::Skill;
+    };
+    let placements = crate::doc::read_map(sctx.fs, &sctx.layout.published(&sid).map)
+        .ok()
+        .flatten()
+        .map(|m| m.placements)
+        .unwrap_or_default();
+    crate::bundle_kind::classify(&sctx, sid.as_str(), &placements).or_skill()
 }
 
 /// The typed refusal for a token this file answers more than once — the paste-ready qualified
@@ -2560,7 +2574,7 @@ struct EagerPlan {
 struct EagerBundle {
     name: String,
     display: String,
-    mcp: bool,
+    kind: BundleKind,
     /// `(host, workspace)` for a workspace bundle's row — the identity every record lookup for
     /// this bundle is cross-checked against (see [`scope_record`]). `None` for a local/forge row
     /// (and for a narrow, which keeps its row).
@@ -2581,13 +2595,14 @@ fn eager_plan(ctx: &Ctx<'_>, target: &EditTarget, arms: &[Arm]) -> EagerPlan {
         bundles: Vec::new(),
     };
     // The pre-apply record lookup for a MACHINE whole-row edit (see [`EagerBundle::record`]).
-    let record_for = |name: &str, mcp: bool, ws: Option<&(String, String)>| -> Option<SkillId> {
-        if mcp || target.scope != ManifestScope::Global {
-            return None;
-        }
-        let sctx = scope_store_ctx(ctx, target)?;
-        scope_record(&sctx, ws, name)
-    };
+    let record_for =
+        |name: &str, kind: BundleKind, ws: Option<&(String, String)>| -> Option<SkillId> {
+            if kind.is_mcp() || target.scope != ManifestScope::Global {
+                return None;
+            }
+            let sctx = scope_store_ctx(ctx, target)?;
+            scope_record(&sctx, ws, name)
+        };
     for arm in arms {
         match arm {
             Arm::FeedDrop { workspace, .. } => plan.feeds.push(workspace.clone()),
@@ -2598,11 +2613,11 @@ fn eager_plan(ctx: &Ctx<'_>, target: &EditTarget, arms: &[Arm]) -> EagerPlan {
                     } => Some((host.clone(), workspace.clone())),
                     _ => None,
                 };
-                let mcp = row_is_mcp(ctx, row, ws.as_ref(), name);
+                let kind = row_kind(ctx, target, Some(row), name);
                 plan.bundles.push(EagerBundle {
                     display: qualified_name(ctx, ws.as_ref(), name),
-                    mcp,
-                    record: record_for(name, mcp, ws.as_ref()),
+                    kind,
+                    record: record_for(name, kind, ws.as_ref()),
                     name: name.clone(),
                     narrow: None,
                     workspace: ws,
@@ -2617,11 +2632,11 @@ fn eager_plan(ctx: &Ctx<'_>, target: &EditTarget, arms: &[Arm]) -> EagerPlan {
                     }) => Some((host, workspace)),
                     _ => None,
                 };
-                let mcp = cached_kind_is_mcp(ctx, ws.as_ref(), name);
+                let kind = row_kind(ctx, target, None, name);
                 plan.bundles.push(EagerBundle {
                     display: qualified_name(ctx, ws.as_ref(), name),
-                    mcp,
-                    record: record_for(name, mcp, ws.as_ref()),
+                    kind,
+                    record: record_for(name, kind, ws.as_ref()),
                     name: name.clone(),
                     narrow: None,
                     workspace: ws,
@@ -2632,12 +2647,12 @@ fn eager_plan(ctx: &Ctx<'_>, target: &EditTarget, arms: &[Arm]) -> EagerPlan {
                 workspace,
                 subtract,
                 remaining,
-                mcp,
+                kind,
                 ..
             } => {
                 plan.bundles.push(EagerBundle {
                     display: qualified_name(ctx, workspace.as_ref(), name),
-                    mcp: *mcp,
+                    kind: *kind,
                     name: name.clone(),
                     narrow: Some((subtract.clone(), *remaining as u64)),
                     record: None,
@@ -2808,7 +2823,7 @@ fn eager_cleanup(
             // own line.
             Some((subtract, remaining)) => {
                 if rows.is_empty() {
-                    let (noun_one, noun_many) = if b.mcp {
+                    let (noun_one, noun_many) = if b.kind.is_mcp() {
                         ("config file", "config files")
                     } else {
                         ("folder", "folders")
@@ -2836,7 +2851,7 @@ fn eager_cleanup(
                 out.push(UninstalledBundle {
                     name: b.display.clone(),
                     destinations: subtract.clone(),
-                    kind: b.mcp.then(|| "mcp".to_owned()),
+                    kind: b.kind.tag(),
                     kept,
                     remaining: Some(*remaining),
                 });
@@ -2868,7 +2883,7 @@ fn eager_cleanup(
                     // adopted sources and in-checkout placements never touched). The record was
                     // resolved BEFORE the apply: the same reconcile's orphan pass may have
                     // retired it just now, which hides the name, not the record.
-                    let Some(sid) = b.record.as_ref().filter(|_| !b.mcp) else {
+                    let Some(sid) = b.record.as_ref().filter(|_| !b.kind.is_mcp()) else {
                         continue;
                     };
                     let Some(sctx) = scope_store_ctx(ctx, target) else {
@@ -2899,7 +2914,7 @@ fn eager_cleanup(
                 out.push(UninstalledBundle {
                     name: b.display.clone(),
                     destinations,
-                    kind: b.mcp.then(|| "mcp".to_owned()),
+                    kind: b.kind.tag(),
                     kept,
                     remaining: None,
                 });
@@ -3068,7 +3083,7 @@ fn remove_imported_mcp_dirs(
         let KeyShape::LocalPath { raw } = &row.shape else {
             continue;
         };
-        if row.fields().kind.as_deref() != Some("mcp") {
+        if row.value.declared_kind() != Some(BundleKind::Mcp) {
             continue;
         }
         let dir = row_dir(ctx, target, raw);
@@ -3136,7 +3151,10 @@ fn mcp_bundle_of_arm(
             .and_then(|(_, e)| {
                 e.delivered
                     .iter()
-                    .find(|(_, d)| d.name == bundle && d.kind.as_deref() == Some("mcp"))
+                    .find(|(_, d)| {
+                        d.name == bundle
+                            && BundleKind::of_tag(d.kind.as_deref()) == Some(BundleKind::Mcp)
+                    })
                     .map(|(id, _)| id.clone())
             })
     };
@@ -3147,7 +3165,7 @@ fn mcp_bundle_of_arm(
                 workspace,
                 bundle,
             } => ws_bundle(host, workspace, bundle),
-            KeyShape::LocalPath { raw } if row.fields().kind.as_deref() == Some("mcp") => {
+            KeyShape::LocalPath { raw } if row.value.declared_kind() == Some(BundleKind::Mcp) => {
                 // Resolved the way every local-path key resolves ([`row_dir`], the `~/` arm
                 // included), so a home-spelled row canonicalizes to the identity its adopt
                 // recorded instead of falling back to a `local:` guess no ledger key answers.
@@ -3386,7 +3404,9 @@ fn undo_for(arms: &[Arm], global: bool, sugar_host: Option<&str>) -> Vec<String>
                 let Some(dest) = f.dest.as_ref().filter(|_| respellable) else {
                     return Vec::new();
                 };
-                tail = super::dest_select::undo_tail(dest, scope, false);
+                // A row the `add` grammar can respell carries no `kind`, so its destinations
+                // are skills folders by construction.
+                tail = super::dest_select::undo_tail(dest, scope, BundleKind::Skill);
                 let base = sugar_row_reference(&row.shape, sugar_host)
                     .unwrap_or_else(|| row.reference.clone());
                 match &f.version {
@@ -3412,11 +3432,11 @@ fn undo_for(arms: &[Arm], global: bool, sugar_host: Option<&str>) -> Vec<String>
             name,
             workspace,
             subtract,
-            mcp,
+            kind,
             ..
         } => {
             // The narrow's inverse: re-add exactly the subtracted destination(s).
-            tail = super::dest_select::undo_tail(subtract, scope, *mcp);
+            tail = super::dest_select::undo_tail(subtract, scope, *kind);
             match workspace {
                 Some((host, ws)) if sugar_host == Some(host.as_str()) => format!("@{ws}/{name}"),
                 _ => reference.clone(),

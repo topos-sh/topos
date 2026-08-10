@@ -46,9 +46,10 @@ pub(crate) struct SkillPaths {
     /// repo): the origin repo, resolved commit, subdir, and license. A best-effort adjunct written after
     /// adoption (never part of the atomic core), so its absence just means "no recorded upstream."
     pub origin: PathBuf,
-    /// The durable bundle-KIND marker — written at the first mcp sync/adopt in this scope, so kind
-    /// classification survives a lost config ledger (`crate::mcp_engine::record_kind`). Absent for
-    /// every ordinary skill and for stores written before the marker existed.
+    /// The durable bundle-KIND marker — written at the first sync/adopt of EVERY bundle in this
+    /// scope, and the first rung [`crate::bundle_kind::classify`] reads. Absent only for a record
+    /// whose store was written before it (and for one whose best-effort write failed, which
+    /// classification answers by refusing, never by guessing).
     pub kind: PathBuf,
     /// The durable RETIREMENT marker — written once when the one-time orphan resolution retires a
     /// record no row claims and nothing delivers. The record's bytes stay on disk forever, but

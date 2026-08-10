@@ -292,17 +292,14 @@ fn retire_mcp_entries(ctx: &Ctx<'_>, skill_id: &str, item: &mut RemoveItem) {
     let Ok(sid) = SkillId::parse(skill_id) else {
         return;
     };
-    // `record_kind`'s middle rung reads the record's placements; with no readable map document
-    // there are none to read, and its LAST rung — this scope's own ledger, which is exactly the
-    // record the removal below acts on — still answers.
-    let mcp = match doc::read_map(ctx.fs, &ctx.layout.published(&sid).map) {
-        Ok(Some(map)) => {
-            crate::mcp_engine::record_kind(ctx, skill_id, &map)
-                == crate::mcp_engine::RecordKind::Mcp
-        }
-        _ => crate::mcp_engine::is_mcp_record(ctx, skill_id),
-    };
-    if !mcp {
+    // Classification does not need the placement map: the durable marker answers first, and an
+    // unreadable map only costs the manifest-row rung below it.
+    let placements = doc::read_map(ctx.fs, &ctx.layout.published(&sid).map)
+        .ok()
+        .flatten()
+        .map(|m| m.placements)
+        .unwrap_or_default();
+    if !crate::bundle_kind::classify(ctx, skill_id, &placements).is_mcp() {
         return;
     }
     let project_root = ctx.layout.project_root().map(std::path::Path::to_path_buf);

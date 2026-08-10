@@ -555,7 +555,7 @@
       "type": "object",
       "properties": {
         "kind": {
-          "description": "The catalog's bundle kind (`\"skill\"` for everything today) — display metadata, never\nbranched on.",
+          "description": "The catalog's bundle kind (`\"skill\"` · `\"mcp\"`) — an OPEN string, a CLOSED vocabulary at\nthe server that mints it. A listing renders it; the rows that DELIVER a bundle branch on\nit to choose the delivery mechanics.",
           "type": "string"
         },
         "name": {

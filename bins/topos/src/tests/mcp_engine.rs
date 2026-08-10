@@ -3390,3 +3390,121 @@ fn an_offline_sweep_keeps_a_dest_narrowed_bundle_narrow() {
         assert!(!p.exists(), "offline widened the row into {p:?}");
     }
 }
+
+/// THE ADD DOOR CLOSES ITS OWN WINDOW. Kind classification for a WORKSPACE bundle reads the store's
+/// durable marker — the row itself never spells a kind — so `add` must not leave a row standing
+/// with no marker for a later verb to guess about. It does not: the reference add DELIVERS in the
+/// same invocation, and the sync that lands the bytes lays the marker before `add` returns.
+#[test]
+fn a_workspace_mcp_add_leaves_the_marker_behind_before_it_returns() {
+    let rig = Rig::new("add-marker");
+    rig.seed_session();
+    seed_harness_dirs(&rig.home.0);
+    let proj = Scratch::new("add-marker-co");
+    std::fs::create_dir_all(proj.0.join(".git")).unwrap();
+    std::fs::write(proj.0.join(crate::manifest::MANIFEST_FILE), "[bundles]\n").unwrap();
+    let v = mk_version(&[(
+        "server.json",
+        server_json("https://mcp.example/linear").as_bytes(),
+    )]);
+    let plane = FakePlane::new().with_version("s_linear", &v);
+    plane.serves(vec![delivered_mcp("s_linear", "linear", &v)]);
+    let dir = FakeDirectory {
+        skills: vec![mcp_catalog_entry("s_linear", "linear", &v)],
+        channels: Vec::new(),
+    };
+    rig.write_global("[bundles]\n");
+    let ctx = rig.ctx_at(Some(&proj.0));
+
+    ops::add_reference(
+        &ctx,
+        &connect(&plane, &dir),
+        None,
+        &format!("{HOST}/{WS_NAME}/linear"),
+        false,
+        false,
+        &Default::default(),
+    )
+    .unwrap();
+
+    // The PROJECT store the add delivered into carries the kind, durably, right now.
+    let layout = crate::sidecar::existing_project_store(&rig.fs, &proj.0)
+        .expect("the add created the project store");
+    let sid = crate::id::SkillId::parse("s_linear").unwrap();
+    let marker = std::fs::read_to_string(layout.published(&sid).kind).expect("kind.json");
+    assert!(marker.contains("\"mcp\""), "{marker}");
+
+    // Which is the fact every later arm resolves against: the classifier answers mcp with no
+    // delivery cache and no ledger consulted.
+    let sctx = crate::ops::ctx_with_layout(&ctx, &layout);
+    assert!(
+        crate::bundle_kind::classify(&sctx, "s_linear", &[]).is_mcp(),
+        "the marker is what a later `remove -a <agent>` resolves the dest vocabulary from"
+    );
+}
+
+/// AND THE WINDOW CANNOT BE OPENED BY A DARK PLANE EITHER. The pair that closes it structurally:
+/// a workspace row's kind comes from the CATALOG, and the catalog is what `add` needs before it
+/// writes anything — so there is no ordering in which a row exists with no marker beside it.
+///
+/// With the DELIVERY dark the explicit row still syncs (it resolves against the catalog, not the
+/// feed snapshot), so the marker lands anyway; with the catalog answering NO the add refuses and
+/// writes no row at all. A never-swept mcp row with no marker is therefore unreachable, and no arm
+/// can fall back to the skills vocabulary for one.
+#[test]
+fn an_mcp_row_never_stands_without_its_marker_even_when_the_feed_is_dark() {
+    let rig = Rig::new("dark-feed-marker");
+    rig.seed_session();
+    seed_harness_dirs(&rig.home.0);
+    let v = mk_version(&[(
+        "server.json",
+        server_json("https://mcp.example/linear").as_bytes(),
+    )]);
+    let plane = FakePlane::new().with_version("s_linear", &v);
+    // The FEED is unreachable for the whole invocation.
+    plane.serve_unreachable();
+    let dir = FakeDirectory {
+        skills: vec![mcp_catalog_entry("s_linear", "linear", &v)],
+        channels: Vec::new(),
+    };
+    rig.write_global("[bundles]\n");
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    ops::add_reference(
+        &ctx,
+        &connect(&plane, &dir),
+        None,
+        &format!("{HOST}/{WS_NAME}/linear"),
+        true,
+        true,
+        &Default::default(),
+    )
+    .expect("an explicit row resolves against the catalog, not the feed");
+
+    let manifest =
+        std::fs::read_to_string(rig.layout().home().join(crate::manifest::MANIFEST_FILE)).unwrap();
+    assert!(manifest.contains("linear"), "the row landed: {manifest}");
+    let sid = crate::id::SkillId::parse("s_linear").unwrap();
+    let marker = std::fs::read_to_string(rig.layout().published(&sid).kind)
+        .expect("and the marker landed with it");
+    assert!(marker.contains("\"mcp\""), "{marker}");
+
+    // The other half: with no catalog answer there is no row either, so "row without marker" has
+    // no way to come about.
+    let empty = FakeDirectory {
+        skills: Vec::new(),
+        channels: Vec::new(),
+    };
+    ops::add_reference(
+        &ctx,
+        &connect(&plane, &empty),
+        None,
+        &format!("{HOST}/{WS_NAME}/absent"),
+        true,
+        true,
+        &Default::default(),
+    )
+    .expect_err("no catalog answer, no row");
+    let manifest =
+        std::fs::read_to_string(rig.layout().home().join(crate::manifest::MANIFEST_FILE)).unwrap();
+    assert!(!manifest.contains("absent"), "{manifest}");
+}

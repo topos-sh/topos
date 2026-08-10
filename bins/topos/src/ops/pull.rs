@@ -24,6 +24,7 @@ use std::path::Path;
 use topos_types::persisted::SyncState;
 use topos_types::results::{ExchangeFault, PullData, ResetData};
 
+use crate::bundle_kind::BundleKind;
 use crate::ctx::Ctx;
 use crate::error::ClientError;
 use crate::id::SkillId;
@@ -673,7 +674,8 @@ pub(super) fn applied_snapshot(
             // detected agent also records an empty map, and reporting IT as held would tell the
             // fleet page this device serves bytes it placed nowhere.
             if map.placements.is_empty() {
-                if crate::mcp_engine::kind_marker(ctx.fs, layout, &sid).as_deref() != Some("mcp") {
+                let marker = crate::bundle_kind::kind_marker(ctx.fs, layout, &sid);
+                if marker.as_deref().and_then(BundleKind::parse) != Some(BundleKind::Mcp) {
                     continue;
                 }
             } else if !map.placements.iter().any(|p| ctx.fs.exists(Path::new(p))) {

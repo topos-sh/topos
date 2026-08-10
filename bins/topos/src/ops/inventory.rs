@@ -24,6 +24,7 @@ use std::path::{Path, PathBuf};
 use topos_types::persisted::{ConflictState, Lock, SyncState};
 use topos_types::results::{ForgeSource, ListDetail, StatusItemState, StatusRegime};
 
+use crate::bundle_kind::BundleKind;
 use crate::ctx::Ctx;
 use crate::error::ClientError;
 use crate::manifest::document::{EntryValue, ManifestScope};
@@ -521,7 +522,8 @@ fn scope_rows(
         // An mcp row the delivery cache says nothing about — every LOCAL one — takes its per-agent
         // entries from this scope's ledger. Without the join the deep dive reads "no agent config
         // entries recorded yet" forever, about entries this very scope placed.
-        if kind.as_deref() == Some("mcp") && harness_states.is_empty() {
+        if BundleKind::of_tag(kind.as_deref()) == Some(BundleKind::Mcp) && harness_states.is_empty()
+        {
             harness_states = ledger_states(&ledger, &ledger_ids);
         }
         // A frozen `dest` that names no config file topos can edit costs the bundle every agent.
@@ -535,7 +537,8 @@ fn scope_rows(
         // possibly still being loaded. A live entry outranks the row's arithmetic: the states below
         // say where the bytes actually are, and the sweep's own warning carries the causality.
         let placed_somewhere = ledger_ids.iter().any(|id| ledger.has_entries_for(id));
-        let mcp_unreachable = (kind.as_deref() == Some("mcp") && !placed_somewhere)
+        let mcp_unreachable = (BundleKind::of_tag(kind.as_deref()) == Some(BundleKind::Mcp)
+            && !placed_somewhere)
             .then(|| {
                 let narrowing = super::reconcile::mcp_dest_narrowing(row.fields().dest, scope);
                 narrowing.reaches_nothing().then(|| {

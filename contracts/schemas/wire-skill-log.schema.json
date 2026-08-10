@@ -12,7 +12,7 @@
       ]
     },
     "kind": {
-      "description": "The catalog's bundle kind — `\"skill\"` for everything that exists today. Display metadata\nonly: clients render it and never branch on it. Additive: an older producer omits it.",
+      "description": "The catalog's bundle kind (`\"skill\"` · `\"mcp\"`) — the same fact the catalog and delivery\ncarry: an OPEN string on the wire, a CLOSED vocabulary at the server that mints it. A log\nread renders it; the rows that DELIVER a bundle branch on it. Additive: an older producer\nomits it.",
       "type": "string",
       "default": "skill"
     },

@@ -349,8 +349,8 @@ pub(crate) fn publish_describe(
     // The BUNDLE KIND, and — for an mcp one — the gate. The describe refuses exactly where the
     // apply would, so a document carrying a credential — or a server too old to record the kind —
     // is named here rather than after `--yes`.
-    let bundle_kind = publish_bundle_kind(ctx, ctx, id.as_str(), &map, &scanned);
-    if bundle_kind.as_deref() == Some(MCP_KIND) {
+    let bundle_kind = crate::bundle_kind::classify(ctx, id.as_str(), &map.placements).or_skill();
+    if bundle_kind.is_mcp() {
         gate_mcp_bundle(&scanned, &skill_name)?;
         if let Some(l) = &lane {
             crate::compat::ensure_server_records_mcp(
@@ -548,7 +548,7 @@ pub(crate) fn publish_describe(
         manifest: transfer_manifest,
         reference: transfer_reference,
         converted_from: transfer_from,
-        kind: bundle_kind,
+        kind: bundle_kind.tag(),
     })
 }
 
@@ -583,57 +583,6 @@ fn from_disclosure(
         Some(p) => (Some(p.spelling.display.clone()), p.others_edited.clone()),
         None => (None, Vec::new()),
     }
-}
-
-/// The `kind` tag a `kind = "mcp"` bundle carries everywhere: the manifest row, the catalog, the
-/// wire, the WAL.
-pub(crate) const MCP_KIND: &str = "mcp";
-
-/// What KIND of bundle a publish is shipping, when it is not the ordinary skill. Three sources,
-/// asked cheapest-and-most-durable first:
-///
-/// 1. this scope's MCP LEDGER — a bundle whose config keys were minted here IS an mcp one,
-///    whatever anyone has since edited a manifest to say;
-/// 2. the delivery CACHE — a republish of a bundle the workspace already governs as `mcp`;
-/// 3. the MANIFEST row that demands it — a local path row's `kind` field is the only place a
-///    folder's kind is recorded, because a local path has no catalog to ask. This is the FIRST
-///    publish of a locally-authored server, so it is load-bearing — but it is only consulted when
-///    the draft actually carries a root `server.json`, which an mcp bundle does by definition and
-///    a skill never does. That keeps an ordinary publish from reading every manifest in reach to
-///    answer a question its own bytes already settle.
-///
-/// `None` means "a skill", which is what every publish before this one shipped: an absent tag on
-/// the wire reads as `"skill"` by the request's own default, so nothing changes for them.
-fn publish_bundle_kind(
-    outer_ctx: &Ctx<'_>,
-    store_ctx: &Ctx<'_>,
-    skill_id: &str,
-    map: &PlacementMap,
-    scanned: &scan::ScannedBundle,
-) -> Option<String> {
-    if crate::mcp_engine::is_mcp_record(store_ctx, skill_id) {
-        return Some(MCP_KIND.to_owned());
-    }
-    let governed = crate::sync_status::read(outer_ctx.fs, &outer_ctx.layout)
-        .ok()
-        .and_then(|cache| {
-            cache
-                .workspaces
-                .values()
-                .find_map(|ws| ws.delivered.get(skill_id).and_then(|d| d.kind.clone()))
-        });
-    if governed.is_some() {
-        return governed;
-    }
-    if !scanned.files.iter().any(|f| f.path == "server.json") {
-        return None;
-    }
-    let dirs: Vec<std::path::PathBuf> = map
-        .placements
-        .iter()
-        .map(std::path::PathBuf::from)
-        .collect();
-    super::path_row_kind(outer_ctx, &dirs).ok().flatten()
 }
 
 /// REFUSAL-FIRST: an mcp bundle's WHOLE candidate goes through the same gate the web tier runs
@@ -791,7 +740,15 @@ fn ensure_name(
                 )
             })?;
             let (path, name) = resolve_add_target(ctx, roots, raw)?;
-            let data = add_with_name(ctx, &path, Some(&name), true)?;
+            // Discovery resolves a bare NAME against agent skill folders: an auto-add is
+            // always a skill.
+            let data = add_with_name(
+                ctx,
+                &path,
+                Some(&name),
+                true,
+                crate::bundle_kind::BundleKind::Skill,
+            )?;
             Ok((
                 data.name.clone(),
                 Some(AddedNote {
@@ -963,8 +920,8 @@ fn enrolled_publish(
     // IS the whole outcome; nothing has happened when it fires. The server-version preflight sits
     // beside it: a server that predates MCP kinds would silently record a SKILL, so it refuses
     // typed here rather than mis-kind on the wire.
-    let bundle_kind = publish_bundle_kind(outer_ctx, ctx, id.as_str(), &map, &scanned);
-    if bundle_kind.as_deref() == Some(MCP_KIND) {
+    let bundle_kind = crate::bundle_kind::classify(ctx, id.as_str(), &map.placements).or_skill();
+    if bundle_kind.is_mcp() {
         gate_mcp_bundle(&scanned, &lock.name)?;
         crate::compat::ensure_server_records_mcp(transport.protocol_card().as_ref())?;
     }
@@ -1020,7 +977,7 @@ fn enrolled_publish(
             &scanned,
             scanned.bundle_digest,
             message,
-            bundle_kind.clone(),
+            bundle_kind.tag(),
         ) {
             Ok(rec) => rec,
             // NO-CHANGE means an earlier publish of these bytes already LANDED — the retry a

@@ -914,7 +914,13 @@ fn run_command(
                             }) => ops::add_scope(&ctx, global).and_then(|scope| {
                                 let sctx = ops::ctx_with_layout(&ctx, &scope.layout);
                                 let entries = selection.skill_entries(scope.target.scope)?;
-                                let mut d = ops::add_with_name(&sctx, &path, Some(&name), true)?;
+                                let mut d = ops::add_with_name(
+                                    &sctx,
+                                    &path,
+                                    Some(&name),
+                                    true,
+                                    crate::bundle_kind::BundleKind::Skill,
+                                )?;
                                 if entries.is_empty() {
                                     ops::note_added_path_in(&ctx, &mut d, &scope.target, &path)?;
                                 } else {

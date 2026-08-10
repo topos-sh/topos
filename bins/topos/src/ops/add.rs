@@ -19,6 +19,7 @@ use topos_types::PERSISTED_SCHEMA_VERSION;
 use topos_types::persisted::{Lock, LockedFile, PlacementMap, SwapCapability, SyncState};
 use topos_types::results::{AddData, KeepAsYoursData, KeepReason, SkillOrigin, UntrackedEntry};
 
+use crate::bundle_kind::BundleKind;
 use crate::ctx::Ctx;
 use crate::error::{ClientError, TrackedBy, WorkspaceHint};
 use crate::git_source::{GitTarballSource, RepoFile, extract_tree};
@@ -60,7 +61,7 @@ pub(crate) fn refuse_unflagged_mcp_dir(ctx: &Ctx<'_>, source: &Path) -> Result<(
 /// store/io failure.
 pub(crate) fn add(ctx: &Ctx<'_>, source: &Path) -> Result<AddData, ClientError> {
     refuse_unflagged_mcp_dir(ctx, source)?;
-    add_with_name(ctx, source, None, true)
+    add_with_name(ctx, source, None, true, BundleKind::Skill)
 }
 
 /// The PATH arm of `add`, against the scope whose file will hold the row: adopt the directory at
@@ -83,7 +84,7 @@ pub(crate) fn adopt_path(
     source: &Path,
 ) -> Result<AddData, ClientError> {
     refuse_unflagged_mcp_dir(ctx, source)?;
-    adopt_path_any_kind(ctx, target, source)
+    adopt_path_any_kind(ctx, target, source, BundleKind::Skill)
 }
 
 /// [`adopt_path`] minus the server-bundle guard — `add --mcp`'s own local door, which adopts
@@ -92,10 +93,18 @@ pub(crate) fn adopt_path_any_kind(
     ctx: &Ctx<'_>,
     target: &EditTarget,
     source: &Path,
+    kind: BundleKind,
 ) -> Result<AddData, ClientError> {
     match unclaimed_record(ctx, target, source)? {
-        Some(data) => Ok(data),
-        None => add_with_name(ctx, source, None, true),
+        Some(data) => {
+            // A RE-LINKED record predates this door's marker when it was written by an older
+            // build; stamping it here is the same first-write-wins belt the mint takes.
+            if let Some(Ok(sid)) = data.skill_id.as_deref().map(crate::id::SkillId::parse) {
+                crate::bundle_kind::write_kind_marker(ctx, &sid, kind);
+            }
+            Ok(data)
+        }
+        None => add_with_name(ctx, source, None, true, kind),
     }
 }
 
@@ -207,6 +216,7 @@ pub(crate) fn add_with_name(
     source: &Path,
     name_override: Option<&str>,
     adopted_in_place: bool,
+    kind: BundleKind,
 ) -> Result<AddData, ClientError> {
     // Establish the home, then refuse a source that overlaps it (canonicalized — catches symlinks), so
     // uninstall can never delete user bytes and the footprint oracle never collapses.
@@ -388,6 +398,10 @@ pub(crate) fn add_with_name(
             }
         })?;
     ctx.fs.fsync_dir(&ctx.layout.skills_dir())?;
+
+    // The durable kind marker — an adopt IS a bundle's first sync, and every later verb reads this
+    // rather than re-deriving the kind from state a sweep may drop.
+    crate::bundle_kind::write_kind_marker(ctx, &skill_id, kind);
 
     logfile::append_event(
         ctx.fs,
@@ -695,7 +709,13 @@ pub(crate) fn add_remote_fetched(
             dest_dir.display()
         )));
     }
-    let mut data = match add_with_name(ctx, &dest_dir, Some(&selected.name), false) {
+    let mut data = match add_with_name(
+        ctx,
+        &dest_dir,
+        Some(&selected.name),
+        false,
+        BundleKind::Skill,
+    ) {
         Ok(d) => d,
         Err(e) => {
             // The staged tree is LIVE at `dest_dir` now, and an edit can land there the instant
@@ -857,7 +877,7 @@ pub(crate) fn keep_as_yours(
     //    already-tracked guard would refuse the still-tracked path.
     retire_tracked(ctx, &sid)?;
     // 3. Adopt `dest` fresh: a new local skill id, named `<name>`, with NO upstream.
-    let data = add_with_name(ctx, &dest, Some(name), false)?;
+    let data = add_with_name(ctx, &dest, Some(name), false, BundleKind::Skill)?;
     Ok(Some(KeepAsYoursOutcome::Forked(Box::new(data))))
 }
 

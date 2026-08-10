@@ -25,6 +25,7 @@
 
 use topos_types::results::{AddData, AddDescribeData};
 
+use crate::bundle_kind::BundleKind;
 use crate::ctx::Ctx;
 use crate::error::ClientError;
 use crate::git_source::GitTarballSource;
@@ -174,6 +175,21 @@ struct Resolved {
     name: String,
 }
 
+/// The kind a catalog entry names, or the refusal `add` answers for a kind this build cannot
+/// deliver — the same teaching the sweep gives, at the other door: what the bundle is, and the
+/// one command that makes this machine able to take it.
+///
+/// # Errors
+/// [`ClientError::InvalidArgument`] naming the bundle, its kind, and `topos self-update`.
+fn add_kind(word: &str, name: &str) -> Result<BundleKind, ClientError> {
+    BundleKind::parse(word).ok_or_else(|| {
+        ClientError::InvalidArgument(format!(
+            "'{name}' is a \"{word}\" bundle — this topos does not know how to deliver that \
+             kind; run `topos self-update`"
+        ))
+    })
+}
+
 fn add_workspace(
     ctx: &Ctx<'_>,
     connect: &SessionConnect<'_>,
@@ -189,7 +205,14 @@ fn add_workspace(
     } else {
         ManifestScope::Project
     };
-    let mcp_kind = resolved.entry.as_deref().is_some_and(|e| e.kind == "mcp");
+    // The catalog's KIND, parsed against what this build can deliver. A bundle a newer server
+    // published under a kind this binary predates is refused HERE — before a row is written for
+    // something no sweep could ever place.
+    let kind = match resolved.entry.as_deref() {
+        Some(e) => Some(add_kind(&e.kind, &resolved.name)?),
+        None => None,
+    };
+    let mcp_kind = kind.is_some_and(BundleKind::is_mcp);
     let dest_entries = if selection.is_empty() {
         Vec::new()
     } else if mcp_kind {
@@ -483,7 +506,14 @@ fn finish_workspace(
             }
         }
     }
-    if resolved.entry.as_deref().is_some_and(|e| e.kind == "mcp") {
+    // The kind was parsed (and an unknown one refused) before any row was written; a bundle
+    // that got this far names a kind this build delivers.
+    if resolved
+        .entry
+        .as_deref()
+        .and_then(|e| BundleKind::parse(&e.kind))
+        .is_some_and(BundleKind::is_mcp)
+    {
         super::add_mcp::fold_workspace_mcp(ctx, target, global, &mut data);
     }
     AddRefOutcome::Applied(Box::new(data))

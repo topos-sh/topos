@@ -106,7 +106,7 @@
           "minimum": 0
         },
         "kind": {
-          "description": "The catalog's bundle kind — `\"skill\"` for everything that exists today. Display metadata\nonly: clients render it and never branch on it (an OPEN vocabulary, like `protection`).\nAdditive: an older producer that omits it is serving skills.",
+          "description": "The catalog's bundle kind (`\"skill\"` · `\"mcp\"`). An OPEN string on the wire and a CLOSED\nvocabulary at the server that mints it. Clients BRANCH on it: the kind chooses the delivery\nmechanics — skill-dir placement, or the MCP config converge — so a client that does not\nknow the kind a row names refuses that row rather than placing it as something else.\nAdditive: an older producer that omits it is serving skills.",
           "type": "string",
           "default": "skill"
         },

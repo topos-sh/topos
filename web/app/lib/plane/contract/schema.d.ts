@@ -1267,8 +1267,10 @@ export interface components {
              */
             generation: number;
             /**
-             * @description The catalog's bundle kind — `"skill"` for everything that exists today. Display metadata
-             *     only: clients render it and never branch on it (an OPEN vocabulary, like `protection`).
+             * @description The catalog's bundle kind (`"skill"` · `"mcp"`). An OPEN string on the wire and a CLOSED
+             *     vocabulary at the server that mints it. Clients BRANCH on it: the kind chooses the delivery
+             *     mechanics — skill-dir placement, or the MCP config converge — so a client that does not
+             *     know the kind a row names refuses that row rather than placing it as something else.
              *     Additive: an older producer that omits it is serving skills.
              */
             kind?: string;
@@ -1565,8 +1567,10 @@ export interface components {
              */
             generation: number;
             /**
-             * @description The catalog's bundle kind — `"skill"` for everything that exists today. Display metadata
-             *     only: clients render it and never branch on it (an OPEN vocabulary, like `status`).
+             * @description The catalog's bundle kind (`"skill"` · `"mcp"`). An OPEN string on the wire and a CLOSED
+             *     vocabulary at the server that mints it. Clients BRANCH on it: the kind chooses the delivery
+             *     mechanics — skill-dir placement, or the MCP config converge — so a client that does not
+             *     know the kind a row names refuses that row rather than placing it as something else.
              *     Additive: an older producer that omits it is serving skills.
              */
             kind?: string;
@@ -1622,8 +1626,10 @@ export interface components {
             /** @description The pre-archive name, when archived (what the skill was called before the rename freed it). */
             base_name?: string | null;
             /**
-             * @description The catalog's bundle kind — `"skill"` for everything that exists today. Display metadata
-             *     only: clients render it and never branch on it. Additive: an older producer omits it.
+             * @description The catalog's bundle kind (`"skill"` · `"mcp"`) — the same fact the catalog and delivery
+             *     carry: an OPEN string on the wire, a CLOSED vocabulary at the server that mints it. A log
+             *     read renders it; the rows that DELIVER a bundle branch on it. Additive: an older producer
+             *     omits it.
              */
             kind?: string;
             /** @description The skill's current catalog name (the archived spelling once archived). */

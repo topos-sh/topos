@@ -484,8 +484,9 @@ pub struct RemoteChannel {
 pub struct RemoteSkill {
     /// The skill's catalog name (the reference leaf).
     pub name: String,
-    /// The catalog's bundle kind (`"skill"` for everything today) — display metadata, never
-    /// branched on.
+    /// The catalog's bundle kind (`"skill"` · `"mcp"`) — an OPEN string, a CLOSED vocabulary at
+    /// the server that mints it. A listing renders it; the rows that DELIVER a bundle branch on
+    /// it to choose the delivery mechanics.
     pub kind: String,
     /// The catalog `current` version id (64-char lowercase hex).
     #[cfg_attr(feature = "contract-derives", schemars(extend("pattern" = "^[0-9a-f]{64}$")))]

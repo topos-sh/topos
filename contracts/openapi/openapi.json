@@ -3687,7 +3687,7 @@
           },
           "kind": {
             "type": "string",
-            "description": "The catalog's bundle kind — `\"skill\"` for everything that exists today. Display metadata\nonly: clients render it and never branch on it (an OPEN vocabulary, like `protection`).\nAdditive: an older producer that omits it is serving skills."
+            "description": "The catalog's bundle kind (`\"skill\"` · `\"mcp\"`). An OPEN string on the wire and a CLOSED\nvocabulary at the server that mints it. Clients BRANCH on it: the kind chooses the delivery\nmechanics — skill-dir placement, or the MCP config converge — so a client that does not\nknow the kind a row names refuses that row rather than placing it as something else.\nAdditive: an older producer that omits it is serving skills."
           },
           "name": {
             "type": "string",
@@ -4245,7 +4245,7 @@
           },
           "kind": {
             "type": "string",
-            "description": "The catalog's bundle kind — `\"skill\"` for everything that exists today. Display metadata\nonly: clients render it and never branch on it (an OPEN vocabulary, like `status`).\nAdditive: an older producer that omits it is serving skills."
+            "description": "The catalog's bundle kind (`\"skill\"` · `\"mcp\"`). An OPEN string on the wire and a CLOSED\nvocabulary at the server that mints it. Clients BRANCH on it: the kind chooses the delivery\nmechanics — skill-dir placement, or the MCP config converge — so a client that does not\nknow the kind a row names refuses that row rather than placing it as something else.\nAdditive: an older producer that omits it is serving skills."
           },
           "mcp_server_name": {
             "type": [
@@ -4324,7 +4324,7 @@
           },
           "kind": {
             "type": "string",
-            "description": "The catalog's bundle kind — `\"skill\"` for everything that exists today. Display metadata\nonly: clients render it and never branch on it. Additive: an older producer omits it."
+            "description": "The catalog's bundle kind (`\"skill\"` · `\"mcp\"`) — the same fact the catalog and delivery\ncarry: an OPEN string on the wire, a CLOSED vocabulary at the server that mints it. A log\nread renders it; the rows that DELIVER a bundle branch on it. Additive: an older producer\nomits it."
           },
           "name": {
             "type": "string",
