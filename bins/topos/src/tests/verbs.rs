@@ -1438,6 +1438,43 @@ fn error_envelope_is_coded_retryability_aware_and_leak_free() {
     );
 }
 
+/// A SOURCE THAT IS NOT THERE IS PERMANENT, and says so in one sentence. It used to surface as
+/// the adopt's generic canonicalize failure — `IO_ERROR`, `retryable: true`, "this is often
+/// transient — running it again is safe" — which is advice to loop forever on a path that will be
+/// missing every time. And it landed AFTER the store home had been created.
+#[test]
+fn adding_a_folder_that_is_not_there_is_a_permanent_refusal() {
+    let h = Harness::new("no-such-source");
+    let missing = h.home.0.join("nope/deploy");
+    let err = ops::add(&h.ctx(), &missing).expect_err("nothing to adopt");
+    assert_eq!(err.code(), "SOURCE_MISSING");
+    assert_eq!(
+        err.outcome(),
+        topos_types::TerminalOutcome::PermanentFailure
+    );
+    let env = render::err_envelope("add", &["add".to_owned()], &err);
+    let e = env.error.as_ref().unwrap();
+    assert!(!e.retryable, "{e:?}");
+    assert_eq!(
+        e.context["message"].as_str().unwrap(),
+        format!("{} does not exist — nothing was added.", missing.display())
+    );
+    // The TTY says the same sentence, and never invites the retry.
+    let tty = render::err_tty(&err);
+    assert_eq!(
+        tty,
+        format!(
+            "error: {} does not exist — nothing was added.",
+            missing.display()
+        )
+    );
+    assert_eq!(
+        render::err_hint_tty("add", &["add".to_owned()], &err),
+        None,
+        "nothing to try: the path is the person's to fix"
+    );
+}
+
 #[test]
 fn list_deep_dive_miss_answers_not_managed() {
     let h = Harness::new("ambig");

@@ -69,15 +69,33 @@ pub(crate) fn refuse_unflagged_mcp_dir(ctx: &Ctx<'_>, source: &Path) -> Result<(
     Err(ClientError::kind_required(&dir))
 }
 
+/// A source path that is not there refuses TYPED and PERMANENT, before any store work. The absence
+/// used to surface as the canonicalize call's generic io failure — deep inside the adopt, after the
+/// store home had been created, and classified RETRYABLE, which told an agent that running the same
+/// command again was safe. It is not: the same path will be missing the second time too.
+///
+/// # Errors
+/// [`ClientError::SourceMissing`] naming the path as the caller spelled it.
+fn refuse_missing_source(ctx: &Ctx<'_>, source: &Path) -> Result<(), ClientError> {
+    if ctx.fs.exists(source) {
+        return Ok(());
+    }
+    Err(ClientError::SourceMissing {
+        path: source.display().to_string(),
+    })
+}
+
 /// Adopt the skill rooted at `source`, naming it from the source itself (a recognized harness dir's name,
 /// else frontmatter-then-basename) — the direct-path entry point (a path-shaped positional).
 ///
 /// # Errors
+/// [`ClientError::SourceMissing`] when `source` is not on this machine;
 /// [`ClientError::KindRequired`] for a server bundle (or a both-marker folder) named without `--kind`;
 /// [`ClientError::SourceOverlap`] if `source` overlaps `~/.topos/`; [`ClientError::EmptyBundle`] /
 /// [`ClientError::Scan`] from the scan; [`ClientError::SkillExists`] on an id collision; otherwise a
 /// store/io failure.
 pub(crate) fn add(ctx: &Ctx<'_>, source: &Path) -> Result<AddData, ClientError> {
+    refuse_missing_source(ctx, source)?;
     refuse_unflagged_mcp_dir(ctx, source)?;
     add_with_name(ctx, source, None, true, BundleKind::Skill)
 }
@@ -120,8 +138,9 @@ pub(crate) fn adopt_path_any_kind(
     source: &Path,
     kind: BundleKind,
 ) -> Result<AddData, ClientError> {
-    // REFUSAL-FIRST, before the re-link's own revive/stamp/log: a record standing for this folder
-    // under a DIFFERENT kind is not re-linkable.
+    // REFUSAL-FIRST, before the re-link's own revive/stamp/log: a folder that is not there at all,
+    // then a record standing for this folder under a DIFFERENT kind (neither is re-linkable).
+    refuse_missing_source(ctx, source)?;
     refuse_kind_change(ctx, source, kind)?;
     match unclaimed_record(ctx, target, source)? {
         Some(data) => {

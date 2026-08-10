@@ -312,6 +312,12 @@ pub(crate) enum ClientError {
     /// never delete user bytes and the footprint oracle never collapses.
     #[error("the source path overlaps the topos home directory")]
     SourceOverlap,
+    /// `add <path>` named a folder that is not on this machine. PERMANENT and refused BEFORE any
+    /// store work: the same command will meet the same absence, so an agent that read `retryable`
+    /// would loop on it — which is exactly what the generic canonicalize failure this replaces
+    /// invited. The `path` is the user's own token, shown VERBATIM.
+    #[error("{path} does not exist — nothing was added.")]
+    SourceMissing { path: String },
     /// A skill with this id already exists on disk — `add` fails closed rather than overwrite/merge.
     #[error("a skill with this id already exists")]
     SkillExists,
@@ -938,6 +944,9 @@ impl ClientError {
             ClientError::Scan(_) => "SCAN_REJECTED",
             ClientError::EmptyBundle => "EMPTY_BUNDLE",
             ClientError::SourceOverlap => "SOURCE_OVERLAP",
+            // Its own word beside SOURCE_OVERLAP: both are refusals ABOUT the source a path-shaped
+            // add named, and an agent branches on which one it met.
+            ClientError::SourceMissing { .. } => "SOURCE_MISSING",
             ClientError::SkillExists => "SKILL_EXISTS",
             ClientError::AlreadyTracked { .. } => "ALREADY_TRACKED",
             ClientError::AmbiguousName { .. } => "AMBIGUOUS_NAME",

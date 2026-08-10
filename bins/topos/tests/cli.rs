@@ -660,7 +660,13 @@ fn a_corrupt_sidecar_doc_still_reports_corrupt_state() {
 #[test]
 fn an_io_error_is_redacted_on_the_surface_and_detailed_in_the_log() {
     let home = scratch("iodiag");
-    let missing = format!("/definitely-missing-topos-{}", std::process::id());
+    // A REGULAR FILE where a bundle folder belongs: the walk's `read_dir` fails with the OS's own
+    // "not a directory", which is exactly the untyped io fault this test is about. (A path that is
+    // not there at all is its own typed refusal — see the add door's `SOURCE_MISSING`.)
+    let not_a_dir = home.join("not-a-folder");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::write(&not_a_dir, b"just a file\n").unwrap();
+    let missing = not_a_dir.display().to_string();
     // A folder's manifest first: the scope resolves BEFORE the source is read, so without one the
     // add would refuse on the scope rather than reaching the io fault this test is about.
     let out = run_raw(&home, &["init", "--json"], false);
