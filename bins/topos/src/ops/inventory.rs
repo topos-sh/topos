@@ -458,7 +458,7 @@ fn scope_rows(
     // delivers it, so no delivery cache ever describes it. Read per bundle, and only for a row
     // this scope could have placed at all, so the ordinary machine with no mcp bundles touches
     // nothing.
-    let entry_rows = |ids: &[String]| -> Vec<topos_types::persisted::EntryPlacement> {
+    let entry_rows = |ids: &[String]| -> Vec<crate::config_custody::EntryPlacement> {
         layout.map_or_else(Vec::new, |l| {
             crate::config_custody::entries_of_any(ctx.fs, l, ids)
         })
@@ -476,10 +476,10 @@ fn scope_rows(
         let mut workspace_id = None;
         let mut kind = row.fields().kind.clone();
         let mut harness_states = Vec::new();
-        // The identities this row could be filed under in the scope's MCP ledger, in order: a
+        // The identities this row could be filed under in this scope's config custody, in order: a
         // workspace bundle by its skill id; a local folder by the id this scope's store tracks it
         // by, or — for an imported document no store adopted — its name-keyed local identity.
-        let mut ledger_ids: Vec<String> = Vec::new();
+        let mut custody_ids: Vec<String> = Vec::new();
         let applied = match &row.shape {
             KeyShape::WorkspaceBundle {
                 host,
@@ -492,7 +492,7 @@ fn scope_rows(
                     workspace_id = Some(hit.workspace_id.to_owned());
                     kind = kind.or_else(|| hit.ds.kind.clone());
                     harness_states = hit.ds.harness_states.clone();
-                    ledger_ids.push(hit.skill_id.to_owned());
+                    custody_ids.push(hit.skill_id.to_owned());
                     // A PINNED row's target is its pin, never the served current: the pin is what
                     // `update` delivers here, so measuring against `current` would report a row
                     // sitting exactly where it was asked to sit as "behind — `topos update` lands
@@ -501,7 +501,7 @@ fn scope_rows(
                     applied_for_id(ctx, layout, hit.skill_id, &target)
                 }
                 None => {
-                    ledger_ids.extend(stored_id(ctx, layout, &mut index, &name));
+                    custody_ids.extend(stored_id(ctx, layout, &mut index, &name));
                     stored_by_name(ctx, layout, &mut index, &name)
                         .unwrap_or_else(|| Applied::plain(session_state(all, host, workspace)))
                 }
@@ -510,8 +510,8 @@ fn scope_rows(
             // upstream to be behind or ahead of).
             KeyShape::LocalPath { raw } => {
                 if ctx.fs.exists(&local_dir(ctx, base.as_deref(), raw)) {
-                    ledger_ids.extend(stored_id(ctx, layout, &mut index, &name));
-                    ledger_ids.push(format!("local:{name}"));
+                    custody_ids.extend(stored_id(ctx, layout, &mut index, &name));
+                    custody_ids.push(format!("local:{name}"));
                     stored_by_name(ctx, layout, &mut index, &name)
                         .unwrap_or_else(|| Applied::plain(StatusItemState::Applied))
                 } else {
@@ -522,7 +522,7 @@ fn scope_rows(
             _ => stored_by_name(ctx, layout, &mut index, &name).unwrap_or_else(Applied::unknown),
         };
         // An mcp row the delivery cache says nothing about — every LOCAL one — takes its per-agent
-        // entries from this scope's ledger. Without the join the deep dive reads "no agent config
+        // entries from its own custody rows. Without the join the deep dive reads "no agent config
         // entries recorded yet" forever, about entries this very scope placed.
         // The bundle's OWN rows are where its per-agent answer comes from — one record, one
         // derivation. `state: "current"` is an "as of the last converge" claim (the rendered
@@ -532,7 +532,7 @@ fn scope_rows(
         // current. It is NOT a live probe.
         let mut own_rows = Vec::new();
         if BundleKind::of_tag(kind.as_deref()) == Some(BundleKind::Mcp) {
-            own_rows = entry_rows(&ledger_ids);
+            own_rows = entry_rows(&custody_ids);
             if harness_states.is_empty() {
                 harness_states = own_rows
                     .iter()
@@ -551,7 +551,7 @@ fn scope_rows(
         //
         // ONLY while nothing of this bundle's is still sitting in an agent's config, though. An
         // entry topos placed and then found hand-edited is LEFT in place (drift is never
-        // clobbered), and it keeps its ledger entry — so a dest change made afterwards would have
+        // clobbered), and it keeps its custody row — so a dest change made afterwards would have
         // this line claim the bundle reaches nobody while that entry is still in the file, and
         // possibly still being loaded. A live entry outranks the row's arithmetic: the states below
         // say where the bytes actually are, and the sweep's own warning carries the causality.
@@ -1728,7 +1728,6 @@ pub(crate) mod testkit {
                                 adopted_source: false,
                             })
                             .collect(),
-                        entry_state: Vec::new(),
                     },
                 )
                 .unwrap();
@@ -2568,8 +2567,7 @@ mod tests {
     /// scope placed. Another bundle's entries never ride along.
     #[test]
     fn a_local_mcp_row_reads_its_agent_entries_from_its_own_record() {
-        use crate::config_custody::ConfigCustody;
-        use topos_types::persisted::EntryPlacement;
+        use crate::config_custody::{ConfigCustody, EntryPlacement};
 
         let home = TempHome::new();
         let cwd = home.0.join("plain");

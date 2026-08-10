@@ -8445,7 +8445,6 @@ fn a_prior_placement_that_no_longer_resolves_inside_the_checkout_is_refused() {
         harness: None,
         harness_layer: None,
         harness_slug: None,
-        entry_state: Vec::new(),
     };
 
     let ctx = rig.ctx_at(Some(&proj.0));
@@ -8878,7 +8877,6 @@ fn seed_store_row(layout: &Layout, id: &str, placement: &std::path::Path) {
             harness: None,
             harness_layer: None,
             harness_slug: Some("claude-code".to_owned()),
-            entry_state: Vec::new(),
         },
     )
     .unwrap();

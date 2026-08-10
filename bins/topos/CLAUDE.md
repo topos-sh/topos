@@ -116,18 +116,25 @@ generated `docs/cli.md` (`cargo xtask gen-cli-ref`).
   the per-scope `locks/mcp.lock` (unavailable = a refusal, never a fallback), over the ONE
   scope-store resolution (`manifest_edit::mcp_scope_target`).
 - `config_custody` — WHO OWNS WHICH CONFIG ENTRY. Placement ownership is the BUNDLE's, recorded
-  in its own `map.json` as `entry_state` rows (`{agent, file, key, fingerprint, owns_file}`) —
-  the same document that records the dirs a skill bundle owns, so one record answers "what does
-  this bundle own here" whatever its kind, and a row's `fingerprint` is to an entry what a dir's
-  `materialized_sha` is to a folder. Only two things outlive or span a bundle, and they live in
+  in `skills/<id>/entries.json` — the SIBLING of its `map.json`, so the record directory is still
+  the one place a bundle's custody lives and deleting the record deletes both halves. Two files,
+  because they have two writers: `map.json` is written only under the per-skill flock and
+  `entries.json` only under `locks/mcp.lock`, which makes single-writer-per-file structural rather
+  than a rule the two lock domains have to honour. A row is
+  `{agent, file, key, fingerprint, owns_file, version_id}`, and its `fingerprint` is to an entry
+  what a dir's `materialized_sha` is to a folder. Readers that need both halves (list, the orphan
+  resolution, remove's describe) read both files lock-free. Only two things outlive or span a
+  bundle, and they live in
   the per-scope `state/config_custody.json`: the minted immutable config keys with their
   retirement reservations (a key names an OAuth trust surface — retired, never re-minted for
   another bundle), and the intent journal every config write rides (one write covers many
   bundles' entries; crash recovery promotes or drops per bundle record by OBSERVING the file, and
   an unreadable file keeps the standing row). `ScopeEntries` is the read-modify-write view that
-  joins both halves into the one index the converge asks its ownership questions of; a bundle
-  with no store record of its own (the fetch door's `local:` identities) rides the scope
-  document's `unrecorded` map.
+  joins the scope document onto every bundle's rows as the one index the converge asks its
+  ownership questions of; a record write that fails puts its intents BACK in the journal, so the
+  durable journal always describes exactly the work that has not landed. A bundle with no record
+  of its own — the fetch door's `local:` identities, and a bundle whose drifted entries outlived
+  the record a `remove` deleted — rides the scope document's `unrecorded` map.
 - `bundle_kind` — WHAT A BUNDLE IS: the closed kind vocabulary (`skill` · `mcp`) and the ONE parse
   of a kind word. A word this build does not own is refused at every door it can enter — the sweep
   (the row is skipped whole, warned, never cached), `add`, and a hand-written manifest at LOAD

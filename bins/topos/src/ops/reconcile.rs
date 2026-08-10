@@ -2190,7 +2190,7 @@ pub(crate) fn mcp_dest_narrowing(
     }
 }
 
-/// The ledger identity of a LOCAL `kind = "mcp"` row: the tracked skill id when THIS SCOPE'S
+/// The custody identity of a LOCAL `kind = "mcp"` row: the tracked skill id when THIS SCOPE'S
 /// OWN store records the dir (custody survives a later publish, which keeps the id), else a
 /// name-keyed local identity. ONLY the scope's store is asked — the same rule `add --mcp`'s
 /// inline converge minted the config key under — because the OTHER scope may track the same
@@ -2882,7 +2882,6 @@ fn sync_workspace_skill<'a>(
             harness: None,
             harness_layer: None,
             harness_slug: None,
-            entry_state: Vec::new(),
         };
         let plan = plan_fn(&run_ctx, &target.skill_id, &baseline_lock, &empty);
         if let Err(e) = lay_baseline_with_plan(
@@ -4552,10 +4551,10 @@ fn held_skill_ids(ctx: &Ctx<'_>, visited: &[sidecar::Layout]) -> HashSet<String>
             let Ok(Some(map)) = doc::read_map(ctx.fs, &layout.published(&sid).map) else {
                 continue;
             };
-            // A CONFIG-PLACED (mcp) record holds no dirs — its "still held" proof is its OWN
-            // record still carrying config entries, the same document the dirs would be in.
+            // A CONFIG-PLACED (mcp) record holds no dirs — its "still held" proof is the
+            // config-entry half of its record (the `entries.json` beside the map).
             let held = if map.placements.is_empty() {
-                !map.entry_state.is_empty()
+                !crate::config_custody::entries_of(ctx.fs, layout, id).is_empty()
             } else {
                 map.placements.iter().any(|p| ctx.fs.exists(Path::new(p)))
             };
@@ -4753,7 +4752,7 @@ fn run_mcp_converge(
 
     for (label, layout, project_root, person_scope) in scopes_to_run {
         let demands = sweep.mcp_demands.remove(&label).unwrap_or_default();
-        // The common non-mcp machine: no demands and no ledger — nothing to converge, nothing to
+        // The common non-mcp machine: no demands and no custody document — nothing to converge,
         // read.
         if demands.is_empty() && !env.ctx.fs.exists(&layout.config_custody_path()) {
             continue;
@@ -4891,7 +4890,7 @@ fn run_mcp_converge(
                 // date` would leave the receipt's own verb saying the run only looked. THE RULE:
                 // a bundle whose config entries this scope had never placed before is an INSTALL
                 // (the first-ever placement of a manifest line, whose store side is a no-op
-                // sync); a write over entries the ledger already recorded is the ordinary
+                // sync); a write over entries custody already recorded is the ordinary
                 // catch-up — a repair, where no version moved and only bytes on disk did.
                 else if row.action == PullAction::UpToDate && bundle.wrote {
                     row.action = if bundle.first_placement {
@@ -5201,7 +5200,7 @@ fn revive_reclaimed(
 /// its records (an outage must never read as an orphan). A workspace with NO live session at all
 /// is no freeze: signed-out is a deliberate state, and its leftovers are exactly what this pass
 /// resolves. Failed channel expansions and unexpanded project sets freeze theirs; an MCP record
-/// with live ledger entries waits for the converge to conclude; a record that already earned a
+/// with live custody entries waits for the converge to conclude; a record that already earned a
 /// receipt row this run (the cleaner's removed/withdrawn) is fresh news, not a standing orphan.
 fn resolve_orphans(
     env: &Env<'_>,
@@ -6243,7 +6242,6 @@ pub(crate) fn lay_baseline_with_plan(
         harness: Some(ctx.harness.id()),
         harness_layer: None,
         harness_slug: Some(ctx.harness.id().slug().to_owned()),
-        entry_state: Vec::new(),
     };
     let mut map = crate::placement::reconcile_map(&baseline, plan);
     // Record the ADOPTIONS durably: a planned dir that already exists under the display name with

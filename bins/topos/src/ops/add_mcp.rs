@@ -31,7 +31,7 @@
 //! edit and publish; the person-scope destination lives under `~/.topos/`, which the adopt path
 //! refuses by construction (so `uninstall` can never delete somebody's own bytes). The row plus
 //! the config converge is the whole act — which is exactly what the reconcile already understands:
-//! a local `kind = "mcp"` row whose dir no store tracks carries the `local:<name>` ledger
+//! a local `kind = "mcp"` row whose dir no store tracks carries the `local:<name>` custody
 //! identity, and every later `update` re-reads the same folder. Authoring a server to SHARE with
 //! the team is the local-folder door, which does adopt and therefore does publish.
 

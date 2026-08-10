@@ -137,7 +137,7 @@ impl RecordKind {
 /// The tiny per-record `kind.json` marker (`skills/<id>/kind.json`, beside `map.json`): the ONE
 /// durable record of what a bundle IS. Written at the first sync/adopt of EVERY bundle in each
 /// scope store, never rewritten, never deleted by any sweep — so no later loss of a delivery cache
-/// row or a config ledger can make a config-placed record classify as a skill and get its
+/// row or a config-custody document can make a config-placed record classify as a skill and get its
 /// `server.json` materialized into skill dirs.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) struct KindDoc {

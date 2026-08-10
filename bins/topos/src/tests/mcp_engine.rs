@@ -1,10 +1,10 @@
-//! The MCP placement engine + ownership ledger, end to end: the per-scope converge over a fake
+//! The MCP placement engine + ownership custody, end to end: the per-scope converge over a fake
 //! HOME (synthetic descriptors — every surface Home-rooted, so no test can touch a real machine's
 //! config), and the reconcile integration over the same fakes the manifest suite drives.
 //!
 //! The trust spine under test: entries land EXACTLY per dialect and byte-identical to the pure
 //! drivers' rendering; a hand-edited entry is drift — never overwritten, never removed, disclosed;
-//! a foreign occupant is never touched or claimed; removal converges only what the ledger proves
+//! a foreign occupant is never touched or claimed; removal converges only what the custody proves
 //! ours; the intent journal makes every config write crash-recoverable; a project surface passes
 //! the containment rail; capability and narrowing filters withhold placement honestly; and the
 //! whole loop — demand → store → config → applied report → offline cache — carries the per-agent
@@ -644,12 +644,12 @@ fn converge_places_into_all_six_dialects_byte_identical_to_the_drivers() {
             h.slug
         );
     }
-    // The ledger: one key, six entries, every fingerprint matching what the file provably holds.
-    let ledger = ScopeEntries::load(&fs, &layout).unwrap();
-    assert_eq!(ledger.key_of("s_linear").unwrap(), "topos-eng-linear");
-    assert_eq!(ledger.row_count(), 6);
-    assert!(ledger.doc.pending.is_empty());
-    for (k, _b, e) in ledger.iter() {
+    // The custody: one key, six entries, every fingerprint matching what the file provably holds.
+    let custody = ScopeEntries::load(&fs, &layout).unwrap();
+    assert_eq!(custody.key_of("s_linear").unwrap(), "topos-eng-linear");
+    assert_eq!(custody.row_count(), 6);
+    assert!(custody.doc.pending.is_empty());
+    for (k, _b, e) in custody.iter() {
         let slug = k.split('/').next().unwrap();
         let h = synthetic().into_iter().find(|h| h.slug == slug).unwrap();
         let dialect = h.mcp().unwrap().user.unwrap().dialect;
@@ -657,7 +657,7 @@ fn converge_places_into_all_six_dialects_byte_identical_to_the_drivers() {
         assert_eq!(
             observed.entries.get("topos-eng-linear"),
             Some(&e.fingerprint),
-            "{k}: ledger fingerprint must match the file"
+            "{k}: custody fingerprint must match the file"
         );
         assert!(e.owns_file, "{k}: a file we created is wholly ours");
     }
@@ -751,12 +751,12 @@ fn removal_converges_everywhere_and_deletes_only_wholly_owned_files() {
         "the user's server survives: {kept}"
     );
     assert!(!kept.contains("topos-eng-alpha"), "ours is gone: {kept}");
-    // The ledger: no entries, the key retired — and NEVER reusable by another bundle.
-    let mut ledger = ScopeEntries::load(&fs, &layout).unwrap();
-    assert_eq!(ledger.row_count(), 0);
-    assert_eq!(ledger.doc.retired["topos-eng-alpha"], "s_a");
+    // The custody: no entries, the key retired — and NEVER reusable by another bundle.
+    let mut custody = ScopeEntries::load(&fs, &layout).unwrap();
+    assert_eq!(custody.row_count(), 0);
+    assert_eq!(custody.doc.retired["topos-eng-alpha"], "s_a");
     assert_eq!(
-        ledger.mint_key("s_other", "alpha", Some("eng")),
+        custody.mint_key("s_other", "alpha", Some("eng")),
         "topos-eng-alpha-2"
     );
 }
@@ -793,7 +793,7 @@ fn a_hand_edited_entry_is_drift_never_clobbered_and_survives_removal_disclosed()
         .replace("https://mcp.example/a", "https://my-fork.example");
     std::fs::write(&cursor, &edited).unwrap();
 
-    // The next converge reads it as DRIFT: untouched, reported, the ledger keeps the OLD
+    // The next converge reads it as DRIFT: untouched, reported, the custody keeps the OLD
     // fingerprint so drift survives re-runs.
     let out = mcp_engine::converge(
         &io,
@@ -848,10 +848,10 @@ fn a_foreign_topos_prefixed_entry_is_never_touched_or_claimed() {
         foreign,
         "foreign bytes untouched"
     );
-    let ledger = ScopeEntries::load(&fs, &layout).unwrap();
+    let custody = ScopeEntries::load(&fs, &layout).unwrap();
     assert!(
-        !ledger.holds("cursor/topos-eng-alpha"),
-        "a foreign entry never enters the ledger"
+        !custody.holds("cursor/topos-eng-alpha"),
+        "a foreign entry never enters the custody"
     );
 }
 
@@ -1079,7 +1079,7 @@ fn a_hand_deleted_plugin_manifest_heals_back_beside_remaining_entries() {
 }
 
 /// Every converge entry point serializes on the scope's `locks/mcp.lock`: a run that starts
-/// while another process holds it WAITS instead of interleaving the ledger + config
+/// while another process holds it WAITS instead of interleaving the custody + config
 /// read-modify-write (flock contends across open file descriptions, so a second in-process
 /// guard stands in for a sibling process here).
 #[test]
@@ -1134,7 +1134,7 @@ fn converges_serialize_on_the_per_scope_mcp_lock() {
     assert!(home.0.join(".cursor/mcp.json").exists());
 }
 
-/// A surface path move (an env-override change) leaves the ledger row recorded at the OLD file:
+/// A surface path move (an env-override change) leaves the custody row recorded at the OLD file:
 /// the converge must not silently drop or re-point it — the row is a disclosed stale class,
 /// warned with the old path, the row and the old file's bytes both left in place.
 #[test]
@@ -1192,14 +1192,14 @@ fn a_moved_surface_path_discloses_the_stale_row_and_never_drops_it() {
         placed,
         "the old file's bytes stay untouched"
     );
-    let ledger = ScopeEntries::load(&fs, &layout).unwrap();
+    let custody = ScopeEntries::load(&fs, &layout).unwrap();
     assert!(
-        ledger.has_entries_for("s_a"),
-        "the stale row is kept, never silently dropped: {ledger:?}"
+        custody.has_entries_for("s_a"),
+        "the stale row is kept, never silently dropped: {custody:?}"
     );
     assert_eq!(
         Path::new(
-            &ledger
+            &custody
                 .row(&config_custody::placement_key("cursor", "topos-eng-alpha"))
                 .unwrap()
                 .file
@@ -1209,7 +1209,7 @@ fn a_moved_surface_path_discloses_the_stale_row_and_never_drops_it() {
     );
 }
 
-/// A hand-deleted plugin dir must not leave phantom ledger entries: the next removal-allowed
+/// A hand-deleted plugin dir must not leave phantom custody entries: the next removal-allowed
 /// converge stale-drops the rows the surface no longer holds, so the key retires and the bundle
 /// can actually leave.
 #[test]
@@ -1241,21 +1241,21 @@ fn a_hand_deleted_plugin_dir_sheds_its_ledger_entries_on_the_next_converge() {
     // The user deletes the whole plugin dir by hand.
     std::fs::remove_dir_all(home.0.join(".claude/skills/topos-mcp")).unwrap();
 
-    // The demand drops: the ledger must shed the phantom rows and retire the key.
+    // The demand drops: the custody must shed the phantom rows and retire the key.
     mcp_engine::converge(&io, &[], &synthetic(), &all_slugs(), &no_hold(), true);
-    let ledger = ScopeEntries::load(&fs, &layout).unwrap();
+    let custody = ScopeEntries::load(&fs, &layout).unwrap();
     assert!(
-        !ledger.has_entries_for("s_a"),
-        "phantom entries survive a hand-deleted plugin dir: {ledger:?}"
+        !custody.has_entries_for("s_a"),
+        "phantom entries survive a hand-deleted plugin dir: {custody:?}"
     );
     assert_eq!(
-        ledger
+        custody
             .doc
             .retired
             .get("topos-eng-alpha")
             .map(String::as_str),
         Some("s_a"),
-        "{ledger:?}"
+        "{custody:?}"
     );
 }
 
@@ -1353,13 +1353,13 @@ fn a_user_entry_added_to_a_topos_created_file_survives_last_entry_removal() {
             !kept.contains("topos-eng-alpha"),
             "{slug}: ours is gone: {kept}"
         );
-        let ledger = ScopeEntries::load(&fs, &layout).unwrap();
-        assert!(!ledger.has_entries_for("s_a"), "{slug}");
+        let custody = ScopeEntries::load(&fs, &layout).unwrap();
+        assert!(!custody.has_entries_for("s_a"), "{slug}");
     }
 }
 
 /// F1 belt two: the moment a converge OBSERVES user content in a file topos created, the
-/// ledger's whole-file-ownership flag goes false — a later removal can never trust a flag the
+/// custody's whole-file-ownership flag goes false — a later removal can never trust a flag the
 /// file has outgrown.
 #[test]
 fn a_converge_that_sees_user_content_flips_owns_file_false() {
@@ -1463,7 +1463,7 @@ fn holds_and_targeted_runs_never_remove_standing_entries() {
     let cursor = home.0.join(".cursor/mcp.json");
     let placed = std::fs::read_to_string(&cursor).unwrap();
 
-    // Undemanded but HELD (its workspace was unreachable): byte-identical, ledger kept.
+    // Undemanded but HELD (its workspace was unreachable): byte-identical, custody kept.
     let hold: HashSet<String> = ["s_a".to_owned()].into();
     mcp_engine::converge(&io, &[], &synthetic(), &all_slugs(), &hold, true);
     assert_eq!(std::fs::read_to_string(&cursor).unwrap(), placed);
@@ -1510,15 +1510,15 @@ fn intent_journal_recovery_heals_both_crash_orders_through_the_engine() {
         mcp::observe(McpDialect::CursorJson, Some(placed.as_bytes())).entries["topos-eng-alpha"]
             .clone();
 
-    // ORDER (b): the config write LANDED, the ledger promotion did not — on disk the ledger
+    // ORDER (b): the config write LANDED, the custody promotion did not — on disk the custody
     // still carries the old fingerprint plus the journaled intent. Without recovery the entry
     // would read as user drift forever.
-    let mut ledger = ScopeEntries::load(&fs, &layout).unwrap();
+    let mut custody = ScopeEntries::load(&fs, &layout).unwrap();
     let lk = config_custody::placement_key("cursor", "topos-eng-alpha");
-    let mut stale = ledger.row(&lk).unwrap().clone();
+    let mut stale = custody.row(&lk).unwrap().clone();
     stale.fingerprint = "0".repeat(64);
-    ledger.put(lk.clone(), "s_a".to_owned(), stale);
-    ledger
+    custody.put(lk.clone(), "s_a".to_owned(), stale);
+    custody
         .journal(
             &fs,
             &layout,
@@ -1535,7 +1535,7 @@ fn intent_journal_recovery_heals_both_crash_orders_through_the_engine() {
             .collect(),
         )
         .unwrap();
-    assert!(ledger.flush(&fs, &layout).is_empty());
+    assert!(custody.flush(&fs, &layout).is_empty());
     let out = mcp_engine::converge(
         &io,
         std::slice::from_ref(&d),
@@ -1557,14 +1557,14 @@ fn intent_journal_recovery_heals_both_crash_orders_through_the_engine() {
         placed,
         "no rewrite"
     );
-    let ledger = ScopeEntries::load(&fs, &layout).unwrap();
-    assert!(ledger.doc.pending.is_empty());
-    assert_eq!(ledger.row(&lk).unwrap().fingerprint, real_fp);
+    let custody = ScopeEntries::load(&fs, &layout).unwrap();
+    assert!(custody.doc.pending.is_empty());
+    assert_eq!(custody.row(&lk).unwrap().fingerprint, real_fp);
 
     // ORDER (a): the intent was journaled, the config write never landed. Recovery drops the
     // intent; the standing entry (which matches the file) stays authoritative.
-    let mut ledger = ScopeEntries::load(&fs, &layout).unwrap();
-    ledger
+    let mut custody = ScopeEntries::load(&fs, &layout).unwrap();
+    custody
         .journal(
             &fs,
             &layout,
@@ -1590,16 +1590,539 @@ fn intent_journal_recovery_heals_both_crash_orders_through_the_engine() {
         true,
     );
     assert_eq!(state_of(&out, "s_a", "cursor").state, "current");
-    let ledger = ScopeEntries::load(&fs, &layout).unwrap();
-    assert!(ledger.doc.pending.is_empty());
-    assert_eq!(ledger.row(&lk).unwrap().fingerprint, real_fp);
+    let custody = ScopeEntries::load(&fs, &layout).unwrap();
+    assert!(custody.doc.pending.is_empty());
+    assert_eq!(custody.row(&lk).unwrap().fingerprint, real_fp);
+}
+
+/// ONE JOURNAL, MANY SURFACES. A converge walks every engaged harness in one run, and each
+/// surface that writes journals its own intents — but there is only one journal, and journalling
+/// REPLACES it. So intents a surface left standing (its record write failed, so the work has not
+/// landed) must survive the surfaces that come after it.
+///
+/// The scenario: bundle X places on surface A, X's `entries.json` write FAILS there, and its
+/// intents are re-journalled. Bundle Y then converges on surface B in the same run. Without the
+/// guard, B's `journal()` overwrites X's intents in memory and on disk, B promotes and flushes,
+/// and X is left live in A's config with no row and no journal — a state nothing can heal.
+///
+/// With the guard, B is refused for this run (the fail-closed posture the converge-start recovery
+/// already takes), X's intents stay on disk, and the NEXT clean run heals X's row and places Y.
+#[test]
+fn a_later_surface_never_journals_over_intents_an_earlier_one_left_standing() {
+    let probe = {
+        let home = Scratch::new("xsurface-probe");
+        let layout = Layout::new(&home.0.join(".topos"));
+        let fault = FaultFs::new(0);
+        let io = ScopeIo {
+            fs: &fault,
+            layout: &layout,
+            home: home.0.clone(),
+            project_root: None,
+        };
+        mcp_engine::converge(
+            &io,
+            &two_bundle_demands(),
+            &synthetic(),
+            &all_slugs(),
+            &no_hold(),
+            true,
+        );
+        fault.ops_attempted()
+    };
+    assert!(probe > 0);
+
+    let mut proven = 0usize;
+    for fail_at in 1..=probe {
+        let fs = RealFs;
+        let home = Scratch::new(&format!("xsurface-{fail_at}"));
+        let layout = Layout::new(&home.0.join(".topos"));
+        let codex = home.0.join(".codex/config.toml");
+        // Both bundles hold RECORDS of their own, so their row writes are real I/O that can fail.
+        for id in ["s_x", "s_y"] {
+            let sid = crate::id::SkillId::parse(id).unwrap();
+            std::fs::create_dir_all(layout.skill_dir(&sid)).unwrap();
+        }
+        {
+            let fault = FaultFs::new(fail_at);
+            let io = ScopeIo {
+                fs: &fault,
+                layout: &layout,
+                home: home.0.clone(),
+                project_root: None,
+            };
+            let _ = mcp_engine::converge(
+                &io,
+                &two_bundle_demands(),
+                &synthetic(),
+                &all_slugs(),
+                &no_hold(),
+                true,
+            );
+        }
+        // The ordering this guards: X's entry is LIVE in its config file, and X's record does not
+        // know about it.
+        let x_live = std::fs::read_to_string(&codex)
+            .map(|t| t.contains("topos-eng-ex"))
+            .unwrap_or(false);
+        let x_recorded = !crate::config_custody::entries_of(&fs, &layout, "s_x").is_empty();
+        if !x_live || x_recorded {
+            continue;
+        }
+        proven += 1;
+        // THE INVARIANT: X's intents survived every later surface in that run.
+        let doc = crate::config_custody::read(&fs, &layout).expect("decipherable");
+        assert!(
+            doc.pending.values().any(|i| i.bundle_id == "s_x"),
+            "fail_at={fail_at}: a later surface journalled over X's outstanding intents — the \
+             entry is live with no row and nothing to recover from: {doc:?}"
+        );
+        // And the next clean run heals it.
+        {
+            let io = ScopeIo {
+                fs: &fs,
+                layout: &layout,
+                home: home.0.clone(),
+                project_root: None,
+            };
+            mcp_engine::converge(
+                &io,
+                &two_bundle_demands(),
+                &synthetic(),
+                &all_slugs(),
+                &no_hold(),
+                true,
+            );
+        }
+        assert!(
+            !crate::config_custody::entries_of(&fs, &layout, "s_x").is_empty(),
+            "fail_at={fail_at}: the next run must heal X's row"
+        );
+        assert!(
+            crate::config_custody::read(&fs, &layout)
+                .unwrap()
+                .pending
+                .is_empty(),
+            "fail_at={fail_at}: and clear the journal once it has"
+        );
+    }
+    assert!(
+        proven > 0,
+        "no fault point produced the live-entry / unrecorded-row ordering this guards"
+    );
+}
+
+/// Two bundles that converge on DIFFERENT surfaces in one run — the cross-surface fixture.
+fn two_bundle_demands() -> Vec<McpDemand> {
+    // X rides the EARLIER surface in table order (codex) and Y the later one (cursor), so Y's
+    // journal write genuinely comes after X has left intents standing — the ordering the guard is
+    // about. Reversed, X is the last surface and nothing follows it to overwrite anything.
+    let mut x = demand(
+        "s_x",
+        "ex",
+        Some("eng"),
+        &server_json("https://mcp.example/x"),
+    );
+    x.harness_filter = Some(vec!["codex".into()]);
+    let mut y = demand(
+        "s_y",
+        "why",
+        Some("eng"),
+        &server_json("https://mcp.example/y"),
+    );
+    y.harness_filter = Some(vec!["cursor".into()]);
+    vec![x, y]
+}
+
+/// A REMOVAL must not swallow a crash left by an earlier run. `remove` is often the FIRST command
+/// after a crash, and it journals intents of its own — and journalling REPLACES the journal
+/// wholesale, so a recovery promotion left only in memory can be overwritten before it is durable.
+/// `remove_bundle` therefore flushes its recovery pass before converging anything.
+///
+/// What this test guards is the OUTCOME, not that ordering: a crash-left intent, a removal as the
+/// first command, one injected failure anywhere in its run, and then a clean retry — which must
+/// finish the removal. An entry that survives the retry is stranded forever, because nothing is
+/// left to prove it was topos's.
+///
+/// NOTE, honestly: this does not discriminate the early flush on its own. `remove_bundle`'s
+/// trailing flush already persists a recovered promotion under a single injected fault, so the
+/// early flush is defense in depth — it makes the durability ordering explicit instead of
+/// incidental to where the last write happens to sit.
+#[test]
+fn a_removal_never_swallows_a_crash_left_intent_before_it_is_durable() {
+    let probe = {
+        let home = Scratch::new("rm-recover-probe");
+        let layout = Layout::new(&home.0.join(".topos"));
+        let fault = FaultFs::new(0);
+        let io = ScopeIo {
+            fs: &fault,
+            layout: &layout,
+            home: home.0.clone(),
+            project_root: None,
+        };
+        let mut d = demand(
+            "s_a",
+            "alpha",
+            Some("eng"),
+            &server_json("https://mcp.example/a"),
+        );
+        d.harness_filter = Some(vec!["cursor".into()]);
+        mcp_engine::converge(&io, &[d], &synthetic(), &all_slugs(), &no_hold(), true);
+        fault.ops_attempted()
+    };
+
+    for fail_at in 1..=probe {
+        let fs = RealFs;
+        let home = Scratch::new(&format!("rm-recover-{fail_at}"));
+        let layout = Layout::new(&home.0.join(".topos"));
+        let cursor = home.0.join(".cursor/mcp.json");
+        let mut d = demand(
+            "s_a",
+            "alpha",
+            Some("eng"),
+            &server_json("https://mcp.example/a"),
+        );
+        d.harness_filter = Some(vec!["cursor".into()]);
+        // A clean placement first.
+        {
+            let io = ScopeIo {
+                fs: &fs,
+                layout: &layout,
+                home: home.0.clone(),
+                project_root: None,
+            };
+            mcp_engine::converge(
+                &io,
+                std::slice::from_ref(&d),
+                &synthetic(),
+                &all_slugs(),
+                &no_hold(),
+                true,
+            );
+        }
+        // A CRASH-LEFT intent: the previous run journalled and died before promoting. Its
+        // fingerprint is what the file provably holds, so recovery must promote it.
+        let real_fp = mcp::observe(
+            McpDialect::CursorJson,
+            std::fs::read(&cursor).ok().as_deref(),
+        )
+        .entries["topos-eng-alpha"]
+            .clone();
+        let mut custody = ScopeEntries::load(&fs, &layout).unwrap();
+        let ck = config_custody::placement_key("cursor", "topos-eng-alpha");
+        custody
+            .journal(
+                &fs,
+                &layout,
+                std::iter::once((
+                    ck.clone(),
+                    config_custody::PendingIntent {
+                        bundle_id: "s_a".into(),
+                        version_id: "v-crashed".into(),
+                        file: cursor.display().to_string(),
+                        fingerprint: real_fp.clone(),
+                        owns_file: true,
+                    },
+                ))
+                .collect(),
+            )
+            .unwrap();
+        assert!(
+            !crate::config_custody::read(&fs, &layout)
+                .unwrap()
+                .pending
+                .is_empty()
+        );
+
+        // The removal runs as the FIRST command, and something in it fails.
+        {
+            let fault = FaultFs::new(fail_at);
+            let io = ScopeIo {
+                fs: &fault,
+                layout: &layout,
+                home: home.0.clone(),
+                project_root: None,
+            };
+            let _ = mcp_engine::remove_bundle(&io, &synthetic(), &all_slugs(), "s_a");
+        }
+
+        // The custody document must still be decipherable whatever failed.
+        crate::config_custody::read(&fs, &layout).expect("decipherable");
+
+        // THE INVARIANT, stated where a person would feel it: a clean retry FINISHES the removal.
+        // If the crash-left promotion was swallowed — cleared in memory, then overwritten on disk
+        // by the removal's own journal write — the entry loses its record, and no later run can
+        // prove it was topos's: the retry leaves it in the config file forever.
+        {
+            let io = ScopeIo {
+                fs: &fs,
+                layout: &layout,
+                home: home.0.clone(),
+                project_root: None,
+            };
+            mcp_engine::remove_bundle(&io, &synthetic(), &all_slugs(), "s_a");
+        }
+        let left = std::fs::read_to_string(&cursor).unwrap_or_default();
+        assert!(
+            !left.contains("topos-eng-alpha"),
+            "fail_at={fail_at}: a clean retry must finish the removal — the entry is stranded: \
+             {left}"
+        );
+    }
+}
+
+/// A DRIFTED entry survives the removal of the record that owned it. Drift is never clobbered, so
+/// a removal legitimately leaves the entry standing — and a classic `remove` then deletes the
+/// record directory, taking `entries.json` with it. If the row went with it, the hand-edited entry
+/// would sit in the person's config forever with nothing left to prove it was ever topos's: no
+/// later sweep could disclose it and none could ever take it out.
+///
+/// So the surviving rows move to the scope document first. They stay disclosable, the bundle keeps
+/// its key (it still has entries, so retirement has not fired), and once the hand edit is reverted
+/// an ordinary sweep removes the entry — the eventual cleanup, restored.
+#[test]
+fn a_drifted_entry_outlives_the_record_and_is_still_cleaned_up_later() {
+    let fs = RealFs;
+    let home = Scratch::new("drift-outlives");
+    let layout = Layout::new(&home.0.join(".topos"));
+    let cursor = home.0.join(".cursor/mcp.json");
+    let sid = crate::id::SkillId::parse("s_a").unwrap();
+    // A bundle WITH a record of its own — the case the detach exists for.
+    std::fs::create_dir_all(layout.skill_dir(&sid)).unwrap();
+
+    let io = ScopeIo {
+        fs: &fs,
+        layout: &layout,
+        home: home.0.clone(),
+        project_root: None,
+    };
+    let mut d = demand(
+        "s_a",
+        "alpha",
+        Some("eng"),
+        &server_json("https://mcp.example/a"),
+    );
+    d.harness_filter = Some(vec!["cursor".into()]);
+    mcp_engine::converge(
+        &io,
+        std::slice::from_ref(&d),
+        &synthetic(),
+        &all_slugs(),
+        &no_hold(),
+        true,
+    );
+    let pristine = std::fs::read_to_string(&cursor).unwrap();
+    assert!(pristine.contains("topos-eng-alpha"));
+    assert!(
+        !crate::config_custody::entries_of(&fs, &layout, "s_a").is_empty(),
+        "the row lives in the record while the record lives"
+    );
+
+    // The person hand-edits the entry: it is now DRIFTED and will never be clobbered.
+    std::fs::write(
+        &cursor,
+        pristine.replace("mcp.example/a", "mcp.example/hand"),
+    )
+    .unwrap();
+
+    // The classic remove: converge the removal, move what survived, then delete the record.
+    let out = mcp_engine::remove_bundle(&io, &synthetic(), &all_slugs(), "s_a");
+    assert!(
+        out.removed.iter().any(|r| r.state.state == "drifted"),
+        "the hand-edited entry is left in place and disclosed: {out:?}"
+    );
+    // A detach that CANNOT land must say so: losing custody of a drifted row is the person's
+    // business, not a silent fact. The faulted attempt reports, and the warning is the shape the
+    // receipt folds into its lines.
+    {
+        let fault = FaultFs::new(1);
+        let faulted = ScopeIo {
+            fs: &fault,
+            layout: &layout,
+            home: home.0.clone(),
+            project_root: None,
+        };
+        let warnings = mcp_engine::detach_bundle_rows(&faulted, "s_a");
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("MCP_CUSTODY_WRITE_FAILED")
+                    || w.contains("MCP_LOCK_UNAVAILABLE")),
+            "a detach that cannot land must report it: {warnings:?}"
+        );
+    }
+
+    mcp_engine::detach_bundle_rows(&io, "s_a");
+    std::fs::remove_dir_all(layout.skill_dir(&sid)).unwrap();
+
+    // The row outlived its record, in the scope document, under the same bundle identity.
+    let doc = crate::config_custody::read(&fs, &layout).unwrap();
+    assert!(
+        doc.unrecorded.contains_key("s_a"),
+        "the surviving row moved out of the record before it was deleted: {doc:?}"
+    );
+    assert!(
+        doc.keys.contains_key("s_a"),
+        "the key is NOT retired while an entry of its still stands: {doc:?}"
+    );
+    assert!(
+        std::fs::read_to_string(&cursor)
+            .unwrap()
+            .contains("mcp.example/hand"),
+        "the hand edit is untouched"
+    );
+
+    // A later sweep with the bundle undemanded still SEES it — and still leaves the drift alone.
+    let out = mcp_engine::converge(&io, &[], &synthetic(), &all_slugs(), &no_hold(), true);
+    assert!(
+        out.removed
+            .iter()
+            .any(|r| r.bundle_id == "s_a" && r.state.state == "drifted"),
+        "a sweep still discloses the entry it can no longer remove: {out:?}"
+    );
+    assert!(
+        std::fs::read_to_string(&cursor)
+            .unwrap()
+            .contains("mcp.example/hand")
+    );
+
+    // The person reverts the hand edit. Now the entry matches what topos recorded, so the next
+    // ordinary sweep takes it out — the cleanup that the lost row would have made impossible.
+    std::fs::write(&cursor, &pristine).unwrap();
+    mcp_engine::converge(&io, &[], &synthetic(), &all_slugs(), &no_hold(), true);
+    assert!(
+        !std::fs::read_to_string(&cursor)
+            .unwrap_or_default()
+            .contains("topos-eng-alpha"),
+        "the reverted entry is finally removed"
+    );
+    let doc = crate::config_custody::read(&fs, &layout).unwrap();
+    assert!(!doc.unrecorded.contains_key("s_a"), "{doc:?}");
+    assert_eq!(
+        doc.retired.get("topos-eng-alpha").map(String::as_str),
+        Some("s_a"),
+        "and only now does the key retire: {doc:?}"
+    );
+}
+
+/// THE JOURNAL MUST DESCRIBE EXACTLY THE WORK THAT HAS NOT LANDED. A config write lands, then the
+/// write of the bundle's own custody document FAILS. The promotion is therefore only in memory —
+/// so the intents that produced it are still outstanding, and the scope document written on that
+/// failure path must still carry them. Clearing the journal there would strand a live entry with
+/// no record, permanently: every later run reads it as a hand edit and refuses to touch it.
+///
+/// Sweeps the fault point to find the exact ordering (config landed, record not), then asserts the
+/// journal survived on disk and that a clean re-run's recovery promotes the row.
+#[test]
+fn a_failed_record_write_keeps_its_intents_in_the_durable_journal() {
+    let probe = {
+        let home = Scratch::new("keep-intent-probe");
+        let layout = Layout::new(&home.0.join(".topos"));
+        let fault = FaultFs::new(0);
+        let io = ScopeIo {
+            fs: &fault,
+            layout: &layout,
+            home: home.0.clone(),
+            project_root: None,
+        };
+        let mut d = demand(
+            "s_a",
+            "alpha",
+            Some("eng"),
+            &server_json("https://mcp.example/a"),
+        );
+        d.harness_filter = Some(vec!["cursor".into()]);
+        mcp_engine::converge(&io, &[d], &synthetic(), &all_slugs(), &no_hold(), true);
+        fault.ops_attempted()
+    };
+    assert!(probe > 0);
+
+    let mut proven = 0usize;
+    for fail_at in 1..=probe {
+        let home = Scratch::new(&format!("keep-intent-{fail_at}"));
+        let layout = Layout::new(&home.0.join(".topos"));
+        let cursor = home.0.join(".cursor/mcp.json");
+        let mut d = demand(
+            "s_a",
+            "alpha",
+            Some("eng"),
+            &server_json("https://mcp.example/a"),
+        );
+        d.harness_filter = Some(vec!["cursor".into()]);
+        {
+            let fault = FaultFs::new(fail_at);
+            let io = ScopeIo {
+                fs: &fault,
+                layout: &layout,
+                home: home.0.clone(),
+                project_root: None,
+            };
+            let _ = mcp_engine::converge(
+                &io,
+                std::slice::from_ref(&d),
+                &synthetic(),
+                &all_slugs(),
+                &no_hold(),
+                true,
+            );
+        }
+        // The ordering this test is about: the ENTRY is in the config file, but the bundle's own
+        // custody document does not record it.
+        let landed = std::fs::read_to_string(&cursor)
+            .map(|t| t.contains("topos-eng-alpha"))
+            .unwrap_or(false);
+        let fs = RealFs;
+        let recorded = !crate::config_custody::entries_of(&fs, &layout, "s_a").is_empty();
+        if !landed || recorded {
+            continue;
+        }
+        proven += 1;
+        // THE INVARIANT: the journal on disk still describes the unlanded work.
+        let doc = crate::config_custody::read(&fs, &layout).expect("the scope doc is decipherable");
+        assert!(
+            !doc.pending.is_empty(),
+            "fail_at={fail_at}: the config write landed and the record did not — the journal must \
+             still carry the intent, or the entry is stranded forever"
+        );
+        // And recovery finishes it: a clean re-run promotes the row into the record.
+        {
+            let io = ScopeIo {
+                fs: &fs,
+                layout: &layout,
+                home: home.0.clone(),
+                project_root: None,
+            };
+            mcp_engine::converge(
+                &io,
+                std::slice::from_ref(&d),
+                &synthetic(),
+                &all_slugs(),
+                &no_hold(),
+                true,
+            );
+        }
+        assert!(
+            !crate::config_custody::entries_of(&fs, &layout, "s_a").is_empty(),
+            "fail_at={fail_at}: recovery must promote the journaled row"
+        );
+        assert!(
+            crate::config_custody::read(&fs, &layout)
+                .unwrap()
+                .pending
+                .is_empty(),
+            "fail_at={fail_at}: and clear the journal once it has"
+        );
+    }
+    assert!(
+        proven > 0,
+        "no fault point produced the landed-config / unrecorded-custody ordering this guards"
+    );
 }
 
 #[test]
 fn a_fault_at_any_write_never_tears_state_and_the_next_converge_heals() {
     // The fault sweep through the fs seam: fail exactly one mutating op, at every op the converge
-    // performs, and prove the invariant pair — nothing torn (the ledger stays decipherable), and
-    // a clean re-run always ends fully placed with a file-matching ledger.
+    // performs, and prove the invariant pair — nothing torn (the custody stays decipherable), and
+    // a clean re-run always ends fully placed with a file-matching custody.
     let probe = {
         let home = Scratch::new("fault-probe");
         let layout = Layout::new(&home.0.join(".topos"));
@@ -1661,7 +2184,7 @@ fn a_fault_at_any_write_never_tears_state_and_the_next_converge_heals() {
         );
         // Fully placed either way: `placed` where this clean re-run did the writing, `current`
         // where the faulted run had already landed the entry and recovery promoted it. The
-        // file-vs-ledger check below is what proves the placement itself.
+        // file-vs-custody check below is what proves the placement itself.
         assert!(
             matches!(
                 state_of(&out, "s_a", "cursor").state.as_str(),
@@ -1671,17 +2194,17 @@ fn a_fault_at_any_write_never_tears_state_and_the_next_converge_heals() {
         );
         let bytes = std::fs::read(home.0.join(".cursor/mcp.json")).unwrap();
         let observed = mcp::observe(McpDialect::CursorJson, Some(&bytes));
-        let ledger = ScopeEntries::load(&fs, &layout).unwrap();
-        assert!(ledger.doc.pending.is_empty(), "fail_at={fail_at}");
+        let custody = ScopeEntries::load(&fs, &layout).unwrap();
+        assert!(custody.doc.pending.is_empty(), "fail_at={fail_at}");
         assert_eq!(
             observed.entries.get("topos-eng-alpha"),
             Some(
-                &ledger
+                &custody
                     .row(&config_custody::placement_key("cursor", "topos-eng-alpha"))
                     .unwrap()
                     .fingerprint
             ),
-            "fail_at={fail_at}: the healed ledger matches the file"
+            "fail_at={fail_at}: the healed custody matches the file"
         );
     }
 }
@@ -1900,7 +2423,7 @@ fn offline_sweeps_still_heal_configs_from_the_store() {
     assert!(cursor.exists());
 
     // The network dies AND the entry is lost locally (the file deleted by hand): the next sweep
-    // converges from the STORE's held bytes + the ledger — no dial needed.
+    // converges from the STORE's held bytes + the custody — no dial needed.
     std::fs::remove_file(&cursor).unwrap();
     plane.serve_unreachable();
     let out = sweep(&ctx, &plane, &dir);
@@ -2004,7 +2527,7 @@ fn a_repaired_config_entry_makes_the_run_an_update_not_a_check() {
 /// store-only — nothing to place, so the sync answers `up to date` — and the converge then writes
 /// the config entries for the first time. That is not a repair of anything: the row must lead
 /// with `+` and read `installed`, exactly as a delivered mcp bundle's first row does. The scope's
-/// ledger is the durable signal, so the SAME bundle re-healed later reads `updated` instead.
+/// custody is the durable signal, so the SAME bundle re-healed later reads `updated` instead.
 #[test]
 fn a_first_ever_mcp_placement_reads_installed_not_a_repair() {
     let rig = Rig::new("first");
@@ -2148,8 +2671,8 @@ fn a_channel_drop_removes_the_entries_everywhere() {
         "{:?}",
         row.destinations
     );
-    let ledger = ScopeEntries::load(&rig.fs, &rig.layout()).unwrap();
-    assert!(!ledger.has_entries_for("s_a"));
+    let custody = ScopeEntries::load(&rig.fs, &rig.layout()).unwrap();
+    assert!(!custody.has_entries_for("s_a"));
 }
 
 #[test]
@@ -2219,7 +2742,7 @@ fn a_project_row_lands_only_in_project_surfaces_and_openclaw_hermes_read_not_sup
             "{slug}"
         );
     }
-    // The ledger lives in the PROJECT store.
+    // The custody lives in the PROJECT store.
     let playout = crate::sidecar::existing_project_store(&rig.fs, &proj.0).unwrap();
     assert!(playout.config_custody_path().exists());
     assert!(!rig.layout().config_custody_path().exists());
@@ -2456,7 +2979,7 @@ fn a_dest_naming_only_unknown_files_reaches_no_agent_and_says_so() {
 }
 
 /// **A live entry outranks the row's arithmetic.** An entry topos placed and then found
-/// hand-edited is LEFT in place — drift is never clobbered — and it keeps its ledger entry. If the
+/// hand-edited is LEFT in place — drift is never clobbered — and it keeps its custody entry. If the
 /// row's `dest` is later changed to files topos cannot edit, the reach arithmetic says "no agent"
 /// while that entry is still sitting in the config, quite possibly still being loaded by the agent.
 /// `list` must not tell that lie: the per-agent states say where the bytes actually are, and the
@@ -2677,7 +3200,7 @@ fn a_tampered_local_row_is_held_with_the_typed_refusal_and_prior_entries_stay() 
     assert!(placed.contains("https://w.example/mcp"), "{placed}");
 
     // Each tamper: the sweep warns with the TYPED refusal code, the config file stays
-    // byte-identical (the credential never reaches it), and the ledger keeps the entry.
+    // byte-identical (the credential never reaches it), and the custody keeps the entry.
     let token = format!("ghp_{}", "A1b2C3d4E5".repeat(4));
     for (tampered, code) in [
         (good("https://w.example/mcp", &token), "MCP_SECRET_REFUSED"),
@@ -2736,7 +3259,7 @@ fn a_github_sourced_mcp_row_refuses_when_the_manifest_loads() {
 }
 
 /// F6: the SAME folder adopted in BOTH scopes must keep each scope's config key stable. The
-/// reconcile resolves a local row's ledger identity against THE SCOPE'S OWN store — never the
+/// reconcile resolves a local row's custody identity against THE SCOPE'S OWN store — never the
 /// other scope's — because add-time minted the key under the scope's tracked id, and a
 /// cross-scope answer would retire that key and re-mint `-2` (the one path an entry name could
 /// move, orphaning any OAuth token filed under it).
@@ -2870,10 +3393,10 @@ fn remove_of_an_mcp_row_converges_inline_and_the_receipt_names_the_removals() {
                 .contains("topos-eng-alpha"),
         "the entry is gone now, not at the next sweep"
     );
-    let ledger = ScopeEntries::load(&rig.fs, &rig.layout()).unwrap();
-    assert!(!ledger.has_entries_for("s_a"));
+    let custody = ScopeEntries::load(&rig.fs, &rig.layout()).unwrap();
+    assert!(!custody.has_entries_for("s_a"));
     assert_eq!(
-        ledger
+        custody
             .doc
             .retired
             .get("topos-eng-alpha")
@@ -2883,7 +3406,7 @@ fn remove_of_an_mcp_row_converges_inline_and_the_receipt_names_the_removals() {
 }
 
 // =================================================================================================
-// The durable kind marker: classification survives a lost ledger, fails closed without evidence,
+// The durable kind marker: classification survives a lost custody, fails closed without evidence,
 // a targeted go-back converges configs, and the applied report never claims an empty-map skill.
 // =================================================================================================
 
@@ -2904,11 +3427,11 @@ fn deliver_linear(rig: &Rig, v: &Version) -> (FakePlane, FakeDirectory) {
 
 /// ITEM PAIR (kind fails durable): the store + empty map stand, the LEDGER is gone — a targeted
 /// go-back must still classify the record as config-placed and materialize NO skill dirs. Before
-/// the fix, classification hung on the ledger alone: its loss let the skill planner run and
+/// the fix, classification hung on the custody alone: its loss let the skill planner run and
 /// `server.json` landed in skill dirs.
 #[test]
 fn a_lost_ledger_never_lets_a_targeted_go_back_materialize_skill_dirs() {
-    let rig = Rig::new("lost-ledger");
+    let rig = Rig::new("lost-custody");
     rig.seed_session();
     seed_harness_dirs(&rig.home.0);
     let v = mk_version(&[(
@@ -2919,7 +3442,7 @@ fn a_lost_ledger_never_lets_a_targeted_go_back_materialize_skill_dirs() {
     let ctx = rig.ctx_at(Some(&rig.work.0));
     sweep(&ctx, &plane, &dir);
 
-    // The failure shape: the ledger is gone, and so is the delivery cache — the MARKER alone must
+    // The failure shape: the custody is gone, and so is the delivery cache — the MARKER alone must
     // answer.
     std::fs::remove_file(rig.layout().config_custody_path()).unwrap();
     std::fs::remove_file(rig.layout().sync_status_path()).unwrap();
@@ -2949,7 +3472,7 @@ fn a_lost_ledger_never_lets_a_targeted_go_back_materialize_skill_dirs() {
     assert!(map.placements.is_empty(), "{map:?}");
 }
 
-/// ITEM PAIR (fail closed): with the map EMPTY and every kind source gone — marker, cache, ledger
+/// ITEM PAIR (fail closed): with the map EMPTY and every kind source gone — marker, cache, custody
 /// — the targeted verb REFUSES with the typed placement error instead of guessing "skill" and
 /// materializing. Before the fix the guess ran the planner.
 #[test]
@@ -2987,6 +3510,124 @@ fn an_empty_map_with_no_kind_evidence_fails_closed_on_targeted_verbs() {
         !rig.work.0.join("skills").exists(),
         "nothing materialized on the refusal"
     );
+}
+
+/// THE TWO-DOMAIN RACE, made single-process. A bundle's DIR custody (`map.json`) and its CONFIG
+/// custody (`entries.json`) are written under DIFFERENT locks — the per-skill flock and the scope's
+/// mcp lock — and a targeted verb legitimately holds the skill lock across a converge, so the two
+/// can never be made to serialize against each other without deadlocking. Safety therefore comes
+/// from the FILES, not the locks: one writer each.
+///
+/// This drives the interleave that proves it, in one process because the locks no longer share a
+/// document: a targeted go-back reads dir custody (t0), a hook-fired quiet sweep converges config
+/// custody in the window (t1), the go-back commits its dir custody from the t0 snapshot (t2), and
+/// only then converges (t3). With both halves in ONE document, t2 writes back a snapshot taken
+/// before t1 and silently drops the rows t1 committed — leaving a live entry with no record, which
+/// the go-back's converge reads as a hand edit and refuses to touch: a permanent drift standoff
+/// that no later sweep clears. With the halves in sibling files, t2 cannot reach the rows: the
+/// entry stays provably topos's, current at v2, and is REPLACED with v1.
+#[test]
+fn a_go_back_racing_a_sweep_never_lands_in_a_drift_standoff() {
+    let rig = Rig::new("standoff");
+    rig.seed_session();
+    seed_harness_dirs(&rig.home.0);
+    let v1 = mk_version(&[(
+        "server.json",
+        server_json("https://mcp.example/v1").as_bytes(),
+    )]);
+    let v2 = mk_version(&[(
+        "server.json",
+        server_json("https://mcp.example/v2").as_bytes(),
+    )]);
+    let plane = FakePlane::new()
+        .with_version("s_linear", &v1)
+        .with_version("s_linear", &v2);
+    plane.serves(vec![delivered_mcp("s_linear", "linear", &v1)]);
+    let dir = FakeDirectory {
+        skills: vec![mcp_catalog_entry("s_linear", "linear", &v1)],
+        channels: Vec::new(),
+    };
+    rig.write_global(&format!(
+        "[bundles]\n\"{HOST}/{WS_NAME}/linear\" = {{ {SAFE} }}\n"
+    ));
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    sweep(&ctx, &plane, &dir);
+
+    // The team moves to v2 and the sweep converges onto it.
+    let mut served2 = delivered_mcp("s_linear", "linear", &v2);
+    served2.generation = 2;
+    plane.serves(vec![served2]);
+    let mut entry2 = mcp_catalog_entry("s_linear", "linear", &v2);
+    entry2.generation = 2;
+    let dir2 = FakeDirectory {
+        skills: vec![entry2],
+        channels: Vec::new(),
+    };
+    sweep(&ctx, &plane, &dir2);
+    let cursor = rig.home.0.join(".cursor/mcp.json");
+    assert!(
+        std::fs::read_to_string(&cursor)
+            .unwrap()
+            .contains("https://mcp.example/v2")
+    );
+
+    let sid = crate::id::SkillId::parse("s_linear").unwrap();
+    let map_path = rig.layout().published(&sid).map;
+
+    // t0 — the snapshot a targeted verb reads before it converges.
+    let stale_map = crate::doc::read_map(&rig.fs, &map_path).unwrap().unwrap();
+
+    // t1 — the quiet sweep lands in the window. The person had deleted the entry by hand, so this
+    // run REWRITES it and commits fresh config custody.
+    std::fs::write(&cursor, "{\n  \"mcpServers\": {}\n}\n").unwrap();
+    sweep(&ctx, &plane, &dir2);
+    assert!(
+        std::fs::read_to_string(&cursor)
+            .unwrap()
+            .contains("https://mcp.example/v2"),
+        "the interleaved sweep re-placed the entry"
+    );
+
+    // t2 — the targeted verb commits DIR custody from its pre-sweep snapshot. This is the write
+    // that used to take the config rows with it.
+    crate::doc::write_map(&rig.fs, &map_path, &stale_map).unwrap();
+    assert!(
+        !crate::config_custody::entries_of(&rig.fs, &rig.layout(), "s_linear").is_empty(),
+        "a dir-custody commit must not disturb config custody — the two have different writers"
+    );
+
+    // t3 — the go-back converges. The entry is topos's own, current at v2, so it is REPLACED.
+    let out = ops::pull(
+        &ctx,
+        ops::PullScope::One {
+            name: "linear".into(),
+            workspace: None,
+            mode: ops::TargetMode::GoBack(ops::VersionRef::Full(v1.id)),
+            store: ops::StoreScope::Here,
+        },
+    )
+    .expect("the go-back applies");
+    let text = std::fs::read_to_string(&cursor).unwrap();
+    assert!(
+        text.contains("https://mcp.example/v1") && !text.contains("https://mcp.example/v2"),
+        "the restored document must reach the config, not stand off against it: {text}"
+    );
+    let row = out
+        .data
+        .skills
+        .iter()
+        .find(|s| s.skill == "linear")
+        .expect("the go-back row");
+    let cursor_state = row
+        .harnesses
+        .iter()
+        .find(|h| h.agent == "cursor")
+        .expect("a cursor state");
+    assert_ne!(
+        cursor_state.state, "drifted",
+        "an entry topos itself wrote must never read as a hand edit: {cursor_state:?}"
+    );
+    assert_eq!(cursor_state.state, "placed", "{cursor_state:?}");
 }
 
 /// ITEM PAIR (go-back converges configs): a targeted `update <mcp>@<version>` must leave the
@@ -3074,7 +3715,7 @@ fn a_targeted_go_back_converges_the_configs_to_the_restored_document() {
 
 /// ITEM PAIR (targeted go-back honors narrowing): a bundle narrowed to ONE harness must stay in
 /// that one harness through a targeted `update <mcp>@<version>` — the go-back's converge reaches
-/// only the harnesses that already hold a ledger entry here, so a harness the narrowing excluded
+/// only the harnesses that already hold a custody entry here, so a harness the narrowing excluded
 /// never gains one. Before the fix the targeted demand carried an EMPTY filter, which
 /// `filter_admits` reads as ALL harnesses: openclaw (detected, engaged, excluded by the row)
 /// gained an entry the sweep then had to claw back.
@@ -3475,7 +4116,7 @@ fn a_workspace_mcp_add_leaves_the_marker_behind_before_it_returns() {
     assert!(marker.contains("\"mcp\""), "{marker}");
 
     // Which is the fact every later arm resolves against: the classifier answers mcp with no
-    // delivery cache and no ledger consulted.
+    // delivery cache and no custody consulted.
     let sctx = crate::ops::ctx_with_layout(&ctx, &layout);
     assert!(
         crate::bundle_kind::classify(&sctx, "s_linear", &[]).is_mcp(),

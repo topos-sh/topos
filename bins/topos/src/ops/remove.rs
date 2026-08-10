@@ -131,7 +131,7 @@ pub(crate) fn remove(
         match removal {
             // A config-placed bundle's blast radius is not its dirs — the `--yes` gate must name
             // the agent configs the apply will edit BEFORE consent, not only on the receipt after
-            // it. The list is knowable now: the scope ledger records every entry topos placed.
+            // it. The list is knowable now: the bundle's own record names every entry topos placed.
             Removal::TrackedLocal { skill_id, .. } => {
                 gated = true;
                 let files = mcp_entry_files(ctx, skill_id);
@@ -316,6 +316,12 @@ fn retire_mcp_entries(ctx: &Ctx<'_>, skill_id: &str, item: &mut RemoveItem) {
         &detected,
         skill_id,
     );
+    // A DRIFTED entry is left in place, so its custody row survives this removal — and the caller
+    // is about to delete the record that holds it. Move those rows to the scope document first, or
+    // the hand-edited entry would sit in the person's config forever with nothing left to prove it
+    // was ever topos's. There they stay disclosable, and a sweep after the edit is reverted still
+    // takes them out.
+    let detach_warnings = crate::mcp_engine::detach_bundle_rows(&io, skill_id);
     // Keyed by the config FILE the entry lived in — receipts speak in destinations, never agents.
     let mut lines: Vec<String> = outcome
         .removed
@@ -332,6 +338,10 @@ fn retire_mcp_entries(ctx: &Ctx<'_>, skill_id: &str, item: &mut RemoveItem) {
         })
         .collect();
     lines.extend(outcome.warnings.iter().cloned());
+    // A detach that could not take the lock or write the scope document has LOST custody of a
+    // drifted row the record is about to take with it. That is the person's business, not a silent
+    // fact — it rides the same receipt lines as every other warning this removal produced.
+    lines.extend(detach_warnings);
     if lines.is_empty() {
         return;
     }

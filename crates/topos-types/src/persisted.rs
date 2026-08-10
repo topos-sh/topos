@@ -86,26 +86,19 @@ pub struct LockedFile {
     pub size: u64,
 }
 
-/// `skills/<id>/map.json` — **ONE bundle's whole ownership record**: every target it owns on this
-/// machine, in both shapes a target comes in, plus the hashes that drive no-op uninstall and exact
-/// go-back. **Field-set pinned**; `swap_capability`'s value enum is INFERRED.
+/// `skills/<id>/map.json` — where a skill is materialized + the hashes that drive no-op uninstall and
+/// exact go-back. **Field-set pinned**; `swap_capability`'s value enum is INFERRED.
 ///
-/// A target is either a DIRECTORY the bundle owns ([`Self::placements`] × [`Self::placement_state`],
-/// written by the dir materializer) or the ENTRIES it owns inside a shared config file
-/// ([`Self::entry_state`], written by the config converge). The two lists are the two delivery
-/// mechanics; the record is one, so "what does this bundle own here" has exactly one answer whatever
-/// its kind.
-///
-/// **Schema v3** (its OWN ceiling, [`crate::PLACEMENT_MAP_SCHEMA_VERSION`]): v2 gave each dir
-/// placement its own durable state, strictly 1:1 with [`Self::placements`]; v3 added the config-entry
-/// half. A v1 document (one placement, map-level state only) upgrades losslessly in memory on read, a
-/// v2 one reads as owning no config entries; the map-level `materialized_sha` / `pre_existing_sha` /
-/// `swap_capability` fields remain the FIRST dir placement's mirror, so the document stays legible to
-/// inspection tools that predate the per-placement shape.
+/// **Schema v2** (its OWN ceiling, [`crate::PLACEMENT_MAP_SCHEMA_VERSION`]): a skill may hold SEVERAL
+/// placements (the shared cross-agent dir + per-harness native dirs), each with its own durable state
+/// in [`Self::placement_state`], strictly 1:1 with [`Self::placements`]. A v1 document (one placement,
+/// map-level state only) upgrades losslessly in memory on read; the map-level `materialized_sha` /
+/// `pre_existing_sha` / `swap_capability` fields remain the FIRST placement's mirror, so a v2 document
+/// stays legible to inspection tools that predate the per-placement shape.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
 pub struct PlacementMap {
-    #[cfg_attr(feature = "contract-derives", schemars(extend("const" = 3)))]
+    #[cfg_attr(feature = "contract-derives", schemars(extend("const" = 2)))]
     pub schema_version: u32,
     /// The target dir(s) where the skill is placed (the shared cross-agent dir and/or per-harness
     /// native dirs), 1:1 with [`Self::placement_state`].
@@ -144,40 +137,6 @@ pub struct PlacementMap {
     /// under a known harness skill dir. **Additive optional.**
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub harness_slug: Option<String>,
-    /// The CONFIG-FILE targets this bundle owns — one row per entry topos wrote into an agent's own
-    /// config. The second half of the ownership record (see the type doc); empty for every bundle
-    /// delivered as directories, and absent from a pre-v3 document. **Additive.**
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub entry_state: Vec<EntryPlacement>,
-}
-
-/// One CONFIG-ENTRY placement's durable state — the ownership record for entries topos wrote into a
-/// shared config file. The exact counterpart of [`PlacementState`] for the other target shape:
-/// `fingerprint` is to an entry what `materialized_sha` is to a dir (what topos last wrote, so drift
-/// is this row against the file, judged independently per row). **Field-set pinned; additive.**
-///
-/// Ownership of an entry is proven by the `topos-` key prefix PLUS this row: the config drivers are
-/// pure, so a `topos-`-looking key with no row here is FOREIGN and is never touched or claimed.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
-pub struct EntryPlacement {
-    /// The registry slug of the harness whose config file holds this entry.
-    pub agent: String,
-    /// The config file the entry lives in. A row recorded at another file is not custody of THIS
-    /// surface: a surface path that moves leaves a disclosed stale row rather than re-pointed custody.
-    pub file: String,
-    /// The immutable config key topos minted for this bundle. Once minted the key never changes —
-    /// several harnesses key OAuth tokens to the server name, so a rename would strand a sign-in.
-    pub key: String,
-    /// The fingerprint topos last wrote (the drivers' drift baseline).
-    pub fingerprint: String,
-    /// Whole-file ownership: topos created the file and still owned every byte at the last write —
-    /// the precondition for deleting the file when the last entry leaves. **Additive.**
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub owns_file: bool,
-    /// The bundle version whose `server.json` the entry was rendered from (provenance). **Additive.**
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub version_id: String,
 }
 
 /// One placement's durable state (`map.json` v2), 1:1 with [`PlacementMap::placements`]. **Field-set

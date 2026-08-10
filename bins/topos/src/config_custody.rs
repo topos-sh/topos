@@ -33,12 +33,58 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 use topos_types::PERSISTED_SCHEMA_VERSION;
-use topos_types::persisted::EntryPlacement;
 
 use crate::doc;
 use crate::error::ClientError;
 use crate::fs_seam::FsOps;
 use crate::sidecar::Layout;
+
+/// `skills/<id>/entries.json` — ONE bundle's config-entry custody, the SIBLING of its `map.json`.
+///
+/// The record directory is still the one place a bundle's custody lives; it holds two documents
+/// because they have two writers. `map.json` (the dirs) is written under the per-skill flock;
+/// this one only ever under the scope's `locks/mcp.lock`. Splitting the file is what makes
+/// "one writer per file" structural rather than a convention two lock domains have to honour —
+/// a targeted verb rewriting dir custody from a snapshot it read before a concurrent converge
+/// cannot silently drop the rows that converge just committed.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct EntryCustody {
+    #[serde(default)]
+    pub schema_version: u32,
+    /// The entries this bundle owns, indexed order (`"<agent>/<key>"` ascending — what the
+    /// converge writes), so the on-disk bytes are deterministic.
+    #[serde(default)]
+    pub entries: Vec<EntryPlacement>,
+}
+
+/// One CONFIG-ENTRY placement's durable state — the ownership record for entries topos wrote into
+/// a shared config file. The counterpart of `PlacementState` for the other target shape:
+/// `fingerprint` is to an entry what `materialized_sha` is to a dir (what topos last wrote, so
+/// drift is this row against the file, judged independently per row).
+///
+/// Ownership of an entry is proven by the `topos-` key prefix PLUS this row: the config drivers
+/// are pure, so a `topos-`-looking key with no row here is FOREIGN and is never touched or claimed.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct EntryPlacement {
+    /// The registry slug of the harness whose config file holds this entry.
+    pub agent: String,
+    /// The config file the entry lives in. A row recorded at another file is not custody of THIS
+    /// surface: a surface path that moves leaves a disclosed stale row rather than re-pointed
+    /// custody.
+    pub file: String,
+    /// The immutable config key topos minted for this bundle. Once minted the key never changes —
+    /// several harnesses key OAuth tokens to the server name, so a rename would strand a sign-in.
+    pub key: String,
+    /// The fingerprint topos last wrote (the drivers' drift baseline).
+    pub fingerprint: String,
+    /// Whole-file ownership: topos created the file and still owned every byte at the last write —
+    /// the precondition for deleting the file when the last entry leaves.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub owns_file: bool,
+    /// The bundle version whose `server.json` the entry was rendered from (provenance).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub version_id: String,
+}
 
 /// The per-scope document. Every map is a `BTreeMap`, so the on-disk bytes are deterministic.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -229,6 +275,13 @@ pub(crate) struct ScopeEntries {
     rows: BTreeMap<String, (String, EntryPlacement)>,
     /// Bundles whose rows changed and must be written back.
     dirty: BTreeSet<String>,
+    /// The intents a promotion has consumed but not yet made durable IN A RECORD. Held until
+    /// [`Self::flush`] proves each bundle's document landed: a record write that FAILS puts its
+    /// intents back into the journal, so the scope document written on the failure path still
+    /// describes work that has not landed and the next run's recovery finishes it. Without this
+    /// the journal would be cleared for a promotion that never reached disk — the one way this
+    /// design could lose an entry's custody permanently.
+    promoted: BTreeMap<String, PendingIntent>,
     /// Whether the scope document itself changed.
     doc_dirty: bool,
 }
@@ -256,6 +309,7 @@ impl ScopeEntries {
             doc,
             rows,
             dirty: BTreeSet::new(),
+            promoted: BTreeMap::new(),
             doc_dirty: false,
         })
     }
@@ -321,16 +375,16 @@ impl ScopeEntries {
     }
 
     /// One row, by its `"<slug>/<key>"` index.
-    pub(crate) fn row(&self, ledger_key: &str) -> Option<&EntryPlacement> {
-        self.rows.get(ledger_key).map(|(_, e)| e)
+    pub(crate) fn row(&self, custody_key: &str) -> Option<&EntryPlacement> {
+        self.rows.get(custody_key).map(|(_, e)| e)
     }
 
-    /// Whether a row exists at `ledger_key`.
-    pub(crate) fn holds(&self, ledger_key: &str) -> bool {
-        self.rows.contains_key(ledger_key)
+    /// Whether a row exists at `custody_key`.
+    pub(crate) fn holds(&self, custody_key: &str) -> bool {
+        self.rows.contains_key(custody_key)
     }
 
-    /// Every row under `slug` recorded at `file`, as `(ledger_key, row)` — the surface's own rows.
+    /// Every row under `slug` recorded at `file`, as `(custody_key, row)` — the surface's own rows.
     pub(crate) fn rows_at(&self, slug: &str, file: &Path) -> Vec<(String, EntryPlacement)> {
         let prefix = format!("{slug}/");
         self.rows
@@ -341,26 +395,26 @@ impl ScopeEntries {
     }
 
     /// Commit one row into its bundle's record (in memory; [`Self::flush`] persists).
-    pub(crate) fn put(&mut self, ledger_key: String, bundle_id: String, row: EntryPlacement) {
+    pub(crate) fn put(&mut self, custody_key: String, bundle_id: String, row: EntryPlacement) {
         if self
             .rows
-            .get(&ledger_key)
+            .get(&custody_key)
             .is_some_and(|(b, e)| *b == bundle_id && *e == row)
         {
             return;
         }
-        if let Some((prior_bundle, _)) = self.rows.get(&ledger_key)
+        if let Some((prior_bundle, _)) = self.rows.get(&custody_key)
             && *prior_bundle != bundle_id
         {
             self.dirty.insert(prior_bundle.clone());
         }
         self.dirty.insert(bundle_id.clone());
-        self.rows.insert(ledger_key, (bundle_id, row));
+        self.rows.insert(custody_key, (bundle_id, row));
     }
 
     /// Drop one row from its bundle's record.
-    pub(crate) fn remove(&mut self, ledger_key: &str) {
-        if let Some((bundle_id, _)) = self.rows.remove(ledger_key) {
+    pub(crate) fn remove(&mut self, custody_key: &str) {
+        if let Some((bundle_id, _)) = self.rows.remove(custody_key) {
             self.dirty.insert(bundle_id);
         }
     }
@@ -425,6 +479,11 @@ impl ScopeEntries {
     /// # Errors
     /// The scope document write failed — the caller must abandon the config write (the intent that
     /// would have made it recoverable is not on disk).
+    ///
+    /// REPLACES the journal wholesale, which is only sound while it is empty: intents left by an
+    /// earlier surface describe work that has NOT landed in a record, and writing over them loses
+    /// the only description of it. [`Self::has_pending`] is the caller's guard — see
+    /// `mcp_engine::journaled_write`.
     pub(crate) fn journal(
         &mut self,
         fs: &dyn FsOps,
@@ -434,6 +493,12 @@ impl ScopeEntries {
         self.doc.pending = intents;
         self.doc_dirty = true;
         write(fs, layout, &self.doc)
+    }
+
+    /// Whether outstanding intents stand — work an earlier surface (or an earlier run) journalled
+    /// that has not reached a record yet. A surface must never journal over them.
+    pub(crate) fn has_pending(&self) -> bool {
+        !self.doc.pending.is_empty()
     }
 
     /// Drop the journalled intents (the config write did not land) — best-effort durably.
@@ -448,8 +513,8 @@ impl ScopeEntries {
     pub(crate) fn promote_journal(&mut self) {
         let pending = std::mem::take(&mut self.doc.pending);
         self.doc_dirty = true;
-        for (ledger_key, intent) in pending {
-            self.apply_intent(&ledger_key, intent);
+        for (custody_key, intent) in pending {
+            self.apply_intent(&custody_key, intent);
         }
     }
 
@@ -469,8 +534,8 @@ impl ScopeEntries {
         }
         let pending = std::mem::take(&mut self.doc.pending);
         self.doc_dirty = true;
-        for (ledger_key, intent) in pending {
-            let Some((slug, entry_key)) = ledger_key.split_once('/') else {
+        for (custody_key, intent) in pending {
+            let Some((slug, entry_key)) = custody_key.split_once('/') else {
                 continue;
             };
             let Some(dialect) = dialect_of(slug) else {
@@ -492,24 +557,26 @@ impl ScopeEntries {
                 observed.entries.get(entry_key) == Some(&intent.fingerprint)
             };
             if landed {
-                self.apply_intent(&ledger_key, intent);
+                self.apply_intent(&custody_key, intent);
             }
             // else: the write never landed — the intent just drops.
         }
         true
     }
 
-    /// One promoted intent, applied to the rows.
-    fn apply_intent(&mut self, ledger_key: &str, intent: PendingIntent) {
-        let Some((slug, entry_key)) = ledger_key.split_once('/') else {
+    /// One promoted intent, applied to the rows — and REMEMBERED until its record write lands (see
+    /// [`Self::promoted`]).
+    fn apply_intent(&mut self, custody_key: &str, intent: PendingIntent) {
+        let Some((slug, entry_key)) = custody_key.split_once('/') else {
             return;
         };
+        self.promoted.insert(custody_key.to_owned(), intent.clone());
         if intent.fingerprint.is_empty() {
-            self.remove(ledger_key);
+            self.remove(custody_key);
             return;
         }
         self.put(
-            ledger_key.to_owned(),
+            custody_key.to_owned(),
             intent.bundle_id,
             EntryPlacement {
                 agent: slug.to_owned(),
@@ -522,12 +589,20 @@ impl ScopeEntries {
         );
     }
 
-    /// Persist everything that moved: each dirty bundle's record once, then the scope document.
-    /// Best-effort per record (a record that cannot be written is reported, never retried into a
-    /// half state); the returned lines are the caller's warnings.
+    /// Persist everything that moved: each dirty bundle's document once, then the scope document.
+    ///
+    /// A record write that FAILS puts that bundle's outstanding intents back into the journal
+    /// before the scope document is written, so the durable journal always describes exactly the
+    /// work that has not landed in a record. That is what makes the promise in [`journaled_write`]
+    /// and at converge start true: the next run's recovery re-observes the file and promotes the
+    /// row again. Best-effort per record — a document that cannot be written is reported, never
+    /// retried into a half state; the returned lines are the caller's warnings.
+    ///
+    /// [`journaled_write`]: crate::mcp_engine
     pub(crate) fn flush(&mut self, fs: &dyn FsOps, layout: &Layout) -> Vec<String> {
         let mut warnings = Vec::new();
         let dirty = std::mem::take(&mut self.dirty);
+        let promoted = std::mem::take(&mut self.promoted);
         for bundle_id in dirty {
             let rows: Vec<EntryPlacement> = self
                 .rows
@@ -535,13 +610,22 @@ impl ScopeEntries {
                 .filter(|(b, _)| *b == bundle_id)
                 .map(|(_, e)| e.clone())
                 .collect();
-            if let Err(e) = write_rows(fs, layout, &mut self.doc, &bundle_id, rows) {
-                warnings.push(format!(
-                    "MCP_CUSTODY_WRITE_FAILED {bundle_id}: {}",
-                    e.detail()
-                ));
-            } else {
+            let Err(e) = write_rows(fs, layout, &mut self.doc, &bundle_id, rows) else {
                 self.doc_dirty = true;
+                continue;
+            };
+            warnings.push(format!(
+                "MCP_CUSTODY_WRITE_FAILED {bundle_id}: {}",
+                e.detail()
+            ));
+            // The rows never reached this bundle's document — so the intents that produced them
+            // are still outstanding work. Back into the journal they go, and the scope document
+            // written below carries them.
+            for (custody_key, intent) in &promoted {
+                if intent.bundle_id == bundle_id {
+                    self.doc.pending.insert(custody_key.clone(), intent.clone());
+                    self.doc_dirty = true;
+                }
             }
         }
         if self.doc_dirty
@@ -558,34 +642,50 @@ impl ScopeEntries {
 // Where one bundle's rows live: its own record, else the scope document's unrecorded map.
 // =================================================================================================
 
-/// One bundle's recorded entry rows, read WHERE THEY LIVE: its own `map.json` when this scope's
-/// store holds a record for it, else the scope document's unrecorded map (see
-/// [`ConfigCustody::unrecorded`]). The two are exclusive and [`write_rows`] keeps them so — a
-/// record that appears later takes the rows with it, and the husk is dropped in the same write.
+/// Whether this scope's store holds a RECORD DIRECTORY for `bundle_id` — the one predicate that
+/// decides where its rows live, asked identically by every reader and writer. A record dir is the
+/// home of `entries.json`; anything else (an identity that is not a record id at all — the fetch
+/// door's `local:` spellings — or a record removed under us) rides the scope document's
+/// [`ConfigCustody::unrecorded`] map.
+fn record_home(
+    fs: &dyn FsOps,
+    layout: &Layout,
+    bundle_id: &str,
+) -> Option<crate::sidecar::SkillPaths> {
+    let sid = crate::id::SkillId::parse(bundle_id).ok()?;
+    fs.exists(&layout.skill_dir(&sid))
+        .then(|| layout.published(&sid))
+}
+
+/// One bundle's recorded entry rows, read WHERE THEY LIVE: its own `entries.json` when this scope's
+/// store holds a record directory for it, else the scope document's unrecorded map. The two are
+/// exclusive and [`write_rows`] keeps them so.
 ///
-/// An unreadable record answers NO rows — never an error: its entries then read as foreign and are
-/// left byte-identical, where failing the scope would strand every other bundle.
+/// An unreadable document answers NO rows — never an error: its entries then read as foreign and
+/// are left byte-identical, where failing the scope would strand every other bundle.
 fn read_rows(
     fs: &dyn FsOps,
     layout: &Layout,
     doc: &ConfigCustody,
     bundle_id: &str,
 ) -> Vec<EntryPlacement> {
-    if let Ok(sid) = crate::id::SkillId::parse(bundle_id)
-        && let Ok(Some(map)) = crate::doc::read_map(fs, &layout.published(&sid).map)
-    {
-        return map.entry_state;
+    match record_home(fs, layout, bundle_id) {
+        Some(sp) => crate::doc::read_doc::<EntryCustody>(fs, &sp.entries)
+            .ok()
+            .flatten()
+            .map(|d| d.entries)
+            .unwrap_or_default(),
+        None => doc.unrecorded.get(bundle_id).cloned().unwrap_or_default(),
     }
-    doc.unrecorded.get(bundle_id).cloned().unwrap_or_default()
 }
 
-/// Write one bundle's entry rows back where [`read_rows`] looks for them: its own `map.json` when
-/// this scope's store holds a record (read-modify-write under the caller's converge lock), else the
-/// scope document, which the caller flushes. A record that now exists claims the rows and the
-/// unrecorded husk is dropped in the same pass, so the two homes never both answer.
+/// Write one bundle's entry rows back where [`read_rows`] looks for them — its own `entries.json`
+/// under a record directory, else the scope document, which the caller flushes. A record that now
+/// exists claims the rows and the unrecorded husk is dropped in the same pass, so the two homes
+/// never both answer.
 ///
 /// # Errors
-/// The record could not be read or written.
+/// The document could not be written.
 fn write_rows(
     fs: &dyn FsOps,
     layout: &Layout,
@@ -593,26 +693,34 @@ fn write_rows(
     bundle_id: &str,
     rows: Vec<EntryPlacement>,
 ) -> Result<(), ClientError> {
-    if let Ok(sid) = crate::id::SkillId::parse(bundle_id) {
-        let path = layout.published(&sid).map;
-        if let Some(mut map) = crate::doc::read_map(fs, &path)? {
+    let Some(sp) = record_home(fs, layout, bundle_id) else {
+        // No record to carry them (a fetch door's `local:` identity, a hand-written row, or a
+        // record removed under us): keep the rows where they can still be found rather than
+        // dropping custody of live entries.
+        if rows.is_empty() {
             doc.unrecorded.remove(bundle_id);
-            if map.entry_state == rows {
-                return Ok(());
-            }
-            map.entry_state = rows;
-            return crate::doc::write_map(fs, &path, &map);
+        } else {
+            doc.unrecorded.insert(bundle_id.to_owned(), rows);
         }
-    }
-    // No record to carry them (a fetch door's `local:` identity, a hand-written row, or a store
-    // removed under us): keep the rows where they can still be found rather than dropping custody
-    // of live entries.
+        return Ok(());
+    };
+    doc.unrecorded.remove(bundle_id);
     if rows.is_empty() {
-        doc.unrecorded.remove(bundle_id);
-    } else {
-        doc.unrecorded.insert(bundle_id.to_owned(), rows);
+        // Nothing left to own: drop the document rather than leave an empty husk beside the record.
+        return match fs.remove_file(&sp.entries) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(e.into()),
+        };
     }
-    Ok(())
+    crate::doc::write_doc(
+        fs,
+        &sp.entries,
+        &EntryCustody {
+            schema_version: PERSISTED_SCHEMA_VERSION,
+            entries: rows,
+        },
+    )
 }
 
 /// The entry rows `bundle_id` owns in `layout`'s scope — the ONE record, read where it lives (the
@@ -621,15 +729,51 @@ fn write_rows(
 /// (`list`'s deep dive, the dest-root resolution, the still-held proofs) rather than converge it.
 /// Best-effort: an unreadable record answers no rows.
 pub(crate) fn entries_of(fs: &dyn FsOps, layout: &Layout, bundle_id: &str) -> Vec<EntryPlacement> {
-    if let Ok(sid) = crate::id::SkillId::parse(bundle_id)
-        && let Ok(Some(map)) = crate::doc::read_map(fs, &layout.published(&sid).map)
-    {
-        return map.entry_state;
+    if let Some(sp) = record_home(fs, layout, bundle_id) {
+        return crate::doc::read_doc::<EntryCustody>(fs, &sp.entries)
+            .ok()
+            .flatten()
+            .map(|d| d.entries)
+            .unwrap_or_default();
     }
     read(fs, layout)
         .ok()
         .and_then(|d| d.unrecorded.get(bundle_id).cloned())
         .unwrap_or_default()
+}
+
+/// Move `bundle_id`'s SURVIVING rows out of its record and into [`ConfigCustody::unrecorded`] —
+/// called when the RECORD ITSELF is about to be deleted (a classic `remove` of a config-placed
+/// bundle). A drifted entry is never clobbered, so a removal legitimately leaves rows standing;
+/// deleting the record with them inside would strand those entries in the person's config files
+/// forever, with nothing left to prove they were ever topos's. Moved here they stay disclosable,
+/// the bundle keeps its key (it still has entries, so retirement has not fired), and a later sweep
+/// still removes them once the hand-edit is reverted.
+///
+/// Answers whether any row moved. Must be called under the scope's converge lock.
+///
+/// # Errors
+/// The scope document could not be read or written.
+pub(crate) fn detach_to_unrecorded(
+    fs: &dyn FsOps,
+    layout: &Layout,
+    bundle_id: &str,
+) -> Result<bool, ClientError> {
+    let Some(sp) = record_home(fs, layout, bundle_id) else {
+        return Ok(false); // already unrecorded — nothing to move
+    };
+    let rows = crate::doc::read_doc::<EntryCustody>(fs, &sp.entries)
+        .ok()
+        .flatten()
+        .map(|d| d.entries)
+        .unwrap_or_default();
+    if rows.is_empty() {
+        return Ok(false);
+    }
+    let mut doc = read(fs, layout)?;
+    doc.unrecorded.insert(bundle_id.to_owned(), rows);
+    write(fs, layout, &doc)?;
+    Ok(true)
 }
 
 /// The rows the FIRST of `ids` that owns any answers — a bundle is filed under ONE of the spellings
@@ -802,9 +946,9 @@ mod tests {
     }
 
     /// A store written by a PREVIOUS release — a `state/mcp_ledger.json` holding keys, entries and
-    /// a journal, beside a v2 `map.json` that predates the config-entry half — is neither read nor
+    /// a journal, beside a `map.json` written before config custody existed — is neither read nor
     /// tripped over. The old document is not this build's; its keys reserve nothing, its entries
-    /// claim nothing, and the record beside it loads with no config entries at all.
+    /// claim nothing, and the record beside it owns no config entries at all.
     #[test]
     fn a_previous_releases_ledger_and_map_are_ignored_not_consulted() {
         let fs = RealFs;
@@ -865,12 +1009,13 @@ mod tests {
         // The old document is left exactly where it is — ignoring is not deleting.
         assert!(layout.state_dir().join("mcp_ledger.json").exists());
 
-        // The v2 record still loads, and owns no config entries.
+        // The record still loads as pure dir custody, and owns no config entries: no
+        // `entries.json` was ever written beside it.
         let map = crate::doc::read_map(&fs, &sp.map)
             .unwrap()
-            .expect("the v2 record loads");
+            .expect("the record loads");
         assert_eq!(map.placements.len(), 1);
-        assert!(map.entry_state.is_empty(), "an old record owns no entries");
+        assert!(!sp.entries.exists(), "an old record has no entry document");
         assert!(entries_of(&fs, &layout, sid.as_str()).is_empty());
     }
 

@@ -1866,7 +1866,7 @@ fn current_dest_roots(
         BundleKind::Skill => false,
     };
     if mcp {
-        // The scope's ledger names the config files THIS bundle's entries live in — filtered by
+        // The bundle's own custody rows name the config files its entries live in — filtered by
         // every identity the bundle may be filed under (its cached skill id, the scope store's
         // tracked id, the name-keyed local identity).
         let Some(layout) = mcp_scope_store(ctx, target) else {
@@ -3211,7 +3211,7 @@ fn mcp_bundle_of_arm(
             KeyShape::LocalPath { raw } if row.value.declared_kind() == Some(BundleKind::Mcp) => {
                 // Resolved the way every local-path key resolves ([`row_dir`], the `~/` arm
                 // included), so a home-spelled row canonicalizes to the identity its adopt
-                // recorded instead of falling back to a `local:` guess no ledger key answers.
+                // recorded instead of falling back to a `local:` guess no minted key answers.
                 let dir = row_dir(ctx, target, raw);
                 // The tracked identity: the scope's own store first (a project row's custody
                 // lives in the checkout), then the home store — the same identity the demand

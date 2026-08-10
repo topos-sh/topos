@@ -51,6 +51,14 @@ pub(crate) struct SkillPaths {
     /// whose store was written before it (and for one whose best-effort write failed, which
     /// classification answers by refusing, never by guessing).
     pub kind: PathBuf,
+    /// The CONFIG-ENTRY custody document (`skills/<id>/entries.json`) — the entries this bundle
+    /// owns inside agents' own MCP config files. A SIBLING of `map.json`, never part of it: the two
+    /// have different single writers. `map.json` is written under the per-skill flock
+    /// ([`lock_skill`]); this one only ever under the scope's `locks/mcp.lock`, which the converge
+    /// takes. One file, one lock domain, one writer — so a targeted verb rewriting dir custody can
+    /// never clobber entry custody a concurrent converge just wrote, and neither lock has to know
+    /// about the other. Absent for every bundle delivered as directories.
+    pub entries: PathBuf,
     /// The durable RETIREMENT marker — written once when the one-time orphan resolution retires a
     /// record no row claims and nothing delivers. The record's bytes stay on disk forever, but
     /// every store walker skips a marked record: it is never listed, resolved, rebuilt, cleaned,
@@ -68,6 +76,7 @@ impl SkillPaths {
             conflict: base.join("conflict.json"),
             origin: base.join("origin.json"),
             kind: base.join("kind.json"),
+            entries: base.join("entries.json"),
             retired: base.join("retired.json"),
         }
     }
@@ -1465,7 +1474,6 @@ mod tests {
                 harness: None,
                 harness_layer: None,
                 harness_slug: None,
-                entry_state: Vec::new(),
             },
         )
         .unwrap();
@@ -1549,7 +1557,6 @@ mod tests {
                 harness: None,
                 harness_layer: None,
                 harness_slug: None,
-                entry_state: Vec::new(),
             },
         )
         .unwrap();
