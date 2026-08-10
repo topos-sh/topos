@@ -15,7 +15,7 @@ use std::sync::{Arc, Mutex};
 
 use topos_core::digest::{self, FileMode, ManifestEntry};
 use topos_core::identity::Commit;
-use topos_harness::triggers::TriggerAdapter;
+use topos_harness::triggers::{TriggerAdapter, TriggerArtifact};
 use topos_harness::{DiscoveredPlacement, HarnessAdapter, PlacementTarget};
 use topos_types::requests::{
     WireChannelEntry, WireChannelIndex, WireChannelSkill, WireMe, WireProposalIndex,
@@ -105,12 +105,12 @@ impl TriggerAdapter for TmpHarness {
         no_trigger()
     }
 
-    fn footprint(&self) -> Vec<PathBuf> {
+    fn artifacts(&self) -> Vec<TriggerArtifact> {
         Vec::new()
     }
 
     fn present(&self) -> bool {
-        !self.footprint().is_empty()
+        !self.artifacts().is_empty()
     }
 }
 fn no_trigger() -> TriggerReport {

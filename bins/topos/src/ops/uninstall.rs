@@ -1,12 +1,15 @@
 //! `uninstall [--yes]` — remove topos from this machine, two-phase.
 //!
-//! Bare = a DESCRIBE of exactly what goes: EVERY harness auto-update-trigger artifact topos owns on this
-//! machine (each named by its path — the same set the apply scrubs, not just the active harness's), the
+//! Bare = a DESCRIBE of exactly what goes: EVERY harness auto-update-trigger artifact the apply
+//! reaches, not just the active harness's — each named by its path, or, where a harness keeps the
+//! trigger in its own program instead of a file, by what the scrub will dial there — the
 //! `~/.topos/` sidecar tree (which holds the signed-in credential), and the note that SKILL FILES IN
-//! AGENT DIRS STAY (uninstall never deletes a skill byte). `--yes` scrubs the active harness's trigger
-//! and then every other supported harness's (both reports surfaced honestly), then deletes the
-//! `~/.topos/` tree via the fs seam. The `topos` binary is NOT self-deleted (a package manager may own
-//! it) — its path is disclosed with a "remove it with your installer (or `rm <path>`)" note. A
+//! AGENT DIRS STAY (uninstall never deletes a skill byte). `--yes` scrubs the active harness's
+//! trigger, deletes the built-in skill's copies and then the `~/.topos/` tree via the fs seam, and
+//! LAST scrubs every other supported harness's trigger (all reports surfaced honestly) — last
+//! because those deletions can fail, and a teardown that dies halfway must not have disarmed the
+//! machine's other agents on its way. The `topos` binary is NOT self-deleted (a package manager may
+//! own it) — its path is disclosed with a "remove it with your installer (or `rm <path>`)" note. A
 //! maintenance command: it needs no sign-in, mints no identity, and touches no plane.
 
 use std::path::PathBuf;
@@ -20,9 +23,13 @@ use crate::error::ClientError;
 /// The bare `uninstall` DESCRIBE — what `--yes` would remove (nothing has changed).
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct UninstallDescribe {
-    /// Every harness artifact the auto-update trigger would be scrubbed from — across EVERY harness
-    /// the apply reaches, not just the active one (empty = none armed anywhere).
-    pub hook_paths: Vec<String>,
+    /// Every artifact the auto-update-trigger scrub would REACH, across EVERY harness the apply
+    /// touches — not just the active one, and not only the ones that leave a file behind: a path
+    /// where the trigger is one, and the named registration where it lives in the harness's own
+    /// program (empty = nothing anywhere). Rendered rows, in the disclosure's own order and
+    /// wording — the preview says what the apply will attempt, so a person reads the same sentence
+    /// the receipt answers for.
+    pub trigger_artifacts: Vec<String>,
     /// The `~/.topos/` sidecar tree that would be deleted (the signed-in credential lives inside it).
     pub sidecar_path: String,
     /// Whether the sidecar tree currently exists (a fresh/already-removed install has none).
@@ -76,13 +83,14 @@ pub(crate) fn uninstall(
     binary_path: Option<PathBuf>,
     yes: bool,
 ) -> Result<UninstallOutcome, ClientError> {
-    // The whole machine's trigger footprint — the ACTIVE harness's plus every other one the apply
-    // scrubs — so the describe can never name less than `--yes` touches.
-    let hook_paths: Vec<String> = ctx
+    // The whole machine's trigger artifacts — the ACTIVE harness's plus every other one the apply
+    // scrubs — so the describe can never name less than `--yes` touches. Rendered through the
+    // artifact's own `Display`, the ONE spelling every disclosure surface prints.
+    let trigger_artifacts: Vec<String> = ctx
         .triggers
-        .footprint()
+        .artifacts()
         .iter()
-        .map(|p| p.to_string_lossy().into_owned())
+        .map(ToString::to_string)
         .collect();
     let home = ctx.layout.home();
     let sidecar_path = home.to_string_lossy().into_owned();
@@ -109,7 +117,7 @@ pub(crate) fn uninstall(
     if !yes {
         return Ok(UninstallOutcome::Described {
             describe: UninstallDescribe {
-                hook_paths,
+                trigger_artifacts,
                 sidecar_path,
                 sidecar_present,
                 binary_path: binary,
@@ -124,13 +132,11 @@ pub(crate) fn uninstall(
     }
 
     // ---- APPLY (`--yes`) ----
-    // Scrub the auto-update triggers FIRST (their artifacts live in the harness homes, not
-    // `~/.topos/`) — the active harness's, then every other supported harness's, exactly the set the
-    // describe above disclosed. Then the built-in skill's placed copies (topos-authored, recorded in
-    // the sidecar we are about to delete), then the sidecar tree itself. Idempotent: a second run
-    // finds nothing to remove.
+    // The ACTIVE harness's trigger goes first (its artifact lives in the harness home, not
+    // `~/.topos/`), then the built-in skill's placed copies (topos-authored, recorded in the sidecar
+    // we are about to delete), then the sidecar tree itself. Idempotent: a second run finds nothing
+    // to remove.
     let hook = ctx.triggers.active().remove();
-    let breadth = ctx.triggers.scrub_others();
     let mut builtin_removed = Vec::new();
     for dir in &builtin_dirs {
         let p = std::path::Path::new(dir);
@@ -145,6 +151,12 @@ pub(crate) fn uninstall(
     } else {
         false
     };
+    // The breadth scrub runs LAST — after every fallible deletion above has SUCCEEDED. Those
+    // deletions can fail (a permission error, an unremovable tree), and this verb fails with them;
+    // disarming the machine's other agents on the way out of a teardown that did not happen would
+    // leave them silently un-updated with nothing removed to show for it. The set is exactly the one
+    // the describe disclosed.
+    let breadth = ctx.triggers.scrub_others();
 
     Ok(UninstallOutcome::Applied(UninstallApplied {
         hook,
@@ -177,9 +189,10 @@ fn looks_like_sidecar(ctx: &Ctx<'_>, home: &std::path::Path) -> bool {
 mod tests {
     use std::cell::Cell;
     use std::path::{Path, PathBuf};
+    use std::rc::Rc;
     use std::sync::atomic::{AtomicU32, Ordering};
 
-    use topos_harness::triggers::TriggerAdapter;
+    use topos_harness::triggers::{TriggerAdapter, TriggerArtifact};
     use topos_harness::{DiscoveredPlacement, HarnessAdapter, PlacementTarget};
     use topos_types::{CurrencyKind, HarnessId, TriggerReport, TriggerState};
 
@@ -209,8 +222,8 @@ mod tests {
     }
 
     /// A harness fake carrying BOTH ports: placement targets nothing real, and the trigger half
-    /// RECORDS whether `remove` was called and reports a fixed footprint (a config path). It touches
-    /// no real config — the op orchestration is what's under test.
+    /// RECORDS whether `remove` was called and discloses one fixed artifact (a config path). It
+    /// touches no real config — the op orchestration is what's under test.
     struct FakeHarness {
         config: PathBuf,
         removed: Cell<u32>,
@@ -250,12 +263,12 @@ mod tests {
             self.report(TriggerState::Inactive, true)
         }
 
-        fn footprint(&self) -> Vec<PathBuf> {
-            vec![self.config.clone()]
+        fn artifacts(&self) -> Vec<TriggerArtifact> {
+            vec![TriggerArtifact::Path(self.config.clone())]
         }
 
         fn present(&self) -> bool {
-            !self.footprint().is_empty()
+            !self.artifacts().is_empty()
         }
     }
     impl FakeHarness {
@@ -271,6 +284,49 @@ mod tests {
         }
     }
 
+    /// A trigger fake for ANOTHER harness — the breadth half. It RECORDS its removals through a
+    /// shared counter (the rig keeps a handle after the adapter is boxed) and discloses whichever
+    /// artifact the test hands it, so a rig can state an out-of-process breadth without a scheduler.
+    struct OtherTrigger {
+        slug: &'static str,
+        artifact: TriggerArtifact,
+        removed: Rc<Cell<u32>>,
+    }
+    impl TriggerAdapter for OtherTrigger {
+        fn slug(&self) -> &'static str {
+            self.slug
+        }
+
+        fn install(&self) -> TriggerReport {
+            self.report()
+        }
+
+        fn remove(&self) -> TriggerReport {
+            self.removed.set(self.removed.get() + 1);
+            self.report()
+        }
+
+        fn artifacts(&self) -> Vec<TriggerArtifact> {
+            vec![self.artifact.clone()]
+        }
+
+        fn present(&self) -> bool {
+            true
+        }
+    }
+    impl OtherTrigger {
+        fn report(&self) -> TriggerReport {
+            TriggerReport {
+                agent: self.slug.to_owned(),
+                currency_kind: CurrencyKind::ExplicitPullOnly,
+                touched_path: None,
+                marker_id: "topos:test:other".into(),
+                state: TriggerState::Inactive,
+                note: None,
+            }
+        }
+    }
+
     fn ctx_with<'a>(
         fs: &'a RealFs,
         ids: &'a SeqIds,
@@ -279,6 +335,31 @@ mod tests {
         plane: &'a InertPlane,
         follow: &'a InertFollow,
         home: &Path,
+    ) -> Ctx<'a> {
+        // The same fake on both ports, no breadth — most of this rig's subject is the verb's
+        // orchestration of the active pair.
+        ctx_with_triggers(
+            fs,
+            ids,
+            clock,
+            harness,
+            plane,
+            follow,
+            home,
+            crate::ops::Triggers::active_only(harness),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)] // A composition root's rig: every port is passed, none resolved.
+    fn ctx_with_triggers<'a>(
+        fs: &'a RealFs,
+        ids: &'a SeqIds,
+        clock: &'a FixedClock,
+        harness: &'a FakeHarness,
+        plane: &'a InertPlane,
+        follow: &'a InertFollow,
+        home: &Path,
+        triggers: crate::ops::Triggers<'a>,
     ) -> Ctx<'a> {
         Ctx {
             progress: crate::progress::silent(),
@@ -289,8 +370,7 @@ mod tests {
             device_id: String::new(),
             layout: Layout::new(home),
             harness,
-            // The same fake on both ports — this rig's subject is the verb's orchestration of them.
-            triggers: crate::ops::Triggers::active_only(harness),
+            triggers,
             plane,
             follow,
             roots: None,
@@ -321,7 +401,7 @@ mod tests {
         match out {
             UninstallOutcome::Described { describe, yes_argv } => {
                 assert_eq!(
-                    describe.hook_paths,
+                    describe.trigger_artifacts,
                     vec![cfg.to_string_lossy().into_owned()]
                 );
                 assert_eq!(describe.sidecar_path, home.0.to_string_lossy());
@@ -427,6 +507,140 @@ mod tests {
             harness.removed.get(),
             0,
             "the hook was never scrubbed either"
+        );
+    }
+
+    /// The describe names an OUT-OF-PROCESS trigger in words. A harness whose trigger lives in its
+    /// own program leaves no path to print, and a preview that prints only paths says nothing at all
+    /// about it — then `--yes` reaches into that program anyway. The row is the promise the apply
+    /// answers for.
+    #[test]
+    fn the_describe_names_a_trigger_that_lives_outside_the_filesystem() {
+        let home = Scratch::new();
+        std::fs::create_dir_all(home.0.join("identity")).unwrap();
+
+        let fs = RealFs;
+        let ids = SeqIds::new("s");
+        let clock = FixedClock(1);
+        let harness = FakeHarness {
+            config: home.0.join("harness-settings.json"),
+            removed: Cell::new(0),
+        };
+        let plane = InertPlane;
+        let follow = InertFollow;
+        let removed = Rc::new(Cell::new(0));
+        let others: Vec<Box<dyn TriggerAdapter>> = vec![Box::new(OtherTrigger {
+            slug: "openclaw",
+            artifact: TriggerArtifact::OutOfProcess {
+                harness: "OpenClaw",
+            },
+            removed: Rc::clone(&removed),
+        })];
+        let ctx = ctx_with_triggers(
+            &fs,
+            &ids,
+            &clock,
+            &harness,
+            &plane,
+            &follow,
+            &home.0,
+            crate::ops::Triggers::machine_of(&harness, &others),
+        );
+
+        let out = uninstall(&ctx, None, false).unwrap();
+        let UninstallOutcome::Described { describe, .. } = out else {
+            panic!("a bare uninstall describes")
+        };
+        assert!(
+            describe.trigger_artifacts.iter().any(|row| row
+                == "the OpenClaw scheduled update job, if armed (removed through OpenClaw's \
+                    scheduler)"),
+            "the out-of-process trigger must be named: {:?}",
+            describe.trigger_artifacts
+        );
+        assert_eq!(removed.get(), 0, "a describe scrubs nothing");
+    }
+
+    /// The teardown ORDER: the breadth scrub runs only after every fallible deletion SUCCEEDED. A
+    /// deletion that fails aborts the verb — and must leave every OTHER harness's trigger armed,
+    /// because disarming a machine's agents is not a thing to do on the way out of a teardown that
+    /// did not happen.
+    #[test]
+    fn a_failed_deletion_leaves_every_other_harnesss_trigger_armed() {
+        use topos_types::persisted::{PlacementKind, PlacementMap, PlacementState, SwapCapability};
+
+        let home = Scratch::new();
+        std::fs::create_dir_all(home.0.join("identity")).unwrap();
+        std::fs::write(home.0.join("identity/credentials.json"), b"secret").unwrap();
+        // The built-in skill's recorded placement is a regular FILE where a directory belongs (a
+        // corrupted agent dir) — so the tree delete fails, deterministically and for every user.
+        let placed = Scratch::new();
+        let placement = placed.0.join("topos");
+        std::fs::write(&placement, b"not a directory").unwrap();
+        let sid = crate::id::SkillId::parse("topos").unwrap();
+        let layout = Layout::new(&home.0);
+        std::fs::create_dir_all(layout.published(&sid).map.parent().unwrap()).unwrap();
+        crate::doc::write_map(
+            &RealFs,
+            &layout.published(&sid).map,
+            &PlacementMap {
+                schema_version: 2,
+                placements: vec![placement.to_string_lossy().into_owned()],
+                applied_commit: "b".repeat(64),
+                materialized_sha: "e".repeat(64),
+                pre_existing_sha: None,
+                swap_capability: SwapCapability::Unsupported,
+                harness: None,
+                harness_layer: None,
+                harness_slug: None,
+                placement_state: vec![PlacementState {
+                    kind: PlacementKind::Native,
+                    agent: None,
+                    materialized_sha: Some("e".repeat(64)),
+                    pre_existing_sha: None,
+                    swap_capability: SwapCapability::Unsupported,
+                    adopted_source: false,
+                }],
+            },
+        )
+        .unwrap();
+
+        let fs = RealFs;
+        let ids = SeqIds::new("s");
+        let clock = FixedClock(1);
+        let harness = FakeHarness {
+            config: home.0.join("harness-settings.json"),
+            removed: Cell::new(0),
+        };
+        let plane = InertPlane;
+        let follow = InertFollow;
+        let removed = Rc::new(Cell::new(0));
+        let others: Vec<Box<dyn TriggerAdapter>> = vec![Box::new(OtherTrigger {
+            slug: "cursor",
+            artifact: TriggerArtifact::Path(home.0.join("cursor-hooks.json")),
+            removed: Rc::clone(&removed),
+        })];
+        let ctx = ctx_with_triggers(
+            &fs,
+            &ids,
+            &clock,
+            &harness,
+            &plane,
+            &follow,
+            &home.0,
+            crate::ops::Triggers::machine_of(&harness, &others),
+        );
+
+        uninstall(&ctx, None, true).expect_err("the failed deletion fails the verb");
+
+        assert_eq!(
+            removed.get(),
+            0,
+            "the breadth scrub never ran — the other harness keeps its trigger"
+        );
+        assert!(
+            home.0.join("identity/credentials.json").exists(),
+            "the sidecar tree is intact: the verb died before its delete"
         );
     }
 }

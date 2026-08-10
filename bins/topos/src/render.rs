@@ -1926,12 +1926,12 @@ pub(crate) fn uninstall_describe_tty(
     yes_argv: &[String],
 ) -> String {
     let mut s = String::from("Uninstalling topos would:");
-    if d.hook_paths.is_empty() {
+    if d.trigger_artifacts.is_empty() {
         s.push_str("\n  · scrub the session-start auto-update hook: none is armed");
     } else {
         s.push_str(&format!(
             "\n  · scrub the session-start auto-update hook from: {}",
-            d.hook_paths.join(", ")
+            d.trigger_artifacts.join(", ")
         ));
     }
     if d.sidecar_present {

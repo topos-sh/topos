@@ -27,7 +27,7 @@ use std::sync::{Arc, Mutex};
 use topos_core::digest::ManifestEntry;
 use topos_core::digest::{self, FileMode};
 use topos_core::identity::Commit;
-use topos_harness::triggers::TriggerAdapter;
+use topos_harness::triggers::{TriggerAdapter, TriggerArtifact};
 use topos_harness::{DiscoveredPlacement, HarnessAdapter, PlacementTarget};
 
 use topos_types::{CurrencyKind, HarnessId, TriggerReport, TriggerState};
@@ -106,12 +106,12 @@ impl TriggerAdapter for NoHarness {
         report()
     }
 
-    fn footprint(&self) -> Vec<PathBuf> {
+    fn artifacts(&self) -> Vec<TriggerArtifact> {
         Vec::new()
     }
 
     fn present(&self) -> bool {
-        !self.footprint().is_empty()
+        !self.artifacts().is_empty()
     }
 }
 fn report() -> TriggerReport {

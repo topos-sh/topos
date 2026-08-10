@@ -5,7 +5,7 @@ the harness impls:
 
 - **`HarnessAdapter`** answers **where** — `id` / `discover` / `placement_for`. It writes nothing.
 - **`triggers::TriggerAdapter`** answers **when the update check fires** — `slug` / `install` /
-  `remove` / `present` / `footprint`, plus the two honesty knobs (`offline_probe_refusal`,
+  `remove` / `present` / `artifacts`, plus the two honesty knobs (`offline_probe_refusal`,
   `scrub_needs_live_harness`). It edits its own harness config surface and nothing else.
 
 Both are **content-blind**: neither receives a skill's bytes, hashes a bundle, or writes a skill
@@ -24,9 +24,13 @@ selects the sweep's stdout dialect: UNMARKED is the schema-conservative default 
 `additionalContext` only, nothing when there is nothing to say — what a strict hook-output
 validator accepts); `claude-code` is the one spec declaring a `hook_dialect` today, opting into
 `reloadSkills` so pulled skills go live same-session. `present` is the hook-health probe
-`list`/`auth status` read, and `footprint` is what `uninstall`'s describe and `list --footprint`
-disclose (topos-owned paths outside skill dirs, never a delete target) — health is never claimed on
-faith and a path is never claimed unconfirmed. The shared contract everywhere:
+`list`/`auth status` read, and `artifacts` is what `uninstall`'s describe discloses — every artifact
+a scrub REACHES, as a `TriggerArtifact`: a topos-owned `Path` outside skill dirs (never a delete
+target, and named only where it is confirmed ours right now — this is also the row
+`list --footprint` prints), or an `OutOfProcess` registration in the harness's own program, named
+unconditionally because proving one means running the harness. A preview discloses INTENT, so it can
+never promise less than an apply touches; health is never claimed on faith and a path is never
+claimed unconfirmed. The shared contract everywhere:
 `Active` only on stated evidence, else the entry is registered and the report floors at explicit
 pull; fail-closed with zero writes on any unprovable config shape; ownership keys on the
 sentinel/marker alone; every (un)install idempotent; topos never writes another program's

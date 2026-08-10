@@ -11,16 +11,17 @@
 //!
 //! [`Triggers`] is what a verb holds ([`Ctx::triggers`](crate::ctx::Ctx)) — the ACTIVE harness's
 //! trigger plus, in production, the machine roots the whole-machine set resolves under. It is the
-//! reason a preview can DISCLOSE what an apply will touch: [`Triggers::footprint`] and
-//! [`Triggers::scrub_others`] walk the same set, so `uninstall`'s describe and `list --footprint`
-//! name exactly the harnesses `uninstall --yes` reaches. The detection-scoped sweeps
+//! reason a preview can DISCLOSE what an apply will touch: [`Triggers::artifacts`] and
+//! [`Triggers::scrub_others`] walk the same set, so `uninstall`'s describe names exactly the
+//! artifacts `uninstall --yes` reaches (and `list --footprint`, a path-typed surface, prints that
+//! set's path rows). The detection-scoped sweeps
 //! ([`arm_detected`], [`probe_detected`]) stay free functions at the composition root, which is the
 //! one layer holding `$HOME`, the cwd, and the real ports. Everything is injected, so tests never
 //! probe the developer's machine or spawn a harness CLI.
 
 use std::path::{Path, PathBuf};
 
-use topos_harness::triggers::TriggerAdapter;
+use topos_harness::triggers::{TriggerAdapter, TriggerArtifact};
 use topos_harness::{CommandRunner, ConfigStore, registry, triggers};
 use topos_types::{TriggerReport, TriggerState};
 
@@ -31,20 +32,30 @@ use topos_types::{TriggerReport, TriggerState};
 ///
 /// Construction is I/O-free (each adapter is a struct over injected paths), so carrying this on every
 /// invocation costs nothing; the harness detection the breadth set needs runs lazily, only when
-/// [`Self::footprint`] or [`Self::scrub_others`] is actually called.
+/// [`Self::artifacts`] or [`Self::scrub_others`] is actually called.
 #[derive(Clone)]
 pub(crate) struct Triggers<'a> {
     active: &'a dyn TriggerAdapter,
     breadth: Option<Breadth<'a>>,
 }
 
-/// What the whole-machine set resolves against: the USER home (each adapter resolves its own harness
-/// root under it, env overrides honored) and the two injected ports.
+/// Where the whole-machine set comes from.
 #[derive(Clone)]
-struct Breadth<'a> {
-    home: PathBuf,
-    cfg: &'a dyn ConfigStore,
-    run: &'a dyn CommandRunner,
+enum Breadth<'a> {
+    /// PRODUCTION: every registry row's trigger, resolved under the USER home (each adapter
+    /// resolves its own harness root there, env overrides honored) through the two injected ports.
+    Machine {
+        home: PathBuf,
+        cfg: &'a dyn ConfigStore,
+        run: &'a dyn CommandRunner,
+    },
+    /// TESTS: the EXPLICIT adapter set, each built by the test over a root it owns. The registry
+    /// resolution above reads `$CLAUDE_CONFIG_DIR` / `$CODEX_HOME` / `$XDG_CONFIG_HOME`, so a rig
+    /// that took its breadth from there would aim writes at the developer's real config whenever
+    /// one of those happens to be set, whatever temp home it passed. Injecting the adapters is what
+    /// puts that out of reach — an ambient variable has nothing left to redirect.
+    #[cfg(test)]
+    Explicit(&'a [Box<dyn TriggerAdapter + 'a>]),
 }
 
 impl<'a> Triggers<'a> {
@@ -67,7 +78,22 @@ impl<'a> Triggers<'a> {
     ) -> Self {
         Self {
             active,
-            breadth: Some(Breadth { home, cfg, run }),
+            breadth: Some(Breadth::Machine { home, cfg, run }),
+        }
+    }
+
+    /// The whole machine as a TEST states it: the active trigger plus exactly the adapters handed
+    /// in, each built over a root the test owns. The registry resolution [`Self::machine`] runs
+    /// honors per-harness env overrides, which on a developer machine point at real config; a rig
+    /// naming its own adapters cannot be redirected by any of them.
+    #[cfg(test)]
+    pub(crate) fn machine_of(
+        active: &'a dyn TriggerAdapter,
+        others: &'a [Box<dyn TriggerAdapter + 'a>],
+    ) -> Self {
+        Self {
+            active,
+            breadth: Some(Breadth::Explicit(others)),
         }
     }
 
@@ -76,64 +102,85 @@ impl<'a> Triggers<'a> {
         self.active
     }
 
-    /// Every OTHER supported harness's trigger this machine's scrub reaches. Sweeps every KNOWN row
-    /// rather than the detected ones — an artifact must be scrubbed even when the harness's detect
-    /// dir has since vanished — minus the active slug (the verb handles that one) and minus a
-    /// trigger whose scrub must dial the harness's OWN program on a machine where it does not look
-    /// installed.
-    fn others(&self) -> Vec<Box<dyn TriggerAdapter + 'a>> {
-        let Some(b) = &self.breadth else {
-            return Vec::new();
-        };
-        let mut detected: Option<Vec<&'static str>> = None;
-        let mut out: Vec<Box<dyn TriggerAdapter + 'a>> = Vec::new();
-        for harness in registry::known_harnesses() {
-            if harness.slug == self.active.slug() {
-                continue;
-            }
-            let Some(adapter) = triggers::adapter_for_slug(harness.slug, &b.home, b.cfg, b.run)
-            else {
-                continue;
-            };
-            if adapter.scrub_needs_live_harness() {
-                let live = detected.get_or_insert_with(|| {
-                    registry::detected_harnesses(&b.home, None)
-                        .iter()
-                        .map(|h| h.slug)
-                        .collect()
-                });
-                if !live.contains(&harness.slug) {
-                    continue;
+    /// Visit every OTHER supported harness's trigger this machine's scrub reaches. The production
+    /// set sweeps every KNOWN registry row rather than the detected ones — an artifact must be
+    /// scrubbed even when the harness's detect dir has since vanished — minus the active slug (the
+    /// verb handles that one) and minus a trigger whose scrub must dial the harness's OWN program
+    /// on a machine where it does not look installed.
+    ///
+    /// A visitor rather than a returned list because the two breadth sources own their adapters
+    /// differently (one builds them, one borrows them); every caller here only ever reads each
+    /// adapter once, in order.
+    fn for_each_other(&self, mut f: impl FnMut(&dyn TriggerAdapter)) {
+        match &self.breadth {
+            None => {}
+            Some(Breadth::Machine { home, cfg, run }) => {
+                let mut detected: Option<Vec<&'static str>> = None;
+                for harness in registry::known_harnesses() {
+                    if harness.slug == self.active.slug() {
+                        continue;
+                    }
+                    let Some(adapter) = triggers::adapter_for_slug(harness.slug, home, *cfg, *run)
+                    else {
+                        continue;
+                    };
+                    if adapter.scrub_needs_live_harness() {
+                        let live = detected.get_or_insert_with(|| {
+                            registry::detected_harnesses(home, None)
+                                .iter()
+                                .map(|h| h.slug)
+                                .collect()
+                        });
+                        if !live.contains(&harness.slug) {
+                            continue;
+                        }
+                    }
+                    f(adapter.as_ref());
                 }
             }
-            out.push(adapter);
+            #[cfg(test)]
+            Some(Breadth::Explicit(adapters)) => {
+                for adapter in *adapters {
+                    f(adapter.as_ref());
+                }
+            }
         }
-        out
     }
 
-    /// Every topos-owned path outside a skill dir, across EXACTLY the harnesses an `uninstall --yes`
-    /// reaches — the active trigger's plus [`Self::others`]'s. This is what `uninstall`'s describe
-    /// and `list --footprint` disclose, so a preview can never name less than the apply touches.
-    /// Sorted and de-duplicated (two harnesses may share a config file).
-    pub(crate) fn footprint(&self) -> Vec<PathBuf> {
-        let mut out = self.active.footprint();
-        for adapter in self.others() {
-            out.extend(adapter.footprint());
-        }
+    /// Every artifact an `uninstall --yes` REACHES — the active trigger's plus every other
+    /// harness's. This is what `uninstall`'s describe discloses (and, filtered to its path rows,
+    /// what `list --footprint` prints), so a preview can never name less than the apply touches:
+    /// the two walk the same set. Sorted and de-duplicated (two harnesses may share a config file);
+    /// paths sort first among themselves, out-of-process rows last.
+    pub(crate) fn artifacts(&self) -> Vec<TriggerArtifact> {
+        let mut out = self.active.artifacts();
+        self.for_each_other(|adapter| out.extend(adapter.artifacts()));
         out.sort();
         out.dedup();
         out
     }
 
     /// Scrub every OTHER supported agent's trigger (the uninstall half; the active one is the verb's
-    /// own). Reports only the rows that had something to say — a clean `Inactive` no-op is noise on
-    /// an uninstall receipt.
+    /// own). Reports the rows that had something to say — a clean `Inactive` no-op on a filesystem
+    /// artifact is noise on an uninstall receipt. An OUT-OF-PROCESS scrub is never filtered: it
+    /// dialed the harness's own program, which is work that happened and carries no path to prove
+    /// it, and the preview named that artifact — so the receipt answers for it either way.
     pub(crate) fn scrub_others(&self) -> Vec<TriggerReport> {
-        self.others()
-            .into_iter()
-            .map(|a| a.remove())
-            .filter(|r| r.state != TriggerState::Inactive || r.touched_path.is_some())
-            .collect()
+        let mut out = Vec::new();
+        self.for_each_other(|adapter| {
+            let reaches_out_of_process = adapter
+                .artifacts()
+                .iter()
+                .any(TriggerArtifact::is_out_of_process);
+            let removed = adapter.remove();
+            if reaches_out_of_process
+                || removed.state != TriggerState::Inactive
+                || removed.touched_path.is_some()
+            {
+                out.push(removed);
+            }
+        });
+        out
     }
 }
 
@@ -161,7 +208,7 @@ impl TriggerAdapter for InertTrigger {
     fn present(&self) -> bool {
         false
     }
-    fn footprint(&self) -> Vec<PathBuf> {
+    fn artifacts(&self) -> Vec<TriggerArtifact> {
         Vec::new()
     }
 }
@@ -296,15 +343,105 @@ mod tests {
         }
     }
 
-    /// The ACTIVE harness's trigger, built the one way production builds it — through the registry
-    /// factory, under the injected home.
-    fn active_trigger<'a>(
+    /// A fake OpenClaw scheduler: `cron add` REMEMBERS the declaration key it was handed, `cron
+    /// list --json` answers with that one job, and `cron rm` forgets it. Enough for the adapter to
+    /// register a job and then VERIFY its removal — the only path on which an out-of-process scrub
+    /// reports a clean success, which is precisely the row a receipt must still carry.
+    #[derive(Debug, Default)]
+    struct FakeScheduler {
+        job: RefCell<Option<String>>,
+    }
+    impl CommandRunner for FakeScheduler {
+        fn run(&self, program: &str, args: &[&str]) -> std::io::Result<RunOutput> {
+            assert_eq!(
+                program, "openclaw",
+                "only OpenClaw's own CLI is ever dialed"
+            );
+            let ok = |stdout: String| {
+                Ok(RunOutput {
+                    success: true,
+                    stdout,
+                })
+            };
+            match args {
+                ["cron", "add", rest @ ..] => {
+                    let key = rest
+                        .windows(2)
+                        .find(|w| w[0] == "--declaration-key")
+                        .map(|w| w[1].to_owned())
+                        .expect("the registration carries its declaration key");
+                    *self.job.borrow_mut() = Some(key);
+                    ok("{\"created\":true}".to_owned())
+                }
+                ["cron", "list", "--json"] => {
+                    let jobs = match self.job.borrow().as_deref() {
+                        Some(key) => {
+                            format!("[{{\"id\":\"job-1\",\"declarationKey\":\"{key}\"}}]")
+                        }
+                        None => "[]".to_owned(),
+                    };
+                    ok(format!("{{\"jobs\":{jobs}}}"))
+                }
+                ["cron", "rm", _id] => {
+                    *self.job.borrow_mut() = None;
+                    ok(String::new())
+                }
+                _ => Err(std::io::Error::new(std::io::ErrorKind::NotFound, "absent")),
+            }
+        }
+    }
+
+    /// The ACTIVE harness's trigger over an EXPLICIT config root under the injected home. Built
+    /// this way and not through [`triggers::adapter_for_slug`] deliberately: that factory resolves
+    /// the root through the registry, which reads `$CLAUDE_CONFIG_DIR` — so on a developer machine
+    /// with the variable set, a rig writing through a real config store would arm (and then scrub)
+    /// the developer's OWN `settings.json`, whatever temp home it passed. Injecting the root leaves
+    /// the environment nothing to redirect.
+    fn claude_trigger<'a>(home: &Path, cfg: &'a dyn ConfigStore) -> Box<dyn TriggerAdapter + 'a> {
+        triggers::claude_code_at(home.join(".claude"), cfg)
+    }
+
+    /// The breadth set stated EXPLICITLY, spanning every machinery this port has: cursor + gemini
+    /// (a JSON config merge), cline (a dropped file), and openclaw (a job in its own scheduler — no
+    /// file anywhere). The three config-file harnesses root plainly under the passed home, so the
+    /// factory resolves them without reading the environment; openclaw takes its root directly.
+    fn other_triggers<'a>(
         home: &Path,
         cfg: &'a dyn ConfigStore,
         run: &'a dyn CommandRunner,
-    ) -> Box<dyn TriggerAdapter + 'a> {
-        triggers::adapter_for_slug("claude-code", home, cfg, run)
-            .expect("claude-code has a trigger")
+    ) -> Vec<Box<dyn TriggerAdapter + 'a>> {
+        let mut out: Vec<Box<dyn TriggerAdapter + 'a>> = ["cursor", "gemini-cli", "cline"]
+            .into_iter()
+            .map(|slug| {
+                triggers::adapter_for_slug(slug, home, cfg, run)
+                    .unwrap_or_else(|| panic!("{slug} has a trigger"))
+            })
+            .collect();
+        out.push(Box::new(topos_harness::OpenClaw::new(
+            home.join(".openclaw"),
+            cfg,
+            run,
+        )));
+        out
+    }
+
+    /// The artifact VOCABULARY, as this suite must cover it. The match is a compile-time fence: a
+    /// new [`TriggerArtifact`] variant stops building here until it is named — and the preview test
+    /// then requires the preview to carry it, so a new kind of artifact can never join an apply
+    /// while the disclosure stays silent about it.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum ArtifactClass {
+        Path,
+        OutOfProcess,
+    }
+    impl ArtifactClass {
+        const ALL: [Self; 2] = [Self::Path, Self::OutOfProcess];
+        fn of(artifact: &TriggerArtifact) -> Self {
+            match artifact {
+                TriggerArtifact::Path(_) => Self::Path,
+                TriggerArtifact::OutOfProcess { .. } => Self::OutOfProcess,
+            }
+        }
     }
 
     /// The sweep arms exactly the DETECTED trigger-supported agents, skips the active adapter's
@@ -360,7 +497,7 @@ mod tests {
             std::fs::create_dir_all(home.0.join(d)).unwrap();
         }
         let cfg = MemConfig::default();
-        let active = active_trigger(&home.0, &cfg, &NoBinary);
+        let active = claude_trigger(&home.0, &cfg);
 
         let out = probe_detected(&home.0, None, active.as_ref(), &cfg, &NoBinary);
         let by = |slug: &str| out.iter().find(|r| r.agent == slug);
@@ -405,7 +542,7 @@ mod tests {
         let cfg = MemConfig::default();
         // Arm cursor first, then scrub everything: only cursor's removal touched a file.
         let _ = arm_detected(&home.0, None, "claude-code", &cfg, &NoBinary);
-        let active = active_trigger(&home.0, &cfg, &NoBinary);
+        let active = claude_trigger(&home.0, &cfg);
         let out =
             Triggers::machine(active.as_ref(), home.0.clone(), &cfg, &NoBinary).scrub_others();
         assert!(
@@ -425,39 +562,46 @@ mod tests {
         );
     }
 
-    /// The disclosure contract: what `uninstall`'s describe and `list --footprint` print covers every
-    /// path the apply would touch. The preview walks the ACTIVE trigger plus exactly the set
-    /// `scrub_others` walks, so a machine armed across several harnesses can never be told about one
-    /// of them and have three more scrubbed.
+    /// The disclosure contract: the preview names EVERY artifact the apply reaches — every class of
+    /// artifact included. The preview walks the ACTIVE trigger plus exactly the set `scrub_others`
+    /// walks, so a machine armed across several harnesses can never be told about one of them and
+    /// have four more scrubbed — and a trigger with no file to name (OpenClaw's scheduler job) can
+    /// never be scrubbed unannounced, which is exactly what a path-only preview did.
     #[test]
-    fn the_preview_footprint_covers_every_path_the_scrub_touches() {
+    fn the_preview_names_every_artifact_class_the_scrub_reaches() {
         let home = TempHome::new();
-        // Three trigger-capable harnesses beside the active one, spanning both shared bases: cursor
-        // + gemini (a JSON config merge) and cline (a dropped file).
-        for d in [".claude", ".cursor", ".gemini", ".cline"] {
+        for d in [".claude", ".cursor", ".gemini", ".cline", ".openclaw"] {
             std::fs::create_dir_all(home.0.join(d)).unwrap();
         }
         // A REAL config store under the temp home: the file-drop family's scrub is an unlink, so an
         // in-memory store would report the removal without ever having a file to remove.
         let cfg = crate::fs_seam::RealFs;
-        let active = active_trigger(&home.0, &cfg, &NoBinary);
-        let ports = Triggers::machine(active.as_ref(), home.0.clone(), &cfg, &NoBinary);
+        let cli = FakeScheduler::default();
+        let active = claude_trigger(&home.0, &cfg);
+        let others = other_triggers(&home.0, &cfg, &cli);
+        let ports = Triggers::machine_of(active.as_ref(), &others);
+        let scheduler_job = TriggerArtifact::OutOfProcess {
+            harness: registry::known_harness("openclaw")
+                .expect("openclaw is a registry row")
+                .display_name,
+        };
 
-        // A clean machine owns nothing anywhere.
-        assert!(
-            ports.footprint().is_empty(),
-            "nothing armed → nothing owned"
+        // A clean machine owns no FILE anywhere — and still names the scheduler job, because a
+        // preview promises what the apply will attempt and never probes a harness to find out.
+        assert_eq!(
+            ports.artifacts(),
+            vec![scheduler_job.clone()],
+            "nothing armed → nothing owned on disk, the out-of-process attempt still disclosed"
         );
 
         // Arm the whole machine, exactly as a login/add receipt does.
         active.install();
-        arm_detected(&home.0, None, "claude-code", &cfg, &NoBinary);
+        for other in &others {
+            other.install();
+        }
 
-        // The preview, taken BEFORE the apply — the bytes the user reads. Every armed harness is in
-        // it, the active one included; before the split only the active harness's row appeared.
-        // (A developer machine with a harness env override may add rows on top — the registry's own
-        // test discipline — so the fixtures are asserted by name, never by an exact list.)
-        let preview = ports.footprint();
+        // The preview, taken BEFORE the apply — the bytes the user reads.
+        let preview = ports.artifacts();
         for expected in [
             home.0.join(".claude").join("settings.json"),
             home.0.join(".cursor").join("hooks.json"),
@@ -465,9 +609,27 @@ mod tests {
             home.0.join(".cline").join("hooks").join("TaskStart.sh"),
         ] {
             assert!(
-                preview.contains(&expected),
+                preview.contains(&TriggerArtifact::Path(expected.clone())),
                 "the preview must disclose {expected:?}: {preview:?}"
             );
+        }
+        assert!(
+            preview.contains(&scheduler_job),
+            "the preview must disclose the scheduler job: {preview:?}"
+        );
+        // EVERY class of artifact the vocabulary has is in the preview. The path-only version of
+        // this assertion is what let an out-of-process trigger be scrubbed unannounced.
+        for class in ArtifactClass::ALL {
+            assert!(
+                preview.iter().any(|a| ArtifactClass::of(a) == class),
+                "no {class:?} artifact in the preview — an apply reaches one: {preview:?}"
+            );
+        }
+        // Every path named is under the temp home: this rig arms nothing on the real machine.
+        for artifact in &preview {
+            if let Some(path) = artifact.path() {
+                assert!(path.starts_with(&home.0), "{path:?} escaped the temp home");
+            }
         }
 
         // The apply: the verb's own scrub of the active harness, then the breadth sweep.
@@ -475,11 +637,11 @@ mod tests {
         if let Some(p) = active.remove().touched_path {
             touched.push(PathBuf::from(p));
         }
+        let scrubbed = ports.scrub_others();
         touched.extend(
-            ports
-                .scrub_others()
-                .into_iter()
-                .filter_map(|r| r.touched_path)
+            scrubbed
+                .iter()
+                .filter_map(|r| r.touched_path.clone())
                 .map(PathBuf::from),
         );
         assert!(
@@ -488,10 +650,22 @@ mod tests {
         );
         for path in &touched {
             assert!(
-                preview.contains(path),
+                preview.contains(&TriggerArtifact::Path(path.clone())),
                 "the apply touched {path:?}, which the preview never disclosed"
             );
         }
+        // The out-of-process scrub HAPPENED — the scheduler answered that the job is gone — and it
+        // has no path to show for it. It rides the receipt all the same: the preview named that
+        // artifact, so the receipt is where the promise is answered.
+        let openclaw = scrubbed
+            .iter()
+            .find(|r| r.agent == "openclaw")
+            .expect("a removed scheduler job is work that happened — it belongs on the receipt");
+        assert_eq!(openclaw.state, TriggerState::Inactive);
+        assert!(
+            openclaw.touched_path.is_none(),
+            "a scheduler job is no file — the row carries no path"
+        );
     }
 
     /// With no `$HOME` there is no detection and therefore no breadth: the active trigger is the
@@ -504,10 +678,10 @@ mod tests {
         // Arm cursor so a breadth-aware sweep would have something to find.
         arm_detected(&home.0, None, "claude-code", &cfg, &NoBinary);
 
-        let active = active_trigger(&home.0, &cfg, &NoBinary);
+        let active = claude_trigger(&home.0, &cfg);
         active.install();
         let ports = Triggers::active_only(active.as_ref());
-        assert_eq!(ports.footprint(), active.footprint());
+        assert_eq!(ports.artifacts(), active.artifacts());
         assert!(ports.scrub_others().is_empty());
     }
 }

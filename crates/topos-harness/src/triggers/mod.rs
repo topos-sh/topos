@@ -147,8 +147,62 @@ fn opens_a_command(prefix: &str) -> bool {
     head.is_empty() || head.ends_with([';', '&', '|', '(', '{'])
 }
 
+/// ONE artifact an auto-update trigger's scrub reaches — the unit a preview names, so a disclosure
+/// can never promise less than the apply touches.
+///
+/// A preview discloses INTENT, not presence: a path row is only ever emitted for an artifact an
+/// adapter can confirm is ours right now, while an out-of-process row is emitted UNCONDITIONALLY
+/// (proving a scheduler registration means running the harness, which a preview must not do) and
+/// says so in its own wording.
+///
+/// The ordering is the disclosure's: paths first (sorted among themselves, exactly as the path-only
+/// footprint sorted), then the out-of-process rows.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub enum TriggerArtifact {
+    /// A topos-owned file outside any skill dir — the config the trigger lives in, or the file it
+    /// dropped. Confirmed ours at the moment it is listed.
+    Path(PathBuf),
+    /// A registration inside the harness's OWN program (a scheduler job): no filesystem artifact
+    /// exists to name, so the row names the harness whose program holds it. `harness` is the
+    /// harness's DISPLAY name — it is rendered to a person.
+    OutOfProcess { harness: &'static str },
+}
+
+impl TriggerArtifact {
+    /// The path this artifact IS, or `None` for one that lives outside the filesystem — the filter
+    /// a path-typed surface (`list --footprint`) applies.
+    #[must_use]
+    pub fn path(&self) -> Option<&Path> {
+        match self {
+            Self::Path(p) => Some(p),
+            Self::OutOfProcess { .. } => None,
+        }
+    }
+
+    /// Whether this artifact lives in the harness's own program rather than the filesystem.
+    #[must_use]
+    pub fn is_out_of_process(&self) -> bool {
+        matches!(self, Self::OutOfProcess { .. })
+    }
+}
+
+impl std::fmt::Display for TriggerArtifact {
+    /// The ONE rendering both disclosure surfaces print: a path verbatim, an out-of-process
+    /// registration as the sentence that names the harness, admits the artifact is unprobed, and
+    /// says where the removal actually happens.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Path(p) => write!(f, "{}", p.to_string_lossy()),
+            Self::OutOfProcess { harness } => write!(
+                f,
+                "the {harness} scheduled update job, if armed (removed through {harness}'s scheduler)"
+            ),
+        }
+    }
+}
+
 /// The auto-update-trigger port for ONE registry-slug harness: idempotent (un)install of the one
-/// sweep trigger, a provable-presence health probe, and the topos-owned paths it discloses. Every
+/// sweep trigger, a provable-presence health probe, and the artifacts it discloses. Every
 /// harness with a trigger is reachable through this port — the config-merge and file-drop families
 /// here, and the two harnesses whose trigger lives in their own program — so a caller arming a
 /// machine never needs to know which machinery serves which harness. Where a bundle's BYTES land is
@@ -165,12 +219,14 @@ pub trait TriggerAdapter {
     /// Provable presence of OUR trigger artifact right now (the health probe). Anything
     /// unprovable answers `false` — presence is never claimed on faith.
     fn present(&self) -> bool;
-    /// Topos-owned paths **outside** any skill dir, for `--footprint` disclosure — never a skill
-    /// file, and never a path `uninstall` DELETES (a shared config the trigger lives in is scrubbed
-    /// surgically by [`Self::remove`], the file itself kept). A path is disclosed only where it can
-    /// be confirmed ours right now; a trigger that lives outside the filesystem entirely (a
-    /// scheduler registration) has no path to disclose and says so with an empty list.
-    fn footprint(&self) -> Vec<PathBuf>;
+    /// Every artifact a scrub of this trigger REACHES — what a preview names. A filesystem
+    /// artifact is disclosed as a [`TriggerArtifact::Path`] only where it can be confirmed ours
+    /// right now (never a skill file, and never a path `uninstall` DELETES: a shared config the
+    /// trigger lives in is scrubbed surgically by [`Self::remove`], the file itself kept); a
+    /// trigger living in the harness's OWN program has no path at all and names itself as a
+    /// [`TriggerArtifact::OutOfProcess`] row instead — unprobed, because a preview discloses
+    /// INTENT, not presence.
+    fn artifacts(&self) -> Vec<TriggerArtifact>;
     /// Why [`Self::present`] cannot be answered without running the harness, when it cannot — the
     /// reason a read-only status reports "unknown" instead of probing. `None` (the default) means the
     /// probe is an honest offline read: a trigger that lives in the filesystem is provable there.
@@ -208,11 +264,10 @@ pub fn adapter_for_slug<'a>(
         "amp" => Box::new(amp::adapter(home, cfg)),
         // The reference harness is an ordinary instance of the shared JSON-hooks base — its own
         // adapter runs this very spec, so arming it here and arming it there are one code path.
-        "claude-code" => Box::new(cc_hooks::JsonHooks::new(
-            &crate::claude_code::SPEC,
+        "claude-code" => claude_code_at(
             crate::registry::config_root(crate::registry::Root::ClaudeHome, home),
             cfg,
-        )),
+        ),
         "cline" => Box::new(cline::adapter(home, cfg)),
         "codex" => Box::new(codex::adapter(home, cfg)),
         "cursor" => Box::new(cursor::adapter(home, cfg)),
@@ -232,6 +287,23 @@ pub fn adapter_for_slug<'a>(
         )),
         _ => return None,
     })
+}
+
+/// The Claude Code trigger over an EXPLICIT config root — the injection-explicit constructor for a
+/// caller that already knows the root, and the ONE way a suite builds this harness's trigger.
+///
+/// [`adapter_for_slug`] resolves the root through the registry, which honors `$CLAUDE_CONFIG_DIR`:
+/// a test that took its trigger from there would write the DEVELOPER's `settings.json` whenever the
+/// variable happens to be set, whatever temp home it passed. This takes the root instead, so no
+/// ambient environment can reach it. It is the same spec and the same machinery
+/// [`adapter_for_slug`] builds — one code path, one config shape.
+#[must_use]
+pub fn claude_code_at(root: PathBuf, cfg: &dyn ConfigStore) -> Box<dyn TriggerAdapter + '_> {
+    Box::new(cc_hooks::JsonHooks::new(
+        &crate::claude_code::SPEC,
+        root,
+        cfg,
+    ))
 }
 
 #[cfg(test)]
@@ -378,6 +450,31 @@ mod tests {
             assert!(a.offline_probe_refusal().is_none(), "{slug}");
             assert!(!a.scrub_needs_live_harness(), "{slug}");
         }
+    }
+
+    /// The disclosure's WORDS, pinned. A path prints as itself; a trigger with no path names the
+    /// harness, admits it was not probed ("if armed" — proving it would mean running the harness),
+    /// and says where the removal actually happens, so a person reading a preview is never
+    /// surprised by what an apply reaches.
+    #[test]
+    fn an_artifact_renders_as_a_path_or_as_the_job_it_names() {
+        assert_eq!(
+            TriggerArtifact::Path(PathBuf::from("/home/me/.claude/settings.json")).to_string(),
+            "/home/me/.claude/settings.json"
+        );
+        assert_eq!(
+            TriggerArtifact::OutOfProcess {
+                harness: "OpenClaw"
+            }
+            .to_string(),
+            "the OpenClaw scheduled update job, if armed (removed through OpenClaw's scheduler)"
+        );
+        // The path row is the filter a path-typed surface applies; the other one has none to give.
+        assert_eq!(
+            TriggerArtifact::Path(PathBuf::from("/h/x")).path(),
+            Some(Path::new("/h/x"))
+        );
+        assert_eq!(TriggerArtifact::OutOfProcess { harness: "X" }.path(), None);
     }
 
     #[test]

@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use topos_core::digest::{self, FileMode, ManifestEntry};
-use topos_harness::triggers::TriggerAdapter;
+use topos_harness::triggers::{TriggerAdapter, TriggerArtifact};
 use topos_harness::{DiscoveredPlacement, HarnessAdapter, PlacementTarget};
 use topos_types::{CurrencyKind, HarnessId, TriggerReport, TriggerState};
 
@@ -84,12 +84,12 @@ impl TriggerAdapter for StubClaude {
         stub_report()
     }
 
-    fn footprint(&self) -> Vec<PathBuf> {
+    fn artifacts(&self) -> Vec<TriggerArtifact> {
         Vec::new()
     }
 
     fn present(&self) -> bool {
-        !self.footprint().is_empty()
+        !self.artifacts().is_empty()
     }
 }
 fn stub_report() -> TriggerReport {

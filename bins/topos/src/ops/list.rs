@@ -160,14 +160,16 @@ pub(crate) fn list_with(
 
     if req.footprint {
         // The `~/.topos/` walk PLUS every harness artifact topos holds a managed trigger in
-        // (disclosed, never deleted) — every topos-owned path outside skill dirs, across every
-        // harness an `uninstall --yes` reaches, not just the active one.
+        // (disclosed, never deleted) — every topos-owned PATH outside skill dirs, across every
+        // harness an `uninstall --yes` reaches, not just the active one. A trigger living in a
+        // harness's own program owns no path and has none to list here; the `uninstall` describe is
+        // where the whole scrub set — paths and out-of-process registrations alike — is named.
         let mut paths = sidecar::footprint(ctx.fs, &ctx.layout)?;
         paths.extend(
             ctx.triggers
-                .footprint()
+                .artifacts()
                 .iter()
-                .map(|p| p.to_string_lossy().into_owned()),
+                .filter_map(|a| Some(a.path()?.to_string_lossy().into_owned())),
         );
         paths.sort();
         data.footprint = Some(paths);

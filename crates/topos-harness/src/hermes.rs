@@ -56,7 +56,7 @@ use std::path::PathBuf;
 use topos_types::{CurrencyKind, HarnessId, TriggerReport, TriggerState};
 
 use crate::registry;
-use crate::triggers::TriggerAdapter;
+use crate::triggers::{TriggerAdapter, TriggerArtifact};
 use crate::{ConfigStore, DiscoveredPlacement, HarnessAdapter, PlacementNaming, PlacementTarget};
 
 /// Hermes's user config file, under the resolved home. (Probed: `~/.hermes/config.yaml`; its
@@ -359,12 +359,12 @@ impl TriggerAdapter for Hermes<'_> {
         self.has_managed_entry()
     }
 
-    fn footprint(&self) -> Vec<PathBuf> {
+    fn artifacts(&self) -> Vec<TriggerArtifact> {
         // Disclose the config file ONLY when it actually holds our managed entry — and never as a
         // path `uninstall` will delete (it is scrubbed via `remove`, the file kept). The allowlist
         // is Hermes's own consent record, never disclosed as topos-owned.
         if self.has_managed_entry() {
-            vec![self.config_path()]
+            vec![TriggerArtifact::Path(self.config_path())]
         } else {
             Vec::new()
         }
@@ -1569,29 +1569,27 @@ personalities: {}
     }
 
     #[test]
-    fn footprint_is_disclosed_only_when_our_entry_is_present() {
+    fn the_artifact_is_disclosed_only_when_our_entry_is_present() {
+        let config = vec![TriggerArtifact::Path(PathBuf::from("/h/config.yaml"))];
         let cfg = MemConfig::default();
         assert!(
-            adapter(&cfg).footprint().is_empty(),
+            adapter(&cfg).artifacts().is_empty(),
             "no entry → nothing disclosed"
         );
         adapter(&cfg).install();
         assert_eq!(
-            adapter(&cfg).footprint(),
-            vec![PathBuf::from("/h/config.yaml")],
+            adapter(&cfg).artifacts(),
+            config,
             "our entry present → config.yaml disclosed (never deleted)"
         );
         adapter(&cfg).remove();
         assert!(
-            adapter(&cfg).footprint().is_empty(),
+            adapter(&cfg).artifacts().is_empty(),
             "after the scrub → nothing disclosed again"
         );
         // A LEGACY install's entry is still disclosed (the sentinel claims it, any event).
         let cfg = MemConfig::with_config(LEGACY_INSTALL);
-        assert_eq!(
-            adapter(&cfg).footprint(),
-            vec![PathBuf::from("/h/config.yaml")]
-        );
+        assert_eq!(adapter(&cfg).artifacts(), config);
     }
 
     #[test]

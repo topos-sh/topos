@@ -853,17 +853,18 @@ mod tests {
     }
 
     #[test]
-    fn footprint_is_disclosed_only_when_our_entry_is_present() {
+    fn the_artifact_is_disclosed_only_when_our_entry_is_present() {
+        use crate::triggers::TriggerArtifact;
         let cfg = MemConfig::default();
         let home = PathBuf::from("/h");
         assert!(
-            trigger(&home, &cfg).footprint().is_empty(),
+            trigger(&home, &cfg).artifacts().is_empty(),
             "no entry → nothing disclosed"
         );
         trigger(&home, &cfg).install();
         assert_eq!(
-            trigger(&home, &cfg).footprint(),
-            vec![PathBuf::from("/h/settings.json")],
+            trigger(&home, &cfg).artifacts(),
+            vec![TriggerArtifact::Path(PathBuf::from("/h/settings.json"))],
             "our entry present → settings.json disclosed (never deleted)"
         );
     }

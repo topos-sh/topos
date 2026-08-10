@@ -45,7 +45,7 @@ use std::path::PathBuf;
 use serde_json::Value;
 use topos_types::{CurrencyKind, HarnessId, TriggerReport, TriggerState};
 
-use crate::triggers::TriggerAdapter;
+use crate::triggers::{TriggerAdapter, TriggerArtifact};
 use crate::{
     CommandRunner, ConfigStore, DiscoveredPlacement, HarnessAdapter, PlacementNaming,
     PlacementTarget,
@@ -65,6 +65,11 @@ const MARKER_ID: &str = "topos:openclaw:currency:2";
 
 /// The OpenClaw management CLI, resolved from `PATH` by the injected runner.
 const OPENCLAW_BIN: &str = "openclaw";
+
+/// How this harness is NAMED to a person — the disclosure row for the scheduler registration is
+/// the only artifact with no path to print, so it prints this instead. It is the registry row's
+/// own display name (a test below holds the two in agreement), never a second spelling.
+const DISPLAY_NAME: &str = "OpenClaw";
 
 /// The cron job's human-facing name (shows in `openclaw cron list`; identity rides the
 /// declaration key, never this label).
@@ -428,18 +433,25 @@ impl TriggerAdapter for OpenClaw<'_> {
         }
     }
 
-    fn footprint(&self) -> Vec<PathBuf> {
-        // Disclosure-only, and LEGACY-only: the cron job is OpenClaw-owned scheduler state
-        // (removed via `remove`, not a filesystem path); what topos may still own on disk are the
-        // retired inject artifacts — the config registration (never a delete target; scrubbed
-        // surgically) and the marker-confirmed plugin file.
+    fn artifacts(&self) -> Vec<TriggerArtifact> {
+        // The FILESYSTEM rows are LEGACY-only: what topos may still own on disk are the retired
+        // inject artifacts — the config registration (never a delete target; scrubbed surgically)
+        // and the marker-confirmed plugin file.
         let mut out = Vec::new();
         if self.has_legacy_entry() {
-            out.push(self.config_path());
+            out.push(TriggerArtifact::Path(self.config_path()));
         }
         if matches!(self.plugin_file(), Ok(PluginFile::Ours)) {
-            out.push(self.legacy_plugin_path());
+            out.push(TriggerArtifact::Path(self.legacy_plugin_path()));
         }
+        // The trigger itself is OpenClaw-owned SCHEDULER state, so it has no path to disclose —
+        // and it is named UNCONDITIONALLY, because a scrub of this adapter always dials the
+        // scheduler. Probing it here would mean running the harness; the row's own wording carries
+        // that ("if armed"), so the preview promises the attempt and never a presence it did not
+        // check.
+        out.push(TriggerArtifact::OutOfProcess {
+            harness: DISPLAY_NAME,
+        });
         out
     }
 
@@ -973,19 +985,29 @@ mod tests {
         assert!(CRON_COMMAND.ends_with("|| true"));
     }
 
+    /// The scheduler job has NO path, so it is disclosed as the out-of-process row — always, and
+    /// unprobed (a preview that ran `cron list` would be running the harness). The filesystem rows
+    /// beside it are the retired inject artifacts, and those ARE presence-gated.
     #[test]
-    fn footprint_discloses_only_legacy_artifacts() {
+    fn the_scheduler_job_is_always_disclosed_and_the_paths_only_when_ours() {
         let home = TempHome::new();
         let cfg = DiskConfig;
         let cli = FakeCli::new(CliMode::Healthy);
         let a = OpenClaw::new(home.0.clone(), &cfg, &cli);
-        assert!(a.footprint().is_empty(), "clean home → nothing");
+        let job = TriggerArtifact::OutOfProcess {
+            harness: DISPLAY_NAME,
+        };
+        assert_eq!(
+            a.artifacts(),
+            vec![job.clone()],
+            "clean home → the scheduler job alone, named before it is armed"
+        );
 
-        // A live cron registration is OpenClaw-owned state, never a footprint path.
+        // Registering the cron changes nothing here: it was already named, and it is still no path.
         a.install();
-        assert!(a.footprint().is_empty());
+        assert_eq!(a.artifacts(), vec![job.clone()]);
 
-        // Legacy artifacts ARE disclosed (marker-confirmed only).
+        // Legacy artifacts ARE disclosed (marker-confirmed only), ahead of the job row.
         std::fs::write(
             home.0.join("openclaw.json"),
             format!(
@@ -996,15 +1018,31 @@ mod tests {
         .unwrap();
         std::fs::write(home.0.join(LEGACY_PLUGIN_FILE_NAME), legacy_plugin_bytes()).unwrap();
         assert_eq!(
-            a.footprint(),
+            a.artifacts(),
             vec![
-                home.0.join("openclaw.json"),
-                home.0.join(LEGACY_PLUGIN_FILE_NAME)
+                TriggerArtifact::Path(home.0.join("openclaw.json")),
+                TriggerArtifact::Path(home.0.join(LEGACY_PLUGIN_FILE_NAME)),
+                job.clone(),
             ]
         );
         // A foreign file on the legacy path is never claimed.
         std::fs::write(home.0.join(LEGACY_PLUGIN_FILE_NAME), "export default {};\n").unwrap();
-        assert_eq!(a.footprint(), vec![home.0.join("openclaw.json")]);
+        assert_eq!(
+            a.artifacts(),
+            vec![TriggerArtifact::Path(home.0.join("openclaw.json")), job]
+        );
+    }
+
+    /// The row a person reads names the harness the way the registry names it — one spelling, not
+    /// two.
+    #[test]
+    fn the_disclosed_display_name_is_the_registry_rows() {
+        assert_eq!(
+            crate::registry::known_harness(HarnessId::OpenClaw.slug())
+                .expect("openclaw is a registry row")
+                .display_name,
+            DISPLAY_NAME
+        );
     }
 
     #[test]

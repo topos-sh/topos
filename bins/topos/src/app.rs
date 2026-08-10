@@ -185,8 +185,8 @@ fn run_command(
             progress: crate::progress::silent(),
         };
         let binary = std::env::current_exe().ok();
-        // The breadth scrub rides the applied receipt, from inside the verb: after the active
-        // harness's trigger scrub, every OTHER agent's trigger artifact is removed too (or its
+        // The breadth scrub rides the applied receipt, from inside the verb: once the teardown's
+        // own deletions have succeeded, every OTHER agent's trigger artifact is removed too (or its
         // survival disclosed — OpenClaw's gateway may be down). Swept over the SUPPORTED set, not
         // detection: an artifact must be scrubbed even when its harness's detect dir has since
         // vanished — and the bare describe disclosed exactly that set.

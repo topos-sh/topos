@@ -189,7 +189,8 @@ A harness is *which directories to read and write* plus *when a update check fir
 translation in the OSS core (bytes sync exactly within a harness family). `topos-harness` holds those
 as two client-side ports, one responsibility each: `HarnessAdapter` (discovery + placement targeting)
 and `triggers::TriggerAdapter` (the idempotent (un)install of one harness's auto-update trigger, its
-presence probe, and the topos-owned paths it discloses). **Claude Code** is the reference on both
+presence probe, and the artifacts it discloses — the files it owns, plus the registration it keeps in
+a harness's own program where there is no file). **Claude Code** is the reference on both
 sides (discovery, adopt-in-place, an idempotent session-start auto-update hook, clean uninstall).
 Adding a harness is a directory map plus a auto-update trigger, not a refactor.
 

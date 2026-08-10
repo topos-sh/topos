@@ -5,7 +5,7 @@
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;
-use topos_harness::triggers::TriggerAdapter;
+use topos_harness::triggers::{TriggerAdapter, TriggerArtifact};
 use topos_harness::{ClaudeCode, DiscoveredPlacement, HarnessAdapter, PlacementTarget};
 use topos_types::persisted::Lock;
 use topos_types::{CurrencyKind, HarnessId, TriggerReport, TriggerState};
@@ -71,12 +71,12 @@ impl TriggerAdapter for NoHarness {
         no_harness_report()
     }
 
-    fn footprint(&self) -> Vec<PathBuf> {
+    fn artifacts(&self) -> Vec<TriggerArtifact> {
         Vec::new()
     }
 
     fn present(&self) -> bool {
-        !self.footprint().is_empty()
+        !self.artifacts().is_empty()
     }
 }
 
@@ -1668,41 +1668,22 @@ fn add_under_fault_preserves_draft_and_is_all_or_nothing() {
     }
 }
 
-/// A `CommandRunner` whose binary is absent — no suite ever spawns a real harness CLI.
-struct NoCli;
-impl topos_harness::CommandRunner for NoCli {
-    fn run(&self, _p: &str, _a: &[&str]) -> std::io::Result<topos_harness::RunOutput> {
-        Err(std::io::Error::new(std::io::ErrorKind::NotFound, "absent"))
-    }
-}
-
-/// Claude Code's config home under a scratch USER home — the path the registry's ONE resolver names
-/// for that user home, which is what [`claude_trigger`] arms.
+/// Claude Code's config home under a scratch USER home — the root [`claude_trigger`] arms, stated
+/// here rather than resolved: the registry's resolver reads `$CLAUDE_CONFIG_DIR`, so a rig that
+/// asked it would arm the DEVELOPER's own settings whenever that variable happens to be set,
+/// whatever scratch home it passed. Naming the root leaves the environment nothing to redirect.
 fn claude_home(user_home: &Path) -> PathBuf {
-    refuse_under_a_redirected_claude_config();
     user_home.join(".claude")
 }
 
-/// Claude Code's TRIGGER port over a scratch USER home, built through the ONE registry factory — so
-/// a rig arms exactly what production arms, rather than a second construction of the same machinery.
+/// Claude Code's TRIGGER port over that root, through the crate's injection-explicit constructor —
+/// the same spec and machinery production arms, with the ONE env-sensitive step (resolving the
+/// root) supplied by the caller instead.
 fn claude_trigger<'a>(
     user_home: &Path,
     cfg: &'a dyn topos_harness::ConfigStore,
 ) -> Box<dyn TriggerAdapter + 'a> {
-    refuse_under_a_redirected_claude_config();
-    topos_harness::triggers::adapter_for_slug("claude-code", user_home, cfg, &NoCli)
-        .expect("claude-code is a trigger-capable registry row")
-}
-
-/// `$CLAUDE_CONFIG_DIR` redirects Claude Code's config root — and with it the rigs above, onto the
-/// REAL machine. Refuse before anything is constructed, so an inherited variable fails the run
-/// instead of writing to the developer's own settings (run the suite with `env -u`).
-fn refuse_under_a_redirected_claude_config() {
-    assert!(
-        std::env::var_os("CLAUDE_CONFIG_DIR").is_none(),
-        "run this suite with `env -u CLAUDE_CONFIG_DIR`: the variable redirects the harness config \
-         root onto the real machine"
-    );
+    topos_harness::triggers::claude_code_at(claude_home(user_home), cfg)
 }
 
 /// Lay down a real Claude Code skill (`<claude_home>/skills/<name>/SKILL.md`) and return its dir.

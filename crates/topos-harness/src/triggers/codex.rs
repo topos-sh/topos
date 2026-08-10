@@ -40,7 +40,7 @@ use crate::{ConfigStore, trigger_report};
 
 use crate::registry::{self, Root};
 
-use super::{GUARDED_SWEEP, SENTINEL, TriggerAdapter, TriggerReport};
+use super::{GUARDED_SWEEP, SENTINEL, TriggerAdapter, TriggerArtifact, TriggerReport};
 
 /// Codex's user config file, under the resolved root.
 const CONFIG_FILENAME: &str = "config.toml";
@@ -146,9 +146,9 @@ impl TriggerAdapter for Codex<'_> {
 
     /// The TOML config, disclosed ONLY while it actually holds our verified block — and never as a
     /// path `uninstall` deletes (the block is scrubbed line-surgically, the file kept).
-    fn footprint(&self) -> Vec<PathBuf> {
+    fn artifacts(&self) -> Vec<TriggerArtifact> {
         if self.present() {
-            vec![self.config_path()]
+            vec![TriggerArtifact::Path(self.config_path())]
         } else {
             Vec::new()
         }

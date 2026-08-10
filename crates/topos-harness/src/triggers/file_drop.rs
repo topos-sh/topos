@@ -23,7 +23,7 @@ use topos_types::{CurrencyKind, TriggerState};
 
 use crate::{ConfigStore, trigger_report};
 
-use super::{TriggerAdapter, TriggerReport};
+use super::{TriggerAdapter, TriggerArtifact, TriggerReport};
 
 /// One instance's parameterization of the shared file-drop machinery.
 pub(crate) struct FileDropSpec {
@@ -144,9 +144,9 @@ impl TriggerAdapter for FileDrop<'_> {
 
     /// The dropped file, disclosed ONLY while it is marker-confirmed ours — a foreign file on our
     /// path is never claimed (and never unlinked).
-    fn footprint(&self) -> Vec<PathBuf> {
+    fn artifacts(&self) -> Vec<TriggerArtifact> {
         if self.present() {
-            vec![self.path.clone()]
+            vec![TriggerArtifact::Path(self.path.clone())]
         } else {
             Vec::new()
         }

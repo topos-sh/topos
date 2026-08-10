@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 use topos_core::digest::{self, FileMode, ManifestEntry, to_hex};
 use topos_core::identity::{self, Commit};
-use topos_harness::triggers::TriggerAdapter;
+use topos_harness::triggers::{TriggerAdapter, TriggerArtifact};
 use topos_harness::{DiscoveredPlacement, HarnessAdapter, PlacementTarget};
 use topos_types::persisted::SyncState;
 use topos_types::results::{PullAction, PullData};
@@ -89,12 +89,12 @@ impl TriggerAdapter for NoHarness {
         report()
     }
 
-    fn footprint(&self) -> Vec<PathBuf> {
+    fn artifacts(&self) -> Vec<TriggerArtifact> {
         Vec::new()
     }
 
     fn present(&self) -> bool {
-        !self.footprint().is_empty()
+        !self.artifacts().is_empty()
     }
 }
 fn report() -> TriggerReport {

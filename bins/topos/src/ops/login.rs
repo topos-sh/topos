@@ -1006,6 +1006,39 @@ mod tests {
         f(&ctx)
     }
 
+    /// The same rig carrying the REAL Claude Code trigger over a temp harness root, handed to the
+    /// closure so the completed-login test can read the config login actually edited. Login is the
+    /// arming moment for a receiving install, and an inert stand-in can only ever prove that some
+    /// report came back — not that a managed entry landed anywhere.
+    ///
+    /// The root is INJECTED rather than resolved: the registry's resolver reads
+    /// `$CLAUDE_CONFIG_DIR`, and a rig writing through a real config store would then arm the
+    /// developer's own `settings.json`.
+    fn with_arming_ctx<R>(home: &Path, f: impl FnOnce(&Ctx<'_>, &Path) -> R) -> R {
+        let fs = RealFs;
+        let ids = RealIds;
+        let clock = RealClock;
+        let plane = crate::plane::InertPlane;
+        let follow = crate::plane::InertFollow;
+        let claude_root = scratch("claude");
+        let harness = ClaudeCode::new(claude_root.clone());
+        let trigger = topos_harness::triggers::claude_code_at(claude_root.clone(), &fs);
+        let ctx = Ctx {
+            progress: crate::progress::silent(),
+            fs: &fs,
+            ids: &ids,
+            clock: &clock,
+            device_id: String::new(),
+            layout: Layout::new(&home.join(".topos")),
+            harness: &harness,
+            triggers: crate::ops::Triggers::active_only(trigger.as_ref()),
+            plane: &plane,
+            follow: &follow,
+            roots: None,
+        };
+        f(&ctx, &claude_root)
+    }
+
     /// What one `device_auth_start` declared: the preselection the browser chooser receives (or
     /// none), and the write-once loopback binding.
     type StartRecord = (Option<String>, bool);
@@ -1320,7 +1353,7 @@ mod tests {
     #[test]
     fn login_starts_pends_resumes_and_persists_the_session() {
         let home = scratch("flow");
-        with_ctx(&home, |ctx| {
+        with_arming_ctx(&home, |ctx, claude_root| {
             let rig = Rig::new(vec![DeviceAuthPoll::Pending, granted(LinkStatus::Active)]);
             rig.with(|connectors| {
                 // START: writes the WAL, answers the pending disclosure — and the named workspace
@@ -1350,7 +1383,19 @@ mod tests {
                     ("topos.example.com", "eng")
                 );
                 assert_eq!(done.delivered, Some(0));
-                assert!(done.currency.is_some(), "login arms the trigger");
+                // Login ARMS: the report says the trigger is live, and the harness's own config
+                // carries the managed entry that makes it so — the file, not just the receipt.
+                let armed = done.currency.expect("login arms the trigger");
+                assert_eq!(armed.state, topos_types::TriggerState::Active);
+                let settings = std::fs::read_to_string(claude_root.join("settings.json")).unwrap();
+                assert!(
+                    settings.contains("topos update --quiet --hook claude-code"),
+                    "the managed sweep landed in the harness config: {settings}"
+                );
+                assert!(
+                    settings.contains("# topos:currency"),
+                    "the entry carries the ownership sentinel: {settings}"
+                );
                 assert!(enroll::read_wal(ctx.fs, &ctx.layout).unwrap().is_none());
             });
             let all = sessions::read_sessions(ctx.fs, &ctx.layout).unwrap();

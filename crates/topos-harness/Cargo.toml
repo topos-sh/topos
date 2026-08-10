@@ -6,7 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 publish = false
-description = "The HarnessAdapter trait + the Claude Code reference impl (other harnesses land later) — the ONE real client-side port. Discovery + byte-exact placement + currency-trigger install. Content-blind: no translate/project. All platform/harness-version deps live here."
+description = "The TWO client-side harness ports, one responsibility each: HarnessAdapter says WHERE a bundle's bytes go (discovery + byte-exact placement targeting), TriggerAdapter says WHEN the update check fires ((un)installing one harness's auto-update trigger, its health probe, the artifacts it discloses). Content-blind: no translate/project. All platform/harness-version deps live here."
 
 [dependencies]
 topos-types.workspace = true

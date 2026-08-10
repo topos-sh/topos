@@ -25,7 +25,9 @@ use topos_types::{CurrencyKind, TriggerState};
 
 use crate::{ConfigStore, trigger_report};
 
-use super::{PLAIN_SWEEP, SENTINEL, SHELL_SWEEP_LINE, TriggerAdapter, TriggerReport};
+use super::{
+    PLAIN_SWEEP, SENTINEL, SHELL_SWEEP_LINE, TriggerAdapter, TriggerArtifact, TriggerReport,
+};
 
 /// One instance's parameterization of the shared JSON-hooks machinery.
 pub(crate) struct JsonHooksSpec {
@@ -157,9 +159,9 @@ impl TriggerAdapter for JsonHooks<'_> {
 
     /// The shared config file, disclosed ONLY while it actually holds our managed entry — and never
     /// as a path `uninstall` deletes (it is scrubbed surgically, the user's own file kept).
-    fn footprint(&self) -> Vec<PathBuf> {
+    fn artifacts(&self) -> Vec<TriggerArtifact> {
         if self.present() {
-            vec![self.config_path()]
+            vec![TriggerArtifact::Path(self.config_path())]
         } else {
             Vec::new()
         }

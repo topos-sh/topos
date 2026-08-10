@@ -76,8 +76,8 @@ generated `docs/cli.md` (`cargo xtask gen-cli-ref`).
   `init`, `fmt`, `uninstall`, `builtin` (the embedded meta-skill from `skills/topos/`),
   `self_update` (minisign-gated via `release`), `version_check`, `arm` (the TRIGGER half of the
   harness ports: `Triggers` — what `ctx.triggers` carries, the active agent's trigger plus the
-  machine root the whole-machine set resolves under, so `footprint` (the uninstall describe +
-  `list --footprint`) and `scrub_others` (`uninstall --yes`) walk THE SAME set — plus the
+  machine root the whole-machine set resolves under, so `artifacts` (the uninstall describe, and its
+  path rows `list --footprint`) and `scrub_others` (`uninstall --yes`) walk THE SAME set — plus the
   detection-scoped `arm_detected`/`probe_detected` sweeps. All of it iterates the ONE harness table
   and asks `topos-harness::triggers` for each row's adapter, so no caller knows which machinery
   serves which agent), `quiet_gate`, `merge_resolve` (diverged-draft diff3 behind the

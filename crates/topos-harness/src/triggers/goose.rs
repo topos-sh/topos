@@ -27,7 +27,7 @@ use crate::ConfigStore;
 use super::file_drop::{FileDrop, FileDropSpec};
 use crate::registry::{self, Root};
 
-use super::{SENTINEL, TriggerAdapter, TriggerReport};
+use super::{SENTINEL, TriggerAdapter, TriggerArtifact, TriggerReport};
 
 pub(crate) static SPEC: FileDropSpec = FileDropSpec {
     slug: "goose",
@@ -131,10 +131,10 @@ impl TriggerAdapter for Goose<'_> {
         self.file.present()
     }
 
-    fn footprint(&self) -> Vec<PathBuf> {
+    fn artifacts(&self) -> Vec<TriggerArtifact> {
         // Only the artifact topos wrote — goose's own config (the enablement evidence) is read, never
         // owned, so it is never disclosed as ours.
-        self.file.footprint()
+        self.file.artifacts()
     }
 }
 
