@@ -495,8 +495,7 @@ pub(crate) fn sync_one_planned(
             // advance `applied` with NO swap, never a false DIVERGED — and no spurious draft snapshot.
             heal_forward(ctx, &sp, &map, &managed, &lock, &sync, &t)?;
             let mut row = applied_row(&name, &sync, target_commit);
-            row.harnesses =
-                converge_explicit_mcp(ctx, mcp_record && explicit, skill_id, &name, &plan);
+            row.harnesses = converge_explicit_mcp(ctx, mcp_record && explicit, skill_id, &name);
             row.kind = mcp_record.then(|| BundleKind::Mcp.as_str().to_owned());
             mark_installed(ctx, &mut row, first_receive, &map, &managed);
             Ok(row)
@@ -518,8 +517,7 @@ pub(crate) fn sync_one_planned(
             }
             apply_forward(ctx, &sp, &map, &managed, &lock, &sync, skill_id, &t)?;
             let mut row = applied_row(&name, &sync, target_commit);
-            row.harnesses =
-                converge_explicit_mcp(ctx, mcp_record && explicit, skill_id, &name, &plan);
+            row.harnesses = converge_explicit_mcp(ctx, mcp_record && explicit, skill_id, &name);
             row.kind = mcp_record.then(|| BundleKind::Mcp.as_str().to_owned());
             mark_installed(ctx, &mut row, first_receive, &map, &managed);
             Ok(row)
@@ -566,7 +564,6 @@ fn converge_explicit_mcp(
     run: bool,
     skill_id: &str,
     name: &str,
-    plan: &crate::placement::PlacementPlan,
 ) -> Vec<topos_types::results::McpAgentState> {
     if !run {
         return Vec::new();
@@ -574,7 +571,7 @@ fn converge_explicit_mcp(
     let Ok(sid) = crate::id::SkillId::parse(skill_id) else {
         return Vec::new();
     };
-    let (mut states, warnings) = crate::mcp_engine::converge_bundle_now(ctx, &sid, name, plan);
+    let (mut states, warnings) = crate::mcp_engine::converge_bundle_now(ctx, &sid, name);
     for w in warnings {
         eprintln!("topos update: {w}");
     }
@@ -742,8 +739,7 @@ pub(crate) fn go_back(
     // best-effort sweep fact uses.
     let harnesses = if mcp_record {
         let sid = crate::id::SkillId::parse(skill_id)?;
-        let (mut states, warnings) =
-            crate::mcp_engine::converge_bundle_now(ctx, &sid, &name, &plan);
+        let (mut states, warnings) = crate::mcp_engine::converge_bundle_now(ctx, &sid, &name);
         for w in warnings {
             eprintln!("topos update: {w}");
         }

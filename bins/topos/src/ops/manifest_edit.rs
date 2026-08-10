@@ -3083,7 +3083,7 @@ fn converge_removed_mcp(
                 _ => format!("{file}: server entry removed"),
             });
         }
-        for w in &outcome.warnings {
+        for w in outcome.notices.iter().chain(&outcome.warnings) {
             lines.push(w.clone());
         }
         if lines.is_empty() {

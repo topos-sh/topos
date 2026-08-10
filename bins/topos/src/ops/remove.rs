@@ -337,6 +337,7 @@ fn retire_mcp_entries(ctx: &Ctx<'_>, skill_id: &str, item: &mut RemoveItem) {
             }
         })
         .collect();
+    lines.extend(outcome.notices.iter().cloned());
     lines.extend(outcome.warnings.iter().cloned());
     // A detach that could not take the lock or write the scope document has LOST custody of a
     // drifted row the record is about to take with it. That is the person's business, not a silent

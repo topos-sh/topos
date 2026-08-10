@@ -4821,6 +4821,14 @@ fn run_mcp_converge(
             allow_removals,
         );
         sweep.warnings.extend(outcome.warnings);
+        // Work that SUCCEEDED belongs in disclosures: a wholly-owned config file deleted when its
+        // last entry left is the removal working, and counted as a fault it makes a clean sweep
+        // report itself failed and exit non-zero.
+        for notice in outcome.notices {
+            if !sweep.disclosures.contains(&notice) {
+                sweep.disclosures.push(notice);
+            }
+        }
         // Config entries that LEFT this run ride the receipt as `removed` rows — one per bundle,
         // counted in the config files the entries lived in; a hand-edited entry stays in place
         // and rides the same row's `kept` list. Named from the delivery cache (the entry's
@@ -4880,14 +4888,25 @@ fn run_mcp_converge(
             });
             let (name, ws_id, display) = match named {
                 Some((n, w, d)) => (n, Some(w), d),
-                None => (
-                    bundle_id
-                        .strip_prefix("local:")
-                        .unwrap_or(&bundle_id)
-                        .to_owned(),
-                    None,
-                    None,
-                ),
+                // No delivery cache row describes this bundle (a local row, a workspace whose
+                // cache entry is gone). Its OWN record still holds the name it was placed under —
+                // ask that before falling back to the opaque id, or a receipt announces the
+                // removal of something nobody can recognise.
+                None => {
+                    let recorded = SkillId::parse(&bundle_id).ok().and_then(|sid| {
+                        doc::read_doc::<Lock>(env.ctx.fs, &layout.published(&sid).lock)
+                            .ok()
+                            .flatten()
+                            .map(|l| l.name)
+                    });
+                    let name = recorded.unwrap_or_else(|| {
+                        bundle_id
+                            .strip_prefix("local:")
+                            .unwrap_or(&bundle_id)
+                            .to_owned()
+                    });
+                    (name, None, None)
+                }
             };
             let mut row = plain_row(&name, PullAction::Removed, ws_id, &label);
             row.kind = BundleKind::Mcp.tag();

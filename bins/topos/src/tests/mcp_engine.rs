@@ -516,6 +516,243 @@ static SYNTHETIC: &[KnownHarness] = &[
     ),
 ];
 
+/// **Z1 — the containment rail is re-run at the WRITE boundary.** A plan resolves a project
+/// surface once and the converge writes it later; `replace_config` follows symlinks, so a path
+/// component swapped for an outward symlink in that window would put managed bytes outside the
+/// checkout. The proof therefore re-runs immediately before any byte moves: ZERO writes outside,
+/// the `unprovable` state spoken with the same note the planner's withheld line carries, and the
+/// escape disclosed.
+#[test]
+fn a_surface_symlinked_out_between_plan_and_write_is_refused_with_zero_writes() {
+    let fs = RealFs;
+    let project = Scratch::new("wb-project");
+    let outside = Scratch::new("wb-outside");
+    std::fs::create_dir_all(project.0.join(".cursor")).unwrap();
+    let layout = Layout::new(&project.0.join(".topos"));
+    let io = ScopeIo {
+        fs: &fs,
+        layout: &layout,
+        home: project.0.clone(),
+        project_root: Some(project.0.clone()),
+    };
+    let mut d = demand(
+        "s_a",
+        "alpha",
+        Some("eng"),
+        &server_json("https://mcp.example/a"),
+    );
+    d.reach = Some(vec!["cursor".into()]);
+    // The plan proves containment HERE, while `.cursor` is an ordinary dir inside the checkout.
+    let demands = plan(&io, vec![d]);
+    assert!(
+        demands[0].plan.entries_for("cursor").is_some(),
+        "the surface planned clean: {:?}",
+        demands[0].plan
+    );
+
+    // ...and the checkout is rewritten under it before the write lands.
+    std::fs::remove_dir_all(project.0.join(".cursor")).unwrap();
+    std::os::unix::fs::symlink(&outside.0, project.0.join(".cursor")).unwrap();
+
+    let out = mcp_engine::converge(&io, &demands, &synthetic(), &all_slugs(), &no_hold(), true);
+
+    assert!(
+        !outside.0.join("mcp.json").exists(),
+        "no managed byte may land outside the checkout"
+    );
+    let st = state_of(&out, "s_a", "cursor");
+    assert_eq!(st.state, "unprovable", "{st:?}");
+    assert_eq!(
+        st.note.as_deref(),
+        Some("the config path does not resolve inside this checkout")
+    );
+    assert!(
+        out.warnings
+            .iter()
+            .any(|w| w.starts_with("PLACEMENT_ESCAPES_PROJECT")),
+        "{:?}",
+        out.warnings
+    );
+}
+
+/// **Z2 — a targeted converge whose whole reach is WITHHELD still speaks, and still recovers.**
+/// The reach resolves to one harness whose surface no longer proves inside the checkout, so there
+/// is nothing to write anywhere. Returning early there would drop the per-agent line the receipt
+/// owes AND skip the intent journal's crash recovery, which runs inside the converge — so a crash
+/// left by an earlier run would survive every targeted verb.
+#[test]
+fn a_targeted_converge_with_only_withheld_surfaces_reports_and_still_recovers() {
+    let rig = Rig::new("withheld-targeted");
+    rig.seed_session();
+    seed_harness_dirs(&rig.home.0);
+    let proj = Scratch::new("withheld-co");
+    std::fs::create_dir_all(proj.0.join(".git")).unwrap();
+    std::fs::create_dir_all(proj.0.join(".cursor")).unwrap();
+    std::fs::write(
+        proj.0.join(crate::manifest::MANIFEST_FILE),
+        format!("[bundles]\n\"{HOST}/{WS_NAME}/linear\" = {{ dest = [\"./.cursor/mcp.json\"] }}\n"),
+    )
+    .unwrap();
+    let v = mk_version(&[(
+        "server.json",
+        server_json("https://mcp.example/linear").as_bytes(),
+    )]);
+    let plane = FakePlane::new().with_version("s_linear", &v);
+    plane.serves(vec![delivered_mcp("s_linear", "linear", &v)]);
+    let dir = FakeDirectory {
+        skills: vec![mcp_catalog_entry("s_linear", "linear", &v)],
+        channels: Vec::new(),
+    };
+    let ctx = rig.ctx_at(Some(&proj.0));
+    sweep(&ctx, &plane, &dir);
+    assert!(
+        proj.0.join(".cursor/mcp.json").exists(),
+        "the sweep placed the one narrowed surface"
+    );
+
+    // The checkout is rewritten: the ONLY harness the record reaches no longer proves inside it.
+    let outside = Scratch::new("withheld-outside");
+    std::fs::remove_dir_all(proj.0.join(".cursor")).unwrap();
+    std::os::unix::fs::symlink(&outside.0, proj.0.join(".cursor")).unwrap();
+
+    // A crash-left intent standing in the scope journal — only a run that ENTERS the converge
+    // resolves it.
+    let playout = crate::sidecar::existing_project_store(&rig.fs, &proj.0).unwrap();
+    let mut custody = crate::config_custody::ScopeEntries::load(&rig.fs, &playout).unwrap();
+    let mut intents = std::collections::BTreeMap::new();
+    intents.insert(
+        crate::config_custody::placement_key("codex", "topos-eng-ghost"),
+        crate::config_custody::PendingIntent {
+            bundle_id: "s_ghost".to_owned(),
+            version_id: "v1".to_owned(),
+            file: proj.0.join(".codex/config.toml").display().to_string(),
+            fingerprint: "deadbeef".to_owned(),
+            owns_file: false,
+        },
+    );
+    custody.journal(&rig.fs, &playout, intents).unwrap();
+    assert!(
+        crate::config_custody::ScopeEntries::load(&rig.fs, &playout)
+            .unwrap()
+            .has_pending(),
+        "the crash-left intent stands before the verb"
+    );
+
+    let out = ops::pull(
+        &ctx,
+        ops::PullScope::One {
+            name: "linear".into(),
+            workspace: None,
+            mode: ops::TargetMode::GoBack(ops::VersionRef::Full(v.id)),
+            store: ops::StoreScope::Here,
+        },
+    )
+    .expect("the go-back applies");
+
+    // It SPOKE: the per-agent line survives a run that wrote nothing.
+    let row = &out.data.skills[0];
+    let st = row
+        .harnesses
+        .iter()
+        .find(|h| h.agent == "cursor")
+        .unwrap_or_else(|| panic!("cursor state: {row:?}"));
+    assert_eq!(st.state, "unprovable", "{st:?}");
+    assert!(
+        !outside.0.join("mcp.json").exists(),
+        "nothing lands outside the checkout"
+    );
+    // And it RECOVERED: the journal the crash left is resolved by observation, not carried.
+    assert!(
+        !crate::config_custody::ScopeEntries::load(&rig.fs, &playout)
+            .unwrap()
+            .has_pending(),
+        "the converge ran its crash recovery"
+    );
+}
+
+/// **Z5 — a `dest` move is a wholly successful sweep, and it says so.** Moving a bundle's config
+/// destination from one agent to another removes its entry from the old surface and deletes the
+/// file topos wholly owned there. Both are work that WORKED: routed through the warning channel
+/// the deletion made a clean run count itself FAILED and exit non-zero while `--json` still said
+/// `ok: true`. It rides disclosures now — and the row reporting the surfaces the bundle left names
+/// it the way a person knows it. For a LOCALLY ADOPTED bundle no delivery cache describes, that
+/// name comes from the bundle's own record; the opaque store id is the last resort, not the first
+/// answer.
+#[test]
+fn a_dest_move_is_a_clean_sweep_that_names_the_bundle_it_moved() {
+    let rig = Rig::new("dest-move");
+    seed_harness_dirs(&rig.home.0);
+    rig.write_global("[bundles]\n");
+    let dir = rig.home.0.join("demo");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("server.json"),
+        "{\"name\":\"io.test/demo\",\"description\":\"D.\",\"version\":\"1.0.0\",\
+         \"remotes\":[{\"type\":\"streamable-http\",\"url\":\"https://demo.example/mcp\"}]}",
+    )
+    .unwrap();
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    let never = |_s: &Session| -> ops::SessionTransports {
+        unreachable!("the path door never dials a session")
+    };
+    // Adopted in place: the store tracks the folder under an opaque id, and no delivery cache
+    // will ever describe it — the shape whose receipt used to print that id at a person.
+    ops::add_mcp(
+        &ctx,
+        &never,
+        None,
+        dir.to_str().unwrap(),
+        true,
+        None,
+        &Default::default(),
+    )
+    .expect("the local mcp folder adopts");
+    let plane = FakePlane::new();
+    let fdir = FakeDirectory {
+        skills: Vec::new(),
+        channels: Vec::new(),
+    };
+    rig.write_global(&format!(
+        "[bundles]\n\"{}\" = {{ kind = \"mcp\", dest = [\"~/.cursor/mcp.json\"] }}\n",
+        dir.display()
+    ));
+    sweep(&ctx, &plane, &fdir);
+    let cursor = rig.home.0.join(".cursor/mcp.json");
+    assert!(cursor.exists(), "the first sweep placed cursor");
+
+    // The row's destination MOVES. The old surface loses the entry, and the file topos created
+    // there goes with it.
+    rig.write_global(&format!(
+        "[bundles]\n\"{}\" = {{ kind = \"mcp\", dest = [\"~/.openclaw/openclaw.json\"] }}\n",
+        dir.display()
+    ));
+    let out = sweep(&ctx, &plane, &fdir);
+
+    assert!(
+        rig.home.0.join(".openclaw/openclaw.json").exists(),
+        "the new destination gained the entry"
+    );
+    assert!(!cursor.exists(), "the wholly-owned old file was deleted");
+    // NOTHING failed — the whole point: a successful move exits 0.
+    assert!(out.warnings.is_empty(), "{:?}", out.warnings);
+    // The deletion is a DISCLOSURE, and it still names the file it deleted.
+    assert!(
+        out.disclosures
+            .iter()
+            .any(|d| d.starts_with("MCP_FILE_REMOVED") && d.contains("mcp.json")),
+        "{:?}",
+        out.disclosures
+    );
+    // The row for the surfaces the bundle left names `demo` — never the store's id for it.
+    let left = out
+        .data
+        .skills
+        .iter()
+        .find(|r| r.action == topos_types::results::PullAction::Removed)
+        .unwrap_or_else(|| panic!("{:?}", out.data.skills));
+    assert_eq!(left.skill, "demo", "{left:?}");
+}
+
 /// **The entries plan is what decides reach — and what says what reach COST.** Four facts, over
 /// the one planner every demand is built through:
 ///
@@ -3857,9 +4094,9 @@ fn a_targeted_go_back_converges_the_configs_to_the_restored_document() {
 /// ITEM PAIR (targeted go-back honors narrowing): a bundle narrowed to ONE harness must stay in
 /// that one harness through a targeted `update <mcp>@<version>` — the go-back's converge reaches
 /// only the harnesses that already hold a custody entry here, so a harness the narrowing excluded
-/// never gains one. Before the fix the targeted demand carried an EMPTY filter, which
-/// `filter_admits` reads as ALL harnesses: openclaw (detected, engaged, excluded by the row)
-/// gained an entry the sweep then had to claw back.
+/// never gains one. Before the fix the targeted demand carried an EMPTY narrowing, read as ALL
+/// harnesses: openclaw (detected, engaged, excluded by the row) gained an entry the sweep then had
+/// to claw back.
 #[test]
 fn a_targeted_go_back_never_reaches_a_narrowing_excluded_harness() {
     let rig = Rig::new("goback-narrow");
@@ -4047,8 +4284,7 @@ fn a_deleted_ledger_makes_the_targeted_go_back_skip_with_a_warning() {
 
     // The converge the go-back hand-runs: zero writes, one honest warning.
     let sid = crate::id::SkillId::parse("s_linear").unwrap();
-    let plan = crate::mcp_engine::recorded_entries_plan(&ctx, sid.as_str());
-    let (states, warnings) = crate::mcp_engine::converge_bundle_now(&ctx, &sid, "linear", &plan);
+    let (states, warnings) = crate::mcp_engine::converge_bundle_now(&ctx, &sid, "linear");
     assert!(states.is_empty(), "{states:?}");
     assert!(
         warnings

@@ -888,6 +888,7 @@ fn converge_one(ctx: &Ctx<'_>, target: &EditTarget, bundle_id: &str, name: &str)
         super::sync_engine::prettify_state_files(ctx, &mut states);
         lines.extend(states.iter().map(agent_line));
     }
+    lines.extend(outcome.notices.iter().cloned());
     lines.extend(outcome.warnings.iter().cloned());
     lines
 }

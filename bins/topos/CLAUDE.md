@@ -115,10 +115,13 @@ generated `docs/cli.md` (`cargo xtask gen-cli-ref`).
   is DEMAND (each bundle's entries plan) plus CUSTODY (its own recorded rows). Reach resolves at
   PLANNING and nowhere else: a row's `dest` config-file entries map to the harnesses that claim
   them (no dest = every MCP-capable agent), a targeted verb plans only the harnesses whose
-  recorded rows prove the bundle already stands there (`recorded_entries_plan`), and the plan
-  carries the surfaces it withheld so a receipt still says what reach cost. An `McpDemand` is
-  built only by `DemandedBundle::planned`, so no caller can hand the converge a reach the planner
-  did not compute, and an add never places where the next sweep would claw it back. Removal and
+  recorded rows prove the bundle already stands there (`recorded_reach`), and the plan carries the
+  surfaces it withheld so a receipt still says what reach cost. Every demand the sweep and `add`
+  converge is built by `DemandedBundle::planned`, so a caller cannot hand the converge a reach the
+  planner did not compute; the targeted converge builds its own demand from a reach it re-derives
+  from the record immediately before the lock, because a verb plans at its top and converges after
+  a materialize — a stale reach would claw back an entry a sweep placed in that window. An add
+  never places where the next sweep would claw it back. Removal and
   key retirement resolve their surfaces from the descriptor table and their reach from the
   recorded rows — prior-matched keys, with drift left in place. ONE converge path serves every
   surface, the wholly-topos-owned Claude plugin dir included (its `.mcp.json` is an ordinary

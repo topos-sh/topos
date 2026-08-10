@@ -184,8 +184,13 @@ pub(crate) struct RemovedEntry {
 pub(crate) struct ConvergeOutcome {
     pub bundles: Vec<BundleStates>,
     pub removed: Vec<RemovedEntry>,
-    /// Honest per-bundle / per-surface failure lines (the sweep's warning channel).
+    /// Honest per-bundle / per-surface FAILURE lines (the sweep's warning channel — the one that
+    /// makes a run exit non-zero).
     pub warnings: Vec<String>,
+    /// Facts about work that SUCCEEDED and is worth stating (a wholly-owned config file deleted
+    /// when its last entry left). A line describing something that worked belongs here: routed
+    /// into the warning channel it would make a clean run report itself broken.
+    pub notices: Vec<String>,
 }
 
 // =================================================================================================
@@ -512,6 +517,7 @@ pub(crate) fn converge(
             &provenance,
         );
         out.warnings.extend(surface_out.warnings);
+        out.notices.extend(surface_out.notices);
         for key in &surface_out.wrote {
             if let Some(i) = desired_bundles.get(key) {
                 wrote.insert(*i);
@@ -646,6 +652,7 @@ pub(crate) fn remove_bundle(
             &provenance,
         );
         out.warnings.extend(surface_out.warnings);
+        out.notices.extend(surface_out.notices);
         for (state_key, state) in surface_out.states {
             if state_key == key && (state.state == "removed" || state.state == "drifted") {
                 out.removed.push(RemovedEntry {
@@ -764,6 +771,8 @@ struct SurfaceOutcome {
     /// left byte-identical, which is what makes it an answer rather than a guess.
     wrote: BTreeSet<String>,
     warnings: Vec<String>,
+    /// Success NOTICES — things that WORKED and are worth stating (see [`ConvergeOutcome::notices`]).
+    notices: Vec<String>,
 }
 
 impl SurfaceOutcome {
@@ -772,6 +781,31 @@ impl SurfaceOutcome {
             states: Vec::new(),
             wrote: BTreeSet::new(),
             warnings: Vec::new(),
+            notices: Vec::new(),
+        }
+    }
+
+    /// The WRITE-BOUNDARY containment refusal: every desired key reads `unprovable` with the same
+    /// note the planner's withheld line carries, nothing is written, and the escape is disclosed.
+    fn escaped(desired: &[McpEntry], h: &KnownHarness, escape: &Path) -> Self {
+        Self {
+            states: desired
+                .iter()
+                .map(|e| {
+                    (
+                        e.key.clone(),
+                        agent_state(
+                            h.slug,
+                            "unprovable",
+                            Some("the config path does not resolve inside this checkout"),
+                            None,
+                        ),
+                    )
+                })
+                .collect(),
+            wrote: BTreeSet::new(),
+            warnings: vec![crate::placement::escape_line(h.slug, escape)],
+            notices: Vec::new(),
         }
     }
     fn unprovable(desired: &[McpEntry], h: &KnownHarness, path: &Path, reason: &str) -> Self {
@@ -787,8 +821,24 @@ impl SurfaceOutcome {
                 .collect(),
             wrote: BTreeSet::new(),
             warnings: vec![format!("MCP_SURFACE_UNPROVABLE {}: {reason}", h.slug)],
+            notices: Vec::new(),
         }
     }
+}
+
+/// **The containment rail, re-run at the WRITE boundary.** A project surface was proven inside the
+/// checkout when the plan was made — and a plan is a memory, not a permission. Any component of
+/// the path can be swapped for an outward symlink between planning and this write, and
+/// `replace_config` follows symlinks, so the proof is re-run HERE, immediately before any byte
+/// moves, over every path this surface is about to touch (the config file, and the plugin manifest
+/// beside it). `None` at the person scope — there is no checkout to be inside of — and when every
+/// path still proves.
+fn write_escape(io: &ScopeIo<'_>, paths: &[&Path]) -> Option<PathBuf> {
+    let root = io.project_root.as_deref()?;
+    paths
+        .iter()
+        .find(|p| !crate::placement::within_project(root, p))
+        .map(|p| (*p).to_path_buf())
 }
 
 /// The intent-journal protocol around ONE config write: (a) the custody persists the pending
@@ -959,6 +1009,8 @@ fn converge_surface(
                 && !outcome.fingerprints.is_empty()
                 && let Some(manifest) = plugin_manifest_path(path)
                 && !io.fs.exists(&manifest)
+                // Healing the manifest is a WRITE — it passes the same write-boundary proof.
+                && write_escape(io, &[&manifest]).is_none()
                 && crate::config_io::replace_config(io.fs, &manifest, &plugin_dir::manifest_bytes())
                     .is_ok()
             {
@@ -998,6 +1050,25 @@ fn converge_surface(
             let owns_file =
                 outcome.created_file || (owned_before && all_ours && kept.is_empty() && !unmanaged);
 
+            // The plugin surface writes its constant manifest beside the entries file — before
+            // it, so a crash never leaves entries without the manifest that makes them load. The
+            // manifest rides the same foreign-occupant rule as every other byte: (re)written
+            // only when absent or still byte-identical to what topos renders; a hand-edited one
+            // is left standing, disclosed.
+            let (manifest, mut manifest_kept) = if is_plugin {
+                plugin_manifest_verdict(io.fs, h.slug, path)
+            } else {
+                (None, None)
+            };
+            // THE WRITE-BOUNDARY CONTAINMENT PROOF — before the journal, before a byte moves, so
+            // a refusal costs nothing and leaves nothing behind.
+            let mut to_write: Vec<&Path> = vec![path];
+            if let Some(m) = &manifest {
+                to_write.push(m);
+            }
+            if let Some(escape) = write_escape(io, &to_write) {
+                return SurfaceOutcome::escaped(desired, h, &escape);
+            }
             let intents = write_intents(
                 custody,
                 h.slug,
@@ -1009,16 +1080,6 @@ fn converge_surface(
             );
             let path_owned = path.to_path_buf();
             let fs = io.fs;
-            // The plugin surface writes its constant manifest beside the entries file — before
-            // it, so a crash never leaves entries without the manifest that makes them load. The
-            // manifest rides the same foreign-occupant rule as every other byte: (re)written
-            // only when absent or still byte-identical to what topos renders; a hand-edited one
-            // is left standing, disclosed.
-            let (manifest, mut manifest_kept) = if is_plugin {
-                plugin_manifest_verdict(io.fs, h.slug, path)
-            } else {
-                (None, None)
-            };
             let write = move || -> std::io::Result<()> {
                 if let Some(m) = &manifest {
                     crate::config_io::replace_config(fs, m, &plugin_dir::manifest_bytes())?;
@@ -1045,7 +1106,10 @@ fn converge_surface(
                             // — its disclosure (kept, dir stays) supersedes the write-time one.
                             manifest_kept = prune_plugin_dir(io.fs, h.slug, path);
                         }
-                        surface.warnings.push(format!(
+                        // A SUCCESS notice, not a fault: the file went because the last entry
+                        // topos owned left it, which is the removal working. Pushed into the
+                        // warning channel it would make a clean sweep count itself failed.
+                        surface.notices.push(format!(
                             "MCP_FILE_REMOVED {}: {} held only topos entries and was deleted",
                             h.slug,
                             path.display()
@@ -1335,14 +1399,20 @@ fn prune_plugin_dir(fs: &dyn FsOps, slug: &str, mcp_path: &Path) -> Option<Strin
 ///   no ownership record to reuse, and minting fresh here would land a DUPLICATE `topos-local-*`
 ///   entry beside the original (now-foreign, unremovable) one. Skip with an honest warning; the
 ///   next sweep re-mints under the full scope plan and heals this scope;
-/// - `plan` — built by [`recorded_entries_plan`] — reaches only the harnesses that ALREADY hold a
-///   custody entry for this bundle in this scope. A harness the narrowing excluded never gained an
-///   entry, so it stays untouched; a narrowing CHANGE is the sweep's job, not a go-back's.
+/// - the reach is the harnesses that ALREADY hold a custody entry for this bundle in this scope. A
+///   harness the narrowing excluded never gained an entry, so it stays untouched; a narrowing
+///   CHANGE is the sweep's job, not a go-back's.
+///
+/// **The reach is derived HERE, not handed in.** A verb plans at its top and converges after a
+/// snapshot, a fetch and a materialize; a sweep landing in that window can widen this bundle's
+/// entries, and converging with the older set would CLAW BACK the entry the sweep just placed (a
+/// demanded bundle's standing rows are never `preserved`, so a surface an out-of-date reach omits
+/// gets prior-matched and removed). So the reach comes from the custody read immediately before
+/// the lock — the verb's own plan decides only THAT the entries mechanic runs, never how far.
 pub(crate) fn converge_bundle_now(
     ctx: &crate::ctx::Ctx<'_>,
     sid: &crate::id::SkillId,
     name: &str,
-    plan: &PlacementPlan,
 ) -> (Vec<McpAgentState>, Vec<String>) {
     let Some(roots) = ctx.roots.clone() else {
         return (Vec::new(), Vec::new());
@@ -1350,8 +1420,9 @@ pub(crate) fn converge_bundle_now(
     let Ok(Some((version_id, server_json))) = stored_server_json(ctx, sid) else {
         return (Vec::new(), Vec::new());
     };
-    // An ADVISORY (unlocked) read: it only answers whether an ownership record exists to reuse.
-    // The authoritative read-modify-write happens inside `converge`, under the per-scope lock.
+    // An ADVISORY (unlocked) read: it answers whether an ownership record exists to reuse, and
+    // supplies the reach below. The authoritative read-modify-write happens inside `converge`,
+    // under the per-scope lock.
     let custody = match ScopeEntries::load(ctx.fs, &ctx.layout) {
         Ok(l) => l,
         Err(e) => {
@@ -1366,7 +1437,7 @@ pub(crate) fn converge_bundle_now(
             );
         }
     };
-    if custody.key_of(sid.as_str()).is_none() {
+    let Some(reach) = recorded_reach(&custody, sid.as_str()) else {
         return (
             Vec::new(),
             vec![format!(
@@ -1374,13 +1445,17 @@ pub(crate) fn converge_bundle_now(
                  heals this scope"
             )],
         );
-    }
-    // Nothing planned ⇒ nothing placed here, nothing stale, nothing to do.
-    if plan.entries().next().is_none() {
+    };
+    let project_root = ctx.layout.project_root().map(Path::to_path_buf);
+    // The demand's plan, from the reach as it stands NOW.
+    let fresh = crate::placement::entries_plan(ctx, project_root.as_deref(), Some(&reach));
+    // Nothing to place AND nothing to say. A plan with only WITHHELD surfaces still enters: it
+    // writes nothing, but it speaks the per-agent states a receipt owes, and the converge it
+    // enters is also where the intent journal's crash recovery runs.
+    if fresh.entries().next().is_none() && fresh.withheld.is_empty() {
         return (Vec::new(), Vec::new());
     }
     let descriptors = mcp::descriptor::mcp_harnesses();
-    let project_root = ctx.layout.project_root().map(Path::to_path_buf);
     let cwd = project_root.clone().or_else(|| roots.cwd.clone());
     let detected: BTreeSet<String> =
         topos_harness::registry::detected_harnesses(&roots.home, cwd.as_deref())
@@ -1401,7 +1476,7 @@ pub(crate) fn converge_bundle_now(
         workspace_slug: None,
         version_id,
         server_json,
-        plan: plan.clone(),
+        plan: fresh,
     };
     let outcome = converge(
         &io,
@@ -1430,20 +1505,26 @@ pub(crate) fn recorded_entries_plan(
     ctx: &crate::ctx::Ctx<'_>,
     skill_id: &str,
 ) -> crate::placement::PlacementPlan {
-    let owned: Vec<String> = ScopeEntries::load(ctx.fs, &ctx.layout)
+    let reach = ScopeEntries::load(ctx.fs, &ctx.layout)
         .ok()
-        .and_then(|custody| {
-            let key = custody.key_of(skill_id)?.to_owned();
-            Some(
-                mcp::descriptor::mcp_harnesses()
-                    .iter()
-                    .filter(|h| custody.holds(&placement_key(h.slug, &key)))
-                    .map(|h| h.slug.to_owned())
-                    .collect(),
-            )
-        })
+        .and_then(|custody| recorded_reach(&custody, skill_id))
         .unwrap_or_default();
-    crate::placement::entries_plan(ctx, ctx.layout.project_root(), Some(&owned))
+    crate::placement::entries_plan(ctx, ctx.layout.project_root(), Some(&reach))
+}
+
+/// The harnesses whose RECORDED rows hold this bundle's minted key in one scope — the row-derived
+/// reach itself, shared by the verb's plan and by the converge's late re-derivation so the two can
+/// never answer differently. `None` = no minted key here at all, which is not an empty reach but
+/// an absent ownership record, and the caller says so.
+fn recorded_reach(custody: &ScopeEntries, skill_id: &str) -> Option<Vec<String>> {
+    let key = custody.key_of(skill_id)?.to_owned();
+    Some(
+        mcp::descriptor::mcp_harnesses()
+            .iter()
+            .filter(|h| custody.holds(&placement_key(h.slug, &key)))
+            .map(|h| h.slug.to_owned())
+            .collect(),
+    )
 }
 
 // =================================================================================================
