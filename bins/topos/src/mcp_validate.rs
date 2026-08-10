@@ -868,7 +868,7 @@ fn parse_endpoint_url(url: &str) -> EndpointUrl {
 /// Validate a WHOLE MCP candidate: the exact file set ([`MCP_ALLOWED_FILES`] — `server.json`
 /// required, `README.md` optional), a credential scan over EVERY allowed file's bytes (raw for
 /// the sibling; raw + decoded strings for the JSON document, inside [`validate_server_json`]),
-/// and then the full document gate. The one gate the publish preflight and the `add --mcp` local
+/// and then the full document gate. The one gate the publish preflight and the `add --kind mcp` local
 /// adopt answer to — the exact mirror of the web tier's `validateCandidateFiles`.
 ///
 /// # Errors
@@ -920,41 +920,6 @@ pub(crate) fn validate_candidate_files(files: &[(&str, &[u8])]) -> Result<McpSum
         }
     }
     validate_server_json(server)
-}
-
-/// The bundle name a server document suggests: the tail segment of its registry name (the part
-/// after the one slash), folded by the catalog's own birth-name rules — lowercase, every run of
-/// non-alphanumerics collapsed to `-`, trimmed, capped at 64. The fallback is `"mcp-server"`,
-/// which the name grammar can never produce an empty fold for in practice.
-pub(crate) fn suggested_name_for(server_name: &str) -> String {
-    let tail = server_name.rsplit('/').next().unwrap_or(server_name);
-    let folded = fold_name(tail);
-    if folded.is_empty() {
-        "mcp-server".to_owned()
-    } else {
-        folded
-    }
-}
-
-/// The catalog's birth-name fold, mirrored: lowercase → non-alphanumeric runs to `-` → trim `-` →
-/// 64 chars → trim `-` again (a cut that lands mid-separator must not leave a trailing dash).
-fn fold_name(input: &str) -> String {
-    let lowered: String = input.to_lowercase();
-    let mut out = String::with_capacity(lowered.len());
-    let mut pending_dash = false;
-    for c in lowered.chars() {
-        if c.is_ascii_alphanumeric() {
-            if pending_dash && !out.is_empty() {
-                out.push('-');
-            }
-            pending_dash = false;
-            out.push(c);
-        } else {
-            pending_dash = true;
-        }
-    }
-    out.truncate(64);
-    out.trim_matches('-').to_owned()
 }
 
 #[cfg(test)]
@@ -1527,22 +1492,6 @@ mod tests {
         assert!(!is_registry_name("has space/server"));
         // The namespace half takes no underscore (the server half does).
         assert!(!is_registry_name("io_github/weather"));
-    }
-
-    /// The bundle folder a server name suggests — the catalog's fold, mirrored.
-    #[test]
-    fn suggested_name_folds_the_tail_segment() {
-        assert_eq!(suggested_name_for("io.github.acme/weather"), "weather");
-        assert_eq!(
-            suggested_name_for("io.github.acme/My_Server.v2"),
-            "my-server-v2"
-        );
-        assert_eq!(suggested_name_for("io.github.acme/---"), "mcp-server");
-        assert_eq!(suggested_name_for("no-slash-at-all"), "no-slash-at-all");
-        assert_eq!(
-            suggested_name_for(&format!("ns/{}", "a".repeat(80))),
-            "a".repeat(64)
-        );
     }
 
     /// A URL the shape check cannot read is refused as INVALID, not silently treated as https.

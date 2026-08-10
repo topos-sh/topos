@@ -275,6 +275,7 @@ mod tests {
             scope: None,
             harnesses: Vec::new(),
             kind: None,
+            draft: false,
         }
     }
 

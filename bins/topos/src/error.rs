@@ -229,6 +229,21 @@ fn already_tracked_message(name: &str, dir: &str, claim: &Option<TrackedBy>) -> 
     }
 }
 
+/// `arg` spelled so a shell reads it as a PATH — the one form every path-taking verb accepts.
+/// A token that already says "path" is handed back untouched; only a bare relative one is
+/// prefixed. Blind prefixing turned `~/deploy` into `./~/deploy`, a path to nothing.
+pub(crate) fn path_token(arg: &str) -> String {
+    if arg.starts_with("./")
+        || arg.starts_with("../")
+        || arg.starts_with('/')
+        || arg.starts_with("~/")
+    {
+        arg.to_owned()
+    } else {
+        format!("./{arg}")
+    }
+}
+
 /// A local-core failure. `#[non_exhaustive]` so new verbs can add variants without breaking matches.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
@@ -392,30 +407,24 @@ pub(crate) enum ClientError {
         references: Vec<String>,
         global: bool,
     },
-    /// `add --mcp <name>` found the EMBEDDED server name in MORE than one connected workspace's
-    /// catalog — the machine cannot pick between two teams' copies, so it names the workspaces
-    /// and refuses. The names are shown VERBATIM (a workspace address name is a path-safe
-    /// identifier, never a secret); each also rides one `next_actions` entry as the
-    /// `--workspace`-narrowed re-run, and `global` preserves the refused invocation's `-g`.
-    #[error(
-        "`{server}` is published by {} of the workspaces this machine is connected to ({}) — say \
-         which you mean (`topos add --mcp {server} --workspace <workspace>`)",
-        workspaces.len(), workspaces.join(", ")
-    )]
-    AmbiguousMcpWorkspace {
-        server: String,
-        workspaces: Vec<String>,
-        global: bool,
-    },
     /// `add <skill>@<harness>` named a harness that holds no untracked skill of that name. The message
     /// names where the skill IS found (if anywhere), all shown VERBATIM (slugs + the user's own tokens).
     #[error("{0}")]
     HarnessNotFound(String),
-    /// `add <arg>` was given a bare token that turned out to name an existing path on disk (a `~`-prefixed
-    /// token, or a cwd entry) rather than a discovered skill name — the user likely meant a path adopt.
-    /// Usage guidance shown VERBATIM (the arg is the user's own token).
-    #[error("'{arg}' looks like a path — to adopt a directory, prefix it (`topos add ./{arg}`)")]
-    PathNotName { arg: String },
+    /// A verb resolving a NAME was given a bare token that turned out to name an existing path on
+    /// disk (a `~`-prefixed token, or a cwd entry) rather than a discovered skill name — the user
+    /// likely meant a path. Usage guidance shown VERBATIM (the arg is the user's own token).
+    ///
+    /// `verb` is the verb that REFUSED — the fix re-runs that same command, never a different one:
+    /// a person who typed `publish` is not asking to `add`, and being told to is a dead end they
+    /// have to translate. `path_token` keeps the suggestion runnable: a token that already spells
+    /// a path is left alone, because prefixing one blindly produced `./~/deploy`, which names
+    /// nothing at all.
+    #[error(
+        "'{arg}' looks like a path, not a skill name — spell it as a path: `topos {verb} {}`",
+        path_token(arg)
+    )]
+    PathNotName { arg: String, verb: String },
     /// The placement cannot be materialized safely (a non-directory sits where a skill dir belongs, a
     /// symlink cannot be resolved to a directory, or the filesystem supports no safe swap) — refused
     /// rather than risk clobbering or a torn write.
@@ -798,7 +807,7 @@ pub(crate) enum ClientError {
     /// user's own spelling, shown VERBATIM.
     #[error(
         "{dir} looks like an MCP server (its root holds server.json and no SKILL.md) — \
-         `topos add --mcp {dir}` adds it as one"
+         `topos add --kind mcp {dir}` adds it as one, and `--kind skill` adds it as a skill"
     )]
     McpFlagRequired { dir: String },
     /// A manifest spells a RETIRED placement field (`path` / `harness` / a `[defaults.<kind>]`
@@ -882,9 +891,6 @@ impl ClientError {
             ClientError::AmbiguousHarness { .. } => "AMBIGUOUS_HARNESS",
             ClientError::AmbiguousScope { .. } => "AMBIGUOUS_SCOPE",
             ClientError::AmbiguousWorkspace { .. } => "AMBIGUOUS_WORKSPACE",
-            // The `--mcp` twin shares the code — an agent branches the same on either; the
-            // `--workspace` re-runs additionally ride the envelope's `next_actions`.
-            ClientError::AmbiguousMcpWorkspace { .. } => "AMBIGUOUS_WORKSPACE",
             ClientError::HarnessNotFound(_) => "HARNESS_NOT_FOUND",
             ClientError::PathNotName { .. } => "PATH_NOT_NAME",
             ClientError::PlacementUnsupported { .. } => "PLACEMENT_UNSUPPORTED",
@@ -955,7 +961,7 @@ impl ClientError {
             // The MCP gate's own vocabulary, carried through unflattened — the client and the web
             // tier refuse the same document with the same word.
             ClientError::McpRefused { code, .. } => code.as_str(),
-            // A server bundle at a skill door: the fix is the `--mcp` spelling, machine-runnable.
+            // A server bundle at a skill door: the fix is the `--kind` word, machine-runnable.
             ClientError::McpFlagRequired { .. } => "MCP_FLAG_REQUIRED",
             // A retired manifest spelling: the fix is the row's `dest` rewrite in the message.
             ClientError::ManifestMigration(_) => "MANIFEST_FIELD_RETIRED",
@@ -981,8 +987,6 @@ impl ClientError {
             | ClientError::AmbiguousScope { .. }
             // A name several connected workspaces publish is the same class — pick a spelling, retry.
             | ClientError::AmbiguousWorkspace { .. }
-            // An embedded MCP server name several workspaces publish is the same class too.
-            | ClientError::AmbiguousMcpWorkspace { .. }
             // A repo holding several skills (or several dirs of one name) is the same "disambiguate and
             // retry" class — as is a workspace-resource name matching across workspaces or kinds.
             | ClientError::AmbiguousSkillInRepo { .. }

@@ -442,7 +442,12 @@ impl crate::plane::DeliverySource for UreqPlane {
                         .iter()
                         .map(|h| topos_types::requests::WireHarnessState {
                             slug: h.agent.clone(),
-                            state: h.state.clone(),
+                            // The fleet report speaks the SAME vocabulary the receipts do —
+                            // the outcome's own wire token, never a second spelling minted here.
+                            state: serde_json::to_value(h.state)
+                                .ok()
+                                .and_then(|v| v.as_str().map(str::to_owned))
+                                .unwrap_or_default(),
                             note: h.note.as_deref().map(clip_report_note),
                         })
                         .collect(),
@@ -2172,182 +2177,6 @@ fn retry_after_ms(resp: &ureq::http::Response<ureq::Body>) -> Option<i64> {
     )
 }
 
-// =================================================================================================
-// UreqMcpSource — the MCP server-document fetcher behind `add --mcp <name|url>`. One GET, capped,
-// bounded, redirect-refusing. Nothing else in the client reads a member-supplied URL, so the whole
-// discipline lives here rather than in a shared helper that would invite reuse without it.
-// =================================================================================================
-
-/// The blocking `ureq` MCP-document source: an https GET of one `server.json`.
-pub(crate) struct UreqMcpSource {
-    agent: ureq::Agent,
-    /// The ACTIVITY sink — the op names the source it is fetching, so this transport stays quiet
-    /// underneath it (the phase is already open by the time `fetch` runs).
-    progress: Rc<dyn ProgressSink>,
-}
-
-impl std::fmt::Debug for UreqMcpSource {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("UreqMcpSource").finish_non_exhaustive()
-    }
-}
-
-impl UreqMcpSource {
-    pub(crate) fn new() -> Self {
-        Self {
-            // A server document is a page of text: bound the whole exchange tightly rather than
-            // letting a hostile endpoint occupy the process for the transport's generous default.
-            agent: ureq::Agent::new_with_config(
-                ureq::Agent::config_builder()
-                    .http_status_as_error(false)
-                    // A 3xx is off-script: an https URL a person typed is the address topos
-                    // fetches, not the start of a chain it follows somewhere else.
-                    .max_redirects(0)
-                    .timeout_global(Some(Duration::from_secs(MCP_FETCH_TIMEOUT_SECS)))
-                    .build(),
-            ),
-            progress: Rc::new(progress::Silent),
-        }
-    }
-
-    /// Attach the invocation's activity sink (the composition root's). Without it the transport is
-    /// silent, which is exactly what the unit tests and fixtures want.
-    pub(crate) fn with_progress(mut self, progress: Rc<dyn ProgressSink>) -> Self {
-        self.progress = progress;
-        self
-    }
-}
-
-/// The whole exchange's ceiling — connect, headers, and body together.
-const MCP_FETCH_TIMEOUT_SECS: u64 = 15;
-
-impl crate::ops::McpDocSource for UreqMcpSource {
-    fn fetch(&self, url: &str) -> Result<Vec<u8>, ClientError> {
-        let host = url_host(url).unwrap_or("the server").to_owned();
-        // https only — the caller's shape check already decided this, and repeating it here is the
-        // last-line guard before a request is made.
-        if !url.starts_with("https://") {
-            return Err(ClientError::RemoteFetch {
-                msg: format!("{url} — a server.json is fetched over https only"),
-                fault: FetchFault::Gone,
-            });
-        }
-        let resp = self
-            .agent
-            .get(url)
-            .header("User-Agent", USER_AGENT)
-            .header("Accept", "application/json")
-            .call()
-            .map_err(|e| ClientError::RemoteFetch {
-                msg: format!("{url} — {}", transport_reason(&host, &e)),
-                fault: transport_fault(&e),
-            })?;
-        let retry_after_ms = retry_after_ms(&resp);
-        let status = resp.status().as_u16();
-        match status {
-            200..=299 => {}
-            300..=399 => {
-                return Err(ClientError::RemoteFetch {
-                    msg: format!(
-                        "{url} — that address redirects; give the address it redirects to"
-                    ),
-                    fault: FetchFault::Gone,
-                });
-            }
-            404 => {
-                return Err(ClientError::RemoteFetch {
-                    msg: format!("{url} — no server document there (HTTP 404)"),
-                    fault: FetchFault::Gone,
-                });
-            }
-            s => {
-                return Err(ClientError::RemoteFetch {
-                    msg: format!("{url} — {}", status_reason(&host, s)),
-                    fault: FetchFault::Unavailable { retry_after_ms },
-                });
-            }
-        }
-        // The document cap is the SAME one the web tier enforces — a server.json is a page of
-        // text, never a payload, and the stream is cut the moment it goes over. The two ways that
-        // read can end badly are OPPOSITE answers: an oversized document is a permanent fact about
-        // this address (retrying fetches the same bytes), while a stream that dies mid-body is the
-        // transport's transient fault, and only the second is worth trying again.
-        let limit = u64::try_from(crate::mcp_validate::MAX_SERVER_JSON_BYTES).unwrap_or(u64::MAX);
-        read_server_json(resp, &*self.progress, limit).map_err(|fault| match fault {
-            ServerJsonFault::TooLarge => ClientError::RemoteFetch {
-                msg: format!(
-                    "{url} — too large to be a server.json (the cap is {} KB)",
-                    limit / 1024
-                ),
-                fault: FetchFault::Gone,
-            },
-            ServerJsonFault::CutShort => ClientError::RemoteFetch {
-                msg: format!("{url} — the download was cut short"),
-                fault: FetchFault::unavailable(),
-            },
-        })
-    }
-}
-
-/// The two ways reading a fetched server document ends badly — kept apart because they are
-/// opposite answers (see the caller).
-#[derive(Debug, PartialEq, Eq)]
-enum ServerJsonFault {
-    /// The body went past the document cap.
-    TooLarge,
-    /// The stream died mid-body.
-    CutShort,
-}
-
-/// Read a fetched server document under the gate's own byte cap, reporting bytes as they arrive
-/// like every other body read.
-///
-/// The cap is enforced HERE, in the loop, rather than by the transport's limiter: that limiter
-/// answers ONE error for an over-cap body and a broken stream alike, and it refuses a body that
-/// merely REACHES the cap — a document of exactly [`crate::mcp_validate::MAX_SERVER_JSON_BYTES`]
-/// bytes, which the gate itself accepts. Nothing past the cap is ever buffered: the read returns
-/// at the first byte over.
-fn read_server_json(
-    resp: ureq::http::Response<ureq::Body>,
-    progress: &dyn ProgressSink,
-    limit: u64,
-) -> Result<Vec<u8>, ServerJsonFault> {
-    use std::io::Read;
-
-    let body = resp.into_body();
-    let total = body.content_length();
-    let mut reader = body.into_with_config().limit(u64::MAX).reader();
-    let mut out: Vec<u8> = Vec::new();
-    let mut buf = vec![0u8; STREAM_CHUNK_BYTES];
-    loop {
-        match reader.read(&mut buf) {
-            Ok(0) => break,
-            Ok(n) => {
-                out.extend_from_slice(&buf[..n]);
-                let done = u64::try_from(out.len()).unwrap_or(u64::MAX);
-                if done > limit {
-                    return Err(ServerJsonFault::TooLarge);
-                }
-                progress.bytes(done, total);
-            }
-            // An interrupted read is retried, exactly as the shared body reader does — a signal
-            // during a download is not a transport fault.
-            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
-            Err(_) => return Err(ServerJsonFault::CutShort),
-        }
-    }
-    Ok(out)
-}
-
-/// The host part of an `https://…` URL, for the transport messages.
-fn url_host(url: &str) -> Option<&str> {
-    let rest = url.strip_prefix("https://")?;
-    let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
-    let authority = &rest[..end];
-    let host = authority.rsplit('@').next()?;
-    (!host.is_empty()).then_some(host)
-}
-
 /// A GitHub owner/repo path segment: ASCII alphanumerics + `.`, `_`, `-`, non-empty — the last-line guard
 /// before splicing into the request path (mirrors [`ensure_url_safe_ids`]).
 fn is_repo_seg(s: &str) -> bool {
@@ -2553,35 +2382,6 @@ mod tests {
         let ok = read_body_reported_limited(measured_response(vec![7u8; 511]), &rec, 0, true, 512)
             .expect("a body under the cap reads");
         assert_eq!(ok.len(), 511);
-    }
-
-    /// A server document that goes over the cap is a PERMANENT answer about that address, said in
-    /// its own words — never folded in with a stream that died, which is worth retrying. And a
-    /// document sitting exactly ON the cap is one the gate accepts, so the fetch must hand it over.
-    #[test]
-    fn an_oversized_server_document_is_its_own_answer() {
-        let rec = Recorder::default();
-        assert_eq!(
-            read_server_json(measured_response(vec![b'x'; 4096]), &rec, 512),
-            Err(ServerJsonFault::TooLarge)
-        );
-        // Nothing past the cap is buffered: the read returns at the first byte over.
-        assert!(
-            rec.reports.borrow().iter().all(|(done, _)| *done <= 512),
-            "{:?}",
-            rec.reports.borrow()
-        );
-        let rec = Recorder::default();
-        let ok = read_server_json(measured_response(vec![b'x'; 512]), &rec, 512)
-            .expect("a document exactly at the cap is the one the gate accepts");
-        assert_eq!(ok.len(), 512);
-        let rec = Recorder::default();
-        assert_eq!(
-            read_server_json(measured_response(vec![b'x'; 511]), &rec, 512)
-                .expect("under the cap reads")
-                .len(),
-            511
-        );
     }
 
     #[test]

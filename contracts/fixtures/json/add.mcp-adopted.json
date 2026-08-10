@@ -11,7 +11,7 @@
         "Cursor"
       ],
       "auth": "oauth",
-      "bundle": "/home/ada/.topos/mcp/weather",
+      "bundle": "/home/ada/work/team-weather",
       "description": "Current conditions and forecasts for a named place.",
       "headers": [
         "X-Region"
@@ -21,15 +21,15 @@
       "url": "https://weather.acme.example/mcp",
       "version": "1.4.0"
     },
-    "name": "weather",
-    "note": "MCP server io.github.acme/weather v1.4.0 — https://weather.acme.example/mcp over streamable-http, auth oauth · cursor: server entry in /home/ada/.cursor/mcp.json — restart Cursor",
-    "reference": "/home/ada/.topos/mcp/weather",
+    "name": "team-weather",
+    "note": "MCP server io.github.acme/weather v1.4.0 — https://weather.acme.example/mcp over streamable-http, auth oauth · /home/ada/.cursor/mcp.json: server entry — restart Cursor",
+    "reference": "/home/ada/work/team-weather",
     "tracked": true,
     "undo": [
       "topos",
       "remove",
       "-g",
-      "/home/ada/.topos/mcp/weather"
+      "/home/ada/work/team-weather"
     ]
   },
   "warnings": [],
@@ -40,7 +40,7 @@
         "topos",
         "remove",
         "-g",
-        "/home/ada/.topos/mcp/weather"
+        "/home/ada/work/team-weather"
       ],
       "mutates": true,
       "risk_note": "removes the MCP server from this machine (a workspace-published server keeps its canonical bytes)"

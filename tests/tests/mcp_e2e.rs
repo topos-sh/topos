@@ -1,5 +1,5 @@
 //! The composed MCP-BUNDLE loop, over real HTTP against the real web app and the real `topos`
-//! binary: an author adopts a local `server.json` folder (`add --mcp`) and publishes it as a
+//! binary: an author adopts a local `server.json` folder (`add --kind mcp`) and publishes it as a
 //! `kind = "mcp"` catalog bundle; a second member's session sweeps and the server lands as a
 //! config entry in ALL SIX MCP-capable agents, each in its own exact dialect; the applied report
 //! carries the per-agent states back to the workspace; a removal converges every surface back to
@@ -7,7 +7,7 @@
 //! and disclosed; and a project-scoped row reaches the four project surfaces alone.
 //!
 //! Like the conflict suite, this one drives the REAL CLI BINARY (`target/<profile>/topos`) as a
-//! subprocess rather than the in-process fixture rig: `add --mcp`, the per-scope config converge
+//! subprocess rather than the in-process fixture rig: `add --kind mcp`, the per-scope config converge
 //! and the harness detection all resolve against `$HOME` / `$TOPOS_HOME`, so only a real process
 //! with a fake home proves them. The two halves share one installation — the fixture rig owns the
 //! browser login (the `/verify` approval), the binary owns every verb after it, both over the same
@@ -270,8 +270,11 @@ fn the_mcp_bundle_loop_across_six_agents() {
     write_server_bundle(&src);
 
     let added = author
-        .run(&root, &["add", "--mcp", "./team-weather", "-g", "--json"])
-        .data("add --mcp");
+        .run(
+            &root,
+            &["add", "--kind", "mcp", "./team-weather", "-g", "--json"],
+        )
+        .data("add --kind mcp");
     assert_eq!(
         added["name"], BUNDLE,
         "the folder name IS the bundle: {added}"
@@ -354,7 +357,10 @@ fn the_mcp_bundle_loop_across_six_agents() {
         "every MCP-capable agent reports: {swept}"
     );
     for (agent, state) in &states {
-        assert_eq!(state, "placed", "{agent} placed the entry: {swept}");
+        // A FIRST placement — nothing stood in any of the six configs before this sweep. The
+        // client's one outcome vocabulary tells that apart from rewriting an entry it already
+        // owned (`refreshed`), where both used to read `placed`.
+        assert_eq!(state, "created", "{agent} placed the entry: {swept}");
     }
 
     // Claude Code — a wholly topos-owned plugin DIR, both files rendered whole.

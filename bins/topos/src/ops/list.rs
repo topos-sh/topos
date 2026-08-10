@@ -34,8 +34,8 @@ use topos_harness::registry::{self, SkillScope};
 use topos_types::persisted::{ConflictReason, Lock, PlacementMap};
 use topos_types::results::{
     AgentView, AgentViewDir, AgentViewEntry, BucketTruncation, ListData, ListDetail, ListScope,
-    ListScopeSummary, RemoteAdoption, RemoteChannel, RemoteSkill, RemoteWorkspace, SkillEntry,
-    SkillStatus, StatusItemState, UntrackedEntry, UntrackedSummary,
+    ListScopeSummary, OrphanRecord, RemoteAdoption, RemoteChannel, RemoteSkill, RemoteWorkspace,
+    SkillEntry, SkillStatus, StatusItemState, UntrackedEntry, UntrackedSummary,
 };
 
 use crate::ctx::Ctx;
@@ -339,10 +339,19 @@ pub(crate) fn list_with(
         if page.is_active() {
             mark(section.scope, page.apply(&mut rows), &mut truncated);
         }
+        // Records nothing demands whose entries or folders still STAND. Deliberately not part of
+        // the row set — they are not inventory — and deliberately not shown under a filter, which
+        // is a question about named rows.
+        let orphans = if narrowed {
+            Vec::new()
+        } else {
+            standing_orphans(ctx, section, &rows)
+        };
         data.scopes.push(ListScope {
             scope: section.scope.to_owned(),
             manifest: manifest_display(ctx, section),
             rows,
+            orphans,
         });
     }
 
@@ -671,6 +680,105 @@ fn conflict_record(
 /// could come back to; a `[current]` column would report a comparison nobody makes. The edit is
 /// still SNAPSHOTTED into the store before the sweep overwrites it — recoverable, just never
 /// advertised as a state of the row.
+/// The records this scope's store holds that NOTHING demands any more, and whose bytes or config
+/// entries are still THERE.
+///
+/// The inventory is built from manifest rows, so a record with no row mints no line — the rule
+/// that keeps records from inventing inventory. It rests on an assumption the sweep breaks in one
+/// place: a record nothing demands is supposed to resolve on the next `update` and stop being
+/// topos's business. The orphan resolution deliberately passes over a record whose CONFIG ENTRIES
+/// still stand (they are placed, not abandoned) — so an MCP server whose row was deleted while a
+/// hand-edited entry survived sat live in an agent's config with no surface naming it and no
+/// command offered for it. This is the one line that names it.
+///
+/// Read-only and best-effort: an unreadable store, record or custody document yields nothing —
+/// a listing must not fail because of a record it was only checking on.
+fn standing_orphans(
+    ctx: &Ctx<'_>,
+    section: &ScopeResolution,
+    rows: &[SkillEntry],
+) -> Vec<OrphanRecord> {
+    let Some(layout) = scope_store(ctx, section) else {
+        return Vec::new();
+    };
+    let shown: HashSet<&str> = rows.iter().map(|r| r.skill.as_str()).collect();
+    let Ok(entries) = ctx.fs.read_dir(&layout.skills_dir()) else {
+        return Vec::new();
+    };
+    let sctx = super::pull::ctx_with_layout(ctx, &layout);
+    let mut out: Vec<OrphanRecord> = Vec::new();
+    for entry in entries {
+        let Some(id) = entry.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        // The built-in places itself with no row and is never orphaned.
+        if super::builtin::is_builtin(id) {
+            continue;
+        }
+        let Ok(sid) = crate::id::SkillId::parse(id) else {
+            continue;
+        };
+        if sidecar::record_retired(ctx.fs, &layout, &sid) {
+            continue; // already settled
+        }
+        let sp = layout.published(&sid);
+        let Ok(Some(lock)) = doc::read_doc::<Lock>(ctx.fs, &sp.lock) else {
+            continue; // an unreadable record is never judged
+        };
+        if shown.contains(lock.name.as_str()) {
+            continue; // a row in this very listing demands it
+        }
+        // WHAT IS STILL THERE — the config files its entries sit in, then the folders holding
+        // copies. A record with nothing standing needs no line: the next sweep retires it and
+        // the person never had to know.
+        let mut standing: Vec<String> = crate::config_custody::entries_of(ctx.fs, &layout, id)
+            .iter()
+            .map(|e| super::inventory::pretty(&sctx, Path::new(&e.file)))
+            .collect();
+        standing.dedup();
+        let config_placed = !standing.is_empty();
+        if let Ok(Some(map)) = doc::read_map(ctx.fs, &sp.map) {
+            standing.extend(
+                map.placements
+                    .iter()
+                    .enumerate()
+                    // The person's OWN adopted folder is not something topos put anywhere — it
+                    // was theirs before the row existed and stays theirs after. Listing it here
+                    // would report their own directory back to them as a leftover.
+                    .filter(|(i, _)| {
+                        !map.placement_state
+                            .get(*i)
+                            .is_some_and(|st| st.adopted_source)
+                    })
+                    .map(|(_, d)| d)
+                    .filter(|d| ctx.fs.exists(Path::new(d)))
+                    .map(|d| super::inventory::pretty(&sctx, Path::new(d))),
+            );
+        }
+        standing.dedup();
+        if standing.is_empty() {
+            continue;
+        }
+        out.push(OrphanRecord {
+            name: lock.name,
+            standing,
+            kind: config_placed.then(|| crate::bundle_kind::BundleKind::Mcp.as_str().to_owned()),
+        });
+    }
+    out.sort_by(|a, b| a.name.cmp(&b.name));
+    out
+}
+
+/// The STORE a scope section's records live in — the machine's for the machine section, the
+/// checkout's own for a project section.
+fn scope_store(ctx: &Ctx<'_>, section: &ScopeResolution) -> Option<sidecar::Layout> {
+    if section.scope == "machine" {
+        return Some(ctx.layout.clone());
+    }
+    let dir = section.manifest_path.as_deref()?.parent()?;
+    sidecar::existing_project_store(ctx.fs, dir)
+}
+
 fn builtin_entry(ctx: &Ctx<'_>) -> Option<SkillEntry> {
     let (lock, _) = builtin_record(ctx)?;
     Some(SkillEntry {

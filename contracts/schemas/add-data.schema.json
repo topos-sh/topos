@@ -30,6 +30,13 @@
         "type": "string"
       }
     },
+    "dest_resolved": {
+      "description": "Where those destinations RESOLVED to on this machine, when that differs from how the\nmanifest spells them.\n\n`dest` is the row's own spelling and must stay it — a manifest line is portable, and\n`~/.codex/config.toml` is what belongs in the file. But an env override (`$CODEX_HOME`,\n`$XDG_CONFIG_HOME`, `$CLAUDE_CONFIG_DIR`) moves where that spelling actually lands, and a\nreceipt naming the default pointed at a file that does not exist on the machine it was\nprinted on. Empty ⇒ nothing moved and the row's own spelling IS the resolved one.\n**INFERRED** (additive-only).",
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
     "display": {
       "description": "The workspace-qualified display name the receipt leads with (`@<ws>/<name>` at the\nmachine's one connected host, else `<host>/<ws>/<name>`). Absent for a non-workspace\nsource. **INFERRED** (additive-only).",
       "type": [
@@ -74,7 +81,7 @@
       ]
     },
     "mcp": {
-      "description": "The MCP SERVER this add landed (`add --mcp`, or a subscribe to a workspace `mcp`\nbundle): what the gated document says it is, the endpoint every agent will call, and the\nagents the converge reached — typed, so a JSON consumer never parses the prose note.\nAbsent for every other add, and for a workspace subscribe whose delivery has not landed\nthe document yet. **INFERRED** (additive-only).",
+      "description": "The MCP SERVER this add landed (`add --kind mcp`, or a subscribe to a workspace `mcp`\nbundle): what the gated document says it is, the endpoint every agent will call, and the\nagents the converge reached — typed, so a JSON consumer never parses the prose note.\nAbsent for every other add, and for a workspace subscribe whose delivery has not landed\nthe document yet. **INFERRED** (additive-only).",
       "anyOf": [
         {
           "$ref": "#/$defs/McpServerSummary"

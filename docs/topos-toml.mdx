@@ -139,7 +139,7 @@ is just a folder, so a row pointing at one holding a `server.json` says what it 
 "~/servers/linear" = { kind = "mcp", dest = ["~/.cursor/mcp.json", "~/.codex/config.toml"] }
 ```
 
-`topos add --mcp ./tools/weather` writes the first line; the folder's `server.json` is the whole
+`topos add --kind mcp ./tools/weather` writes the first line; the folder's `server.json` is the whole
 bundle, and it lands as an entry in each agent's MCP config rather than as a skill folder — see
 [MCP servers](/docs/mcp).
 
@@ -164,7 +164,7 @@ that set refuses, because its format must be known to edit it.
 | `topos add <ref>` | adds one line to the nearest `topos.toml` at or above this folder — with none covering it, refuses |
 | `topos add <ref> -g` | adds one line to `~/.topos/topos.toml` |
 | `topos add ./folder` | adds `"./folder" = "*"` — relative when the folder sits under the file's own folder, absolute when it doesn't |
-| `topos add --mcp <source>` | adds one line carrying `{ kind = "mcp" }` — for a fetched server, after writing its `server.json` out as a folder |
+| `topos add --kind mcp ./folder` | adds one line carrying `{ kind = "mcp" }` |
 | `topos add -g @acme` | adds `"topos.sh/acme" = "*"` |
 | `topos add -g <skill>` when an `"off"` line stands | deletes the `"off"` line |
 | `topos remove <skill>` | drops that line — or splits the channel/repo line carrying it |

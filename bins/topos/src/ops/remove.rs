@@ -315,6 +315,7 @@ fn retire_mcp_entries(ctx: &Ctx<'_>, skill_id: &str, item: &mut RemoveItem) {
         &topos_harness::mcp::descriptor::mcp_harnesses(),
         &detected,
         skill_id,
+        &item.name,
     );
     // A DRIFTED entry is left in place, so its custody row survives this removal — and the caller
     // is about to delete the record that holds it. Move those rows to the scope document first, or
@@ -323,20 +324,24 @@ fn retire_mcp_entries(ctx: &Ctx<'_>, skill_id: &str, item: &mut RemoveItem) {
     // takes them out.
     let detach_warnings = crate::mcp_engine::detach_bundle_rows(&io, skill_id);
     // Keyed by the config FILE the entry lived in — receipts speak in destinations, never agents.
-    let mut lines: Vec<String> = outcome
-        .removed
-        .iter()
-        .map(|removed| {
-            let file = removed.state.file.as_deref().map_or_else(
-                || "its config".to_owned(),
-                |f| super::inventory::pretty(ctx, std::path::Path::new(f)),
-            );
-            match removed.state.state.as_str() {
-                "drifted" => format!("{file}: hand-edited entry left in place"),
-                _ => format!("{file}: server entry removed"),
+    // ORDER IS THE MESSAGE — the same rule the manifest arm follows: a hand-edited entry
+    // SURVIVING the removal is the fact a person must not miss, so it leads, wherever the
+    // harness table happened to put its agent.
+    let mut lines: Vec<String> = Vec::with_capacity(outcome.removed.len());
+    let mut gone: Vec<String> = Vec::new();
+    for removed in &outcome.removed {
+        let file = removed.state.file.as_deref().map_or_else(
+            || "its config".to_owned(),
+            |f| super::inventory::pretty(ctx, std::path::Path::new(f)),
+        );
+        match removed.state.state {
+            topos_types::results::TargetOutcome::Drifted => {
+                lines.push(format!("{file}: hand-edited entry left in place"));
             }
-        })
-        .collect();
+            _ => gone.push(format!("{file}: server entry removed")),
+        }
+    }
+    lines.extend(gone);
     lines.extend(outcome.notices.iter().cloned());
     lines.extend(outcome.warnings.iter().cloned());
     // A detach that could not take the lock or write the scope document has LOST custody of a
@@ -346,9 +351,10 @@ fn retire_mcp_entries(ctx: &Ctx<'_>, skill_id: &str, item: &mut RemoveItem) {
     if lines.is_empty() {
         return;
     }
-    let folded = lines.join(" · ");
+    // ONE CLAUSE PER LINE — the renderer leads with the first and indents the rest.
+    let folded = lines.join("\n");
     item.note = Some(match item.note.take() {
-        Some(prev) => format!("{prev} · {folded}"),
+        Some(prev) => format!("{prev}\n{folded}"),
         None => folded,
     });
 }
@@ -546,7 +552,7 @@ fn untracked(
         Some(a) => format!("{name}@{a}"),
         None => name.to_owned(),
     };
-    match super::resolve_add_target(ctx, roots, &target) {
+    match super::resolve_add_target(ctx, roots, &target, "remove") {
         Ok((dir, resolved)) => Ok(Removal::Untracked {
             name: resolved,
             dir,

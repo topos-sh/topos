@@ -13,8 +13,15 @@ import { harnessTone } from "@/routes/sessions";
  */
 
 describe("harness state → chip tone", () => {
-  it("names a machine that holds the entry as good", () => {
-    expect(harnessTone("current")).toBe("verified");
+  it.each([
+    "current",
+    "created",
+    "refreshed",
+  ])("names a machine that holds the entry as good (%s)", (state) => {
+    // `created`/`refreshed` replaced the client's single `placed` when it unified its outcome
+    // vocabulary. An entry topos just wrote is in order, so it reads like one — before this it
+    // fell through to the unknown-word arm and a freshly placed server looked unremarkable.
+    expect(harnessTone(state)).toBe("verified");
   });
 
   it.each(["drifted", "unprovable", "conflicting"])("marks %s as wanting attention", (state) => {

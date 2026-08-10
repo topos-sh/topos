@@ -35,7 +35,9 @@ use topos_gitstore::Store;
 use topos_types::PERSISTED_SCHEMA_VERSION;
 use topos_types::persisted::{Lock, PlacementMap, SwapCapability, SyncState};
 use topos_types::requests::{WireChannelIndex, WireSkillIndex, WireSkillIndexEntry};
-use topos_types::results::{ExchangeFault, PullAction, PullData, PullSkill, WorkspaceSyncReport};
+use topos_types::results::{
+    ExchangeFault, PullAction, PullData, PullSkill, TargetOutcome, WorkspaceSyncReport,
+};
 use topos_types::{CurrentRecord, PointerScope, WIRE_SCHEMA_VERSION, WireCurrentRecord};
 
 use crate::bundle_kind::BundleKind;
@@ -416,6 +418,13 @@ struct Sweep {
     /// They ride the same `--json` `warnings` array (one stable machine channel) but are never
     /// counted as failures.
     disclosures: Vec<String>,
+    /// The BUNDLES this sweep could not carry forward — written by, and only by, the two
+    /// per-bundle failure recorders ([`note_item_failure`] and pull's twin). It is what the
+    /// receipt counts as failed, because `warnings` is a LINE channel and a line is not a
+    /// bundle: a scope-level fault (an unavailable lock, an unreadable custody document) is one
+    /// line about no bundle at all, and counting lines made the summary invent bundles that do
+    /// not exist and then report them failed.
+    failed_bundles: std::collections::BTreeSet<String>,
     /// ADVISORIES — real `warning:` lines about a row that still DELIVERED (an unknown MCP dest
     /// entry dropped from a bundle's narrowing). They ride the same `--json` `warnings` array and
     /// print with the warnings, but the summary never counts them: the bundle they annotate has
@@ -1723,6 +1732,7 @@ pub(crate) fn manifest_update(
             behind_elsewhere,
         },
         warnings: sweep.warnings,
+        failed_bundles: sweep.failed_bundles,
         decisions: sweep.decisions,
         advisories: sweep.advisories,
         disclosures: sweep.disclosures,
@@ -2026,7 +2036,14 @@ fn reconcile_thing<'a>(
                 let mut row_index = None;
                 if !converge_pending_governance(env, &dir, sweep) {
                     row_index = Some(sweep.next_row_index());
-                    sweep.push(plain_row(&display, PullAction::UpToDate, None, &sc.label));
+                    let mut r = plain_row(&display, PullAction::UpToDate, None, &sc.label);
+                    // An adopted folder the person is still editing is a DRAFT, and this row is
+                    // the one `update` prints about it. Delivery owed it nothing — which is why
+                    // the row reads `up to date` — but `list` calls it a draft and `status`
+                    // counts it as one, and a receipt that stayed silent made three surfaces
+                    // disagree about one machine.
+                    r.draft = local_row_drafted(env, sc, &dir);
+                    sweep.push(r);
                 }
                 // A `kind = "mcp"` path row: the dir IS the bundle (`server.json` at its root) —
                 // adopted-path custody as ever, no skill placement; the demand feeds the scope's
@@ -2041,9 +2058,19 @@ fn reconcile_thing<'a>(
                     converge_local_dest(env, sc, &dir, &display, &dest, sweep);
                 }
             } else {
+                // The remediation is SCOPE-EXACT, like every other command this CLI offers: the
+                // row lives in one file, and `remove` without `-g` edits the other one. The
+                // command used to be spelled the same whichever file carried the row, so on the
+                // machine-wide file it refused — leaving the only named way out of a permanent
+                // warning as a command that could not clear it.
+                let g = if matches!(sc.scope, ResolvedScope::Person) {
+                    " -g"
+                } else {
+                    ""
+                };
                 sweep.warnings.push(format!(
-                    "PATH_MISSING {}: \"{raw}\" — the folder is gone; `topos remove {raw}` drops \
-                     the row",
+                    "PATH_MISSING {}: \"{raw}\" — the folder is gone; `topos remove{g} {raw}` \
+                     drops the row",
                     sc.label
                 ));
                 if row.value.declared_kind() == Some(BundleKind::Mcp) {
@@ -2155,7 +2182,7 @@ impl DestNarrowing {
 }
 
 /// The ONE resolution of an MCP demand's dest-file narrowing — shared by the sweep (through
-/// [`mcp_filter`]) and `add --mcp`'s inline converge, so the add can never fan out past what
+/// [`mcp_filter`]) and `add --kind mcp`'s inline converge, so the add can never fan out past what
 /// the next sweep would keep. Each entry is matched against the descriptor table's config-file
 /// spellings for the scope (default spelling, or the resolved env-override path); an entry no
 /// harness claims is dropped from the narrowing and reported back in `unknown` — this resolution
@@ -2194,7 +2221,7 @@ pub(crate) fn mcp_dest_narrowing(
 
 /// The custody identity of a LOCAL `kind = "mcp"` row: the tracked skill id when THIS SCOPE'S
 /// OWN store records the dir (custody survives a later publish, which keeps the id), else a
-/// name-keyed local identity. ONLY the scope's store is asked — the same rule `add --mcp`'s
+/// name-keyed local identity. ONLY the scope's store is asked — the same rule `add --kind mcp`'s
 /// inline converge minted the config key under — because the OTHER scope may track the same
 /// folder under its own id, and answering with it would retire this scope's standing key and
 /// re-mint a suffixed one: the one way a config entry's name could move, stranding any OAuth
@@ -2216,6 +2243,27 @@ fn local_bundle_identity(env: &Env<'_>, sc: &ScopeCtx<'_>, dir: &Path, display: 
                 .flatten()
         })
         .unwrap_or_else(|| format!("local:{display}"))
+}
+
+/// Whether the record a LOCAL path row tracks carries local edits — the same scan `list` and
+/// `status` read, over the store that owns the record (the scope's own, not always the home's).
+/// Best-effort: an unresolvable record or an unreadable map reads as "no draft", exactly like the
+/// other two surfaces, so the three never disagree by construction.
+fn local_row_drafted(env: &Env<'_>, sc: &ScopeCtx<'_>, dir: &Path) -> bool {
+    let scope_layout = match &sc.scope {
+        ResolvedScope::Person => Some(env.ctx.layout.clone()),
+        ResolvedScope::Project { dir: project_dir } => {
+            sidecar::existing_project_store(env.ctx.fs, project_dir)
+        }
+    };
+    let Some((canonical, layout)) = dir.canonicalize().ok().zip(scope_layout) else {
+        return false;
+    };
+    let sctx = super::pull::ctx_with_layout(env.ctx, &layout);
+    let Ok(Some(id)) = super::add::tracked_skill_at(&sctx, &canonical) else {
+        return false;
+    };
+    SkillId::parse(&id).is_ok_and(|sid| super::store_has_draft(&sctx, &sid))
 }
 
 /// Feed the scope's MCP demand list from a LOCAL path row: `server.json` read straight from the
@@ -2271,7 +2319,13 @@ fn local_mcp_demand(
                 .insert(bundle_id);
         }
         Err(e) => {
-            note_item_failure(env.ctx, &mut sweep.warnings, display, &e.into());
+            note_item_failure(
+                env.ctx,
+                &mut sweep.warnings,
+                &mut sweep.failed_bundles,
+                display,
+                &e.into(),
+            );
             sweep
                 .mcp_hold
                 .entry(sc.label.clone())
@@ -2624,7 +2678,13 @@ fn reconcile_feed<'a>(
                         row_index = Some(sweep.next_row_index());
                         sweep.push(row);
                     }
-                    Err(e) => note_item_failure(env.ctx, &mut sweep.warnings, &ds.name, &e),
+                    Err(e) => note_item_failure(
+                        env.ctx,
+                        &mut sweep.warnings,
+                        &mut sweep.failed_bundles,
+                        &ds.name,
+                        &e,
+                    ),
                 }
                 if mcp {
                     push_stored_mcp_demand(
@@ -2802,7 +2862,13 @@ fn sync_workspace_skill<'a>(
         Some(dir) => match sidecar::ensure_project_store(ctx.fs, dir) {
             Ok(layout) => layout,
             Err(e) => {
-                note_item_failure(ctx, &mut sweep.warnings, &target.name, &e);
+                note_item_failure(
+                    ctx,
+                    &mut sweep.warnings,
+                    &mut sweep.failed_bundles,
+                    &target.name,
+                    &e,
+                );
                 return;
             }
         },
@@ -2909,7 +2975,13 @@ fn sync_workspace_skill<'a>(
             &plan,
             target.bundle_digest.as_ref(),
         ) {
-            note_item_failure(ctx, &mut sweep.warnings, &target.name, &e);
+            note_item_failure(
+                ctx,
+                &mut sweep.warnings,
+                &mut sweep.failed_bundles,
+                &target.name,
+                &e,
+            );
             return;
         }
     }
@@ -2988,7 +3060,13 @@ fn sync_workspace_skill<'a>(
             row_index = Some(sweep.next_row_index());
             sweep.push(row);
         }
-        Err(e) => note_item_failure(ctx, &mut sweep.warnings, &target.name, &e),
+        Err(e) => note_item_failure(
+            ctx,
+            &mut sweep.warnings,
+            &mut sweep.failed_bundles,
+            &target.name,
+            &e,
+        ),
     }
     // DEST-FROZEN convergence (skill rows with `dest` only): a hand-edited dest change converges
     // on this update. GROW already landed through the plan above — disclose it as the install it
@@ -3053,7 +3131,13 @@ fn converge_dest_freeze(
     let guard = match crate::sidecar::lock_skill(run_ctx.fs, &run_ctx.layout, sid) {
         Ok(g) => g,
         Err(e) => {
-            note_item_failure(env.ctx, &mut sweep.warnings, display, &e);
+            note_item_failure(
+                env.ctx,
+                &mut sweep.warnings,
+                &mut sweep.failed_bundles,
+                display,
+                &e,
+            );
             return;
         }
     };
@@ -3139,7 +3223,13 @@ fn converge_dest_freeze(
             sweep.push(row);
         }
         Ok(None) => {}
-        Err(e) => note_item_failure(env.ctx, &mut sweep.warnings, display, &e),
+        Err(e) => note_item_failure(
+            env.ctx,
+            &mut sweep.warnings,
+            &mut sweep.failed_bundles,
+            display,
+            &e,
+        ),
     }
     drop(guard);
 }
@@ -3179,7 +3269,13 @@ fn converge_local_dest(
         return;
     };
     if let Err(e) = local_dest_apply(&sctx, sc, &sid, display, dest, sweep) {
-        note_item_failure(env.ctx, &mut sweep.warnings, display, &e);
+        note_item_failure(
+            env.ctx,
+            &mut sweep.warnings,
+            &mut sweep.failed_bundles,
+            display,
+            &e,
+        );
     }
 }
 
@@ -3290,7 +3386,13 @@ fn local_dest_apply(
                 sweep.push(row);
             }
             Ok(None) => {}
-            Err(e) => note_item_failure(ctx, &mut sweep.warnings, display, &e),
+            Err(e) => note_item_failure(
+                ctx,
+                &mut sweep.warnings,
+                &mut sweep.failed_bundles,
+                display,
+                &e,
+            ),
         }
     }
     Ok(())
@@ -3335,7 +3437,13 @@ fn push_stored_mcp_demand(
                 .insert(sid.as_str().to_owned());
         }
         Err(e) => {
-            note_item_failure(env.ctx, &mut sweep.warnings, name, &e);
+            note_item_failure(
+                env.ctx,
+                &mut sweep.warnings,
+                &mut sweep.failed_bundles,
+                name,
+                &e,
+            );
             sweep
                 .mcp_hold
                 .entry(sc.label.clone())
@@ -3398,7 +3506,13 @@ fn converge_pending_governance(env: &Env<'_>, dir: &Path, sweep: &mut Sweep) -> 
         // The row was removed while this converge ran — a completed removal is never re-added.
         Ok(super::GovernedOutcome::RowRemoved { .. } | super::GovernedOutcome::None) => false,
         Err(e) => {
-            note_item_failure(ctx, &mut sweep.warnings, &lock.name, &e);
+            note_item_failure(
+                ctx,
+                &mut sweep.warnings,
+                &mut sweep.failed_bundles,
+                &lock.name,
+                &e,
+            );
             false
         }
     }
@@ -3683,7 +3797,13 @@ fn reconcile_repo_set(
             Err(e) => {
                 // Ending here is the point: falling through to the archive would pay a second
                 // round-trip for an answer the first one already failed to get.
-                note_item_failure(env.ctx, &mut sweep.warnings, &row.reference, &e);
+                note_item_failure(
+                    env.ctx,
+                    &mut sweep.warnings,
+                    &mut sweep.failed_bundles,
+                    &row.reference,
+                    &e,
+                );
                 converge_in_place(sweep, targets);
                 return;
             }
@@ -3703,7 +3823,13 @@ fn reconcile_repo_set(
     let targz = match lane.fetch(&origin, &git_ref, &spec) {
         Ok(t) => t,
         Err(e) => {
-            note_item_failure(env.ctx, &mut sweep.warnings, &row.reference, &e);
+            note_item_failure(
+                env.ctx,
+                &mut sweep.warnings,
+                &mut sweep.failed_bundles,
+                &row.reference,
+                &e,
+            );
             converge_in_place(sweep, targets);
             return;
         }
@@ -3714,7 +3840,13 @@ fn reconcile_repo_set(
             // An archive that arrived and would not decode is a FAILED check, not a passed one:
             // the request succeeded, the answer did not.
             lane.note_fault(&origin, &git_ref, &e);
-            note_item_failure(env.ctx, &mut sweep.warnings, &row.reference, &e);
+            note_item_failure(
+                env.ctx,
+                &mut sweep.warnings,
+                &mut sweep.failed_bundles,
+                &row.reference,
+                &e,
+            );
             converge_in_place(sweep, targets);
             return;
         }
@@ -3786,7 +3918,13 @@ fn reconcile_repo_set(
         ) {
             Ok(Some(name)) => sweep.push(plain_row(&name, PullAction::Withdrawn, None, &sc.label)),
             Ok(None) => {}
-            Err(e) => note_item_failure(env.ctx, &mut sweep.warnings, &import.lock.name, &e),
+            Err(e) => note_item_failure(
+                env.ctx,
+                &mut sweep.warnings,
+                &mut sweep.failed_bundles,
+                &import.lock.name,
+                &e,
+            ),
         }
     }
     let decisions_before = sweep.decisions.len();
@@ -3936,7 +4074,13 @@ fn reconcile_repo_skill(
         let head = match lane.probe(&origin, &git_ref, &spec) {
             Ok(h) => h,
             Err(e) => {
-                note_item_failure(env.ctx, &mut sweep.warnings, &row.reference, &e);
+                note_item_failure(
+                    env.ctx,
+                    &mut sweep.warnings,
+                    &mut sweep.failed_bundles,
+                    &row.reference,
+                    &e,
+                );
                 // Only a TRACKED copy has something to converge; the not-installed-yet line would
                 // be a second, weaker sentence about the failure just reported.
                 if tracked.is_some() {
@@ -3965,7 +4109,13 @@ fn reconcile_repo_skill(
     let targz = match lane.fetch(&origin, &git_ref, &spec) {
         Ok(t) => t,
         Err(e) => {
-            note_item_failure(env.ctx, &mut sweep.warnings, &row.reference, &e);
+            note_item_failure(
+                env.ctx,
+                &mut sweep.warnings,
+                &mut sweep.failed_bundles,
+                &row.reference,
+                &e,
+            );
             if tracked.is_some() {
                 converge_in_place(sweep);
             }
@@ -3978,7 +4128,13 @@ fn reconcile_repo_skill(
         Ok(t) => t,
         Err(e) => {
             lane.note_fault(&origin, &git_ref, &e);
-            note_item_failure(env.ctx, &mut sweep.warnings, &row.reference, &e);
+            note_item_failure(
+                env.ctx,
+                &mut sweep.warnings,
+                &mut sweep.failed_bundles,
+                &row.reference,
+                &e,
+            );
             if tracked.is_some() {
                 converge_in_place(sweep);
             }
@@ -4189,7 +4345,13 @@ fn install_or_refresh_repo_skill(
     if let ResolvedScope::Project { dir } = &sc.scope
         && let Err(e) = sidecar::ensure_project_store(env.ctx.fs, dir)
     {
-        note_item_failure(env.ctx, &mut sweep.warnings, name, &e);
+        note_item_failure(
+            env.ctx,
+            &mut sweep.warnings,
+            &mut sweep.failed_bundles,
+            name,
+            &e,
+        );
         return;
     }
     let mut landed: Option<String> = None;
@@ -4217,7 +4379,13 @@ fn install_or_refresh_repo_skill(
             // choice is the person's. It is stated ONCE, as a decision row — a second slot
             // blocked on the same edits is the same unanswered question, not a second one.
             Ok(RefreshOutcome::BlockedByEdits) => blocked = true,
-            Err(e) => note_item_failure(env.ctx, &mut sweep.warnings, name, &e),
+            Err(e) => note_item_failure(
+                env.ctx,
+                &mut sweep.warnings,
+                &mut sweep.failed_bundles,
+                name,
+                &e,
+            ),
         }
     }
     if let Some(name) = landed {
@@ -4844,7 +5012,7 @@ fn run_mcp_converge(
                 .file
                 .as_deref()
                 .map(|f| super::inventory::pretty(env.ctx, Path::new(f)));
-            let list = if removed.state.state == "drifted" {
+            let list = if removed.state.state == TargetOutcome::Drifted {
                 &mut entry.1
             } else {
                 &mut entry.0
@@ -4856,7 +5024,7 @@ fn run_mcp_converge(
             }
         }
         for removed in &outcome.removed {
-            if removed.state.state != "drifted" {
+            if removed.state.state != TargetOutcome::Drifted {
                 continue;
             }
             if left
@@ -4958,8 +5126,8 @@ fn run_mcp_converge(
             // receipt above keeps the distinction, which is where it means something.
             let entry = merged.entry(bundle.bundle_id).or_default();
             for mut state in bundle.states {
-                if state.state == "placed" {
-                    state.state = "current".to_owned();
+                if state.state.wrote() {
+                    state.state = TargetOutcome::Current;
                 }
                 let replace = person_scope || !entry.iter().any(|s| s.agent == state.agent);
                 if replace {
@@ -5074,7 +5242,13 @@ fn clean_undemanded(
                             sweep.push(row);
                         }
                         Ok(None) => {}
-                        Err(e) => note_item_failure(ctx, &mut sweep.warnings, skill_id, &e),
+                        Err(e) => note_item_failure(
+                            ctx,
+                            &mut sweep.warnings,
+                            &mut sweep.failed_bundles,
+                            skill_id,
+                            &e,
+                        ),
                     }
                 } else {
                     match withdraw_person_scope(ctx, &sid) {
@@ -5084,7 +5258,13 @@ fn clean_undemanded(
                             Some(run.session.workspace_id.clone()),
                             &label,
                         )),
-                        Err(e) => note_item_failure(ctx, &mut sweep.warnings, skill_id, &e),
+                        Err(e) => note_item_failure(
+                            ctx,
+                            &mut sweep.warnings,
+                            &mut sweep.failed_bundles,
+                            skill_id,
+                            &e,
+                        ),
                     }
                 }
             }
@@ -5107,7 +5287,13 @@ fn clean_undemanded(
                     sweep.push(row);
                 }
                 Ok(None) => {}
-                Err(e) => note_item_failure(ctx, &mut sweep.warnings, &import.lock.name, &e),
+                Err(e) => note_item_failure(
+                    ctx,
+                    &mut sweep.warnings,
+                    &mut sweep.failed_bundles,
+                    &import.lock.name,
+                    &e,
+                ),
             }
         }
     }
@@ -5197,7 +5383,13 @@ fn clean_undemanded(
                 sweep.push(row);
             }
             Ok(None) => {}
-            Err(e) => note_item_failure(ctx, &mut sweep.warnings, &lock.name, &e),
+            Err(e) => note_item_failure(
+                ctx,
+                &mut sweep.warnings,
+                &mut sweep.failed_bundles,
+                &lock.name,
+                &e,
+            ),
         }
     }
 }
@@ -5378,7 +5570,13 @@ fn resolve_orphans(
             }
             // RETIRE FIRST, then say it — at-most-once presentation.
             if let Err(e) = sidecar::retire_record(ctx.fs, &layout, &sid, now_ms) {
-                note_item_failure(ctx, &mut sweep.warnings, &lock.name, &e);
+                note_item_failure(
+                    ctx,
+                    &mut sweep.warnings,
+                    &mut sweep.failed_bundles,
+                    &lock.name,
+                    &e,
+                );
                 continue;
             }
             let (recorded, present) = orphan_placements(ctx, &map);
@@ -5896,9 +6094,9 @@ fn clean_placements(
 ///
 /// TWO records are skipped outright. A RETIRED one is never re-projected: the sweep would not write
 /// it back, so a rebuild that dropped its dirs would be a plain delete of the person's own copies.
-/// And the BUILT-IN is force-synced from the binary at the top of every invocation — that sync IS
-/// its rebuild, and it has already run by the time this loop starts, so dropping its folder here
-/// deletes a dir nothing later in the same run puts back.
+/// And the BUILT-IN is not delivered from anywhere — the bare sweep force-syncs it from THIS BINARY,
+/// on its own, so it has no drift a rebuild could repair and dropping its folder here would only
+/// take away a dir this run never asked about.
 fn rebuild_store(ctx: &Ctx<'_>, layout: &crate::sidecar::Layout, sweep: &mut Sweep) {
     let Ok(entries) = ctx.fs.read_dir(&layout.skills_dir()) else {
         return;
@@ -6015,6 +6213,7 @@ fn plain_row(
         scope: Some(scope.to_owned()),
         harnesses: Vec::new(),
         kind: None,
+        draft: false,
     }
 }
 
@@ -6042,7 +6241,14 @@ fn not_connected_line(reference: &str, host: &str, workspace: &str) -> String {
 }
 
 /// Disclose one isolated per-item failure (stderr + diagnostics log + a stable warning).
-fn note_item_failure(ctx: &Ctx<'_>, warnings: &mut Vec<String>, name: &str, e: &ClientError) {
+fn note_item_failure(
+    ctx: &Ctx<'_>,
+    warnings: &mut Vec<String>,
+    failed: &mut std::collections::BTreeSet<String>,
+    name: &str,
+    e: &ClientError,
+) {
+    failed.insert(name.to_owned());
     let _ = crate::logfile::append_error_event(
         ctx.fs,
         &ctx.layout.log_path(),

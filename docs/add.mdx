@@ -227,23 +227,24 @@ import with a preview at `<origin>/skills/import`.
 ## Add an MCP server
 
 ```bash
-topos add --mcp io.github.acme/weather -g
-topos add --mcp https://weather.acme.example/.well-known/mcp/server.json -g
-topos add --mcp ./tools/weather
+topos add weather                      # a server your workspace publishes
+topos add --kind mcp ./tools/weather   # a folder holding a server.json
 ```
 
-With `--mcp` the source is a **remote MCP server** rather than a skill: a registry name, an https
-link to its `server.json`, or a folder holding one. It records the same one line, but your agents
-get it as a tool endpoint in their own MCP config instead of as a skill folder. A name is looked
-for in your workspaces' catalogs first (on each server's own embedded name), then the official
-registry — when exactly one workspace publishes it, you get the workspace's governed copy and the
-receipt names the catalog it came from.
+An MCP server is a **bundle like any other**: it records the same one line, but your agents get it
+as a tool endpoint in their own MCP config instead of as a skill folder. A workspace bundle needs no
+flag — the catalog records what each bundle is. A local folder needs `--kind mcp`, because a folder
+is just a folder until somebody says what it holds; without the flag, a folder whose root holds a
+`server.json` refuses rather than landing as a skill, and `--kind skill` adopts it as a skill.
 
-Every spelling applies immediately, and the receipt leads with the undo: what the server is, its
-endpoint, whether a sign-in is coming, which agents it reached, and the one `topos remove` that
-takes it all back. A folder already on your disk is adopted in place and `remove` never deletes it;
-a fetched document is written out as a folder, and that folder leaves with the row. What Topos
-refuses to place, and why: [MCP servers](/docs/mcp).
+The CLI fetches nothing: a registry name or a link to a `server.json` is refused, pointing at the
+workspace's own **Add an MCP server** page, which takes all three. One governed copy the team can
+review and revert beats a pointer each machine resolved for itself.
+
+Both doors apply immediately, and the receipt leads with the undo: what the server is, its endpoint,
+whether a sign-in is coming, which agents it reached, and the one `topos remove` that takes it back.
+An adopted folder is left in place, and `remove` never deletes it. What Topos refuses to place, and
+why: [MCP servers](/docs/mcp).
 
 ## Stop receiving
 

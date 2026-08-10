@@ -739,7 +739,7 @@ fn ensure_name(
                         .into(),
                 )
             })?;
-            let (path, name) = resolve_add_target(ctx, roots, raw)?;
+            let (path, name) = resolve_add_target(ctx, roots, raw, "publish")?;
             // Discovery resolves a bare NAME against agent skill folders: an auto-add is
             // always a skill.
             let data = add_with_name(

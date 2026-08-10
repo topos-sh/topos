@@ -77,29 +77,28 @@ reads silence as one.
   </Tab>
   <Tab title="The CLI">
     ```bash
-    topos add --mcp io.github.acme/weather -g
-    topos add --mcp https://weather.acme.example/.well-known/mcp/server.json -g
-    topos add --mcp ./tools/weather
+    topos add weather                   # a server your workspace already publishes
+    topos add --kind mcp ./tools/weather   # a folder on this machine holding a server.json
     ```
 
-    A name is looked for in your workspaces' catalogs first, then the official registry: when
-    exactly one workspace you are connected to publishes a server by that embedded name, you get
-    the workspace's copy — subscribed by its catalog name, governed and kept current — and the
-    receipt says which catalog it came from. Several workspaces publishing it ask you to say
-    which with `--workspace <name>`; a name none of them publishes is fetched from the registry
-    as ever.
+    Those are the two doors. A workspace bundle needs no flag — the catalog already records what
+    each bundle is, so `topos add weather` (or `topos add @acme/weather`) gets the server with its
+    kind intact. A local folder needs `--kind mcp`, because a folder is just a folder until
+    somebody says what it holds.
 
-    Every spelling applies immediately, and the receipt **leads with the undo**: what the server
-    is, the endpoint it points at, whether a sign-in is coming, which agents it reached — and the
-    one `topos remove` that takes it all back. For a fetched import that remove is the full
-    inverse: the row, the config entries, and the folder the import itself wrote all leave —
-    unless the folder's bytes have changed since, in which case it is kept and the receipt says
-    so. A folder already on your disk is adopted in place; `remove` drops its row and never
-    deletes your folder.
+    The CLI fetches nothing. A registry name or a link to a `server.json` is refused, pointing at
+    the page above: the server goes into the workspace once, where the whole team reviews,
+    reverts, and stays current on one governed copy, instead of each machine resolving a pointer
+    for itself.
+
+    Both doors apply immediately, and the receipt **leads with the undo**: what the server is, the
+    endpoint it points at, whether a sign-in is coming, which agents it reached — and the one
+    `topos remove` that takes it back. A folder on your disk is adopted in place, so `remove`
+    drops its row and never deletes your folder.
   </Tab>
   <Tab title="Publish a folder">
     ```bash
-    topos add --mcp ./tools/weather
+    topos add --kind mcp ./tools/weather
     topos publish weather --yes
     ```
 
@@ -109,14 +108,14 @@ reads silence as one.
   </Tab>
 </Tabs>
 
-Each `add --mcp` records **one line** in the nearest [`topos.toml`](/docs/topos-toml) at or above
-this folder — or your machine's own file with `-g` — and converges your agents' configs in the same
-command. A fetched document is written out as a real folder first: `~/.topos/mcp/<name>/server.json`
-for a `-g` import, or `./<name>/server.json` beside you inside a checkout, so the row points at
-bytes you can read and commit.
+Each `add` records **one line** in the nearest [`topos.toml`](/docs/topos-toml) at or above this
+folder — or your machine's own file with `-g` — and converges your agents' configs in the same
+command. An adopted folder is left exactly where it is, so the row points at bytes you can read and
+commit.
 
-`--mcp` names a *source*, never a workspace bundle. `topos add @acme/weather` already gets the
-server with its kind intact, because the workspace records what each bundle is.
+`--kind mcp` describes a *folder*, never a workspace bundle. Say it when a folder holding a
+`server.json` would otherwise be adopted as a skill; `--kind skill` on that same folder adopts it as
+a skill, because an explicit word is yours to give.
 
 Published servers live under their own addresses — `<origin>/mcp/<name>`, listed in the **MCP
 servers** section of the panel and of the dashboard. Nothing about a server is filed under skills.
@@ -169,7 +168,7 @@ sign in — that stays the agent's own business:
 Each agent's exact config file — and the environment variables that move it — is in
 [Supported agents](/docs/harnesses#mcp-servers).
 
-By default the entry reaches every one of those agents this machine has. On `topos add --mcp`,
+By default the entry reaches every one of those agents this machine has. On `topos add`,
 `-a <agent>` (a slug like `cursor`, repeatable) or `--dest <file>` (a config file from that same
 set) narrows the row to exactly the files named, recorded as `dest` on the line — so an agent set
 up later changes nothing until the line does. The same two flags on `topos remove` subtract one
@@ -183,9 +182,9 @@ it.
 topos publish weather --yes
 ```
 
-A server is updated from the folder that authored it — the one you adopted with `topos add --mcp
-./tools/weather`, or the one a fetched import wrote out (`~/.topos/mcp/weather/` for a `-g` import).
-Edit its `server.json` — a moved endpoint, a new version string, a changed header — and publish it.
+A server is updated from the folder that authored it — the one you adopted with `topos add
+--kind mcp ./tools/weather`. Edit its `server.json` — a moved endpoint, a new version string, a
+changed header — and publish it.
 The document runs the same gate it ran the first time, and on a `reviewed` bundle the publish opens
 a [proposal](/docs/review) instead: the approval is what moves `current`. Every machine picks the
 new address up on its next update, in place, under the key it already has — so a sign-in already

@@ -558,34 +558,38 @@ fn run_command(
             skill,
             agent,
             dest,
-            mcp,
+            kind,
             global,
             yes,
         } => {
             // The `-a`/`--dest` SELECTION, verbatim — resolved per arm below (a skill source
             // freezes skills folders, an MCP source config files).
             let selection = ops::Selection::new(&agent, &dest);
-            // `--mcp` declares WHAT is being imported, so it is read before every resolution
-            // ladder below: an MCP server is a tool endpoint, not a skill folder, and none of the
+            // `--kind` declares WHAT is being added, so it is read before every resolution ladder
+            // below: an MCP server is a tool endpoint, not a skill folder, and none of the
             // ladder's answers (untracked discovery, the keep-as-yours fork, the workspace
-            // catalogs) mean anything for one. `-s` is a repo-member selector and clap refuses
-            // it alongside; `-a`/`--dest` narrow WHICH config files get the entry.
-            if mcp {
-                let docs =
-                    crate::plane_http::UreqMcpSource::new().with_progress(Rc::clone(&progress));
-                // Every `--mcp` door applies immediately with an undo-led receipt; `--yes` stays
-                // parsed and changes nothing here (the flag's own help says so). A
-                // registry-shaped name resolves against the connected workspaces' catalogs
-                // FIRST (their embedded server names), then the official registry.
-                let result = ops::add_mcp(
-                    &ctx,
-                    &connect_session_transports,
-                    Some(&docs),
-                    &source,
-                    global,
-                    workspace.as_deref(),
-                    &selection,
-                );
+            // catalogs) mean anything for one. `-a`/`--dest` narrow WHICH config files get the
+            // entry.
+            if kind == Some(crate::bundle_kind::BundleKind::Mcp) {
+                // `-s` picks WHICH skills to take from a repo holding several. An MCP server
+                // bundle is one document with nothing to pick from, so the pair is refused by
+                // name rather than silently ignoring the selector.
+                if !skill.is_empty() {
+                    return emit_err(
+                        json,
+                        cmd_name,
+                        &ClientError::InvalidArgument(
+                            "`-s` picks which skills to take from a repository that holds \
+                             several — an MCP server bundle is one document, so `--kind mcp` has \
+                             nothing to select; drop `-s`"
+                                .into(),
+                        ),
+                        &diag,
+                    );
+                }
+                // The one door applies immediately with an undo-led receipt; `--yes` stays parsed
+                // and changes nothing here (the flag's own help says so).
+                let result = ops::add_mcp(&ctx, &source, global, &selection);
                 // The arming sweep + the built-in ride an APPLIED import exactly as they ride any
                 // other adopt receipt (the same trigger-arming moment).
                 let result = result.map(|mut data| {
@@ -642,6 +646,13 @@ fn run_command(
                 });
                 return finish_add_many(json, cmd_name, result, &diag);
             }
+            // Whether the invocation SAID what kind it is adding — the one input the local-path
+            // adopt's server-bundle guard reads (it arms on silence, never over an explicit word).
+            let declared = if kind.is_some() {
+                ops::KindDeclared::Yes
+            } else {
+                ops::KindDeclared::No
+            };
             let single_skill = skill.into_iter().next();
             let single_agent = agent.first().cloned();
             // The BUILT-IN's restore: `add topos` clears the durable `remove topos` opt-out and
@@ -813,7 +824,9 @@ fn run_command(
                         // The selection resolves (and refuses) BEFORE the adopt, so an unknown
                         // agent leaves nothing half-landed.
                         let entries = selection.skill_entries(scope.target.scope)?;
-                        let mut d = ops::adopt_path(&sctx, &scope.target, &p)?;
+                        // The server-bundle guard arms on SILENCE: `--kind skill` on a
+                        // `server.json`-rooted folder adopts it as a skill, the person's own word.
+                        let mut d = ops::adopt_path(&sctx, &scope.target, &p, declared)?;
                         if entries.is_empty() {
                             ops::note_added_path_in(&ctx, &mut d, &scope.target, &p)?;
                         } else {
@@ -1121,6 +1134,7 @@ fn run_command(
         }
         Command::Diff {
             skill,
+            global,
             r#ref,
             agent,
             dest,
@@ -1128,11 +1142,15 @@ fn run_command(
         } => {
             let budget = ops::DiffBudget::resolve(max_bytes, json);
             let selection = ops::Selection::one(agent.as_deref(), dest.as_deref());
-            // The FETCH_FULL_DIFF argv — this same diff, uncapped. The copy selector rides along:
-            // dropping it would refetch a DIFFERENT copy's diff than the one just truncated.
+            // The FETCH_FULL_DIFF argv — this same diff, uncapped. The scope flag and the copy
+            // selector both ride along: dropping either would refetch a DIFFERENT copy's diff
+            // than the one just truncated.
             let mut full_argv = vec!["topos".to_owned(), "diff".to_owned(), skill.clone()];
             if let Some(r) = &r#ref {
                 full_argv.push(r.clone());
+            }
+            if global {
+                full_argv.push("-g".to_owned());
             }
             full_argv.extend(selection.argv_tail());
             full_argv.extend([
@@ -1143,7 +1161,18 @@ fn run_command(
             finish_diff(
                 json,
                 cmd_name,
-                ops::diff(&ctx, &skill, r#ref.as_deref(), budget, &selection),
+                ops::diff(
+                    &ctx,
+                    &skill,
+                    r#ref.as_deref(),
+                    budget,
+                    &selection,
+                    if global {
+                        ops::StoreScope::Machine
+                    } else {
+                        ops::StoreScope::Here
+                    },
+                ),
                 full_argv,
                 &diag,
             )
@@ -1383,20 +1412,6 @@ fn run_command(
                     }
                 }
             }
-            // The bare sweep also re-syncs the BUILT-IN `topos` skill (force-synced to this
-            // binary; the durable opt-out honored inside). Best-effort: a built-in hiccup must
-            // never block the team sweep; its byte changes count as a changed sweep below.
-            let builtin_changed = if bare_sweep {
-                match ops::ensure_builtin(&ctx) {
-                    Ok(r) => r.changed,
-                    Err(e) => {
-                        let _ = diag.note(cmd_name, &e);
-                        false
-                    }
-                }
-            } else {
-                false
-            };
             // The go-back (`<skill>@<hash>`) and the `--keep-mine` escape act on LOCAL bytes
             // through the classic per-skill engine; everything else is the MANIFEST reconcile —
             // resolve the manifest layers covering cwd + the logged-in profiles and converge.
@@ -1456,6 +1471,28 @@ fn run_command(
                         },
                     },
                 )
+            };
+            // The bare sweep also re-syncs the BUILT-IN `topos` skill (force-synced to this
+            // binary; the durable opt-out honored inside) — and it runs HERE, after the reconcile,
+            // not before it. The reconcile refuses a run WHOLE when a manifest it would drive
+            // fails to load, before a session is dialed or a byte moves; a refusal that closes the
+            // TTY with `nothing changed` must not have placed a skill folder on its way to saying
+            // so. A SOFT failure is not that refusal: the built-in is rendered from this binary
+            // and owes nothing to a reachable plane, so an offline sweep still lands the meta-skill
+            // a fresh `self-update` brought. Best-effort either way — a built-in hiccup must never
+            // fail the team sweep; its byte changes count as a changed sweep below.
+            let builtin_changed = if bare_sweep
+                && (result.is_ok() || result.as_ref().is_err_and(ops::quiet_soft_failure))
+            {
+                match ops::ensure_builtin(&ctx) {
+                    Ok(r) => r.changed,
+                    Err(e) => {
+                        let _ = diag.note(cmd_name, &e);
+                        false
+                    }
+                }
+            } else {
+                false
             };
             // A COMPLETED bare sweep stamps the TTL clock (best-effort) — success, or the quiet
             // path's soft failure (an unreachable plane must not be re-dialed on every session
@@ -1815,6 +1852,14 @@ fn finish_status(
 /// waiting on the person, nothing is broken, and no retry changes the answer. Those exit 0 and are
 /// counted under `waiting on you`; only real faults (network, unreadable store, corrupt record)
 /// take the non-zero status.
+/// Whether a sweep could not carry something forward — the ONE verdict `finish_pull` reads for
+/// both the envelope's `ok` and the exit status, so the two can never contradict each other.
+/// Isolation is unaffected: the payload still reports every other bundle, and the failure lines
+/// ride `warnings` either way.
+fn sweep_failed(warnings: &[String]) -> bool {
+    !warnings.is_empty()
+}
+
 fn finish_pull(
     json: bool,
     command: &str,
@@ -1828,7 +1873,11 @@ fn finish_pull(
             // because nothing CAN be — state the join fix in prose and mirror it structurally
             // (the argv template's `needs` names the workspace address).
             let unenrolled_dead_end = !enrolled && out.data.skills.is_empty();
-            let failed = !out.warnings.is_empty();
+            // ONE binding answers both surfaces — the envelope's `ok` and the process's exit
+            // status. They were computed apart, and a partial failure printed `ok: true` on the
+            // very run it exited non-zero; deriving them from one value makes that disagreement
+            // unrepresentable rather than merely fixed.
+            let failed = sweep_failed(&out.warnings);
             if json {
                 // Each WITHDRAWN skill carries a paste-ready `keep-as-yours` next action.
                 let mut next_actions = render::withdrawn_next_actions(&out.data);
@@ -1856,6 +1905,13 @@ fn finish_pull(
                 next_actions.extend(render::decision_next_actions(&out.decisions));
                 let value = serde_json::to_value(&out.data).unwrap_or_default();
                 let mut envelope = render::ok_envelope(command, value);
+                // `ok` says what the EXIT STATUS says. A sweep that could not carry a bundle
+                // forward exits non-zero (below) — and used to hand the agent reading its JSON an
+                // `ok: true` on the same run. One of the two answers had to be false, and an
+                // agent that trusts `ok` over the status is exactly the caller this channel
+                // exists for. Isolation is unchanged: the payload still reports every other
+                // bundle, and the failures are named in `warnings`.
+                envelope.ok = !failed;
                 // ONE stable machine channel: failures first, then the decisions, then the
                 // advisories, then the disclosures. The split is the receipt's (a decision, an
                 // advisory or a disclosure must not be counted as a failure), not the wire's.
@@ -1874,6 +1930,7 @@ fn finish_pull(
                     &out.warnings,
                     &out.advisories,
                     &out.disclosures,
+                    out.failed_bundles.len(),
                 );
                 if !out.access_gone.is_empty() {
                     text.push_str(&format!(
@@ -1898,6 +1955,26 @@ fn finish_pull(
             }
         }
         Err(e) => emit_err(json, command, &e, diag),
+    }
+}
+
+#[cfg(test)]
+mod sweep_verdict_tests {
+    /// `ok` and the exit status are ONE answer. A sweep that could not carry a bundle forward
+    /// used to print `ok: true` in the envelope and exit non-zero on the same run — and an agent
+    /// reading `ok` is exactly the caller that channel exists for.
+    #[test]
+    fn the_envelope_ok_is_the_exit_status() {
+        for warnings in [
+            Vec::new(),
+            vec!["IO_ERROR docs: a filesystem operation failed".to_owned()],
+        ] {
+            let failed = super::sweep_failed(&warnings);
+            let ok = !failed;
+            let exit_is_failure = failed;
+            assert_eq!(ok, !exit_is_failure, "{warnings:?}");
+            assert_eq!(ok, warnings.is_empty(), "{warnings:?}");
+        }
     }
 }
 
@@ -2174,8 +2251,13 @@ fn finish_add_reference(
             if json {
                 let value = serde_json::to_value(&data).unwrap_or_default();
                 let mut envelope = render::ok_envelope(command, value);
-                envelope.next_actions =
-                    render::undo_next_actions(&data.undo, crate::actions::Subject::Skill);
+                // A workspace reference resolves to whatever the catalog says it is, so the undo's
+                // caution is read off the RECEIPT, not assumed: an `add @ws/linear` of an MCP
+                // bundle came through here and borrowed a skill's sentence about folders.
+                envelope.next_actions = render::undo_next_actions(
+                    &data.undo,
+                    crate::actions::Subject::of_receipt(&data),
+                );
                 println!("{}", render::to_json(&envelope));
             } else {
                 println!("{}", render::add_tty(&data));
@@ -2197,7 +2279,7 @@ fn finish_add_reference(
     }
 }
 
-/// The `add --mcp` finisher — an APPLY RECEIPT that leads with the undo, like every other ungated
+/// The `add --kind mcp` finisher — an APPLY RECEIPT that leads with the undo, like every other ungated
 /// arm; the typed `mcp` block on the payload carries the server facts a JSON consumer reads.
 fn finish_add_mcp(
     json: bool,
@@ -2286,8 +2368,13 @@ fn finish_remove(
             if json {
                 let value = serde_json::to_value(&data).unwrap_or_default();
                 let mut envelope = render::ok_envelope(command, value);
-                envelope.next_actions =
-                    render::undo_next_actions(&data.undo, crate::actions::Subject::Skill);
+                // Same rule as `add`: the removal's own rows say what left this machine, so the
+                // caution names servers when that is what they were. A mixed removal keeps the
+                // skill sentence — it is the one that speaks for folders on disk.
+                envelope.next_actions = render::undo_next_actions(
+                    &data.undo,
+                    crate::actions::Subject::of_removal(&data.uninstalled),
+                );
                 println!("{}", render::to_json(&envelope));
             } else {
                 println!("{}", render::remove_applied_tty(&data));
@@ -3398,6 +3485,7 @@ mod tests {
         };
         let outcome = |decisions: Vec<crate::ops::PendingDecision>, warnings: Vec<String>| {
             Ok(ops::PullOutcome {
+                failed_bundles: warnings.iter().cloned().collect(),
                 data: empty(),
                 warnings,
                 decisions,

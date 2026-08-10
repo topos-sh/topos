@@ -629,6 +629,7 @@ fn set_data(name: &str) -> AddData {
         note: None,
         mcp: None,
         dest: Vec::new(),
+        dest_resolved: Vec::new(),
         display: None,
     }
 }

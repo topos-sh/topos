@@ -1333,6 +1333,10 @@ fn a_workspace_row_without_a_session_is_an_honest_local_line() {
 /// success-claiming receipt over a no-op. The refusal is the MANIFEST family (verbatim message
 /// naming the file; the TTY closes with `nothing changed`), and the bytes stay: the failure mode
 /// of a mistake must be keeping bytes.
+///
+/// The SWEEP'S BUILT-IN ENSURE hangs off this same refusal, which is why the two live together: a
+/// run that refuses at the load closes with `nothing changed`, so nothing may have been placed on
+/// the way to saying it — see [`a_load_refusal_is_never_a_soft_failure`].
 #[test]
 fn a_driven_manifest_that_fails_to_load_refuses_the_run_whole() {
     let rig = Rig::new("badfile");
@@ -1373,6 +1377,33 @@ fn a_driven_manifest_that_fails_to_load_refuses_the_run_whole() {
     assert!(placed.exists(), "a refused run never cleans");
 }
 
+/// The BARE SWEEP re-syncs the built-in `topos` skill, and it does so AFTER the reconcile, gated on
+/// the run not having refused locally — because a refused manifest load prints `nothing changed`,
+/// and a run that placed a skill folder first would be lying in its own last line.
+///
+/// The gate is [`ops::quiet_soft_failure`]: a TRANSPORT or AUTH failure still refreshes the
+/// built-in (it is rendered from this binary and owes nothing to a reachable plane, so a
+/// `self-update` on an offline machine must still land its meta-skill), while every local refusal —
+/// the manifest load's two above all — skips it. This asserts the split the dispatch depends on, so
+/// moving a manifest refusal into the soft set goes red here rather than silently making that last
+/// line false again.
+#[test]
+fn a_load_refusal_is_never_a_soft_failure() {
+    for local in [
+        ClientError::ManifestInvalid("topos.toml: not a reference".to_owned()),
+        ClientError::ManifestMigration("topos.toml: `path` is retired".to_owned()),
+    ] {
+        assert!(
+            !ops::quiet_soft_failure(&local),
+            "a load refusal must skip the built-in ensure: {}",
+            local.code()
+        );
+    }
+    // The other side of the split: an unreachable plane still refreshes the built-in.
+    assert!(ops::quiet_soft_failure(&ClientError::Plane(
+        "connection refused".to_owned()
+    )));
+}
 /// A broken manifest in a scope the run does NOT drive never blocks it: the failure degrades to
 /// the freeze warning, the driven scope still converges, and the frozen scope's bytes stay.
 #[test]
@@ -4300,6 +4331,7 @@ fn rebuild_leaves_a_blocked_bundle_alone_and_names_both_exits() {
         &out.warnings,
         &out.advisories,
         &out.disclosures,
+        out.failed_bundles.len(),
     );
     assert!(
         tty.contains(
@@ -5358,7 +5390,14 @@ fn an_off_switch_over_a_draft_applies_with_the_kept_disclosure() {
             assert!(data.applied);
             let note = data.items[0].note.clone().unwrap_or_default();
             assert!(note.contains("local edits"), "{note}");
-            assert!(note.contains("stays in place"), "{note}");
+            // The note names the FOLDER the edits stay in. It used to send the reader to
+            // `topos list <name>`, which answers "not managed on this machine" once the row is
+            // gone — the one command it named could never show the copy it was about.
+            assert!(
+                note.contains(&format!("they stay in {}", placed.display())),
+                "{note}"
+            );
+            assert!(!note.contains("topos list"), "{note}");
             // The edited copy really is still on disk.
             assert_eq!(
                 std::fs::read(placed.join("SKILL.md")).unwrap(),
@@ -7135,6 +7174,7 @@ fn a_bundle_held_at_two_versions_reports_the_person_copy_and_says_nothing_about_
         &out.warnings,
         &out.advisories,
         &out.disclosures,
+        out.failed_bundles.len(),
     );
     assert!(!tty.contains("behind"), "{tty}");
     assert!(!tty.contains("VERSION_SPLIT"), "{tty}");
@@ -7203,6 +7243,7 @@ fn the_machine_copy_left_behind_by_a_project_update_earns_the_counted_trailer() 
         &out.warnings,
         &out.advisories,
         &out.disclosures,
+        out.failed_bundles.len(),
     );
     assert!(
         tty.ends_with("1 bundle behind machine-wide — `topos update -g` updates it."),
@@ -7285,6 +7326,7 @@ fn a_pin_on_the_scope_this_run_left_alone_is_never_reported_behind() {
         &out.warnings,
         &out.advisories,
         &out.disclosures,
+        out.failed_bundles.len(),
     );
     assert!(!tty.contains("behind"), "{tty}");
 
@@ -7324,6 +7366,7 @@ fn a_pin_on_the_scope_this_run_left_alone_is_never_reported_behind() {
         &out.warnings,
         &out.advisories,
         &out.disclosures,
+        out.failed_bundles.len(),
     );
     assert!(
         tty.ends_with("1 bundle behind machine-wide — `topos update -g` updates it."),
@@ -8576,6 +8619,7 @@ fn a_forge_refresh_holds_the_lock_and_keeps_an_edit_that_lands_at_the_stash() {
         &out.warnings,
         &out.advisories,
         &out.disclosures,
+        out.failed_bundles.len(),
     );
     let expected_block = concat!(
         "deploy   github.com/o/r has a newer version, but your edits would be overwritten\n",
@@ -9607,7 +9651,7 @@ fn scoped_path_add(
 ) -> Result<topos_types::results::AddData, ClientError> {
     let scope = ops::add_scope(ctx, global)?;
     let sctx = ops::ctx_with_layout(ctx, &scope.layout);
-    let mut data = ops::adopt_path(&sctx, &scope.target, source)?;
+    let mut data = ops::adopt_path(&sctx, &scope.target, source, ops::KindDeclared::No)?;
     ops::note_added_path_in(ctx, &mut data, &scope.target, source)?;
     Ok(data)
 }
@@ -10184,6 +10228,7 @@ fn diff_and_log_resolve_a_project_stores_copy() {
         None,
         ops::DiffBudget::unlimited(),
         &ops::Selection::default(),
+        ops::StoreScope::Here,
     )
     .unwrap();
     assert!(
@@ -10376,12 +10421,32 @@ fn reads_from_inside_a_project_answer_the_project_copy() {
         None,
         ops::DiffBudget::unlimited(),
         &ops::Selection::default(),
+        ops::StoreScope::Here,
     )
     .unwrap();
     assert!(
         d.diff.contains("project edit") && !d.diff.contains("machine edit"),
         "the diff is the copy you stand in: {}",
         d.diff
+    );
+
+    // `-g` is the other half of the same line, and `diff` carries it like every other
+    // scope-taking verb: the machine copy's edit, read without leaving the checkout. Before it
+    // existed there was NO way to read the machine twin from in here — the folder you stand in
+    // answered, and the flag every sibling verb takes was simply rejected.
+    let g = ops::diff(
+        &ctx,
+        "deploy",
+        None,
+        ops::DiffBudget::unlimited(),
+        &ops::Selection::default(),
+        ops::StoreScope::Machine,
+    )
+    .unwrap();
+    assert!(
+        g.diff.contains("machine edit") && !g.diff.contains("project edit"),
+        "`-g` reads the machine copy from inside the project: {}",
+        g.diff
     );
 
     let dirs = |_: &str| -> Box<dyn DirectorySource> { Box::new(dir2.clone()) };
@@ -12362,7 +12427,7 @@ fn a_local_adopt_with_dest_places_a_copy_at_the_selected_folder() {
     let ctx = rig.ctx_at(Some(&rig.work.0));
     let scope = ops::add_scope(&ctx, true).unwrap();
     let sctx = ops::ctx_with_layout(&ctx, &scope.layout);
-    let mut d = ops::adopt_path(&sctx, &scope.target, &src).unwrap();
+    let mut d = ops::adopt_path(&sctx, &scope.target, &src, ops::KindDeclared::No).unwrap();
     ops::note_added_path_dest_in(
         &ctx,
         &mut d,
@@ -12545,7 +12610,7 @@ fn a_local_path_whole_row_remove_deletes_managed_copies_and_spares_the_source() 
     let ctx = rig.ctx_at(Some(&rig.work.0));
     let scope = ops::add_scope(&ctx, true).unwrap();
     let sctx = ops::ctx_with_layout(&ctx, &scope.layout);
-    let mut d = ops::adopt_path(&sctx, &scope.target, &src).unwrap();
+    let mut d = ops::adopt_path(&sctx, &scope.target, &src, ops::KindDeclared::No).unwrap();
     ops::note_added_path_dest_in(
         &ctx,
         &mut d,
@@ -12889,7 +12954,8 @@ fn healing_a_deleted_placement_reads_installed_never_all_up_to_date() {
             &clean.decisions,
             &clean.warnings,
             &clean.advisories,
-            &clean.disclosures
+            &clean.disclosures,
+            0,
         ),
         "checked machine-wide\nChecked 1 skill: all up to date."
     );
@@ -12920,6 +12986,7 @@ fn healing_a_deleted_placement_reads_installed_never_all_up_to_date() {
         &healed.warnings,
         &healed.advisories,
         &healed.disclosures,
+        healed.failed_bundles.len(),
     );
     assert!(out.contains(&format!("+ @{WS_NAME}/deploy")), "{out}");
     assert!(out.contains("installed ("), "{out}");
@@ -12936,7 +13003,8 @@ fn healing_a_deleted_placement_reads_installed_never_all_up_to_date() {
             &again.decisions,
             &again.warnings,
             &again.advisories,
-            &again.disclosures
+            &again.disclosures,
+            0,
         ),
         "checked machine-wide\nChecked 1 skill: all up to date."
     );
@@ -12990,6 +13058,7 @@ fn re_adding_the_feed_line_reinstalls_with_a_receipt_line() {
         &back.warnings,
         &back.advisories,
         &back.disclosures,
+        back.failed_bundles.len(),
     );
     assert!(out.contains("installed ("), "{out}");
     assert!(!out.contains("all up to date"), "{out}");
@@ -13065,6 +13134,7 @@ fn zz_dest_reads_one_copy_of_a_frozen_bundle_while_the_bare_diff_still_refuses()
         None,
         ops::DiffBudget::unlimited(),
         &ops::Selection::default(),
+        ops::StoreScope::Here,
     )
     .expect_err("a bare diff of divergent copies refuses");
     let ClientError::PlacementsDiverged { copies, .. } = &err else {
@@ -13089,8 +13159,15 @@ fn zz_dest_reads_one_copy_of_a_frozen_bundle_while_the_bare_diff_still_refuses()
         ops::Selection::one(None, Some(&native.display().to_string())),
         ops::Selection::one(Some("claude-code"), None),
     ] {
-        let d = ops::diff(&ctx, &name, None, ops::DiffBudget::unlimited(), &sel)
-            .expect("the selector reads past the freeze");
+        let d = ops::diff(
+            &ctx,
+            &name,
+            None,
+            ops::DiffBudget::unlimited(),
+            &sel,
+            ops::StoreScope::Here,
+        )
+        .expect("the selector reads past the freeze");
         assert!(d.diff.contains("native edit"), "{}", d.diff);
         assert!(!d.diff.contains("shared edit"), "{}", d.diff);
         // The header names WHICH copy — the bundle sits in more than one folder.
@@ -13109,6 +13186,7 @@ fn zz_dest_reads_one_copy_of_a_frozen_bundle_while_the_bare_diff_still_refuses()
         None,
         ops::DiffBudget::unlimited(),
         &ops::Selection::one(None, Some("~/.agents/skills")),
+        ops::StoreScope::Here,
     )
     .unwrap();
     assert!(other.diff.contains("shared edit"), "{}", other.diff);
@@ -13129,6 +13207,7 @@ fn zz_a_dest_naming_no_copy_or_a_clean_copy_refuses_by_name() {
         None,
         ops::DiffBudget::unlimited(),
         &ops::Selection::one(None, Some("~/.cursor/skills")),
+        ops::StoreScope::Here,
     )
     .expect_err("a folder holding no copy refuses");
     assert_eq!(err.code(), "INVALID_ARGUMENT");
@@ -13148,6 +13227,7 @@ fn zz_a_dest_naming_no_copy_or_a_clean_copy_refuses_by_name() {
         None,
         ops::DiffBudget::unlimited(),
         &ops::Selection::one(None, Some("~/.codex/skills")),
+        ops::StoreScope::Here,
     )
     .expect_err("a copy with no edits refuses rather than answering nothing");
     let message = crate::render::safe_message(&err);
@@ -13166,6 +13246,7 @@ fn zz_a_dest_naming_no_copy_or_a_clean_copy_refuses_by_name() {
         Some(&"ab".repeat(32)),
         ops::DiffBudget::unlimited(),
         &ops::Selection::one(None, Some("~/.claude/skills")),
+        ops::StoreScope::Here,
     )
     .expect_err("a selector with a version reference refuses");
     assert_eq!(
@@ -13285,6 +13366,7 @@ fn zz_a_per_copy_reset_drops_one_copys_edits_and_leaves_the_other_alone() {
         None,
         ops::DiffBudget::unlimited(),
         &ops::Selection::default(),
+        ops::StoreScope::Here,
     )
     .expect("one edited copy is the ordinary draft");
     assert!(d.diff.contains("shared edit"), "{}", d.diff);
@@ -13514,6 +13596,7 @@ fn zz_a_per_copy_publish_leaves_the_other_copy_alone_and_resolves_the_freeze() {
         None,
         ops::DiffBudget::unlimited(),
         &ops::Selection::default(),
+        ops::StoreScope::Here,
     )
     .expect("the survivor is the single draft");
     assert!(d.diff.contains("native edit"), "{}", d.diff);
@@ -13718,6 +13801,137 @@ fn a_name_whose_machine_row_still_stands_refuses_toward_the_machine_file() {
     )
     .expect("the offered command is runnable");
     assert_eq!(global_text(&rig), "[bundles]\n");
+}
+
+/// PATH_MISSING names a command that WORKS. The row lives in the machine-wide file, so the drop
+/// takes `-g` — the warning used to spell it without, which refused, leaving the only named way
+/// out of a warning that repeats on every sweep as a command that could not clear it. Both halves
+/// are asserted here: the exact spelling, and that running it clears the row (and the warning).
+#[test]
+fn path_missing_names_the_scope_exact_drop_and_it_clears_the_row() {
+    let rig = Rig::new("path-missing-scope");
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let plane = FakePlane::new(log);
+    plane.serves(Vec::new());
+    let dir = FakeDirectory::new(Vec::new(), Vec::new());
+
+    let src = rig.work.0.join("weather");
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::write(src.join("SKILL.md"), b"# weather\n").unwrap();
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    let canonical = src.canonicalize().unwrap();
+    rig.write_global(&format!("[bundles]\n\"{}\" = \"*\"\n", canonical.display()));
+
+    // The folder goes; the row stays. That is the state PATH_MISSING exists to report.
+    std::fs::remove_dir_all(&src).unwrap();
+    let out = sweep_scoped(&ctx, &plane, &dir, ops::UpdateScope::Machine);
+    let warning = out
+        .warnings
+        .iter()
+        .find(|w| w.starts_with("PATH_MISSING"))
+        .unwrap_or_else(|| panic!("the missing folder is reported: {:?}", out.warnings));
+    let offered = format!("`topos remove -g {}`", canonical.display());
+    assert!(
+        warning.contains(&offered),
+        "the drop is spelled for the file that HOLDS the row: {warning}"
+    );
+
+    // The offered command runs, and the next sweep has nothing left to warn about.
+    let named_connect = |_s: &Session| ops::SessionTransports {
+        plane: Box::new(plane.clone()),
+        directory: Box::new(dir.clone()),
+        contribute: Box::new(NoContribute),
+        governance: Box::new(NoGovernance),
+    };
+    ops::remove_global(
+        &ctx,
+        &named_connect,
+        &[canonical.display().to_string()],
+        None,
+        true,
+        &Default::default(),
+    )
+    .expect("the offered command is runnable");
+    assert_eq!(global_text(&rig), "[bundles]\n");
+    let out = sweep_scoped(&ctx, &plane, &dir, ops::UpdateScope::Machine);
+    assert!(
+        !out.warnings.iter().any(|w| w.starts_with("PATH_MISSING")),
+        "the warning is gone with the row: {:?}",
+        out.warnings
+    );
+}
+
+/// THREE SURFACES, ONE MACHINE. `list` prints `(draft)` and `status` counts `1 draft ahead` for a
+/// bundle the person is still editing — and `update` used to answer "all up to date" about the
+/// very same bundle, because delivery owed it nothing and the row said only that. The row now
+/// carries the draft fact, so the receipt says both true things and its summary matches what the
+/// other two surfaces report.
+#[test]
+fn an_update_never_calls_a_drafted_bundle_all_up_to_date() {
+    let rig = Rig::new("draft-agreement");
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let plane = FakePlane::new(log);
+    plane.serves(Vec::new());
+    let dir = FakeDirectory::new(Vec::new(), Vec::new());
+
+    // An adopted-in-place local folder: the dir IS the placement, so editing it IS the draft.
+    let src = rig.work.0.join("notes");
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::write(src.join("SKILL.md"), b"# notes\nbase\n").unwrap();
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    ops::add(&ctx, &src).unwrap();
+    let canonical = src.canonicalize().unwrap();
+    rig.write_global(&format!("[bundles]\n\"{}\" = \"*\"\n", canonical.display()));
+
+    // CLEAN: nothing owed, nothing unshared — the compact sentence is true and stays.
+    let out = sweep_scoped(&ctx, &plane, &dir, ops::UpdateScope::Machine);
+    let tty = crate::render::pull_tty(
+        &out.data,
+        &out.decisions,
+        &out.warnings,
+        &out.advisories,
+        &out.disclosures,
+        out.failed_bundles.len(),
+    );
+    assert!(tty.contains("all up to date"), "{tty}");
+    assert!(
+        out.data.skills.iter().all(|s| !s.draft),
+        "{:?}",
+        out.data.skills
+    );
+
+    // DRAFTED: the person edits their own copy. `list` calls this a draft; so must `update`.
+    std::fs::write(
+        src.join("SKILL.md"),
+        b"# notes\nbase\nmy own unshared line\n",
+    )
+    .unwrap();
+    let out = sweep_scoped(&ctx, &plane, &dir, ops::UpdateScope::Machine);
+    let row = out
+        .data
+        .skills
+        .iter()
+        .find(|s| s.skill.contains("notes"))
+        .unwrap_or_else(|| panic!("the row: {:?}", out.data.skills));
+    assert!(row.draft, "the row carries the draft fact: {row:?}");
+    assert_eq!(row.action, topos_types::results::PullAction::UpToDate);
+    let tty = crate::render::pull_tty(
+        &out.data,
+        &out.decisions,
+        &out.warnings,
+        &out.advisories,
+        &out.disclosures,
+        out.failed_bundles.len(),
+    );
+    assert!(
+        !tty.contains("all up to date"),
+        "the sentence that contradicted `list`: {tty}"
+    );
+    assert!(
+        tty.contains("up to date — your edits are not shared yet (topos publish"),
+        "{tty}"
+    );
+    assert!(tty.ends_with("Checked 1 skill: 1 draft ahead."), "{tty}");
 }
 
 /// THE ARM STILL EXISTS. A record no visible scope demands is still the classic ladder's business:

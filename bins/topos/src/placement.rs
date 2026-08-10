@@ -46,6 +46,7 @@ use topos_harness::coverage;
 use topos_harness::mcp::{EntryState, McpDialect, plugin_dir};
 use topos_harness::{PlacementNaming, registry};
 use topos_types::persisted::{Lock, PlacementKind, PlacementMap, PlacementState, SwapCapability};
+use topos_types::results::TargetOutcome;
 
 use crate::ctx::Ctx;
 use crate::error::ClientError;
@@ -90,9 +91,10 @@ pub(crate) enum PlannedTarget {
 pub(crate) struct WithheldSurface {
     /// The registry slug that was withheld.
     pub agent: String,
-    /// The wire state token (`not-supported` — no surface at this scope; `unprovable` — the
-    /// surface cannot be safely edited).
-    pub state: &'static str,
+    /// Why the surface was withheld, in [the one outcome vocabulary](TargetOutcome):
+    /// `Withheld` — no surface of that kind at this scope; `Unprovable` — the surface exists but
+    /// cannot be edited safely.
+    pub state: TargetOutcome,
     /// The note a person reads beside it.
     pub note: String,
 }
@@ -687,12 +689,12 @@ pub(crate) fn entries_plan_at(
         match config_surface(h, home, project_root) {
             ConfigSurface::NotSupported { note } => plan.withheld.push(WithheldSurface {
                 agent: h.slug.to_owned(),
-                state: "not-supported",
+                state: TargetOutcome::Withheld,
                 note: note.to_owned(),
             }),
             ConfigSurface::Escaped { .. } => plan.withheld.push(WithheldSurface {
                 agent: h.slug.to_owned(),
-                state: "unprovable",
+                state: TargetOutcome::Unprovable,
                 note: "the config path does not resolve inside this checkout".to_owned(),
             }),
             ConfigSurface::Ready {
@@ -1180,6 +1182,29 @@ impl Drift {
             EntryState::Current | EntryState::Updated => Self::Clean,
             EntryState::Drifted => Self::Modified,
             EntryState::Foreign => Self::Foreign,
+        }
+    }
+
+    /// This drift plus the one bit the record cannot hold — whether the run WROTE the target —
+    /// as the [one outcome vocabulary](TargetOutcome) every receipt and every wire state is
+    /// chosen from. This is the ONLY place an outcome word is derived: a render site picks a
+    /// word by asking the record what happened, never by naming a state of its own.
+    ///
+    /// The two write outcomes are what a person most needs told apart, and only the found-state
+    /// distinguishes them: writing where nothing stood is a first placement (`created`), writing
+    /// where our own recorded target stood is a catch-up or a repair (`refreshed`). A run that
+    /// wrote nothing reports what it found.
+    pub(crate) fn outcome(self, wrote: bool) -> TargetOutcome {
+        match (self, wrote) {
+            (Self::Absent, true) => TargetOutcome::Created,
+            (Self::Clean, true) => TargetOutcome::Refreshed,
+            // Drift and foreign content are never written over, so `wrote` cannot be true of
+            // them; if a caller ever claims otherwise the record's word still wins.
+            (Self::Modified, _) => TargetOutcome::Drifted,
+            (Self::Foreign, _) => TargetOutcome::Conflicting,
+            (Self::Unscannable, _) => TargetOutcome::Unprovable,
+            (Self::Absent, false) => TargetOutcome::Removed,
+            (Self::Clean, false) => TargetOutcome::Current,
         }
     }
 }
@@ -1926,6 +1951,82 @@ mod tests {
         assert_eq!(
             next.placement_state[0].pre_existing_sha.as_deref(),
             Some("a".repeat(64).as_str())
+        );
+    }
+
+    /// THE ONE OUTCOME VOCABULARY, derived. Both target shapes reach it through the same drift
+    /// projection, so a folder and a config entry cannot name one outcome two different ways —
+    /// which is exactly what they used to do (dirs through the row's action, entries through a
+    /// free-form per-agent string).
+    #[test]
+    fn every_outcome_is_derived_from_the_record_and_the_write() {
+        use topos_harness::mcp::EntryState;
+        use topos_types::results::TargetOutcome as T;
+
+        // The DIR side: what the scan found, plus whether this run wrote.
+        assert_eq!(Drift::Absent.outcome(true), T::Created);
+        assert_eq!(Drift::Clean.outcome(true), T::Refreshed);
+        assert_eq!(Drift::Clean.outcome(false), T::Current);
+        assert_eq!(Drift::Absent.outcome(false), T::Removed);
+        // Never written over, so the record's word wins whatever the caller claims.
+        for wrote in [true, false] {
+            assert_eq!(Drift::Modified.outcome(wrote), T::Drifted);
+            assert_eq!(Drift::Foreign.outcome(wrote), T::Conflicting);
+            assert_eq!(Drift::Unscannable.outcome(wrote), T::Unprovable);
+        }
+
+        // The ENTRY side lands on the SAME set, through the same projection. The two write
+        // outcomes are the ones a person most needs told apart: a first placement and a repair
+        // of a hand-deleted entry are both `created`, while rewriting our own recorded entry is
+        // `refreshed`.
+        let entry = |st: EntryState| {
+            let wrote = matches!(st, EntryState::PlacedNew | EntryState::Updated);
+            Drift::of_entry(st).outcome(wrote)
+        };
+        assert_eq!(entry(EntryState::PlacedNew), T::Created);
+        assert_eq!(entry(EntryState::Updated), T::Refreshed);
+        assert_eq!(entry(EntryState::Current), T::Current);
+        assert_eq!(entry(EntryState::Drifted), T::Drifted);
+        assert_eq!(entry(EntryState::Foreign), T::Conflicting);
+        assert_eq!(entry(EntryState::Removed), T::Removed);
+
+        // `wrote()` is the ONE rule for "this run changed something here" — the two outcomes that
+        // wrote, and no others.
+        for (o, wrote) in [
+            (T::Created, true),
+            (T::Refreshed, true),
+            (T::Current, false),
+            (T::Drifted, false),
+            (T::Conflicting, false),
+            (T::Unprovable, false),
+            (T::Removed, false),
+            (T::Withheld, false),
+        ] {
+            assert_eq!(o.wrote(), wrote, "{o:?}");
+            // Every outcome has a word, and no two share one — a person meets one name per
+            // outcome, on either target shape.
+            assert!(!o.word().is_empty(), "{o:?}");
+        }
+        let mut words: Vec<&str> = [
+            T::Created,
+            T::Refreshed,
+            T::Current,
+            T::Drifted,
+            T::Conflicting,
+            T::Unprovable,
+            T::Removed,
+            T::Withheld,
+        ]
+        .iter()
+        .map(|o| o.word())
+        .collect();
+        words.sort_unstable();
+        let before = words.len();
+        words.dedup();
+        assert_eq!(
+            words.len(),
+            before,
+            "two outcomes share one word: {words:?}"
         );
     }
 }

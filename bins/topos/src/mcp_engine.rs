@@ -54,7 +54,7 @@ use std::path::{Path, PathBuf};
 use serde_json::Value;
 use topos_harness::mcp::{self, AuthHint, EditPlan, EntryState, McpDialect, McpEntry, plugin_dir};
 use topos_harness::registry::KnownHarness;
-use topos_types::results::McpAgentState;
+use topos_types::results::{McpAgentState, TargetOutcome};
 
 use crate::config_custody::EntryPlacement;
 use crate::config_custody::{self, PendingIntent, ScopeEntries, placement_key};
@@ -305,6 +305,12 @@ pub(crate) fn converge(
     allow_removals: bool,
 ) -> ConvergeOutcome {
     let mut out = ConvergeOutcome::default();
+    // The one place a bundle id becomes the word a person reads. Built once, from the demands
+    // this run planned — the only names the converge is ever given.
+    let names: BTreeMap<String, String> = demands
+        .iter()
+        .map(|d| (d.bundle_id.clone(), d.name.clone()))
+        .collect();
     let _lock = match converge_lock(io) {
         Ok(guard) => guard,
         Err(warning) => {
@@ -361,14 +367,22 @@ pub(crate) fn converge(
     let mut parsed: Vec<(usize, ParsedServer)> = Vec::new();
     let mut failed: BTreeMap<usize, String> = BTreeMap::new();
     for (i, d) in demands.iter().enumerate() {
+        // ONE code per line. The gate's own code used to be pasted in front of its sentence and
+        // then wrapped in this line's code, so a person read two machine words before the first
+        // English one (`MCP_UNPLACEABLE weather: MCP_INSECURE_URL: the endpoint …`). The gate's
+        // code is the one that survives, because it is the one an agent can act on — WHY the
+        // document was refused, not merely that something was. A failure with no typed code of
+        // its own (an unparseable document) keeps the generic one.
         let gated = crate::mcp_validate::validate_server_json(&d.server_json)
-            .map_err(|r| format!("{}: {}", r.code.as_str(), r.message))
-            .and_then(|_| parse_server_json(&d.server_json));
+            .map_err(|r| (r.code.as_str().to_owned(), r.message))
+            .and_then(|_| {
+                parse_server_json(&d.server_json).map_err(|m| ("MCP_UNPLACEABLE".to_owned(), m))
+            });
         match gated {
             Ok(p) => parsed.push((i, p)),
-            Err(reason) => {
+            Err((code, reason)) => {
                 out.warnings.push(format!(
-                    "MCP_UNPLACEABLE {}: {reason} — nothing is placed for it",
+                    "{code} {}: {reason} — nothing is placed for it",
                     d.name
                 ));
                 failed.insert(i, reason);
@@ -478,7 +492,12 @@ pub(crate) fn converge(
                 push_state(
                     &mut states,
                     *i,
-                    agent_state(h.slug, "unprovable", Some(reason.as_str()), None),
+                    agent_state(
+                        h.slug,
+                        TargetOutcome::Unprovable,
+                        Some(reason.as_str()),
+                        None,
+                    ),
                 );
             }
         }
@@ -515,6 +534,7 @@ pub(crate) fn converge(
             &desired,
             &preserved,
             &provenance,
+            &names,
         );
         out.warnings.extend(surface_out.warnings);
         out.notices.extend(surface_out.notices);
@@ -529,7 +549,7 @@ pub(crate) fn converge(
                 None => {
                     // A key outside the desired set: a removal (or a drifted survivor of one),
                     // reported with its bundle.
-                    if (state.state == "removed" || state.state == "drifted")
+                    if matches!(state.state, TargetOutcome::Removed | TargetOutcome::Drifted)
                         && let Some(bundle) = custody.bundle_of_key(&key)
                     {
                         out.removed.push(RemovedEntry {
@@ -578,8 +598,11 @@ pub(crate) fn remove_bundle(
     descriptors: &[&'static KnownHarness],
     detected: &BTreeSet<String>,
     bundle_id: &str,
+    /* the name a person calls it — see `converge`'s `names` */ name: &str,
 ) -> ConvergeOutcome {
     let mut out = ConvergeOutcome::default();
+    let names: BTreeMap<String, String> =
+        std::iter::once((bundle_id.to_owned(), name.to_owned())).collect();
     let _lock = match converge_lock(io) {
         Ok(guard) => guard,
         Err(warning) => {
@@ -650,11 +673,14 @@ pub(crate) fn remove_bundle(
             &[],
             &only_this,
             &provenance,
+            &names,
         );
         out.warnings.extend(surface_out.warnings);
         out.notices.extend(surface_out.notices);
         for (state_key, state) in surface_out.states {
-            if state_key == key && (state.state == "removed" || state.state == "drifted") {
+            if state_key == key
+                && matches!(state.state, TargetOutcome::Removed | TargetOutcome::Drifted)
+            {
                 out.removed.push(RemovedEntry {
                     bundle_id: bundle_id.to_owned(),
                     state,
@@ -731,10 +757,15 @@ fn converge_lock(io: &ScopeIo<'_>) -> Result<crate::fs_seam::LockGuard, String> 
     })
 }
 
-fn agent_state(slug: &str, state: &str, note: Option<&str>, file: Option<&Path>) -> McpAgentState {
+fn agent_state(
+    slug: &str,
+    state: TargetOutcome,
+    note: Option<&str>,
+    file: Option<&Path>,
+) -> McpAgentState {
     McpAgentState {
         agent: slug.to_owned(),
-        state: state.to_owned(),
+        state,
         note: note.map(str::to_owned),
         file: file.map(|p| p.display().to_string()),
     }
@@ -742,19 +773,6 @@ fn agent_state(slug: &str, state: &str, note: Option<&str>, file: Option<&Path>)
 
 fn push_state(states: &mut BTreeMap<usize, Vec<McpAgentState>>, i: usize, s: McpAgentState) {
     states.entry(i).or_default().push(s);
-}
-
-/// ONE state vocabulary. The tokens are this engine's (see the module docs); the phrases are the
-/// words a person reads for them — and every receipt that shows a per-agent outcome comes through
-/// here, so `add` and `update` can never name the same state two different ways. The vocabulary
-/// is OPEN: a token with no phrase of its own reads verbatim rather than being folded into a
-/// wrong one.
-pub(crate) fn state_phrase(state: &str) -> &str {
-    match state {
-        "placed" => "placed",
-        "not-supported" => "not placed",
-        other => other,
-    }
 }
 
 // =================================================================================================
@@ -796,7 +814,7 @@ impl SurfaceOutcome {
                         e.key.clone(),
                         agent_state(
                             h.slug,
-                            "unprovable",
+                            TargetOutcome::Unprovable,
                             Some("the config path does not resolve inside this checkout"),
                             None,
                         ),
@@ -815,7 +833,7 @@ impl SurfaceOutcome {
                 .map(|e| {
                     (
                         e.key.clone(),
-                        agent_state(h.slug, "unprovable", Some(reason), Some(path)),
+                        agent_state(h.slug, TargetOutcome::Unprovable, Some(reason), Some(path)),
                     )
                 })
                 .collect(),
@@ -909,15 +927,24 @@ fn converge_file(
     desired: &[McpEntry],
     preserved: &dyn Fn(&ScopeEntries, &str) -> bool,
     provenance: &BTreeMap<String, (String, String)>,
+    // `names`: bundle id → the name a person calls it, for the rows this run demands. A stale
+    // row's bundle may not be demanded at all (that is what makes it stale), and then its id is
+    // all there is.
+    names: &BTreeMap<String, String>,
 ) -> SurfaceOutcome {
     let stale: Vec<String> = custody
         .stale_rows(h.slug, path)
         .into_iter()
-        .map(|(key, old)| {
+        .map(|(key, bundle, old)| {
+            // The BUNDLE is what a person recognizes. `key` is the config key topos minted
+            // (`topos-<ws>-<name>`, collision-suffixed) — an internal identity that this line
+            // used to print as though it were the bundle's name. It is still named, because the
+            // stale entry is findable by nothing else once you open the old file.
             format!(
-                "MCP_ENTRY_STALE_PATH {}: {key} is recorded in {old}, but this scope's surface \
-                 is {} — the old entry is left in place",
+                "MCP_ENTRY_STALE_PATH {}: '{}' is recorded in {old} (as `{key}`), but this \
+                 scope's surface is {} — the old entry is left in place",
                 h.slug,
+                names.get(&bundle).map_or(bundle.as_str(), String::as_str),
                 path.display()
             )
         })
@@ -1018,10 +1045,10 @@ fn converge_surface(
                 // state every reader joins on — a row whose verb reports a write while its own
                 // per-agent line reads `current` has told a person two things.
                 for (key, state) in &mut surface.states {
-                    if state.state == "current"
+                    if state.state == TargetOutcome::Current
                         && outcome.fingerprints.iter().any(|(k, _)| k == key)
                     {
-                        state.state = "placed".to_owned();
+                        state.state = TargetOutcome::Refreshed;
                         state.note = h.mcp().map(|m| m.reload_note.to_owned());
                     }
                 }
@@ -1277,33 +1304,29 @@ fn fold_states(
     let desired_keys: BTreeSet<&str> = desired.iter().map(|e| e.key.as_str()).collect();
     let mut out = SurfaceOutcome::empty();
     for (key, st) in states {
-        let mapped = match st {
-            // A NEW or CHANGED placement carries the harness's reload note — how the change goes
-            // live. These two are also the whole of what "topos wrote this entry" means, so they
-            // get their OWN wire state: a reader (the receipt, the fleet page, `--json`) can tell
-            // a file this run wrote from one it merely found in order, and both channels say it
-            // with the same word.
-            EntryState::PlacedNew | EntryState::Updated => {
-                out.wrote.insert(key.clone());
-                agent_state(h.slug, "placed", h.mcp().map(|m| m.reload_note), Some(path))
+        // A foreign key nobody demanded is not this bundle's business at all — no outcome, no row.
+        if matches!(st, EntryState::Foreign) && !desired_keys.contains(key.as_str()) {
+            continue;
+        }
+        // DERIVED, never chosen: the driver's per-key state projects onto the ONE drift
+        // vocabulary, and that plus "did this run write it" is the outcome. Nothing here names a
+        // word — the words live in `TargetOutcome`, where the dir side reads them too.
+        let wrote = matches!(st, EntryState::PlacedNew | EntryState::Updated);
+        let outcome = crate::placement::Drift::of_entry(*st).outcome(wrote);
+        if wrote {
+            out.wrote.insert(key.clone());
+        }
+        let note = match outcome {
+            // How the change goes live, in the harness's own words.
+            TargetOutcome::Created | TargetOutcome::Refreshed => h.mcp().map(|m| m.reload_note),
+            TargetOutcome::Drifted => Some("hand-edited since topos wrote it — left in place"),
+            TargetOutcome::Conflicting => {
+                Some("the config key is held by an entry topos does not own")
             }
-            EntryState::Current => agent_state(h.slug, "current", None, Some(path)),
-            EntryState::Drifted => agent_state(
-                h.slug,
-                "drifted",
-                Some("hand-edited since topos wrote it — left in place"),
-                Some(path),
-            ),
-            EntryState::Foreign if desired_keys.contains(key.as_str()) => agent_state(
-                h.slug,
-                "conflicting",
-                Some("the config key is held by an entry topos does not own"),
-                Some(path),
-            ),
-            EntryState::Foreign => continue,
-            EntryState::Removed => agent_state(h.slug, "removed", None, Some(path)),
+            _ => None,
         };
-        out.states.push((key.clone(), mapped));
+        out.states
+            .push((key.clone(), agent_state(h.slug, outcome, note, Some(path))));
     }
     out
 }

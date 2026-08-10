@@ -28,7 +28,7 @@ what only a cross-crate composed run can prove.
   governance-transferring genesis publish → project-manifest delivery → silent fast-forward →
   protect/review → the person-scope feed lane and its `-g` arms → the owner-side session end),
   plus the deny/logout arms.
-- **`tests/mcp_e2e.rs`** — the `kind = "mcp"` bundle loop: `add --mcp` adopting a local
+- **`tests/mcp_e2e.rs`** — the `kind = "mcp"` bundle loop: `add --kind mcp` adopting a local
   `server.json` folder, the publish that makes it a catalog bundle (witnessed on the row, the
   delivery lane, and the workspace's registry-shape read API), a second member's sweep landing the
   entry in ALL SIX MCP-capable agents' configs in their exact dialects, the applied report's

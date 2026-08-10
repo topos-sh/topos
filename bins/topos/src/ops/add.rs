@@ -34,13 +34,25 @@ use super::manifest_edit::EditTarget;
 /// preimage, so it must stay constant for a deterministic id.
 const ADD_MESSAGE: &str = "topos: add";
 
+/// Whether the invocation SAID what kind it was adding. The server-bundle guard arms only on
+/// SILENCE: a folder that is plainly an MCP bundle refuses toward `--kind mcp` when nobody said
+/// what it was, and proceeds as exactly what was asked for when somebody did — an explicit word is
+/// the person's own, and this door does not second-guess it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum KindDeclared {
+    /// No `--kind` on the command line — the guard stands.
+    No,
+    /// `--kind <word>` was given — the guard stands down.
+    Yes,
+}
+
 /// Whether `dir`'s root holds a `server.json` and no `SKILL.md` — the MCP bundle shape. The plain
-/// skill doors ([`add`], [`adopt_path`], publish's auto-add) refuse it toward `topos add --mcp`
-/// ([`ClientError::McpFlagRequired`]) instead of silently adopting a server document as a SKILL
-/// and delivering raw JSON into skills dirs.
+/// skill doors ([`add`], an undeclared [`adopt_path`], publish's auto-add) refuse it toward
+/// `topos add --kind mcp` ([`ClientError::McpFlagRequired`]) instead of silently adopting a server
+/// document as a SKILL and delivering raw JSON into skills dirs.
 ///
 /// # Errors
-/// [`ClientError::McpFlagRequired`] naming the `--mcp` spelling.
+/// [`ClientError::McpFlagRequired`] naming the `--kind mcp` spelling.
 pub(crate) fn refuse_unflagged_mcp_dir(ctx: &Ctx<'_>, source: &Path) -> Result<(), ClientError> {
     let has_server = matches!(ctx.fs.read_opt(&source.join("server.json")), Ok(Some(_)));
     if has_server && !ctx.fs.exists(&source.join("SKILL.md")) {
@@ -55,7 +67,7 @@ pub(crate) fn refuse_unflagged_mcp_dir(ctx: &Ctx<'_>, source: &Path) -> Result<(
 /// else frontmatter-then-basename) — the direct-path entry point (a path-shaped positional).
 ///
 /// # Errors
-/// [`ClientError::McpFlagRequired`] for an MCP server bundle named without `--mcp`;
+/// [`ClientError::McpFlagRequired`] for an MCP server bundle named without `--kind`;
 /// [`ClientError::SourceOverlap`] if `source` overlaps `~/.topos/`; [`ClientError::EmptyBundle`] /
 /// [`ClientError::Scan`] from the scan; [`ClientError::SkillExists`] on an id collision; otherwise a
 /// store/io failure.
@@ -76,18 +88,25 @@ pub(crate) fn add(ctx: &Ctx<'_>, source: &Path) -> Result<AddData, ClientError> 
 /// the undo is the state before the remove. A folder `target` STILL spells is refused exactly as
 /// before: that add really is a second adoption of one mutable directory.
 ///
+/// `declared` is whether the invocation carried an explicit `--kind` word: the server-bundle guard
+/// arms on silence alone, so `--kind skill` adopts a `server.json`-rooted folder AS a skill — the
+/// person said which, and that answer outranks the folder's shape.
+///
 /// # Errors
 /// As [`add`], plus a `target` manifest that cannot be read or parsed.
 pub(crate) fn adopt_path(
     ctx: &Ctx<'_>,
     target: &EditTarget,
     source: &Path,
+    declared: KindDeclared,
 ) -> Result<AddData, ClientError> {
-    refuse_unflagged_mcp_dir(ctx, source)?;
+    if declared == KindDeclared::No {
+        refuse_unflagged_mcp_dir(ctx, source)?;
+    }
     adopt_path_any_kind(ctx, target, source, BundleKind::Skill)
 }
 
-/// [`adopt_path`] minus the server-bundle guard — `add --mcp`'s own local door, which adopts
+/// [`adopt_path`] minus the server-bundle guard — `add --kind mcp`'s own local door, which adopts
 /// exactly that shape deliberately (the flag IS the declaration the guard asks for).
 pub(crate) fn adopt_path_any_kind(
     ctx: &Ctx<'_>,
@@ -240,6 +259,7 @@ fn unclaimed_record(
         published_match: None,
         mcp: None,
         dest: Vec::new(),
+        dest_resolved: Vec::new(),
         display: None,
         // The receipt would otherwise read as a fresh adopt while carrying a version older than
         // this run: say what actually happened.
@@ -494,10 +514,11 @@ pub(crate) fn add_with_name(
         // Set by the manifest half when the edit was not the plain row write (a file born here, a
         // redundant row withheld, an `off` switch deleted, a standing web decline).
         note: None,
-        // Set by `add --mcp`'s receipt fold; a plain adopt is not a server.
+        // Set by `add --kind mcp`'s receipt fold; a plain adopt is not a server.
         mcp: None,
         // Set by the `-a`/`--dest` arms at the composition root (the row's frozen destinations).
         dest: Vec::new(),
+        dest_resolved: Vec::new(),
         display: None,
     })
 }
@@ -1405,6 +1426,7 @@ pub(crate) fn resolve_add_target(
     ctx: &Ctx<'_>,
     roots: &super::DiscoveryRoots,
     target: &str,
+    verb: &str,
 ) -> Result<(std::path::PathBuf, String), ClientError> {
     let (name, harness) = split_target(target);
     // A residual guard: `crate::source` already routes path shapes to a direct adopt, but a `~`-prefixed
@@ -1413,6 +1435,7 @@ pub(crate) fn resolve_add_target(
     if is_path_shaped(name) {
         return Err(ClientError::PathNotName {
             arg: target.to_owned(),
+            verb: verb.to_owned(),
         });
     }
     let untracked = super::list::discover_untracked(ctx, roots)?;
@@ -1457,6 +1480,7 @@ pub(crate) fn resolve_add_target(
                 // A bare word that is a real cwd entry but no skill — the user likely meant a path.
                 Err(ClientError::PathNotName {
                     arg: target.to_owned(),
+                    verb: verb.to_owned(),
                 })
             } else {
                 Err(ClientError::NoUntrackedSkill {
@@ -1738,6 +1762,7 @@ pub(crate) fn plan_bare_add(
     if is_path_shaped(name) {
         return Err(ClientError::PathNotName {
             arg: target.to_owned(),
+            verb: "add".to_owned(),
         });
     }
     let untracked = super::list::discover_untracked(ctx, roots)?;
@@ -1796,6 +1821,7 @@ pub(crate) fn plan_bare_add(
                 // A bare word that is a real cwd entry but no skill — the user likely meant a path.
                 return Err(ClientError::PathNotName {
                     arg: target.to_owned(),
+                    verb: "add".to_owned(),
                 });
             }
             let published = published_matches(ctx, connect, name, workspace);

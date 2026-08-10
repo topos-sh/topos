@@ -422,6 +422,13 @@
             "null"
           ]
         },
+        "orphans": {
+          "description": "Records this scope's store still holds — with skill folders or config entries still\nstanding — that NO row in this manifest, and no feed, demands any more.\n\nAn inventory built from manifest rows alone could not show these, and the sweep's orphan\nresolution deliberately passes over a record whose config entries still stand (they are\nplaced, not abandoned). Between the two, an MCP server could sit live in an agent's config\nwith no surface naming it and no command offered for it. One line each, never a section:\nthe thing standing, and the way out. **INFERRED** (additive).",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/OrphanRecord"
+          }
+        },
         "rows": {
           "description": "The scope's inventory rows.",
           "type": "array",
@@ -467,7 +474,7 @@
       ]
     },
     "McpAgentState": {
-      "description": "One agent's (harness's) state for a config-placed (`mcp`) bundle on this installation.\n`state` is an OPEN vocabulary — `placed` (this run WROTE the entry into that file: a first\nplacement, an update, or a repair) / `current` (found already in order, nothing written) /\n`drifted` / `not-supported` / `unprovable` / `conflicting` / `removed`; a reader ignores a\nstate it does not recognize. **INFERRED** (additive).",
+      "description": "One agent's (harness's) state for a config-placed (`mcp`) bundle on this installation — its\nconfig ENTRY, projected onto [the one outcome vocabulary](TargetOutcome). **INFERRED**\n(additive).",
       "type": "object",
       "properties": {
         "agent": {
@@ -489,13 +496,40 @@
           ]
         },
         "state": {
-          "description": "The state — an OPEN vocabulary (see the struct doc).",
-          "type": "string"
+          "description": "What this bundle's entry in that agent's config looks like after the run.",
+          "$ref": "#/$defs/TargetOutcome"
         }
       },
       "required": [
         "agent",
         "state"
+      ]
+    },
+    "OrphanRecord": {
+      "description": "One record nothing demands whose bytes or entries still stand (see [`ListScope::orphans`]).\n**INFERRED** (additive).",
+      "type": "object",
+      "properties": {
+        "kind": {
+          "description": "The catalog bundle kind (`\"mcp\"` for a config-placed bundle). Absent ⇒ an ordinary skill.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "description": "The bundle's name — what a person calls it, never the store id.",
+          "type": "string"
+        },
+        "standing": {
+          "description": "Where it still stands: the config files its entries sit in, or the folders holding its\ncopies. Display paths, `~`-abbreviated.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "name"
       ]
     },
     "RemoteAdoption": {
@@ -816,6 +850,51 @@
           "description": "Not applied here yet — `topos update` applies it (or the state is not determinable\noffline).",
           "type": "string",
           "const": "unknown"
+        }
+      ]
+    },
+    "TargetOutcome": {
+      "description": "**THE ONE OUTCOME VOCABULARY** — what a single managed TARGET looks like after a run.\n\nA bundle's bytes reach a machine as one of two target shapes: a placement DIRECTORY the bundle\nowns, or an ENTRY it owns inside a config file. They are the same question asked twice (\"what\ndoes the thing topos owns look like now?\"), and they used to answer in two unrelated word sets\n— dirs through the row's action, entries through a free-form per-agent string that a reader\nhad to know by heart. Both now project onto THIS set, and both render from\n[`TargetOutcome::word`], so one outcome cannot be called two things.\n\nEvery variant is DERIVED, never chosen at a render site: from the drift vocabulary the\nownership record is scanned into (absent / clean / modified / foreign / unscannable) plus the\none bit the record cannot hold — whether this run WROTE the target. **INFERRED** (additive\nvalue set).",
+      "oneOf": [
+        {
+          "description": "Nothing was there and this run wrote it — the target's FIRST materialization here.",
+          "type": "string",
+          "const": "created"
+        },
+        {
+          "description": "The target stood at what the record says topos wrote, and this run rewrote it: a version\ncaught up, or a hand-deleted target put back. Never `created` — the distinction is the\nwhole reason a person can tell a new install from a repair.",
+          "type": "string",
+          "const": "refreshed"
+        },
+        {
+          "description": "Found byte-for-byte as recorded; nothing was written.",
+          "type": "string",
+          "const": "current"
+        },
+        {
+          "description": "Changed since topos wrote it — a local edit, left exactly as it is.",
+          "type": "string",
+          "const": "drifted"
+        },
+        {
+          "description": "Content topos holds no record of writing, standing where this bundle's target belongs.\nNever overwritten.",
+          "type": "string",
+          "const": "conflicting"
+        },
+        {
+          "description": "The target could not be read safely, so nothing was decided about it — fail closed.",
+          "type": "string",
+          "const": "unprovable"
+        },
+        {
+          "description": "The target left this run.",
+          "type": "string",
+          "const": "removed"
+        },
+        {
+          "description": "The surface exists but this bundle was deliberately not placed there (no config of that\nkind at this scope, a `dest` that excludes it).",
+          "type": "string",
+          "const": "not-supported"
         }
       ]
     },

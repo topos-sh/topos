@@ -24,13 +24,25 @@ use crate::sidecar::Layout;
 /// The bundle kinds THIS BINARY delivers. CLOSED: a kind joins the list in the release that ships
 /// its delivery mechanics, so the enum IS the inventory of what this build knows how to place —
 /// and a third kind becomes a compile error at every branch rather than a silent mis-placement.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+///
+/// It is also `add --kind`'s value enum, so the word the CLI accepts and the word this build can
+/// deliver are the SAME list: a third kind extends the vocabulary, the flag, and its help in one
+/// place, and can never be spelled at a door that cannot place it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum)]
 pub(crate) enum BundleKind {
     /// A skill bundle: its files are placed into each agent's skills folder.
+    ///
+    /// The `value(help)` is what `--kind`'s own help prints, and these doc comments are internal —
+    /// clap would otherwise put "skill-dir placement must never engage" in front of a person.
     #[default]
+    #[value(help = "a folder of instructions your agents read (the default)")]
     Skill,
     /// An MCP server bundle: its one `server.json` is converged into each agent's own MCP config,
     /// and skill-dir placement must never engage for it.
+    #[value(
+        help = "a folder whose root holds a server.json — your agents get it as a tool \
+                    endpoint in their own MCP config"
+    )]
     Mcp,
 }
 
@@ -127,6 +139,60 @@ impl RecordKind {
             Self::Known(k) => k,
             Self::Indeterminate => BundleKind::Skill,
         }
+    }
+}
+
+// =================================================================================================
+// What a kind CANNOT serve — the one refusal construction
+// =================================================================================================
+
+/// A verb that acts on a bundle's PLACED FILES: it reads, compares, or discards the bytes sitting
+/// in a folder an agent reads. That is the ONE axis a kind can fail to serve — a bundle whose bytes
+/// reach agents as config ENTRIES has no such folder — so all of them refuse through one
+/// construction rather than three ad-hoc sentences a person has to reconcile.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FileVerb {
+    /// `topos diff` — the placed files against the version they came from.
+    Diff,
+    /// `topos update --reset` — discard local edits to the placed files.
+    Reset,
+    /// `topos update --keep-mine` — end a stopped merge over the placed files.
+    KeepMine,
+}
+
+impl FileVerb {
+    /// The clause naming what this verb does, spelled as the flag the person typed. Reads directly
+    /// into the refusal sentence, so the message says the verb's own job back to them.
+    const fn acts_on(self) -> &'static str {
+        match self {
+            Self::Diff => "`diff` compares",
+            Self::Reset => "`--reset` discards your edits to",
+            Self::KeepMine => "`--keep-mine` ends a stopped merge over",
+        }
+    }
+}
+
+/// The refusal `verb` earns over a bundle of `kind` — `None` when the kind serves it. THE one
+/// construction site: a verb asks here instead of inventing a sentence, so every file verb says the
+/// same true thing about the same bundle, and a third kind answers all of them in one edit.
+///
+/// The alternative each of these used to take — a fake empty diff, a reset that discarded nothing
+/// and reported a discard — is worse than a refusal by exactly the amount a person trusts it.
+pub(crate) fn refuse_file_verb(
+    verb: FileVerb,
+    name: &str,
+    kind: BundleKind,
+) -> Option<crate::error::ClientError> {
+    match kind {
+        // A skill IS its placed files — every file verb is precisely what it exists for.
+        BundleKind::Skill => None,
+        BundleKind::Mcp => Some(crate::error::ClientError::InvalidArgument(format!(
+            "'{name}' is an MCP server bundle — {} a skill's placed files, and a server bundle \
+             places none. Its bytes are one entry per agent MCP config, and an entry you edited by \
+             hand is left exactly as you left it, never overwritten. `topos list {name}` names the \
+             files carrying it",
+            verb.acts_on()
+        ))),
     }
 }
 

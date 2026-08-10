@@ -591,11 +591,13 @@ function HarnessChips({ harnesses }: { harnesses: SessionSkillState["harnesses"]
   );
 }
 
-/** current is good; drifted/unprovable/conflicting want attention; not-supported is neither.
- * Exported for the unit suite: the vocabulary is the CLIENT'S and open, so which words earn
- * which tone — and that an unheard-of word still renders — is worth pinning. */
+/** created/refreshed/current are good; drifted/unprovable/conflicting want attention;
+ * not-supported is neither. `created`/`refreshed` replaced the single `placed` when the client
+ * unified its outcome vocabulary — an entry topos just wrote is in order, so it reads like one.
+ * Exported for the unit suite: the vocabulary is the CLIENT'S, so which words earn which tone —
+ * and that an unheard-of word still renders — is worth pinning. */
 export function harnessTone(state: string): "verified" | "pending" | "faint" | "neutral" {
-  if (state === "current") {
+  if (state === "current" || state === "created" || state === "refreshed") {
     return "verified";
   }
   if (state === "drifted" || state === "unprovable" || state === "conflicting") {

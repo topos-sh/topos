@@ -400,14 +400,23 @@ pub(crate) fn sync_one_planned(
                 }
                 return Ok(row);
             }
+            // A LOCAL DRAFT rides every row this arm produces. Delivery had nothing to do for a
+            // drafted bundle, so its action is `up_to_date` — and the fact was discarded here,
+            // which is how a receipt came to announce "all up to date" about the very bundles
+            // `list` was calling drafts and `status` was counting as drafts ahead. The three
+            // surfaces read one machine; they now say the same thing about it.
+            let drafted = matches!(work.state, WorkState::Draft { .. });
             if !converged.refreshed.is_empty() {
                 let mut row = state_row(&name, &sync, PullAction::Refreshed);
                 // Every folder holding the applied version, not only the ones rewritten — a
                 // bundle in two folders that needed one rewrite still lives in two folders.
                 row.destinations = converged.at_version;
+                row.draft = drafted;
                 return Ok(row);
             }
-            return Ok(state_row(&name, &sync, PullAction::UpToDate));
+            let mut row = state_row(&name, &sync, PullAction::UpToDate);
+            row.draft = drafted;
+            return Ok(row);
         }
         // ② BEHIND / ④ DIVERGED — an update is pending; fall through to fetch + apply.
         sync::SyncStatus::Behind | sync::SyncStatus::Diverged => {}
@@ -767,6 +776,9 @@ pub(crate) fn go_back(
         // The go-back's own row: a config-placed bundle says so, so the receipt that follows
         // names what it moved rather than calling every row a skill.
         kind: mcp_record.then(|| BundleKind::Mcp.as_str().to_owned()),
+        // A go-back RESTORES the recorded bytes over the placement, so nothing of the person's is
+        // left unshared in it.
+        draft: false,
     })
 }
 
@@ -1990,7 +2002,7 @@ pub(crate) fn config_destinations(
 ) -> Vec<String> {
     let mut out: Vec<String> = states
         .iter()
-        .filter(|s| s.state == "placed")
+        .filter(|s| s.state.wrote())
         .filter_map(|s| s.file.as_deref())
         .map(|f| super::inventory::pretty(ctx, Path::new(f)))
         .collect();
@@ -2016,6 +2028,7 @@ fn state_row(name: &str, sync: &SyncState, action: PullAction) -> PullSkill {
         scope: None,
         harnesses: Vec::new(),
         kind: None,
+        draft: false,
     }
 }
 
@@ -2036,6 +2049,7 @@ fn applied_row(name: &str, sync: &SyncState, _target: [u8; 32]) -> PullSkill {
         scope: None,
         harnesses: Vec::new(),
         kind: None,
+        draft: false,
     }
 }
 
@@ -2056,5 +2070,6 @@ fn synced_row(name: &str, sync: &SyncState, n: u32) -> PullSkill {
         scope: None,
         harnesses: Vec::new(),
         kind: None,
+        draft: false,
     }
 }

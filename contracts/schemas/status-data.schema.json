@@ -261,7 +261,7 @@
           "type": "string"
         },
         "armed": {
-          "description": "Provable presence of the topos trigger artifact right now. Absent = unknowable without a\nlive probe `status` refuses to run (a scheduler that must be dialed to answer).",
+          "description": "Provable presence of the topos trigger ARTIFACT right now — a footprint read, which is\nwhy every surface built on it says \"registered\" rather than \"armed\": the artifact stands,\nand nothing here watched it fire. Absent = unknowable without a live probe `status`\nrefuses to run (a scheduler that must be dialed to answer).",
           "type": [
             "boolean",
             "null"

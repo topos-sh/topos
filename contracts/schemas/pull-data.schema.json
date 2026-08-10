@@ -185,7 +185,7 @@
       ]
     },
     "McpAgentState": {
-      "description": "One agent's (harness's) state for a config-placed (`mcp`) bundle on this installation.\n`state` is an OPEN vocabulary — `placed` (this run WROTE the entry into that file: a first\nplacement, an update, or a repair) / `current` (found already in order, nothing written) /\n`drifted` / `not-supported` / `unprovable` / `conflicting` / `removed`; a reader ignores a\nstate it does not recognize. **INFERRED** (additive).",
+      "description": "One agent's (harness's) state for a config-placed (`mcp`) bundle on this installation — its\nconfig ENTRY, projected onto [the one outcome vocabulary](TargetOutcome). **INFERRED**\n(additive).",
       "type": "object",
       "properties": {
         "agent": {
@@ -207,8 +207,8 @@
           ]
         },
         "state": {
-          "description": "The state — an OPEN vocabulary (see the struct doc).",
-          "type": "string"
+          "description": "What this bundle's entry in that agent's config looks like after the run.",
+          "$ref": "#/$defs/TargetOutcome"
         }
       },
       "required": [
@@ -412,6 +412,10 @@
             "null"
           ]
         },
+        "draft": {
+          "description": "Whether this bundle carries LOCAL EDITS that are not shared — the same fact `list` prints\nas `(draft)` and `status` counts as `drafts ahead`.\n\nDelivery had nothing to do for such a row, so its action is `up_to_date` — and a summary\nbuilt from actions alone then announced \"all up to date\" about the very bundles `list` and\n`status` were calling drafts. The three surfaces disagreed about one machine. Carried here\nso the receipt can say both true things at once: nothing was owed, and something of yours\nis still unshared. **INFERRED** (additive).",
+          "type": "boolean"
+        },
         "harnesses": {
           "description": "Per-agent applied states for a config-placed (`mcp`) bundle: which detected agents hold\nthe server entry and how. Empty (and omitted) for file-bundle skills. **INFERRED**\n(additive).",
           "type": "array",
@@ -489,6 +493,51 @@
         "observed",
         "applied",
         "action"
+      ]
+    },
+    "TargetOutcome": {
+      "description": "**THE ONE OUTCOME VOCABULARY** — what a single managed TARGET looks like after a run.\n\nA bundle's bytes reach a machine as one of two target shapes: a placement DIRECTORY the bundle\nowns, or an ENTRY it owns inside a config file. They are the same question asked twice (\"what\ndoes the thing topos owns look like now?\"), and they used to answer in two unrelated word sets\n— dirs through the row's action, entries through a free-form per-agent string that a reader\nhad to know by heart. Both now project onto THIS set, and both render from\n[`TargetOutcome::word`], so one outcome cannot be called two things.\n\nEvery variant is DERIVED, never chosen at a render site: from the drift vocabulary the\nownership record is scanned into (absent / clean / modified / foreign / unscannable) plus the\none bit the record cannot hold — whether this run WROTE the target. **INFERRED** (additive\nvalue set).",
+      "oneOf": [
+        {
+          "description": "Nothing was there and this run wrote it — the target's FIRST materialization here.",
+          "type": "string",
+          "const": "created"
+        },
+        {
+          "description": "The target stood at what the record says topos wrote, and this run rewrote it: a version\ncaught up, or a hand-deleted target put back. Never `created` — the distinction is the\nwhole reason a person can tell a new install from a repair.",
+          "type": "string",
+          "const": "refreshed"
+        },
+        {
+          "description": "Found byte-for-byte as recorded; nothing was written.",
+          "type": "string",
+          "const": "current"
+        },
+        {
+          "description": "Changed since topos wrote it — a local edit, left exactly as it is.",
+          "type": "string",
+          "const": "drifted"
+        },
+        {
+          "description": "Content topos holds no record of writing, standing where this bundle's target belongs.\nNever overwritten.",
+          "type": "string",
+          "const": "conflicting"
+        },
+        {
+          "description": "The target could not be read safely, so nothing was decided about it — fail closed.",
+          "type": "string",
+          "const": "unprovable"
+        },
+        {
+          "description": "The target left this run.",
+          "type": "string",
+          "const": "removed"
+        },
+        {
+          "description": "The surface exists but this bundle was deliberately not placed there (no config of that\nkind at this scope, a `dest` that excludes it).",
+          "type": "string",
+          "const": "not-supported"
+        }
       ]
     },
     "WireNotice": {

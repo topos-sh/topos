@@ -18,7 +18,7 @@
 //! hang the harness.
 
 use std::cell::Cell;
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 use std::path::Path;
 
 use topos_types::persisted::SyncState;
@@ -90,6 +90,11 @@ pub(crate) struct PullOutcome {
     /// Isolated per-skill FAILURES — what the receipt counts and calls failed, and what makes the
     /// run exit non-zero. Only [`note_skill_failure`] and its reconcile twin write here.
     pub warnings: Vec<String>,
+    /// The BUNDLES this run could not carry forward. `warnings` is a LINE channel and a line is
+    /// not a bundle — a scope-level fault (an unavailable lock, an unreadable custody document)
+    /// is one line about no bundle at all — so the receipt's arithmetic counts THIS, and the
+    /// summary can no longer invent bundles that never existed and report them failed.
+    pub failed_bundles: std::collections::BTreeSet<String>,
     /// Bundles waiting on a DECISION only the person can make (see [`PendingDecision`]). They are
     /// not failures: the run exits 0 and the receipt counts them under `waiting on you`.
     pub decisions: Vec<PendingDecision>,
@@ -243,10 +248,11 @@ impl From<ExchangeFault> for StaleReason {
 
 impl PullOutcome {
     /// Wrap the schema payload with no workspace-level signals (the targeted paths).
-    fn plain(data: PullData, warnings: Vec<String>) -> Self {
+    fn plain(data: PullData, warnings: Vec<String>, failed_bundles: BTreeSet<String>) -> Self {
         Self {
             data,
             warnings,
+            failed_bundles,
             decisions: Vec::new(),
             advisories: Vec::new(),
             disclosures: Vec::new(),
@@ -278,6 +284,7 @@ pub(crate) fn pull(ctx: &Ctx<'_>, scope: PullScope) -> Result<PullOutcome, Clien
             let sweep_ctx = ctx_with_plane(ctx, &breaker);
             let mut skills = Vec::new();
             let mut warnings = Vec::new();
+            let mut failed_bundles = BTreeSet::new();
             let mut disclosures = Vec::new();
             for (skill_id, follow) in ctx.follow.followed() {
                 if !follow.following {
@@ -290,7 +297,7 @@ pub(crate) fn pull(ctx: &Ctx<'_>, scope: PullScope) -> Result<PullOutcome, Clien
                 let sid = match SkillId::parse(&skill_id) {
                     Ok(sid) => sid,
                     Err(e) => {
-                        note_skill_failure(ctx, &mut warnings, &skill_id, &e);
+                        note_skill_failure(ctx, &mut warnings, &mut failed_bundles, &skill_id, &e);
                         continue;
                     }
                 };
@@ -321,7 +328,9 @@ pub(crate) fn pull(ctx: &Ctx<'_>, scope: PullScope) -> Result<PullOutcome, Clien
                     // A hard per-skill failure (corrupt docs, store/io) must not abort the whole sweep —
                     // disclose it (stderr + a typed warning; never stdout, which the hook injects) and
                     // leave that skill put.
-                    Err(e) => note_skill_failure(ctx, &mut warnings, &skill_id, &e),
+                    Err(e) => {
+                        note_skill_failure(ctx, &mut warnings, &mut failed_bundles, &skill_id, &e)
+                    }
                 }
             }
             // The proposals count runs AFTER the sweep (it is disclosure, not the update itself) and is skipped
@@ -341,6 +350,7 @@ pub(crate) fn pull(ctx: &Ctx<'_>, scope: PullScope) -> Result<PullOutcome, Clien
                     scope: None,
                 },
                 warnings,
+                failed_bundles,
             );
             out.disclosures = disclosures;
             Ok(out)
@@ -363,6 +373,24 @@ pub(crate) fn pull(ctx: &Ctx<'_>, scope: PullScope) -> Result<PullOutcome, Clien
             let (layout, skill_id, _lock) =
                 super::resolve_skill_in_scope(ctx, &name, workspace.as_deref(), store)?;
             let sctx = ctx_with_layout(ctx, &layout);
+            // `--keep-mine` finishes a stopped merge over PLACED FILES. A config-placed bundle has
+            // none and can hold no merge, so it refuses through the ONE kind construction rather
+            // than reporting "no merge has stopped" in a skill's merge vocabulary.
+            if matches!(mode, TargetMode::KeepMine) {
+                let placements: Vec<String> =
+                    doc::read_map(ctx.fs, &layout.published(&skill_id).map)
+                        .ok()
+                        .flatten()
+                        .map(|m: topos_types::persisted::PlacementMap| m.placements)
+                        .unwrap_or_default();
+                if let Some(refusal) = crate::bundle_kind::refuse_file_verb(
+                    crate::bundle_kind::FileVerb::KeepMine,
+                    &_lock.name,
+                    crate::bundle_kind::classify(&sctx, skill_id.as_str(), &placements).or_skill(),
+                ) {
+                    return Err(refusal);
+                }
+            }
             // The go-back and the `--keep-mine` escape are documented plane-independent (the escape is
             // the offline no-deadlock guarantee) — neither spends a network call on the proposals count.
             let plane_independent = matches!(mode, TargetMode::GoBack(_) | TargetMode::KeepMine);
@@ -408,6 +436,7 @@ pub(crate) fn pull(ctx: &Ctx<'_>, scope: PullScope) -> Result<PullOutcome, Clien
                     scope: None,
                 },
                 Vec::new(),
+                BTreeSet::new(),
             ))
         }
     }
@@ -458,6 +487,21 @@ pub(crate) fn reset(
     }
     let mut items = Vec::with_capacity(resolved.len());
     for (layout, id, lock) in &resolved {
+        let sctx = ctx_with_layout(ctx, layout);
+        let map: topos_types::persisted::PlacementMap =
+            doc::read_map(ctx.fs, &layout.published(id).map)?
+                .ok_or_else(|| ClientError::Corrupt("missing placement map".to_owned()))?;
+        // The KIND decides whether this verb applies AT ALL, and it is asked FIRST — ahead of the
+        // selection below, whose vocabulary is skills folders. A config-placed bundle resolved
+        // `-a cursor` to the skills dir and refused about a folder that was never the point; now
+        // the one kind refusal answers, naming what `--reset` acts on.
+        if let Some(refusal) = crate::bundle_kind::refuse_file_verb(
+            crate::bundle_kind::FileVerb::Reset,
+            &lock.name,
+            crate::bundle_kind::classify(&sctx, id.as_str(), &map.placements).or_skill(),
+        ) {
+            return Err(refusal);
+        }
         // WHICH copy this reset acts on, and which edited copies it leaves ALONE — resolved from
         // the same selection the loss diff below is measured through, so the sentences around that
         // diff can never claim a wider loss than the diff shows. Empty selection = the whole
@@ -465,10 +509,6 @@ pub(crate) fn reset(
         let picked = if sel.is_empty() {
             None
         } else {
-            let sctx = ctx_with_layout(ctx, layout);
-            let map: topos_types::persisted::PlacementMap =
-                doc::read_map(ctx.fs, &layout.published(id).map)?
-                    .ok_or_else(|| ClientError::Corrupt("missing placement map".to_owned()))?;
             Some(super::dest_select::select_copy(
                 &sctx, sel, &lock.name, &map,
             )?)
@@ -729,7 +769,14 @@ fn skill_warning(skill_id: &str, e: &ClientError) -> String {
 /// Disclose one isolated per-skill sweep failure under the same redaction policy as the top-level error
 /// path: the SAFE message on stderr (the hook surface — never stdout), the FULL `Display` chain to the
 /// append-only diagnostics log (best-effort), and a stable-shape envelope warning.
-fn note_skill_failure(ctx: &Ctx<'_>, warnings: &mut Vec<String>, skill_id: &str, e: &ClientError) {
+fn note_skill_failure(
+    ctx: &Ctx<'_>,
+    warnings: &mut Vec<String>,
+    failed: &mut BTreeSet<String>,
+    skill_id: &str,
+    e: &ClientError,
+) {
+    failed.insert(skill_id.to_owned());
     let _ = crate::logfile::append_error_event(
         ctx.fs,
         &ctx.layout.log_path(),

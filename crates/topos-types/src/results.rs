@@ -141,20 +141,95 @@ pub struct PullSkill {
     /// (additive).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kind: Option<String>,
+    /// Whether this bundle carries LOCAL EDITS that are not shared — the same fact `list` prints
+    /// as `(draft)` and `status` counts as `drafts ahead`.
+    ///
+    /// Delivery had nothing to do for such a row, so its action is `up_to_date` — and a summary
+    /// built from actions alone then announced "all up to date" about the very bundles `list` and
+    /// `status` were calling drafts. The three surfaces disagreed about one machine. Carried here
+    /// so the receipt can say both true things at once: nothing was owed, and something of yours
+    /// is still unshared. **INFERRED** (additive).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub draft: bool,
 }
 
-/// One agent's (harness's) state for a config-placed (`mcp`) bundle on this installation.
-/// `state` is an OPEN vocabulary — `placed` (this run WROTE the entry into that file: a first
-/// placement, an update, or a repair) / `current` (found already in order, nothing written) /
-/// `drifted` / `not-supported` / `unprovable` / `conflicting` / `removed`; a reader ignores a
-/// state it does not recognize. **INFERRED** (additive).
+/// **THE ONE OUTCOME VOCABULARY** — what a single managed TARGET looks like after a run.
+///
+/// A bundle's bytes reach a machine as one of two target shapes: a placement DIRECTORY the bundle
+/// owns, or an ENTRY it owns inside a config file. They are the same question asked twice ("what
+/// does the thing topos owns look like now?"), and they used to answer in two unrelated word sets
+/// — dirs through the row's action, entries through a free-form per-agent string that a reader
+/// had to know by heart. Both now project onto THIS set, and both render from
+/// [`TargetOutcome::word`], so one outcome cannot be called two things.
+///
+/// Every variant is DERIVED, never chosen at a render site: from the drift vocabulary the
+/// ownership record is scanned into (absent / clean / modified / foreign / unscannable) plus the
+/// one bit the record cannot hold — whether this run WROTE the target. **INFERRED** (additive
+/// value set).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
+#[serde(rename_all = "kebab-case")]
+pub enum TargetOutcome {
+    /// Nothing was there and this run wrote it — the target's FIRST materialization here.
+    Created,
+    /// The target stood at what the record says topos wrote, and this run rewrote it: a version
+    /// caught up, or a hand-deleted target put back. Never `created` — the distinction is the
+    /// whole reason a person can tell a new install from a repair.
+    Refreshed,
+    /// Found byte-for-byte as recorded; nothing was written.
+    Current,
+    /// Changed since topos wrote it — a local edit, left exactly as it is.
+    Drifted,
+    /// Content topos holds no record of writing, standing where this bundle's target belongs.
+    /// Never overwritten.
+    Conflicting,
+    /// The target could not be read safely, so nothing was decided about it — fail closed.
+    Unprovable,
+    /// The target left this run.
+    Removed,
+    /// The surface exists but this bundle was deliberately not placed there (no config of that
+    /// kind at this scope, a `dest` that excludes it).
+    #[serde(rename = "not-supported")]
+    Withheld,
+}
+
+impl TargetOutcome {
+    /// The ONE word a person reads for this outcome, on EITHER target shape. Every receipt line
+    /// about a dir and every line about a config entry comes through here, so `add` and `update`
+    /// — and a folder and a config file — can never name one outcome two different ways.
+    #[must_use]
+    pub const fn word(self) -> &'static str {
+        match self {
+            Self::Created => "created",
+            Self::Refreshed => "refreshed",
+            Self::Current => "current",
+            Self::Drifted => "hand-edited",
+            Self::Conflicting => "held by another entry",
+            Self::Unprovable => "could not be read",
+            Self::Removed => "removed",
+            Self::Withheld => "not placed",
+        }
+    }
+
+    /// Whether this run WROTE the target. The two writing outcomes are exactly the two that make
+    /// a sweep a change rather than a look, so the rule lives here rather than in each caller's
+    /// idea of which words count.
+    #[must_use]
+    pub const fn wrote(self) -> bool {
+        matches!(self, Self::Created | Self::Refreshed)
+    }
+}
+
+/// One agent's (harness's) state for a config-placed (`mcp`) bundle on this installation — its
+/// config ENTRY, projected onto [the one outcome vocabulary](TargetOutcome). **INFERRED**
+/// (additive).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
 pub struct McpAgentState {
     /// The harness registry slug (e.g. `claude-code`, `cursor`).
     pub agent: String,
-    /// The state — an OPEN vocabulary (see the struct doc).
-    pub state: String,
+    /// What this bundle's entry in that agent's config looks like after the run.
+    pub state: TargetOutcome,
     /// A short human-readable qualifier (why not-supported / how a change goes live), when one
     /// exists.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -422,6 +497,32 @@ pub struct ListScope {
     pub manifest: Option<String>,
     /// The scope's inventory rows.
     pub rows: Vec<SkillEntry>,
+    /// Records this scope's store still holds — with skill folders or config entries still
+    /// standing — that NO row in this manifest, and no feed, demands any more.
+    ///
+    /// An inventory built from manifest rows alone could not show these, and the sweep's orphan
+    /// resolution deliberately passes over a record whose config entries still stand (they are
+    /// placed, not abandoned). Between the two, an MCP server could sit live in an agent's config
+    /// with no surface naming it and no command offered for it. One line each, never a section:
+    /// the thing standing, and the way out. **INFERRED** (additive).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub orphans: Vec<OrphanRecord>,
+}
+
+/// One record nothing demands whose bytes or entries still stand (see [`ListScope::orphans`]).
+/// **INFERRED** (additive).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
+pub struct OrphanRecord {
+    /// The bundle's name — what a person calls it, never the store id.
+    pub name: String,
+    /// Where it still stands: the config files its entries sit in, or the folders holding its
+    /// copies. Display paths, `~`-abbreviated.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub standing: Vec<String>,
+    /// The catalog bundle kind (`"mcp"` for a config-placed bundle). Absent ⇒ an ordinary skill.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
 }
 
 /// The one-line summary of a scope the invocation does not show in full. **PINNED.**
@@ -970,7 +1071,7 @@ pub struct AddData {
     /// **Additive.**
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
-    /// The MCP SERVER this add landed (`add --mcp`, or a subscribe to a workspace `mcp`
+    /// The MCP SERVER this add landed (`add --kind mcp`, or a subscribe to a workspace `mcp`
     /// bundle): what the gated document says it is, the endpoint every agent will call, and the
     /// agents the converge reached — typed, so a JSON consumer never parses the prose note.
     /// Absent for every other add, and for a workspace subscribe whose delivery has not landed
@@ -988,6 +1089,17 @@ pub struct AddData {
     /// source. **INFERRED** (additive-only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display: Option<String>,
+    /// Where those destinations RESOLVED to on this machine, when that differs from how the
+    /// manifest spells them.
+    ///
+    /// `dest` is the row's own spelling and must stay it — a manifest line is portable, and
+    /// `~/.codex/config.toml` is what belongs in the file. But an env override (`$CODEX_HOME`,
+    /// `$XDG_CONFIG_HOME`, `$CLAUDE_CONFIG_DIR`) moves where that spelling actually lands, and a
+    /// receipt naming the default pointed at a file that does not exist on the machine it was
+    /// printed on. Empty ⇒ nothing moved and the row's own spelling IS the resolved one.
+    /// **INFERRED** (additive-only).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dest_resolved: Vec<String>,
 }
 
 /// The describe a bare `add` of a git source returns: the source, what was discovered in it, and
@@ -2106,8 +2218,10 @@ pub enum StatusItemState {
 pub struct StatusTrigger {
     /// The registry slug.
     pub agent: String,
-    /// Provable presence of the topos trigger artifact right now. Absent = unknowable without a
-    /// live probe `status` refuses to run (a scheduler that must be dialed to answer).
+    /// Provable presence of the topos trigger ARTIFACT right now — a footprint read, which is
+    /// why every surface built on it says "registered" rather than "armed": the artifact stands,
+    /// and nothing here watched it fire. Absent = unknowable without a live probe `status`
+    /// refuses to run (a scheduler that must be dialed to answer).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub armed: Option<bool>,
     /// A short honesty note (e.g. why `armed` is unknown), when one is needed.
@@ -2137,6 +2251,7 @@ mod tests {
                 note: None,
                 harnesses: Vec::new(),
                 kind: None,
+                draft: false,
             }],
             proposals_awaiting: 0,
             notices: Vec::new(),
@@ -2148,8 +2263,10 @@ mod tests {
         assert_eq!(v["skills"][0]["action"], "up_to_date");
         assert_eq!(v["skills"][0]["workspace_id"], "w_acme");
         assert_eq!(v["proposals_awaiting"], 0);
-        // The additive fields OMIT when empty (an older consumer sees the unchanged pinned shape).
+        // The additive fields OMIT when empty (an older consumer sees the unchanged pinned shape)
+        // — `draft` included: a bundle with nothing unshared says nothing about drafts at all.
         assert!(v.get("notices").is_none() && v.get("sync").is_none());
+        assert!(v["skills"][0].get("draft").is_none());
         let back: PullData = serde_json::from_value(v).unwrap();
         assert_eq!(back.skills[0].action, PullAction::UpToDate);
     }

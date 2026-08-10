@@ -26,6 +26,60 @@ pub enum Subject {
     McpServer,
 }
 
+impl Subject {
+    /// What a bundle's KIND tag says it is. The one place a kind word becomes a subject, so a
+    /// render site never re-decides "is this an MCP bundle" with a comparison of its own.
+    #[must_use]
+    pub fn of_kind(kind: Option<&str>) -> Self {
+        match crate::bundle_kind::BundleKind::of_tag(kind) {
+            Some(crate::bundle_kind::BundleKind::Mcp) => Self::McpServer,
+            _ => Self::Skill,
+        }
+    }
+
+    /// The subject an APPLIED `add` receipt is about. The typed `mcp` block is present exactly
+    /// when the bundle that landed is a server, whatever door it came through.
+    #[must_use]
+    pub fn of_receipt(data: &topos_types::results::AddData) -> Self {
+        if data.mcp.is_some() {
+            Self::McpServer
+        } else {
+            Self::Skill
+        }
+    }
+
+    /// The subject an APPLIED `remove` receipt is about — servers only when every bundle that
+    /// left was one. A mixed removal keeps the skill sentence: it is the one that speaks for
+    /// folders on disk, and understating what left is the failure mode that matters.
+    #[must_use]
+    pub fn of_removal(uninstalled: &[topos_types::results::UninstalledBundle]) -> Self {
+        if !uninstalled.is_empty()
+            && uninstalled
+                .iter()
+                .all(|u| Self::of_kind(u.kind.as_deref()) == Self::McpServer)
+        {
+            Self::McpServer
+        } else {
+            Self::Skill
+        }
+    }
+
+    /// What this subject's TARGETS are, counted — `2 folders` for a skill's placement dirs,
+    /// `2 config files` for a server's entries. Four receipt sites each carried their own copy of
+    /// this decision (and one of them guessed the kind by sniffing dest spellings); they all read
+    /// it here now, so a receipt cannot call a config file a folder.
+    #[must_use]
+    pub fn targets(self, n: usize) -> String {
+        let noun = match (self, n == 1) {
+            (Self::Skill, true) => "folder",
+            (Self::Skill, false) => "folders",
+            (Self::McpServer, true) => "config file",
+            (Self::McpServer, false) => "config files",
+        };
+        format!("{n} {noun}")
+    }
+}
+
 /// Build a [`NextAction`] about a skill — the ordinary case. See [`next_action_about`] for the
 /// one that has to say which kind it is talking about.
 #[must_use]
@@ -657,5 +711,22 @@ mod tests {
         );
         assert_eq!(remove.needs_network, None);
         assert_eq!(remove.mutates, Some(true));
+    }
+
+    /// ONE noun table. Four receipt sites each carried their own folders-vs-config-files
+    /// decision, and one of them guessed the kind by sniffing `dest` spellings rather than asking
+    /// what the bundle is — so a receipt could call a config file a folder.
+    #[test]
+    fn the_target_noun_comes_from_what_the_bundle_is() {
+        assert_eq!(Subject::of_kind(None), Subject::Skill);
+        assert_eq!(Subject::of_kind(Some("skill")), Subject::Skill);
+        assert_eq!(Subject::of_kind(Some("mcp")), Subject::McpServer);
+        // A kind word this build does not own is never guessed into the nearest kind.
+        assert_eq!(Subject::of_kind(Some("knowledge")), Subject::Skill);
+
+        assert_eq!(Subject::Skill.targets(1), "1 folder");
+        assert_eq!(Subject::Skill.targets(2), "2 folders");
+        assert_eq!(Subject::McpServer.targets(1), "1 config file");
+        assert_eq!(Subject::McpServer.targets(2), "2 config files");
     }
 }

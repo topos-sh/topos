@@ -467,6 +467,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
             mcp: None,
             dest: Vec::new(),
             display: None,
+            dest_resolved: Vec::new(),
         })
         .expect("AddData serializes"),
         warnings: vec![],
@@ -508,6 +509,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
             mcp: None,
             dest: Vec::new(),
             display: None,
+            dest_resolved: Vec::new(),
         })
         .expect("AddData serializes"),
         warnings: vec![],
@@ -551,6 +553,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
             mcp: None,
             dest: Vec::new(),
             display: None,
+            dest_resolved: Vec::new(),
         })
         .expect("AddData serializes"),
         warnings: vec![],
@@ -598,22 +601,38 @@ fn fixtures() -> Vec<(&'static str, String)> {
         }),
     };
 
-    // `add --mcp <registry-name>` — the fetched arm APPLIES immediately: an undo-led APPLY
-    // RECEIPT (the `UNDO` next action is the full inverse — the row, the config entries, and the
-    // bundle folder this import itself wrote), with the typed `mcp` block carrying the server
-    // facts a JSON consumer reads. The fetched arm mints no version history, so the id and the
-    // version are ABSENT — but the bundle digest is real: the kernel digest of the document
-    // bytes the import wrote, recomputable by anyone holding that folder.
-    let add_mcp_applied = JsonEnvelope {
+    // (d) The LOCAL ambiguity, enriched: two directories carry the name in one harness, and a
+    //     workspace publishes it too — so the refusal offers the inventory read AND the subscribe.
+    let ambiguous_scope_actions = vec![
+        topos::actions::next_action(
+            ActionCode::DisambiguateName,
+            argv(&["topos", "list", "--json"]),
+        ),
+        topos::actions::next_action(
+            ActionCode::from("RUN_COMMAND".to_owned()),
+            argv(&["topos", "add", "topos.sh/acme/code-review", "--json"]),
+        ),
+    ];
+    // The LOCAL MCP DOOR — `topos add --kind mcp ./team-weather -g`. This is now the only door
+    // that adopts a server from bytes on this machine (a workspace reference is the other way in,
+    // and needs no flag at all). The folder IS the bundle: adopted in place, so the row points at
+    // it and the undo is the row drop. No version history is minted, so `skill_id` and
+    // `version_id` are ABSENT — but the bundle digest is real, the kernel digest of the document
+    // bytes, recomputable by anyone holding that folder.
+    //
+    // The typed `mcp` block carries the server facts a JSON consumer reads, and `agents` names
+    // the agents the converge actually reached — an empty list there is what makes the receipt
+    // say the row was recorded rather than installed.
+    let add_mcp_adopted = JsonEnvelope {
         schema_version: 1,
         command: "add".to_owned(),
         ok: true,
         data: serde_json::to_value(AddData {
             skill_id: None,
-            name: "weather".to_owned(),
+            name: "team-weather".to_owned(),
             version_id: None,
             // A stand-in digest of the right SHAPE: the real one is the kernel digest of the
-            // one-file bundle the import wrote, which the client computes from those bytes.
+            // one-file bundle in the adopted folder.
             bundle_digest: Some("f".repeat(64)),
             tracked: true,
             harness: None,
@@ -622,14 +641,14 @@ fn fixtures() -> Vec<(&'static str, String)> {
             triggers: Vec::new(),
             origin: None,
             manifest: Some("/home/ada/.topos/topos.toml".to_owned()),
-            reference: Some("/home/ada/.topos/mcp/weather".to_owned()),
-            undo: argv(&["topos", "remove", "-g", "/home/ada/.topos/mcp/weather"]),
+            reference: Some("/home/ada/work/team-weather".to_owned()),
+            undo: argv(&["topos", "remove", "-g", "/home/ada/work/team-weather"]),
             governed_copy: None,
             published_match: None,
             note: Some(
                 "MCP server io.github.acme/weather v1.4.0 — https://weather.acme.example/mcp \
-                 over streamable-http, auth oauth · cursor: server entry in \
-                 /home/ada/.cursor/mcp.json — restart Cursor"
+                 over streamable-http, auth oauth · /home/ada/.cursor/mcp.json: server entry — \
+                 restart Cursor"
                     .to_owned(),
             ),
             dest: Vec::new(),
@@ -644,34 +663,24 @@ fn fixtures() -> Vec<(&'static str, String)> {
                 // Only LITERAL headers reach a receipt — a credential-shaped one refuses the
                 // whole document instead.
                 headers: vec!["X-Region".to_owned()],
-                // ABSENT on a workspace-subscribed server, whose bytes live in the scope store.
-                bundle: Some("/home/ada/.topos/mcp/weather".to_owned()),
+                bundle: Some("/home/ada/work/team-weather".to_owned()),
                 agents: vec!["Claude Code".to_owned(), "Cursor".to_owned()],
             }),
+            dest_resolved: Vec::new(),
         })
         .expect("AddData serializes"),
         warnings: vec![],
+        // The undo takes a SERVER off this machine, so its caution says so rather than borrowing
+        // a skill's sentence about folders — read off the receipt, never hardcoded.
         next_actions: vec![topos::actions::next_action_about(
             ActionCode::from("UNDO".to_owned()),
-            argv(&["topos", "remove", "-g", "/home/ada/.topos/mcp/weather"]),
+            argv(&["topos", "remove", "-g", "/home/ada/work/team-weather"]),
             topos::actions::Subject::McpServer,
         )],
         receipt: None,
         error: None,
     };
 
-    // (d) The LOCAL ambiguity, enriched: two directories carry the name in one harness, and a
-    //     workspace publishes it too — so the refusal offers the inventory read AND the subscribe.
-    let ambiguous_scope_actions = vec![
-        topos::actions::next_action(
-            ActionCode::DisambiguateName,
-            argv(&["topos", "list", "--json"]),
-        ),
-        topos::actions::next_action(
-            ActionCode::from("RUN_COMMAND".to_owned()),
-            argv(&["topos", "add", "topos.sh/acme/code-review", "--json"]),
-        ),
-    ];
     let add_ambiguous_scope = JsonEnvelope {
         schema_version: 1,
         command: "add".to_owned(),
@@ -725,6 +734,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
                 scope: Some("person".to_owned()),
                 harnesses: Vec::new(),
                 kind: None,
+                draft: false,
             }],
             proposals_awaiting: 0,
         })
@@ -776,6 +786,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
                 scope: Some("person".to_owned()),
                 harnesses: Vec::new(),
                 kind: None,
+                draft: false,
             }],
             proposals_awaiting: 0,
         })
@@ -836,6 +847,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
                 scope: Some("person".to_owned()),
                 harnesses: Vec::new(),
                 kind: None,
+                draft: false,
             }],
             proposals_awaiting: 0,
         })
@@ -893,6 +905,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
                     draft_dir: None,
                     draft_diverged: None,
                 }],
+                orphans: Vec::new(),
             }],
             signed_in: true,
             ..Default::default()
@@ -1401,6 +1414,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
                 scope: Some("person".to_owned()),
                 harnesses: Vec::new(),
                 kind: None,
+                draft: false,
             }],
             proposals_awaiting: 1,
             notices: vec![WireNotice {
@@ -1546,9 +1560,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
                 StatusTrigger {
                     agent: "openclaw".to_owned(),
                     armed: None,
-                    note: Some(
-                        "presence needs a live scheduler query — not probed offline".to_owned(),
-                    ),
+                    note: Some("presence needs a live scheduler query".to_owned()),
                 },
             ],
             scopes: vec![StatusScope {
@@ -1753,7 +1765,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
             emit_json(&add_ambiguous_workspace),
         ),
         ("json/add.ambiguous-scope", emit_json(&add_ambiguous_scope)),
-        ("json/add.mcp-applied", emit_json(&add_mcp_applied)),
+        ("json/add.mcp-adopted", emit_json(&add_mcp_adopted)),
         ("json/list.ok", emit_json(&list_ok)),
         ("json/diff.ok", emit_json(&diff_ok)),
         ("json/log.ok", emit_json(&log_ok)),

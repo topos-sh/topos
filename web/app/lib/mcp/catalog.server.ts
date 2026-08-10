@@ -141,9 +141,10 @@ export async function scanMcpCatalog(
 /**
  * Decorate the session-lane catalog listing with each ACTIVE `kind: 'mcp'` entry's EMBEDDED
  * server name (`server.name` from the CURRENT version's document — the same source the registry
- * lane serves, never recomputed elsewhere). This is what lets the CLI resolve a registry-shaped
- * `add --mcp <name>` against the workspaces a machine is connected to before the official
- * registry. Best-effort and additive by design: a document this tier cannot read right now just
+ * lane serves, never recomputed elsewhere). It used to be what let the CLI resolve a
+ * registry-shaped `add` against the connected workspaces before the official registry; that door
+ * is gone, and NO client reads the field today — it stands for registry-shape consumers of this
+ * listing. Best-effort and additive by design: a document this tier cannot read right now just
  * leaves its entry undecorated (the wire field is optional), and the pass reads at most
  * [`MAX_MCP_BUNDLES_SCANNED`] documents — each warmed by the immutable per-version cache, so a
  * steady-state listing costs no vault round-trips.

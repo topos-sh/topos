@@ -251,7 +251,7 @@ pub fn adapter_for_slug<'a>(
             adapter: Box::new(crate::OpenClaw::new(home.join(".openclaw"), cfg, run)),
             // The trigger lives in OpenClaw's SCHEDULER, not the filesystem: proving it there means
             // running `openclaw cron list`, which a read-only status must not do.
-            offline_refusal: Some("presence needs a live scheduler query — not probed offline"),
+            offline_refusal: Some("presence needs a live scheduler query"),
             needs_live_harness: true,
         }),
         "hermes-agent" => Box::new(AdapterTrigger {

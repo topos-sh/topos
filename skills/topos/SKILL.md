@@ -177,19 +177,22 @@ reference accepts — never guess, read the message.
 
 ## MCP servers (the other kind of bundle)
 
-A bundle whose one file is a `server.json` is a REMOTE MCP server — reach for `add --mcp` when the
-user wants a tool endpoint (not instructions) on this machine or in this repo, or wants the team to
-have one:
+A bundle whose one file is a `server.json` is a REMOTE MCP server — a tool endpoint, not
+instructions. There are exactly TWO doors:
 
 ```
-topos add --mcp io.github.acme/weather      # an official-registry name — applies, undo-led
-topos add --mcp https://…/server.json       # a link to the document — same immediate apply
-topos add --mcp ./tools/weather             # a folder holding one — applies immediately
-topos publish weather                       # share it: same verb, same consent bar as a skill
+topos add weather                        # a server the workspace publishes — no flag needed
+topos add --kind mcp ./tools/weather     # a folder holding a server.json — applies, undo-led
+topos publish weather                    # share it: same verb, same consent bar as a skill
 ```
 
-A workspace reference needs no `--mcp` (`topos add @<ws>/weather` gets it with its kind intact);
-the flag is for a server the workspace does not have yet. Placement is SILENT and per-agent: no
+A workspace reference needs no flag — the catalog records what each bundle is. `--kind mcp` is for a
+FOLDER, which is just a folder until somebody says what it holds; without it a `server.json`-rooted
+folder refuses rather than landing as a skill, and `--kind skill` adopts that same folder as a
+skill. topos fetches NOTHING: a registry name or an https link to a document is refused. To bring a
+server the workspace does not have yet, the human adds it on the web (its MCP servers page takes a
+registry name, a URL, or the pasted document), then every machine adds it by name. Placement is
+SILENT and per-agent: no
 skill folder is written — each detected agent gets ONE entry in its own MCP config under an
 immutable `topos-…` key, so never hand-edit those entries or rename them (a rename strands the
 agent's OAuth sign-in). An entry a human edited reads `drifted` and is left byte-identical forever.

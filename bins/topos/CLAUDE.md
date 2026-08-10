@@ -98,17 +98,16 @@ generated `docs/cli.md` (`cargo xtask gen-cli-ref`).
   `tests/fixtures/mcp/` (six typed refusal codes; the credential scan runs FIRST, over the whole
   raw text; the named shapes are compiled-in matcher fns — no regex engine ships — and a
   dev-dependency `regex` referees them against the JSON's own sources in test). `ops/add_mcp` is
-  `add --mcp`: a local folder is gated then adopted in place with `kind = "mcp"` on its row; a
-  registry-shaped name resolves WORKSPACE-FIRST against the connected catalogs' embedded server
-  names (the listing's additive `mcp_server_name` field) — exactly one hit subscribes to that
-  bundle by catalog name through the ordinary reference arm, source-disclosed; several refuse
-  toward `--workspace`; a miss falls through to the official registry, whose 404 then names both
-  consulted sources; a registry name or https URL is fetched, gated, and applied immediately with
-  an undo-led receipt
-  (the canonical document written, the row recorded, the scope's config converged; the per-scope
-  `state/mcp_imports.json` record is what lets `remove` delete the written folder only when its
-  bytes still match). `publish` reads the kind through the one classifier (`bundle_kind`),
-  re-runs the gate BEFORE the op WAL, and threads it onto the wire.
+  `add --kind mcp`'s ONE door: a local folder holding a root `server.json` is gated whole then
+  adopted in place with `kind = "mcp"` on its row, and the scope's configs converge in the same
+  invocation. The client FETCHES NOTHING — a registry-shaped name and an https link to a document
+  are classified only so their refusal can teach the covered path (the server is added to a
+  workspace on the web, then every machine adds it by catalog name, needing no flag at all). The
+  kind word is `--kind`'s value enum, which IS `BundleKind`, so the CLI vocabulary and the
+  deliverable vocabulary cannot drift; the server-bundle guard on the plain skill doors arms only
+  on SILENCE, so `--kind skill` adopts a `server.json`-rooted folder as a skill. `publish` reads
+  the kind through the one classifier (`bundle_kind`), re-runs the gate BEFORE the op WAL, and
+  threads it onto the wire.
 - `mcp_engine` + `config_custody` — the `kind = "mcp"` bundle's delivery half: a store-only sync
   (lock custody, no dir placement) feeds a per-scope config CONVERGE over
   `topos-harness::mcp`'s pure drivers — server.json parsed fail-closed, and the converge itself

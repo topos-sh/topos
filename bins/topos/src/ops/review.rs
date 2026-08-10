@@ -246,6 +246,8 @@ fn review_describe(
         // A proposal's diff is version-vs-version — the same bytes everywhere, so no local copy
         // takes part in it and there is nothing to narrow.
         &super::Selection::default(),
+        // `review` resolves the skill where the reviewer stands, like every other read.
+        super::StoreScope::Here,
     )?;
     let handle = format!("{}@{}", skill_name, proposal.version_id);
     let next_argvs = verdict_next_argvs(&handle, yours);

@@ -9,7 +9,10 @@ import { withMcpServerNames } from "@/lib/mcp/catalog.server";
  * `GET /api/v1/workspaces/{ws}/skills` — the workspace catalog (every bundle holding a
  * `current`), authorized by workspace membership. Metadata only, no bytes; ordered by id.
  * Active `kind: 'mcp'` entries additionally carry their EMBEDDED server name (additive,
- * best-effort) — what lets a CLI resolve `add --mcp <name>` workspace-first.
+ * best-effort). NOTE: the CLI no longer reads this field — it was the join a registry-shaped
+ * `add` resolved workspace-first, and that door is gone (a server enters a workspace here, on the
+ * web, and machines add it by CATALOG name). The field is kept for registry-shape consumers of
+ * this listing; nothing in the client consumes it today.
  */
 export async function loader({ request, params }: LoaderFunctionArgs): Promise<Response> {
   const gated = laneGate(request);

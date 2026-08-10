@@ -767,7 +767,7 @@ fn a_re_disclosed_block_never_names_a_folder_that_is_no_longer_there() {
         "{:?}",
         row.merge
     );
-    let tty = crate::render::pull_tty(&data, &[], &[], &[], &[]);
+    let tty = crate::render::pull_tty(&data, &[], &[], &[], &[], 0);
     assert!(
         tty.contains(
             "    no agent folder holds this skill right now — either way out below puts it back\n"
@@ -1689,7 +1689,7 @@ fn keep_mine_settles_every_structural_collision_the_way_git_does() {
             "{label}: the receipt never names the team's change it dropped ({dropped}):\n{dd}"
         );
         // And the rendered row says it in the one voice a person reads.
-        let rendered = crate::render::pull_tty(&escaped, &[], &[], &[], &[]);
+        let rendered = crate::render::pull_tty(&escaped, &[], &[], &[], &[], 0);
         assert!(
             rendered.contains("kept your wording where you both changed the same lines"),
             "{label}: {rendered}"
@@ -2211,7 +2211,7 @@ fn a_placement_holding_the_marker_tree_is_never_committed_as_the_persons_work() 
             .collect::<Vec<_>>(),
         vec![topos_types::results::ConflictHolds::MarkedUp]
     );
-    let tty = crate::render::pull_tty(&data, &[], &[], &[], &[]);
+    let tty = crate::render::pull_tty(&data, &[], &[], &[], &[], 0);
     let leaf = rig
         .placement()
         .file_name()
@@ -2528,7 +2528,7 @@ fn a_narrowed_reset_leaves_per_folder_truth_on_both_surfaces() {
 
     // And the receipt says the three of them one at a time — never the aggregate sentence, which
     // is false of two of these folders.
-    let tty = crate::render::pull_tty(&data, &[], &[], &[], &[]);
+    let tty = crate::render::pull_tty(&data, &[], &[], &[], &[], 0);
     assert!(
         !tty.contains("your agents are unaffected"),
         "the aggregate promise is false here: {tty}"
@@ -2723,6 +2723,7 @@ fn no_base_falls_back_to_two_way_never_silent() {
         None,
         ops::DiffBudget::unlimited(),
         &ops::Selection::default(),
+        ops::StoreScope::Here,
     )
     .expect("diff reads the draft against a renderable base");
     assert!(diffed.diff.contains("reconciled"), "{}", diffed.diff);
@@ -5532,6 +5533,7 @@ fn a_refreshed_stale_replica_never_reads_all_up_to_date() {
         &out.warnings,
         &out.advisories,
         &out.disclosures,
+        out.failed_bundles.len(),
     );
     assert!(tty.contains("updated (3 folders)"), "{tty}");
     // Counted rows spell their folders out — a number nobody can act on is not an answer.
@@ -5562,7 +5564,8 @@ fn a_refreshed_stale_replica_never_reads_all_up_to_date() {
             &again.decisions,
             &again.warnings,
             &again.advisories,
-            &again.disclosures
+            &again.disclosures,
+            0,
         )
         .contains("all up to date")
     );
@@ -5622,6 +5625,7 @@ fn a_heal_riding_along_with_a_settled_fanout_is_named_on_the_row() {
         &out.warnings,
         &out.advisories,
         &out.disclosures,
+        out.failed_bundles.len(),
     );
     assert!(tty.contains("synced your edits to"), "{tty}");
     assert!(

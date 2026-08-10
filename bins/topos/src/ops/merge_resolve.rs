@@ -1976,6 +1976,7 @@ fn merged_row(
         scope: None,
         harnesses: Vec::new(),
         kind: None,
+        draft: false,
     }
 }
 
@@ -2092,6 +2093,7 @@ fn conflicted_row(
         scope: Some(scope_label(ctx)),
         harnesses: Vec::new(),
         kind: None,
+        draft: false,
     }
 }
 

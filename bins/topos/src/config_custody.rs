@@ -331,17 +331,19 @@ impl ScopeEntries {
             .collect()
     }
 
-    /// The `(entry_key, recorded file)` rows under `slug` whose recorded file is NOT `file` — the
-    /// disclosed stale class a surface-path move leaves behind. The caller warns with the old path
-    /// and leaves the rows (and the old files) in place.
-    pub(crate) fn stale_rows(&self, slug: &str, file: &Path) -> Vec<(String, String)> {
+    /// The `(entry_key, bundle id, recorded file)` rows under `slug` whose recorded file is NOT
+    /// `file` — the disclosed stale class a surface-path move leaves behind. The caller warns with
+    /// the old path and leaves the rows (and the old files) in place. The BUNDLE rides along
+    /// because a person reads a warning about their own bundle, not about the config key topos
+    /// minted for it.
+    pub(crate) fn stale_rows(&self, slug: &str, file: &Path) -> Vec<(String, String, String)> {
         let prefix = format!("{slug}/");
         self.rows
             .iter()
             .filter(|(_, (_, e))| Path::new(&e.file) != file)
-            .filter_map(|(k, (_, e))| {
+            .filter_map(|(k, (bundle, e))| {
                 k.strip_prefix(&prefix)
-                    .map(|key| (key.to_owned(), e.file.clone()))
+                    .map(|key| (key.to_owned(), bundle.clone(), e.file.clone()))
             })
             .collect()
     }
@@ -1053,10 +1055,13 @@ mod tests {
                 .map(String::as_str),
             Some("fp-old")
         );
+        // The BUNDLE rides along with the key and the old file: the disclosure a caller writes
+        // from this is about a bundle a person owns, not about the config key topos minted.
         assert_eq!(
             scope.stale_rows("cursor", here),
             vec![(
                 "topos-ws-a".to_owned(),
+                "local:a".to_owned(),
                 "/old/home/.cursor/mcp.json".to_owned()
             )]
         );

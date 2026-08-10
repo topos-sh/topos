@@ -52,11 +52,11 @@ mod uninstall;
 mod version_check;
 
 pub(crate) use add::{
-    AddRemoteOpts, BareAddPlan, KeepAsYoursOutcome, OriginDoc, add, add_remote, add_remote_fetched,
-    add_with_name, adopt_path, adopt_path_any_kind, governed_copy_suggestion, keep_as_yours,
-    plan_bare_add, resolve_add_target, split_target, tracked_skill_at,
+    AddRemoteOpts, BareAddPlan, KeepAsYoursOutcome, KindDeclared, OriginDoc, add, add_remote,
+    add_remote_fetched, add_with_name, adopt_path, adopt_path_any_kind, governed_copy_suggestion,
+    keep_as_yours, plan_bare_add, resolve_add_target, split_target, tracked_skill_at,
 };
-pub(crate) use add_mcp::{McpDocSource, add_mcp};
+pub(crate) use add_mcp::add_mcp;
 pub(crate) use arm::{arm_detected, probe_detected, scrub_all};
 pub(crate) use builtin::{ensure_builtin, is_builtin, restore_builtin};
 pub(crate) use connect::device_challenge;
@@ -351,7 +351,7 @@ fn resolve_skill_here(
 /// Whether a store's copy of `sid` carries LOCAL EDITS (any scanned placement modified against
 /// its pristine version). Best-effort — an unreadable map or scan reads as "no draft" here; the
 /// verbs' own loss-guards re-check with fail-toward-the-gate semantics.
-fn store_has_draft(ctx: &Ctx<'_>, sid: &SkillId) -> bool {
+pub(crate) fn store_has_draft(ctx: &Ctx<'_>, sid: &SkillId) -> bool {
     let sp = ctx.layout.published(sid);
     let Ok(Some(map)) = crate::doc::read_map(ctx.fs, &sp.map) else {
         return false;

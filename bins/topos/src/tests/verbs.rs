@@ -1459,6 +1459,7 @@ fn diff_is_empty_when_clean_and_a_golden_when_edited() {
         None,
         ops::DiffBudget::unlimited(),
         &ops::Selection::default(),
+        ops::StoreScope::Here,
     )
     .unwrap();
     assert!(
@@ -1479,6 +1480,7 @@ fn diff_is_empty_when_clean_and_a_golden_when_edited() {
         None,
         ops::DiffBudget::unlimited(),
         &ops::Selection::default(),
+        ops::StoreScope::Here,
     )
     .unwrap();
     assert_eq!(edited.source, topos_types::results::DiffSource::Local);
@@ -1508,6 +1510,7 @@ fn diff_reports_the_draft_digest_not_the_base() {
         None,
         ops::DiffBudget::unlimited(),
         &ops::Selection::default(),
+        ops::StoreScope::Here,
     )
     .unwrap();
 
@@ -1623,6 +1626,7 @@ fn add_under_fault_preserves_draft_and_is_all_or_nothing() {
                 None,
                 ops::DiffBudget::unlimited(),
                 &ops::Selection::default(),
+                ops::StoreScope::Here,
             )
             .unwrap_or_else(|e| panic!("fail_at={fail_at}: tracked skill must be usable: {e:?}"));
         }

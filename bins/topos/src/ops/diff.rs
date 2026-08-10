@@ -72,11 +72,14 @@ pub(crate) fn diff(
     r#ref: Option<&str>,
     budget: DiffBudget,
     sel: &super::Selection,
+    store: super::StoreScope,
 ) -> Result<DiffData, ClientError> {
-    // Resolve WHERE YOU STAND: a bundle a project `topos.toml` delivers keeps its custody in the
-    // checkout's own store, and a `diff` run from inside that checkout is about THAT copy — not a
-    // same-named machine twin, and not a not-found.
-    let (layout, id, lock) = super::resolve_skill_here(ctx, skill, None)?;
+    // Resolve in the scope the invocation SELECTED: bare, a bundle a project `topos.toml` delivers
+    // keeps its custody in the checkout's own store, and a `diff` run from inside that checkout is
+    // about THAT copy — not a same-named machine twin, and not a not-found. `-g` names the machine
+    // copy instead, so a person standing in a project can read the twin the other scope holds
+    // without leaving the folder (the same escape `list`/`status`/`update` offer).
+    let (layout, id, lock) = super::resolve_skill_in_scope(ctx, skill, None, store)?;
     if !sel.is_empty() && r#ref.is_some() {
         return Err(ClientError::InvalidArgument(
             "`--dest`/`-a` names the copy of YOUR edits a diff reads, and a version-to-version \
@@ -197,22 +200,16 @@ fn diff_draft_vs_current(
     let map: PlacementMap = doc::read_map(ctx.fs, &sp.map)?
         .ok_or_else(|| ClientError::Corrupt("missing placement map".to_owned()))?;
     // A CONFIG-PLACED (mcp) bundle has no working tree — its bytes live in agent configs, not in
-    // an editable dir — so the honest bare-diff answer is the no-local-draft shape: an empty diff
-    // whose endpoint IS the held current (never the "map has no placement" corruption error a
-    // store-only record would otherwise trip).
-    if map.placements.is_empty()
-        && crate::bundle_kind::classify(ctx, &lock.skill_id, &map.placements).is_mcp()
-    {
-        return Ok(DiffData {
-            source: DiffSource::Local,
-            version_id: lock.base_commit.clone(),
-            bundle_digest: lock.bundle_digest.clone(),
-            diff: String::new(),
-            truncated: false,
-            files: Vec::new(),
-            dest: None,
-            skill: None,
-        });
+    // an editable dir. It used to answer the no-local-draft shape (an empty diff whose endpoint IS
+    // the held current), which reads as "nothing has changed" over a bundle this verb never looked
+    // at — including one whose entry a person had hand-edited. It refuses instead, through the ONE
+    // construction every file verb shares.
+    if let Some(refusal) = crate::bundle_kind::refuse_file_verb(
+        crate::bundle_kind::FileVerb::Diff,
+        &lock.name,
+        crate::bundle_kind::classify(ctx, &lock.skill_id, &map.placements).or_skill(),
+    ) {
+        return Err(refusal);
     }
     // The draft side is the WORK TREE — the single edited copy when one exists (draft-anywhere),
     // else the first placement; several divergent copies freeze typed. A `-a`/`--dest` selection

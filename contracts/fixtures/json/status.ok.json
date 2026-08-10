@@ -51,7 +51,7 @@
       },
       {
         "agent": "openclaw",
-        "note": "presence needs a live scheduler query — not probed offline"
+        "note": "presence needs a live scheduler query"
       }
     ],
     "version": "0.1.0"

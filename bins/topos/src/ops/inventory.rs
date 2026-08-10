@@ -538,7 +538,7 @@ fn scope_rows(
                     .iter()
                     .map(|e| topos_types::results::McpAgentState {
                         agent: e.agent.clone(),
-                        state: "current".to_owned(),
+                        state: topos_types::results::TargetOutcome::Current,
                         note: None,
                         file: Some(e.file.clone()),
                     })
@@ -2623,7 +2623,7 @@ mod tests {
                 .map(|h| {
                     (
                         h.agent.as_str(),
-                        h.state.as_str(),
+                        h.state.word(),
                         h.file.as_deref().unwrap_or_default(),
                     )
                 })

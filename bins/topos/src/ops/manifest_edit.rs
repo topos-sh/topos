@@ -1266,7 +1266,11 @@ fn resolve_arms(
     for token in tokens {
         let canonical = keys::parse_input(token, host.as_deref())
             .ok()
-            .map(|r| r.shape.canonical());
+            .map(|r| r.shape.canonical())
+            // A PATH-shaped token names a directory, and a directory has many spellings while the
+            // row `add` wrote holds exactly one of them. Re-spell the token as the reference of
+            // the row whose folder it IS, so every way of naming that folder reaches the same row.
+            .map(|c| path_row_reference(ctx, target, &plan, token).unwrap_or(c));
         out.push(resolve_one(
             ctx,
             connect,
@@ -1948,8 +1952,8 @@ fn scope_store_ctx<'a>(ctx: &'a Ctx<'a>, target: &EditTarget) -> Option<Ctx<'a>>
 
 /// What the bundle a manifest arm acts on IS — the answer that picks a destination VOCABULARY
 /// (config files vs skills folders) and the noun a receipt uses. The row's own `kind` field
-/// answers first: a locally declared server folder has no catalog to ask, and a fetched
-/// `add --mcp` bundle has no store record at all. Otherwise the scope store's record answers
+/// answers first: a locally declared server folder has no catalog to ask, and a hand-written
+/// row may point outside every store. Otherwise the scope store's record answers
 /// through THE chain ([`crate::bundle_kind::classify`]).
 ///
 /// Nothing answering is the ordinary skill. No bytes move on this answer — an arm that would
@@ -2070,6 +2074,45 @@ fn member_of(set: &PlanRow, canonical: Option<&str>) -> Option<String> {
         ) if sh == host && so == owner && sr == repo => Some(skill.clone()),
         _ => None,
     }
+}
+
+/// The reference of the local-path row whose FOLDER `token` names, when `token` is path-shaped and
+/// some row in this file points at that folder. `None` for every other token, and for a path that
+/// resolves to no row (the ordinary miss then reports the token as typed).
+///
+/// `add ./deploy` records the folder's canonicalized absolute path, so `remove ./deploy` — the
+/// documented exact inverse — matched nothing: the row's one spelling and the person's own were
+/// different strings for one directory. Both sides are resolved and canonicalized here, which
+/// makes every spelling of a folder (`./deploy`, `../repo/deploy`, `~/repo/deploy`, the absolute
+/// path) reach the row, rather than only the spelling that happened to be stored. A relative TOKEN
+/// resolves against the CWD (that is what the person typed it against); a relative ROW resolves
+/// against the folder its manifest governs.
+fn path_row_reference(
+    ctx: &Ctx<'_>,
+    target: &EditTarget,
+    plan: &ScopePlan,
+    token: &str,
+) -> Option<String> {
+    if !matches!(keys::classify_key(token), Ok(KeyShape::LocalPath { .. })) {
+        return None;
+    }
+    let roots = ctx.roots.as_ref()?;
+    let resolve = |raw: &str, base: &Path| -> Option<PathBuf> {
+        let joined = match raw.strip_prefix("~/") {
+            Some(rest) => roots.home.join(rest),
+            None if Path::new(raw).is_absolute() => PathBuf::from(raw),
+            None => base.join(raw.trim_start_matches("./")),
+        };
+        std::fs::canonicalize(joined).ok()
+    };
+    let wanted = resolve(token, roots.cwd.as_deref()?)?;
+    plan.things
+        .iter()
+        .find(|r| match &r.shape {
+            KeyShape::LocalPath { raw } => resolve(raw, &target.dir).as_ref() == Some(&wanted),
+            _ => false,
+        })
+        .map(|r| r.reference.clone())
 }
 
 /// Whether `token` names `row`: the exact canonical reference, the reference as typed, or the
@@ -2225,12 +2268,15 @@ fn cross_scope_hint(
 // ---------------------------------------------------------------------------------------------
 
 /// What a draft scan concluded about a bundle's working copies.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum DraftState {
     /// No local edits anywhere (or nothing local at all).
     Clean,
-    /// At least one copy carries local edits.
-    Draft,
+    /// At least one copy carries local edits — the folders holding them, so the note can say
+    /// WHERE the work a person is about to stop managing will still be. It used to point at
+    /// `topos list <name>`, which answers "not managed on this machine" the moment the row is
+    /// gone: the one command the note named could never show the copy it was about.
+    Draft(Vec<String>),
     /// A copy could not be classified — the guard fails TOWARD the gate.
     Indeterminate,
 }
@@ -2254,12 +2300,20 @@ fn draft_state(ctx: &Ctx<'_>, name: &str) -> DraftState {
         return DraftState::Indeterminate;
     };
     let mut state = DraftState::Clean;
+    let mut drafted: Vec<String> = Vec::new();
     for scan in &scans {
         match scan.status {
-            crate::placement::ScanStatus::Modified { .. } => return DraftState::Draft,
+            crate::placement::ScanStatus::Modified { .. } => {
+                drafted.push(super::inventory::pretty(&sctx, &scan.dir));
+            }
             crate::placement::ScanStatus::Unscannable => state = DraftState::Indeterminate,
             _ => {}
         }
+    }
+    // A draft anywhere is a draft: the folders are the answer, and an unreadable SIBLING copy
+    // does not make a proven edit unprovable.
+    if !drafted.is_empty() {
+        return DraftState::Draft(drafted);
     }
     state
 }
@@ -2310,11 +2364,22 @@ fn apply_arms(
                     _ => None,
                 };
                 match draft_state(ctx, name) {
-                    DraftState::Draft => Some(join_notes(
-                        format!(
-                            "'{name}' has local edits that are not shared — the edited copy \
-                             stays in place (`topos list {name}` shows it)"
-                        ),
+                    // The FOLDERS, named. Once the row is gone `topos list <name>` answers "not
+                    // managed on this machine" and stops — so the command this note used to
+                    // offer could not show the edited copy it was about. One folder reads
+                    // inline; several are counted and listed, the same convention every other
+                    // destination follows.
+                    DraftState::Draft(dirs) => Some(join_notes(
+                        match dirs.as_slice() {
+                            [one] => format!(
+                                "'{name}' has local edits that are not shared — they stay in \
+                                 {one}"
+                            ),
+                            many => format!(
+                                "'{name}' has local edits that are not shared — they stay in {}",
+                                many.join(", ")
+                            ),
+                        },
                         removal_note,
                     )),
                     DraftState::Indeterminate => {
@@ -2568,11 +2633,8 @@ fn apply_arms(
     // left behind — instead of deferring the fact to the next sweep. Best-effort: the row edit
     // already landed, and the next sweep's removal convergence reaches the same end state.
     converge_removed_mcp(ctx, target, &arms, &mut items);
-    // The folder half of the fetched import's inverse: a bundle folder `add --mcp <name|url>`
-    // itself wrote leaves with the row — but ONLY when its bytes still match what the import
-    // wrote (the scope's import record proves it); anything else is kept, disclosed. An adopted
-    // folder has no record and is never touched.
-    remove_imported_mcp_dirs(ctx, target, global, &arms, &mut items);
+    // A manifest file this very edit brought into existence leads the receipt, so the row's
+    // inverse is read against the world the edit found rather than the one it made.
     if let Some(note) = born
         && let Some(first) = items.first_mut()
     {
@@ -2852,16 +2914,8 @@ fn eager_cleanup(
             // own line.
             Some((subtract, remaining)) => {
                 if rows.is_empty() {
-                    let (noun_one, noun_many) = if b.kind.is_mcp() {
-                        ("config file", "config files")
-                    } else {
-                        ("folder", "folders")
-                    };
-                    let keeps = if *remaining == 1 {
-                        format!("1 {noun_one}")
-                    } else {
-                        format!("{remaining} {noun_many}")
-                    };
+                    let keeps = crate::actions::Subject::of_kind(b.kind.tag().as_deref())
+                        .targets(usize::try_from(*remaining).unwrap_or(usize::MAX));
                     let note = format!(
                         "the destination left its row, but its copy could not be uninstalled \
                          this run — it leaves on the next `topos update`; the row keeps {keeps}"
@@ -3068,8 +3122,15 @@ fn converge_removed_mcp(
             &topos_harness::mcp::descriptor::mcp_harnesses(),
             &detected,
             &bundle_id,
+            &item.name,
         );
         let mut lines: Vec<String> = Vec::new();
+        // ORDER IS THE MESSAGE. A hand-edited entry SURVIVING a removal is the one fact a
+        // person must not miss, and it used to sit at whatever position the harness table
+        // happened to order it into — position four of eleven, in a `·`-joined run-on. The
+        // clauses that say "something of yours is still there" lead; the ordinary departures
+        // follow.
+        let mut kept: Vec<String> = Vec::new();
         for removed in &outcome.removed {
             // Keyed by the config FILE the entry lived in — receipts speak in destinations,
             // never agents.
@@ -3078,99 +3139,31 @@ fn converge_removed_mcp(
                 .file
                 .as_deref()
                 .map_or_else(|| "its config".to_owned(), |f| pretty_path(ctx, f));
-            lines.push(match removed.state.state.as_str() {
-                "drifted" => format!("{file}: hand-edited entry left in place"),
-                _ => format!("{file}: server entry removed"),
-            });
+            match removed.state.state {
+                topos_types::results::TargetOutcome::Drifted => {
+                    kept.push(format!("{file}: hand-edited entry left in place"));
+                }
+                _ => lines.push(format!("{file}: server entry removed")),
+            }
         }
+        let mut lines = {
+            kept.extend(lines);
+            kept
+        };
         for w in outcome.notices.iter().chain(&outcome.warnings) {
             lines.push(w.clone());
         }
         if lines.is_empty() {
             continue;
         }
-        let folded = lines.join(" · ");
+        // ONE CLAUSE PER LINE. The renderer leads with the first and indents the rest, so a
+        // six-agent removal reads as a list instead of one sentence nobody finishes.
+        let folded = lines.join("\n");
         item.note = Some(match item.note.take() {
-            Some(prev) => format!("{prev} · {folded}"),
+            Some(prev) => format!("{prev}\n{folded}"),
             None => folded,
         });
     }
-}
-
-/// Delete the bundle folders the FETCHED `add --mcp` arm itself wrote, for every dropped
-/// `kind = "mcp"` local-path row — through [`super::add_mcp::remove_imported_bundle`], which
-/// verifies the folder still holds exactly the imported bytes (the scope's import record) and
-/// KEEPS it disclosed otherwise. Runs AFTER the config converge, so removal never races the
-/// entries that pointed at the folder.
-fn remove_imported_mcp_dirs(
-    ctx: &Ctx<'_>,
-    target: &EditTarget,
-    global: bool,
-    arms: &[Arm],
-    items: &mut [RemoveItem],
-) {
-    // The edited scope's store — where the fetched arm filed its import record.
-    let layout = if global {
-        Some(ctx.layout.clone())
-    } else {
-        crate::sidecar::existing_project_store(ctx.fs, &target.dir)
-    };
-    let Some(layout) = layout else {
-        return;
-    };
-    let mut born_here = false;
-    for (arm, item) in arms.iter().zip(items.iter_mut()) {
-        let Arm::RowDrop { row, .. } = arm else {
-            continue;
-        };
-        let KeyShape::LocalPath { raw } = &row.shape else {
-            continue;
-        };
-        if row.value.declared_kind() != Some(BundleKind::Mcp) {
-            continue;
-        }
-        let dir = row_dir(ctx, target, raw);
-        let Some(removal) = super::add_mcp::remove_imported_bundle(ctx, &layout, &dir) else {
-            continue;
-        };
-        born_here |= removal.manifest_born;
-        if let Some(line) = removal.note {
-            item.note = Some(match item.note.take() {
-                Some(prev) => format!("{prev} · {line}"),
-                None => line,
-            });
-        }
-    }
-    if born_here
-        && let Some(line) = prune_born_manifest(ctx, target)
-        && let Some(item) = items.first_mut()
-    {
-        item.note = Some(match item.note.take() {
-            Some(prev) => format!("{prev} · {line}"),
-            None => line,
-        });
-    }
-}
-
-/// Take back a manifest file an `add --mcp` import BROUGHT INTO EXISTENCE, now that its row is
-/// gone — the other half of an inverse that already restores the row, the config entries, and the
-/// folder. Byte-proof, like every other thing this CLI deletes: the file goes only while it still
-/// holds EXACTLY what a birth writes and nothing else (an empty `[bundles]` under topos's own
-/// header). A feed row, a `[defaults]` block, a hand-written line or comment — anything at all
-/// that is not the seed — and the file stays, unread and untouched.
-fn prune_born_manifest(ctx: &Ctx<'_>, target: &EditTarget) -> Option<String> {
-    if target.scope != ManifestScope::Global {
-        return None;
-    }
-    let text = read_text(ctx, &target.path).ok().flatten()?;
-    if text != crate::manifest::document::materialized_global(&[]) {
-        return None;
-    }
-    ctx.fs.remove_file(&target.path).ok()?;
-    Some(format!(
-        "removed {} — this import created it, and nothing else was ever written there",
-        target.path.display()
-    ))
 }
 
 /// The mcp bundle one removal arm drops, when it drops one: a `kind = "mcp"` local path row (its

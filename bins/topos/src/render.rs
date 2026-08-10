@@ -51,11 +51,6 @@ pub(crate) fn err_envelope(command: &str, argv: &[String], err: &ClientError) ->
         ClientError::AmbiguousWorkspace { references, .. } => {
             serde_json::json!({ "references": references })
         }
-        // The `--mcp` twin names WORKSPACES (the `--workspace` selector's own vocabulary) rather
-        // than references — the re-run keeps the embedded server name the user typed.
-        ClientError::AmbiguousMcpWorkspace { workspaces, .. } => {
-            serde_json::json!({ "workspaces": workspaces })
-        }
         _ => serde_json::json!({}),
     };
     JsonEnvelope {
@@ -113,17 +108,6 @@ pub(crate) fn next_actions(command: &str, argv: &[String], err: &ClientError) ->
         } => references
             .iter()
             .map(|reference| subscribe_action(reference, *global))
-            .collect(),
-        // Several workspaces publish the embedded server name: one executable re-run per
-        // workspace, each the user's own `--mcp` invocation narrowed by `--workspace` — so the
-        // agent picks a team instead of re-parsing the sentence that listed them.
-        ClientError::AmbiguousMcpWorkspace {
-            server,
-            workspaces,
-            global,
-        } => workspaces
-            .iter()
-            .map(|workspace| mcp_workspace_action(server, workspace, *global))
             .collect(),
         // Every "look at the discovered inventory to resolve this" error points the agent at `list` — the
         // ambiguity shapes plus the not-found cases from `add <skill>` name resolution.
@@ -272,12 +256,15 @@ pub(crate) fn next_actions(command: &str, argv: &[String], err: &ClientError) ->
         // The value-carrying fixes, TYPED: the runtime value rides as exactly ONE argv element,
         // straight from the error variant's own field — never re-tokenized out of prose, so a
         // hostile name containing whitespace or a `--flag` fragment stays one inert token.
-        ClientError::PathNotName { arg } => vec![crate::actions::next_action(
+        // The fix re-runs the VERB that refused, spelled as a path — the same command the message
+        // prints. Hardcoding `add` here sent a person who typed `publish` (or `remove`) off to a
+        // different verb than the one they were using.
+        ClientError::PathNotName { arg, verb } => vec![crate::actions::next_action(
             ActionCode::from("RUN_COMMAND".to_owned()),
             vec![
                 "topos".into(),
-                "add".into(),
-                format!("./{arg}"),
+                verb.clone(),
+                crate::error::path_token(arg),
                 "--json".into(),
             ],
         )],
@@ -298,13 +285,14 @@ pub(crate) fn next_actions(command: &str, argv: &[String], err: &ClientError) ->
                 readd_argv.clone(),
             ),
         ],
-        // A server bundle at a skill door: the fix is the `--mcp` spelling, runnable as-is.
+        // A server bundle at a skill door: the fix is the `--kind` word, runnable as-is.
         ClientError::McpFlagRequired { dir } => vec![crate::actions::next_action(
             ActionCode::from("RUN_COMMAND".to_owned()),
             vec![
                 "topos".into(),
                 "add".into(),
-                "--mcp".into(),
+                "--kind".into(),
+                "mcp".into(),
                 dir.clone(),
                 "--json".into(),
             ],
@@ -492,25 +480,6 @@ fn subscribe_action(reference: &str, global: bool) -> NextAction {
         argv.push("-g".to_owned());
     }
     argv.push(reference.to_owned());
-    argv.push("--json".to_owned());
-    crate::actions::next_action(ActionCode::from("RUN_COMMAND".to_owned()), argv)
-}
-
-/// One runnable re-run for the `--mcp` workspace-disambiguation refusal: the user's own embedded
-/// server name, narrowed to ONE workspace with `--workspace` — carrying the refused invocation's
-/// `-g` for the same reason [`subscribe_action`] does.
-fn mcp_workspace_action(server: &str, workspace: &str, global: bool) -> NextAction {
-    let mut argv = vec![
-        "topos".to_owned(),
-        "add".to_owned(),
-        "--mcp".to_owned(),
-        server.to_owned(),
-        "--workspace".to_owned(),
-        workspace.to_owned(),
-    ];
-    if global {
-        argv.push("-g".to_owned());
-    }
     argv.push("--json".to_owned());
     crate::actions::next_action(ActionCode::from("RUN_COMMAND".to_owned()), argv)
 }
@@ -749,9 +718,7 @@ pub(crate) fn add_tty(data: &AddData) -> String {
         out.push_str(&format!("note: {note}\n"));
     }
     // A SET reference (a channel, a feed, a whole repo) has no bytes of its own — the "Adopted @
-    // <version>" line would be a fabrication, so the receipt states what the row expands to. A
-    // LOCAL-PATH reference with no record is the fetched `add --mcp` arm (a pointer row, no
-    // version history minted): the receipt names the server recorded, never a channel.
+    // <version>" line would be a fabrication, so the receipt states what the row expands to.
     if data.skill_id.is_none() {
         let sentence = match data
             .reference
@@ -764,22 +731,6 @@ pub(crate) fn add_tty(data: &AddData) -> String {
             ),
             Some(crate::manifest::keys::KeyShape::RepoSet { .. }) => format!(
                 "Added the '{}' repository — its skills deliver with `topos update`.",
-                data.name
-            ),
-            // The closing line must never point at agents "named above" when none were: a scope
-            // with no MCP-capable agent gets the describe's honest sentence instead.
-            Some(crate::manifest::keys::KeyShape::LocalPath { .. })
-                if data.mcp.as_ref().is_some_and(|m| m.agents.is_empty()) =>
-            {
-                format!(
-                    "Added the '{}' MCP server — no MCP-capable agent is set up here yet, so the \
-                     row waits for one; `topos update` places its entry when one appears.",
-                    data.name
-                )
-            }
-            Some(crate::manifest::keys::KeyShape::LocalPath { .. }) => format!(
-                "Added the '{}' MCP server — its entry lands in each agent's own MCP config \
-                 (named above) and stays current with `topos update`.",
                 data.name
             ),
             _ => format!(
@@ -884,25 +835,34 @@ pub(crate) fn add_tty(data: &AddData) -> String {
 /// where it does not (a local folder, a forge import).
 fn add_dest_receipt(data: &AddData) -> String {
     let name = data.display.as_deref().unwrap_or(&data.name);
-    let noun = if data.dest.iter().all(|e| {
-        crate::manifest::dest::mcp_slug_for_dest(
-            e,
-            crate::manifest::document::ManifestScope::Global,
-        )
-        .is_some()
-            || crate::manifest::dest::mcp_slug_for_dest(
-                e,
-                crate::manifest::document::ManifestScope::Project,
-            )
-            .is_some()
-    }) {
-        "config files"
+    // The subject comes from WHAT THE BUNDLE IS, asked once. This site used to guess it by
+    // sniffing every `dest` entry for a known MCP config spelling — a fourth, different answer to
+    // a question the kind already settles.
+    let subject = if data.mcp.is_some() {
+        crate::actions::Subject::McpServer
     } else {
-        "folders"
+        crate::actions::Subject::Skill
     };
-    let column = match data.dest.as_slice() {
-        [one] => format!("installed ({one})"),
-        many => format!("installed ({} {noun})", many.len()),
+    // WHAT ACTUALLY HAPPENED. A row can be written on a machine that has nowhere to put its
+    // bytes — no agent of that kind is set up here — and the receipt then said `installed` above
+    // a note saying no agent was set up yet: a headline contradicting its own next line. The row
+    // IS the durable act, so it is what the headline reports.
+    let landed_nowhere = data.mcp.as_ref().is_some_and(|m| m.agents.is_empty());
+    // WHERE THE BYTES WENT, not how the row spells it. `dest` is the manifest's own portable
+    // spelling and stays in the file; but an env override (`$CODEX_HOME`, `$XDG_CONFIG_HOME`,
+    // `$CLAUDE_CONFIG_DIR`) moves where that spelling lands, and this headline used to name
+    // `~/.codex/config.toml` on a machine whose entry went to `$CODEX_HOME/config.toml` — a path
+    // the reader could go and look at and find nothing. The note beneath already said the true
+    // one; the two now agree.
+    let shown_dest = if data.dest_resolved.is_empty() {
+        &data.dest
+    } else {
+        &data.dest_resolved
+    };
+    let column = match (landed_nowhere, shown_dest.as_slice()) {
+        (true, _) => "recorded — no agent is set up here yet".to_owned(),
+        (false, [one]) => format!("installed ({one})"),
+        (false, many) => format!("installed ({})", subject.targets(many.len())),
     };
     let mut s = format!("+ {name}   {column}");
     if !data.undo.is_empty() {
@@ -1212,11 +1172,14 @@ pub(crate) fn list_tty(out: &ListOutcome) -> String {
         for scope in &data.scopes {
             s.push_str(&list_scope_header(&scope.scope, scope.manifest.as_deref()));
             s.push('\n');
-            if scope.rows.is_empty() {
+            if scope.rows.is_empty() && scope.orphans.is_empty() {
                 s.push_str("  (nothing installed in this scope)\n");
             }
             for entry in &scope.rows {
                 s.push_str(&list_row(entry, &scope.scope));
+            }
+            for o in &scope.orphans {
+                s.push_str(&orphan_row(o));
             }
         }
     }
@@ -1338,6 +1301,27 @@ fn push_list_tail(s: &mut String, out: &ListOutcome) {
 
 /// One `--remote` catalog row: `<name>  <name>@<short>  <kind>  <adoption note>` (+ any
 /// open-proposal count). The kind is displayed verbatim (never branched on).
+/// The ONE line a record nothing demands earns, when its entries or folders still stand.
+///
+/// It exists because the two surfaces that should have covered it both, correctly, do not: the
+/// inventory is built from manifest rows (a record may describe a row, never create one) and the
+/// sweep's orphan resolution passes over a record whose config entries still stand. Between them
+/// an MCP server could sit live in an agent's config, named by nothing and fixable by nothing.
+///
+/// One line, never a section, and it says the two things a person needs: WHERE the thing still is,
+/// and the command that ends it. `remove` here is the record delete — it takes no scope flag,
+/// because there is no row in any file to scope to; that is the whole condition being reported.
+fn orphan_row(o: &topos_types::results::OrphanRecord) -> String {
+    let what = match o.standing.as_slice() {
+        [one] => one.clone(),
+        many => many.join(", "),
+    };
+    format!(
+        "  {}  no longer in this file — still in {what} (`topos remove {}` ends it)\n",
+        o.name, o.name
+    )
+}
+
 fn remote_row(r: &RemoteSkill) -> String {
     use topos_types::results::RemoteAdoption;
     let note = match r.state {
@@ -2075,10 +2059,15 @@ pub(crate) fn status_tty(d: &topos_types::results::StatusData) -> String {
     if !d.triggers.is_empty() {
         s.push_str("\nauto-update triggers:");
         for t in &d.triggers {
+            // The word the EVIDENCE supports. `status` never installs anything, so it holds no
+            // `Active` report to call a trigger armed: all it has is the artifact's footprint,
+            // which proves the trigger is REGISTERED — the same word the install receipt uses for
+            // exactly that evidence level (see [`breadth_trigger_lines`]). `armed` is reserved
+            // there, for a report that stated a live update moment.
             let state = match t.armed {
-                Some(true) => "armed",
-                Some(false) => "not armed",
-                None => "unknown",
+                Some(true) => "registered",
+                Some(false) => "not registered",
+                None => "not checked",
             };
             s.push_str(&format!("\n  {}: {state}", t.agent));
             if let Some(n) = &t.note {
@@ -2216,15 +2205,21 @@ fn list_detail_tty(detail: &topos_types::results::ListDetail) -> String {
             s.push_str("\n  an MCP server bundle, configured in (as of the last converge):");
             for h in &detail.harnesses {
                 let file = h.file.as_deref().unwrap_or("(no file recorded)");
-                match (h.state.as_str(), h.note.as_deref()) {
-                    // `placed` is what the LAST converge did, not a standing property of the
-                    // entry — this heading speaks about where entries live, so both healthy
-                    // states read the same way here.
-                    ("current" | "placed", _) => s.push_str(&format!("\n    {}: {file}", h.agent)),
-                    (state, Some(note)) => {
-                        s.push_str(&format!("\n    {}: {file} — {state} ({note})", h.agent));
+                match (h.state, h.note.as_deref()) {
+                    // Created/refreshed is what the LAST converge DID, not a standing property of
+                    // the entry — this heading speaks about where entries live, so every healthy
+                    // outcome reads the same way here.
+                    (s2, _) if s2.wrote() || s2 == topos_types::results::TargetOutcome::Current => {
+                        s.push_str(&format!("\n    {}: {file}", h.agent));
                     }
-                    (state, None) => s.push_str(&format!("\n    {}: {file} — {state}", h.agent)),
+                    (state, Some(note)) => s.push_str(&format!(
+                        "\n    {}: {file} — {} ({note})",
+                        h.agent,
+                        state.word()
+                    )),
+                    (state, None) => {
+                        s.push_str(&format!("\n    {}: {file} — {}", h.agent, state.word()));
+                    }
                 }
             }
         }
@@ -2413,9 +2408,27 @@ pub(crate) fn auth_status_tty(d: &crate::ops::AuthStatusData) -> String {
 fn remove_item_line(item: &RemoveItem, applied: bool) -> String {
     // A removal-specific disclosure overrides the kind's stock line (the built-in skill's durable
     // opt-out and its way back).
+    //
+    // A note that carries SEVERAL facts becomes several lines. A config-placed bundle leaving six
+    // agents folded six per-file clauses, plus any warning, into one `·`-joined sentence — an
+    // eleven-clause run-on whose load-bearing clause (your hand edit survived) sat at whatever
+    // position the harness table happened to order it into. The clauses are separated at their
+    // one producer now; here the FIRST is the headline and the rest are indented under it, which
+    // is what every other multi-fact receipt in this CLI already does.
     if let Some(note) = &item.note {
         let verb = if applied { "Removed" } else { "Would remove" };
-        return format!("{verb} '{}'{} — {note}.", item.name, from_dirs(item));
+        let mut clauses = note.lines();
+        let head = clauses.next().unwrap_or_default();
+        let mut out = format!("{verb} '{}'{} — {head}", item.name, from_dirs(item));
+        let rest: Vec<&str> = clauses.collect();
+        if rest.is_empty() {
+            out.push('.');
+        } else {
+            for line in rest {
+                out.push_str(&format!("\n    {line}"));
+            }
+        }
+        return out;
     }
     match item.kind {
         RemoveKind::ManifestRemoved => {
@@ -2566,22 +2579,18 @@ pub(crate) fn remove_applied_tty(data: &RemoveData) -> String {
 /// receipt's removed rows use. A NARROWED removal appends what the row still names
 /// (`— 2 folders remain` / `— 1 config file remains`).
 fn uninstalled_column(u: &topos_types::results::UninstalledBundle) -> String {
-    let (noun_one, noun_many) = if BundleKind::of_tag(u.kind.as_deref()) == Some(BundleKind::Mcp) {
-        ("config file", "config files")
-    } else {
-        ("folder", "folders")
-    };
+    let subject = crate::actions::Subject::of_kind(u.kind.as_deref());
     let mut out = match u.destinations.as_slice() {
         [] => "removed".to_owned(),
         [one] => format!("removed ({one})"),
-        many => format!("removed ({} {noun_many})", many.len()),
+        many => format!("removed ({})", subject.targets(many.len())),
     };
     if let Some(n) = u.remaining {
-        if n == 1 {
-            out.push_str(&format!(" — 1 {noun_one} remains"));
-        } else {
-            out.push_str(&format!(" — {n} {noun_many} remain"));
-        }
+        let verb = if n == 1 { "remains" } else { "remain" };
+        out.push_str(&format!(
+            " — {} {verb}",
+            subject.targets(usize::try_from(n).unwrap_or(usize::MAX))
+        ));
     }
     out
 }
@@ -3187,6 +3196,9 @@ pub(crate) fn pull_tty(
     warnings: &[String],
     advisories: &[String],
     disclosures: &[String],
+    // `failed`: how many BUNDLES this run could not carry forward — the sweep's own count,
+    // never `warnings.len()`. See the arithmetic at the summary below.
+    failed: usize,
 ) -> String {
     let scope = PullReceiptScope::read(data.scope.as_deref());
     if data.skills.is_empty()
@@ -3223,7 +3235,7 @@ pub(crate) fn pull_tty(
         .skills
         .iter()
         .filter_map(|s| {
-            tally.count(s.action);
+            tally.count(s);
             // The name a receipt row leads with: the workspace-qualified display where one is
             // recorded, `+`/`-`-led for the rows that moved bytes in or out.
             let shown = s.display.as_deref().unwrap_or(&s.skill);
@@ -3237,10 +3249,13 @@ pub(crate) fn pull_tty(
             // carries a NOTE has something to say by construction (an mcp bundle whose dest
             // reaches no agent has no per-agent state to speak for it), so it is never swallowed
             // either — a healthy row carries none.
-            let noteworthy = s.note.is_some()
-                || s.harnesses
-                    .iter()
-                    .any(|h| !matches!(h.state.as_str(), "current" | "placed"));
+            // A DRAFTED row is noteworthy by construction: swallowing it is exactly how the
+            // summary came to say "all up to date" about a bundle `list` was calling a draft.
+            let noteworthy = s.draft
+                || s.note.is_some()
+                || s.harnesses.iter().any(|h| {
+                    !(h.state.wrote() || h.state == topos_types::results::TargetOutcome::Current)
+                });
             if matches!(s.action, PullAction::UpToDate) && !noteworthy {
                 return None;
             }
@@ -3262,7 +3277,7 @@ pub(crate) fn pull_tty(
             // A row that WROTE a config file this run reads its untouched files as `unchanged`
             // beside the ones it placed — two words that answer the same question. A row that
             // wrote nothing has nothing to contrast with, so its files stay `current`.
-            let wrote = s.harnesses.iter().any(|h| h.state == "placed");
+            let wrote = s.harnesses.iter().any(|h| h.state.wrote());
             extra.extend(s.harnesses.iter().map(|h| mcp_agent_line(h, wrote)));
             Some((lead, line, extra))
         })
@@ -3306,13 +3321,19 @@ pub(crate) fn pull_tty(
         out.push_str(&format!("{}\n", notice_line(n)));
     }
 
-    // The summary counts every row the sweep attempted — the failed ones above, and the ones
-    // waiting on an answer — and names them by what they ARE: a sweep that reconciled an MCP
-    // server counts bundles, because calling that row a skill is simply false. All-skills stays
-    // the ordinary word.
-    let total = data.skills.len() + warnings.len() + decisions.len();
+    // The summary counts every BUNDLE the sweep attempted — the ones it could not carry forward,
+    // and the ones waiting on an answer — and names them by what they ARE: a sweep that
+    // reconciled an MCP server counts bundles, because calling that row a skill is simply false.
+    // All-skills stays the ordinary word.
+    //
+    // `failed` is the count of BUNDLES that failed, never of warning LINES. Those are not the
+    // same number and never were: a scope-level fault (an unavailable lock, an unreadable custody
+    // document) is one line about no bundle at all, and two lines can be about one bundle. Counting
+    // lines invented bundles that do not exist and then reported them failed — `Checked 3 skills:
+    // 2 already up to date, 1 failed` over a machine holding two.
+    let total = data.skills.len() + failed + decisions.len();
     let noun = managed_noun(&data.skills, total);
-    tally.failed = warnings.len();
+    tally.failed = failed;
     tally.waiting += decisions.len();
     if rows.is_empty() && warnings.is_empty() && kept_lines.is_empty() {
         out.push_str(&format!("Checked {total} {noun}: all up to date."));
@@ -3348,12 +3369,23 @@ struct PullTally {
     no_longer_shared: usize,
     held: usize,
     failed: usize,
+    /// Bundles carrying local edits that are not shared — the same fact `list` prints as
+    /// `(draft)` and `status` counts as `drafts ahead`.
+    drafts_ahead: usize,
 }
 
 impl PullTally {
-    fn count(&mut self, action: topos_types::results::PullAction) {
+    fn count(&mut self, s: &PullSkill) {
         use topos_types::results::PullAction as A;
-        match action {
+        // A DRAFTED row is not "already up to date" — delivery owed it nothing, and something of
+        // the person's is still unshared. It takes its own bucket INSTEAD of that one (never as
+        // well, or the parts would stop summing to the total), in the words `status` already
+        // uses for the same fact.
+        if s.draft && matches!(s.action, A::UpToDate | A::Refreshed) {
+            self.drafts_ahead += 1;
+            return;
+        }
+        match s.action {
             A::Installed => self.installed += 1,
             // Four ways bytes caught up: a served version landed, a copy behind the version this
             // machine holds was rewritten, a draft was rebased onto the new current, a settled
@@ -3377,6 +3409,7 @@ impl PullTally {
             (self.updated, "updated"),
             (self.removed, "removed"),
             (self.up_to_date, "already up to date"),
+            (self.drafts_ahead, "draft ahead"),
             (self.waiting, "waiting on you"),
             (self.no_longer_shared, "no longer shared"),
             (self.held, "held"),
@@ -3384,7 +3417,11 @@ impl PullTally {
         ]
         .into_iter()
         .filter(|(n, _)| *n > 0)
-        .map(|(n, what)| format!("{n} {what}"))
+        // `draft ahead` is the one clause whose noun pluralizes inside it, not at the end.
+        .map(|(n, what)| match what.strip_suffix(" ahead") {
+            Some(noun) => format!("{} ahead", counted(n as u64, noun)),
+            None => format!("{n} {what}"),
+        })
         .collect()
     }
 
@@ -3399,6 +3436,7 @@ impl PullTally {
             + self.no_longer_shared
             + self.held
             + self.failed
+            + self.drafts_ahead
     }
 }
 
@@ -3480,25 +3518,25 @@ fn notice_line(n: &topos_types::requests::WireNotice) -> String {
 }
 
 /// One MCP config outcome as a receipt sub-line, KEYED BY THE CONFIG FILE the entry lives in
-/// (receipts speak in destinations, never agents) — the agent slug keys only a state that landed
-/// in no file at all (not supported, unprovable). The phrase for every state comes from the ONE
-/// shared vocabulary ([`crate::mcp_engine::state_phrase`]), which `add`'s own receipt reads too;
-/// an unrecognized state renders verbatim with its note.
+/// (receipts speak in destinations, never agents) — the agent slug keys only an outcome that
+/// landed in no file at all (not placed, unreadable). The word for every outcome comes from
+/// [`TargetOutcome::word`], the ONE vocabulary the dir side reads too, so a folder and a config
+/// entry can never call the same outcome two different things.
 ///
-/// `row_wrote` is whether THIS row wrote any config file this run: beside a `placed` line, a file
-/// left alone reads `unchanged` — the answer to the question the placed line just raised — where
-/// on a row that wrote nothing the same state reads `current`, a standing fact about the file
-/// rather than a comparison with a sibling.
+/// `row_wrote` is whether THIS row wrote any config file this run: beside a created/refreshed
+/// line, a file left alone reads `unchanged` — the answer to the question the written line just
+/// raised — where on a row that wrote nothing the same outcome reads `current`, a standing fact
+/// about the file rather than a comparison with a sibling.
 pub(crate) fn mcp_agent_line(h: &topos_types::results::McpAgentState, row_wrote: bool) -> String {
+    use topos_types::results::TargetOutcome;
     let key = h.file.as_deref().unwrap_or(&h.agent);
-    match (h.state.as_str(), h.note.as_deref()) {
-        ("current", _) if row_wrote => format!("{key}: unchanged"),
-        ("current", None) => format!("{key}: current"),
-        ("drifted", _) => format!("{key}: hand-edited — left in place"),
-        (state, Some(note)) => {
-            format!("{key}: {} — {note}", crate::mcp_engine::state_phrase(state))
-        }
-        (state, None) => format!("{key}: {}", crate::mcp_engine::state_phrase(state)),
+    match (h.state, h.note.as_deref()) {
+        (TargetOutcome::Current, _) if row_wrote => format!("{key}: unchanged"),
+        (TargetOutcome::Current, None) => format!("{key}: current"),
+        // Drift's own sentence IS the word plus what it means for the file; a note would repeat it.
+        (TargetOutcome::Drifted, _) => format!("{key}: hand-edited — left in place"),
+        (state, Some(note)) => format!("{key}: {} — {note}", state.word()),
+        (state, None) => format!("{key}: {}", state.word()),
     }
 }
 
@@ -3525,7 +3563,15 @@ fn pull_action_row(s: &PullSkill, scope: &PullReceiptScope) -> (String, Vec<Stri
     use topos_types::results::{MergeResolution, PullAction};
     let name = &s.skill;
     match s.action {
-        // Handled by the caller's compact summary.
+        // Handled by the caller's compact summary — unless the person has unshared edits in it,
+        // which is the one thing an "up to date" row must not leave unsaid: nothing was OWED,
+        // and something of theirs is still only here. `list` and `status` both say it, and a
+        // receipt that did not was the third surface disagreeing about one machine. `publish`
+        // resolves the name across scopes itself, so this command takes no `-g`.
+        PullAction::UpToDate if s.draft => (
+            format!("up to date — your edits are not shared yet (topos publish {name})"),
+            Vec::new(),
+        ),
         PullAction::UpToDate => (String::from("up to date"), Vec::new()),
         PullAction::FastForwarded => (String::from("fast-forwarded"), Vec::new()),
         // The destination column: exactly one destination prints its path; several print a
@@ -3755,15 +3801,21 @@ fn pull_action_row(s: &PullSkill, scope: &PullReceiptScope) -> (String, Vec<Stri
 /// (`installed (~/.codex/skills)`), several print a count in the bundle's own noun (`installed
 /// (2 folders)` / `(2 config files)`), none prints the bare verb.
 fn destination_column(verb: &str, s: &PullSkill) -> String {
-    let noun = if BundleKind::of_tag(s.kind.as_deref()) == Some(BundleKind::Mcp) {
-        "config files"
+    let subject = crate::actions::Subject::of_kind(s.kind.as_deref());
+    // A COUNT HEADS THE LIST IT HEADS. A config-placed row's detail lines are its per-agent
+    // lines — one per config file, whatever happened in each — while `destinations` holds only
+    // the files this run WROTE. Counting the written subset printed "(5 config files)" above six
+    // lines, and the reader was left to work out which of the two numbers was the lie.
+    let listed = if s.harnesses.is_empty() {
+        s.destinations.len()
     } else {
-        "folders"
+        s.harnesses.len()
     };
-    match s.destinations.as_slice() {
-        [] => verb.to_owned(),
-        [one] => format!("{verb} ({one})"),
-        many => format!("{verb} ({} {noun})", many.len()),
+    match (listed, s.destinations.as_slice()) {
+        (0, _) => verb.to_owned(),
+        // One target names its path inline; the detail lines below then add nothing.
+        (1, [one]) => format!("{verb} ({one})"),
+        _ => format!("{verb} ({})", subject.targets(listed)),
     }
 }
 
@@ -3775,7 +3827,7 @@ fn destination_column(verb: &str, s: &PullSkill) -> String {
 /// lines name the very same files AND say what happened in each, so the bare list beside them is
 /// the same list twice. (A removal carries no per-agent lines and keeps its list.)
 fn sub_destinations(s: &PullSkill) -> Vec<String> {
-    if BundleKind::of_tag(s.kind.as_deref()) == Some(BundleKind::Mcp) && !s.harnesses.is_empty() {
+    if !s.harnesses.is_empty() {
         return Vec::new();
     }
     match s.destinations.as_slice() {
@@ -4406,66 +4458,6 @@ mod tests {
         );
     }
 
-    /// The fetched `add --mcp` arm's receipt (a local-path row, no version minted) names the MCP
-    /// server that was recorded — with the row, the per-agent note, and the undo — never a
-    /// channel.
-    #[test]
-    fn a_fetched_mcp_add_receipt_names_the_server_not_a_channel() {
-        let data = topos_types::results::AddData {
-            dest: Vec::new(),
-            display: None,
-            skill_id: None,
-            name: "weather".to_owned(),
-            version_id: None,
-            bundle_digest: Some("d".repeat(64)),
-            tracked: true,
-            harness: None,
-            harness_slug: None,
-            currency: None,
-            triggers: Vec::new(),
-            origin: None,
-            manifest: Some("/home/u/.topos/topos.toml".to_owned()),
-            reference: Some("/home/u/.topos/mcp/weather".to_owned()),
-            undo: vec![
-                "topos".to_owned(),
-                "remove".to_owned(),
-                "-g".to_owned(),
-                "/home/u/.topos/mcp/weather".to_owned(),
-            ],
-            governed_copy: None,
-            published_match: None,
-            note: Some(
-                "MCP server io.github.acme/weather v1.4.0 — https://weather.acme.example/mcp \
-                 over streamable-http · cursor: server entry in /home/u/.cursor/mcp.json"
-                    .to_owned(),
-            ),
-            mcp: Some(topos_types::results::McpServerSummary {
-                server: "io.github.acme/weather".to_owned(),
-                description: "Conditions for a named place.".to_owned(),
-                version: "1.4.0".to_owned(),
-                url: "https://weather.acme.example/mcp".to_owned(),
-                transport: "streamable-http".to_owned(),
-                auth: None,
-                headers: vec!["X-Region".to_owned()],
-                bundle: Some("/home/u/.topos/mcp/weather".to_owned()),
-                agents: vec!["Cursor".to_owned()],
-            }),
-        };
-        let text = add_tty(&data);
-        assert!(text.contains("MCP server"), "{text}");
-        assert!(
-            !text.contains("channel"),
-            "an MCP import is not a channel: {text}"
-        );
-        // The row + undo lead; the per-agent note rides along.
-        assert!(
-            text.contains("undo: topos remove -g /home/u/.topos/mcp/weather"),
-            "{text}"
-        );
-        assert!(text.contains("cursor: server entry in"), "{text}");
-        assert!(text.contains("'weather'"), "{text}");
-    }
-
     /// A LOCAL folder adopted with `-a`/`--dest` states its destination like every other
     /// selected add. The receipt used to be gated on the workspace-qualified `display`, which a
     /// local source never has — so `topos add ./my-skill -a codex` answered with a bare
@@ -4498,6 +4490,7 @@ mod tests {
             note: None,
             mcp: None,
             dest,
+            dest_resolved: Vec::new(),
             // The local source's tell: no workspace qualifies it.
             display: None,
         };
@@ -4519,6 +4512,50 @@ mod tests {
         let bare = add_tty(&local(Vec::new()));
         assert!(bare.contains("Adopted 'my-skill' @"), "{bare}");
         assert!(!bare.contains("installed ("), "{bare}");
+
+        // AN ENV OVERRIDE MOVED THE FILE. `dest` stays the row's portable spelling — that is what
+        // belongs in a manifest — but the headline follows the BYTES. It used to print the
+        // default, naming a path the reader could go and look at and find nothing, while the note
+        // right beneath it named the real one.
+        let mut moved = local(vec!["~/.codex/config.toml".to_owned()]);
+        moved.dest_resolved = vec!["/opt/codex/config.toml".to_owned()];
+        let text = add_tty(&moved);
+        assert!(
+            text.contains("+ my-skill   installed (/opt/codex/config.toml)"),
+            "{text}"
+        );
+        assert!(!text.contains("~/.codex/config.toml"), "{text}");
+        // Two moved files still count in the noun their kind owns.
+        let mut moved_many = local(vec![
+            "~/.codex/config.toml".to_owned(),
+            "~/.cursor/mcp.json".to_owned(),
+        ]);
+        moved_many.mcp = Some(server_summary());
+        moved_many.dest_resolved = vec![
+            "/opt/codex/config.toml".to_owned(),
+            "/opt/cursor/mcp.json".to_owned(),
+        ];
+        assert!(
+            add_tty(&moved_many).contains("+ my-skill   installed (2 config files)"),
+            "{}",
+            add_tty(&moved_many)
+        );
+    }
+
+    /// A minimal typed `mcp` block — enough for the receipt to know the bundle is a server (which
+    /// decides its noun) and that it reached an agent.
+    fn server_summary() -> topos_types::results::McpServerSummary {
+        topos_types::results::McpServerSummary {
+            server: "io.test/wx".to_owned(),
+            description: "Weather.".to_owned(),
+            version: "1.0.0".to_owned(),
+            url: "https://wx.example/mcp".to_owned(),
+            transport: "streamable-http".to_owned(),
+            auth: None,
+            headers: Vec::new(),
+            bundle: None,
+            agents: vec!["Codex".to_owned(), "Cursor".to_owned()],
+        }
     }
 
     fn row(name: &str, action: PullAction) -> PullSkill {
@@ -4537,6 +4574,7 @@ mod tests {
             scope: None,
             harnesses: Vec::new(),
             kind: None,
+            draft: false,
         }
     }
 
@@ -4958,7 +4996,7 @@ mod tests {
             behind_elsewhere: Vec::new(),
             scope: None,
         };
-        let out = pull_tty(&data, &[], &[], &[], &[]);
+        let out = pull_tty(&data, &[], &[], &[], &[], 0);
 
         // Fast-forwarded says only that it moved — the pointer's internal edition count is a
         // `--json` field, never the human line (versions are named by hash, git-style).
@@ -5025,7 +5063,7 @@ mod tests {
             behind_elsewhere: Vec::new(),
             scope: None,
         };
-        let out = pull_tty(&data, &[], &[], &[], &[]);
+        let out = pull_tty(&data, &[], &[], &[], &[], 0);
         assert!(
             out.contains("+ @acme/deploy-checklist   installed (2 folders)\n"),
             "{out}"
@@ -5093,7 +5131,7 @@ mod tests {
             behind_elsewhere: Vec::new(),
             scope: None,
         };
-        let out = pull_tty(&data, &[], &[], &[], &[]);
+        let out = pull_tty(&data, &[], &[], &[], &[], 0);
         assert!(
             out.contains("- @acme/deploy-checklist   removed (2 folders)\n"),
             "{out}"
@@ -5196,7 +5234,7 @@ mod tests {
             scope: None,
         };
         assert_eq!(
-            pull_tty(&only_a_server, &[], &[], &[], &[]),
+            pull_tty(&only_a_server, &[], &[], &[], &[], 0),
             "Checked 1 bundle: all up to date."
         );
 
@@ -5210,7 +5248,7 @@ mod tests {
             scope: None,
         };
         assert_eq!(
-            pull_tty(&mixed, &[], &[], &[], &[]),
+            pull_tty(&mixed, &[], &[], &[], &[], 0),
             "Checked 2 bundles: all up to date."
         );
 
@@ -5218,7 +5256,7 @@ mod tests {
         let mut noteworthy = server("weather");
         noteworthy.harnesses = vec![topos_types::results::McpAgentState {
             agent: "openclaw".to_owned(),
-            state: "not-supported".to_owned(),
+            state: topos_types::results::TargetOutcome::Withheld,
             note: Some("no project-level config".to_owned()),
             file: None,
         }];
@@ -5230,7 +5268,7 @@ mod tests {
             behind_elsewhere: Vec::new(),
             scope: None,
         };
-        let out = pull_tty(&surfaced, &[], &[], &[], &[]);
+        let out = pull_tty(&surfaced, &[], &[], &[], &[], 0);
         assert!(
             out.contains("Checked 1 bundle: 1 already up to date."),
             "{out}"
@@ -5258,7 +5296,7 @@ mod tests {
             scope: None,
         };
         assert_eq!(
-            pull_tty(&clean, &[], &[], &[], &[]),
+            pull_tty(&clean, &[], &[], &[], &[], 0),
             "Checked 2 skills: all up to date."
         );
         // Nothing followed at all.
@@ -5271,12 +5309,12 @@ mod tests {
             scope: None,
         };
         assert_eq!(
-            pull_tty(&empty, &[], &[], &[], &[]),
+            pull_tty(&empty, &[], &[], &[], &[], 0),
             "Nothing to update here — no manifest or profile demands anything in this directory."
         );
         // A failed skill renders visibly and is counted (even when every synced row was current).
         let warnings = vec!["IO_ERROR s_docs: a filesystem operation failed".to_owned()];
-        let out = pull_tty(&clean, &[], &warnings, &[], &[]);
+        let out = pull_tty(&clean, &[], &warnings, &[], &[], warnings.len());
         assert!(
             out.contains("warning: IO_ERROR s_docs: a filesystem operation failed"),
             "{out}"
@@ -5290,7 +5328,7 @@ mod tests {
         let disclosures = vec![
             "NOTHING_ASSIGNED topos.sh/acme: exchanged — nothing assigned to you yet".to_owned(),
         ];
-        let out = pull_tty(&empty, &[], &[], &[], &disclosures);
+        let out = pull_tty(&empty, &[], &[], &[], &disclosures, 0);
         assert!(
             out.contains(
                 "note: NOTHING_ASSIGNED topos.sh/acme: exchanged — nothing assigned to you yet"
@@ -5307,7 +5345,7 @@ mod tests {
              file"
                 .to_owned(),
         ];
-        let out = pull_tty(&clean, &[], &[], &advisories, &[]);
+        let out = pull_tty(&clean, &[], &[], &advisories, &[], 0);
         assert!(out.contains("warning: MCP_DEST_UNKNOWN"), "{out}");
         assert!(out.contains("Checked 2 skills: all up to date."), "{out}");
         assert!(!out.contains("failed"), "{out}");
@@ -5336,7 +5374,7 @@ mod tests {
             scope: Some("project ~/Forward/labs/topos_test".to_owned()),
         };
         assert_eq!(
-            pull_tty(&data, &[], &[], &[], &[]),
+            pull_tty(&data, &[], &[], &[], &[], 0),
             "updated project (~/Forward/labs/topos_test)\n\
              coolify-deploy   updated (2 folders)\n\
              \x20   project/.agents/skills/coolify-deploy\n\
@@ -5362,7 +5400,7 @@ mod tests {
             scope: Some("project ~/Forward/labs/topos_test".to_owned()),
         };
         assert_eq!(
-            pull_tty(&data, &[], &[], &[], &[]),
+            pull_tty(&data, &[], &[], &[], &[], 0),
             "updated project (~/Forward/labs/topos_test)\n\
              coolify-deploy   updated (project/.claude/skills/coolify-deploy)\n\
              Checked 1 skill: 1 updated."
@@ -5387,7 +5425,7 @@ mod tests {
             scope: Some("machine".to_owned()),
         };
         assert_eq!(
-            pull_tty(&data, &[], &[], &[], &[]),
+            pull_tty(&data, &[], &[], &[], &[], 0),
             "updated machine-wide\n\
              coolify-deploy   updated (2 folders)\n\
              \x20   ~/.agents/skills/coolify-deploy\n\
@@ -5416,7 +5454,7 @@ mod tests {
             scope: Some("project ~/Forward/labs/topos_test".to_owned()),
         };
         assert_eq!(
-            pull_tty(&data, &[], &[], &[], &[]),
+            pull_tty(&data, &[], &[], &[], &[], 0),
             "updated project (~/Forward/labs/topos_test)\n\
              + coolify-deploy   installed (project/.claude/skills/coolify-deploy)\n\
              \x20   also updated project/.agents/skills/coolify-deploy\n\
@@ -5428,7 +5466,9 @@ mod tests {
     /// what happened.
     #[test]
     fn the_summary_counts_every_action_by_name() {
-        let summary = |skills: Vec<PullSkill>, warnings: &[String]| {
+        // `failed` is the count of BUNDLES the run could not carry forward — the sweep's own,
+        // never `warnings.len()`.
+        let counted = |skills: Vec<PullSkill>, warnings: &[String], failed: usize| {
             let data = PullData {
                 skills,
                 proposals_awaiting: 0,
@@ -5437,8 +5477,12 @@ mod tests {
                 behind_elsewhere: Vec::new(),
                 scope: None,
             };
-            let out = pull_tty(&data, &[], warnings, &[], &[]);
+            let out = pull_tty(&data, &[], warnings, &[], &[], failed);
             out.lines().last().unwrap_or_default().to_owned()
+        };
+        let summary = |skills: Vec<PullSkill>, warnings: &[String]| {
+            let failed = warnings.len();
+            counted(skills, warnings, failed)
         };
         let placed = |name: &str, action| {
             let mut r = row(name, action);
@@ -5494,6 +5538,84 @@ mod tests {
             summary(vec![placed("deploy", PullAction::Refreshed), server], &[]),
             "Checked 2 bundles: 1 updated, 1 already up to date."
         );
+
+        // A DRAFT IS NOT "ALREADY UP TO DATE". Delivery owed this bundle nothing, so its action
+        // is `up_to_date` — and the receipt used to announce "all up to date" about the very
+        // bundle `list` was calling a draft and `status` was counting as a draft ahead. Three
+        // surfaces, one machine, three answers. The row now says both true things, and the
+        // clause uses `status`'s own words.
+        let mut drafted = row("deploy", PullAction::UpToDate);
+        drafted.draft = true;
+        assert_eq!(
+            summary(
+                vec![drafted.clone(), row("style", PullAction::UpToDate)],
+                &[]
+            ),
+            "Checked 2 skills: 1 already up to date, 1 draft ahead."
+        );
+        // The compact "all up to date" shortcut cannot fire over a draft — it was the sentence
+        // that did the contradicting.
+        let whole = {
+            let data = PullData {
+                skills: vec![drafted.clone()],
+                proposals_awaiting: 0,
+                notices: Vec::new(),
+                sync: Vec::new(),
+                behind_elsewhere: Vec::new(),
+                scope: None,
+            };
+            pull_tty(&data, &[], &[], &[], &[], 0)
+        };
+        assert!(!whole.contains("all up to date"), "{whole}");
+        // The ROW says what `list` says, and names the one command that shares the work.
+        assert!(
+            whole.contains("up to date — your edits are not shared yet (topos publish deploy)"),
+            "{whole}"
+        );
+        assert!(
+            whole.ends_with("Checked 1 skill: 1 draft ahead."),
+            "{whole}"
+        );
+        // Plural reads as a person would say it.
+        let mut d2 = row("notes", PullAction::UpToDate);
+        d2.draft = true;
+        assert_eq!(
+            summary(vec![drafted, d2], &[]),
+            "Checked 2 skills: 2 drafts ahead."
+        );
+
+        // A WARNING IS NOT A BUNDLE. A scope-level fault — an unavailable lock, an unreadable
+        // custody document — is one line about no bundle at all, and two lines can be about one
+        // bundle. Counting LINES made this summary invent bundles the machine does not have and
+        // then report them failed; the arithmetic now counts what the sweep actually failed on.
+        assert_eq!(
+            counted(
+                vec![
+                    placed("deploy", PullAction::Refreshed),
+                    row("style", PullAction::UpToDate),
+                ],
+                &[
+                    "MCP_LOCK_UNAVAILABLE person: no MCP config is read or written this run"
+                        .to_owned(),
+                    "MCP_SURFACE_UNPROVABLE cursor: the file could not be parsed".to_owned(),
+                ],
+                0,
+            ),
+            "Checked 2 skills: 1 updated, 1 already up to date.",
+            "two scope-level lines are still printed, and counted as nothing"
+        );
+        // Two lines about ONE wedged bundle count that bundle once.
+        assert_eq!(
+            counted(
+                vec![row("style", PullAction::UpToDate)],
+                &[
+                    "IO_ERROR docs: a filesystem operation failed".to_owned(),
+                    "IO_ERROR docs: and again on the second placement".to_owned(),
+                ],
+                1,
+            ),
+            "Checked 2 skills: 1 already up to date, 1 failed."
+        );
     }
 
     /// The clause exists so nobody has to subtract — so it must SUM. Over a payload holding every
@@ -5537,8 +5659,8 @@ mod tests {
             .iter()
             .enumerate()
             .map(|(i, action)| {
-                tally.count(*action);
                 let mut r = row(&format!("skill{i}"), *action);
+                tally.count(&r);
                 r.destinations = vec![format!("~/.claude/skills/skill{i}")];
                 // A released row states its whole fact in `note`; the sweep composes it.
                 if *action == PullAction::Released {
@@ -5573,7 +5695,7 @@ mod tests {
             behind_elsewhere: Vec::new(),
             scope: None,
         };
-        let out = pull_tty(&data, &[], &warnings, &[], &[]);
+        let out = pull_tty(&data, &[], &warnings, &[], &[], warnings.len());
         let line = out
             .lines()
             .find(|l| l.starts_with("Checked "))
@@ -5624,7 +5746,7 @@ mod tests {
                 behind_elsewhere: entries,
                 scope: None,
             };
-            let out = pull_tty(&data, &[], &[], &[], &[]);
+            let out = pull_tty(&data, &[], &[], &[], &[], 0);
             out.lines().skip(1).collect::<Vec<_>>().join("\n")
         };
         let machine = |name: &str| BehindElsewhere {
@@ -5673,7 +5795,7 @@ mod tests {
             scope: Some("project ~/Forward/labs/api".to_owned()),
         };
         assert_eq!(
-            pull_tty(&empty(Vec::new()), &[], &[], &[], &[]),
+            pull_tty(&empty(Vec::new()), &[], &[], &[], &[], 0),
             "Up to date."
         );
         assert_eq!(
@@ -5691,7 +5813,8 @@ mod tests {
                 &[],
                 &[],
                 &[],
-                &[]
+                &[],
+                0,
             ),
             "Up to date.\n2 bundles behind machine-wide — `topos update -g` updates them."
         );
@@ -5701,7 +5824,7 @@ mod tests {
             project_dir: None,
         }]);
         awaiting.proposals_awaiting = 1;
-        let out = pull_tty(&awaiting, &[], &[], &[], &[]);
+        let out = pull_tty(&awaiting, &[], &[], &[], &[], 0);
         assert!(
             out.starts_with("Up to date.\n1 bundle behind machine-wide"),
             "{out}"
@@ -5738,7 +5861,7 @@ mod tests {
             behind_elsewhere: Vec::new(),
             scope: None,
         };
-        let out = pull_tty(&data, &[], &[], &[], &[]);
+        let out = pull_tty(&data, &[], &[], &[], &[], 0);
         // The verdict shows its outcome + reason, and sorts before the closure.
         let v = out.find("was rejected").expect("the verdict is shown");
         assert!(
@@ -5777,6 +5900,7 @@ mod tests {
                         // Never applied here: the all-zero identity renders as the honest note.
                         entry("fresh", &"0".repeat(64), None),
                     ],
+                    orphans: Vec::new(),
                 }],
                 machine_summary: Some(ListScopeSummary {
                     skills: 2,
@@ -5836,6 +5960,7 @@ mod tests {
                     scope: "machine".to_owned(),
                     manifest: None,
                     rows: Vec::new(),
+                    orphans: Vec::new(),
                 }],
                 signed_in: false,
                 ..ListData::default()
@@ -5880,11 +6005,13 @@ mod tests {
                         scope: "project".to_owned(),
                         manifest: Some("/repo/topos.toml".to_owned()),
                         rows: vec![never_applied("in-repo")],
+                        orphans: Vec::new(),
                     },
                     ListScope {
                         scope: "machine".to_owned(),
                         manifest: None,
                         rows: vec![never_applied("machine-wide")],
+                        orphans: Vec::new(),
                     },
                 ],
                 signed_in: false,
@@ -5932,6 +6059,7 @@ mod tests {
                         scope: scope.to_owned(),
                         manifest: Some("./topos.toml".to_owned()),
                         rows: vec![entry],
+                        orphans: Vec::new(),
                     }],
                     signed_in: false,
                     ..ListData::default()
@@ -6335,6 +6463,7 @@ mod tests {
                         scope: "project".to_owned(),
                         manifest: Some("./topos.toml".to_owned()),
                         rows: vec![row(health)],
+                        orphans: Vec::new(),
                     }],
                     ..ListData::default()
                 },
@@ -6404,6 +6533,7 @@ mod tests {
                         draft_dir: None,
                         draft_diverged: None,
                     }],
+                    orphans: Vec::new(),
                 }],
                 signed_in: false,
                 ..ListData::default()
@@ -6460,6 +6590,7 @@ mod tests {
                 &[],
                 &[],
                 &[],
+                0,
             )
         };
 
@@ -6621,6 +6752,7 @@ mod tests {
             &[],
             &[],
             &[],
+            0,
         );
         assert!(!workbenchless.contains("that folder"), "{workbenchless}");
         assert!(
@@ -6655,6 +6787,7 @@ mod tests {
             note: Some(note.to_owned()),
             harnesses: Vec::new(),
             kind: None,
+            draft: false,
         };
         // The final copy, composed by the sweep (`ops::orphan_fact`) exactly as it is asserted
         // there: the reason, then the files.
@@ -6670,7 +6803,7 @@ mod tests {
             scope: Some("machine".to_owned()),
         };
         assert_eq!(
-            pull_tty(&data, &[], &[], &[], &[]),
+            pull_tty(&data, &[], &[], &[], &[], 0),
             "updated machine-wide\n\
              legacy-deploy   acme stopped sharing this — topos will not update it any more\n\
              \x20   the files stay where they are, and are yours to keep or delete: \
@@ -6702,7 +6835,7 @@ mod tests {
             scope: Some("machine".to_owned()),
         };
         assert_eq!(
-            pull_tty(&data, &[], &[], &[], &[]),
+            pull_tty(&data, &[], &[], &[], &[], 0),
             "updated machine-wide\n\
              @acme/frontend-design   acme stopped sharing this — topos will not update it any more\n\
              \x20   the files stay where they are, and are yours to keep or delete:\n\
@@ -6724,11 +6857,13 @@ mod tests {
                         scope: "project".to_owned(),
                         manifest: Some("/repo/topos.toml".to_owned()),
                         rows: Vec::new(),
+                        orphans: Vec::new(),
                     },
                     ListScope {
                         scope: "machine".to_owned(),
                         manifest: None,
                         rows: Vec::new(),
+                        orphans: Vec::new(),
                     },
                 ],
                 untracked: vec![
@@ -7190,9 +7325,13 @@ mod tests {
             ),
             "{text}"
         );
-        assert!(text.contains("claude-code: armed"), "{text}");
+        // The trigger words say what the EVIDENCE supports: `status` only ever reads a footprint,
+        // so a present artifact is REGISTERED — never `armed`, which the install receipt reserves
+        // for a report that stated a live update moment.
+        assert!(text.contains("claude-code: registered"), "{text}");
+        assert!(!text.contains("claude-code: armed"), "{text}");
         assert!(
-            text.contains("openclaw: unknown — presence needs"),
+            text.contains("openclaw: not checked — presence needs"),
             "{text}"
         );
         // NO inventory here — health only; the dead vocabulary stays dead on this surface.
@@ -7280,12 +7419,49 @@ mod tests {
             &typed(&["add"]),
             &crate::error::ClientError::PathNotName {
                 arg: "deploy".to_owned(),
+                verb: "add".to_owned(),
             },
         );
         assert_eq!(actions.len(), 1, "{actions:?}");
         assert_eq!(actions[0].code.as_str(), "RUN_COMMAND");
         assert_eq!(actions[0].argv, vec!["topos", "add", "./deploy", "--json"]);
         assert!(actions[0].needs.is_empty());
+
+        // The fix re-runs the VERB THAT REFUSED. It used to say `add` whatever had refused, so a
+        // person who typed `publish` was handed a different command than the one they were using.
+        for verb in ["publish", "remove"] {
+            let actions = super::next_actions(
+                verb,
+                &typed(&[verb]),
+                &crate::error::ClientError::PathNotName {
+                    arg: "deploy".to_owned(),
+                    verb: verb.to_owned(),
+                },
+            );
+            assert_eq!(
+                actions[0].argv,
+                vec!["topos", verb, "./deploy", "--json"],
+                "{verb}"
+            );
+        }
+
+        // And the suggestion stays RUNNABLE: a token that already spells a path is not prefixed
+        // again. Blind prefixing produced `./~/deploy`, a path to nothing.
+        for arg in ["~/deploy", "./deploy", "../deploy", "/opt/deploy"] {
+            let err = crate::error::ClientError::PathNotName {
+                arg: arg.to_owned(),
+                verb: "add".to_owned(),
+            };
+            let actions = super::next_actions("add", &typed(&["add"]), &err);
+            assert_eq!(
+                actions[0].argv,
+                vec!["topos", "add", arg, "--json"],
+                "{arg}"
+            );
+            // The prose and the structured fix name the SAME command.
+            let msg = safe_message(&err);
+            assert!(msg.contains(&format!("`topos add {arg}`")), "{msg}");
+        }
 
         // A SESSION-REQUIRED refusal carries its address as an EXECUTABLE argv, typed.
         let actions = super::next_actions(
@@ -7361,6 +7537,7 @@ mod tests {
             &typed(&["add"]),
             &crate::error::ClientError::PathNotName {
                 arg: "skill --yes".to_owned(),
+                verb: "add".to_owned(),
             },
         );
         assert_eq!(actions.len(), 1, "{actions:?}");
@@ -7516,7 +7693,7 @@ mod tests {
                 behind_elsewhere: Vec::new(),
                 scope: None,
             };
-            pull_tty(&data, &[], &[], &[], &[])
+            pull_tty(&data, &[], &[], &[], &[], 0)
         };
         let kept_mine = |took: Vec<String>| MergeReport {
             drop_diff: Some("--- a\n+++ b\n".to_owned()),
@@ -7807,7 +7984,7 @@ mod tests {
                 behind_elsewhere: Vec::new(),
                 scope: None,
             };
-            pull_tty(&data, &[], &[], &[], &[])
+            pull_tty(&data, &[], &[], &[], &[], 0)
         };
 
         let marked = "to merge by hand, both versions are marked up here:";

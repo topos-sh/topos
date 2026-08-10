@@ -24,6 +24,7 @@ use topos_types::requests::{
     WireChannelEntry, WireChannelIndex, WireChannelSkill, WireMe, WireProposalIndex,
     WireSkillIndex, WireSkillIndexEntry, WireSkillLog,
 };
+use topos_types::results::TargetOutcome;
 use topos_types::{CurrencyKind, HarnessId, TriggerReport, TriggerState};
 
 use crate::config_custody::{self, ScopeEntries};
@@ -561,7 +562,7 @@ fn a_surface_symlinked_out_between_plan_and_write_is_refused_with_zero_writes() 
         "no managed byte may land outside the checkout"
     );
     let st = state_of(&out, "s_a", "cursor");
-    assert_eq!(st.state, "unprovable", "{st:?}");
+    assert_eq!(st.state, TargetOutcome::Unprovable, "{st:?}");
     assert_eq!(
         st.note.as_deref(),
         Some("the config path does not resolve inside this checkout")
@@ -656,7 +657,7 @@ fn a_targeted_converge_with_only_withheld_surfaces_reports_and_still_recovers() 
         .iter()
         .find(|h| h.agent == "cursor")
         .unwrap_or_else(|| panic!("cursor state: {row:?}"));
-    assert_eq!(st.state, "unprovable", "{st:?}");
+    assert_eq!(st.state, TargetOutcome::Unprovable, "{st:?}");
     assert!(
         !outside.0.join("mcp.json").exists(),
         "nothing lands outside the checkout"
@@ -692,21 +693,10 @@ fn a_dest_move_is_a_clean_sweep_that_names_the_bundle_it_moved() {
     )
     .unwrap();
     let ctx = rig.ctx_at(Some(&rig.work.0));
-    let never = |_s: &Session| -> ops::SessionTransports {
-        unreachable!("the path door never dials a session")
-    };
     // Adopted in place: the store tracks the folder under an opaque id, and no delivery cache
     // will ever describe it — the shape whose receipt used to print that id at a person.
-    ops::add_mcp(
-        &ctx,
-        &never,
-        None,
-        dir.to_str().unwrap(),
-        true,
-        None,
-        &Default::default(),
-    )
-    .expect("the local mcp folder adopts");
+    ops::add_mcp(&ctx, dir.to_str().unwrap(), true, &Default::default())
+        .expect("the local mcp folder adopts");
     let plane = FakePlane::new();
     let fdir = FakeDirectory {
         skills: Vec::new(),
@@ -775,10 +765,10 @@ fn the_entries_plan_carries_reach_and_names_what_it_withheld() {
     let slugs = |p: &crate::placement::PlacementPlan| -> Vec<String> {
         p.entries().map(|e| e.agent.clone()).collect()
     };
-    let withheld = |p: &crate::placement::PlacementPlan| -> Vec<(String, String)> {
+    let withheld = |p: &crate::placement::PlacementPlan| -> Vec<(String, TargetOutcome)> {
         p.withheld
             .iter()
-            .map(|w| (w.agent.clone(), w.state.to_owned()))
+            .map(|w| (w.agent.clone(), w.state))
             .collect()
     };
 
@@ -810,7 +800,7 @@ fn the_entries_plan_carries_reach_and_names_what_it_withheld() {
         let w = proj.withheld_for(slug).unwrap_or_else(|| panic!("{slug}"));
         assert_eq!(
             (w.state, w.note.as_str()),
-            ("not-supported", "no project-level config")
+            (TargetOutcome::Withheld, "no project-level config")
         );
     }
     assert!(proj.entries_for("cursor").is_some());
@@ -957,7 +947,7 @@ fn converge_places_into_all_six_dialects_byte_identical_to_the_drivers() {
     // reload note (a fresh placement).
     for h in synthetic() {
         let st = state_of(&out, "s_linear", h.slug);
-        assert_eq!(st.state, "placed", "{}", h.slug);
+        assert!(st.state.wrote(), "{}", h.slug);
         assert_eq!(
             st.note.as_deref(),
             h.mcp().map(|m| m.reload_note),
@@ -1000,8 +990,8 @@ fn converge_places_into_all_six_dialects_byte_identical_to_the_drivers() {
     for h in synthetic() {
         let st = state_of(&out2, "s_linear", h.slug);
         assert_eq!(
-            (st.state.as_str(), st.note.as_deref()),
-            ("current", None),
+            (st.state, st.note.as_deref()),
+            (TargetOutcome::Current, None),
             "{}",
             h.slug
         );
@@ -1125,7 +1115,10 @@ fn a_hand_edited_entry_is_drift_never_clobbered_and_survives_removal_disclosed()
         &no_hold(),
         true,
     );
-    assert_eq!(state_of(&out, "s_a", "cursor").state, "drifted");
+    assert_eq!(
+        state_of(&out, "s_a", "cursor").state,
+        TargetOutcome::Drifted
+    );
     assert_eq!(
         std::fs::read_to_string(&cursor).unwrap(),
         edited,
@@ -1135,7 +1128,9 @@ fn a_hand_edited_entry_is_drift_never_clobbered_and_survives_removal_disclosed()
     // Removal LEAVES the drifted entry and disclosed it (never destroys a hand edit).
     let out = mcp_engine::converge(&io, &[], &synthetic(), &all_slugs(), &no_hold(), true);
     assert!(
-        out.removed.iter().any(|r| r.state.state == "drifted"),
+        out.removed
+            .iter()
+            .any(|r| r.state.state == TargetOutcome::Drifted),
         "{out:?}"
     );
     assert_eq!(
@@ -1171,7 +1166,10 @@ fn a_foreign_topos_prefixed_entry_is_never_touched_or_claimed() {
         &no_hold(),
         true,
     );
-    assert_eq!(state_of(&out, "s_a", "cursor").state, "conflicting");
+    assert_eq!(
+        state_of(&out, "s_a", "cursor").state,
+        TargetOutcome::Conflicting
+    );
     assert_eq!(
         std::fs::read_to_string(&cursor).unwrap(),
         foreign,
@@ -1201,14 +1199,32 @@ fn a_suspect_header_fails_the_demand_closed_with_a_warning() {
         &no_hold(),
         true,
     );
+    let line = out
+        .warnings
+        .iter()
+        .find(|w| w.contains("MCP_SECRET_REFUSED"))
+        .unwrap_or_else(|| panic!("the typed refusal is named: {:?}", out.warnings));
+    // ONE code per line. The gate's code used to be printed INSIDE this line's own
+    // (`MCP_UNPLACEABLE alpha: MCP_SECRET_REFUSED: …`), so a reader met two machine words
+    // before the first English one and a parser found two codes on one line.
     assert!(
-        out.warnings
-            .iter()
-            .any(|w| w.contains("MCP_SECRET_REFUSED")),
-        "{:?}",
-        out.warnings
+        line.starts_with("MCP_SECRET_REFUSED alpha: "),
+        "the code leads, once: {line}"
     );
-    assert_eq!(state_of(&out, "s_a", "cursor").state, "unprovable");
+    assert!(!line.contains("MCP_UNPLACEABLE"), "{line}");
+    assert_eq!(
+        line.split_whitespace()
+            .filter(
+                |t| t.starts_with("MCP_") && t.chars().all(|c| c.is_ascii_uppercase() || c == '_')
+            )
+            .count(),
+        1,
+        "exactly one machine code on the line: {line}"
+    );
+    assert_eq!(
+        state_of(&out, "s_a", "cursor").state,
+        TargetOutcome::Unprovable
+    );
     assert!(
         !home.0.join(".cursor/mcp.json").exists(),
         "nothing was placed"
@@ -1274,7 +1290,10 @@ fn a_sibling_key_in_the_plugin_mcp_json_backs_the_surface_off_and_survives() {
         "the user's sibling key survives an update: {now}"
     );
     assert_eq!(now, edited, "the surface backs off byte-identical");
-    assert_eq!(state_of(&out, "s_a", "claude-code").state, "unprovable");
+    assert_eq!(
+        state_of(&out, "s_a", "claude-code").state,
+        TargetOutcome::Unprovable
+    );
 
     // A removal (the demand drops) must not delete the file over the sibling key either.
     mcp_engine::converge(&io, &[], &synthetic(), &all_slugs(), &no_hold(), true);
@@ -1336,7 +1355,7 @@ fn a_hand_edited_plugin_manifest_survives_update_and_removal_disclosed() {
         &no_hold(),
         true,
     );
-    assert_eq!(state_of(&out, "s_a", "claude-code").state, "placed");
+    assert!(state_of(&out, "s_a", "claude-code").state.wrote());
     let mcp_path = home.0.join(".claude/skills/topos-mcp/.mcp.json");
     assert!(
         std::fs::read_to_string(&mcp_path).unwrap().contains("/v2"),
@@ -1480,7 +1499,7 @@ fn converges_serialize_on_the_per_scope_mcp_lock() {
         .expect("the released lock lets the converge finish");
     worker.join().unwrap();
     assert!(out.warnings.is_empty(), "{:?}", out.warnings);
-    assert_eq!(state_of(&out, "s_a", "cursor").state, "placed");
+    assert!(state_of(&out, "s_a", "cursor").state.wrote());
     assert!(home.0.join(".cursor/mcp.json").exists());
 }
 
@@ -1759,7 +1778,10 @@ fn a_converge_that_sees_user_content_flips_owns_file_false() {
         &no_hold(),
         true,
     );
-    assert_eq!(state_of(&out, "s_a", "cursor").state, "current");
+    assert_eq!(
+        state_of(&out, "s_a", "cursor").state,
+        TargetOutcome::Current
+    );
     assert!(
         !ScopeEntries::load(&fs, &layout)
             .unwrap()
@@ -1791,7 +1813,7 @@ fn the_engine_places_the_remote_the_gate_approved_not_the_first_typed_one() {
         true,
     );
     assert!(out.warnings.is_empty(), "{:?}", out.warnings);
-    assert_eq!(state_of(&out, "s_two", "cursor").state, "placed");
+    assert!(state_of(&out, "s_two", "cursor").state.wrote());
     let text = std::fs::read_to_string(home.0.join(".cursor/mcp.json")).unwrap();
     assert!(text.contains("https://second.example/mcp"), "{text}");
 }
@@ -1903,10 +1925,10 @@ fn intent_journal_recovery_heals_both_crash_orders_through_the_engine() {
     );
     assert_eq!(
         (
-            state_of(&out, "s_a", "cursor").state.as_str(),
+            state_of(&out, "s_a", "cursor").state,
             state_of(&out, "s_a", "cursor").note.as_deref()
         ),
-        ("current", None),
+        (TargetOutcome::Current, None),
         "recovery promoted the landed write instead of reading it as drift"
     );
     assert_eq!(
@@ -1946,7 +1968,10 @@ fn intent_journal_recovery_heals_both_crash_orders_through_the_engine() {
         &no_hold(),
         true,
     );
-    assert_eq!(state_of(&out, "s_a", "cursor").state, "current");
+    assert_eq!(
+        state_of(&out, "s_a", "cursor").state,
+        TargetOutcome::Current
+    );
     let custody = ScopeEntries::load(&fs, &layout).unwrap();
     assert!(custody.doc.pending.is_empty());
     assert_eq!(custody.row(&lk).unwrap().fingerprint, real_fp);
@@ -2206,7 +2231,7 @@ fn a_removal_never_swallows_a_crash_left_intent_before_it_is_durable() {
                 home: home.0.clone(),
                 project_root: None,
             };
-            let _ = mcp_engine::remove_bundle(&io, &synthetic(), &all_slugs(), "s_a");
+            let _ = mcp_engine::remove_bundle(&io, &synthetic(), &all_slugs(), "s_a", "a");
         }
 
         // The custody document must still be decipherable whatever failed.
@@ -2223,7 +2248,7 @@ fn a_removal_never_swallows_a_crash_left_intent_before_it_is_durable() {
                 home: home.0.clone(),
                 project_root: None,
             };
-            mcp_engine::remove_bundle(&io, &synthetic(), &all_slugs(), "s_a");
+            mcp_engine::remove_bundle(&io, &synthetic(), &all_slugs(), "s_a", "a");
         }
         let left = std::fs::read_to_string(&cursor).unwrap_or_default();
         assert!(
@@ -2289,9 +2314,11 @@ fn a_drifted_entry_outlives_the_record_and_is_still_cleaned_up_later() {
     .unwrap();
 
     // The classic remove: converge the removal, move what survived, then delete the record.
-    let out = mcp_engine::remove_bundle(&io, &synthetic(), &all_slugs(), "s_a");
+    let out = mcp_engine::remove_bundle(&io, &synthetic(), &all_slugs(), "s_a", "a");
     assert!(
-        out.removed.iter().any(|r| r.state.state == "drifted"),
+        out.removed
+            .iter()
+            .any(|r| r.state.state == TargetOutcome::Drifted),
         "the hand-edited entry is left in place and disclosed: {out:?}"
     );
     // A detach that CANNOT land must say so: losing custody of a drifted row is the person's
@@ -2340,7 +2367,7 @@ fn a_drifted_entry_outlives_the_record_and_is_still_cleaned_up_later() {
     assert!(
         out.removed
             .iter()
-            .any(|r| r.bundle_id == "s_a" && r.state.state == "drifted"),
+            .any(|r| r.bundle_id == "s_a" && r.state.state == TargetOutcome::Drifted),
         "a sweep still discloses the entry it can no longer remove: {out:?}"
     );
     assert!(
@@ -2563,11 +2590,9 @@ fn a_fault_at_any_write_never_tears_state_and_the_next_converge_heals() {
         // Fully placed either way: `placed` where this clean re-run did the writing, `current`
         // where the faulted run had already landed the entry and recovery promoted it. The
         // file-vs-custody check below is what proves the placement itself.
+        let st = state_of(&out, "s_a", "cursor").state;
         assert!(
-            matches!(
-                state_of(&out, "s_a", "cursor").state.as_str(),
-                "placed" | "current"
-            ),
+            st.wrote() || st == TargetOutcome::Current,
             "fail_at={fail_at}: {out:?}"
         );
         let bytes = std::fs::read(home.0.join(".cursor/mcp.json")).unwrap();
@@ -2666,7 +2691,7 @@ fn a_workspace_mcp_bundle_lands_in_configs_reports_harnesses_and_caches_kind() {
     let agents: BTreeSet<&str> = row.harnesses.iter().map(|h| h.agent.as_str()).collect();
     assert_eq!(agents, ["cursor", "openclaw"].into());
     assert!(
-        row.harnesses.iter().all(|h| h.state == "placed"),
+        row.harnesses.iter().all(|h| h.state.wrote()),
         "a fresh placement: this run wrote every one of them — {row:?}"
     );
 
@@ -2681,7 +2706,7 @@ fn a_workspace_mcp_bundle_lands_in_configs_reports_harnesses_and_caches_kind() {
     assert_eq!(version, &topos_core::digest::to_hex(&v.id));
     assert_eq!(harnesses.len(), 2, "{harnesses:?}");
     assert!(
-        harnesses.iter().all(|h| h.state == "current"),
+        harnesses.iter().all(|h| h.state == TargetOutcome::Current),
         "the fleet's standing picture: {harnesses:?}"
     );
 
@@ -2691,7 +2716,9 @@ fn a_workspace_mcp_bundle_lands_in_configs_reports_harnesses_and_caches_kind() {
     assert_eq!(ds.kind.as_deref(), Some("mcp"));
     assert_eq!(ds.harness_states.len(), 2, "{ds:?}");
     assert!(
-        ds.harness_states.iter().all(|h| h.state == "current"),
+        ds.harness_states
+            .iter()
+            .all(|h| h.state == TargetOutcome::Current),
         "{ds:?}"
     );
 
@@ -2714,7 +2741,7 @@ fn a_workspace_mcp_bundle_lands_in_configs_reports_harnesses_and_caches_kind() {
 }
 
 /// ITEM (the subscribe receipt's typed block): `topos add` of a workspace mcp bundle — the same
-/// act the workspace-first `--mcp` resolution rides — delivers in the same invocation and folds
+/// act a workspace mcp reference rides — delivers in the same invocation and folds
 /// the typed `mcp` block from the document that LANDED: the embedded identity, the endpoint,
 /// the narrowed agents — and NO `bundle` folder, because a workspace bundle's bytes live in the
 /// store.
@@ -2812,7 +2839,7 @@ fn offline_sweeps_still_heal_configs_from_the_store() {
     assert!(
         row.harnesses
             .iter()
-            .any(|h| h.agent == "cursor" && h.state == "placed"),
+            .any(|h| h.agent == "cursor" && h.state.wrote()),
         "the repaired entry says this run wrote it: {row:?}"
     );
 }
@@ -2856,6 +2883,7 @@ fn a_repaired_config_entry_makes_the_run_an_update_not_a_check() {
             &out.warnings,
             &out.advisories,
             &out.disclosures,
+            out.failed_bundles.len(),
         )
     };
     sweep(&ctx, &plane, &dir);
@@ -2876,27 +2904,35 @@ fn a_repaired_config_entry_makes_the_run_an_update_not_a_check() {
         topos_types::results::PullAction::Refreshed,
         "{row:?}"
     );
-    // THE ROW BLOCK, byte for byte: one file list, the written file named inline, and the
-    // untouched file's own line saying it was left alone.
+    // THE ROW BLOCK, byte for byte. The column counts the config files it HEADS — the same two
+    // its detail lines name — never the subset this run wrote: a count over a longer list is a
+    // number the reader has to reconcile with the lines under it. Which file moved is the lines'
+    // own job, and they say it.
     assert_eq!(
         tty(&out),
         "updated machine-wide\n\
-         alpha   updated (~/.cursor/mcp.json)\n    \
+         alpha   updated (2 config files)\n    \
              ~/.openclaw/openclaw.json: unchanged\n    \
-             ~/.cursor/mcp.json: placed — restart Cursor\n\
+             ~/.cursor/mcp.json: created — restart Cursor\n\
          Checked 1 bundle: 1 updated."
     );
     // The wire says the same thing the receipt does: the written file, and only it, is the
     // destination — and the two files' states differ.
     assert_eq!(row.destinations, vec!["~/.cursor/mcp.json".to_owned()]);
-    let states: Vec<(&str, &str)> = row
+    let states: Vec<(&str, TargetOutcome)> = row
         .harnesses
         .iter()
-        .map(|h| (h.agent.as_str(), h.state.as_str()))
+        .map(|h| (h.agent.as_str(), h.state))
         .collect();
     assert_eq!(
         states,
-        vec![("openclaw", "current"), ("cursor", "placed")],
+        vec![
+            ("openclaw", TargetOutcome::Current),
+            // The entry was hand-DELETED, so this run put one where none stood: `created` at the
+            // target, while the ROW above is still an `updated` — the bundle was already
+            // installed here. Two levels, both true.
+            ("cursor", TargetOutcome::Created),
+        ],
         "the rewritten file and the merely-found one are distinguishable: {row:?}"
     );
 }
@@ -2934,6 +2970,7 @@ fn a_first_ever_mcp_placement_reads_installed_not_a_repair() {
             &out.warnings,
             &out.advisories,
             &out.disclosures,
+            out.failed_bundles.len(),
         )
     };
 
@@ -2954,9 +2991,9 @@ fn a_first_ever_mcp_placement_reads_installed_not_a_repair() {
         // Agent lines follow the ONE harness table's row order.
         "updated machine-wide\n\
          + weather   installed (2 config files)\n    \
-             ~/.openclaw/openclaw.json: placed — picked up automatically; sign in with \
+             ~/.openclaw/openclaw.json: created — picked up automatically; sign in with \
              `openclaw mcp login <name>`\n    \
-             ~/.cursor/mcp.json: placed — restart Cursor\n\
+             ~/.cursor/mcp.json: created — restart Cursor\n\
          Checked 1 bundle: 1 installed."
     );
 
@@ -3113,7 +3150,7 @@ fn a_project_row_lands_only_in_project_surfaces_and_openclaw_hermes_read_not_sup
             .iter()
             .find(|h| h.agent == slug)
             .unwrap_or_else(|| panic!("{slug} state: {row:?}"));
-        assert_eq!(st.state, "not-supported", "{slug}");
+        assert_eq!(st.state, TargetOutcome::Withheld, "{slug}");
         assert_eq!(
             st.note.as_deref(),
             Some("no project-level config"),
@@ -3171,7 +3208,7 @@ fn a_project_config_symlink_escaping_the_checkout_is_refused_and_disclosed() {
     assert!(
         row.harnesses
             .iter()
-            .any(|h| h.agent == "cursor" && h.state == "unprovable"),
+            .any(|h| h.agent == "cursor" && h.state == TargetOutcome::Unprovable),
         "{row:?}"
     );
 }
@@ -3242,6 +3279,7 @@ fn a_rows_dest_files_narrow_the_placement_and_unknown_files_warn_once() {
         &clean.warnings,
         &clean.advisories,
         &clean.disclosures,
+        clean.failed_bundles.len(),
     );
     assert!(
         receipt.contains("MCP_DEST_UNKNOWN"),
@@ -3319,6 +3357,7 @@ fn a_dest_naming_only_unknown_files_reaches_no_agent_and_says_so() {
         &clean.warnings,
         &clean.advisories,
         &clean.disclosures,
+        clean.failed_bundles.len(),
     );
     assert!(
         receipt.contains("alpha") && receipt.contains("reaches no agent"),
@@ -3537,7 +3576,8 @@ fn a_skill_rows_folder_dest_never_warns_mcp_dest_unknown() {
             &clean.decisions,
             &clean.warnings,
             &clean.advisories,
-            &clean.disclosures
+            &clean.disclosures,
+            0,
         ),
         "checked machine-wide\nChecked 1 skill: all up to date."
     );
@@ -3607,6 +3647,107 @@ fn a_tampered_local_row_is_held_with_the_typed_refusal_and_prior_entries_stay() 
     }
 }
 
+/// INVISIBLE AND UNFIXABLE. An MCP bundle whose manifest row is hand-deleted while its config
+/// entry carries a hand edit leaves a record nothing demands whose ENTRY is still live in the
+/// agent's config — and neither surface said so: `list` builds its inventory from manifest rows,
+/// and the sweep's orphan resolution deliberately passes over a record whose entries still stand
+/// (they are placed, not abandoned). `update` read "all up to date" while the server sat in
+/// Cursor's config. One line in `list` now names it and the command that ends it.
+#[test]
+fn an_orphaned_record_whose_entries_still_stand_gets_one_line_in_list() {
+    let rig = Rig::new("orphan-visible");
+    seed_harness_dirs(&rig.home.0);
+    let plane = FakePlane::new();
+    let fdir = FakeDirectory {
+        skills: Vec::new(),
+        channels: Vec::new(),
+    };
+    let dir = rig.home.0.join("wx");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("server.json"),
+        server_json("https://wx.example/mcp"),
+    )
+    .unwrap();
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    // The ordinary door: the adopt mints the record AND places the entry.
+    ops::add_mcp(&ctx, dir.to_str().unwrap(), true, &Default::default()).unwrap();
+    let cursor = rig.home.0.join(".cursor/mcp.json");
+    assert!(cursor.exists(), "the entry landed");
+
+    // The row goes; the ENTRY stays. A hand-edited entry is never destroyed, so its custody row
+    // survives the removal — and a record that still holds entries is exactly what the sweep's
+    // orphan pass declines to retire.
+    let placed = std::fs::read_to_string(&cursor).unwrap();
+    std::fs::write(&cursor, placed.replace("wx.example", "edited.example")).unwrap();
+    rig.write_global("[bundles]\n");
+    let _ = sweep(&ctx, &plane, &fdir);
+    assert!(
+        std::fs::read_to_string(&cursor)
+            .unwrap()
+            .contains("edited.example"),
+        "the hand-edited entry survives — that is what makes the record stick"
+    );
+
+    let listing = |ctx: &Ctx<'_>| {
+        ops::list_with(
+            ctx,
+            &ops::ListRequest {
+                view: ops::ScopeView::Machine,
+                ..Default::default()
+            },
+            None,
+            None,
+            ops::RowPage::unlimited(),
+        )
+        .unwrap()
+    };
+
+    // THE LINE. One, naming the bundle, where it still stands, and the command that ends it.
+    let listed = listing(&ctx);
+    let orphans = &listed.data.scopes[0].orphans;
+    assert_eq!(orphans.len(), 1, "{orphans:?}");
+    assert_eq!(orphans[0].name, "wx");
+    assert!(
+        orphans[0].standing.iter().any(|p| p.contains("mcp.json")),
+        "it names WHERE it still is: {orphans:?}"
+    );
+    let tty = crate::render::list_tty(&listed);
+    assert!(
+        tty.contains(
+            "wx  no longer in this file — still in ~/.cursor/mcp.json (`topos remove wx` ends it)"
+        ),
+        "{tty}"
+    );
+
+    // AND THE WAY OUT WORKS — the whole point of naming a command. The record goes, and the line
+    // goes with it: it reports a state, never a permanent mark.
+    let named = |_s: &Session| ops::SessionTransports {
+        plane: Box::new(plane.clone()),
+        directory: Box::new(fdir.clone()),
+        contribute: Box::new(NoContribute),
+        governance: Box::new(NoGovernance),
+    };
+    let dir_connect = |_: &str| -> Box<dyn DirectorySource> { Box::new(fdir.clone()) };
+    ops::remove(
+        &ctx,
+        &ops::RemoveConnectors {
+            session: &named,
+            directory: &dir_connect,
+        },
+        &["wx".to_owned()],
+        &[],
+        None,
+        true,
+    )
+    .expect("the offered command is runnable");
+    assert!(
+        listing(&ctx).data.scopes[0].orphans.is_empty(),
+        "{:?}",
+        listing(&ctx).data.scopes[0].orphans
+    );
+}
+
 /// A repo row tagged `kind = "mcp"` never becomes a demand: the grammar refuses it when the file
 /// LOADS, exactly like any other field the shape does not take — so the update refuses with the
 /// teaching instead of syncing a row whose bytes no config converge could ever place.
@@ -3660,29 +3801,8 @@ fn dual_scope_adoption_keeps_each_scopes_config_key_stable() {
     let ctx = rig.ctx_at(Some(&proj.0));
     // Adopt at PROJECT scope (the checkout's store tracks the dir under the project id), then
     // the SAME folder with `-g` (the home store tracks it under its own id).
-    let never = |_s: &Session| -> ops::SessionTransports {
-        unreachable!("the path door never dials a session")
-    };
-    ops::add_mcp(
-        &ctx,
-        &never,
-        None,
-        dir.to_str().unwrap(),
-        false,
-        None,
-        &Default::default(),
-    )
-    .expect("project adopt");
-    ops::add_mcp(
-        &ctx,
-        &never,
-        None,
-        dir.to_str().unwrap(),
-        true,
-        None,
-        &Default::default(),
-    )
-    .expect("global adopt");
+    ops::add_mcp(&ctx, dir.to_str().unwrap(), false, &Default::default()).expect("project adopt");
+    ops::add_mcp(&ctx, dir.to_str().unwrap(), true, &Default::default()).expect("global adopt");
     let playout = crate::sidecar::existing_project_store(&rig.fs, &proj.0)
         .expect("the project adopt minted the checkout's store");
     let before = ScopeEntries::load(&rig.fs, &playout).unwrap();
@@ -4002,10 +4122,11 @@ fn a_go_back_racing_a_sweep_never_lands_in_a_drift_standoff() {
         .find(|h| h.agent == "cursor")
         .expect("a cursor state");
     assert_ne!(
-        cursor_state.state, "drifted",
+        cursor_state.state,
+        TargetOutcome::Drifted,
         "an entry topos itself wrote must never read as a hand edit: {cursor_state:?}"
     );
-    assert_eq!(cursor_state.state, "placed", "{cursor_state:?}");
+    assert!(cursor_state.state.wrote(), "{cursor_state:?}");
 }
 
 /// ITEM PAIR (go-back converges configs): a targeted `update <mcp>@<version>` must leave the
@@ -4367,11 +4488,16 @@ fn a_scoped_out_skill_with_an_empty_map_is_not_reported_held() {
     );
 }
 
-/// ITEM PAIR (bare diff): a delivered, store-only mcp bundle's bare `diff` answers the honest
-/// no-local-draft shape — an empty diff whose endpoint is the held current — instead of the
-/// "placement map has no placement" corruption error the pre-fix path tripped.
+/// A delivered, store-only mcp bundle's bare `diff` REFUSES, naming what `diff` acts on.
+///
+/// It used to answer an empty diff whose endpoint was the held current. That was honest about the
+/// working tree (there is none) and dishonest about everything a person reads it for: "No changes"
+/// over a bundle the verb never looked at, printed identically whether or not the entry standing in
+/// their agent's config had been hand-edited. The refusal names the kind and points at the verb
+/// that does answer. (It also still never trips the "placement map has no placement" corruption
+/// error a store-only record would otherwise reach.)
 #[test]
-fn a_bare_diff_of_a_config_placed_bundle_answers_the_empty_no_draft_shape() {
+fn a_bare_diff_of_a_config_placed_bundle_refuses_naming_the_kind() {
     let rig = Rig::new("bare-diff");
     rig.seed_session();
     seed_harness_dirs(&rig.home.0);
@@ -4383,19 +4509,27 @@ fn a_bare_diff_of_a_config_placed_bundle_answers_the_empty_no_draft_shape() {
     let ctx = rig.ctx_at(Some(&rig.work.0));
     sweep(&ctx, &plane, &dir);
 
-    let d = ops::diff(
+    let err = ops::diff(
         &ctx,
         "linear",
         None,
         ops::DiffBudget::resolve(None, true),
         &ops::Selection::default(),
+        ops::StoreScope::Here,
     )
-    .unwrap();
-    assert_eq!(d.diff, "", "no working tree — no draft to show");
-    assert!(!d.truncated);
-    assert_eq!(d.version_id, topos_core::digest::to_hex(&v.id));
-    assert_eq!(d.bundle_digest, topos_core::digest::to_hex(&v.digest));
-    assert!(d.files.is_empty());
+    .expect_err("a config-placed bundle has no file diff");
+    let detail = err.detail();
+    assert_eq!(err.code(), "INVALID_ARGUMENT", "{detail}");
+    assert!(
+        detail.contains("'linear' is an MCP server bundle"),
+        "{detail}"
+    );
+    assert!(detail.contains("`diff` compares"), "{detail}");
+    assert!(detail.contains("`topos list linear`"), "{detail}");
+    assert!(
+        !detail.contains("placement map"),
+        "never the corruption error: {detail}"
+    );
 }
 
 /// **An offline sweep never WIDENS a dest-narrowed bundle.** A row's `dest` freezes which config

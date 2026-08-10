@@ -198,12 +198,14 @@ pub(crate) enum Command {
     /// catalogs of the workspaces you are connected to — when only a workspace has it, that is
     /// what you get. A GitHub source shows what it found and waits for `--yes`, every time — a
     /// skill is instructions your agent will follow, and that listing is there to be read.
-    /// `add topos` restores the built-in topos skill. With `--mcp` the source is an MCP
-    /// SERVER instead — a registry name, an https link to its server.json, or a folder
-    /// holding one — and your agents get it as a tool endpoint in their own MCP config rather than
-    /// as a skill folder; a name is looked for in your workspaces' catalogs first, then the
-    /// official registry; every `--mcp` source applies immediately, and the receipt leads with
-    /// the undo (`topos remove <name>`). By default a skill reaches every agent on the machine;
+    /// `add topos` restores the built-in topos skill. `--kind mcp` says the source is an MCP
+    /// SERVER instead — a folder whose root holds a `server.json` — and your agents get it as a
+    /// tool endpoint in their own MCP config rather than as a skill folder; it applies
+    /// immediately, and the receipt leads with the undo (`topos remove <name>`). A folder that is
+    /// plainly a server bundle refuses without the flag rather than landing as a skill, and
+    /// `--kind skill` on one adopts it as a skill anyway. Anything your workspace publishes needs
+    /// no flag at all — the catalog already records what each bundle is. By default a skill
+    /// reaches every agent on the machine;
     /// `-a <agent>` (repeatable) installs it for just those agents, and `--dest <folder>`
     /// (repeatable) installs into an exact folder — together they freeze the row to exactly
     /// those destinations, recorded in the file so updates keep landing there. For an MCP
@@ -223,10 +225,10 @@ pub(crate) enum Command {
         /// destination set). An MCP source takes a known config file instead.
         #[arg(long, value_name = "FOLDER")]
         dest: Vec<String>,
-        /// Import an MCP server: an official-registry name (io.github.x/y), an https URL to its
-        /// server.json, or a local folder holding one.
-        #[arg(long, conflicts_with = "skill")]
-        mcp: bool,
+        /// What the source IS: `skill` (the default) or `mcp`, a folder whose root holds a
+        /// server.json. Only needed for a local folder — a workspace bundle carries its own kind.
+        #[arg(long, value_name = "KIND")]
+        kind: Option<crate::bundle_kind::BundleKind>,
         /// Add it machine-wide (your `~/.topos/topos.toml`) instead of to this folder's file.
         #[arg(long, short = 'g')]
         global: bool,
@@ -323,12 +325,16 @@ pub(crate) enum Command {
     },
     /// Show what changed in a skill. Bare: your local edits against the version you last applied.
     /// With a version id: that version against the team's current. `<a>..<b>` compares two
-    /// versions. When the skill sits in more than one folder, `--dest <folder>` (or `-a <agent>`)
-    /// reads the edits in that one — still against the version you last applied, so two such runs
-    /// compare like for like.
+    /// versions. Reads the copy where you are standing; `-g` reads your machine-wide copy even
+    /// from inside a project. When the skill sits in more than one folder, `--dest <folder>` (or
+    /// `-a <agent>`) reads the edits in that one — still against the version you last applied, so
+    /// two such runs compare like for like.
     Diff {
         /// The skill name.
         skill: String,
+        /// Read your machine-wide copy, even when run inside a project.
+        #[arg(long, short = 'g')]
+        global: bool,
         /// What to compare: a version id, or `<a>..<b>`. Omitted: your edits vs the version you
         /// last applied.
         #[arg(value_name = "REF")]
@@ -815,9 +821,10 @@ mod tests {
             ),
             "Show what changed in a skill. Bare: your local edits against the version you last \
              applied. With a version id: that version against the team's current. `<a>..<b>` \
-             compares two versions. When the skill sits in more than one folder, `--dest \
-             <folder>` (or `-a <agent>`) reads the edits in that one — still against the version \
-             you last applied, so two such runs compare like for like"
+             compares two versions. Reads the copy where you are standing; `-g` reads your \
+             machine-wide copy even from inside a project. When the skill sits in more than one \
+             folder, `--dest <folder>` (or `-a <agent>`) reads the edits in that one — still \
+             against the version you last applied, so two such runs compare like for like"
         );
         assert_eq!(
             flag_help("diff", "ref"),
@@ -973,14 +980,35 @@ mod tests {
             Some(Command::Remove { agent, dest, .. })
                 if agent == ["codex", "cursor"] && dest == ["~/x"]
         ));
-        // `--mcp` now combines with `-a` (the agent picks whose config file gets the entry);
-        // `-s` stays a repo-member selector and still refuses beside it.
+        // `--kind mcp` combines with `-a` (the agent picks whose config file gets the entry).
         assert!(
-            Cli::try_parse_from(["topos", "add", "--mcp", "io.github.a/b", "-a", "codex"]).is_ok()
+            Cli::try_parse_from(["topos", "add", "--kind", "mcp", "./weather", "-a", "codex"])
+                .is_ok()
         );
-        assert!(
-            Cli::try_parse_from(["topos", "add", "--mcp", "io.github.a/b", "-s", "x"]).is_err()
-        );
+    }
+
+    /// `--kind` takes the CLOSED vocabulary and nothing else: the value enum is the same list this
+    /// build can deliver, so a word it cannot place is refused at the parse rather than carried to
+    /// a door that would have to guess. Omitting the flag is legal — silence means "a skill,
+    /// unless the folder is plainly a server bundle", which the adopt door judges.
+    #[test]
+    fn add_kind_takes_the_closed_vocabulary() {
+        use crate::bundle_kind::BundleKind;
+        for (word, want) in [("skill", BundleKind::Skill), ("mcp", BundleKind::Mcp)] {
+            let out = Cli::try_parse_from(["topos", "add", "--kind", word, "./x"]).unwrap();
+            assert!(
+                matches!(out.command, Some(Command::Add { kind: Some(k), .. }) if k == want),
+                "{word}"
+            );
+        }
+        for word in ["knowledge", "MCP", "skills", ""] {
+            assert!(
+                Cli::try_parse_from(["topos", "add", "--kind", word, "./x"]).is_err(),
+                "`{word}` must not parse as a kind"
+            );
+        }
+        let out = Cli::try_parse_from(["topos", "add", "./x"]).unwrap();
+        assert!(matches!(out.command, Some(Command::Add { kind: None, .. })));
     }
 
     /// The three verbs that act on ONE copy take the selector in the SINGULAR — a repeatable flag

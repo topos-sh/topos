@@ -10,8 +10,9 @@ import {
 import { type StubVault, startStubVault } from "./helpers/stub-vault";
 
 /**
- * THE ADDITIVE `mcp_server_name` FIELD on the session-lane catalog listing — the join the
- * `add --mcp <name>` workspace-first resolution stands on. Against a real scratch Postgres and
+ * THE ADDITIVE `mcp_server_name` FIELD on the session-lane catalog listing. It once carried a
+ * registry-shaped `add`'s workspace-first join; that door is gone and no client reads the field
+ * today, so this pins the SHAPE the lane still serves. Against a real scratch Postgres and
  * the stub vault, because the embedded name comes from the CURRENT version's document (the same
  * source the registry lane serves), never from a second index:
  *

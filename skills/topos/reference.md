@@ -188,7 +188,7 @@ topos fmt [OPTIONS]
 
 ### `topos add`
 
-Get skills and keep them updated. The source can be a skill or channel from your workspace (`code-review`, `@acme/code-review`, `@acme/channels/backend`), a whole workspace's feed (`@acme`, with `-g`), a local folder (`./tools/my-skill`), or a public GitHub repo (`owner/repo` for every skill in it, `owner/repo/name` for one). Records one line in the nearest `topos.toml` at or above this folder — or in your machine-wide file (`~/.topos/topos.toml`) with `-g` — and installs right away. With no `topos.toml` covering this folder it stops and says so: `topos init` creates one here, or add `-g`. A plain name is looked for both in the skills already sitting in your agents' folders and in the catalogs of the workspaces you are connected to — when only a workspace has it, that is what you get. A GitHub source shows what it found and waits for `--yes`, every time — a skill is instructions your agent will follow, and that listing is there to be read. `add topos` restores the built-in topos skill. With `--mcp` the source is an MCP SERVER instead — a registry name, an https link to its server.json, or a folder holding one — and your agents get it as a tool endpoint in their own MCP config rather than as a skill folder; a name is looked for in your workspaces' catalogs first, then the official registry; every `--mcp` source applies immediately, and the receipt leads with the undo (`topos remove <name>`). By default a skill reaches every agent on the machine; `-a <agent>` (repeatable) installs it for just those agents, and `--dest <folder>` (repeatable) installs into an exact folder — together they freeze the row to exactly those destinations, recorded in the file so updates keep landing there. For an MCP source `-a` picks whose config file gets the entry. Re-adding a source with `-a`/`--dest` replaces its recorded destinations with the new set
+Get skills and keep them updated. The source can be a skill or channel from your workspace (`code-review`, `@acme/code-review`, `@acme/channels/backend`), a whole workspace's feed (`@acme`, with `-g`), a local folder (`./tools/my-skill`), or a public GitHub repo (`owner/repo` for every skill in it, `owner/repo/name` for one). Records one line in the nearest `topos.toml` at or above this folder — or in your machine-wide file (`~/.topos/topos.toml`) with `-g` — and installs right away. With no `topos.toml` covering this folder it stops and says so: `topos init` creates one here, or add `-g`. A plain name is looked for both in the skills already sitting in your agents' folders and in the catalogs of the workspaces you are connected to — when only a workspace has it, that is what you get. A GitHub source shows what it found and waits for `--yes`, every time — a skill is instructions your agent will follow, and that listing is there to be read. `add topos` restores the built-in topos skill. `--kind mcp` says the source is an MCP SERVER instead — a folder whose root holds a `server.json` — and your agents get it as a tool endpoint in their own MCP config rather than as a skill folder; it applies immediately, and the receipt leads with the undo (`topos remove <name>`). A folder that is plainly a server bundle refuses without the flag rather than landing as a skill, and `--kind skill` on one adopts it as a skill anyway. Anything your workspace publishes needs no flag at all — the catalog already records what each bundle is. By default a skill reaches every agent on the machine; `-a <agent>` (repeatable) installs it for just those agents, and `--dest <folder>` (repeatable) installs into an exact folder — together they freeze the row to exactly those destinations, recorded in the file so updates keep landing there. For an MCP source `-a` picks whose config file gets the entry. Re-adding a source with `-a`/`--dest` replaces its recorded destinations with the new set
 
 ```
 topos add [OPTIONS] <SOURCE>
@@ -200,7 +200,7 @@ topos add [OPTIONS] <SOURCE>
 | `-s, --skill <NAME>` | When a GitHub repo holds several skills, pick which one(s) (repeatable; `'*'` = all) |
 | `-a, --agent <SLUG>` | Install for this agent only (a slug like `codex`; repeatable). Recorded on the row, so updates keep the copy where you asked |
 | `--dest <FOLDER>` | Install into this exact folder (repeatable; combined with `-a` the union is the destination set). An MCP source takes a known config file instead |
-| `--mcp` | Import an MCP server: an official-registry name (io.github.x/y), an https URL to its server.json, or a local folder holding one |
+| `--kind <KIND>` | What the source IS: `skill` (the default) or `mcp`, a folder whose root holds a server.json. Only needed for a local folder — a workspace bundle carries its own kind |
 | `-g, --global` | Add it machine-wide (your `~/.topos/topos.toml`) instead of to this folder's file |
 | `--yes` | Confirm adding from a GitHub source, after reading what it found (everything else applies immediately, and `--yes` changes nothing there) |
 
@@ -270,7 +270,7 @@ topos list [OPTIONS] [NAME]
 
 ### `topos diff`
 
-Show what changed in a skill. Bare: your local edits against the version you last applied. With a version id: that version against the team's current. `<a>..<b>` compares two versions. When the skill sits in more than one folder, `--dest <folder>` (or `-a <agent>`) reads the edits in that one — still against the version you last applied, so two such runs compare like for like
+Show what changed in a skill. Bare: your local edits against the version you last applied. With a version id: that version against the team's current. `<a>..<b>` compares two versions. Reads the copy where you are standing; `-g` reads your machine-wide copy even from inside a project. When the skill sits in more than one folder, `--dest <folder>` (or `-a <agent>`) reads the edits in that one — still against the version you last applied, so two such runs compare like for like
 
 ```
 topos diff [OPTIONS] <SKILL> [REF]
@@ -279,6 +279,7 @@ topos diff [OPTIONS] <SKILL> [REF]
 | Argument / flag | What it does |
 |---|---|
 | `<SKILL>` | The skill name |
+| `-g, --global` | Read your machine-wide copy, even when run inside a project |
 | `[REF]` | What to compare: a version id, or `<a>..<b>`. Omitted: your edits vs the version you last applied |
 | `-a, --agent <SLUG>` | Read this agent's copy of the skill (a slug like `codex`) |
 | `--dest <FOLDER>` | Read the copy in this exact folder — the folder as `topos list` prints it, or the one the `topos.toml` line names |
