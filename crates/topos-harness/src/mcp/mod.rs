@@ -170,8 +170,8 @@ pub fn apply(
         && !input_round_trips(dialect, current.unwrap_or_default())
     {
         return unprovable(
-            "the config does not re-serialize byte-identical (a BOM or unusual line endings?); \
-             refusing to edit",
+            "topos cannot rewrite this file without changing bytes it does not own (a BOM, or \
+             unusual line endings), so it did not edit it",
         );
     }
     outcome
@@ -843,7 +843,10 @@ mod tests {
         let EditPlan::Unprovable(reason) = &out.plan else {
             panic!("CRLF TOML must refuse the edit: {:?}", out.plan);
         };
-        assert!(reason.contains("byte-identical"), "{reason}");
+        assert!(
+            reason.contains("without changing bytes it does not own"),
+            "{reason}"
+        );
         assert!(out.states.is_empty() && out.fingerprints.is_empty());
 
         // A BOM-carrying TOML file: the BOM would be stripped on rewrite — refused.

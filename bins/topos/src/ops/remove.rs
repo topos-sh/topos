@@ -374,26 +374,23 @@ fn retire_mcp_entries(
         );
         match removed.state.state {
             topos_types::results::TargetOutcome::Drifted => {
-                lines.push(format!("{file}: hand-edited entry left in place"));
+                lines.push(format!(
+                    "{file}: the entry you edited by hand is left in place."
+                ));
             }
-            _ => gone.push(format!("{file}: server entry removed")),
+            _ => gone.push(format!("{file}: the server's entry was removed.")),
         }
     }
     lines.extend(gone);
     // The notices land in a person's RECEIPT here, not in the sweep's machine channel — so they
-    // arrive as prose, with the leading code taken off ("~/.codex/config.toml held only topos
-    // entries and was deleted"). The coded spelling still rides the sweep's warnings array.
-    lines.extend(
-        outcome
-            .notices
-            .iter()
-            .map(|n| crate::render::plain_coded_line(n).to_owned()),
-    );
-    lines.extend(outcome.warnings.iter().cloned());
+    // arrive as the PROSE the typed message carries. The code rides `messages[].code` on the
+    // sweep's envelope and nowhere near a receipt line.
+    lines.extend(outcome.notices.iter().map(|n| n.text.clone()));
+    lines.extend(outcome.warnings.iter().map(|w| w.text.clone()));
     // A detach that could not take the lock or write the scope document has LOST custody of a
     // drifted row the record is about to take with it. That is the person's business, not a silent
     // fact — it rides the same receipt lines as every other warning this removal produced.
-    lines.extend(detach_warnings);
+    lines.extend(detach_warnings.iter().map(|w| w.text.clone()));
     if lines.is_empty() {
         return;
     }

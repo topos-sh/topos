@@ -54,6 +54,7 @@ use std::path::{Path, PathBuf};
 use serde_json::Value;
 use topos_harness::mcp::{self, AuthHint, EditPlan, EntryState, McpDialect, McpEntry, plugin_dir};
 use topos_harness::registry::KnownHarness;
+use topos_types::Message;
 use topos_types::results::{McpAgentState, TargetOutcome};
 
 use crate::config_custody::EntryPlacement;
@@ -186,11 +187,11 @@ pub(crate) struct ConvergeOutcome {
     pub removed: Vec<RemovedEntry>,
     /// Honest per-bundle / per-surface FAILURE lines (the sweep's warning channel — the one that
     /// makes a run exit non-zero).
-    pub warnings: Vec<String>,
+    pub warnings: Vec<Message>,
     /// Facts about work that SUCCEEDED and is worth stating (a wholly-owned config file deleted
     /// when its last entry left). A line describing something that worked belongs here: routed
     /// into the warning channel it would make a clean run report itself broken.
-    pub notices: Vec<String>,
+    pub notices: Vec<Message>,
     /// The BUNDLE IDENTITIES this converge could not place — a `server.json` the gate refused, a
     /// document that would not parse. Each already has a line in `warnings`, but a line is not a
     /// bundle: the sweep counts BUNDLES, and a gate failure that rode only the line channel exited
@@ -221,7 +222,7 @@ struct ParsedServer {
 /// demand closed (never place a suspect entry).
 fn parse_server_json(bytes: &[u8]) -> Result<ParsedServer, String> {
     let root: Value = serde_json::from_slice(bytes)
-        .map_err(|e| format!("server.json is not valid JSON ({e})"))?;
+        .map_err(|e| format!("its server.json is not valid JSON ({e})"))?;
     // A non-empty `packages[]` is a LOCALLY-RUN server — out of scope for a shared bundle, and
     // something the publish gate refuses outright; a stored copy carrying one is suspect.
     if root
@@ -229,12 +230,14 @@ fn parse_server_json(bytes: &[u8]) -> Result<ParsedServer, String> {
         .and_then(Value::as_array)
         .is_some_and(|p| !p.is_empty())
     {
-        return Err("server.json carries local packages[] — not a shareable remote server".into());
+        return Err(
+            "its server.json lists local packages — that is not a shareable remote server".into(),
+        );
     }
     let remotes = root
         .get("remotes")
         .and_then(Value::as_array)
-        .ok_or_else(|| "server.json carries no remotes[] list".to_owned())?;
+        .ok_or_else(|| "its server.json lists no remotes".to_owned())?;
     // The FIRST remote with `type == "streamable-http"` AND a url — ONE predicate, the same
     // pick the gate makes (`crate::mcp_validate`), so the engine can never resolve a different
     // remote than the one the gate approved.
@@ -244,12 +247,12 @@ fn parse_server_json(bytes: &[u8]) -> Result<ParsedServer, String> {
             r.get("type").and_then(Value::as_str) == Some("streamable-http")
                 && r.get("url").and_then(Value::as_str).is_some()
         })
-        .ok_or_else(|| "server.json carries no streamable-http remote with a url".to_owned())?;
+        .ok_or_else(|| "its server.json has no streamable-http remote with a url".to_owned())?;
     let url = remote
         .get("url")
         .and_then(Value::as_str)
         .filter(|u| !u.trim().is_empty())
-        .ok_or_else(|| "the streamable-http remote carries no url".to_owned())?
+        .ok_or_else(|| "its streamable-http remote has no url".to_owned())?
         .to_owned();
     let mut headers = Vec::new();
     if let Some(list) = remote.get("headers").and_then(Value::as_array) {
@@ -258,7 +261,7 @@ fn parse_server_json(bytes: &[u8]) -> Result<ParsedServer, String> {
                 .get("name")
                 .and_then(Value::as_str)
                 .filter(|n| !n.trim().is_empty())
-                .ok_or_else(|| "a header entry carries no name".to_owned())?;
+                .ok_or_else(|| "one of its headers has no name".to_owned())?;
             // The publish gate refused secret / variable / value-less headers. RE-CHECK here,
             // fail-closed: a suspect header fails the whole demand rather than placing a header
             // whose value the gate never validated as a shareable literal. (`isRequired` with a
@@ -271,17 +274,17 @@ fn parse_server_json(bytes: &[u8]) -> Result<ParsedServer, String> {
             // is deleted — the engine never grows a private rule, because a bundle the gate
             // publishes must never be permanently unplaceable here.
             if h.get("isSecret").and_then(Value::as_bool) == Some(true) {
-                return Err(format!("header {name:?} is marked secret"));
+                return Err(format!("its {name} header is marked secret"));
             }
             if h.get("variables").is_some_and(|v| !v.is_null()) {
-                return Err(format!("header {name:?} carries variable substitutions"));
+                return Err(format!("its {name} header carries variable substitutions"));
             }
             let value = h
                 .get("value")
                 .and_then(Value::as_str)
-                .ok_or_else(|| format!("header {name:?} carries no literal value"))?;
+                .ok_or_else(|| format!("its {name} header carries no literal value"))?;
             if value.contains('{') && value.contains('}') {
-                return Err(format!("header {name:?} carries a templated value"));
+                return Err(format!("its {name} header carries a templated value"));
             }
             headers.push((name.to_owned(), value.to_owned()));
         }
@@ -296,6 +299,21 @@ fn parse_server_json(bytes: &[u8]) -> Result<ParsedServer, String> {
         _ => AuthHint::Unknown,
     };
     Ok(ParsedServer { url, headers, auth })
+}
+
+/// The ONE refusal line a gated server document earns. `{code}` is the GATE's own code (WHY the
+/// document was refused), and the remedy names the audience that can actually act: a local folder
+/// row is the reader's own file to correct; a workspace bundle is an owner's.
+fn gate_refusal(code: &str, name: &str, reason: &str, from_workspace: bool) -> Message {
+    let remedy = if from_workspace {
+        "ask a workspace owner to correct it, then run 'topos update'"
+    } else {
+        "correct its server.json, then run 'topos update'"
+    };
+    crate::message::failure(
+        code,
+        format!("{name}: {reason}. Nothing is placed for it — {remedy}."),
+    )
 }
 
 // =================================================================================================
@@ -335,12 +353,16 @@ pub(crate) fn converge(
     let mut custody = match ScopeEntries::load(io.fs, io.layout) {
         Ok(l) => l,
         Err(e) => {
-            out.warnings.push(format!(
-                "MCP_CUSTODY_UNREADABLE {}: {} — no MCP config is read or written this run \
-                 (without a decipherable custody document no entry's ownership is answerable, and \
-                 an empty answer would read every managed entry as foreign)",
-                io.layout.config_custody_path().display(),
-                e.detail()
+            out.warnings.push(crate::message::failure(
+                "MCP_CUSTODY_UNREADABLE",
+                format!(
+                    "{}: topos's record of which MCP config entries it owns could not be read \
+                     ({}), so no MCP config file was read or written this run. Without that \
+                     record topos cannot tell its own entries from yours, and it will not guess. \
+                     Inspect that file by hand.",
+                    io.layout.config_custody_path().display(),
+                    e.detail()
+                ),
             ));
             return out;
         }
@@ -353,11 +375,12 @@ pub(crate) fn converge(
         let failures = custody.flush(io.fs, io.layout);
         if !failures.is_empty() {
             out.warnings.extend(failures);
-            out.warnings.push(
-                "MCP_CUSTODY_WRITE_FAILED: recovery could not be recorded — MCP convergence \
-                 skipped this run"
+            out.warnings.push(crate::message::failure(
+                "MCP_CUSTODY_WRITE_FAILED",
+                "topos could not record the repair of its own MCP entry list, so it skipped MCP \
+                 config files this run. Run 'topos update' to try again."
                     .to_owned(),
-            );
+            ));
             return out;
         }
     }
@@ -392,9 +415,11 @@ pub(crate) fn converge(
         match gated {
             Ok(p) => parsed.push((i, p)),
             Err((code, reason)) => {
-                out.warnings.push(format!(
-                    "{code} {}: {reason} — nothing is placed for it",
-                    d.name
+                out.warnings.push(gate_refusal(
+                    &code,
+                    &d.name,
+                    &reason,
+                    d.workspace_slug.is_some(),
                 ));
                 // The bundle could not be carried forward — so it is counted as one. The line
                 // alone left the sweep exiting non-zero under a summary that named no failure.
@@ -470,7 +495,7 @@ pub(crate) fn converge(
                     // disclosure (the per-bundle states rode the plans above); a harness with no
                     // surface at this scope is simply not here.
                     if let crate::placement::ConfigSurface::Escaped { path } = surface {
-                        let line = crate::placement::escape_line(h.slug, &path);
+                        let line = crate::placement::escape_message(h.slug, &path);
                         if !out.warnings.contains(&line) {
                             out.warnings.push(line);
                         }
@@ -631,10 +656,15 @@ pub(crate) fn remove_bundle(
     let mut custody = match ScopeEntries::load(io.fs, io.layout) {
         Ok(l) => l,
         Err(e) => {
-            out.warnings.push(format!(
-                "MCP_CUSTODY_UNREADABLE {}: {} — MCP entries are left in place",
-                io.layout.config_custody_path().display(),
-                e.detail()
+            out.warnings.push(crate::message::failure(
+                "MCP_CUSTODY_UNREADABLE",
+                format!(
+                    "{}: topos's record of which MCP config entries it owns could not be read \
+                     ({}), so the bundle's MCP entries are left in place. Inspect that file by \
+                     hand.",
+                    io.layout.config_custody_path().display(),
+                    e.detail()
+                ),
             ));
             return out;
         }
@@ -648,11 +678,12 @@ pub(crate) fn remove_bundle(
         let failures = custody.flush(io.fs, io.layout);
         if !failures.is_empty() {
             out.warnings.extend(failures);
-            out.warnings.push(
-                "MCP_CUSTODY_WRITE_FAILED: recovery could not be recorded — MCP entries are left \
-                 in place"
+            out.warnings.push(crate::message::failure(
+                "MCP_CUSTODY_WRITE_FAILED",
+                "topos could not record the repair of its own MCP entry list, so the bundle's MCP \
+                 entries are left in place. Run 'topos update', then remove it again."
                     .to_owned(),
-            );
+            ));
             return out;
         }
     }
@@ -717,17 +748,21 @@ pub(crate) fn remove_bundle(
 /// Move a bundle's SURVIVING config rows out of its record, under the converge lock, because the
 /// record is about to be deleted (see [`crate::config_custody::detach_to_unrecorded`]). Returns the
 /// caller's warning lines — best-effort, because the removal itself already landed.
-pub(crate) fn detach_bundle_rows(io: &ScopeIo<'_>, bundle_id: &str) -> Vec<String> {
+pub(crate) fn detach_bundle_rows(io: &ScopeIo<'_>, bundle_id: &str) -> Vec<Message> {
     let _lock = match converge_lock(io) {
         Ok(guard) => guard,
         Err(warning) => return vec![warning],
     };
     match config_custody::detach_to_unrecorded(io.fs, io.layout, bundle_id) {
         Ok(_) => Vec::new(),
-        Err(e) => vec![format!(
-            "MCP_CUSTODY_WRITE_FAILED {bundle_id}: {} — a config entry left standing here is no \
-             longer tracked",
-            e.detail()
+        Err(e) => vec![crate::message::failure(
+            "MCP_CUSTODY_WRITE_FAILED",
+            format!(
+                "{bundle_id}: topos could not update its own record of MCP entries ({}). An entry \
+                 left standing in your MCP config is no longer tracked — remove it by hand if you \
+                 do not want it.",
+                e.detail()
+            ),
         )],
     }
 }
@@ -757,21 +792,30 @@ pub(crate) fn detach_bundle_rows(io: &ScopeIo<'_>, bundle_id: &str) -> Vec<Strin
 /// Failure is a refusal, not a fallback: without the lock nothing is read or written this run
 /// (the warning says so), because an unserialized converge could interleave with another and
 /// tear the custody-vs-config agreement.
-fn converge_lock(io: &ScopeIo<'_>) -> Result<crate::fs_seam::LockGuard, String> {
+fn converge_lock(io: &ScopeIo<'_>) -> Result<crate::fs_seam::LockGuard, Message> {
     let locks = io.layout.locks_dir();
     // Created only when absent so the common case adds no mutating op (the crash sweep counts
     // them).
     if !io.fs.exists(&locks)
         && let Err(e) = io.fs.create_dir_all(&locks)
     {
-        return Err(format!(
-            "MCP_LOCK_UNAVAILABLE: creating {} failed ({e}) — no MCP config is read or written \
-             this run",
-            locks.display()
+        return Err(crate::message::failure(
+            "MCP_LOCK_UNAVAILABLE",
+            format!(
+                "{}: topos could not create this folder ({e}), so no MCP config file was read or \
+                 written this run. Run 'topos update' to try again.",
+                locks.display()
+            ),
         ));
     }
     io.fs.lock_exclusive(&locks.join("mcp.lock")).map_err(|e| {
-        format!("MCP_LOCK_UNAVAILABLE: {e} — no MCP config is read or written this run")
+        crate::message::failure(
+            "MCP_LOCK_UNAVAILABLE",
+            format!(
+                "topos could not take its MCP lock ({e}) — another topos may be running — so no \
+                 MCP config file was read or written this run. Run 'topos update' to try again."
+            ),
+        )
     })
 }
 
@@ -806,9 +850,9 @@ struct SurfaceOutcome {
     /// The keys this surface WROTE this run — placed, updated, or repaired. Empty on a surface
     /// left byte-identical, which is what makes it an answer rather than a guess.
     wrote: BTreeSet<String>,
-    warnings: Vec<String>,
+    warnings: Vec<Message>,
     /// Success NOTICES — things that WORKED and are worth stating (see [`ConvergeOutcome::notices`]).
-    notices: Vec<String>,
+    notices: Vec<Message>,
 }
 
 impl SurfaceOutcome {
@@ -840,7 +884,7 @@ impl SurfaceOutcome {
                 })
                 .collect(),
             wrote: BTreeSet::new(),
-            warnings: vec![crate::placement::escape_line(h.slug, escape)],
+            warnings: vec![crate::placement::escape_message(h.slug, escape)],
             notices: Vec::new(),
         }
     }
@@ -856,7 +900,13 @@ impl SurfaceOutcome {
                 })
                 .collect(),
             wrote: BTreeSet::new(),
-            warnings: vec![format!("MCP_SURFACE_UNPROVABLE {}: {reason}", h.slug)],
+            warnings: vec![crate::message::failure(
+                "MCP_SURFACE_UNPROVABLE",
+                format!(
+                    "{}'s MCP config: {reason}. topos changed nothing in that file.",
+                    h.slug
+                ),
+            )],
             notices: Vec::new(),
         }
     }
@@ -898,14 +948,17 @@ fn journaled_write(
     // custody for another surface's bytes that may never have been written.
     if custody.has_pending() {
         return Err(format!(
-            "earlier config work is not yet durable — {} is skipped this run; the next run's \
-             recovery finishes it",
+            "an earlier config write is not finished yet, so topos skipped {} this run — the next \
+             'topos update' finishes it",
             path.display()
         ));
     }
     if let Err(e) = custody.journal(io.fs, io.layout, intents) {
         custody.drop_journal(io.fs, io.layout);
-        return Err(format!("the custody write failed ({})", e.detail()));
+        return Err(format!(
+            "topos could not save its own record of the entries ({})",
+            e.detail()
+        ));
     }
     if let Err(e) = write() {
         // The config write FAILED — which is not the same as "nothing landed". A replace is
@@ -924,8 +977,12 @@ fn journaled_write(
         // The rows moved in memory and the intents are still journaled ON DISK — the next run's
         // recovery promotes them again. Disclose, never lose.
         return Err(format!(
-            "{}; recovery heals it next run",
-            failures.join("; ")
+            "{} — the next 'topos update' finishes it",
+            failures
+                .iter()
+                .map(|f| f.text.as_str())
+                .collect::<Vec<_>>()
+                .join("; ")
         ));
     }
     Ok(())
@@ -950,7 +1007,7 @@ fn converge_file(
     // all there is.
     names: &BTreeMap<String, String>,
 ) -> SurfaceOutcome {
-    let stale: Vec<String> = custody
+    let stale: Vec<Message> = custody
         .stale_rows(h.slug, path)
         .into_iter()
         .map(|(key, bundle, old)| {
@@ -958,12 +1015,17 @@ fn converge_file(
             // (`topos-<ws>-<name>`, collision-suffixed) — an internal identity that this line
             // used to print as though it were the bundle's name. It is still named, because the
             // stale entry is findable by nothing else once you open the old file.
-            format!(
-                "MCP_ENTRY_STALE_PATH {}: '{}' is recorded in {old} (as `{key}`), but this \
-                 scope's surface is {} — the old entry is left in place",
-                h.slug,
-                names.get(&bundle).map_or(bundle.as_str(), String::as_str),
-                path.display()
+            crate::message::failure(
+                "MCP_ENTRY_STALE_PATH",
+                format!(
+                    "'{}': topos recorded an entry for {} in {old} (named `{key}` there), but \
+                     {}'s config here is {}. The old entry is left in place — delete it by hand \
+                     if you no longer want it.",
+                    names.get(&bundle).map_or(bundle.as_str(), String::as_str),
+                    h.slug,
+                    h.slug,
+                    path.display()
+                ),
             )
         })
         .collect();
@@ -1026,7 +1088,7 @@ fn converge_surface(
             desired,
             h,
             path,
-            "the topos plugin dir holds content topos did not write",
+            "the folder topos owns for this agent holds files topos did not write",
         );
     }
     let outcome = mcp::apply(dialect, current.as_deref(), desired, &prior);
@@ -1154,10 +1216,13 @@ fn converge_surface(
                         // A SUCCESS notice, not a fault: the file went because the last entry
                         // topos owned left it, which is the removal working. Pushed into the
                         // warning channel it would make a clean sweep count itself failed.
-                        surface.notices.push(format!(
-                            "MCP_FILE_REMOVED {}: {} held only topos entries and was deleted",
-                            h.slug,
-                            path.display()
+                        surface.notices.push(crate::message::disclosure(
+                            "MCP_FILE_REMOVED",
+                            format!(
+                                "{}: this file held only entries topos placed, so topos deleted \
+                                 it with the last one.",
+                                path.display()
+                            ),
                         ));
                     }
                     if let Some(kept) = manifest_kept {
@@ -1370,7 +1435,7 @@ fn plugin_manifest_verdict(
     fs: &dyn FsOps,
     slug: &str,
     mcp_path: &Path,
-) -> (Option<PathBuf>, Option<String>) {
+) -> (Option<PathBuf>, Option<Message>) {
     let Some(manifest) = plugin_manifest_path(mcp_path) else {
         return (None, None);
     };
@@ -1378,10 +1443,12 @@ fn plugin_manifest_verdict(
         Ok(None) => (Some(manifest), None),
         Ok(Some(bytes)) if bytes == plugin_dir::manifest_bytes() => (Some(manifest), None),
         _ => {
-            let kept = format!(
-                "MCP_PLUGIN_MANIFEST_KEPT {slug}: {} is not the manifest topos wrote — left in \
-                 place",
-                manifest.display()
+            let kept = crate::message::failure(
+                "MCP_PLUGIN_MANIFEST_KEPT",
+                format!(
+                    "{}: this is not the file topos wrote for {slug}, so topos left it alone.",
+                    manifest.display()
+                ),
             );
             (None, Some(kept))
         }
@@ -1394,7 +1461,7 @@ fn plugin_manifest_verdict(
 /// ANY foreign occupant is left standing. A hand-edited manifest is such an occupant — kept, the
 /// dir kept with it, and the returned disclosure says so. Best-effort throughout (a stray empty
 /// dir is recoverable; destroyed bytes are not).
-fn prune_plugin_dir(fs: &dyn FsOps, slug: &str, mcp_path: &Path) -> Option<String> {
+fn prune_plugin_dir(fs: &dyn FsOps, slug: &str, mcp_path: &Path) -> Option<Message> {
     let dir = mcp_path.parent()?;
     let manifest = dir.join(plugin_dir::PLUGIN_MANIFEST_PATH);
     let mut kept = None;
@@ -1404,10 +1471,13 @@ fn prune_plugin_dir(fs: &dyn FsOps, slug: &str, mcp_path: &Path) -> Option<Strin
             let _ = fs.remove_file(&manifest);
         }
         _ => {
-            kept = Some(format!(
-                "MCP_PLUGIN_MANIFEST_KEPT {slug}: {} is not the manifest topos wrote — left in \
-                 place, so the plugin dir stays",
-                manifest.display()
+            kept = Some(crate::message::failure(
+                "MCP_PLUGIN_MANIFEST_KEPT",
+                format!(
+                    "{}: this is not the file topos wrote for {slug}, so topos left it alone and \
+                     kept the folder around it.",
+                    manifest.display()
+                ),
             ));
         }
     }
@@ -1454,7 +1524,7 @@ pub(crate) fn converge_bundle_now(
     ctx: &crate::ctx::Ctx<'_>,
     sid: &crate::id::SkillId,
     name: &str,
-) -> (Vec<McpAgentState>, Vec<String>) {
+) -> (Vec<McpAgentState>, Vec<Message>) {
     let Some(roots) = ctx.roots.clone() else {
         return (Vec::new(), Vec::new());
     };
@@ -1470,10 +1540,15 @@ pub(crate) fn converge_bundle_now(
             // The same fail-closed answer the sweep's converge gives an unreadable custody.
             return (
                 Vec::new(),
-                vec![format!(
-                    "MCP_CUSTODY_UNREADABLE {}: {} — no MCP config is read or written this run",
-                    ctx.layout.config_custody_path().display(),
-                    e.detail()
+                vec![crate::message::failure(
+                    "MCP_CUSTODY_UNREADABLE",
+                    format!(
+                        "{}: topos's record of which MCP config entries it owns could not be read \
+                         ({}), so no MCP config file was read or written this run. Inspect that \
+                         file by hand.",
+                        ctx.layout.config_custody_path().display(),
+                        e.detail()
+                    ),
                 )],
             );
         }
@@ -1481,9 +1556,12 @@ pub(crate) fn converge_bundle_now(
     let Some(reach) = recorded_reach(&custody, sid.as_str()) else {
         return (
             Vec::new(),
-            vec![format!(
-                "MCP_OWNERSHIP_MISSING {name}: ownership record missing here — the next update \
-                 heals this scope"
+            vec![crate::message::failure(
+                "MCP_OWNERSHIP_MISSING",
+                format!(
+                    "{name}: topos has no record of where it placed this server's MCP entries \
+                     here. The next 'topos update' restores it."
+                ),
             )],
         );
     };

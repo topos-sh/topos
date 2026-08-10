@@ -24,6 +24,7 @@ pub(crate) fn ok_envelope(command: &str, data: serde_json::Value) -> JsonEnvelop
         ok: true,
         data,
         warnings: Vec::new(),
+        messages: Vec::new(),
         next_actions: Vec::new(),
         receipt: None,
         error: None,
@@ -59,6 +60,7 @@ pub(crate) fn err_envelope(command: &str, argv: &[String], err: &ClientError) ->
         ok: false,
         data,
         warnings: Vec::new(),
+        messages: Vec::new(),
         next_actions: next_actions.clone(),
         receipt: None,
         error: Some(WireError {
@@ -1089,12 +1091,11 @@ pub(crate) fn reset_next_actions(items: &[topos_types::results::ResetData]) -> V
         .collect()
 }
 
-/// One line per bundle waiting on a decision, for the `--json` envelope's one stable line channel:
-/// the bundle, then what is waiting. NO internal code leads it — the codes on that channel name a
-/// fault to look up, and there is no fault here; what the reader (or the agent) needs is the two
-/// commands, which ride [`decision_next_actions`] beside it.
-pub(crate) fn decision_wire_line(d: &crate::ops::PendingDecision) -> String {
-    format!("{}: {}", d.name, d.line)
+/// One typed message per bundle waiting on a decision: the bundle, then what is waiting. NO code —
+/// a code names a fault to look up, and there is no fault here; what the reader (or the agent)
+/// needs is the two commands, which ride [`decision_next_actions`] beside it.
+pub(crate) fn decision_message(d: &crate::ops::PendingDecision) -> topos_types::Message {
+    crate::message::decision(format!("{}: {}", d.name, d.line))
 }
 
 /// Every pending decision's ways out as structured next actions — the same argv the receipt prints
@@ -1316,7 +1317,7 @@ fn push_list_tail(s: &mut String, out: &ListOutcome) {
     }
     // Isolated per-workspace catalog-read failures — the same stable lines the `--json` envelope carries.
     for w in &out.warnings {
-        s.push_str(&format!("warning: {w}\n"));
+        s.push_str(&format!("warning: {}\n", w.text));
     }
     if let Some(footprint) = &data.footprint {
         // The count is the header; then each path, so a `--footprint` read reports WHAT topos owns (not
@@ -2456,34 +2457,6 @@ fn primary_rank(s: &PullSkill) -> u8 {
     }
 }
 
-/// The codes whose line is written to read as ENGLISH once the code is taken off the front — the
-/// TTY prints them that way, and the `--json` `warnings` array keeps the coded string it always
-/// carried. A short list, not a policy: a person reading a receipt should not have to skip a
-/// machine word to reach the sentence, and these are the ones that shipped one into prose.
-///
-/// This is deliberately an ALLOWLIST rather than "strip any leading SCREAMING_SNAKE token". Most
-/// coded lines do not read whole without their code (the code IS the subject of the sentence), so
-/// a blanket rule would mangle them. Settling one convention for every coded line — which channel
-/// carries the code, and how prose is written around it — is the message-contract follow-up.
-const PLAIN_ON_TTY: [&str; 3] = ["MCP_FILE_REMOVED", "PATH_MISSING", "MCP_DEST_NO_AGENT"];
-
-/// A coded line as the TTY says it: the code taken off the front for the allowlisted codes above,
-/// verbatim for everything else.
-pub(crate) fn plain_coded_line(line: &str) -> &str {
-    for code in PLAIN_ON_TTY {
-        // The SEPARATOR is the whole-token test: a code is only a code when a space follows it.
-        // Testing the remainder's length instead proved nothing — stripping a non-empty prefix
-        // always shortens the line — so any longer word starting with an allowlisted code
-        // (`PATH_MISSINGFOO …`) had its first eleven characters eaten.
-        if let Some(rest) = line.strip_prefix(code)
-            && let Some(rest) = rest.strip_prefix(' ')
-        {
-            return rest;
-        }
-    }
-    line
-}
-
 /// One `remove` item line for the describe/apply — the boundary a followed removal keeps vs the
 /// permanence of a local delete.
 fn remove_item_line(item: &RemoveItem, applied: bool) -> String {
@@ -3339,9 +3312,9 @@ impl PullReceiptScope {
 pub(crate) fn pull_tty(
     data: &PullData,
     decisions: &[crate::ops::PendingDecision],
-    warnings: &[String],
-    advisories: &[String],
-    disclosures: &[String],
+    warnings: &[topos_types::Message],
+    advisories: &[topos_types::Message],
+    disclosures: &[topos_types::Message],
     // `failed`: how many BUNDLES this run could not carry forward — the sweep's own count,
     // never `warnings.len()`. See the arithmetic at the summary below.
     failed: usize,
@@ -3477,11 +3450,14 @@ pub(crate) fn pull_tty(
     for k in &kept_lines {
         out.push_str(&scope.relative(&format!("{k}\n")));
     }
+    // The TTY prints the TEXT, never the code: a person reading a receipt should not have to
+    // skip a machine word to reach the sentence, and the code rides `messages[].code` for the
+    // consumer that wants it.
     for w in warnings.iter().chain(advisories) {
-        out.push_str(&format!("warning: {}\n", plain_coded_line(w)));
+        out.push_str(&format!("warning: {}\n", w.text));
     }
     for d in disclosures {
-        out.push_str(&format!("note: {}\n", plain_coded_line(d)));
+        out.push_str(&format!("note: {}\n", d.text));
     }
 
     // The delivered notices (verdicts first) — an interactive `update` MARKED these read server-side,
@@ -4542,35 +4518,6 @@ mod tests {
     /// 'demo' PERMANENTLY" asked a person to approve bytes it declined to show — while the APPLY
     /// receipt afterwards named the path. Both tenses name it now, and both permanent shapes do.
     #[test]
-    fn a_coded_line_loses_its_code_only_on_a_whole_token() {
-        // The two allowlisted codes read as English without them.
-        assert_eq!(
-            super::plain_coded_line("PATH_MISSING \"~/x\" is demanded machine-wide"),
-            "\"~/x\" is demanded machine-wide"
-        );
-        assert_eq!(
-            super::plain_coded_line(
-                "MCP_FILE_REMOVED ~/.codex/config.toml held only topos entries"
-            ),
-            "~/.codex/config.toml held only topos entries"
-        );
-        // A LONGER WORD that merely starts with a code is not that code. The guard used to test
-        // the remainder's length — which a non-empty prefix always shortens — so this line came
-        // out with its first eleven characters eaten.
-        for line in [
-            "PATH_MISSINGFOO something happened",
-            "MCP_FILE_REMOVEDX something happened",
-            "PATH_MISSING_EXTRA: something happened",
-        ] {
-            assert_eq!(super::plain_coded_line(line), line, "{line}");
-        }
-        // A code with nothing after it is left alone too — there is no sentence to promote.
-        assert_eq!(super::plain_coded_line("PATH_MISSING"), "PATH_MISSING");
-        // Anything uncoded passes through untouched.
-        assert_eq!(super::plain_coded_line("plain english"), "plain english");
-    }
-
-    #[test]
     fn a_permanent_delete_names_its_folders_in_both_tenses() {
         let item = |kind| RemoveItem {
             name: "demo".to_owned(),
@@ -5517,40 +5464,47 @@ mod tests {
             "Nothing to update here — no manifest or profile demands anything in this directory."
         );
         // A failed skill renders visibly and is counted (even when every synced row was current).
-        let warnings = vec!["IO_ERROR s_docs: a filesystem operation failed".to_owned()];
+        // The TTY prints the message's TEXT — the code rides `messages[].code`, never the prose.
+        let warnings = vec![crate::message::failure(
+            "IO_ERROR",
+            "s_docs: a filesystem operation failed.".to_owned(),
+        )];
         let out = pull_tty(&clean, &[], &warnings, &[], &[], warnings.len());
         assert!(
-            out.contains("warning: IO_ERROR s_docs: a filesystem operation failed"),
+            out.contains("warning: s_docs: a filesystem operation failed."),
             "{out}"
         );
+        assert!(!out.contains("IO_ERROR"), "no code reaches the TTY: {out}");
         assert!(
             out.contains("Checked 3 skills: 2 already up to date, 1 failed."),
             "{out}"
         );
         // A DISCLOSURE prints beside them and is counted by neither half of the summary — an
         // exchange that served nothing is a fact about a clean run, not a fault in it.
-        let disclosures = vec![
-            "NOTHING_ASSIGNED topos.sh/acme: exchanged — nothing assigned to you yet".to_owned(),
-        ];
+        let disclosures = vec![crate::message::disclosure(
+            "NOTHING_ASSIGNED",
+            "topos.sh/acme: reached, and nothing is assigned to you yet.".to_owned(),
+        )];
         let out = pull_tty(&empty, &[], &[], &[], &disclosures, 0);
         assert!(
-            out.contains(
-                "note: NOTHING_ASSIGNED topos.sh/acme: exchanged — nothing assigned to you yet"
-            ),
+            out.contains("note: topos.sh/acme: reached, and nothing is assigned to you yet."),
             "{out}"
         );
+        assert!(!out.contains("NOTHING_ASSIGNED"), "{out}");
         assert!(!out.contains("failed"), "{out}");
         assert!(!out.contains("warning:"), "{out}");
         // An ADVISORY prints as a warning but is counted by NEITHER half of the summary: the
         // bundle it annotates DELIVERED and has its own row — counting the line too would
         // invent a second, failed bundle.
-        let advisories = vec![
-            "MCP_DEST_UNKNOWN person: \"linear\" — dest entry `~/.x` is not a known MCP config \
-             file"
+        let advisories = vec![crate::message::advisory(
+            "MCP_DEST_UNKNOWN",
+            "\"linear\" (person): the dest entry `~/.x` in your topos.toml is not a known MCP \
+             config file, so it was skipped."
                 .to_owned(),
-        ];
+        )];
         let out = pull_tty(&clean, &[], &[], &advisories, &[], 0);
-        assert!(out.contains("warning: MCP_DEST_UNKNOWN"), "{out}");
+        assert!(out.contains("warning: \"linear\" (person):"), "{out}");
+        assert!(!out.contains("MCP_DEST_UNKNOWN"), "{out}");
         assert!(out.contains("Checked 2 skills: all up to date."), "{out}");
         assert!(!out.contains("failed"), "{out}");
     }
@@ -5672,7 +5626,7 @@ mod tests {
     fn the_summary_counts_every_action_by_name() {
         // `failed` is the count of BUNDLES the run could not carry forward — the sweep's own,
         // never `warnings.len()`.
-        let counted = |skills: Vec<PullSkill>, warnings: &[String], failed: usize| {
+        let counted = |skills: Vec<PullSkill>, warnings: &[topos_types::Message], failed: usize| {
             let data = PullData {
                 skills,
                 proposals_awaiting: 0,
@@ -5684,7 +5638,7 @@ mod tests {
             let out = pull_tty(&data, &[], warnings, &[], &[], failed);
             out.lines().last().unwrap_or_default().to_owned()
         };
-        let summary = |skills: Vec<PullSkill>, warnings: &[String]| {
+        let summary = |skills: Vec<PullSkill>, warnings: &[topos_types::Message]| {
             let failed = warnings.len();
             counted(skills, warnings, failed)
         };
@@ -5721,7 +5675,10 @@ mod tests {
                     placed("deploy", PullAction::Refreshed),
                     row("style", PullAction::UpToDate),
                 ],
-                &["IO_ERROR s_docs: a filesystem operation failed".to_owned()]
+                &[crate::message::failure(
+                    "IO_ERROR",
+                    "s_docs: a filesystem operation failed.".to_owned()
+                )]
             ),
             "Checked 3 skills: 1 updated, 1 already up to date, 1 failed."
         );
@@ -5799,9 +5756,14 @@ mod tests {
                     row("style", PullAction::UpToDate),
                 ],
                 &[
-                    "MCP_LOCK_UNAVAILABLE person: no MCP config is read or written this run"
-                        .to_owned(),
-                    "MCP_SURFACE_UNPROVABLE cursor: the file could not be parsed".to_owned(),
+                    crate::message::failure(
+                        "MCP_LOCK_UNAVAILABLE",
+                        "no MCP config file was read or written this run.".to_owned(),
+                    ),
+                    crate::message::failure(
+                        "MCP_SURFACE_UNPROVABLE",
+                        "cursor's MCP config: the file could not be parsed.".to_owned(),
+                    ),
                 ],
                 0,
             ),
@@ -5813,8 +5775,14 @@ mod tests {
             counted(
                 vec![row("style", PullAction::UpToDate)],
                 &[
-                    "IO_ERROR docs: a filesystem operation failed".to_owned(),
-                    "IO_ERROR docs: and again on the second placement".to_owned(),
+                    crate::message::failure(
+                        "IO_ERROR",
+                        "docs: a filesystem operation failed.".to_owned(),
+                    ),
+                    crate::message::failure(
+                        "IO_ERROR",
+                        "docs: and again on the second placement.".to_owned(),
+                    ),
                 ],
                 1,
             ),
@@ -5883,7 +5851,10 @@ mod tests {
                 r
             })
             .collect();
-        let warnings = vec!["IO_ERROR s_docs: a filesystem operation failed".to_owned()];
+        let warnings = vec![crate::message::failure(
+            "IO_ERROR",
+            "s_docs: a filesystem operation failed.".to_owned(),
+        )];
         tally.failed = warnings.len();
         assert_eq!(
             tally.total(),
@@ -7152,11 +7123,11 @@ mod tests {
                 signed_in: true,
                 ..ListData::default()
             },
-            warnings: vec![
-                "could not read the catalog for workspace beta (the server did not answer) — \
-                 skipped"
+            warnings: vec![crate::message::uncoded_failure(
+                "beta: the server did not answer, so this listing skips it. Run the command again \
+                 to retry."
                     .to_owned(),
-            ],
+            )],
             untracked_view: false,
         };
         let text = list_tty(&out);
@@ -7189,7 +7160,7 @@ mod tests {
         assert!(!text.contains("workspaces offer"), "{text}");
         // The per-workspace degradation warning surfaces.
         assert!(
-            text.contains("warning: could not read the catalog for workspace beta"),
+            text.contains("warning: beta: the server did not answer, so this listing skips it."),
             "{text}"
         );
     }

@@ -163,9 +163,9 @@ pub(crate) struct PlacementPlan {
     /// The harnesses the shared target covers (empty when no shared target is planned).
     pub shared_covers: Vec<CoveredAgent>,
     /// PROJECT scope only: the candidate roots [`within_project`] refused — each already rendered
-    /// as its disclosure line ([`escape_line`]). The placement is skipped, never redirected; the
+    /// as its typed disclosure ([`escape_line`]). The placement is skipped, never redirected; the
     /// caller surfaces the lines so a silent non-delivery is impossible.
-    pub refused: Vec<String>,
+    pub refused: Vec<topos_types::Message>,
     /// ENTRIES plans only: the surfaces this plan does not reach, and why (see
     /// [`WithheldSurface`]).
     pub withheld: Vec<WithheldSurface>,
@@ -398,14 +398,14 @@ pub(crate) fn project_plan(
             // followed — the rail does not care whether a path is fresh or remembered.
             PriorProjectDir::Escaped(dir) => {
                 plan.refused
-                    .push(escape_line("the recorded shared dir", &dir));
+                    .push(escape_message("the recorded shared dir", &dir));
             }
             // THE CONTAINMENT RAIL, on the DEFAULT root — not just the override. A committed
             // `.agents/skills` symlink aiming out of the checkout would otherwise place every
             // covered agent's bytes wherever it points.
             PriorProjectDir::None if !within_project(project_dir, &shared_root) => {
                 plan.refused
-                    .push(escape_line("the shared agents dir", &shared_root));
+                    .push(escape_message("the shared agents dir", &shared_root));
             }
             PriorProjectDir::None => {
                 plan.push_dir(choose(&shared_root), PlacementKind::Shared, None);
@@ -426,11 +426,11 @@ pub(crate) fn project_plan(
         let dir = match prior_in(PlacementKind::Native, Some(h.slug)) {
             PriorProjectDir::Reuse(dir) => dir,
             PriorProjectDir::Escaped(dir) => {
-                plan.refused.push(escape_line(h.slug, &dir));
+                plan.refused.push(escape_message(h.slug, &dir));
                 continue;
             }
             PriorProjectDir::None if !within_project(project_dir, &root) => {
-                plan.refused.push(escape_line(h.slug, &root));
+                plan.refused.push(escape_message(h.slug, &root));
                 continue;
             }
             PriorProjectDir::None => choose(&root),
@@ -461,11 +461,11 @@ pub(crate) fn project_plan(
             PriorProjectDir::Reuse(dir) => {
                 plan.push_dir(dir, PlacementKind::Native, Some(active.to_owned()));
             }
-            PriorProjectDir::Escaped(dir) => plan.refused.push(escape_line(active, &dir)),
+            PriorProjectDir::Escaped(dir) => plan.refused.push(escape_message(active, &dir)),
             // The last root is the rail's last stand: refusing leaves this scope with NO target,
             // which is the honest answer — nothing lands rather than landing outside the checkout.
             PriorProjectDir::None if !within_project(project_dir, &root) => {
-                plan.refused.push(escape_line(active, &root));
+                plan.refused.push(escape_message(active, &root));
             }
             PriorProjectDir::None => {
                 plan.push_dir(
@@ -506,12 +506,12 @@ pub(crate) fn dest_plan(
             Some(dir) => {
                 if !safe_project_rel(entry) {
                     plan.refused
-                        .push(escape_line("the dest entry", Path::new(entry)));
+                        .push(escape_message("the dest entry", Path::new(entry)));
                     continue;
                 }
                 let root = dir.join(entry.trim_start_matches("./"));
                 if !within_project(dir, &root) {
-                    plan.refused.push(escape_line("the dest entry", &root));
+                    plan.refused.push(escape_message("the dest entry", &root));
                     continue;
                 }
                 root
@@ -923,11 +923,18 @@ pub(crate) fn within_project(project_dir: &Path, candidate: &Path) -> bool {
 /// The disclosure a refused project root earns — the override's voice, one rail wider.
 pub(crate) fn escape_line(what: &str, path: &Path) -> String {
     format!(
-        "PLACEMENT_ESCAPES_PROJECT {what}: {} does not resolve inside this checkout (a symlink or \
-         a climb out of it) — a committed file must never aim managed bytes elsewhere, so it is \
-         skipped",
+        "{} does not resolve inside this checkout ({what}) — a symlink, or a path that climbs out \
+         of it. A committed file must never aim managed files elsewhere, so topos skipped it. \
+         Point it at a path inside the checkout, then run 'topos update'.",
         path.display()
     )
+}
+
+/// [`escape_line`] as the typed disclosure a sweep carries. The refusal that rides a
+/// [`crate::error::ClientError`] keeps the bare sentence — a code belongs on the message channel,
+/// never inside another error's prose.
+pub(crate) fn escape_message(what: &str, path: &Path) -> topos_types::Message {
+    crate::message::failure("PLACEMENT_ESCAPES_PROJECT", escape_line(what, path))
 }
 
 /// Whether a manifest `[placement]` value is a SAFE project-relative path: non-empty, relative,

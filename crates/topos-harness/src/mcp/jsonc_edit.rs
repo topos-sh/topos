@@ -103,9 +103,13 @@ pub fn apply(
     desired: &[McpEntry],
     prior: &BTreeMap<String, String>,
 ) -> ApplyOutcome {
-    let Some(spec) = dialect_spec(dialect) else {
-        return unprovable(format!("{dialect:?} is not a JSON(C) dialect"));
-    };
+    // UNREPRESENTABLE, not reworded: the dialect set is closed and [`super::apply`] — the one
+    // dispatcher — routes `CodexToml` and `HermesYaml` to their own editors before this is
+    // reached, so every dialect that arrives here HAS a spec (`every_json_dialect_has_a_spec`
+    // proves it). The old refusal printed a Rust type name through `{:?}` at a person who could
+    // do nothing with it; a dispatcher invariant is asserted, never worded.
+    let spec = dialect_spec(dialect)
+        .unwrap_or_else(|| unreachable!("mcp::apply routes non-JSON(C) dialects to their editor"));
     if let Err(reason) = validate_desired(desired) {
         return unprovable(reason);
     }
@@ -132,7 +136,7 @@ pub fn apply(
     }
     let bytes = current.unwrap_or_default();
     let Ok(text) = std::str::from_utf8(bytes) else {
-        return unprovable(format!("{} config is not UTF-8", spec.name));
+        return unprovable(format!("the {} config is not UTF-8", spec.name));
     };
     let view = match parse_view(&spec, text) {
         Ok(v) => v,
@@ -158,11 +162,15 @@ pub fn apply(
     // The lossless edit: parse the CST in the dialect's mode, prove it round-trips, mutate only
     // our entries, then verify the result before offering any bytes.
     let Ok(root) = CstRootNode::parse(text, &parse_options(spec.strictness)) else {
-        return unprovable(format!("{} config failed to parse for editing", spec.name));
+        return unprovable(format!(
+            "the {} config could not be parsed for editing",
+            spec.name
+        ));
     };
     if root.to_string() != text {
         return unprovable(format!(
-            "{} config did not round-trip losslessly; refusing to edit",
+            "topos cannot rewrite the {} config without changing bytes it does not own, so it did \
+             not edit it",
             spec.name
         ));
     }
@@ -617,6 +625,24 @@ mod tests {
 
     fn fp(dialect: McpDialect, e: &McpEntry) -> String {
         fingerprint_value(&entry_value(dialect, e))
+    }
+
+    /// The invariant [`apply`] asserts instead of wording: every dialect the ONE dispatcher sends
+    /// here has a spec, so a person can never be shown a Rust type name for a routing mistake.
+    /// The two dialects with their own editors are the only ones without one.
+    #[test]
+    fn every_json_dialect_has_a_spec() {
+        for dialect in [
+            McpDialect::ClaudeProjectJson,
+            McpDialect::CursorJson,
+            McpDialect::OpencodeJson,
+            McpDialect::OpenclawJson,
+            McpDialect::ClaudePluginDir,
+        ] {
+            assert!(dialect_spec(dialect).is_some(), "{dialect:?}");
+        }
+        assert!(dialect_spec(McpDialect::CodexToml).is_none());
+        assert!(dialect_spec(McpDialect::HermesYaml).is_none());
     }
 
     fn ledger(pairs: &[(String, String)]) -> BTreeMap<String, String> {

@@ -38,7 +38,7 @@ use topos_types::requests::{WireChannelIndex, WireSkillIndex, WireSkillIndexEntr
 use topos_types::results::{
     ExchangeFault, PullAction, PullData, PullSkill, TargetOutcome, WorkspaceSyncReport,
 };
-use topos_types::{CurrentRecord, PointerScope, WIRE_SCHEMA_VERSION, WireCurrentRecord};
+use topos_types::{CurrentRecord, Message, PointerScope, WIRE_SCHEMA_VERSION, WireCurrentRecord};
 
 use crate::bundle_kind::BundleKind;
 use crate::ctx::Ctx;
@@ -211,7 +211,7 @@ fn stale_signal(s: &Session, reason: StaleReason) -> UnreachableWorkspace {
 
 impl SessionRun {
     /// The catalog, fetched once per run (a failure caches as `None` — one warning, not N).
-    fn catalog(&self, warnings: &mut Vec<String>) -> Option<Rc<WireSkillIndex>> {
+    fn catalog(&self, warnings: &mut Vec<Message>) -> Option<Rc<WireSkillIndex>> {
         let mut slot = self.skills_index.borrow_mut();
         if slot.is_none() {
             let fetched = match self
@@ -221,10 +221,14 @@ impl SessionRun {
             {
                 Ok(ix) => Some(Rc::new(ix)),
                 Err(e) => {
-                    warnings.push(format!(
-                        "CATALOG_UNAVAILABLE {}: {}",
-                        self.session.workspace_name,
-                        crate::render::safe_message(&e)
+                    warnings.push(crate::message::failure(
+                        "CATALOG_UNAVAILABLE",
+                        format!(
+                            "{}: topos could not read this workspace's list of bundles ({}). Run \
+                             'topos update' to try again.",
+                            self.session.workspace_name,
+                            crate::render::safe_message(&e)
+                        ),
                     ));
                     None
                 }
@@ -234,7 +238,7 @@ impl SessionRun {
         slot.as_ref().and_then(Clone::clone)
     }
 
-    fn channels(&self, warnings: &mut Vec<String>) -> Option<Rc<WireChannelIndex>> {
+    fn channels(&self, warnings: &mut Vec<Message>) -> Option<Rc<WireChannelIndex>> {
         let mut slot = self.channels_index.borrow_mut();
         if slot.is_none() {
             let fetched = match self
@@ -244,10 +248,14 @@ impl SessionRun {
             {
                 Ok(ix) => Some(Rc::new(ix)),
                 Err(e) => {
-                    warnings.push(format!(
-                        "CHANNELS_UNAVAILABLE {}: {}",
-                        self.session.workspace_name,
-                        crate::render::safe_message(&e)
+                    warnings.push(crate::message::failure(
+                        "CHANNELS_UNAVAILABLE",
+                        format!(
+                            "{}: topos could not read this workspace's channels ({}). Run 'topos \
+                             update' to try again.",
+                            self.session.workspace_name,
+                            crate::render::safe_message(&e)
+                        ),
                     ));
                     None
                 }
@@ -415,7 +423,7 @@ struct Sweep {
     /// something that WORKED belongs in `disclosures`, or a clean run reports itself as broken;
     /// a bundle waiting on a person belongs in `decisions`, or an answer nobody has given yet
     /// reads as a fault to go and fix.
-    warnings: Vec<String>,
+    warnings: Vec<Message>,
     /// Bundles left as they are until the PERSON decides (see [`super::PendingDecision`]) — their
     /// own edits standing in the way of a newer version. Counted under `waiting on you`, never
     /// under `failed`, and the run still exits 0.
@@ -423,7 +431,7 @@ struct Sweep {
     /// Successful facts worth stating — the settled-draft fan-out, a cross-scope version split.
     /// They ride the same `--json` `warnings` array (one stable machine channel) but are never
     /// counted as failures.
-    disclosures: Vec<String>,
+    disclosures: Vec<Message>,
     /// The BUNDLES this sweep could not carry forward — written by, and only by, the two
     /// per-bundle failure recorders ([`note_item_failure`] and pull's twin). It is what the
     /// receipt counts as failed, because `warnings` is a LINE channel and a line is not a
@@ -443,7 +451,7 @@ struct Sweep {
     /// entry dropped from a bundle's narrowing). They ride the same `--json` `warnings` array and
     /// print with the warnings, but the summary never counts them: the bundle they annotate has
     /// its own row, and counting the line too would invent a second, failed bundle.
-    advisories: Vec<String>,
+    advisories: Vec<Message>,
     /// `(scope label, bundle identity)` already reconciled — the ONE dedupe key. Scopes are
     /// unblended, so the same identity may appear once per scope.
     synced: HashSet<(String, String)>,
@@ -1002,8 +1010,8 @@ impl<'a> ForgeLane<'a> {
     /// A final refusal, as the one sentence a person gets about it.
     fn announce_gone(&self, origin: &str, reason: &str) {
         let line = format!(
-            "topos: {origin} — {reason}; the copies here still work, and `topos update` retries \
-             once the row names something that resolves"
+            "topos: {origin} — {reason}. The copies here still work. Point the line at something \
+             that resolves, then run 'topos update'."
         );
         let mut said = self.announce.borrow_mut();
         if !said.contains(&line) {
@@ -1088,6 +1096,54 @@ impl Targets {
 // The entry point.
 // =================================================================================================
 
+/// A served bundle id this build cannot parse. The producer holds only the served name and cannot
+/// tell a server bug from a client too old to read the id, so the line names both ways forward.
+fn bad_id(name: &str) -> Message {
+    crate::message::failure(
+        "BAD_ID",
+        format!(
+            "{name}: the server identified this bundle in a way topos cannot read. Run 'topos \
+             self-update'; if it persists, tell a workspace owner."
+        ),
+    )
+}
+
+/// The applied report this run could not deliver — the workspace's fleet view will be one sweep
+/// behind until the next one lands.
+fn report_failed(workspace_name: &str, detail: &str) -> Message {
+    crate::message::failure(
+        "REPORT_FAILED",
+        format!(
+            "{workspace_name}: topos could not tell this workspace what this machine now holds \
+             ({detail}). Run 'topos update' to try again."
+        ),
+    )
+}
+
+/// The two no-answer faults a session's delivery can hit — unreached and unsuccessful — say the
+/// same thing to a person: this workspace's server did not answer, and the run can be retried.
+fn plane_unavailable(workspace_name: &str, detail: &str) -> Message {
+    crate::message::failure(
+        "PLANE_UNAVAILABLE",
+        format!(
+            "{workspace_name}: topos could not reach this workspace's server ({detail}). Run \
+             'topos update' to try again."
+        ),
+    )
+}
+
+/// A scope this run does NOT drive whose manifest would not load: the file froze, and the detail
+/// the loader carries already names the file and what is wrong with it.
+fn manifest_invalid(e: &ClientError) -> Message {
+    crate::message::failure(
+        "MANIFEST_INVALID",
+        format!(
+            "{} — correct the file, then run 'topos update'.",
+            e.detail()
+        ),
+    )
+}
+
 /// The reconcile (see the module doc). Returns the [`PullOutcome`] shape the hook and the `update`
 /// finishers consume — `access_gone` carries the sessions that answered the uniform 404 (ended
 /// server-side), `unreachable` the sessions that got no fresh delivery for any other reason — the
@@ -1114,9 +1170,13 @@ pub(crate) fn manifest_update(
     let prior_sync = match sync_status::read(ctx.fs, &ctx.layout) {
         Ok(s) => s,
         Err(e) => {
-            sweep
-                .warnings
-                .push(format!("SYNC_STATUS_UNREADABLE: {}", e.detail()));
+            sweep.warnings.push(crate::message::failure(
+                "SYNC_STATUS_UNREADABLE",
+                format!(
+                    "topos's record of when each workspace last delivered could not be read ({}).",
+                    e.detail()
+                ),
+            ));
             // The mcp hold computation reads this cache; blind, it must freeze removals.
             sweep.mcp_blind = true;
             sync_status::SyncStatus::default()
@@ -1165,16 +1225,12 @@ pub(crate) fn manifest_update(
             if driven.person {
                 return Err(e);
             }
-            sweep
-                .warnings
-                .push(format!("MANIFEST_INVALID {}", e.detail()));
+            sweep.warnings.push(manifest_invalid(&e));
             None
         }
     };
     if let Some(e) = &project_err {
-        sweep
-            .warnings
-            .push(format!("MANIFEST_INVALID {}", e.detail()));
+        sweep.warnings.push(manifest_invalid(e));
     }
     let project_display = project_dir
         .as_deref()
@@ -1225,10 +1281,13 @@ pub(crate) fn manifest_update(
                 // The whole session answered the uniform 404: revoked, the seat removed, or the
                 // workspace gone — indistinguishable by design. Mark it ended locally so the line
                 // prints once; every copy stays in place (bytes are yours; `login` re-connects).
-                sweep.warnings.push(format!(
-                    "SESSION_ENDED {}: this session no longer has access (ended, removed, or \
-                     gone); its skills stay in place — reconnect with `topos login {}/{}`",
-                    s.workspace_name, s.host, s.workspace_name
+                sweep.warnings.push(crate::message::failure(
+                    "SESSION_ENDED",
+                    format!(
+                        "{}: this session no longer has access (ended, removed, or gone). Its \
+                         skills stay in place. Reconnect with 'topos login {}/{}'.",
+                        s.workspace_name, s.host, s.workspace_name
+                    ),
                 ));
                 access_gone.push(s.workspace_name.clone());
                 let _ = sessions::set_session_status(
@@ -1250,10 +1309,13 @@ pub(crate) fn manifest_update(
             // below (the offline cache keeps the local converge working); the sweep never aborts
             // for one session.
             Err(PlaneError::UpdateRequired { min }) => {
-                sweep.warnings.push(format!(
-                    "CLI_UPDATE_REQUIRED {}: {} — run `topos self-update`",
-                    s.workspace_name,
-                    crate::render::safe_message(&ClientError::UpdateRequired { min })
+                sweep.warnings.push(crate::message::failure(
+                    "CLI_UPDATE_REQUIRED",
+                    format!(
+                        "{}: {}. Run 'topos self-update'.",
+                        s.workspace_name,
+                        crate::render::safe_message(&ClientError::UpdateRequired { min })
+                    ),
                 ));
                 unreachable.push(stale_signal(s, StaleReason::Unavailable));
                 runs.push(offline_run(s, transports));
@@ -1261,21 +1323,26 @@ pub(crate) fn manifest_update(
             Err(PlaneError::Unreachable(m)) => {
                 sweep
                     .warnings
-                    .push(format!("PLANE_UNAVAILABLE {}: {m}", s.workspace_name));
+                    .push(plane_unavailable(&s.workspace_name, &m));
                 unreachable.push(stale_signal(s, StaleReason::Unreachable));
                 runs.push(offline_run(s, transports));
             }
             Err(PlaneError::Unavailable(m)) => {
                 sweep
                     .warnings
-                    .push(format!("PLANE_UNAVAILABLE {}: {m}", s.workspace_name));
+                    .push(plane_unavailable(&s.workspace_name, &m));
                 unreachable.push(stale_signal(s, StaleReason::Unavailable));
                 runs.push(offline_run(s, transports));
             }
             Err(PlaneError::Malformed(m)) => {
-                sweep
-                    .warnings
-                    .push(format!("WIRE_INVALID {}: {m}", s.workspace_name));
+                sweep.warnings.push(crate::message::failure(
+                    "WIRE_INVALID",
+                    format!(
+                        "{}: the server's answer could not be read ({m}). Run 'topos update' to \
+                         try again.",
+                        s.workspace_name
+                    ),
+                ));
                 unreachable.push(stale_signal(s, StaleReason::Malformed));
                 runs.push(offline_run(s, transports));
             }
@@ -1291,9 +1358,13 @@ pub(crate) fn manifest_update(
         .map(|u| (u.workspace_id.clone(), u.reason.fault()))
         .collect();
     if let Err(e) = sync_status::record_faults(ctx.fs, &ctx.layout, &faults) {
-        sweep
-            .warnings
-            .push(format!("SYNC_STATUS_WRITE_FAILED: {}", e.detail()));
+        sweep.warnings.push(crate::message::failure(
+            "SYNC_STATUS_WRITE_FAILED",
+            format!(
+                "topos could not save when each workspace last delivered ({}).",
+                e.detail()
+            ),
+        ));
     }
 
     // Every manifest dir up the chain — NOT a resolution input (nearest wins whole); the store
@@ -1310,10 +1381,13 @@ pub(crate) fn manifest_update(
         if let Some(playout) = sidecar::existing_project_store(ctx.fs, pd)
             && let Err(e) = sidecar::recover(ctx.fs, &playout, now_millis, &mut sweep.warnings)
         {
-            sweep.warnings.push(format!(
-                "STORE_RECOVERY_FAILED {}: {}",
-                pd.display(),
-                e.detail()
+            sweep.warnings.push(crate::message::failure(
+                "STORE_RECOVERY_FAILED",
+                format!(
+                    "{}: topos could not finish repairing its own state here ({}).",
+                    pd.display(),
+                    e.detail()
+                ),
             ));
         }
     }
@@ -1586,15 +1660,13 @@ pub(crate) fn manifest_update(
                         };
                         sweep
                             .warnings
-                            .push(format!("REPORT_FAILED {}: {m}", run.session.workspace_name));
+                            .push(report_failed(&run.session.workspace_name, &m));
                     }
                 }
             }
-            Err(e) => sweep.warnings.push(format!(
-                "REPORT_FAILED {}: {}",
-                run.session.workspace_name,
-                e.detail()
-            )),
+            Err(e) => sweep
+                .warnings
+                .push(report_failed(&run.session.workspace_name, &e.detail())),
         }
         let mut delivered_cache: BTreeMap<String, DeliveredSkill> = BTreeMap::new();
         for ds in &snap.skills {
@@ -1702,18 +1774,27 @@ pub(crate) fn manifest_update(
                         | PlaneError::Unavailable(m)
                         | PlaneError::Malformed(m) => m,
                     };
-                    sweep
-                        .warnings
-                        .push(format!("ACK_FAILED {}: {m}", run.session.workspace_name));
+                    sweep.warnings.push(crate::message::failure(
+                        "ACK_FAILED",
+                        format!(
+                            "{}: topos could not confirm this workspace's notices as read ({m}). \
+                             Run 'topos update' to try again.",
+                            run.session.workspace_name
+                        ),
+                    ));
                 }
             }
             notices.extend(snap.notices.iter().cloned());
         }
     }
     if let Err(e) = sync_status::record(ctx.fs, &ctx.layout, &sync_updates) {
-        sweep
-            .warnings
-            .push(format!("SYNC_STATUS_WRITE_FAILED: {}", e.detail()));
+        sweep.warnings.push(crate::message::failure(
+            "SYNC_STATUS_WRITE_FAILED",
+            format!(
+                "topos could not save when each workspace last delivered ({}).",
+                e.detail()
+            ),
+        ));
     }
     let sync = sync_updates
         .into_iter()
@@ -1861,7 +1942,7 @@ fn close_forge_round(
     ctx: &Ctx<'_>,
     lane: &ForgeLane<'_>,
     now_ms: i64,
-    warnings: &mut Vec<String>,
+    warnings: &mut Vec<Message>,
     gone: &mut Vec<String>,
 ) -> Vec<StaleForge> {
     gone.extend(lane.announce.borrow().iter().cloned());
@@ -1893,7 +1974,13 @@ fn close_forge_round(
         })
         .collect();
     if let Err(e) = forge_check::record_round(ctx.fs, &ctx.layout, lane.backoff.get(), &outcomes) {
-        warnings.push(format!("FORGE_CHECK_WRITE_FAILED: {}", e.detail()));
+        warnings.push(crate::message::failure(
+            "FORGE_CHECK_WRITE_FAILED",
+            format!(
+                "topos could not save when it last checked your repository sources ({}).",
+                e.detail()
+            ),
+        ));
     }
 
     let mut by_host: BTreeMap<String, StaleForge> = BTreeMap::new();
@@ -1981,10 +2068,14 @@ fn reconcile_thing<'a>(
                 return;
             };
             let Some(entry) = catalog.skills.iter().find(|e| &e.name == bundle) else {
-                sweep.warnings.push(format!(
-                    "NOT_AVAILABLE {}: \"{}\" — not in {}'s catalog, or not visible with your \
-                     current access",
-                    sc.label, row.reference, run.session.workspace_name
+                sweep.warnings.push(crate::message::failure(
+                    "NOT_AVAILABLE",
+                    format!(
+                        "\"{}\" ({}): {} does not share a bundle by this name, or it is not \
+                         visible with your access. Check the spelling in topos.toml, or ask a \
+                         workspace owner to share it with you.",
+                        row.reference, sc.label, run.session.workspace_name
+                    ),
                 ));
                 return;
             };
@@ -2098,11 +2189,13 @@ fn reconcile_thing<'a>(
                 let identity = local_bundle_identity(env, sc, &dir, &display);
                 // The scope is named in the PERSON'S vocabulary, not the resolver's: `person` is
                 // an internal word for the machine-wide scope, and it shipped verbatim to anyone
-                // who deleted a folder a row still asks for. The sentence also reads whole with
-                // the leading code removed, which is how the TTY prints it.
-                sweep.warnings.push(format!(
-                    "PATH_MISSING \"{raw}\" is demanded {whose} but the folder is gone — \
-                     `topos remove{g} {raw}` drops the row"
+                // who deleted a folder a row still asks for.
+                sweep.warnings.push(crate::message::failure(
+                    "PATH_MISSING",
+                    format!(
+                        "\"{raw}\": your topos.toml asks for this folder {whose}, and the folder \
+                         is gone. Run 'topos remove{g} {raw}' to drop the line."
+                    ),
                 ));
                 // The BUNDLE is what could not be carried forward, so the bundle is what the
                 // summary counts. Pushing only a line left a one-row failing sweep printing
@@ -2169,8 +2262,8 @@ fn mcp_filter(
     bundle: &str,
     voice: &DestVoice<'_>,
     warned: &mut HashSet<String>,
-    advisories: &mut Vec<String>,
-    warnings: &mut Vec<String>,
+    advisories: &mut Vec<Message>,
+    warnings: &mut Vec<Message>,
 ) -> McpNarrowing {
     let scope = manifest_scope_of(sc);
     let narrowing = mcp_dest_narrowing(dest, scope);
@@ -2198,9 +2291,13 @@ fn mcp_filter(
         if warned.insert(format!(
             "no-agent\u{1f}{label}\u{1f}{identity}\u{1f}{channel}"
         )) {
-            warnings.push(format!(
-                "MCP_DEST_NO_AGENT \"{bundle}\" (via channel \"{channel}\") reaches no agent — \
-                 {clause}"
+            warnings.push(crate::message::failure(
+                "MCP_DEST_NO_AGENT",
+                format!(
+                    "\"{bundle}\" reaches no agent: the mcp_dest on the \"{channel}\" line in \
+                     your topos.toml names no MCP config file. Add one to that mcp_dest, or drop \
+                     mcp_dest so the bundle reaches every MCP-capable agent."
+                ),
             ));
         }
         return McpNarrowing {
@@ -2215,10 +2312,14 @@ fn mcp_filter(
         // same spelling swallow it — the exact silence this warning exists to end. (Its own key
         // space, so it can never collide with the per-entry advisory keys either.)
         if warned.insert(format!("no-agent\u{1f}{label}\u{1f}{bundle}")) {
-            // No scope label: the TTY prints this line with its code taken off the front, and
-            // `person` is the resolver's word for the machine-wide scope, not a person's.
-            warnings.push(format!(
-                "MCP_DEST_NO_AGENT \"{bundle}\" reaches no agent — {clause}"
+            // No scope label: `person` is the resolver's word for the machine-wide scope, not a
+            // person's, and the array this complains about lives in the reader's OWN topos.toml.
+            warnings.push(crate::message::failure(
+                "MCP_DEST_NO_AGENT",
+                format!(
+                    "\"{bundle}\" reaches no agent: {}",
+                    crate::manifest::dest::dest_names_no_mcp_file_remedy(&narrowing.unknown, scope)
+                ),
             ));
         }
         return McpNarrowing {
@@ -2228,9 +2329,13 @@ fn mcp_filter(
     }
     for entry in &narrowing.unknown {
         if warned.insert(entry.clone()) {
-            advisories.push(format!(
-                "MCP_DEST_UNKNOWN {label}: \"{bundle}\" — {}",
-                crate::manifest::dest::unknown_mcp_file(entry, scope)
+            advisories.push(crate::message::advisory(
+                "MCP_DEST_UNKNOWN",
+                format!(
+                    "\"{bundle}\" ({label}): the dest entry `{entry}` in your topos.toml is not a \
+                     known MCP config file, so it was skipped. The known files here are {}.",
+                    crate::manifest::dest::known_mcp_files(scope).join(", ")
+                ),
             ));
         }
     }
@@ -2406,9 +2511,14 @@ fn local_mcp_demand(
             );
         }
         Ok(None) => {
-            sweep.warnings.push(format!(
-                "MCP_UNPLACEABLE {}: \"{display}\" — the folder holds no server.json at its root",
-                sc.label
+            sweep.warnings.push(crate::message::failure(
+                "MCP_UNPLACEABLE",
+                format!(
+                    "\"{display}\" ({}): this folder holds no server.json at its root, so topos \
+                     has no server to place. Add server.json to the folder, then run 'topos \
+                     update'.",
+                    sc.label
+                ),
             ));
             sweep
                 .mcp_hold
@@ -2467,10 +2577,14 @@ fn reconcile_set<'a>(
             };
             let Some(ch) = index.channels.iter().find(|c| &c.name == channel) else {
                 sweep.note_set_failure(Some(&run.session.workspace_id), channel, &sc.scope);
-                sweep.warnings.push(format!(
-                    "NOT_AVAILABLE {}: \"{}\" — no such channel in {}, or not visible with your \
-                     current access",
-                    sc.label, row.reference, run.session.workspace_name
+                sweep.warnings.push(crate::message::failure(
+                    "NOT_AVAILABLE",
+                    format!(
+                        "\"{}\" ({}): {} has no channel by this name, or it is not visible with \
+                         your access. Check the spelling in topos.toml, or ask a workspace owner \
+                         to add you to it.",
+                        row.reference, sc.label, run.session.workspace_name
+                    ),
                 ));
                 return;
             };
@@ -2509,9 +2623,7 @@ fn reconcile_set<'a>(
                     // An unparseable id can never open a phase (the sync guard refuses it first),
                     // so it must not count either — same warning, raised where it is excluded.
                     if SkillId::parse(&entry.skill_id).is_err() {
-                        sweep
-                            .warnings
-                            .push(format!("BAD_ID {}: served an invalid skill id", entry.name));
+                        sweep.warnings.push(bad_id(&entry.name));
                         return None;
                     }
                     picked.insert(entry.skill_id.as_str()).then_some(entry)
@@ -2611,10 +2723,12 @@ fn reconcile_feed<'a>(
     let address = format!("{host}/{workspace}");
     let feed_selected = targets.hit(&[workspace, address.as_str()]);
     let Some(run) = find_run(env.runs, Some(host), workspace) else {
-        sweep.warnings.push(format!(
-            "NOT_AVAILABLE {}: the feed of {address} is adopted here, but this installation is not \
-             logged into it (run `topos login {address}`)",
-            sc.label
+        sweep.warnings.push(crate::message::failure(
+            "NOT_AVAILABLE",
+            format!(
+                "{address}: your topos.toml takes everything this workspace assigns you, but this \
+                 machine is not logged into it. Run 'topos login {address}'."
+            ),
         ));
         return;
     };
@@ -2656,9 +2770,7 @@ fn reconcile_feed<'a>(
                     // Same as the channel batch: an unparseable id cannot open a phase, so it is
                     // warned about here and never counted.
                     if SkillId::parse(&ds.skill_id).is_err() {
-                        sweep
-                            .warnings
-                            .push(format!("BAD_ID {}: served an invalid skill id", ds.name));
+                        sweep.warnings.push(bad_id(&ds.name));
                         return false;
                     }
                     // A kind this build cannot deliver is refused at the door, before anything
@@ -2839,13 +2951,16 @@ fn served_kind(
     word: &str,
     bundle: &str,
     label: &str,
-    warnings: &mut Vec<String>,
+    warnings: &mut Vec<Message>,
 ) -> Option<BundleKind> {
     let kind = BundleKind::parse(word);
     if kind.is_none() {
-        warnings.push(format!(
-            "UNKNOWN_KIND {label}: \"{bundle}\" is a \"{word}\" bundle — this topos does not \
-             know how to deliver that kind; run `topos self-update`"
+        warnings.push(crate::message::failure(
+            "UNKNOWN_KIND",
+            format!(
+                "\"{bundle}\" ({label}) is a \"{word}\" bundle, and this version of topos does \
+                 not know how to deliver that kind. Run 'topos self-update'."
+            ),
         ));
     }
     kind
@@ -2933,10 +3048,7 @@ fn sync_workspace_skill<'a>(
     let ctx = env.ctx;
     let target = &st.target;
     let Ok(sid) = SkillId::parse(&target.skill_id) else {
-        sweep.warnings.push(format!(
-            "BAD_ID {}: served an invalid skill id",
-            target.name
-        ));
+        sweep.warnings.push(bad_id(&target.name));
         return;
     };
     if !sweep.claim(&sc.label, &target.skill_id) {
@@ -3012,7 +3124,7 @@ fn sync_workspace_skill<'a>(
     // A project root the containment rail refused is a placement that DID NOT HAPPEN — collected
     // from wherever the engine computes the plan, so the receipt says so instead of the bundle
     // quietly landing nowhere.
-    let escapes: std::cell::RefCell<Vec<String>> = std::cell::RefCell::new(Vec::new());
+    let escapes: std::cell::RefCell<Vec<Message>> = std::cell::RefCell::new(Vec::new());
     let mcp_reach = st.mcp_dest_filter.clone();
     let plan_fn = |ctx: &Ctx<'_>, skill_id: &str, lock: &Lock, map: &PlacementMap| {
         if mcp {
@@ -3637,10 +3749,13 @@ fn converge_pending_governance(
         // that finished someone's pending transfer must not report itself as broken, and must not
         // hand an agent a non-zero status for it.
         Ok(super::GovernedOutcome::Rewritten(rw)) => {
-            sweep.advisories.push(format!(
-                "GOVERNANCE_CONVERGED {}: {} — the \"{}\" line is now \"{}\" (a landed publish's \
-                 pending transfer)",
-                lock.name, rw.manifest, rw.from, rw.canonical
+            sweep.advisories.push(crate::message::advisory(
+                "GOVERNANCE_CONVERGED",
+                format!(
+                    "{}: topos rewrote the \"{}\" line in {} to \"{}\" — the publish you landed \
+                     moved where this bundle comes from.",
+                    lock.name, rw.from, rw.manifest, rw.canonical
+                ),
             ));
             true
         }
@@ -3701,28 +3816,34 @@ fn local_dir(ctx: &Ctx<'_>, sc: &ScopeCtx<'_>, raw: &str) -> PathBuf {
 }
 
 /// The one receipt line a settled-draft fan-out earns (the sweep stays otherwise silent about it).
-fn draft_synced_line(name: &str, synced: Option<u32>) -> String {
+pub(super) fn draft_synced_line(name: &str, synced: Option<u32>) -> Message {
     let n = synced.unwrap_or(0);
     let folders = if n == 1 {
         "1 other folder".to_owned()
     } else {
         format!("{n} other folders")
     };
-    format!("DRAFT_SYNCED {name}: synced your edits of {name} to {folders}")
+    crate::message::disclosure(
+        "DRAFT_SYNCED",
+        format!("{name}: your edits were copied to {folders}."),
+    )
 }
 
 /// The one receipt line an adopted feed earns when its exchange lands empty — the workspace was
 /// reached, and it has nothing for this person yet. Says what happened, never what to do about it:
 /// there is no command that makes a teammate share something.
-fn nothing_assigned_line(address: &str) -> String {
-    format!("NOTHING_ASSIGNED {address}: exchanged — nothing assigned to you yet")
+fn nothing_assigned_line(address: &str) -> Message {
+    crate::message::disclosure(
+        "NOTHING_ASSIGNED",
+        format!("{address}: reached, and nothing is assigned to you yet."),
+    )
 }
 
 /// Warn ONCE per bundle when a PROJECT placement is visible to git: the bundle ships its OWN
 /// root `.gitignore` (content — the sentinel never overlays it) and that file does not
 /// self-ignore the directory. Bundle content is never edited to fix it; the line is the fix's
 /// whole surface.
-fn disclose_git_visible(ctx: &Ctx<'_>, sid: &SkillId, name: &str, warnings: &mut Vec<String>) {
+fn disclose_git_visible(ctx: &Ctx<'_>, sid: &SkillId, name: &str, warnings: &mut Vec<Message>) {
     let Ok(Some(map)) = doc::read_map(ctx.fs, &ctx.layout.published(sid).map) else {
         return;
     };
@@ -3732,9 +3853,13 @@ fn disclose_git_visible(ctx: &Ctx<'_>, sid: &SkillId, name: &str, warnings: &mut
             && bytes != crate::scan::IGNORE_SENTINEL
             && !crate::materialize::ignores_all(&bytes)
         {
-            warnings.push(format!(
-                "GIT_VISIBLE {name}: the bundle ships its own .gitignore, which does not ignore \
-                 the placement — {p} is visible to git; commit or ignore it deliberately"
+            warnings.push(crate::message::advisory(
+                "GIT_VISIBLE",
+                format!(
+                    "{name}: this bundle ships its own .gitignore and it does not ignore where \
+                     the copy landed, so {p} is visible to git. Commit it, or ignore it, \
+                     deliberately."
+                ),
             ));
             return;
         }
@@ -3743,7 +3868,7 @@ fn disclose_git_visible(ctx: &Ctx<'_>, sid: &SkillId, name: &str, warnings: &mut
 
 /// Warn when a skill's placement had to land under a NAMESPACED dir because the by-name dir is
 /// occupied by content the record does not own (never clobbered — the occupant keeps its bytes).
-fn disclose_namespaced(ctx: &Ctx<'_>, sid: &SkillId, name: &str, warnings: &mut Vec<String>) {
+fn disclose_namespaced(ctx: &Ctx<'_>, sid: &SkillId, name: &str, warnings: &mut Vec<Message>) {
     let Some(sanitized) = topos_harness::sanitize_skill_dir(name) else {
         return;
     };
@@ -3767,10 +3892,13 @@ fn disclose_namespaced(ctx: &Ctx<'_>, sid: &SkillId, name: &str, warnings: &mut 
             && !map.placements.iter().any(|q| Path::new(q) == sibling)
             && !placement::recorded_by_another_skill(ctx, sid.as_str(), &sibling)
         {
-            warnings.push(format!(
-                "NAMESPACED {name}: {} holds different content topos never placed; delivered \
-                 beside it as {base}",
-                sibling.display()
+            warnings.push(crate::message::advisory(
+                "NAMESPACED",
+                format!(
+                    "{name}: {} already held files topos never placed, so topos delivered beside \
+                     it as {base} and left the other folder untouched.",
+                    sibling.display()
+                ),
             ));
         }
     }
@@ -4193,10 +4321,13 @@ fn reconcile_repo_skill(
             &sc.label,
         )),
         // Nothing to converge: this member has never been fetched here.
-        None => sweep.warnings.push(format!(
-            "NOT_INSTALLED {}: \"{}\" — an external skill this machine has not fetched yet \
-             (network required)",
-            sc.label, row.reference
+        None => sweep.warnings.push(crate::message::failure(
+            "NOT_INSTALLED",
+            format!(
+                "\"{}\" ({}): this machine has never fetched this repository's bundle. Run \
+                 'topos update' while online.",
+                row.reference, sc.label
+            ),
         )),
     };
     let Some(lane) = env.forge.filter(|_| !pin_satisfied) else {
@@ -4306,7 +4437,7 @@ fn reconcile_repo_skill(
     };
     lane.note_landed(&origin, &git_ref, &tree.commit.clone().unwrap_or_default());
     // The source's motion, said only once the re-import has had its turn (see below).
-    let mut motion: Option<String> = None;
+    let mut motion: Option<Message> = None;
     // Every slot's copy at the same commit is settled: nothing moves without a real change.
     if let Some(import) = &tracked {
         let resolved = tree.commit.clone().unwrap_or_default();
@@ -4331,11 +4462,14 @@ fn reconcile_repo_skill(
             // failure (see the set arm above). HELD until the re-import has run: if the copy
             // here carries edits, the decision row below says the source moved in words a person
             // can act on, and this line would repeat it in the engine's.
-            motion = Some(format!(
-                "GIT_UPDATED {origin}: {} → {}; skills: ~{}",
-                short_commit(&recorded),
-                short_commit(&resolved),
-                import.lock.name
+            motion = Some(crate::message::disclosure(
+                "GIT_UPDATED",
+                format!(
+                    "{origin}: moved from {} to {}; bundles: ~{}.",
+                    short_commit(&recorded),
+                    short_commit(&resolved),
+                    import.lock.name
+                ),
             ));
         }
     }
@@ -4448,7 +4582,7 @@ fn record_member_sets(
     tracked: &[ForgeImport],
     resolved: &str,
     discovered: &[String],
-    warnings: &mut Vec<String>,
+    warnings: &mut Vec<Message>,
 ) {
     if discovered.is_empty() || resolved.is_empty() {
         return;
@@ -4462,11 +4596,7 @@ fn record_member_sets(
             Ok(Some(d)) => d,
             Ok(None) => continue,
             Err(e) => {
-                warnings.push(format!(
-                    "MEMBERS_UNRECORDED {}: {}",
-                    import.lock.name,
-                    e.detail()
-                ));
+                warnings.push(members_unrecorded(&import.lock.name, &e.detail()));
                 continue;
             }
         };
@@ -4475,11 +4605,7 @@ fn record_member_sets(
             ..existing
         };
         if let Err(e) = doc::write_doc(sctx.fs, &path, &next) {
-            warnings.push(format!(
-                "MEMBERS_UNRECORDED {}: {}",
-                import.lock.name,
-                e.detail()
-            ));
+            warnings.push(members_unrecorded(&import.lock.name, &e.detail()));
         }
     }
 }
@@ -4595,11 +4721,17 @@ fn import_blocked_decision(
         ResolvedScope::Person => argv(&["topos", "update", "-g", name, "--reset"]),
         ResolvedScope::Project { .. } => argv(&["topos", "update", name, "--reset"]),
     };
+    // The command the sentence names is the one `ways_out` carries, spelled for the scope the row
+    // stands in — a decision a person reads and a decision an agent runs must not differ.
+    let spelled = reset.join(" ");
     let ways = vec![("to discard them:", reset)];
     let pad = ways.iter().map(|(label, _)| label.len()).max().unwrap_or(0);
     super::PendingDecision {
         name: name.to_owned(),
-        line: format!("{origin} has a newer version, but your edits would be overwritten"),
+        line: format!(
+            "{origin} has a newer version, and taking it would overwrite your edits. Keep them by \
+             doing nothing, or run '{spelled}' to discard them and take the new version."
+        ),
         detail: ways
             .iter()
             .map(|(label, cmd)| format!("{label:<pad$}   {}", cmd.join(" ")))
@@ -4796,10 +4928,13 @@ fn forge_hold_line(sc: &ScopeCtx<'_>, reference: &str, hold: &ForgeHold, sweep: 
     if let ForgeHold::Gone { reason, first_time } = hold
         && *first_time
     {
-        sweep.warnings.push(format!(
-            "REMOTE_FETCH {}: \"{reference}\" — {reason}; the copies here still work, and \
-             `topos update` retries once the row names something that resolves",
-            sc.label
+        sweep.warnings.push(crate::message::failure(
+            "REMOTE_FETCH",
+            format!(
+                "\"{reference}\" ({}): {reason}. The copies here still work. Point the line at \
+                 something that resolves, then run 'topos update'.",
+                sc.label
+            ),
         ));
     }
 }
@@ -4817,9 +4952,12 @@ fn forge_hold_line(sc: &ScopeCtx<'_>, reference: &str, hold: &ForgeHold, sweep: 
 fn renamed_line(origin: &str, head: &RepoHead, sweep: &mut Sweep) {
     if let Some((owner, repo)) = &head.renamed_to {
         let host = origin.split('/').next().unwrap_or_default();
-        sweep.disclosures.push(format!(
-            "GIT_RENAMED {origin}: the forge now serves this as {host}/{owner}/{repo} and \
-             redirects to it — the row keeps working as written"
+        sweep.disclosures.push(crate::message::disclosure(
+            "GIT_RENAMED",
+            format!(
+                "{origin}: this repository is now served as {host}/{owner}/{repo} and redirects \
+                 to it — the line in your topos.toml keeps working as written."
+            ),
         ));
     }
 }
@@ -4837,7 +4975,7 @@ fn git_updated_line(
     tracked: &[ForgeImport],
     discovered: &[String],
     blocked: &[String],
-) -> String {
+) -> Message {
     let had: Vec<&str> = tracked
         .iter()
         .map(|i| i.lock.name.as_str())
@@ -4857,15 +4995,28 @@ fn git_updated_line(
         }
     }
     let mut line = format!(
-        "GIT_UPDATED {origin}: {} → {}",
+        "{origin}: moved from {} to {}",
         short_commit(old),
         short_commit(new)
     );
     if !parts.is_empty() {
-        line.push_str("; skills: ");
+        line.push_str("; bundles: ");
         line.push_str(&parts.join(" "));
     }
-    line
+    line.push('.');
+    crate::message::disclosure("GIT_UPDATED", line)
+}
+
+/// A member set this fetch proved but could not write down — the pair (commit, members) is simply
+/// not recorded, so the next run asks the repository for it again.
+fn members_unrecorded(name: &str, detail: &str) -> Message {
+    crate::message::failure(
+        "MEMBERS_UNRECORDED",
+        format!(
+            "{name}: topos could not record which bundles this repository holds ({detail}), so it \
+             will ask the repository again next time."
+        ),
+    )
 }
 
 /// A commit's first 12 characters — enough to recognize, short enough to read.
@@ -5005,11 +5156,14 @@ fn disclose(env: &Env<'_>, person: Option<&ScopePlan>, sweep: &mut Sweep) {
             if unadopted == 0 {
                 continue;
             }
-            sweep.advisories.push(format!(
-                "GLOBAL_MANIFEST {}/{}: global manifest adopts {total} bundles; {unadopted} \
-                 assigned bundles are not adopted here (no feed row) — `topos add -g @{}` restores \
-                 them",
-                run.session.host, run.session.workspace_name, run.session.workspace_name
+            sweep.advisories.push(crate::message::advisory(
+                "GLOBAL_MANIFEST",
+                format!(
+                    "{}/{}: your machine-wide topos.toml names {total} bundles from this \
+                     workspace, and {unadopted} more that it assigns you are not listed there. \
+                     Run 'topos add -g @{}' to take them all.",
+                    run.session.host, run.session.workspace_name, run.session.workspace_name
+                ),
             ));
         }
     }
@@ -5019,8 +5173,13 @@ fn disclose(env: &Env<'_>, person: Option<&ScopePlan>, sweep: &mut Sweep) {
         let Some(snap) = &run.snapshot else { continue };
         for (skill_id, name) in &snap.declined {
             if sweep.explicit.contains(skill_id) {
-                sweep.advisories.push(format!(
-                    "DECLINED_OVERRIDE {name}: declined on the web, delivered here by your manifest"
+                sweep.advisories.push(crate::message::advisory(
+                    "DECLINED_OVERRIDE",
+                    format!(
+                        "{name}: you declined this on the web, and your topos.toml asks for it, \
+                         so it is still delivered here. Remove its line from topos.toml to stop \
+                         that."
+                    ),
                 ));
             }
         }
@@ -5113,9 +5272,14 @@ fn run_mcp_converge(
             match sidecar::ensure_project_store(env.ctx.fs, dir) {
                 Ok(l) => Some(l),
                 Err(e) => {
-                    sweep
-                        .warnings
-                        .push(format!("MCP_STORE_FAILED {}: {}", label, e.detail()));
+                    sweep.warnings.push(crate::message::failure(
+                        "MCP_STORE_FAILED",
+                        format!(
+                            "{label}: topos could not open its own store for this folder ({}), so \
+                             no MCP config was read or written for it.",
+                            e.detail()
+                        ),
+                    ));
                     None
                 }
             }
@@ -5252,10 +5416,13 @@ fn run_mcp_converge(
             {
                 continue; // the bundle's own `removed` row carries it as a kept file
             }
-            let line = format!(
-                "MCP_DRIFTED {}: a hand-edited entry in {} is left in place",
-                removed.state.agent,
-                removed.state.file.as_deref().unwrap_or("its config"),
+            let line = crate::message::disclosure(
+                "MCP_DRIFTED",
+                format!(
+                    "{}: an entry you edited by hand is left in place for {}.",
+                    removed.state.file.as_deref().unwrap_or("its config"),
+                    removed.state.agent,
+                ),
             );
             if !sweep.disclosures.contains(&line) {
                 sweep.disclosures.push(line);
@@ -6362,9 +6529,13 @@ fn rebuild_store(ctx: &Ctx<'_>, layout: &crate::sidecar::Layout, sweep: &mut Swe
             // Undecided merge: a DECISION, not a fault. Nothing is broken and no retry helps —
             // the folders stand exactly as they were until the person picks a side.
             Ok(Some(decision)) => sweep.decisions.push(decision),
-            Err(e) => sweep.warnings.push(format!(
-                "REBUILD_SKIPPED {id}: {}",
-                crate::render::safe_message(&e)
+            Err(e) => sweep.warnings.push(crate::message::failure(
+                "REBUILD_SKIPPED",
+                format!(
+                    "{id}: topos could not rebuild this bundle's folders ({}). They stay as they \
+                     are.",
+                    crate::render::safe_message(&e)
+                ),
             )),
         }
     }
@@ -6421,7 +6592,8 @@ fn rebuild_blocked_decision(ctx: &Ctx<'_>, name: &str) -> super::PendingDecision
     let g = crate::error::scope_flag(!ctx.layout.is_project_scope());
     super::PendingDecision {
         name: name.to_owned(),
-        line: "waiting on a merge decision, so its folders were left as they are".to_owned(),
+        line: "a merge is still waiting on your answer, so topos left its folders as they are."
+            .to_owned(),
         detail: vec![
             "settle it first, then rebuild:".to_owned(),
             format!("  topos update{g} {name} --keep-mine"),
@@ -6478,10 +6650,13 @@ fn find_run<'a>(
 
 /// The honest "not available" line for a workspace reference with no session — phrased from LOCAL
 /// knowledge (which recipe asked; which login is missing), never a server answer.
-fn not_connected_line(reference: &str, host: &str, workspace: &str) -> String {
-    format!(
-        "NOT_AVAILABLE {reference}: referenced here, but this installation is not logged into \
-         {host}/{workspace} (run `topos login {host}/{workspace}`)"
+fn not_connected_line(reference: &str, host: &str, workspace: &str) -> Message {
+    crate::message::failure(
+        "NOT_AVAILABLE",
+        format!(
+            "{reference}: your topos.toml asks for this, but this machine is not logged into \
+             {host}/{workspace}. Run 'topos login {host}/{workspace}'."
+        ),
     )
 }
 
@@ -6493,7 +6668,7 @@ fn not_connected_line(reference: &str, host: &str, workspace: &str) -> String {
 /// the second is what made two same-named bundles count once.
 fn note_item_failure(
     ctx: &Ctx<'_>,
-    warnings: &mut Vec<String>,
+    warnings: &mut Vec<Message>,
     failed: &mut std::collections::BTreeSet<(String, String)>,
     label: &str,
     identity: &str,
@@ -6511,11 +6686,17 @@ fn note_item_failure(
         ctx.clock.now_unix_millis(),
     );
     eprintln!("topos update: {name}: {}", crate::render::safe_message(e));
-    warnings.push(format!(
-        "{} {name}: {}",
+    warnings.push(item_failure(name, e));
+}
+
+/// The one per-item failure line — the bundle, then the error's own safe sentence. ONE template
+/// covers every `ClientError` an item can fail with, so it carries no remedy of its own: the
+/// variants that have one already spell it inside their message.
+pub(super) fn item_failure(name: &str, e: &ClientError) -> Message {
+    crate::message::failure(
         e.code(),
-        crate::render::safe_message(e)
-    ));
+        format!("{name}: {}.", crate::render::safe_message(e)),
+    )
 }
 
 /// Pre-1.0 old-state handover (no compatibility machinery): before per-scope stores, ONE home map
@@ -6547,8 +6728,8 @@ fn note_item_failure(
 pub(crate) fn handover_legacy_project_rows(
     ctx: &Ctx<'_>,
     project_dirs: &[PathBuf],
-    advisories: &mut Vec<String>,
-    warnings: &mut Vec<String>,
+    advisories: &mut Vec<Message>,
+    warnings: &mut Vec<Message>,
 ) {
     use topos_types::persisted::PlacementKind;
     if project_dirs.is_empty() {
@@ -6620,11 +6801,14 @@ pub(crate) fn handover_legacy_project_rows(
                 Some(&sid),
             ) {
                 Ok(parked) => {
-                    advisories.push(format!(
-                        "STATE_HANDOVER {id}: the project store now tracks it; the old home-side \
-                         state (history + draft snapshots) is preserved at {} — delete it \
-                         deliberately when you no longer want it",
-                        parked.display()
+                    advisories.push(crate::message::advisory(
+                        "STATE_HANDOVER",
+                        format!(
+                            "{id}: this project now keeps this bundle's record. The old \
+                             machine-wide copy of its history and draft snapshots is preserved at \
+                             {} — delete that folder when you no longer want it.",
+                            parked.display()
+                        ),
                     ));
                     let _ = crate::logfile::append_event(
                         ctx.fs,
@@ -6648,7 +6832,14 @@ pub(crate) fn handover_legacy_project_rows(
             doc::write_map(ctx.fs, &sp.map, &next)
         };
         if let Err(e) = done {
-            warnings.push(format!("STATE_HANDOVER_FAILED {id}: {}", e.detail()));
+            warnings.push(crate::message::failure(
+                "STATE_HANDOVER_FAILED",
+                format!(
+                    "{id}: topos could not hand this bundle's old machine-wide record over to \
+                     this project ({}). Nothing was deleted.",
+                    e.detail()
+                ),
+            ));
         }
     }
 }

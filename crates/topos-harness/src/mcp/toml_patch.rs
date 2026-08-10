@@ -63,10 +63,10 @@ pub fn apply(
         return outcome(EditPlan::Write(doc.to_string().into_bytes()), rec, true);
     }
     let Ok(text) = std::str::from_utf8(current.unwrap_or_default()) else {
-        return unprovable("Codex config is not UTF-8");
+        return unprovable("the Codex config is not UTF-8");
     };
     let Ok(mut doc) = text.parse::<DocumentMut>() else {
-        return unprovable("Codex config is not valid TOML");
+        return unprovable("the Codex config is not valid TOML");
     };
     let found = match found_entries(&doc) {
         Ok(found) => found,
@@ -86,7 +86,9 @@ pub fn apply(
     for &i in &rec.updates {
         let entry = &desired[i];
         let Some(servers) = doc.get_mut(SERVERS_KEY).and_then(Item::as_table_mut) else {
-            return unprovable("mcp_servers vanished during edit");
+            return unprovable(
+                "the config's mcp_servers section disappeared while topos was editing it",
+            );
         };
         // Keep the replaced table's document position so the file doesn't reorder, and
         // TRANSPLANT its decor — a user comment attached above `[mcp_servers.<key>]` travels

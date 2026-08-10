@@ -89,7 +89,7 @@ pub(crate) struct PullOutcome {
     pub data: PullData,
     /// Isolated per-skill FAILURES — what the receipt counts and calls failed, and what makes the
     /// run exit non-zero. Only [`note_skill_failure`] and its reconcile twin write here.
-    pub warnings: Vec<String>,
+    pub warnings: Vec<topos_types::Message>,
     /// The BUNDLES this run could not carry forward, keyed `(scope label, bundle identity)`.
     /// `warnings` is a LINE channel and a line is not a bundle — a scope-level fault (an
     /// unavailable lock, an unreadable custody document) is one line about no bundle at all — so
@@ -111,11 +111,11 @@ pub(crate) struct PullOutcome {
     /// dropped from a bundle's narrowing). They join `warnings` in the `--json` envelope's one
     /// stable array and print beside them, but the summary never counts them: the bundle they
     /// annotate has its own row, and counting the line too would invent a second, failed bundle.
-    pub advisories: Vec<String>,
+    pub advisories: Vec<topos_types::Message>,
     /// Facts about what WORKED that are still worth stating (the settled-draft fan-out, a
     /// cross-scope version split). They join `warnings` in the `--json` envelope's one stable
     /// array, but a successful run must never report itself as having failed anything.
-    pub disclosures: Vec<String>,
+    pub disclosures: Vec<topos_types::Message>,
     /// Workspaces whose whole delivery answered the uniform 404 THIS run (removed / revoked) — every
     /// copy froze in place. Display NAMES: the freeze line and the `update` prose both just say them.
     pub access_gone: Vec<String>,
@@ -259,7 +259,7 @@ impl PullOutcome {
     /// Wrap the schema payload with no workspace-level signals (the targeted paths).
     fn plain(
         data: PullData,
-        warnings: Vec<String>,
+        warnings: Vec<topos_types::Message>,
         failed_bundles: BTreeSet<(String, String)>,
     ) -> Self {
         Self {
@@ -329,12 +329,11 @@ pub(crate) fn pull(ctx: &Ctx<'_>, scope: PullScope) -> Result<PullOutcome, Clien
                         // The settled-draft fan-out's one receipt line — quiet, factual, and a
                         // DISCLOSURE: the fan-out worked, so it never joins the failure count.
                         if row.action == topos_types::results::PullAction::DraftSynced {
-                            let n = row.synced_placements.unwrap_or(0);
-                            disclosures.push(format!(
-                                "DRAFT_SYNCED {skill}: synced your edits of {skill} to {n} other \
-                                 folder{s}",
-                                skill = row.skill,
-                                s = if n == 1 { "" } else { "s" }
+                            // ONE producer for this wording — the reconcile's, so the sweep and
+                            // this path can never drift into two spellings of one fact.
+                            disclosures.push(super::reconcile::draft_synced_line(
+                                &row.skill,
+                                row.synced_placements,
                             ));
                         }
                         skills.push(row);
@@ -772,12 +771,10 @@ pub(super) fn applied_snapshot(
 /// One isolated per-skill failure as a stable, machine-parseable envelope warning:
 /// `<CODE> <skill_id>: <safe message>` (the same code/safe-message pair the error envelope would carry;
 /// the skill id here came from the follow-state, never a secret).
-fn skill_warning(skill_id: &str, e: &ClientError) -> String {
-    format!(
-        "{} {skill_id}: {}",
-        e.code(),
-        crate::render::safe_message(e)
-    )
+fn skill_warning(skill_id: &str, e: &ClientError) -> topos_types::Message {
+    // ONE producer for the per-item failure line — the reconcile's, so the two sweeps cannot
+    // spell the same fault differently.
+    super::reconcile::item_failure(skill_id, e)
 }
 
 /// Disclose one isolated per-skill sweep failure under the same redaction policy as the top-level error
@@ -785,7 +782,7 @@ fn skill_warning(skill_id: &str, e: &ClientError) -> String {
 /// append-only diagnostics log (best-effort), and a stable-shape envelope warning.
 fn note_skill_failure(
     ctx: &Ctx<'_>,
-    warnings: &mut Vec<String>,
+    warnings: &mut Vec<topos_types::Message>,
     failed: &mut BTreeSet<(String, String)>,
     skill_id: &str,
     e: &ClientError,
@@ -831,9 +828,12 @@ pub(crate) fn quiet_hook_lines(
 ) -> Vec<String> {
     let mut lines = Vec::new();
     for ws in &out.access_gone {
+        // `<workspace-address>` is a PLACEHOLDER on purpose: `access_gone` carries the display
+        // NAME, and a bare name is not something `topos login` can be handed. The trailer the
+        // interactive sweep prints spells it the same way, for the same reason.
         lines.push(format!(
-            "topos: {ws} — this device no longer has access (unlinked, removed, or gone); its \
-             skills are frozen in place"
+            "topos: {ws} — this machine no longer has access (unlinked, removed, or gone). Its \
+             skills are frozen in place. Run 'topos login <workspace-address>' to reconnect."
         ));
     }
     // A repository the forge says is GONE is not a staleness nudge — it is a fact about the row
@@ -852,13 +852,13 @@ pub(crate) fn quiet_hook_lines(
             .answered_at
             .map(|at| sync_status::human_duration(now_millis.saturating_sub(at)));
         lines.push(format!(
-            "topos: {} {} — {} {} not checked{}; they still work",
+            "topos: {} {} — {} {} not checked{}. They still work.",
             forge.host,
             // A host that answered is not unreachable, whatever else went wrong with the answer.
             if forge.reached {
                 "is not answering checks"
             } else {
-                "unreachable"
+                "is unreachable"
             },
             forge.sources,
             if forge.sources == 1 {
@@ -881,7 +881,7 @@ pub(crate) fn quiet_hook_lines(
             // The nudge (the shared prefix) is the same fact for every kind; only the reason
             // clause varies, so each line is TRUE of what happened.
             lines.push(format!(
-                "topos: {} last synced {} ago — {}",
+                "topos: {} last synced {} ago — {}.",
                 ws.workspace_name,
                 sync_status::human_duration(now_millis.saturating_sub(last)),
                 ws.reason.clause()

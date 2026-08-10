@@ -249,7 +249,7 @@ fn run_command(
     // Recovery's typed disclosures (a refused park-journal entry) ride stderr — diagnostics,
     // never the envelope, so `--json` stdout stays the one document.
     for warning in &recovery_warnings {
-        eprintln!("topos: {warning}");
+        eprintln!("topos: {}", warning.text);
     }
 
     // The plane + follow-state sources — SESSIONS are the identity: the routed plane sends each
@@ -1865,7 +1865,7 @@ fn finish_status(
 /// both the envelope's `ok` and the exit status, so the two can never contradict each other.
 /// Isolation is unaffected: the payload still reports every other bundle, and the failure lines
 /// ride `warnings` either way.
-fn sweep_failed(warnings: &[String]) -> bool {
+fn sweep_failed(warnings: &[topos_types::Message]) -> bool {
     !warnings.is_empty()
 }
 
@@ -1935,12 +1935,15 @@ fn finish_pull(
                 // ONE stable machine channel: failures first, then the decisions, then the
                 // advisories, then the disclosures. The split is the receipt's (a decision, an
                 // advisory or a disclosure must not be counted as a failure), not the wire's.
-                envelope.warnings = out.warnings;
-                envelope
-                    .warnings
-                    .extend(out.decisions.iter().map(render::decision_wire_line));
-                envelope.warnings.extend(out.advisories.iter().cloned());
-                envelope.warnings.extend(out.disclosures.iter().cloned());
+                let mut messages = out.warnings;
+                messages.extend(out.decisions.iter().map(render::decision_message));
+                messages.extend(out.advisories.iter().cloned());
+                messages.extend(out.disclosures.iter().cloned());
+                // ONE string, two renderings: the legacy array is DERIVED from the typed one, in
+                // the same order, so every consumer that matches on it reads exactly what it read
+                // before — and the code it matched on now has a field of its own.
+                envelope.warnings = crate::message::legacy_lines(&messages);
+                envelope.messages = messages;
                 envelope.next_actions = next_actions;
                 println!("{}", render::to_json(&envelope));
             } else {
@@ -1954,16 +1957,16 @@ fn finish_pull(
                 );
                 if !out.access_gone.is_empty() {
                     text.push_str(&format!(
-                        "\nnote: the session{} for {} ended — every skill it delivered stays in \
-                         place, frozen; `topos login <workspace-address>` reconnects.",
+                        "\nnote: the session{} for {} ended. Every skill it delivered stays in \
+                         place, frozen. Run 'topos login <workspace-address>' to reconnect.",
                         if out.access_gone.len() == 1 { "" } else { "s" },
                         out.access_gone.join(", ")
                     ));
                 }
                 if unenrolled_dead_end {
                     text.push_str(
-                        "\nNot logged in — join your team with `topos login \
-                         <workspace-address>` (ask a teammate for the address).",
+                        "\nNot logged in. Join your team with 'topos login <workspace-address>' \
+                         — ask a teammate for the address.",
                     );
                 }
                 println!("{text}");
@@ -1987,13 +1990,108 @@ mod sweep_verdict_tests {
     fn the_envelope_ok_is_the_exit_status() {
         for warnings in [
             Vec::new(),
-            vec!["IO_ERROR docs: a filesystem operation failed".to_owned()],
+            vec![crate::message::failure(
+                "IO_ERROR",
+                "docs: a filesystem operation failed.".to_owned(),
+            )],
         ] {
             let failed = super::sweep_failed(&warnings);
             let ok = !failed;
             let exit_is_failure = failed;
             assert_eq!(ok, !exit_is_failure, "{warnings:?}");
             assert_eq!(ok, warnings.is_empty(), "{warnings:?}");
+        }
+    }
+
+    /// **The two channels are ONE channel.** `messages` carries the typed line and `warnings` the
+    /// legacy string derived from it — same membership, same ORDER, index for index — so every
+    /// consumer that matches on `warnings[]` reads exactly what it read before the field existed,
+    /// and the derivation is `"{code} {text}"` with a code and the bare text without one.
+    #[test]
+    fn the_legacy_array_mirrors_the_typed_one_line_for_line() {
+        let messages = vec![
+            crate::message::failure("CATALOG_UNAVAILABLE", "acme: unreadable.".to_owned()),
+            crate::message::uncoded_failure("beta: skipped.".to_owned()),
+            crate::message::decision("deploy: waiting on you.".to_owned()),
+            crate::message::advisory("GIT_VISIBLE", "docs: visible to git.".to_owned()),
+            crate::message::disclosure("MCP_DRIFTED", "cursor: left alone.".to_owned()),
+        ];
+        let mut envelope = super::render::ok_envelope("update", serde_json::json!({}));
+        envelope.warnings = crate::message::legacy_lines(&messages);
+        envelope.messages = messages;
+
+        assert_eq!(envelope.warnings.len(), envelope.messages.len());
+        for (line, message) in envelope.warnings.iter().zip(&envelope.messages) {
+            match &message.code {
+                Some(code) => assert_eq!(line, &format!("{code} {}", message.text)),
+                None => assert_eq!(line, &message.text),
+            }
+        }
+        assert_eq!(
+            envelope.warnings,
+            vec![
+                "CATALOG_UNAVAILABLE acme: unreadable.",
+                "beta: skipped.",
+                "deploy: waiting on you.",
+                "GIT_VISIBLE docs: visible to git.",
+                "MCP_DRIFTED cursor: left alone.",
+            ]
+        );
+    }
+
+    /// **A TTY receipt never prints a code.** A sweep whose every channel carries a coded message
+    /// renders as prose only — the SCREAMING_SNAKE token is a lookup key on `messages[].code` and
+    /// must not reach the person reading the receipt.
+    #[test]
+    fn a_tty_receipt_prints_no_screaming_snake_code() {
+        let data = topos_types::results::PullData {
+            skills: Vec::new(),
+            proposals_awaiting: 0,
+            notices: Vec::new(),
+            sync: Vec::new(),
+            behind_elsewhere: Vec::new(),
+            scope: None,
+        };
+        let warnings = vec![
+            crate::message::failure("CATALOG_UNAVAILABLE", "acme: unreadable.".to_owned()),
+            crate::message::failure("PATH_MISSING", "\"~/x\": the folder is gone.".to_owned()),
+        ];
+        let advisories = vec![crate::message::advisory(
+            "MCP_DEST_UNKNOWN",
+            "\"linear\" (person): the entry was skipped.".to_owned(),
+        )];
+        let disclosures = vec![crate::message::disclosure(
+            "MCP_FILE_REMOVED",
+            "~/.cursor/mcp.json: deleted with the last entry.".to_owned(),
+        )];
+        let tty = super::render::pull_tty(&data, &[], &warnings, &advisories, &disclosures, 2);
+        for code in [
+            "CATALOG_UNAVAILABLE",
+            "PATH_MISSING",
+            "MCP_DEST_UNKNOWN",
+            "MCP_FILE_REMOVED",
+        ] {
+            assert!(!tty.contains(code), "{code} reached the TTY:\n{tty}");
+        }
+        // …and every message's own prose DID reach it.
+        for m in warnings.iter().chain(&advisories).chain(&disclosures) {
+            assert!(
+                tty.contains(&m.text),
+                "{:?} is missing from:\n{tty}",
+                m.text
+            );
+        }
+        // The one general rail: no bare SCREAMING_SNAKE token anywhere in the receipt.
+        for token in tty.split_whitespace() {
+            let word = token.trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '_');
+            assert!(
+                !(word.len() > 3
+                    && word.contains('_')
+                    && word
+                        .chars()
+                        .all(|c| c.is_ascii_uppercase() || c == '_' || c.is_ascii_digit())),
+                "a code-shaped token reached the TTY: {word}\n{tty}"
+            );
         }
     }
 }
@@ -2048,16 +2146,21 @@ fn finish_list(
                 }
                 // The stable-shape truncation warnings — a belt for a consumer that ignores the new
                 // typed markers: a capped enumeration is never mistakable for a complete one.
-                let mut warnings = out.warnings.clone();
+                let mut messages = out.warnings.clone();
                 for b in &out.data.truncated {
-                    warnings.push(format!(
-                        "LIST_TRUNCATED {}: {} of {} rows shown — the NEXT_PAGE next action pages on",
-                        b.bucket, b.shown, b.total
+                    messages.push(crate::message::failure(
+                        "LIST_TRUNCATED",
+                        format!(
+                            "{}: showing {} of {}. The next action on this response fetches the \
+                             rest.",
+                            b.bucket, b.shown, b.total
+                        ),
                     ));
                 }
                 let value = serde_json::to_value(&out.data).unwrap_or_default();
                 let mut envelope = render::ok_envelope(command, value);
-                envelope.warnings = warnings;
+                envelope.warnings = crate::message::legacy_lines(&messages);
+                envelope.messages = messages;
                 envelope.next_actions = next_actions;
                 println!("{}", render::to_json(&envelope));
             } else {
@@ -2155,13 +2258,14 @@ fn finish_diff(
     match result {
         Ok(data) => {
             if json {
-                let mut envelope_warnings = Vec::new();
+                let mut messages = Vec::new();
                 let next_actions = if data.truncated {
-                    envelope_warnings.push(
-                        "DIFF_TRUNCATED: the emitted diff is partial (byte cap) — the \
-                         FETCH_FULL_DIFF next action re-runs it uncapped"
+                    messages.push(crate::message::failure(
+                        "DIFF_TRUNCATED",
+                        "This diff is cut short at a size limit. The next action on this response \
+                         re-runs it in full."
                             .to_owned(),
-                    );
+                    ));
                     vec![crate::actions::next_action(
                         topos_types::ActionCode::FetchFullDiff,
                         full_argv,
@@ -2171,7 +2275,8 @@ fn finish_diff(
                 };
                 let value = serde_json::to_value(&data).unwrap_or_default();
                 let mut envelope = render::ok_envelope(command, value);
-                envelope.warnings = envelope_warnings;
+                envelope.warnings = crate::message::legacy_lines(&messages);
+                envelope.messages = messages;
                 envelope.next_actions = next_actions;
                 println!("{}", render::to_json(&envelope));
             } else {
@@ -2201,19 +2306,23 @@ fn finish_log(
                     data.truncated,
                     vec!["topos".to_owned(), "log".to_owned(), skill.to_owned()],
                 );
-                let mut warnings = Vec::new();
+                let mut messages = Vec::new();
                 if data.truncated
                     && let Some(total) = data.total
                 {
-                    warnings.push(format!(
-                        "LOG_TRUNCATED: {} of {total} events shown — the NEXT_PAGE next action \
-                         pages on",
-                        data.events.len()
+                    messages.push(crate::message::failure(
+                        "LOG_TRUNCATED",
+                        format!(
+                            "Showing {} of {total} events. The next action on this response \
+                             fetches the rest.",
+                            data.events.len()
+                        ),
                     ));
                 }
                 let value = serde_json::to_value(&data).unwrap_or_default();
                 let mut envelope = render::ok_envelope(command, value);
-                envelope.warnings = warnings;
+                envelope.warnings = crate::message::legacy_lines(&messages);
+                envelope.messages = messages;
                 envelope.next_actions = next_actions;
                 println!("{}", render::to_json(&envelope));
             } else {
@@ -2506,18 +2615,19 @@ fn finish_review(
         Ok(ops::ReviewOutcome::Describe { data, next_argvs }) => {
             if json {
                 let mut next_actions = render::describe_next_actions(next_argvs.clone());
-                let mut warnings = Vec::new();
+                let mut messages = Vec::new();
                 // A byte-capped describe diff adds the full-fidelity escape: the SAME
                 // `current..<proposal>` diff through `topos diff`, uncapped — carrying the
                 // invocation's `--workspace` so an ambiguous name re-resolves identically.
                 if data.diff_truncated
                     && let Some((_, hash)) = data.proposal.rsplit_once('@')
                 {
-                    warnings.push(
-                        "DIFF_TRUNCATED: the describe's diff is partial (byte cap) — the \
-                         FETCH_FULL_DIFF next action re-runs it uncapped"
+                    messages.push(crate::message::failure(
+                        "DIFF_TRUNCATED",
+                        "The diff in this preview is cut short at a size limit. The next action \
+                         on this response re-runs it in full."
                             .to_owned(),
-                    );
+                    ));
                     let mut argv = vec![
                         "topos".to_owned(),
                         "diff".to_owned(),
@@ -2537,7 +2647,8 @@ fn finish_review(
                 }
                 let value = serde_json::json!({ "describe": data });
                 let mut envelope = render::ok_envelope(command, value);
-                envelope.warnings = warnings;
+                envelope.warnings = crate::message::legacy_lines(&messages);
+                envelope.messages = messages;
                 envelope.next_actions = next_actions;
                 println!("{}", render::to_json(&envelope));
             } else {
@@ -3520,13 +3631,14 @@ mod tests {
             behind_elsewhere: Vec::new(),
             scope: Some("machine".to_owned()),
         };
-        let outcome = |decisions: Vec<crate::ops::PendingDecision>, warnings: Vec<String>| {
+        let outcome = |decisions: Vec<crate::ops::PendingDecision>,
+                       warnings: Vec<topos_types::Message>| {
             Ok(ops::PullOutcome {
                 // One failed BUNDLE per fault line, keyed the way the sweep keys them:
                 // `(scope label, bundle identity)`. The fixture's faults are all one scope's.
                 failed_bundles: warnings
                     .iter()
-                    .map(|w| ("person".to_owned(), w.clone()))
+                    .map(|w| ("person".to_owned(), w.text.clone()))
                     .collect(),
                 data: empty(),
                 warnings,
@@ -3583,7 +3695,10 @@ mod tests {
                 "update",
                 outcome(
                     Vec::new(),
-                    vec!["IO_ERROR deploy: the store is unreadable".to_owned()]
+                    vec![crate::message::failure(
+                        "IO_ERROR",
+                        "deploy: the store is unreadable.".to_owned()
+                    )]
                 ),
                 true,
                 &diag
@@ -3596,7 +3711,10 @@ mod tests {
                 "update",
                 outcome(
                     vec![decision],
-                    vec!["IO_ERROR deploy: the store is unreadable".to_owned()]
+                    vec![crate::message::failure(
+                        "IO_ERROR",
+                        "deploy: the store is unreadable.".to_owned()
+                    )]
                 ),
                 true,
                 &diag

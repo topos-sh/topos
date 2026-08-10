@@ -585,7 +585,7 @@ fn converge_explicit_mcp(
     };
     let (mut states, warnings) = crate::mcp_engine::converge_bundle_now(ctx, &sid, name);
     for w in warnings {
-        eprintln!("topos update: {w}");
+        eprintln!("topos update: {}", w.text);
     }
     prettify_state_files(ctx, &mut states);
     states
@@ -753,7 +753,7 @@ pub(crate) fn go_back(
         let sid = crate::id::SkillId::parse(skill_id)?;
         let (mut states, warnings) = crate::mcp_engine::converge_bundle_now(ctx, &sid, &name);
         for w in warnings {
-            eprintln!("topos update: {w}");
+            eprintln!("topos update: {}", w.text);
         }
         prettify_state_files(ctx, &mut states);
         states

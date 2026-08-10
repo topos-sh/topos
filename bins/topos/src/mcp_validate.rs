@@ -479,7 +479,7 @@ fn declares_variables(v: Option<&Value>) -> bool {
 /// The one sentence both tiers say when an endpoint is spelled in a way they would read
 /// differently — same words, same code, either side of the wire.
 const AMBIGUOUS_ENDPOINT_MESSAGE: &str = concat!(
-    "the endpoint is not a plain address — a shared endpoint spells scheme://host, ",
+    "its endpoint is not a plain address — a shared endpoint spells scheme://host, ",
     "with no backslash, tab or line break anywhere in it"
 );
 
@@ -518,7 +518,7 @@ fn check_remote(remote: &Value) -> Result<Vec<McpHeader>, McpRefusal> {
         if url.contains('{') || url.contains('}') {
             return refuse(
                 McpRefusalCode::UrlTemplate,
-                "the endpoint carries a {placeholder} — it is a template, not an address every \
+                "its endpoint carries a {placeholder} — that is a template, not an address every \
                  machine can use",
             );
         }
@@ -530,20 +530,20 @@ fn check_remote(remote: &Value) -> Result<Vec<McpHeader>, McpRefusal> {
         }
         match parse_endpoint_url(url) {
             EndpointUrl::Invalid => {
-                return refuse(McpRefusalCode::Invalid, "the endpoint is not a URL");
+                return refuse(McpRefusalCode::Invalid, "its endpoint is not a URL");
             }
             // userinfo in the address IS a credential — refused before the scheme is even judged,
             // so an http URL carrying one still names the real problem.
             EndpointUrl::Userinfo => {
                 return refuse(
                     McpRefusalCode::SecretRefused,
-                    "the endpoint URL carries credentials (user:password@) — a shared bundle \
-                     never holds one",
+                    "its endpoint carries credentials (user:password@) — a shared bundle never \
+                     holds one",
                 );
             }
             EndpointUrl::Scheme(scheme) if scheme == "https" => {}
             EndpointUrl::Scheme(_) => {
-                return refuse(McpRefusalCode::InsecureUrl, "the endpoint must be https");
+                return refuse(McpRefusalCode::InsecureUrl, "its endpoint must be https");
             }
         }
     }
@@ -553,8 +553,8 @@ fn check_remote(remote: &Value) -> Result<Vec<McpHeader>, McpRefusal> {
     if has_entries(remote.get("variables")) {
         return refuse(
             McpRefusalCode::SecretRefused,
-            "the endpoint declares per-installation variables — a shared bundle carries the same \
-             bytes everywhere",
+            "its endpoint declares per-installation variables — a shared bundle is the same on \
+             every machine",
         );
     }
 
@@ -566,7 +566,7 @@ fn check_remote(remote: &Value) -> Result<Vec<McpHeader>, McpRefusal> {
                 .and_then(Value::as_str)
                 .unwrap_or_default();
             if hname.is_empty() {
-                return refuse(McpRefusalCode::Invalid, "every header needs a name");
+                return refuse(McpRefusalCode::Invalid, "one of its headers has no name");
             }
             // A credential-bearing header NAME refuses whatever the value or the flags say —
             // before isSecret, before the value shape, independent of entropy.
@@ -574,7 +574,7 @@ fn check_remote(remote: &Value) -> Result<Vec<McpHeader>, McpRefusal> {
                 return refuse(
                     McpRefusalCode::SecretRefused,
                     format!(
-                        "the header {hname} carries a credential by definition — a shared bundle \
+                        "its {hname} header carries a credential by definition — a shared bundle \
                          never holds one"
                     ),
                 );
@@ -583,7 +583,7 @@ fn check_remote(remote: &Value) -> Result<Vec<McpHeader>, McpRefusal> {
                 return refuse(
                     McpRefusalCode::SecretRefused,
                     format!(
-                        "the header {hname} is declared secret — a shared bundle never carries a \
+                        "its {hname} header is declared secret — a shared bundle never carries a \
                          credential"
                     ),
                 );
@@ -591,7 +591,7 @@ fn check_remote(remote: &Value) -> Result<Vec<McpHeader>, McpRefusal> {
             if declares_variables(entry.get("variables")) {
                 return refuse(
                     McpRefusalCode::SecretRefused,
-                    format!("the header {hname} is assembled from per-installation variables"),
+                    format!("its {hname} header is assembled from per-installation variables"),
                 );
             }
             // A header with no literal value is a slot somebody fills in on each machine — the
@@ -604,7 +604,7 @@ fn check_remote(remote: &Value) -> Result<Vec<McpHeader>, McpRefusal> {
                 return refuse(
                     McpRefusalCode::SecretRefused,
                     format!(
-                        "the header {hname} has no value — it is a slot for a per-machine \
+                        "its {hname} header has no value — that is a slot for a per-machine \
                          credential"
                     ),
                 );
@@ -617,8 +617,8 @@ fn check_remote(remote: &Value) -> Result<Vec<McpHeader>, McpRefusal> {
                 return refuse(
                     McpRefusalCode::UrlTemplate,
                     format!(
-                        "the header {hname} carries a {{placeholder}} — it is a template, not a \
-                         value every machine can send"
+                        "its {hname} header carries a {{placeholder}} — that is a template, not \
+                         a value every machine can send"
                     ),
                 );
             }
@@ -640,15 +640,18 @@ pub(crate) fn validate_server_json(raw: &[u8]) -> Result<McpSummary, McpRefusal>
     // STRICT decode: an invalid byte refuses outright — a lossy replacement char could both hide
     // what the bytes spelled and let an unreadable document parse as if it were readable.
     let Ok(text) = std::str::from_utf8(raw) else {
-        return refuse(McpRefusalCode::Invalid, "the document is not valid UTF-8");
+        return refuse(
+            McpRefusalCode::Invalid,
+            "its server.json is not valid UTF-8",
+        );
     };
     if text.is_empty() {
-        return refuse(McpRefusalCode::Invalid, "the document is empty");
+        return refuse(McpRefusalCode::Invalid, "its server.json is empty");
     }
     let Ok(parsed) = serde_json::from_str::<Value>(text) else {
         return refuse(
             McpRefusalCode::Invalid,
-            "that is not JSON — a server.json document is a JSON object",
+            "its server.json is not JSON — a server.json is a JSON object",
         );
     };
 
@@ -659,7 +662,7 @@ pub(crate) fn validate_server_json(raw: &[u8]) -> Result<McpSummary, McpRefusal>
         return refuse(
             McpRefusalCode::SecretRefused,
             format!(
-                "the document carries what looks like a credential ({kind}) — a shared bundle \
+                "its server.json carries what looks like a credential ({kind}) — a shared bundle \
                  never holds one"
             ),
         );
@@ -668,7 +671,7 @@ pub(crate) fn validate_server_json(raw: &[u8]) -> Result<McpSummary, McpRefusal>
     let Some(root) = parsed.as_object() else {
         return refuse(
             McpRefusalCode::Invalid,
-            "a server.json document is a JSON object",
+            "its server.json is not a JSON object",
         );
     };
 
@@ -676,13 +679,13 @@ pub(crate) fn validate_server_json(raw: &[u8]) -> Result<McpSummary, McpRefusal>
     if name.chars().count() < NAME_MIN || name.chars().count() > NAME_MAX {
         return refuse(
             McpRefusalCode::Invalid,
-            format!("name is required, {NAME_MIN}–{NAME_MAX} characters"),
+            format!("its server.json needs a name, {NAME_MIN}–{NAME_MAX} characters"),
         );
     }
     if !is_registry_name(name) {
         return refuse(
             McpRefusalCode::Invalid,
-            "name must be a reverse-DNS namespace and a server name with exactly one slash \
+            "its name must be a reverse-DNS namespace and a server name with exactly one slash \
              between them",
         );
     }
@@ -693,7 +696,7 @@ pub(crate) fn validate_server_json(raw: &[u8]) -> Result<McpSummary, McpRefusal>
     if description.is_empty() || description.chars().count() > DESCRIPTION_MAX {
         return refuse(
             McpRefusalCode::Invalid,
-            format!("description is required, 1–{DESCRIPTION_MAX} characters"),
+            format!("its server.json needs a description, 1–{DESCRIPTION_MAX} characters"),
         );
     }
     let version = root
@@ -701,7 +704,7 @@ pub(crate) fn validate_server_json(raw: &[u8]) -> Result<McpSummary, McpRefusal>
         .and_then(Value::as_str)
         .unwrap_or_default();
     if version.is_empty() || version.chars().count() > VERSION_MAX {
-        return refuse(McpRefusalCode::Invalid, "version is required");
+        return refuse(McpRefusalCode::Invalid, "its server.json needs a version");
     }
 
     // A non-empty packages[] is the registry's way of saying "install and run this locally". That
@@ -714,7 +717,8 @@ pub(crate) fn validate_server_json(raw: &[u8]) -> Result<McpSummary, McpRefusal>
     {
         return refuse(
             McpRefusalCode::LocalRefused,
-            "this server installs and runs locally (packages[]) — Topos shares remote servers",
+            "this server installs and runs locally (it lists packages) — topos shares remote \
+             servers",
         );
     }
 
@@ -732,7 +736,8 @@ pub(crate) fn validate_server_json(raw: &[u8]) -> Result<McpSummary, McpRefusal>
     let Some(placed) = placed else {
         return refuse(
             McpRefusalCode::NoStreamableRemote,
-            "no streamable-http remote — Topos places servers an agent reaches over that transport",
+            "it declares no streamable-http remote — topos places servers an agent reaches over \
+             that transport",
         );
     };
 
@@ -877,7 +882,7 @@ pub(crate) fn validate_candidate_files(files: &[(&str, &[u8])]) -> Result<McpSum
     let Some((_, server)) = files.iter().find(|(path, _)| *path == "server.json") else {
         return refuse(
             McpRefusalCode::Invalid,
-            "an MCP bundle carries server.json at its root — this candidate has none",
+            "an MCP bundle carries server.json at its root, and this one has none",
         );
     };
     for (path, _) in files {
@@ -885,7 +890,7 @@ pub(crate) fn validate_candidate_files(files: &[(&str, &[u8])]) -> Result<McpSum
             return refuse(
                 McpRefusalCode::Invalid,
                 format!(
-                    "an MCP bundle may hold only {} — {path} is not part of one",
+                    "an MCP bundle may hold only {}, and {path} is not one of those",
                     MCP_ALLOWED_FILES.join(", ")
                 ),
             );
@@ -894,7 +899,7 @@ pub(crate) fn validate_candidate_files(files: &[(&str, &[u8])]) -> Result<McpSum
     if server.len() > MAX_SERVER_JSON_BYTES {
         return refuse(
             McpRefusalCode::Invalid,
-            "server.json is too large to be a server document",
+            "its server.json is too large to be a server document",
         );
     }
     // Every sibling's bytes run the credential scan (the document runs its own, twice over,

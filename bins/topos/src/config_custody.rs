@@ -602,7 +602,7 @@ impl ScopeEntries {
     /// retried into a half state; the returned lines are the caller's warnings.
     ///
     /// [`journaled_write`]: crate::mcp_engine
-    pub(crate) fn flush(&mut self, fs: &dyn FsOps, layout: &Layout) -> Vec<String> {
+    pub(crate) fn flush(&mut self, fs: &dyn FsOps, layout: &Layout) -> Vec<topos_types::Message> {
         let mut warnings = Vec::new();
         let dirty = std::mem::take(&mut self.dirty);
         let promoted = std::mem::take(&mut self.promoted);
@@ -617,9 +617,13 @@ impl ScopeEntries {
                 self.doc_dirty = true;
                 continue;
             };
-            warnings.push(format!(
-                "MCP_CUSTODY_WRITE_FAILED {bundle_id}: {}",
-                e.detail()
+            warnings.push(crate::message::failure(
+                "MCP_CUSTODY_WRITE_FAILED",
+                format!(
+                    "{bundle_id}: topos could not save its record of this bundle's MCP entries \
+                     ({}). The next 'topos update' finishes it.",
+                    e.detail()
+                ),
             ));
             // The rows never reached this bundle's document — so the intents that produced them
             // are still outstanding work. Back into the journal they go, and the scope document
@@ -634,7 +638,14 @@ impl ScopeEntries {
         if self.doc_dirty
             && let Err(e) = write(fs, layout, &self.doc)
         {
-            warnings.push(format!("MCP_CUSTODY_WRITE_FAILED: {}", e.detail()));
+            warnings.push(crate::message::failure(
+                "MCP_CUSTODY_WRITE_FAILED",
+                format!(
+                    "topos could not save its record of which MCP config entries it owns ({}). \
+                     The next 'topos update' finishes it.",
+                    e.detail()
+                ),
+            ));
         }
         self.doc_dirty = false;
         warnings

@@ -82,7 +82,7 @@ pub fn apply(
         );
     }
     let Ok(text) = std::str::from_utf8(current.unwrap_or_default()) else {
-        return unprovable("Hermes config is not UTF-8");
+        return unprovable("the Hermes config is not UTF-8");
     };
     let shape = match analyze(text) {
         Ok(shape) => shape,
@@ -111,7 +111,7 @@ pub fn apply(
                 }
                 if found.contains_key(key) {
                     return unprovable(format!(
-                        "duplicate `{key}` under mcp_servers (a sentinel line and a plain one)"
+                        "the Hermes config lists `{key}` twice under mcp_servers"
                     ));
                 }
                 found.insert(key.clone(), FoundEntry::OpaqueForeign);

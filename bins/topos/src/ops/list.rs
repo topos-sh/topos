@@ -88,7 +88,7 @@ pub(crate) struct ListRequest {
 #[derive(Debug)]
 pub(crate) struct ListOutcome {
     pub data: ListData,
-    pub warnings: Vec<String>,
+    pub warnings: Vec<topos_types::Message>,
     /// TTY-only: this run was `--untracked`, so the tracked scopes render as one summary line
     /// each (the wire carries them in full either way).
     pub untracked_view: bool,
@@ -119,7 +119,7 @@ pub(crate) fn list_with(
     let (all, cache) = inventory::read_sources(ctx)?;
     let signed_in = all.live().count() > 0;
     let resolved = inventory::resolve(ctx, &all, &cache)?;
-    let mut warnings: Vec<String> = Vec::new();
+    let mut warnings: Vec<topos_types::Message> = Vec::new();
     let mut data = ListData {
         signed_in,
         ..ListData::default()
@@ -917,7 +917,7 @@ fn remote_view(
     all: &crate::sessions::Sessions,
     only: Option<&str>,
     connect: SessionDirectory<'_>,
-    warnings: &mut Vec<String>,
+    warnings: &mut Vec<topos_types::Message>,
 ) -> Result<Vec<RemoteWorkspace>, ClientError> {
     let live: Vec<&Session> = all.live().collect();
     if live.is_empty() {
@@ -983,15 +983,22 @@ fn remote_view(
 }
 
 /// A short, leak-free line for one skipped `--remote` workspace.
-fn remote_skip_line(s: &Session, e: &ClientError) -> String {
-    let label = match e {
-        ClientError::TargetNotFound { .. } => "not visible to you",
-        _ => "the server did not answer",
+fn remote_skip_line(s: &Session, e: &ClientError) -> topos_types::Message {
+    // The two arms are not the same news, so they do not carry the same remedy: one is a
+    // permission fact whose fix is a person, the other a transport fault whose fix is a retry.
+    let text = match e {
+        ClientError::TargetNotFound { .. } => format!(
+            "{}: this workspace's bundles are not visible to you, so this listing skips it. Ask a \
+             workspace owner for access.",
+            s.workspace_name
+        ),
+        _ => format!(
+            "{}: the server did not answer, so this listing skips it. Run the command again to \
+             retry.",
+            s.workspace_name
+        ),
     };
-    format!(
-        "could not read the catalog for workspace {} ({label}) — skipped",
-        s.workspace_name
-    )
+    crate::message::uncoded_failure(text)
 }
 
 /// The manifest file whose channel row adopts `<host>/<ws>/channels/<name>` here, when one does.
@@ -3421,11 +3428,13 @@ mod tests {
         .unwrap();
         assert!(out.data.remote.is_empty());
         assert_eq!(out.warnings.len(), 1);
+        let line = &out.warnings[0];
         assert!(
-            out.warnings[0].contains("workspace acme") && out.warnings[0].contains("skipped"),
-            "{}",
-            out.warnings[0]
+            line.text.starts_with("acme:") && line.text.contains("skips it"),
+            "{line:?}"
         );
+        // A skipped workspace has no code of its own — the producer never had one.
+        assert!(line.code.is_none(), "{line:?}");
     }
 
     /// The page reaches the rows a nested view actually holds. `--remote` used to page the

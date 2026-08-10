@@ -686,7 +686,7 @@ fn recover_park_journal(
     fs: &dyn FsOps,
     layout: &Layout,
     now_millis: i64,
-    warnings: &mut Vec<String>,
+    warnings: &mut Vec<topos_types::Message>,
 ) -> Result<(), ClientError> {
     let _guard = fs.lock_exclusive(&layout.park_journal_lock_file())?;
     let path = layout.park_journal_path();
@@ -721,10 +721,13 @@ fn recover_park_journal(
         }
         // The untrusted-journal gate — refuse before the first rename, move nothing, disclose.
         if let Some(reason) = journal_entry_inadmissible(layout, &park, &original) {
-            warnings.push(format!(
-                "PARK_JOURNAL_REFUSED {}: {reason} — the entry was ignored and nothing was moved \
-                 (bytes at that path, if any, stay exactly where they are)",
-                entry.park
+            warnings.push(crate::message::failure(
+                "PARK_JOURNAL_REFUSED",
+                format!(
+                    "{}: {reason}. topos ignored the entry and moved nothing — the files at that \
+                     path, if any, stay exactly where they are.",
+                    entry.park
+                ),
             ));
             let _ = crate::logfile::append_event(
                 fs,
@@ -911,7 +914,7 @@ pub(crate) fn recover(
     fs: &dyn FsOps,
     layout: &Layout,
     now_millis: i64,
-    warnings: &mut Vec<String>,
+    warnings: &mut Vec<topos_types::Message>,
 ) -> Result<(), ClientError> {
     crate::logfile::repair_torn_tail(fs, &layout.log_path())?;
     crate::enroll::sweep_expired_wal(fs, layout, now_millis)?;
@@ -1019,7 +1022,7 @@ fn recover_published(
     layout: &Layout,
     id: &SkillId,
     skill_dir: &Path,
-    warnings: &mut Vec<String>,
+    warnings: &mut Vec<topos_types::Message>,
 ) -> Result<(), ClientError> {
     // Claim the id; a held lock means a concurrent writer is mid-publish — leave it.
     let Some(_guard) = fs.try_lock_exclusive(&layout.lock_file(id))? else {
@@ -1044,11 +1047,14 @@ fn recover_published(
         // doc read's call below (fail-closed there too).
         Some(crate::fs_seam::PathKind::Other) => {}
         Some(crate::fs_seam::PathKind::Symlink) | Some(crate::fs_seam::PathKind::Dir) => {
-            warnings.push(format!(
-                "SIDECAR_LOCK_UNREADABLE {}: lock.json is not a regular file — nothing was \
-                 deleted (the sidecar, its history, and any draft snapshots stay whole); \
-                 inspect it by hand",
-                skill_dir.display()
+            warnings.push(crate::message::failure(
+                "SIDECAR_LOCK_UNREADABLE",
+                format!(
+                    "{}: lock.json is not a regular file, so topos deleted nothing — topos's \
+                     record of this bundle, its history, and any draft snapshots stay whole. \
+                     Inspect that file by hand.",
+                    skill_dir.display()
+                ),
             ));
             let _ = crate::logfile::append_event(
                 fs,
@@ -1660,7 +1666,7 @@ mod tests {
         assert_eq!(
             warnings
                 .iter()
-                .filter(|w| w.starts_with("PARK_JOURNAL_REFUSED"))
+                .filter(|w| w.code.as_deref() == Some("PARK_JOURNAL_REFUSED"))
                 .count(),
             5,
             "{warnings:?}"
@@ -1913,7 +1919,7 @@ mod tests {
         assert!(
             warnings
                 .iter()
-                .any(|w| w.starts_with("SIDECAR_LOCK_UNREADABLE")),
+                .any(|w| w.code.as_deref() == Some("SIDECAR_LOCK_UNREADABLE")),
             "disclosed: {warnings:?}"
         );
         let log = std::fs::read_to_string(layout.log_path()).unwrap();

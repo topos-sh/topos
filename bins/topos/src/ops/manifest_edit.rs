@@ -3149,9 +3149,11 @@ fn converge_removed_mcp(
                 .map_or_else(|| "its config".to_owned(), |f| pretty_path(ctx, f));
             match removed.state.state {
                 topos_types::results::TargetOutcome::Drifted => {
-                    kept.push(format!("{file}: hand-edited entry left in place"));
+                    kept.push(format!(
+                        "{file}: the entry you edited by hand is left in place."
+                    ));
                 }
-                _ => lines.push(format!("{file}: server entry removed")),
+                _ => lines.push(format!("{file}: the server's entry was removed.")),
             }
         }
         let mut lines = {
@@ -3159,7 +3161,7 @@ fn converge_removed_mcp(
             kept
         };
         for w in outcome.notices.iter().chain(&outcome.warnings) {
-            lines.push(w.clone());
+            lines.push(w.text.clone());
         }
         if lines.is_empty() {
             continue;

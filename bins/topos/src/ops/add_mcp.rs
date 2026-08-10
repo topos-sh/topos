@@ -333,8 +333,8 @@ fn converge_one(
         lines.extend(states.iter().map(agent_line));
     }
     resolved.dedup();
-    lines.extend(outcome.notices.iter().cloned());
-    lines.extend(outcome.warnings.iter().cloned());
+    lines.extend(outcome.notices.iter().map(|n| n.text.clone()));
+    lines.extend(outcome.warnings.iter().map(|w| w.text.clone()));
     (lines, resolved)
 }
 

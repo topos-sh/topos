@@ -138,6 +138,24 @@ pub(crate) fn dest_names_no_mcp_file(unknown: &[String], scope: ManifestScope) -
     )
 }
 
+/// The same fact as [`dest_names_no_mcp_file`], said to the person whose file carries the array —
+/// so it names the file the entries live in and both ways out. The sweep's warning uses this one;
+/// the receipt-row clause above stays the bare statement of what the row is frozen to.
+pub(crate) fn dest_names_no_mcp_file_remedy(unknown: &[String], scope: ManifestScope) -> String {
+    let (noun, verb) = if unknown.len() == 1 {
+        ("dest entry", "is")
+    } else {
+        ("dest entries", "are")
+    };
+    format!(
+        "the {noun} {} in your topos.toml {verb} not a known MCP config file. The known files \
+         here are {} — use one of those, or drop dest so the bundle reaches every MCP-capable \
+         agent.",
+        quoted_list(unknown),
+        known_mcp_files(scope).join(", ")
+    )
+}
+
 /// Which MCP-capable harness a dest entry's config file belongs to at `scope` — matched against
 /// the descriptor's DEFAULT spelling, and against the resolved env-override path (a moved
 /// `$CODEX_HOME` still names a known file). `None` when no harness claims the file.

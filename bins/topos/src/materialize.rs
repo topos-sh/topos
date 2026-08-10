@@ -2418,8 +2418,15 @@ mod tests {
         let mut r = req("topos_esc", &[0], &bundle, &prior, &lock, &sync, &d.sp);
         r.project_root = Some(&proj.0);
         let err = materialize(&RealFs, &r).unwrap_err();
+        // The refusal states the fact; the CODE rides the message channel, never another
+        // error's prose.
         assert!(
-            err.to_string().contains("PLACEMENT_ESCAPES_PROJECT"),
+            err.to_string()
+                .contains("does not resolve inside this checkout (the placement)"),
+            "{err}"
+        );
+        assert!(
+            !err.to_string().contains("PLACEMENT_ESCAPES_PROJECT"),
             "{err}"
         );
         assert!(

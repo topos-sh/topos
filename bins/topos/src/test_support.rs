@@ -404,11 +404,13 @@ impl SessionInstall {
                 },
             )
             // The lines a sweep emits, merged exactly as the `--json` envelope merges them:
-            // failures first, then the disclosures (a settled-draft fan-out, a version split).
+            // failures first, then the disclosures (a settled-draft fan-out, a version split) —
+            // and rendered through the SAME legacy derivation the envelope's `warnings` array
+            // uses, so a composed fixture reads exactly what a consumer of that array reads.
             .map(|out| {
-                let mut lines = out.warnings;
-                lines.extend(out.disclosures);
-                (out.data, lines)
+                let mut messages = out.warnings;
+                messages.extend(out.disclosures);
+                (out.data, crate::message::legacy_lines(&messages))
             })
             .map_err(err_str)
         })
