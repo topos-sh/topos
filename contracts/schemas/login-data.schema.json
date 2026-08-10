@@ -89,7 +89,7 @@
       "description": "The breadth arming sweep's outcomes (one row per other detected agent).",
       "type": "array",
       "items": {
-        "$ref": "#/$defs/BreadthTriggerReport"
+        "$ref": "#/$defs/TriggerReport"
       }
     },
     "undo": {
@@ -116,45 +116,6 @@
     "session_status"
   ],
   "$defs": {
-    "BreadthTriggerReport": {
-      "description": "One breadth-sweep trigger outcome for a DETECTED registry agent (beyond the active adapter's\nown [`crate::TriggerReport`]). `agent` is the registry slug; the state/kind pair follows the\nsame honesty rule everywhere: only `active` carries a live kind, everything else advertises\nthe explicit-pull floor. **Additive.**",
-      "type": "object",
-      "properties": {
-        "agent": {
-          "description": "The registry slug (e.g. `cursor`, `opencode`).",
-          "type": "string"
-        },
-        "currency_kind": {
-          "$ref": "#/$defs/CurrencyKind"
-        },
-        "marker_id": {
-          "type": "string"
-        },
-        "note": {
-          "description": "The consent step still owed, or the evidence-level caveat — `None` when nothing needs saying.",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "state": {
-          "$ref": "#/$defs/TriggerState"
-        },
-        "touched_path": {
-          "description": "The config file the (un)install edited, when it edited one.",
-          "type": [
-            "string",
-            "null"
-          ]
-        }
-      },
-      "required": [
-        "agent",
-        "currency_kind",
-        "state",
-        "marker_id"
-      ]
-    },
     "CurrencyKind": {
       "description": "What fires the update check for a harness — drives HONEST receipt copy (\"current by next session\",\n\"within about a minute\", …). `ExplicitPullOnly` is the honest-degrade floor.",
       "oneOf": [
@@ -209,27 +170,28 @@
         "user_code"
       ]
     },
-    "HarnessId": {
-      "type": "string",
-      "enum": [
-        "claude-code",
-        "openclaw",
-        "hermes"
-      ]
-    },
     "TriggerReport": {
-      "description": "The result of installing a auto-update trigger — what was touched + the marker, so re-install is\nidempotent (the marker is a managed sentinel block in the config edit, NEVER in skill bytes).",
+      "description": "The result of (un)installing ONE agent's auto-update trigger — what was touched + the marker, so\nre-install is idempotent (the marker is a managed sentinel block in the config edit, NEVER in skill\nbytes). The one shape every trigger reports in, whichever machinery served it.",
       "type": "object",
       "properties": {
+        "agent": {
+          "description": "The agent's registry slug (`claude-code`, `cursor`, `hermes-agent`).",
+          "type": "string"
+        },
         "currency_kind": {
+          "description": "Only an `active` state carries a live kind; every other state advertises the explicit-pull floor.",
           "$ref": "#/$defs/CurrencyKind"
         },
-        "harness": {
-          "$ref": "#/$defs/HarnessId"
-        },
         "marker_id": {
-          "description": "`topos` + harness id + schema version + command identity.",
+          "description": "`topos` + agent slug + schema version + command identity.",
           "type": "string"
+        },
+        "note": {
+          "description": "The consent step still owed, or the evidence-level caveat — `None` when nothing needs saying.",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "state": {
           "$ref": "#/$defs/TriggerState"
@@ -243,7 +205,7 @@
         }
       },
       "required": [
-        "harness",
+        "agent",
         "currency_kind",
         "marker_id",
         "state"

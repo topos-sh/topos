@@ -50,10 +50,11 @@
 //! (bytes in → an [`EditPlan`] out); the crash-safe write is delegated to the injected
 //! [`ConfigStore`], exactly like the Claude Code reference.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use topos_types::{CurrencyKind, HarnessId, TriggerReport, TriggerState};
 
+use crate::registry;
 use crate::{ConfigStore, DiscoveredPlacement, HarnessAdapter, PlacementNaming, PlacementTarget};
 
 /// Hermes's user config file, under the resolved home. (Probed: `~/.hermes/config.yaml`; its
@@ -169,17 +170,12 @@ impl<'a> Hermes<'a> {
         }
     }
 
-    /// Resolve Hermes's home exactly as Hermes does: `$HERMES_HOME` if set, else `$HOME/.hermes`
-    /// (falling back to `./.hermes` if `$HOME` is unset).
+    /// Resolve Hermes's home exactly as Hermes does — `$HERMES_HOME` if set, else `$HOME/.hermes` —
+    /// through the registry's ONE resolver, so this and the detection probe can never disagree about
+    /// where the harness lives.
     #[must_use]
     pub fn resolve_home() -> PathBuf {
-        if let Some(dir) = std::env::var_os("HERMES_HOME") {
-            return PathBuf::from(dir);
-        }
-        std::env::var_os("HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join(".hermes")
+        registry::config_root(registry::Root::HermesHome, &registry::real_home())
     }
 
     /// Whether `HERMES_ACCEPT_HOOKS` is set truthy, using Hermes's own truthiness set
@@ -240,21 +236,18 @@ impl<'a> Hermes<'a> {
         }
     }
 
-    /// Build the report. The trigger kind rides the state honestly: only a confirmably-live
-    /// trigger claims `SessionStart`; every other state degrades plainly to the explicit-pull
-    /// floor.
+    /// Build the report through the crate's ONE constructor, so the honest kind rule (only a
+    /// confirmably-live trigger claims `SessionStart`; every other state degrades to the
+    /// explicit-pull floor) is the same rule every harness reports under.
     fn report(&self, state: TriggerState, touched: bool) -> TriggerReport {
-        TriggerReport {
-            harness: HarnessId::Hermes,
-            currency_kind: if state == TriggerState::Active {
-                CurrencyKind::SessionStart
-            } else {
-                CurrencyKind::ExplicitPullOnly
-            },
-            touched_path: touched.then(|| self.config_path().to_string_lossy().into_owned()),
-            marker_id: MARKER_ID.to_owned(),
+        crate::trigger_report(
+            HarnessId::Hermes.slug(),
+            CurrencyKind::SessionStart,
             state,
-        }
+            touched.then(|| self.config_path().to_string_lossy().into_owned()),
+            MARKER_ID,
+            None,
+        )
     }
 
     /// Whether a managed auto-update entry is currently present (drives `--footprint` disclosure).
@@ -271,49 +264,21 @@ impl<'a> Hermes<'a> {
     }
 }
 
-/// The non-dot, UTF-8-named child directories of `dir` (following symlinks — a symlinked skill dir
-/// is valid). Absent or unreadable → empty, never an error. Dot-dirs are never skills (incl. the
-/// materializer's transient `.topos-staging-*` siblings during the sub-second swap window).
-fn child_dirs(dir: &Path) -> Vec<(String, PathBuf)> {
-    let mut out = Vec::new();
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return out;
-    };
-    for entry in entries.flatten() {
-        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
-            continue;
-        };
-        if name.starts_with('.') {
-            continue;
-        }
-        let path = entry.path();
-        if path.is_dir() {
-            out.push((name, path));
-        }
-    }
-    out
-}
-
-/// SKILL.md's *existence* confirms skill-ness — never the frontmatter (all-optional, never parsed
-/// here), so a malformed SKILL.md cannot mislead.
-fn is_skill_dir(path: &Path) -> bool {
-    path.join("SKILL.md").is_file()
-}
-
 impl HarnessAdapter for Hermes<'_> {
     fn id(&self) -> HarnessId {
         HarnessId::Hermes
     }
 
-    /// Walk `<home>/skills/` in Hermes's own mixed-depth shape (probed): a dir with a root
-    /// `SKILL.md` is a skill wherever it sits — `skills/<name>/` (uncategorized, `layer: None`)
+    /// Walk `<home>/skills/` in Hermes's own mixed-depth shape (probed), composing the registry's
+    /// shared probe halves ([`registry::child_dirs`] + [`registry::is_skill_dir`]) rather than
+    /// restating what a skill dir is: a dir with a root `SKILL.md` is a skill wherever it sits — `skills/<name>/` (uncategorized, `layer: None`)
     /// or `skills/<category>/<name>/` (`layer: Some(category)`). A level-1 skill dir is still
     /// descended (minus its support dirs) so a nested skill under it is not invisible. Deeper
     /// nesting is out of this probe's shape and left undiscovered.
     fn discover(&self) -> Vec<DiscoveredPlacement> {
         let mut out = Vec::new();
-        for (name, path) in child_dirs(&self.skills_dir()) {
-            let is_skill = is_skill_dir(&path);
+        for (name, path) in registry::child_dirs(&self.skills_dir()) {
+            let is_skill = registry::is_skill_dir(&path);
             if is_skill {
                 out.push(DiscoveredPlacement {
                     path: path.clone(),
@@ -322,11 +287,11 @@ impl HarnessAdapter for Hermes<'_> {
             }
             // Level 2: the children of a category dir — or of a level-1 skill dir, minus its
             // support dirs (which may hold archived SKILL.md files that must not surface).
-            for (child_name, child_path) in child_dirs(&path) {
+            for (child_name, child_path) in registry::child_dirs(&path) {
                 if is_skill && SKILL_SUPPORT_DIRS.contains(&child_name.as_str()) {
                     continue;
                 }
-                if is_skill_dir(&child_path) {
+                if registry::is_skill_dir(&child_path) {
                     out.push(DiscoveredPlacement {
                         path: child_path,
                         layer: Some(name.clone()),
@@ -886,6 +851,7 @@ mod tests {
     use super::*;
     use std::cell::RefCell;
     use std::collections::HashMap;
+    use std::path::Path;
     use std::sync::atomic::{AtomicU32, Ordering};
 
     /// An in-memory [`ConfigStore`] keyed by path (the adapter reads two files: the config and the
@@ -1021,7 +987,7 @@ personalities: {}
         let cfg = MemConfig::default(); // absent
         let report = adapter(&cfg).install_currency_trigger();
 
-        assert_eq!(report.harness, HarnessId::Hermes);
+        assert_eq!(report.agent, "hermes-agent");
         assert_eq!(report.marker_id, MARKER_ID);
         // No acceptance evidence: the entries are registered but honestly NOT active — the report
         // degrades to the explicit-pull floor, never a fake Active.

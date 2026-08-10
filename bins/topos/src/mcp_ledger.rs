@@ -316,17 +316,17 @@ pub(crate) fn placement_key(slug: &str, entry_key: &str) -> String {
 /// The engine's "which dialect does this slug's file speak in this scope" recovery lookup,
 /// derived from a descriptor slice (see [`McpLedger::recover_pending`]).
 pub(crate) fn dialect_lookup<'a>(
-    descriptors: &'a [topos_harness::mcp::McpHarness],
+    descriptors: &'a [&'static topos_harness::registry::KnownHarness],
     project: bool,
 ) -> impl Fn(&str) -> Option<topos_harness::mcp::McpDialect> + 'a {
     move |slug: &str| {
         let h = descriptors.iter().find(|h| h.slug == slug)?;
         if project {
-            h.project_surface.map(|(_, d)| d)
+            h.mcp().and_then(|m| m.project).map(|(_, d)| d)
         } else {
             // The intent journal records the driver surface FILE — for the plugin dir that is
             // its `.mcp.json`, which observes through the same dialect as every other surface.
-            h.user_surface.map(|s| s.dialect)
+            h.mcp().and_then(|m| m.user).map(|s| s.dialect)
         }
     }
 }

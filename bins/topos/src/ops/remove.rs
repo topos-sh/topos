@@ -318,7 +318,7 @@ fn retire_mcp_entries(ctx: &Ctx<'_>, skill_id: &str, item: &mut RemoveItem) {
     };
     let outcome = crate::mcp_engine::remove_bundle(
         &io,
-        topos_harness::mcp::descriptor::mcp_harnesses(),
+        &topos_harness::mcp::descriptor::mcp_harnesses(),
         &detected,
         skill_id,
     );

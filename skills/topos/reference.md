@@ -100,11 +100,11 @@ An MCP-server bundle arrives as an entry in the agent's own MCP config rather th
 | Agent | Machine config file | Project config file |
 |---|---|---|
 | `claude-code` | `~/.claude/skills/topos-mcp` | `.mcp.json` |
+| `openclaw` | `~/.openclaw/openclaw.json` | — |
 | `codex` | `~/.codex/config.toml` | `.codex/config.toml` |
 | `cursor` | `~/.cursor/mcp.json` | `.cursor/mcp.json` |
-| `opencode` | `~/.config/opencode/opencode.json` | `opencode.json` |
-| `openclaw` | `~/.openclaw/openclaw.json` | — |
 | `hermes-agent` | `~/.hermes/config.yaml` | — |
+| `opencode` | `~/.config/opencode/opencode.json` | `opencode.json` |
 
 ## Global options
 

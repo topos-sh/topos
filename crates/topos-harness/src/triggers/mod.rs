@@ -1,20 +1,25 @@
-//! `triggers` — breadth auto-update triggers: one [`TriggerAdapter`] per additional registry-slug
-//! harness, all running the ONE sweep (`topos update --quiet`, which self-throttles client-side,
-//! so session-shaped re-fires are cheap) in its SCHEMA-CONSERVATIVE form — no `--hook <harness>`
-//! marker, because none of these harnesses is proven to tolerate hook-output fields beyond
-//! `hookEventName` + `additionalContext` and one of them (codex) rejects them outright.
+//! `triggers` — auto-update triggers: ONE [`TriggerAdapter`] port covering every trigger-capable
+//! harness, all running the ONE sweep (`topos update --quiet`, which self-throttles client-side, so
+//! session-shaped re-fires are cheap). The sweep is SCHEMA-CONSERVATIVE unless a harness declares a
+//! hook dialect: an unmarked command answers with `hookEventName` + `additionalContext` only,
+//! because most harnesses are not proven to tolerate more and one of them (codex) rejects unknown
+//! hook-output fields outright.
 //!
-//! The three fully-adapted harnesses (Claude Code, OpenClaw, Hermes) keep their own
-//! [`HarnessAdapter`](crate::HarnessAdapter) reports; this module is the breadth surface — a
-//! trigger (un)install + health probe for nine more harnesses, keyed by their
-//! [`registry`](crate::registry) slugs. Two shared bases carry the machinery:
+//! [`adapter_for_slug`] is the ONE place a harness's trigger machinery is named, so the set of
+//! trigger-capable harnesses is a VIEW over the [`registry`](crate::registry) table — a caller arms
+//! or scrubs by iterating rows, never by carrying its own list. Three shared bases carry the
+//! machinery, plus the harnesses whose trigger rides their full
+//! [`HarnessAdapter`]:
 //!
 //! - `cc_hooks` — the JSON-config-merge family (Claude-Code-shaped hooks registered in a shared
-//!   strict-JSON config file): `gemini-cli`, `cursor`, `droid`.
+//!   strict-JSON config file): `claude-code` (whose spec lives with its adapter, and is the only one
+//!   declaring a hook dialect), `gemini-cli`, `cursor`, `droid`.
 //! - `file_drop` — one topos-owned file at a harness-defined path: `github-copilot`, `opencode`,
 //!   `goose`, `amp`, `cline`.
 //! - `codex` is special: its config is TOML, handled as a line-anchored merge mirroring the
 //!   Hermes YAML discipline — provable shapes only, fail-closed on everything else.
+//! - `openclaw` (its own scheduler) and `hermes-agent` (its own config edit) answer through their
+//!   adapters, wrapped so a caller never sees the difference.
 //!
 //! Every adapter here mirrors the big-three idiom: content-blind, an injected home (never the
 //! real `~`), durable writes through the [`ConfigStore`] port, sentinel/marker-keyed ownership,
@@ -22,18 +27,18 @@
 //! cannot prove. Honesty is structural: `Active` is claimed only on the per-instance evidence
 //! documented in each instance module; a registration whose harness gates hooks behind its own
 //! consent (and whose consent store is not readable evidence) reports `Inactive` with the
-//! [`CurrencyKind::ExplicitPullOnly`] floor and a note naming the consent step still owed. No
+//! [`topos_types::CurrencyKind::ExplicitPullOnly`] floor and a note naming the consent step still owed. No
 //! adapter ever WRITES another program's trust/consent state — at most it reads it, fail-closed,
 //! as evidence.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
-use topos_types::{CurrencyKind, TriggerState};
+use topos_types::TriggerReport;
 
-use crate::ConfigStore;
+use crate::{CommandRunner, ConfigStore, HarnessAdapter};
 
 mod amp;
-mod cc_hooks;
+pub(crate) mod cc_hooks;
 mod cline;
 mod codex;
 mod cursor;
@@ -142,72 +147,97 @@ fn opens_a_command(prefix: &str) -> bool {
     head.is_empty() || head.ends_with([';', '&', '|', '(', '{'])
 }
 
-/// One trigger (un)install outcome for a registry-slug harness. The big-three adapters keep
-/// their own [`HarnessAdapter`](crate::HarnessAdapter) `TriggerReport`s; this is the breadth
-/// surface's receipt.
-#[derive(Debug, Clone)]
-pub struct TriggerOutcome {
-    /// The registry slug (see [`registry`](crate::registry)).
-    pub slug: &'static str,
-    /// Honest trigger labeling: what fires when `state` is [`TriggerState::Active`]; the
-    /// [`CurrencyKind::ExplicitPullOnly`] floor on every other state.
-    pub kind: CurrencyKind,
-    pub state: TriggerState,
-    /// The file this call actually wrote (or unlinked) — `None` on a true no-op.
-    pub touched_path: Option<String>,
-    /// The structured marker identity (topos + slug + schema version).
-    pub marker_id: String,
-    /// A short human note carried to the receipt: the consent step still owed, or the evidence
-    /// level ("vendor docs, unverified") — `None` when nothing needs saying.
-    pub note: Option<String>,
-}
-
-/// The auto-update-trigger port for one registry-slug harness: idempotent (un)install of the one
-/// sweep trigger, plus a provable-presence health probe.
+/// The auto-update-trigger port for ONE registry-slug harness: idempotent (un)install of the one
+/// sweep trigger, plus a provable-presence health probe. Every harness with a trigger is reachable
+/// through this port — the config-merge and file-drop families here, and the harnesses whose trigger
+/// rides their full [`HarnessAdapter`] — so a caller arming a machine never
+/// needs to know which machinery serves which harness.
 pub trait TriggerAdapter {
     /// The registry slug this adapter serves.
     fn slug(&self) -> &'static str;
     /// Idempotently install the auto-update trigger — a rerun over an already-canonical artifact
     /// writes nothing; anything unprovable degrades with zero writes.
-    fn install(&self) -> TriggerOutcome;
+    fn install(&self) -> TriggerReport;
     /// Surgically remove OUR trigger artifact (sentinel/marker-confirmed only — a foreign
     /// artifact is never touched); idempotent.
-    fn remove(&self) -> TriggerOutcome;
+    fn remove(&self) -> TriggerReport;
     /// Provable presence of OUR trigger artifact right now (the health probe). Anything
     /// unprovable answers `false` — presence is never claimed on faith.
     fn present(&self) -> bool;
+    /// Why [`Self::present`] cannot be answered without running the harness, when it cannot — the
+    /// reason a read-only status reports "unknown" instead of probing. `None` (the default) means the
+    /// probe is an honest offline read: a trigger that lives in the filesystem is provable there.
+    fn offline_probe_refusal(&self) -> Option<&'static str> {
+        None
+    }
+    /// Whether removing this trigger must reach OUTSIDE the filesystem, into the harness's own
+    /// program. A filesystem artifact is scrubbed unconditionally — it can outlive the harness that
+    /// read it — while an out-of-process scrub is attempted only where the harness still looks
+    /// installed, so a machine that never had it is never probed. `false` (the default) is the
+    /// filesystem case.
+    fn scrub_needs_live_harness(&self) -> bool {
+        false
+    }
 }
 
-/// The registry slugs with trigger support here (registry-table order), for the integrator's
-/// arming sweep. Every other slug is placement-only — [`adapter_for_slug`] answers `None`.
-#[must_use]
-pub fn supported_slugs() -> &'static [&'static str] {
-    &[
-        "amp",
-        "cline",
-        "codex",
-        "cursor",
-        "droid",
-        "gemini-cli",
-        "github-copilot",
-        "goose",
-        "opencode",
-    ]
+/// A full [`HarnessAdapter`] seen through the trigger port. The harnesses topos ships a whole adapter
+/// for carry their trigger inside it (a config edit; a scheduler registration), and this is how they
+/// answer [`adapter_for_slug`] like any other harness — so a caller arming or scrubbing a machine
+/// iterates ONE list and never branches on which machinery a slug uses.
+struct AdapterTrigger<'a> {
+    slug: &'static str,
+    adapter: Box<dyn HarnessAdapter + 'a>,
+    offline_refusal: Option<&'static str>,
+    needs_live_harness: bool,
 }
 
-/// Construct the trigger adapter for a registry slug, over an injected home + the [`ConfigStore`]
-/// port. `home` is the USER home dir; each adapter resolves its own harness root under it,
-/// honoring the harness's env override (`$CODEX_HOME`, `$XDG_CONFIG_HOME`) the way the registry
-/// does. `None` = no trigger support for that slug (a placement-only harness). Tests construct
-/// the adapters over fully-injected roots instead, so no suite depends on the real environment.
+impl TriggerAdapter for AdapterTrigger<'_> {
+    fn slug(&self) -> &'static str {
+        self.slug
+    }
+    fn install(&self) -> TriggerReport {
+        self.adapter.install_currency_trigger()
+    }
+    fn remove(&self) -> TriggerReport {
+        self.adapter.remove_currency_trigger()
+    }
+    fn present(&self) -> bool {
+        self.adapter.trigger_present()
+    }
+    fn offline_probe_refusal(&self) -> Option<&'static str> {
+        self.offline_refusal
+    }
+    fn scrub_needs_live_harness(&self) -> bool {
+        self.needs_live_harness
+    }
+}
+
+/// Construct the trigger adapter for a registry slug, over an injected home + the [`ConfigStore`] and
+/// [`CommandRunner`] ports. `home` is the USER home dir; each adapter resolves its own harness root
+/// under it through the registry's one resolver, so a harness's env override (`$CODEX_HOME`,
+/// `$HERMES_HOME`, `$XDG_CONFIG_HOME`) is honored exactly as detection honored it. `None` = no trigger
+/// support for that slug (a placement-only harness), which is also the answer to an unknown slug.
+///
+/// This is the ONE place a harness's trigger machinery is named: the enumeration of trigger-capable
+/// harnesses is "the [`registry`](crate::registry) rows this answers `Some` for", so there is no second
+/// list to drift. Tests construct the adapters over fully-injected roots instead, so no suite depends
+/// on the real environment.
 #[must_use]
 pub fn adapter_for_slug<'a>(
     slug: &str,
     home: &Path,
     cfg: &'a dyn ConfigStore,
+    run: &'a dyn CommandRunner,
 ) -> Option<Box<dyn TriggerAdapter + 'a>> {
     Some(match slug {
         "amp" => Box::new(amp::adapter(home, cfg)),
+        // The reference harness is an ordinary instance of the shared JSON-hooks base — its own
+        // adapter runs this very spec, so arming it here and arming it there are one code path.
+        "claude-code" => Box::new(cc_hooks::JsonHooks::new(
+            &crate::claude_code::SPEC,
+            crate::registry::config_root(crate::registry::Root::ClaudeHome, home),
+            cfg,
+        )),
         "cline" => Box::new(cline::adapter(home, cfg)),
         "codex" => Box::new(codex::adapter(home, cfg)),
         "cursor" => Box::new(cursor::adapter(home, cfg)),
@@ -216,56 +246,33 @@ pub fn adapter_for_slug<'a>(
         "github-copilot" => Box::new(github_copilot::adapter(home, cfg)),
         "goose" => Box::new(goose::adapter(home, cfg)),
         "opencode" => Box::new(opencode::adapter(home, cfg)),
+        "openclaw" => Box::new(AdapterTrigger {
+            slug: "openclaw",
+            adapter: Box::new(crate::OpenClaw::new(home.join(".openclaw"), cfg, run)),
+            // The trigger lives in OpenClaw's SCHEDULER, not the filesystem: proving it there means
+            // running `openclaw cron list`, which a read-only status must not do.
+            offline_refusal: Some("presence needs a live scheduler query — not probed offline"),
+            needs_live_harness: true,
+        }),
+        "hermes-agent" => Box::new(AdapterTrigger {
+            slug: "hermes-agent",
+            adapter: Box::new(crate::Hermes::new(
+                crate::registry::config_root(crate::registry::Root::HermesHome, home),
+                crate::Hermes::resolve_accept_hooks(),
+                cfg,
+            )),
+            offline_refusal: None,
+            needs_live_harness: false,
+        }),
         _ => return None,
     })
-}
-
-/// Build a [`TriggerOutcome`] with the honest kind rule applied: only an `Active` state carries
-/// the instance's live trigger kind; every other state advertises just the guaranteed floor —
-/// an explicit `topos update`.
-pub(crate) fn outcome(
-    slug: &'static str,
-    live_kind: CurrencyKind,
-    state: TriggerState,
-    touched_path: Option<String>,
-    marker_id: &str,
-    note: Option<&str>,
-) -> TriggerOutcome {
-    TriggerOutcome {
-        slug,
-        kind: if state == TriggerState::Active {
-            live_kind
-        } else {
-            CurrencyKind::ExplicitPullOnly
-        },
-        state,
-        touched_path,
-        marker_id: marker_id.to_owned(),
-        note: note.map(str::to_owned),
-    }
-}
-
-/// Read a `$VAR` home override — trimmed, non-empty — as a path, else `None` (the same
-/// resolution rule the registry's baked table uses). The ONE place these adapters read the real
-/// environment; every test constructs adapters over injected roots instead.
-pub(crate) fn env_override(var: &str) -> Option<PathBuf> {
-    std::env::var(var)
-        .ok()
-        .map(|v| v.trim().to_owned())
-        .filter(|v| !v.is_empty())
-        .map(PathBuf::from)
-}
-
-/// `$XDG_CONFIG_HOME` else `home/.config` — the config-home root the XDG-rooted harnesses
-/// (`opencode`, `amp`, `goose`'s own config) resolve under, matching the registry's rule.
-pub(crate) fn resolve_config_home(home: &Path) -> PathBuf {
-    env_override("XDG_CONFIG_HOME").unwrap_or_else(|| home.join(".config"))
 }
 
 #[cfg(test)]
 mod tests {
     use super::testutil::MemConfig;
     use super::*;
+    use crate::trigger_report;
 
     /// The hand-rolled probe decides whether topos installs its trigger AT ALL on a machine, and a
     /// false positive is the silent failure: adopt-or-leave writes nothing and reports success, so
@@ -333,37 +340,96 @@ mod tests {
         }
     }
 
+    /// A `CommandRunner` whose binary is absent — no suite ever spawns a real harness CLI.
+    struct NoCli;
+    impl CommandRunner for NoCli {
+        fn run(&self, _p: &str, _a: &[&str]) -> std::io::Result<crate::RunOutput> {
+            Err(std::io::Error::new(std::io::ErrorKind::NotFound, "absent"))
+        }
+    }
+
+    /// The trigger-capable set is a VIEW over the registry, not a list beside it: a caller arming a
+    /// machine iterates registry rows and asks THIS for an adapter, so there is no second enumeration
+    /// to drift. Both families answer here — the config-merge/file-drop instances and the harnesses
+    /// whose trigger rides their full `HarnessAdapter`.
     #[test]
-    fn adapter_for_slug_covers_exactly_the_supported_slugs() {
+    fn the_trigger_capable_harnesses_are_a_view_over_the_registry() {
         let cfg = MemConfig::default();
         let home = std::path::PathBuf::from("/no-such-home");
-        for slug in supported_slugs() {
-            let adapter = adapter_for_slug(slug, &home, &cfg)
-                .unwrap_or_else(|| panic!("{slug} is supported"));
+        let capable: Vec<&str> = crate::registry::known_harnesses()
+            .iter()
+            .filter(|h| adapter_for_slug(h.slug, &home, &cfg, &NoCli).is_some())
+            .map(|h| h.slug)
+            .collect();
+        assert_eq!(
+            capable,
+            [
+                "amp",
+                "claude-code",
+                "openclaw",
+                "cline",
+                "codex",
+                "cursor",
+                "droid",
+                "gemini-cli",
+                "github-copilot",
+                "goose",
+                "hermes-agent",
+                "opencode",
+            ],
+            "registry-table order"
+        );
+        for slug in &capable {
+            let adapter = adapter_for_slug(slug, &home, &cfg, &NoCli)
+                .unwrap_or_else(|| panic!("{slug} is trigger-capable"));
             assert_eq!(adapter.slug(), *slug);
             assert!(
                 !adapter.present(),
                 "{slug}: nothing on an empty store is ever claimed present"
             );
         }
-        // Placement-only (or fully-adapted) slugs get no breadth trigger adapter.
-        for slug in ["claude-code", "openclaw", "hermes-agent", "zed", "warp", ""] {
-            assert!(adapter_for_slug(slug, &home, &cfg).is_none(), "{slug}");
+        // Placement-only harnesses — and an unknown slug — get no trigger adapter.
+        for slug in ["zed", "warp", "augment", "not-a-harness", ""] {
+            assert!(
+                adapter_for_slug(slug, &home, &cfg, &NoCli).is_none(),
+                "{slug}"
+            );
+        }
+    }
+
+    /// The two knobs a caller needs to stay honest without knowing the machinery: a trigger living in
+    /// the harness's own scheduler refuses an offline presence answer and is scrubbed only where the
+    /// harness looks installed; every filesystem artifact answers and is scrubbed unconditionally.
+    #[test]
+    fn only_an_out_of_process_trigger_refuses_the_offline_probe() {
+        let cfg = MemConfig::default();
+        let home = std::path::PathBuf::from("/no-such-home");
+        let openclaw = adapter_for_slug("openclaw", &home, &cfg, &NoCli).expect("openclaw");
+        assert!(openclaw.offline_probe_refusal().is_some());
+        assert!(openclaw.scrub_needs_live_harness());
+        for slug in ["claude-code", "hermes-agent", "cursor", "goose"] {
+            let a = adapter_for_slug(slug, &home, &cfg, &NoCli).expect(slug);
+            assert!(a.offline_probe_refusal().is_none(), "{slug}");
+            assert!(!a.scrub_needs_live_harness(), "{slug}");
         }
     }
 
     #[test]
-    fn outcome_advertises_only_the_floor_when_not_active() {
+    fn a_report_advertises_only_the_floor_when_not_active() {
         use topos_types::{CurrencyKind, TriggerState};
         for state in [
             TriggerState::Inactive,
             TriggerState::Degraded,
             TriggerState::AlreadyPresentUnmanaged,
         ] {
-            let out = outcome("cline", CurrencyKind::SessionStart, state, None, "m", None);
-            assert_eq!(out.kind, CurrencyKind::ExplicitPullOnly, "{state:?}");
+            let out = trigger_report("cline", CurrencyKind::SessionStart, state, None, "m", None);
+            assert_eq!(
+                out.currency_kind,
+                CurrencyKind::ExplicitPullOnly,
+                "{state:?}"
+            );
         }
-        let live = outcome(
+        let live = trigger_report(
             "cline",
             CurrencyKind::SessionStart,
             TriggerState::Active,
@@ -371,6 +437,6 @@ mod tests {
             "m",
             None,
         );
-        assert_eq!(live.kind, CurrencyKind::SessionStart);
+        assert_eq!(live.currency_kind, CurrencyKind::SessionStart);
     }
 }

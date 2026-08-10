@@ -17,8 +17,8 @@
 
 use std::path::{Component, Path};
 
-use topos_harness::mcp::descriptor::{self, McpHarness, SurfaceRoot};
-use topos_harness::registry;
+use topos_harness::mcp::descriptor;
+use topos_harness::registry::{self, KnownHarness};
 
 use crate::manifest::document::ManifestScope;
 
@@ -33,73 +33,27 @@ pub(crate) fn safe_project_rel(raw: &str) -> bool {
             .all(|c| matches!(c, Component::Normal(_) | Component::CurDir))
 }
 
-/// The DEFAULT `~/`-spelled base a descriptor surface root resolves to with no env override.
-fn mcp_root_default(root: SurfaceRoot) -> &'static str {
-    match root {
-        SurfaceRoot::Home => "~",
-        SurfaceRoot::Config => "~/.config",
-        SurfaceRoot::ClaudeHome => "~/.claude",
-        SurfaceRoot::CodexHome => "~/.codex",
-        SurfaceRoot::HermesHome => "~/.hermes",
-    }
-}
-
 /// An MCP-capable slug's config-file spelling at `scope`, DEFAULT spellings only (machine scope:
 /// the user surface under its `~/`-spelled default root; project scope: the project surface
 /// string verbatim). `None` when the slug is not MCP-capable, or has no surface at this scope.
+/// The `~/` spelling of every root is the registry's ([`DirSpec::default_spelling`]), so a new root
+/// is spelled in exactly one place.
 pub(crate) fn mcp_dest_spelling(slug: &str, scope: ManifestScope) -> Option<String> {
-    let h = descriptor::mcp_harness(slug)?;
+    let mcp = descriptor::mcp_harness(slug)?.mcp()?;
     match scope {
-        ManifestScope::Global => {
-            let s = h.user_surface.as_ref()?;
-            Some(format!("{}/{}", mcp_root_default(s.root), s.suffix))
-        }
-        ManifestScope::Project => h.project_surface.map(|(rel, _)| rel.to_owned()),
+        ManifestScope::Global => mcp.user?.dir.default_spelling(),
+        ManifestScope::Project => mcp.project.map(|(rel, _)| rel.to_owned()),
     }
-}
-
-/// ONE registry user-dir spec string (the `<root-tag>/<suffix>` encoding
-/// [`registry::KnownHarness::user_dir_specs`] renders) as its DEFAULT `~/`-spelled machine
-/// folder — no env resolution. `None` for a root with no machine-file spelling (a cwd- or
-/// env-only root).
-pub(crate) fn spec_default_spelling(spec: &str) -> Option<String> {
-    let (tag, suffix) = match spec.split_once('/') {
-        Some((t, s)) => (t, s),
-        None => (spec, ""),
-    };
-    // An absolute spec renders `/`-rooted (empty tag) and carries over verbatim.
-    if tag.is_empty() {
-        return Some(spec.to_owned());
-    }
-    let base = match tag {
-        "home" => "~",
-        "configHome" => "~/.config",
-        "codexHome" => "~/.codex",
-        "claudeHome" => "~/.claude",
-        "vibeHome" => "~/.vibe",
-        "hermesHome" => "~/.hermes",
-        "autohandHome" => "~/.autohand",
-        "grokHome" => "~/.grok",
-        // cwd-only / env-only roots have no machine-file default spelling.
-        _ => return None,
-    };
-    Some(if suffix.is_empty() {
-        base.to_owned()
-    } else {
-        format!("{base}/{suffix}")
-    })
 }
 
 /// A harness slug's SKILLS-ROOT spelling at `scope`, DEFAULT spellings only: the registry's
 /// first user dir under its `~/`-spelled default root for the machine file, the project dir
-/// string verbatim for a project file. `None` for an unknown slug or a scope the harness has no
-/// dir at.
+/// string verbatim for a project file. `None` for an unknown slug, a scope the harness has no
+/// dir at, or a machine root with no `~/` spelling (a cwd- or env-only root).
 pub(crate) fn skills_dest_spelling(slug: &str, scope: ManifestScope) -> Option<String> {
-    let h = registry::known_harnesses()
-        .iter()
-        .find(|h| h.slug == slug)?;
+    let h = registry::known_harness(slug)?;
     match scope {
-        ManifestScope::Global => spec_default_spelling(&h.user_dir_specs().into_iter().next()?),
+        ManifestScope::Global => h.user_dirs().first()?.default_spelling(),
         ManifestScope::Project => {
             let dir = h.project_dir();
             (!dir.is_empty()).then(|| dir.to_owned())
@@ -200,10 +154,11 @@ pub(crate) fn mcp_slug_for_dest(entry: &str, scope: ManifestScope) -> Option<&'s
 /// against the project surface string (`./`-prefix tolerated); machine entries against the
 /// default `~/` spelling, and — resolved against the real home — against the env-honoring
 /// surface path the engine would edit.
-fn dest_names_mcp_surface(entry: &str, scope: ManifestScope, h: &McpHarness) -> bool {
+fn dest_names_mcp_surface(entry: &str, scope: ManifestScope, h: &KnownHarness) -> bool {
     match scope {
         ManifestScope::Project => h
-            .project_surface
+            .mcp()
+            .and_then(|m| m.project)
             .is_some_and(|(rel, _)| entry.trim_start_matches("./") == rel),
         ManifestScope::Global => {
             if mcp_dest_spelling(h.slug, ManifestScope::Global).as_deref() == Some(entry) {
@@ -214,7 +169,7 @@ fn dest_names_mcp_surface(entry: &str, scope: ManifestScope, h: &McpHarness) -> 
             let Some(home) = std::env::var_os("HOME").map(std::path::PathBuf::from) else {
                 return false;
             };
-            let Some(resolved) = descriptor::user_surface_path(h, &home) else {
+            let Some(resolved) = h.mcp_user_path(&home) else {
                 return false;
             };
             let expanded = match entry.strip_prefix("~/") {
@@ -311,7 +266,7 @@ mod tests {
         // comparison; env overrides resolve through the same seam).
         if let Some(home) = std::env::var_os("HOME").map(std::path::PathBuf::from) {
             let h = descriptor::mcp_harness("cursor").unwrap();
-            let resolved = descriptor::user_surface_path(h, &home).unwrap();
+            let resolved = h.mcp_user_path(&home).unwrap();
             assert_eq!(
                 mcp_slug_for_dest(&resolved.display().to_string(), ManifestScope::Global),
                 Some("cursor")

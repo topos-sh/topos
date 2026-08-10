@@ -891,7 +891,7 @@ fn converge_one(
     let outcome = crate::mcp_engine::converge(
         &io,
         std::slice::from_ref(&demand),
-        topos_harness::mcp::descriptor::mcp_harnesses(),
+        &topos_harness::mcp::descriptor::mcp_harnesses(),
         &detected,
         &HashSet::new(),
         false,
@@ -1047,11 +1047,11 @@ fn engaged_agents(
             continue;
         }
         let surface = match &project_root {
-            Some(root) => h.project_surface.and_then(|(rel, _)| {
+            Some(root) => h.mcp().and_then(|m| m.project).and_then(|(rel, _)| {
                 let path = root.join(rel);
                 crate::placement::within_project(root, &path).then_some(path)
             }),
-            None => topos_harness::mcp::descriptor::user_surface_path(h, &roots.home),
+            None => h.mcp_user_path(&roots.home),
         };
         let Some(path) = surface else { continue };
         if detected.contains(h.slug) || ctx.fs.exists(&path) {

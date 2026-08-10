@@ -28,6 +28,8 @@ pub(crate) static SPEC: JsonHooksSpec = JsonHooksSpec {
     grouped: true,
     handler_type: true,
     timeout: Some(60),
+    handler_async: false,
+    hook_dialect: None,
     root_seed: None,
     live_kind: CurrencyKind::SessionStart,
     // Gemini gates a new/changed hook behind its own confirm prompt (docs), and that store is
@@ -81,12 +83,12 @@ mod tests {
     fn fresh_install_writes_the_exact_hook_and_reports_the_consent_floor() {
         let cfg = MemConfig::default();
         let report = a(&cfg).install();
-        assert_eq!(report.slug, "gemini-cli");
+        assert_eq!(report.agent, "gemini-cli");
         assert_eq!(report.marker_id, "topos:gemini-cli:currency:1");
         // The hook is registered, but Gemini's own confirm prompt is a consent step we cannot
         // read — so the report is Inactive + the explicit-pull floor + the consent note.
         assert_eq!(report.state, TriggerState::Inactive);
-        assert_eq!(report.kind, CurrencyKind::ExplicitPullOnly);
+        assert_eq!(report.currency_kind, CurrencyKind::ExplicitPullOnly);
         assert!(report.note.as_deref().unwrap().contains("confirm"));
         assert_eq!(report.touched_path.as_deref(), Some(CONFIG));
         assert_eq!(cfg.text(CONFIG).as_deref(), Some(FRESH_INSTALL));
@@ -133,7 +135,7 @@ mod tests {
         );
         let report = a(&cfg).install();
         assert_eq!(report.state, TriggerState::AlreadyPresentUnmanaged);
-        assert_eq!(report.kind, CurrencyKind::ExplicitPullOnly);
+        assert_eq!(report.currency_kind, CurrencyKind::ExplicitPullOnly);
         assert!(report.note.is_none());
         assert_eq!(cfg.writes(), 0, "never blind-append beside a user's hook");
     }

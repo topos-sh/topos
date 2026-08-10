@@ -24,6 +24,8 @@ pub(crate) static SPEC: JsonHooksSpec = JsonHooksSpec {
     grouped: true,
     handler_type: true,
     timeout: Some(60),
+    handler_async: false,
+    hook_dialect: None,
     root_seed: None,
     live_kind: CurrencyKind::SessionStart,
     placed_state: TriggerState::Active,
@@ -75,10 +77,10 @@ mod tests {
     fn fresh_install_writes_the_exact_hook_and_reports_active() {
         let cfg = MemConfig::default();
         let report = a(&cfg).install();
-        assert_eq!(report.slug, "droid");
+        assert_eq!(report.agent, "droid");
         assert_eq!(report.marker_id, "topos:droid:currency:1");
         assert_eq!(report.state, TriggerState::Active);
-        assert_eq!(report.kind, CurrencyKind::SessionStart);
+        assert_eq!(report.currency_kind, CurrencyKind::SessionStart);
         assert_eq!(report.note.as_deref(), Some("vendor docs, unverified"));
         assert_eq!(cfg.text(CONFIG).as_deref(), Some(FRESH_INSTALL));
         assert!(

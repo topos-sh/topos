@@ -74,8 +74,10 @@ generated `docs/cli.md` (`cargo xtask gen-cli-ref`).
 - `ops/` — the verbs: `add`, `remove`, `reconcile` (update), `sync_engine`, `publish`, `review`,
   `revert`, `protect`, `invite`, `login`/`loopback`, `status`, `auth`, `list`, `diff`, `log`,
   `init`, `fmt`, `uninstall`, `builtin` (the embedded meta-skill from `skills/topos/`),
-  `self_update` (minisign-gated via `release`), `version_check`, `arm` (the breadth arming
-  sweep), `quiet_gate`, `merge_resolve` (diverged-draft diff3 behind the `DivergedWitness`
+  `self_update` (minisign-gated via `release`), `version_check`, `arm` (the arming sweep — every
+  detected agent's auto-update trigger, iterating the ONE harness table and asking
+  `topos-harness::triggers` for each row's adapter, so no caller knows which machinery serves
+  which agent), `quiet_gate`, `merge_resolve` (diverged-draft diff3 behind the `DivergedWitness`
   token).
 - `materialize` — crash-safe dir-swap placement writes. The destructive-path rail is
   PARK-THEN-VERIFY (park aside, re-read, drop only what is accounted for; unaccounted bytes are

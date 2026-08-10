@@ -5,15 +5,15 @@
 //! Placement *bytes* are identical across adapters; an adapter differs only in *where* + *when the update check
 //! fires*, and edits its own harness *config* (never a skill dir) to (un)install the auto-update trigger.
 //!
-//! This **harness-independent** unit is frozen (the trait + `CurrencyKind` incl. `ExplicitPullOnly` +
-//! `TriggerReport` + the idempotency-marker convention); the OpenClaw impl ships **build-first behind the
+//! The **harness-independent** unit is the trait + `CurrencyKind` (incl. `ExplicitPullOnly`) +
+//! `TriggerReport` + the idempotency-marker convention; the OpenClaw impl ships **build-first behind the
 //! trait** — its concrete config bytes stay provisional until the pilot's real build is probed (see the
 //! `openclaw` module doc) — and Hermes's were probed against a real local build, with the pilot's exact
 //! build staying a MUST-VERIFY (see `hermes.rs`).
 
 use std::io;
 use std::path::{Path, PathBuf};
-use topos_types::{CurrencyKind, HarnessId, TriggerReport};
+use topos_types::{CurrencyKind, HarnessId, TriggerReport, TriggerState};
 
 mod claude_code;
 pub mod coverage;
@@ -185,6 +185,32 @@ pub fn choose_skill_dir(
         }
     }
     by_id
+}
+
+/// Build a [`TriggerReport`] with the honest kind rule applied — the crate's ONE trigger-report
+/// construction, shared by both adapter families: only an `Active` state carries the instance's live
+/// trigger kind; every other state advertises just the guaranteed floor, an explicit `topos update`.
+/// A report is therefore never able to overstate what fires, whichever machinery produced it.
+pub(crate) fn trigger_report(
+    agent: &str,
+    live_kind: CurrencyKind,
+    state: TriggerState,
+    touched_path: Option<String>,
+    marker_id: &str,
+    note: Option<&str>,
+) -> TriggerReport {
+    TriggerReport {
+        agent: agent.to_owned(),
+        currency_kind: if state == TriggerState::Active {
+            live_kind
+        } else {
+            CurrencyKind::ExplicitPullOnly
+        },
+        touched_path,
+        marker_id: marker_id.to_owned(),
+        state,
+        note: note.map(str::to_owned),
+    }
 }
 
 /// The narrow filesystem port an adapter needs to read + atomically replace a harness **config** file
@@ -389,10 +415,10 @@ mod ladder_tests {
     #[test]
     fn the_reserved_plugin_dir_is_the_claude_code_mcp_surfaces_own_component() {
         let surface = mcp::descriptor::mcp_harness("claude-code")
-            .and_then(|h| h.user_surface)
+            .and_then(|h| h.mcp()?.user)
             .expect("claude-code has a user MCP surface");
         assert_eq!(
-            surface.suffix.rsplit('/').next(),
+            surface.dir.suffix().rsplit('/').next(),
             Some(RESERVED_MCP_PLUGIN_DIR)
         );
     }

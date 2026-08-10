@@ -42,7 +42,7 @@ pub(crate) struct UninstallApplied {
     /// The breadth scrub's outcomes — other agents whose trigger the sweep removed (or could not,
     /// disclosed) — attached by the composition root; clean no-ops stay off the receipt.
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub triggers: Vec<topos_types::results::BreadthTriggerReport>,
+    pub triggers: Vec<TriggerReport>,
     /// Whether the `~/.topos/` sidecar tree was deleted (false = there was nothing to delete).
     pub sidecar_removed: bool,
     /// The built-in `topos` skill's placed copies that were removed (topos-authored artifacts).
@@ -241,11 +241,12 @@ mod tests {
     impl FakeHarness {
         fn report(&self, state: TriggerState, touched: bool) -> TriggerReport {
             TriggerReport {
-                harness: HarnessId::ClaudeCode,
+                agent: "claude-code".to_owned(),
                 currency_kind: CurrencyKind::SessionStart,
                 touched_path: touched.then(|| self.config.to_string_lossy().into_owned()),
                 marker_id: "topos:test".into(),
                 state,
+                note: None,
             }
         }
     }

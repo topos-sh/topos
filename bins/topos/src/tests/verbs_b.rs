@@ -56,11 +56,13 @@ impl HarnessAdapter for NullHarness {
     }
     fn install_currency_trigger(&self) -> TriggerReport {
         TriggerReport {
-            harness: HarnessId::ClaudeCode,
+            agent: "claude-code".to_owned(),
             currency_kind: CurrencyKind::ExplicitPullOnly,
             touched_path: None,
             marker_id: "test".into(),
             state: TriggerState::Inactive,
+
+            note: None,
         }
     }
     fn remove_currency_trigger(&self) -> TriggerReport {

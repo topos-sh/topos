@@ -1,8 +1,8 @@
 //! `mcp` — pure MCP-server config placement for six harnesses. Bytes in → an [`EditPlan`] out;
 //! the CLI owns ALL file I/O (read, crash-safe write, dir materialization) exactly as it does for
 //! the trigger adapters. Nothing here touches a filesystem, a clock, or the environment (the one
-//! exception: [`descriptor::user_surface_path`] reads the per-harness home-override env vars, the
-//! same rule the registry uses).
+//! exception: resolving a harness's user surface reads the per-harness home-override env vars,
+//! through the registry's one resolver).
 //!
 //! ## The ownership model — a fingerprint ledger, not a marker comment
 //!
@@ -57,7 +57,7 @@ use std::collections::BTreeMap;
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 
-pub use descriptor::{McpDialect, McpHarness, McpSurface, SurfaceRoot};
+pub use descriptor::McpDialect;
 
 /// One desired managed entry (harness-neutral).
 #[derive(Debug, Clone)]

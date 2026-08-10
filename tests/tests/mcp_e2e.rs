@@ -34,14 +34,15 @@ const KEY: &str = "topos-acme-team-weather";
 /// A url a hand-edit puts in place of [`SERVER_URL`] (the drift phase).
 const DRIFTED_URL: &str = "https://hand-edited.example/mcp";
 
-/// The six MCP-capable harnesses, in descriptor order.
+/// The six MCP-capable harnesses, in the harness table's row order (the order every surface reports
+/// them in — there is one table).
 const SIX: [&str; 6] = [
     "claude-code",
+    "openclaw",
     "codex",
     "cursor",
-    "opencode",
-    "openclaw",
     "hermes-agent",
+    "opencode",
 ];
 
 // ── the real binary ─────────────────────────────────────────────────────────────────────────────
@@ -659,14 +660,14 @@ fn the_mcp_bundle_loop_across_six_agents() {
         json!([
             { "agent": "claude-code", "state": "current",
               "file": canon(&proj.join(".mcp.json")) },
+            { "agent": "openclaw", "state": "not-supported", "note": "no project-level config" },
             { "agent": "codex", "state": "current",
               "file": canon(&proj.join(".codex").join("config.toml")) },
             { "agent": "cursor", "state": "current",
               "file": canon(&proj.join(".cursor").join("mcp.json")) },
+            { "agent": "hermes-agent", "state": "not-supported", "note": "no project-level config" },
             { "agent": "opencode", "state": "current",
               "file": canon(&proj_opencode) },
-            { "agent": "openclaw", "state": "not-supported", "note": "no project-level config" },
-            { "agent": "hermes-agent", "state": "not-supported", "note": "no project-level config" },
         ]),
         "the deep dive answers per agent, with the file: {deep}"
     );

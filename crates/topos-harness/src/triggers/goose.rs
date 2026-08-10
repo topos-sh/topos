@@ -25,7 +25,9 @@ use topos_types::{CurrencyKind, TriggerState};
 use crate::ConfigStore;
 
 use super::file_drop::{FileDrop, FileDropSpec};
-use super::{SENTINEL, TriggerAdapter, TriggerOutcome, resolve_config_home};
+use crate::registry::{self, Root};
+
+use super::{SENTINEL, TriggerAdapter, TriggerReport};
 
 pub(crate) static SPEC: FileDropSpec = FileDropSpec {
     slug: "goose",
@@ -69,7 +71,7 @@ pub(crate) struct Goose<'a> {
 }
 
 pub(crate) fn adapter<'a>(home: &Path, cfg: &'a dyn ConfigStore) -> Goose<'a> {
-    Goose::new(home, &resolve_config_home(home), cfg)
+    Goose::new(home, &registry::config_root(Root::Config, home), cfg)
 }
 
 impl<'a> Goose<'a> {
@@ -108,20 +110,20 @@ impl TriggerAdapter for Goose<'_> {
         "goose"
     }
 
-    fn install(&self) -> TriggerOutcome {
+    fn install(&self) -> TriggerReport {
         let mut out = self.file.install();
         // The artifact landed (or already sat) canonical — but goose fires it only when the
         // plugin is enabled, and that consent is goose's own. Without readable evidence the
         // report demotes to the honest floor; the write itself already happened content-blind.
         if out.state == TriggerState::Active && !self.enablement_evidence() {
             out.state = TriggerState::Inactive;
-            out.kind = CurrencyKind::ExplicitPullOnly;
+            out.currency_kind = CurrencyKind::ExplicitPullOnly;
             out.note = Some(NOTE.to_owned());
         }
         out
     }
 
-    fn remove(&self) -> TriggerOutcome {
+    fn remove(&self) -> TriggerReport {
         self.file.remove()
     }
 
@@ -196,9 +198,9 @@ mod tests {
     fn install_without_enablement_evidence_reports_the_consent_floor() {
         let cfg = MemConfig::default(); // no goose config at all
         let report = a(&cfg).install();
-        assert_eq!(report.slug, "goose");
+        assert_eq!(report.agent, "goose");
         assert_eq!(report.state, TriggerState::Inactive);
-        assert_eq!(report.kind, CurrencyKind::ExplicitPullOnly);
+        assert_eq!(report.currency_kind, CurrencyKind::ExplicitPullOnly);
         assert_eq!(report.note.as_deref(), Some(NOTE));
         assert_eq!(
             cfg.text(HOOKS_PATH).as_deref(),
@@ -215,7 +217,7 @@ mod tests {
             cfg.set(GOOSE_CONFIG, enabled);
             let report = a(&cfg).install();
             assert_eq!(report.state, TriggerState::Active, "{enabled:?}");
-            assert_eq!(report.kind, CurrencyKind::SessionStart);
+            assert_eq!(report.currency_kind, CurrencyKind::SessionStart);
             assert!(report.note.is_none(), "nothing owed once goose consented");
         }
     }

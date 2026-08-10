@@ -90,9 +90,9 @@ mod tests {
     fn fresh_install_places_the_file_and_reports_active_with_the_docs_note() {
         let cfg = MemConfig::default();
         let report = a(&cfg).install();
-        assert_eq!(report.slug, "github-copilot");
+        assert_eq!(report.agent, "github-copilot");
         assert_eq!(report.state, TriggerState::Active);
-        assert_eq!(report.kind, CurrencyKind::SessionStart);
+        assert_eq!(report.currency_kind, CurrencyKind::SessionStart);
         assert_eq!(report.note.as_deref(), Some("vendor docs, unverified"));
         assert_eq!(report.touched_path.as_deref(), Some(PATH));
         assert_eq!(cfg.text(PATH).as_deref(), Some(HOOK_FILE));

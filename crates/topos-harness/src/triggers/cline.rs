@@ -73,10 +73,10 @@ mod tests {
     fn fresh_install_places_the_script_and_reports_active_with_no_note() {
         let cfg = MemConfig::default();
         let report = a(&cfg).install();
-        assert_eq!(report.slug, "cline");
+        assert_eq!(report.agent, "cline");
         assert_eq!(report.marker_id, "topos:cline:currency:1");
         assert_eq!(report.state, TriggerState::Active);
-        assert_eq!(report.kind, CurrencyKind::SessionStart);
+        assert_eq!(report.currency_kind, CurrencyKind::SessionStart);
         assert!(
             report.note.is_none(),
             "source-verified — nothing needs saying"

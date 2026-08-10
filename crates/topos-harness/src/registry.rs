@@ -1,15 +1,17 @@
-//! The **baked harness registry** — the on-disk skill-directory conventions for every agent harness
-//! recognized by `vercel-labs/skills`, so `topos` can discover *untracked* skills across the whole
-//! ecosystem (not just the three harnesses it ships a full [`HarnessAdapter`](crate::HarnessAdapter) for).
+//! The **baked harness registry** — ONE row per agent harness, carrying everything this crate knows
+//! about it: the on-disk skill-directory conventions ported from `vercel-labs/skills` (so `topos` can
+//! discover *untracked* skills across the whole ecosystem), the MCP-server config surfaces, and the
+//! shared-dir coverage claim. Every consumer joins on this table; supporting a new capability for a
+//! harness is filling a column, not adding a table.
 //!
-//! This is the **broad, simple probe**: a static table (ported from that project's `src/agents.ts`) plus
-//! two read-only queries over the real filesystem — [`discover_all`] (what skills are on this machine)
-//! and [`attribute_path`] (which harness owns a given skill dir, for `add`-time attribution). It reads
-//! skill *directories* only to confirm a root `SKILL.md` exists — never the bytes, never the frontmatter —
-//! mirroring the reference adapter's `discover()` probe mechanics exactly.
+//! The queries over the real filesystem are read-only: [`discover_all`] (what skills are on this
+//! machine), [`attribute_path`] (which harness owns a given skill dir, for `add`-time attribution), and
+//! [`detected_harnesses`] (which agents are installed here). Skill *directories* are read only to
+//! confirm a root `SKILL.md` exists — never the bytes, never the frontmatter — through the one shared
+//! [`discover_skill_dirs`] probe every adapter's `discover()` also runs.
 //!
-//! It deliberately does NOT reimplement any adapter's richer behavior (Hermes's `<category>/<name>`
-//! nesting, Claude Code's config edit): the three built adapters keep their own `discover()`. Only
+//! A harness's richer behavior stays its adapter's (Hermes's `<category>/<name>` nesting composes the
+//! shared probe's two halves rather than restating them; Claude Code's config edit is its own). Only
 //! `claude-code`, `openclaw`, and `hermes-agent` carry [`KnownHarness::adapter_supported`] `= true`
 //! (topos can *place + follow* those); every other row is discover-and-`add` only.
 //!
@@ -21,6 +23,9 @@
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+
+use crate::coverage::SharedDirSupport;
+use crate::mcp::descriptor::McpDialect;
 
 /// The on-disk scope a skill was discovered in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -52,6 +57,33 @@ pub struct KnownHarness {
     /// the harness present. Any one existing ⇒ present. Empty ⇒ never independently present (the sentinel
     /// `universal` row, whose dirs are covered by the concrete harness that shares them).
     detect_dirs: &'static [DirSpec],
+    /// Where this harness reads MCP-server config, in which dialect, and how a change gets picked up —
+    /// `None` for a harness with no MCP surface (the great majority).
+    mcp: Option<McpSurfaces>,
+    /// Whether this harness reads the shared `~/.agents/skills` dir, WITH the claim's provenance.
+    /// [`SharedDirSupport::Unknown`] (the default) means the row carries no claim of its own, and
+    /// [`crate::coverage::shared_dir_support`] falls through to its derivation from the user dirs below.
+    shared_dir: SharedDirSupport,
+}
+
+/// One harness's MCP-server config surfaces — the column joining the placement engine's detection probe
+/// to the config file it must edit.
+#[derive(Debug)]
+pub struct McpSurfaces {
+    /// The user/global config surface, if the harness has one.
+    pub user: Option<McpSurface>,
+    /// Project-relative config path + dialect (`None` = no project surface).
+    pub project: Option<(&'static str, McpDialect)>,
+    /// Receipt copy: how config changes get picked up.
+    pub reload_note: &'static str,
+}
+
+/// A user-scope MCP config surface: where the file lives + the dialect it speaks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct McpSurface {
+    /// The file's location, resolved like every other dir in this table ([`resolve_spec`]).
+    pub dir: DirSpec,
+    pub dialect: McpDialect,
 }
 
 /// One discovered skill directory in a known harness.
@@ -85,8 +117,12 @@ pub struct HarnessAttribution {
 /// The root a [`DirSpec`]'s suffix hangs off — how a per-harness env override resolves (each falls back to
 /// a `home`-relative default when its variable is unset, so the whole table is testable against a temp
 /// home).
-#[derive(Debug, Clone, Copy)]
-enum Root {
+///
+/// This is the crate's ONE root vocabulary: every skills dir, detection probe, MCP config surface, and
+/// trigger config root names its root here and resolves through [`resolve_root`], so adding a root — or
+/// changing what an override falls back to — is a one-place edit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Root {
     /// The passed home dir.
     Home,
     /// `$XDG_CONFIG_HOME`, else `home/.config`.
@@ -115,10 +151,95 @@ enum Root {
 
 /// A directory location = a resolution [`Root`] + a `/`-separated suffix under it (empty suffix ⇒ the root
 /// itself).
-#[derive(Debug, Clone, Copy)]
-struct DirSpec {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DirSpec {
     root: Root,
     suffix: &'static str,
+}
+
+impl Root {
+    /// The tag naming this root's upstream resolution variable (`home`, `configHome`, `codexHome`, …) —
+    /// the encoding [`DirSpec::raw`] renders and an out-of-band checker compares. An absolute root is the
+    /// empty tag (it renders `/`-rooted).
+    #[must_use]
+    pub fn tag(self) -> &'static str {
+        match self {
+            Root::Home => "home",
+            Root::Config => "configHome",
+            Root::CodexHome => "codexHome",
+            Root::ClaudeHome => "claudeHome",
+            Root::VibeHome => "vibeHome",
+            Root::HermesHome => "hermesHome",
+            Root::AutohandHome => "autohandHome",
+            Root::GrokHome => "grokHome",
+            Root::Cwd => "cwd",
+            Root::Abs => "",
+            Root::Appdata => "APPDATA",
+            Root::FlatpakConfig => "FLATPAK_XDG_CONFIG_HOME",
+        }
+    }
+
+    /// The `~/`-spelled base this root resolves to with NO env override — the spelling a manifest `dest`
+    /// entry and the generated agent tables name a machine path by. `None` for a root that has no
+    /// machine-file spelling at all: the project dir, and the two Windows/Flatpak roots that exist only
+    /// as an environment variable.
+    #[must_use]
+    pub fn default_spelling(self) -> Option<&'static str> {
+        Some(match self {
+            Root::Home => "~",
+            Root::Config => "~/.config",
+            Root::CodexHome => "~/.codex",
+            Root::ClaudeHome => "~/.claude",
+            Root::VibeHome => "~/.vibe",
+            Root::HermesHome => "~/.hermes",
+            Root::AutohandHome => "~/.autohand",
+            Root::GrokHome => "~/.grok",
+            Root::Abs => "",
+            Root::Cwd | Root::Appdata | Root::FlatpakConfig => return None,
+        })
+    }
+}
+
+impl DirSpec {
+    /// The resolution root this location hangs off.
+    #[must_use]
+    pub fn root(self) -> Root {
+        self.root
+    }
+
+    /// The `/`-separated suffix under [`Self::root`] (empty ⇒ the root itself).
+    #[must_use]
+    pub fn suffix(self) -> &'static str {
+        self.suffix
+    }
+
+    /// This location as a canonical RAW spec string — [`Root::tag`] followed by the `/`-joined suffix (an
+    /// absolute root renders `/`-rooted). This is the shape upstream's `join(<root>, …)` expressions
+    /// reduce to, so an out-of-band checker can compare the two tables' dir strings without resolving
+    /// anything against a real home.
+    #[must_use]
+    pub fn raw(self) -> String {
+        let tag = self.root.tag();
+        match (tag.is_empty(), self.suffix.is_empty()) {
+            (true, true) => "/".to_owned(),
+            (true, false) => format!("/{}", self.suffix),
+            (false, true) => tag.to_owned(),
+            (false, false) => format!("{tag}/{}", self.suffix),
+        }
+    }
+
+    /// This location's DEFAULT `~/`-spelled machine path — no env resolution. `None` when the root has no
+    /// machine-file spelling ([`Root::default_spelling`]).
+    #[must_use]
+    pub fn default_spelling(self) -> Option<String> {
+        let base = self.root.default_spelling()?;
+        Some(match (base.is_empty(), self.suffix.is_empty()) {
+            (true, true) => "/".to_owned(),
+            (true, false) => format!("/{}", self.suffix),
+            (false, true) => base.to_owned(),
+            (false, false) => format!("{base}/{}", self.suffix),
+        })
+    }
 }
 
 // Terse const-fn constructors so the baked table below stays a readable one-line-per-harness block.
@@ -210,6 +331,24 @@ const fn kh(
         user_dirs,
         project_dir,
         detect_dirs,
+        mcp: None,
+        shared_dir: SharedDirSupport::Unknown,
+    }
+}
+
+impl KnownHarness {
+    /// Column setter: this harness's MCP config surfaces (see [`McpSurfaces`]). Chained onto [`kh`] in
+    /// the table below so a row without MCP support stays a one-liner.
+    const fn with_mcp(mut self, mcp: McpSurfaces) -> Self {
+        self.mcp = Some(mcp);
+        self
+    }
+
+    /// Column setter: this harness's shared-dir coverage claim, with the evidence that backs it. Each
+    /// call site carries the evidence in a comment — a fresh probe result is a one-line edit.
+    const fn with_shared_dir(mut self, support: SharedDirSupport) -> Self {
+        self.shared_dir = support;
+        self
     }
 }
 
@@ -232,7 +371,9 @@ static HARNESSES: &[KnownHarness] = &[
         &[cfg("agents/skills")],
         ".agents/skills",
         &[cfg("amp")],
-    ),
+    )
+    // Vendor manual lists `~/.agents/skills` among its skills dirs (closed source — docs only).
+    .with_shared_dir(SharedDirSupport::Docs(true)),
     kh(
         "antigravity",
         "Antigravity",
@@ -288,7 +429,17 @@ static HARNESSES: &[KnownHarness] = &[
         &[claude_home("skills")],
         ".claude/skills",
         &[claude_home("")],
-    ),
+    )
+    .with_mcp(McpSurfaces {
+        // An OWNED plugin DIRECTORY: the `.mcp.json` under it is patched through the strict JSON
+        // driver; `plugin_dir` renders the constant `.claude-plugin/plugin.json` beside it.
+        user: Some(McpSurface {
+            dir: claude_home("skills/topos-mcp"),
+            dialect: McpDialect::ClaudePluginDir,
+        }),
+        project: Some((".mcp.json", McpDialect::ClaudeProjectJson)),
+        reload_note: "loads next session; /reload-plugins reloads live; sign in with /mcp",
+    }),
     kh(
         "openclaw",
         "OpenClaw",
@@ -300,7 +451,18 @@ static HARNESSES: &[KnownHarness] = &[
         ],
         "skills",
         &[home(".openclaw"), home(".clawdbot"), home(".moltbot")],
-    ),
+    )
+    .with_mcp(McpSurfaces {
+        user: Some(McpSurface {
+            dir: home(".openclaw/openclaw.json"),
+            dialect: McpDialect::OpenclawJson,
+        }),
+        project: None,
+        reload_note: "picked up automatically; sign in with `openclaw mcp login <name>`",
+    })
+    // Verified against a live containerized install of openclaw@2026.7.1 on 2026-07-16:
+    // `~/.agents/skills` is a recognized skills root, higher precedence than `~/.openclaw/skills`.
+    .with_shared_dir(SharedDirSupport::Probed(true)),
     kh(
         "cline",
         "Cline",
@@ -308,7 +470,10 @@ static HARNESSES: &[KnownHarness] = &[
         &[home(".agents/skills")],
         ".agents/skills",
         &[home(".cline")],
-    ),
+    )
+    // Verified against cline 3.0.43 source on 2026-07-16: `~/.agents/skills` is in the global
+    // skills search paths (upgrades the registry-derived docs-level claim).
+    .with_shared_dir(SharedDirSupport::Probed(true)),
     kh(
         "codearts-agent",
         "CodeArts Agent",
@@ -348,7 +513,19 @@ static HARNESSES: &[KnownHarness] = &[
         &[codex_home("skills")],
         ".agents/skills",
         &[codex_home(""), abs("etc/codex")],
-    ),
+    )
+    .with_mcp(McpSurfaces {
+        user: Some(McpSurface {
+            dir: codex_home("config.toml"),
+            dialect: McpDialect::CodexToml,
+        }),
+        // Codex honors a project config only once the user trusts the repo in Codex.
+        project: Some((".codex/config.toml", McpDialect::CodexToml)),
+        reload_note: "restart codex; sign in with `codex mcp login <name>`",
+    })
+    // Verified against a live codex-cli 0.144.4 binary on 2026-07-16: no `.agents/skills` path
+    // literal exists in the build; its only user skills root is `$CODEX_HOME/skills`.
+    .with_shared_dir(SharedDirSupport::Probed(false)),
     kh(
         "command-code",
         "Command Code",
@@ -380,7 +557,10 @@ static HARNESSES: &[KnownHarness] = &[
         &[home(".config/crush/skills")],
         ".crush/skills",
         &[home(".config/crush")],
-    ),
+    )
+    // Verified against crush v0.85.0 source on 2026-07-16: `~/.agents/skills` is in the global
+    // skills dirs ("Per the Agent Skills spec"); its own user dir alone would derive nothing.
+    .with_shared_dir(SharedDirSupport::Probed(true)),
     kh(
         "cursor",
         "Cursor",
@@ -388,7 +568,15 @@ static HARNESSES: &[KnownHarness] = &[
         &[home(".cursor/skills")],
         ".agents/skills",
         &[home(".cursor")],
-    ),
+    )
+    .with_mcp(McpSurfaces {
+        user: Some(McpSurface {
+            dir: home(".cursor/mcp.json"),
+            dialect: McpDialect::CursorJson,
+        }),
+        project: Some((".cursor/mcp.json", McpDialect::CursorJson)),
+        reload_note: "restart Cursor",
+    }),
     kh(
         "deepagents",
         "Deep Agents",
@@ -445,7 +633,9 @@ static HARNESSES: &[KnownHarness] = &[
         &[home(".gemini/skills")],
         ".agents/skills",
         &[home(".gemini")],
-    ),
+    )
+    // Vendor docs list `~/.agents/skills`.
+    .with_shared_dir(SharedDirSupport::Docs(true)),
     kh(
         "github-copilot",
         "GitHub Copilot",
@@ -453,7 +643,9 @@ static HARNESSES: &[KnownHarness] = &[
         &[home(".copilot/skills")],
         ".agents/skills",
         &[home(".copilot")],
-    ),
+    )
+    // Vendor docs list `~/.agents/skills`.
+    .with_shared_dir(SharedDirSupport::Docs(true)),
     kh(
         "goose",
         "Goose",
@@ -461,7 +653,11 @@ static HARNESSES: &[KnownHarness] = &[
         &[cfg("goose/skills")],
         ".goose/skills",
         &[cfg("goose")],
-    ),
+    )
+    // Verified LIVE against goose 1.43.0 in a container on 2026-07-16: a skill placed at
+    // `~/.agents/skills/<name>` appears in `goose skills list` (and `~/.agents/skills` is the
+    // build's writable global skills dir).
+    .with_shared_dir(SharedDirSupport::Probed(true)),
     kh(
         "grok",
         "Grok Build",
@@ -477,7 +673,15 @@ static HARNESSES: &[KnownHarness] = &[
         &[hermes_home("skills")],
         ".hermes/skills",
         &[hermes_home("")],
-    ),
+    )
+    .with_mcp(McpSurfaces {
+        user: Some(McpSurface {
+            dir: hermes_home("config.yaml"),
+            dialect: McpDialect::HermesYaml,
+        }),
+        project: None,
+        reload_note: "/reload-mcp in a session, or next session",
+    }),
     kh(
         "inference-sh",
         "inference.sh",
@@ -617,7 +821,20 @@ static HARNESSES: &[KnownHarness] = &[
         &[cfg("opencode/skills")],
         ".agents/skills",
         &[cfg("opencode")],
-    ),
+    )
+    .with_mcp(McpSurfaces {
+        user: Some(McpSurface {
+            dir: cfg("opencode/opencode.json"),
+            dialect: McpDialect::OpencodeJson,
+        }),
+        // The project config sits at the checkout root, not under a dot-dir.
+        project: Some(("opencode.json", McpDialect::OpencodeJson)),
+        // Automatic on 401 + dynamic client registration.
+        reload_note: "restart opencode",
+    })
+    // Verified against a live containerized opencode-ai 1.18.3 on 2026-07-16: the binary's own
+    // help text names `~/.agents/skills/<name>/SKILL.md` as an auto-loaded external skills dir.
+    .with_shared_dir(SharedDirSupport::Probed(true)),
     kh(
         "openhands",
         "OpenHands",
@@ -836,6 +1053,36 @@ pub fn known_harnesses() -> &'static [KnownHarness] {
     HARNESSES
 }
 
+/// The row for a harness slug, or `None` when the slug is not a known harness.
+#[must_use]
+pub fn known_harness(slug: &str) -> Option<&'static KnownHarness> {
+    HARNESSES.iter().find(|h| h.slug == slug)
+}
+
+/// A harness row whose MCP surface is rooted at the passed home, with no skills dirs and no
+/// detection probes — a TEST fixture. Production code READS rows from [`known_harnesses`] and never
+/// builds one; this exists so a config-placement test can point every surface inside a temp home it
+/// fully controls, whatever the developer's `$CLAUDE_CONFIG_DIR` / `$CODEX_HOME` / `$HERMES_HOME`
+/// happen to say — a suite that resolved the real roots would write into a real config.
+#[must_use]
+pub const fn home_rooted_mcp_row(
+    slug: &'static str,
+    display_name: &'static str,
+    user_suffix: &'static str,
+    user_dialect: McpDialect,
+    project: Option<(&'static str, McpDialect)>,
+    reload_note: &'static str,
+) -> KnownHarness {
+    kh(slug, display_name, false, &[], "", &[]).with_mcp(McpSurfaces {
+        user: Some(McpSurface {
+            dir: home(user_suffix),
+            dialect: user_dialect,
+        }),
+        project,
+        reload_note,
+    })
+}
+
 impl KnownHarness {
     /// The project/cwd-relative skills dir — a `/`-separated path, verbatim as ported from upstream's
     /// `skillsDir`.
@@ -844,49 +1091,46 @@ impl KnownHarness {
         self.project_dir
     }
 
-    /// Each user/global skills dir as a canonical RAW spec string — the resolution root named by the
-    /// upstream variable it maps to (`home`, `configHome`, `codexHome`, `claudeHome`, `vibeHome`,
-    /// `hermesHome`, `autohandHome`, `cwd`, `APPDATA`, `FLATPAK_XDG_CONFIG_HOME`; an absolute root renders
-    /// `/`-rooted) followed by the `/`-joined suffix. This is the shape upstream's `join(<root>, …)`
-    /// expressions reduce to, so an out-of-band checker can compare the two tables' dir strings without
-    /// resolving anything against a real home. Usually one entry; `openclaw` has three, the two cwd-only
-    /// harnesses (`eve`, `promptscript`) have none.
+    /// The user/global skills dir locations. Usually one; `openclaw` has three, the two cwd-only
+    /// harnesses (`eve`, `promptscript`) have none. The FIRST is the harness's canonical global skills
+    /// location (what [`skills_root`] writes).
+    #[must_use]
+    pub fn user_dirs(&self) -> &'static [DirSpec] {
+        self.user_dirs
+    }
+
+    /// Each user/global skills dir as a canonical RAW spec string ([`DirSpec::raw`]) — the shape an
+    /// out-of-band checker compares against the upstream table.
     #[must_use]
     pub fn user_dir_specs(&self) -> Vec<String> {
-        self.user_dirs.iter().map(spec_display).collect()
+        self.user_dirs.iter().map(|s| s.raw()).collect()
     }
 
     /// Each "is this harness installed" detect dir as a canonical RAW spec string — same encoding as
     /// [`Self::user_dir_specs`].
     #[must_use]
     pub fn detect_dir_specs(&self) -> Vec<String> {
-        self.detect_dirs.iter().map(spec_display).collect()
+        self.detect_dirs.iter().map(|s| s.raw()).collect()
     }
-}
 
-/// Render a [`DirSpec`] to its canonical RAW string (see [`KnownHarness::user_dir_specs`]) — the root as a
-/// tag naming its upstream resolution variable (an absolute root is the empty tag → a leading `/`), joined
-/// to the `/`-separated suffix.
-fn spec_display(spec: &DirSpec) -> String {
-    let tag = match spec.root {
-        Root::Home => "home",
-        Root::Config => "configHome",
-        Root::CodexHome => "codexHome",
-        Root::ClaudeHome => "claudeHome",
-        Root::VibeHome => "vibeHome",
-        Root::HermesHome => "hermesHome",
-        Root::AutohandHome => "autohandHome",
-        Root::GrokHome => "grokHome",
-        Root::Cwd => "cwd",
-        Root::Abs => "", // an absolute path — renders `/`-rooted below
-        Root::Appdata => "APPDATA",
-        Root::FlatpakConfig => "FLATPAK_XDG_CONFIG_HOME",
-    };
-    match (tag.is_empty(), spec.suffix.is_empty()) {
-        (true, true) => "/".to_owned(),
-        (true, false) => format!("/{}", spec.suffix),
-        (false, true) => tag.to_owned(),
-        (false, false) => format!("{tag}/{}", spec.suffix),
+    /// This harness's MCP-server config surfaces, or `None` when it has no MCP support.
+    #[must_use]
+    pub fn mcp(&self) -> Option<&McpSurfaces> {
+        self.mcp.as_ref()
+    }
+
+    /// The user-scope MCP config path resolved against `home` (env overrides honored exactly as every
+    /// other dir in this table). `None` when the harness has no MCP support, or no user surface.
+    #[must_use]
+    pub fn mcp_user_path(&self, home: &Path) -> Option<PathBuf> {
+        resolve_spec(&self.mcp.as_ref()?.user?.dir, home, None)
+    }
+
+    /// This row's OWN shared-dir coverage claim ([`SharedDirSupport::Unknown`] = no claim; the query in
+    /// [`crate::coverage`] then derives one from the user dirs).
+    #[must_use]
+    pub fn shared_dir_claim(&self) -> SharedDirSupport {
+        self.shared_dir
     }
 }
 
@@ -913,17 +1157,32 @@ pub fn discover_all(home: &Path, cwd: Option<&Path>) -> Vec<DiscoveredSkill> {
             if let Some(dir) = resolve_spec(spec, home, cwd)
                 && probed.insert(dir.clone())
             {
-                probe_skill_dir(&dir, SkillScope::User, harness, &mut out);
+                probe(&dir, SkillScope::User, harness, &mut out);
             }
         }
         if let Some(dir) = project_dir_of(harness, cwd)
             && probed.insert(dir.clone())
         {
-            probe_skill_dir(&dir, SkillScope::Project, harness, &mut out);
+            probe(&dir, SkillScope::Project, harness, &mut out);
         }
     }
     out.sort_by(|a, b| a.path.cmp(&b.path)); // read_dir order is OS-dependent — pin it
     out
+}
+
+/// Attribute every skill dir under `dir` (the shared [`discover_skill_dirs`] probe) to `harness`.
+fn probe(dir: &Path, scope: SkillScope, harness: &KnownHarness, out: &mut Vec<DiscoveredSkill>) {
+    out.extend(
+        discover_skill_dirs(dir)
+            .into_iter()
+            .map(|path| DiscoveredSkill {
+                path,
+                harness_slug: harness.slug.to_owned(),
+                harness_name: harness.display_name.to_owned(),
+                adapter_supported: harness.adapter_supported,
+                scope,
+            }),
+    );
 }
 
 /// Which known harness owns `path` — does `path` sit directly under a harness skills dir? For `add`-time
@@ -971,7 +1230,7 @@ pub fn skills_root(
     home: &Path,
     cwd: Option<&Path>,
 ) -> Option<PathBuf> {
-    let harness = HARNESSES.iter().find(|h| h.slug == slug)?;
+    let harness = known_harness(slug)?;
     match scope {
         SkillScope::User => harness
             .user_dirs
@@ -986,9 +1245,9 @@ pub fn skills_root(
 // ---------------------------------------------------------------------------------------------
 
 /// Read a `$VAR` home override — trimmed, non-empty — as a path, else `None` (mirrors the source's
-/// `process.env.X?.trim() || default`). The one place the real environment is read, so the rest resolves
-/// deterministically from the passed `home`.
-fn env_override(var: &str) -> Option<PathBuf> {
+/// `process.env.X?.trim() || default`). The one place in the crate the real environment is read, so
+/// everything else resolves deterministically from the passed `home`.
+pub(crate) fn env_override(var: &str) -> Option<PathBuf> {
     std::env::var(var)
         .ok()
         .map(|v| v.trim().to_owned())
@@ -998,7 +1257,13 @@ fn env_override(var: &str) -> Option<PathBuf> {
 
 /// Resolve a [`Root`] to a concrete base dir, or `None` when it has no meaning in this call (a `Cwd` spec
 /// with no `cwd`, or an unset `$APPDATA` / `$FLATPAK_XDG_CONFIG_HOME`).
-fn resolve_root(root: Root, home: &Path, cwd: Option<&Path>) -> Option<PathBuf> {
+///
+/// The crate's ONE root resolver: every skills dir, detection probe, MCP surface, and trigger config root
+/// lands here, so a per-harness override (`$CLAUDE_CONFIG_DIR`, `$CODEX_HOME`, `$HERMES_HOME`,
+/// `$XDG_CONFIG_HOME`, …) is honored identically wherever it is read — and a test that passes its own
+/// `home` never touches a developer's real config.
+#[must_use]
+pub fn resolve_root(root: Root, home: &Path, cwd: Option<&Path>) -> Option<PathBuf> {
     match root {
         Root::Home => Some(home.to_path_buf()),
         Root::Config => {
@@ -1023,8 +1288,30 @@ fn resolve_root(root: Root, home: &Path, cwd: Option<&Path>) -> Option<PathBuf> 
     }
 }
 
+/// The user's home dir as this machine reports it — `$HOME`, else the current directory. The ONE
+/// read of `$HOME` in the crate: an adapter built at a composition root (which is handed no home)
+/// resolves its own config root as [`config_root`] over this, so "where does this harness keep its
+/// config" has one answer whether detection asked or the adapter did.
+#[must_use]
+pub fn real_home() -> PathBuf {
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."))
+}
+
+/// A harness CONFIG root resolved against `home` — "the harness's own root, its env override honored",
+/// the shape every adapter needs. The three roots whose value can be absent ([`Root::Cwd`],
+/// [`Root::Appdata`], [`Root::FlatpakConfig`]) never name a config root, so this answers a plain path;
+/// [`resolve_root`] is the general form.
+#[must_use]
+pub fn config_root(root: Root, home: &Path) -> PathBuf {
+    resolve_root(root, home, None)
+        .expect("a harness config root never depends on a cwd or an unset variable")
+}
+
 /// Resolve a full [`DirSpec`] to a concrete path (`None` when its root has no meaning here).
-fn resolve_spec(spec: &DirSpec, home: &Path, cwd: Option<&Path>) -> Option<PathBuf> {
+#[must_use]
+pub fn resolve_spec(spec: &DirSpec, home: &Path, cwd: Option<&Path>) -> Option<PathBuf> {
     let base = resolve_root(spec.root, home, cwd)?;
     Some(join_rel(&base, spec.suffix))
 }
@@ -1057,41 +1344,56 @@ fn is_present(harness: &KnownHarness, home: &Path, cwd: Option<&Path>) -> bool {
         .any(|spec| resolve_spec(spec, home, cwd).is_some_and(|p| p.exists()))
 }
 
-/// Walk ONE level under `dir`: every child directory whose root `SKILL.md` is a regular file is a skill.
-/// Skips `.`-prefixed entries (transient staging dirs) and non-UTF-8 names — exactly the reference
-/// adapter's `discover()` probe. A missing/unreadable `dir` yields nothing, never an error.
-fn probe_skill_dir(
-    dir: &Path,
-    scope: SkillScope,
-    harness: &KnownHarness,
-    out: &mut Vec<DiscoveredSkill>,
-) {
+/// Every CHILD DIRECTORY of `dir` that could hold a skill, as `(name, path)` — the one directory walk
+/// every discovery probe in this crate shares. Skips `.`-prefixed entries (a transient
+/// `.topos-staging-*` / `.topos-old-*` dir the materializer builds beside a skill dir is never a real
+/// skill, even with a `SKILL.md` inside, so a discovery during the sub-second swap window cannot surface
+/// it) and non-UTF-8 names (the dir name IS the skill's invocation name, so a name we cannot spell is
+/// never one we manage). Symlinks are followed — a symlinked skill dir is valid. Unordered; a missing or
+/// unreadable `dir` yields nothing, never an error.
+#[must_use]
+pub fn child_dirs(dir: &Path) -> Vec<(String, PathBuf)> {
     let Ok(entries) = std::fs::read_dir(dir) else {
-        return; // no such dir (or unreadable) → nothing discovered
+        return Vec::new();
     };
+    let mut out = Vec::new();
     for entry in entries.flatten() {
-        // The dir name is the skill's invocation name, so a non-UTF-8 name can't be a skill we manage.
         let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
             continue;
         };
-        // A transient `.topos-staging-*` / `.topos-old-*` dir is never a real skill, even with a
-        // `SKILL.md` inside — so a discovery during the sub-second swap window can't surface it.
         if name.starts_with('.') {
             continue;
         }
         let path = entry.path();
-        // A skill is a directory (symlinks followed) whose root `SKILL.md` is a regular file. The file's
-        // existence confirms skill-ness — never the frontmatter (we never parse it).
-        if path.is_dir() && path.join("SKILL.md").is_file() {
-            out.push(DiscoveredSkill {
-                path,
-                harness_slug: harness.slug.to_owned(),
-                harness_name: harness.display_name.to_owned(),
-                adapter_supported: harness.adapter_supported,
-                scope,
-            });
+        if path.is_dir() {
+            out.push((name, path));
         }
     }
+    out
+}
+
+/// Whether `path` IS a skill dir: its root `SKILL.md` is a regular file. The file's existence is what
+/// confirms skill-ness — never the frontmatter (all-optional, and this crate never parses it), so a
+/// malformed `SKILL.md` cannot mislead.
+#[must_use]
+pub fn is_skill_dir(path: &Path) -> bool {
+    path.join("SKILL.md").is_file()
+}
+
+/// Walk ONE level under `dir`: every child directory that [`is_skill_dir`] confirms, sorted (`read_dir`
+/// order is OS-dependent — pin it). THE skill-directory probe: the registry's own discovery and every
+/// adapter's `discover()` run this one function, so "what counts as a skill on disk" is decided in a
+/// single place. A harness with a deeper shape composes it from [`child_dirs`] + [`is_skill_dir`] rather
+/// than restating the rule.
+#[must_use]
+pub fn discover_skill_dirs(dir: &Path) -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = child_dirs(dir)
+        .into_iter()
+        .map(|(_, path)| path)
+        .filter(|path| is_skill_dir(path))
+        .collect();
+    out.sort();
+    out
 }
 
 fn attribution(harness: &KnownHarness, scope: SkillScope) -> HarnessAttribution {

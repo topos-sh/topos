@@ -1,17 +1,20 @@
-//! The `ClaudeCode` reference [`HarnessAdapter`] — discovery, byte-exact placement targeting, and the
-//! idempotent session-start **auto-update trigger** edit of `~/.claude/settings.json`.
+//! The `ClaudeCode` [`HarnessAdapter`] — discovery, byte-exact placement targeting, and the idempotent
+//! session-start **auto-update trigger** entry in `~/.claude/settings.json`.
 //!
 //! Content-blind: it reads skill *directories* only to confirm a `SKILL.md` exists (never the bytes,
 //! never the frontmatter), and the only file it ever writes is the harness **config** — its own
-//! `settings.json` hook entry, never a skill file. The strict-JSON merge here is pure (bytes in → bytes
-//! out); the crash-safe write is delegated to the injected [`ConfigStore`] so the one atomic
-//! `temp → fsync → rename → fsync-dir` sequence lives in the CLI, not a second copy here.
+//! `settings.json` hook entry, never a skill file. The trigger is a [`JsonHooksSpec`] instance over the
+//! shared strict-JSON merge ([`crate::triggers`]), so the sentinel-keyed ownership, adopt-or-leave,
+//! in-place migration of an older managed shape, and prune-only-what-we-emptied removal are the SAME
+//! machinery every JSON-config harness runs — this harness declares only what is its own: the `async`
+//! handler field and the `--hook claude-code` dialect marker.
 
 use std::path::PathBuf;
 
-use serde_json::{Map, Value};
 use topos_types::{CurrencyKind, HarnessId, TriggerReport, TriggerState};
 
+use crate::triggers::TriggerAdapter as _;
+use crate::triggers::cc_hooks::{JsonHooks, JsonHooksSpec};
 use crate::{ConfigStore, DiscoveredPlacement, HarnessAdapter, PlacementNaming, PlacementTarget};
 
 /// The user-scope layer label recorded for a discovered/placed Claude Code skill. (`project`,
@@ -19,49 +22,52 @@ use crate::{ConfigStore, DiscoveredPlacement, HarnessAdapter, PlacementNaming, P
 /// is already `Option<String>`.)
 pub(crate) const LAYER_USER: &str = "user";
 
-/// The version-agnostic in-command sentinel marking topos's managed auto-update hook — a trailing shell
-/// comment (the command runs via `sh -c`, so `# …` is inert). Detection matches this PREFIX so a later
-/// topos still recognizes (and could migrate) an entry an earlier build wrote.
-const SENTINEL: &str = "# topos:currency";
-
-/// The structured marker identity reported in [`TriggerReport::marker_id`] — topos + harness id +
-/// schema version + command identity. Schema 2 = the async, every-SessionStart-source entry.
-const MARKER_ID: &str = "topos:claude-code:currency:2";
-
-/// The exact session-start hook command topos installs. The `command -v topos` guard skips the update
-/// when the binary is gone (post-uninstall safety); the trailing `|| true` then makes the whole line
-/// exit 0 *regardless* — critically when topos is absent (`command -v` itself exits non-zero, and that
-/// code would otherwise become the hook's, which the harness paints as a session-start hook error), and
-/// equally when an update degrades (plane down): a best-effort update sweep must never surface as an
-/// error at session start (diagnostics go to `~/.topos/log.jsonl`, never the session). `--quiet` keeps
-/// stdout near-empty — a no-change sweep emits nothing; a sweep that changed skill bytes emits ONE
-/// SessionStart hook-output JSON.
-///
-/// **`--hook claude-code` is what opts THIS harness into the `reloadSkills` extension** — the field
-/// that makes Claude Code re-scan its skill dirs same-session, so pulled bytes are live immediately
-/// (any person-facing line rides the same document's context injection). It is a marker, not a
-/// behavior switch: a trigger that does NOT carry it gets a schema-conservative document
-/// (`hookEventName` + `additionalContext` only, and nothing at all when there is nothing to read),
-/// because other harnesses validate hook stdout against a strict schema and reject unknown fields —
-/// Codex fails the whole session-start hook on one. Conservative is therefore the default every
-/// trigger gets, and each harness proven to understand an extension names itself here.
-///
-/// The quiet path also self-throttles (a TTL + single-flight gate in the client), so this command may
-/// fire on EVERY SessionStart source — startup, resume, clear, compact — cheaply. The trailing comment
-/// is the idempotency sentinel; ownership keys on that sentinel ALONE, so changing the command's
-/// spelling stays free (a re-arm migrates any earlier spelling in place).
-const HOOK_COMMAND: &str = "command -v topos >/dev/null 2>&1 && topos update --quiet --hook claude-code || true  # topos:currency";
-
 /// The per-hook timeout (seconds). A real sweep makes network calls (one delivery call per enrolled
 /// workspace, plus fetches when a pointer moved), so this must cover a slow-but-working plane — while a
 /// dead or stalling one must never hold the session start hostage: the client bounds its own connect/
 /// response/body timeouts and trips a plane-down circuit breaker on the first connect failure, so one
-/// minute is generous headroom, not the expected cost. The hook also runs `async` (below), so even the
-/// worst case never blocks the session.
+/// minute is generous headroom, not the expected cost. The hook also runs `async`, so even the worst
+/// case never blocks the session.
 const HOOK_TIMEOUT_SECS: u64 = 60;
 
-/// The reference [`HarnessAdapter`] for Claude Code. Holds the resolved config home (injected, so tests
-/// point it at a temp dir) and the [`ConfigStore`] port that performs the durable config write.
+/// Claude Code's auto-update trigger: a matcher-free `SessionStart` entry in `settings.json` carrying
+/// the one guarded sweep. An omitted matcher fires on EVERY SessionStart source — startup, resume,
+/// clear, compact — and the quiet sweep's own TTL makes the redundant fires cheap.
+///
+/// Two fields are this harness's alone. `handler_async` runs the hook off the session's critical path,
+/// so even a stalled sweep never blocks a session event. **`hook_dialect` is what opts THIS harness
+/// into the `reloadSkills` extension** — the field that makes Claude Code re-scan its skill dirs
+/// same-session, so pulled bytes are live immediately (any person-facing line rides the same
+/// document's context injection). It is a marker, not a behavior switch: a trigger that does NOT carry
+/// it gets a schema-conservative document (`hookEventName` + `additionalContext` only, and nothing at
+/// all when there is nothing to read), because other harnesses validate hook stdout against a strict
+/// schema and reject unknown fields — Codex fails the whole session-start hook on one. Conservative is
+/// therefore the default every trigger gets, and each harness proven to understand an extension names
+/// itself here.
+///
+/// The written state is the whole evidence — Claude Code gates no hook behind a separate consent — so
+/// a successful registration honestly reports `Active`. Ownership keys on the sentinel ALONE, so
+/// changing the command's spelling stays free: a re-arm migrates any earlier spelling in place.
+/// Marker schema 2 = the async, every-SessionStart-source entry.
+pub(crate) static SPEC: JsonHooksSpec = JsonHooksSpec {
+    slug: "claude-code",
+    marker_id: "topos:claude-code:currency:2",
+    config_file: "settings.json",
+    events_path: &["hooks"],
+    event: "SessionStart",
+    grouped: true,
+    handler_type: true,
+    timeout: Some(HOOK_TIMEOUT_SECS),
+    handler_async: true,
+    hook_dialect: Some("claude-code"),
+    root_seed: None,
+    live_kind: CurrencyKind::SessionStart,
+    placed_state: TriggerState::Active,
+    note: None,
+};
+
+/// The [`HarnessAdapter`] for Claude Code. Holds the resolved config home (injected, so tests point it
+/// at a temp dir) and the [`ConfigStore`] port that performs the durable config write.
 pub struct ClaudeCode<'a> {
     /// `$CLAUDE_CONFIG_DIR` (Claude Code's own override) else `$HOME/.claude`.
     home: PathBuf,
@@ -84,18 +90,16 @@ impl<'a> ClaudeCode<'a> {
         Self { home, cfg }
     }
 
-    /// Resolve Claude Code's config home exactly as Claude Code does: `$CLAUDE_CONFIG_DIR` if set, else
-    /// `$HOME/.claude` (falling back to `./.claude` if `$HOME` is unset, mirroring the client's own
-    /// home resolution). Editing any other path would touch a `settings.json` Claude Code never reads.
+    /// Resolve Claude Code's config home exactly as Claude Code does — `$CLAUDE_CONFIG_DIR` if set,
+    /// else `$HOME/.claude` — through the registry's ONE resolver, so this and the detection probe
+    /// can never disagree about where the harness lives. Editing any other path would touch a
+    /// `settings.json` Claude Code never reads.
     #[must_use]
     pub fn resolve_home() -> PathBuf {
-        if let Some(dir) = std::env::var_os("CLAUDE_CONFIG_DIR") {
-            return PathBuf::from(dir);
-        }
-        std::env::var_os("HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join(".claude")
+        crate::registry::config_root(
+            crate::registry::Root::ClaudeHome,
+            &crate::registry::real_home(),
+        )
     }
 
     fn skills_dir(&self) -> PathBuf {
@@ -124,50 +128,10 @@ impl<'a> ClaudeCode<'a> {
         self.home.join("settings.json")
     }
 
-    /// Read the current settings, returning `None` if the file does not exist and `Err` only on a
-    /// genuine I/O failure (a permission error, say) — distinct from absent.
-    fn read_settings(&self) -> std::io::Result<Option<Vec<u8>>> {
-        self.cfg.read(&self.settings_path())
-    }
-
-    /// Apply a planned edit: write through the port (degrading honestly if the write fails) or leave the
-    /// file untouched, reporting the planned state.
-    fn apply(&self, plan: EditPlan) -> TriggerReport {
-        match plan {
-            EditPlan::Leave(state) => self.report(state, false),
-            EditPlan::Write(bytes, state) => {
-                match self.cfg.replace(&self.settings_path(), &bytes) {
-                    Ok(()) => self.report(state, true),
-                    Err(_) => self.report(TriggerState::Degraded, false),
-                }
-            }
-        }
-    }
-
-    fn report(&self, state: TriggerState, touched: bool) -> TriggerReport {
-        TriggerReport {
-            harness: HarnessId::ClaudeCode,
-            currency_kind: CurrencyKind::SessionStart,
-            touched_path: touched.then(|| self.settings_path().to_string_lossy().into_owned()),
-            marker_id: MARKER_ID.to_owned(),
-            state,
-        }
-    }
-
-    /// Whether the managed auto-update entry is currently present (drives `--footprint` disclosure). A
-    /// missing/unreadable/malformed settings file means "not present" — we never claim to own a path we
-    /// cannot confirm.
-    fn has_managed_entry(&self) -> bool {
-        let Ok(Some(bytes)) = self.read_settings() else {
-            return false;
-        };
-        let Ok(root) = serde_json::from_slice::<Value>(&bytes) else {
-            return false;
-        };
-        matches!(
-            session_start_ref(&root).map(|ss| classify(ss)),
-            Some(Classification::Managed)
-        )
+    /// The trigger half, over the shared strict-JSON merge: the ONE machinery, parameterized by
+    /// [`SPEC`]. Everything about ownership, migration, and fail-closed refusal lives there.
+    fn hooks(&self) -> JsonHooks<'a> {
+        JsonHooks::new(&SPEC, self.home.clone(), self.cfg)
     }
 }
 
@@ -176,35 +140,16 @@ impl HarnessAdapter for ClaudeCode<'_> {
         HarnessId::ClaudeCode
     }
 
+    /// The ONE skill-directory probe ([`crate::registry::discover_skill_dirs`]) over this harness's
+    /// skills dir — sorted, dot-entries skipped, a root `SKILL.md` the only confirmation.
     fn discover(&self) -> Vec<DiscoveredPlacement> {
-        let mut out = Vec::new();
-        let Ok(entries) = std::fs::read_dir(self.skills_dir()) else {
-            return out; // no skills dir (or unreadable) → nothing discovered, never an error
-        };
-        for entry in entries.flatten() {
-            // The command name is the directory name, so a non-UTF-8 name can't be a skill we manage.
-            let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
-                continue;
-            };
-            // Skip dot-prefixed entries: a transient `.topos-staging-*` / `.topos-old-*` dir the
-            // materializer builds beside a skill dir is never a real skill, even with a `SKILL.md`
-            // inside — so a concurrent discovery during the sub-second swap window can't surface it.
-            if name.starts_with('.') {
-                continue;
-            }
-            let path = entry.path();
-            // A skill is a directory (follow symlinks — a symlinked skill dir is valid) whose root
-            // `SKILL.md` is a regular file. SKILL.md's existence confirms skill-ness — never the
-            // frontmatter (all-optional, and we never parse it), so a malformed SKILL.md can't mislead.
-            if path.is_dir() && path.join("SKILL.md").is_file() {
-                out.push(DiscoveredPlacement {
-                    path,
-                    layer: Some(LAYER_USER.to_owned()),
-                });
-            }
-        }
-        out.sort_by(|a, b| a.path.cmp(&b.path)); // read_dir order is OS-dependent — pin it
-        out
+        crate::registry::discover_skill_dirs(&self.skills_dir())
+            .into_iter()
+            .map(|path| DiscoveredPlacement {
+                path,
+                layer: Some(LAYER_USER.to_owned()),
+            })
+            .collect()
     }
 
     fn placement_for(
@@ -229,24 +174,19 @@ impl HarnessAdapter for ClaudeCode<'_> {
     }
 
     fn install_currency_trigger(&self) -> TriggerReport {
-        match self.read_settings() {
-            Ok(current) => self.apply(plan_install(current.as_deref())),
-            // Unreadable (e.g. a permission error) — degrade honestly, never blind-overwrite.
-            Err(_) => self.report(TriggerState::Degraded, false),
-        }
+        self.hooks().install()
     }
 
     fn remove_currency_trigger(&self) -> TriggerReport {
-        match self.read_settings() {
-            Ok(current) => self.apply(plan_remove(current.as_deref())),
-            Err(_) => self.report(TriggerState::Degraded, false),
-        }
+        self.hooks().remove()
     }
 
     fn uninstall_footprint(&self) -> Vec<PathBuf> {
         // Disclose the config file ONLY when it actually holds our managed entry — and never as a path
-        // `uninstall` will delete (it is scrubbed via `remove_currency_trigger`, the file kept).
-        if self.has_managed_entry() {
+        // `uninstall` will delete (it is scrubbed via `remove_currency_trigger`, the file kept). A
+        // missing/unreadable/malformed settings file is not present: we never claim to own a path we
+        // cannot confirm.
+        if self.hooks().present() {
             vec![self.settings_path()]
         } else {
             Vec::new()
@@ -254,317 +194,11 @@ impl HarnessAdapter for ClaudeCode<'_> {
     }
 }
 
-// ---------------------------------------------------------------------------------------------
-// The pure settings.json merge — bytes in → an edit plan out. No I/O; fail-closed on anything we
-// cannot safely interpret (never coerce or clobber a user's differently-shaped config).
-// ---------------------------------------------------------------------------------------------
-
-/// What a planned edit does: write the post-image bytes (and report the resulting state), or leave the
-/// file untouched (reporting the observed state — a true no-op, so an unchanged launch never
-/// re-serializes / re-alphabetizes the user's file).
-enum EditPlan {
-    Write(Vec<u8>, TriggerState),
-    Leave(TriggerState),
-}
-
-/// How the existing `SessionStart` hooks relate to topos's managed entry.
-#[derive(Debug, PartialEq, Eq)]
-enum Classification {
-    /// Our marked hook is present.
-    Managed,
-    /// A topos sweep hook exists WITHOUT our marker (hand-rolled) — adopt-or-leave.
-    Unmanaged,
-    /// No topos auto-update hook at all.
-    Absent,
-}
-
-fn plan_install(current: Option<&[u8]>) -> EditPlan {
-    let mut root = match parse_settings(current) {
-        ParsedSettings::Fresh => Value::Object(Map::new()),
-        ParsedSettings::Value(v) => v,
-        ParsedSettings::Malformed => return EditPlan::Leave(TriggerState::Degraded),
-    };
-    // Navigate to (creating) `hooks.SessionStart`; a wrong-typed `hooks`/`SessionStart` fails closed.
-    let Some(session_start) = session_start_mut(&mut root) else {
-        return EditPlan::Leave(TriggerState::Degraded);
-    };
-    match classify(session_start) {
-        Classification::Managed => {
-            // Ours already — but an entry an EARLIER build wrote may carry a stale command string or a
-            // stale entry shape (the old `matcher: startup` group; a pre-`async` handler). The sentinel
-            // is version-agnostic on purpose, so we still recognize it. Rewrite the managed handler —
-            // and, on a group holding ONLY our handler, the group's shape — to the current canonical
-            // form; a true no-op (no write) when it already matches. This is how a fix to the managed
-            // entry reaches installs that predate it — without it, `Managed` would be an unconditional
-            // no-op and the old bytes would live forever.
-            if migrate_managed(session_start) {
-                match serialize(&root) {
-                    Some(bytes) => EditPlan::Write(bytes, TriggerState::Active),
-                    None => EditPlan::Leave(TriggerState::Degraded),
-                }
-            } else {
-                EditPlan::Leave(TriggerState::Active) // already canonical → no write
-            }
-        }
-        Classification::Unmanaged => EditPlan::Leave(TriggerState::AlreadyPresentUnmanaged), // leave it
-        Classification::Absent => {
-            session_start.push(managed_group());
-            match serialize(&root) {
-                Some(bytes) => EditPlan::Write(bytes, TriggerState::Active),
-                None => EditPlan::Leave(TriggerState::Degraded),
-            }
-        }
-    }
-}
-
-fn plan_remove(current: Option<&[u8]>) -> EditPlan {
-    let mut root = match parse_settings(current) {
-        ParsedSettings::Fresh => return EditPlan::Leave(TriggerState::Inactive), // nothing to remove
-        ParsedSettings::Value(v) => v,
-        ParsedSettings::Malformed => return EditPlan::Leave(TriggerState::Degraded), // leave + warn
-    };
-    let Some(session_start) = session_start_existing_mut(&mut root) else {
-        return EditPlan::Leave(TriggerState::Inactive); // no well-typed SessionStart → nothing ours
-    };
-    match classify(session_start) {
-        Classification::Absent => EditPlan::Leave(TriggerState::Inactive),
-        Classification::Unmanaged => EditPlan::Leave(TriggerState::AlreadyPresentUnmanaged),
-        Classification::Managed => {
-            // Drop every topos-marked handler (any topos version's marker, so an older one can't
-            // orphan), pruning a matcher group ONLY when OUR removal is what emptied it. A group we
-            // never managed — including a pre-existing empty one — is the user's and is left intact.
-            session_start.retain_mut(|group| {
-                let Some(handlers) = group.get_mut("hooks").and_then(Value::as_array_mut) else {
-                    return true; // not a well-formed group → leave it untouched
-                };
-                if !handlers
-                    .iter()
-                    .any(|h| command_of(h).is_some_and(is_managed_command))
-                {
-                    return true; // we never managed this group → keep it (incl. a pre-existing empty one)
-                }
-                handlers.retain(|h| !command_of(h).is_some_and(is_managed_command));
-                !handlers.is_empty() // drop only if removing OUR handler is what emptied the group
-            });
-            prune_empty(&mut root);
-            match serialize(&root) {
-                Some(bytes) => EditPlan::Write(bytes, TriggerState::Inactive),
-                None => EditPlan::Leave(TriggerState::Degraded),
-            }
-        }
-    }
-}
-
-/// The parse outcome for the existing settings bytes.
-enum ParsedSettings {
-    /// Absent or whitespace-only — start from a fresh object.
-    Fresh,
-    /// Parsed JSON.
-    Value(Value),
-    /// Present but not valid JSON — fail closed (never clobber a file we can't read).
-    Malformed,
-}
-
-fn parse_settings(current: Option<&[u8]>) -> ParsedSettings {
-    match current {
-        None => ParsedSettings::Fresh,
-        Some(bytes) if bytes.iter().all(u8::is_ascii_whitespace) => ParsedSettings::Fresh,
-        Some(bytes) => match serde_json::from_slice::<Value>(bytes) {
-            Ok(value) => ParsedSettings::Value(value),
-            Err(_) => ParsedSettings::Malformed,
-        },
-    }
-}
-
-/// `hooks.SessionStart` as a mutable array, creating `hooks` (object) and `SessionStart` (array) if
-/// absent. `None` (caller fails closed) when the top level, `hooks`, or `SessionStart` is present but
-/// the wrong JSON type — we never coerce a user's differently-shaped config.
-fn session_start_mut(root: &mut Value) -> Option<&mut Vec<Value>> {
-    let obj = root.as_object_mut()?;
-    let hooks = obj
-        .entry("hooks")
-        .or_insert_with(|| Value::Object(Map::new()))
-        .as_object_mut()?;
-    hooks
-        .entry("SessionStart")
-        .or_insert_with(|| Value::Array(Vec::new()))
-        .as_array_mut()
-}
-
-/// `hooks.SessionStart` as a mutable array IF it already exists and is well-typed (never creating it).
-fn session_start_existing_mut(root: &mut Value) -> Option<&mut Vec<Value>> {
-    root.as_object_mut()?
-        .get_mut("hooks")?
-        .as_object_mut()?
-        .get_mut("SessionStart")?
-        .as_array_mut()
-}
-
-/// `hooks.SessionStart` as a shared array IF it exists and is well-typed.
-fn session_start_ref(root: &Value) -> Option<&Vec<Value>> {
-    root.as_object()?
-        .get("hooks")?
-        .as_object()?
-        .get("SessionStart")?
-        .as_array()
-}
-
-/// Classify the existing `SessionStart` groups against topos's marker.
-fn classify(session_start: &[Value]) -> Classification {
-    let mut unmanaged = false;
-    for group in session_start {
-        let Some(handlers) = group.get("hooks").and_then(Value::as_array) else {
-            continue;
-        };
-        for handler in handlers {
-            let Some(cmd) = command_of(handler) else {
-                continue;
-            };
-            if is_managed_command(cmd) {
-                return Classification::Managed;
-            }
-            if crate::triggers::is_hand_rolled_sweep(cmd) {
-                unmanaged = true;
-            }
-        }
-    }
-    if unmanaged {
-        Classification::Unmanaged
-    } else {
-        Classification::Absent
-    }
-}
-
-fn command_of(handler: &Value) -> Option<&str> {
-    handler.get("command").and_then(Value::as_str)
-}
-
-/// Ours iff the command carries our sentinel — the version-agnostic ownership marker topos writes.
-/// Keying on the sentinel ALONE (never the command text) is what lets a re-arm recognize an entry an
-/// earlier build wrote under a different command spelling (e.g. the old `topos pull`) and rewrite it in
-/// place, so the current `topos update` command REPLACES it instead of duplicating alongside it.
-fn is_managed_command(cmd: &str) -> bool {
-    cmd.contains(SENTINEL)
-}
-
-/// Rewrite every topos-managed handler to the current canonical handler object (command + timeout +
-/// type + async), and — on a group whose handlers are ALL ours — normalize the group to the canonical
-/// matcher-free shape (an omitted matcher fires on EVERY SessionStart source: startup, resume, clear,
-/// compact — the point of the migration). A group also holding a user's own handler keeps its matcher
-/// and grouping untouched (we own our handler, never the user's grouping). Returns whether anything
-/// changed; idempotent — a canonical entry is left byte-for-byte, so re-running install after a
-/// migration writes nothing. The canonical handler still satisfies [`is_managed_command`] (it keeps the
-/// sentinel), so the entry stays classified as ours — this is how a re-arm REPLACES an old
-/// `topos pull` / `matcher: startup` managed entry with the current async all-sources one, in place.
-fn migrate_managed(session_start: &mut Vec<Value>) -> bool {
-    let mut changed = false;
-    // Pass 1: pull our handler OUT of any group also holding a user's handler. Their group (and
-    // its matcher) governs THEIR handlers; leaving ours inside would pin it to their source
-    // filter (e.g. `matcher: resume` — never firing at startup) while re-arms read it as
-    // canonical and no-op forever. Extraction only fires when a foreign handler exists, so the
-    // user's group is never emptied.
-    for group in session_start.iter_mut() {
-        let Some(handlers) = group.get_mut("hooks").and_then(Value::as_array_mut) else {
-            continue;
-        };
-        let ours = handlers
-            .iter()
-            .filter(|h| command_of(h).is_some_and(is_managed_command))
-            .count();
-        if ours > 0 && ours < handlers.len() {
-            handlers.retain(|h| !command_of(h).is_some_and(is_managed_command));
-            changed = true;
-        }
-    }
-    // Pass 2: every remaining managed handler now lives in an all-ours group — canonicalize the
-    // handler objects and shed the group's stale source matcher.
-    let mut any_managed = false;
-    for group in session_start.iter_mut() {
-        let Some(handlers) = group.get_mut("hooks").and_then(Value::as_array_mut) else {
-            continue;
-        };
-        let mut ours = false;
-        for handler in handlers.iter_mut() {
-            if !command_of(handler).is_some_and(is_managed_command) {
-                continue;
-            }
-            ours = true;
-            if handler != &canonical_handler() {
-                *handler = canonical_handler();
-                changed = true;
-            }
-        }
-        if ours {
-            any_managed = true;
-            if let Some(obj) = group.as_object_mut()
-                && obj.remove("matcher").is_some()
-            {
-                changed = true; // an all-ours group sheds its stale source matcher
-            }
-        }
-    }
-    // Pass 3: an extraction that left NO managed handler anywhere re-homes it as the canonical
-    // matcher-free group (never a duplicate: this fires only when none remains).
-    if !any_managed {
-        session_start.push(managed_group());
-        changed = true;
-    }
-    changed
-}
-
-/// The canonical managed handler object.
-fn canonical_handler() -> Value {
-    serde_json::json!({
-        "type": "command",
-        "command": HOOK_COMMAND,
-        "timeout": HOOK_TIMEOUT_SECS,
-        "async": true
-    })
-}
-
-/// The group topos appends: NO matcher (an omitted matcher fires on every SessionStart source —
-/// startup, resume, clear, compact; the quiet sweep's own TTL makes the redundant fires cheap),
-/// carrying the one guarded, async command.
-fn managed_group() -> Value {
-    serde_json::json!({ "hooks": [ canonical_handler() ] })
-}
-
-/// After a removal, drop an emptied `SessionStart` array and then an emptied `hooks` object — but only
-/// when WE emptied them — so a clean uninstall restores the file toward its pre-install shape without
-/// disturbing any sibling key or hook.
-fn prune_empty(root: &mut Value) {
-    let Some(obj) = root.as_object_mut() else {
-        return;
-    };
-    let Some(hooks) = obj.get_mut("hooks").and_then(Value::as_object_mut) else {
-        return;
-    };
-    if hooks
-        .get("SessionStart")
-        .and_then(Value::as_array)
-        .is_some_and(Vec::is_empty)
-    {
-        hooks.remove("SessionStart");
-    }
-    if hooks.is_empty() {
-        obj.remove("hooks");
-    }
-}
-
-/// Serialize the merged config the way Claude Code writes it: 2-space pretty + a trailing newline.
-/// Key order is `serde_json`'s default (alphabetical) — we deliberately do NOT enable
-/// `serde_json/preserve_order` (a workspace-global feature that would flip every `--json` payload to
-/// insertion order and break the committed golden fixtures); a write happens only on a real change, so
-/// this is a one-time, action-triggered normalization that matches Claude Code's own writer.
-fn serialize(root: &Value) -> Option<Vec<u8>> {
-    let mut text = serde_json::to_string_pretty(root).ok()?;
-    text.push('\n');
-    Some(text.into_bytes())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::triggers::SENTINEL;
+    use serde_json::Value;
     use std::cell::RefCell;
     use std::path::Path;
     use std::sync::atomic::{AtomicU32, Ordering};
@@ -631,6 +265,12 @@ mod tests {
         ClaudeCode::new(home.to_path_buf(), cfg)
     }
 
+    /// The exact command [`SPEC`] registers — the shared shell sweep plus this harness's dialect
+    /// marker, composed by the one base rather than restated here.
+    fn hook_command() -> String {
+        crate::triggers::cc_hooks::sweep_command(&SPEC)
+    }
+
     /// The exact bytes a fresh install produces — the byte-compared fixture (2-space pretty, keys
     /// alphabetical, trailing newline; matches Claude Code's own writer). NO matcher — an omitted
     /// matcher fires on every SessionStart source (startup/resume/clear/compact); the handler is
@@ -661,14 +301,14 @@ mod tests {
         // it into the `reloadSkills` extension. Every other harness stays on the unmarked line,
         // whose answer is the schema-conservative document a strict validator accepts.
         assert_eq!(
-            HOOK_COMMAND,
+            hook_command(),
             crate::triggers::SHELL_SWEEP_LINE.replace(
                 "topos update --quiet",
                 "topos update --quiet --hook claude-code"
             ),
             "the Claude Code command is the shared sweep line + the dialect marker"
         );
-        assert!(HOOK_COMMAND.ends_with(SENTINEL), "ownership keys on this");
+        assert!(hook_command().ends_with(SENTINEL), "ownership keys on this");
     }
 
     #[test]
@@ -678,9 +318,9 @@ mod tests {
         let report = adapter(&home, &cfg).install_currency_trigger();
 
         assert_eq!(report.state, TriggerState::Active);
-        assert_eq!(report.harness, HarnessId::ClaudeCode);
+        assert_eq!(report.agent, "claude-code");
         assert_eq!(report.currency_kind, CurrencyKind::SessionStart);
-        assert_eq!(report.marker_id, MARKER_ID);
+        assert_eq!(report.marker_id, SPEC.marker_id);
         assert!(
             report.touched_path.is_some(),
             "a fresh write touches the file"
@@ -733,7 +373,8 @@ mod tests {
         let handler = &root["hooks"]["SessionStart"][0]["hooks"][0];
         let cmd = handler["command"].as_str().unwrap();
         assert_eq!(
-            cmd, HOOK_COMMAND,
+            cmd,
+            hook_command(),
             "migrated to the current canonical command"
         );
         assert!(
@@ -762,7 +403,7 @@ mod tests {
         // A re-arm rewrites it to the async matcher-free canonical shape — in place, idempotent.
         let cfg = MemConfig::with(&format!(
             "{{\"hooks\":{{\"SessionStart\":[{{\"matcher\":\"startup\",\"hooks\":[{{\"type\":\"command\",\"command\":\"{}\",\"timeout\":60}}]}}]}}}}",
-            HOOK_COMMAND.replace('"', "\\\"")
+            hook_command().replace('"', "\\\"")
         ));
         let report = adapter(&PathBuf::from("/h"), &cfg).install_currency_trigger();
         assert_eq!(report.state, TriggerState::Active);
@@ -808,7 +449,7 @@ mod tests {
         );
         let ours = groups[1]["hooks"].as_array().unwrap();
         assert_eq!(ours.len(), 1);
-        assert_eq!(ours[0]["command"].as_str().unwrap(), HOOK_COMMAND);
+        assert_eq!(ours[0]["command"].as_str().unwrap(), hook_command());
         assert_eq!(ours[0]["async"], true);
 
         // Idempotent: the relocated shape is canonical — a re-run writes nothing.
@@ -860,7 +501,7 @@ mod tests {
         assert_eq!(handlers.len(), 1, "still exactly one handler");
         assert_eq!(
             handlers[0]["command"].as_str().unwrap(),
-            HOOK_COMMAND,
+            hook_command(),
             "the single managed hook is the canonical update command"
         );
     }
@@ -879,9 +520,10 @@ mod tests {
             root["hooks"]["PreToolUse"].is_array(),
             "sibling hook survives"
         );
-        assert_eq!(
-            classify(session_start_ref(&root).unwrap()),
-            Classification::Managed,
+        assert!(
+            root["hooks"]["SessionStart"][0]["hooks"][0]["command"]
+                .as_str()
+                .is_some_and(|c| c.contains(SENTINEL)),
             "our hook was added"
         );
     }
@@ -951,7 +593,7 @@ mod tests {
         );
         assert_eq!(
             groups[0]["hooks"][0]["command"].as_str().unwrap(),
-            HOOK_COMMAND,
+            hook_command(),
             "normalized to the canonical managed command"
         );
     }
@@ -974,7 +616,7 @@ mod tests {
             "sibling hook survives"
         );
         assert!(
-            session_start_ref(&root).is_none(),
+            root["hooks"].get("SessionStart").is_none(),
             "our SessionStart group was pruned away (we created it)"
         );
 
@@ -1015,7 +657,9 @@ mod tests {
         assert_eq!(report.state, TriggerState::Inactive);
 
         let root: Value = serde_json::from_str(&cfg.text().unwrap()).unwrap();
-        let groups = session_start_ref(&root).expect("the user's SessionStart group survives");
+        let groups = root["hooks"]["SessionStart"]
+            .as_array()
+            .expect("the user's SessionStart group survives");
         assert_eq!(groups.len(), 1, "only OUR group was pruned");
         assert_eq!(
             groups[0]["matcher"], "resume",

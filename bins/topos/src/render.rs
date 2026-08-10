@@ -832,14 +832,10 @@ pub(crate) fn add_tty(data: &AddData) -> String {
             (TriggerState::Active, CurrencyKind::ExplicitPullOnly) => {
                 "\nNo automatic auto-update trigger — run `topos update` to check for updates."
             }
-            (TriggerState::AlreadyPresentUnmanaged, CurrencyKind::SessionStart) => {
-                "\nLeft your existing session-start auto-update hook untouched."
-            }
+            // Every non-`Active` state carries the explicit-pull floor (the one report constructor
+            // applies it), so the copy below names no update moment it cannot back.
             (TriggerState::AlreadyPresentUnmanaged, _) => {
                 "\nLeft your existing auto-update trigger untouched."
-            }
-            (TriggerState::Degraded, CurrencyKind::SessionStart) => {
-                "\nCouldn't update settings.json for the auto-update hook — left it untouched."
             }
             (TriggerState::Degraded, _) => {
                 "\nCouldn't update the harness config for the auto-update trigger — left it untouched; run `topos update` to check for updates."
@@ -965,9 +961,7 @@ pub(crate) fn fmt_tty(data: &topos_types::results::FmtData) -> String {
 /// The breadth arming sweep's receipt lines — one per OTHER detected agent, honest per row (an
 /// `Active` row names its live moment; a registered-but-ungated row names the consent still owed;
 /// a degraded row names the explicit-pull floor). Empty input renders nothing.
-pub(crate) fn breadth_trigger_lines(
-    triggers: &[topos_types::results::BreadthTriggerReport],
-) -> String {
+pub(crate) fn breadth_trigger_lines(triggers: &[topos_types::TriggerReport]) -> String {
     if triggers.is_empty() {
         return String::new();
     }

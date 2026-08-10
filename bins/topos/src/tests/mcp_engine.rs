@@ -17,9 +17,8 @@ use std::sync::{Arc, Mutex};
 
 use topos_core::digest::{self, FileMode, ManifestEntry};
 use topos_core::identity::Commit;
-use topos_harness::mcp::{
-    self, AuthHint, McpDialect, McpEntry, McpHarness, McpSurface, SurfaceRoot, plugin_dir,
-};
+use topos_harness::mcp::{self, AuthHint, McpDialect, McpEntry, plugin_dir};
+use topos_harness::registry::{self, KnownHarness};
 use topos_harness::{DiscoveredPlacement, HarnessAdapter, PlacementTarget};
 use topos_types::requests::{
     WireChannelEntry, WireChannelIndex, WireChannelSkill, WireMe, WireProposalIndex,
@@ -110,11 +109,13 @@ impl HarnessAdapter for TmpHarness {
 }
 fn no_trigger() -> TriggerReport {
     TriggerReport {
-        harness: HarnessId::ClaudeCode,
+        agent: "claude-code".to_owned(),
         currency_kind: CurrencyKind::ExplicitPullOnly,
         touched_path: None,
         marker_id: "test".into(),
         state: TriggerState::Inactive,
+
+        note: None,
     }
 }
 
@@ -464,77 +465,65 @@ fn sweep(ctx: &Ctx<'_>, plane: &FakePlane, dir: &FakeDirectory) -> ops::PullOutc
 // hermetic whatever `$CLAUDE_CONFIG_DIR`/`$CODEX_HOME`/`$HERMES_HOME` say on the dev machine.
 // =================================================================================================
 
-static SYNTHETIC: &[McpHarness] = &[
-    McpHarness {
-        slug: "claude-code",
-        display_name: "Claude Code",
-        user_surface: Some(McpSurface {
-            root: SurfaceRoot::Home,
-            suffix: ".claude/skills/topos-mcp",
-            dialect: McpDialect::ClaudePluginDir,
-        }),
-        project_surface: Some((".mcp.json", McpDialect::ClaudeProjectJson)),
-        reload_note: "reload claude",
-    },
-    McpHarness {
-        slug: "codex",
-        display_name: "Codex",
-        user_surface: Some(McpSurface {
-            root: SurfaceRoot::Home,
-            suffix: ".codex/config.toml",
-            dialect: McpDialect::CodexToml,
-        }),
-        project_surface: Some((".codex/config.toml", McpDialect::CodexToml)),
-        reload_note: "restart codex",
-    },
-    McpHarness {
-        slug: "cursor",
-        display_name: "Cursor",
-        user_surface: Some(McpSurface {
-            root: SurfaceRoot::Home,
-            suffix: ".cursor/mcp.json",
-            dialect: McpDialect::CursorJson,
-        }),
-        project_surface: Some((".cursor/mcp.json", McpDialect::CursorJson)),
-        reload_note: "restart cursor",
-    },
-    McpHarness {
-        slug: "opencode",
-        display_name: "OpenCode",
-        user_surface: Some(McpSurface {
-            root: SurfaceRoot::Home,
-            suffix: ".opencode/opencode.json",
-            dialect: McpDialect::OpencodeJson,
-        }),
-        project_surface: Some((".opencode/opencode.json", McpDialect::OpencodeJson)),
-        reload_note: "restart opencode",
-    },
-    McpHarness {
-        slug: "openclaw",
-        display_name: "OpenClaw",
-        user_surface: Some(McpSurface {
-            root: SurfaceRoot::Home,
-            suffix: ".openclaw/openclaw.json",
-            dialect: McpDialect::OpenclawJson,
-        }),
-        project_surface: None,
-        reload_note: "picked up automatically",
-    },
-    McpHarness {
-        slug: "hermes-agent",
-        display_name: "Hermes Agent",
-        user_surface: Some(McpSurface {
-            root: SurfaceRoot::Home,
-            suffix: ".hermes/config.yaml",
-            dialect: McpDialect::HermesYaml,
-        }),
-        project_surface: None,
-        reload_note: "/reload-mcp",
-    },
+static SYNTHETIC: &[KnownHarness] = &[
+    registry::home_rooted_mcp_row(
+        "claude-code",
+        "Claude Code",
+        ".claude/skills/topos-mcp",
+        McpDialect::ClaudePluginDir,
+        Some((".mcp.json", McpDialect::ClaudeProjectJson)),
+        "reload claude",
+    ),
+    registry::home_rooted_mcp_row(
+        "codex",
+        "Codex",
+        ".codex/config.toml",
+        McpDialect::CodexToml,
+        Some((".codex/config.toml", McpDialect::CodexToml)),
+        "restart codex",
+    ),
+    registry::home_rooted_mcp_row(
+        "cursor",
+        "Cursor",
+        ".cursor/mcp.json",
+        McpDialect::CursorJson,
+        Some((".cursor/mcp.json", McpDialect::CursorJson)),
+        "restart cursor",
+    ),
+    registry::home_rooted_mcp_row(
+        "opencode",
+        "OpenCode",
+        ".opencode/opencode.json",
+        McpDialect::OpencodeJson,
+        Some((".opencode/opencode.json", McpDialect::OpencodeJson)),
+        "restart opencode",
+    ),
+    registry::home_rooted_mcp_row(
+        "openclaw",
+        "OpenClaw",
+        ".openclaw/openclaw.json",
+        McpDialect::OpenclawJson,
+        None,
+        "picked up automatically",
+    ),
+    registry::home_rooted_mcp_row(
+        "hermes-agent",
+        "Hermes Agent",
+        ".hermes/config.yaml",
+        McpDialect::HermesYaml,
+        None,
+        "/reload-mcp",
+    ),
 ];
 
+/// The synthetic table as the engine takes it — the same `&[&KnownHarness]` view the real
+/// [`mcp_harnesses`](topos_harness::mcp::descriptor::mcp_harnesses) hands production.
+fn synthetic() -> Vec<&'static KnownHarness> {
+    SYNTHETIC.iter().collect()
+}
+
 fn all_slugs() -> BTreeSet<String> {
-    SYNTHETIC.iter().map(|h| h.slug.to_owned()).collect()
+    synthetic().iter().map(|h| h.slug.to_owned()).collect()
 }
 
 fn person_io<'a>(fs: &'a RealFs, layout: &'a Layout, home: &Path) -> ScopeIo<'a> {
@@ -595,7 +584,7 @@ fn converge_places_into_all_six_dialects_byte_identical_to_the_drivers() {
     let out = mcp_engine::converge(
         &person_io(&fs, &layout, &home.0),
         std::slice::from_ref(&d),
-        SYNTHETIC,
+        &synthetic(),
         &all_slugs(),
         &no_hold(),
         true,
@@ -645,10 +634,15 @@ fn converge_places_into_all_six_dialects_byte_identical_to_the_drivers() {
 
     // Six states, all `placed` — this converge wrote every one of them — each carrying its
     // reload note (a fresh placement).
-    for h in SYNTHETIC {
+    for h in synthetic() {
         let st = state_of(&out, "s_linear", h.slug);
         assert_eq!(st.state, "placed", "{}", h.slug);
-        assert_eq!(st.note.as_deref(), Some(h.reload_note), "{}", h.slug);
+        assert_eq!(
+            st.note.as_deref(),
+            h.mcp().map(|m| m.reload_note),
+            "{}",
+            h.slug
+        );
     }
     // The ledger: one key, six entries, every fingerprint matching what the file provably holds.
     let ledger = mcp_ledger::read(&fs, &layout).unwrap();
@@ -657,8 +651,8 @@ fn converge_places_into_all_six_dialects_byte_identical_to_the_drivers() {
     assert!(ledger.pending.is_empty());
     for (k, e) in &ledger.entries {
         let slug = k.split('/').next().unwrap();
-        let h = SYNTHETIC.iter().find(|h| h.slug == slug).unwrap();
-        let dialect = h.user_surface.unwrap().dialect;
+        let h = synthetic().into_iter().find(|h| h.slug == slug).unwrap();
+        let dialect = h.mcp().unwrap().user.unwrap().dialect;
         let observed = mcp::observe(dialect, std::fs::read(&e.file).ok().as_deref());
         assert_eq!(
             observed.entries.get("topos-eng-linear"),
@@ -669,20 +663,20 @@ fn converge_places_into_all_six_dialects_byte_identical_to_the_drivers() {
     }
 
     // Idempotent: a second converge leaves every byte and reports Current (no reload note).
-    let before: Vec<Vec<u8>> = SYNTHETIC
+    let before: Vec<Vec<u8>> = synthetic()
         .iter()
-        .map(|h| std::fs::read(mcp::descriptor::user_surface_path(h, &home.0).unwrap()).ok())
+        .map(|h| std::fs::read(h.mcp_user_path(&home.0).unwrap()).ok())
         .map(Option::unwrap_or_default)
         .collect();
     let out2 = mcp_engine::converge(
         &person_io(&fs, &layout, &home.0),
         std::slice::from_ref(&d),
-        SYNTHETIC,
+        &synthetic(),
         &all_slugs(),
         &no_hold(),
         true,
     );
-    for h in SYNTHETIC {
+    for h in synthetic() {
         let st = state_of(&out2, "s_linear", h.slug);
         assert_eq!(
             (st.state.as_str(), st.note.as_deref()),
@@ -691,9 +685,9 @@ fn converge_places_into_all_six_dialects_byte_identical_to_the_drivers() {
             h.slug
         );
     }
-    let after: Vec<Vec<u8>> = SYNTHETIC
+    let after: Vec<Vec<u8>> = synthetic()
         .iter()
-        .map(|h| std::fs::read(mcp::descriptor::user_surface_path(h, &home.0).unwrap()).ok())
+        .map(|h| std::fs::read(h.mcp_user_path(&home.0).unwrap()).ok())
         .map(Option::unwrap_or_default)
         .collect();
     assert_eq!(before, after, "the second converge moved bytes");
@@ -722,7 +716,7 @@ fn removal_converges_everywhere_and_deletes_only_wholly_owned_files() {
     let out = mcp_engine::converge(
         &person_io(&fs, &layout, &home.0),
         std::slice::from_ref(&d),
-        SYNTHETIC,
+        &synthetic(),
         &all_slugs(),
         &no_hold(),
         true,
@@ -734,7 +728,7 @@ fn removal_converges_everywhere_and_deletes_only_wholly_owned_files() {
     let out = mcp_engine::converge(
         &person_io(&fs, &layout, &home.0),
         &[],
-        SYNTHETIC,
+        &synthetic(),
         &all_slugs(),
         &no_hold(),
         true,
@@ -787,7 +781,7 @@ fn a_hand_edited_entry_is_drift_never_clobbered_and_survives_removal_disclosed()
     mcp_engine::converge(
         &io,
         &[cursor_only(&d)],
-        SYNTHETIC,
+        &synthetic(),
         &all_slugs(),
         &no_hold(),
         true,
@@ -804,7 +798,7 @@ fn a_hand_edited_entry_is_drift_never_clobbered_and_survives_removal_disclosed()
     let out = mcp_engine::converge(
         &io,
         &[cursor_only(&d)],
-        SYNTHETIC,
+        &synthetic(),
         &all_slugs(),
         &no_hold(),
         true,
@@ -817,7 +811,7 @@ fn a_hand_edited_entry_is_drift_never_clobbered_and_survives_removal_disclosed()
     );
 
     // Removal LEAVES the drifted entry and disclosed it (never destroys a hand edit).
-    let out = mcp_engine::converge(&io, &[], SYNTHETIC, &all_slugs(), &no_hold(), true);
+    let out = mcp_engine::converge(&io, &[], &synthetic(), &all_slugs(), &no_hold(), true);
     assert!(
         out.removed.iter().any(|r| r.state.state == "drifted"),
         "{out:?}"
@@ -847,7 +841,7 @@ fn a_foreign_topos_prefixed_entry_is_never_touched_or_claimed() {
     );
     d.harness_filter = Some(vec!["cursor".into()]);
     let io = person_io(&fs, &layout, &home.0);
-    let out = mcp_engine::converge(&io, &[d], SYNTHETIC, &all_slugs(), &no_hold(), true);
+    let out = mcp_engine::converge(&io, &[d], &synthetic(), &all_slugs(), &no_hold(), true);
     assert_eq!(state_of(&out, "s_a", "cursor").state, "conflicting");
     assert_eq!(
         std::fs::read_to_string(&cursor).unwrap(),
@@ -870,7 +864,7 @@ fn a_suspect_header_fails_the_demand_closed_with_a_warning() {
     let mut d = demand("s_a", "alpha", Some("eng"), "");
     d.server_json = br#"{"name":"io.test/a","description":"A.","version":"1.0.0","remotes":[{"type":"streamable-http","url":"https://a.example","headers":[{"name":"Authorization","isSecret":true}]}]}"#.to_vec();
     d.harness_filter = Some(vec!["cursor".into()]);
-    let out = mcp_engine::converge(&io, &[d], SYNTHETIC, &all_slugs(), &no_hold(), true);
+    let out = mcp_engine::converge(&io, &[d], &synthetic(), &all_slugs(), &no_hold(), true);
     assert!(
         out.warnings
             .iter()
@@ -908,7 +902,7 @@ fn a_sibling_key_in_the_plugin_mcp_json_backs_the_surface_off_and_survives() {
     mcp_engine::converge(
         &io,
         &[claude_only(&v1)],
-        SYNTHETIC,
+        &synthetic(),
         &all_slugs(),
         &no_hold(),
         true,
@@ -933,7 +927,7 @@ fn a_sibling_key_in_the_plugin_mcp_json_backs_the_surface_off_and_survives() {
     let out = mcp_engine::converge(
         &io,
         &[claude_only(&v2)],
-        SYNTHETIC,
+        &synthetic(),
         &all_slugs(),
         &no_hold(),
         true,
@@ -947,7 +941,7 @@ fn a_sibling_key_in_the_plugin_mcp_json_backs_the_surface_off_and_survives() {
     assert_eq!(state_of(&out, "s_a", "claude-code").state, "unprovable");
 
     // A removal (the demand drops) must not delete the file over the sibling key either.
-    mcp_engine::converge(&io, &[], SYNTHETIC, &all_slugs(), &no_hold(), true);
+    mcp_engine::converge(&io, &[], &synthetic(), &all_slugs(), &no_hold(), true);
     let kept = std::fs::read_to_string(&mcp_path)
         .unwrap_or_else(|e| panic!("the plugin .mcp.json was deleted over a user key: {e}"));
     assert!(kept.contains("\"theme\""), "{kept}");
@@ -977,7 +971,7 @@ fn a_hand_edited_plugin_manifest_survives_update_and_removal_disclosed() {
     mcp_engine::converge(
         &io,
         &[claude_only(&v1)],
-        SYNTHETIC,
+        &synthetic(),
         &all_slugs(),
         &no_hold(),
         true,
@@ -1001,7 +995,7 @@ fn a_hand_edited_plugin_manifest_survives_update_and_removal_disclosed() {
     let out = mcp_engine::converge(
         &io,
         &[claude_only(&v2)],
-        SYNTHETIC,
+        &synthetic(),
         &all_slugs(),
         &no_hold(),
         true,
@@ -1027,7 +1021,7 @@ fn a_hand_edited_plugin_manifest_survives_update_and_removal_disclosed() {
 
     // The LAST entry's removal deletes the wholly-owned .mcp.json — and keeps the edited
     // manifest, the dir standing over it, disclosed.
-    let out = mcp_engine::converge(&io, &[], SYNTHETIC, &all_slugs(), &no_hold(), true);
+    let out = mcp_engine::converge(&io, &[], &synthetic(), &all_slugs(), &no_hold(), true);
     assert!(!mcp_path.exists(), "the wholly-owned entries file leaves");
     assert_eq!(
         std::fs::read_to_string(&manifest)
@@ -1066,7 +1060,7 @@ fn a_hand_deleted_plugin_manifest_heals_back_beside_remaining_entries() {
     mcp_engine::converge(
         &io,
         std::slice::from_ref(&d),
-        SYNTHETIC,
+        &synthetic(),
         &all_slugs(),
         &no_hold(),
         true,
@@ -1077,7 +1071,7 @@ fn a_hand_deleted_plugin_manifest_heals_back_beside_remaining_entries() {
     std::fs::remove_file(&manifest).unwrap();
 
     // The next converge (nothing changed — a Leave) re-heals the constant file.
-    mcp_engine::converge(&io, &[d], SYNTHETIC, &all_slugs(), &no_hold(), true);
+    mcp_engine::converge(&io, &[d], &synthetic(), &all_slugs(), &no_hold(), true);
     assert_eq!(
         std::fs::read(&manifest).unwrap_or_else(|e| panic!("the manifest was not healed: {e}")),
         plugin_dir::manifest_bytes()
@@ -1116,7 +1110,7 @@ fn converges_serialize_on_the_per_scope_mcp_lock() {
             &server_json("https://mcp.example/a"),
         );
         d.harness_filter = Some(vec!["cursor".into()]);
-        let out = mcp_engine::converge(&io, &[d], SYNTHETIC, &all_slugs(), &no_hold(), true);
+        let out = mcp_engine::converge(&io, &[d], &synthetic(), &all_slugs(), &no_hold(), true);
         tx.send(out).unwrap();
     });
 
@@ -1159,7 +1153,7 @@ fn a_moved_surface_path_discloses_the_stale_row_and_never_drops_it() {
     mcp_engine::converge(
         &io,
         std::slice::from_ref(&d),
-        SYNTHETIC,
+        &synthetic(),
         &all_slugs(),
         &no_hold(),
         true,
@@ -1168,20 +1162,24 @@ fn a_moved_surface_path_discloses_the_stale_row_and_never_drops_it() {
     let placed = std::fs::read_to_string(&old_file).unwrap();
 
     // The surface resolves ELSEWHERE now (the descriptor's suffix moved).
-    static MOVED: &[McpHarness] = &[McpHarness {
-        slug: "cursor",
-        display_name: "Cursor",
-        user_surface: Some(McpSurface {
-            root: SurfaceRoot::Home,
-            suffix: ".cursor-next/mcp.json",
-            dialect: McpDialect::CursorJson,
-        }),
-        project_surface: None,
-        reload_note: "restart cursor",
-    }];
+    static MOVED: &[KnownHarness] = &[registry::home_rooted_mcp_row(
+        "cursor",
+        "Cursor",
+        ".cursor-next/mcp.json",
+        McpDialect::CursorJson,
+        None,
+        "restart cursor",
+    )];
     // An undemanded removal run over the moved surface: the row is NOT dropped, the old file is
     // NOT touched, and the stale class is disclosed naming the old path.
-    let out = mcp_engine::converge(&io, &[], MOVED, &all_slugs(), &no_hold(), true);
+    let out = mcp_engine::converge(
+        &io,
+        &[],
+        &MOVED.iter().collect::<Vec<_>>(),
+        &all_slugs(),
+        &no_hold(),
+        true,
+    );
     assert!(
         out.warnings
             .iter()
@@ -1225,7 +1223,7 @@ fn a_hand_deleted_plugin_dir_sheds_its_ledger_entries_on_the_next_converge() {
     mcp_engine::converge(
         &io,
         std::slice::from_ref(&d),
-        SYNTHETIC,
+        &synthetic(),
         &all_slugs(),
         &no_hold(),
         true,
@@ -1239,7 +1237,7 @@ fn a_hand_deleted_plugin_dir_sheds_its_ledger_entries_on_the_next_converge() {
     std::fs::remove_dir_all(home.0.join(".claude/skills/topos-mcp")).unwrap();
 
     // The demand drops: the ledger must shed the phantom rows and retire the key.
-    mcp_engine::converge(&io, &[], SYNTHETIC, &all_slugs(), &no_hold(), true);
+    mcp_engine::converge(&io, &[], &synthetic(), &all_slugs(), &no_hold(), true);
     let ledger = mcp_ledger::read(&fs, &layout).unwrap();
     assert!(
         !ledger.has_entries_for("s_a"),
@@ -1323,7 +1321,7 @@ fn a_user_entry_added_to_a_topos_created_file_survives_last_entry_removal() {
         mcp_engine::converge(
             &io,
             std::slice::from_ref(&d),
-            SYNTHETIC,
+            &synthetic(),
             &all_slugs(),
             &no_hold(),
             true,
@@ -1334,7 +1332,7 @@ fn a_user_entry_added_to_a_topos_created_file_survives_last_entry_removal() {
         std::fs::write(&file, inject(&created)).unwrap();
 
         // The demand drops: our entry leaves, the FILE STAYS with the user's content.
-        let out = mcp_engine::converge(&io, &[], SYNTHETIC, &all_slugs(), &no_hold(), true);
+        let out = mcp_engine::converge(&io, &[], &synthetic(), &all_slugs(), &no_hold(), true);
         assert!(out.warnings.is_empty(), "{slug}: {:?}", out.warnings);
         let kept = std::fs::read_to_string(&file)
             .unwrap_or_else(|e| panic!("{slug}: the file was deleted over a user entry: {e}"));
@@ -1370,7 +1368,7 @@ fn a_converge_that_sees_user_content_flips_owns_file_false() {
     mcp_engine::converge(
         &io,
         std::slice::from_ref(&d),
-        SYNTHETIC,
+        &synthetic(),
         &all_slugs(),
         &no_hold(),
         true,
@@ -1393,7 +1391,7 @@ fn a_converge_that_sees_user_content_flips_owns_file_false() {
     let out = mcp_engine::converge(
         &io,
         std::slice::from_ref(&d),
-        SYNTHETIC,
+        &synthetic(),
         &all_slugs(),
         &no_hold(),
         true,
@@ -1417,7 +1415,7 @@ fn the_engine_places_the_remote_the_gate_approved_not_the_first_typed_one() {
     let mut d = demand("s_two", "two", Some("eng"), "");
     d.server_json = br#"{"name":"io.test/two","description":"Two remotes.","version":"1.0.0","remotes":[{"type":"streamable-http"},{"type":"streamable-http","url":"https://second.example/mcp"}]}"#.to_vec();
     d.harness_filter = Some(vec!["cursor".into()]);
-    let out = mcp_engine::converge(&io, &[d], SYNTHETIC, &all_slugs(), &no_hold(), true);
+    let out = mcp_engine::converge(&io, &[d], &synthetic(), &all_slugs(), &no_hold(), true);
     assert!(out.warnings.is_empty(), "{:?}", out.warnings);
     assert_eq!(state_of(&out, "s_two", "cursor").state, "placed");
     let text = std::fs::read_to_string(home.0.join(".cursor/mcp.json")).unwrap();
@@ -1440,7 +1438,7 @@ fn holds_and_targeted_runs_never_remove_standing_entries() {
     mcp_engine::converge(
         &io,
         std::slice::from_ref(&d),
-        SYNTHETIC,
+        &synthetic(),
         &all_slugs(),
         &no_hold(),
         true,
@@ -1450,7 +1448,7 @@ fn holds_and_targeted_runs_never_remove_standing_entries() {
 
     // Undemanded but HELD (its workspace was unreachable): byte-identical, ledger kept.
     let hold: HashSet<String> = ["s_a".to_owned()].into();
-    mcp_engine::converge(&io, &[], SYNTHETIC, &all_slugs(), &hold, true);
+    mcp_engine::converge(&io, &[], &synthetic(), &all_slugs(), &hold, true);
     assert_eq!(std::fs::read_to_string(&cursor).unwrap(), placed);
     assert!(
         mcp_ledger::read(&fs, &layout)
@@ -1459,7 +1457,7 @@ fn holds_and_targeted_runs_never_remove_standing_entries() {
     );
 
     // Undemanded on a run that may NOT remove (a targeted update): same freeze.
-    mcp_engine::converge(&io, &[], SYNTHETIC, &all_slugs(), &no_hold(), false);
+    mcp_engine::converge(&io, &[], &synthetic(), &all_slugs(), &no_hold(), false);
     assert_eq!(std::fs::read_to_string(&cursor).unwrap(), placed);
     assert!(
         mcp_ledger::read(&fs, &layout)
@@ -1484,7 +1482,7 @@ fn intent_journal_recovery_heals_both_crash_orders_through_the_engine() {
     mcp_engine::converge(
         &io,
         std::slice::from_ref(&d),
-        SYNTHETIC,
+        &synthetic(),
         &all_slugs(),
         &no_hold(),
         true,
@@ -1515,7 +1513,7 @@ fn intent_journal_recovery_heals_both_crash_orders_through_the_engine() {
     let out = mcp_engine::converge(
         &io,
         std::slice::from_ref(&d),
-        SYNTHETIC,
+        &synthetic(),
         &all_slugs(),
         &no_hold(),
         true,
@@ -1554,7 +1552,7 @@ fn intent_journal_recovery_heals_both_crash_orders_through_the_engine() {
     let out = mcp_engine::converge(
         &io,
         std::slice::from_ref(&d),
-        SYNTHETIC,
+        &synthetic(),
         &all_slugs(),
         &no_hold(),
         true,
@@ -1587,7 +1585,7 @@ fn a_fault_at_any_write_never_tears_state_and_the_next_converge_heals() {
             &server_json("https://mcp.example/a"),
         );
         d.harness_filter = Some(vec!["cursor".into()]);
-        mcp_engine::converge(&io, &[d], SYNTHETIC, &all_slugs(), &no_hold(), true);
+        mcp_engine::converge(&io, &[d], &synthetic(), &all_slugs(), &no_hold(), true);
         fault.ops_attempted()
     };
     assert!(probe > 0);
@@ -1612,7 +1610,7 @@ fn a_fault_at_any_write_never_tears_state_and_the_next_converge_heals() {
             let _ = mcp_engine::converge(
                 &io,
                 std::slice::from_ref(&d),
-                SYNTHETIC,
+                &synthetic(),
                 &all_slugs(),
                 &no_hold(),
                 true,
@@ -1624,7 +1622,7 @@ fn a_fault_at_any_write_never_tears_state_and_the_next_converge_heals() {
         let out = mcp_engine::converge(
             &io,
             std::slice::from_ref(&d),
-            SYNTHETIC,
+            &synthetic(),
             &all_slugs(),
             &no_hold(),
             true,
@@ -1949,8 +1947,8 @@ fn a_repaired_config_entry_makes_the_run_an_update_not_a_check() {
         tty(&out),
         "updated machine-wide\n\
          alpha   updated (~/.cursor/mcp.json)\n    \
-             ~/.cursor/mcp.json: placed — restart Cursor\n    \
-             ~/.openclaw/openclaw.json: unchanged\n\
+             ~/.openclaw/openclaw.json: unchanged\n    \
+             ~/.cursor/mcp.json: placed — restart Cursor\n\
          Checked 1 bundle: 1 updated."
     );
     // The wire says the same thing the receipt does: the written file, and only it, is the
@@ -1963,7 +1961,7 @@ fn a_repaired_config_entry_makes_the_run_an_update_not_a_check() {
         .collect();
     assert_eq!(
         states,
-        vec![("cursor", "placed"), ("openclaw", "current")],
+        vec![("openclaw", "current"), ("cursor", "placed")],
         "the rewritten file and the merely-found one are distinguishable: {row:?}"
     );
 }
@@ -2018,11 +2016,12 @@ fn a_first_ever_mcp_placement_reads_installed_not_a_repair() {
     );
     assert_eq!(
         tty(&out),
+        // Agent lines follow the ONE harness table's row order.
         "updated machine-wide\n\
          + weather   installed (2 config files)\n    \
-             ~/.cursor/mcp.json: placed — restart Cursor\n    \
              ~/.openclaw/openclaw.json: placed — picked up automatically; sign in with \
-             `openclaw mcp login <name>`\n\
+             `openclaw mcp login <name>`\n    \
+             ~/.cursor/mcp.json: placed — restart Cursor\n\
          Checked 1 bundle: 1 installed."
     );
 

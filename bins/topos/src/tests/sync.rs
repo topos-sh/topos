@@ -88,11 +88,13 @@ impl HarnessAdapter for NoHarness {
 }
 fn report() -> TriggerReport {
     TriggerReport {
-        harness: HarnessId::ClaudeCode,
+        agent: "claude-code".to_owned(),
         currency_kind: CurrencyKind::ExplicitPullOnly,
         touched_path: None,
         marker_id: "test".into(),
         state: TriggerState::Inactive,
+
+        note: None,
     }
 }
 

@@ -226,7 +226,7 @@ fn run_command(
         let result = ops::status_snapshot(&ctx, view).map(|mut data| {
             if let Some(r) = &ctx.roots {
                 data.triggers =
-                    ops::probe_detected(&r.home, r.cwd.as_deref(), harness.as_ref(), &fs);
+                    ops::probe_detected(&r.home, r.cwd.as_deref(), harness.as_ref(), &fs, &fs);
             }
             data
         });
@@ -3127,7 +3127,7 @@ fn breadth_arm(
     roots: &Option<crate::ctx::AgentRoots>,
     active: &dyn HarnessAdapter,
     fs: &RealFs,
-) -> Vec<topos_types::results::BreadthTriggerReport> {
+) -> Vec<topos_types::TriggerReport> {
     match roots {
         Some(r) => ops::arm_detected(&r.home, r.cwd.as_deref(), active.id().slug(), fs, fs),
         None => Vec::new(),

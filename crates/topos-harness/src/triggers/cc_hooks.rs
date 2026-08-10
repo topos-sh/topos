@@ -23,15 +23,15 @@ use std::path::PathBuf;
 use serde_json::{Map, Value};
 use topos_types::{CurrencyKind, TriggerState};
 
-use crate::ConfigStore;
+use crate::{ConfigStore, trigger_report};
 
-use super::{SENTINEL, SHELL_SWEEP_LINE, TriggerAdapter, TriggerOutcome, outcome};
+use super::{PLAIN_SWEEP, SENTINEL, SHELL_SWEEP_LINE, TriggerAdapter, TriggerReport};
 
 /// One instance's parameterization of the shared JSON-hooks machinery.
 pub(crate) struct JsonHooksSpec {
     /// The registry slug.
     pub(crate) slug: &'static str,
-    /// The structured marker identity reported in [`TriggerOutcome::marker_id`].
+    /// The structured marker identity reported in [`TriggerReport::marker_id`].
     pub(crate) marker_id: &'static str,
     /// The config file name under the harness root (e.g. `settings.json`, `hooks.json`).
     pub(crate) config_file: &'static str,
@@ -46,6 +46,14 @@ pub(crate) struct JsonHooksSpec {
     pub(crate) handler_type: bool,
     /// The canonical handler's `timeout` value, where the harness supports one.
     pub(crate) timeout: Option<u64>,
+    /// Whether the canonical handler carries `"async": true` — the harness runs the hook off the
+    /// session's critical path, so even a slow sweep never blocks a session event.
+    pub(crate) handler_async: bool,
+    /// The harness this trigger NAMES ITSELF to in the sweep command (`--hook <harness>`), for a
+    /// harness proven to understand a hook-output extension. `None` — the default — leaves the
+    /// command unmarked, which is what earns the schema-conservative answer a strict validator
+    /// accepts (see [`SHELL_SWEEP_LINE`]).
+    pub(crate) hook_dialect: Option<&'static str>,
     /// A top-level key seeded ONLY when the file is created from scratch (e.g. a schema
     /// `version`); an existing file's own value is never touched.
     pub(crate) root_seed: Option<(&'static str, u64)>,
@@ -88,13 +96,8 @@ impl<'a> JsonHooks<'a> {
         self.cfg.read(&self.config_path())
     }
 
-    fn out(
-        &self,
-        state: TriggerState,
-        touched: bool,
-        note: Option<&'static str>,
-    ) -> TriggerOutcome {
-        outcome(
+    fn out(&self, state: TriggerState, touched: bool, note: Option<&'static str>) -> TriggerReport {
+        trigger_report(
             self.spec.slug,
             self.spec.live_kind,
             state,
@@ -106,7 +109,7 @@ impl<'a> JsonHooks<'a> {
 
     /// Apply a planned edit: write through the port (degrading honestly if the write fails) or
     /// leave the file untouched, reporting the planned state.
-    fn apply(&self, plan: EditPlan) -> TriggerOutcome {
+    fn apply(&self, plan: EditPlan) -> TriggerReport {
         match plan {
             EditPlan::Leave(state, note) => self.out(state, false, note),
             EditPlan::Write(bytes, state, note) => {
@@ -124,7 +127,7 @@ impl TriggerAdapter for JsonHooks<'_> {
         self.spec.slug
     }
 
-    fn install(&self) -> TriggerOutcome {
+    fn install(&self) -> TriggerReport {
         match self.read() {
             Ok(current) => self.apply(plan_install(self.spec, current.as_deref())),
             // Unreadable (e.g. a permission error) — degrade honestly, never blind-overwrite.
@@ -132,7 +135,7 @@ impl TriggerAdapter for JsonHooks<'_> {
         }
     }
 
-    fn remove(&self) -> TriggerOutcome {
+    fn remove(&self) -> TriggerReport {
         match self.read() {
             Ok(current) => self.apply(plan_remove(self.spec, current.as_deref())),
             Err(_) => self.out(TriggerState::Degraded, false, None),
@@ -358,6 +361,18 @@ fn is_managed_command(cmd: &str) -> bool {
     cmd.contains(SENTINEL)
 }
 
+/// The shell sweep line this instance registers: the shared [`SHELL_SWEEP_LINE`] verbatim, or — for
+/// a harness that declares a hook dialect — the same line with its `--hook <harness>` marker on the
+/// sweep. The two spellings can therefore never drift: there is one line, plus one declared marker.
+pub(crate) fn sweep_command(spec: &JsonHooksSpec) -> String {
+    match spec.hook_dialect {
+        None => SHELL_SWEEP_LINE.to_owned(),
+        Some(harness) => {
+            SHELL_SWEEP_LINE.replace(PLAIN_SWEEP, &format!("{PLAIN_SWEEP} --hook {harness}"))
+        }
+    }
+}
+
 /// The canonical managed handler object for this instance (keys land alphabetically under
 /// `serde_json`'s default map, matching the family's writer style).
 fn canonical_handler(spec: &JsonHooksSpec) -> Value {
@@ -365,12 +380,12 @@ fn canonical_handler(spec: &JsonHooksSpec) -> Value {
     if spec.handler_type {
         m.insert("type".to_owned(), Value::String("command".to_owned()));
     }
-    m.insert(
-        "command".to_owned(),
-        Value::String(SHELL_SWEEP_LINE.to_owned()),
-    );
+    m.insert("command".to_owned(), Value::String(sweep_command(spec)));
     if let Some(timeout) = spec.timeout {
         m.insert("timeout".to_owned(), Value::from(timeout));
+    }
+    if spec.handler_async {
+        m.insert("async".to_owned(), Value::Bool(true));
     }
     Value::Object(m)
 }

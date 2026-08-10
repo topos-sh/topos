@@ -36,14 +36,16 @@ use std::path::{Path, PathBuf};
 
 use topos_types::{CurrencyKind, TriggerState};
 
-use crate::ConfigStore;
+use crate::{ConfigStore, trigger_report};
 
-use super::{GUARDED_SWEEP, SENTINEL, TriggerAdapter, TriggerOutcome, env_override, outcome};
+use crate::registry::{self, Root};
+
+use super::{GUARDED_SWEEP, SENTINEL, TriggerAdapter, TriggerReport};
 
 /// Codex's user config file, under the resolved root.
 const CONFIG_FILENAME: &str = "config.toml";
 
-/// The structured marker identity reported in [`TriggerOutcome::marker_id`].
+/// The structured marker identity reported in [`TriggerReport::marker_id`].
 const MARKER_ID: &str = "topos:codex:currency:1";
 
 /// The consent step still owed after a successful registration (codex's own trust prompt).
@@ -70,7 +72,7 @@ pub(crate) struct Codex<'a> {
 /// Production root: `$CODEX_HOME` (codex's own override, resolved the way the registry does)
 /// else `~/.codex` under the passed home.
 pub(crate) fn resolve_root(home: &Path) -> PathBuf {
-    env_override("CODEX_HOME").unwrap_or_else(|| home.join(".codex"))
+    registry::config_root(Root::CodexHome, home)
 }
 
 pub(crate) fn adapter<'a>(home: &Path, cfg: &'a dyn ConfigStore) -> Codex<'a> {
@@ -86,13 +88,8 @@ impl<'a> Codex<'a> {
         self.root.join(CONFIG_FILENAME)
     }
 
-    fn out(
-        &self,
-        state: TriggerState,
-        touched: bool,
-        note: Option<&'static str>,
-    ) -> TriggerOutcome {
-        outcome(
+    fn out(&self, state: TriggerState, touched: bool, note: Option<&'static str>) -> TriggerReport {
+        trigger_report(
             "codex",
             CurrencyKind::SessionStart, // what fires when live; never reported live (see above)
             state,
@@ -102,7 +99,7 @@ impl<'a> Codex<'a> {
         )
     }
 
-    fn apply(&self, plan: EditPlan) -> TriggerOutcome {
+    fn apply(&self, plan: EditPlan) -> TriggerReport {
         match plan {
             EditPlan::Leave(state, note) => self.out(state, false, note),
             EditPlan::Write(bytes, state, note) => {
@@ -120,14 +117,14 @@ impl TriggerAdapter for Codex<'_> {
         "codex"
     }
 
-    fn install(&self) -> TriggerOutcome {
+    fn install(&self) -> TriggerReport {
         match self.cfg.read(&self.config_path()) {
             Ok(current) => self.apply(plan_install(current.as_deref())),
             Err(_) => self.out(TriggerState::Degraded, false, None),
         }
     }
 
-    fn remove(&self) -> TriggerOutcome {
+    fn remove(&self) -> TriggerReport {
         match self.cfg.read(&self.config_path()) {
             Ok(current) => self.apply(plan_remove(current.as_deref())),
             Err(_) => self.out(TriggerState::Degraded, false, None),
@@ -315,11 +312,11 @@ command = "command -v topos >/dev/null 2>&1 && topos update --quiet || true"
     fn fresh_install_writes_exactly_the_block_and_never_claims_active() {
         let cfg = MemConfig::default();
         let report = a(&cfg).install();
-        assert_eq!(report.slug, "codex");
+        assert_eq!(report.agent, "codex");
         assert_eq!(report.marker_id, MARKER_ID);
         // Codex gates hooks behind its own trust prompt — Active is never claimed.
         assert_eq!(report.state, TriggerState::Inactive);
-        assert_eq!(report.kind, CurrencyKind::ExplicitPullOnly);
+        assert_eq!(report.currency_kind, CurrencyKind::ExplicitPullOnly);
         assert!(report.note.as_deref().unwrap().contains("trust the hook"));
         assert_eq!(report.touched_path.as_deref(), Some(CONFIG));
         assert_eq!(cfg.text(CONFIG).as_deref(), Some(BLOCK_FIXTURE));
@@ -417,7 +414,7 @@ command = "command -v topos >/dev/null 2>&1 && topos update --quiet || true"
 
         let report = a(&cfg).remove();
         assert_eq!(report.state, TriggerState::Inactive);
-        assert_eq!(report.kind, CurrencyKind::ExplicitPullOnly);
+        assert_eq!(report.currency_kind, CurrencyKind::ExplicitPullOnly);
         assert_eq!(
             cfg.text(CONFIG).as_deref(),
             Some(before),

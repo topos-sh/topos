@@ -1,18 +1,27 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "TriggerReport",
-  "description": "The result of installing a auto-update trigger — what was touched + the marker, so re-install is\nidempotent (the marker is a managed sentinel block in the config edit, NEVER in skill bytes).",
+  "description": "The result of (un)installing ONE agent's auto-update trigger — what was touched + the marker, so\nre-install is idempotent (the marker is a managed sentinel block in the config edit, NEVER in skill\nbytes). The one shape every trigger reports in, whichever machinery served it.",
   "type": "object",
   "properties": {
+    "agent": {
+      "description": "The agent's registry slug (`claude-code`, `cursor`, `hermes-agent`).",
+      "type": "string"
+    },
     "currency_kind": {
+      "description": "Only an `active` state carries a live kind; every other state advertises the explicit-pull floor.",
       "$ref": "#/$defs/CurrencyKind"
     },
-    "harness": {
-      "$ref": "#/$defs/HarnessId"
-    },
     "marker_id": {
-      "description": "`topos` + harness id + schema version + command identity.",
+      "description": "`topos` + agent slug + schema version + command identity.",
       "type": "string"
+    },
+    "note": {
+      "description": "The consent step still owed, or the evidence-level caveat — `None` when nothing needs saying.",
+      "type": [
+        "string",
+        "null"
+      ]
     },
     "state": {
       "$ref": "#/$defs/TriggerState"
@@ -26,7 +35,7 @@
     }
   },
   "required": [
-    "harness",
+    "agent",
     "currency_kind",
     "marker_id",
     "state"
@@ -50,14 +59,6 @@
           "type": "string",
           "const": "explicit_pull_only"
         }
-      ]
-    },
-    "HarnessId": {
-      "type": "string",
-      "enum": [
-        "claude-code",
-        "openclaw",
-        "hermes"
       ]
     },
     "TriggerState": {

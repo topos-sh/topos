@@ -176,7 +176,7 @@ fn render_command(out: &mut String, path: &str, cmd: &clap::Command, level: usiz
 /// never drift from what `-a` actually writes. The `--check` gate turns any registry change into a
 /// failing build until the committed copies are regenerated.
 fn render_agents(out: &mut String) {
-    use crate::manifest::dest::{mcp_dest_spelling, skills_dest_spelling, spec_default_spelling};
+    use crate::manifest::dest::{mcp_dest_spelling, skills_dest_spelling};
     use crate::manifest::document::ManifestScope;
 
     // Per agent: its DEFAULT machine folders (the first is the one `-a` writes) + its project folder.
@@ -186,9 +186,9 @@ fn render_agents(out: &mut String) {
             .iter()
             .map(|h| {
                 let machine: Vec<String> = h
-                    .user_dir_specs()
+                    .user_dirs()
                     .iter()
-                    .filter_map(|spec| spec_default_spelling(spec))
+                    .filter_map(|spec| spec.default_spelling())
                     .collect();
                 (
                     h.slug,

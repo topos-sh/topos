@@ -21,15 +21,15 @@ use std::path::PathBuf;
 
 use topos_types::{CurrencyKind, TriggerState};
 
-use crate::ConfigStore;
+use crate::{ConfigStore, trigger_report};
 
-use super::{TriggerAdapter, TriggerOutcome, outcome};
+use super::{TriggerAdapter, TriggerReport};
 
 /// One instance's parameterization of the shared file-drop machinery.
 pub(crate) struct FileDropSpec {
     /// The registry slug.
     pub(crate) slug: &'static str,
-    /// The structured marker identity reported in [`TriggerOutcome::marker_id`].
+    /// The structured marker identity reported in [`TriggerReport::marker_id`].
     pub(crate) marker_id: &'static str,
     /// The ownership needle — a file whose bytes contain it is OURS (version-agnostic: a marker
     /// id minus its schema number, or the in-command sentinel). Never matched against a foreign
@@ -79,13 +79,8 @@ impl<'a> FileDrop<'a> {
         String::from_utf8_lossy(bytes).contains(self.spec.marker_needle)
     }
 
-    fn out(
-        &self,
-        state: TriggerState,
-        touched: bool,
-        note: Option<&'static str>,
-    ) -> TriggerOutcome {
-        outcome(
+    fn out(&self, state: TriggerState, touched: bool, note: Option<&'static str>) -> TriggerReport {
+        trigger_report(
             self.spec.slug,
             self.spec.live_kind,
             state,
@@ -95,7 +90,7 @@ impl<'a> FileDrop<'a> {
         )
     }
 
-    fn write_canonical(&self) -> TriggerOutcome {
+    fn write_canonical(&self) -> TriggerReport {
         match self.cfg.replace(&self.path, &self.canonical) {
             Ok(()) => self.out(TriggerState::Active, true, self.spec.note),
             Err(_) => self.out(TriggerState::Degraded, false, None),
@@ -108,7 +103,7 @@ impl TriggerAdapter for FileDrop<'_> {
         self.spec.slug
     }
 
-    fn install(&self) -> TriggerOutcome {
+    fn install(&self) -> TriggerReport {
         match self.cfg.read(&self.path) {
             // Unreadable (e.g. a permission error) — degrade honestly, never blind-overwrite.
             Err(_) => self.out(TriggerState::Degraded, false, None),
@@ -125,7 +120,7 @@ impl TriggerAdapter for FileDrop<'_> {
         }
     }
 
-    fn remove(&self) -> TriggerOutcome {
+    fn remove(&self) -> TriggerReport {
         match self.cfg.read(&self.path) {
             Err(_) => self.out(TriggerState::Degraded, false, None),
             Ok(None) => self.out(TriggerState::Inactive, false, None), // already clean
@@ -176,7 +171,7 @@ mod tests {
         let a = drop_at(&cfg, PATH);
         let report = a.install();
         assert_eq!(report.state, TriggerState::Active);
-        assert_eq!(report.kind, CurrencyKind::SessionStart);
+        assert_eq!(report.currency_kind, CurrencyKind::SessionStart);
         assert_eq!(report.note.as_deref(), Some("vendor docs, unverified"));
         assert_eq!(report.touched_path.as_deref(), Some(PATH));
         assert_eq!(cfg.text(PATH).as_deref(), Some(CANON));
@@ -223,7 +218,7 @@ mod tests {
 
         let report = a.remove();
         assert_eq!(report.state, TriggerState::Inactive);
-        assert_eq!(report.kind, CurrencyKind::ExplicitPullOnly);
+        assert_eq!(report.currency_kind, CurrencyKind::ExplicitPullOnly);
         assert!(report.touched_path.is_some(), "the unlink is disclosed");
         assert!(!path.exists());
         assert!(!a.present());

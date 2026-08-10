@@ -7,12 +7,11 @@
 //! everything else is [`SharedDirSupport::Unknown`] — treated as *not* covered (fail closed: a skill
 //! must never be assumed delivered to a harness on no evidence).
 //!
-//! Two sources feed [`shared_dir_support`], override first:
-//! 1. the small override table below — one row per line, each commented with its evidence source,
-//!    so a fresh probe result is a one-line edit;
-//! 2. the derivation rule — a [`registry`] row whose USER dirs include the literal home
-//!    `.agents/skills` spec is itself a docs-level claim (`Docs(true)`), and this stays in sync with
-//!    registry re-syncs automatically.
+//! The claim lives ON the harness's [`registry`] row ([`registry::KnownHarness::shared_dir_claim`]),
+//! each with its evidence in a comment, so a fresh probe result is a one-line edit. A row carrying no
+//! claim of its own falls through to the derivation rule: a row whose USER dirs include the literal home
+//! `.agents/skills` spec is itself a docs-level claim (`Docs(true)`), which keeps registry re-syncs in
+//! sync automatically.
 
 use std::path::{Path, PathBuf};
 
@@ -48,58 +47,30 @@ impl SharedDirSupport {
     }
 }
 
-/// The per-harness overrides — one row per line, each commented with its evidence source, so fresh
-/// probe results are trivial to fold in. An override WINS over the registry derivation.
-const OVERRIDES: &[(&str, SharedDirSupport)] = &[
-    // Verified against a live containerized install of openclaw@2026.7.1 on 2026-07-16:
-    // `~/.agents/skills` is a recognized skills root, higher precedence than `~/.openclaw/skills`.
-    ("openclaw", SharedDirSupport::Probed(true)),
-    // Verified against a live codex-cli 0.144.4 binary on 2026-07-16: no `.agents/skills` path
-    // literal exists in the build; its only user skills root is `$CODEX_HOME/skills`.
-    ("codex", SharedDirSupport::Probed(false)),
-    // Vendor manual lists `~/.agents/skills` among its skills dirs (closed source — docs only).
-    ("amp", SharedDirSupport::Docs(true)),
-    // Vendor docs list `~/.agents/skills`.
-    ("gemini-cli", SharedDirSupport::Docs(true)),
-    // Vendor docs list `~/.agents/skills`.
-    ("github-copilot", SharedDirSupport::Docs(true)),
-    // Verified LIVE against goose 1.43.0 in a container on 2026-07-16: a skill placed at
-    // `~/.agents/skills/<name>` appears in `goose skills list` (and `~/.agents/skills` is the
-    // build's writable global skills dir).
-    ("goose", SharedDirSupport::Probed(true)),
-    // Verified against a live containerized opencode-ai 1.18.3 on 2026-07-16: the binary's own
-    // help text names `~/.agents/skills/<name>/SKILL.md` as an auto-loaded external skills dir.
-    ("opencode", SharedDirSupport::Probed(true)),
-    // Verified against cline 3.0.43 source on 2026-07-16: `~/.agents/skills` is in the global
-    // skills search paths (upgrades the registry-derived docs-level claim).
-    ("cline", SharedDirSupport::Probed(true)),
-    // Verified against crush v0.85.0 source on 2026-07-16: `~/.agents/skills` is in the global
-    // skills dirs ("Per the Agent Skills spec"); its registry row alone would derive nothing.
-    ("crush", SharedDirSupport::Probed(true)),
-];
-
 /// The canonical raw spec string a registry row carries when its user skills dir IS the shared dir —
-/// the derivation rule's needle (see [`registry::KnownHarness::user_dir_specs`] for the encoding).
+/// the derivation rule's needle (see [`registry::DirSpec::raw`] for the encoding).
 const SHARED_USER_SPEC: &str = "home/.agents/skills";
 
-/// The shared-dir coverage claim for a harness slug. Override first, then the registry derivation
+/// The shared-dir coverage claim for a harness slug: the row's own claim, else the registry derivation
 /// (a user dir at the literal home `.agents/skills` ⇒ `Docs(true)`), else `Unknown`.
 #[must_use]
 pub fn shared_dir_support(slug: &str) -> SharedDirSupport {
-    if let Some((_, support)) = OVERRIDES.iter().find(|(s, _)| *s == slug) {
-        return *support;
-    }
-    let Some(harness) = registry::known_harnesses().iter().find(|h| h.slug == slug) else {
+    let Some(harness) = registry::known_harness(slug) else {
         return SharedDirSupport::Unknown;
     };
-    if harness
-        .user_dir_specs()
-        .iter()
-        .any(|s| s == SHARED_USER_SPEC)
-    {
-        SharedDirSupport::Docs(true)
-    } else {
-        SharedDirSupport::Unknown
+    match harness.shared_dir_claim() {
+        SharedDirSupport::Unknown => {
+            if harness
+                .user_dir_specs()
+                .iter()
+                .any(|s| s == SHARED_USER_SPEC)
+            {
+                SharedDirSupport::Docs(true)
+            } else {
+                SharedDirSupport::Unknown
+            }
+        }
+        claim => claim,
     }
 }
 
@@ -113,10 +84,11 @@ pub fn shared_skills_dir(home: &Path) -> PathBuf {
 mod tests {
     use super::*;
 
+    /// A row's own claim wins over the derivation and carries its provenance.
     #[test]
-    fn overrides_win_and_carry_their_provenance() {
+    fn a_rows_claim_wins_and_carries_its_provenance() {
         // The live probes (positive and negative; `cline`/`crush` upgrade or establish what the
-        // registry row alone could not).
+        // row's own dirs could not derive).
         for slug in ["openclaw", "goose", "opencode", "cline", "crush"] {
             assert_eq!(
                 shared_dir_support(slug),
@@ -134,14 +106,14 @@ mod tests {
             );
         }
         // `codex` derives nothing (its user dir is `$CODEX_HOME/skills`), so the Probed(false)
-        // override is the whole claim — and it must NOT read as covered.
+        // claim on its row is the whole answer — and it must NOT read as covered.
         assert!(!shared_dir_support("codex").covered());
     }
 
     #[test]
     fn registry_rows_with_the_shared_user_dir_derive_docs_true() {
         // These rows carry `home/.agents/skills` as their user dir upstream — the registry claim is
-        // itself a docs-level source, so they derive Docs(true) with no override row.
+        // itself a docs-level source, so they derive Docs(true) carrying no claim of their own.
         for slug in ["zed", "dexto", "kimi-code-cli", "loaf", "warp"] {
             let support = shared_dir_support(slug);
             assert_eq!(support, SharedDirSupport::Docs(true), "{slug}");

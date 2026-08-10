@@ -15,7 +15,7 @@ Every registered trigger runs the ONE sweep `topos update --quiet` (self-throttl
 firing on every session-shaped event is cheap). `--hook <harness>` names the calling trigger and
 selects the sweep's stdout dialect: UNMARKED is the schema-conservative default (`hookEventName` +
 `additionalContext` only, nothing when there is nothing to say — what a strict hook-output
-validator accepts); `--hook claude-code` is the one declaration today that opts into
+validator accepts); `claude-code` is the one spec declaring a `hook_dialect` today, opting into
 `reloadSkills` so pulled skills go live same-session. `trigger_present` is the hook-health probe
 `list`/`auth status` read — health is never claimed on faith. The shared contract everywhere:
 `Active` only on stated evidence, else the entry is registered and the report floors at explicit
@@ -23,30 +23,41 @@ pull; fail-closed with zero writes on any unprovable config shape; ownership key
 sentinel/marker alone; every (un)install idempotent; topos never writes another program's
 trust/consent state.
 
+Every trigger reports in ONE shape — `topos_types::TriggerReport`, built by the crate's single
+`trigger_report` constructor, which is what applies the honest-kind floor. `triggers::TriggerAdapter`
+is the ONE port: the config-merge and file-drop instances implement it directly, and the harnesses
+whose trigger rides their full `HarnessAdapter` (OpenClaw's scheduler, Hermes's config edit) are
+wrapped into it, so a caller arms, scrubs, and probes by iterating registry rows and never learns
+which machinery served which harness.
+
 ## What's here
 
-- **`claude_code`** — the reference adapter: discover `~/.claude/skills/*/SKILL.md`;
-  `placement_for` (sanitized display name → `<skill>-<workspace>` on collision → validated id);
-  the idempotent strict-JSON `settings.json` SessionStart entry (matcher-free + `async: true`,
-  sentinel-keyed `# topos:currency`, re-arm migrates older shapes in place, user handlers kept
-  byte-identical). `$CLAUDE_CONFIG_DIR` honored and injected.
+- **`claude_code`** — the reference adapter: discover `~/.claude/skills/*/SKILL.md` through the
+  registry's one probe; `placement_for` (sanitized display name → `<skill>-<workspace>` on
+  collision → validated id); the trigger is a `JsonHooksSpec` instance over the shared merge —
+  matcher-free `settings.json` SessionStart, `async: true`, the `--hook claude-code` dialect
+  marker, sentinel-keyed `# topos:currency`. `$CLAUDE_CONFIG_DIR` honored and injected.
 - **`hermes`** — session-boundary shell hooks (`on_session_start`/`on_session_reset`) in
   `config.yaml` via an anchored line-surgical merge (no YAML dep); Active only on evidence from
   Hermes's own consent allowlist. `$HERMES_HOME` injected.
 - **`openclaw`** — native delivery into its default-watched skills root; the trigger is a silent
   1-minute OpenClaw cron registered argv-only through `CommandRunner` (declaration-key
   idempotent); Active only on a successful gateway round-trip.
-- **`triggers`** — auto-update triggers for nine more registry harnesses over two shared bases:
-  `cc_hooks` (generalized strict-JSON session-start merge: gemini-cli, cursor, droid; plus codex
-  as a line-anchored TOML merge, never Active) and `file_drop` (one topos-owned marker-led file:
-  github-copilot, opencode, goose, amp, cline). `adapter_for_slug`/`supported_slugs` is the seam
-  the CLI's breadth arming sweep consumes; the one sweep spelling is composed from shared consts.
+- **`triggers`** — the ONE trigger port over twelve harnesses: `cc_hooks` (the strict-JSON
+  session-start merge — claude-code, gemini-cli, cursor, droid — parameterized by a `JsonHooksSpec`
+  whose `handler_async` and `hook_dialect` knobs are the only per-harness deviations; plus codex as
+  a line-anchored TOML merge, never Active) and `file_drop` (one topos-owned marker-led file:
+  github-copilot, opencode, goose, amp, cline), with openclaw + hermes-agent wrapped in from their
+  own adapters. `adapter_for_slug` is the seam the CLI's arming sweep consumes AND the only place
+  machinery is named, so the trigger-capable set is a view over the registry, not a second list;
+  the one sweep spelling is composed from shared consts.
 - **`coverage`** — whether a harness reads the shared `~/.agents/skills` dir, with PROVENANCE
-  (`Probed`/`Docs`/`Unknown` — no evidence = not covered, fail closed); override table over an
-  automatic derivation from the registry.
+  (`Probed`/`Docs`/`Unknown` — no evidence = not covered, fail closed): the claim is a registry-row
+  column, over an automatic derivation for a row carrying none.
 - **`mcp`** — pure MCP-server config placement for six harnesses; bytes in → an `EditPlan` out,
-  the CLI owns ALL file I/O. A descriptor table (registry-slug-keyed: user/project surface +
-  dialect + reload copy) over three editing drivers: `jsonc_edit` (Cursor / Claude-project /
+  the CLI owns ALL file I/O. The surfaces (user/project + dialect + reload copy) are a registry-row
+  column; `descriptor` holds the dialect vocabulary + the filtered views, over three editing
+  drivers: `jsonc_edit` (Cursor / Claude-project /
   OpenCode strict JSON + OpenClaw JSONC — and the Claude Code plugin dir's `.mcp.json` — through
   a lossless CST, comments and formatting preserved), `toml_patch` (Codex `[mcp_servers.*]` via
   `toml_edit`) and `yaml_splice` (Hermes one-line sentinel-marked flow entries, the `hermes.rs`
@@ -60,9 +71,13 @@ trust/consent state.
   planning an edit when the input does not re-serialize byte-identical through its own dialect
   (a BOM, unusual line endings): the round-trip precondition is the dispatcher's, not each
   driver's discretion.
-- **`registry`** — the baked ~76-harness table (detection + skills-root resolution;
-  `detected_harnesses`), plus `choose_skill_dir`, the ONE placement-naming discipline every
-  target dir follows (`topos` is `RESERVED_SKILL_DIR`, the built-in's name).
+- **`registry`** — the ONE baked ~76-harness table: every row carries its skills dirs, detection
+  probes, MCP surfaces, and shared-dir claim, so a capability is a column rather than a table.
+  It owns the crate's ONE root vocabulary (`Root`) + resolver (`resolve_root`/`resolve_spec`/
+  `config_root` — every env override read in one place) and the ONE skill-directory probe
+  (`discover_skill_dirs`, over `child_dirs` + `is_skill_dir`, which a deeper shape composes rather
+  than restates). Also `choose_skill_dir`, the ONE placement-naming discipline every target dir
+  follows (`topos` is `RESERVED_SKILL_DIR`, the built-in's name).
 
 **The durable config write is the CLI's:** `install`/`remove` compute post-image bytes as a pure
 merge and write through the injected `ConfigStore` port, so the adapters stay fault-injectable

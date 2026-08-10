@@ -439,7 +439,7 @@ pub struct WireCurrentRecord {
 }
 
 // ---------------------------------------------------------------------------------------------
-// Harness adapter report types — the frozen harness-INDEPENDENT unit. The trait
+// Harness adapter report types — the harness-INDEPENDENT unit. The trait
 // itself lives in `topos-harness`; these wire/report DTOs live here.
 // ---------------------------------------------------------------------------------------------
 
@@ -496,19 +496,25 @@ pub enum TriggerState {
     AlreadyPresentUnmanaged,
 }
 
-/// The result of installing a auto-update trigger — what was touched + the marker, so re-install is
-/// idempotent (the marker is a managed sentinel block in the config edit, NEVER in skill bytes).
+/// The result of (un)installing ONE agent's auto-update trigger — what was touched + the marker, so
+/// re-install is idempotent (the marker is a managed sentinel block in the config edit, NEVER in skill
+/// bytes). The one shape every trigger reports in, whichever machinery served it.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
 pub struct TriggerReport {
-    pub harness: HarnessId,
+    /// The agent's registry slug (`claude-code`, `cursor`, `hermes-agent`).
+    pub agent: String,
+    /// Only an `active` state carries a live kind; every other state advertises the explicit-pull floor.
     pub currency_kind: CurrencyKind,
     /// The config file edited (never a skill dir).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub touched_path: Option<String>,
-    /// `topos` + harness id + schema version + command identity.
+    /// `topos` + agent slug + schema version + command identity.
     pub marker_id: String,
     pub state: TriggerState,
+    /// The consent step still owed, or the evidence-level caveat — `None` when nothing needs saying.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
 }
 
 #[cfg(test)]

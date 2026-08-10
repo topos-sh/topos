@@ -143,10 +143,7 @@ impl<'a> OpenClaw<'a> {
     /// is unset).
     #[must_use]
     pub fn resolve_home() -> PathBuf {
-        std::env::var_os("HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join(".openclaw")
+        crate::registry::real_home().join(".openclaw")
     }
 
     fn skills_dir(&self) -> PathBuf {
@@ -284,20 +281,18 @@ impl<'a> OpenClaw<'a> {
         }
     }
 
+    /// Honest labeling through the crate's ONE constructor: `Scheduled` only for a verified
+    /// registration round-trip; every other state advertises just the guaranteed floor — an
+    /// explicit `topos update`.
     fn report(&self, state: TriggerState, touched: Option<PathBuf>) -> TriggerReport {
-        TriggerReport {
-            harness: HarnessId::OpenClaw,
-            // Honest labeling: Scheduled only for a verified registration round-trip; every other
-            // state advertises just the guaranteed floor — an explicit `topos update`.
-            currency_kind: if state == TriggerState::Active {
-                CurrencyKind::Scheduled
-            } else {
-                CurrencyKind::ExplicitPullOnly
-            },
-            touched_path: touched.map(|p| p.to_string_lossy().into_owned()),
-            marker_id: MARKER_ID.to_owned(),
+        crate::trigger_report(
+            HarnessId::OpenClaw.slug(),
+            CurrencyKind::Scheduled,
             state,
-        }
+            touched.map(|p| p.to_string_lossy().into_owned()),
+            MARKER_ID,
+            None,
+        )
     }
 
     /// Whether the RETIRED registration entry is still present (drives `--footprint` disclosure).
@@ -354,36 +349,17 @@ impl HarnessAdapter for OpenClaw<'_> {
         HarnessId::OpenClaw
     }
 
+    /// The ONE skill-directory probe ([`crate::registry::discover_skill_dirs`]) over this harness's
+    /// default-watched skills root — sorted, dot-entries skipped, a root `SKILL.md` the only
+    /// confirmation.
     fn discover(&self) -> Vec<DiscoveredPlacement> {
-        let mut out = Vec::new();
-        let Ok(entries) = std::fs::read_dir(self.skills_dir()) else {
-            return out; // no skills dir (or unreadable) → nothing discovered, never an error
-        };
-        for entry in entries.flatten() {
-            // The skill name is the directory name, so a non-UTF-8 name can't be a skill we manage.
-            let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
-                continue;
-            };
-            // Skip dot-prefixed entries: a transient `.topos-staging-*` / `.topos-old-*` dir the
-            // materializer builds beside a skill dir is never a real skill, even with a `SKILL.md`
-            // inside — so a concurrent discovery during the sub-second swap window can't surface it.
-            if name.starts_with('.') {
-                continue;
-            }
-            let path = entry.path();
-            // A skill is a directory (follow symlinks — a symlinked skill dir is valid) whose root
-            // `SKILL.md` is a regular file. SKILL.md's existence confirms skill-ness — never the
-            // frontmatter (all-optional, and we never parse it), so a malformed SKILL.md can't
-            // mislead.
-            if path.is_dir() && path.join("SKILL.md").is_file() {
-                out.push(DiscoveredPlacement {
-                    path,
-                    layer: Some(LAYER_USER.to_owned()),
-                });
-            }
-        }
-        out.sort_by(|a, b| a.path.cmp(&b.path)); // read_dir order is OS-dependent — pin it
-        out
+        crate::registry::discover_skill_dirs(&self.skills_dir())
+            .into_iter()
+            .map(|path| DiscoveredPlacement {
+                path,
+                layer: Some(LAYER_USER.to_owned()),
+            })
+            .collect()
     }
 
     fn placement_for(
@@ -694,7 +670,7 @@ mod tests {
         let report = OpenClaw::new(PathBuf::from("/h"), &cfg, &cli).install_currency_trigger();
 
         assert_eq!(report.state, TriggerState::Active);
-        assert_eq!(report.harness, HarnessId::OpenClaw);
+        assert_eq!(report.agent, "openclaw");
         assert_eq!(report.currency_kind, CurrencyKind::Scheduled);
         assert_eq!(report.marker_id, MARKER_ID);
         assert!(report.touched_path.is_none(), "no config file was edited");

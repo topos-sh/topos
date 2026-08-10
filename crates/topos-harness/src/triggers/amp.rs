@@ -15,7 +15,9 @@ use topos_types::CurrencyKind;
 use crate::ConfigStore;
 
 use super::file_drop::{FileDrop, FileDropSpec};
-use super::{PLAIN_SWEEP, resolve_config_home};
+use crate::registry::{self, Root};
+
+use super::PLAIN_SWEEP;
 
 pub(crate) static SPEC: FileDropSpec = FileDropSpec {
     slug: "amp",
@@ -53,7 +55,7 @@ pub(crate) fn in_config_home<'a>(config_home: &Path, cfg: &'a dyn ConfigStore) -
 }
 
 pub(crate) fn adapter<'a>(home: &Path, cfg: &'a dyn ConfigStore) -> FileDrop<'a> {
-    in_config_home(&resolve_config_home(home), cfg)
+    in_config_home(&registry::config_root(Root::Config, home), cfg)
 }
 
 #[cfg(test)]
@@ -95,9 +97,9 @@ amp.on("session.start", () => sweep())
     fn fresh_install_places_the_plugin_and_reports_active_with_the_docs_note() {
         let cfg = MemConfig::default();
         let report = a(&cfg).install();
-        assert_eq!(report.slug, "amp");
+        assert_eq!(report.agent, "amp");
         assert_eq!(report.state, TriggerState::Active);
-        assert_eq!(report.kind, CurrencyKind::SessionStart);
+        assert_eq!(report.currency_kind, CurrencyKind::SessionStart);
         assert_eq!(
             report.note.as_deref(),
             Some("vendor docs, unverified (closed source)")

@@ -46,9 +46,8 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;
-use topos_harness::mcp::{
-    self, AuthHint, EditPlan, EntryState, McpDialect, McpEntry, McpHarness, plugin_dir,
-};
+use topos_harness::mcp::{self, AuthHint, EditPlan, EntryState, McpDialect, McpEntry, plugin_dir};
+use topos_harness::registry::KnownHarness;
 use topos_types::results::McpAgentState;
 
 use crate::error::ClientError;
@@ -235,7 +234,7 @@ fn parse_server_json(bytes: &[u8]) -> Result<ParsedServer, String> {
 pub(crate) fn converge(
     io: &ScopeIo<'_>,
     demands: &[McpDemand],
-    descriptors: &[McpHarness],
+    descriptors: &[&'static KnownHarness],
     detected: &BTreeSet<String>,
     hold: &HashSet<String>,
     allow_removals: bool,
@@ -340,7 +339,7 @@ pub(crate) fn converge(
     for h in descriptors {
         // The scope surface. A PROJECT scope never falls back to the user surface.
         let surface: Option<(PathBuf, McpDialect)> = match &io.project_root {
-            Some(root) => match h.project_surface {
+            Some(root) => match h.mcp().and_then(|m| m.project) {
                 Some((rel, dialect)) => {
                     let path = root.join(rel);
                     // THE CONTAINMENT RAIL, before ANY read or write: the resolved path (symlinks
@@ -374,9 +373,10 @@ pub(crate) fn converge(
                 }
                 None => None,
             },
-            None => h.user_surface.as_ref().and_then(|s| {
-                mcp::descriptor::user_surface_path(h, &io.home).map(|p| (p, s.dialect))
-            }),
+            None => h
+                .mcp()
+                .and_then(|m| m.user)
+                .and_then(|s| h.mcp_user_path(&io.home).map(|p| (p, s.dialect))),
         };
         let Some((path, dialect)) = surface else {
             // No surface AT THIS SCOPE: withheld, honestly, per demanded bundle.
@@ -531,7 +531,7 @@ pub(crate) fn converge(
 /// in every file is left byte-identical. Drifted entries are LEFT and disclosed.
 pub(crate) fn remove_bundle(
     io: &ScopeIo<'_>,
-    descriptors: &[McpHarness],
+    descriptors: &[&'static KnownHarness],
     detected: &BTreeSet<String>,
     bundle_id: &str,
 ) -> ConvergeOutcome {
@@ -561,13 +561,14 @@ pub(crate) fn remove_bundle(
 
     for h in descriptors {
         let surface: Option<(PathBuf, McpDialect)> = match &io.project_root {
-            Some(root) => h.project_surface.and_then(|(rel, dialect)| {
+            Some(root) => h.mcp().and_then(|m| m.project).and_then(|(rel, dialect)| {
                 let path = root.join(rel);
                 crate::placement::within_project(root, &path).then_some((path, dialect))
             }),
-            None => h.user_surface.as_ref().and_then(|s| {
-                mcp::descriptor::user_surface_path(h, &io.home).map(|p| (p, s.dialect))
-            }),
+            None => h
+                .mcp()
+                .and_then(|m| m.user)
+                .and_then(|s| h.mcp_user_path(&io.home).map(|p| (p, s.dialect))),
         };
         let Some((path, dialect)) = surface else {
             continue;
@@ -707,7 +708,7 @@ impl SurfaceOutcome {
             warnings: Vec::new(),
         }
     }
-    fn unprovable(desired: &[McpEntry], h: &McpHarness, path: &Path, reason: &str) -> Self {
+    fn unprovable(desired: &[McpEntry], h: &KnownHarness, path: &Path, reason: &str) -> Self {
         Self {
             states: desired
                 .iter()
@@ -784,7 +785,7 @@ fn journaled_write(
 fn converge_file(
     io: &ScopeIo<'_>,
     ledger: &mut McpLedger,
-    h: &McpHarness,
+    h: &KnownHarness,
     path: &Path,
     dialect: McpDialect,
     desired: &[McpEntry],
@@ -814,7 +815,7 @@ fn converge_file(
 fn converge_surface(
     io: &ScopeIo<'_>,
     ledger: &mut McpLedger,
-    h: &McpHarness,
+    h: &KnownHarness,
     path: &Path,
     dialect: McpDialect,
     desired: &[McpEntry],
@@ -899,7 +900,7 @@ fn converge_surface(
                         && outcome.fingerprints.iter().any(|(k, _)| k == key)
                     {
                         state.state = "placed".to_owned();
-                        state.note = Some(h.reload_note.to_owned());
+                        state.note = h.mcp().map(|m| m.reload_note.to_owned());
                     }
                 }
                 surface
@@ -1172,7 +1173,7 @@ fn sync_ledger_entries(
 
 /// Fold driver per-key states into per-key wire states (see the module doc's vocabulary).
 fn fold_states(
-    h: &McpHarness,
+    h: &KnownHarness,
     path: &Path,
     states: &[(String, EntryState)],
     desired: &[McpEntry],
@@ -1188,7 +1189,7 @@ fn fold_states(
             // with the same word.
             EntryState::PlacedNew | EntryState::Updated => {
                 out.wrote.insert(key.clone());
-                agent_state(h.slug, "placed", Some(h.reload_note), Some(path))
+                agent_state(h.slug, "placed", h.mcp().map(|m| m.reload_note), Some(path))
             }
             EntryState::Current => agent_state(h.slug, "current", None, Some(path)),
             EntryState::Drifted => agent_state(
@@ -1387,7 +1388,7 @@ pub(crate) fn converge_bundle_now(
     let outcome = converge(
         &io,
         std::slice::from_ref(&demand),
-        descriptors,
+        &descriptors,
         &detected,
         &HashSet::new(),
         false,

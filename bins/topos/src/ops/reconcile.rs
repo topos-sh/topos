@@ -4790,7 +4790,7 @@ fn run_mcp_converge(
         let outcome = crate::mcp_engine::converge(
             &io,
             &demands,
-            topos_harness::mcp::descriptor::mcp_harnesses(),
+            &topos_harness::mcp::descriptor::mcp_harnesses(),
             &detected,
             &hold,
             allow_removals,
