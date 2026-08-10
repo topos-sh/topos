@@ -11,7 +11,7 @@ import {
   requireReviewer,
   requireWorkspaceOwner,
 } from "@/lib/auth/guards.server";
-import { baseOf, bundleNameOf, bundlePath, useBundleBase } from "@/lib/bundle-base";
+import { baseOf, bundleNameOf, bundleNoun, bundlePath, useBundleBase } from "@/lib/bundle-base";
 import { requireCanonicalBase } from "@/lib/bundle-base.server";
 import { recordAdminEvent } from "@/lib/db/audit.server";
 import { movePointerWithKindPrecondition } from "@/lib/db/queries.custody.server";
@@ -157,7 +157,7 @@ export async function action({ request, params }: ActionFunctionArgs) {
   const form = await request.formData();
   const intent = String(form.get("intent") ?? "");
   if (intent === "revert") {
-    return revertAction(request, ws, skill, form);
+    return revertAction(request, ws, skill, bundleNoun(baseOf(params)), form);
   }
   if (intent === "purge") {
     return purgeAction(request, ws, skill, form);
@@ -174,7 +174,14 @@ export async function action({ request, params }: ActionFunctionArgs) {
  * the per-workspace name lock, in the same transaction as the move. One admin_event lands per
  * attempt (the vault records only the pass-through display).
  */
-async function revertAction(request: Request, ws: string, skill: string, form: FormData) {
+async function revertAction(
+  request: Request,
+  ws: string,
+  skill: string,
+  /** What this bundle is called in a sentence — the refusals below are read by a person. */
+  noun: string,
+  form: FormData,
+) {
   const actor = await requireReviewer(request, ws);
   if (!allowRevertWrite(actor.userId)) {
     return data<RevertActionData>({ status: "error" });
@@ -249,10 +256,10 @@ async function revertAction(request: Request, ws: string, skill: string, form: F
       reason: "That version's bytes were purged — there is nothing to roll back to.",
     });
   }
-  // not_found / rejected — the id names nothing this skill's custody can roll back to.
+  // not_found / rejected — the id names nothing this bundle's custody can roll back to.
   return data<RevertActionData>({
     status: "denied",
-    reason: "The server has no version with this id for this skill.",
+    reason: `The server has no version with this id for this ${noun}.`,
   });
 }
 

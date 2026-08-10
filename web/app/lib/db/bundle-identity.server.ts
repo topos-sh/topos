@@ -49,9 +49,9 @@ export interface IdentityHolder {
  * A concurrent claimer is serialized by the index itself: the second insert waits on the first's
  * row lock, then sees the committed row and takes the refusal branch.
  *
- * On success the bundle's OTHER identity rows are dropped — a re-publish that RENAMES the server
- * releases the old name in the same breath it takes the new one. On refusal nothing is written
- * at all, so a caller that returns the refusal may safely commit.
+ * On success the bundle's other identity rows IN THIS KIND'S NAMESPACE are dropped — a re-publish
+ * that RENAMES the server releases the old name in the same breath it takes the new one. On
+ * refusal nothing is written at all, so a caller that returns the refusal may safely commit.
  */
 export async function claimBundleIdentityInTx(
   tx: Tx,
@@ -60,22 +60,44 @@ export async function claimBundleIdentityInTx(
   kind: string,
   identity: string,
 ): Promise<{ ok: true } | { ok: false; heldBy: IdentityHolder | null }> {
-  const claimed = await tx.execute(sql`
-    INSERT INTO web.bundle_identity (workspace_id, bundle_id, kind, identity)
-    VALUES (${workspaceId}, ${bundleId}, ${kind}, ${identity})
-    ON CONFLICT (workspace_id, kind, identity) DO UPDATE
-      SET bundle_id = excluded.bundle_id
-      WHERE web.bundle_identity.bundle_id = excluded.bundle_id
-    RETURNING bundle_id
-  `);
-  if (claimed.rows.length === 0) {
-    return { ok: false, heldBy: await identityHolder(workspaceId, kind, identity, bundleId, tx) };
+  const attempt = async (): Promise<boolean> => {
+    const claimed = await tx.execute(sql`
+      INSERT INTO web.bundle_identity (workspace_id, bundle_id, kind, identity)
+      VALUES (${workspaceId}, ${bundleId}, ${kind}, ${identity})
+      ON CONFLICT (workspace_id, kind, identity) DO UPDATE
+        SET bundle_id = excluded.bundle_id
+        WHERE web.bundle_identity.bundle_id = excluded.bundle_id
+      RETURNING bundle_id
+    `);
+    return claimed.rows.length > 0;
+  };
+
+  let took = await attempt();
+  if (!took) {
+    const holder = await identityHolder(workspaceId, kind, identity, bundleId, tx);
+    if (holder !== null) {
+      return { ok: false, heldBy: holder };
+    }
+    // NOBODY HOLDS IT — so the insert lost to a claimant that let go between the two statements
+    // (an archive or a delete committing right there). Reporting "refused, held by nobody" would
+    // be the worst of both: the caller has no refusal to word and no row to stand on, and would
+    // go on believing it owns a name it never claimed. The name is free as of this read, so take
+    // it. ONCE: a second miss means real contention, and answering with the holder is honest.
+    took = await attempt();
+    if (!took) {
+      return {
+        ok: false,
+        heldBy: await identityHolder(workspaceId, kind, identity, bundleId, tx),
+      };
+    }
   }
-  // The rename case: this bundle now claims exactly one name in this kind's namespace.
+  // The rename case: this bundle now claims exactly one name in THIS kind's namespace. Scoped to
+  // the kind because the namespaces are independent — a bundle that ever holds two kinds' worth
+  // of identity must not lose one by claiming the other.
   await tx.execute(sql`
     DELETE FROM web.bundle_identity
     WHERE workspace_id = ${workspaceId} AND bundle_id = ${bundleId}
-      AND NOT (kind = ${kind} AND identity = ${identity})
+      AND kind = ${kind} AND identity <> ${identity}
   `);
   return { ok: true };
 }
@@ -137,6 +159,24 @@ export async function identitiesByBundle(
   );
 }
 
+/**
+ * How long ONE document read may take before the backfill stops waiting on it, and how long the
+ * whole sweep may take before it stops entirely.
+ *
+ * These exist because this runs at module load, BEFORE the server binds its port. A vault that is
+ * DOWN is harmless — the connection is refused and the read fails fast. A vault that accepts the
+ * connection and then never answers is not: `fetch` carries no timeout of its own, so the await
+ * never settles, the port never binds, a container healthcheck never passes, and the orchestrator
+ * restarts into the same stall. A wedged vault has to behave like a down one, which is what a
+ * deadline makes true.
+ *
+ * The pre-bind ordering itself is NOT negotiable — it is what stops a publish claiming a name an
+ * already-published server is still serving — so the budget is what gives the ordering its
+ * guarantee of ending.
+ */
+const DOCUMENT_READ_TIMEOUT_MS = 3_000;
+const SWEEP_BUDGET_MS = 10_000;
+
 /** What one backfill pass did — the operator's account of it. */
 export interface IdentityBackfillReport {
   claimed: number;
@@ -144,6 +184,27 @@ export interface IdentityBackfillReport {
   unreadable: string[];
   /** Bundles whose name was already held by another bundle — a duplicate that predates the key. */
   contested: string[];
+  /** Bundles the sweep never got to before its budget ran out — named, and left for next boot. */
+  deferred: string[];
+}
+
+/**
+ * Wait for `work`, but not forever. Resolves to `null` on expiry; the underlying promise is
+ * abandoned rather than cancelled (there is nothing to cancel a hung `fetch` with here), which is
+ * fine for a step that runs once at boot and whose whole job is to stop blocking it.
+ */
+async function withDeadline<T>(work: Promise<T>, ms: number): Promise<T | null> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const expiry = new Promise<null>((resolve) => {
+    timer = setTimeout(() => resolve(null), ms);
+  });
+  try {
+    return await Promise.race([work, expiry]);
+  } finally {
+    if (timer !== undefined) {
+      clearTimeout(timer);
+    }
+  }
 }
 
 /**
@@ -163,7 +224,13 @@ export interface IdentityBackfillReport {
  * from booting, and the next boot picks the work up where this one left it.
  */
 export async function backfillBundleIdentities(): Promise<IdentityBackfillReport> {
-  const report: IdentityBackfillReport = { claimed: 0, unreadable: [], contested: [] };
+  const report: IdentityBackfillReport = {
+    claimed: 0,
+    unreadable: [],
+    contested: [],
+    deferred: [],
+  };
+  const deadline = Date.now() + SWEEP_BUDGET_MS;
   for (const record of BUNDLE_KINDS) {
     if (!record.hasContentGate) {
       continue;
@@ -187,7 +254,16 @@ export async function backfillBundleIdentities(): Promise<IdentityBackfillReport
       name: string;
       version_id: string;
     }[]) {
-      const document = await serverDocumentOf(row.workspace_id, row.bundle_id, row.version_id);
+      if (Date.now() >= deadline) {
+        // Out of budget. Everything still unvisited is NAMED and left for the next boot rather
+        // than quietly forgotten — and boot proceeds, which is the point.
+        report.deferred.push(`${row.workspace_id}/${row.name}`);
+        continue;
+      }
+      const document = await withDeadline(
+        serverDocumentOf(row.workspace_id, row.bundle_id, row.version_id),
+        DOCUMENT_READ_TIMEOUT_MS,
+      );
       const identity = typeof document?.name === "string" ? document.name : null;
       if (identity === null) {
         report.unreadable.push(`${row.workspace_id}/${row.name}`);
@@ -224,10 +300,14 @@ export async function backfillBundleIdentitiesAtBoot(): Promise<void> {
   try {
     report = await backfillBundleIdentities();
   } catch (error) {
+    // ONE SENTENCE. A thrown query error carries its whole statement and parameters, which turns
+    // an operator's boot log into ten lines of SQL where a description of what happened belongs
+    // — and puts row values somewhere nobody chose to put them. The cause rides its own line.
     console.warn(
-      "[bundle-identity] backfill did not complete; it will run again on the next boot:",
-      error instanceof Error ? error.message : error,
+      "[bundle-identity] the server-name backfill did not complete; it runs again on the next " +
+        "boot, and until it does another bundle could claim a name an existing server still serves.",
     );
+    console.warn(`[bundle-identity] cause: ${firstLine(error)}`);
     return;
   }
   for (const name of report.unreadable) {
@@ -237,6 +317,13 @@ export async function backfillBundleIdentitiesAtBoot(): Promise<void> {
         "Retried on the next boot.",
     );
   }
+  for (const name of report.deferred) {
+    console.warn(
+      `[bundle-identity] ${name}: the backfill ran out of time before reaching it (the vault was ` +
+        "slow or unreachable), so the registry name it serves is NOT recorded yet. Retried on " +
+        "the next boot.",
+    );
+  }
   for (const name of report.contested) {
     console.warn(
       `[bundle-identity] ${name}: the registry name it serves is already recorded for another ` +
@@ -244,4 +331,12 @@ export async function backfillBundleIdentitiesAtBoot(): Promise<void> {
         "different name.",
     );
   }
+}
+
+/** An error boiled down to something that belongs on one log line: its first line, bounded. A
+ *  driver error's message opens with the failure and continues into the statement it came from. */
+function firstLine(error: unknown): string {
+  const text = error instanceof Error ? error.message : String(error);
+  const line = text.split("\n", 1)[0] ?? "";
+  return line.length > 200 ? `${line.slice(0, 200)}…` : line;
 }

@@ -288,11 +288,24 @@ describe("the three genesis doors produce the same bundle", () => {
     const fromPage = await bundleShapeOf(fromPageRow?.id ?? "");
 
     expect(fromLane.kind).toBe("mcp");
-    expect(sequenceShapeOf(fromLane)).toEqual(sequenceShapeOf(fromPage));
-    // AN MCP SERVER REACHES NOBODY BY DEFAULT — importing one is not the same act as handing it
-    // out, and that is the kind's record talking, not either call site.
-    expect(fromLane.channels).toEqual([]);
+    // The two doors agree on everything the SHARED sequence decides — but NOT on where a new
+    // bundle reaches, because that is the door's ruling, not the kind's.
+    expect(sequenceShapeOf({ ...fromLane, channels: [] })).toEqual(
+      sequenceShapeOf({ ...fromPage, channels: [] }),
+    );
+
+    // THE SESSION LANE KEEPS THE WIRE'S SEMANTICS. An agent's `topos publish` with no `--to`
+    // reaches the workspace's default channel — for every kind — which is what puts the bundle
+    // on the team's machines. An MCP server is not an exception: a server nobody receives is not
+    // a server the team can call.
+    expect(fromLane.channels).toEqual(["everyone"]);
+    expect((envelope.receipt as { details?: unknown } | undefined)?.details).toBeUndefined();
+
+    // THE WEB CREATION PAGE RESTS ON "NO CHANNEL". Importing a server on a form is a different
+    // act from an agent publishing one: the field rests on no channel, and nothing arriving
+    // without one may be read as consent to reach the whole workspace.
     expect(fromPage.channels).toEqual([]);
+
     // Both recorded the registry name they serve, which is what makes it unavailable to anyone
     // else — one door cannot skip the claim.
     const claims = await db.q<{ bundle_id: string; identity: string }>(
@@ -375,7 +388,7 @@ describe("a name conflict reads the same at every door", () => {
       versionId: candidate,
       move: async () => {
         moved = true;
-        return "moved" as const;
+        return { kind: "ok" as const };
       },
     });
     expect(claimed.refusal?.code).toBe("MCP_NAME_TAKEN");

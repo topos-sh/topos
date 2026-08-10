@@ -2,7 +2,7 @@ import { Link } from "react-router";
 import { relativeTime } from "@/components/format";
 import { CopyCommand } from "@/components/review/CopyCommand";
 import { Card, Chip, SectionHeading, ShortId } from "@/components/ui";
-import { bundlePath, useBundleBase } from "@/lib/bundle-base";
+import { bundleNoun, bundlePath, useBundleBase } from "@/lib/bundle-base";
 import { buildDiffCommand } from "@/lib/diff/command";
 import { useWsPath } from "@/lib/ws-path";
 
@@ -33,6 +33,7 @@ export function ProposalsSection({
   skill: string;
   proposals: ProposalListItem[];
 }) {
+  const noun = bundleNoun(useBundleBase());
   const open = proposals.filter((p) => p.status === "open");
   const resolved = proposals.filter((p) => p.status !== "open");
   return (
@@ -44,7 +45,7 @@ export function ProposalsSection({
         {open.length === 0 ? (
           <Card className="px-4 py-3">
             <p className="text-sm text-faint">
-              No open proposals. A member&apos;s publish on a review-required skill lands here; so
+              No open proposals. A member&apos;s publish on a review-required {noun} lands here; so
               does an explicit propose.
             </p>
           </Card>

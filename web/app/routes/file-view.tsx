@@ -6,7 +6,7 @@ import { ViewToggle } from "@/components/browse/view-toggle";
 import { Breadcrumbs } from "@/components/shell/breadcrumbs";
 import { Card, Chip } from "@/components/ui";
 import { notFound, requireMemberInScope } from "@/lib/auth/guards.server";
-import { baseOf, bundleNameOf, bundlePath } from "@/lib/bundle-base";
+import { baseOf, bundleNameOf, bundleNoun, bundlePath, useBundleBase } from "@/lib/bundle-base";
 import { requireCanonicalBase } from "@/lib/bundle-base.server";
 import { skillIndexRow } from "@/lib/db/queries.server";
 import { classifyBytes, decodeTextVerbatim } from "@/lib/diff/classify";
@@ -172,12 +172,13 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
 }
 
 export default function FileViewPage() {
+  const noun = bundleNoun(useBundleBase());
   const data = useLoaderData<typeof loader>();
   if (data.kind === "meta_missing") {
     return (
       <BrowseShell>
         <BrowseEmpty heading="This version isn't available">
-          The server has no readable version with this id for this skill.
+          The server has no readable version with this id for this {noun}.
         </BrowseEmpty>
       </BrowseShell>
     );

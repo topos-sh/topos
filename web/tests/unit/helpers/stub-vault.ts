@@ -37,6 +37,12 @@ export interface StubVault {
   calls: StubCall[];
   /** Files a `publish` call carried, oldest first — what actually crossed the boundary. */
   published: { ws: string; bundle: string; versionId: string; files: StubFile[] }[];
+  /**
+   * Make the NEXT `publish` answer the vault's own 409 (one shot). The real vault refuses a
+   * publish whose bundle already holds a `current` the caller did not fence on — routine, not a
+   * fault, and the client-minted-id doors can meet it on a retry.
+   */
+  conflictNextPublish(generation?: number): void;
   close(): Promise<void>;
 }
 
@@ -57,6 +63,8 @@ export async function startStubVault(): Promise<StubVault> {
   const calls: StubCall[] = [];
   const published: StubVault["published"] = [];
   let minted = 0;
+  /** Armed by `conflictNextPublish`, consumed by the next publish. */
+  let publishConflict: number | null = null;
 
   // Object ids must be stable per (version, path) so a listing and a read agree.
   const objectIdOf = (versionId: string, path: string): string => {
@@ -103,6 +111,11 @@ export async function startStubVault(): Promise<StubVault> {
           files?: { path: string; content_base64: string }[];
         };
         calls.push({ route, ws, bundle });
+        if (route === "publish" && publishConflict !== null) {
+          const generation = publishConflict;
+          publishConflict = null;
+          return json(409, { code: "CONFLICT", generation });
+        }
         minted += 1;
         const versionId = idFor("ee", minted);
         const files = (body.files ?? []).map((f) => ({
@@ -264,6 +277,9 @@ export async function startStubVault(): Promise<StubVault> {
     point,
     calls,
     published,
+    conflictNextPublish(generation = 1) {
+      publishConflict = generation;
+    },
     async close() {
       await new Promise<void>((resolve, reject) =>
         (server as Server).close((e) => (e ? reject(e) : resolve())),

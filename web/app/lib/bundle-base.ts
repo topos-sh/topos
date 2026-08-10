@@ -21,9 +21,9 @@ import { useParams } from "react-router";
  * names its param `server`, the skills mount `skill`. Route ids rename when a downstream build
  * re-roots these modules; a param name doesn't.
  *
- * Client-safe by construction: plain data and pure lookups, no server import. The genesis
- * DESTINATION is therefore spelled as a tag rather than the server's own `NO_CHANNEL` symbol —
- * the publish path resolves the tag, so the choice still lives here and never at a call site.
+ * Client-safe by construction: plain data and pure lookups, no server import. The web pages'
+ * default DESTINATION is therefore spelled as a tag rather than the server's own `NO_CHANNEL`
+ * symbol — the publish path resolves the tag.
  */
 
 /** The URL base a bundle's pages live under. */
@@ -32,11 +32,11 @@ export type BundleBase = "skills" | "mcp";
 /** The catalog tags this release defines. Mirrors the `bundle_kind_check` constraint. */
 export type BundleKind = "skill" | "mcp";
 
-/** Where a genesis publish of this kind reaches by default, absent an explicit destination. */
-export type GenesisDefault =
-  /** The workspace's default channel — publishing a skill IS handing it to the team. */
+/** Where THIS KIND'S WEB CREATION PAGE rests when the member picks no channel. */
+export type WebNewDefault =
+  /** The workspace's default channel. */
   | "default-channel"
-  /** Nowhere: the catalog only. Importing a server is not the same act as handing it out. */
+  /** Nowhere: the catalog only. */
   | "no-channel";
 
 /** Everything the product knows about one kind of bundle. */
@@ -61,8 +61,15 @@ export interface BundleKindEntry {
   /** The one line the dashboard's section carries beside its heading — what a reader most needs
    *  to know about this kind once they can see a list of them. */
   indexNote: string;
-  /** Where a genesis publish reaches when the caller names no destination. */
-  defaultGenesisDestination: GenesisDefault;
+  /**
+   * WHERE THIS KIND'S WEB CREATION PAGE RESTS — the destination its form carries when the member
+   * chooses no channel. Scoped to that page ON PURPOSE, and named for it: importing an MCP
+   * server on a web form is not the same act as an agent publishing one, and only the form was
+   * ever ruled on. The SESSION LANE keeps its own wire semantics (an absent channel means the
+   * workspace default, for every kind) — a publish that reached the team before this record
+   * existed still reaches the team, and this field must never be read there.
+   */
+  webNewDefaultDestination: WebNewDefault;
   /** Whether a candidate's BYTES are gated before custody (the MCP server-document gate). */
   hasContentGate: boolean;
   /** What the rail says when this section holds nothing yet. Both sections render when empty:
@@ -106,7 +113,7 @@ export const BUNDLE_KINDS: readonly BundleKindEntry[] = [
     newPageFile: "skill-import.tsx",
     newPageLabel: "Add from GitHub",
     indexNote: "Published skills appear here automatically.",
-    defaultGenesisDestination: "default-channel",
+    webNewDefaultDestination: "default-channel",
     hasContentGate: false,
     railEmptyNote: "No skills yet.",
     newActionLabel: "Publish a skill from your agent",
@@ -125,7 +132,7 @@ export const BUNDLE_KINDS: readonly BundleKindEntry[] = [
     newPageFile: "mcp-new.tsx",
     newPageLabel: "Add an MCP server",
     indexNote: "Delivered as a tool endpoint in each member's agent configs.",
-    defaultGenesisDestination: "no-channel",
+    webNewDefaultDestination: "no-channel",
     hasContentGate: true,
     railEmptyNote: "No MCP servers yet.",
     newActionLabel: "Add an MCP server",

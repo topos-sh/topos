@@ -1,7 +1,7 @@
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
 import { data, Form, Link, redirect, useActionData, useLoaderData } from "react-router";
 import { BusyFields, buttonClasses, Card, PageHeader, SectionHeading } from "@/components/ui";
-import { publishGenesisBundle } from "@/lib/api/genesis.server";
+import { publishGenesisBundle, webNewDestination } from "@/lib/api/genesis.server";
 import { requireMemberInScope } from "@/lib/auth/guards.server";
 import { fetchUpstreamTree, governedCopiesOf, resolveTreeSource } from "@/lib/db/upstream.server";
 import { useSubmittingIntent } from "@/lib/pending";
@@ -249,6 +249,7 @@ export async function action({ request, params }: ActionFunctionArgs) {
         message: `imported from ${repo}@${commit.slice(0, 12)}`,
       },
       displayName: name,
+      destination: webNewDestination("skill", ""),
       alsoInTx: async (tx, registered) => {
         const { sql } = await import("drizzle-orm");
         await tx.execute(sql`

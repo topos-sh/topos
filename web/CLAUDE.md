@@ -40,10 +40,12 @@ caller.
 - **Publishing a BRAND-NEW bundle happens once** (`app/lib/api/genesis.server.ts`): the session
   lane's publish, add-from-GitHub and add-an-MCP-server all run one sequence — the kind's content
   gate → the vault call → ONE transaction holding the registration, the identity claim, and
-  whatever that door adds (upstream rows, an import audit line, the op receipt). The gate and the
-  default destination come from the kind's record, never from the call site; the registration
-  precedes the claim (its key points at the bundle row) and a refused claim rolls both back, so a
-  refusal still means no catalog row was written.
+  whatever that door adds (upstream rows, an import audit line, the op receipt). The content gate
+  comes from the kind's record (the same bytes are the same bytes at every door); the
+  DESTINATION does not — it is a required argument each door states outright, because where a new
+  bundle reaches is the door's ruling, not the kind's. The registration precedes the claim (its
+  key points at the bundle row) and a refused claim rolls both back, so a refusal still means no
+  catalog row was written.
 - **Auth guards fail closed** (`app/lib/auth/guards.server.ts` — the only minters of branded
   actors: `requireSession → requireMember → requireWorkspaceOwner`/`requireReviewer`,
   `requireDeviceActor`); the brand symbol is module-private. **Misses render 404, never 403.**
@@ -99,7 +101,8 @@ caller.
   `error.data`, path, or stack).
 - **ONE RECORD PER KIND** (`app/lib/bundle-base.ts` — `BUNDLE_KINDS`): everything the product
   knows about a kind of bundle, written once. Base · noun · section label · route param · its own
-  way in · where a genesis publish reaches by default · whether its bytes face a content gate ·
+  way in · where its WEB CREATION PAGE rests when no channel is picked · whether its bytes face a
+  content gate ·
   its rail and list marks. The route table BUILDS its per-kind mounts from it (`skills/:skill`,
   `mcp/:server` — the face + its six subpages once per kind; every mount past the first carries
   an explicit route id from the same record, and the MOUNT is told apart by param NAME, never by
@@ -138,9 +141,11 @@ caller.
   a document it cannot read gets no row and is NAMED in the log, never skipped silently.
   `mcp/new` mints a NEW bundle per import and its destination field RESTS ON NO CHANNEL — an
   import lands catalog-only and reaches nobody until a channel is chosen, here or later. That is
-  this kind's own default (`NO_CHANNEL`, distinct from the default-channel `null`), read from its
-  record rather than decided at the call site; every channel INCLUDING the default is an ordinary
-  named option, so no empty value stands in for one. When a channel IS chosen the page discloses what the publish did
+  this PAGE's resting state (`NO_CHANNEL`, distinct from the default-channel `null`), read from
+  the kind's record; every channel INCLUDING the default is an ordinary named option, so no empty
+  value stands in for one. It is the FORM's ruling and scoped to it: the session lane keeps the
+  wire's own semantics, where an absent channel means the workspace default for every kind — an
+  agent's `topos publish` reaches the team, MCP servers included. When a channel IS chosen the page discloses what the publish did
   to the REACH: a curated channel withholds a member's placement, and the bundle face says so.
   `…/registry/v0.1/servers[/{name}/versions[/latest]]` serves the workspace's catalog in the
   official read-API shape, member-gated by cookie OR bearer, uniform-404 otherwise.

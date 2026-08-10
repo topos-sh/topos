@@ -47,6 +47,12 @@ export function inviteMailDelivery(): InviteMailDelivery {
   return { canSend: mailDelivery().canSend };
 }
 
+/** The noun for a first-destination hint: the non-bundle destinations by name, everything else
+ *  from its kind record. */
+function hintNounFor(kind: string): string {
+  return kind === "channel" ? "channel" : kindEntry(kind).noun;
+}
+
 /** The notice body — shared by the text mail and the dev recording (user-entered fields escaped
  * only in the HTML mirror). The hint leads: a hinted invitation names its first destination in
  * the subject and the opening line, because that is what the invitee was invited FOR. */
@@ -61,8 +67,10 @@ function inviteLines({
   text: string;
   html: string;
 } {
-  // The hint's kind is the catalog tag; the mail says what a person calls it.
-  const hintNoun = hint === undefined ? "" : kindEntry(hint.kind).noun;
+  // What a person calls the thing this invitation leads with. A hint's `kind` is NOT always a
+  // bundle kind — an invitation may lead with a CHANNEL, which the bundle records know nothing
+  // about and would silently read as the plain case. Named first, then the records answer.
+  const hintNoun = hint === undefined ? "" : hintNounFor(hint.kind);
   const hintLead = hint === undefined ? "" : ` — starting with the ${hint.name} ${hintNoun}`;
   const subject = `You're invited to ${workspaceDisplayName} on Topos${hintLead}`;
   const intro =

@@ -176,4 +176,19 @@ describe("sendInviteEmail in production mode", () => {
     );
     expect(message.text).toContain("First up: the deploy skill.");
   });
+
+  it("names an MCP server and a CHANNEL by what each is actually called", async () => {
+    // The hint's `kind` is not always a BUNDLE kind — an invitation may lead with a channel, and
+    // a channel is not a skill. Every one of these is a noun a person reads in a subject line.
+    const mail = await importInviteMail("production", SMTP_ENV);
+    await mail.sendInviteEmail({ ...INVITE, hint: { kind: "mcp", name: "weather" } });
+    await mail.sendInviteEmail({ ...INVITE, hint: { kind: "channel", name: "ops" } });
+    const subjects = sendMailSpy.mock.calls.map((call) => (call[0] as { subject: string }).subject);
+    expect(subjects[0]).toBe(
+      `You're invited to ${INVITE.workspaceDisplayName} on Topos — starting with the weather MCP server`,
+    );
+    expect(subjects[1]).toBe(
+      `You're invited to ${INVITE.workspaceDisplayName} on Topos — starting with the ops channel`,
+    );
+  });
 });

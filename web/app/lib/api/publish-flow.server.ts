@@ -277,8 +277,12 @@ export async function publishFlow(args: PublishFlowArgs): Promise<Response> {
       bundleId: skillId,
       candidate: laneCandidate,
       displayName,
-      // `--to` names a channel; naming none takes this kind's own default.
-      ...(channel === null ? {} : { destination: channel }),
+      // THE WIRE'S OWN SEMANTICS, for every kind: `--to` names a channel, and naming none means
+      // the workspace's default channel — which is what makes a published bundle arrive on the
+      // team's machines. A web form's "no channel" resting state is that FORM's ruling and has
+      // no business here; reading it at this door silently stopped lane publishes from reaching
+      // anyone.
+      destination: channel,
       alsoInTx: async (tx, registered) => {
         const details: Record<string, unknown> = {};
         if (registered.placement !== undefined) {
@@ -293,7 +297,32 @@ export async function publishFlow(args: PublishFlowArgs): Promise<Response> {
             args.upstream,
           );
         }
-        return details;
+        // THE RECEIPT RIDES THIS TRANSACTION. Written afterwards it would leave a window in which
+        // the bundle is registered with no replay record, and the op's retry would stop being a
+        // replay: it would take the registered-bundle path and report a generation conflict for
+        // work that already succeeded.
+        const receipt = buildReceipt({
+          opId,
+          command,
+          outcome: "OK",
+          workspaceId: actor.workspaceId,
+          skillId: registered.bundleId,
+          versionId: registered.versionId,
+          bundleDigest: registered.bundleDigest,
+          currentGeneration: registered.generation,
+          createdAt,
+          ...(Object.keys(details).length > 0 ? { details } : {}),
+        });
+        // The pointer MOVED — the envelope's data carries the current record (the client's
+        // read-your-writes advance requires it and scope-checks it).
+        const built = okPointerEnvelope(
+          command,
+          receipt,
+          { workspaceId: actor.workspaceId, skillId: registered.bundleId },
+          { versionId: registered.versionId, generation: registered.generation },
+        );
+        await insertReceiptInTx(tx, actor, opId, raw, built);
+        return built;
       },
     });
     if (landed.kind === "refused") {
@@ -315,31 +344,36 @@ export async function publishFlow(args: PublishFlowArgs): Promise<Response> {
     if (landed.kind === "rejected") {
       return badRequest(landed.message ?? "candidate rejected");
     }
+    if (landed.kind === "not_found") {
+      return uniformNotFound();
+    }
+    if (landed.kind === "conflict") {
+      // The id already carries a `current` this publish did not fence on — routine, and the
+      // client can retry against the generation it is told.
+      const receipt = buildReceipt({
+        opId,
+        command,
+        outcome: "CONFLICT",
+        workspaceId: actor.workspaceId,
+        skillId,
+        expectedGeneration: expected,
+        currentGeneration: landed.generation ?? undefined,
+        createdAt,
+      });
+      const envelope = conflictEnvelope({
+        command,
+        skillName: skillName ?? skillId,
+        receipt,
+        expectedGeneration: expected,
+        currentGeneration: landed.generation ?? 0,
+      });
+      await inFinalTx((tx) => insertReceiptInTx(tx, actor, opId, raw, envelope));
+      return envelopeResponse(envelope);
+    }
     if (landed.kind !== "ok") {
       return internalError();
     }
-    const receipt = buildReceipt({
-      opId,
-      command,
-      outcome: "OK",
-      workspaceId: actor.workspaceId,
-      skillId: landed.bundleId,
-      versionId: landed.versionId,
-      bundleDigest: landed.bundleDigest,
-      currentGeneration: landed.generation,
-      createdAt,
-      ...(Object.keys(landed.extra).length > 0 ? { details: landed.extra } : {}),
-    });
-    // The pointer MOVED — the envelope's data carries the current record (the client's
-    // read-your-writes advance requires it and scope-checks it).
-    const built = okPointerEnvelope(
-      command,
-      receipt,
-      { workspaceId: actor.workspaceId, skillId: landed.bundleId },
-      { versionId: landed.versionId, generation: landed.generation },
-    );
-    await inFinalTx((tx) => insertReceiptInTx(tx, actor, opId, raw, built));
-    return envelopeResponse(built);
+    return envelopeResponse(landed.extra);
   }
 
   // The direct arm for a REGISTERED bundle (reviewer+, or an open bundle).

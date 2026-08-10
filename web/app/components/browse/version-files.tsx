@@ -2,6 +2,7 @@ import { FileListing } from "@/components/browse/file-listing";
 import { BrowseEmpty } from "@/components/browse/shell";
 import { firstLine } from "@/components/format";
 import { Card, Chip, SectionHeading } from "@/components/ui";
+import { bundleNoun, useBundleBase } from "@/lib/bundle-base";
 import type { CustodyVersionMeta } from "@/lib/plane/wire";
 import type { ListingEntry } from "@/lib/view/tree";
 
@@ -42,10 +43,11 @@ export function VersionFiles({
   docName?: string;
   docTooLarge?: boolean;
 }) {
+  const noun = bundleNoun(useBundleBase());
   if (version === null) {
     return (
       <BrowseEmpty heading="This version isn't available">
-        The server has no readable version with this id for this skill.
+        The server has no readable version with this id for this {noun}.
       </BrowseEmpty>
     );
   }

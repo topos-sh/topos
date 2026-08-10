@@ -13,7 +13,7 @@ import {
   requireOwnerInScope,
   requireWorkspaceOwner,
 } from "@/lib/auth/guards.server";
-import { type BundleBase, baseOf, bundlePath, useBundleBase } from "@/lib/bundle-base";
+import { type BundleBase, baseOf, bundleNoun, bundlePath, useBundleBase } from "@/lib/bundle-base";
 import { requireCanonicalBase } from "@/lib/bundle-base.server";
 import { recordAdminEvent } from "@/lib/db/audit.server";
 import {
@@ -426,6 +426,7 @@ function ProtectionCeremony({
   protection: ProtectionChoice;
   protectionDefault: "open" | "reviewed";
 }) {
+  const noun = bundleNoun(useBundleBase());
   const fetcher = useFetcher<SettingsFormError>();
   const pending = fetcher.state !== "idle";
   const [staged, setStaged] = useState<ProtectionChoice>(protection);
@@ -444,7 +445,7 @@ function ProtectionCeremony({
           Whether a member&apos;s publish to <code className="font-mono text-ink">{skill}</code>{" "}
           lands directly or reroutes into a proposal a reviewer approves. The workspace default is{" "}
           <span className="font-medium text-ink">{protectionDefault}</span>; a pin here overrides it
-          for this skill alone.
+          for this {noun} alone.
         </p>
         <fetcher.Form method="post" className="space-y-3">
           <input type="hidden" name="intent" value="set-protection" />
@@ -483,6 +484,7 @@ function ProtectionCeremony({
 }
 
 function RenameCeremony({ skill }: { skill: string }) {
+  const noun = bundleNoun(useBundleBase());
   const fetcher = useFetcher<SettingsFormError>();
   const pending = fetcher.state !== "idle";
   const error = fetcher.data?.form === "rename" ? fetcher.data.message : undefined;
@@ -495,7 +497,7 @@ function RenameCeremony({ skill }: { skill: string }) {
         <p className="text-dim text-sm">
           Renaming <code className="font-mono text-ink">{skill}</code> keeps the old name resolving
           as a redirect — a bookmark or a running command that used it keeps working until someone
-          claims the name for a new skill.
+          claims the name for a new {noun}.
         </p>
         <fetcher.Form method="post" className="space-y-3">
           <input type="hidden" name="intent" value="rename" />
@@ -521,7 +523,7 @@ function RenameCeremony({ skill }: { skill: string }) {
           )}
           <div>
             <ConfirmButton
-              label="Rename skill"
+              label={`Rename ${noun}`}
               confirmLabel="Rename — confirm?"
               tone="primary"
               pendingLabel="Renaming…"
@@ -535,6 +537,7 @@ function RenameCeremony({ skill }: { skill: string }) {
 }
 
 function ArchiveCeremony({ skill }: { skill: string }) {
+  const noun = bundleNoun(useBundleBase());
   const fetcher = useFetcher<SettingsFormError>();
   const pending = fetcher.state !== "idle";
   const error = fetcher.data?.form === "archive" ? fetcher.data.message : undefined;
@@ -546,8 +549,8 @@ function ArchiveCeremony({ skill }: { skill: string }) {
       <Card className="space-y-4 px-4 py-4">
         <p className="text-dim text-sm">{ARCHIVE_BOUNDARY}</p>
         <p className="text-faint text-sm">
-          The base name is freed for reuse and the skill drops off every machine at its next update;
-          you can unarchive it from the archive page.
+          The base name is freed for reuse and the {noun} drops off every machine at its next
+          update; you can unarchive it from the archive page.
         </p>
         <fetcher.Form method="post" className="space-y-3">
           <input type="hidden" name="intent" value="archive" />

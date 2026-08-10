@@ -31,11 +31,21 @@ import type { LaneFile } from "@/lib/plane/wire";
  *   the kind's own candidate gate → the vault call → ONE transaction holding the registration,
  *   the identity claim, and whatever the door adds → one typed outcome.
  *
- * TWO THINGS COME FROM THE KIND'S RECORD rather than from the caller, because a call site is
- * exactly the wrong place to decide either. `hasContentGate` picks the gate a candidate's BYTES
- * must pass before any custody call (an MCP server's `server.json` rules; a skill has none), and
- * `defaultGenesisDestination` decides where a new bundle REACHES when the caller names nowhere —
- * publishing a skill hands it to the team, while importing a server does not hand it to anyone.
+ * The `alsoInTx` hook runs in THAT transaction, which is where a door's op receipt belongs: a
+ * receipt written afterwards, in a second transaction, leaves a crash window in which the bundle
+ * exists with no replay record — and the op's retry then stops being a replay and becomes a
+ * second publish against a bundle that now exists, reported as a generation conflict.
+ *
+ * ONE THING COMES FROM THE KIND'S RECORD rather than from the caller: `hasContentGate` picks the
+ * gate a candidate's BYTES must pass before any custody call (an MCP server's `server.json`
+ * rules; a skill has none). That one is a property of the KIND — the same bytes are the same
+ * bytes at every door.
+ *
+ * WHERE A NEW BUNDLE REACHES IS NOT. It is a property of the DOOR: the session lane carries the
+ * wire's semantics for every kind (an absent channel means the workspace default, which is what
+ * makes a published bundle arrive on the team's machines), while a web creation page carries
+ * whatever its own form rests on. So `destination` is a required argument, never a default read
+ * from a record here.
  *
  * ORDER INSIDE THE TRANSACTION IS LOAD-BEARING: the registration comes first because the
  * identity claim's foreign key points at the bundle row, and a refused claim rolls the whole
@@ -65,8 +75,14 @@ export interface GenesisPublishArgs<T> {
   bundleId?: string;
   candidate: GenesisCandidate;
   displayName: string | null;
-  /** Where it reaches. Omit for this kind's own default. */
-  destination?: GenesisDestination;
+  /**
+   * Where it reaches — REQUIRED, and each door says it outright. There is no shared default,
+   * because there is no shared answer: the session lane carries the WIRE's semantics (a named
+   * channel, or the workspace default when none is named), while a web creation page carries
+   * whatever its form rests on. A default living here would silently apply one door's ruling to
+   * the others, which is exactly how a publish stops reaching the team it used to reach.
+   */
+  destination: GenesisDestination;
   /**
    * The rows this DOOR adds, inside the same transaction as the registration — upstream
    * provenance, an import audit line, an op receipt. Whatever it returns rides the outcome.
@@ -81,20 +97,37 @@ export interface GenesisLanding {
   name: string;
   versionId: string;
   bundleDigest: string;
+  /** The pointer's generation after the publish — a receipt written in this transaction needs it. */
+  generation: number;
   placement: GenesisRegistration["placement"];
 }
 
 export type GenesisPublishOutcome<T> =
-  | ({ kind: "ok"; generation: number; extra: T } & GenesisLanding)
+  | ({ kind: "ok"; extra: T } & GenesisLanding)
   /** The kind's gate, or the identity claim, said no — nothing was registered. */
   | { kind: "refused"; refusal: McpGateRefusal }
   /** The vault refused the candidate itself (a malformed tree). */
   | { kind: "rejected"; message: string | null }
+  /**
+   * The bundle already holds a `current` this publish did not fence on. ROUTINE, not a fault:
+   * the ids these doors publish under can be client-minted, so a retry after a refused first
+   * attempt meets exactly this. Folding it into a fault would answer 500 forever on that id.
+   */
+  | { kind: "conflict"; generation: number | null }
+  /** The vault does not hold the bundle this id names. */
+  | { kind: "not_found" }
   | { kind: "fault" };
 
-/** A kind's default destination, resolved from its record's tag to the value the DAL takes. */
-function defaultDestination(kind: BundleKind): GenesisDestination {
-  return kindEntry(kind).defaultGenesisDestination === "no-channel" ? NO_CHANNEL : null;
+/**
+ * What a WEB CREATION PAGE means by "no channel chosen", for its kind — the tag on that kind's
+ * record resolved to the value the DAL takes. Only the web pages call this; the session lane
+ * passes the wire's own channel through untouched.
+ */
+export function webNewDestination(kind: BundleKind, chosenChannel: string): GenesisDestination {
+  if (chosenChannel.length > 0) {
+    return chosenChannel;
+  }
+  return kindEntry(kind).webNewDefaultDestination === "no-channel" ? NO_CHANNEL : null;
 }
 
 export async function publishGenesisBundle<T = undefined>(
@@ -124,6 +157,12 @@ export async function publishGenesisBundle<T = undefined>(
   if (published.kind === "rejected") {
     return { kind: "rejected", message: published.message ?? null };
   }
+  if (published.kind === "conflict") {
+    return { kind: "conflict", generation: published.generation ?? null };
+  }
+  if (published.kind === "not_found") {
+    return { kind: "not_found" };
+  }
   if (published.kind !== "ok") {
     return { kind: "fault" };
   }
@@ -135,7 +174,7 @@ export async function publishGenesisBundle<T = undefined>(
         args.actor,
         bundleId,
         args.displayName,
-        args.destination ?? defaultDestination(args.kind),
+        args.destination,
         args.kind,
       );
       const landing: GenesisLanding = {
@@ -143,6 +182,7 @@ export async function publishGenesisBundle<T = undefined>(
         name: registration.name,
         versionId: published.value.version_id,
         bundleDigest: published.value.bundle_digest,
+        generation: published.value.pointer.generation,
         placement: registration.placement,
       };
       // The claim comes AFTER the row it points at, and a refusal rolls both back.
@@ -159,10 +199,5 @@ export async function publishGenesisBundle<T = undefined>(
   if (landed.refused !== null) {
     return { kind: "refused", refusal: landed.refused };
   }
-  return {
-    kind: "ok",
-    ...landed.value.landing,
-    generation: published.value.pointer.generation,
-    extra: landed.value.extra,
-  };
+  return { kind: "ok", ...landed.value.landing, extra: landed.value.extra };
 }

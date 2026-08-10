@@ -659,8 +659,16 @@ export type GuardedMove<T> = { refusal: null; moved: T } | { refusal: McpGateRef
  * The claim and the move ride ONE transaction, which is what makes check-then-move atomic
  * against a publish claiming the name in between. A kind with no precondition moves the pointer
  * with no transaction at all, exactly as it did before.
+ *
+ * A MOVE THAT DID NOT LAND TAKES THE CLAIM DOWN WITH IT. The custody call answers routine
+ * failures with a TYPED outcome rather than a throw — a generation conflict above all, which is
+ * what a reviewer meets when someone published while they were deciding. Committing on that path
+ * would record a claim for a pointer that never moved: the bundle's OLD name released while it is
+ * still being served, and the freed name available to the next publish while the registry lane
+ * still answers to it. So anything but `ok` rolls the transaction back and is handed to the
+ * caller unchanged — the caller still branches on exactly the outcome custody gave it.
  */
-export async function movePointerWithKindPrecondition<T>(args: {
+export async function movePointerWithKindPrecondition<T extends { kind: string }>(args: {
   /** The bundle's catalog kind — the authority on what must be checked first. */
   kind: string;
   actor: MemberActor | SessionActor;
@@ -673,10 +681,18 @@ export async function movePointerWithKindPrecondition<T>(args: {
   if (!kindEntry(args.kind).hasContentGate) {
     return { refusal: null, moved: await args.move() };
   }
-  return await inFinalTx(async (tx) => {
+  const landed = await inFinalTxOrRefusal<GuardedMove<T>, GuardedMove<T>>(async (tx, abort) => {
     const refusal = await mcpNameClaimRefusalInTx(tx, args.actor, args.bundleId, args.versionId);
-    return refusal === null
-      ? ({ refusal: null, moved: await args.move() } as const)
-      : ({ refusal } as const);
+    if (refusal !== null) {
+      abort({ refusal });
+    }
+    const moved = await args.move();
+    if (moved.kind !== "ok") {
+      // Nothing moved, so nothing may be claimed — but this is an ANSWER, not a fault, and it
+      // travels out intact.
+      abort({ refusal: null, moved });
+    }
+    return { refusal: null, moved };
   });
+  return landed.refused !== null ? landed.refused : landed.value;
 }

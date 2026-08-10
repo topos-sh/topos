@@ -11,7 +11,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { publishGenesisBundle } from "@/lib/api/genesis.server";
+import { publishGenesisBundle, webNewDestination } from "@/lib/api/genesis.server";
 import { requireMemberInScope } from "@/lib/auth/guards.server";
 import { bundlePath } from "@/lib/bundle-base";
 import { auditInTx } from "@/lib/db/identity.server";
@@ -294,9 +294,9 @@ export async function action({ request, params }: ActionFunctionArgs) {
         message: `imported MCP server ${validated.summary.name}`,
       },
       displayName: name.length > 0 ? name : suggestedNameFor(validated.summary.name),
-      ...(channel.length > 0 ? { destination: channel } : {}),
-      alsoInTx: (tx, registered) =>
-        auditInTx(tx, {
+      destination: webNewDestination("mcp", channel),
+      alsoInTx: async (tx, registered) => {
+        await auditInTx(tx, {
           workspaceId: workspace.id,
           actor: { userId: actor.userId, display: actor.display },
           kind: "mcp_imported",
@@ -307,7 +307,8 @@ export async function action({ request, params }: ActionFunctionArgs) {
             version: validated.summary.version,
             url: validated.summary.url,
           },
-        }),
+        });
+      },
     });
     if (landed.kind === "refused") {
       return refuseGate(landed.refusal);
