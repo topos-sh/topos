@@ -735,8 +735,8 @@ fn the_feed_row_adopts_the_workspaces_feed() {
     );
     // Nothing is loud: the feed row adopts everything, so there is nothing to disclose.
     assert!(
-        !out.advisories
-            .iter()
+        !crate::message::legacy_lines(&out.advisories)
+            .into_iter()
             .any(|w| w.starts_with("GLOBAL_MANIFEST")),
         "{:?}",
         out.warnings
@@ -842,16 +842,17 @@ fn a_global_file_withholds_the_feed_and_says_so_loudly() {
         !rig.work.0.join("skills/deploy").exists(),
         "no feed row, no feed"
     );
-    let loud = out
-        .advisories
-        .iter()
+    let loud = crate::message::legacy_lines(&out.advisories)
+        .into_iter()
         .find(|w| w.starts_with("GLOBAL_MANIFEST"))
         .expect("the loud line");
     assert!(loud.contains(&format!("{HOST}/{WS_NAME}")), "{loud}");
-    assert!(loud.contains("no feed row"), "{loud}");
-    assert!(loud.contains("adopts 1 bundles"), "{loud}");
     assert!(
-        loud.contains("1 assigned bundles are not adopted"),
+        loud.contains("names 1 bundles from this workspace"),
+        "{loud}"
+    );
+    assert!(
+        loud.contains("1 more that it assigns you are not listed there"),
         "{loud}"
     );
     assert!(loud.contains(&format!("topos add -g @{WS_NAME}")), "{loud}");
@@ -871,13 +872,12 @@ fn an_exchange_that_serves_nothing_says_so_without_counting_as_a_failure() {
     let ctx = rig.ctx_at(Some(&rig.work.0));
     let out = sweep(&ctx, &plane, &dir);
 
-    let line = out
-        .disclosures
-        .iter()
+    let line = crate::message::legacy_lines(&out.disclosures)
+        .into_iter()
         .find(|d| d.starts_with("NOTHING_ASSIGNED"))
         .unwrap_or_else(|| panic!("the empty-serve line: {:?}", out.disclosures));
     assert!(line.contains(&format!("{HOST}/{WS_NAME}")), "{line}");
-    assert!(line.contains("nothing assigned to you yet"), "{line}");
+    assert!(line.contains("nothing is assigned to you yet"), "{line}");
     // A DISCLOSURE: the exchange worked, so nothing here may read as broken.
     assert!(out.warnings.is_empty(), "{:?}", out.warnings);
     assert!(out.data.skills.is_empty(), "{:?}", out.data.skills);
@@ -918,8 +918,8 @@ fn one_address_adopted_twice_earns_one_empty_exchange_line() {
     let out = sweep(&ctx, &plane, &dir);
 
     assert_eq!(
-        out.disclosures
-            .iter()
+        crate::message::legacy_lines(&out.disclosures)
+            .into_iter()
             .filter(|d| d.starts_with("NOTHING_ASSIGNED"))
             .count(),
         1,
@@ -951,8 +951,8 @@ fn a_served_feed_never_earns_the_empty_exchange_line() {
         "the switch withholds it"
     );
     assert!(
-        !out.disclosures
-            .iter()
+        !crate::message::legacy_lines(&out.disclosures)
+            .into_iter()
             .any(|d| d.starts_with("NOTHING_ASSIGNED")),
         "the workspace assigned something: {:?}",
         out.disclosures
@@ -996,8 +996,8 @@ fn an_off_row_withholds_exactly_its_bundle_from_a_flowing_feed() {
     );
     // A flowing feed is not a withheld one — no loud line here.
     assert!(
-        !out.advisories
-            .iter()
+        !crate::message::legacy_lines(&out.advisories)
+            .into_iter()
             .any(|w| w.starts_with("GLOBAL_MANIFEST")),
         "{:?}",
         out.warnings
@@ -1056,12 +1056,11 @@ fn a_declined_bundle_a_row_still_delivers_is_disclosed() {
     let ctx = rig.ctx_at(Some(&rig.work.0));
     let out = sweep(&ctx, &plane, &dir);
     assert!(rig.work.0.join("skills/deploy/SKILL.md").exists());
-    let line = out
-        .advisories
-        .iter()
+    let line = crate::message::legacy_lines(&out.advisories)
+        .into_iter()
         .find(|w| w.starts_with("DECLINED_OVERRIDE"))
         .expect("the honest note");
-    assert!(line.contains("declined on the web"), "{line}");
+    assert!(line.contains("you declined this on the web"), "{line}");
 }
 
 // =================================================================================================
@@ -1332,9 +1331,8 @@ fn a_workspace_row_without_a_session_is_an_honest_local_line() {
     let dir = FakeDirectory::new(Vec::new(), Vec::new());
     let ctx = rig.ctx_at(Some(&proj.0));
     let out = sweep(&ctx, &plane, &dir);
-    let w = out
-        .warnings
-        .iter()
+    let w = crate::message::legacy_lines(&out.warnings)
+        .into_iter()
         .find(|w| w.starts_with("NOT_AVAILABLE"))
         .expect("the honest line");
     assert!(w.contains("topos login elsewhere.dev/ops"), "{w}");
@@ -1451,8 +1449,8 @@ fn a_broken_manifest_in_an_undriven_scope_warns_and_freezes_it() {
     let pctx = rig.ctx_at(Some(&proj.0));
     let out = sweep(&pctx, &plane, &dir);
     assert!(
-        out.warnings
-            .iter()
+        crate::message::legacy_lines(&out.warnings)
+            .into_iter()
             .any(|w| w.starts_with("MANIFEST_INVALID")),
         "{:?}",
         out.warnings
@@ -2025,9 +2023,8 @@ fn a_floating_repo_row_advances_through_the_silent_sweep_alone() {
     // Once the interval has elapsed, the NEXT session start lands it — and says what moved.
     forge_interval_elapsed(&rig);
     let out = quiet_sweep(&ctx, &plane, &dir, &git);
-    let line = out
-        .disclosures
-        .iter()
+    let line = crate::message::legacy_lines(&out.disclosures)
+        .into_iter()
         .find(|w| w.starts_with("GIT_UPDATED"))
         .unwrap_or_else(|| panic!("the moved-source line: {:?}", out.disclosures));
     assert!(line.contains("github.com/o/r"), "{line}");
@@ -2223,8 +2220,8 @@ fn a_dead_network_costs_one_timeout_for_the_whole_round() {
     // The skipped rows say nothing of their own: the source that actually failed already did, and
     // "we skipped this because something else broke" is noise about someone else's problem.
     assert!(
-        !out.warnings
-            .iter()
+        !crate::message::legacy_lines(&out.warnings)
+            .into_iter()
             .any(|w| w.contains("already unreachable")),
         "{:?}",
         out.warnings
@@ -2272,7 +2269,9 @@ fn a_machine_with_no_prior_grant_auto_updates_a_cloned_projects_row() {
         out.warnings
     );
     assert!(
-        !out.warnings.iter().any(|w| w.contains("FIRST_TRUST")),
+        !crate::message::legacy_lines(&out.warnings)
+            .into_iter()
+            .any(|w| w.contains("FIRST_TRUST")),
         "{:?}",
         out.warnings
     );
@@ -2329,7 +2328,9 @@ fn a_deleted_repo_is_reported_once_and_then_left_alone() {
     let out = quiet_sweep(&ctx, &plane, &dir, &git);
     let dialed = git.probes() + git.fetches();
     assert!(
-        out.warnings.iter().any(|w| w.starts_with("REMOTE_FETCH")),
+        crate::message::legacy_lines(&out.warnings)
+            .into_iter()
+            .any(|w| w.starts_with("REMOTE_FETCH")),
         "the refusal is said: {:?}",
         out.warnings
     );
@@ -2344,7 +2345,9 @@ fn a_deleted_repo_is_reported_once_and_then_left_alone() {
         "a settled verdict stops the dialing"
     );
     assert!(
-        !out.warnings.iter().any(|w| w.starts_with("REMOTE_FETCH")),
+        !crate::message::legacy_lines(&out.warnings)
+            .into_iter()
+            .any(|w| w.starts_with("REMOTE_FETCH")),
         "and is not repeated: {:?}",
         out.warnings
     );
@@ -2399,14 +2402,15 @@ fn a_renamed_repo_keeps_working_and_says_where_it_went() {
         "the renamed repo keeps delivering: {:?}",
         out.warnings
     );
-    let line = out
-        .disclosures
-        .iter()
+    let line = crate::message::legacy_lines(&out.disclosures)
+        .into_iter()
         .find(|d| d.starts_with("GIT_RENAMED"))
         .unwrap_or_else(|| panic!("the rename note: {:?}", out.disclosures));
     assert!(line.contains("github.com/newowner/newrepo"), "{line}");
     assert!(
-        !out.warnings.iter().any(|w| w.contains("not found")),
+        !crate::message::legacy_lines(&out.warnings)
+            .into_iter()
+            .any(|w| w.contains("not found")),
         "a rename is never reported as a missing repo: {:?}",
         out.warnings
     );
@@ -2459,8 +2463,8 @@ fn five_rows_behind_one_quiet_forge_produce_one_line_and_only_when_stale() {
     // repositories and calling them skills would be a number about the wrong thing.
     assert!(lines[0].contains("5 sources"), "{:?}", lines[0]);
     assert!(
-        lines[0].contains("they still work"),
-        "the consequence, so `unreachable` does not read as breakage: {:?}",
+        lines[0].contains("They still work."),
+        "the consequence, so `is unreachable` does not read as breakage: {:?}",
         lines[0]
     );
 }
@@ -2569,9 +2573,8 @@ fn two_rows_over_one_gone_repo_ask_once_and_say_it_once() {
         1,
         "one repository, one question"
     );
-    let said: Vec<&String> = out
-        .warnings
-        .iter()
+    let said: Vec<String> = crate::message::legacy_lines(&out.warnings)
+        .into_iter()
         .filter(|w| w.starts_with("REMOTE_FETCH"))
         .collect();
     assert_eq!(said.len(), 1, "said once, not once per row: {said:?}");
@@ -2644,12 +2647,16 @@ fn a_failed_check_on_an_uninstalled_member_says_one_thing_not_two() {
     git.fail_with(FetchFault::Unreachable);
     let out = update_now(&ctx, &plane, &dir, &git);
     assert!(
-        out.warnings.iter().any(|w| w.starts_with("REMOTE_FETCH")),
+        crate::message::legacy_lines(&out.warnings)
+            .into_iter()
+            .any(|w| w.starts_with("REMOTE_FETCH")),
         "the fault is named: {:?}",
         out.warnings
     );
     assert!(
-        !out.warnings.iter().any(|w| w.starts_with("NOT_INSTALLED")),
+        !crate::message::legacy_lines(&out.warnings)
+            .into_iter()
+            .any(|w| w.starts_with("NOT_INSTALLED")),
         "and only once: {:?}",
         out.warnings
     );
@@ -2751,7 +2758,7 @@ fn a_reachable_but_failing_forge_is_not_called_unreachable() {
         lines[0]
     );
     assert!(lines[0].contains("github.com"), "{:?}", lines[0]);
-    assert!(lines[0].contains("they still work"), "{:?}", lines[0]);
+    assert!(lines[0].contains("They still work."), "{:?}", lines[0]);
 }
 
 #[test]
@@ -3292,7 +3299,9 @@ fn an_emptied_repository_stays_probe_only() {
         forge_interval_elapsed(&rig);
         let out = quiet_sweep(&ctx, &plane, &dir, &git);
         assert!(
-            !out.disclosures.iter().any(|d| d.starts_with("GIT_UPDATED")),
+            !crate::message::legacy_lines(&out.disclosures)
+                .into_iter()
+                .any(|d| d.starts_with("GIT_UPDATED")),
             "and does not re-announce a move that already happened: {:?}",
             out.disclosures
         );
@@ -4326,7 +4335,7 @@ fn rebuild_leaves_a_blocked_bundle_alone_and_names_both_exits() {
     );
     assert_eq!(
         out.decisions[0].line,
-        "waiting on a merge decision, so its folders were left as they are"
+        "a merge is still waiting on your answer, so topos left its folders as they are."
     );
     assert_eq!(
         out.decisions[0].detail,
@@ -4348,9 +4357,9 @@ fn rebuild_leaves_a_blocked_bundle_alone_and_names_both_exits() {
     );
     assert!(
         tty.contains(
-            "deploy   waiting on a merge decision, so its folders were left as they are\n    \
-             settle it first, then rebuild:\n      topos update -g deploy --keep-mine\n      topos \
-             update -g deploy --reset"
+            "deploy   a merge is still waiting on your answer, so topos left its folders as they \
+             are.\n    settle it first, then rebuild:\n      topos update -g deploy \
+             --keep-mine\n      topos update -g deploy --reset"
         ),
         "{tty}"
     );
@@ -4412,7 +4421,9 @@ fn an_ended_session_freezes_and_prints_once() {
     let ctx = rig.ctx_at(Some(&rig.work.0));
     let out = sweep(&ctx, &plane, &dir);
     assert!(
-        out.warnings.iter().any(|w| w.starts_with("SESSION_ENDED")),
+        crate::message::legacy_lines(&out.warnings)
+            .into_iter()
+            .any(|w| w.starts_with("SESSION_ENDED")),
         "{:?}",
         out.warnings
     );
@@ -4490,7 +4501,7 @@ fn an_unreachable_and_stale_workspace_warns_by_name() {
     assert_eq!(
         lines,
         vec![format!(
-            "topos: {WS_NAME} last synced 8d ago — the server could not be reached"
+            "topos: {WS_NAME} last synced 8d ago — the server could not be reached."
         )]
     );
 
@@ -4519,14 +4530,14 @@ fn an_answering_server_never_gets_blamed_on_the_network() {
     let out = sweep(&ctx, &plane, &dir);
     assert_eq!(out.unreachable.len(), 1);
     assert!(
-        out.warnings
-            .iter()
+        crate::message::legacy_lines(&out.warnings)
+            .into_iter()
             .any(|w| w.starts_with("PLANE_UNAVAILABLE")),
         "{:?}",
         out.warnings
     );
     let unavailable_line =
-        format!("topos: {WS_NAME} last synced 8d ago — the server did not answer successfully");
+        format!("topos: {WS_NAME} last synced 8d ago — the server did not answer successfully.");
     assert_eq!(
         ops::quiet_hook_lines(&rig.fs, &rig.layout(), stale_now, &out),
         vec![unavailable_line.clone()]
@@ -4548,14 +4559,16 @@ fn an_answering_server_never_gets_blamed_on_the_network() {
     plane.serve_malformed();
     let out = sweep(&ctx, &plane, &dir);
     assert!(
-        out.warnings.iter().any(|w| w.starts_with("WIRE_INVALID")),
+        crate::message::legacy_lines(&out.warnings)
+            .into_iter()
+            .any(|w| w.starts_with("WIRE_INVALID")),
         "the MALFORMED arm ran, not the transport one: {:?}",
         out.warnings
     );
     assert_eq!(
         ops::quiet_hook_lines(&rig.fs, &rig.layout(), stale_now, &out),
         vec![format!(
-            "topos: {WS_NAME} last synced 8d ago — the server's answer could not be read"
+            "topos: {WS_NAME} last synced 8d ago — the server's answer could not be read."
         )]
     );
     assert_eq!(recorded_fault(&rig, WS), Some(ExchangeFault::Malformed));
@@ -4909,9 +4922,8 @@ fn a_member_gone_from_the_archive_is_cleaned_snapshot_first() {
         &ops::ManifestUpdateOpts::default(),
     )
     .unwrap();
-    let line = out
-        .disclosures
-        .iter()
+    let line = crate::message::legacy_lines(&out.disclosures)
+        .into_iter()
         .find(|w| w.starts_with("GIT_UPDATED"))
         .expect("the moved-source line");
     assert!(line.contains("-beta"), "{line}");
@@ -5137,8 +5149,8 @@ fn the_report_covers_a_declined_but_locally_added_bundle() {
     let ctx = rig.ctx_at(Some(&rig.work.0));
     let out = sweep(&ctx, &plane, &dir);
     assert!(
-        out.advisories
-            .iter()
+        crate::message::legacy_lines(&out.advisories)
+            .into_iter()
             .any(|w| w.starts_with("DECLINED_OVERRIDE")),
         "{:?}",
         out.warnings
@@ -5913,9 +5925,8 @@ fn a_landed_publish_survives_a_failed_rewrite_and_the_next_update_converges_it()
         &ops::ManifestUpdateOpts::default(),
     )
     .unwrap();
-    let line = out
-        .advisories
-        .iter()
+    let line = crate::message::legacy_lines(&out.advisories)
+        .into_iter()
         .find(|w| w.starts_with("GOVERNANCE_CONVERGED"))
         .unwrap_or_else(|| panic!("the converge line: {:?}", out.advisories));
     assert!(line.contains(&format!("{HOST}/{WS_NAME}/deploy")), "{line}");
@@ -5939,9 +5950,8 @@ fn a_landed_publish_survives_a_failed_rewrite_and_the_next_update_converges_it()
     )
     .unwrap();
     assert!(
-        !out2
-            .advisories
-            .iter()
+        !crate::message::legacy_lines(&out2.advisories)
+            .into_iter()
             .any(|w| w.starts_with("GOVERNANCE_CONVERGED")),
         "{:?}",
         out2.warnings
@@ -6154,9 +6164,8 @@ fn a_project_scope_pending_rewrite_converges_from_the_projects_own_store() {
         &ops::ManifestUpdateOpts::default(),
     )
     .unwrap();
-    let line = out
-        .advisories
-        .iter()
+    let line = crate::message::legacy_lines(&out.advisories)
+        .into_iter()
         .find(|w| w.starts_with("GOVERNANCE_CONVERGED"))
         .unwrap_or_else(|| panic!("the converge line: {:?}", out.advisories));
     assert!(line.contains(&format!("{HOST}/{WS_NAME}/deploy")), "{line}");
@@ -6390,9 +6399,8 @@ fn a_genesis_propose_pending_rewrite_still_converges() {
         &ops::ManifestUpdateOpts::default(),
     )
     .unwrap();
-    let line = out
-        .advisories
-        .iter()
+    let line = crate::message::legacy_lines(&out.advisories)
+        .into_iter()
         .find(|w| w.starts_with("GOVERNANCE_CONVERGED"))
         .unwrap_or_else(|| panic!("the converge line: {:?}", out.advisories));
     assert!(line.contains(&format!("{HOST}/{WS_NAME}/deploy")), "{line}");
@@ -6546,9 +6554,8 @@ fn a_delivered_bundle_shipping_a_non_self_ignoring_gitignore_warns_on_the_sweep(
         "bundle content is never edited: {:?}",
         out.warnings
     );
-    let w = out
-        .advisories
-        .iter()
+    let w = crate::message::legacy_lines(&out.advisories)
+        .into_iter()
         .find(|w| w.starts_with("GIT_VISIBLE"))
         .unwrap_or_else(|| panic!("the visibility disclosure: {:?}", out.advisories));
     assert!(w.contains("deploy"), "{w}");
@@ -7061,7 +7068,8 @@ fn a_committed_topos_symlink_refuses_the_project_store() {
     let err = crate::sidecar::ensure_project_store(&rig.fs, &proj.0).unwrap_err();
     assert_eq!(err.code(), "PLACEMENT_UNSUPPORTED", "{err:?}");
     assert!(
-        err.to_string().contains("PLACEMENT_ESCAPES_PROJECT"),
+        err.to_string()
+            .contains("does not resolve inside this checkout (the project store)"),
         "{err}"
     );
     assert!(
@@ -7100,8 +7108,8 @@ fn a_committed_skills_symlink_is_refused_as_a_placement_root() {
         None,
     );
     assert!(
-        plan.refused
-            .iter()
+        crate::message::legacy_lines(&plan.refused)
+            .into_iter()
             .any(|r| r.starts_with("PLACEMENT_ESCAPES_PROJECT")),
         "the escaping root is refused: {:?}",
         plan.refused
@@ -8529,8 +8537,8 @@ fn a_prior_placement_that_no_longer_resolves_inside_the_checkout_is_refused() {
         None,
     );
     assert!(
-        plan.refused
-            .iter()
+        crate::message::legacy_lines(&plan.refused)
+            .into_iter()
             .any(|r| r.starts_with("PLACEMENT_ESCAPES_PROJECT")),
         "the escaping record is refused: {:?}",
         plan.refused
@@ -8620,7 +8628,9 @@ fn a_forge_refresh_holds_the_lock_and_keeps_an_edit_that_lands_at_the_stash() {
     assert_eq!(out.decisions[0].name, "deploy");
     assert_eq!(
         out.decisions[0].line,
-        "github.com/o/r has a newer version, but your edits would be overwritten"
+        "github.com/o/r has a newer version, and taking it would overwrite your edits. Keep them \
+         by doing nothing, or run 'topos update -g deploy --reset' to discard them and take the \
+         new version."
     );
     // ONE way out, and it is the only one that runs: a skill imported from a repository reaches
     // people who have no workspace at all, and `topos publish` refuses them at the login step.
@@ -8648,7 +8658,9 @@ fn a_forge_refresh_holds_the_lock_and_keeps_an_edit_that_lands_at_the_stash() {
         out.failed_bundles.len(),
     );
     let expected_block = concat!(
-        "deploy   github.com/o/r has a newer version, but your edits would be overwritten\n",
+        "deploy   github.com/o/r has a newer version, and taking it would overwrite your edits. ",
+        "Keep them by doing nothing, or run 'topos update -g deploy --reset' to discard them and ",
+        "take the new version.\n",
         "    to discard them:   topos update -g deploy --reset\n",
     );
     assert!(tty.contains(expected_block), "{tty}");
@@ -8756,7 +8768,9 @@ fn a_selector_imports_harness_choice_rides_the_row_into_the_next_update() {
         out.warnings
     );
     assert!(
-        out.disclosures.iter().all(|w| w.starts_with("GIT_UPDATED")),
+        crate::message::legacy_lines(&out.disclosures)
+            .into_iter()
+            .all(|w| w.starts_with("GIT_UPDATED")),
         "the moved source is disclosed and nothing else: {:?}",
         out.disclosures
     );
@@ -9035,8 +9049,8 @@ fn an_adopted_project_placement_hands_over_and_parks_the_home_store() {
         .unwrap()
         .expect("the parked store's bytes are intact");
     assert_eq!(kept.placements.len(), 1, "{kept:?}");
-    let line = advisories
-        .iter()
+    let line = crate::message::legacy_lines(&advisories)
+        .into_iter()
         .find(|w| w.starts_with("STATE_HANDOVER"))
         .unwrap_or_else(|| panic!("the disclosure line: {advisories:?}"));
     assert!(line.contains(&parked.display().to_string()), "{line}");
@@ -11185,7 +11199,7 @@ fn a_classic_delete_of_an_mcp_record_takes_its_config_entries_with_it() {
     // says so.
     let note = data.items[0].note.clone().unwrap_or_default();
     assert!(
-        note.contains("server entry removed") && note.contains("cursor"),
+        note.contains("the server's entry was removed.") && note.contains("cursor"),
         "{note}"
     );
 }
@@ -12752,7 +12766,7 @@ fn a_whole_row_remove_of_an_mcp_row_takes_its_config_entries_out() {
         "the config entry leaves in-invocation"
     );
     let note = data.items[0].note.clone().unwrap_or_default();
-    assert!(note.contains("server entry removed"), "{note}");
+    assert!(note.contains("the server's entry was removed."), "{note}");
 }
 
 /// Two teams publish a `deploy` and only the OTHER team's copy is on this machine. Dropping the
@@ -13683,9 +13697,8 @@ fn a_served_kind_this_build_cannot_deliver_is_skipped_and_named() {
 
     // ONE line, and it teaches: the bundle, the kind, and the command that makes this machine able
     // to take it.
-    let w = out
-        .warnings
-        .iter()
+    let w = crate::message::legacy_lines(&out.warnings)
+        .into_iter()
         .find(|w| w.starts_with("UNKNOWN_KIND"))
         .unwrap_or_else(|| panic!("the refusal line; got {:?}", out.warnings));
     assert!(w.contains("runbook"), "{w}");
@@ -13879,12 +13892,11 @@ fn path_missing_names_the_scope_exact_drop_and_it_clears_the_row() {
     // The folder goes; the row stays. That is the state PATH_MISSING exists to report.
     std::fs::remove_dir_all(&src).unwrap();
     let out = sweep_scoped(&ctx, &plane, &dir, ops::UpdateScope::Machine);
-    let warning = out
-        .warnings
-        .iter()
+    let warning = crate::message::legacy_lines(&out.warnings)
+        .into_iter()
         .find(|w| w.starts_with("PATH_MISSING"))
         .unwrap_or_else(|| panic!("the missing folder is reported: {:?}", out.warnings));
-    let offered = format!("`topos remove -g {}`", canonical.display());
+    let offered = format!("'topos remove -g {}'", canonical.display());
     assert!(
         warning.contains(&offered),
         "the drop is spelled for the file that HOLDS the row: {warning}"
@@ -13893,7 +13905,7 @@ fn path_missing_names_the_scope_exact_drop_and_it_clears_the_row() {
     // machine-wide scope and it shipped verbatim to anyone who deleted a folder a row still asks
     // for. The machine lane keeps the code; the TTY prints the sentence without it.
     assert!(
-        warning.contains("demanded machine-wide") && !warning.contains("person"),
+        warning.contains("asks for this folder machine-wide") && !warning.contains("person"),
         "the scope is named in user vocabulary: {warning}"
     );
     let warn_tty = crate::render::pull_tty(
@@ -13905,12 +13917,14 @@ fn path_missing_names_the_scope_exact_drop_and_it_clears_the_row() {
         out.failed_bundles.len(),
     );
     assert!(
-        warn_tty.contains("is demanded machine-wide but the folder is gone")
+        warn_tty.contains("asks for this folder machine-wide, and the folder is gone")
             && !warn_tty.contains("PATH_MISSING"),
         "the TTY reads as English: {warn_tty}"
     );
     assert!(
-        out.warnings.iter().any(|w| w.starts_with("PATH_MISSING")),
+        crate::message::legacy_lines(&out.warnings)
+            .into_iter()
+            .any(|w| w.starts_with("PATH_MISSING")),
         "the machine lane keeps the code: {:?}",
         out.warnings
     );
@@ -13972,7 +13986,9 @@ fn path_missing_names_the_scope_exact_drop_and_it_clears_the_row() {
     assert_eq!(global_text(&rig), "[bundles]\n");
     let out = sweep_scoped(&ctx, &plane, &dir, ops::UpdateScope::Machine);
     assert!(
-        !out.warnings.iter().any(|w| w.starts_with("PATH_MISSING")),
+        !crate::message::legacy_lines(&out.warnings)
+            .into_iter()
+            .any(|w| w.starts_with("PATH_MISSING")),
         "the warning is gone with the row: {:?}",
         out.warnings
     );

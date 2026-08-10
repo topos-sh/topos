@@ -937,7 +937,8 @@ fn add_remote_refuses_a_project_destination_that_escapes_the_checkout() {
     };
     let err = ops::add_remote(&h.ctx(), &git, &spec, &roots, &opts).unwrap_err();
     assert!(
-        err.to_string().contains("PLACEMENT_ESCAPES_PROJECT"),
+        err.to_string()
+            .contains("does not resolve inside this checkout (the import destination)"),
         "{err}"
     );
     assert!(

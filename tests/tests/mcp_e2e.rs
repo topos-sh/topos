@@ -476,12 +476,12 @@ fn the_mcp_bundle_loop_across_six_agents() {
         .as_str()
         .unwrap_or_else(|| panic!("the removal discloses what it did: {removed}"));
     assert_eq!(
-        note.matches(": server entry removed").count(),
+        note.matches(": the server's entry was removed.").count(),
         SIX.len(),
         "one line per config file the entry left: {note}"
     );
     assert!(
-        note.contains("~/.cursor/mcp.json: server entry removed"),
+        note.contains("~/.cursor/mcp.json: the server's entry was removed."),
         "file-keyed, `~`-abbreviated: {note}"
     );
     let swept = dev
@@ -575,9 +575,9 @@ fn the_mcp_bundle_loop_across_six_agents() {
         .collect();
     assert!(
         warnings.iter().any(|w| {
-            w.starts_with("MCP_DRIFTED cursor:")
+            w.starts_with("MCP_DRIFTED ")
                 && w.contains(&cursor_path.display().to_string())
-                && w.contains("left in place")
+                && w.contains("left in place for cursor")
         }),
         "the drift survivor is disclosed by file: {warnings:?}"
     );

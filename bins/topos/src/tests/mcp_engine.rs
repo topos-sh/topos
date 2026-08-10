@@ -579,8 +579,8 @@ fn a_surface_symlinked_out_between_plan_and_write_is_refused_with_zero_writes() 
         Some("the config path does not resolve inside this checkout")
     );
     assert!(
-        out.warnings
-            .iter()
+        crate::message::legacy_lines(&out.warnings)
+            .into_iter()
             .any(|w| w.starts_with("PLACEMENT_ESCAPES_PROJECT")),
         "{:?}",
         out.warnings
@@ -740,8 +740,8 @@ fn a_dest_move_is_a_clean_sweep_that_names_the_bundle_it_moved() {
     // the code (an agent branches on it); the TTY prints the sentence, because a person reading a
     // receipt should not have to skip a machine word to reach English.
     assert!(
-        out.disclosures
-            .iter()
+        crate::message::legacy_lines(&out.disclosures)
+            .into_iter()
             .any(|d| d.starts_with("MCP_FILE_REMOVED") && d.contains("mcp.json")),
         "{:?}",
         out.disclosures
@@ -755,8 +755,10 @@ fn a_dest_move_is_a_clean_sweep_that_names_the_bundle_it_moved() {
         out.failed_bundles.len(),
     );
     assert!(
-        note_tty.contains("held only topos entries and was deleted")
-            && !note_tty.contains("MCP_FILE_REMOVED"),
+        note_tty.contains(
+            "this file held only entries topos placed, so topos deleted it with the \
+                           last one."
+        ) && !note_tty.contains("MCP_FILE_REMOVED"),
         "the note reads as English on the TTY: {note_tty}"
     );
     // The row for the surfaces the bundle left names `demo` — never the store's id for it.
@@ -1251,9 +1253,8 @@ fn a_suspect_header_fails_the_demand_closed_with_a_warning() {
         &no_hold(),
         true,
     );
-    let line = out
-        .warnings
-        .iter()
+    let line = crate::message::legacy_lines(&out.warnings)
+        .into_iter()
         .find(|w| w.contains("MCP_SECRET_REFUSED"))
         .unwrap_or_else(|| panic!("the typed refusal is named: {:?}", out.warnings));
     // ONE code per line. The gate's code used to be printed INSIDE this line's own
@@ -1419,8 +1420,8 @@ fn a_hand_edited_plugin_manifest_survives_update_and_removal_disclosed() {
         "the hand-edited manifest survives an entry update byte-identical"
     );
     assert!(
-        out.warnings
-            .iter()
+        crate::message::legacy_lines(&out.warnings)
+            .into_iter()
             .any(|w| w.contains("MCP_PLUGIN_MANIFEST_KEPT")),
         "the kept manifest is disclosed: {:?}",
         out.warnings
@@ -1441,8 +1442,8 @@ fn a_hand_edited_plugin_manifest_survives_update_and_removal_disclosed() {
         "the dir stays with its foreign occupant"
     );
     assert!(
-        out.warnings
-            .iter()
+        crate::message::legacy_lines(&out.warnings)
+            .into_iter()
             .any(|w| w.contains("MCP_PLUGIN_MANIFEST_KEPT")),
         "{:?}",
         out.warnings
@@ -1602,8 +1603,8 @@ fn a_moved_surface_path_discloses_the_stale_row_and_never_drops_it() {
         true,
     );
     assert!(
-        out.warnings
-            .iter()
+        crate::message::legacy_lines(&out.warnings)
+            .into_iter()
             .any(|w| w.contains("MCP_ENTRY_STALE_PATH") && w.contains(".cursor/mcp.json")),
         "{:?}",
         out.warnings
@@ -2386,7 +2387,7 @@ fn a_drifted_entry_outlives_the_record_and_is_still_cleaned_up_later() {
         };
         let warnings = mcp_engine::detach_bundle_rows(&faulted, "s_a");
         assert!(
-            warnings
+            crate::message::legacy_lines(&warnings)
                 .iter()
                 .any(|w| w.contains("MCP_CUSTODY_WRITE_FAILED")
                     || w.contains("MCP_LOCK_UNAVAILABLE")),
@@ -3246,8 +3247,8 @@ fn a_project_config_symlink_escaping_the_checkout_is_refused_and_disclosed() {
     let ctx = rig.ctx_at(Some(&proj.0));
     let out = sweep(&ctx, &plane, &dir);
     assert!(
-        out.warnings
-            .iter()
+        crate::message::legacy_lines(&out.warnings)
+            .into_iter()
             .any(|w| w.contains("PLACEMENT_ESCAPES_PROJECT")),
         "{:?}",
         out.warnings
@@ -3299,13 +3300,14 @@ fn a_rows_dest_files_narrow_the_placement_and_unknown_files_warn_once() {
     // The line is an ADVISORY — the bundle itself delivered, so it must never join the counted
     // failure channel.
     assert!(
-        !out.warnings.iter().any(|w| w.contains("MCP_DEST_UNKNOWN")),
+        !crate::message::legacy_lines(&out.warnings)
+            .into_iter()
+            .any(|w| w.contains("MCP_DEST_UNKNOWN")),
         "an advisory about a delivered bundle is not a counted failure: {:?}",
         out.warnings
     );
-    let unknown: Vec<&String> = out
-        .advisories
-        .iter()
+    let unknown: Vec<String> = crate::message::legacy_lines(&out.advisories)
+        .into_iter()
         .filter(|w| w.contains("MCP_DEST_UNKNOWN"))
         .collect();
     assert_eq!(
@@ -3314,7 +3316,10 @@ fn a_rows_dest_files_narrow_the_placement_and_unknown_files_warn_once() {
         "one warning per unknown file: {unknown:?}"
     );
     assert!(
-        unknown[0].contains("`~/.notepad/mcp.json` is not a known MCP config file"),
+        unknown[0].contains(
+            "the dest entry `~/.notepad/mcp.json` in your topos.toml is not a known MCP config \
+             file, so it was skipped."
+        ),
         "{unknown:?}"
     );
     assert!(
@@ -3339,9 +3344,10 @@ fn a_rows_dest_files_narrow_the_placement_and_unknown_files_warn_once() {
         clean.failed_bundles.len(),
     );
     assert!(
-        receipt.contains("MCP_DEST_UNKNOWN"),
+        receipt.contains("warning: \"alpha\" (person): the dest entry `~/.notepad/mcp.json`"),
         "still warned: {receipt}"
     );
+    assert!(!receipt.contains("MCP_DEST_UNKNOWN"), "{receipt}");
     assert!(
         receipt.contains("Checked 1 bundle: all up to date."),
         "{receipt}"
@@ -3384,15 +3390,17 @@ fn a_dest_naming_only_unknown_files_reaches_no_agent_and_says_so() {
     assert!(!rig.home.0.join(".codex/config.toml").exists());
 
     // LOUD: the counted channel, not the advisory one — the bundle delivered nowhere.
-    let loud: Vec<&String> = out
-        .warnings
-        .iter()
+    let loud: Vec<String> = crate::message::legacy_lines(&out.warnings)
+        .into_iter()
         .filter(|w| w.contains("MCP_DEST_NO_AGENT"))
         .collect();
     assert_eq!(loud.len(), 1, "{:?}", out.warnings);
     assert!(loud[0].contains("\"alpha\" reaches no agent"), "{loud:?}");
     assert!(
-        loud[0].contains("\"~/.codex/config.yaml\" is not a known MCP config file"),
+        loud[0].contains(
+            "the dest entry \"~/.codex/config.yaml\" in your topos.toml is not a known MCP config \
+             file."
+        ),
         "{loud:?}"
     );
     assert!(
@@ -3400,20 +3408,28 @@ fn a_dest_naming_only_unknown_files_reaches_no_agent_and_says_so() {
         "the line teaches the files that would have worked: {loud:?}"
     );
     assert!(
-        !out.advisories.iter().any(|w| w.contains("MCP_DEST")),
+        !crate::message::legacy_lines(&out.advisories)
+            .into_iter()
+            .any(|w| w.contains("MCP_DEST")),
         "a bundle reaching nothing is never filed as an advisory: {:?}",
         out.advisories
     );
-    // The line reads whole with the code taken off the front, which is how the TTY prints it. It
-    // used to lead with the scope label, so the receipt said `person:` — the resolver's word for
-    // the machine-wide scope, and never a person's.
+    // The TTY prints the message's TEXT, which carries no code at all — and the legacy line is
+    // that text with the code put back on the front. It used to lead with the scope label, so the
+    // receipt said `person:` — the resolver's word for the machine-wide scope, never a person's.
+    let typed: Vec<&topos_types::Message> = out
+        .warnings
+        .iter()
+        .filter(|w| w.code.as_deref() == Some("MCP_DEST_NO_AGENT"))
+        .collect();
+    assert_eq!(typed.len(), 1, "{:?}", out.warnings);
     assert_eq!(
-        crate::render::plain_coded_line(loud[0]),
-        &loud[0]["MCP_DEST_NO_AGENT ".len()..],
+        typed[0].text,
+        loud[0]["MCP_DEST_NO_AGENT ".len()..],
         "{loud:?}"
     );
     assert!(
-        crate::render::plain_coded_line(loud[0]).starts_with("\"alpha\" reaches no agent"),
+        typed[0].text.starts_with("\"alpha\" reaches no agent"),
         "{loud:?}"
     );
 
@@ -3504,7 +3520,9 @@ fn a_drifted_entry_keeps_list_from_claiming_the_bundle_reaches_no_agent() {
     ));
     let out = sweep(&ctx, &plane, &dir);
     assert!(
-        out.warnings.iter().any(|w| w.contains("MCP_DEST_NO_AGENT")),
+        crate::message::legacy_lines(&out.warnings)
+            .into_iter()
+            .any(|w| w.contains("MCP_DEST_NO_AGENT")),
         "the causality still rides the sweep warning: {:?}",
         out.warnings
     );
@@ -3577,15 +3595,15 @@ fn one_bundles_dest_advisory_never_swallows_anothers_reaches_no_agent() {
     let out = sweep(&ctx, &plane, &dir);
 
     assert!(
-        out.advisories
-            .iter()
+        crate::message::legacy_lines(&out.advisories)
+            .into_iter()
             .any(|w| w.contains("MCP_DEST_UNKNOWN") && w.contains("\"alpha\"")),
         "the delivering bundle's dropped entry stays an advisory: {:?}",
         out.advisories
     );
     assert!(
-        out.warnings
-            .iter()
+        crate::message::legacy_lines(&out.warnings)
+            .into_iter()
             .any(|w| w.contains("MCP_DEST_NO_AGENT") && w.contains("\"beta\" reaches no agent")),
         "the bundle reaching nothing is warned in its own right: {:?}",
         out.warnings
@@ -3707,9 +3725,9 @@ fn a_channel_dest_places_its_skills_while_its_servers_reach_every_agent() {
         "a server is never placed as a folder"
     );
     assert!(
-        !out.warnings
-            .iter()
-            .chain(out.advisories.iter())
+        !crate::message::legacy_lines(&out.warnings)
+            .into_iter()
+            .chain(crate::message::legacy_lines(&out.advisories).into_iter())
             .any(|w| w.contains("MCP_DEST")),
         "a healthy channel is silent: {:?} / {:?}",
         out.warnings,
@@ -3749,27 +3767,28 @@ fn a_channels_typoed_mcp_dest_fails_the_server_and_names_the_channel() {
     assert!(!rig.home.0.join(".openclaw/openclaw.json").exists());
 
     // The line, verbatim — one code, the channel as provenance INSIDE it.
-    let loud: Vec<&String> = out
-        .warnings
-        .iter()
+    let loud: Vec<String> = crate::message::legacy_lines(&out.warnings)
+        .into_iter()
         .filter(|w| w.contains("MCP_DEST_NO_AGENT"))
         .collect();
     assert_eq!(loud.len(), 1, "{:?}", out.warnings);
-    assert_eq!(
-        loud[0],
-        "MCP_DEST_NO_AGENT \"alpha\" (via channel \"tools\") reaches no agent — the channel's \
-         mcp_dest in topos.toml names no MCP config file; add one to that mcp_dest, or drop \
-         mcp_dest so it reaches every MCP-capable agent"
-    );
-    // …and the TTY prints it as prose: the sentence reads whole with the code taken off.
-    assert_eq!(
-        crate::render::plain_coded_line(loud[0]),
-        "\"alpha\" (via channel \"tools\") reaches no agent — the channel's mcp_dest in \
-         topos.toml names no MCP config file; add one to that mcp_dest, or drop mcp_dest so it \
-         reaches every MCP-capable agent"
-    );
+    const CHANNEL_LINE: &str = "\"alpha\" reaches no agent: the mcp_dest on the \"tools\" line in \
+                                your topos.toml names no MCP config file. Add one to that \
+                                mcp_dest, or drop mcp_dest so the bundle reaches every MCP-capable \
+                                agent.";
+    assert_eq!(loud[0], format!("MCP_DEST_NO_AGENT {CHANNEL_LINE}"));
+    // …and the TTY prints the TEXT — the same sentence, with no code in front of it.
+    let typed: Vec<&topos_types::Message> = out
+        .warnings
+        .iter()
+        .filter(|w| w.code.as_deref() == Some("MCP_DEST_NO_AGENT"))
+        .collect();
+    assert_eq!(typed.len(), 1, "{:?}", out.warnings);
+    assert_eq!(typed[0].text, CHANNEL_LINE);
     assert!(
-        !out.advisories.iter().any(|w| w.contains("MCP_DEST")),
+        !crate::message::legacy_lines(&out.advisories)
+            .into_iter()
+            .any(|w| w.contains("MCP_DEST")),
         "a server reaching nothing is never filed as an advisory: {:?}",
         out.advisories
     );
@@ -3829,9 +3848,9 @@ fn a_channels_partly_mapping_mcp_dest_delivers_narrowed_with_no_advisory() {
         "the narrowing held: openclaw was not named"
     );
     assert!(
-        !out.warnings
-            .iter()
-            .chain(out.advisories.iter())
+        !crate::message::legacy_lines(&out.warnings)
+            .into_iter()
+            .chain(crate::message::legacy_lines(&out.advisories).into_iter())
             .any(|w| w.contains("MCP_DEST")),
         "no advisory is owed on a channel: {:?} / {:?}",
         out.warnings,
@@ -3925,16 +3944,18 @@ fn each_server_a_channel_strands_is_named_once_and_counted_once() {
     let ctx = rig.ctx_at(Some(&rig.work.0));
     let out = sweep(&ctx, &plane, &dir);
 
-    let loud: Vec<&String> = out
-        .warnings
-        .iter()
+    let loud: Vec<String> = crate::message::legacy_lines(&out.warnings)
+        .into_iter()
         .filter(|w| w.contains("MCP_DEST_NO_AGENT"))
         .collect();
     assert_eq!(loud.len(), 2, "{:?}", out.warnings);
     for name in ["alpha", "beta"] {
         assert_eq!(
             loud.iter()
-                .filter(|w| w.contains(&format!("\"{name}\" (via channel \"tools\")")))
+                .filter(|w| {
+                    w.contains(&format!("\"{name}\" reaches no agent"))
+                        && w.contains("the mcp_dest on the \"tools\" line")
+                })
                 .count(),
             1,
             "{name}: {loud:?}"
@@ -4015,10 +4036,9 @@ fn a_skill_rows_folder_dest_never_warns_mcp_dest_unknown() {
     let ctx = rig.ctx_at(Some(&rig.work.0));
     let first = sweep(&ctx, &plane, &dir);
     assert!(
-        !first
-            .warnings
-            .iter()
-            .chain(&first.advisories)
+        !crate::message::legacy_lines(&first.warnings)
+            .into_iter()
+            .chain(crate::message::legacy_lines(&first.advisories))
             .any(|w| w.contains("MCP_DEST_UNKNOWN")),
         "a skill row's folder dest is not an MCP config file: {:?} / {:?}",
         first.warnings,
@@ -4031,10 +4051,9 @@ fn a_skill_rows_folder_dest_never_warns_mcp_dest_unknown() {
     // The second sweep is untouched — and wholly clean: one skill, up to date, nothing failed.
     let clean = sweep(&ctx, &plane, &dir);
     assert!(
-        !clean
-            .warnings
-            .iter()
-            .chain(&clean.advisories)
+        !crate::message::legacy_lines(&clean.warnings)
+            .into_iter()
+            .chain(crate::message::legacy_lines(&clean.advisories))
             .any(|w| w.contains("MCP_DEST_UNKNOWN")),
         "{:?} / {:?}",
         clean.warnings,
@@ -4101,7 +4120,9 @@ fn a_tampered_local_row_is_held_with_the_typed_refusal_and_prior_entries_stay() 
         std::fs::write(dir.join("server.json"), &tampered).unwrap();
         let out = sweep(&ctx, &plane, &fdir);
         assert!(
-            out.warnings.iter().any(|w| w.contains(code)),
+            crate::message::legacy_lines(&out.warnings)
+                .into_iter()
+                .any(|w| w.contains(code)),
             "{code}: {:?}",
             out.warnings
         );
@@ -4659,7 +4680,7 @@ fn remove_of_an_mcp_row_converges_inline_and_the_receipt_names_the_removals() {
     };
     let note = data.items[0].note.clone().unwrap_or_default();
     assert!(
-        note.contains("server entry removed") && note.contains("cursor"),
+        note.contains("the server's entry was removed.") && note.contains("cursor"),
         "{note}"
     );
     assert!(
@@ -5187,9 +5208,9 @@ fn a_deleted_ledger_makes_the_targeted_go_back_skip_with_a_warning() {
     let (states, warnings) = crate::mcp_engine::converge_bundle_now(&ctx, &sid, "linear");
     assert!(states.is_empty(), "{states:?}");
     assert!(
-        warnings
-            .iter()
-            .any(|w| w.contains("MCP_OWNERSHIP_MISSING") && w.contains("next update heals")),
+        crate::message::legacy_lines(&warnings).iter().any(|w| {
+            w.contains("MCP_OWNERSHIP_MISSING") && w.contains("The next 'topos update' restores it")
+        }),
         "{warnings:?}"
     );
 
@@ -5668,8 +5689,8 @@ fn two_same_named_bundles_from_two_workspaces_both_failing_count_as_two() {
 
     // BOTH refusals are on the record…
     assert_eq!(
-        out.warnings
-            .iter()
+        crate::message::legacy_lines(&out.warnings)
+            .into_iter()
             .filter(|w| w.contains("MCP_INSECURE_URL"))
             .count(),
         2,

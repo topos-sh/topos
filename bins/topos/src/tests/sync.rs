@@ -4499,12 +4499,18 @@ fn sweep_surfaces_an_isolated_per_skill_failure_as_an_envelope_warning() {
     assert_eq!(out.warnings.len(), 1);
     let w = &out.warnings[0];
     assert!(
-        w.contains("topos_missing"),
-        "the warning names the failed skill: {w}"
+        w.text.contains("topos_missing"),
+        "the warning names the failed skill: {w:?}"
+    );
+    // The CODE rides its own field now — never the prose a person reads.
+    let code = w.code.clone().expect("the stable error code");
+    assert!(
+        code.starts_with(char::is_uppercase) && !code.contains(' '),
+        "the code is one SCREAMING_SNAKE token: {w:?}"
     );
     assert!(
-        w.starts_with(char::is_uppercase) && w.contains(' '),
-        "the warning leads with the stable error code: {w}"
+        !w.text.starts_with(&code),
+        "the text never repeats the code: {w:?}"
     );
 }
 
@@ -4587,7 +4593,7 @@ fn sweep_refuses_a_traversal_follow_id_as_a_warning_never_a_join() {
     assert!(out.data.skills.is_empty());
     assert_eq!(out.warnings.len(), 1);
     assert!(
-        out.warnings[0].contains("CORRUPT_STATE"),
+        out.warnings[0].code.as_deref() == Some("CORRUPT_STATE"),
         "{:?}",
         out.warnings
     );
@@ -5369,8 +5375,8 @@ fn a_settled_draft_spreads_and_advances_the_sibling_baselines() {
         "the landed folder is named — the destination convention"
     );
     assert!(
-        out.disclosures
-            .iter()
+        crate::message::legacy_lines(&out.disclosures)
+            .into_iter()
             .any(|w| w.starts_with("DRAFT_SYNCED") && w.contains("1 other folder")),
         "{:?}",
         out.disclosures
@@ -5725,8 +5731,8 @@ fn true_competitors_freeze_and_the_fanout_never_runs() {
     std::fs::write(replica.join("SKILL.md"), b"# replica edit\n").unwrap();
     let out = ops::pull(&ctx, ops::PullScope::AllFollowed).unwrap();
     assert!(
-        out.warnings
-            .iter()
+        crate::message::legacy_lines(&out.warnings)
+            .into_iter()
             .any(|w| w.starts_with("PLACEMENTS_DIVERGED")),
         "{:?}",
         out.warnings

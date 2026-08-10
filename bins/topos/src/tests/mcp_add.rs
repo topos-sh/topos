@@ -433,7 +433,7 @@ fn a_tilde_spelled_adopted_row_converges_its_config_entries_out_on_remove() {
     // The inline converge answered on the receipt AND the entry actually left.
     let note = removed.items[0].note.clone().unwrap_or_default();
     assert!(
-        note.contains("server entry removed"),
+        note.contains("the server's entry was removed."),
         "the inline converge must reach a ~/ row's entries: {note}"
     );
     assert!(
