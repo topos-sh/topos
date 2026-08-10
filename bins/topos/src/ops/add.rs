@@ -95,10 +95,14 @@ pub(crate) fn adopt_path_any_kind(
     source: &Path,
     kind: BundleKind,
 ) -> Result<AddData, ClientError> {
+    // REFUSAL-FIRST, before the re-link's own revive/stamp/log: a record standing for this folder
+    // under a DIFFERENT kind is not re-linkable.
+    refuse_kind_change(ctx, source, kind)?;
     match unclaimed_record(ctx, target, source)? {
         Some(data) => {
             // A RE-LINKED record predates this door's marker when it was written by an older
-            // build; stamping it here is the same first-write-wins belt the mint takes.
+            // build; stamping it here is the same first-write-wins belt the mint takes — and the
+            // guard above has already proven no standing marker disagrees with `kind`.
             if let Some(Ok(sid)) = data.skill_id.as_deref().map(crate::id::SkillId::parse) {
                 crate::bundle_kind::write_kind_marker(ctx, &sid, kind);
             }
@@ -106,6 +110,51 @@ pub(crate) fn adopt_path_any_kind(
         }
         None => add_with_name(ctx, source, None, true, kind),
     }
+}
+
+/// A record's KIND is decided once, when it is adopted, and everything downstream trusts the
+/// marker that records it — including the publish gate, which reads it to know a bundle IS a
+/// server and must have its document scanned for credentials. So a folder whose record already
+/// stands under one kind can never be re-linked under another: the marker is neither overwritten
+/// (it is the durable fact) nor left to disagree with the row (that is how a server document would
+/// reach the wire as a skill, gate unrun). The way through is to drop the record and add the
+/// folder again.
+///
+/// Silent when nothing stands for the folder, when it stands with no marker at all (the mint's
+/// first write then records `kind`), or when the standing marker already agrees. A marker naming
+/// a kind THIS BUILD does not own disagrees with every request, and refuses.
+///
+/// # Errors
+/// [`ClientError::InvalidArgument`] naming both kinds and the command that frees the folder.
+fn refuse_kind_change(
+    ctx: &Ctx<'_>,
+    source: &Path,
+    requested: BundleKind,
+) -> Result<(), ClientError> {
+    let Ok(dir) = source.canonicalize() else {
+        return Ok(());
+    };
+    let Some(id) = tracked_skill_at(ctx, &dir)? else {
+        return Ok(());
+    };
+    let Ok(sid) = crate::id::SkillId::parse(&id) else {
+        return Ok(());
+    };
+    let Some(recorded) = crate::bundle_kind::kind_marker(ctx.fs, &ctx.layout, &sid) else {
+        return Ok(());
+    };
+    if crate::bundle_kind::BundleKind::parse(&recorded) == Some(requested) {
+        return Ok(());
+    }
+    let name = tracked_name(ctx, &id)
+        .or_else(|| dir_basename(&dir))
+        .unwrap_or_else(|| dir.display().to_string());
+    Err(ClientError::InvalidArgument(format!(
+        "'{name}' is already tracked here as a {recorded} bundle — a record's kind is fixed when \
+         it is adopted; `topos remove {name}` drops it, and the folder can then be added as a {} \
+         bundle",
+        requested.as_str()
+    )))
 }
 
 /// The add receipt for a retained record no row in `target` claims — `None` when there is nothing

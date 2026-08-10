@@ -646,3 +646,29 @@ fn the_name_is_reserved_end_to_end_client_side() {
     );
     assert_eq!(own, root.join("topos"));
 }
+
+/// THE BUILT-IN IS A BUNDLE TOO. It mints its own record — its own store init, its own docs — so
+/// the "every bundle's store records what it is" invariant only holds if this path stamps the
+/// marker as well. Without it every fresh home carried a `skills/topos/` with lock, map, store and
+/// sync but no `kind.json`, and the built-in was the one record whose kind had to be inferred.
+#[test]
+fn the_built_in_record_carries_its_kind_marker() {
+    let rig = Rig::new("builtin-kind");
+    rig.detect(".cline");
+    let inert_f = InertFollow;
+    let inert_p = InertPlane;
+    let ctx = rig.ctx(&inert_f, &inert_p);
+
+    ops::ensure_builtin(&ctx).unwrap();
+
+    let sid = crate::id::SkillId::parse("topos").unwrap();
+    let marker = std::fs::read_to_string(rig.layout().published(&sid).kind)
+        .expect("the built-in's store records what it is");
+    assert!(marker.contains("\"skill\""), "{marker}");
+
+    // And the ONE classifier answers from it, like every other record.
+    assert_eq!(
+        crate::bundle_kind::classify(&ctx, "topos", &[]),
+        crate::bundle_kind::RecordKind::Known(crate::bundle_kind::BundleKind::Skill),
+    );
+}

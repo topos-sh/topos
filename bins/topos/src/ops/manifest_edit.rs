@@ -1576,7 +1576,7 @@ fn narrow_one(
                 } => Some((host.clone(), workspace.clone())),
                 _ => None,
             };
-            let kind = row_kind(ctx, target, Some(&row), &name);
+            let kind = row_kind(ctx, target, Some(&row), ws.as_ref(), &name);
             let entries = if kind.is_mcp() {
                 selection.mcp_entries(target.scope)?
             } else {
@@ -1641,7 +1641,7 @@ fn narrow_one(
                 })
                 .unwrap_or_default();
             let ws = Some((host, workspace.clone()));
-            let kind = row_kind(ctx, target, None, &name);
+            let kind = row_kind(ctx, target, None, ws.as_ref(), &name);
             let entries = if kind.is_mcp() {
                 selection.mcp_entries(target.scope)?
             } else {
@@ -1963,7 +1963,13 @@ fn scope_store_ctx<'a>(ctx: &'a Ctx<'a>, target: &EditTarget) -> Option<Ctx<'a>>
 ///
 /// Nothing answering is the ordinary skill. No bytes move on this answer — an arm that would
 /// place or destroy them asks the engine, which refuses rather than guesses.
-fn row_kind(ctx: &Ctx<'_>, target: &EditTarget, row: Option<&PlanRow>, name: &str) -> BundleKind {
+fn row_kind(
+    ctx: &Ctx<'_>,
+    target: &EditTarget,
+    row: Option<&PlanRow>,
+    ws: Option<&(String, String)>,
+    name: &str,
+) -> BundleKind {
     if let Some(kind) = row
         .and_then(|r| r.fields().kind)
         .and_then(|word| BundleKind::parse(&word))
@@ -1973,7 +1979,7 @@ fn row_kind(ctx: &Ctx<'_>, target: &EditTarget, row: Option<&PlanRow>, name: &st
     let Some(sctx) = scope_store_ctx(ctx, target) else {
         return BundleKind::Skill;
     };
-    let Ok((sid, _)) = super::resolve_skill(&sctx, name) else {
+    let Some(sid) = qualified_record(&sctx, ws, name) else {
         return BundleKind::Skill;
     };
     let placements = crate::doc::read_map(sctx.fs, &sctx.layout.published(&sid).map)
@@ -1982,6 +1988,38 @@ fn row_kind(ctx: &Ctx<'_>, target: &EditTarget, row: Option<&PlanRow>, name: &st
         .map(|m| m.placements)
         .unwrap_or_default();
     crate::bundle_kind::classify(&sctx, sid.as_str(), &placements).or_skill()
+}
+
+/// The scope store's record for a row's bundle, QUALIFIED by the row's own workspace. A bare name
+/// is not an identity: two workspaces may each publish a `linear`, and asking for that name alone
+/// answers "ambiguous" — which would leave a qualified row resolving nothing and falling back to
+/// the wrong vocabulary. So a workspace row finds its record through the delivery cache's
+/// (host, workspace, name) → id map first. The cache answers WHICH record; the marker answers WHAT
+/// it is — kind never comes from here.
+fn qualified_record(sctx: &Ctx<'_>, ws: Option<&(String, String)>, name: &str) -> Option<SkillId> {
+    if let Some((host, workspace)) = ws {
+        let hit = crate::sync_status::read(sctx.fs, &sctx.layout)
+            .ok()
+            .and_then(|cache| {
+                cache.workspaces.values().find_map(|e| {
+                    (e.host.as_deref() == Some(host.as_str())
+                        && e.workspace_name.as_deref() == Some(workspace.as_str()))
+                    .then(|| {
+                        e.delivered
+                            .iter()
+                            .find(|(_, d)| d.name == *name)
+                            .map(|(id, _)| id.clone())
+                    })
+                    .flatten()
+                })
+            });
+        if let Some(id) = hit {
+            return SkillId::parse(&id).ok();
+        }
+    }
+    // Unqualified (a local/forge row), or a workspace the cache has no row for yet: the bare name
+    // is the only handle there is, and an ambiguous one answers nothing rather than guessing.
+    super::resolve_skill(sctx, name).ok().map(|(sid, _)| sid)
 }
 
 /// The typed refusal for a token this file answers more than once — the paste-ready qualified
@@ -2613,7 +2651,7 @@ fn eager_plan(ctx: &Ctx<'_>, target: &EditTarget, arms: &[Arm]) -> EagerPlan {
                     } => Some((host.clone(), workspace.clone())),
                     _ => None,
                 };
-                let kind = row_kind(ctx, target, Some(row), name);
+                let kind = row_kind(ctx, target, Some(row), ws.as_ref(), name);
                 plan.bundles.push(EagerBundle {
                     display: qualified_name(ctx, ws.as_ref(), name),
                     kind,
@@ -2632,7 +2670,7 @@ fn eager_plan(ctx: &Ctx<'_>, target: &EditTarget, arms: &[Arm]) -> EagerPlan {
                     }) => Some((host, workspace)),
                     _ => None,
                 };
-                let kind = row_kind(ctx, target, None, name);
+                let kind = row_kind(ctx, target, None, ws.as_ref(), name);
                 plan.bundles.push(EagerBundle {
                     display: qualified_name(ctx, ws.as_ref(), name),
                     kind,

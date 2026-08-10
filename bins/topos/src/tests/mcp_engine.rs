@@ -3508,3 +3508,81 @@ fn an_mcp_row_never_stands_without_its_marker_even_when_the_feed_is_dark() {
         std::fs::read_to_string(rig.layout().home().join(crate::manifest::MANIFEST_FILE)).unwrap();
     assert!(!manifest.contains("absent"), "{manifest}");
 }
+
+/// A BARE NAME IS NOT AN IDENTITY. Two records in one store can answer to `linear` — here a
+/// workspace MCP bundle and a local skill folder of the same name. Asking the store for "linear"
+/// answers AMBIGUOUS, and a row that falls back from that ambiguity resolves its `-a` selector
+/// against the SKILLS-folder vocabulary: the wrong dest table for a config-placed bundle. The row
+/// is qualified, so the lookup must be too.
+#[test]
+fn a_qualified_row_resolves_its_own_record_when_the_name_is_shared() {
+    let rig = Rig::new("shared-name");
+    rig.seed_session();
+    seed_harness_dirs(&rig.home.0);
+
+    // Record ONE: a local skill folder that happens to be called `linear`.
+    let local = rig.work.0.join("linear");
+    std::fs::create_dir_all(&local).unwrap();
+    std::fs::write(local.join("SKILL.md"), b"# linear\n").unwrap();
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    crate::ops::add(&ctx, &local).expect("the local skill adopts");
+
+    // Record TWO: the workspace's MCP bundle, same name, delivered by its qualified row.
+    let v = mk_version(&[(
+        "server.json",
+        server_json("https://mcp.example/linear").as_bytes(),
+    )]);
+    let plane = FakePlane::new().with_version("s_mcp", &v);
+    plane.serves(vec![delivered_mcp("s_mcp", "linear", &v)]);
+    let dir = FakeDirectory {
+        skills: vec![mcp_catalog_entry("s_mcp", "linear", &v)],
+        channels: Vec::new(),
+    };
+    rig.write_global(&format!("[bundles]\n\"{HOST}/{WS_NAME}/linear\" = \"*\"\n"));
+    sweep(&ctx, &plane, &dir);
+    assert!(
+        rig.home.0.join(".cursor/mcp.json").exists(),
+        "the mcp bundle landed in a config file"
+    );
+
+    // The premise: TWO records in this one store answer to the name, so a bare-name lookup
+    // resolves to neither and only the row's workspace can pick between them.
+    let named = std::fs::read_dir(rig.layout().skills_dir())
+        .unwrap()
+        .filter_map(|e| {
+            let sid = crate::id::SkillId::parse(&e.ok()?.file_name().to_string_lossy()).ok()?;
+            crate::doc::read_doc::<topos_types::persisted::Lock>(
+                &rig.fs,
+                &rig.layout().published(&sid).lock,
+            )
+            .ok()
+            .flatten()
+            .filter(|l| l.name == "linear")
+        })
+        .count();
+    assert_eq!(
+        named, 2,
+        "the test is meaningless unless both records answer to the name"
+    );
+
+    // Narrowing the QUALIFIED mcp row by `-a cursor` must resolve cursor's MCP CONFIG FILE. It is
+    // the row's only destination, so the subtraction takes the whole row — and the receipt speaks
+    // in config files, which is only reachable through the mcp vocabulary.
+    let outcome = ops::remove_global(
+        &ctx,
+        &connect(&plane, &dir),
+        &[format!("{HOST}/{WS_NAME}/linear")],
+        None,
+        true,
+        &ops::Selection::new(&["cursor".to_owned()], &[]),
+    )
+    .expect("the qualified row resolves its own record");
+    let ops::RemoveOutcome::Applied(data) = outcome else {
+        panic!("applies under --yes");
+    };
+    let shown = format!("{:?}", data.uninstalled);
+    assert!(
+        shown.contains("mcp.json"),
+        "the mcp vocabulary resolved cursor to its config file: {shown}"
+    );
+}

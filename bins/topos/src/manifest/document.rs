@@ -487,7 +487,7 @@ fn unknown_kind(reference: &str, word: &str) -> ManifestError {
     at(
         reference,
         format!(
-            "`kind = \"{word}\"` is not a kind topos delivers — known kinds: {}",
+            "`kind = \"{word}\"` on `{reference}` is not a kind topos delivers — known kinds: {}",
             crate::bundle_kind::BundleKind::known_list()
         ),
     )
@@ -1895,7 +1895,8 @@ db-conventions = { dest = ["~/.agents/skills", "~/.claude/knowledge"] }
             assert_eq!(e.key.as_deref(), Some("./tools/notes"), "{e}");
             assert_eq!(
                 e.message,
-                "`kind = \"knowledge\"` is not a kind topos delivers — known kinds: `skill`, `mcp`",
+                "`kind = \"knowledge\"` on `./tools/notes` is not a kind topos delivers — known \
+                 kinds: `skill`, `mcp`",
                 "{e}"
             );
         }
@@ -1912,6 +1913,19 @@ db-conventions = { dest = ["~/.agents/skills", "~/.claude/knowledge"] }
         parse_global("[bundles]\n\"./tools/notes\" = { kind = \"skill\" }\n");
         parse_global("[bundles]\n\"./tools/notes\" = \"*\"\n");
         parse_global("[bundles]\n\"./tools/notes\" = { dest = [\"~/.claude/skills\"] }\n");
+        // A FILE WITH SEVERAL ROWS: the refusal names the row it is about, inline. Without the
+        // reference in the message a reader is left grepping their own file for the bad word.
+        let e = parse_manifest(
+            "[bundles]\n\
+             \"topos.sh/acme/deploy\" = \"*\"\n\
+             \"./tools/notes\" = { kind = \"knowledge\" }\n\
+             \"github.com/o/r\" = \"*\"\n\
+             \"~/dev/runbooks\" = { kind = \"playbook\" }\n",
+            ManifestScope::Global,
+        )
+        .unwrap_err();
+        assert!(e.message.contains("`./tools/notes`"), "{e}");
+        assert_eq!(e.key.as_deref(), Some("./tools/notes"), "{e}");
     }
 
     // -- the retired spellings ----------------------------------------------

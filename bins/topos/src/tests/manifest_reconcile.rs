@@ -13640,3 +13640,110 @@ fn the_first_sync_of_a_skill_records_its_kind_durably() {
         crate::bundle_kind::RecordKind::Known(crate::bundle_kind::BundleKind::Skill),
     );
 }
+
+/// The machine-wide manifest as it stands right now.
+fn global_text(rig: &Rig) -> String {
+    std::fs::read_to_string(rig.layout().home().join(crate::manifest::MANIFEST_FILE))
+        .unwrap_or_default()
+}
+
+// =================================================================================================
+// A demand that still stands is removed by editing the demand — never by deleting the copy
+// =================================================================================================
+
+/// DATA LOSS. `topos remove <name> --yes` from a folder no project manifest covers used to take
+/// the classic permanent-delete arm even when THIS MACHINE'S OWN file still carried the row: the
+/// adopted source folder was deleted, the row was left standing, and every later `update -g` failed
+/// PATH_MISSING forever. The path form already refused toward `-g`; the name form must too.
+#[test]
+fn a_name_whose_machine_row_still_stands_refuses_toward_the_machine_file() {
+    let rig = Rig::new("standing-row-name");
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let plane = FakePlane::new(log);
+    plane.serves(Vec::new());
+    let dir = FakeDirectory::new(Vec::new(), Vec::new());
+
+    // A local folder adopted in place, demanded by the MACHINE-WIDE file.
+    let src = rig.work.0.join("weather");
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::write(src.join("SKILL.md"), b"# weather\n").unwrap();
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    ops::add(&ctx, &src).unwrap();
+    let canonical = src.canonicalize().unwrap();
+    rig.write_global(&format!("[bundles]\n\"{}\" = \"*\"\n", canonical.display()));
+
+    let named_connect = |_s: &Session| ops::SessionTransports {
+        plane: Box::new(plane.clone()),
+        directory: Box::new(dir.clone()),
+        contribute: Box::new(NoContribute),
+        governance: Box::new(NoGovernance),
+    };
+    let dir_connect = |_: &str| -> Box<dyn DirectorySource> { Box::new(dir.clone()) };
+    let connectors = ops::RemoveConnectors {
+        session: &named_connect,
+        directory: &dir_connect,
+    };
+
+    // The cwd carries no manifest of its own, so nothing here can drop that row.
+    let err = ops::remove(&ctx, &connectors, &["weather".to_owned()], &[], None, true)
+        .expect_err("a standing machine row is removed by editing the demand");
+    let detail = err.detail();
+    assert!(detail.contains("topos remove -g weather"), "{detail}");
+
+    // NOTHING was destroyed and nothing was half-done: the folder and the row both stand.
+    assert!(
+        src.join("SKILL.md").exists(),
+        "the adopted source folder survives"
+    );
+    assert!(
+        global_text(&rig).contains("weather"),
+        "the row survives: {}",
+        global_text(&rig)
+    );
+
+    // And the command the refusal offers actually works — the row goes, through the machine arm.
+    ops::remove_global(
+        &ctx,
+        &named_connect,
+        &["weather".to_owned()],
+        None,
+        true,
+        &Default::default(),
+    )
+    .expect("the offered command is runnable");
+    assert_eq!(global_text(&rig), "[bundles]\n");
+}
+
+/// THE ARM STILL EXISTS. A record no visible scope demands is still the classic ladder's business:
+/// the guard is about a STANDING demand, not about local records in general.
+#[test]
+fn a_record_no_row_demands_still_takes_the_classic_delete() {
+    let rig = Rig::new("orphan-name");
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let plane = FakePlane::new(log);
+    plane.serves(Vec::new());
+    let dir = FakeDirectory::new(Vec::new(), Vec::new());
+
+    let src = rig.work.0.join("weather");
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::write(src.join("SKILL.md"), b"# weather\n").unwrap();
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    ops::add(&ctx, &src).unwrap();
+    // NO row anywhere demands it.
+    rig.write_global("[bundles]\n");
+
+    let named_connect = |_s: &Session| ops::SessionTransports {
+        plane: Box::new(plane.clone()),
+        directory: Box::new(dir.clone()),
+        contribute: Box::new(NoContribute),
+        governance: Box::new(NoGovernance),
+    };
+    let dir_connect = |_: &str| -> Box<dyn DirectorySource> { Box::new(dir.clone()) };
+    let connectors = ops::RemoveConnectors {
+        session: &named_connect,
+        directory: &dir_connect,
+    };
+    ops::remove(&ctx, &connectors, &["weather".to_owned()], &[], None, true)
+        .expect("an undemanded record is the classic ladder's business");
+    assert!(!src.exists(), "the copy is gone");
+}

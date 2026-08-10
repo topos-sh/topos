@@ -2213,3 +2213,98 @@ fn mcp_selection_narrows_add_and_remove_by_config_file() {
         "{tty}"
     );
 }
+
+// =================================================================================================
+// A record's KIND is fixed at adoption — the re-link door cannot change it
+// =================================================================================================
+
+/// THE GATE BYPASS THIS CLOSES. `remove <path>` keeps the bytes and the record, so the folder can
+/// be edited and named to `add` again — and the re-link arm hands back the SAME record. If that
+/// record's durable marker still said `skill` while the new row said `mcp`, every later reader
+/// would trust the marker: `publish` would skip the MCP gate entirely and ship the server document
+/// — credentials and all — as a skill. So a standing marker that disagrees with the requested kind
+/// is a refusal that names both kinds and the command that frees the folder.
+#[test]
+fn a_skill_record_cannot_be_re_linked_as_an_mcp_bundle() {
+    let rig = Rig::new("relink-skill-to-mcp");
+    rig.write_global("[bundles]\n");
+    let dir = rig.work.0.join("weather");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("SKILL.md"), b"# weather\n").unwrap();
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+
+    // Adopted as a SKILL; the row is then dropped by hand, which is what leaves the record
+    // unclaimed and the folder re-addable.
+    ops::add(&ctx, &dir).expect("the skill adopts");
+    rig.write_global("[bundles]\n");
+
+    // The folder is converted into a perfectly valid MCP bundle.
+    std::fs::remove_file(dir.join("SKILL.md")).unwrap();
+    write_bundle(&dir, &good_server());
+
+    let err = ops::add_mcp(
+        &ctx,
+        &empty_connect,
+        None,
+        dir.to_str().unwrap(),
+        true,
+        None,
+        &Default::default(),
+    )
+    .expect_err("a record's kind is fixed at adoption");
+    let detail = err.detail();
+    assert!(
+        detail.contains("already tracked here as a skill bundle"),
+        "{detail}"
+    );
+    assert!(detail.contains("mcp bundle"), "{detail}");
+    assert!(detail.contains("topos remove weather"), "{detail}");
+    assert_eq!(rig.global_text(), "[bundles]\n", "nothing was recorded");
+
+    // And the marker still says what the record IS — never overwritten, never left to disagree.
+    let sid = crate::id::SkillId::parse(
+        &crate::ops::tracked_skill_at(&ctx, &dir.canonicalize().unwrap())
+            .unwrap()
+            .unwrap(),
+    )
+    .unwrap();
+    let marker = std::fs::read_to_string(rig.layout().published(&sid).kind).unwrap();
+    assert!(marker.contains("\"skill\""), "{marker}");
+}
+
+/// THE MIRROR. An MCP record whose folder is turned back into a skill refuses the same way — the
+/// rule is about the record, not about which kind is "bigger".
+#[test]
+fn an_mcp_record_cannot_be_re_linked_as_a_skill() {
+    let rig = Rig::new("relink-mcp-to-skill");
+    rig.write_global("[bundles]\n");
+    let dir = rig.work.0.join("weather");
+    write_bundle(&dir, &good_server());
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+
+    ops::add_mcp(
+        &ctx,
+        &empty_connect,
+        None,
+        dir.to_str().unwrap(),
+        true,
+        None,
+        &Default::default(),
+    )
+    .expect("the server adopts");
+    rig.write_global("[bundles]\n");
+
+    // Now it is a skill on disk — so the unflagged-mcp guard passes and the re-link door is next.
+    std::fs::remove_file(dir.join("server.json")).unwrap();
+    std::fs::write(dir.join("SKILL.md"), b"# weather\n").unwrap();
+
+    let scope = ops::add_scope(&ctx, true).unwrap();
+    let err = ops::adopt_path(&ctx, &scope.target, &dir).expect_err("the record is an mcp one");
+    let detail = err.detail();
+    assert!(
+        detail.contains("already tracked here as a mcp bundle"),
+        "{detail}"
+    );
+    assert!(detail.contains("skill bundle"), "{detail}");
+    assert_eq!(rig.global_text(), "[bundles]\n", "nothing was recorded");
+}

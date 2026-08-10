@@ -263,6 +263,11 @@ fn ensure_inner(
     if !ctx.fs.exists(&ctx.layout.skill_dir(&sid)) {
         create_builtin(ctx, &sid, bundle)?;
     }
+    // The durable kind marker — the built-in mints its own record, so it needs its own stamp for
+    // the "every bundle's store records what it is" invariant to actually hold. It is an ordinary
+    // SKILL. First-write-wins, so this also back-fills a record minted before the marker existed,
+    // and it runs on every ensure — the mint, the version-forward, and `add topos`'s restore.
+    crate::bundle_kind::write_kind_marker(ctx, &sid, crate::bundle_kind::BundleKind::Skill);
 
     let mut lock: Lock = doc::read_doc(ctx.fs, &sp.lock)?
         .ok_or_else(|| ClientError::Corrupt("built-in skill: missing lock".into()))?;

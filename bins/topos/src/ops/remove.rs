@@ -350,6 +350,18 @@ fn retire_mcp_entries(ctx: &Ctx<'_>, skill_id: &str, item: &mut RemoveItem) {
 
 /// The verbatim demand-refusal: a workspace-delivered skill whose demand still STANDS is removed
 /// by editing the demand, never by deleting the copy.
+/// A record THIS MACHINE'S OWN file still demands, named from a folder whose scope cannot edit
+/// that row. The path form already refuses toward `-g` when no `topos.toml` covers the folder; the
+/// name form owes the same answer, because the alternative is deleting bytes a standing row will
+/// keep asking for.
+fn standing_row_refusal(name: &str) -> ClientError {
+    ClientError::InvalidArgument(format!(
+        "'{name}' is demanded by this machine's own topos.toml — deleting the copy would leave \
+         that row standing (every later `topos update -g` would fail on the missing folder); \
+         `topos remove -g {name}` drops the row and the copy together"
+    ))
+}
+
 fn delivered_refusal(name: &str) -> ClientError {
     ClientError::InvalidArgument(format!(
         "'{name}' is delivered from a workspace — remove the DEMAND, not the copy: `topos \
@@ -444,11 +456,11 @@ struct OrphanNote {
     applied: String,
 }
 
-/// A locally-tracked skill resolved by name. With workspace provenance (the delivery cache still
-/// names a workspace) the DEMAND decides: a row still claiming the name keeps the refusal toward
-/// the demand; no claiming row means the demand already ended — an ORPHAN — and the token falls
+/// A locally-tracked skill resolved by name. The DEMAND decides, whatever the provenance: a row
+/// still claiming the name refuses toward the file that carries it — the workspace teaching when
+/// the copy is followed, the machine-file teaching when it is this machine's own row. No claiming
+/// row means the demand already ended — an ORPHAN, or a purely local record — and the token falls
 /// through to the same describe-first permanent delete untracked copies ride, disclosed honestly.
-/// A never-followed one is a plain permanent local delete.
 fn tracked_or_followed(
     ctx: &Ctx<'_>,
     demanded: &HashSet<String>,
@@ -457,8 +469,16 @@ fn tracked_or_followed(
 ) -> Result<Removal, ClientError> {
     let skill_id = sid.as_str().to_owned();
     let followed = super::followed_workspace(ctx, &skill_id).is_some();
-    if followed && demanded.contains(&name) {
-        return Err(delivered_refusal(&name));
+    // THE DEMAND GUARD, whatever the record's provenance. A demand that still stands is removed by
+    // editing the demand, never by deleting the copy: the classic arm would delete the bytes and
+    // leave the row, and every later sweep for that row fails on a path that is gone. Which
+    // refusal depends only on WHERE the demand lives, not on how the copy got here.
+    if demanded.contains(&name) {
+        return Err(if followed {
+            delivered_refusal(&name)
+        } else {
+            standing_row_refusal(&name)
+        });
     }
     // The placement dirs to delete come from the record's map.
     let sp = ctx.layout.published(&sid);
