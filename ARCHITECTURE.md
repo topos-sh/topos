@@ -186,10 +186,12 @@ languages can depend on the wire without depending on the Rust.
 ## Harness adapters
 
 A harness is *which directories to read and write* plus *when a update check fires* — no dialect
-translation in the OSS core (bytes sync exactly within a harness family). The `HarnessAdapter` port in
-`topos-harness` is the one client-side seam; the **Claude Code** adapter is the reference implementation
-(discovery, adopt-in-place, an idempotent session-start auto-update hook, clean uninstall). Adding a harness is
-a directory map plus a auto-update trigger, not a refactor.
+translation in the OSS core (bytes sync exactly within a harness family). `topos-harness` holds those
+as two client-side ports, one responsibility each: `HarnessAdapter` (discovery + placement targeting)
+and `triggers::TriggerAdapter` (the idempotent (un)install of one harness's auto-update trigger, its
+presence probe, and the topos-owned paths it discloses). **Claude Code** is the reference on both
+sides (discovery, adopt-in-place, an idempotent session-start auto-update hook, clean uninstall).
+Adding a harness is a directory map plus a auto-update trigger, not a refactor.
 
 ## The gates
 

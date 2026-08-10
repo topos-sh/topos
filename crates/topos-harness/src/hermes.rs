@@ -1,5 +1,6 @@
-//! The `Hermes` [`HarnessAdapter`] — mixed-depth skill discovery, byte-exact placement targeting,
-//! and the idempotent **session-start auto-update trigger** edit of `~/.hermes/config.yaml`.
+//! The `Hermes` adapter — BOTH of the crate's ports on one type: [`HarnessAdapter`] (mixed-depth
+//! skill discovery + byte-exact placement targeting) and [`TriggerAdapter`] (the idempotent
+//! **session-start auto-update trigger** edit of `~/.hermes/config.yaml`).
 //!
 //! Hermes's auto-update mechanism is the pair of **session-boundary shell hooks** — `on_session_start`
 //! (a brand-new session's first turn) and `on_session_reset` (every `/new`, `/reset`, `/clear`) —
@@ -55,6 +56,7 @@ use std::path::PathBuf;
 use topos_types::{CurrencyKind, HarnessId, TriggerReport, TriggerState};
 
 use crate::registry;
+use crate::triggers::TriggerAdapter;
 use crate::{ConfigStore, DiscoveredPlacement, HarnessAdapter, PlacementNaming, PlacementTarget};
 
 /// Hermes's user config file, under the resolved home. (Probed: `~/.hermes/config.yaml`; its
@@ -134,9 +136,9 @@ const DEFAULT_CATEGORY: &str = "general";
 /// files that must not surface as skills). Probed from v0.17.0's own walk.
 const SKILL_SUPPORT_DIRS: [&str; 4] = ["references", "templates", "assets", "scripts"];
 
-/// The `Hermes` [`HarnessAdapter`]. Holds the resolved config home and the acceptance-evidence
-/// flag (both injected, so tests never touch the real `~/.hermes` or the process environment) and
-/// the [`ConfigStore`] port that performs the durable config write.
+/// The `Hermes` adapter — [`HarnessAdapter`] + [`TriggerAdapter`]. Holds the resolved config home and
+/// the acceptance-evidence flag (both injected, so tests never touch the real `~/.hermes` or the
+/// process environment) and the [`ConfigStore`] port that performs the durable config write.
 pub struct Hermes<'a> {
     /// `$HERMES_HOME` (Hermes's own override) else `$HOME/.hermes`.
     home: PathBuf,
@@ -326,12 +328,14 @@ impl HarnessAdapter for Hermes<'_> {
             },
         }
     }
+}
 
-    fn currency_kind(&self) -> CurrencyKind {
-        CurrencyKind::SessionStart
+impl TriggerAdapter for Hermes<'_> {
+    fn slug(&self) -> &'static str {
+        HarnessId::Hermes.slug()
     }
 
-    fn install_currency_trigger(&self) -> TriggerReport {
+    fn install(&self) -> TriggerReport {
         match self.read_config() {
             Ok(current) => {
                 let live = self.acceptance_evidence(current.as_deref());
@@ -342,17 +346,23 @@ impl HarnessAdapter for Hermes<'_> {
         }
     }
 
-    fn remove_currency_trigger(&self) -> TriggerReport {
+    fn remove(&self) -> TriggerReport {
         match self.read_config() {
             Ok(current) => self.apply(plan_remove(current.as_deref())),
             Err(_) => self.report(TriggerState::Degraded, false),
         }
     }
 
-    fn uninstall_footprint(&self) -> Vec<PathBuf> {
+    /// The trigger IS a line in the config file, so the offline read is the honest probe: a
+    /// managed entry is present exactly when the config provably holds one.
+    fn present(&self) -> bool {
+        self.has_managed_entry()
+    }
+
+    fn footprint(&self) -> Vec<PathBuf> {
         // Disclose the config file ONLY when it actually holds our managed entry — and never as a
-        // path `uninstall` will delete (it is scrubbed via `remove_currency_trigger`, the file
-        // kept). The allowlist is Hermes's own consent record, never disclosed as topos-owned.
+        // path `uninstall` will delete (it is scrubbed via `remove`, the file kept). The allowlist
+        // is Hermes's own consent record, never disclosed as topos-owned.
         if self.has_managed_entry() {
             vec![self.config_path()]
         } else {
@@ -985,7 +995,7 @@ personalities: {}
     #[test]
     fn install_into_absent_config_writes_the_exact_fresh_block() {
         let cfg = MemConfig::default(); // absent
-        let report = adapter(&cfg).install_currency_trigger();
+        let report = adapter(&cfg).install();
 
         assert_eq!(report.agent, "hermes-agent");
         assert_eq!(report.marker_id, MARKER_ID);
@@ -1008,7 +1018,7 @@ personalities: {}
     #[test]
     fn install_registers_both_session_events_and_never_pre_llm_call() {
         let cfg = MemConfig::default();
-        adapter(&cfg).install_currency_trigger();
+        adapter(&cfg).install();
         let text = cfg.config_text().unwrap();
         assert!(text.contains("on_session_start:"), "the primary event");
         assert!(text.contains("on_session_reset:"), "the reset re-fire");
@@ -1018,14 +1028,14 @@ personalities: {}
              sync paid latency for freshness the loader could not consume"
         );
         // And the un-evidenced report claims only the floor, never a live kind.
-        let report = adapter(&cfg).install_currency_trigger();
+        let report = adapter(&cfg).install();
         assert_eq!(report.currency_kind, CurrencyKind::ExplicitPullOnly);
     }
 
     #[test]
     fn install_replaces_the_shipped_default_empty_hooks_line() {
         let cfg = MemConfig::with_config(DEFAULT_CONFIG);
-        let report = adapter(&cfg).install_currency_trigger();
+        let report = adapter(&cfg).install();
         assert_eq!(report.state, TriggerState::Inactive);
         assert_eq!(
             cfg.config_text().as_deref(),
@@ -1038,7 +1048,7 @@ personalities: {}
     #[test]
     fn install_appends_when_no_hooks_key_even_without_trailing_newline() {
         let cfg = MemConfig::with_config("model: gpt-9"); // no trailing newline
-        let report = adapter(&cfg).install_currency_trigger();
+        let report = adapter(&cfg).install();
         assert_eq!(report.state, TriggerState::Inactive);
         assert_eq!(
             cfg.config_text(),
@@ -1053,7 +1063,7 @@ personalities: {}
         // anchoring) — it is preserved verbatim and a real top-level block is appended.
         let before = "profiles:\n  default:\n    hooks: {}\n";
         let cfg = MemConfig::with_config(before);
-        adapter(&cfg).install_currency_trigger();
+        adapter(&cfg).install();
         let after = cfg.config_text().unwrap();
         assert!(
             after.starts_with(before),
@@ -1069,9 +1079,9 @@ personalities: {}
                 None => MemConfig::default(),
                 Some(s) => MemConfig::with_config(s),
             };
-            adapter(&cfg).install_currency_trigger();
+            adapter(&cfg).install();
             let after_first = cfg.config_text();
-            let report = adapter(&cfg).install_currency_trigger();
+            let report = adapter(&cfg).install();
             assert_eq!(report.state, TriggerState::Inactive);
             assert!(
                 report.touched_path.is_none(),
@@ -1089,7 +1099,7 @@ personalities: {}
         // it, and register the canonical session-boundary pair — never leave both, never
         // duplicate.
         let cfg = MemConfig::with_config(LEGACY_INSTALL);
-        let report = adapter(&cfg).install_currency_trigger();
+        let report = adapter(&cfg).install();
         // No acceptance evidence → registered but honestly not live.
         assert_eq!(report.state, TriggerState::Inactive);
         assert!(report.touched_path.is_some(), "the old entry is migrated");
@@ -1105,7 +1115,7 @@ personalities: {}
         assert_eq!(text.as_str(), FRESH_INSTALL, "byte-exact canonical result");
 
         // And the migration is idempotent.
-        let again = adapter(&cfg).install_currency_trigger();
+        let again = adapter(&cfg).install();
         assert!(again.touched_path.is_none(), "no second write");
         assert_eq!(cfg.writes(), 1);
     }
@@ -1117,7 +1127,7 @@ personalities: {}
         let cfg = MemConfig::with_config(
             "model: gpt-9\nhooks:\n  pre_llm_call:\n  - command: topos update --quiet  # topos:currency\npersonalities: {}\n",
         );
-        let report = adapter(&cfg).install_currency_trigger();
+        let report = adapter(&cfg).install();
         assert_eq!(report.state, TriggerState::Inactive);
         assert_eq!(
             cfg.config_text().as_deref(),
@@ -1135,7 +1145,7 @@ personalities: {}
         let cfg = MemConfig::with_config(
             "hooks:\n  on_session_start:\n  - {command: topos update --quiet, timeout: 30}  # topos:currency\n",
         );
-        let report = adapter(&cfg).install_currency_trigger();
+        let report = adapter(&cfg).install();
         assert_eq!(report.state, TriggerState::Inactive);
         assert_eq!(cfg.config_text().as_deref(), Some(FRESH_INSTALL));
     }
@@ -1147,7 +1157,7 @@ personalities: {}
         // writes, the old per-turn entry keeps working, the report degrades honestly.
         let before = "hooks:\n  pre_llm_call:\n  - command: topos update --quiet  # topos:currency\n  post_llm_call:\n  - command: echo bye\n";
         let cfg = MemConfig::with_config(before);
-        let report = adapter(&cfg).install_currency_trigger();
+        let report = adapter(&cfg).install();
         assert_eq!(report.state, TriggerState::Degraded);
         assert_eq!(report.currency_kind, CurrencyKind::ExplicitPullOnly);
         assert_eq!(cfg.writes(), 0, "never half-migrate");
@@ -1158,7 +1168,7 @@ personalities: {}
     fn install_leaves_a_hand_rolled_topos_pull_unmanaged() {
         // A hand-rolled variant…
         let cfg = MemConfig::with_config("hooks:\n  on_session_start:\n  - command: topos pull\n");
-        let report = adapter(&cfg).install_currency_trigger();
+        let report = adapter(&cfg).install();
         assert_eq!(report.state, TriggerState::AlreadyPresentUnmanaged);
         assert_eq!(report.currency_kind, CurrencyKind::ExplicitPullOnly);
         assert_eq!(
@@ -1172,14 +1182,14 @@ personalities: {}
         let cfg = MemConfig::with_config(
             "hooks:\n  on_session_start:\n  - command: topos pull --quiet\n",
         );
-        let report = adapter(&cfg).install_currency_trigger();
+        let report = adapter(&cfg).install();
         assert_eq!(report.state, TriggerState::AlreadyPresentUnmanaged);
         assert_eq!(cfg.writes(), 0);
 
         // A topos sweep entry under any other event is also adopt-or-leave.
         let cfg =
             MemConfig::with_config("hooks:\n  post_llm_call:\n  - command: topos pull --quiet\n");
-        let report = adapter(&cfg).install_currency_trigger();
+        let report = adapter(&cfg).install();
         assert_eq!(report.state, TriggerState::AlreadyPresentUnmanaged);
         assert_eq!(cfg.writes(), 0);
 
@@ -1189,7 +1199,7 @@ personalities: {}
             let cfg = MemConfig::with_config(&format!(
                 "hooks:\n  {event}:\n  - command: topos update --quiet\n"
             ));
-            let report = adapter(&cfg).install_currency_trigger();
+            let report = adapter(&cfg).install();
             assert_eq!(
                 report.state,
                 TriggerState::AlreadyPresentUnmanaged,
@@ -1215,7 +1225,7 @@ personalities: {}
             "\u{feff}hooks: {}\n", // a BOM hides column 0 from every anchor — never reasoned about
         ] {
             let cfg = MemConfig::with_config(bad);
-            let report = adapter(&cfg).install_currency_trigger();
+            let report = adapter(&cfg).install();
             assert_eq!(report.state, TriggerState::Degraded, "input: {bad:?}");
             assert_eq!(report.currency_kind, CurrencyKind::ExplicitPullOnly);
             assert_eq!(cfg.writes(), 0);
@@ -1226,7 +1236,7 @@ personalities: {}
         cfg.files
             .borrow_mut()
             .insert(PathBuf::from("/h/config.yaml"), vec![0xff, 0xfe, b'x']);
-        let report = adapter(&cfg).install_currency_trigger();
+        let report = adapter(&cfg).install();
         assert_eq!(report.state, TriggerState::Degraded);
         assert_eq!(cfg.writes(), 0);
     }
@@ -1238,14 +1248,14 @@ personalities: {}
         let before =
             "notes: |\n  - {command: topos update --quiet, timeout: 30}  # topos:currency\n";
         let cfg = MemConfig::with_config(before);
-        adapter(&cfg).install_currency_trigger();
+        adapter(&cfg).install();
         let installed = cfg.config_text().unwrap();
         assert!(
             installed.starts_with(before),
             "the user's scalar is untouched"
         );
 
-        let report = adapter(&cfg).remove_currency_trigger();
+        let report = adapter(&cfg).remove();
         assert_eq!(report.state, TriggerState::Inactive);
         let after = cfg.config_text().unwrap();
         assert!(
@@ -1264,14 +1274,14 @@ personalities: {}
     fn approval_evidence_flips_active_honestly() {
         // env/ctor evidence → Active + SessionStart.
         let cfg = MemConfig::default();
-        let report = accepting_adapter(&cfg).install_currency_trigger();
+        let report = accepting_adapter(&cfg).install();
         assert_eq!(report.state, TriggerState::Active);
         assert_eq!(report.currency_kind, CurrencyKind::SessionStart);
 
         // Persisted allowlist evidence (Hermes's own record, exact (event, command) key) → Active.
         let cfg = MemConfig::default();
         cfg.set_allowlist(START_APPROVAL);
-        let report = adapter(&cfg).install_currency_trigger();
+        let report = adapter(&cfg).install();
         assert_eq!(report.state, TriggerState::Active);
         assert_eq!(report.currency_kind, CurrencyKind::SessionStart);
 
@@ -1280,7 +1290,7 @@ personalities: {}
         cfg.set_allowlist(
             "{\"approvals\":[{\"event\":\"on_session_start\",\"command\":\"topos pull\"}]}",
         );
-        let report = adapter(&cfg).install_currency_trigger();
+        let report = adapter(&cfg).install();
         assert_eq!(report.state, TriggerState::Inactive);
 
         // The RETIRED per-turn pair's approval does not carry over — the allowlist is
@@ -1289,7 +1299,7 @@ personalities: {}
         cfg.set_allowlist(
             "{\"approvals\":[{\"event\":\"pre_llm_call\",\"command\":\"topos update --quiet\"}]}",
         );
-        let report = adapter(&cfg).install_currency_trigger();
+        let report = adapter(&cfg).install();
         assert_eq!(report.state, TriggerState::Inactive);
         assert_eq!(report.currency_kind, CurrencyKind::ExplicitPullOnly);
 
@@ -1297,7 +1307,7 @@ personalities: {}
         for bad in ["not json", "{\"approvals\": \"oops\"}", "[]"] {
             let cfg = MemConfig::default();
             cfg.set_allowlist(bad);
-            let report = adapter(&cfg).install_currency_trigger();
+            let report = adapter(&cfg).install();
             assert_eq!(report.state, TriggerState::Inactive, "allowlist: {bad:?}");
         }
     }
@@ -1306,33 +1316,24 @@ personalities: {}
     fn config_auto_accept_counts_only_at_top_level() {
         // The shipped default (`hooks_auto_accept: false`) is not evidence.
         let cfg = MemConfig::with_config(DEFAULT_CONFIG);
-        assert_eq!(
-            adapter(&cfg).install_currency_trigger().state,
-            TriggerState::Inactive
-        );
+        assert_eq!(adapter(&cfg).install().state, TriggerState::Inactive);
 
         // Top-level true IS Hermes's own durable auto-accept.
         let cfg = MemConfig::with_config("hooks: {}\nhooks_auto_accept: true\n");
-        let report = adapter(&cfg).install_currency_trigger();
+        let report = adapter(&cfg).install();
         assert_eq!(report.state, TriggerState::Active);
         assert_eq!(report.currency_kind, CurrencyKind::SessionStart);
 
         // A nested occurrence is some other mapping's key — not evidence.
         let cfg =
             MemConfig::with_config("hooks: {}\nprofiles:\n  dev:\n    hooks_auto_accept: true\n");
-        assert_eq!(
-            adapter(&cfg).install_currency_trigger().state,
-            TriggerState::Inactive
-        );
+        assert_eq!(adapter(&cfg).install().state, TriggerState::Inactive);
 
         // Conflicting duplicates fail closed.
         let cfg = MemConfig::with_config(
             "hooks: {}\nhooks_auto_accept: true\nhooks_auto_accept: false\n",
         );
-        assert_eq!(
-            adapter(&cfg).install_currency_trigger().state,
-            TriggerState::Inactive
-        );
+        assert_eq!(adapter(&cfg).install().state, TriggerState::Inactive);
     }
 
     #[test]
@@ -1355,8 +1356,8 @@ personalities: {}
         // surface: the entries and their approval keys are byte-identical run over run).
         let cfg = MemConfig::default();
         cfg.set_allowlist(START_APPROVAL);
-        adapter(&cfg).install_currency_trigger();
-        let report = adapter(&cfg).install_currency_trigger();
+        adapter(&cfg).install();
+        let report = adapter(&cfg).install();
         assert_eq!(report.state, TriggerState::Active);
         assert_eq!(cfg.writes(), 1, "the approved re-install is a true no-op");
     }
@@ -1364,8 +1365,8 @@ personalities: {}
     #[test]
     fn remove_scrubs_only_ours_and_restores_the_default_shape() {
         let cfg = MemConfig::with_config(DEFAULT_CONFIG);
-        adapter(&cfg).install_currency_trigger();
-        let report = adapter(&cfg).remove_currency_trigger();
+        adapter(&cfg).install();
+        let report = adapter(&cfg).remove();
         assert_eq!(report.state, TriggerState::Inactive);
         assert_eq!(report.currency_kind, CurrencyKind::ExplicitPullOnly);
         assert_eq!(
@@ -1376,7 +1377,7 @@ personalities: {}
 
         // Idempotent: a second remove is a clean no-op.
         let writes_before = cfg.writes();
-        let report = adapter(&cfg).remove_currency_trigger();
+        let report = adapter(&cfg).remove();
         assert_eq!(report.state, TriggerState::Inactive);
         assert_eq!(cfg.writes(), writes_before, "second remove writes nothing");
     }
@@ -1386,7 +1387,7 @@ personalities: {}
         // Uninstall on an install an EARLIER build armed: the sentinel claims it, the scrub
         // prunes it, the shipped shape comes back.
         let cfg = MemConfig::with_config(LEGACY_INSTALL);
-        let report = adapter(&cfg).remove_currency_trigger();
+        let report = adapter(&cfg).remove();
         assert_eq!(report.state, TriggerState::Inactive);
         assert_eq!(cfg.config_text().as_deref(), Some("hooks: {}\n"));
     }
@@ -1396,7 +1397,7 @@ personalities: {}
         let cfg = MemConfig::with_config(
             "hooks:\n  on_session_start:\n  - {command: topos update --quiet, timeout: 30}  # topos:currency\n  # keep me\n  - command: echo keep\n",
         );
-        let report = adapter(&cfg).remove_currency_trigger();
+        let report = adapter(&cfg).remove();
         assert_eq!(report.state, TriggerState::Inactive);
         assert_eq!(
             cfg.config_text().as_deref(),
@@ -1411,7 +1412,7 @@ personalities: {}
         // item at the block's item indent — it is never claimed as ours and never deleted.
         let before = "hooks:\n  on_session_start:\n  - command: echo hi\n    notes: |\n      - command: topos pull --quiet  # topos:currency\n";
         let cfg = MemConfig::with_config(before);
-        let report = adapter(&cfg).remove_currency_trigger();
+        let report = adapter(&cfg).remove();
         assert_eq!(
             report.state,
             TriggerState::AlreadyPresentUnmanaged,
@@ -1430,7 +1431,7 @@ personalities: {}
         let cfg = MemConfig::with_config(
             "hooks:  # keep this comment\n  on_session_start:\n  - {command: topos update --quiet, timeout: 30}  # topos:currency\n  on_session_reset:\n  - {command: topos update --quiet, timeout: 30}  # topos:currency\n",
         );
-        let report = adapter(&cfg).remove_currency_trigger();
+        let report = adapter(&cfg).remove();
         assert_eq!(report.state, TriggerState::Inactive);
         assert_eq!(
             cfg.config_text().as_deref(),
@@ -1444,7 +1445,7 @@ personalities: {}
         let cfg = MemConfig::with_config(
             "hooks:\n  on_session_start:\n  - {command: topos update --quiet, timeout: 30}  # topos:currency\n  post_llm_call:\n  - command: echo bye\n",
         );
-        let report = adapter(&cfg).remove_currency_trigger();
+        let report = adapter(&cfg).remove();
         assert_eq!(report.state, TriggerState::Inactive);
         assert_eq!(
             cfg.config_text().as_deref(),
@@ -1459,13 +1460,13 @@ personalities: {}
         let cfg = MemConfig::with_config(
             "hooks:\n  on_session_start:\n  - command: topos pull --quiet\n",
         );
-        let report = adapter(&cfg).remove_currency_trigger();
+        let report = adapter(&cfg).remove();
         assert_eq!(report.state, TriggerState::AlreadyPresentUnmanaged);
         assert_eq!(cfg.writes(), 0);
 
         // An absent config → a clean no-op, never created.
         let absent = MemConfig::default();
-        let report = adapter(&absent).remove_currency_trigger();
+        let report = adapter(&absent).remove();
         assert_eq!(report.state, TriggerState::Inactive);
         assert!(
             absent.config_text().is_none(),
@@ -1477,7 +1478,7 @@ personalities: {}
     fn remove_degrades_on_unprovable_without_clobbering() {
         let bad = "hooks: {}\nmodel: a\nhooks: {}\n"; // duplicate top-level keys
         let cfg = MemConfig::with_config(bad);
-        let report = adapter(&cfg).remove_currency_trigger();
+        let report = adapter(&cfg).remove();
         assert_eq!(report.state, TriggerState::Degraded);
         assert_eq!(cfg.config_text().as_deref(), Some(bad), "never clobbered");
     }
@@ -1571,36 +1572,36 @@ personalities: {}
     fn footprint_is_disclosed_only_when_our_entry_is_present() {
         let cfg = MemConfig::default();
         assert!(
-            adapter(&cfg).uninstall_footprint().is_empty(),
+            adapter(&cfg).footprint().is_empty(),
             "no entry → nothing disclosed"
         );
-        adapter(&cfg).install_currency_trigger();
+        adapter(&cfg).install();
         assert_eq!(
-            adapter(&cfg).uninstall_footprint(),
+            adapter(&cfg).footprint(),
             vec![PathBuf::from("/h/config.yaml")],
             "our entry present → config.yaml disclosed (never deleted)"
         );
-        adapter(&cfg).remove_currency_trigger();
+        adapter(&cfg).remove();
         assert!(
-            adapter(&cfg).uninstall_footprint().is_empty(),
+            adapter(&cfg).footprint().is_empty(),
             "after the scrub → nothing disclosed again"
         );
         // A LEGACY install's entry is still disclosed (the sentinel claims it, any event).
         let cfg = MemConfig::with_config(LEGACY_INSTALL);
         assert_eq!(
-            adapter(&cfg).uninstall_footprint(),
+            adapter(&cfg).footprint(),
             vec![PathBuf::from("/h/config.yaml")]
         );
     }
 
     #[test]
-    fn currency_kind_is_session_start_and_the_id_is_hermes() {
+    fn the_two_ports_name_the_same_harness() {
         let cfg = MemConfig::default();
         let a = adapter(&cfg);
-        assert_eq!(a.currency_kind(), CurrencyKind::SessionStart);
         assert_eq!(a.id(), HarnessId::Hermes);
+        assert_eq!(a.slug(), HarnessId::Hermes.slug());
         // Anything but Active advertises only the guaranteed floor.
-        let report = a.install_currency_trigger();
+        let report = a.install();
         assert_eq!(report.currency_kind, CurrencyKind::ExplicitPullOnly);
     }
 }

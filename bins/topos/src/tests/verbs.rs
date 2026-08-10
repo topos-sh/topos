@@ -5,6 +5,7 @@
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;
+use topos_harness::triggers::TriggerAdapter;
 use topos_harness::{ClaudeCode, DiscoveredPlacement, HarnessAdapter, PlacementTarget};
 use topos_types::persisted::Lock;
 use topos_types::{CurrencyKind, HarnessId, TriggerReport, TriggerState};
@@ -55,17 +56,27 @@ impl HarnessAdapter for NoHarness {
             dir: PathBuf::from(skill_id),
         }
     }
-    fn currency_kind(&self) -> CurrencyKind {
-        CurrencyKind::SessionStart
+}
+
+impl TriggerAdapter for NoHarness {
+    fn slug(&self) -> &'static str {
+        HarnessId::ClaudeCode.slug()
     }
-    fn install_currency_trigger(&self) -> TriggerReport {
+
+    fn install(&self) -> TriggerReport {
         no_harness_report()
     }
-    fn remove_currency_trigger(&self) -> TriggerReport {
+
+    fn remove(&self) -> TriggerReport {
         no_harness_report()
     }
-    fn uninstall_footprint(&self) -> Vec<PathBuf> {
+
+    fn footprint(&self) -> Vec<PathBuf> {
         Vec::new()
+    }
+
+    fn present(&self) -> bool {
+        !self.footprint().is_empty()
     }
 }
 
@@ -155,10 +166,15 @@ impl Harness {
         }
     }
     fn ctx(&self) -> Ctx<'_> {
-        self.ctx_with(&self.harness)
+        self.ctx_with(&self.harness, &self.harness)
     }
-    /// A context over an explicit harness adapter (for the Claude Code recognition / hook tests).
-    fn ctx_with<'a>(&'a self, harness: &'a dyn HarnessAdapter) -> Ctx<'a> {
+    /// A context over an explicit pair of ports — the placement adapter and the trigger — so the
+    /// Claude Code recognition tests can swap either half alone.
+    fn ctx_with<'a>(
+        &'a self,
+        harness: &'a dyn HarnessAdapter,
+        trigger: &'a dyn TriggerAdapter,
+    ) -> Ctx<'a> {
         Ctx {
             progress: crate::progress::silent(),
             fs: &self.fs,
@@ -167,6 +183,7 @@ impl Harness {
             device_id: DEVICE_ID.to_owned(),
             layout: Layout::new(&self.home.0),
             harness,
+            triggers: crate::ops::Triggers::active_only(trigger),
             plane: &self.plane,
             follow: &self.follow,
             roots: None,
@@ -1555,6 +1572,7 @@ fn add_under_fault_preserves_draft_and_is_all_or_nothing() {
         device_id: DEVICE_ID.to_owned(),
         layout: Layout::new(&probe_home.0),
         harness: &no_harness,
+        triggers: crate::ops::Triggers::active_only(&no_harness),
         plane: &no_plane,
         follow: &no_follow,
         roots: None,
@@ -1576,6 +1594,7 @@ fn add_under_fault_preserves_draft_and_is_all_or_nothing() {
             device_id: DEVICE_ID.to_owned(),
             layout: layout.clone(),
             harness: &no_harness,
+            triggers: crate::ops::Triggers::active_only(&no_harness),
             plane: &no_plane,
             follow: &no_follow,
             roots: None,
@@ -1601,6 +1620,7 @@ fn add_under_fault_preserves_draft_and_is_all_or_nothing() {
             device_id: DEVICE_ID.to_owned(),
             layout: layout.clone(),
             harness: &no_harness,
+            triggers: crate::ops::Triggers::active_only(&no_harness),
             plane: &no_plane,
             follow: &no_follow,
             roots: None,
@@ -1648,6 +1668,43 @@ fn add_under_fault_preserves_draft_and_is_all_or_nothing() {
     }
 }
 
+/// A `CommandRunner` whose binary is absent — no suite ever spawns a real harness CLI.
+struct NoCli;
+impl topos_harness::CommandRunner for NoCli {
+    fn run(&self, _p: &str, _a: &[&str]) -> std::io::Result<topos_harness::RunOutput> {
+        Err(std::io::Error::new(std::io::ErrorKind::NotFound, "absent"))
+    }
+}
+
+/// Claude Code's config home under a scratch USER home — the path the registry's ONE resolver names
+/// for that user home, which is what [`claude_trigger`] arms.
+fn claude_home(user_home: &Path) -> PathBuf {
+    refuse_under_a_redirected_claude_config();
+    user_home.join(".claude")
+}
+
+/// Claude Code's TRIGGER port over a scratch USER home, built through the ONE registry factory — so
+/// a rig arms exactly what production arms, rather than a second construction of the same machinery.
+fn claude_trigger<'a>(
+    user_home: &Path,
+    cfg: &'a dyn topos_harness::ConfigStore,
+) -> Box<dyn TriggerAdapter + 'a> {
+    refuse_under_a_redirected_claude_config();
+    topos_harness::triggers::adapter_for_slug("claude-code", user_home, cfg, &NoCli)
+        .expect("claude-code is a trigger-capable registry row")
+}
+
+/// `$CLAUDE_CONFIG_DIR` redirects Claude Code's config root — and with it the rigs above, onto the
+/// REAL machine. Refuse before anything is constructed, so an inherited variable fails the run
+/// instead of writing to the developer's own settings (run the suite with `env -u`).
+fn refuse_under_a_redirected_claude_config() {
+    assert!(
+        std::env::var_os("CLAUDE_CONFIG_DIR").is_none(),
+        "run this suite with `env -u CLAUDE_CONFIG_DIR`: the variable redirects the harness config \
+         root onto the real machine"
+    );
+}
+
 /// Lay down a real Claude Code skill (`<claude_home>/skills/<name>/SKILL.md`) and return its dir.
 fn claude_skill(claude_home: &Path, name: &str, body: &str) -> PathBuf {
     let dir = claude_home.join("skills").join(name);
@@ -1659,19 +1716,21 @@ fn claude_skill(claude_home: &Path, name: &str, body: &str) -> PathBuf {
 #[test]
 fn add_recognizes_a_claude_code_skill_tags_it_installs_the_hook_and_writes_nothing() {
     let h = Harness::new("cc-add");
-    let claude = Scratch::new("cc-home");
+    let user = Scratch::new("cc-home");
+    let claude = claude_home(&user.0);
     // Frontmatter `name` deliberately differs from the dir name — the DIRECTORY name (the command name)
     // must win for a recognized Claude Code skill.
     let skill = claude_skill(
-        &claude.0,
+        &claude,
         "pr-describe",
         "---\nname: not-the-command-name\n---\n\n# PR describe\n\nWrite a clear PR description.\n",
     );
     let before = fs_hashes(&skill);
 
     let cfg = RealFs;
-    let cc = ClaudeCode::new(claude.0.clone(), &cfg);
-    let ctx = h.ctx_with(&cc);
+    let cc = ClaudeCode::new(claude.clone());
+    let trigger = claude_trigger(&user.0, &cfg);
+    let ctx = h.ctx_with(&cc, trigger.as_ref());
 
     let add = ops::add(&ctx, &skill).unwrap();
     assert_eq!(
@@ -1695,7 +1754,7 @@ fn add_recognizes_a_claude_code_skill_tags_it_installs_the_hook_and_writes_nothi
     );
 
     // The hook landed in the harness settings.json (the only write outside ~/.topos/).
-    let settings = std::fs::read_to_string(claude.0.join("settings.json")).unwrap();
+    let settings = std::fs::read_to_string(claude.join("settings.json")).unwrap();
     assert!(
         settings.contains("topos update --quiet --hook claude-code"),
         "hook command installed, carrying the dialect marker that opts Claude Code into the \
@@ -1712,11 +1771,13 @@ fn add_recognizes_a_claude_code_skill_tags_it_installs_the_hook_and_writes_nothi
 #[test]
 fn add_of_a_plain_dir_tags_no_harness_and_installs_no_hook() {
     let h = Harness::new("cc-plain");
-    let claude = Scratch::new("cc-empty"); // a real (empty) Claude home — the source is NOT under it
+    let user = Scratch::new("cc-empty"); // a real (empty) Claude home — the source is NOT under it
+    let claude = claude_home(&user.0);
     let src = editable_source();
     let cfg = RealFs;
-    let cc = ClaudeCode::new(claude.0.clone(), &cfg);
-    let ctx = h.ctx_with(&cc);
+    let cc = ClaudeCode::new(claude.clone());
+    let trigger = claude_trigger(&user.0, &cfg);
+    let ctx = h.ctx_with(&cc, trigger.as_ref());
 
     let add = ops::add(&ctx, &src.0.join("pr-describe")).unwrap();
     assert!(
@@ -1725,7 +1786,7 @@ fn add_of_a_plain_dir_tags_no_harness_and_installs_no_hook() {
     );
     assert!(add.currency.is_none(), "no currency armed for a plain dir");
     assert!(
-        !claude.0.join("settings.json").exists(),
+        !claude.join("settings.json").exists(),
         "a plain-dir add never touches the harness config"
     );
 }
@@ -1819,16 +1880,18 @@ fn the_already_tracked_refusal_names_the_claiming_manifest_row() {
 }
 
 #[test]
-fn install_currency_trigger_is_crash_safe_across_the_fault_table() {
+fn installing_the_trigger_is_crash_safe_across_the_fault_table() {
     // A realistic pre-existing settings.json: a foreign top-level key + a non-SessionStart hook.
-    let claude = Scratch::new("cc-fault");
-    let settings_path = claude.0.join("settings.json");
+    let user = Scratch::new("cc-fault");
+    let claude = claude_home(&user.0);
+    std::fs::create_dir_all(&claude).unwrap();
+    let settings_path = claude.join("settings.json");
     let original = "{\n  \"model\": \"opus\",\n  \"hooks\": {\n    \"PreToolUse\": [{\"matcher\": \"Bash\"}]\n  }\n}\n";
 
     // Count the durable ops a clean install performs, so we fault each.
     std::fs::write(&settings_path, original).unwrap();
     let probe = FaultFs::new(0);
-    ClaudeCode::new(claude.0.clone(), &probe).install_currency_trigger();
+    claude_trigger(&user.0, &probe).install();
     let max_ops = probe.ops_attempted();
     assert!(
         max_ops >= 4,
@@ -1838,7 +1901,7 @@ fn install_currency_trigger_is_crash_safe_across_the_fault_table() {
     for fail_at in 1..=max_ops {
         std::fs::write(&settings_path, original).unwrap(); // reset to the pre-state
         let fs = FaultFs::new(fail_at);
-        let _ = ClaudeCode::new(claude.0.clone(), &fs).install_currency_trigger();
+        let _ = claude_trigger(&user.0, &fs).install();
 
         // After a fault at any step, settings.json is the pre- or post-state — never torn — so it always
         // parses as JSON and the user's foreign content survives intact.

@@ -19,6 +19,7 @@ use topos_core::digest::{self, FileMode, ManifestEntry};
 use topos_core::identity::Commit;
 use topos_harness::mcp::{self, AuthHint, McpDialect, McpEntry, plugin_dir};
 use topos_harness::registry::{self, KnownHarness};
+use topos_harness::triggers::TriggerAdapter;
 use topos_harness::{DiscoveredPlacement, HarnessAdapter, PlacementTarget};
 use topos_types::requests::{
     WireChannelEntry, WireChannelIndex, WireChannelSkill, WireMe, WireProposalIndex,
@@ -95,17 +96,27 @@ impl HarnessAdapter for TmpHarness {
             ),
         }
     }
-    fn currency_kind(&self) -> CurrencyKind {
-        CurrencyKind::ExplicitPullOnly
+}
+
+impl TriggerAdapter for TmpHarness {
+    fn slug(&self) -> &'static str {
+        HarnessId::ClaudeCode.slug()
     }
-    fn install_currency_trigger(&self) -> TriggerReport {
+
+    fn install(&self) -> TriggerReport {
         no_trigger()
     }
-    fn remove_currency_trigger(&self) -> TriggerReport {
+
+    fn remove(&self) -> TriggerReport {
         no_trigger()
     }
-    fn uninstall_footprint(&self) -> Vec<PathBuf> {
+
+    fn footprint(&self) -> Vec<PathBuf> {
         Vec::new()
+    }
+
+    fn present(&self) -> bool {
+        !self.footprint().is_empty()
     }
 }
 fn no_trigger() -> TriggerReport {
@@ -156,6 +167,7 @@ impl Rig {
             device_id: "d_test".into(),
             layout: self.layout(),
             harness: &self.harness,
+            triggers: crate::ops::Triggers::active_only(&self.harness),
             plane: &InertPlane,
             follow: &InertFollow,
             roots: Some(crate::ctx::AgentRoots {
@@ -4697,6 +4709,7 @@ fn a_targeted_accept_updates_the_configs_before_reporting_success() {
         device_id: "d_test".into(),
         layout: rig.layout(),
         harness: &rig.harness,
+        triggers: crate::ops::Triggers::active_only(&rig.harness),
         plane: &serves,
         follow: &follow,
         roots: Some(crate::ctx::AgentRoots {

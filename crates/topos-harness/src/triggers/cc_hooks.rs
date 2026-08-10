@@ -154,6 +154,16 @@ impl TriggerAdapter for JsonHooks<'_> {
         entries_ref(&root, self.spec)
             .is_some_and(|e| matches!(classify(self.spec, e), Classification::Managed))
     }
+
+    /// The shared config file, disclosed ONLY while it actually holds our managed entry — and never
+    /// as a path `uninstall` deletes (it is scrubbed surgically, the user's own file kept).
+    fn footprint(&self) -> Vec<PathBuf> {
+        if self.present() {
+            vec![self.config_path()]
+        } else {
+            Vec::new()
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------------------------

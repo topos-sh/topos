@@ -144,8 +144,8 @@ pub(crate) fn status(
         principal: probed_principal,
         signed_in,
         workspaces,
-        // The same probe `list`'s header uses: the adapter's own trigger-health answer.
-        hook_armed: ctx.harness.trigger_present(),
+        // The same probe `list`'s header uses: the active harness's own trigger-health answer.
+        hook_armed: ctx.triggers.active().present(),
         reporting,
     })
 }

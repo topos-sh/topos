@@ -8,8 +8,9 @@ Five library crates, one acyclic graph. Each has its own `CLAUDE.md`:
   even `topos-types`).
 - **`topos-gitstore/`** — the `gix` object mechanics + the content-addressed large-object store
   (verify-on-read). Path-parameterized and bundle-generic. Depends on `topos-core` only.
-- **`topos-harness/`** — the `HarnessAdapter` port + its impls. The one client-side port. Depends
-  on `topos-core` + `topos-types`.
+- **`topos-harness/`** — the two client-side ports + their impls: `HarnessAdapter` (where a bundle's
+  bytes go) and `triggers::TriggerAdapter` (when the update check fires). Depends on `topos-core` +
+  `topos-types`.
 - **`plane-store/`** — the vault's byte-custody boundary: private SQL + per-workspace object
   storage behind the ONE public `Authority` facade. Holds no identity, membership, or policy; two
   `cargo xtask check-arch` gates (identity-vocabulary + schema-boundary) pin that. Depends on

@@ -15,6 +15,7 @@ use std::sync::{Arc, Mutex};
 
 use topos_core::digest::{self, FileMode, ManifestEntry};
 use topos_core::identity::Commit;
+use topos_harness::triggers::TriggerAdapter;
 use topos_harness::{DiscoveredPlacement, HarnessAdapter, PlacementTarget};
 use topos_types::requests::{
     WireChannelEntry, WireChannelIndex, WireChannelSkill, WireMe, WireProposalIndex,
@@ -89,17 +90,27 @@ impl HarnessAdapter for TmpHarness {
             ),
         }
     }
-    fn currency_kind(&self) -> CurrencyKind {
-        CurrencyKind::ExplicitPullOnly
+}
+
+impl TriggerAdapter for TmpHarness {
+    fn slug(&self) -> &'static str {
+        HarnessId::ClaudeCode.slug()
     }
-    fn install_currency_trigger(&self) -> TriggerReport {
+
+    fn install(&self) -> TriggerReport {
         no_trigger()
     }
-    fn remove_currency_trigger(&self) -> TriggerReport {
+
+    fn remove(&self) -> TriggerReport {
         no_trigger()
     }
-    fn uninstall_footprint(&self) -> Vec<PathBuf> {
+
+    fn footprint(&self) -> Vec<PathBuf> {
         Vec::new()
+    }
+
+    fn present(&self) -> bool {
+        !self.footprint().is_empty()
     }
 }
 fn no_trigger() -> TriggerReport {
@@ -155,6 +166,7 @@ impl Rig {
             device_id: "d_test".into(),
             layout: self.layout(),
             harness: &self.harness,
+            triggers: crate::ops::Triggers::active_only(&self.harness),
             plane: &InertPlane,
             follow: &InertFollow,
             roots: Some(crate::ctx::AgentRoots {
@@ -6795,6 +6807,7 @@ fn ops_ctx_with_layout<'a>(ctx: &'a Ctx<'a>, layout: &Layout) -> Ctx<'a> {
         clock: ctx.clock,
         device_id: ctx.device_id.clone(),
         harness: ctx.harness,
+        triggers: ctx.triggers.clone(),
         plane: ctx.plane,
         follow: ctx.follow,
         roots: ctx.roots.clone(),

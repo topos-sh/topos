@@ -1,21 +1,21 @@
-//! The `ClaudeCode` [`HarnessAdapter`] — discovery, byte-exact placement targeting, and the idempotent
-//! session-start **auto-update trigger** entry in `~/.claude/settings.json`.
+//! The `ClaudeCode` [`HarnessAdapter`] — discovery and byte-exact placement targeting — plus [`SPEC`],
+//! the parameterization its idempotent session-start **auto-update trigger** in
+//! `~/.claude/settings.json` runs under.
 //!
 //! Content-blind: it reads skill *directories* only to confirm a `SKILL.md` exists (never the bytes,
-//! never the frontmatter), and the only file it ever writes is the harness **config** — its own
-//! `settings.json` hook entry, never a skill file. The trigger is a [`JsonHooksSpec`] instance over the
-//! shared strict-JSON merge ([`crate::triggers`]), so the sentinel-keyed ownership, adopt-or-leave,
-//! in-place migration of an older managed shape, and prune-only-what-we-emptied removal are the SAME
-//! machinery every JSON-config harness runs — this harness declares only what is its own: the `async`
-//! handler field and the `--hook claude-code` dialect marker.
+//! never the frontmatter), and it writes nothing at all. The trigger is a [`JsonHooksSpec`] instance
+//! over the shared strict-JSON merge ([`crate::triggers`]) — built by
+//! [`crate::triggers::adapter_for_slug`], like every other harness's — so the sentinel-keyed ownership,
+//! adopt-or-leave, in-place migration of an older managed shape, and prune-only-what-we-emptied removal
+//! are the SAME machinery every JSON-config harness runs. This harness declares only what is its own:
+//! the `async` handler field and the `--hook claude-code` dialect marker.
 
 use std::path::PathBuf;
 
-use topos_types::{CurrencyKind, HarnessId, TriggerReport, TriggerState};
+use topos_types::{CurrencyKind, HarnessId, TriggerState};
 
-use crate::triggers::TriggerAdapter as _;
-use crate::triggers::cc_hooks::{JsonHooks, JsonHooksSpec};
-use crate::{ConfigStore, DiscoveredPlacement, HarnessAdapter, PlacementNaming, PlacementTarget};
+use crate::triggers::cc_hooks::JsonHooksSpec;
+use crate::{DiscoveredPlacement, HarnessAdapter, PlacementNaming, PlacementTarget};
 
 /// The user-scope layer label recorded for a discovered/placed Claude Code skill. (`project`,
 /// `enterprise`, … become representable later without a contract change — `DiscoveredPlacement.layer`
@@ -66,15 +66,15 @@ pub(crate) static SPEC: JsonHooksSpec = JsonHooksSpec {
     note: None,
 };
 
-/// The [`HarnessAdapter`] for Claude Code. Holds the resolved config home (injected, so tests point it
-/// at a temp dir) and the [`ConfigStore`] port that performs the durable config write.
-pub struct ClaudeCode<'a> {
+/// The [`HarnessAdapter`] for Claude Code. Holds only the resolved config home (injected, so tests
+/// point it at a temp dir): placement reads directories and writes nothing, so this side needs no
+/// [`crate::ConfigStore`] — the trigger half built from this module's spec holds that port.
+pub struct ClaudeCode {
     /// `$CLAUDE_CONFIG_DIR` (Claude Code's own override) else `$HOME/.claude`.
     home: PathBuf,
-    cfg: &'a dyn ConfigStore,
 }
 
-impl std::fmt::Debug for ClaudeCode<'_> {
+impl std::fmt::Debug for ClaudeCode {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ClaudeCode")
             .field("home", &self.home)
@@ -82,12 +82,12 @@ impl std::fmt::Debug for ClaudeCode<'_> {
     }
 }
 
-impl<'a> ClaudeCode<'a> {
-    /// Construct over an explicit config home + a config-store port. Production passes
-    /// [`ClaudeCode::resolve_home`]; tests pass a temp dir so the real `~/.claude` is never touched.
+impl ClaudeCode {
+    /// Construct over an explicit config home. Production passes [`ClaudeCode::resolve_home`]; tests
+    /// pass a temp dir so the real `~/.claude` is never read.
     #[must_use]
-    pub fn new(home: PathBuf, cfg: &'a dyn ConfigStore) -> Self {
-        Self { home, cfg }
+    pub fn new(home: PathBuf) -> Self {
+        Self { home }
     }
 
     /// Resolve Claude Code's config home exactly as Claude Code does — `$CLAUDE_CONFIG_DIR` if set,
@@ -123,19 +123,9 @@ impl<'a> ClaudeCode<'a> {
             &|_| false,
         )
     }
-
-    fn settings_path(&self) -> PathBuf {
-        self.home.join("settings.json")
-    }
-
-    /// The trigger half, over the shared strict-JSON merge: the ONE machinery, parameterized by
-    /// [`SPEC`]. Everything about ownership, migration, and fail-closed refusal lives there.
-    fn hooks(&self) -> JsonHooks<'a> {
-        JsonHooks::new(&SPEC, self.home.clone(), self.cfg)
-    }
 }
 
-impl HarnessAdapter for ClaudeCode<'_> {
+impl HarnessAdapter for ClaudeCode {
     fn id(&self) -> HarnessId {
         HarnessId::ClaudeCode
     }
@@ -168,36 +158,15 @@ impl HarnessAdapter for ClaudeCode<'_> {
             },
         }
     }
-
-    fn currency_kind(&self) -> CurrencyKind {
-        CurrencyKind::SessionStart
-    }
-
-    fn install_currency_trigger(&self) -> TriggerReport {
-        self.hooks().install()
-    }
-
-    fn remove_currency_trigger(&self) -> TriggerReport {
-        self.hooks().remove()
-    }
-
-    fn uninstall_footprint(&self) -> Vec<PathBuf> {
-        // Disclose the config file ONLY when it actually holds our managed entry — and never as a path
-        // `uninstall` will delete (it is scrubbed via `remove_currency_trigger`, the file kept). A
-        // missing/unreadable/malformed settings file is not present: we never claim to own a path we
-        // cannot confirm.
-        if self.hooks().present() {
-            vec![self.settings_path()]
-        } else {
-            Vec::new()
-        }
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ConfigStore;
     use crate::triggers::SENTINEL;
+    use crate::triggers::TriggerAdapter as _;
+    use crate::triggers::cc_hooks::JsonHooks;
     use serde_json::Value;
     use std::cell::RefCell;
     use std::path::Path;
@@ -261,8 +230,14 @@ mod tests {
         }
     }
 
-    fn adapter<'a>(home: &Path, cfg: &'a MemConfig) -> ClaudeCode<'a> {
-        ClaudeCode::new(home.to_path_buf(), cfg)
+    fn adapter(home: &Path) -> ClaudeCode {
+        ClaudeCode::new(home.to_path_buf())
+    }
+
+    /// This harness's TRIGGER half — the shared JSON-hooks machinery under [`SPEC`], built exactly as
+    /// [`crate::triggers::adapter_for_slug`] builds it for the real machine.
+    fn trigger<'a>(home: &Path, cfg: &'a MemConfig) -> JsonHooks<'a> {
+        JsonHooks::new(&SPEC, home.to_path_buf(), cfg)
     }
 
     /// The exact command [`SPEC`] registers — the shared shell sweep plus this harness's dialect
@@ -315,7 +290,7 @@ mod tests {
     fn install_into_absent_settings_writes_the_exact_managed_hook() {
         let cfg = MemConfig::default(); // absent
         let home = PathBuf::from("/nonexistent-claude-home");
-        let report = adapter(&home, &cfg).install_currency_trigger();
+        let report = trigger(&home, &cfg).install();
 
         assert_eq!(report.state, TriggerState::Active);
         assert_eq!(report.agent, "claude-code");
@@ -337,10 +312,10 @@ mod tests {
     fn install_is_idempotent_a_true_no_op_on_rerun() {
         let cfg = MemConfig::default();
         let home = PathBuf::from("/h");
-        adapter(&home, &cfg).install_currency_trigger();
+        trigger(&home, &cfg).install();
         let after_first = cfg.text();
 
-        let report = adapter(&home, &cfg).install_currency_trigger();
+        let report = trigger(&home, &cfg).install();
         assert_eq!(report.state, TriggerState::Active);
         assert!(
             report.touched_path.is_none(),
@@ -361,7 +336,7 @@ mod tests {
             "{{\"hooks\":{{\"SessionStart\":[{{\"matcher\":\"startup\",\"hooks\":[{{\"type\":\"command\",\"command\":\"{stale}\",\"timeout\":60}}]}}]}}}}"
         ));
 
-        let report = adapter(&PathBuf::from("/h"), &cfg).install_currency_trigger();
+        let report = trigger(&PathBuf::from("/h"), &cfg).install();
         assert_eq!(report.state, TriggerState::Active);
         assert!(
             report.touched_path.is_some(),
@@ -388,7 +363,7 @@ mod tests {
         );
 
         // Re-running is now a true no-op — the migration is idempotent.
-        let again = adapter(&PathBuf::from("/h"), &cfg).install_currency_trigger();
+        let again = trigger(&PathBuf::from("/h"), &cfg).install();
         assert_eq!(again.state, TriggerState::Active);
         assert!(
             again.touched_path.is_none(),
@@ -405,7 +380,7 @@ mod tests {
             "{{\"hooks\":{{\"SessionStart\":[{{\"matcher\":\"startup\",\"hooks\":[{{\"type\":\"command\",\"command\":\"{}\",\"timeout\":60}}]}}]}}}}",
             hook_command().replace('"', "\\\"")
         ));
-        let report = adapter(&PathBuf::from("/h"), &cfg).install_currency_trigger();
+        let report = trigger(&PathBuf::from("/h"), &cfg).install();
         assert_eq!(report.state, TriggerState::Active);
         assert_eq!(cfg.writes(), 1, "one migrating write");
 
@@ -415,7 +390,7 @@ mod tests {
         assert!(groups[0].get("matcher").is_none(), "matcher shed");
         assert_eq!(groups[0]["hooks"][0]["async"], true);
 
-        let again = adapter(&PathBuf::from("/h"), &cfg).install_currency_trigger();
+        let again = trigger(&PathBuf::from("/h"), &cfg).install();
         assert!(again.touched_path.is_none(), "idempotent after migration");
         assert_eq!(cfg.writes(), 1);
     }
@@ -429,7 +404,7 @@ mod tests {
         let cfg = MemConfig::with(
             "{\"hooks\":{\"SessionStart\":[{\"matcher\":\"resume\",\"hooks\":[{\"type\":\"command\",\"command\":\"echo mine\"},{\"type\":\"command\",\"command\":\"topos pull --quiet  # topos:currency\"}]}]}}",
         );
-        let report = adapter(&PathBuf::from("/h"), &cfg).install_currency_trigger();
+        let report = trigger(&PathBuf::from("/h"), &cfg).install();
         assert_eq!(report.state, TriggerState::Active);
         assert_eq!(cfg.writes(), 1);
 
@@ -453,7 +428,7 @@ mod tests {
         assert_eq!(ours[0]["async"], true);
 
         // Idempotent: the relocated shape is canonical — a re-run writes nothing.
-        let again = adapter(&PathBuf::from("/h"), &cfg).install_currency_trigger();
+        let again = trigger(&PathBuf::from("/h"), &cfg).install();
         assert!(again.touched_path.is_none(), "no second write");
         assert_eq!(cfg.writes(), 1);
         assert_eq!(
@@ -474,7 +449,7 @@ mod tests {
             "{{\"hooks\":{{\"SessionStart\":[{{\"matcher\":\"startup\",\"hooks\":[{{\"type\":\"command\",\"command\":\"{old}\",\"timeout\":60}}]}}]}}}}"
         ));
 
-        let report = adapter(&PathBuf::from("/h"), &cfg).install_currency_trigger();
+        let report = trigger(&PathBuf::from("/h"), &cfg).install();
         assert_eq!(report.state, TriggerState::Active);
         assert!(report.touched_path.is_some(), "the old hook is rewritten");
         assert_eq!(cfg.writes(), 1, "exactly one replacing write");
@@ -511,7 +486,7 @@ mod tests {
         let cfg = MemConfig::with(
             "{\n  \"model\": \"opus\",\n  \"hooks\": {\n    \"PreToolUse\": [{\"matcher\": \"Bash\"}]\n  }\n}\n",
         );
-        let report = adapter(&PathBuf::from("/h"), &cfg).install_currency_trigger();
+        let report = trigger(&PathBuf::from("/h"), &cfg).install();
         assert_eq!(report.state, TriggerState::Active);
 
         let root: Value = serde_json::from_str(&cfg.text().unwrap()).unwrap();
@@ -537,7 +512,7 @@ mod tests {
             let cfg = MemConfig::with(&format!(
                 "{{\"hooks\":{{\"SessionStart\":[{{\"hooks\":[{{\"type\":\"command\",\"command\":\"{hand_rolled}\"}}]}}]}}}}"
             ));
-            let report = adapter(&PathBuf::from("/h"), &cfg).install_currency_trigger();
+            let report = trigger(&PathBuf::from("/h"), &cfg).install();
             assert_eq!(
                 report.state,
                 TriggerState::AlreadyPresentUnmanaged,
@@ -556,7 +531,7 @@ mod tests {
     fn install_fails_closed_on_malformed_or_wrong_typed_config() {
         // Malformed JSON → degrade, no write.
         let bad = MemConfig::with("{ this is not json ");
-        let r = adapter(&PathBuf::from("/h"), &bad).install_currency_trigger();
+        let r = trigger(&PathBuf::from("/h"), &bad).install();
         assert_eq!(r.state, TriggerState::Degraded);
         assert_eq!(bad.writes(), 0);
         assert_eq!(
@@ -567,7 +542,7 @@ mod tests {
 
         // `hooks` present but the wrong type → degrade, no write.
         let wrong = MemConfig::with("{\"hooks\": \"oops\"}");
-        let r = adapter(&PathBuf::from("/h"), &wrong).install_currency_trigger();
+        let r = trigger(&PathBuf::from("/h"), &wrong).install();
         assert_eq!(r.state, TriggerState::Degraded);
         assert_eq!(wrong.writes(), 0);
     }
@@ -580,7 +555,7 @@ mod tests {
         let cfg = MemConfig::with(
             "{\"hooks\":{\"SessionStart\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"echo nope  # topos:currency\"}]}]}}",
         );
-        let report = adapter(&PathBuf::from("/h"), &cfg).install_currency_trigger();
+        let report = trigger(&PathBuf::from("/h"), &cfg).install();
         assert_eq!(report.state, TriggerState::Active);
         assert_eq!(cfg.writes(), 1, "the sentinel-carrying entry is rewritten");
 
@@ -604,10 +579,10 @@ mod tests {
             "{\n  \"model\": \"opus\",\n  \"hooks\": {\n    \"PreToolUse\": [{\"matcher\": \"Bash\"}]\n  }\n}\n",
         );
         let home = PathBuf::from("/h");
-        adapter(&home, &cfg).install_currency_trigger();
+        trigger(&home, &cfg).install();
         assert!(cfg.text().unwrap().contains("topos update"));
 
-        let report = adapter(&home, &cfg).remove_currency_trigger();
+        let report = trigger(&home, &cfg).remove();
         assert_eq!(report.state, TriggerState::Inactive);
         let root: Value = serde_json::from_str(&cfg.text().unwrap()).unwrap();
         assert_eq!(root["model"], "opus", "foreign key survives the scrub");
@@ -622,7 +597,7 @@ mod tests {
 
         // Idempotent: a second remove is a clean no-op.
         let writes_before = cfg.writes();
-        let report = adapter(&home, &cfg).remove_currency_trigger();
+        let report = trigger(&home, &cfg).remove();
         assert_eq!(report.state, TriggerState::Inactive);
         assert_eq!(cfg.writes(), writes_before, "second remove writes nothing");
     }
@@ -633,13 +608,13 @@ mod tests {
         let cfg = MemConfig::with(
             "{\"hooks\":{\"SessionStart\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"topos pull\"}]}]}}",
         );
-        let report = adapter(&PathBuf::from("/h"), &cfg).remove_currency_trigger();
+        let report = trigger(&PathBuf::from("/h"), &cfg).remove();
         assert_eq!(report.state, TriggerState::AlreadyPresentUnmanaged);
         assert_eq!(cfg.writes(), 0);
 
         // An absent settings file → a clean no-op, never created.
         let absent = MemConfig::default();
-        let report = adapter(&PathBuf::from("/h"), &absent).remove_currency_trigger();
+        let report = trigger(&PathBuf::from("/h"), &absent).remove();
         assert_eq!(report.state, TriggerState::Inactive);
         assert!(absent.text().is_none(), "remove never creates the file");
     }
@@ -652,8 +627,8 @@ mod tests {
             "{\"hooks\":{\"SessionStart\":[{\"matcher\":\"resume\",\"hooks\":[]}]}}",
         );
         let home = PathBuf::from("/h");
-        adapter(&home, &cfg).install_currency_trigger(); // appends our dedicated group
-        let report = adapter(&home, &cfg).remove_currency_trigger();
+        trigger(&home, &cfg).install(); // appends our dedicated group
+        let report = trigger(&home, &cfg).remove();
         assert_eq!(report.state, TriggerState::Inactive);
 
         let root: Value = serde_json::from_str(&cfg.text().unwrap()).unwrap();
@@ -670,7 +645,7 @@ mod tests {
     #[test]
     fn remove_degrades_on_malformed_without_clobbering() {
         let cfg = MemConfig::with("{ not json ");
-        let report = adapter(&PathBuf::from("/h"), &cfg).remove_currency_trigger();
+        let report = trigger(&PathBuf::from("/h"), &cfg).remove();
         assert_eq!(report.state, TriggerState::Degraded);
         assert_eq!(
             cfg.text().as_deref(),
@@ -689,8 +664,7 @@ mod tests {
         // A stray file under skills/ is not a skill dir.
         std::fs::write(home.0.join("skills").join("loose.txt"), b"x").unwrap();
 
-        let cfg = MemConfig::default();
-        let found = adapter(&home.0, &cfg).discover();
+        let found = adapter(&home.0).discover();
         let names: Vec<String> = found
             .iter()
             .map(|d| d.path.file_name().unwrap().to_string_lossy().into_owned())
@@ -705,15 +679,13 @@ mod tests {
 
     #[test]
     fn discover_on_absent_home_is_empty_not_an_error() {
-        let cfg = MemConfig::default();
-        let found = adapter(&PathBuf::from("/no-such-claude-home-xyz"), &cfg).discover();
+        let found = adapter(&PathBuf::from("/no-such-claude-home-xyz")).discover();
         assert!(found.is_empty());
     }
 
     #[test]
     fn placement_for_reuses_a_discovered_dir() {
-        let cfg = MemConfig::default();
-        let a = adapter(&PathBuf::from("/h"), &cfg);
+        let a = adapter(&PathBuf::from("/h"));
         let disc = DiscoveredPlacement {
             path: PathBuf::from("/h/skills/pr-describe"),
             layer: Some(LAYER_USER.to_owned()),
@@ -727,9 +699,8 @@ mod tests {
 
     #[test]
     fn placement_names_a_free_folder_by_the_sanitized_display_name() {
-        let cfg = MemConfig::default();
         // A home with nothing on disk, so no candidate ever collides.
-        let a = adapter(&PathBuf::from("/nonexistent-home"), &cfg);
+        let a = adapter(&PathBuf::from("/nonexistent-home"));
         let naming = PlacementNaming {
             name: Some("deploy-helper"),
             workspace_slug: Some("acme"),
@@ -743,8 +714,7 @@ mod tests {
 
     #[test]
     fn placement_falls_back_to_the_id_for_an_absent_or_unsafe_name() {
-        let cfg = MemConfig::default();
-        let a = adapter(&PathBuf::from("/h"), &cfg);
+        let a = adapter(&PathBuf::from("/h"));
         // No name → the validated id.
         assert_eq!(
             a.placement_for("topos_abc", PlacementNaming::default(), None)
@@ -779,8 +749,7 @@ mod tests {
     fn placement_namespaces_by_workspace_on_a_collision_then_falls_back_to_the_id() {
         let home = TempHome::new();
         home.skill("deploy-helper"); // a DIFFERENT skill already holds the plain name
-        let cfg = MemConfig::default();
-        let a = adapter(&home.0, &cfg);
+        let a = adapter(&home.0);
 
         // Collision on the plain name → suffixed by the (sanitized) workspace slug — skill first, so
         // the folder stays recognizable — never clobbering.
@@ -813,8 +782,7 @@ mod tests {
         home.skill("deploy-helper"); // the plain name is taken…
         home.skill("deploy-helper-acme"); // …and its workspace form…
         home.skill("deploy-helper-acme-2"); // …and the first counted form.
-        let cfg = MemConfig::default();
-        let a = adapter(&home.0, &cfg);
+        let a = adapter(&home.0);
         let naming = PlacementNaming {
             name: Some("deploy-helper"),
             workspace_slug: Some("acme"),
@@ -841,8 +809,7 @@ mod tests {
         std::fs::create_dir_all(&skills).unwrap();
         std::os::unix::fs::symlink(skills.join("gone-target"), skills.join("deploy-helper"))
             .unwrap();
-        let cfg = MemConfig::default();
-        let a = adapter(&home.0, &cfg);
+        let a = adapter(&home.0);
         let naming = PlacementNaming {
             name: Some("deploy-helper"),
             workspace_slug: Some("acme"),
@@ -890,12 +857,12 @@ mod tests {
         let cfg = MemConfig::default();
         let home = PathBuf::from("/h");
         assert!(
-            adapter(&home, &cfg).uninstall_footprint().is_empty(),
+            trigger(&home, &cfg).footprint().is_empty(),
             "no entry → nothing disclosed"
         );
-        adapter(&home, &cfg).install_currency_trigger();
+        trigger(&home, &cfg).install();
         assert_eq!(
-            adapter(&home, &cfg).uninstall_footprint(),
+            trigger(&home, &cfg).footprint(),
             vec![PathBuf::from("/h/settings.json")],
             "our entry present → settings.json disclosed (never deleted)"
         );

@@ -254,7 +254,7 @@ fn unclaimed_record(
         // Re-armed exactly as an adopt arms it: the folder is demanded again, and the harness
         // config may have been rewritten while it was not. Idempotent, and the signal the
         // composition root's breadth sweep + built-in placement ride.
-        currency: recognize(ctx, &source_abs).map(|_| ctx.harness.install_currency_trigger()),
+        currency: recognize(ctx, &source_abs).map(|_| ctx.triggers.active().install()),
         triggers: Vec::new(),
         origin: None,
         // Set by the manifest-edit step at the composition root, exactly as on a fresh adopt.
@@ -493,9 +493,7 @@ pub(crate) fn add_with_name(
     // Arm auto-update for a recognized harness — a best-effort, idempotent edit of the harness CONFIG
     // (never the skill dir), AFTER the all-or-nothing adoption above, so a settings.json hiccup never
     // rolls back a good adoption. Disclosed in the result (the only write `add` makes outside ~/.topos/).
-    let currency = recognized
-        .as_ref()
-        .map(|_| ctx.harness.install_currency_trigger());
+    let currency = recognized.as_ref().map(|_| ctx.triggers.active().install());
 
     Ok(AddData {
         skill_id: Some(skill_id.into_string()),

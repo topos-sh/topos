@@ -8,7 +8,8 @@ use std::time::Duration;
 
 use clap::Parser;
 use serde::Serialize;
-use topos_harness::{ClaudeCode, ConfigStore, HarnessAdapter, OpenClaw};
+use topos_harness::triggers::TriggerAdapter;
+use topos_harness::{ClaudeCode, ConfigStore, HarnessAdapter, OpenClaw, registry, triggers};
 use topos_types::HarnessId;
 use topos_types::results::AddData;
 
@@ -138,10 +139,20 @@ fn run_command(
         log_path: layout.log_path(),
         argv,
     };
-    // The harness adapter, selected through the one dispatch seam. v0 wires Claude Code only; the
-    // adapter touches its config home only when adopting a recognized skill, arming auto-updates, or on
-    // uninstall.
+    // The PLACEMENT port, selected through the one dispatch seam. v0 wires Claude Code only; it
+    // reads skill dirs and writes nothing.
     let harness = adapter_for(HarnessId::ClaudeCode, &fs, &fs);
+    // The TRIGGER ports, composed beside it — never through it. The active harness's trigger comes
+    // from the ONE registry factory (so this and the breadth sweep can never build a slug two ways),
+    // and `$HOME` widens the set to the whole machine: with no home there is no detection, so the
+    // active trigger is the whole surface, exactly as the breadth sweeps degrade.
+    let active_trigger = trigger_for(harness.id(), &fs, &fs);
+    let triggers = match std::env::var_os("HOME") {
+        Some(home) => {
+            ops::Triggers::machine(active_trigger.as_ref(), PathBuf::from(home), &fs, &fs)
+        }
+        None => ops::Triggers::active_only(active_trigger.as_ref()),
+    };
     // The ACTIVITY channel (stderr only — stdout stays the one document). Animated on a terminal,
     // one plain line per phase when piped, and byte-silent for the harness hook sweep, which fires
     // on every session-start-shaped event and must cost nothing on either stream. Held as an `Rc`
@@ -165,6 +176,7 @@ fn run_command(
             device_id: String::new(),
             layout: layout.clone(),
             harness: harness.as_ref(),
+            triggers: triggers.clone(),
             plane: &inert_plane,
             follow: &inert_follow,
             roots: None,
@@ -173,19 +185,12 @@ fn run_command(
             progress: crate::progress::silent(),
         };
         let binary = std::env::current_exe().ok();
-        // The breadth scrub rides the applied receipt: after the active adapter's hook scrub,
-        // every OTHER agent's trigger artifact is removed too (or its survival disclosed —
-        // OpenClaw's gateway may be down). Swept over the SUPPORTED set, not detection: an
-        // artifact must be scrubbed even when its harness's detect dir has since vanished.
-        let result = ops::uninstall(&ctx, binary, *yes).map(|outcome| match outcome {
-            ops::UninstallOutcome::Applied(mut applied) => {
-                if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
-                    applied.triggers = ops::scrub_all(&home, harness.id().slug(), &fs, &fs);
-                }
-                ops::UninstallOutcome::Applied(applied)
-            }
-            other => other,
-        });
+        // The breadth scrub rides the applied receipt, from inside the verb: after the active
+        // harness's trigger scrub, every OTHER agent's trigger artifact is removed too (or its
+        // survival disclosed — OpenClaw's gateway may be down). Swept over the SUPPORTED set, not
+        // detection: an artifact must be scrubbed even when its harness's detect dir has since
+        // vanished — and the bare describe disclosed exactly that set.
+        let result = ops::uninstall(&ctx, binary, *yes);
         return finish_uninstall(json, cmd_name, result, &diag);
     }
 
@@ -209,6 +214,7 @@ fn run_command(
             device_id: String::new(),
             layout: layout.clone(),
             harness: harness.as_ref(),
+            triggers: triggers.clone(),
             plane: &inert_plane,
             follow: &inert_follow,
             roots: std::env::var_os("HOME").map(|h| crate::ctx::AgentRoots {
@@ -226,7 +232,7 @@ fn run_command(
         let result = ops::status_snapshot(&ctx, view).map(|mut data| {
             if let Some(r) = &ctx.roots {
                 data.triggers =
-                    ops::probe_detected(&r.home, r.cwd.as_deref(), harness.as_ref(), &fs, &fs);
+                    ops::probe_detected(&r.home, r.cwd.as_deref(), ctx.triggers.active(), &fs, &fs);
             }
             data
         });
@@ -305,6 +311,7 @@ fn run_command(
         device_id,
         layout,
         harness: harness.as_ref(),
+        triggers: triggers.clone(),
         plane,
         follow,
         // The machine roots the placement engine detects agents against — the same `$HOME` + cwd
@@ -3234,9 +3241,8 @@ fn breadth_arm(
     }
 }
 
-/// Build the harness adapter for `id`, borrowing the shared config-store seam plus the subprocess
-/// runner (OpenClaw's trigger drives its own `openclaw` CLI). Adding a harness is ONE new match arm
-/// — no caller change. v0 only ever selects Claude Code (the CLI's one selection site above passes
+/// Build the PLACEMENT adapter for `id`. Adding a harness is ONE new match arm — no caller change.
+/// v0 only ever selects Claude Code (the CLI's one selection site above passes
 /// `HarnessId::ClaudeCode`; each adapter resolves its own config home: `$CLAUDE_CONFIG_DIR` else
 /// `$HOME/.claude`; `$HOME/.openclaw`; `$HERMES_HOME` else `$HOME/.hermes`). The OpenClaw and
 /// Hermes arms serve the test rigs while pilot verification stays open (each module's doc).
@@ -3246,7 +3252,10 @@ fn adapter_for<'a>(
     cli: &'a dyn topos_harness::CommandRunner,
 ) -> Box<dyn HarnessAdapter + 'a> {
     match id {
-        HarnessId::ClaudeCode => Box::new(ClaudeCode::new(ClaudeCode::resolve_home(), fs)),
+        // Claude Code's placement half needs no ports at all — it reads dirs and writes nothing.
+        HarnessId::ClaudeCode => Box::new(ClaudeCode::new(ClaudeCode::resolve_home())),
+        // These two carry BOTH ports on one type, so they still hold the seams their trigger half
+        // writes through.
         HarnessId::OpenClaw => Box::new(OpenClaw::new(OpenClaw::resolve_home(), fs, cli)),
         HarnessId::Hermes => Box::new(topos_harness::Hermes::new(
             topos_harness::Hermes::resolve_home(),
@@ -3254,6 +3263,21 @@ fn adapter_for<'a>(
             fs,
         )),
     }
+}
+
+/// Build the TRIGGER adapter for `id`, borrowing the shared config-store seam plus the subprocess
+/// runner (OpenClaw's trigger drives its own `openclaw` CLI). It goes through
+/// [`topos_harness::triggers::adapter_for_slug`] — the ONE place a harness's trigger machinery is
+/// named — over the real user home, so each adapter resolves its own harness root exactly as
+/// detection resolves it. Every `HarnessId` names a trigger-capable registry row (the crate's own
+/// view test pins that), so the factory always answers.
+fn trigger_for<'a>(
+    id: HarnessId,
+    fs: &'a dyn ConfigStore,
+    cli: &'a dyn topos_harness::CommandRunner,
+) -> Box<dyn TriggerAdapter + 'a> {
+    triggers::adapter_for_slug(id.slug(), &registry::real_home(), fs, cli)
+        .expect("every selectable harness is a trigger-capable registry row")
 }
 
 /// `$TOPOS_HOME`, else `$HOME/.topos` (`./.topos` as a last resort).

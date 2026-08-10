@@ -29,9 +29,13 @@ pub(crate) struct Ctx<'a> {
     /// The device identity that authors local commits (a controlled-ASCII token, e.g. `d_<hex>`).
     pub device_id: String,
     pub layout: Layout,
-    /// The harness adapter (Claude Code today): discovery, placement targeting, and the content-blind
-    /// auto-update-trigger (un)install. Content-blind — it never sees a skill's bytes.
+    /// The PLACEMENT port (Claude Code today): discovery + placement targeting. Content-blind — it
+    /// never sees a skill's bytes, and it writes nothing.
     pub harness: &'a dyn HarnessAdapter,
+    /// The TRIGGER ports — the active harness's auto-update trigger, plus (in production) the whole
+    /// machine's, so a preview discloses exactly what an `uninstall --yes` scrubs. Deliberately a
+    /// second port: which machinery arms a harness has nothing to do with where its bytes land.
+    pub triggers: crate::ops::Triggers<'a>,
     /// The plane's read side (the unsigned `current` pointer + version bytes). The real `ureq` transport
     /// when enrolled; the inert no-op before any enrollment; fixture-driven in tests. Integrity is the
     /// content-addressed `version_id`, re-verified by digest on every apply — never a pointer signature.

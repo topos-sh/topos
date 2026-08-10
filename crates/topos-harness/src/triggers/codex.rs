@@ -143,6 +143,16 @@ impl TriggerAdapter for Codex<'_> {
         let lines = split_lines(text);
         matches!(sentinel_indices(&lines)[..], [i] if block_verified(&lines, i))
     }
+
+    /// The TOML config, disclosed ONLY while it actually holds our verified block — and never as a
+    /// path `uninstall` deletes (the block is scrubbed line-surgically, the file kept).
+    fn footprint(&self) -> Vec<PathBuf> {
+        if self.present() {
+            vec![self.config_path()]
+        } else {
+            Vec::new()
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------------------------

@@ -11,6 +11,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 use topos_core::digest::{self, FileMode, ManifestEntry, to_hex};
 use topos_core::identity::{self, Commit};
+use topos_harness::triggers::TriggerAdapter;
 use topos_harness::{DiscoveredPlacement, HarnessAdapter, PlacementTarget};
 use topos_types::persisted::SyncState;
 use topos_types::results::{PullAction, PullData};
@@ -73,17 +74,27 @@ impl HarnessAdapter for NoHarness {
             dir: PathBuf::from(skill_id),
         }
     }
-    fn currency_kind(&self) -> CurrencyKind {
-        CurrencyKind::ExplicitPullOnly
+}
+
+impl TriggerAdapter for NoHarness {
+    fn slug(&self) -> &'static str {
+        HarnessId::ClaudeCode.slug()
     }
-    fn install_currency_trigger(&self) -> TriggerReport {
+
+    fn install(&self) -> TriggerReport {
         report()
     }
-    fn remove_currency_trigger(&self) -> TriggerReport {
+
+    fn remove(&self) -> TriggerReport {
         report()
     }
-    fn uninstall_footprint(&self) -> Vec<PathBuf> {
+
+    fn footprint(&self) -> Vec<PathBuf> {
         Vec::new()
+    }
+
+    fn present(&self) -> bool {
+        !self.footprint().is_empty()
     }
 }
 fn report() -> TriggerReport {
@@ -272,6 +283,7 @@ impl Rig {
             device_id: DEVICE.to_owned(),
             layout: self.layout(),
             harness: &self.harness,
+            triggers: crate::ops::Triggers::active_only(&self.harness),
             plane,
             follow,
             roots: None,

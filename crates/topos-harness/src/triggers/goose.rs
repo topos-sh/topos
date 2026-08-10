@@ -130,6 +130,12 @@ impl TriggerAdapter for Goose<'_> {
     fn present(&self) -> bool {
         self.file.present()
     }
+
+    fn footprint(&self) -> Vec<PathBuf> {
+        // Only the artifact topos wrote — goose's own config (the enablement evidence) is read, never
+        // owned, so it is never disclosed as ours.
+        self.file.footprint()
+    }
 }
 
 /// The zero-risk line scan: exactly ONE zero-indent `plugins:` key, and within its block (up to

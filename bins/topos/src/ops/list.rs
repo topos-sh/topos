@@ -159,12 +159,13 @@ pub(crate) fn list_with(
     data.forge = inventory::forge_sources(ctx, &sections);
 
     if req.footprint {
-        // The `~/.topos/` walk PLUS any harness config path topos holds a managed entry in
-        // (disclosed, never deleted) — every topos-owned path outside skill dirs.
+        // The `~/.topos/` walk PLUS every harness artifact topos holds a managed trigger in
+        // (disclosed, never deleted) — every topos-owned path outside skill dirs, across every
+        // harness an `uninstall --yes` reaches, not just the active one.
         let mut paths = sidecar::footprint(ctx.fs, &ctx.layout)?;
         paths.extend(
-            ctx.harness
-                .uninstall_footprint()
+            ctx.triggers
+                .footprint()
                 .iter()
                 .map(|p| p.to_string_lossy().into_owned()),
         );

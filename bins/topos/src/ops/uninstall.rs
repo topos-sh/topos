@@ -1,12 +1,13 @@
 //! `uninstall [--yes]` — remove topos from this machine, two-phase.
 //!
-//! Bare = a DESCRIBE of exactly what goes: the harness auto-update-hook entry (named by its config path),
-//! the `~/.topos/` sidecar tree (which holds the signed-in credential), and the note that SKILL FILES IN
-//! AGENT DIRS STAY (uninstall never deletes a skill byte). `--yes` scrubs the auto-update hook
-//! (`remove_currency_trigger`, whose report is surfaced honestly), then deletes the `~/.topos/` tree via
-//! the fs seam. The `topos` binary is NOT self-deleted (a package manager may own it) — its path is
-//! disclosed with a "remove it with your installer (or `rm <path>`)" note. A maintenance command: it needs
-//! no sign-in, mints no identity, and touches no plane.
+//! Bare = a DESCRIBE of exactly what goes: EVERY harness auto-update-trigger artifact topos owns on this
+//! machine (each named by its path — the same set the apply scrubs, not just the active harness's), the
+//! `~/.topos/` sidecar tree (which holds the signed-in credential), and the note that SKILL FILES IN
+//! AGENT DIRS STAY (uninstall never deletes a skill byte). `--yes` scrubs the active harness's trigger
+//! and then every other supported harness's (both reports surfaced honestly), then deletes the
+//! `~/.topos/` tree via the fs seam. The `topos` binary is NOT self-deleted (a package manager may own
+//! it) — its path is disclosed with a "remove it with your installer (or `rm <path>`)" note. A
+//! maintenance command: it needs no sign-in, mints no identity, and touches no plane.
 
 use std::path::PathBuf;
 
@@ -19,7 +20,8 @@ use crate::error::ClientError;
 /// The bare `uninstall` DESCRIBE — what `--yes` would remove (nothing has changed).
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct UninstallDescribe {
-    /// The harness config path(s) the auto-update hook would be scrubbed from (empty = none armed).
+    /// Every harness artifact the auto-update trigger would be scrubbed from — across EVERY harness
+    /// the apply reaches, not just the active one (empty = none armed anywhere).
     pub hook_paths: Vec<String>,
     /// The `~/.topos/` sidecar tree that would be deleted (the signed-in credential lives inside it).
     pub sidecar_path: String,
@@ -37,10 +39,11 @@ pub(crate) struct UninstallDescribe {
 /// The applied `uninstall` — what was removed.
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct UninstallApplied {
-    /// The auto-update-hook scrub report (surfaced honestly — `Inactive` when nothing was armed).
+    /// The ACTIVE harness's trigger scrub report (surfaced honestly — `Inactive` when nothing was
+    /// armed).
     pub hook: TriggerReport,
     /// The breadth scrub's outcomes — other agents whose trigger the sweep removed (or could not,
-    /// disclosed) — attached by the composition root; clean no-ops stay off the receipt.
+    /// disclosed); clean no-ops stay off the receipt.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub triggers: Vec<TriggerReport>,
     /// Whether the `~/.topos/` sidecar tree was deleted (false = there was nothing to delete).
@@ -73,9 +76,11 @@ pub(crate) fn uninstall(
     binary_path: Option<PathBuf>,
     yes: bool,
 ) -> Result<UninstallOutcome, ClientError> {
+    // The whole machine's trigger footprint — the ACTIVE harness's plus every other one the apply
+    // scrubs — so the describe can never name less than `--yes` touches.
     let hook_paths: Vec<String> = ctx
-        .harness
-        .uninstall_footprint()
+        .triggers
+        .footprint()
         .iter()
         .map(|p| p.to_string_lossy().into_owned())
         .collect();
@@ -119,10 +124,13 @@ pub(crate) fn uninstall(
     }
 
     // ---- APPLY (`--yes`) ----
-    // Scrub the auto-update hook FIRST (its config lives in the harness home, not `~/.topos/`), then
-    // the built-in skill's placed copies (topos-authored, recorded in the sidecar we are about to
-    // delete), then the sidecar tree itself. Idempotent: a second run finds nothing to remove.
-    let hook = ctx.harness.remove_currency_trigger();
+    // Scrub the auto-update triggers FIRST (their artifacts live in the harness homes, not
+    // `~/.topos/`) — the active harness's, then every other supported harness's, exactly the set the
+    // describe above disclosed. Then the built-in skill's placed copies (topos-authored, recorded in
+    // the sidecar we are about to delete), then the sidecar tree itself. Idempotent: a second run
+    // finds nothing to remove.
+    let hook = ctx.triggers.active().remove();
+    let breadth = ctx.triggers.scrub_others();
     let mut builtin_removed = Vec::new();
     for dir in &builtin_dirs {
         let p = std::path::Path::new(dir);
@@ -140,9 +148,7 @@ pub(crate) fn uninstall(
 
     Ok(UninstallOutcome::Applied(UninstallApplied {
         hook,
-        // The breadth scrub (other agents' triggers) runs at the composition root, which holds
-        // the real ports; it attaches its outcomes here after this returns.
-        triggers: Vec::new(),
+        triggers: breadth,
         sidecar_removed,
         builtin_dirs: builtin_removed,
         binary_path: binary,
@@ -173,6 +179,7 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicU32, Ordering};
 
+    use topos_harness::triggers::TriggerAdapter;
     use topos_harness::{DiscoveredPlacement, HarnessAdapter, PlacementTarget};
     use topos_types::{CurrencyKind, HarnessId, TriggerReport, TriggerState};
 
@@ -201,8 +208,9 @@ mod tests {
         }
     }
 
-    /// A harness fake that RECORDS whether `remove_currency_trigger` was called and reports a fixed
-    /// footprint (a config path). It touches no real config — the op orchestration is what's under test.
+    /// A harness fake carrying BOTH ports: placement targets nothing real, and the trigger half
+    /// RECORDS whether `remove` was called and reports a fixed footprint (a config path). It touches
+    /// no real config — the op orchestration is what's under test.
     struct FakeHarness {
         config: PathBuf,
         removed: Cell<u32>,
@@ -211,9 +219,11 @@ mod tests {
         fn id(&self) -> HarnessId {
             HarnessId::ClaudeCode
         }
+
         fn discover(&self) -> Vec<DiscoveredPlacement> {
             Vec::new()
         }
+
         fn placement_for(
             &self,
             skill_id: &str,
@@ -224,18 +234,28 @@ mod tests {
                 dir: PathBuf::from("/nonexistent").join(skill_id),
             }
         }
-        fn currency_kind(&self) -> CurrencyKind {
-            CurrencyKind::SessionStart
+    }
+
+    impl TriggerAdapter for FakeHarness {
+        fn slug(&self) -> &'static str {
+            HarnessId::ClaudeCode.slug()
         }
-        fn install_currency_trigger(&self) -> TriggerReport {
+
+        fn install(&self) -> TriggerReport {
             self.report(TriggerState::Active, true)
         }
-        fn remove_currency_trigger(&self) -> TriggerReport {
+
+        fn remove(&self) -> TriggerReport {
             self.removed.set(self.removed.get() + 1);
             self.report(TriggerState::Inactive, true)
         }
-        fn uninstall_footprint(&self) -> Vec<PathBuf> {
+
+        fn footprint(&self) -> Vec<PathBuf> {
             vec![self.config.clone()]
+        }
+
+        fn present(&self) -> bool {
+            !self.footprint().is_empty()
         }
     }
     impl FakeHarness {
@@ -269,6 +289,8 @@ mod tests {
             device_id: String::new(),
             layout: Layout::new(home),
             harness,
+            // The same fake on both ports — this rig's subject is the verb's orchestration of them.
+            triggers: crate::ops::Triggers::active_only(harness),
             plane,
             follow,
             roots: None,

@@ -8,6 +8,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 
+use topos_harness::triggers::TriggerAdapter;
 use topos_harness::{DiscoveredPlacement, HarnessAdapter, PlacementTarget};
 use topos_types::results::{AddData, LoginData, PullData, StatusData};
 use topos_types::{CurrencyKind, HarnessId, TriggerReport, TriggerState};
@@ -66,17 +67,27 @@ impl HarnessAdapter for WorkHarness {
             dir: self.work.join(skill_id),
         }
     }
-    fn currency_kind(&self) -> CurrencyKind {
-        CurrencyKind::ExplicitPullOnly
+}
+
+impl TriggerAdapter for WorkHarness {
+    fn slug(&self) -> &'static str {
+        HarnessId::ClaudeCode.slug()
     }
-    fn install_currency_trigger(&self) -> TriggerReport {
+
+    fn install(&self) -> TriggerReport {
         no_trigger()
     }
-    fn remove_currency_trigger(&self) -> TriggerReport {
+
+    fn remove(&self) -> TriggerReport {
         no_trigger()
     }
-    fn uninstall_footprint(&self) -> Vec<PathBuf> {
+
+    fn footprint(&self) -> Vec<PathBuf> {
         Vec::new()
+    }
+
+    fn present(&self) -> bool {
+        !self.footprint().is_empty()
     }
 }
 
@@ -212,6 +223,8 @@ impl SessionInstall {
             device_id,
             layout,
             harness: &harness,
+            // The same fixture on both ports: the e2e suites prove the loop, never a harness config.
+            triggers: ops::Triggers::active_only(&harness),
             plane: &routed,
             follow: &cache,
             roots: Some(AgentRoots {

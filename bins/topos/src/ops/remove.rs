@@ -488,6 +488,7 @@ fn project_demand(
         device_id: ctx.device_id.clone(),
         layout: ctx.layout.clone(),
         harness: ctx.harness,
+        triggers: ctx.triggers.clone(),
         plane: ctx.plane,
         follow: ctx.follow,
         roots,

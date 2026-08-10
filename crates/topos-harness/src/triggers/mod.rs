@@ -8,18 +8,18 @@
 //! [`adapter_for_slug`] is the ONE place a harness's trigger machinery is named, so the set of
 //! trigger-capable harnesses is a VIEW over the [`registry`](crate::registry) table — a caller arms
 //! or scrubs by iterating rows, never by carrying its own list. Three shared bases carry the
-//! machinery, plus the harnesses whose trigger rides their full
-//! [`HarnessAdapter`]:
+//! machinery, plus the two harnesses whose trigger lives in a program of their own:
 //!
 //! - `cc_hooks` — the JSON-config-merge family (Claude-Code-shaped hooks registered in a shared
-//!   strict-JSON config file): `claude-code` (whose spec lives with its adapter, and is the only one
-//!   declaring a hook dialect), `gemini-cli`, `cursor`, `droid`.
+//!   strict-JSON config file): `claude-code` (whose spec lives with its placement adapter, and is the
+//!   only one declaring a hook dialect), `gemini-cli`, `cursor`, `droid`.
 //! - `file_drop` — one topos-owned file at a harness-defined path: `github-copilot`, `opencode`,
 //!   `goose`, `amp`, `cline`.
 //! - `codex` is special: its config is TOML, handled as a line-anchored merge mirroring the
 //!   Hermes YAML discipline — provable shapes only, fail-closed on everything else.
-//! - `openclaw` (its own scheduler) and `hermes-agent` (its own config edit) answer through their
-//!   adapters, wrapped so a caller never sees the difference.
+//! - `openclaw` (its own scheduler) and `hermes-agent` (its own config edit) implement this port
+//!   DIRECTLY on the same types that carry their placement half, so a caller never sees the
+//!   difference.
 //!
 //! Every adapter here mirrors the big-three idiom: content-blind, an injected home (never the
 //! real `~`), durable writes through the [`ConfigStore`] port, sentinel/marker-keyed ownership,
@@ -31,11 +31,11 @@
 //! adapter ever WRITES another program's trust/consent state — at most it reads it, fail-closed,
 //! as evidence.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use topos_types::TriggerReport;
 
-use crate::{CommandRunner, ConfigStore, HarnessAdapter};
+use crate::{CommandRunner, ConfigStore};
 
 mod amp;
 pub(crate) mod cc_hooks;
@@ -148,10 +148,11 @@ fn opens_a_command(prefix: &str) -> bool {
 }
 
 /// The auto-update-trigger port for ONE registry-slug harness: idempotent (un)install of the one
-/// sweep trigger, plus a provable-presence health probe. Every harness with a trigger is reachable
-/// through this port — the config-merge and file-drop families here, and the harnesses whose trigger
-/// rides their full [`HarnessAdapter`] — so a caller arming a machine never
-/// needs to know which machinery serves which harness.
+/// sweep trigger, a provable-presence health probe, and the topos-owned paths it discloses. Every
+/// harness with a trigger is reachable through this port — the config-merge and file-drop families
+/// here, and the two harnesses whose trigger lives in their own program — so a caller arming a
+/// machine never needs to know which machinery serves which harness. Where a bundle's BYTES land is
+/// the other port's ([`crate::HarnessAdapter`]); nothing here ever writes a skill dir.
 pub trait TriggerAdapter {
     /// The registry slug this adapter serves.
     fn slug(&self) -> &'static str;
@@ -164,6 +165,12 @@ pub trait TriggerAdapter {
     /// Provable presence of OUR trigger artifact right now (the health probe). Anything
     /// unprovable answers `false` — presence is never claimed on faith.
     fn present(&self) -> bool;
+    /// Topos-owned paths **outside** any skill dir, for `--footprint` disclosure — never a skill
+    /// file, and never a path `uninstall` DELETES (a shared config the trigger lives in is scrubbed
+    /// surgically by [`Self::remove`], the file itself kept). A path is disclosed only where it can
+    /// be confirmed ours right now; a trigger that lives outside the filesystem entirely (a
+    /// scheduler registration) has no path to disclose and says so with an empty list.
+    fn footprint(&self) -> Vec<PathBuf>;
     /// Why [`Self::present`] cannot be answered without running the harness, when it cannot — the
     /// reason a read-only status reports "unknown" instead of probing. `None` (the default) means the
     /// probe is an honest offline read: a trigger that lives in the filesystem is provable there.
@@ -177,38 +184,6 @@ pub trait TriggerAdapter {
     /// filesystem case.
     fn scrub_needs_live_harness(&self) -> bool {
         false
-    }
-}
-
-/// A full [`HarnessAdapter`] seen through the trigger port. The harnesses topos ships a whole adapter
-/// for carry their trigger inside it (a config edit; a scheduler registration), and this is how they
-/// answer [`adapter_for_slug`] like any other harness — so a caller arming or scrubbing a machine
-/// iterates ONE list and never branches on which machinery a slug uses.
-struct AdapterTrigger<'a> {
-    slug: &'static str,
-    adapter: Box<dyn HarnessAdapter + 'a>,
-    offline_refusal: Option<&'static str>,
-    needs_live_harness: bool,
-}
-
-impl TriggerAdapter for AdapterTrigger<'_> {
-    fn slug(&self) -> &'static str {
-        self.slug
-    }
-    fn install(&self) -> TriggerReport {
-        self.adapter.install_currency_trigger()
-    }
-    fn remove(&self) -> TriggerReport {
-        self.adapter.remove_currency_trigger()
-    }
-    fn present(&self) -> bool {
-        self.adapter.trigger_present()
-    }
-    fn offline_probe_refusal(&self) -> Option<&'static str> {
-        self.offline_refusal
-    }
-    fn scrub_needs_live_harness(&self) -> bool {
-        self.needs_live_harness
     }
 }
 
@@ -246,24 +221,15 @@ pub fn adapter_for_slug<'a>(
         "github-copilot" => Box::new(github_copilot::adapter(home, cfg)),
         "goose" => Box::new(goose::adapter(home, cfg)),
         "opencode" => Box::new(opencode::adapter(home, cfg)),
-        "openclaw" => Box::new(AdapterTrigger {
-            slug: "openclaw",
-            adapter: Box::new(crate::OpenClaw::new(home.join(".openclaw"), cfg, run)),
-            // The trigger lives in OpenClaw's SCHEDULER, not the filesystem: proving it there means
-            // running `openclaw cron list`, which a read-only status must not do.
-            offline_refusal: Some("presence needs a live scheduler query"),
-            needs_live_harness: true,
-        }),
-        "hermes-agent" => Box::new(AdapterTrigger {
-            slug: "hermes-agent",
-            adapter: Box::new(crate::Hermes::new(
-                crate::registry::config_root(crate::registry::Root::HermesHome, home),
-                crate::Hermes::resolve_accept_hooks(),
-                cfg,
-            )),
-            offline_refusal: None,
-            needs_live_harness: false,
-        }),
+        // The two harnesses whose trigger lives in a program of their own (OpenClaw's scheduler;
+        // Hermes's own config surface) implement this port on the same type that carries their
+        // placement half — no wrapper, and the offline/live-harness knobs are theirs to declare.
+        "openclaw" => Box::new(crate::OpenClaw::new(home.join(".openclaw"), cfg, run)),
+        "hermes-agent" => Box::new(crate::Hermes::new(
+            crate::registry::config_root(crate::registry::Root::HermesHome, home),
+            crate::Hermes::resolve_accept_hooks(),
+            cfg,
+        )),
         _ => return None,
     })
 }

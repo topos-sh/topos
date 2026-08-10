@@ -579,6 +579,7 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU32, Ordering};
 
+    use topos_harness::triggers::TriggerAdapter;
     use topos_harness::{DiscoveredPlacement, HarnessAdapter, PlacementTarget};
     use topos_types::requests::{ProposeRequest, PublishRequest, RevertRequest, ReviewRequest};
     use topos_types::{
@@ -626,17 +627,27 @@ mod tests {
                 dir: PathBuf::from("/nonexistent").join(skill_id),
             }
         }
-        fn currency_kind(&self) -> CurrencyKind {
-            CurrencyKind::ExplicitPullOnly
+    }
+
+    impl TriggerAdapter for NullHarness {
+        fn slug(&self) -> &'static str {
+            HarnessId::ClaudeCode.slug()
         }
-        fn install_currency_trigger(&self) -> TriggerReport {
+
+        fn install(&self) -> TriggerReport {
             no_trigger()
         }
-        fn remove_currency_trigger(&self) -> TriggerReport {
+
+        fn remove(&self) -> TriggerReport {
             no_trigger()
         }
-        fn uninstall_footprint(&self) -> Vec<PathBuf> {
+
+        fn footprint(&self) -> Vec<PathBuf> {
             Vec::new()
+        }
+
+        fn present(&self) -> bool {
+            !self.footprint().is_empty()
         }
     }
     fn no_trigger() -> TriggerReport {
@@ -741,6 +752,7 @@ mod tests {
             device_id: "d_author".to_owned(),
             layout: layout.clone(),
             harness: &harness,
+            triggers: crate::ops::Triggers::active_only(&harness),
             plane: &inert_p,
             follow: &inert_f,
             roots: None,
@@ -827,6 +839,7 @@ mod tests {
             device_id: "d_author".to_owned(),
             layout: layout.clone(),
             harness: &harness,
+            triggers: crate::ops::Triggers::active_only(&harness),
             plane: &inert_p,
             follow: &inert_f,
             roots: None,
@@ -966,6 +979,7 @@ mod tests {
             device_id: "d_author".to_owned(),
             layout: layout.clone(),
             harness: &harness,
+            triggers: crate::ops::Triggers::active_only(&harness),
             plane: &inert_p,
             follow: &inert_f,
             roots: None,

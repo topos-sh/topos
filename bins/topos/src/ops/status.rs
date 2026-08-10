@@ -528,7 +528,7 @@ mod tests {
 
         // The exact pair the composition root's pre-recovery fast path runs. `with_bare_ctx`
         // wires the layout at the home root and NO roots — the fixture's original shape.
-        let harness = topos_harness::ClaudeCode::new(home.0.join(".claude"), &fs);
+        let harness = topos_harness::ClaudeCode::new(home.0.join(".claude"));
         let ctx = crate::ctx::Ctx {
             progress: crate::progress::silent(),
             fs: &fs,
@@ -537,13 +537,14 @@ mod tests {
             device_id: String::new(),
             layout: layout.clone(),
             harness: &harness,
+            triggers: crate::ops::Triggers::active_only(&crate::ops::INERT_TRIGGER),
             plane: &crate::plane::InertPlane,
             follow: &crate::plane::InertFollow,
             roots: None,
         };
         let data = status_snapshot(&ctx, ScopeView::Here).expect("status snapshot");
         assert!(data.sessions.is_empty());
-        let _ = crate::ops::probe_detected(&home.0, None, &harness, &fs, &fs);
+        let _ = crate::ops::probe_detected(&home.0, None, &crate::ops::INERT_TRIGGER, &fs, &fs);
         assert_eq!(
             before,
             tree_bytes(&home.0),

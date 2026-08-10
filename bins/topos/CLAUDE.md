@@ -74,11 +74,14 @@ generated `docs/cli.md` (`cargo xtask gen-cli-ref`).
 - `ops/` — the verbs: `add`, `remove`, `reconcile` (update), `sync_engine`, `publish`, `review`,
   `revert`, `protect`, `invite`, `login`/`loopback`, `status`, `auth`, `list`, `diff`, `log`,
   `init`, `fmt`, `uninstall`, `builtin` (the embedded meta-skill from `skills/topos/`),
-  `self_update` (minisign-gated via `release`), `version_check`, `arm` (the arming sweep — every
-  detected agent's auto-update trigger, iterating the ONE harness table and asking
-  `topos-harness::triggers` for each row's adapter, so no caller knows which machinery serves
-  which agent), `quiet_gate`, `merge_resolve` (diverged-draft diff3 behind the `DivergedWitness`
-  token).
+  `self_update` (minisign-gated via `release`), `version_check`, `arm` (the TRIGGER half of the
+  harness ports: `Triggers` — what `ctx.triggers` carries, the active agent's trigger plus the
+  machine root the whole-machine set resolves under, so `footprint` (the uninstall describe +
+  `list --footprint`) and `scrub_others` (`uninstall --yes`) walk THE SAME set — plus the
+  detection-scoped `arm_detected`/`probe_detected` sweeps. All of it iterates the ONE harness table
+  and asks `topos-harness::triggers` for each row's adapter, so no caller knows which machinery
+  serves which agent), `quiet_gate`, `merge_resolve` (diverged-draft diff3 behind the
+  `DivergedWitness` token).
 - `materialize` — crash-safe dir-swap placement writes. The destructive-path rail is
   PARK-THEN-VERIFY (park aside, re-read, drop only what is accounted for; unaccounted bytes are
   preserved as `.topos-kept-*` siblings) plus the park journal + recovery; the contracts live in
@@ -158,8 +161,9 @@ generated `docs/cli.md` (`cargo xtask gen-cli-ref`).
   not a default.
 - `plane_http` — the blocking `ureq` transports; one `SessionTransports` set per session;
   `resolve_session_lane` picks a write verb's lane. `scan` — the bundle scanner (rejects
-  fs-level hazards before the kernel digest). `config_io` + `ctx` — the injected
-  `HarnessAdapter`/`ConfigStore` seams. `actions` — the one `NextAction` construction fn.
+  fs-level hazards before the kernel digest). `config_io` + `ctx` — the injected `ConfigStore` seam
+  and the two harness ports a verb holds apart (`ctx.harness` = placement, `ctx.triggers` =
+  auto-update triggers). `actions` — the one `NextAction` construction fn.
 - `progress` — the ACTIVITY seam: a stderr-only transient line naming what is in flight while a
   fetch runs. One phase at a time, opened through an RAII guard; a verb's label (`updating docs
   (2 of 3)`) wins over a transport's (`contacting topos.sh`), which opens only when idle; byte

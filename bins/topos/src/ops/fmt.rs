@@ -124,7 +124,7 @@ mod tests {
         let clock = RealClock;
         let plane = InertPlane;
         let follow = InertFollow;
-        let harness = ClaudeCode::new(scratch("adapter"), &fs);
+        let harness = ClaudeCode::new(scratch("adapter"));
         let ctx = Ctx {
             progress: crate::progress::silent(),
             fs: &fs,
@@ -133,6 +133,7 @@ mod tests {
             device_id: String::new(),
             layout: Layout::new(&home.join(".topos")),
             harness: &harness,
+            triggers: crate::ops::Triggers::active_only(&crate::ops::INERT_TRIGGER),
             plane: &plane,
             follow: &follow,
             roots: Some(AgentRoots {

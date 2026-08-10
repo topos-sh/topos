@@ -1,10 +1,17 @@
-# `topos-harness` — the `HarnessAdapter` port
+# `topos-harness` — the placement port + the trigger port
 
-The `HarnessAdapter` trait + the `ConfigStore` + `CommandRunner` ports + the harness impls — the
-one client-side port. An adapter answers **where** (`discover` / `placement_for`) and **when**
-(`currency_kind` + trigger (un)install); it is **content-blind**: it never receives a skill's
-bytes, never hashes a bundle, never writes a skill dir — only its own harness config surface. v0
-places exact bytes with no dialect translation, so adding a harness is a new impl, not a refactor.
+TWO client-side ports, one responsibility each, plus the `ConfigStore` + `CommandRunner` seams and
+the harness impls:
+
+- **`HarnessAdapter`** answers **where** — `id` / `discover` / `placement_for`. It writes nothing.
+- **`triggers::TriggerAdapter`** answers **when the update check fires** — `slug` / `install` /
+  `remove` / `present` / `footprint`, plus the two honesty knobs (`offline_probe_refusal`,
+  `scrub_needs_live_harness`). It edits its own harness config surface and nothing else.
+
+Both are **content-blind**: neither receives a skill's bytes, hashes a bundle, or writes a skill
+dir. A harness may be served by both ports, by either alone, or by different machinery on each side;
+a caller composes them and never learns which. v0 places exact bytes with no dialect translation, so
+adding a harness is a new impl, not a refactor.
 
 **ALL platform / harness-version dependencies live here** — the rest of the workspace stays
 platform-agnostic.
@@ -16,39 +23,44 @@ firing on every session-shaped event is cheap). `--hook <harness>` names the cal
 selects the sweep's stdout dialect: UNMARKED is the schema-conservative default (`hookEventName` +
 `additionalContext` only, nothing when there is nothing to say — what a strict hook-output
 validator accepts); `claude-code` is the one spec declaring a `hook_dialect` today, opting into
-`reloadSkills` so pulled skills go live same-session. `trigger_present` is the hook-health probe
-`list`/`auth status` read — health is never claimed on faith. The shared contract everywhere:
+`reloadSkills` so pulled skills go live same-session. `present` is the hook-health probe
+`list`/`auth status` read, and `footprint` is what `uninstall`'s describe and `list --footprint`
+disclose (topos-owned paths outside skill dirs, never a delete target) — health is never claimed on
+faith and a path is never claimed unconfirmed. The shared contract everywhere:
 `Active` only on stated evidence, else the entry is registered and the report floors at explicit
 pull; fail-closed with zero writes on any unprovable config shape; ownership keys on the
 sentinel/marker alone; every (un)install idempotent; topos never writes another program's
 trust/consent state.
 
 Every trigger reports in ONE shape — `topos_types::TriggerReport`, built by the crate's single
-`trigger_report` constructor, which is what applies the honest-kind floor. `triggers::TriggerAdapter`
-is the ONE port: the config-merge and file-drop instances implement it directly, and the harnesses
-whose trigger rides their full `HarnessAdapter` (OpenClaw's scheduler, Hermes's config edit) are
-wrapped into it, so a caller arms, scrubs, and probes by iterating registry rows and never learns
-which machinery served which harness.
+`trigger_report` constructor, which is what applies the honest-kind floor (only an `Active` report
+carries the instance's live `CurrencyKind`; every other state advertises the explicit-pull floor).
+`triggers::TriggerAdapter` is the ONE port: the config-merge and file-drop instances implement it,
+and so do `OpenClaw` (its scheduler) and `Hermes` (its config edit) — directly, on the same types
+that carry their placement half — so a caller arms, scrubs, and probes by iterating registry rows and
+never learns which machinery served which harness.
 
 ## What's here
 
-- **`claude_code`** — the reference adapter: discover `~/.claude/skills/*/SKILL.md` through the
-  registry's one probe; `placement_for` (sanitized display name → `<skill>-<workspace>` on
-  collision → validated id); the trigger is a `JsonHooksSpec` instance over the shared merge —
-  matcher-free `settings.json` SessionStart, `async: true`, the `--hook claude-code` dialect
-  marker, sentinel-keyed `# topos:currency`. `$CLAUDE_CONFIG_DIR` honored and injected.
-- **`hermes`** — session-boundary shell hooks (`on_session_start`/`on_session_reset`) in
-  `config.yaml` via an anchored line-surgical merge (no YAML dep); Active only on evidence from
-  Hermes's own consent allowlist. `$HERMES_HOME` injected.
-- **`openclaw`** — native delivery into its default-watched skills root; the trigger is a silent
-  1-minute OpenClaw cron registered argv-only through `CommandRunner` (declaration-key
-  idempotent); Active only on a successful gateway round-trip.
+- **`claude_code`** — the reference PLACEMENT adapter (it holds no port, writes nothing): discover
+  `~/.claude/skills/*/SKILL.md` through the registry's one probe; `placement_for` (sanitized display
+  name → `<skill>-<workspace>` on collision → validated id). Its trigger half is the `JsonHooksSpec`
+  the module also declares, run by `triggers::cc_hooks` over the shared merge — matcher-free
+  `settings.json` SessionStart, `async: true`, the `--hook claude-code` dialect marker,
+  sentinel-keyed `# topos:currency`. `$CLAUDE_CONFIG_DIR` honored and injected.
+- **`hermes`** — BOTH ports on one type: mixed-depth discovery/placement, plus session-boundary shell
+  hooks (`on_session_start`/`on_session_reset`) in `config.yaml` via an anchored line-surgical merge
+  (no YAML dep); Active only on evidence from Hermes's own consent allowlist. `$HERMES_HOME` injected.
+- **`openclaw`** — BOTH ports on one type: native delivery into its default-watched skills root, plus
+  a silent 1-minute OpenClaw cron registered argv-only through `CommandRunner` (declaration-key
+  idempotent); Active only on a successful gateway round-trip, and the only trigger that refuses the
+  offline presence probe (`offline_probe_refusal`) and needs a live harness to scrub.
 - **`triggers`** — the ONE trigger port over twelve harnesses: `cc_hooks` (the strict-JSON
   session-start merge — claude-code, gemini-cli, cursor, droid — parameterized by a `JsonHooksSpec`
   whose `handler_async` and `hook_dialect` knobs are the only per-harness deviations; plus codex as
   a line-anchored TOML merge, never Active) and `file_drop` (one topos-owned marker-led file:
-  github-copilot, opencode, goose, amp, cline), with openclaw + hermes-agent wrapped in from their
-  own adapters. `adapter_for_slug` is the seam the CLI's arming sweep consumes AND the only place
+  github-copilot, opencode, goose, amp, cline), plus openclaw + hermes-agent implementing the port
+  themselves. `adapter_for_slug` is the seam the CLI's arming sweep consumes AND the only place
   machinery is named, so the trigger-capable set is a view over the registry, not a second list;
   the one sweep spelling is composed from shared consts.
 - **`coverage`** — whether a harness reads the shared `~/.agents/skills` dir, with PROVENANCE

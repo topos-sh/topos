@@ -1,5 +1,6 @@
-//! The `OpenClaw` [`HarnessAdapter`] — discovery, byte-exact placement targeting, and the
-//! idempotent **silent-cron auto-update trigger** registered through OpenClaw's own CLI.
+//! The `OpenClaw` adapter — BOTH of the crate's ports on one type: [`HarnessAdapter`] (discovery +
+//! byte-exact placement targeting) and [`TriggerAdapter`] (the idempotent **silent-cron auto-update
+//! trigger** registered through OpenClaw's own CLI). The two halves share only the resolved home.
 //!
 //! OpenClaw reads native AgentSkills-spec `SKILL.md` bundles from `~/.openclaw/skills` (probed
 //! live against openclaw@2026.7.1 in a container: recognized offline, ungated, source
@@ -44,6 +45,7 @@ use std::path::PathBuf;
 use serde_json::Value;
 use topos_types::{CurrencyKind, HarnessId, TriggerReport, TriggerState};
 
+use crate::triggers::TriggerAdapter;
 use crate::{
     CommandRunner, ConfigStore, DiscoveredPlacement, HarnessAdapter, PlacementNaming,
     PlacementTarget,
@@ -91,9 +93,9 @@ const LEGACY_PLUGIN_FILE_NAME: &str = "topos-currency.mjs";
 /// old topos wrote is ever scrubbed.)
 const LEGACY_EXTRA_FILES_KEY: &str = "bootstrap-extra-files";
 
-/// The `OpenClaw` [`HarnessAdapter`]. Holds the resolved config home, the [`ConfigStore`] port
-/// (the legacy scrub's durable write), and the [`CommandRunner`] port (the `openclaw cron` CLI) —
-/// all injected, so tests point the home at a temp dir and drive a fake CLI.
+/// The `OpenClaw` adapter — [`HarnessAdapter`] + [`TriggerAdapter`]. Holds the resolved config home,
+/// the [`ConfigStore`] port (the legacy scrub's durable write), and the [`CommandRunner`] port (the
+/// `openclaw cron` CLI) — all injected, so tests point the home at a temp dir and drive a fake CLI.
 pub struct OpenClaw<'a> {
     /// `$HOME/.openclaw` — injected in tests; see [`OpenClaw::resolve_home`].
     home: PathBuf,
@@ -382,12 +384,14 @@ impl HarnessAdapter for OpenClaw<'_> {
             },
         }
     }
+}
 
-    fn currency_kind(&self) -> CurrencyKind {
-        CurrencyKind::Scheduled
+impl TriggerAdapter for OpenClaw<'_> {
+    fn slug(&self) -> &'static str {
+        HarnessId::OpenClaw.slug()
     }
 
-    fn install_currency_trigger(&self) -> TriggerReport {
+    fn install(&self) -> TriggerReport {
         // The legacy inject surface is scrubbed FIRST (best-effort, fail-closed) so an upgraded
         // install converges on the one trigger; its outcome never decides the state — the cron
         // registration does.
@@ -401,7 +405,7 @@ impl HarnessAdapter for OpenClaw<'_> {
         }
     }
 
-    fn remove_currency_trigger(&self) -> TriggerReport {
+    fn remove(&self) -> TriggerReport {
         let touched = self.scrub_legacy();
         match self.remove_cron() {
             CronRemoval::Removed | CronRemoval::NotPresent => {
@@ -413,11 +417,22 @@ impl HarnessAdapter for OpenClaw<'_> {
         }
     }
 
-    fn uninstall_footprint(&self) -> Vec<PathBuf> {
+    /// The hook-health probe: our trigger lives in OpenClaw's SCHEDULER, not the filesystem, so a
+    /// footprint-based answer would call a healthy cron "not installed". A live `cron list` proves
+    /// presence; anything unprovable (no binary, a down gateway, unreadable output) answers
+    /// `false` — health is never claimed on faith.
+    fn present(&self) -> bool {
+        match self.cli.run(OPENCLAW_BIN, &["cron", "list", "--json"]) {
+            Ok(out) if out.success => matches!(read_jobs(&out.stdout), ListRead::Jobs(Some(_))),
+            _ => false,
+        }
+    }
+
+    fn footprint(&self) -> Vec<PathBuf> {
         // Disclosure-only, and LEGACY-only: the cron job is OpenClaw-owned scheduler state
-        // (removed via `remove_currency_trigger`, not a filesystem path); what topos may still
-        // own on disk are the retired inject artifacts — the config registration (never a delete
-        // target; scrubbed surgically) and the marker-confirmed plugin file.
+        // (removed via `remove`, not a filesystem path); what topos may still own on disk are the
+        // retired inject artifacts — the config registration (never a delete target; scrubbed
+        // surgically) and the marker-confirmed plugin file.
         let mut out = Vec::new();
         if self.has_legacy_entry() {
             out.push(self.config_path());
@@ -428,15 +443,16 @@ impl HarnessAdapter for OpenClaw<'_> {
         out
     }
 
-    /// The hook-health probe: our trigger lives in OpenClaw's SCHEDULER, not the filesystem, so
-    /// the default footprint-based answer would call a healthy cron "not installed". A live
-    /// `cron list` proves presence; anything unprovable (no binary, a down gateway, unreadable
-    /// output) answers `false` — health is never claimed on faith.
-    fn trigger_present(&self) -> bool {
-        match self.cli.run(OPENCLAW_BIN, &["cron", "list", "--json"]) {
-            Ok(out) if out.success => matches!(read_jobs(&out.stdout), ListRead::Jobs(Some(_))),
-            _ => false,
-        }
+    /// The trigger lives in OpenClaw's SCHEDULER, not the filesystem: proving it there means
+    /// running `openclaw cron list`, which a read-only status must not do.
+    fn offline_probe_refusal(&self) -> Option<&'static str> {
+        Some("presence needs a live scheduler query")
+    }
+
+    /// The scrub must reach OUT of the filesystem, into OpenClaw's own program — so it is attempted
+    /// only where the harness still looks installed.
+    fn scrub_needs_live_harness(&self) -> bool {
+        true
     }
 }
 
@@ -667,7 +683,7 @@ mod tests {
     fn install_registers_the_silent_cron_job_byte_exact() {
         let cfg = MemConfig::default();
         let cli = FakeCli::new(CliMode::Healthy);
-        let report = OpenClaw::new(PathBuf::from("/h"), &cfg, &cli).install_currency_trigger();
+        let report = OpenClaw::new(PathBuf::from("/h"), &cfg, &cli).install();
 
         assert_eq!(report.state, TriggerState::Active);
         assert_eq!(report.agent, "openclaw");
@@ -703,8 +719,8 @@ mod tests {
         let cfg = MemConfig::default();
         let cli = FakeCli::new(CliMode::Healthy);
         let a = OpenClaw::new(PathBuf::from("/h"), &cfg, &cli);
-        a.install_currency_trigger();
-        let report = a.install_currency_trigger();
+        a.install();
+        let report = a.install();
         assert_eq!(
             report.state,
             TriggerState::Active,
@@ -719,7 +735,7 @@ mod tests {
         for mode in [CliMode::NoBinary, CliMode::GatewayDown] {
             let cfg = MemConfig::default();
             let cli = FakeCli::new(mode);
-            let report = OpenClaw::new(PathBuf::from("/h"), &cfg, &cli).install_currency_trigger();
+            let report = OpenClaw::new(PathBuf::from("/h"), &cfg, &cli).install();
             assert_eq!(report.state, TriggerState::Degraded, "{mode:?}");
             assert_eq!(report.currency_kind, CurrencyKind::ExplicitPullOnly);
             assert_eq!(cfg.writes(), 0, "nothing is written on a degrade");
@@ -743,7 +759,7 @@ mod tests {
         std::fs::write(home.0.join(LEGACY_PLUGIN_FILE_NAME), legacy_plugin_bytes()).unwrap();
 
         let cli = FakeCli::new(CliMode::Healthy);
-        let report = OpenClaw::new(home.0.clone(), &cfg, &cli).install_currency_trigger();
+        let report = OpenClaw::new(home.0.clone(), &cfg, &cli).install();
         assert_eq!(report.state, TriggerState::Active);
         assert_eq!(
             report.touched_path.as_deref(),
@@ -784,7 +800,7 @@ mod tests {
         std::fs::write(home.0.join(LEGACY_PLUGIN_FILE_NAME), legacy_plugin_bytes()).unwrap();
 
         let cli = FakeCli::new(CliMode::Healthy);
-        OpenClaw::new(home.0.clone(), &cfg, &cli).install_currency_trigger();
+        OpenClaw::new(home.0.clone(), &cfg, &cli).install();
         let root: Value =
             serde_json::from_slice(&std::fs::read(home.0.join("openclaw.json")).unwrap()).unwrap();
         assert!(
@@ -796,7 +812,7 @@ mod tests {
         // A marker orphan with NO config at all is unlinked too.
         std::fs::remove_file(home.0.join("openclaw.json")).unwrap();
         std::fs::write(home.0.join(LEGACY_PLUGIN_FILE_NAME), legacy_plugin_bytes()).unwrap();
-        OpenClaw::new(home.0.clone(), &cfg, &cli).install_currency_trigger();
+        OpenClaw::new(home.0.clone(), &cfg, &cli).install();
         assert!(!home.0.join(LEGACY_PLUGIN_FILE_NAME).exists());
     }
 
@@ -811,7 +827,7 @@ mod tests {
         std::fs::write(home.0.join(LEGACY_PLUGIN_FILE_NAME), legacy_plugin_bytes()).unwrap();
 
         let cli = FakeCli::new(CliMode::Healthy);
-        let report = OpenClaw::new(home.0.clone(), &cfg, &cli).install_currency_trigger();
+        let report = OpenClaw::new(home.0.clone(), &cfg, &cli).install();
         assert_eq!(
             report.state,
             TriggerState::Active,
@@ -830,7 +846,7 @@ mod tests {
         // A marker-LESS file on the legacy path is foreign — never unlinked, even with no config.
         std::fs::remove_file(home.0.join("openclaw.json")).unwrap();
         std::fs::write(home.0.join(LEGACY_PLUGIN_FILE_NAME), "export default {};\n").unwrap();
-        OpenClaw::new(home.0.clone(), &cfg, &cli).install_currency_trigger();
+        OpenClaw::new(home.0.clone(), &cfg, &cli).install();
         assert!(
             home.0.join(LEGACY_PLUGIN_FILE_NAME).exists(),
             "foreign file kept"
@@ -845,7 +861,7 @@ mod tests {
             "{\n  \"bootstrap-extra-files\": [\n    \"/elsewhere/topos-currency.mjs\"\n  ]\n}\n";
         let cfg = MemConfig::with_config(before);
         let cli = FakeCli::new(CliMode::Healthy);
-        let report = OpenClaw::new(PathBuf::from("/h"), &cfg, &cli).install_currency_trigger();
+        let report = OpenClaw::new(PathBuf::from("/h"), &cfg, &cli).install();
         assert_eq!(report.state, TriggerState::Active);
         assert_eq!(cfg.writes(), 0, "a foreign registration is never scrubbed");
         assert_eq!(cfg.text(CONFIG).as_deref(), Some(before));
@@ -855,7 +871,7 @@ mod tests {
     fn remove_unregisters_by_declaration_key() {
         let cfg = MemConfig::default();
         let cli = FakeCli::with_job(CliMode::Healthy, MARKER_ID);
-        let report = OpenClaw::new(PathBuf::from("/h"), &cfg, &cli).remove_currency_trigger();
+        let report = OpenClaw::new(PathBuf::from("/h"), &cfg, &cli).remove();
         assert_eq!(report.state, TriggerState::Inactive);
         assert_eq!(report.currency_kind, CurrencyKind::ExplicitPullOnly);
         assert!(cli.keys().is_empty(), "our job was removed");
@@ -873,7 +889,7 @@ mod tests {
         let cfg = MemConfig::default();
         // Another tool's job is registered; ours is not.
         let cli = FakeCli::with_job(CliMode::Healthy, "someone-else:job");
-        let report = OpenClaw::new(PathBuf::from("/h"), &cfg, &cli).remove_currency_trigger();
+        let report = OpenClaw::new(PathBuf::from("/h"), &cfg, &cli).remove();
         assert_eq!(report.state, TriggerState::Inactive);
         assert_eq!(
             cli.keys(),
@@ -891,12 +907,12 @@ mod tests {
         let cfg = MemConfig::default();
         for mode in [CliMode::NoBinary, CliMode::GatewayDown] {
             let cli = FakeCli::new(mode);
-            let report = OpenClaw::new(PathBuf::from("/h"), &cfg, &cli).remove_currency_trigger();
+            let report = OpenClaw::new(PathBuf::from("/h"), &cfg, &cli).remove();
             assert_eq!(report.state, TriggerState::Degraded, "{mode:?}");
         }
         // A zero-exit `cron list` whose stdout does not parse proves nothing about the job.
         let cli = FakeCli::new(CliMode::UnreadableList);
-        let report = OpenClaw::new(PathBuf::from("/h"), &cfg, &cli).remove_currency_trigger();
+        let report = OpenClaw::new(PathBuf::from("/h"), &cfg, &cli).remove();
         assert_eq!(report.state, TriggerState::Degraded);
         assert_eq!(cli.calls().len(), 1, "no blind rm was attempted");
     }
@@ -906,10 +922,10 @@ mod tests {
         let cfg = MemConfig::default();
         // A registered job answers true…
         let cli = FakeCli::with_job(CliMode::Healthy, MARKER_ID);
-        assert!(OpenClaw::new(PathBuf::from("/h"), &cfg, &cli).trigger_present());
+        assert!(OpenClaw::new(PathBuf::from("/h"), &cfg, &cli).present());
         // …no job answers false…
         let cli = FakeCli::new(CliMode::Healthy);
-        assert!(!OpenClaw::new(PathBuf::from("/h"), &cfg, &cli).trigger_present());
+        assert!(!OpenClaw::new(PathBuf::from("/h"), &cfg, &cli).present());
         // …and anything unprovable answers false (health is never claimed on faith).
         for mode in [
             CliMode::NoBinary,
@@ -918,7 +934,7 @@ mod tests {
         ] {
             let cli = FakeCli::new(mode);
             assert!(
-                !OpenClaw::new(PathBuf::from("/h"), &cfg, &cli).trigger_present(),
+                !OpenClaw::new(PathBuf::from("/h"), &cfg, &cli).present(),
                 "{mode:?}"
             );
         }
@@ -938,7 +954,7 @@ mod tests {
         .unwrap();
         std::fs::write(home.0.join(LEGACY_PLUGIN_FILE_NAME), legacy_plugin_bytes()).unwrap();
         let cli = FakeCli::new(CliMode::Healthy);
-        let report = OpenClaw::new(home.0.clone(), &cfg, &cli).remove_currency_trigger();
+        let report = OpenClaw::new(home.0.clone(), &cfg, &cli).remove();
         assert_eq!(report.state, TriggerState::Inactive);
         assert!(!home.0.join(LEGACY_PLUGIN_FILE_NAME).exists());
         assert!(
@@ -963,11 +979,11 @@ mod tests {
         let cfg = DiskConfig;
         let cli = FakeCli::new(CliMode::Healthy);
         let a = OpenClaw::new(home.0.clone(), &cfg, &cli);
-        assert!(a.uninstall_footprint().is_empty(), "clean home → nothing");
+        assert!(a.footprint().is_empty(), "clean home → nothing");
 
         // A live cron registration is OpenClaw-owned state, never a footprint path.
-        a.install_currency_trigger();
-        assert!(a.uninstall_footprint().is_empty());
+        a.install();
+        assert!(a.footprint().is_empty());
 
         // Legacy artifacts ARE disclosed (marker-confirmed only).
         std::fs::write(
@@ -980,7 +996,7 @@ mod tests {
         .unwrap();
         std::fs::write(home.0.join(LEGACY_PLUGIN_FILE_NAME), legacy_plugin_bytes()).unwrap();
         assert_eq!(
-            a.uninstall_footprint(),
+            a.footprint(),
             vec![
                 home.0.join("openclaw.json"),
                 home.0.join(LEGACY_PLUGIN_FILE_NAME)
@@ -988,7 +1004,7 @@ mod tests {
         );
         // A foreign file on the legacy path is never claimed.
         std::fs::write(home.0.join(LEGACY_PLUGIN_FILE_NAME), "export default {};\n").unwrap();
-        assert_eq!(a.uninstall_footprint(), vec![home.0.join("openclaw.json")]);
+        assert_eq!(a.footprint(), vec![home.0.join("openclaw.json")]);
     }
 
     #[test]
@@ -996,10 +1012,9 @@ mod tests {
         let cfg = MemConfig::default();
         let cli = FakeCli::new(CliMode::Healthy);
         let a = OpenClaw::new(PathBuf::from("/h"), &cfg, &cli);
-        assert_eq!(a.currency_kind(), CurrencyKind::Scheduled);
-        let active = a.install_currency_trigger();
+        let active = a.install();
         assert_eq!(active.currency_kind, CurrencyKind::Scheduled);
-        let inactive = a.remove_currency_trigger();
+        let inactive = a.remove();
         assert_eq!(
             inactive.currency_kind,
             CurrencyKind::ExplicitPullOnly,

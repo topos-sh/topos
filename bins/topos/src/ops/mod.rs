@@ -57,7 +57,9 @@ pub(crate) use add::{
     keep_as_yours, plan_bare_add, resolve_add_target, split_target, tracked_skill_at,
 };
 pub(crate) use add_mcp::add_mcp;
-pub(crate) use arm::{arm_detected, probe_detected, scrub_all};
+#[cfg(test)]
+pub(crate) use arm::INERT_TRIGGER;
+pub(crate) use arm::{Triggers, arm_detected, probe_detected};
 pub(crate) use builtin::{ensure_builtin, is_builtin, restore_builtin};
 pub(crate) use connect::device_challenge;
 pub(crate) use dest_select::Selection;
@@ -810,7 +812,7 @@ mod tests {
             let ids = RealIds;
             let clock = RealClock;
             let plane = InertPlane;
-            let harness = ClaudeCode::new(scratch("adapter"), &fs);
+            let harness = ClaudeCode::new(scratch("adapter"));
             let ctx = Ctx {
                 progress: crate::progress::silent(),
                 fs: &fs,
@@ -819,6 +821,7 @@ mod tests {
                 device_id: String::new(),
                 layout: home.clone(),
                 harness: &harness,
+                triggers: crate::ops::Triggers::active_only(&crate::ops::INERT_TRIGGER),
                 plane: &plane,
                 follow,
                 roots: None,

@@ -141,6 +141,16 @@ impl TriggerAdapter for FileDrop<'_> {
     fn present(&self) -> bool {
         matches!(self.cfg.read(&self.path), Ok(Some(bytes)) if self.is_ours(&bytes))
     }
+
+    /// The dropped file, disclosed ONLY while it is marker-confirmed ours — a foreign file on our
+    /// path is never claimed (and never unlinked).
+    fn footprint(&self) -> Vec<PathBuf> {
+        if self.present() {
+            vec![self.path.clone()]
+        } else {
+            Vec::new()
+        }
+    }
 }
 
 #[cfg(test)]

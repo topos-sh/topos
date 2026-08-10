@@ -1775,7 +1775,7 @@ pub(crate) mod testkit {
         f: impl FnOnce(&Ctx<'_>) -> R,
     ) -> R {
         let fs = RealFs;
-        let harness = topos_harness::ClaudeCode::new(home.0.join(".claude"), &fs);
+        let harness = topos_harness::ClaudeCode::new(home.0.join(".claude"));
         let ctx = Ctx {
             progress: crate::progress::silent(),
             fs: &fs,
@@ -1784,6 +1784,7 @@ pub(crate) mod testkit {
             device_id: String::new(),
             layout: home.layout(),
             harness: &harness,
+            triggers: crate::ops::Triggers::active_only(&crate::ops::INERT_TRIGGER),
             plane: &InertPlane,
             follow: &InertFollow,
             roots: Some(crate::ctx::AgentRoots {
