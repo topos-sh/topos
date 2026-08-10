@@ -431,14 +431,14 @@ struct Sweep {
     /// line about no bundle at all, and counting lines made the summary invent bundles that do
     /// not exist and then report them failed.
     ///
-    /// KNOWN COLLAPSE, deliberately left: the key is the DISPLAY NAME, so two same-named bundles
-    /// from different workspaces that BOTH fail in one sweep are counted once and the summary
-    /// undercounts by one. Every other channel still reports both (a warning line each, and each
-    /// bundle's own row), so nothing is hidden — only the tally is short. The same name-keying
-    /// costs one more thing, in the converge fold: the row RETAIN that stands a failed bundle's
-    /// row down matches on name+scope, so a same-named healthy twin in that scope loses its row
-    /// alongside the failed one. Both are the one re-key by scope+identity, and it is a follow-up.
-    failed_bundles: std::collections::BTreeSet<String>,
+    /// The key is `(scope label, bundle identity)` — the SAME join key [`Sweep::synced`] and
+    /// [`Sweep::mcp_rows`] use, and for the same reason: a workspace `linear` and a local `linear`
+    /// can stand in one scope, so a name would make two bundles one. Under a name key two
+    /// same-named bundles from different workspaces failing in one sweep counted once, and the
+    /// converge fold's row stand-down (which matched name+scope) took a healthy twin's receipt row
+    /// down with the failed one. Scopes are unblended, so one identity may legitimately fail once
+    /// per scope. Display names ride the warning lines and nothing else.
+    failed_bundles: std::collections::BTreeSet<(String, String)>,
     /// ADVISORIES — real `warning:` lines about a row that still DELIVERED (an unknown MCP dest
     /// entry dropped from a bundle's narrowing). They ride the same `--json` `warnings` array and
     /// print with the warnings, but the summary never counts them: the bundle they annotate has
@@ -2049,7 +2049,7 @@ fn reconcile_thing<'a>(
                 // publish's PENDING transfer (the local rewrite half failed) — converge it here,
                 // idempotently, disclosed.
                 let mut row_index = None;
-                if !converge_pending_governance(env, &dir, sweep) {
+                if !converge_pending_governance(env, sc, &dir, sweep) {
                     row_index = Some(sweep.next_row_index());
                     let mut r = plain_row(&display, PullAction::UpToDate, None, &sc.label);
                     // An adopted folder the person is still editing is a DRAFT, and this row is
@@ -2083,6 +2083,10 @@ fn reconcile_thing<'a>(
                 } else {
                     ("", "by this project")
                 };
+                // The row's custody identity — computed once, because the tally and the mcp hold
+                // below must file this bundle under the SAME key (a gone dir resolves to the
+                // name-keyed local identity, which is exactly what a later run would use again).
+                let identity = local_bundle_identity(env, sc, &dir, &display);
                 // The scope is named in the PERSON'S vocabulary, not the resolver's: `person` is
                 // an internal word for the machine-wide scope, and it shipped verbatim to anyone
                 // who deleted a folder a row still asks for. The sentence also reads whole with
@@ -2095,7 +2099,9 @@ fn reconcile_thing<'a>(
                 // summary counts. Pushing only a line left a one-row failing sweep printing
                 // "Checked 0 skills" and exiting 1 — a receipt that reported nothing wrong beside
                 // a status that said something was.
-                sweep.failed_bundles.insert(display.clone());
+                sweep
+                    .failed_bundles
+                    .insert((sc.label.clone(), identity.clone()));
                 // …and the way out rides the machine channel too, spelled for the file that
                 // actually carries the row.
                 let mut argv = vec!["topos".to_owned(), "remove".to_owned()];
@@ -2114,7 +2120,7 @@ fn reconcile_thing<'a>(
                         .mcp_hold
                         .entry(sc.label.clone())
                         .or_default()
-                        .insert(local_bundle_identity(env, sc, &dir, &display));
+                        .insert(identity);
                 }
             }
         }
@@ -2358,6 +2364,8 @@ fn local_mcp_demand(
                 env.ctx,
                 &mut sweep.warnings,
                 &mut sweep.failed_bundles,
+                &sc.label,
+                &bundle_id,
                 display,
                 &e.into(),
             );
@@ -2717,6 +2725,8 @@ fn reconcile_feed<'a>(
                         env.ctx,
                         &mut sweep.warnings,
                         &mut sweep.failed_bundles,
+                        &sc.label,
+                        skill_id,
                         &ds.name,
                         &e,
                     ),
@@ -2901,6 +2911,8 @@ fn sync_workspace_skill<'a>(
                     ctx,
                     &mut sweep.warnings,
                     &mut sweep.failed_bundles,
+                    &sc.label,
+                    &target.skill_id,
                     &target.name,
                     &e,
                 );
@@ -3014,6 +3026,8 @@ fn sync_workspace_skill<'a>(
                 ctx,
                 &mut sweep.warnings,
                 &mut sweep.failed_bundles,
+                &sc.label,
+                &target.skill_id,
                 &target.name,
                 &e,
             );
@@ -3099,6 +3113,8 @@ fn sync_workspace_skill<'a>(
             ctx,
             &mut sweep.warnings,
             &mut sweep.failed_bundles,
+            &sc.label,
+            &target.skill_id,
             &target.name,
             &e,
         ),
@@ -3170,6 +3186,8 @@ fn converge_dest_freeze(
                 env.ctx,
                 &mut sweep.warnings,
                 &mut sweep.failed_bundles,
+                &sc.label,
+                sid.as_str(),
                 display,
                 &e,
             );
@@ -3262,6 +3280,8 @@ fn converge_dest_freeze(
             env.ctx,
             &mut sweep.warnings,
             &mut sweep.failed_bundles,
+            &sc.label,
+            sid.as_str(),
             display,
             &e,
         ),
@@ -3308,6 +3328,8 @@ fn converge_local_dest(
             env.ctx,
             &mut sweep.warnings,
             &mut sweep.failed_bundles,
+            &sc.label,
+            sid.as_str(),
             display,
             &e,
         );
@@ -3425,6 +3447,8 @@ fn local_dest_apply(
                 ctx,
                 &mut sweep.warnings,
                 &mut sweep.failed_bundles,
+                &sc.label,
+                sid.as_str(),
                 display,
                 &e,
             ),
@@ -3476,6 +3500,8 @@ fn push_stored_mcp_demand(
                 env.ctx,
                 &mut sweep.warnings,
                 &mut sweep.failed_bundles,
+                &sc.label,
+                sid.as_str(),
                 name,
                 &e,
             );
@@ -3497,7 +3523,12 @@ fn push_stored_mcp_demand(
 /// in no catalog, and a proposal that DID land remotely satisfies it. On a hit the manifest's
 /// path line is rewritten to the canonical reference (the same rewrite the publish would have
 /// run), disclosed with one line. Returns whether a rewrite happened.
-fn converge_pending_governance(env: &Env<'_>, dir: &Path, sweep: &mut Sweep) -> bool {
+fn converge_pending_governance(
+    env: &Env<'_>,
+    sc: &ScopeCtx<'_>,
+    dir: &Path,
+    sweep: &mut Sweep,
+) -> bool {
     let ctx = env.ctx;
     let Ok(canonical) = dir.canonicalize() else {
         return false;
@@ -3545,6 +3576,8 @@ fn converge_pending_governance(env: &Env<'_>, dir: &Path, sweep: &mut Sweep) -> 
                 ctx,
                 &mut sweep.warnings,
                 &mut sweep.failed_bundles,
+                &sc.label,
+                &skill_id,
                 &lock.name,
                 &e,
             );
@@ -3832,10 +3865,16 @@ fn reconcile_repo_set(
             Err(e) => {
                 // Ending here is the point: falling through to the archive would pay a second
                 // round-trip for an answer the first one already failed to get.
+                //
+                // What failed is the SOURCE, not one member of it, so the row's own reference is
+                // both its identity and the word the line says — it names a repository, and two
+                // rows of one scope never share one.
                 note_item_failure(
                     env.ctx,
                     &mut sweep.warnings,
                     &mut sweep.failed_bundles,
+                    &sc.label,
+                    &row.reference,
                     &row.reference,
                     &e,
                 );
@@ -3862,6 +3901,8 @@ fn reconcile_repo_set(
                 env.ctx,
                 &mut sweep.warnings,
                 &mut sweep.failed_bundles,
+                &sc.label,
+                &row.reference,
                 &row.reference,
                 &e,
             );
@@ -3879,6 +3920,8 @@ fn reconcile_repo_set(
                 env.ctx,
                 &mut sweep.warnings,
                 &mut sweep.failed_bundles,
+                &sc.label,
+                &row.reference,
                 &row.reference,
                 &e,
             );
@@ -3957,6 +4000,8 @@ fn reconcile_repo_set(
                 env.ctx,
                 &mut sweep.warnings,
                 &mut sweep.failed_bundles,
+                &sc.label,
+                import.sid.as_str(),
                 &import.lock.name,
                 &e,
             ),
@@ -4109,10 +4154,14 @@ fn reconcile_repo_skill(
         let head = match lane.probe(&origin, &git_ref, &spec) {
             Ok(h) => h,
             Err(e) => {
+                // The whole ROW could not be answered for, and its reference is what identifies
+                // it — one per scope, and never another bundle's display name.
                 note_item_failure(
                     env.ctx,
                     &mut sweep.warnings,
                     &mut sweep.failed_bundles,
+                    &sc.label,
+                    &row.reference,
                     &row.reference,
                     &e,
                 );
@@ -4148,6 +4197,8 @@ fn reconcile_repo_skill(
                 env.ctx,
                 &mut sweep.warnings,
                 &mut sweep.failed_bundles,
+                &sc.label,
+                &row.reference,
                 &row.reference,
                 &e,
             );
@@ -4167,6 +4218,8 @@ fn reconcile_repo_skill(
                 env.ctx,
                 &mut sweep.warnings,
                 &mut sweep.failed_bundles,
+                &sc.label,
+                &row.reference,
                 &row.reference,
                 &e,
             );
@@ -4374,6 +4427,14 @@ fn install_or_refresh_repo_skill(
     let Some(roots) = discovery_roots(env.ctx, &sc.scope) else {
         return;
     };
+    // This member's IDENTITY for the failure tally: the id this scope's store already tracks the
+    // copy under, and — for a member never fetched here, which has no id yet — the origin-
+    // qualified reference. Never the bare member name: two repositories may both hold a `docs`,
+    // and one key for both would count one failure and hide the other.
+    let identity = slots
+        .iter()
+        .find_map(|s| s.import.map(|i| i.sid.as_str().to_owned()))
+        .unwrap_or_else(|| format!("{}/{name}", spec.origin()));
     // A project install writes through the project store, whose self-ignoring `.topos/` shell
     // must exist first (idempotent; the tracked read above proved the store real, but a fresh
     // member install may be the store's first write after a hand-cleaned tree).
@@ -4384,6 +4445,8 @@ fn install_or_refresh_repo_skill(
             env.ctx,
             &mut sweep.warnings,
             &mut sweep.failed_bundles,
+            &sc.label,
+            &identity,
             name,
             &e,
         );
@@ -4418,6 +4481,8 @@ fn install_or_refresh_repo_skill(
                 env.ctx,
                 &mut sweep.warnings,
                 &mut sweep.failed_bundles,
+                &sc.label,
+                &identity,
                 name,
                 &e,
             ),
@@ -4911,6 +4976,10 @@ fn run_mcp_converge(
     sweep: &mut Sweep,
 ) -> HashMap<String, Vec<topos_types::results::McpAgentState>> {
     let mut merged: HashMap<String, Vec<topos_types::results::McpAgentState>> = HashMap::new();
+    // Receipt rows whose bundle this converge could not place — collected across every scope and
+    // dropped in ONE pass below, because until then their positions are what `Sweep::mcp_rows`
+    // joins on.
+    let mut stood_down: BTreeSet<usize> = BTreeSet::new();
     let Some(roots) = env.ctx.roots.clone() else {
         return merged; // no machine roots: no config surface is resolvable
     };
@@ -5034,12 +5103,24 @@ fn run_mcp_converge(
         // the two clauses contradicting each other. The failure is the load-bearing fact (nothing
         // was placed for it, and the warning line says why), so it takes the bundle and the row
         // stands down.
-        for name in &outcome.failed_bundles {
-            sweep
-                .rows
-                .retain(|r| &r.skill != name || r.scope.as_deref() != Some(label.as_str()));
+        //
+        // The row that stands down is found through the IDENTITY index, never by name: a name
+        // match in a scope holding a workspace `linear` and a local `linear` took the healthy
+        // twin's row down beside the failed one's. The index is only MARKED here — `mcp_rows`
+        // holds positions in `sweep.rows`, so removing a row mid-fold would re-point every later
+        // bundle's lookup at its neighbour; the marked rows leave together at the end, where no
+        // index is live any more.
+        for bundle_id in &outcome.failed_bundles {
+            if let Some(at) = sweep.mcp_rows.get(&(label.clone(), bundle_id.clone())) {
+                stood_down.insert(*at);
+            }
         }
-        sweep.failed_bundles.extend(outcome.failed_bundles);
+        sweep.failed_bundles.extend(
+            outcome
+                .failed_bundles
+                .iter()
+                .map(|id| (label.clone(), id.clone())),
+        );
         // Work that SUCCEEDED belongs in disclosures: a wholly-owned config file deleted when its
         // last entry left is the removal working, and counted as a fault it makes a clean sweep
         // report itself failed and exit non-zero.
@@ -5188,6 +5269,17 @@ fn run_mcp_converge(
             }
         }
     }
+    // ONE BUNDLE, ONE BUCKET, resolved: the rows marked above leave now that every index into
+    // `sweep.rows` has been read. Rows pushed after a marking only ever APPEND, so the positions
+    // held here still name the rows they were taken for.
+    if !stood_down.is_empty() {
+        let mut at = 0;
+        sweep.rows.retain(|_| {
+            let keep = !stood_down.contains(&at);
+            at += 1;
+            keep
+        });
+    }
     merged
 }
 
@@ -5297,6 +5389,8 @@ fn clean_undemanded(
                             ctx,
                             &mut sweep.warnings,
                             &mut sweep.failed_bundles,
+                            &label,
+                            skill_id,
                             skill_id,
                             &e,
                         ),
@@ -5313,6 +5407,8 @@ fn clean_undemanded(
                             ctx,
                             &mut sweep.warnings,
                             &mut sweep.failed_bundles,
+                            &label,
+                            skill_id,
                             skill_id,
                             &e,
                         ),
@@ -5342,6 +5438,8 @@ fn clean_undemanded(
                     ctx,
                     &mut sweep.warnings,
                     &mut sweep.failed_bundles,
+                    &label,
+                    import.sid.as_str(),
                     &import.lock.name,
                     &e,
                 ),
@@ -5438,6 +5536,8 @@ fn clean_undemanded(
                 ctx,
                 &mut sweep.warnings,
                 &mut sweep.failed_bundles,
+                &label,
+                sid.as_str(),
                 &lock.name,
                 &e,
             ),
@@ -5625,6 +5725,8 @@ fn resolve_orphans(
                     ctx,
                     &mut sweep.warnings,
                     &mut sweep.failed_bundles,
+                    &label,
+                    id,
                     &lock.name,
                     &e,
                 );
@@ -6292,14 +6394,21 @@ fn not_connected_line(reference: &str, host: &str, workspace: &str) -> String {
 }
 
 /// Disclose one isolated per-item failure (stderr + diagnostics log + a stable warning).
+///
+/// `label` + `identity` are what the TALLY is keyed by (see [`Sweep::failed_bundles`]); `name` is
+/// the word the lines a person reads lead with. They are separate arguments because they answer
+/// separate questions — which bundle failed, and what to call it — and collapsing the first into
+/// the second is what made two same-named bundles count once.
 fn note_item_failure(
     ctx: &Ctx<'_>,
     warnings: &mut Vec<String>,
-    failed: &mut std::collections::BTreeSet<String>,
+    failed: &mut std::collections::BTreeSet<(String, String)>,
+    label: &str,
+    identity: &str,
     name: &str,
     e: &ClientError,
 ) {
-    failed.insert(name.to_owned());
+    failed.insert((label.to_owned(), identity.to_owned()));
     let _ = crate::logfile::append_error_event(
         ctx.fs,
         &ctx.layout.log_path(),

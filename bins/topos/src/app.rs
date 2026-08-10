@@ -3522,7 +3522,12 @@ mod tests {
         };
         let outcome = |decisions: Vec<crate::ops::PendingDecision>, warnings: Vec<String>| {
             Ok(ops::PullOutcome {
-                failed_bundles: warnings.iter().cloned().collect(),
+                // One failed BUNDLE per fault line, keyed the way the sweep keys them:
+                // `(scope label, bundle identity)`. The fixture's faults are all one scope's.
+                failed_bundles: warnings
+                    .iter()
+                    .map(|w| ("person".to_owned(), w.clone()))
+                    .collect(),
                 data: empty(),
                 warnings,
                 fault_actions: Vec::new(),

@@ -90,15 +90,17 @@ pub(crate) struct PullOutcome {
     /// Isolated per-skill FAILURES — what the receipt counts and calls failed, and what makes the
     /// run exit non-zero. Only [`note_skill_failure`] and its reconcile twin write here.
     pub warnings: Vec<String>,
-    /// The BUNDLES this run could not carry forward. `warnings` is a LINE channel and a line is
-    /// not a bundle — a scope-level fault (an unavailable lock, an unreadable custody document)
-    /// is one line about no bundle at all — so the receipt's arithmetic counts THIS, and the
-    /// summary can no longer invent bundles that never existed and report them failed.
+    /// The BUNDLES this run could not carry forward, keyed `(scope label, bundle identity)`.
+    /// `warnings` is a LINE channel and a line is not a bundle — a scope-level fault (an
+    /// unavailable lock, an unreadable custody document) is one line about no bundle at all — so
+    /// the receipt's arithmetic counts THIS, and the summary can no longer invent bundles that
+    /// never existed and report them failed.
     ///
-    /// KNOWN COLLAPSE, deliberately left: keyed by DISPLAY NAME, so two same-named bundles from
-    /// different workspaces both failing in one sweep count once (the tally is short by one; every
-    /// other channel still reports both). Keying by scope+identity is a follow-up.
-    pub failed_bundles: std::collections::BTreeSet<String>,
+    /// The IDENTITY, never the display name — the same key the sweep's own dedupe and receipt-row
+    /// joins use. Scopes are unblended, so one bundle may legitimately fail once per scope; a
+    /// workspace `linear` and a local `linear` failing in ONE scope are two bundles and count as
+    /// two. Names appear in the warning lines and nowhere else.
+    pub failed_bundles: std::collections::BTreeSet<(String, String)>,
     /// The RUNNABLE fixes for the faults in `warnings`, for the faults that have one — the
     /// `--json` lane's share of what the prose line already tells a person. Empty on a clean run.
     pub fault_actions: Vec<topos_types::NextAction>,
@@ -255,7 +257,11 @@ impl From<ExchangeFault> for StaleReason {
 
 impl PullOutcome {
     /// Wrap the schema payload with no workspace-level signals (the targeted paths).
-    fn plain(data: PullData, warnings: Vec<String>, failed_bundles: BTreeSet<String>) -> Self {
+    fn plain(
+        data: PullData,
+        warnings: Vec<String>,
+        failed_bundles: BTreeSet<(String, String)>,
+    ) -> Self {
         Self {
             data,
             warnings,
@@ -780,11 +786,16 @@ fn skill_warning(skill_id: &str, e: &ClientError) -> String {
 fn note_skill_failure(
     ctx: &Ctx<'_>,
     warnings: &mut Vec<String>,
-    failed: &mut BTreeSet<String>,
+    failed: &mut BTreeSet<(String, String)>,
     skill_id: &str,
     e: &ClientError,
 ) {
-    failed.insert(skill_id.to_owned());
+    // `(scope label, bundle identity)` — this sweep runs against the MACHINE store alone, so the
+    // person scope is the one label it can speak for, and the followed skill id IS the identity.
+    failed.insert((
+        crate::manifest::scopes::ResolvedScope::Person.label(),
+        skill_id.to_owned(),
+    ));
     let _ = crate::logfile::append_error_event(
         ctx.fs,
         &ctx.layout.log_path(),

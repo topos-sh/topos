@@ -191,11 +191,16 @@ pub(crate) struct ConvergeOutcome {
     /// when its last entry left). A line describing something that worked belongs here: routed
     /// into the warning channel it would make a clean run report itself broken.
     pub notices: Vec<String>,
-    /// The BUNDLE NAMES this converge could not place — a `server.json` the gate refused, a
+    /// The BUNDLE IDENTITIES this converge could not place — a `server.json` the gate refused, a
     /// document that would not parse. Each already has a line in `warnings`, but a line is not a
     /// bundle: the sweep counts BUNDLES, and a gate failure that rode only the line channel exited
     /// non-zero under a summary saying "1 already up to date". The caller folds these into the
     /// count so the summary and the status describe the same run.
+    ///
+    /// The IDENTITY, never the display name — the same key [`BundleStates::bundle_id`] answers on,
+    /// so the caller can join a failure onto the receipt row it belongs to. A workspace `linear`
+    /// and a local `linear` can stand in one scope, and a name would make them one bundle: one
+    /// tally entry for two failures, and one bundle's failure standing the other's row down.
     pub failed_bundles: Vec<String>,
 }
 
@@ -393,8 +398,10 @@ pub(crate) fn converge(
                 ));
                 // The bundle could not be carried forward — so it is counted as one. The line
                 // alone left the sweep exiting non-zero under a summary that named no failure.
-                if !out.failed_bundles.contains(&d.name) {
-                    out.failed_bundles.push(d.name.clone());
+                // Filed under the IDENTITY the demand was planned with: the name is what the
+                // warning line above says, and nothing else.
+                if !out.failed_bundles.contains(&d.bundle_id) {
+                    out.failed_bundles.push(d.bundle_id.clone());
                 }
                 failed.insert(i, reason);
             }

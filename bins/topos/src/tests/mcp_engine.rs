@@ -5145,3 +5145,216 @@ fn a_qualified_row_resolves_its_own_record_when_the_name_is_shared() {
         "the mcp vocabulary resolved cursor to its config file: {shown}"
     );
 }
+
+// =================================================================================================
+// The failure tally's key: `(scope label, bundle identity)`.
+//
+// Two bundles of one name are two bundles. Keyed by DISPLAY NAME the tally counted them once, and
+// the converge fold's row stand-down — which matched name + scope — took a healthy twin's receipt
+// row down beside the failed one's. Both fixtures below give every bundle an id UNLIKE its name on
+// purpose: a fixture whose id IS its name passes with the bug still in.
+// =================================================================================================
+
+/// A SECOND connected workspace, on its own server — what makes two same-named bundles two
+/// bundles rather than one name said twice.
+fn seed_ops_session(rig: &Rig) {
+    sessions::upsert_session(
+        &rig.fs,
+        &rig.layout(),
+        Session {
+            host: "beta.test".into(),
+            base_url: "https://beta.test/api".into(),
+            workspace_id: "w_ops".into(),
+            workspace_name: "ops".into(),
+            display_name: "Operations".into(),
+            session_id: "sn_2".into(),
+            credential: "cred-2".into(),
+            status: SESSION_ACTIVE.into(),
+            logged_in_at: 1,
+        },
+    )
+    .unwrap();
+}
+
+/// Each workspace answers from its OWN catalog and delivery. The single-lane [`connect`] would
+/// hand both sessions one catalog holding two entries of one name, which is an ambiguous catalog
+/// — not two workspaces.
+fn connect_lanes<'a>(
+    lanes: &'a [(&'a str, FakePlane, FakeDirectory)],
+) -> impl Fn(&Session) -> ops::SessionTransports + 'a {
+    move |s: &Session| {
+        let (_, plane, dir) = lanes
+            .iter()
+            .find(|(ws, ..)| *ws == s.workspace_id)
+            .unwrap_or_else(|| panic!("no lane for {}", s.workspace_id));
+        ops::SessionTransports {
+            plane: Box::new(plane.clone()),
+            directory: Box::new(dir.clone()),
+            contribute: Box::new(NoContribute),
+            governance: Box::new(NoGovernance),
+        }
+    }
+}
+
+fn sweep_lanes(ctx: &Ctx<'_>, lanes: &[(&str, FakePlane, FakeDirectory)]) -> ops::PullOutcome {
+    ops::manifest_update(
+        ctx,
+        &connect_lanes(lanes),
+        None,
+        &ops::ManifestUpdateOpts::default(),
+    )
+    .unwrap()
+}
+
+/// TWO WORKSPACES, ONE NAME, TWO FAILURES. Both teams publish an MCP server called `linear`, and
+/// this run can place neither: each document names an http endpoint the gate refuses. The tally
+/// counts what actually failed — two bundles — because it is keyed by the bundle identity the
+/// sweep already joins on. Under the display name the second failure disappeared into the first
+/// and the summary was short by one on every same-named pair.
+#[test]
+fn two_same_named_bundles_from_two_workspaces_both_failing_count_as_two() {
+    let rig = Rig::new("tally-two-ws");
+    rig.seed_session();
+    seed_ops_session(&rig);
+    seed_harness_dirs(&rig.home.0);
+    let eng = mk_version(&[(
+        "server.json",
+        server_json("http://eng.example/linear").as_bytes(),
+    )]);
+    let ops_v = mk_version(&[(
+        "server.json",
+        server_json("http://ops.example/linear").as_bytes(),
+    )]);
+    let lanes = [
+        (
+            WS,
+            FakePlane::new().with_version("s_lin_eng", &eng),
+            FakeDirectory {
+                skills: vec![mcp_catalog_entry("s_lin_eng", "linear", &eng)],
+                channels: Vec::new(),
+            },
+        ),
+        (
+            "w_ops",
+            FakePlane::new().with_version("s_lin_ops", &ops_v),
+            FakeDirectory {
+                skills: vec![mcp_catalog_entry("s_lin_ops", "linear", &ops_v)],
+                channels: Vec::new(),
+            },
+        ),
+    ];
+    rig.write_global(&format!(
+        "[bundles]\n\"{HOST}/{WS_NAME}/linear\" = {{ {SAFE} }}\n\
+         \"beta.test/ops/linear\" = {{ {SAFE} }}\n"
+    ));
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    let out = sweep_lanes(&ctx, &lanes);
+
+    // BOTH refusals are on the record…
+    assert_eq!(
+        out.warnings
+            .iter()
+            .filter(|w| w.contains("MCP_INSECURE_URL"))
+            .count(),
+        2,
+        "each bundle's own refusal: {:?}",
+        out.warnings
+    );
+    // …and the tally holds two entries, one per IDENTITY, in the one scope both rows stand in.
+    let failed: Vec<(&str, &str)> = out
+        .failed_bundles
+        .iter()
+        .map(|(label, id)| (label.as_str(), id.as_str()))
+        .collect();
+    assert_eq!(
+        failed,
+        vec![("person", "s_lin_eng"), ("person", "s_lin_ops")],
+        "two bundles failed, so the summary counts two"
+    );
+    // Nothing was placed for either, and neither stood-down row is left claiming otherwise.
+    assert!(
+        !out.data.skills.iter().any(|s| s.skill == "linear"),
+        "a bundle nothing was placed for keeps no row: {:?}",
+        out.data.skills
+    );
+    let cursor = std::fs::read_to_string(rig.home.0.join(".cursor/mcp.json")).unwrap_or_default();
+    assert!(!cursor.contains("linear"), "{cursor}");
+}
+
+/// A FAILURE STANDS DOWN ITS OWN ROW AND NOBODY ELSE'S. One scope holds two bundles called
+/// `linear`: the workspace's, which places cleanly, and a local folder whose `server.json` the
+/// gate refuses. The stand-down finds the failed bundle's row through the identity index, so the
+/// healthy twin keeps its own — a name + scope match took both rows down and left the run
+/// wordless about a bundle it had just placed.
+#[test]
+fn a_failed_bundle_stands_down_its_own_row_and_the_healthy_twin_keeps_its_row() {
+    let rig = Rig::new("tally-twin");
+    rig.seed_session();
+    seed_harness_dirs(&rig.home.0);
+    // The healthy one: the workspace's `linear`, over https.
+    let v = mk_version(&[(
+        "server.json",
+        server_json("https://mcp.example/linear").as_bytes(),
+    )]);
+    let plane = FakePlane::new().with_version("s_lin_ws", &v);
+    let dir = FakeDirectory {
+        skills: vec![mcp_catalog_entry("s_lin_ws", "linear", &v)],
+        channels: Vec::new(),
+    };
+    // The failing one: a LOCAL folder of the same name whose document names an http endpoint.
+    let local = rig.home.0.join("linear");
+    std::fs::create_dir_all(&local).unwrap();
+    std::fs::write(
+        local.join("server.json"),
+        server_json("http://local.example/linear"),
+    )
+    .unwrap();
+    rig.write_global(&format!(
+        "[bundles]\n\"{HOST}/{WS_NAME}/linear\" = {{ {SAFE} }}\n\
+         \"{}\" = {{ kind = \"mcp\", {SAFE} }}\n",
+        local.display()
+    ));
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    let out = sweep(&ctx, &plane, &dir);
+
+    // ONE failure, filed under the LOCAL bundle's identity — never the name the two share.
+    let failed: Vec<(&str, &str)> = out
+        .failed_bundles
+        .iter()
+        .map(|(label, id)| (label.as_str(), id.as_str()))
+        .collect();
+    assert_eq!(
+        failed,
+        vec![("person", "local:linear")],
+        "the refused bundle is the one that is counted: {:?}",
+        out.warnings
+    );
+    // The healthy twin keeps its receipt row, with the agents its entries reached.
+    let rows: Vec<_> = out
+        .data
+        .skills
+        .iter()
+        .filter(|s| s.skill == "linear")
+        .collect();
+    assert_eq!(
+        rows.len(),
+        1,
+        "one row stands down, the other stands: {:?}",
+        out.data.skills
+    );
+    assert_eq!(
+        rows[0].workspace_id.as_deref(),
+        Some(WS),
+        "the surviving row is the workspace bundle's: {:?}",
+        rows[0]
+    );
+    let agents: BTreeSet<&str> = rows[0].harnesses.iter().map(|h| h.agent.as_str()).collect();
+    assert_eq!(agents, ["cursor", "openclaw"].into(), "{:?}", rows[0]);
+    // …and the disk agrees: the healthy entry landed, the refused one never did.
+    let cursor = std::fs::read_to_string(rig.home.0.join(".cursor/mcp.json")).unwrap();
+    assert!(
+        cursor.contains("topos-eng-linear") && cursor.contains("https://mcp.example/linear"),
+        "{cursor}"
+    );
+    assert!(!cursor.contains("http://local.example"), "{cursor}");
+}
