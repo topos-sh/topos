@@ -81,6 +81,7 @@ fn sample_map(tag: u8) -> PlacementMap {
         harness: None,
         harness_layer: None,
         harness_slug: None,
+        entry_state: Vec::new(),
     }
 }
 

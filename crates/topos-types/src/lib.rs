@@ -30,10 +30,11 @@ pub const WIRE_SCHEMA_VERSION: u32 = 1;
 pub const PERSISTED_SCHEMA_VERSION: u32 = 1;
 
 /// The `map.json` document's OWN schema ceiling — bumped independently of the other persisted docs
-/// (v2 added the per-placement `placement_state` shape; a v1 single-placement document upgrades
-/// losslessly in memory on read, and every write re-emits v2). Readers of the other documents keep
-/// dispatching on [`PERSISTED_SCHEMA_VERSION`].
-pub const PLACEMENT_MAP_SCHEMA_VERSION: u32 = 2;
+/// (v2 added the per-placement `placement_state` shape; v3 added [`persisted::PlacementMap::entry_state`],
+/// the config-file half of the same record). A v1 single-placement document upgrades losslessly in
+/// memory on read, a v2 one reads as holding no config entries, and every write re-emits v3. Readers
+/// of the other documents keep dispatching on [`PERSISTED_SCHEMA_VERSION`].
+pub const PLACEMENT_MAP_SCHEMA_VERSION: u32 = 3;
 
 /// Bumped on any breaking change to the [`Receipt`] shape (the durable idempotency record evolves
 /// with the op vocabulary, not with the envelope or the sidecar docs).

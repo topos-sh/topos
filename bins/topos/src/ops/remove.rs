@@ -238,18 +238,12 @@ pub(crate) fn remove(
     }))
 }
 
-/// The config files this scope's ledger records standing entries for, `~`-abbreviated, in ledger
-/// order and deduped — what the describe names before consent and what the apply will edit. Empty
-/// for an ordinary skill record (no ledger entries) and for a scope that never config-placed.
+/// The config files this bundle's own record carries standing entries in, `~`-abbreviated, in
+/// record order and deduped — what the describe names before consent and what the apply will edit.
+/// Empty for an ordinary skill record (no config entries) and for a scope that never config-placed.
 fn mcp_entry_files(ctx: &Ctx<'_>, skill_id: &str) -> Vec<String> {
-    if !ctx.fs.exists(&ctx.layout.mcp_ledger_path()) {
-        return Vec::new();
-    }
-    let Ok(ledger) = crate::mcp_ledger::read(ctx.fs, &ctx.layout) else {
-        return Vec::new();
-    };
     let mut out: Vec<String> = Vec::new();
-    for entry in ledger.entries.values().filter(|e| e.bundle_id == skill_id) {
+    for entry in crate::config_custody::entries_of(ctx.fs, &ctx.layout, skill_id) {
         let file = super::inventory::pretty(ctx, std::path::Path::new(&entry.file));
         if !out.contains(&file) {
             out.push(file);
@@ -286,7 +280,7 @@ fn retire_mcp_entries(ctx: &Ctx<'_>, skill_id: &str, item: &mut RemoveItem) {
     let Some(roots) = ctx.roots.clone() else {
         return;
     };
-    if !ctx.fs.exists(&ctx.layout.mcp_ledger_path()) {
+    if !ctx.fs.exists(&ctx.layout.config_custody_path()) {
         return; // nothing was ever config-placed in this scope
     }
     let Ok(sid) = SkillId::parse(skill_id) else {

@@ -8,8 +8,9 @@
 //! - `server.json` parsing with a fail-closed re-check of the publish gate (a secret /
 //!   templated / value-less header the gate should have refused is never placed, only warned
 //!   about),
-//! - the [`crate::mcp_ledger`] discipline: key minting, the `key → fingerprint` prior map, the
-//!   intent journal around EVERY config write, and crash recovery at converge start,
+//! - the [`crate::config_custody`] discipline: key minting, the `key → fingerprint` prior map
+//!   (read off each bundle's OWN record — the same `map.json` that records a skill bundle's dirs),
+//!   the intent journal around EVERY config write, and crash recovery at converge start,
 //! - the per-harness surface: the descriptor table joined onto detection (a harness engages only
 //!   when its slug is detected OR its config file already exists), the person/project surface
 //!   split (a project scope NEVER falls back to a user surface), and the project containment
@@ -29,7 +30,7 @@
 //!   entry leaves.
 //!
 //! The engine is OFFLINE by construction: demands carry the stored `server.json` bytes, so a dead
-//! network still heals config files from the store + ledger.
+//! network still heals config files from the store + the custody records.
 //!
 //! Wire states (an OPEN vocabulary, kept small): `placed` (THIS run wrote the entry — a first
 //! placement, an update to it, or the repair of one that was gone) · `current` (found already in
@@ -50,10 +51,11 @@ use topos_harness::mcp::{self, AuthHint, EditPlan, EntryState, McpDialect, McpEn
 use topos_harness::registry::KnownHarness;
 use topos_types::results::McpAgentState;
 
+use crate::config_custody::{self, PendingIntent, ScopeEntries, placement_key};
 use crate::error::ClientError;
 use crate::fs_seam::FsOps;
-use crate::mcp_ledger::{self, LedgerEntry, McpLedger, PendingIntent, placement_key};
 use crate::sidecar::Layout;
+use topos_types::persisted::EntryPlacement;
 
 /// One demanded MCP bundle in one scope — everything the engine needs, resolved by the reconcile.
 #[derive(Debug, Clone)]
@@ -77,11 +79,11 @@ pub(crate) struct McpDemand {
     pub harness_filter: Option<Vec<String>>,
 }
 
-/// The scope's I/O: the fs seam, the scope store (the ledger's home), and the machine roots the
-/// surfaces resolve against.
+/// The scope's I/O: the fs seam, the scope store (where the custody document and every bundle's own
+/// record live), and the machine roots the surfaces resolve against.
 pub(crate) struct ScopeIo<'a> {
     pub fs: &'a dyn FsOps,
-    /// The scope's store layout — where `state/mcp_ledger.json` lives.
+    /// The scope's store layout — where `state/config_custody.json` and the per-bundle records live.
     pub layout: &'a Layout,
     /// The machine home (user surfaces resolve under it).
     pub home: PathBuf,
@@ -99,12 +101,12 @@ pub(crate) struct BundleStates {
     /// placement, an update to it, or the repair of one a person deleted by hand. It is the
     /// only honest answer to "did the disk move for this bundle": a store that is already
     /// current says nothing about the config files, and the receipt's own verb depends on the
-    /// difference. The scope's ledger is topos's own bookkeeping, so a run that only rewrote
-    /// THAT wrote nothing here. The `placed` states in `states` name the FILES those writes
+    /// difference. The custody records are topos's own bookkeeping, so a run that only rewrote
+    /// THOSE wrote nothing here. The `placed` states in `states` name the FILES those writes
     /// landed in.
     pub wrote: bool,
     /// Whether those writes are this scope's FIRST config entries for the bundle — the durable
-    /// signal being the ledger, which held no entry for it when this converge began. A first
+    /// signal being the bundle's own record, which held no entry for it when this converge began. A first
     /// placement is an INSTALL however the store got its bytes; a write over a bundle the ledger
     /// already placed is a repair. False whenever `wrote` is.
     pub first_placement: bool,
@@ -248,9 +250,9 @@ pub(crate) fn converge(
         }
     };
 
-    // The ledger — fail closed whole: without it no ownership question is answerable, so nothing
-    // is read or written.
-    let mut ledger = match mcp_ledger::read(io.fs, io.layout) {
+    // The scope's custody picture — fail closed whole: without it no ownership question is
+    // answerable, so nothing is read or written.
+    let mut ledger = match ScopeEntries::load(io.fs, io.layout) {
         Ok(l) => l,
         Err(e) => {
             out.warnings.push(format!(
@@ -263,26 +265,25 @@ pub(crate) fn converge(
 
     // Crash recovery over the intent journal, BEFORE any prior map is built (a landed-but-
     // unpromoted write would otherwise read as user drift forever).
-    let dialect_of = mcp_ledger::dialect_lookup(descriptors, io.project_root.is_some());
-    if ledger.recover_pending(io.fs, &dialect_of)
-        && let Err(e) = mcp_ledger::write(io.fs, io.layout, &ledger)
-    {
-        out.warnings.push(format!(
-            "MCP_LEDGER_WRITE_FAILED: {} — MCP convergence skipped this run",
-            e.detail()
-        ));
-        return out;
+    let dialect_of = config_custody::dialect_lookup(descriptors, io.project_root.is_some());
+    if ledger.recover(io.fs, &dialect_of) {
+        let failures = ledger.flush(io.fs, io.layout);
+        if !failures.is_empty() {
+            out.warnings.extend(failures);
+            out.warnings.push(
+                "MCP_LEDGER_WRITE_FAILED: recovery could not be recorded — MCP convergence \
+                 skipped this run"
+                    .to_owned(),
+            );
+            return out;
+        }
     }
 
-    // The bundles this scope had ALREADY placed when the converge began — read off the ledger
-    // after recovery, so it is the durable record and not a guess. A bundle absent here whose
+    // The bundles this scope had ALREADY placed when the converge began — read off the durable
+    // records after recovery, so it is the record and not a guess. A bundle absent here whose
     // entry this run writes is being placed for the FIRST time in this scope (see
     // [`BundleStates::first_placement`]).
-    let placed_before: HashSet<String> = ledger
-        .entries
-        .values()
-        .map(|e| e.bundle_id.clone())
-        .collect();
+    let placed_before: HashSet<String> = ledger.placed_bundles().into_iter().collect();
 
     // Parse every demand once. The FULL server-document gate (`mcp_validate`) re-runs on the
     // demand bytes here, fail-closed, BEFORE the placement parse: a local row's `server.json` is
@@ -318,7 +319,6 @@ pub(crate) fn converge(
     };
 
     // Mint keys for the placeable demands (durable with the first write below).
-    let keys_before = ledger.keys.clone();
     let minted: BTreeMap<usize, String> = parsed
         .iter()
         .map(|(i, _)| {
@@ -329,7 +329,6 @@ pub(crate) fn converge(
             )
         })
         .collect();
-    let mut ledger_dirty = ledger.keys != keys_before;
 
     // Per-bundle state collector, keyed by demand index (order preserved for the receipt).
     let mut states: BTreeMap<usize, Vec<McpAgentState>> = BTreeMap::new();
@@ -436,7 +435,7 @@ pub(crate) fn converge(
         // Keys PRESERVED from removal on this surface: a held bundle's, and — on a run that may
         // not remove — every undemanded bundle's. Excluded from the drivers' prior map, so the
         // drivers read them as foreign and leave them byte-identical.
-        let preserved = |ledger: &McpLedger, entry_key: &str| -> bool {
+        let preserved = |ledger: &ScopeEntries, entry_key: &str| -> bool {
             let Some(bundle) = ledger.bundle_of_key(entry_key) else {
                 return false;
             };
@@ -467,7 +466,6 @@ pub(crate) fn converge(
             &preserved,
             &provenance,
         );
-        ledger_dirty |= surface_out.ledger_dirty;
         out.warnings.extend(surface_out.warnings);
         for key in &surface_out.wrote {
             if let Some(i) = desired_bundles.get(key) {
@@ -496,22 +494,17 @@ pub(crate) fn converge(
     // Retirement: a bundle with no remaining entries anywhere, not demanded and not held, gives
     // its key back to the reserve.
     let retire: Vec<String> = ledger
-        .keys
-        .keys()
+        .keyed_bundles()
+        .into_iter()
         .filter(|b| !demanded_ids.contains(b.as_str()) && !held(b) && !ledger.has_entries_for(b))
-        .cloned()
         .collect();
-    for bundle in retire {
-        if allow_removals {
+    if allow_removals {
+        for bundle in retire {
             ledger.retire_key(&bundle);
-            ledger_dirty = true;
         }
     }
 
-    if ledger_dirty && let Err(e) = mcp_ledger::write(io.fs, io.layout, &ledger) {
-        out.warnings
-            .push(format!("MCP_LEDGER_WRITE_FAILED: {}", e.detail()));
-    }
+    out.warnings.extend(ledger.flush(io.fs, io.layout));
 
     out.bundles = demands
         .iter()
@@ -543,7 +536,7 @@ pub(crate) fn remove_bundle(
             return out;
         }
     };
-    let mut ledger = match mcp_ledger::read(io.fs, io.layout) {
+    let mut ledger = match ScopeEntries::load(io.fs, io.layout) {
         Ok(l) => l,
         Err(e) => {
             out.warnings.push(format!(
@@ -553,9 +546,9 @@ pub(crate) fn remove_bundle(
             return out;
         }
     };
-    let dialect_of = mcp_ledger::dialect_lookup(descriptors, io.project_root.is_some());
-    let mut ledger_dirty = ledger.recover_pending(io.fs, &dialect_of);
-    let Some(key) = ledger.keys.get(bundle_id).cloned() else {
+    let dialect_of = config_custody::dialect_lookup(descriptors, io.project_root.is_some());
+    ledger.recover(io.fs, &dialect_of);
+    let Some(key) = ledger.key_of(bundle_id).map(str::to_owned) else {
         return out; // never placed here — nothing to converge
     };
 
@@ -576,12 +569,12 @@ pub(crate) fn remove_bundle(
         if !(detected.contains(h.slug) || io.fs.exists(&path)) {
             continue;
         }
-        if !ledger.entries.contains_key(&placement_key(h.slug, &key)) {
+        if !ledger.holds(&placement_key(h.slug, &key)) {
             continue; // nothing recorded on this surface
         }
         // Prior scoped to ONLY this bundle's key: the drivers remove prior-matched undesired
         // keys, and every other entry — ours or not — reads foreign and stays byte-identical.
-        let only_this = |_l: &McpLedger, entry_key: &str| entry_key != key;
+        let only_this = |_l: &ScopeEntries, entry_key: &str| entry_key != key;
         let provenance = BTreeMap::new();
         let path = surface_file(&path, dialect);
         let surface_out = converge_file(
@@ -594,7 +587,6 @@ pub(crate) fn remove_bundle(
             &only_this,
             &provenance,
         );
-        ledger_dirty |= surface_out.ledger_dirty;
         out.warnings.extend(surface_out.warnings);
         for (state_key, state) in surface_out.states {
             if state_key == key && (state.state == "removed" || state.state == "drifted") {
@@ -608,17 +600,13 @@ pub(crate) fn remove_bundle(
 
     if !ledger.has_entries_for(bundle_id) {
         ledger.retire_key(bundle_id);
-        ledger_dirty = true;
     }
-    if ledger_dirty && let Err(e) = mcp_ledger::write(io.fs, io.layout, &ledger) {
-        out.warnings
-            .push(format!("MCP_LEDGER_WRITE_FAILED: {}", e.detail()));
-    }
+    out.warnings.extend(ledger.flush(io.fs, io.layout));
     out
 }
 
 /// The per-scope MCP converge lock (`locks/mcp.lock`, blocking): every entry point that runs the
-/// ledger + config read-modify-write — the sweep's [`converge`], add's inline converge, a
+/// custody + config read-modify-write — the sweep's [`converge`], add's inline converge, a
 /// targeted go-back's / accept's [`converge_bundle_now`], and [`remove_bundle`] — serializes on it, so two
 /// processes can never interleave a read-modify-write over the same scope's configs.
 ///
@@ -695,7 +683,6 @@ struct SurfaceOutcome {
     /// The keys this surface WROTE this run — placed, updated, or repaired. Empty on a surface
     /// left byte-identical, which is what makes it an answer rather than a guess.
     wrote: BTreeSet<String>,
-    ledger_dirty: bool,
     warnings: Vec<String>,
 }
 
@@ -704,7 +691,6 @@ impl SurfaceOutcome {
         Self {
             states: Vec::new(),
             wrote: BTreeSet::new(),
-            ledger_dirty: false,
             warnings: Vec::new(),
         }
     }
@@ -720,7 +706,6 @@ impl SurfaceOutcome {
                 })
                 .collect(),
             wrote: BTreeSet::new(),
-            ledger_dirty: false,
             warnings: vec![format!("MCP_SURFACE_UNPROVABLE {}: {reason}", h.slug)],
         }
     }
@@ -731,47 +716,30 @@ impl SurfaceOutcome {
 /// (b) and (c) is healed by [`McpLedger::recover_pending`] next run.
 fn journaled_write(
     io: &ScopeIo<'_>,
-    ledger: &mut McpLedger,
+    ledger: &mut ScopeEntries,
     path: &Path,
     intents: BTreeMap<String, PendingIntent>,
     write: &dyn Fn() -> std::io::Result<()>,
 ) -> Result<(), String> {
-    ledger.pending = intents;
-    if let Err(e) = mcp_ledger::write(io.fs, io.layout, ledger) {
-        ledger.pending.clear();
-        return Err(format!("the ledger write failed ({})", e.detail()));
+    if let Err(e) = ledger.journal(io.fs, io.layout, intents) {
+        ledger.drop_journal(io.fs, io.layout);
+        return Err(format!("the custody write failed ({})", e.detail()));
     }
     if let Err(e) = write() {
         // The config write did not land: drop the intents durably (best-effort — recovery would
         // reach the same answer by observing the file).
-        ledger.pending.clear();
-        let _ = mcp_ledger::write(io.fs, io.layout, ledger);
+        ledger.drop_journal(io.fs, io.layout);
         return Err(format!("writing {} failed ({e})", path.display()));
     }
-    // Promote: pending → entries, exactly as recovery would.
-    let pending = std::mem::take(&mut ledger.pending);
-    for (ledger_key, intent) in pending {
-        if intent.fingerprint.is_empty() {
-            ledger.entries.remove(&ledger_key);
-        } else {
-            ledger.entries.insert(
-                ledger_key,
-                LedgerEntry {
-                    bundle_id: intent.bundle_id,
-                    version_id: intent.version_id,
-                    file: intent.file,
-                    fingerprint: intent.fingerprint,
-                    owns_file: intent.owns_file,
-                },
-            );
-        }
-    }
-    if let Err(e) = mcp_ledger::write(io.fs, io.layout, ledger) {
-        // The entries moved in memory and the intents are still journaled ON DISK — the next
-        // run's recovery promotes them again. Disclose, never lose.
+    // Promote: pending → each bundle's own rows, exactly as recovery would.
+    ledger.promote_journal();
+    let failures = ledger.flush(io.fs, io.layout);
+    if !failures.is_empty() {
+        // The rows moved in memory and the intents are still journaled ON DISK — the next run's
+        // recovery promotes them again. Disclose, never lose.
         return Err(format!(
-            "the ledger promotion write failed ({}); recovery heals it next run",
-            e.detail()
+            "{}; recovery heals it next run",
+            failures.join("; ")
         ));
     }
     Ok(())
@@ -784,12 +752,12 @@ fn journaled_write(
 #[allow(clippy::too_many_arguments)]
 fn converge_file(
     io: &ScopeIo<'_>,
-    ledger: &mut McpLedger,
+    ledger: &mut ScopeEntries,
     h: &KnownHarness,
     path: &Path,
     dialect: McpDialect,
     desired: &[McpEntry],
-    preserved: &dyn Fn(&McpLedger, &str) -> bool,
+    preserved: &dyn Fn(&ScopeEntries, &str) -> bool,
     provenance: &BTreeMap<String, (String, String)>,
 ) -> SurfaceOutcome {
     let stale: Vec<String> = ledger
@@ -814,12 +782,12 @@ fn converge_file(
 #[allow(clippy::too_many_arguments)]
 fn converge_surface(
     io: &ScopeIo<'_>,
-    ledger: &mut McpLedger,
+    ledger: &mut ScopeEntries,
     h: &KnownHarness,
     path: &Path,
     dialect: McpDialect,
     desired: &[McpEntry],
-    preserved: &dyn Fn(&McpLedger, &str) -> bool,
+    preserved: &dyn Fn(&ScopeEntries, &str) -> bool,
     provenance: &BTreeMap<String, (String, String)>,
 ) -> SurfaceOutcome {
     let mut prior = ledger.prior_for(h.slug, path);
@@ -869,7 +837,7 @@ fn converge_surface(
         EditPlan::Unprovable(reason) => SurfaceOutcome::unprovable(desired, h, path, &reason),
         EditPlan::Leave => {
             let mut surface = fold_states(h, path, &outcome.states, desired);
-            surface.ledger_dirty = sync_ledger_entries(
+            sync_ledger_entries(
                 ledger,
                 h.slug,
                 path,
@@ -879,7 +847,7 @@ fn converge_surface(
                 false,
             );
             if unmanaged {
-                surface.ledger_dirty |= clear_owns_file(ledger, h.slug, path);
+                ledger.clear_owns_file(h.slug, path);
             }
             // The plugin manifest is constant and carries no entry state: re-heal a hand-deleted
             // one beside entries that remain (best-effort, no journal needed). Healing it IS a
@@ -914,14 +882,8 @@ fn converge_surface(
             // owned every byte at the last write AND this reconcile saw nothing that is not ours
             // — neither a drifted/foreign managed entry NOR any unmanaged content.
             let owned_before = {
-                let prefix = format!("{}/", h.slug);
-                let mine: Vec<&LedgerEntry> = ledger
-                    .entries
-                    .iter()
-                    .filter(|(k, e)| k.starts_with(&prefix) && Path::new(&e.file) == path)
-                    .map(|(_, e)| e)
-                    .collect();
-                !mine.is_empty() && mine.iter().all(|e| e.owns_file)
+                let mine = ledger.rows_at(h.slug, path);
+                !mine.is_empty() && mine.iter().all(|(_, e)| e.owns_file)
             };
             let all_ours = outcome
                 .states
@@ -960,7 +922,6 @@ fn converge_surface(
             match journaled_write(io, ledger, path, intents, &write) {
                 Ok(()) => {
                     let mut surface = fold_states(h, path, &outcome.states, desired);
-                    surface.ledger_dirty = true;
                     // The file topos wholly owned just lost its LAST entry: nothing of ours
                     // remains — delete it (through the seam; the write above already proved the
                     // path safe). CONSERVATIVE BELT before any whole-file delete: RE-READ the
@@ -969,9 +930,7 @@ fn converge_surface(
                     // The ownership flag is a recorded claim; the post-image is the fact.
                     if desired.is_empty()
                         && owns_file
-                        && !ledger.entries.iter().any(|(k, e)| {
-                            k.starts_with(&format!("{}/", h.slug)) && Path::new(&e.file) == path
-                        })
+                        && ledger.rows_at(h.slug, path).is_empty()
                         && post_image_structurally_empty(io, dialect, path)
                         && io.fs.remove_file(path).is_ok()
                     {
@@ -997,21 +956,6 @@ fn converge_surface(
     }
 }
 
-/// Belt two of the whole-file-ownership discipline: the ledger's `owns_file` flags for `path` go
-/// false the moment a converge OBSERVES content in the file beyond topos's managed entries — so
-/// a later removal can never trust a flag the file has outgrown.
-fn clear_owns_file(ledger: &mut McpLedger, slug: &str, path: &Path) -> bool {
-    let prefix = format!("{slug}/");
-    let mut dirty = false;
-    for (k, e) in &mut ledger.entries {
-        if k.starts_with(&prefix) && Path::new(&e.file) == path && e.owns_file {
-            e.owns_file = false;
-            dirty = true;
-        }
-    }
-    dirty
-}
-
 /// Belt one, at the delete boundary: re-read the just-written post-image and answer whether
 /// NOTHING but our removal remains — provably readable, zero managed entries, and no content
 /// beyond what a fresh topos-created file would hold. Any read failure or indeterminate shape
@@ -1031,7 +975,7 @@ fn post_image_structurally_empty(io: &ScopeIo<'_>, dialect: McpDialect, path: &P
 /// carries.
 #[allow(clippy::too_many_arguments)]
 fn write_intents(
-    ledger: &McpLedger,
+    ledger: &ScopeEntries,
     slug: &str,
     path: &Path,
     fingerprints: &[(String, String)],
@@ -1053,8 +997,7 @@ fn write_intents(
                 .bundle_of_key(key)
                 .map(|b| {
                     let version = ledger
-                        .entries
-                        .get(&placement_key(slug, key))
+                        .row(&placement_key(slug, key))
                         .map(|e| e.version_id.clone())
                         .unwrap_or_default();
                     (b.to_owned(), version)
@@ -1064,7 +1007,7 @@ fn write_intents(
     };
     for (key, fp) in &next {
         let ledger_key = placement_key(slug, key);
-        let standing = ledger.entries.get(&ledger_key);
+        let standing = ledger.row(&ledger_key);
         let changed = standing.map(|e| (e.fingerprint.as_str(), e.owns_file, e.file.as_str()))
             != Some((*fp, owns_file, file.as_str()));
         if changed {
@@ -1081,24 +1024,21 @@ fn write_intents(
             );
         }
     }
-    let prefix = format!("{slug}/");
-    for (ledger_key, entry) in &ledger.entries {
-        let Some(key) = ledger_key.strip_prefix(&prefix) else {
-            continue;
-        };
-        if kept.contains(key) || next.contains_key(key) {
-            continue;
-        }
-        // A row recorded at ANOTHER file is the disclosed stale class — never removal-intended
-        // against this surface (recovery would observe THIS file, read the key as absent, and
-        // drop custody of a live entry elsewhere).
-        if Path::new(&entry.file) != path {
+    // A row recorded at ANOTHER file is the disclosed stale class — never removal-intended against
+    // this surface (recovery would observe THIS file, read the key as absent, and drop custody of a
+    // live entry elsewhere), so only THIS surface's rows are scanned.
+    for (ledger_key, entry) in ledger.rows_at(slug, path) {
+        if kept.contains(&entry.key) || next.contains_key(entry.key.as_str()) {
             continue;
         }
+        let bundle_id = ledger
+            .bundle_of_key(&entry.key)
+            .unwrap_or_default()
+            .to_owned();
         intents.insert(
-            ledger_key.clone(),
+            ledger_key,
             PendingIntent {
-                bundle_id: entry.bundle_id.clone(),
+                bundle_id,
                 version_id: String::new(),
                 file: file.clone(),
                 fingerprint: String::new(),
@@ -1109,66 +1049,52 @@ fn write_intents(
     intents
 }
 
-/// Sync ledger entries to a LEAVE outcome's fingerprints (no config write happened; the ledger
+/// Sync the custody rows to a LEAVE outcome's fingerprints (no config write happened; the record
 /// just tracks what the file provably holds — e.g. a prior key that vanished from the file).
 #[allow(clippy::too_many_arguments)]
 fn sync_ledger_entries(
-    ledger: &mut McpLedger,
+    ledger: &mut ScopeEntries,
     slug: &str,
     path: &Path,
     fingerprints: &[(String, String)],
     kept: &BTreeSet<String>,
     provenance: &BTreeMap<String, (String, String)>,
     owns_file_default: bool,
-) -> bool {
+) {
     let file = path.display().to_string();
     let next: BTreeMap<&str, &str> = fingerprints
         .iter()
         .map(|(k, f)| (k.as_str(), f.as_str()))
         .collect();
-    let mut dirty = false;
-    // Drop standing entries the surface no longer carries (not the preserved ones, and never a
-    // row recorded at ANOTHER file — that is the disclosed stale class, left in place).
-    let prefix = format!("{slug}/");
-    let stale: Vec<String> = ledger
-        .entries
-        .iter()
-        .filter(|(k, e)| {
-            k.strip_prefix(&prefix)
-                .is_some_and(|key| !next.contains_key(key) && !kept.contains(key))
-                && Path::new(&e.file) == path
-        })
-        .map(|(k, _)| k.clone())
-        .collect();
-    for k in stale {
-        ledger.entries.remove(&k);
-        dirty = true;
+    // Drop standing rows the surface no longer carries (not the preserved ones, and never a row
+    // recorded at ANOTHER file — that is the disclosed stale class, left in place).
+    for (ledger_key, entry) in ledger.rows_at(slug, path) {
+        if !next.contains_key(entry.key.as_str()) && !kept.contains(&entry.key) {
+            ledger.remove(&ledger_key);
+        }
     }
     for (key, fp) in &next {
         let ledger_key = placement_key(slug, key);
+        let standing = ledger.row(&ledger_key).cloned();
         let (bundle, version) = provenance.get(*key).cloned().unwrap_or_else(|| {
             (
                 ledger.bundle_of_key(key).unwrap_or_default().to_owned(),
-                String::new(),
+                standing
+                    .as_ref()
+                    .map(|e| e.version_id.clone())
+                    .unwrap_or_default(),
             )
         });
-        let entry = ledger.entries.entry(ledger_key).or_insert_with(|| {
-            dirty = true;
-            LedgerEntry {
-                bundle_id: bundle.clone(),
-                version_id: version.clone(),
-                file: file.clone(),
-                fingerprint: String::new(),
-                owns_file: owns_file_default,
-            }
-        });
-        if entry.fingerprint != **fp || entry.file != file {
-            entry.fingerprint = (**fp).to_owned();
-            entry.file = file.clone();
-            dirty = true;
-        }
+        let row = EntryPlacement {
+            agent: slug.to_owned(),
+            file: file.clone(),
+            key: (*key).to_owned(),
+            fingerprint: (**fp).to_owned(),
+            owns_file: standing.as_ref().map_or(owns_file_default, |e| e.owns_file),
+            version_id: version,
+        };
+        ledger.put(ledger_key, bundle, row);
     }
-    dirty
 }
 
 /// Fold driver per-key states into per-key wire states (see the module doc's vocabulary).
@@ -1329,7 +1255,7 @@ pub(crate) fn converge_bundle_now(
     };
     // An ADVISORY (unlocked) read: it only derives the targeted reach below. The authoritative
     // read-modify-write happens inside `converge`, under the per-scope converge lock.
-    let ledger = match mcp_ledger::read(ctx.fs, &ctx.layout) {
+    let ledger = match ScopeEntries::load(ctx.fs, &ctx.layout) {
         Ok(l) => l,
         Err(e) => {
             // The same fail-closed answer the sweep's converge gives an unreadable ledger.
@@ -1342,7 +1268,7 @@ pub(crate) fn converge_bundle_now(
             );
         }
     };
-    let Some(key) = ledger.keys.get(sid.as_str()).cloned() else {
+    let Some(key) = ledger.key_of(sid.as_str()).map(str::to_owned) else {
         return (
             Vec::new(),
             vec![format!(
@@ -1356,7 +1282,7 @@ pub(crate) fn converge_bundle_now(
     // converge. None ⇒ nothing placed, nothing stale, nothing to do.
     let owned: Vec<String> = descriptors
         .iter()
-        .filter(|h| ledger.entries.contains_key(&placement_key(h.slug, &key)))
+        .filter(|h| ledger.holds(&placement_key(h.slug, &key)))
         .map(|h| h.slug.to_owned())
         .collect();
     if owned.is_empty() {

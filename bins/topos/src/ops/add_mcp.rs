@@ -43,7 +43,6 @@ use topos_types::results::{AddData, McpServerSummary};
 use crate::bundle_kind::BundleKind;
 use crate::ctx::Ctx;
 use crate::error::ClientError;
-use crate::manifest::document::ManifestScope;
 use crate::mcp_validate::{self, McpSummary};
 use crate::sidecar::Layout;
 
@@ -392,11 +391,9 @@ pub(crate) fn fold_workspace_mcp(
     else {
         return;
     };
-    let layout = match target.scope {
-        ManifestScope::Global => Some(ctx.layout.clone()),
-        ManifestScope::Project => crate::sidecar::existing_project_store(ctx.fs, &target.dir),
+    let Some(layout) = super::manifest_edit::mcp_scope_store(ctx, target) else {
+        return;
     };
-    let Some(layout) = layout else { return };
     let sctx = super::ctx_with_layout(ctx, &layout);
     let Ok(Some((_version, bytes))) = crate::mcp_engine::stored_server_json(&sctx, &sid) else {
         return;
@@ -464,7 +461,7 @@ fn adopt_local(
     let (filter, _) = row_narrowing(ctx, &scope.target, &data.name);
     let agents = engaged_agents(ctx, &scope.target, global, filter.as_deref());
     let bundle_id = data.skill_id.clone().unwrap_or_default();
-    let lines = converge_one(ctx, &scope.target, global, &bundle_id, &data.name);
+    let lines = converge_one(ctx, &scope.target, &bundle_id, &data.name);
     fold_receipt(&mut data, &summary, Some(dir), agents, &lines);
     Ok(Box::new(data))
 }
@@ -580,7 +577,7 @@ fn fetch_arm(
         data.dest = dest_entries.clone();
     }
     let bundle_id = format!("local:{slug}");
-    let lines = converge_one(ctx, &scope.target, global, &bundle_id, &slug);
+    let lines = converge_one(ctx, &scope.target, &bundle_id, &slug);
     fold_receipt(&mut data, &summary, Some(&bundle_dir), agents, &lines);
     Ok(Box::new(data))
 }
@@ -834,25 +831,11 @@ fn import_still_pristine(ctx: &Ctx<'_>, dir: &Path, recorded_sha: &str) -> bool 
 ///
 /// Best-effort by construction — the row already landed, and the next sweep reaches the same end
 /// state; every failure becomes a receipt line rather than a failed add.
-fn converge_one(
-    ctx: &Ctx<'_>,
-    target: &EditTarget,
-    global: bool,
-    bundle_id: &str,
-    name: &str,
-) -> Vec<String> {
+fn converge_one(ctx: &Ctx<'_>, target: &EditTarget, bundle_id: &str, name: &str) -> Vec<String> {
     let Some(roots) = ctx.roots.clone() else {
         return Vec::new();
     };
-    let (layout, project_root) = if global {
-        (Some(ctx.layout.clone()), None)
-    } else {
-        (
-            crate::sidecar::existing_project_store(ctx.fs, &target.dir),
-            Some(target.dir.clone()),
-        )
-    };
-    let Some(layout) = layout else {
+    let Some((layout, project_root)) = super::manifest_edit::mcp_scope_target(ctx, target) else {
         return Vec::new();
     };
     // The dir the row points at IS the bundle; read its document back from disk, so what gets

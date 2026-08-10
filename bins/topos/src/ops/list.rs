@@ -1400,6 +1400,7 @@ mod tests {
                         adopted_source: false,
                     })
                     .collect(),
+                entry_state: Vec::new(),
             },
         )
         .unwrap();

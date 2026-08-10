@@ -1869,14 +1869,7 @@ fn current_dest_roots(
         // The scope's ledger names the config files THIS bundle's entries live in — filtered by
         // every identity the bundle may be filed under (its cached skill id, the scope store's
         // tracked id, the name-keyed local identity).
-        let layout = match target.scope {
-            ManifestScope::Global => Some(ctx.layout.clone()),
-            ManifestScope::Project => crate::sidecar::existing_project_store(ctx.fs, &target.dir),
-        };
-        let Some(ledger) = layout
-            .filter(|l| ctx.fs.exists(&l.mcp_ledger_path()))
-            .and_then(|l| crate::mcp_ledger::read(ctx.fs, &l).ok())
-        else {
+        let Some(layout) = mcp_scope_store(ctx, target) else {
             return Ok(Vec::new());
         };
         let mut ids: Vec<String> = Vec::new();
@@ -1894,10 +1887,8 @@ fn current_dest_roots(
             ids.push(sid.as_str().to_owned());
         }
         ids.push(format!("local:{name}"));
-        let mut files: Vec<String> = ledger
-            .entries
-            .values()
-            .filter(|e| ids.contains(&e.bundle_id))
+        let mut files: Vec<String> = crate::config_custody::entries_of_any(ctx.fs, &layout, &ids)
+            .iter()
             .map(|e| dest_display(ctx, target, Path::new(&e.file)))
             .collect();
         files.sort();
@@ -2576,7 +2567,7 @@ fn apply_arms(
     // INLINE, so the receipt names the per-agent removals — and discloses a hand-edited entry
     // left behind — instead of deferring the fact to the next sweep. Best-effort: the row edit
     // already landed, and the next sweep's removal convergence reaches the same end state.
-    converge_removed_mcp(ctx, target, global, &arms, &mut items);
+    converge_removed_mcp(ctx, target, &arms, &mut items);
     // The folder half of the fetched import's inverse: a bundle folder `add --mcp <name|url>`
     // itself wrote leaves with the row — but ONLY when its bytes still match what the import
     // wrote (the scope's import record proves it); anything else is kept, disclosed. An adopted
@@ -3010,6 +3001,31 @@ fn note_still_delivered(b: &EagerBundle, feed: Option<&str>, items: &mut [Remove
     });
 }
 
+/// The SCOPE STORE one manifest-edit target's config custody lives in, with the project root its
+/// config surfaces resolve against — the ONE resolution every MCP entry point shares (`add`'s
+/// inline converge, the dest-root read, the removal converge), so no two of them can disagree
+/// about which store a row's entries belong to. The home layout for a GLOBAL target; the
+/// checkout's own EXISTING store otherwise — none of these paths mints one, because a scope that
+/// never placed has nothing to converge. `None` = there is no such store, so nothing was placed.
+pub(crate) fn mcp_scope_target(
+    ctx: &Ctx<'_>,
+    target: &EditTarget,
+) -> Option<(crate::sidecar::Layout, Option<PathBuf>)> {
+    match target.scope {
+        ManifestScope::Global => Some((ctx.layout.clone(), None)),
+        ManifestScope::Project => crate::sidecar::existing_project_store(ctx.fs, &target.dir)
+            .map(|l| (l, Some(target.dir.clone()))),
+    }
+}
+
+/// [`mcp_scope_target`] when only the store is wanted.
+pub(crate) fn mcp_scope_store(
+    ctx: &Ctx<'_>,
+    target: &EditTarget,
+) -> Option<crate::sidecar::Layout> {
+    mcp_scope_target(ctx, target).map(|(l, _)| l)
+}
+
 /// The inline MCP removal convergence a `remove` apply runs (see the call site): for each dropped
 /// row (or written `"off"` switch) whose bundle is a `kind = "mcp"` one, run
 /// [`crate::mcp_engine::remove_bundle`] against the edited scope and fold the per-agent outcomes
@@ -3017,27 +3033,16 @@ fn note_still_delivered(b: &EagerBundle, feed: Option<&str>, items: &mut [Remove
 fn converge_removed_mcp(
     ctx: &Ctx<'_>,
     target: &EditTarget,
-    global: bool,
     arms: &[Arm],
     items: &mut [RemoveItem],
 ) {
     let Some(roots) = ctx.roots.clone() else {
         return;
     };
-    // The edited scope's store: the home layout for `-g`, the checkout's own (existing) store
-    // otherwise — a removal never mints a store.
-    let (layout, project_root) = if global {
-        (Some(ctx.layout.clone()), None)
-    } else {
-        (
-            crate::sidecar::existing_project_store(ctx.fs, &target.dir),
-            Some(target.dir.clone()),
-        )
-    };
-    let Some(layout) = layout else {
+    let Some((layout, project_root)) = mcp_scope_target(ctx, target) else {
         return;
     };
-    if !ctx.fs.exists(&layout.mcp_ledger_path()) {
+    if !ctx.fs.exists(&layout.config_custody_path()) {
         return; // nothing was ever config-placed in this scope
     }
     let cache = crate::sync_status::read(ctx.fs, &ctx.layout).unwrap_or_default();

@@ -103,21 +103,31 @@ generated `docs/cli.md` (`cargo xtask gen-cli-ref`).
   `state/mcp_imports.json` record is what lets `remove` delete the written folder only when its
   bytes still match). `publish` reads the kind through the one classifier (`bundle_kind`),
   re-runs the gate BEFORE the op WAL, and threads it onto the wire.
-- `mcp_engine` + `mcp_ledger` — the `kind = "mcp"` bundle's delivery half: a store-only sync
+- `mcp_engine` + `config_custody` — the `kind = "mcp"` bundle's delivery half: a store-only sync
   (lock custody, no dir placement) feeds a per-scope config CONVERGE over
   `topos-harness::mcp`'s pure drivers — server.json parsed fail-closed, per-harness surfaces
   joined onto detection (project surfaces containment-proven) and narrowed by ONE shared
   resolution (the row's `dest` config-file entries mapped to the harnesses that claim them;
   no dest = every MCP-capable agent) so an add never places where the next sweep would claw it
-  back, removal via prior-matched keys with drift left in place. ONE converge path serves every surface, the wholly-topos-owned Claude plugin dir
-  included (its `.mcp.json` is an ordinary driver surface; content topos did not write backs the
-  whole surface off), and every entry point — the sweep, add's inline converge, a targeted
-  accept/go-back, `remove` — serializes on the per-scope `locks/mcp.lock` (unavailable = a
-  refusal, never a fallback). `mcp_ledger` (`state/mcp_ledger.json`, per scope) is the ownership
-  record: minted immutable config keys (retired, never reused), `key → fingerprint` entries
-  scoped to the FILE they were written into (a surface path that moves leaves a disclosed stale
-  class rather than re-pointed custody), and the intent journal every config write rides (crash
-  recovery promotes or drops by OBSERVING the file; an unreadable file keeps the standing entry).
+  back, removal via prior-matched keys with drift left in place. ONE converge path serves every
+  surface, the wholly-topos-owned Claude plugin dir included (its `.mcp.json` is an ordinary
+  driver surface; content topos did not write backs the whole surface off), and every entry
+  point — the sweep, add's inline converge, a targeted accept/go-back, `remove` — serializes on
+  the per-scope `locks/mcp.lock` (unavailable = a refusal, never a fallback), over the ONE
+  scope-store resolution (`manifest_edit::mcp_scope_target`).
+- `config_custody` — WHO OWNS WHICH CONFIG ENTRY. Placement ownership is the BUNDLE's, recorded
+  in its own `map.json` as `entry_state` rows (`{agent, file, key, fingerprint, owns_file}`) —
+  the same document that records the dirs a skill bundle owns, so one record answers "what does
+  this bundle own here" whatever its kind, and a row's `fingerprint` is to an entry what a dir's
+  `materialized_sha` is to a folder. Only two things outlive or span a bundle, and they live in
+  the per-scope `state/config_custody.json`: the minted immutable config keys with their
+  retirement reservations (a key names an OAuth trust surface — retired, never re-minted for
+  another bundle), and the intent journal every config write rides (one write covers many
+  bundles' entries; crash recovery promotes or drops per bundle record by OBSERVING the file, and
+  an unreadable file keeps the standing row). `ScopeEntries` is the read-modify-write view that
+  joins both halves into the one index the converge asks its ownership questions of; a bundle
+  with no store record of its own (the fetch door's `local:` identities) rides the scope
+  document's `unrecorded` map.
 - `bundle_kind` — WHAT A BUNDLE IS: the closed kind vocabulary (`skill` · `mcp`) and the ONE parse
   of a kind word. A word this build does not own is refused at every door it can enter — the sweep
   (the row is skipped whole, warned, never cached), `add`, and a hand-written manifest at LOAD

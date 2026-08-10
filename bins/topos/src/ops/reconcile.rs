@@ -2882,6 +2882,7 @@ fn sync_workspace_skill<'a>(
             harness: None,
             harness_layer: None,
             harness_slug: None,
+            entry_state: Vec::new(),
         };
         let plan = plan_fn(&run_ctx, &target.skill_id, &baseline_lock, &empty);
         if let Err(e) = lay_baseline_with_plan(
@@ -3101,7 +3102,7 @@ fn converge_dest_freeze(
         .filter(|(_, (p, pst))| {
             pst.materialized_sha.is_some()
                 && !pst.adopted_source
-                && !plan.targets.iter().any(|t| t.dir == Path::new(p))
+                && !plan.holds_planned_dir(Path::new(p))
         })
         .map(|(i, _)| i)
         .collect();
@@ -3259,7 +3260,7 @@ fn local_dest_apply(
         .filter(|(_, (p, st))| {
             st.materialized_sha.is_some()
                 && !st.adopted_source
-                && !plan.targets.iter().any(|t| t.dir == Path::new(p))
+                && !plan.holds_planned_dir(Path::new(p))
         })
         .map(|(i, _)| i)
         .collect();
@@ -4536,10 +4537,6 @@ fn held_skill_ids(ctx: &Ctx<'_>, visited: &[sidecar::Layout]) -> HashSet<String>
         let Ok(entries) = ctx.fs.read_dir(&layout.skills_dir()) else {
             continue;
         };
-        // A CONFIG-PLACED (mcp) record holds no dirs — its "still held" proof is the scope's mcp
-        // ledger still recording entries for it. Read once per store, best-effort (an unreadable
-        // ledger holds nothing here; the converge already warned about it).
-        let ledger = crate::mcp_ledger::read(ctx.fs, layout).unwrap_or_default();
         for entry in entries {
             let Some(id) = entry.file_name().and_then(|n| n.to_str()) else {
                 continue;
@@ -4555,8 +4552,10 @@ fn held_skill_ids(ctx: &Ctx<'_>, visited: &[sidecar::Layout]) -> HashSet<String>
             let Ok(Some(map)) = doc::read_map(ctx.fs, &layout.published(&sid).map) else {
                 continue;
             };
+            // A CONFIG-PLACED (mcp) record holds no dirs — its "still held" proof is its OWN
+            // record still carrying config entries, the same document the dirs would be in.
             let held = if map.placements.is_empty() {
-                ledger.has_entries_for(sid.as_str())
+                !map.entry_state.is_empty()
             } else {
                 map.placements.iter().any(|p| ctx.fs.exists(Path::new(p)))
             };
@@ -4756,7 +4755,7 @@ fn run_mcp_converge(
         let demands = sweep.mcp_demands.remove(&label).unwrap_or_default();
         // The common non-mcp machine: no demands and no ledger — nothing to converge, nothing to
         // read.
-        if demands.is_empty() && !env.ctx.fs.exists(&layout.mcp_ledger_path()) {
+        if demands.is_empty() && !env.ctx.fs.exists(&layout.config_custody_path()) {
             continue;
         }
         let mut hold = machine_hold.clone();
@@ -5243,7 +5242,6 @@ fn resolve_orphans(
             .filter(|r| r.scope.as_deref() == Some(label.as_str()))
             .map(|r| r.skill.clone())
             .collect();
-        let ledger = crate::mcp_ledger::read(ctx.fs, &layout).unwrap_or_default();
         let Ok(entries) = ctx.fs.read_dir(&layout.skills_dir()) else {
             continue;
         };
@@ -5256,7 +5254,9 @@ fn resolve_orphans(
             };
             if super::builtin::is_builtin(id)
                 || sidecar::record_retired(ctx.fs, &layout, &sid)
-                || ledger.has_entries_for(id)
+                // A record still carrying config entries is placed, not orphaned — its own
+                // document says so.
+                || !crate::config_custody::entries_of(ctx.fs, &layout, id).is_empty()
             {
                 continue;
             }
@@ -6243,6 +6243,7 @@ pub(crate) fn lay_baseline_with_plan(
         harness: Some(ctx.harness.id()),
         harness_layer: None,
         harness_slug: Some(ctx.harness.id().slug().to_owned()),
+        entry_state: Vec::new(),
     };
     let mut map = crate::placement::reconcile_map(&baseline, plan);
     // Record the ADOPTIONS durably: a planned dir that already exists under the display name with

@@ -26,12 +26,12 @@ use topos_types::requests::{
 };
 use topos_types::{CurrencyKind, HarnessId, TriggerReport, TriggerState};
 
+use crate::config_custody::{self, ScopeEntries};
 use crate::ctx::Ctx;
 use crate::error::ClientError;
 use crate::fs_seam::{FaultFs, FsOps as _, RealFs};
 use crate::ids::test_sources::{FixedClock, SeqIds};
 use crate::mcp_engine::{self, McpDemand, ScopeIo};
-use crate::mcp_ledger;
 use crate::plane::{
     AppliedSkillReport, DeliverySkill, DeliverySnapshot, DeliverySource, DirectorySource,
     FetchedFile, FetchedVersion, InertFollow, InertPlane, KnownCurrent, LinkStatus, PlaneError,
@@ -645,11 +645,11 @@ fn converge_places_into_all_six_dialects_byte_identical_to_the_drivers() {
         );
     }
     // The ledger: one key, six entries, every fingerprint matching what the file provably holds.
-    let ledger = mcp_ledger::read(&fs, &layout).unwrap();
-    assert_eq!(ledger.keys["s_linear"], "topos-eng-linear");
-    assert_eq!(ledger.entries.len(), 6);
-    assert!(ledger.pending.is_empty());
-    for (k, e) in &ledger.entries {
+    let ledger = ScopeEntries::load(&fs, &layout).unwrap();
+    assert_eq!(ledger.key_of("s_linear").unwrap(), "topos-eng-linear");
+    assert_eq!(ledger.row_count(), 6);
+    assert!(ledger.doc.pending.is_empty());
+    for (k, _b, e) in ledger.iter() {
         let slug = k.split('/').next().unwrap();
         let h = synthetic().into_iter().find(|h| h.slug == slug).unwrap();
         let dialect = h.mcp().unwrap().user.unwrap().dialect;
@@ -752,9 +752,9 @@ fn removal_converges_everywhere_and_deletes_only_wholly_owned_files() {
     );
     assert!(!kept.contains("topos-eng-alpha"), "ours is gone: {kept}");
     // The ledger: no entries, the key retired — and NEVER reusable by another bundle.
-    let mut ledger = mcp_ledger::read(&fs, &layout).unwrap();
-    assert!(ledger.entries.is_empty());
-    assert_eq!(ledger.retired["topos-eng-alpha"], "s_a");
+    let mut ledger = ScopeEntries::load(&fs, &layout).unwrap();
+    assert_eq!(ledger.row_count(), 0);
+    assert_eq!(ledger.doc.retired["topos-eng-alpha"], "s_a");
     assert_eq!(
         ledger.mint_key("s_other", "alpha", Some("eng")),
         "topos-eng-alpha-2"
@@ -848,9 +848,9 @@ fn a_foreign_topos_prefixed_entry_is_never_touched_or_claimed() {
         foreign,
         "foreign bytes untouched"
     );
-    let ledger = mcp_ledger::read(&fs, &layout).unwrap();
+    let ledger = ScopeEntries::load(&fs, &layout).unwrap();
     assert!(
-        !ledger.entries.contains_key("cursor/topos-eng-alpha"),
+        !ledger.holds("cursor/topos-eng-alpha"),
         "a foreign entry never enters the ledger"
     );
 }
@@ -1192,13 +1192,18 @@ fn a_moved_surface_path_discloses_the_stale_row_and_never_drops_it() {
         placed,
         "the old file's bytes stay untouched"
     );
-    let ledger = mcp_ledger::read(&fs, &layout).unwrap();
+    let ledger = ScopeEntries::load(&fs, &layout).unwrap();
     assert!(
         ledger.has_entries_for("s_a"),
         "the stale row is kept, never silently dropped: {ledger:?}"
     );
     assert_eq!(
-        Path::new(&ledger.entries[&mcp_ledger::placement_key("cursor", "topos-eng-alpha")].file),
+        Path::new(
+            &ledger
+                .row(&config_custody::placement_key("cursor", "topos-eng-alpha"))
+                .unwrap()
+                .file
+        ),
         old_file,
         "the row still names the old file"
     );
@@ -1229,7 +1234,7 @@ fn a_hand_deleted_plugin_dir_sheds_its_ledger_entries_on_the_next_converge() {
         true,
     );
     assert!(
-        mcp_ledger::read(&fs, &layout)
+        ScopeEntries::load(&fs, &layout)
             .unwrap()
             .has_entries_for("s_a")
     );
@@ -1238,13 +1243,17 @@ fn a_hand_deleted_plugin_dir_sheds_its_ledger_entries_on_the_next_converge() {
 
     // The demand drops: the ledger must shed the phantom rows and retire the key.
     mcp_engine::converge(&io, &[], &synthetic(), &all_slugs(), &no_hold(), true);
-    let ledger = mcp_ledger::read(&fs, &layout).unwrap();
+    let ledger = ScopeEntries::load(&fs, &layout).unwrap();
     assert!(
         !ledger.has_entries_for("s_a"),
         "phantom entries survive a hand-deleted plugin dir: {ledger:?}"
     );
     assert_eq!(
-        ledger.retired.get("topos-eng-alpha").map(String::as_str),
+        ledger
+            .doc
+            .retired
+            .get("topos-eng-alpha")
+            .map(String::as_str),
         Some("s_a"),
         "{ledger:?}"
     );
@@ -1344,7 +1353,7 @@ fn a_user_entry_added_to_a_topos_created_file_survives_last_entry_removal() {
             !kept.contains("topos-eng-alpha"),
             "{slug}: ours is gone: {kept}"
         );
-        let ledger = mcp_ledger::read(&fs, &layout).unwrap();
+        let ledger = ScopeEntries::load(&fs, &layout).unwrap();
         assert!(!ledger.has_entries_for("s_a"), "{slug}");
     }
 }
@@ -1373,9 +1382,13 @@ fn a_converge_that_sees_user_content_flips_owns_file_false() {
         &no_hold(),
         true,
     );
-    let lk = mcp_ledger::placement_key("cursor", "topos-eng-alpha");
+    let lk = config_custody::placement_key("cursor", "topos-eng-alpha");
     assert!(
-        mcp_ledger::read(&fs, &layout).unwrap().entries[&lk].owns_file,
+        ScopeEntries::load(&fs, &layout)
+            .unwrap()
+            .row(&lk)
+            .unwrap()
+            .owns_file,
         "created → wholly owned"
     );
     // The user adds a plain entry; the next converge (demand unchanged, a LEAVE) must record
@@ -1398,7 +1411,11 @@ fn a_converge_that_sees_user_content_flips_owns_file_false() {
     );
     assert_eq!(state_of(&out, "s_a", "cursor").state, "current");
     assert!(
-        !mcp_ledger::read(&fs, &layout).unwrap().entries[&lk].owns_file,
+        !ScopeEntries::load(&fs, &layout)
+            .unwrap()
+            .row(&lk)
+            .unwrap()
+            .owns_file,
         "the flag stops lying at the first sighting"
     );
 }
@@ -1451,7 +1468,7 @@ fn holds_and_targeted_runs_never_remove_standing_entries() {
     mcp_engine::converge(&io, &[], &synthetic(), &all_slugs(), &hold, true);
     assert_eq!(std::fs::read_to_string(&cursor).unwrap(), placed);
     assert!(
-        mcp_ledger::read(&fs, &layout)
+        ScopeEntries::load(&fs, &layout)
             .unwrap()
             .has_entries_for("s_a")
     );
@@ -1460,7 +1477,7 @@ fn holds_and_targeted_runs_never_remove_standing_entries() {
     mcp_engine::converge(&io, &[], &synthetic(), &all_slugs(), &no_hold(), false);
     assert_eq!(std::fs::read_to_string(&cursor).unwrap(), placed);
     assert!(
-        mcp_ledger::read(&fs, &layout)
+        ScopeEntries::load(&fs, &layout)
             .unwrap()
             .has_entries_for("s_a")
     );
@@ -1496,20 +1513,29 @@ fn intent_journal_recovery_heals_both_crash_orders_through_the_engine() {
     // ORDER (b): the config write LANDED, the ledger promotion did not — on disk the ledger
     // still carries the old fingerprint plus the journaled intent. Without recovery the entry
     // would read as user drift forever.
-    let mut ledger = mcp_ledger::read(&fs, &layout).unwrap();
-    let lk = mcp_ledger::placement_key("cursor", "topos-eng-alpha");
-    ledger.entries.get_mut(&lk).unwrap().fingerprint = "0".repeat(64);
-    ledger.pending.insert(
-        lk.clone(),
-        mcp_ledger::PendingIntent {
-            bundle_id: "s_a".into(),
-            version_id: "v1".into(),
-            file: cursor.display().to_string(),
-            fingerprint: real_fp.clone(),
-            owns_file: true,
-        },
-    );
-    mcp_ledger::write(&fs, &layout, &ledger).unwrap();
+    let mut ledger = ScopeEntries::load(&fs, &layout).unwrap();
+    let lk = config_custody::placement_key("cursor", "topos-eng-alpha");
+    let mut stale = ledger.row(&lk).unwrap().clone();
+    stale.fingerprint = "0".repeat(64);
+    ledger.put(lk.clone(), "s_a".to_owned(), stale);
+    ledger
+        .journal(
+            &fs,
+            &layout,
+            std::iter::once((
+                lk.clone(),
+                config_custody::PendingIntent {
+                    bundle_id: "s_a".into(),
+                    version_id: "v1".into(),
+                    file: cursor.display().to_string(),
+                    fingerprint: real_fp.clone(),
+                    owns_file: true,
+                },
+            ))
+            .collect(),
+        )
+        .unwrap();
+    assert!(ledger.flush(&fs, &layout).is_empty());
     let out = mcp_engine::converge(
         &io,
         std::slice::from_ref(&d),
@@ -1531,24 +1557,30 @@ fn intent_journal_recovery_heals_both_crash_orders_through_the_engine() {
         placed,
         "no rewrite"
     );
-    let ledger = mcp_ledger::read(&fs, &layout).unwrap();
-    assert!(ledger.pending.is_empty());
-    assert_eq!(ledger.entries[&lk].fingerprint, real_fp);
+    let ledger = ScopeEntries::load(&fs, &layout).unwrap();
+    assert!(ledger.doc.pending.is_empty());
+    assert_eq!(ledger.row(&lk).unwrap().fingerprint, real_fp);
 
     // ORDER (a): the intent was journaled, the config write never landed. Recovery drops the
     // intent; the standing entry (which matches the file) stays authoritative.
-    let mut ledger = mcp_ledger::read(&fs, &layout).unwrap();
-    ledger.pending.insert(
-        lk.clone(),
-        mcp_ledger::PendingIntent {
-            bundle_id: "s_a".into(),
-            version_id: "v2".into(),
-            file: cursor.display().to_string(),
-            fingerprint: "f".repeat(64),
-            owns_file: true,
-        },
-    );
-    mcp_ledger::write(&fs, &layout, &ledger).unwrap();
+    let mut ledger = ScopeEntries::load(&fs, &layout).unwrap();
+    ledger
+        .journal(
+            &fs,
+            &layout,
+            std::iter::once((
+                lk.clone(),
+                config_custody::PendingIntent {
+                    bundle_id: "s_a".into(),
+                    version_id: "v2".into(),
+                    file: cursor.display().to_string(),
+                    fingerprint: "f".repeat(64),
+                    owns_file: true,
+                },
+            ))
+            .collect(),
+        )
+        .unwrap();
     let out = mcp_engine::converge(
         &io,
         std::slice::from_ref(&d),
@@ -1558,9 +1590,9 @@ fn intent_journal_recovery_heals_both_crash_orders_through_the_engine() {
         true,
     );
     assert_eq!(state_of(&out, "s_a", "cursor").state, "current");
-    let ledger = mcp_ledger::read(&fs, &layout).unwrap();
-    assert!(ledger.pending.is_empty());
-    assert_eq!(ledger.entries[&lk].fingerprint, real_fp);
+    let ledger = ScopeEntries::load(&fs, &layout).unwrap();
+    assert!(ledger.doc.pending.is_empty());
+    assert_eq!(ledger.row(&lk).unwrap().fingerprint, real_fp);
 }
 
 #[test]
@@ -1639,12 +1671,14 @@ fn a_fault_at_any_write_never_tears_state_and_the_next_converge_heals() {
         );
         let bytes = std::fs::read(home.0.join(".cursor/mcp.json")).unwrap();
         let observed = mcp::observe(McpDialect::CursorJson, Some(&bytes));
-        let ledger = mcp_ledger::read(&fs, &layout).unwrap();
-        assert!(ledger.pending.is_empty(), "fail_at={fail_at}");
+        let ledger = ScopeEntries::load(&fs, &layout).unwrap();
+        assert!(ledger.doc.pending.is_empty(), "fail_at={fail_at}");
         assert_eq!(
             observed.entries.get("topos-eng-alpha"),
             Some(
-                &ledger.entries[&mcp_ledger::placement_key("cursor", "topos-eng-alpha")]
+                &ledger
+                    .row(&config_custody::placement_key("cursor", "topos-eng-alpha"))
+                    .unwrap()
                     .fingerprint
             ),
             "fail_at={fail_at}: the healed ledger matches the file"
@@ -2114,7 +2148,7 @@ fn a_channel_drop_removes_the_entries_everywhere() {
         "{:?}",
         row.destinations
     );
-    let ledger = mcp_ledger::read(&rig.fs, &rig.layout()).unwrap();
+    let ledger = ScopeEntries::load(&rig.fs, &rig.layout()).unwrap();
     assert!(!ledger.has_entries_for("s_a"));
 }
 
@@ -2187,8 +2221,8 @@ fn a_project_row_lands_only_in_project_surfaces_and_openclaw_hermes_read_not_sup
     }
     // The ledger lives in the PROJECT store.
     let playout = crate::sidecar::existing_project_store(&rig.fs, &proj.0).unwrap();
-    assert!(playout.mcp_ledger_path().exists());
-    assert!(!rig.layout().mcp_ledger_path().exists());
+    assert!(playout.config_custody_path().exists());
+    assert!(!rig.layout().config_custody_path().exists());
 }
 
 #[test]
@@ -2664,7 +2698,7 @@ fn a_tampered_local_row_is_held_with_the_typed_refusal_and_prior_entries_stay() 
         assert_eq!(now, placed, "{code}: the placed config never moves");
         assert!(!now.contains("ghp_"), "{code}: no credential lands");
         assert!(
-            mcp_ledger::read(&rig.fs, &rig.layout())
+            ScopeEntries::load(&rig.fs, &rig.layout())
                 .unwrap()
                 .has_entries_for("local:weather"),
             "{code}: the standing entry is held, not dropped"
@@ -2750,9 +2784,9 @@ fn dual_scope_adoption_keeps_each_scopes_config_key_stable() {
     .expect("global adopt");
     let playout = crate::sidecar::existing_project_store(&rig.fs, &proj.0)
         .expect("the project adopt minted the checkout's store");
-    let before = mcp_ledger::read(&rig.fs, &playout).unwrap();
-    assert_eq!(before.keys.len(), 1, "{before:?}");
-    let (proj_bundle, proj_key) = before.keys.iter().next().unwrap();
+    let before = ScopeEntries::load(&rig.fs, &playout).unwrap();
+    assert_eq!(before.doc.keys.len(), 1, "{before:?}");
+    let (proj_bundle, proj_key) = before.doc.keys.iter().next().unwrap();
     let (proj_bundle, proj_key) = (proj_bundle.clone(), proj_key.clone());
     let cursor = proj.0.join(".cursor/mcp.json");
     let placed = std::fs::read_to_string(&cursor).unwrap();
@@ -2766,13 +2800,16 @@ fn dual_scope_adoption_keeps_each_scopes_config_key_stable() {
         channels: Vec::new(),
     };
     sweep(&ctx, &plane, &fdir);
-    let after = mcp_ledger::read(&rig.fs, &playout).unwrap();
+    let after = ScopeEntries::load(&rig.fs, &playout).unwrap();
     assert_eq!(
-        after.keys.get(&proj_bundle),
+        after.doc.keys.get(&proj_bundle),
         Some(&proj_key),
         "the project scope's key must survive the sweep: {after:?}"
     );
-    assert!(after.retired.is_empty(), "nothing was retired: {after:?}");
+    assert!(
+        after.doc.retired.is_empty(),
+        "nothing was retired: {after:?}"
+    );
     let now = std::fs::read_to_string(&cursor).unwrap();
     assert!(now.contains(&proj_key), "{now}");
     assert!(
@@ -2833,10 +2870,14 @@ fn remove_of_an_mcp_row_converges_inline_and_the_receipt_names_the_removals() {
                 .contains("topos-eng-alpha"),
         "the entry is gone now, not at the next sweep"
     );
-    let ledger = mcp_ledger::read(&rig.fs, &rig.layout()).unwrap();
+    let ledger = ScopeEntries::load(&rig.fs, &rig.layout()).unwrap();
     assert!(!ledger.has_entries_for("s_a"));
     assert_eq!(
-        ledger.retired.get("topos-eng-alpha").map(String::as_str),
+        ledger
+            .doc
+            .retired
+            .get("topos-eng-alpha")
+            .map(String::as_str),
         Some("s_a")
     );
 }
@@ -2880,7 +2921,7 @@ fn a_lost_ledger_never_lets_a_targeted_go_back_materialize_skill_dirs() {
 
     // The failure shape: the ledger is gone, and so is the delivery cache — the MARKER alone must
     // answer.
-    std::fs::remove_file(rig.layout().mcp_ledger_path()).unwrap();
+    std::fs::remove_file(rig.layout().config_custody_path()).unwrap();
     std::fs::remove_file(rig.layout().sync_status_path()).unwrap();
 
     let out = ops::pull(
@@ -2925,7 +2966,7 @@ fn an_empty_map_with_no_kind_evidence_fails_closed_on_targeted_verbs() {
     sweep(&ctx, &plane, &dir);
 
     let sid = crate::id::SkillId::parse("s_linear").unwrap();
-    std::fs::remove_file(rig.layout().mcp_ledger_path()).unwrap();
+    std::fs::remove_file(rig.layout().config_custody_path()).unwrap();
     std::fs::remove_file(rig.layout().sync_status_path()).unwrap();
     std::fs::remove_file(rig.layout().published(&sid).kind).unwrap();
 
@@ -3220,7 +3261,7 @@ fn a_deleted_ledger_makes_the_targeted_go_back_skip_with_a_warning() {
     );
 
     // The failure shape: the ownership record is GONE (the kind marker still classifies).
-    std::fs::remove_file(rig.layout().mcp_ledger_path()).unwrap();
+    std::fs::remove_file(rig.layout().config_custody_path()).unwrap();
 
     // The converge the go-back hand-runs: zero writes, one honest warning.
     let sid = crate::id::SkillId::parse("s_linear").unwrap();

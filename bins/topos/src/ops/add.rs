@@ -421,6 +421,7 @@ pub(crate) fn add_with_name(
             harness,
             harness_layer,
             harness_slug: harness_slug.clone(),
+            entry_state: Vec::new(),
         },
     )?;
     doc::write_doc(

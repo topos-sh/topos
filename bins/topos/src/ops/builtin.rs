@@ -473,6 +473,7 @@ fn create_builtin(ctx: &Ctx<'_>, sid: &SkillId, bundle: &ScannedBundle) -> Resul
             harness: None,
             harness_layer: None,
             harness_slug: None,
+            entry_state: Vec::new(),
         },
     )?;
     doc::write_doc(

@@ -40,13 +40,36 @@ use crate::error::ClientError;
 use crate::scan::{self, ScannedBundle};
 use crate::stat_cache;
 
-/// One planned placement target — where one copy of the skill's bytes belongs on this machine.
+/// One planned placement target — where one copy of the bundle's bytes belongs on this machine.
 #[derive(Debug, Clone)]
 pub(crate) struct PlannedTarget {
     pub dir: PathBuf,
     pub kind: PlacementKind,
     /// The registry slug a `Native` target serves (`None` for the shared dir).
     pub agent: Option<String>,
+}
+
+impl PlacementPlan {
+    /// The plan's targets, in plan order — the apply set [`crate::materialize`] writes.
+    pub(crate) fn dirs(&self) -> impl Iterator<Item = &PlannedTarget> {
+        self.targets.iter()
+    }
+
+    /// Record one target.
+    fn push_dir(&mut self, dir: PathBuf, kind: PlacementKind, agent: Option<String>) {
+        self.targets.push(PlannedTarget { dir, kind, agent });
+    }
+
+    /// Whether a dir is already planned — one dir, one copy, one record.
+    fn holds_dir(&self, dir: &Path) -> bool {
+        self.dirs().any(|d| d.dir == dir)
+    }
+
+    /// [`Self::holds_dir`] for the callers outside this module (the retire scans, which ask
+    /// whether a RECORDED placement is still one the plan wants).
+    pub(crate) fn holds_planned_dir(&self, dir: &Path) -> bool {
+        self.holds_dir(dir)
+    }
 }
 
 /// One covered harness riding the shared target (describe disclosure: which agents the one shared
@@ -139,11 +162,7 @@ pub(crate) fn plan_targets(
                 adopt,
             )
         });
-        plan.targets.push(PlannedTarget {
-            dir,
-            kind: PlacementKind::Shared,
-            agent: None,
-        });
+        plan.push_dir(dir, PlacementKind::Shared, None);
     }
 
     let active_slug = ctx.harness.id().slug();
@@ -174,14 +193,10 @@ pub(crate) fn plan_targets(
         };
         // A native dir may coincide with an already-planned target (a harness whose native user dir
         // IS the shared convention dir, placed under a scope) — one dir, one copy, one record.
-        if plan.targets.iter().any(|t| t.dir == dir) {
+        if plan.holds_dir(&dir) {
             continue;
         }
-        plan.targets.push(PlannedTarget {
-            dir,
-            kind: PlacementKind::Native,
-            agent: Some(h.slug.to_owned()),
-        });
+        plan.push_dir(dir, PlacementKind::Native, Some(h.slug.to_owned()));
     }
 
     // The AGENT-LESS recorded placements — an adopt-in-place source dir, a plain tracked dir with no
@@ -191,13 +206,9 @@ pub(crate) fn plan_targets(
         for (dir, st) in map.placements.iter().zip(&map.placement_state) {
             if st.kind == PlacementKind::Native
                 && st.agent.is_none()
-                && !plan.targets.iter().any(|t| t.dir == Path::new(dir))
+                && !plan.holds_dir(Path::new(dir))
             {
-                plan.targets.push(PlannedTarget {
-                    dir: PathBuf::from(dir),
-                    kind: PlacementKind::Native,
-                    agent: None,
-                });
+                plan.push_dir(PathBuf::from(dir), PlacementKind::Native, None);
             }
         }
     }
@@ -305,11 +316,7 @@ pub(crate) fn project_plan(
     if !plan.shared_covers.is_empty() {
         let shared_root = project_dir.join(".agents/skills");
         match prior_in(PlacementKind::Shared, None) {
-            PriorProjectDir::Reuse(dir) => plan.targets.push(PlannedTarget {
-                dir,
-                kind: PlacementKind::Shared,
-                agent: None,
-            }),
+            PriorProjectDir::Reuse(dir) => plan.push_dir(dir, PlacementKind::Shared, None),
             // A recorded dir that no longer resolves inside the checkout is refused, never
             // followed — the rail does not care whether a path is fresh or remembered.
             PriorProjectDir::Escaped(dir) => {
@@ -323,11 +330,9 @@ pub(crate) fn project_plan(
                 plan.refused
                     .push(escape_line("the shared agents dir", &shared_root));
             }
-            PriorProjectDir::None => plan.targets.push(PlannedTarget {
-                dir: choose(&shared_root),
-                kind: PlacementKind::Shared,
-                agent: None,
-            }),
+            PriorProjectDir::None => {
+                plan.push_dir(choose(&shared_root), PlacementKind::Shared, None);
+            }
         }
     }
     for h in native {
@@ -353,14 +358,10 @@ pub(crate) fn project_plan(
             }
             PriorProjectDir::None => choose(&root),
         };
-        if plan.targets.iter().any(|t| t.dir == dir) {
+        if plan.holds_dir(&dir) {
             continue;
         }
-        plan.targets.push(PlannedTarget {
-            dir,
-            kind: PlacementKind::Native,
-            agent: Some(h.slug.to_owned()),
-        });
+        plan.push_dir(dir, PlacementKind::Native, Some(h.slug.to_owned()));
     }
 
     if plan.targets.is_empty() {
@@ -380,22 +381,22 @@ pub(crate) fn project_plan(
             })
             .unwrap_or_else(|| project_dir.join(".claude/skills"));
         match prior_in(PlacementKind::Native, Some(active)) {
-            PriorProjectDir::Reuse(dir) => plan.targets.push(PlannedTarget {
-                dir,
-                kind: PlacementKind::Native,
-                agent: Some(active.to_owned()),
-            }),
+            PriorProjectDir::Reuse(dir) => {
+                plan.push_dir(dir, PlacementKind::Native, Some(active.to_owned()));
+            }
             PriorProjectDir::Escaped(dir) => plan.refused.push(escape_line(active, &dir)),
             // The last root is the rail's last stand: refusing leaves this scope with NO target,
             // which is the honest answer — nothing lands rather than landing outside the checkout.
             PriorProjectDir::None if !within_project(project_dir, &root) => {
                 plan.refused.push(escape_line(active, &root));
             }
-            PriorProjectDir::None => plan.targets.push(PlannedTarget {
-                dir: choose(&root),
-                kind: PlacementKind::Native,
-                agent: Some(active.to_owned()),
-            }),
+            PriorProjectDir::None => {
+                plan.push_dir(
+                    choose(&root),
+                    PlacementKind::Native,
+                    Some(active.to_owned()),
+                );
+            }
         }
     }
     plan
@@ -474,14 +475,10 @@ pub(crate) fn dest_plan(
                     adopt,
                 )
             });
-        if plan.targets.iter().any(|t| t.dir == dir) {
+        if plan.holds_dir(&dir) {
             continue;
         }
-        plan.targets.push(PlannedTarget {
-            dir,
-            kind: PlacementKind::Native,
-            agent: None,
-        });
+        plan.push_dir(dir, PlacementKind::Native, None);
     }
     plan
 }
@@ -845,12 +842,18 @@ fn owned_predicate(prior: Option<&PlacementMap>) -> impl Fn(&Path) -> bool + '_ 
     }
 }
 
-/// Reconcile the durable record with a fresh plan: every prior placement is KEPT (its dir and state
-/// verbatim — a placement leaves the record only through an explicit verb), and every planned target
-/// the record does not yet hold is APPENDED never-materialized. Returns the next map.
+/// Reconcile the durable record with a fresh plan's DIR half: every prior placement is KEPT (its dir
+/// and state verbatim — a placement leaves the record only through an explicit verb), and every
+/// planned dir target the record does not yet hold is APPENDED never-materialized. Returns the next
+/// map.
+///
+/// The ENTRY half is deliberately not reconciled here. A dir target is RESERVED before its bytes
+/// land (the reservation is what holds the name still); an entry has no name to hold — its row IS
+/// the fingerprint of what the converge wrote, so it is born by the write and by nothing else.
+/// A planned-but-unwritten entry would be a row claiming custody of bytes nobody put there.
 pub(crate) fn reconcile_map(prior: &PlacementMap, plan: &PlacementPlan) -> PlacementMap {
     let mut next = prior.clone();
-    for t in &plan.targets {
+    for t in plan.dirs() {
         let dir = t.dir.to_string_lossy().into_owned();
         if next.placements.contains(&dir) {
             continue;
@@ -870,7 +873,7 @@ pub(crate) fn reconcile_map(prior: &PlacementMap, plan: &PlacementPlan) -> Place
                 st.kind == t.kind
                     && st.agent.as_deref() == t.agent.as_deref()
                     && st.materialized_sha.is_none()
-                    && !plan.targets.iter().any(|pt| pt.dir == Path::new(d))
+                    && !plan.holds_dir(Path::new(d))
             })
         {
             next.placements[i] = dir;
@@ -904,7 +907,7 @@ pub(crate) fn managed_indices(map: &PlacementMap, plan: &PlacementPlan) -> Vec<u
     map.placements
         .iter()
         .enumerate()
-        .filter(|(_, dir)| plan.targets.iter().any(|t| t.dir == Path::new(dir)))
+        .filter(|(_, dir)| plan.holds_dir(Path::new(dir)))
         .map(|(i, _)| i)
         .collect()
 }
@@ -1515,6 +1518,7 @@ mod tests {
             harness: None,
             harness_layer: None,
             harness_slug: None,
+            entry_state: Vec::new(),
         }
     }
 

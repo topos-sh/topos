@@ -7046,7 +7046,7 @@ fn a_committed_skills_symlink_is_refused_as_a_placement_root() {
         plan.refused
     );
     assert!(
-        plan.targets.iter().all(|t| !t.dir.starts_with(&outside.0)),
+        plan.dirs().all(|t| !t.dir.starts_with(&outside.0)),
         "nothing is aimed outside the checkout: {:?}",
         plan.targets
     );
@@ -7067,7 +7067,7 @@ fn a_committed_skills_symlink_is_refused_as_a_placement_root() {
     );
     assert!(plan.refused.is_empty(), "{:?}", plan.refused);
     assert!(
-        plan.targets.iter().all(|t| t.dir.starts_with(&ok.0)),
+        plan.dirs().all(|t| t.dir.starts_with(&ok.0)),
         "{:?}",
         plan.targets
     );
@@ -8445,6 +8445,7 @@ fn a_prior_placement_that_no_longer_resolves_inside_the_checkout_is_refused() {
         harness: None,
         harness_layer: None,
         harness_slug: None,
+        entry_state: Vec::new(),
     };
 
     let ctx = rig.ctx_at(Some(&proj.0));
@@ -8467,7 +8468,7 @@ fn a_prior_placement_that_no_longer_resolves_inside_the_checkout_is_refused() {
         plan.refused
     );
     assert!(
-        plan.targets.iter().all(|t| !t.dir.starts_with(&outside.0)),
+        plan.dirs().all(|t| !t.dir.starts_with(&outside.0)),
         "the symlink is never followed: {:?}",
         plan.targets
     );
@@ -8877,6 +8878,7 @@ fn seed_store_row(layout: &Layout, id: &str, placement: &std::path::Path) {
             harness: None,
             harness_layer: None,
             harness_slug: Some("claude-code".to_owned()),
+            entry_state: Vec::new(),
         },
     )
     .unwrap();
@@ -11064,11 +11066,15 @@ fn a_classic_delete_of_an_mcp_record_takes_its_config_entries_with_it() {
             "the entry outlived the record it belonged to, in {f:?}: {text}"
         );
     }
-    // The ledger retires the key rather than forgetting it — a retired key is never re-minted.
-    let ledger = crate::mcp_ledger::read(&rig.fs, &rig.layout()).unwrap();
-    assert!(!ledger.has_entries_for("s_linear"));
+    // The scope RETIRES the key rather than forgetting it — a retired key is never re-minted —
+    // and the bundle's own record no longer carries a config entry.
+    let custody = crate::config_custody::read(&rig.fs, &rig.layout()).unwrap();
+    assert!(
+        crate::config_custody::entries_of(&rig.fs, &rig.layout(), "s_linear").is_empty(),
+        "the record's config entries left with the row"
+    );
     assert_eq!(
-        ledger.retired.get("topos-eng-linear").map(String::as_str),
+        custody.retired.get("topos-eng-linear").map(String::as_str),
         Some("s_linear")
     );
     // And the receipt names the files it touched — a removal that edited somebody's agent config
