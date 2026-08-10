@@ -145,20 +145,6 @@ export async function identityHolder(
   return row === undefined ? null : { bundleId: row.bundle_id, name: row.name };
 }
 
-/** Every identity this workspace's bundles hold, by bundle id — one indexed read, no vault. */
-export async function identitiesByBundle(
-  workspaceId: string,
-  kind: string,
-): Promise<Map<string, string>> {
-  const rows = await getDb().execute(sql`
-    SELECT bundle_id, identity FROM web.bundle_identity
-    WHERE workspace_id = ${workspaceId} AND kind = ${kind}
-  `);
-  return new Map(
-    (rows.rows as { bundle_id: string; identity: string }[]).map((r) => [r.bundle_id, r.identity]),
-  );
-}
-
 /**
  * How long ONE document read may take before the backfill stops waiting on it, and how long the
  * whole sweep may take before it stops entirely.

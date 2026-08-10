@@ -4247,13 +4247,6 @@
             "type": "string",
             "description": "The catalog's bundle kind (`\"skill\"` · `\"mcp\"`). An OPEN string on the wire and a CLOSED\nvocabulary at the server that mints it. Clients BRANCH on it: the kind chooses the delivery\nmechanics — skill-dir placement, or the MCP config converge — so a client that does not\nknow the kind a row names refuses that row rather than placing it as something else.\nAdditive: an older producer that omits it is serving skills."
           },
-          "mcp_server_name": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "The EMBEDDED server name (`server.name`) the bundle's `current` document declares — the\nidentity the MCP read API keys on, distinct from the catalog `name` above. Present only\nfor an active `kind = \"mcp\"` entry whose document could be read; it is what lets a\nregistry-shaped token be recognized as a bundle a connected workspace already publishes.\nThe client dials no registry of its own — a registry-shaped name it cannot match here is\nrefused toward the workspace, never fetched. **Additive.**"
-          },
           "name": {
             "type": "string",
             "description": "The catalog's user-facing name (a pre-catalog seeded pointer falls back to the skill id)."

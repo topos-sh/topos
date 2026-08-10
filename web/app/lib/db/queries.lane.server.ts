@@ -826,12 +826,6 @@ export interface LaneSkillIndexEntry {
   upstream_host?: string;
   upstream_repo?: string;
   upstream_path?: string;
-  /** The EMBEDDED server name (`server.name`) of an active `kind: 'mcp'` entry's current
-   * document — the identity the registry read API keys on, distinct from the catalog `name`.
-   * NOT filled by the index read itself: the route decorates it via `withMcpServerNames`
-   * (app/lib/mcp/catalog.server.ts), which reads the RECORDED claim (`web.bundle_identity`) in
-   * one indexed pass. Additive — an entry with no recorded claim is left undecorated. */
-  mcp_server_name?: string;
 }
 
 /** The workspace catalog — every bundle holding a `current`, ordered by id. */

@@ -482,7 +482,6 @@ pub(super) fn catalog_entry(skill_id: &str, name: &str, v: &Version) -> WireSkil
         upstream_host: None,
         upstream_repo: None,
         upstream_path: None,
-        mcp_server_name: None,
     }
 }
 impl DirectorySource for FakeDirectory {

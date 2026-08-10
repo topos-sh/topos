@@ -3212,7 +3212,6 @@ mod tests {
             upstream_host: None,
             upstream_repo: None,
             upstream_path: None,
-            mcp_server_name: None,
         }
     }
 

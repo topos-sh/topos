@@ -3,16 +3,13 @@ import { laneGate } from "@/lib/api/compat.server";
 import { NO_STORE, uniformNotFound } from "@/lib/api/wire.server";
 import { requireSessionActor } from "@/lib/auth/guards.server";
 import { laneSkillsIndex } from "@/lib/db/queries.lane.server";
-import { withMcpServerNames } from "@/lib/mcp/catalog.server";
 
 /**
  * `GET /api/v1/workspaces/{ws}/skills` — the workspace catalog (every bundle holding a
  * `current`), authorized by workspace membership. Metadata only, no bytes; ordered by id.
- * Active `kind: 'mcp'` entries additionally carry their EMBEDDED server name (additive,
- * best-effort). NOTE: the CLI no longer reads this field — it was the join a registry-shaped
- * `add` resolved workspace-first, and that door is gone (a server enters a workspace here, on the
- * web, and machines add it by CATALOG name). The field is kept for registry-shape consumers of
- * this listing; nothing in the client consumes it today.
+ * A bundle is named here by its CATALOG name, whatever its kind: an MCP server's embedded
+ * registry name is the registry lane's business (`…/registry/v0.1/servers`), which serves it in
+ * the shape a registry client expects.
  */
 export async function loader({ request, params }: LoaderFunctionArgs): Promise<Response> {
   const gated = laneGate(request);
@@ -20,7 +17,7 @@ export async function loader({ request, params }: LoaderFunctionArgs): Promise<R
     return gated;
   }
   const actor = await requireSessionActor(request, params.ws ?? "");
-  const skills = await withMcpServerNames(actor.workspaceId, await laneSkillsIndex(actor));
+  const skills = await laneSkillsIndex(actor);
   return Response.json({ skills }, { headers: NO_STORE });
 }
 

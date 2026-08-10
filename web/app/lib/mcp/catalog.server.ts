@@ -1,5 +1,4 @@
 import type { MemberActor, SessionActor } from "@/lib/auth/guards.server";
-import { identitiesByBundle } from "@/lib/db/bundle-identity.server";
 import {
   MAX_MCP_BUNDLES_SCANNED,
   type McpBundleRow,
@@ -119,33 +118,4 @@ export async function scanMcpCatalog(
     entries.push({ row, server, serverName: server.name });
   }
   return { entries };
-}
-
-/**
- * Decorate the session-lane catalog listing with each ACTIVE `kind: 'mcp'` entry's EMBEDDED
- * server name — read from the RECORDED claim (`web.bundle_identity`), which is the same name the
- * registry lane serves and the one the workspace holds it against. It used to be what let the
- * CLI resolve a registry-shaped `add` against the connected workspaces before the official
- * registry; that door is gone, and NO client reads the field today — it stands for
- * registry-shape consumers of this listing.
- *
- * One indexed read for the whole listing, no vault round-trips and no per-pass cap: the claim
- * IS the recorded answer. Additive by design — an entry with no recorded claim (a server whose
- * document was unreadable when its name was last due to be recorded) is left undecorated, and
- * the wire field is optional.
- */
-export async function withMcpServerNames<
-  T extends { skill_id: string; kind: string; status: string; version_id: string },
->(ws: string, entries: T[]): Promise<(T & { mcp_server_name?: string })[]> {
-  if (!entries.some((entry) => entry.kind === "mcp" && entry.status === "active")) {
-    return entries;
-  }
-  const identities = await identitiesByBundle(ws, "mcp");
-  return entries.map((entry) => {
-    if (entry.kind !== "mcp" || entry.status !== "active") {
-      return entry;
-    }
-    const name = identities.get(entry.skill_id);
-    return name === undefined ? entry : { ...entry, mcp_server_name: name };
-  });
 }

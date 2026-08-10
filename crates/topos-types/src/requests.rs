@@ -380,14 +380,6 @@ pub struct WireSkillIndexEntry {
     /// `upstream_host` is. **Additive.**
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub upstream_path: Option<String>,
-    /// The EMBEDDED server name (`server.name`) the bundle's `current` document declares — the
-    /// identity the MCP read API keys on, distinct from the catalog `name` above. Present only
-    /// for an active `kind = "mcp"` entry whose document could be read; it is what lets a
-    /// registry-shaped token be recognized as a bundle a connected workspace already publishes.
-    /// The client dials no registry of its own — a registry-shaped name it cannot match here is
-    /// refused toward the workspace, never fetched. **Additive.**
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub mcp_server_name: Option<String>,
 }
 
 /// `GET /v1/workspaces/{ws}/skills` response body — the workspace catalog (every skill holding a `current`),
@@ -1394,17 +1386,14 @@ mod tests {
             upstream_host: None,
             upstream_repo: None,
             upstream_path: None,
-            mcp_server_name: None,
         };
         let v = serde_json::to_value(&entry).unwrap();
         // The new fields ride under their snake_case spellings.
         assert_eq!(v["name"], "pr-describe");
         assert_eq!(v["status"], "active");
-        // An absent display_name omits (skip_serializing_if), as do the upstream fields and the
-        // mcp-only embedded server name.
+        // An absent display_name omits (skip_serializing_if), as do the upstream fields.
         assert!(v.get("display_name").is_none());
         assert!(v.get("upstream_host").is_none());
-        assert!(v.get("mcp_server_name").is_none());
         let back: WireSkillIndexEntry = serde_json::from_value(v).unwrap();
         assert_eq!(back.name, "pr-describe");
         assert_eq!(back.status, "active");
