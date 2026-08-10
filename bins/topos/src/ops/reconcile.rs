@@ -2185,8 +2185,8 @@ fn reconcile_thing<'a>(
                 };
                 // The row's custody identity — computed once, because the tally and the mcp hold
                 // below must file this bundle under the SAME key (a gone dir resolves to the
-                // name-keyed local identity, which is exactly what a later run would use again).
-                let identity = local_bundle_identity(env, sc, &dir, &display);
+                // row-keyed local identity, which is exactly what a later run would use again).
+                let identity = local_bundle_identity(env, sc, &dir, &row.reference);
                 // The scope is named in the PERSON'S vocabulary, not the resolver's: `person` is
                 // an internal word for the machine-wide scope, and it shipped verbatim to anyone
                 // who deleted a folder a row still asks for.
@@ -2194,7 +2194,7 @@ fn reconcile_thing<'a>(
                     "PATH_MISSING",
                     format!(
                         "\"{raw}\": your topos.toml asks for this folder {whose}, and the folder \
-                         is gone. Run 'topos remove{g} {raw}' to drop the line."
+                         is gone. Run 'topos remove{g} {raw} --yes' to drop the line."
                     ),
                 ));
                 // The BUNDLE is what could not be carried forward, so the bundle is what the
@@ -2211,6 +2211,10 @@ fn reconcile_thing<'a>(
                     argv.push("-g".to_owned());
                 }
                 argv.push(raw.to_string());
+                // `--yes`, because the drop is what COMPLETES: the offered command is the one a
+                // person (or an agent) runs to clear this warning for good, and without it the
+                // gone-folder row would only ever be described back at them.
+                argv.push("--yes".to_owned());
                 argv.push("--json".to_owned());
                 sweep.fault_actions.push(crate::actions::next_action(
                     topos_types::ActionCode::from("REMOVE_MISSING_ROW".to_owned()),
@@ -2422,14 +2426,16 @@ pub(crate) fn mcp_dest_narrowing(
     }
 }
 
-/// The custody identity of a LOCAL `kind = "mcp"` row: the tracked skill id when THIS SCOPE'S
-/// OWN store records the dir (custody survives a later publish, which keeps the id), else a
-/// name-keyed local identity. ONLY the scope's store is asked — the same rule `add --kind mcp`'s
-/// inline converge minted the config key under — because the OTHER scope may track the same
-/// folder under its own id, and answering with it would retire this scope's standing key and
-/// re-mint a suffixed one: the one way a config entry's name could move, stranding any OAuth
-/// token a harness filed under it.
-fn local_bundle_identity(env: &Env<'_>, sc: &ScopeCtx<'_>, dir: &Path, display: &str) -> String {
+/// The custody identity of a LOCAL row: the tracked skill id when THIS SCOPE'S OWN store records
+/// the dir (custody survives a later publish, which keeps the id), else the row's own
+/// [`config_custody::local_identity`] — keyed by the MANIFEST LINE, never by the display name, so
+/// two rows naming two folders that each hold a `linear` stay two bundles wherever this identity
+/// is the key (the failure tally, the MCP hold, the custody rows). ONLY the scope's store is
+/// asked — the same rule `add --kind mcp`'s inline converge minted the config key under — because
+/// the OTHER scope may track the same folder under its own id, and answering with it would retire
+/// this scope's standing key and re-mint a suffixed one: the one way a config entry's name could
+/// move, stranding any OAuth token a harness filed under it.
+fn local_bundle_identity(env: &Env<'_>, sc: &ScopeCtx<'_>, dir: &Path, reference: &str) -> String {
     let scope_layout = match &sc.scope {
         ResolvedScope::Person => Some(env.ctx.layout.clone()),
         ResolvedScope::Project { dir: project_dir } => {
@@ -2445,7 +2451,7 @@ fn local_bundle_identity(env: &Env<'_>, sc: &ScopeCtx<'_>, dir: &Path, display: 
                 .ok()
                 .flatten()
         })
-        .unwrap_or_else(|| format!("local:{display}"))
+        .unwrap_or_else(|| crate::config_custody::local_identity(reference))
 }
 
 /// Whether the record a LOCAL path row tracks carries local edits — the same scan `list` and
@@ -2481,7 +2487,7 @@ fn local_mcp_demand(
     row_index: Option<usize>,
     sweep: &mut Sweep,
 ) {
-    let bundle_id = local_bundle_identity(env, sc, dir, display);
+    let bundle_id = local_bundle_identity(env, sc, dir, &row.reference);
     match env.ctx.fs.read_opt(&dir.join("server.json")) {
         Ok(Some(bytes)) => {
             let narrowing = mcp_filter(

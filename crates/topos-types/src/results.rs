@@ -874,6 +874,11 @@ pub struct SkillEntry {
     /// copies compete; `draft_dir` is the one-copy case. **INFERRED** (additive).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub draft_diverged: Option<u32>,
+    /// The row's SOURCE FOLDER is gone: a local-path row whose folder no longer exists. Nothing
+    /// can apply it, so the row's only honest next step is dropping the line — never the update
+    /// every other never-applied row offers. **INFERRED** (additive).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub source_missing: bool,
 }
 
 /// A row's origin has STOPPED ANSWERING — the one fact about a bundle that no other column can

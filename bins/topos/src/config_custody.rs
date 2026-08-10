@@ -254,6 +254,17 @@ pub(crate) fn placement_key(slug: &str, entry_key: &str) -> String {
     format!("{slug}/{entry_key}")
 }
 
+/// The custody identity of a LOCAL bundle no store record answers for — a folder adopted by hand,
+/// a document imported by name, a row someone wrote into `topos.toml` themselves. It is keyed by
+/// the MANIFEST LINE, which is unique per scope by construction, and never by the display name:
+/// two rows can name two different folders that both hold a `linear`, and a name-keyed identity
+/// silently filed them as one bundle — one tally count for two failures, one custody row for two
+/// servers' entries. The ONE derivation, so every surface that asks "which bundle is this row"
+/// gets the same answer.
+pub(crate) fn local_identity(reference: &str) -> String {
+    format!("local:{reference}")
+}
+
 // =================================================================================================
 // The scope-wide read-modify-write view.
 // =================================================================================================

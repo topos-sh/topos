@@ -13896,10 +13896,12 @@ fn path_missing_names_the_scope_exact_drop_and_it_clears_the_row() {
         .into_iter()
         .find(|w| w.starts_with("PATH_MISSING"))
         .unwrap_or_else(|| panic!("the missing folder is reported: {:?}", out.warnings));
-    let offered = format!("'topos remove -g {}'", canonical.display());
+    // COMPLETE, not merely correct: the offered command carries `--yes`, so running it finishes
+    // the job instead of describing the drop back at the reader.
+    let offered = format!("'topos remove -g {} --yes'", canonical.display());
     assert!(
         warning.contains(&offered),
-        "the drop is spelled for the file that HOLDS the row: {warning}"
+        "the drop is spelled for the file that HOLDS the row, and it completes: {warning}"
     );
     // THE SCOPE IN THE PERSON'S WORDS. `person` is the resolver's internal name for the
     // machine-wide scope and it shipped verbatim to anyone who deleted a folder a row still asks
@@ -13962,9 +13964,11 @@ fn path_missing_names_the_scope_exact_drop_and_it_clears_the_row() {
             "remove".to_owned(),
             "-g".to_owned(),
             canonical.display().to_string(),
+            "--yes".to_owned(),
             "--json".to_owned(),
         ],
-        "the machine channel spells the same scope the prose did"
+        "the machine channel spells the same scope — and the same completing command — the prose \
+         did"
     );
 
     // The offered command runs, and the next sweep has nothing left to warn about.
@@ -13992,6 +13996,145 @@ fn path_missing_names_the_scope_exact_drop_and_it_clears_the_row() {
         "the warning is gone with the row: {:?}",
         out.warnings
     );
+}
+
+/// THE GONE-FOLDER CHAIN, END TO END: every surface a person meets after deleting a folder a row
+/// still asks for names the SAME fact and the SAME command, and none of them promises anything
+/// that cannot happen. `list` used to offer `topos update -g` for a row that can never apply; the
+/// remove hedged with the loss guard's "files could not be read" (through a doubled possessive)
+/// about files that are not there; and the receipt printed `Undo: topos add <gone path>` — an
+/// inverse that must fail.
+#[test]
+fn a_gone_folders_row_states_the_fact_and_withholds_the_undo() {
+    let rig = Rig::new("gone-folder-chain");
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let plane = FakePlane::new(log);
+    plane.serves(Vec::new());
+    let dir = FakeDirectory::new(Vec::new(), Vec::new());
+
+    let src = rig.work.0.join("solo");
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::write(src.join("SKILL.md"), b"# solo\n").unwrap();
+    let canonical = src.canonicalize().unwrap();
+    let raw = canonical.display().to_string();
+    rig.write_global(&format!("[bundles]\n\"{raw}\" = \"*\"\n"));
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    std::fs::remove_dir_all(&src).unwrap();
+
+    // THE LISTING. One note, and the only command in it is the one that changes something.
+    let listing = ops::list_with(
+        &ctx,
+        &ops::ListRequest {
+            view: ops::ScopeView::Machine,
+            ..Default::default()
+        },
+        None,
+        None,
+        ops::RowPage::unlimited(),
+    )
+    .unwrap();
+    let text = crate::render::list_tty(&listing);
+    assert!(
+        text.contains(&format!(
+            "(its folder is gone — run 'topos remove -g {raw} --yes' to drop the line)"
+        )),
+        "{text}"
+    );
+    assert!(
+        !text.contains("topos update -g` applies it"),
+        "a row that can never apply is never offered the update: {text}"
+    );
+
+    // THE REMOVE. Bare — nothing can be lost, so nothing gates — with the real reason, and the
+    // possessive spelled once.
+    let out = ops::remove_global(
+        &ctx,
+        &|_s: &Session| ops::SessionTransports {
+            plane: Box::new(plane.clone()),
+            directory: Box::new(dir.clone()),
+            contribute: Box::new(NoContribute),
+            governance: Box::new(NoGovernance),
+        },
+        std::slice::from_ref(&raw),
+        None,
+        false,
+        &Default::default(),
+    )
+    .unwrap();
+    let data = match out {
+        ops::RemoveOutcome::Applied(data) => data,
+        other => panic!("nothing can be lost, so nothing describes first: {other:?}"),
+    };
+    let note = data.items[0].note.clone().unwrap_or_default();
+    assert!(
+        note.contains(
+            "its folder is gone, so there are no files to check — dropping the line changes \
+             nothing else"
+        ),
+        "{note}"
+    );
+    assert!(!note.contains("could not be read"), "{note}");
+    assert!(!note.contains("''s"), "one apostrophe, one s: {note}");
+
+    // THE RECEIPT. No undo: `topos add <gone path>` cannot restore anything.
+    assert!(
+        data.undo.is_empty(),
+        "an inverse that must fail is withheld: {:?}",
+        data.undo
+    );
+    assert_eq!(global_text(&rig), "[bundles]\n");
+}
+
+/// TWO ROWS, TWO FOLDERS, ONE NAME — and TWO failures. A gone folder's bundle is counted under
+/// the MANIFEST LINE that asks for it (unique per scope by construction), never under the display
+/// name two folders can share: the name-keyed tally filed both rows as one bundle, so a sweep that
+/// could carry neither forward summarised "1 failed" while warning about two.
+#[test]
+fn two_same_named_local_rows_whose_folders_are_gone_are_two_failures() {
+    let rig = Rig::new("path-missing-twins");
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let plane = FakePlane::new(log);
+    plane.serves(Vec::new());
+    let dir = FakeDirectory::new(Vec::new(), Vec::new());
+
+    let mut refs = Vec::new();
+    for parent in ["one", "two"] {
+        let src = rig.work.0.join(parent).join("linear");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("SKILL.md"), format!("# {parent}\n")).unwrap();
+        refs.push(src.canonicalize().unwrap());
+    }
+    rig.write_global(&format!(
+        "[bundles]\n\"{}\" = \"*\"\n\"{}\" = \"*\"\n",
+        refs[0].display(),
+        refs[1].display()
+    ));
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    for r in &refs {
+        std::fs::remove_dir_all(r).unwrap();
+    }
+    let out = sweep_scoped(&ctx, &plane, &dir, ops::UpdateScope::Machine);
+
+    let warned: Vec<String> = crate::message::legacy_lines(&out.warnings)
+        .into_iter()
+        .filter(|w| w.starts_with("PATH_MISSING"))
+        .collect();
+    assert_eq!(warned.len(), 2, "both rows are reported: {warned:?}");
+    assert_eq!(
+        out.failed_bundles.len(),
+        2,
+        "the summary counts what the warnings named: {:?}",
+        out.failed_bundles
+    );
+    let tty = crate::render::pull_tty(
+        &out.data,
+        &out.decisions,
+        &out.warnings,
+        &out.advisories,
+        &out.disclosures,
+        out.failed_bundles.len(),
+    );
+    assert!(tty.contains("2 failed"), "{tty}");
 }
 
 /// THREE SURFACES, ONE MACHINE. `list` prints `(draft)` and `status` counts `1 draft ahead` for a

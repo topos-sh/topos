@@ -1412,7 +1412,15 @@ fn list_row(entry: &SkillEntry, scope: &str) -> String {
     let columns = list_columns(entry);
     if entry.version_id.bytes().all(|b| b == b'0') {
         let mut note = String::new();
-        if entry.status.is_none() {
+        // A row whose FOLDER IS GONE is never going to apply, so it is never offered the update.
+        // The one command that changes anything here is the one that drops the line — spelled for
+        // the file that holds the row, and complete, so running it finishes the job.
+        if entry.source_missing {
+            note.push_str(&format!(
+                "  (its folder is gone — run 'topos remove{flag} {} --yes' to drop the line)",
+                entry.source.as_deref().unwrap_or(&entry.skill)
+            ));
+        } else if entry.status.is_none() {
             note.push_str(&format!(
                 "  (not applied here yet — `topos update{flag}` applies it)"
             ));
@@ -6064,6 +6072,7 @@ mod tests {
             source_health: None,
             draft_dir: None,
             draft_diverged: None,
+            source_missing: false,
         };
         let out = ListOutcome {
             data: ListData {
@@ -6172,6 +6181,7 @@ mod tests {
             source_health: None,
             draft_dir: None,
             draft_diverged: None,
+            source_missing: false,
         };
         let out = ListOutcome {
             data: ListData {
@@ -6226,6 +6236,7 @@ mod tests {
             source_health: None,
             draft_dir: dir.map(str::to_owned),
             draft_diverged: diverged,
+            source_missing: false,
         };
         let render = |scope: &str, entry| {
             list_tty(&ListOutcome {
@@ -6630,6 +6641,7 @@ mod tests {
             source_health: health,
             draft_dir: None,
             draft_diverged: None,
+            source_missing: false,
         };
         let render = |health: Option<SourceHealth>| {
             list_tty(&ListOutcome {
@@ -6707,6 +6719,7 @@ mod tests {
                         source_health: None,
                         draft_dir: None,
                         draft_diverged: None,
+                        source_missing: false,
                     }],
                     orphans: Vec::new(),
                 }],

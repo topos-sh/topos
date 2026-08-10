@@ -103,7 +103,7 @@ An MCP-server bundle arrives as an entry in the agent's own MCP config rather th
 
 | Agent | Machine config file | Project config file |
 |---|---|---|
-| `claude-code` | `~/.claude/skills/topos-mcp` | `.mcp.json` |
+| `claude-code` | `~/.claude/skills/topos-mcp/.mcp.json` | `.mcp.json` |
 | `openclaw` | `~/.openclaw/openclaw.json` | — |
 | `codex` | `~/.codex/config.toml` | `.codex/config.toml` |
 | `cursor` | `~/.cursor/mcp.json` | `.cursor/mcp.json` |

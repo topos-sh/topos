@@ -2687,6 +2687,72 @@ fn seed_harness_dirs(home: &Path) {
     std::fs::create_dir_all(home.join(".openclaw")).unwrap();
 }
 
+/// **THE RECEIPT'S OWN SPELLING IS A LEGAL `dest`.** Claude Code's MCP surface is a topos-owned
+/// plugin DIRECTORY, and every receipt names the `.mcp.json` inside it — while the teaching list
+/// taught the directory, so pasting what you had just been shown was refused as "not a known MCP
+/// config file". The file spelling is now the one the teaching prints AND one `dest` accepts, and
+/// it delivers.
+#[test]
+fn the_claude_plugin_dirs_file_spelling_is_taught_and_delivers() {
+    // The teaching list names the FILE — the same string the receipts print.
+    let taught =
+        crate::manifest::dest::known_mcp_files(crate::manifest::document::ManifestScope::Global);
+    assert!(
+        taught.contains(&"~/.claude/skills/topos-mcp/.mcp.json".to_owned()),
+        "{taught:?}"
+    );
+
+    let rig = Rig::new("plugin-dest");
+    rig.seed_session();
+    seed_harness_dirs(&rig.home.0);
+    std::fs::create_dir_all(rig.home.0.join(".claude")).unwrap();
+    let v = mk_version(&[(
+        "server.json",
+        server_json("https://mcp.example/linear").as_bytes(),
+    )]);
+    let plane = FakePlane::new().with_version("s_linear", &v);
+    plane.serves(vec![delivered_mcp("s_linear", "linear", &v)]);
+    let dir = FakeDirectory {
+        skills: vec![mcp_catalog_entry("s_linear", "linear", &v)],
+        channels: Vec::new(),
+    };
+    rig.write_global(&format!(
+        "[bundles]\n\"{HOST}/{WS_NAME}/linear\" = \
+         {{ dest = [\"~/.claude/skills/topos-mcp/.mcp.json\"] }}\n"
+    ));
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    let out = sweep(&ctx, &plane, &dir);
+
+    assert!(out.failed_bundles.is_empty(), "{:?}", out.warnings);
+    assert!(
+        !crate::message::legacy_lines(&out.warnings)
+            .into_iter()
+            .chain(crate::message::legacy_lines(&out.advisories))
+            .any(|w| w.contains("MCP_DEST")),
+        "a known file earns no dest complaint: {:?} / {:?}",
+        out.warnings,
+        out.advisories
+    );
+    let placed = std::fs::read_to_string(rig.home.0.join(".claude/skills/topos-mcp/.mcp.json"))
+        .expect("the plugin dir's config");
+    assert!(
+        placed.contains("topos-eng-linear") && placed.contains("https://mcp.example/linear"),
+        "{placed}"
+    );
+    let row = out
+        .data
+        .skills
+        .iter()
+        .find(|s| s.skill == "linear")
+        .unwrap_or_else(|| panic!("{:?}", out.data.skills));
+    let agents: BTreeSet<&str> = row.harnesses.iter().map(|h| h.agent.as_str()).collect();
+    assert_eq!(
+        agents,
+        ["claude-code"].into(),
+        "frozen to the one file the row names: {row:?}"
+    );
+}
+
 #[test]
 fn a_workspace_mcp_bundle_lands_in_configs_reports_harnesses_and_caches_kind() {
     let rig = Rig::new("deliver");
@@ -3816,6 +3882,50 @@ fn a_channels_typoed_mcp_dest_fails_the_server_and_names_the_channel() {
     );
     // The fix is a file edit, so no argv-shaped action is offered — the sentence IS the remedy.
     assert!(out.fault_actions.is_empty(), "{:?}", out.fault_actions);
+
+    // …AND THE DEEP DIVE SAYS IT TOO. `topos list alpha` is where a person goes after reading
+    // that warning, and it answered as if nothing were wrong: the channel's `mcp_dest` was never
+    // resolved for its members, so the row that reaches nobody read like a healthy install.
+    let list = ops::list_with(
+        &ctx,
+        &ops::ListRequest {
+            name: Some("alpha".into()),
+            ..Default::default()
+        },
+        None,
+        None,
+        ops::RowPage::unlimited(),
+    )
+    .unwrap();
+    let detail = list.data.detail.clone().unwrap();
+    assert!(
+        detail
+            .mcp_unreachable
+            .as_deref()
+            .is_some_and(|w| w.contains("~/.cursor/mcp.jsonn")),
+        "the member carries the channel's own zero-reach: {detail:?}"
+    );
+    let text = crate::render::list_tty(&list);
+    assert!(
+        text.contains("an MCP server bundle that reaches no agent"),
+        "{text}"
+    );
+    // The channel's SKILL member says nothing of the sort — `mcp_dest` is not about it.
+    let skill_dive = ops::list_with(
+        &ctx,
+        &ops::ListRequest {
+            name: Some("deploy".into()),
+            ..Default::default()
+        },
+        None,
+        None,
+        ops::RowPage::unlimited(),
+    )
+    .unwrap();
+    assert_eq!(
+        skill_dive.data.detail.clone().unwrap().mcp_unreachable,
+        None
+    );
 }
 
 /// **A channel's `mcp_dest` that maps SOME of its entries still delivers, and stays quiet.** A
@@ -3977,6 +4087,96 @@ fn each_server_a_channel_strands_is_named_once_and_counted_once() {
     );
 }
 
+/// **A MIXED CHANNEL SPLITS PER KIND.** Removing one member replaces the curated line with its
+/// survivors' own rows, and each survivor takes the destinations written in ITS vocabulary: the
+/// skill members the line's `dest` (placement folders), the mcp members its `mcp_dest` (config
+/// files) as the row `dest` a member row spells them in. One shared value handed the server the
+/// channel's skill folders and the very next reconcile refused it — a removal that cost an
+/// untouched bundle every agent.
+#[test]
+fn a_mixed_channel_split_gives_each_survivor_its_own_kinds_destinations() {
+    use crate::manifest::document::{EntryValue, ManifestScope, parse_manifest};
+    let rig = Rig::new("ch-split");
+    rig.seed_session();
+    seed_harness_dirs(&rig.home.0);
+    let (sk, sv) = skill_and_server();
+    let plane = FakePlane::new()
+        .with_version("s_dep", &sk)
+        .with_version("s_a", &sv);
+    let dir = channel_of(vec![
+        skill_catalog_entry("s_dep", "deploy", &sk),
+        mcp_catalog_entry("s_a", "alpha", &sv),
+    ]);
+    rig.write_global(&format!(
+        "[bundles]\n\"{HOST}/{WS_NAME}/channels/tools\" = \
+         {{ dest = [\"~/.claude/skills\"], mcp_dest = [\"~/.cursor/mcp.json\"] }}\n"
+    ));
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    // One healthy delivery first — it is what records each member's kind.
+    let first = sweep(&ctx, &plane, &dir);
+    assert!(first.failed_bundles.is_empty(), "{:?}", first.warnings);
+
+    // The describe says which array went to which kind, in its own clause.
+    let described = ops::remove_global(
+        &ctx,
+        &connect(&plane, &dir),
+        &["deploy".into()],
+        None,
+        false,
+        &Default::default(),
+    )
+    .unwrap();
+    match described {
+        ops::RemoveOutcome::Described { data, .. } => {
+            let note = data.items[0].note.clone().unwrap_or_default();
+            assert!(
+                note.contains(
+                    "its mcp_dest settings carry onto each new mcp row as that row's dest"
+                ),
+                "{note}"
+            );
+        }
+        other => panic!("a set split describes first: {other:?}"),
+    }
+    let out = ops::remove_global(
+        &ctx,
+        &connect(&plane, &dir),
+        &["deploy".into()],
+        None,
+        true,
+        &Default::default(),
+    )
+    .unwrap();
+    assert!(matches!(out, ops::RemoveOutcome::Applied(_)), "{out:?}");
+
+    let text =
+        std::fs::read_to_string(rig.layout().home().join(crate::manifest::MANIFEST_FILE)).unwrap();
+    let doc = parse_manifest(&text, ManifestScope::Global).unwrap();
+    let survivor = doc
+        .rows
+        .iter()
+        .find(|r| r.reference == format!("{HOST}/{WS_NAME}/alpha"))
+        .unwrap_or_else(|| panic!("the server survives with its own row: {text}"));
+    match &survivor.value {
+        EntryValue::Fields(f) => assert_eq!(
+            f.dest.as_deref(),
+            Some(&["~/.cursor/mcp.json".to_owned()][..]),
+            "the CHANNEL's mcp_dest rides the mcp survivor's row: {text}"
+        ),
+        other => panic!("the mcp survivor carries its config file: {other:?}: {text}"),
+    }
+    // …and the row reconciles clean: reach resolves, nothing fails, the entry is still there.
+    let after = sweep(&ctx, &plane, &dir);
+    assert!(
+        after.failed_bundles.is_empty(),
+        "{:?} / {:?}",
+        after.failed_bundles,
+        after.warnings
+    );
+    let cursor = std::fs::read_to_string(rig.home.0.join(".cursor/mcp.json")).unwrap();
+    assert!(cursor.contains("topos-eng-alpha"), "{cursor}");
+}
+
 /// `mcp_dest` is the CHANNEL's word alone — a bundle row's own kind already says which thing its
 /// `dest` means, so the field refuses there exactly as any other unknown key on that shape does:
 /// by naming what the shape takes.
@@ -4132,7 +4332,9 @@ fn a_tampered_local_row_is_held_with_the_typed_refusal_and_prior_entries_stay() 
         assert!(
             ScopeEntries::load(&rig.fs, &rig.layout())
                 .unwrap()
-                .has_entries_for("local:weather"),
+                .has_entries_for(&crate::config_custody::local_identity(
+                    &dir.display().to_string()
+                )),
             "{code}: the standing entry is held, not dropped"
         );
         // AND THE SUMMARY AGREES WITH THE STATUS. The refused bundle is a bundle that could not
@@ -5762,8 +5964,12 @@ fn a_failed_bundle_stands_down_its_own_row_and_the_healthy_twin_keeps_its_row() 
         .collect();
     assert_eq!(
         failed,
-        vec![("person", "local:linear")],
-        "the refused bundle is the one that is counted: {:?}",
+        vec![(
+            "person",
+            crate::config_custody::local_identity(&local.display().to_string()).as_str()
+        )],
+        "the refused bundle is the one that is counted — keyed by ITS OWN LINE, never the name \
+         it shares with the workspace's: {:?}",
         out.warnings
     );
     // The healthy twin keeps its receipt row, with the agents its entries reached.

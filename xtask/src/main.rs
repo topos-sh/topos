@@ -913,6 +913,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
                     // A clean row names no draft folder — both fields omit from the envelope.
                     draft_dir: None,
                     draft_diverged: None,
+                    source_missing: false,
                 }],
                 orphans: Vec::new(),
             }],

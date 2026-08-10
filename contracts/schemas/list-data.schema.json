@@ -723,6 +723,10 @@
             }
           ]
         },
+        "source_missing": {
+          "description": "The row's SOURCE FOLDER is gone: a local-path row whose folder no longer exists. Nothing\ncan apply it, so the row's only honest next step is dropping the line — never the update\nevery other never-applied row offers. **INFERRED** (additive).",
+          "type": "boolean"
+        },
         "status": {
           "description": "The update status of the local copy: `current` / `behind` / `draft` / `off`. Absent when\nno status is honestly claimable (never applied, pending, no delivery yet). **INFERRED**\n(additive).",
           "anyOf": [

@@ -123,6 +123,9 @@ pub(crate) struct Row {
     /// For an `mcp` line whose row freezes a `dest` naming no config file topos can edit: why the
     /// bundle reaches NO agent. `None` whenever it reaches at least one.
     pub mcp_unreachable: Option<String>,
+    /// A LOCAL-PATH row whose folder is GONE. The row can never apply, so it must not be offered
+    /// the update every other never-applied row is.
+    pub source_missing: bool,
 }
 
 /// One scope's whole resolution: its label, its governing file, its lines, and the disclosure
@@ -452,7 +455,7 @@ fn scope_rows(
     let mut out = ScopeOut::default();
     let mut claimed: BTreeSet<String> = BTreeSet::new();
     let mut by_name: BTreeMap<String, (String, String)> = BTreeMap::new();
-    let mut index: Option<BTreeMap<String, String>> = None;
+    let mut index: Option<StoreIndex> = None;
     // A bundle's own entry rows are the ONLY record a LOCAL mcp row (a folder adopted in place, a
     // document imported by name or URL) has of where its config entries went: no workspace
     // delivers it, so no delivery cache ever describes it. Read per bundle, and only for a row
@@ -476,9 +479,10 @@ fn scope_rows(
         let mut workspace_id = None;
         let mut kind = row.fields().kind.clone();
         let mut harness_states = Vec::new();
+        let mut source_missing = false;
         // The identities this row could be filed under in this scope's config custody, in order: a
         // workspace bundle by its skill id; a local folder by the id this scope's store tracks it
-        // by, or — for an imported document no store adopted — its name-keyed local identity.
+        // by, or — for an imported document no store adopted — its line-keyed local identity.
         let mut custody_ids: Vec<String> = Vec::new();
         let applied = match &row.shape {
             KeyShape::WorkspaceBundle {
@@ -507,14 +511,22 @@ fn scope_rows(
                 }
             },
             // A local folder: its presence IS the delivery (adopted in place — there is no
-            // upstream to be behind or ahead of).
+            // upstream to be behind or ahead of). The record it reads is the one recorded AT THAT
+            // FOLDER — never the one filed under its display name, which two rows can share.
             KeyShape::LocalPath { raw } => {
-                if ctx.fs.exists(&local_dir(ctx, base.as_deref(), raw)) {
-                    custody_ids.extend(stored_id(ctx, layout, &mut index, &name));
-                    custody_ids.push(format!("local:{name}"));
-                    stored_by_name(ctx, layout, &mut index, &name)
-                        .unwrap_or_else(|| Applied::plain(StatusItemState::Applied))
+                let dir = local_dir(ctx, base.as_deref(), raw);
+                if ctx.fs.exists(&dir) {
+                    let id = stored_at(ctx, layout, &mut index, &dir);
+                    custody_ids.extend(id.clone());
+                    custody_ids.push(crate::config_custody::local_identity(&row.reference));
+                    id.map_or_else(
+                        || Applied::plain(StatusItemState::Applied),
+                        |id| applied_for_id(ctx, layout, &id, ""),
+                    )
                 } else {
+                    // The folder a row names is not there. Nothing can apply it, and the row says
+                    // so itself rather than reading as one more thing an `update` would land.
+                    source_missing = true;
                     Applied::plain(StatusItemState::Unknown)
                 }
             }
@@ -585,6 +597,7 @@ fn scope_rows(
             kind,
             harness_states,
             mcp_unreachable,
+            source_missing,
         });
     }
 
@@ -632,6 +645,7 @@ fn scope_rows(
                     kind: None,
                     harness_states: Vec::new(),
                     mcp_unreachable: None,
+                    source_missing: false,
                 });
             }
             continue;
@@ -670,6 +684,22 @@ fn scope_rows(
                 &ds.served_version,
             );
             let applied = applied_for_id(ctx, layout, skill_id, &ds.served_version);
+            // A CHANNEL narrows its mcp members through `mcp_dest`, exactly as an explicit row
+            // narrows itself through `dest` — so the same fact is owed here, from the same
+            // arithmetic: an array naming no config file topos can edit costs the member every
+            // agent, and the sweep says so out loud. `list <server>` used to answer as if nothing
+            // were wrong, which is the one place a person goes after reading that warning. The
+            // live-entry guard is the explicit row's: something of this bundle's still sitting in
+            // a config outranks the array's arithmetic.
+            let mcp_unreachable = (BundleKind::of_tag(ds.kind.as_deref()) == Some(BundleKind::Mcp)
+                && entry_rows(&[skill_id.to_owned()]).is_empty())
+            .then(|| {
+                let narrowing = super::reconcile::mcp_dest_narrowing(row.fields().mcp_dest, scope);
+                narrowing.reaches_nothing().then(|| {
+                    crate::manifest::dest::dest_names_no_mcp_file(&narrowing.unknown, scope)
+                })
+            })
+            .flatten();
             out.rows.push(Row {
                 name: ds.name.clone(),
                 reference: member,
@@ -689,7 +719,8 @@ fn scope_rows(
                 bundle: true,
                 kind: ds.kind.clone(),
                 harness_states: ds.harness_states.clone(),
-                mcp_unreachable: None,
+                mcp_unreachable,
+                source_missing: false,
             });
             itemized += 1;
         }
@@ -750,6 +781,7 @@ fn scope_rows(
                 kind: ds.kind.clone(),
                 harness_states: ds.harness_states.clone(),
                 mcp_unreachable: None,
+                source_missing: false,
             });
             itemized += 1;
         }
@@ -820,6 +852,7 @@ fn scope_rows(
             kind: None,
             harness_states: Vec::new(),
             mcp_unreachable: None,
+            source_missing: false,
         });
     }
     out
@@ -1188,11 +1221,23 @@ fn applied_for_id(
     }
 }
 
-/// The scope store's `name → skill id` index, built once per scope on first need — the offline
-/// answer for a row the delivery cache does not name (a repo skill, a local folder, a bundle
-/// applied before the cache was written).
-fn store_index(ctx: &Ctx<'_>, layout: &Layout) -> BTreeMap<String, String> {
-    let mut out = BTreeMap::new();
+/// The scope store's two indexes, built once per scope on first need — the offline answer for a
+/// row the delivery cache does not name (a repo skill, a local folder, a bundle applied before the
+/// cache was written).
+///
+/// TWO keys, because two kinds of row ask two different questions. A workspace/repo row asks by
+/// NAME, which is all it has. A LOCAL row asks by the FOLDER it adopts, which is the only key that
+/// tells its record from another row's: the name index holds one id per name, so two rows that
+/// each adopt a folder called `linear` collapsed onto whichever record was scanned last — one row
+/// printing the other's version, and the deep dive mixing one bundle's placements into the other's.
+#[derive(Default)]
+struct StoreIndex {
+    by_name: BTreeMap<String, String>,
+    by_dir: BTreeMap<PathBuf, String>,
+}
+
+fn store_index(ctx: &Ctx<'_>, layout: &Layout) -> StoreIndex {
+    let mut out = StoreIndex::default();
     let Ok(entries) = ctx.fs.read_dir(&layout.skills_dir()) else {
         return out;
     };
@@ -1211,7 +1256,16 @@ fn store_index(ctx: &Ctx<'_>, layout: &Layout) -> BTreeMap<String, String> {
         let Ok(Some(lock)) = doc::read_doc::<Lock>(ctx.fs, &layout.published(&sid).lock) else {
             continue;
         };
-        out.insert(lock.name, id.to_owned());
+        // Canonical, exactly as the adopt recorded it and as `tracked_skill_at` compares — a row
+        // spelled `~/x` and a placement recorded `/Users/…/x` are one folder.
+        if let Ok(Some(map)) = doc::read_map(ctx.fs, &layout.published(&sid).map) {
+            for placement in &map.placements {
+                if let Ok(canonical) = Path::new(placement).canonicalize() {
+                    out.by_dir.entry(canonical).or_insert_with(|| id.to_owned());
+                }
+            }
+        }
+        out.by_name.insert(lock.name, id.to_owned());
     }
     out
 }
@@ -1222,7 +1276,7 @@ fn store_index(ctx: &Ctx<'_>, layout: &Layout) -> BTreeMap<String, String> {
 fn stored_by_name(
     ctx: &Ctx<'_>,
     layout: Option<&Layout>,
-    index: &mut Option<BTreeMap<String, String>>,
+    index: &mut Option<StoreIndex>,
     name: &str,
 ) -> Option<Applied> {
     let id = stored_id(ctx, layout, index, name)?;
@@ -1234,13 +1288,31 @@ fn stored_by_name(
 fn stored_id(
     ctx: &Ctx<'_>,
     layout: Option<&Layout>,
-    index: &mut Option<BTreeMap<String, String>>,
+    index: &mut Option<StoreIndex>,
     name: &str,
 ) -> Option<String> {
     let layout = layout?;
     index
         .get_or_insert_with(|| store_index(ctx, layout))
+        .by_name
         .get(name)
+        .cloned()
+}
+
+/// The skill id this scope's store records at a FOLDER — the join a LOCAL row makes, so its record
+/// is its own and never a same-named neighbour's.
+fn stored_at(
+    ctx: &Ctx<'_>,
+    layout: Option<&Layout>,
+    index: &mut Option<StoreIndex>,
+    dir: &Path,
+) -> Option<String> {
+    let layout = layout?;
+    let canonical = dir.canonicalize().ok()?;
+    index
+        .get_or_insert_with(|| store_index(ctx, layout))
+        .by_dir
+        .get(&canonical)
         .cloned()
 }
 
@@ -2591,7 +2663,8 @@ mod tests {
         };
         let mut custody = ConfigCustody::default();
         custody.unrecorded.insert(
-            "local:weather".to_owned(),
+            // The row's own line-keyed identity — what the converge files a local bundle under.
+            crate::config_custody::local_identity(&dir.display().to_string()),
             // Record order — what a converge writes: the rows are indexed by
             // `"<slug>/<key>"`, so they land sorted by agent slug.
             vec![

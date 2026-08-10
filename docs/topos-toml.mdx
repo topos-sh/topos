@@ -158,8 +158,9 @@ so publish the bundle there and name it by its workspace address instead.
 
 An MCP line's `dest` entries — and a channel line's `mcp_dest` entries — name each agent's own MCP
 config, and they must come from the set
-topos knows how to edit — `~/.claude/skills/topos-mcp` (a Topos-owned plugin *directory*, not a
-file), `~/.codex/config.toml`, `~/.cursor/mcp.json`, `~/.config/opencode/opencode.json`,
+topos knows how to edit — `~/.claude/skills/topos-mcp/.mcp.json` (the config file inside a
+Topos-owned plugin directory; naming the directory itself works too),
+`~/.codex/config.toml`, `~/.cursor/mcp.json`, `~/.config/opencode/opencode.json`,
 `~/.openclaw/openclaw.json`, `~/.hermes/config.yaml` in your machine's file; `.mcp.json`,
 `.codex/config.toml`, `.cursor/mcp.json`, `opencode.json` in a committed one (an agent whose env
 override moves its config still counts — the resolved path matches too). A destination outside

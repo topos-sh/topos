@@ -17,7 +17,7 @@
 
 use std::path::{Component, Path};
 
-use topos_harness::mcp::descriptor;
+use topos_harness::mcp::{McpDialect, descriptor, plugin_dir};
 use topos_harness::registry::{self, KnownHarness};
 
 use crate::manifest::document::ManifestScope;
@@ -33,16 +33,43 @@ pub(crate) fn safe_project_rel(raw: &str) -> bool {
             .all(|c| matches!(c, Component::Normal(_) | Component::CurDir))
 }
 
-/// An MCP-capable slug's config-file spelling at `scope`, DEFAULT spellings only (machine scope:
+/// An MCP-capable slug's config-FILE spelling at `scope`, DEFAULT spellings only (machine scope:
 /// the user surface under its `~/`-spelled default root; project scope: the project surface
 /// string verbatim). `None` when the slug is not MCP-capable, or has no surface at this scope.
 /// The `~/` spelling of every root is the registry's ([`DirSpec::default_spelling`]), so a new root
 /// is spelled in exactly one place.
+///
+/// Always the FILE, never the directory holding it: Claude Code's surface is a topos-owned plugin
+/// DIRECTORY, and every receipt names the `.mcp.json` inside it. Teaching one spelling while
+/// printing another meant pasting a receipt's own path into `dest` was refused.
 pub(crate) fn mcp_dest_spelling(slug: &str, scope: ManifestScope) -> Option<String> {
     let mcp = descriptor::mcp_harness(slug)?.mcp()?;
     match scope {
-        ManifestScope::Global => mcp.user?.dir.default_spelling(),
+        ManifestScope::Global => {
+            let user = mcp.user?;
+            let base = user.dir.default_spelling()?;
+            Some(match user.dialect {
+                McpDialect::ClaudePluginDir => format!(
+                    "{}/{}",
+                    base.trim_end_matches('/'),
+                    plugin_dir::PLUGIN_MCP_PATH
+                ),
+                _ => base,
+            })
+        }
         ManifestScope::Project => mcp.project.map(|(rel, _)| rel.to_owned()),
+    }
+}
+
+/// One `dest` entry as the SURFACE is keyed — the directory, for the one dialect whose surface is
+/// a directory. Both spellings of that surface (the dir, and the `.mcp.json` inside it) name the
+/// same place, so both are accepted and both normalize here; everything downstream sees one form.
+fn surface_key(entry: &str, dialect: McpDialect) -> &str {
+    match dialect {
+        McpDialect::ClaudePluginDir => entry
+            .strip_suffix(plugin_dir::PLUGIN_MCP_PATH)
+            .map_or(entry, |head| head.trim_end_matches('/')),
+        _ => entry,
     }
 }
 
@@ -179,7 +206,13 @@ fn dest_names_mcp_surface(entry: &str, scope: ManifestScope, h: &KnownHarness) -
             .and_then(|m| m.project)
             .is_some_and(|(rel, _)| entry.trim_start_matches("./") == rel),
         ManifestScope::Global => {
-            if mcp_dest_spelling(h.slug, ManifestScope::Global).as_deref() == Some(entry) {
+            let Some(user) = h.mcp().and_then(|m| m.user) else {
+                return false;
+            };
+            // Normalized to the surface's own key, so the file spelling a receipt prints and the
+            // directory spelling the table holds both answer to the one surface.
+            let entry = surface_key(entry, user.dialect);
+            if user.dir.default_spelling().as_deref() == Some(entry) {
                 return true;
             }
             // The resolved comparison needs a real home; without one only the default spelling
@@ -210,9 +243,10 @@ mod tests {
             mcp_dest_spelling("codex", ManifestScope::Global).as_deref(),
             Some("~/.codex/config.toml")
         );
+        // The FILE, not the directory holding it — the spelling every receipt prints.
         assert_eq!(
             mcp_dest_spelling("claude-code", ManifestScope::Global).as_deref(),
-            Some("~/.claude/skills/topos-mcp")
+            Some("~/.claude/skills/topos-mcp/.mcp.json")
         );
         assert_eq!(
             mcp_dest_spelling("opencode", ManifestScope::Global).as_deref(),
@@ -266,6 +300,19 @@ mod tests {
         );
         assert_eq!(
             mcp_slug_for_dest("./.mcp.json", ManifestScope::Project),
+            Some("claude-code")
+        );
+        // Claude Code's plugin-dir surface answers to BOTH its spellings — the file a receipt
+        // prints, and the directory the table holds.
+        assert_eq!(
+            mcp_slug_for_dest(
+                "~/.claude/skills/topos-mcp/.mcp.json",
+                ManifestScope::Global
+            ),
+            Some("claude-code")
+        );
+        assert_eq!(
+            mcp_slug_for_dest("~/.claude/skills/topos-mcp", ManifestScope::Global),
             Some("claude-code")
         );
         assert_eq!(

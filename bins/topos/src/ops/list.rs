@@ -448,6 +448,7 @@ fn skill_entry(ctx: &Ctx<'_>, section: &ScopeResolution, row: &Row) -> SkillEntr
         source_health: None,
         draft_dir,
         draft_diverged,
+        source_missing: row.source_missing,
     }
 }
 
@@ -816,6 +817,7 @@ fn builtin_entry(ctx: &Ctx<'_>) -> Option<SkillEntry> {
         // Locked by `an_edited_builtin_row_offers_no_commands`.
         draft_dir: None,
         draft_diverged: None,
+        source_missing: false,
     })
 }
 
@@ -1357,7 +1359,43 @@ mod tests {
             },
         )
         .unwrap();
+        // The ADOPTED FOLDER, recorded — what makes this record the row's own. An adopt writes
+        // its source dir into the map, and that is the key a local row joins on; a record with no
+        // map answers for no folder at all. No `materialized_sha` (topos never wrote these bytes),
+        // so the dir scans FOREIGN and the row reads settled, not drafted.
+        lay_adopted(&layout, "repo-helper", &tool);
         repo
+    }
+
+    /// Record ONE adopted-in-place placement — the shape `add <path>` writes: the source dir, with
+    /// no sha of topos's own.
+    fn lay_adopted(layout: &crate::sidecar::Layout, name: &str, dir: &Path) {
+        use topos_types::persisted::{PlacementKind, PlacementState, SwapCapability};
+        let sid = crate::id::SkillId::parse(&skill_id_of(name)).unwrap();
+        crate::doc::write_map(
+            &crate::fs_seam::RealFs,
+            &layout.published(&sid).map,
+            &PlacementMap {
+                schema_version: 2,
+                placements: vec![dir.to_string_lossy().into_owned()],
+                applied_commit: "b".repeat(64),
+                materialized_sha: "e".repeat(64),
+                pre_existing_sha: None,
+                swap_capability: SwapCapability::Unsupported,
+                harness: None,
+                harness_layer: None,
+                harness_slug: None,
+                placement_state: vec![PlacementState {
+                    kind: PlacementKind::Native,
+                    agent: None,
+                    materialized_sha: None,
+                    pre_existing_sha: None,
+                    swap_capability: SwapCapability::Unsupported,
+                    adopted_source: true,
+                }],
+            },
+        )
+        .unwrap();
     }
 
     /// Every reference shape answers ONE origin — the address a person would type to get those
@@ -1503,21 +1541,114 @@ mod tests {
         assert!(out.data.machine_summary.is_none());
     }
 
+    /// TWO LOCAL ROWS, ONE NAME. Each row answers with the record kept AT ITS OWN FOLDER: its own
+    /// version on its own line, its own folder in its own deep dive. The store's name index holds
+    /// one id per name, so the second row printed the first's version and `list <second row>`
+    /// answered with the first bundle's placement — one bundle wearing another's identity on two
+    /// surfaces at once.
+    #[test]
+    fn two_same_named_local_rows_each_answer_with_their_own_record() {
+        let home = TempHome::new();
+        let one = home.0.join("one/linear");
+        let two = home.0.join("two/linear");
+        for dir in [&one, &two] {
+            std::fs::create_dir_all(dir).unwrap();
+            std::fs::write(dir.join("SKILL.md"), b"# linear\n").unwrap();
+        }
+        home.global(&format!(
+            "[bundles]\n\"{}\" = \"*\"\n\"{}\" = \"*\"\n",
+            one.display(),
+            two.display()
+        ));
+        let v_one = "1".repeat(64);
+        let v_two = "2".repeat(64);
+        home.store_applied(
+            &format!("topos_{}", "a".repeat(32)),
+            "linear",
+            &v_one,
+            &[&one.to_string_lossy()],
+        );
+        home.store_applied(
+            &format!("topos_{}", "b".repeat(32)),
+            "linear",
+            &v_two,
+            &[&two.to_string_lossy()],
+        );
+
+        let out = run(
+            &home,
+            &home.0,
+            &ListRequest {
+                view: ScopeView::Machine,
+                ..request()
+            },
+        )
+        .unwrap();
+        let rows = &scope(&out, "machine").rows;
+        let version_at = |dir: &Path| {
+            rows.iter()
+                .find(|r| r.source.as_deref() == Some(&*dir.to_string_lossy()))
+                .unwrap_or_else(|| panic!("a row for {}: {rows:?}", dir.display()))
+                .version_id
+                .clone()
+        };
+        assert_eq!(version_at(&one), v_one, "{rows:?}");
+        assert_eq!(version_at(&two), v_two, "{rows:?}");
+
+        // The deep dive on ONE row names that row's folder and nothing of its twin's.
+        let deep = run(
+            &home,
+            &home.0,
+            &ListRequest {
+                view: ScopeView::Machine,
+                name: Some(two.to_string_lossy().into_owned()),
+                ..request()
+            },
+        )
+        .unwrap();
+        let detail = deep.data.detail.as_ref().expect("a detail");
+        assert_eq!(
+            detail.version.as_deref(),
+            Some(v_two.as_str()),
+            "{detail:?}"
+        );
+        assert_eq!(detail.placements.len(), 1, "{detail:?}");
+        assert!(
+            detail.placements[0].ends_with("two/linear"),
+            "the dive shows its OWN placement: {detail:?}"
+        );
+    }
+
     /// Record placements for a skill in one scope's store, each with a recorded sha no real dir
     /// bytes can match — so an existing placement dir scans as an EDITED copy (the same shape
     /// [`TempHome::store_applied`] lays machine-side).
-    fn lay_placements(layout: &crate::sidecar::Layout, name: &str, dirs: &[&Path]) {
+    /// `source` is the ADOPTED folder the row names — recorded first, with no sha of topos's own
+    /// (it scans FOREIGN, never a draft), exactly as `add <path>` writes it. It is the key a local
+    /// row joins its record on, so a fixture that omitted it would describe a record answering for
+    /// no folder at all.
+    fn lay_placements(layout: &crate::sidecar::Layout, name: &str, source: &Path, dirs: &[&Path]) {
         use topos_types::persisted::{PlacementKind, PlacementState, SwapCapability};
         let sid = crate::id::SkillId::parse(&skill_id_of(name)).unwrap();
+        let placement = |sha: Option<String>, adopted: bool| PlacementState {
+            kind: PlacementKind::Native,
+            agent: None,
+            materialized_sha: sha,
+            pre_existing_sha: None,
+            swap_capability: SwapCapability::Unsupported,
+            adopted_source: adopted,
+        };
+        let mut placements = vec![source.to_string_lossy().into_owned()];
+        let mut state = vec![placement(None, true)];
+        for d in dirs {
+            placements.push(d.to_string_lossy().into_owned());
+            state.push(placement(Some("e".repeat(64)), false));
+        }
         crate::doc::write_map(
             &crate::fs_seam::RealFs,
             &layout.published(&sid).map,
             &PlacementMap {
                 schema_version: 2,
-                placements: dirs
-                    .iter()
-                    .map(|d| d.to_string_lossy().into_owned())
-                    .collect(),
+                placements,
                 applied_commit: "b".repeat(64),
                 materialized_sha: "e".repeat(64),
                 pre_existing_sha: None,
@@ -1525,17 +1656,7 @@ mod tests {
                 harness: None,
                 harness_layer: None,
                 harness_slug: None,
-                placement_state: dirs
-                    .iter()
-                    .map(|_| PlacementState {
-                        kind: PlacementKind::Native,
-                        agent: None,
-                        materialized_sha: Some("e".repeat(64)),
-                        pre_existing_sha: None,
-                        swap_capability: SwapCapability::Unsupported,
-                        adopted_source: false,
-                    })
-                    .collect(),
+                placement_state: state,
             },
         )
         .unwrap();
@@ -1567,6 +1688,7 @@ mod tests {
         lay_placements(
             &crate::sidecar::project_store_layout(&repo),
             "repo-helper",
+            &repo.join("tools/repo-helper"),
             &[&placed],
         );
 
@@ -1605,12 +1727,6 @@ mod tests {
     fn the_project_deep_dive_writes_its_paths_against_the_project() {
         let home = TempHome::new();
         let repo = lay_project(&home);
-        let placed = repo.join("tools/repo-helper");
-        lay_placements(
-            &crate::sidecar::project_store_layout(&repo),
-            "repo-helper",
-            &[&placed],
-        );
 
         let out = run(
             &home,
@@ -1657,6 +1773,7 @@ mod tests {
         lay_placements(
             &crate::sidecar::project_store_layout(&repo),
             "repo-helper",
+            &repo.join("tools/repo-helper"),
             &[&one, &two],
         );
 

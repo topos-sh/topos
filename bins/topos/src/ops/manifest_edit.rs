@@ -776,6 +776,17 @@ fn row_dir(ctx: &Ctx<'_>, target: &EditTarget, raw: &str) -> PathBuf {
     target.dir.join(raw.trim_start_matches("./"))
 }
 
+/// Whether a row's LOCAL FOLDER is gone: the row names a path on this machine, and nothing is
+/// there. It is the one fact that settles a row drop outright — there are no files to scan for
+/// local edits, so nothing can be lost, and `topos add <that path>` can never restore it, so no
+/// undo is offered either.
+fn row_folder_gone(ctx: &Ctx<'_>, target: &EditTarget, row: &PlanRow) -> bool {
+    match &row.shape {
+        KeyShape::LocalPath { raw } => !ctx.fs.exists(&row_dir(ctx, target, raw)),
+        _ => false,
+    }
+}
+
 /// Whether a string is commit-shaped (7–40 hex) — the only pin a forge row takes.
 pub(super) fn is_commit(s: &str) -> bool {
     (7..=40).contains(&s.len()) && s.bytes().all(|b| b.is_ascii_hexdigit())
@@ -1591,7 +1602,10 @@ fn narrow_one(
             };
             let (row_dest, materialized) = match row.fields().dest {
                 Some(d) => (d, false),
-                None => (current_dest_roots(ctx, target, &name, kind)?, true),
+                None => (
+                    current_dest_roots(ctx, target, Some(&row), &name, kind)?,
+                    true,
+                ),
             };
             let (subtract, remaining) = split_dest(
                 ctx,
@@ -1654,7 +1668,7 @@ fn narrow_one(
             } else {
                 selection.skill_entries(target.scope)?
             };
-            let current = current_dest_roots(ctx, target, &name, kind)?;
+            let current = current_dest_roots(ctx, target, None, &name, kind)?;
             // NO recorded copies at all: nothing to subtract FROM. This arm is FEED-delivered —
             // no row exists, so `split_dest`'s "its row was added" zero-state would be a
             // fabrication here; the honest variant names what stands (the feed delivers it) and
@@ -1863,6 +1877,7 @@ fn qualified_name(ctx: &Ctx<'_>, ws: Option<&(String, String)>, name: &str) -> S
 fn current_dest_roots(
     ctx: &Ctx<'_>,
     target: &EditTarget,
+    row: Option<&PlanRow>,
     name: &str,
     kind: BundleKind,
 ) -> Result<Vec<String>, ClientError> {
@@ -1875,7 +1890,7 @@ fn current_dest_roots(
     if mcp {
         // The bundle's own custody rows name the config files its entries live in — filtered by
         // every identity the bundle may be filed under (its cached skill id, the scope store's
-        // tracked id, the name-keyed local identity).
+        // tracked id, and — for a local row — the line-keyed local identity).
         let Some(layout) = mcp_scope_store(ctx, target) else {
             return Ok(Vec::new());
         };
@@ -1893,7 +1908,9 @@ fn current_dest_roots(
         {
             ids.push(sid.as_str().to_owned());
         }
-        ids.push(format!("local:{name}"));
+        if let Some(r) = row.filter(|r| matches!(r.shape, KeyShape::LocalPath { .. })) {
+            ids.push(crate::config_custody::local_identity(&r.reference));
+        }
         let mut files: Vec<String> = crate::config_custody::entries_of_any(ctx.fs, &layout, &ids)
             .iter()
             .map(|e| dest_display(ctx, target, Path::new(&e.file)))
@@ -2366,6 +2383,21 @@ fn apply_arms(
                     )),
                     _ => None,
                 };
+                // A row whose FOLDER IS GONE is settled before the loss guard runs: there is
+                // nothing on disk to scan, so the scan's own hedge ("could not be read —
+                // describing first") named the wrong fact and gated an edit that can lose
+                // nothing. State what is true instead, and apply.
+                if let Arm::RowDrop { row, .. } = arm
+                    && row_folder_gone(ctx, target, row)
+                {
+                    notes.push(Some(join_notes(
+                        "its folder is gone, so there are no files to check — dropping the line \
+                         changes nothing else"
+                            .to_owned(),
+                        removal_note,
+                    )));
+                    continue;
+                }
                 match draft_state(ctx, name) {
                     // The FOLDERS, named. Once the row is gone `topos list <name>` answers "not
                     // managed on this machine" and stops — so the command this note used to
@@ -2389,7 +2421,7 @@ fn apply_arms(
                         gated = true;
                         Some(join_notes(
                             format!(
-                                "'{name}''s files could not be read to check for local edits — \
+                                "{name}'s files could not be read to check for local edits — \
                                  describing first rather than assuming there are none"
                             ),
                             removal_note,
@@ -2417,7 +2449,7 @@ fn apply_arms(
                         gated = true;
                         Some(join_notes(
                             format!(
-                                "'{name}''s files could not be read to check for local edits — \
+                                "{name}'s files could not be read to check for local edits — \
                                  describing first rather than assuming there are none"
                             ),
                             materialize_note,
@@ -2433,7 +2465,6 @@ fn apply_arms(
                 keeps_own,
             } => {
                 gated = true;
-                let (_, carried, dropped) = split_carriage(set);
                 let mut note = format!(
                     "'{}' {} from the {} line `{}` — removing {} replaces that one line \
                      with its current members, so later additions by whoever curates it stop \
@@ -2468,12 +2499,47 @@ fn apply_arms(
                         }
                     ));
                 }
-                if !carried.is_empty() && !new_rows.is_empty() {
-                    note.push_str(&format!(
-                        "; the line's {} settings carry onto each new member row",
-                        carried.join("/")
-                    ));
-                }
+                // The carriage, said PER KIND — one clause each — because a channel's two
+                // destination arrays go to different survivors: `dest` to the skills, `mcp_dest`
+                // to the mcp servers (as their own row `dest`). A reader who is told only "the
+                // line's settings carry" cannot tell which of their rows got which array.
+                let kinds: Vec<BundleKind> = new_rows
+                    .iter()
+                    .map(|m| member_kind(ctx, target, set, m))
+                    .collect();
+                let mut carried_any: Vec<&'static str> = Vec::new();
+                let mut dropped: Vec<&'static str> = Vec::new();
+                let mut note_kind = |kind: BundleKind, note: &mut String| {
+                    if !kinds.contains(&kind) {
+                        return;
+                    }
+                    let (_, carried, lost) = split_carriage(set, kind);
+                    carried_any.extend(carried.iter().copied());
+                    dropped.extend(lost);
+                    if kind.is_mcp() {
+                        note.push_str(if carried.contains(&"mcp_dest") {
+                            "; its mcp_dest settings carry onto each new mcp row as that row's \
+                             dest"
+                        } else {
+                            "; the line names no mcp_dest, so each new mcp row carries no dest"
+                        });
+                    } else if !carried.is_empty() {
+                        note.push_str(&format!(
+                            "; the line's {} settings carry onto each new skill row",
+                            carried.join("/")
+                        ));
+                    }
+                };
+                note_kind(BundleKind::Skill, &mut note);
+                note_kind(BundleKind::Mcp, &mut note);
+                // What NO survivor's kind could take is disclosed rather than silently lost.
+                let mut said: Vec<&'static str> = Vec::new();
+                dropped.retain(|f| {
+                    !carried_any.contains(f) && !said.contains(f) && {
+                        said.push(f);
+                        true
+                    }
+                });
                 if !dropped.is_empty() {
                     note.push_str(&format!(
                         "; its {} cannot ride a member row and is dropped",
@@ -2618,7 +2684,10 @@ fn apply_arms(
                 // strip the line's placement/harness discipline. Explicit beats set: a survivor
                 // that already has its own explicit row keeps it untouched (its pin/path/
                 // harness/name settings are stronger facts than the set's value).
-                let (member_value, _, _) = split_carriage(set);
+                //
+                // The carriage is resolved PER MEMBER, because a channel's `dest` and `mcp_dest`
+                // are two vocabularies: writing one shared value would hand an MCP survivor the
+                // channel's skill folders as its row `dest` and cost it every agent.
                 for member in members {
                     if names.contains(member) || keeps_own.contains(member) {
                         continue;
@@ -2626,6 +2695,8 @@ fn apply_arms(
                     let Some(reference) = member_reference(set, member) else {
                         continue;
                     };
+                    let (member_value, _, _) =
+                        split_carriage(set, member_kind(ctx, target, set, member));
                     editor
                         .set_row(&reference, &member_value)
                         .map_err(|e| ClientError::InvalidArgument(e.message))?;
@@ -2653,8 +2724,14 @@ fn apply_arms(
     }
     // A feed-line drop's EAGER uninstall runs in [`remove_global`], after the writer lock
     // releases — the receipt's `uninstalled` block is filled there.
+    // NO UNDO BEATS A WRONG ONE: `topos add <path>` cannot re-adopt a folder that is not there,
+    // so a row whose folder is gone gets no inverse rather than one that must fail.
+    let undo = match arms.as_slice() {
+        [Arm::RowDrop { row, .. }] if row_folder_gone(ctx, target, row) => Vec::new(),
+        _ => undo_for(&arms, global, manifest_host(ctx).as_deref()),
+    };
     Ok(RemoveOutcome::Applied(RemoveData {
-        undo: undo_for(&arms, global, manifest_host(ctx).as_deref()),
+        undo,
         items,
         applied: true,
         uninstalled: Vec::new(),
@@ -2686,6 +2763,10 @@ struct EagerBundle {
     /// longer resolves). `None` for a narrow, an mcp bundle, a project edit, an unresolvable
     /// name (an ambiguity fails toward not deleting), or a record another workspace delivered.
     record: Option<SkillId>,
+    /// A LOCAL row's line-keyed custody identity ([`crate::config_custody::local_identity`]) — the
+    /// second spelling its reconcile rows can arrive under when no store record answers for the
+    /// folder. `None` for every other shape.
+    local: Option<String>,
 }
 
 fn eager_plan(ctx: &Ctx<'_>, target: &EditTarget, arms: &[Arm]) -> EagerPlan {
@@ -2717,6 +2798,8 @@ fn eager_plan(ctx: &Ctx<'_>, target: &EditTarget, arms: &[Arm]) -> EagerPlan {
                     display: qualified_name(ctx, ws.as_ref(), name),
                     kind,
                     record: record_for(name, kind, ws.as_ref()),
+                    local: matches!(row.shape, KeyShape::LocalPath { .. })
+                        .then(|| crate::config_custody::local_identity(&row.reference)),
                     name: name.clone(),
                     narrow: None,
                     workspace: ws,
@@ -2736,6 +2819,7 @@ fn eager_plan(ctx: &Ctx<'_>, target: &EditTarget, arms: &[Arm]) -> EagerPlan {
                     display: qualified_name(ctx, ws.as_ref(), name),
                     kind,
                     record: record_for(name, kind, ws.as_ref()),
+                    local: None,
                     name: name.clone(),
                     narrow: None,
                     workspace: ws,
@@ -2755,6 +2839,7 @@ fn eager_plan(ctx: &Ctx<'_>, target: &EditTarget, arms: &[Arm]) -> EagerPlan {
                     name: name.clone(),
                     narrow: Some((subtract.clone(), *remaining as u64)),
                     record: None,
+                    local: None,
                     workspace: None,
                 });
             }
@@ -2902,7 +2987,7 @@ fn eager_cleanup(
             .filter(|r| {
                 r.skill == b.name
                     || store_id.as_deref() == Some(r.skill.as_str())
-                    || r.skill == format!("local:{}", b.name)
+                    || b.local.as_deref() == Some(r.skill.as_str())
             })
             .collect();
         let mut destinations: Vec<String> = Vec::new();
@@ -3233,7 +3318,10 @@ fn mcp_bundle_of_arm(
                             .flatten()
                     })
                 });
-                Some(tracked.unwrap_or_else(|| format!("local:{}", row.display_name())))
+                Some(
+                    tracked
+                        .unwrap_or_else(|| crate::config_custody::local_identity(&row.reference)),
+                )
             }
             _ => None,
         },
@@ -3339,13 +3427,23 @@ fn join_notes(lead: String, tail: Option<String>) -> String {
     }
 }
 
-/// What a set split writes on each surviving member row, and how the describe words it: the set
-/// line's pin/fields filtered to what the member's shape legally carries —
-/// `(member value, carried field names, dropped field names)`. `dest` and a repo set's commit pin
-/// are member-legal and carry; a channel's `mcp_dest` is SET-ONLY (a member row's own kind decides
-/// what its `dest` means, so there is nothing for a second array to say there) and is disclosed as
-/// dropped rather than silently lost.
-fn split_carriage(set: &PlanRow) -> (EntryValue, Vec<&'static str>, Vec<&'static str>) {
+/// What a set split writes on ONE surviving member row of `kind`, and how the describe words it:
+/// the set line's pin/fields filtered to what that member legally carries —
+/// `(member value, carried field names, dropped field names)`.
+///
+/// Carriage is PER KIND, because a channel's two destination arrays mean different things: `dest`
+/// names skill placement FOLDERS and `mcp_dest` names MCP CONFIG FILES, while a member row has one
+/// `dest` whose meaning is decided by that row's own kind. So a SKILL survivor takes the line's
+/// `dest`, an MCP survivor takes the line's `mcp_dest` AS its row `dest`, and whichever array the
+/// survivor's kind cannot read is disclosed as dropped rather than silently written onto it —
+/// which would freeze the row to destinations of the wrong vocabulary and cost it every agent. A
+/// channel with no `mcp_dest` leaves its MCP survivors with no `dest` at all (they reach every
+/// MCP-capable agent, which is what the unnarrowed line did for them). A repo set's members are
+/// always skills, and its commit pin is a legal member pin verbatim.
+fn split_carriage(
+    set: &PlanRow,
+    kind: BundleKind,
+) -> (EntryValue, Vec<&'static str>, Vec<&'static str>) {
     use crate::manifest::document::{EntryFields, legal_fields};
     // A representative member shape: a channel's members are workspace bundles, a repo set's
     // are repo skills.
@@ -3394,15 +3492,33 @@ fn split_carriage(set: &PlanRow) -> (EntryValue, Vec<&'static str>, Vec<&'static
             take("version", f.version.is_some(), &mut || {
                 out.version = f.version.clone();
             });
-            take("dest", f.dest.is_some(), &mut || out.dest = f.dest.clone());
-            take("mcp_dest", f.mcp_dest.is_some(), &mut || {
-                out.mcp_dest = f.mcp_dest.clone();
-            });
+            // The two destination arrays, resolved against THIS member's kind: the one written in
+            // the survivor's own vocabulary becomes its row `dest`, the other is disclosed as
+            // dropped. Legality is asked of the field the value LANDS in (`dest` on the member
+            // row), never of the set-line spelling it came from.
+            let (mine, theirs) = if kind.is_mcp() {
+                (("mcp_dest", &f.mcp_dest), ("dest", &f.dest))
+            } else {
+                (("dest", &f.dest), ("mcp_dest", &f.mcp_dest))
+            };
+            take("dest", mine.1.is_some(), &mut || out.dest = mine.1.clone());
             take("name", f.name.is_some(), &mut || out.name = f.name.clone());
             take("subdir", f.subdir.is_some(), &mut || {
                 out.subdir = f.subdir.clone();
             });
             take("kind", f.kind.is_some(), &mut || out.kind = f.kind.clone());
+            // The set-line spelling is what the describe names, so a carried `mcp_dest` reads as
+            // itself rather than as the `dest` it became.
+            if mine.1.is_some() {
+                for c in &mut carried {
+                    if *c == "dest" {
+                        *c = mine.0;
+                    }
+                }
+            }
+            if theirs.1.is_some() {
+                dropped.push(theirs.0);
+            }
             let value = if out == EntryFields::default() {
                 EntryValue::Star
             } else {
@@ -3410,6 +3526,25 @@ fn split_carriage(set: &PlanRow) -> (EntryValue, Vec<&'static str>, Vec<&'static
             };
             (value, carried, dropped)
         }
+    }
+}
+
+/// WHAT one set member is — the kind that decides which of a channel's two destination arrays its
+/// survivor row carries (see [`split_carriage`]). A channel member is resolved through the same
+/// chain an explicit row's kind is (`row_kind`, qualified by the channel's own workspace); a repo
+/// set's members are always skills, because `kind = "mcp"` on a GitHub row refuses at load.
+fn member_kind(ctx: &Ctx<'_>, target: &EditTarget, set: &PlanRow, member: &str) -> BundleKind {
+    match &set.shape {
+        KeyShape::Channel {
+            host, workspace, ..
+        } => row_kind(
+            ctx,
+            target,
+            None,
+            Some(&(host.clone(), workspace.clone())),
+            member,
+        ),
+        _ => BundleKind::Skill,
     }
 }
 
@@ -3657,7 +3792,7 @@ mod tests {
             shape: keys::classify_key("github.com/o/r").unwrap(),
             value: EntryValue::Pin("abc1234".into()),
         };
-        let (value, carried, dropped) = split_carriage(&repo_pinned);
+        let (value, carried, dropped) = split_carriage(&repo_pinned, BundleKind::Skill);
         assert_eq!(value, EntryValue::Pin("abc1234".into()));
         assert_eq!(carried, vec!["version"]);
         assert!(dropped.is_empty());
@@ -3671,7 +3806,7 @@ mod tests {
                 ..Default::default()
             }),
         };
-        let (value, carried, dropped) = split_carriage(&channel_fields);
+        let (value, carried, dropped) = split_carriage(&channel_fields, BundleKind::Skill);
         match value {
             EntryValue::Fields(f) => {
                 assert_eq!(f.dest.as_deref(), Some(&[".agents/skills".to_owned()][..]));
@@ -3687,7 +3822,57 @@ mod tests {
             shape: keys::classify_key("github.com/o/r").unwrap(),
             value: EntryValue::Star,
         };
-        assert_eq!(split_carriage(&star).0, EntryValue::Star);
+        assert_eq!(split_carriage(&star, BundleKind::Skill).0, EntryValue::Star);
+    }
+
+    /// A MIXED channel splits PER KIND: the skill survivor's row takes the line's `dest` (skill
+    /// folders), the mcp survivor's takes its `mcp_dest` — as that row's own `dest`, the only
+    /// field a member row has — and neither ever receives the other's array.
+    #[test]
+    fn a_mixed_channel_split_carries_each_array_to_the_kind_that_reads_it() {
+        use crate::manifest::document::EntryFields;
+        let channel = PlanRow {
+            reference: "topos.sh/acme/channels/backend".into(),
+            shape: keys::classify_key("topos.sh/acme/channels/backend").unwrap(),
+            value: EntryValue::Fields(EntryFields {
+                dest: Some(vec!["~/.claude/skills".into()]),
+                mcp_dest: Some(vec!["~/.cursor/mcp.json".into()]),
+                ..Default::default()
+            }),
+        };
+        let dest_of = |kind| match split_carriage(&channel, kind) {
+            (EntryValue::Fields(f), carried, dropped) => (f.dest, carried, dropped),
+            other => panic!("fields carry: {other:?}"),
+        };
+        assert_eq!(
+            dest_of(BundleKind::Skill),
+            (
+                Some(vec!["~/.claude/skills".to_owned()]),
+                vec!["dest"],
+                vec!["mcp_dest"]
+            )
+        );
+        assert_eq!(
+            dest_of(BundleKind::Mcp),
+            (
+                Some(vec!["~/.cursor/mcp.json".to_owned()]),
+                vec!["mcp_dest"],
+                vec!["dest"]
+            )
+        );
+        // A channel with no `mcp_dest` leaves its mcp survivors unnarrowed rather than handing
+        // them the skill folders.
+        let skills_only = PlanRow {
+            value: EntryValue::Fields(EntryFields {
+                dest: Some(vec!["~/.claude/skills".into()]),
+                ..Default::default()
+            }),
+            ..channel.clone()
+        };
+        assert_eq!(
+            split_carriage(&skills_only, BundleKind::Mcp).0,
+            EntryValue::Star
+        );
     }
 
     #[test]
