@@ -226,6 +226,53 @@ fn assert_golden(name: &str, command: &str, value: Value) {
     assert_eq!(got, want, "golden {name} mismatch.\nACTUAL:\n{got}");
 }
 
+/// Byte-equality over a WHOLE envelope a finisher built — payload, line channels, next actions.
+/// [`assert_golden`] rebuilds the envelope from `data` alone, so a golden it guards can carry an
+/// empty `warnings`/`messages` pair forever while the binary prints a populated one and nothing
+/// notices. A golden asserted through here is asserted against the finisher's own bytes.
+fn assert_golden_envelope(name: &str, envelope: &topos_types::JsonEnvelope) {
+    let got = serde_json::to_string_pretty(envelope).unwrap() + "\n";
+    let path = workspace_root().join(format!("contracts/fixtures/json/{name}.json"));
+    let want = std::fs::read_to_string(&path).unwrap_or_default();
+    assert_eq!(got, want, "golden {name} mismatch.\nACTUAL:\n{got}");
+}
+
+/// The committed `diff.truncated` golden IS what `topos diff --json` prints on a capped body —
+/// including its POPULATED line channels. The fixture generator and this assertion both go
+/// through the binary's own producer and its own legacy derivation, so a channel that stops
+/// being populated (or a kind, code, or sentence that moves) breaks the golden instead of
+/// silently draining it.
+#[test]
+fn the_capped_diff_golden_is_the_envelope_the_finisher_prints() {
+    let want: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(
+            workspace_root().join("contracts/fixtures/json/diff.truncated.json"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let data: topos_types::results::DiffData =
+        serde_json::from_value(want["data"].clone()).unwrap();
+    assert!(data.truncated, "the fixture's whole point is the cap");
+    let envelope = crate::app::diff_envelope(
+        "diff",
+        &data,
+        vec![
+            "topos".to_owned(),
+            "diff".to_owned(),
+            "pr-describe".to_owned(),
+            "--max-bytes".to_owned(),
+            "0".to_owned(),
+            "--json".to_owned(),
+        ],
+    );
+    assert!(
+        !envelope.warnings.is_empty() && !envelope.messages.is_empty(),
+        "the golden must exercise a populated pair"
+    );
+    assert_golden_envelope("diff.truncated", &envelope);
+}
+
 /// The same byte-equality over a REFUSAL: the committed example must be exactly what
 /// [`render::err_envelope`] emits for that error — code, message, `data`, and the runnable
 /// next actions alike.

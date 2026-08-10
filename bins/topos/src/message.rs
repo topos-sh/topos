@@ -1,6 +1,9 @@
 //! The typed message channel — how a producer builds one, and how the legacy line is derived.
 //!
-//! ONE string, two renderings. A producer writes a [`Message`]: the machine-readable code it
+//! `pub` for the same reason [`crate::actions`] is: the fixture generator (xtask) builds its
+//! golden envelopes through the SAME producers and the SAME legacy derivation — no second table.
+//!
+//! ONE string, two renderings. A producer writes a [`topos_types::Message`]: the machine-readable code it
 //! already had, what kind of thing the line is, and the ONE sentence a person reads. The TTY
 //! prints `text` alone (a code is a lookup key, never prose); the envelope's legacy `warnings`
 //! array carries [`legacy_line`], which puts the code back on the front exactly where it always
@@ -54,19 +57,86 @@ pub(crate) fn decision(text: String) -> Message {
     }
 }
 
-/// The LEGACY `warnings` line for a message: `"{code} {text}"` when it carries a code, the bare
+/// The LEGACY `warnings` line for a message (`pub` alongside [`legacy_lines`]): `"{code} {text}"` when it carries a code, the bare
 /// text when it does not. Membership and order are the message channel's — untouched — so every
 /// count, exit status and `!warnings.is_empty()` gate reads exactly what it read before.
-pub(crate) fn legacy_line(m: &Message) -> String {
+pub fn legacy_line(m: &Message) -> String {
     match &m.code {
         Some(code) => format!("{code} {}", m.text),
         None => m.text.clone(),
     }
 }
 
-/// [`legacy_line`] over a whole channel, in order.
-pub(crate) fn legacy_lines(messages: &[Message]) -> Vec<String> {
+/// [`legacy_line`] over a whole channel, in order. `pub` for the same reason
+/// [`crate::actions`] is: the fixture generator derives the golden envelope's legacy array from
+/// the typed one through THIS function, never a second copy of the rule.
+pub fn legacy_lines(messages: &[Message]) -> Vec<String> {
     messages.iter().map(legacy_line).collect()
+}
+
+/// `text` ended as ONE sentence: a full stop is appended only when the text does not already end
+/// in terminal punctuation. Lines are assembled from error `Display`s that a caller cannot see,
+/// and a handful of those write their own full stop — so a template that appends unconditionally
+/// prints `..` for exactly those, and only for those. The rule lives HERE, once, rather than in
+/// each template that folds a sentence someone else wrote.
+pub(crate) fn ended(text: &str) -> String {
+    let trimmed = text.trim_end();
+    if trimmed.ends_with(['.', '!', '?', ':', ';']) {
+        trimmed.to_owned()
+    } else {
+        format!("{trimmed}.")
+    }
+}
+
+// =================================================================================================
+// The PAGING facts — a capped response's own disclosure.
+// =================================================================================================
+//
+// All three are `disclosure`, not `failure`: the run succeeded and returned exactly the page it
+// promised. `failure` is the channel's one word for "this did not happen", and a page that is a
+// page did happen. They keep their codes (a consumer already matches on them), and their legacy
+// `warnings` line and its position in the array do not move. `pub` so the fixture generator emits
+// the bytes the binary emits.
+
+/// One row-capped `list` bucket.
+#[must_use]
+pub fn list_truncated(bucket: &str, shown: u64, total: u64) -> Message {
+    disclosure(
+        "LIST_TRUNCATED",
+        format!(
+            "{bucket}: showing {shown} of {total}. The next action on this response fetches the \
+             rest."
+        ),
+    )
+}
+
+/// A byte-capped `diff` body. `preview` is the `review` describe's embedded diff, whose sentence
+/// names the preview it sits in rather than the whole response.
+#[must_use]
+pub fn diff_truncated(preview: bool) -> Message {
+    disclosure(
+        "DIFF_TRUNCATED",
+        if preview {
+            "The diff in this preview is cut short at a size limit. The next action on this \
+             response re-runs it in full."
+                .to_owned()
+        } else {
+            "This diff is cut short at a size limit. The next action on this response re-runs it \
+             in full."
+                .to_owned()
+        },
+    )
+}
+
+/// A row-capped `log` page.
+#[must_use]
+pub fn log_truncated(shown: usize, total: u64) -> Message {
+    disclosure(
+        "LOG_TRUNCATED",
+        format!(
+            "Showing {shown} of {total} events. The next action on this response fetches the rest."
+        ),
+    )
 }
 
 #[cfg(test)]
@@ -100,6 +170,35 @@ mod tests {
         assert_eq!(decision(String::new()).kind, MessageKind::Decision);
         assert!(decision(String::new()).code.is_none());
         assert!(uncoded_failure(String::new()).code.is_none());
+    }
+
+    /// A PAGING fact is a `disclosure`, not a `failure`. The envelope's contract says only
+    /// `failure` means something did not happen — and a capped page is exactly the page the
+    /// response promised, on a run that exited 0 with `ok: true`. What does NOT move: the code
+    /// each one carries, and the legacy `warnings` line derived from it.
+    #[test]
+    fn a_paging_fact_discloses_rather_than_failing() {
+        let paging = [
+            list_truncated("machine", 20, 57),
+            diff_truncated(false),
+            diff_truncated(true),
+            log_truncated(20, 57),
+        ];
+        for m in &paging {
+            assert_eq!(m.kind, MessageKind::Disclosure, "{m:?}");
+            assert!(m.code.is_some(), "a paging fact keeps its code: {m:?}");
+            assert!(
+                legacy_line(m).starts_with(m.code.as_deref().unwrap_or_default()),
+                "the legacy line still leads with the code: {m:?}"
+            );
+        }
+        assert_eq!(
+            legacy_lines(&paging[..1]),
+            vec![
+                "LIST_TRUNCATED machine: showing 20 of 57. The next action on this response \
+                 fetches the rest."
+            ]
+        );
     }
 
     /// Order is preserved line for line — the array a consumer indexes into does not move.

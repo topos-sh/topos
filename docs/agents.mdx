@@ -49,7 +49,6 @@ Every `--json` run prints one object on stdout (one line; pretty-printed here):
     }
   },
   "warnings": [],
-  "messages": [],
   "next_actions": [
     {
       "code": "APPLY_DESCRIBED",
@@ -118,13 +117,15 @@ the error's:
   `advisory` annotates a row that still delivered, and `disclosure` states a fact about
   work that succeeded.
 - `code` is the same open SCREAMING_SNAKE vocabulary as elsewhere, and is **absent** when
-  the producer has none (a decision, a paging fact).
+  the producer has none (a decision).
 - `text` is the one sentence a person reads. It never carries the code.
 
 Machine-readable message codes now ride `messages[].code` — each entry is
 `{code, kind, text}`. The `warnings` array is unchanged in shape for now and will be
 retired in a future contract version; match on `messages[].code` rather than `warnings[]`
-string prefixes.
+string prefixes. A paging or size fact rides kind `"disclosure"` even though its legacy
+line still sits in the warnings array. Legacy warning strings now uniformly spell
+`"CODE text"` — the colon variant some codes used is gone.
 
 The full JSON Schemas live in the repository under `contracts/schemas/`, with golden examples
 under `contracts/fixtures/json/`.

@@ -166,7 +166,7 @@ pub(crate) fn next_actions(command: &str, argv: &[String], err: &ClientError) ->
         )],
         // A denial is not self-service (ask an owner to invite/roster you, or contact an admin) — the
         // codes carry no executable argv.
-        ClientError::Denied(_) => vec![
+        ClientError::Denied(_) | ClientError::MailNotConfigured => vec![
             crate::actions::next_action(ActionCode::RequestAccess, Vec::new()),
             crate::actions::next_action(ActionCode::ContactAdmin, Vec::new()),
         ],
@@ -1320,12 +1320,11 @@ fn push_list_tail(s: &mut String, out: &ListOutcome) {
         s.push_str(&format!("warning: {}\n", w.text));
     }
     if let Some(footprint) = &data.footprint {
-        // The count is the header; then each path, so a `--footprint` read reports WHAT topos owns (not
-        // just how many) — the set `uninstall` deletes.
-        s.push_str(&format!(
-            "Footprint: {} paths under the topos home\n",
-            footprint.len()
-        ));
+        // The count is the header; then each path, so a `--footprint` read reports WHAT topos owns
+        // (not just how many) — the set `uninstall` deletes. The header states the COUNT and
+        // nothing else: the rows are not all under the topos home (a trigger artifact lives in its
+        // harness's own config dir), and the header used to say they were.
+        s.push_str(&format!("Footprint: {} paths\n", footprint.len()));
         for p in footprint {
             s.push_str(&format!("  {p}\n"));
         }
@@ -7302,9 +7301,12 @@ mod tests {
     #[test]
     fn list_footprint_prints_each_path_not_just_a_count() {
         // `--footprint` reports WHAT topos owns (the set `uninstall` deletes), not merely how many.
+        // And the header COUNTS, without claiming where: a trigger artifact lives in its harness's
+        // own config dir, so "under the topos home" was false of the very rows it introduced.
         let out = ListOutcome {
             data: ListData {
                 footprint: Some(vec![
+                    "/home/x/.claude/settings.json".to_owned(),
                     "/home/x/.topos/identity".to_owned(),
                     "/home/x/.topos/skills/topos_s00".to_owned(),
                 ]),
@@ -7314,9 +7316,11 @@ mod tests {
             untracked_view: false,
         };
         let text = list_tty(&out);
+        assert!(text.contains("Footprint: 3 paths\n"), "{text}");
+        assert!(!text.contains("under the topos home"), "{text}");
         assert!(
-            text.contains("Footprint: 2 paths under the topos home"),
-            "{text}"
+            text.contains("/home/x/.claude/settings.json"),
+            "a harness-home row is listed too: {text}"
         );
         assert!(
             text.contains("/home/x/.topos/identity"),

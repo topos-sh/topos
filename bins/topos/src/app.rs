@@ -2144,18 +2144,14 @@ fn finish_list(
                         ],
                     ));
                 }
-                // The stable-shape truncation warnings — a belt for a consumer that ignores the new
-                // typed markers: a capped enumeration is never mistakable for a complete one.
+                // The stable-shape truncation line — a belt for a consumer that ignores the new
+                // typed markers: a capped enumeration is never mistakable for a complete one. Its
+                // KIND is `disclosure`: the run succeeded and the page it returned is exactly the
+                // page it promised, so a channel where `failure` means "this did not happen" must
+                // not carry it. The legacy `warnings` membership and order do not move.
                 let mut messages = out.warnings.clone();
                 for b in &out.data.truncated {
-                    messages.push(crate::message::failure(
-                        "LIST_TRUNCATED",
-                        format!(
-                            "{}: showing {} of {}. The next action on this response fetches the \
-                             rest.",
-                            b.bucket, b.shown, b.total
-                        ),
-                    ));
+                    messages.push(crate::message::list_truncated(&b.bucket, b.shown, b.total));
                 }
                 let value = serde_json::to_value(&out.data).unwrap_or_default();
                 let mut envelope = render::ok_envelope(command, value);
@@ -2258,27 +2254,10 @@ fn finish_diff(
     match result {
         Ok(data) => {
             if json {
-                let mut messages = Vec::new();
-                let next_actions = if data.truncated {
-                    messages.push(crate::message::failure(
-                        "DIFF_TRUNCATED",
-                        "This diff is cut short at a size limit. The next action on this response \
-                         re-runs it in full."
-                            .to_owned(),
-                    ));
-                    vec![crate::actions::next_action(
-                        topos_types::ActionCode::FetchFullDiff,
-                        full_argv,
-                    )]
-                } else {
-                    Vec::new()
-                };
-                let value = serde_json::to_value(&data).unwrap_or_default();
-                let mut envelope = render::ok_envelope(command, value);
-                envelope.warnings = crate::message::legacy_lines(&messages);
-                envelope.messages = messages;
-                envelope.next_actions = next_actions;
-                println!("{}", render::to_json(&envelope));
+                println!(
+                    "{}",
+                    render::to_json(&diff_envelope(command, &data, full_argv))
+                );
             } else {
                 println!("{}", render::diff_tty(&data));
             }
@@ -2286,6 +2265,33 @@ fn finish_diff(
         }
         Err(e) => emit_err(json, command, &e, diag),
     }
+}
+
+/// The `--json` envelope `diff` prints — the ONE place its payload, its size fact, the legacy
+/// derivation of that fact, and the full-fidelity next action are joined. Split out of the
+/// finisher so the committed golden can be asserted against the FINISHER'S OWN bytes: a golden
+/// rebuilt from `data` alone can never notice a line channel that stopped being populated.
+pub(crate) fn diff_envelope(
+    command: &str,
+    data: &topos_types::results::DiffData,
+    full_argv: Vec<String>,
+) -> topos_types::JsonEnvelope {
+    let mut messages = Vec::new();
+    let next_actions = if data.truncated {
+        messages.push(crate::message::diff_truncated(false));
+        vec![crate::actions::next_action(
+            topos_types::ActionCode::FetchFullDiff,
+            full_argv,
+        )]
+    } else {
+        Vec::new()
+    };
+    let value = serde_json::to_value(data).unwrap_or_default();
+    let mut envelope = render::ok_envelope(command, value);
+    envelope.warnings = crate::message::legacy_lines(&messages);
+    envelope.messages = messages;
+    envelope.next_actions = next_actions;
+    envelope
 }
 
 /// `log`'s finisher — a row-capped event list adds the NEXT_PAGE next action (this same log at the
@@ -2310,14 +2316,7 @@ fn finish_log(
                 if data.truncated
                     && let Some(total) = data.total
                 {
-                    messages.push(crate::message::failure(
-                        "LOG_TRUNCATED",
-                        format!(
-                            "Showing {} of {total} events. The next action on this response \
-                             fetches the rest.",
-                            data.events.len()
-                        ),
-                    ));
+                    messages.push(crate::message::log_truncated(data.events.len(), total));
                 }
                 let value = serde_json::to_value(&data).unwrap_or_default();
                 let mut envelope = render::ok_envelope(command, value);
@@ -2622,12 +2621,7 @@ fn finish_review(
                 if data.diff_truncated
                     && let Some((_, hash)) = data.proposal.rsplit_once('@')
                 {
-                    messages.push(crate::message::failure(
-                        "DIFF_TRUNCATED",
-                        "The diff in this preview is cut short at a size limit. The next action \
-                         on this response re-runs it in full."
-                            .to_owned(),
-                    ));
+                    messages.push(crate::message::diff_truncated(true));
                     let mut argv = vec![
                         "topos".to_owned(),
                         "diff".to_owned(),

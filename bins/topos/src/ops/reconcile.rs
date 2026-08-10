@@ -6701,7 +6701,10 @@ fn note_item_failure(
 pub(super) fn item_failure(name: &str, e: &ClientError) -> Message {
     crate::message::failure(
         e.code(),
-        format!("{name}: {}.", crate::render::safe_message(e)),
+        format!(
+            "{name}: {}",
+            crate::message::ended(&crate::render::safe_message(e))
+        ),
     )
 }
 
@@ -7005,6 +7008,27 @@ mod tests {
         assert_eq!(
             Step::label(None, "deploy-runbook"),
             "updating deploy-runbook"
+        );
+    }
+
+    /// The per-item failure line folds a sentence the ERROR wrote, and a handful of those write
+    /// their own full stop. The template appended one unconditionally, so exactly those printed
+    /// `..` — the one punctuation bug a reader is guaranteed to notice.
+    #[test]
+    fn the_item_failure_line_ends_in_one_full_stop_whoever_wrote_the_sentence() {
+        // An error whose own Display ends in a full stop.
+        let ends_itself = crate::error::ClientError::PublishBehind {
+            skill: "docs".to_owned(),
+            global: true,
+        };
+        let line = super::item_failure("docs", &ends_itself);
+        assert!(line.text.ends_with('.'), "{}", line.text);
+        assert!(!line.text.ends_with(".."), "{}", line.text);
+        // An error whose own Display does not — the full stop is still added.
+        let ends_bare = crate::error::ClientError::InvalidArgument("no such scope".to_owned());
+        assert_eq!(
+            super::item_failure("docs", &ends_bare).text,
+            "docs: no such scope."
         );
     }
 }

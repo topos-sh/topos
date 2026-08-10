@@ -516,6 +516,17 @@ pub(crate) enum ClientError {
     /// proposal. Carries the wire code for the agent to branch on; never a secret.
     #[error("the server refused this operation ({0})")]
     Denied(String),
+    /// The server holds no outgoing mail and invitations travel by mail (`MAIL_NOT_CONFIGURED`) —
+    /// a denial with a describable way out, so it gets a variant of its own rather than riding
+    /// [`ClientError::Denied`]'s wire-code-in-the-message shape. THE CODE RIDES THE CODE FIELD:
+    /// the sentence a person reads never repeats it, so no surface prints a SCREAMING_SNAKE word
+    /// before the first English one.
+    #[error(
+        "the server has no outgoing mail configured, and invitations travel by mail — ask an \
+         admin to configure SMTP on the server, or manage invitations from the workspace's \
+         People page on the web"
+    )]
+    MailNotConfigured,
     /// A `review` verdict (`--approve`/`--reject`/`--withdraw`) targeted a proposal that is no longer OPEN
     /// at the live `current`: an already-resolved proposal moved `current` past its base, so the
     /// fresh-current `expected` matches no open proposal and the plane answers a terminal
@@ -973,6 +984,9 @@ impl ClientError {
             ClientError::ApprovalMismatch { .. } => "CONSENT_MISMATCH",
             ClientError::Conflict { .. } => "CONFLICT",
             ClientError::Denied(_) => "DENIED",
+            // Its own code, so an agent branches on WHY the invite was refused; the sentence it
+            // carries never spells that code out loud.
+            ClientError::MailNotConfigured => "MAIL_NOT_CONFIGURED",
             // A review verdict on a no-longer-open proposal — an open code, its own domain refusal.
             ClientError::ReviewNotOpen(_) => "REVIEW_NOT_OPEN",
             ClientError::PublishBlocked { .. } => "PUBLISH_BLOCKED",
@@ -1094,7 +1108,7 @@ impl ClientError {
             ClientError::ManifestChanged { .. } | ClientError::ManifestExists { .. } => {
                 TerminalOutcome::Conflict
             }
-            ClientError::Denied(_) => TerminalOutcome::Denied,
+            ClientError::Denied(_) | ClientError::MailNotConfigured => TerminalOutcome::Denied,
             ClientError::PublishBlocked { .. } => TerminalOutcome::Diverged,
             // Behind is the local half of the stale-base CONFLICT: update to rebase, then retry —
             // never a blind re-run of the same publish.

@@ -1473,6 +1473,11 @@ fn fixtures() -> Vec<(&'static str, String)> {
     // A BYTE-CAPPED `diff` (`--max-bytes`, or the `--json` default): the body keeps only the leading
     // whole-file sections that fit, `files` lists every changed file with `patch_omitted` marks, and
     // the FETCH_FULL_DIFF next action re-runs the same diff uncapped.
+    //
+    // It is also the golden that exercises a POPULATED line channel: the size fact comes from the
+    // binary's own producer and the legacy array from the binary's own derivation, so the two
+    // committed arrays are the bytes `topos diff --json` prints and cannot drift from them by hand.
+    let diff_size_fact = vec![topos::message::diff_truncated(false)];
     let diff_truncated = JsonEnvelope {
         schema_version: 1,
         command: "diff".to_owned(),
@@ -1499,8 +1504,8 @@ fn fixtures() -> Vec<(&'static str, String)> {
             skill: None,
         })
         .expect("DiffData serializes"),
-        warnings: vec![],
-        messages: vec![],
+        warnings: topos::message::legacy_lines(&diff_size_fact),
+        messages: diff_size_fact,
         next_actions: vec![topos::actions::next_action(
             ActionCode::FetchFullDiff,
             argv(&["topos", "diff", "pr-describe", "--max-bytes", "0", "--json"]),

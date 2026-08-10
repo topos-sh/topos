@@ -1294,12 +1294,7 @@ fn map_invite_envelope(
         // The one describable dead end: the server holds no outgoing mail, and invitations
         // travel BY mail — a typed answer with the way out, never a bare transport-shaped line.
         if code == "MAIL_NOT_CONFIGURED" {
-            return Err(ClientError::Denied(
-                "MAIL_NOT_CONFIGURED: the server has no outgoing mail configured, and \
-                 invitations travel by mail — ask an admin to configure SMTP on the server, or \
-                 manage invitations from the workspace's People page on the web"
-                    .to_owned(),
-            ));
+            return Err(ClientError::MailNotConfigured);
         }
         return Err(ClientError::Plane(format!(
             "the server refused this invitation ({code})"
@@ -2615,6 +2610,72 @@ mod tests {
             ClientError::Plane(m) => assert!(m.contains("NOT_AUTHORIZED"), "got {m}"),
             other => panic!("expected a typed Plane error, got {other:?}"),
         }
+    }
+
+    /// The ONE place a code may appear is the typed error's own code field. The unarmed-mail
+    /// refusal used to paste `MAIL_NOT_CONFIGURED: ` in front of its sentence, so the TTY read a
+    /// machine word before the first English one — while the envelope's `code` said `DENIED` and
+    /// the fine code was reachable only by parsing prose. Now the code IS the code, and the
+    /// sentence carries no SCREAMING_SNAKE at all.
+    #[test]
+    fn the_unarmed_mail_refusal_puts_its_code_in_the_code_field_and_not_in_the_sentence() {
+        use topos_types::{Affected, TerminalOutcome, WireError};
+        let env = JsonEnvelope {
+            schema_version: 1,
+            command: "invite".to_owned(),
+            ok: false,
+            data: serde_json::json!({}),
+            warnings: Vec::new(),
+            messages: Vec::new(),
+            next_actions: Vec::new(),
+            receipt: None,
+            error: Some(WireError {
+                code: "MAIL_NOT_CONFIGURED".to_owned(),
+                outcome: TerminalOutcome::Denied,
+                retryable: false,
+                affected: Affected::default(),
+                expected_generation: None,
+                current_generation: None,
+                context: serde_json::json!({}),
+                next_actions: Vec::new(),
+            }),
+        };
+        let err = map_invite_envelope("topos.test", 200, &envelope_bytes(&env)).unwrap_err();
+        assert_eq!(err.code(), "MAIL_NOT_CONFIGURED");
+        assert_eq!(err.outcome(), topos_types::TerminalOutcome::Denied);
+        // Every surface a person reads: the safe message, the TTY refusal, and the envelope's own
+        // context sentence.
+        let tty = crate::render::err_tty(&err);
+        for text in [crate::render::safe_message(&err), tty.clone()] {
+            assert!(
+                text.contains("no outgoing mail configured"),
+                "the sentence survives: {text}"
+            );
+            assert!(
+                !text.split_whitespace().any(is_screaming_snake),
+                "no code leaks into prose: {text}"
+            );
+        }
+        let envelope = crate::render::err_envelope("invite", &["invite".to_owned()], &err);
+        let wire = envelope.error.expect("a refusal carries its error");
+        assert_eq!(wire.code, "MAIL_NOT_CONFIGURED");
+        let message = wire.context["message"].as_str().unwrap_or_default();
+        assert!(
+            !message.split_whitespace().any(is_screaming_snake),
+            "{message}"
+        );
+    }
+
+    /// A word that is a machine code rather than English: SCREAMING_SNAKE with at least one
+    /// underscore — the shape every code in this vocabulary takes, and one no acronym a sentence
+    /// legitimately carries (`SMTP`, `TLS`) can wear.
+    fn is_screaming_snake(word: &str) -> bool {
+        let word = word.trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '_');
+        word.contains('_')
+            && word.chars().any(|c| c.is_ascii_uppercase())
+            && word
+                .chars()
+                .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
     }
 
     #[test]
