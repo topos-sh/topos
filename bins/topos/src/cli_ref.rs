@@ -319,15 +319,22 @@ pub fn cli_ref_md() -> String {
     out.push_str(
         "## The `--json` envelope\n\n\
          Every `--json` run prints one object on stdout: `schema_version` (1), `command`, `ok`, a \
-         per-command `data` payload, `warnings`, `next_actions`, and — on `ok: false` — an `error` \
-         (`code`, `outcome`, `retryable`, plus its own `next_actions`). Each `next_actions` entry \
-         is a ready-to-run step: `argv` is a complete command; `needs` lists any `<placeholder>` \
-         tokens you must substitute first; `mutates`, `needs_network`, and `risk_note` are safety \
-         metadata (absent means unknown). Treat `code` as an open vocabulary — run an unfamiliar \
-         action by its `argv` rather than rejecting it. The full JSON-Schemas live under \
-         `contracts/schemas/` in the repository, with golden examples under \
-         `contracts/fixtures/json/`; the agents guide (topos.sh/docs/agents) shows worked \
-         examples.\n\n",
+         per-command `data` payload, `warnings`, `messages`, `next_actions`, and — on `ok: false` \
+         — an `error` (`code`, `outcome`, `retryable`, plus its own `next_actions`). Each \
+         `next_actions` entry is a ready-to-run step: `argv` is a complete command; `needs` lists \
+         any `<placeholder>` tokens you must substitute first; `mutates`, `needs_network`, and \
+         `risk_note` are safety metadata (absent means unknown). Treat `code` as an open \
+         vocabulary — run an unfamiliar action by its `argv` rather than rejecting it.\n\n\
+         `messages` is the typed line channel: one `{code, kind, text}` entry per line, where \
+         `kind` is `failure` · `decision` · `advisory` · `disclosure`, `code` is the open \
+         SCREAMING_SNAKE vocabulary (absent when the producer has none), and `text` is the \
+         sentence a person reads. Machine-readable message codes now ride `messages[].code` — \
+         each entry is `{code, kind, text}`. The `warnings` array is unchanged in shape for now \
+         and will be retired in a future contract version; match on `messages[].code` rather than \
+         `warnings[]` string prefixes.\n\n\
+         The full JSON-Schemas live under `contracts/schemas/` in the repository, with golden \
+         examples under `contracts/fixtures/json/`; the agents guide (topos.sh/docs/agents) shows \
+         worked examples.\n\n",
     );
 
     // The agent → folder tables, generated from the baked registry + the MCP descriptor table.

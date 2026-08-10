@@ -49,6 +49,7 @@ Every `--json` run prints one object on stdout (one line; pretty-printed here):
     }
   },
   "warnings": [],
+  "messages": [],
   "next_actions": [
     {
       "code": "APPLY_DESCRIBED",
@@ -91,6 +92,39 @@ the error's:
   `needs_network`, and `risk_note` are safety metadata — **absent means unknown, not safe**.
 - Every error whose prose names a concrete command carries that command structurally in
   `next_actions`, so you never parse English to find the fix.
+
+### Messages
+
+`messages` is the typed line channel — one entry per line the run produced, in order:
+
+```json
+{
+  "messages": [
+    {
+      "code": "PLANE_UNAVAILABLE",
+      "kind": "failure",
+      "text": "acme: topos could not reach this workspace's server (connection refused). Run 'topos update' to try again."
+    },
+    {
+      "kind": "disclosure",
+      "text": "topos.sh/acme: reached, and nothing is assigned to you yet."
+    }
+  ]
+}
+```
+
+- `kind` is a **closed** set: `failure` · `decision` · `advisory` · `disclosure`. Only
+  `failure` says something did not happen; `decision` is a bundle waiting on a person,
+  `advisory` annotates a row that still delivered, and `disclosure` states a fact about
+  work that succeeded.
+- `code` is the same open SCREAMING_SNAKE vocabulary as elsewhere, and is **absent** when
+  the producer has none (a decision, a paging fact).
+- `text` is the one sentence a person reads. It never carries the code.
+
+Machine-readable message codes now ride `messages[].code` — each entry is
+`{code, kind, text}`. The `warnings` array is unchanged in shape for now and will be
+retired in a future contract version; match on `messages[].code` rather than `warnings[]`
+string prefixes.
 
 The full JSON Schemas live in the repository under `contracts/schemas/`, with golden examples
 under `contracts/fixtures/json/`.
