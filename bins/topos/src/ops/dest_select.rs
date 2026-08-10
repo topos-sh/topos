@@ -336,15 +336,17 @@ fn norm(raw: &str) -> String {
 /// written for — naming it would otherwise publish nothing, or reset nothing, and report success;
 /// the other three states say what is actually in the way instead of pretending it is emptiness.
 fn unusable_copy(display: &str, status: &ScanStatus) -> ClientError {
-    ClientError::SelectionRefused(match status {
-        ScanStatus::Clean { .. } => {
+    use crate::placement::Drift;
+    // The words come from the ONE drift vocabulary — the classification, never the bytes.
+    ClientError::SelectionRefused(match status.drift() {
+        Drift::Clean => {
             format!("that copy has no edits — {display} holds the version topos placed there")
         }
-        ScanStatus::Absent => format!("that copy is not there — nothing is placed at {display}"),
-        ScanStatus::Foreign => {
+        Drift::Absent => format!("that copy is not there — nothing is placed at {display}"),
+        Drift::Foreign => {
             format!("{display} holds files topos did not write — it is not a copy of this bundle")
         }
-        ScanStatus::Modified { .. } | ScanStatus::Unscannable => {
+        Drift::Modified | Drift::Unscannable => {
             format!("{display} cannot be read safely — nothing was touched")
         }
     })

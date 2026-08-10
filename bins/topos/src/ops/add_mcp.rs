@@ -853,28 +853,31 @@ fn converge_one(ctx: &Ctx<'_>, target: &EditTarget, bundle_id: &str, name: &str)
     .iter()
     .map(|h| h.slug.to_owned())
     .collect();
+    // The SAME narrowing the sweep resolves for this row (its `dest` entries mapped to the
+    // config files they name) — one shared resolution, so the add can never place into a
+    // harness the next sweep would claw back. It is a PLANNER input: the plan turns it into the
+    // config files this bundle's entries belong in.
+    let (reach, filter_warnings) = row_narrowing(ctx, target, name);
     let io = crate::mcp_engine::ScopeIo {
         fs: ctx.fs,
         layout: &layout,
         home: roots.home.clone(),
         project_root,
     };
-    // The SAME narrowing the sweep resolves for this row (its `dest` entries mapped to the
-    // config files they name) — one shared resolution, so the add can never place into a
-    // harness the next sweep would claw back.
-    let (filter, filter_warnings) = row_narrowing(ctx, target, name);
-    let demand = crate::mcp_engine::McpDemand {
+    let descriptors = topos_harness::mcp::descriptor::mcp_harnesses();
+    let demand = crate::mcp_engine::DemandedBundle {
         bundle_id: bundle_id.to_owned(),
         name: name.to_owned(),
         workspace_slug: None,
         version_id: String::new(),
         server_json,
-        harness_filter: filter,
-    };
+        reach,
+    }
+    .planned(&io, &descriptors, &detected);
     let outcome = crate::mcp_engine::converge(
         &io,
         std::slice::from_ref(&demand),
-        &topos_harness::mcp::descriptor::mcp_harnesses(),
+        &descriptors,
         &detected,
         &HashSet::new(),
         false,

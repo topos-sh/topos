@@ -84,9 +84,15 @@ generated `docs/cli.md` (`cargo xtask gen-cli-ref`).
   preserved as `.topos-kept-*` siblings) plus the park journal + recovery; the contracts live in
   the module docs. The rule everywhere: **no byte differing from its recorded baseline is
   destroyed unless a snapshot taken after the last revalidation holds it.**
-- `placement` — where a bundle's bytes land per scope (shared-dir-first over the home;
-  project-rooted with containment proven at the write boundary), composing
-  `topos-harness::{coverage,registry}`.
+- `placement` — where a bundle's bytes land per scope, in the TWO target shapes one plan carries:
+  a DIRECTORY the bundle owns (shared-dir-first over the home; project-rooted with containment
+  proven at the write boundary), or ENTRIES it owns inside a config file shared with the whole
+  machine (`entries_plan` — the harness table's MCP surfaces joined onto detection, narrowed by
+  the reach the caller resolved, with the surfaces it withheld and their reasons). A kind picks
+  which arm plans and which mechanic applies; a plan says what SHOULD stand and never what does
+  (that is the bundle record's custody). Composes `topos-harness::{coverage,registry,mcp}`. `Drift`
+  is the ONE payload-free vocabulary both shapes project onto (Absent/Clean/Modified/Foreign/
+  Unscannable) for the words receipts and the wire choose; `ScanStatus` keeps its scanned bytes.
 - `mcp_validate` + `ops/add_mcp` — the `kind = "mcp"` bundle's AUTHORING half. `mcp_validate` is
   the server-document gate, mirroring the web tier rule for rule over the shared vectors at
   `tests/fixtures/mcp/` (six typed refusal codes; the credential scan runs FIRST, over the whole
@@ -105,11 +111,16 @@ generated `docs/cli.md` (`cargo xtask gen-cli-ref`).
   re-runs the gate BEFORE the op WAL, and threads it onto the wire.
 - `mcp_engine` + `config_custody` — the `kind = "mcp"` bundle's delivery half: a store-only sync
   (lock custody, no dir placement) feeds a per-scope config CONVERGE over
-  `topos-harness::mcp`'s pure drivers — server.json parsed fail-closed, per-harness surfaces
-  joined onto detection (project surfaces containment-proven) and narrowed by ONE shared
-  resolution (the row's `dest` config-file entries mapped to the harnesses that claim them;
-  no dest = every MCP-capable agent) so an add never places where the next sweep would claw it
-  back, removal via prior-matched keys with drift left in place. ONE converge path serves every
+  `topos-harness::mcp`'s pure drivers — server.json parsed fail-closed, and the converge itself
+  is DEMAND (each bundle's entries plan) plus CUSTODY (its own recorded rows). Reach resolves at
+  PLANNING and nowhere else: a row's `dest` config-file entries map to the harnesses that claim
+  them (no dest = every MCP-capable agent), a targeted verb plans only the harnesses whose
+  recorded rows prove the bundle already stands there (`recorded_entries_plan`), and the plan
+  carries the surfaces it withheld so a receipt still says what reach cost. An `McpDemand` is
+  built only by `DemandedBundle::planned`, so no caller can hand the converge a reach the planner
+  did not compute, and an add never places where the next sweep would claw it back. Removal and
+  key retirement resolve their surfaces from the descriptor table and their reach from the
+  recorded rows — prior-matched keys, with drift left in place. ONE converge path serves every
   surface, the wholly-topos-owned Claude plugin dir included (its `.mcp.json` is an ordinary
   driver surface; content topos did not write backs the whole surface off), and every entry
   point — the sweep, add's inline converge, a targeted accept/go-back, `remove` — serializes on

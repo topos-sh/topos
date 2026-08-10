@@ -4,7 +4,12 @@
 //! The pure placement math lives in `topos_harness::mcp` (bytes in → an [`EditPlan`] out, one
 //! driver per dialect); THIS module owns everything stateful around it, per scope:
 //!
-//! - the demand set (what the reconcile resolved this run — see [`McpDemand`]),
+//! - the demand set — what the reconcile resolved this run, PLANNED onto this scope's config
+//!   surfaces ([`McpDemand`], built only by [`DemandedBundle::planned`]). Reach is the plan's
+//!   answer: the converge places a bundle exactly where its plan carries an entries target, and
+//!   states the surfaces the plan withheld. Removal and key retirement read the RECORDED rows
+//!   instead — a bundle being removed has no demand left to plan from, and custody is the only
+//!   thing that knows where its entries went,
 //! - `server.json` parsing with a fail-closed re-check of the publish gate (a secret /
 //!   templated / value-less header the gate should have refused is never placed, only warned
 //!   about),
@@ -55,11 +60,14 @@ use crate::config_custody::EntryPlacement;
 use crate::config_custody::{self, PendingIntent, ScopeEntries, placement_key};
 use crate::error::ClientError;
 use crate::fs_seam::FsOps;
+use crate::placement::PlacementPlan;
 use crate::sidecar::Layout;
 
-/// One demanded MCP bundle in one scope — everything the engine needs, resolved by the reconcile.
+/// What a caller RESOLVED about one demanded MCP bundle, before its placement is planned: the
+/// identity, the bytes, and the reach its row asked for. Turned into an [`McpDemand`] — the only
+/// way one is ever built — by [`DemandedBundle::planned`].
 #[derive(Debug, Clone)]
-pub(crate) struct McpDemand {
+pub(crate) struct DemandedBundle {
     /// The bundle identity the custody keys on (the workspace skill id; `local:<name>` for an
     /// untracked local row).
     pub bundle_id: String,
@@ -73,10 +81,60 @@ pub(crate) struct McpDemand {
     /// The bundle's `server.json` bytes, read from the scope store's current tree (or the local
     /// row's dir).
     pub server_json: Vec<u8>,
-    /// Registry slugs this demand is narrowed to — the harnesses whose config files the row's
-    /// `dest` names. `None` = no dest (every MCP-capable harness); `Some` = exactly these,
-    /// possibly none at all (a dest row is frozen to what it names).
-    pub harness_filter: Option<Vec<String>>,
+    /// The harness narrowing the caller resolved — the slugs whose config files the row's `dest`
+    /// names, or (for a targeted verb) the harnesses whose recorded rows prove the bundle already
+    /// stands there. `None` = every MCP-capable harness. It is a PLANNER INPUT and nothing else:
+    /// the plan turns it into targets, and no downstream step re-derives reach.
+    pub reach: Option<Vec<String>>,
+}
+
+impl DemandedBundle {
+    /// Plan this row onto ONE scope's config surfaces — the ONE construction of an [`McpDemand`].
+    /// The scope (its fs, home and project root) comes from `io`, and `detected` is the SAME set
+    /// the converge this feeds engages against.
+    pub(crate) fn planned(
+        self,
+        io: &ScopeIo<'_>,
+        descriptors: &[&'static KnownHarness],
+        detected: &BTreeSet<String>,
+    ) -> McpDemand {
+        let plan = crate::placement::entries_plan_at(
+            io.fs,
+            descriptors,
+            &io.home,
+            detected,
+            io.project_root.as_deref(),
+            self.reach.as_deref(),
+        );
+        McpDemand {
+            bundle_id: self.bundle_id,
+            name: self.name,
+            workspace_slug: self.workspace_slug,
+            version_id: self.version_id,
+            server_json: self.server_json,
+            plan,
+        }
+    }
+}
+
+/// One demanded MCP bundle PLANNED onto one scope — the identity + bytes the caller resolved, and
+/// the plan that says WHERE its entries belong here. The converge is demand (these plans) plus
+/// custody (each bundle's own recorded rows); it never re-decides reach.
+#[derive(Debug, Clone)]
+pub(crate) struct McpDemand {
+    /// See [`DemandedBundle::bundle_id`].
+    pub bundle_id: String,
+    /// See [`DemandedBundle::name`].
+    pub name: String,
+    /// See [`DemandedBundle::workspace_slug`].
+    pub workspace_slug: Option<String>,
+    /// See [`DemandedBundle::version_id`].
+    pub version_id: String,
+    /// See [`DemandedBundle::server_json`].
+    pub server_json: Vec<u8>,
+    /// The ENTRIES half of this bundle's placement plan at this scope: one target per config file
+    /// its entries belong in, plus the surfaces the plan withheld with their reasons.
+    pub plan: PlacementPlan,
 }
 
 /// The scope's I/O: the fs seam, the scope store (where the custody document and every bundle's own
@@ -339,80 +397,65 @@ pub(crate) fn converge(
     let mut wrote: BTreeSet<usize> = BTreeSet::new();
 
     for h in descriptors {
-        // The scope surface. A PROJECT scope never falls back to the user surface.
-        let surface: Option<(PathBuf, McpDialect)> = match &io.project_root {
-            Some(root) => match h.mcp().and_then(|m| m.project) {
-                Some((rel, dialect)) => {
-                    let path = root.join(rel);
-                    // THE CONTAINMENT RAIL, before ANY read or write: the resolved path (symlinks
-                    // followed for the check) must stay inside the checkout — refused and
-                    // disclosed, never redirected.
-                    if crate::placement::within_project(root, &path) {
-                        Some((path, dialect))
-                    } else {
+        // WHAT THE PLANS WITHHELD from this surface — one line per placeable demand that asked for
+        // this harness and did not get it (no surface at this scope, a project path the containment
+        // rail refused). The reach decision is the plan's, so the disclosure of what it cost is the
+        // plan's too; the converge only speaks it in the descriptor order the receipt reads in.
+        for (i, _) in &parsed {
+            if let Some(w) = demands[*i].plan.withheld_for(h.slug) {
+                push_state(
+                    &mut states,
+                    *i,
+                    agent_state(h.slug, w.state, Some(w.note.as_str()), None),
+                );
+            }
+        }
+        // WHERE this surface's file is. A harness some plan REACHES answers with the plan's own
+        // target — the file the demand named, and engagement already proven when it was planned.
+        // A harness only CUSTODY names (an undemanded bundle's standing entry, a narrowing change,
+        // a removal-only run) has no plan to read, so it resolves through the same shared
+        // resolution the planner used — because a removal must still reach the files it wrote.
+        let planned = parsed
+            .iter()
+            .find_map(|(i, _)| demands[*i].plan.entries_for(h.slug));
+        let (file, dialect) = match planned {
+            Some(t) => (t.file.clone(), t.dialect),
+            None => {
+                let surface =
+                    crate::placement::config_surface(h, &io.home, io.project_root.as_deref());
+                let crate::placement::ConfigSurface::Ready {
+                    root,
+                    file,
+                    dialect,
+                } = surface
+                else {
+                    // A project surface the containment rail refused earns ONE scope-level
+                    // disclosure (the per-bundle states rode the plans above); a harness with no
+                    // surface at this scope is simply not here.
+                    if let crate::placement::ConfigSurface::Escaped { path } = surface {
                         let line = crate::placement::escape_line(h.slug, &path);
                         if !out.warnings.contains(&line) {
                             out.warnings.push(line);
                         }
-                        for (i, _) in &parsed {
-                            if filter_admits(&demands[*i], h.slug) {
-                                push_state(
-                                    &mut states,
-                                    *i,
-                                    agent_state(
-                                        h.slug,
-                                        "unprovable",
-                                        Some(
-                                            "the config path does not resolve inside this checkout",
-                                        ),
-                                        None,
-                                    ),
-                                );
-                            }
-                        }
-                        continue;
                     }
+                    continue;
+                };
+                // Engagement: the harness is detected on this machine, OR its config surface
+                // already exists (entries were placed while it was detected — removal must still
+                // reach them).
+                if !(detected.contains(h.slug) || io.fs.exists(&root)) {
+                    continue;
                 }
-                None => None,
-            },
-            None => h
-                .mcp()
-                .and_then(|m| m.user)
-                .and_then(|s| h.mcp_user_path(&io.home).map(|p| (p, s.dialect))),
-        };
-        let Some((path, dialect)) = surface else {
-            // No surface AT THIS SCOPE: withheld, honestly, per demanded bundle.
-            let note = if io.project_root.is_some() {
-                "no project-level config"
-            } else {
-                "no user-level config"
-            };
-            for (i, _) in &parsed {
-                if filter_admits(&demands[*i], h.slug) {
-                    push_state(
-                        &mut states,
-                        *i,
-                        agent_state(h.slug, "not-supported", Some(note), None),
-                    );
-                }
+                (file, dialect)
             }
-            continue;
         };
 
-        // Engagement: the harness is detected on this machine, OR its config surface already
-        // exists (entries were placed while it was detected — removal/update must still reach
-        // them).
-        let engaged = detected.contains(h.slug) || io.fs.exists(&path);
-        if !engaged {
-            continue;
-        }
-
-        // The desired set for this harness: the placeable demands that pass the row narrowing.
+        // The desired set for this harness: the placeable demands whose PLAN puts an entries
+        // target here. Nothing is re-narrowed — the plan already answered.
         let mut desired: Vec<McpEntry> = Vec::new();
         let mut desired_bundles: BTreeMap<String, usize> = BTreeMap::new();
         for (i, p) in &parsed {
-            let d = &demands[*i];
-            if !filter_admits(d, h.slug) {
+            if demands[*i].plan.entries_for(h.slug).is_none() {
                 continue;
             }
             let key = minted[i].clone();
@@ -426,7 +469,7 @@ pub(crate) fn converge(
         }
         // Parse-failed demands report per engaged harness (their entries are held above).
         for (i, reason) in &failed {
-            if filter_admits(&demands[*i], h.slug) {
+            if demands[*i].plan.entries_for(h.slug).is_some() {
                 push_state(
                     &mut states,
                     *i,
@@ -456,14 +499,13 @@ pub(crate) fn converge(
                 (key.clone(), (d.bundle_id.clone(), d.version_id.clone()))
             })
             .collect();
-        // The plugin dir's driver surface is its `.mcp.json`; the manifest beside it and the
-        // dir prune are `converge_file`'s dialect-specific I/O.
-        let path = surface_file(&path, dialect);
+        // The plugin dir's driver surface is its `.mcp.json` (resolved with the surface); the
+        // manifest beside it and the dir prune are `converge_file`'s dialect-specific I/O.
         let surface_out = converge_file(
             io,
             &mut custody,
             h,
-            &path,
+            &file,
             dialect,
             &desired,
             &preserved,
@@ -572,20 +614,18 @@ pub(crate) fn remove_bundle(
     };
 
     for h in descriptors {
-        let surface: Option<(PathBuf, McpDialect)> = match &io.project_root {
-            Some(root) => h.mcp().and_then(|m| m.project).and_then(|(rel, dialect)| {
-                let path = root.join(rel);
-                crate::placement::within_project(root, &path).then_some((path, dialect))
-            }),
-            None => h
-                .mcp()
-                .and_then(|m| m.user)
-                .and_then(|s| h.mcp_user_path(&io.home).map(|p| (p, s.dialect))),
-        };
-        let Some((path, dialect)) = surface else {
+        // A removal resolves its surfaces from the DESCRIPTOR table and its reach from the
+        // RECORDED rows — never from a plan. A bundle being removed has no demand left to plan
+        // from, and custody is the only thing that knows where its entries actually went.
+        let crate::placement::ConfigSurface::Ready {
+            root,
+            file,
+            dialect,
+        } = crate::placement::config_surface(h, &io.home, io.project_root.as_deref())
+        else {
             continue;
         };
-        if !(detected.contains(h.slug) || io.fs.exists(&path)) {
+        if !(detected.contains(h.slug) || io.fs.exists(&root)) {
             continue;
         }
         if !custody.holds(&placement_key(h.slug, &key)) {
@@ -595,12 +635,11 @@ pub(crate) fn remove_bundle(
         // keys, and every other entry — ours or not — reads foreign and stays byte-identical.
         let only_this = |_l: &ScopeEntries, entry_key: &str| entry_key != key;
         let provenance = BTreeMap::new();
-        let path = surface_file(&path, dialect);
         let surface_out = converge_file(
             io,
             &mut custody,
             h,
-            &path,
+            &file,
             dialect,
             &[],
             &only_this,
@@ -683,14 +722,6 @@ fn converge_lock(io: &ScopeIo<'_>) -> Result<crate::fs_seam::LockGuard, String> 
     io.fs.lock_exclusive(&locks.join("mcp.lock")).map_err(|e| {
         format!("MCP_LOCK_UNAVAILABLE: {e} — no MCP config is read or written this run")
     })
-}
-
-/// Whether a demand's dest narrowing admits `slug` (`None` = every MCP-capable harness; a dest
-/// row admits exactly the harnesses its config files name — possibly none).
-fn filter_admits(d: &McpDemand, slug: &str) -> bool {
-    d.harness_filter
-        .as_ref()
-        .is_none_or(|f| f.iter().any(|s| s == slug))
 }
 
 fn agent_state(slug: &str, state: &str, note: Option<&str>, file: Option<&Path>) -> McpAgentState {
@@ -956,10 +987,14 @@ fn converge_surface(
                 let mine = custody.rows_at(h.slug, path);
                 !mine.is_empty() && mine.iter().all(|(_, e)| e.owns_file)
             };
-            let all_ours = outcome
-                .states
-                .iter()
-                .all(|(_, s)| !matches!(s, EntryState::Drifted | EntryState::Foreign));
+            // The same drift question the dir side asks of a folder, asked of the entries —
+            // through the one vocabulary both project onto.
+            let all_ours = outcome.states.iter().all(|(_, s)| {
+                !matches!(
+                    crate::placement::Drift::of_entry(*s),
+                    crate::placement::Drift::Modified | crate::placement::Drift::Foreign
+                )
+            });
             let owns_file =
                 outcome.created_file || (owned_before && all_ours && kept.is_empty() && !unmanaged);
 
@@ -1215,16 +1250,6 @@ fn fold_states(
 // manifest beside it, the dir prune when the last entry leaves).
 // =================================================================================================
 
-/// The driver surface FILE for a resolved descriptor surface: the plugin DIR's `.mcp.json` for
-/// [`McpDialect::ClaudePluginDir`], the path itself for every file dialect.
-fn surface_file(path: &Path, dialect: McpDialect) -> PathBuf {
-    if dialect == McpDialect::ClaudePluginDir {
-        path.join(plugin_dir::PLUGIN_MCP_PATH)
-    } else {
-        path.to_path_buf()
-    }
-}
-
 /// The constant manifest's path beside a plugin `.mcp.json`.
 fn plugin_manifest_path(mcp_path: &Path) -> Option<PathBuf> {
     mcp_path
@@ -1310,13 +1335,14 @@ fn prune_plugin_dir(fs: &dyn FsOps, slug: &str, mcp_path: &Path) -> Option<Strin
 ///   no ownership record to reuse, and minting fresh here would land a DUPLICATE `topos-local-*`
 ///   entry beside the original (now-foreign, unremovable) one. Skip with an honest warning; the
 ///   next sweep re-mints under the full scope plan and heals this scope;
-/// - it converges only the harnesses that ALREADY hold a custody entry for this bundle in this
-///   scope. A harness the narrowing excluded never gained an entry, so it stays untouched; a
-///   narrowing CHANGE is the sweep's job, not a go-back's.
+/// - `plan` — built by [`recorded_entries_plan`] — reaches only the harnesses that ALREADY hold a
+///   custody entry for this bundle in this scope. A harness the narrowing excluded never gained an
+///   entry, so it stays untouched; a narrowing CHANGE is the sweep's job, not a go-back's.
 pub(crate) fn converge_bundle_now(
     ctx: &crate::ctx::Ctx<'_>,
     sid: &crate::id::SkillId,
     name: &str,
+    plan: &PlacementPlan,
 ) -> (Vec<McpAgentState>, Vec<String>) {
     let Some(roots) = ctx.roots.clone() else {
         return (Vec::new(), Vec::new());
@@ -1324,8 +1350,8 @@ pub(crate) fn converge_bundle_now(
     let Ok(Some((version_id, server_json))) = stored_server_json(ctx, sid) else {
         return (Vec::new(), Vec::new());
     };
-    // An ADVISORY (unlocked) read: it only derives the targeted reach below. The authoritative
-    // read-modify-write happens inside `converge`, under the per-scope converge lock.
+    // An ADVISORY (unlocked) read: it only answers whether an ownership record exists to reuse.
+    // The authoritative read-modify-write happens inside `converge`, under the per-scope lock.
     let custody = match ScopeEntries::load(ctx.fs, &ctx.layout) {
         Ok(l) => l,
         Err(e) => {
@@ -1340,7 +1366,7 @@ pub(crate) fn converge_bundle_now(
             );
         }
     };
-    let Some(key) = custody.key_of(sid.as_str()).map(str::to_owned) else {
+    if custody.key_of(sid.as_str()).is_none() {
         return (
             Vec::new(),
             vec![format!(
@@ -1348,18 +1374,12 @@ pub(crate) fn converge_bundle_now(
                  heals this scope"
             )],
         );
-    };
-    let descriptors = mcp::descriptor::mcp_harnesses();
-    // The harnesses that provably hold this bundle's entry here — the whole reach of a targeted
-    // converge. None ⇒ nothing placed, nothing stale, nothing to do.
-    let owned: Vec<String> = descriptors
-        .iter()
-        .filter(|h| custody.holds(&placement_key(h.slug, &key)))
-        .map(|h| h.slug.to_owned())
-        .collect();
-    if owned.is_empty() {
+    }
+    // Nothing planned ⇒ nothing placed here, nothing stale, nothing to do.
+    if plan.entries().next().is_none() {
         return (Vec::new(), Vec::new());
     }
+    let descriptors = mcp::descriptor::mcp_harnesses();
     let project_root = ctx.layout.project_root().map(Path::to_path_buf);
     let cwd = project_root.clone().or_else(|| roots.cwd.clone());
     let detected: BTreeSet<String> =
@@ -1381,7 +1401,7 @@ pub(crate) fn converge_bundle_now(
         workspace_slug: None,
         version_id,
         server_json,
-        harness_filter: Some(owned),
+        plan: plan.clone(),
     };
     let outcome = converge(
         &io,
@@ -1398,6 +1418,32 @@ pub(crate) fn converge_bundle_now(
         .map(|b| b.states)
         .unwrap_or_default();
     (states, outcome.warnings)
+}
+
+/// **The targeted verbs' ENTRIES plan** — the row-derived reach A2 keeps: a bundle's plan here is
+/// exactly the harnesses whose RECORDED rows prove it already stands there, planned onto this
+/// scope's surfaces through the one planner. A targeted accept, go-back or reset must never fan a
+/// bundle out past what the sweep's narrowing last admitted, and the record is the only local
+/// evidence of what that was. An unreadable custody, or a bundle with no minted key, plans nothing
+/// — `converge_bundle_now` then says so with its own honest warning.
+pub(crate) fn recorded_entries_plan(
+    ctx: &crate::ctx::Ctx<'_>,
+    skill_id: &str,
+) -> crate::placement::PlacementPlan {
+    let owned: Vec<String> = ScopeEntries::load(ctx.fs, &ctx.layout)
+        .ok()
+        .and_then(|custody| {
+            let key = custody.key_of(skill_id)?.to_owned();
+            Some(
+                mcp::descriptor::mcp_harnesses()
+                    .iter()
+                    .filter(|h| custody.holds(&placement_key(h.slug, &key)))
+                    .map(|h| h.slug.to_owned())
+                    .collect(),
+            )
+        })
+        .unwrap_or_default();
+    crate::placement::entries_plan(ctx, ctx.layout.project_root(), Some(&owned))
 }
 
 // =================================================================================================

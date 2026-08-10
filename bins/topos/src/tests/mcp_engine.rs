@@ -31,7 +31,7 @@ use crate::ctx::Ctx;
 use crate::error::ClientError;
 use crate::fs_seam::{FaultFs, FsOps as _, RealFs};
 use crate::ids::test_sources::{FixedClock, SeqIds};
-use crate::mcp_engine::{self, McpDemand, ScopeIo};
+use crate::mcp_engine::{self, DemandedBundle, McpDemand, ScopeIo};
 use crate::plane::{
     AppliedSkillReport, DeliverySkill, DeliverySnapshot, DeliverySource, DirectorySource,
     FetchedFile, FetchedVersion, InertFollow, InertPlane, KnownCurrent, LinkStatus, PlaneError,
@@ -516,6 +516,80 @@ static SYNTHETIC: &[KnownHarness] = &[
     ),
 ];
 
+/// **The entries plan is what decides reach — and what says what reach COST.** Four facts, over
+/// the one planner every demand is built through:
+///
+/// - no narrowing ⇒ every engaged harness with a surface at this scope gets a target;
+/// - a narrowing admits exactly what it names, and stays SILENT about the rest — a row that never
+///   asked for a harness is owed no disclosure about it;
+/// - a harness with no surface AT THIS SCOPE is WITHHELD, carrying the phrase the receipt prints
+///   (this is what keeps the per-agent `not-supported` lines alive now that the converge no longer
+///   derives them);
+/// - a harness that is neither detected nor already configured earns neither a target nor a line:
+///   there is no agent here to reach, and nothing was withheld from anyone.
+#[test]
+fn the_entries_plan_carries_reach_and_names_what_it_withheld() {
+    let home = Scratch::new("entries-plan");
+    let fs = RealFs;
+    let plan_at =
+        |detected: &BTreeSet<String>, project: Option<&Path>, reach: Option<&[String]>| {
+            crate::placement::entries_plan_at(&fs, &synthetic(), &home.0, detected, project, reach)
+        };
+    let slugs = |p: &crate::placement::PlacementPlan| -> Vec<String> {
+        p.entries().map(|e| e.agent.clone()).collect()
+    };
+    let withheld = |p: &crate::placement::PlacementPlan| -> Vec<(String, String)> {
+        p.withheld
+            .iter()
+            .map(|w| (w.agent.clone(), w.state.to_owned()))
+            .collect()
+    };
+
+    // Every engaged harness, person scope: six targets, nothing withheld.
+    let all = plan_at(&all_slugs(), None, None);
+    assert_eq!(slugs(&all).len(), synthetic().len(), "{:?}", slugs(&all));
+    assert!(withheld(&all).is_empty(), "{:?}", withheld(&all));
+    // The target names the DRIVER file — the plugin dialect's own `.mcp.json`, not its dir.
+    let plugin = all.entries_for("claude-code").expect("claude-code planned");
+    assert!(
+        plugin.file.ends_with(".mcp.json"),
+        "{}",
+        plugin.file.display()
+    );
+
+    // A narrowing admits exactly what it names — and says nothing about the rest.
+    let narrowed = plan_at(&all_slugs(), None, Some(&["cursor".to_owned()]));
+    assert_eq!(slugs(&narrowed), vec!["cursor".to_owned()]);
+    assert!(withheld(&narrowed).is_empty(), "{:?}", withheld(&narrowed));
+
+    // PROJECT scope: the two harnesses with no project surface are withheld, by name and phrase.
+    let project = Scratch::new("entries-plan-co");
+    let proj = plan_at(&all_slugs(), Some(&project.0), None);
+    for slug in ["openclaw", "hermes-agent"] {
+        assert!(
+            proj.entries_for(slug).is_none(),
+            "{slug} must not be planned"
+        );
+        let w = proj.withheld_for(slug).unwrap_or_else(|| panic!("{slug}"));
+        assert_eq!(
+            (w.state, w.note.as_str()),
+            ("not-supported", "no project-level config")
+        );
+    }
+    assert!(proj.entries_for("cursor").is_some());
+
+    // Nothing detected and no config on disk: no target, and nothing withheld from anyone.
+    let cold = Scratch::new("entries-plan-cold");
+    let cold_plan =
+        crate::placement::entries_plan_at(&fs, &synthetic(), &cold.0, &BTreeSet::new(), None, None);
+    assert!(slugs(&cold_plan).is_empty(), "{:?}", slugs(&cold_plan));
+    assert!(
+        withheld(&cold_plan).is_empty(),
+        "{:?}",
+        withheld(&cold_plan)
+    );
+}
+
 /// The synthetic table as the engine takes it — the same `&[&KnownHarness]` view the real
 /// [`mcp_harnesses`](topos_harness::mcp::descriptor::mcp_harnesses) hands production.
 fn synthetic() -> Vec<&'static KnownHarness> {
@@ -535,15 +609,24 @@ fn person_io<'a>(fs: &'a RealFs, layout: &'a Layout, home: &Path) -> ScopeIo<'a>
     }
 }
 
-fn demand(bundle_id: &str, name: &str, ws: Option<&str>, server: &str) -> McpDemand {
-    McpDemand {
+fn demand(bundle_id: &str, name: &str, ws: Option<&str>, server: &str) -> DemandedBundle {
+    DemandedBundle {
         bundle_id: bundle_id.to_owned(),
         name: name.to_owned(),
         workspace_slug: ws.map(str::to_owned),
         version_id: "v1".to_owned(),
         server_json: server.as_bytes().to_vec(),
-        harness_filter: None,
+        reach: None,
     }
+}
+
+/// Plan a scope's demanded rows onto the SYNTHETIC harness table — the production seam
+/// ([`DemandedBundle::planned`]) with the tests' own rows, so a converge here reads its demand
+/// off plans exactly as the sweep does.
+fn plan(io: &ScopeIo<'_>, rows: Vec<DemandedBundle>) -> Vec<McpDemand> {
+    rows.into_iter()
+        .map(|r| r.planned(io, &synthetic(), &all_slugs()))
+        .collect()
 }
 
 fn no_hold() -> HashSet<String> {
@@ -581,9 +664,10 @@ fn converge_places_into_all_six_dialects_byte_identical_to_the_drivers() {
         Some("eng"),
         &server_json("https://mcp.example/linear"),
     );
+    let io = person_io(&fs, &layout, &home.0);
     let out = mcp_engine::converge(
-        &person_io(&fs, &layout, &home.0),
-        std::slice::from_ref(&d),
+        &io,
+        &plan(&io, vec![d.clone()]),
         &synthetic(),
         &all_slugs(),
         &no_hold(),
@@ -669,8 +753,8 @@ fn converge_places_into_all_six_dialects_byte_identical_to_the_drivers() {
         .map(Option::unwrap_or_default)
         .collect();
     let out2 = mcp_engine::converge(
-        &person_io(&fs, &layout, &home.0),
-        std::slice::from_ref(&d),
+        &io,
+        &plan(&io, vec![d.clone()]),
         &synthetic(),
         &all_slugs(),
         &no_hold(),
@@ -713,9 +797,10 @@ fn removal_converges_everywhere_and_deletes_only_wholly_owned_files() {
         Some("eng"),
         &server_json("https://mcp.example/a"),
     );
+    let io = person_io(&fs, &layout, &home.0);
     let out = mcp_engine::converge(
-        &person_io(&fs, &layout, &home.0),
-        std::slice::from_ref(&d),
+        &io,
+        &plan(&io, vec![d.clone()]),
         &synthetic(),
         &all_slugs(),
         &no_hold(),
@@ -772,15 +857,15 @@ fn a_hand_edited_entry_is_drift_never_clobbered_and_survives_removal_disclosed()
         Some("eng"),
         &server_json("https://mcp.example/a"),
     );
-    let cursor_only = |d: &McpDemand| {
+    let cursor_only = |d: &DemandedBundle| {
         let mut d = d.clone();
-        d.harness_filter = Some(vec!["cursor".into()]);
+        d.reach = Some(vec!["cursor".into()]);
         d
     };
     let io = person_io(&fs, &layout, &home.0);
     mcp_engine::converge(
         &io,
-        &[cursor_only(&d)],
+        &plan(&io, vec![cursor_only(&d)]),
         &synthetic(),
         &all_slugs(),
         &no_hold(),
@@ -797,7 +882,7 @@ fn a_hand_edited_entry_is_drift_never_clobbered_and_survives_removal_disclosed()
     // fingerprint so drift survives re-runs.
     let out = mcp_engine::converge(
         &io,
-        &[cursor_only(&d)],
+        &plan(&io, vec![cursor_only(&d)]),
         &synthetic(),
         &all_slugs(),
         &no_hold(),
@@ -839,9 +924,16 @@ fn a_foreign_topos_prefixed_entry_is_never_touched_or_claimed() {
         Some("eng"),
         &server_json("https://mcp.example/a"),
     );
-    d.harness_filter = Some(vec!["cursor".into()]);
+    d.reach = Some(vec!["cursor".into()]);
     let io = person_io(&fs, &layout, &home.0);
-    let out = mcp_engine::converge(&io, &[d], &synthetic(), &all_slugs(), &no_hold(), true);
+    let out = mcp_engine::converge(
+        &io,
+        &plan(&io, vec![d.clone()]),
+        &synthetic(),
+        &all_slugs(),
+        &no_hold(),
+        true,
+    );
     assert_eq!(state_of(&out, "s_a", "cursor").state, "conflicting");
     assert_eq!(
         std::fs::read_to_string(&cursor).unwrap(),
@@ -863,8 +955,15 @@ fn a_suspect_header_fails_the_demand_closed_with_a_warning() {
     let io = person_io(&fs, &layout, &home.0);
     let mut d = demand("s_a", "alpha", Some("eng"), "");
     d.server_json = br#"{"name":"io.test/a","description":"A.","version":"1.0.0","remotes":[{"type":"streamable-http","url":"https://a.example","headers":[{"name":"Authorization","isSecret":true}]}]}"#.to_vec();
-    d.harness_filter = Some(vec!["cursor".into()]);
-    let out = mcp_engine::converge(&io, &[d], &synthetic(), &all_slugs(), &no_hold(), true);
+    d.reach = Some(vec!["cursor".into()]);
+    let out = mcp_engine::converge(
+        &io,
+        &plan(&io, vec![d.clone()]),
+        &synthetic(),
+        &all_slugs(),
+        &no_hold(),
+        true,
+    );
     assert!(
         out.warnings
             .iter()
@@ -888,9 +987,9 @@ fn a_sibling_key_in_the_plugin_mcp_json_backs_the_surface_off_and_survives() {
     let fs = RealFs;
     let layout = Layout::new(&home.0.join(".topos"));
     let io = person_io(&fs, &layout, &home.0);
-    let claude_only = |d: &McpDemand| {
+    let claude_only = |d: &DemandedBundle| {
         let mut d = d.clone();
-        d.harness_filter = Some(vec!["claude-code".into()]);
+        d.reach = Some(vec!["claude-code".into()]);
         d
     };
     let v1 = demand(
@@ -901,7 +1000,7 @@ fn a_sibling_key_in_the_plugin_mcp_json_backs_the_surface_off_and_survives() {
     );
     mcp_engine::converge(
         &io,
-        &[claude_only(&v1)],
+        &plan(&io, vec![claude_only(&v1)]),
         &synthetic(),
         &all_slugs(),
         &no_hold(),
@@ -926,7 +1025,7 @@ fn a_sibling_key_in_the_plugin_mcp_json_backs_the_surface_off_and_survives() {
     );
     let out = mcp_engine::converge(
         &io,
-        &[claude_only(&v2)],
+        &plan(&io, vec![claude_only(&v2)]),
         &synthetic(),
         &all_slugs(),
         &no_hold(),
@@ -957,9 +1056,9 @@ fn a_hand_edited_plugin_manifest_survives_update_and_removal_disclosed() {
     let fs = RealFs;
     let layout = Layout::new(&home.0.join(".topos"));
     let io = person_io(&fs, &layout, &home.0);
-    let claude_only = |d: &McpDemand| {
+    let claude_only = |d: &DemandedBundle| {
         let mut d = d.clone();
-        d.harness_filter = Some(vec!["claude-code".into()]);
+        d.reach = Some(vec!["claude-code".into()]);
         d
     };
     let v1 = demand(
@@ -970,7 +1069,7 @@ fn a_hand_edited_plugin_manifest_survives_update_and_removal_disclosed() {
     );
     mcp_engine::converge(
         &io,
-        &[claude_only(&v1)],
+        &plan(&io, vec![claude_only(&v1)]),
         &synthetic(),
         &all_slugs(),
         &no_hold(),
@@ -994,7 +1093,7 @@ fn a_hand_edited_plugin_manifest_survives_update_and_removal_disclosed() {
     );
     let out = mcp_engine::converge(
         &io,
-        &[claude_only(&v2)],
+        &plan(&io, vec![claude_only(&v2)]),
         &synthetic(),
         &all_slugs(),
         &no_hold(),
@@ -1056,10 +1155,10 @@ fn a_hand_deleted_plugin_manifest_heals_back_beside_remaining_entries() {
         Some("eng"),
         &server_json("https://mcp.example/a"),
     );
-    d.harness_filter = Some(vec!["claude-code".into()]);
+    d.reach = Some(vec!["claude-code".into()]);
     mcp_engine::converge(
         &io,
-        std::slice::from_ref(&d),
+        &plan(&io, vec![d.clone()]),
         &synthetic(),
         &all_slugs(),
         &no_hold(),
@@ -1071,7 +1170,14 @@ fn a_hand_deleted_plugin_manifest_heals_back_beside_remaining_entries() {
     std::fs::remove_file(&manifest).unwrap();
 
     // The next converge (nothing changed — a Leave) re-heals the constant file.
-    mcp_engine::converge(&io, &[d], &synthetic(), &all_slugs(), &no_hold(), true);
+    mcp_engine::converge(
+        &io,
+        &plan(&io, vec![d.clone()]),
+        &synthetic(),
+        &all_slugs(),
+        &no_hold(),
+        true,
+    );
     assert_eq!(
         std::fs::read(&manifest).unwrap_or_else(|e| panic!("the manifest was not healed: {e}")),
         plugin_dir::manifest_bytes()
@@ -1109,8 +1215,15 @@ fn converges_serialize_on_the_per_scope_mcp_lock() {
             Some("eng"),
             &server_json("https://mcp.example/a"),
         );
-        d.harness_filter = Some(vec!["cursor".into()]);
-        let out = mcp_engine::converge(&io, &[d], &synthetic(), &all_slugs(), &no_hold(), true);
+        d.reach = Some(vec!["cursor".into()]);
+        let out = mcp_engine::converge(
+            &io,
+            &plan(&io, vec![d.clone()]),
+            &synthetic(),
+            &all_slugs(),
+            &no_hold(),
+            true,
+        );
         tx.send(out).unwrap();
     });
 
@@ -1149,10 +1262,10 @@ fn a_moved_surface_path_discloses_the_stale_row_and_never_drops_it() {
         Some("eng"),
         &server_json("https://mcp.example/a"),
     );
-    d.harness_filter = Some(vec!["cursor".into()]);
+    d.reach = Some(vec!["cursor".into()]);
     mcp_engine::converge(
         &io,
-        std::slice::from_ref(&d),
+        &plan(&io, vec![d.clone()]),
         &synthetic(),
         &all_slugs(),
         &no_hold(),
@@ -1224,10 +1337,10 @@ fn a_hand_deleted_plugin_dir_sheds_its_ledger_entries_on_the_next_converge() {
         Some("eng"),
         &server_json("https://mcp.example/a"),
     );
-    d.harness_filter = Some(vec!["claude-code".into()]);
+    d.reach = Some(vec!["claude-code".into()]);
     mcp_engine::converge(
         &io,
-        std::slice::from_ref(&d),
+        &plan(&io, vec![d.clone()]),
         &synthetic(),
         &all_slugs(),
         &no_hold(),
@@ -1326,10 +1439,10 @@ fn a_user_entry_added_to_a_topos_created_file_survives_last_entry_removal() {
             Some("eng"),
             &server_json("https://mcp.example/a"),
         );
-        d.harness_filter = Some(vec![slug.to_owned()]);
+        d.reach = Some(vec![slug.to_owned()]);
         mcp_engine::converge(
             &io,
-            std::slice::from_ref(&d),
+            &plan(&io, vec![d.clone()]),
             &synthetic(),
             &all_slugs(),
             &no_hold(),
@@ -1373,10 +1486,10 @@ fn a_converge_that_sees_user_content_flips_owns_file_false() {
         Some("eng"),
         &server_json("https://mcp.example/a"),
     );
-    d.harness_filter = Some(vec!["cursor".into()]);
+    d.reach = Some(vec!["cursor".into()]);
     mcp_engine::converge(
         &io,
-        std::slice::from_ref(&d),
+        &plan(&io, vec![d.clone()]),
         &synthetic(),
         &all_slugs(),
         &no_hold(),
@@ -1403,7 +1516,7 @@ fn a_converge_that_sees_user_content_flips_owns_file_false() {
     std::fs::write(&cursor, serde_json::to_string_pretty(&root).unwrap() + "\n").unwrap();
     let out = mcp_engine::converge(
         &io,
-        std::slice::from_ref(&d),
+        &plan(&io, vec![d.clone()]),
         &synthetic(),
         &all_slugs(),
         &no_hold(),
@@ -1431,8 +1544,15 @@ fn the_engine_places_the_remote_the_gate_approved_not_the_first_typed_one() {
     let io = person_io(&fs, &layout, &home.0);
     let mut d = demand("s_two", "two", Some("eng"), "");
     d.server_json = br#"{"name":"io.test/two","description":"Two remotes.","version":"1.0.0","remotes":[{"type":"streamable-http"},{"type":"streamable-http","url":"https://second.example/mcp"}]}"#.to_vec();
-    d.harness_filter = Some(vec!["cursor".into()]);
-    let out = mcp_engine::converge(&io, &[d], &synthetic(), &all_slugs(), &no_hold(), true);
+    d.reach = Some(vec!["cursor".into()]);
+    let out = mcp_engine::converge(
+        &io,
+        &plan(&io, vec![d.clone()]),
+        &synthetic(),
+        &all_slugs(),
+        &no_hold(),
+        true,
+    );
     assert!(out.warnings.is_empty(), "{:?}", out.warnings);
     assert_eq!(state_of(&out, "s_two", "cursor").state, "placed");
     let text = std::fs::read_to_string(home.0.join(".cursor/mcp.json")).unwrap();
@@ -1451,10 +1571,10 @@ fn holds_and_targeted_runs_never_remove_standing_entries() {
         Some("eng"),
         &server_json("https://mcp.example/a"),
     );
-    d.harness_filter = Some(vec!["cursor".into()]);
+    d.reach = Some(vec!["cursor".into()]);
     mcp_engine::converge(
         &io,
-        std::slice::from_ref(&d),
+        &plan(&io, vec![d.clone()]),
         &synthetic(),
         &all_slugs(),
         &no_hold(),
@@ -1495,10 +1615,10 @@ fn intent_journal_recovery_heals_both_crash_orders_through_the_engine() {
         Some("eng"),
         &server_json("https://mcp.example/a"),
     );
-    d.harness_filter = Some(vec!["cursor".into()]);
+    d.reach = Some(vec!["cursor".into()]);
     mcp_engine::converge(
         &io,
-        std::slice::from_ref(&d),
+        &plan(&io, vec![d.clone()]),
         &synthetic(),
         &all_slugs(),
         &no_hold(),
@@ -1538,7 +1658,7 @@ fn intent_journal_recovery_heals_both_crash_orders_through_the_engine() {
     assert!(custody.flush(&fs, &layout).is_empty());
     let out = mcp_engine::converge(
         &io,
-        std::slice::from_ref(&d),
+        &plan(&io, vec![d.clone()]),
         &synthetic(),
         &all_slugs(),
         &no_hold(),
@@ -1583,7 +1703,7 @@ fn intent_journal_recovery_heals_both_crash_orders_through_the_engine() {
         .unwrap();
     let out = mcp_engine::converge(
         &io,
-        std::slice::from_ref(&d),
+        &plan(&io, vec![d.clone()]),
         &synthetic(),
         &all_slugs(),
         &no_hold(),
@@ -1621,7 +1741,7 @@ fn a_later_surface_never_journals_over_intents_an_earlier_one_left_standing() {
         };
         mcp_engine::converge(
             &io,
-            &two_bundle_demands(),
+            &plan(&io, two_bundle_demands()),
             &synthetic(),
             &all_slugs(),
             &no_hold(),
@@ -1652,7 +1772,7 @@ fn a_later_surface_never_journals_over_intents_an_earlier_one_left_standing() {
             };
             let _ = mcp_engine::converge(
                 &io,
-                &two_bundle_demands(),
+                &plan(&io, two_bundle_demands()),
                 &synthetic(),
                 &all_slugs(),
                 &no_hold(),
@@ -1686,7 +1806,7 @@ fn a_later_surface_never_journals_over_intents_an_earlier_one_left_standing() {
             };
             mcp_engine::converge(
                 &io,
-                &two_bundle_demands(),
+                &plan(&io, two_bundle_demands()),
                 &synthetic(),
                 &all_slugs(),
                 &no_hold(),
@@ -1712,7 +1832,7 @@ fn a_later_surface_never_journals_over_intents_an_earlier_one_left_standing() {
 }
 
 /// Two bundles that converge on DIFFERENT surfaces in one run — the cross-surface fixture.
-fn two_bundle_demands() -> Vec<McpDemand> {
+fn two_bundle_demands() -> Vec<DemandedBundle> {
     // X rides the EARLIER surface in table order (codex) and Y the later one (cursor), so Y's
     // journal write genuinely comes after X has left intents standing — the ordering the guard is
     // about. Reversed, X is the last surface and nothing follows it to overwrite anything.
@@ -1722,14 +1842,14 @@ fn two_bundle_demands() -> Vec<McpDemand> {
         Some("eng"),
         &server_json("https://mcp.example/x"),
     );
-    x.harness_filter = Some(vec!["codex".into()]);
+    x.reach = Some(vec!["codex".into()]);
     let mut y = demand(
         "s_y",
         "why",
         Some("eng"),
         &server_json("https://mcp.example/y"),
     );
-    y.harness_filter = Some(vec!["cursor".into()]);
+    y.reach = Some(vec!["cursor".into()]);
     vec![x, y]
 }
 
@@ -1765,8 +1885,15 @@ fn a_removal_never_swallows_a_crash_left_intent_before_it_is_durable() {
             Some("eng"),
             &server_json("https://mcp.example/a"),
         );
-        d.harness_filter = Some(vec!["cursor".into()]);
-        mcp_engine::converge(&io, &[d], &synthetic(), &all_slugs(), &no_hold(), true);
+        d.reach = Some(vec!["cursor".into()]);
+        mcp_engine::converge(
+            &io,
+            &plan(&io, vec![d.clone()]),
+            &synthetic(),
+            &all_slugs(),
+            &no_hold(),
+            true,
+        );
         fault.ops_attempted()
     };
 
@@ -1781,7 +1908,7 @@ fn a_removal_never_swallows_a_crash_left_intent_before_it_is_durable() {
             Some("eng"),
             &server_json("https://mcp.example/a"),
         );
-        d.harness_filter = Some(vec!["cursor".into()]);
+        d.reach = Some(vec!["cursor".into()]);
         // A clean placement first.
         {
             let io = ScopeIo {
@@ -1792,7 +1919,7 @@ fn a_removal_never_swallows_a_crash_left_intent_before_it_is_durable() {
             };
             mcp_engine::converge(
                 &io,
-                std::slice::from_ref(&d),
+                &plan(&io, vec![d.clone()]),
                 &synthetic(),
                 &all_slugs(),
                 &no_hold(),
@@ -1901,10 +2028,10 @@ fn a_drifted_entry_outlives_the_record_and_is_still_cleaned_up_later() {
         Some("eng"),
         &server_json("https://mcp.example/a"),
     );
-    d.harness_filter = Some(vec!["cursor".into()]);
+    d.reach = Some(vec!["cursor".into()]);
     mcp_engine::converge(
         &io,
-        std::slice::from_ref(&d),
+        &plan(&io, vec![d.clone()]),
         &synthetic(),
         &all_slugs(),
         &no_hold(),
@@ -2030,8 +2157,15 @@ fn a_failed_record_write_keeps_its_intents_in_the_durable_journal() {
             Some("eng"),
             &server_json("https://mcp.example/a"),
         );
-        d.harness_filter = Some(vec!["cursor".into()]);
-        mcp_engine::converge(&io, &[d], &synthetic(), &all_slugs(), &no_hold(), true);
+        d.reach = Some(vec!["cursor".into()]);
+        mcp_engine::converge(
+            &io,
+            &plan(&io, vec![d.clone()]),
+            &synthetic(),
+            &all_slugs(),
+            &no_hold(),
+            true,
+        );
         fault.ops_attempted()
     };
     assert!(probe > 0);
@@ -2047,7 +2181,7 @@ fn a_failed_record_write_keeps_its_intents_in_the_durable_journal() {
             Some("eng"),
             &server_json("https://mcp.example/a"),
         );
-        d.harness_filter = Some(vec!["cursor".into()]);
+        d.reach = Some(vec!["cursor".into()]);
         {
             let fault = FaultFs::new(fail_at);
             let io = ScopeIo {
@@ -2058,7 +2192,7 @@ fn a_failed_record_write_keeps_its_intents_in_the_durable_journal() {
             };
             let _ = mcp_engine::converge(
                 &io,
-                std::slice::from_ref(&d),
+                &plan(&io, vec![d.clone()]),
                 &synthetic(),
                 &all_slugs(),
                 &no_hold(),
@@ -2093,7 +2227,7 @@ fn a_failed_record_write_keeps_its_intents_in_the_durable_journal() {
             };
             mcp_engine::converge(
                 &io,
-                std::slice::from_ref(&d),
+                &plan(&io, vec![d.clone()]),
                 &synthetic(),
                 &all_slugs(),
                 &no_hold(),
@@ -2139,8 +2273,15 @@ fn a_fault_at_any_write_never_tears_state_and_the_next_converge_heals() {
             Some("eng"),
             &server_json("https://mcp.example/a"),
         );
-        d.harness_filter = Some(vec!["cursor".into()]);
-        mcp_engine::converge(&io, &[d], &synthetic(), &all_slugs(), &no_hold(), true);
+        d.reach = Some(vec!["cursor".into()]);
+        mcp_engine::converge(
+            &io,
+            &plan(&io, vec![d.clone()]),
+            &synthetic(),
+            &all_slugs(),
+            &no_hold(),
+            true,
+        );
         fault.ops_attempted()
     };
     assert!(probe > 0);
@@ -2153,7 +2294,7 @@ fn a_fault_at_any_write_never_tears_state_and_the_next_converge_heals() {
             Some("eng"),
             &server_json("https://mcp.example/a"),
         );
-        d.harness_filter = Some(vec!["cursor".into()]);
+        d.reach = Some(vec!["cursor".into()]);
         {
             let fault = FaultFs::new(fail_at);
             let io = ScopeIo {
@@ -2164,7 +2305,7 @@ fn a_fault_at_any_write_never_tears_state_and_the_next_converge_heals() {
             };
             let _ = mcp_engine::converge(
                 &io,
-                std::slice::from_ref(&d),
+                &plan(&io, vec![d.clone()]),
                 &synthetic(),
                 &all_slugs(),
                 &no_hold(),
@@ -2176,7 +2317,7 @@ fn a_fault_at_any_write_never_tears_state_and_the_next_converge_heals() {
         let io = person_io(&fs, &layout, &home.0);
         let out = mcp_engine::converge(
             &io,
-            std::slice::from_ref(&d),
+            &plan(&io, vec![d.clone()]),
             &synthetic(),
             &all_slugs(),
             &no_hold(),
@@ -3906,7 +4047,8 @@ fn a_deleted_ledger_makes_the_targeted_go_back_skip_with_a_warning() {
 
     // The converge the go-back hand-runs: zero writes, one honest warning.
     let sid = crate::id::SkillId::parse("s_linear").unwrap();
-    let (states, warnings) = crate::mcp_engine::converge_bundle_now(&ctx, &sid, "linear");
+    let plan = crate::mcp_engine::recorded_entries_plan(&ctx, sid.as_str());
+    let (states, warnings) = crate::mcp_engine::converge_bundle_now(&ctx, &sid, "linear", &plan);
     assert!(states.is_empty(), "{states:?}");
     assert!(
         warnings

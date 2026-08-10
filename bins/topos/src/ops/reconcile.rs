@@ -439,9 +439,11 @@ struct Sweep {
     /// Per scope label, every NAME its rows MENTION — delivered or not. A name a row still names is
     /// never cleaned, so a transient failure can not read as a drop.
     mentioned: BTreeMap<String, HashSet<String>>,
-    /// Per scope label: the MCP demands this sweep resolved (`kind = "mcp"` rows and feed items,
-    /// with the stored `server.json` bytes) — what [`crate::mcp_engine::converge`] runs on.
-    mcp_demands: BTreeMap<String, Vec<crate::mcp_engine::McpDemand>>,
+    /// Per scope label: the MCP bundles this sweep resolved (`kind = "mcp"` rows and feed items,
+    /// with the stored `server.json` bytes and the reach their rows asked for). Planned onto the
+    /// scope's config surfaces — once, in [`run_mcp_converge`] — into what
+    /// [`crate::mcp_engine::converge`] runs on.
+    mcp_demands: BTreeMap<String, Vec<crate::mcp_engine::DemandedBundle>>,
     /// Per scope label: mcp bundle ids whose demand state is UNKNOWABLE this run (a row whose
     /// resolution failed, a store not yet holding bytes) — the engine holds their config entries.
     mcp_hold: BTreeMap<String, HashSet<String>>,
@@ -2247,13 +2249,13 @@ fn local_mcp_demand(
                 narrowing.unreachable.as_deref(),
             );
             sweep.mcp_demands.entry(sc.label.clone()).or_default().push(
-                crate::mcp_engine::McpDemand {
+                crate::mcp_engine::DemandedBundle {
                     bundle_id,
                     name: display.to_owned(),
                     workspace_slug: None,
                     version_id: String::new(),
                     server_json: bytes,
-                    harness_filter: narrowing.filter,
+                    reach: narrowing.filter,
                 },
             );
         }
@@ -2580,9 +2582,17 @@ fn reconcile_feed<'a>(
                 // The marker back-fills offline too: a store synced before the marker existed
                 // gains it from the cache's word, so the cache row's loss stops mattering.
                 crate::bundle_kind::write_kind_marker(&run_ctx, &sid, kind);
+                // The ENTRIES plan: the config files this scope's surfaces put the bundle's
+                // entries in. The offline arm resolves no row `dest`, so it plans the full reach
+                // — the scope converge below re-plans from the same seam with whatever the row
+                // narrowed to.
+                let scope_root = match &sc.scope {
+                    ResolvedScope::Project { dir } => Some(dir.clone()),
+                    ResolvedScope::Person => None,
+                };
                 let plan_fn: Option<&sync_engine::PlanFn<'_>> = if mcp {
-                    Some(&|_: &Ctx<'_>, _: &str, _: &Lock, _: &PlacementMap| {
-                        crate::placement::PlacementPlan::default()
+                    Some(&|ctx: &Ctx<'_>, _: &str, _: &Lock, _: &PlacementMap| {
+                        crate::placement::entries_plan(ctx, scope_root.as_deref(), None)
                     })
                 } else {
                     None
@@ -2815,9 +2825,17 @@ fn sync_workspace_skill<'a>(
     // from wherever the engine computes the plan, so the receipt says so instead of the bundle
     // quietly landing nowhere.
     let escapes: std::cell::RefCell<Vec<String>> = std::cell::RefCell::new(Vec::new());
+    let mcp_reach = st.mcp_dest_filter.clone();
     let plan_fn = |ctx: &Ctx<'_>, skill_id: &str, lock: &Lock, map: &PlacementMap| {
         if mcp {
-            return crate::placement::PlacementPlan::default();
+            // A config-placed bundle plans ENTRIES, not dirs: the config files its row's `dest`
+            // narrowing leaves standing at this scope. The dir half of the engine sees no target
+            // and the store sync degenerates to pure lock/sync advancement, exactly as before.
+            return crate::placement::entries_plan(
+                ctx,
+                project_dir.as_deref(),
+                mcp_reach.as_deref(),
+            );
         }
         // The row's `name` is what the directory is called; everything else about the bundle keeps
         // its catalog identity.
@@ -3290,7 +3308,7 @@ fn push_stored_mcp_demand(
     sid: &SkillId,
     name: &str,
     workspace_slug: Option<&str>,
-    harness_filter: Option<Vec<String>>,
+    reach: Option<Vec<String>>,
     unreachable: Option<&str>,
     row_index: Option<usize>,
     sweep: &mut Sweep,
@@ -3299,13 +3317,13 @@ fn push_stored_mcp_demand(
         Ok(Some((version_id, server_json))) => {
             sweep.note_mcp_row(&sc.label, sid.as_str(), row_index, unreachable);
             sweep.mcp_demands.entry(sc.label.clone()).or_default().push(
-                crate::mcp_engine::McpDemand {
+                crate::mcp_engine::DemandedBundle {
                     bundle_id: sid.as_str().to_owned(),
                     name: name.to_owned(),
                     workspace_slug: workspace_slug.map(str::to_owned),
                     version_id,
                     server_json,
-                    harness_filter,
+                    reach,
                 },
             );
         }
@@ -4751,19 +4769,20 @@ fn run_mcp_converge(
     }
 
     for (label, layout, project_root, person_scope) in scopes_to_run {
-        let demands = sweep.mcp_demands.remove(&label).unwrap_or_default();
+        let rows = sweep.mcp_demands.remove(&label).unwrap_or_default();
         // The common non-mcp machine: no demands and no custody document — nothing to converge,
         // read.
-        if demands.is_empty() && !env.ctx.fs.exists(&layout.config_custody_path()) {
+        if rows.is_empty() && !env.ctx.fs.exists(&layout.config_custody_path()) {
             continue;
         }
+
         let mut hold = machine_hold.clone();
         hold.extend(sweep.mcp_hold.remove(&label).unwrap_or_default());
         // A name a row still MENTIONS whose demand did not land this run (a catalog fetch
         // failure, a refused resolution) must hold its entries too — matched through the cache's
         // name → id rows.
         if let Some(mentioned) = sweep.mentioned.get(&label) {
-            let demanded: HashSet<&str> = demands.iter().map(|d| d.bundle_id.as_str()).collect();
+            let demanded: HashSet<&str> = rows.iter().map(|d| d.bundle_id.as_str()).collect();
             for entry in env.prior.workspaces.values() {
                 for (skill_id, ds) in &entry.delivered {
                     if mentioned.contains(&ds.name) && !demanded.contains(skill_id.as_str()) {
@@ -4785,10 +4804,18 @@ fn run_mcp_converge(
             home: roots.home.clone(),
             project_root: project_root.clone(),
         };
+        let descriptors = topos_harness::mcp::descriptor::mcp_harnesses();
+        // THE ONE PLANNING CALL for this scope: every resolved row's reach becomes the config
+        // files its entries belong in. The converge past this point reads demand from these
+        // plans and custody from each bundle's own record — it decides no reach of its own.
+        let demands: Vec<crate::mcp_engine::McpDemand> = rows
+            .into_iter()
+            .map(|row| row.planned(&io, &descriptors, &detected))
+            .collect();
         let outcome = crate::mcp_engine::converge(
             &io,
             &demands,
-            &topos_harness::mcp::descriptor::mcp_harnesses(),
+            &descriptors,
             &detected,
             &hold,
             allow_removals,

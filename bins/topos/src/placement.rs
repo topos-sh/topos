@@ -1,7 +1,17 @@
-//! The **placement engine** — WHERE a followed skill's bytes land on this machine, computed from the
-//! machine alone: which agents are detected, and which of them read the shared `~/.agents/skills`
-//! convention dir. A row that names its own destinations bypasses detection entirely
-//! ([`dest_plan`]).
+//! The **placement engine** — WHERE a followed bundle's bytes land on this machine, computed from
+//! the machine alone: which agents are detected, and which of them read the shared
+//! `~/.agents/skills` convention dir. A row that names its own destinations bypasses detection
+//! entirely ([`dest_plan`]).
+//!
+//! ## Two target shapes, one plan
+//!
+//! A [`PlacementPlan`] carries [`PlannedTarget`]s of two shapes, and a bundle's kind picks which
+//! arm plans: a **DIRECTORY** this bundle owns ([`DirTarget`] — the dir planners below, written by
+//! [`crate::materialize`]), or **ENTRIES** it owns inside a config file shared with everything else
+//! on the machine ([`EntriesTarget`] — [`entries_plan`], applied by [`crate::mcp_engine`]'s
+//! per-scope converge, one write per file carrying every bundle's entries at once). Nothing forces
+//! one writer; what the two shapes share is the plan, and what the plan means: **WHAT SHOULD
+//! STAND**. What topos actually put there is CUSTODY, and it lives in the bundle's own record.
 //!
 //! ## The policy: shared-dir-first
 //!
@@ -29,9 +39,11 @@
 //! and that no OTHER tracked skill's record owns — is ADOPTED in place (the caller arms the choice
 //! with the incoming bundle digest), never duplicated under a namespaced sibling.
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use topos_harness::coverage;
+use topos_harness::mcp::{EntryState, McpDialect, plugin_dir};
 use topos_harness::{PlacementNaming, registry};
 use topos_types::persisted::{Lock, PlacementKind, PlacementMap, PlacementState, SwapCapability};
 
@@ -40,24 +52,82 @@ use crate::error::ClientError;
 use crate::scan::{self, ScannedBundle};
 use crate::stat_cache;
 
-/// One planned placement target — where one copy of the bundle's bytes belongs on this machine.
+/// One planned DIRECTORY target — a folder this bundle owns, written by [`crate::materialize`].
 #[derive(Debug, Clone)]
-pub(crate) struct PlannedTarget {
+pub(crate) struct DirTarget {
     pub dir: PathBuf,
     pub kind: PlacementKind,
     /// The registry slug a `Native` target serves (`None` for the shared dir).
     pub agent: Option<String>,
 }
 
+/// One planned ENTRIES target — the shared config FILE a bundle's entries belong in, and the
+/// dialect that file speaks. Written by the scope's config converge (`crate::mcp_engine`), never
+/// by the materializer: one write per file carries every bundle's entries at once.
+#[derive(Debug, Clone)]
+pub(crate) struct EntriesTarget {
+    /// The DRIVER surface file the entries land in — the plugin dir's own `.mcp.json` under that
+    /// dialect, the descriptor's path everywhere else.
+    pub file: PathBuf,
+    /// The registry slug whose config this is.
+    pub agent: String,
+    pub dialect: McpDialect,
+}
+
+/// One planned target — the two shapes a bundle's bytes reach an agent through: a DIRECTORY this
+/// bundle owns, or ENTRIES it owns inside a config file shared with everything else on the
+/// machine. A kind picks a mechanic; nothing forces one writer.
+#[derive(Debug, Clone)]
+pub(crate) enum PlannedTarget {
+    Dir(DirTarget),
+    Entries(EntriesTarget),
+}
+
+/// A surface this plan deliberately does NOT reach, with the reason the receipt states. Reach is
+/// the plan's answer, so what reach COST is the plan's answer too — without it a bundle that lands
+/// nowhere on some agent would simply go unmentioned.
+#[derive(Debug, Clone)]
+pub(crate) struct WithheldSurface {
+    /// The registry slug that was withheld.
+    pub agent: String,
+    /// The wire state token (`not-supported` — no surface at this scope; `unprovable` — the
+    /// surface cannot be safely edited).
+    pub state: &'static str,
+    /// The note a person reads beside it.
+    pub note: String,
+}
+
 impl PlacementPlan {
-    /// The plan's targets, in plan order — the apply set [`crate::materialize`] writes.
-    pub(crate) fn dirs(&self) -> impl Iterator<Item = &PlannedTarget> {
-        self.targets.iter()
+    /// The plan's DIR targets, in plan order — the apply set [`crate::materialize`] writes.
+    pub(crate) fn dirs(&self) -> impl Iterator<Item = &DirTarget> {
+        self.targets.iter().filter_map(|t| match t {
+            PlannedTarget::Dir(d) => Some(d),
+            PlannedTarget::Entries(_) => None,
+        })
     }
 
-    /// Record one target.
+    /// The plan's ENTRIES targets, in plan order — the demand the scope's config converge applies.
+    pub(crate) fn entries(&self) -> impl Iterator<Item = &EntriesTarget> {
+        self.targets.iter().filter_map(|t| match t {
+            PlannedTarget::Entries(e) => Some(e),
+            PlannedTarget::Dir(_) => None,
+        })
+    }
+
+    /// The planned entries target for one registry slug, if the plan reaches it.
+    pub(crate) fn entries_for(&self, agent: &str) -> Option<&EntriesTarget> {
+        self.entries().find(|e| e.agent == agent)
+    }
+
+    /// What this plan withheld from one registry slug, if anything.
+    pub(crate) fn withheld_for(&self, agent: &str) -> Option<&WithheldSurface> {
+        self.withheld.iter().find(|w| w.agent == agent)
+    }
+
+    /// Record one dir target.
     fn push_dir(&mut self, dir: PathBuf, kind: PlacementKind, agent: Option<String>) {
-        self.targets.push(PlannedTarget { dir, kind, agent });
+        self.targets
+            .push(PlannedTarget::Dir(DirTarget { dir, kind, agent }));
     }
 
     /// Whether a dir is already planned — one dir, one copy, one record.
@@ -82,7 +152,9 @@ pub(crate) struct CoveredAgent {
     pub docs_level: bool,
 }
 
-/// The full placement plan for one skill on this machine.
+/// The full placement plan for one bundle at one scope — WHAT SHOULD STAND. Its targets are the
+/// demand; what topos actually put there is CUSTODY, and that lives in the bundle's own record
+/// (`map.json` for dirs, `entries.json` for config entries), never here.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct PlacementPlan {
     pub targets: Vec<PlannedTarget>,
@@ -92,6 +164,9 @@ pub(crate) struct PlacementPlan {
     /// as its disclosure line ([`escape_line`]). The placement is skipped, never redirected; the
     /// caller surfaces the lines so a silent non-delivery is impossible.
     pub refused: Vec<String>,
+    /// ENTRIES plans only: the surfaces this plan does not reach, and why (see
+    /// [`WithheldSurface`]).
+    pub withheld: Vec<WithheldSurface>,
 }
 
 /// Compute the placement plan for one skill. `naming` carries the untrusted display name + workspace
@@ -483,6 +558,165 @@ pub(crate) fn dest_plan(
     plan
 }
 
+// ---------------------------------------------------------------------------------------------
+// The ENTRIES half of the planner — where a bundle's entries belong inside SHARED config files.
+// ---------------------------------------------------------------------------------------------
+
+/// What one harness's MCP config surface resolves to at one scope — the ONE resolution both the
+/// planner (which decides reach) and the converge (which must find the files custody names) ask.
+#[derive(Debug, Clone)]
+pub(crate) enum ConfigSurface {
+    /// A usable surface: the driver file, the path engagement is probed at, and the dialect.
+    Ready {
+        root: PathBuf,
+        file: PathBuf,
+        dialect: McpDialect,
+    },
+    /// The harness has no config surface AT THIS SCOPE (a project scope never falls back to the
+    /// user surface). `note` is the phrase the receipt states.
+    NotSupported { note: &'static str },
+    /// PROJECT scope: the surface does not resolve inside the checkout — refused and disclosed,
+    /// never redirected (the same rail every project path passes, see [`within_project`]).
+    Escaped { path: PathBuf },
+}
+
+/// Resolve one harness's MCP config surface at one scope. `project_root` `Some` = the PROJECT
+/// scope, whose surfaces are the checkout-relative ones, containment-proven.
+pub(crate) fn config_surface(
+    h: &registry::KnownHarness,
+    home: &Path,
+    project_root: Option<&Path>,
+) -> ConfigSurface {
+    let resolved = match project_root {
+        Some(root) => match h.mcp().and_then(|m| m.project) {
+            Some((rel, dialect)) => {
+                let path = root.join(rel);
+                // THE CONTAINMENT RAIL, before ANY read or write: the resolved path (symlinks
+                // followed for the check) must stay inside the checkout.
+                if !within_project(root, &path) {
+                    return ConfigSurface::Escaped { path };
+                }
+                Some((path, dialect))
+            }
+            None => None,
+        },
+        None => h
+            .mcp()
+            .and_then(|m| m.user)
+            .and_then(|s| h.mcp_user_path(home).map(|p| (p, s.dialect))),
+    };
+    match resolved {
+        Some((root, dialect)) => ConfigSurface::Ready {
+            file: surface_file(&root, dialect),
+            root,
+            dialect,
+        },
+        None => ConfigSurface::NotSupported {
+            note: if project_root.is_some() {
+                "no project-level config"
+            } else {
+                "no user-level config"
+            },
+        },
+    }
+}
+
+/// The DRIVER surface file for a resolved descriptor surface: the plugin DIR's `.mcp.json` for
+/// [`McpDialect::ClaudePluginDir`], the path itself for every file dialect.
+pub(crate) fn surface_file(path: &Path, dialect: McpDialect) -> PathBuf {
+    if dialect == McpDialect::ClaudePluginDir {
+        path.join(plugin_dir::PLUGIN_MCP_PATH)
+    } else {
+        path.to_path_buf()
+    }
+}
+
+/// **The ENTRIES plan for one bundle at one scope** — the config files its entries belong in, plus
+/// the surfaces the scope WITHHELD and why. The mirror of the dir planners: it says what SHOULD
+/// stand, and nothing about what already does (that is the bundle's custody record's answer).
+///
+/// `reach` is the harness narrowing the caller resolved — a row's `dest` entries mapped to the
+/// config files they name, or (for a targeted verb) the harnesses whose recorded rows prove the
+/// bundle already stands there. `None` = every MCP-capable harness. Narrowing resolves HERE, once:
+/// a harness outside it earns no target and no withheld line, because the row never asked for it.
+///
+/// The three outcomes, in the order the surface decides them: no surface at this scope, or one the
+/// containment rail refuses ⇒ WITHHELD, disclosed; a surface the machine does not engage (the
+/// harness is neither detected nor does its config already exist) ⇒ nothing at all, because there
+/// is no agent here to reach; else an ENTRIES target.
+pub(crate) fn entries_plan(
+    ctx: &Ctx<'_>,
+    project_root: Option<&Path>,
+    reach: Option<&[String]>,
+) -> PlacementPlan {
+    let Some(roots) = &ctx.roots else {
+        return PlacementPlan::default(); // no machine roots: no config surface is resolvable
+    };
+    // A PROJECT scope detects against the checkout; the person scope against the machine's cwd.
+    let detected: BTreeSet<String> =
+        registry::detected_harnesses(&roots.home, project_root.or(roots.cwd.as_deref()))
+            .iter()
+            .map(|h| h.slug.to_owned())
+            .collect();
+    entries_plan_at(
+        ctx.fs,
+        &topos_harness::mcp::descriptor::mcp_harnesses(),
+        &roots.home,
+        &detected,
+        project_root,
+        reach,
+    )
+}
+
+/// [`entries_plan`] over the primitives — the machine home, the harness table, and the DETECTED
+/// set as arguments (the callers that already probed detection for their converge pass the same
+/// one, so a plan and the converge it feeds can never disagree about which agents are here).
+pub(crate) fn entries_plan_at(
+    fs: &dyn crate::fs_seam::FsOps,
+    descriptors: &[&'static registry::KnownHarness],
+    home: &Path,
+    detected: &BTreeSet<String>,
+    project_root: Option<&Path>,
+    reach: Option<&[String]>,
+) -> PlacementPlan {
+    let mut plan = PlacementPlan::default();
+    for h in descriptors {
+        if reach.is_some_and(|r| !r.iter().any(|s| s == h.slug)) {
+            continue;
+        }
+        match config_surface(h, home, project_root) {
+            ConfigSurface::NotSupported { note } => plan.withheld.push(WithheldSurface {
+                agent: h.slug.to_owned(),
+                state: "not-supported",
+                note: note.to_owned(),
+            }),
+            ConfigSurface::Escaped { .. } => plan.withheld.push(WithheldSurface {
+                agent: h.slug.to_owned(),
+                state: "unprovable",
+                note: "the config path does not resolve inside this checkout".to_owned(),
+            }),
+            ConfigSurface::Ready {
+                root,
+                file,
+                dialect,
+            } => {
+                // Engagement: the harness is detected on this machine, OR its config surface
+                // already exists (entries were placed while it was detected — an update or a
+                // removal must still reach them).
+                if !(detected.contains(h.slug) || fs.exists(&root)) {
+                    continue;
+                }
+                plan.targets.push(PlannedTarget::Entries(EntriesTarget {
+                    file,
+                    agent: h.slug.to_owned(),
+                    dialect,
+                }));
+            }
+        }
+    }
+    plan
+}
+
 /// The classic single-placement plan (no detection): the prior record's targets as-is — except a
 /// STALE adoption reservation (never materialized, dir occupied, the occupant no longer matching
 /// its recorded digest), which is re-chosen fresh so [`reconcile_map`] can replace it (mirroring
@@ -501,14 +735,14 @@ fn classic_plan(
     if let Some(map) = prior
         && !map.placements.is_empty()
     {
-        let mut targets: Vec<PlannedTarget> = Vec::new();
+        let mut targets: Vec<DirTarget> = Vec::new();
         let mut invalid: Vec<(PlacementKind, Option<String>)> = Vec::new();
         for (dir, st) in map.placements.iter().zip(&map.placement_state) {
             let reusable = st.materialized_sha.is_some()
                 || !topos_harness::dir_taken(Path::new(dir))
                 || adoption_reservation_holds(dir, st, adopt);
             if reusable {
-                targets.push(PlannedTarget {
+                targets.push(DirTarget {
                     dir: PathBuf::from(dir),
                     kind: st.kind,
                     agent: st.agent.clone(),
@@ -524,22 +758,20 @@ fn classic_plan(
             if targets.iter().any(|t| t.dir == dir) {
                 continue;
             }
-            targets.push(PlannedTarget { dir, kind, agent });
+            targets.push(DirTarget { dir, kind, agent });
         }
         return PlacementPlan {
-            targets,
-            shared_covers: Vec::new(),
-            refused: Vec::new(),
+            targets: targets.into_iter().map(PlannedTarget::Dir).collect(),
+            ..PlacementPlan::default()
         };
     }
     PlacementPlan {
-        targets: vec![PlannedTarget {
+        targets: vec![PlannedTarget::Dir(DirTarget {
             dir: adapter_choice(ctx, skill_id, naming, &taken, &owned, adopt),
             kind: PlacementKind::Native,
             agent: Some(ctx.harness.id().slug().to_owned()),
-        }],
-        shared_covers: Vec::new(),
-        refused: Vec::new(),
+        })],
+        ..PlacementPlan::default()
     }
 }
 
@@ -916,6 +1148,42 @@ pub(crate) fn managed_indices(map: &PlacementMap, plan: &PlacementPlan) -> Vec<u
 // The multi-placement work-tree scan — draft-anywhere classification.
 // ---------------------------------------------------------------------------------------------
 
+/// **The ONE drift vocabulary** — what a managed target LOOKS LIKE against what the record says
+/// topos put there. Both target shapes project onto these five: a placement DIR through
+/// [`ScanStatus::drift`], a config ENTRY through [`Drift::of_entry`].
+///
+/// It is deliberately PAYLOAD-FREE, and a projection rather than a replacement: the payload stays
+/// where it is load-bearing ([`ScanStatus::Modified`] carries the scanned bytes every consumer
+/// commits), and this is what the words a person reads — and the wire states — are chosen from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Drift {
+    /// Nothing is there: an absent dir, or an entry gone from its config file.
+    Absent,
+    /// Byte-for-byte what the record says topos wrote.
+    Clean,
+    /// Changed since topos wrote it — a local edit, never clobbered.
+    Modified,
+    /// Content topos holds no record of writing: not ours, never overwritten.
+    Foreign,
+    /// It cannot be read safely — fail closed.
+    Unscannable,
+}
+
+impl Drift {
+    /// One config ENTRY's apply outcome projected onto the vocabulary: what the converge FOUND
+    /// before it wrote. A first placement was absent; an update sat at our own recorded
+    /// fingerprint; a hand edit is drift; a `topos-` key we hold no record of is foreign; and an
+    /// entry the removal took out is absent once the write lands.
+    pub(crate) fn of_entry(state: EntryState) -> Self {
+        match state {
+            EntryState::PlacedNew | EntryState::Removed => Self::Absent,
+            EntryState::Current | EntryState::Updated => Self::Clean,
+            EntryState::Drifted => Self::Modified,
+            EntryState::Foreign => Self::Foreign,
+        }
+    }
+}
+
 /// One placement's scan outcome, against ITS OWN recorded materialized sha.
 pub(crate) enum ScanStatus {
     /// The dir does not exist (or is a dangling symlink).
@@ -933,6 +1201,20 @@ pub(crate) enum ScanStatus {
     Foreign,
     /// The dir exists but cannot be scanned safely — fail closed, never overwrite it.
     Unscannable,
+}
+
+impl ScanStatus {
+    /// This dir's projection onto the [one drift vocabulary](Drift) — the classification without
+    /// the bytes, for every consumer that asks WHAT it is rather than WHICH bytes it holds.
+    pub(crate) fn drift(&self) -> Drift {
+        match self {
+            Self::Absent => Drift::Absent,
+            Self::Clean { .. } => Drift::Clean,
+            Self::Modified { .. } => Drift::Modified,
+            Self::Foreign => Drift::Foreign,
+            Self::Unscannable => Drift::Unscannable,
+        }
+    }
 }
 
 /// One placement's scan row.
@@ -1528,13 +1810,12 @@ mod tests {
     fn a_replaced_stale_reservation_resets_the_slot_state() {
         let prior = reservation_map("/skills/deploy", Some(&"a".repeat(64)));
         let plan = PlacementPlan {
-            targets: vec![PlannedTarget {
+            targets: vec![PlannedTarget::Dir(DirTarget {
                 dir: PathBuf::from("/skills/deploy-acme"),
                 kind: PlacementKind::Native,
                 agent: Some("claude-code".to_owned()),
-            }],
-            shared_covers: Vec::new(),
-            refused: Vec::new(),
+            })],
+            ..PlacementPlan::default()
         };
         let next = reconcile_map(&prior, &plan);
         assert_eq!(next.placements, vec!["/skills/deploy-acme".to_owned()]);
@@ -1633,13 +1914,12 @@ mod tests {
     fn an_unchanged_reservation_keeps_its_recorded_state() {
         let prior = reservation_map("/skills/deploy", Some(&"a".repeat(64)));
         let plan = PlacementPlan {
-            targets: vec![PlannedTarget {
+            targets: vec![PlannedTarget::Dir(DirTarget {
                 dir: PathBuf::from("/skills/deploy"),
                 kind: PlacementKind::Native,
                 agent: Some("claude-code".to_owned()),
-            }],
-            shared_covers: Vec::new(),
-            refused: Vec::new(),
+            })],
+            ..PlacementPlan::default()
         };
         let next = reconcile_map(&prior, &plan);
         assert_eq!(next.placements, vec!["/skills/deploy".to_owned()]);

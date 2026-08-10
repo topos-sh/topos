@@ -310,12 +310,13 @@ pub(crate) fn sync_one_planned(
     // map carries every recorded placement — appended targets are never-materialized until an apply.
     let applied_eq_observed = sync.applied == sync.observed;
     // A CONFIG-PLACED (mcp) record reached without an injected planner (a targeted accept, a
-    // resume) keeps its EMPTY plan: skill-dir placement must never engage for it — its bytes
-    // reach agents through the config converge alone.
+    // resume) plans ENTRIES targets, never dirs: skill-dir placement must never engage for it —
+    // its bytes reach agents through the config files the plan names, and the apply below
+    // dispatches on the target arm.
     let mcp_record = plan_fn.is_none() && planning_kind(ctx, skill_id, &map, &name)?.is_mcp();
     let make_plan = |map: &PlacementMap| match plan_fn {
         Some(f) => f(ctx, skill_id, &lock, map),
-        None if mcp_record => crate::placement::PlacementPlan::default(),
+        None if mcp_record => crate::mcp_engine::recorded_entries_plan(ctx, skill_id),
         None => placement::plan_for_skill(ctx, skill_id, &lock, map),
     };
     let plan = make_plan(&map);
@@ -494,7 +495,8 @@ pub(crate) fn sync_one_planned(
             // advance `applied` with NO swap, never a false DIVERGED — and no spurious draft snapshot.
             heal_forward(ctx, &sp, &map, &managed, &lock, &sync, &t)?;
             let mut row = applied_row(&name, &sync, target_commit);
-            row.harnesses = converge_explicit_mcp(ctx, mcp_record && explicit, skill_id, &name);
+            row.harnesses =
+                converge_explicit_mcp(ctx, mcp_record && explicit, skill_id, &name, &plan);
             row.kind = mcp_record.then(|| BundleKind::Mcp.as_str().to_owned());
             mark_installed(ctx, &mut row, first_receive, &map, &managed);
             Ok(row)
@@ -516,7 +518,8 @@ pub(crate) fn sync_one_planned(
             }
             apply_forward(ctx, &sp, &map, &managed, &lock, &sync, skill_id, &t)?;
             let mut row = applied_row(&name, &sync, target_commit);
-            row.harnesses = converge_explicit_mcp(ctx, mcp_record && explicit, skill_id, &name);
+            row.harnesses =
+                converge_explicit_mcp(ctx, mcp_record && explicit, skill_id, &name, &plan);
             row.kind = mcp_record.then(|| BundleKind::Mcp.as_str().to_owned());
             mark_installed(ctx, &mut row, first_receive, &map, &managed);
             Ok(row)
@@ -563,6 +566,7 @@ fn converge_explicit_mcp(
     run: bool,
     skill_id: &str,
     name: &str,
+    plan: &crate::placement::PlacementPlan,
 ) -> Vec<topos_types::results::McpAgentState> {
     if !run {
         return Vec::new();
@@ -570,7 +574,7 @@ fn converge_explicit_mcp(
     let Ok(sid) = crate::id::SkillId::parse(skill_id) else {
         return Vec::new();
     };
-    let (mut states, warnings) = crate::mcp_engine::converge_bundle_now(ctx, &sid, name);
+    let (mut states, warnings) = crate::mcp_engine::converge_bundle_now(ctx, &sid, name, plan);
     for w in warnings {
         eprintln!("topos update: {w}");
     }
@@ -647,7 +651,7 @@ pub(crate) fn go_back(
     // for it (the converge below re-renders configs from the restored version's server.json).
     let mcp_record = planning_kind(ctx, skill_id, &map, &name)?.is_mcp();
     let plan = if mcp_record {
-        crate::placement::PlacementPlan::default()
+        crate::mcp_engine::recorded_entries_plan(ctx, skill_id)
     } else {
         placement::plan_for_skill(ctx, skill_id, &lock, &map)
     };
@@ -738,7 +742,8 @@ pub(crate) fn go_back(
     // best-effort sweep fact uses.
     let harnesses = if mcp_record {
         let sid = crate::id::SkillId::parse(skill_id)?;
-        let (mut states, warnings) = crate::mcp_engine::converge_bundle_now(ctx, &sid, &name);
+        let (mut states, warnings) =
+            crate::mcp_engine::converge_bundle_now(ctx, &sid, &name, &plan);
         for w in warnings {
             eprintln!("topos update: {w}");
         }
@@ -810,7 +815,10 @@ pub(crate) fn reset_to_base(
     // Same rule as the go-back: an mcp record never gets skill-dir placements planned, and an
     // empty-map record with no kind evidence fails CLOSED rather than materializing on a guess.
     let plan = if planning_kind(ctx, sid, &map, &lock.name)?.is_mcp() {
-        crate::placement::PlacementPlan::default()
+        // An mcp record plans ENTRIES, so this reset touches no folder. Restoring the store is
+        // where a reset's authority ends here: the config files reconverge on the next sweep (or
+        // on a targeted `update <name>`), which is also where a narrowing change would land.
+        crate::mcp_engine::recorded_entries_plan(ctx, sid)
     } else {
         placement::plan_for_skill(ctx, sid, &lock, &map)
     };
@@ -976,8 +984,8 @@ fn every_copy_settled(ctx: &Ctx<'_>, sp: &sidecar::SkillPaths) -> bool {
     };
     !scans.iter().any(|s| {
         matches!(
-            s.status,
-            ScanStatus::Modified { .. } | ScanStatus::Unscannable
+            s.status.drift(),
+            placement::Drift::Modified | placement::Drift::Unscannable
         )
     })
 }
