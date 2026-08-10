@@ -67,8 +67,17 @@ pub struct JsonEnvelope {
     /// Command-specific payload (`{}` when empty).
     #[serde(default = "empty_object")]
     pub data: serde_json::Value,
+    /// The LEGACY line channel — one flat string per message, kept in shape and membership for
+    /// consumers that already match on it. Each entry is derived from the matching [`Message`]:
+    /// `"{code} {text}"` when the message carries a code, the bare text when it does not.
+    /// Superseded by `messages`; it will be retired in a future contract version.
     #[serde(default)]
     pub warnings: Vec<String>,
+    /// The TYPED message channel — the same lines as `warnings`, in the same order, with the
+    /// machine-readable code and the kind separated from the prose a person reads. ADDITIVE: a
+    /// producer that emits nothing omits it, and an envelope without it still parses.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub messages: Vec<Message>,
     /// Stable, machine-actionable next steps — each carries a complete argv.
     #[serde(default)]
     pub next_actions: Vec<NextAction>,
@@ -78,6 +87,44 @@ pub struct JsonEnvelope {
     /// The actionable failure detail (when `ok == false`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<WireError>,
+}
+
+// ---------------------------------------------------------------------------------------------
+// The typed message channel — one line a person reads, plus the two things a machine branches on.
+// ---------------------------------------------------------------------------------------------
+
+/// What a [`Message`] IS, so a consumer never has to infer it from wording. `failure` is the only
+/// kind that says something did not happen; `decision` is a bundle waiting on a person; `advisory`
+/// annotates something that still worked; `disclosure` states a fact about work that succeeded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(
+    feature = "contract-derives",
+    derive(schemars::JsonSchema, utoipa::ToSchema)
+)]
+#[serde(rename_all = "lowercase")]
+pub enum MessageKind {
+    Failure,
+    Decision,
+    Advisory,
+    Disclosure,
+}
+
+/// One message: the machine-readable code (when the producer has one), what kind of thing it is,
+/// and the ONE sentence a person reads. `text` never carries the code — a code is a lookup key,
+/// not prose, and the TTY prints `text` alone.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(
+    feature = "contract-derives",
+    derive(schemars::JsonSchema, utoipa::ToSchema)
+)]
+pub struct Message {
+    /// The stable SCREAMING_SNAKE code an agent branches on. Absent where the producer has no
+    /// code (a decision, a paging fact) — an open vocabulary, exactly like `WireError.code`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code: Option<String>,
+    pub kind: MessageKind,
+    /// The line a person reads. Complete on its own; no code, no Rust type name.
+    pub text: String,
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -572,6 +619,7 @@ mod tests {
             ok: true,
             data: serde_json::json!({}),
             warnings: vec![],
+            messages: vec![],
             next_actions: vec![],
             receipt: None,
             error: None,
@@ -581,5 +629,52 @@ mod tests {
         assert_eq!(v["ok"], true);
         // optional receipt/error are omitted when None
         assert!(v.get("error").is_none());
+        // `messages` is ADDITIVE: an empty one is omitted, so an envelope that carries no message
+        // is byte-identical to the one this contract emitted before the field existed.
+        assert!(v.get("messages").is_none());
+    }
+
+    /// The typed channel is ADDITIVE IN BOTH DIRECTIONS: a document written before the field
+    /// existed still parses (the field defaults empty), and a document carrying it parses back
+    /// with its codes and kinds intact.
+    #[test]
+    fn messages_is_additive_in_both_directions() {
+        let without: JsonEnvelope = serde_json::from_str(
+            r#"{"schema_version":1,"command":"update","ok":true,"data":{},"warnings":["X y"]}"#,
+        )
+        .unwrap();
+        assert!(without.messages.is_empty());
+        assert_eq!(without.warnings, vec!["X y".to_owned()]);
+
+        let with: JsonEnvelope = serde_json::from_str(
+            r#"{"schema_version":1,"command":"update","ok":true,"data":{},"warnings":["X y"],
+                "messages":[{"code":"X","kind":"failure","text":"y"}]}"#,
+        )
+        .unwrap();
+        assert_eq!(with.messages.len(), 1);
+        assert_eq!(with.messages[0].code.as_deref(), Some("X"));
+        assert_eq!(with.messages[0].kind, MessageKind::Failure);
+        assert_eq!(with.messages[0].text, "y");
+    }
+
+    /// The kind vocabulary is lowercase on the wire, and an uncoded message omits `code`.
+    #[test]
+    fn message_kind_is_lowercase_and_code_is_optional() {
+        let m = Message {
+            code: None,
+            kind: MessageKind::Disclosure,
+            text: "a fact".to_owned(),
+        };
+        let v = serde_json::to_value(&m).unwrap();
+        assert_eq!(v["kind"], "disclosure");
+        assert!(v.get("code").is_none());
+        for (kind, word) in [
+            (MessageKind::Failure, "failure"),
+            (MessageKind::Decision, "decision"),
+            (MessageKind::Advisory, "advisory"),
+            (MessageKind::Disclosure, "disclosure"),
+        ] {
+            assert_eq!(serde_json::to_value(kind).unwrap(), word);
+        }
     }
 }

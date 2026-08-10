@@ -23,6 +23,13 @@
         }
       ]
     },
+    "messages": {
+      "description": "The TYPED message channel — the same lines as `warnings`, in the same order, with the\nmachine-readable code and the kind separated from the prose a person reads. ADDITIVE: a\nproducer that emits nothing omits it, and an envelope without it still parses.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Message"
+      }
+    },
     "next_actions": {
       "description": "Stable, machine-actionable next steps — each carries a complete argv.",
       "type": "array",
@@ -53,6 +60,7 @@
       "minimum": 0
     },
     "warnings": {
+      "description": "The LEGACY line channel — one flat string per message, kept in shape and membership for\nconsumers that already match on it. Each entry is derived from the matching [`Message`]:\n`\"{code} {text}\"` when the message carries a code, the bare text when it does not.\nSuperseded by `messages`; it will be retired in a future contract version.",
       "type": "array",
       "default": [],
       "items": {
@@ -115,6 +123,40 @@
           ]
         }
       }
+    },
+    "Message": {
+      "description": "One message: the machine-readable code (when the producer has one), what kind of thing it is,\nand the ONE sentence a person reads. `text` never carries the code — a code is a lookup key,\nnot prose, and the TTY prints `text` alone.",
+      "type": "object",
+      "properties": {
+        "code": {
+          "description": "The stable SCREAMING_SNAKE code an agent branches on. Absent where the producer has no\ncode (a decision, a paging fact) — an open vocabulary, exactly like `WireError.code`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "kind": {
+          "$ref": "#/$defs/MessageKind"
+        },
+        "text": {
+          "description": "The line a person reads. Complete on its own; no code, no Rust type name.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "text"
+      ]
+    },
+    "MessageKind": {
+      "description": "What a [`Message`] IS, so a consumer never has to infer it from wording. `failure` is the only\nkind that says something did not happen; `decision` is a bundle waiting on a person; `advisory`\nannotates something that still worked; `disclosure` states a fact about work that succeeded.",
+      "type": "string",
+      "enum": [
+        "failure",
+        "decision",
+        "advisory",
+        "disclosure"
+      ]
     },
     "NextAction": {
       "description": "A machine-actionable next step. The `argv` is the ready-to-exec command; `code` lets an agent\nbranch on the known set and still pass through unknowns. The three safety fields are ADDITIVE\nand optional (absent = unknown) — a producer fills them from its one rules module, never\nper call site, so the classification cannot drift between surfaces.",

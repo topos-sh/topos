@@ -606,6 +606,12 @@ export interface components {
             /** @description Command-specific payload (`{}` when empty). */
             data?: unknown;
             error?: null | components["schemas"]["WireError"];
+            /**
+             * @description The TYPED message channel — the same lines as `warnings`, in the same order, with the
+             *     machine-readable code and the kind separated from the prose a person reads. ADDITIVE: a
+             *     producer that emits nothing omits it, and an envelope without it still parses.
+             */
+            messages?: components["schemas"]["Message"][];
             /** @description Stable, machine-actionable next steps — each carries a complete argv. */
             next_actions?: components["schemas"]["NextAction"][];
             ok: boolean;
@@ -615,6 +621,12 @@ export interface components {
              * @description Always `1` for this contract version (the schema pins it `const`).
              */
             schema_version: number;
+            /**
+             * @description The LEGACY line channel — one flat string per message, kept in shape and membership for
+             *     consumers that already match on it. Each entry is derived from the matching [`Message`]:
+             *     `"{code} {text}"` when the message carries a code, the bare text when it does not.
+             *     Superseded by `messages`; it will be retired in a future contract version.
+             */
             warnings?: string[];
         };
         /**
@@ -649,6 +661,28 @@ export interface components {
             /** @description The connected workspace. */
             workspace: components["schemas"]["DeviceAuthWorkspace"];
         };
+        /**
+         * @description One message: the machine-readable code (when the producer has one), what kind of thing it is,
+         *     and the ONE sentence a person reads. `text` never carries the code — a code is a lookup key,
+         *     not prose, and the TTY prints `text` alone.
+         */
+        Message: {
+            /**
+             * @description The stable SCREAMING_SNAKE code an agent branches on. Absent where the producer has no
+             *     code (a decision, a paging fact) — an open vocabulary, exactly like `WireError.code`.
+             */
+            code?: string | null;
+            kind: components["schemas"]["MessageKind"];
+            /** @description The line a person reads. Complete on its own; no code, no Rust type name. */
+            text: string;
+        };
+        /**
+         * @description What a [`Message`] IS, so a consumer never has to infer it from wording. `failure` is the only
+         *     kind that says something did not happen; `decision` is a bundle waiting on a person; `advisory`
+         *     annotates something that still worked; `disclosure` states a fact about work that succeeded.
+         * @enum {string}
+         */
+        MessageKind: "failure" | "decision" | "advisory" | "disclosure";
         /**
          * @description A machine-actionable next step. The `argv` is the ready-to-exec command; `code` lets an agent
          *     branch on the known set and still pass through unknowns. The three safety fields are ADDITIVE

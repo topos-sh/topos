@@ -471,6 +471,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
         })
         .expect("AddData serializes"),
         warnings: vec![],
+        messages: vec![],
         next_actions: vec![],
         receipt: None,
         error: None,
@@ -513,6 +514,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
         })
         .expect("AddData serializes"),
         warnings: vec![],
+        messages: vec![],
         next_actions: vec![topos::actions::next_action(
             ActionCode::from("UNDO".to_owned()),
             argv(&["topos", "remove", "topos.sh/acme/code-review"]),
@@ -557,6 +559,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
         })
         .expect("AddData serializes"),
         warnings: vec![],
+        messages: vec![],
         next_actions: vec![topos::actions::next_action(
             ActionCode::from("UNDO".to_owned()),
             argv(&["topos", "remove", "./tools/pr-describe"]),
@@ -583,6 +586,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
         ok: false,
         data: serde_json::json!({ "references": ws_refs }),
         warnings: vec![],
+        messages: vec![],
         next_actions: ambiguous_workspace_actions.clone(),
         receipt: None,
         error: Some(WireError {
@@ -670,6 +674,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
         })
         .expect("AddData serializes"),
         warnings: vec![],
+        messages: vec![],
         // The undo takes a SERVER off this machine, so its caution says so rather than borrowing
         // a skill's sentence about folders — read off the receipt, never hardcoded.
         next_actions: vec![topos::actions::next_action_about(
@@ -687,6 +692,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
         ok: false,
         data: serde_json::json!({}),
         warnings: vec![],
+        messages: vec![],
         next_actions: ambiguous_scope_actions.clone(),
         receipt: None,
         error: Some(WireError {
@@ -740,6 +746,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
         })
         .expect("PullData serializes"),
         warnings: vec![],
+        messages: vec![],
         next_actions: vec![],
         receipt: None,
         error: None,
@@ -792,6 +799,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
         })
         .expect("PullData serializes"),
         warnings: vec![],
+        messages: vec![],
         next_actions: vec![],
         receipt: None,
         error: None,
@@ -853,6 +861,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
         })
         .expect("PullData serializes"),
         warnings: vec![],
+        messages: vec![],
         // The two ways out, per stopped row — the same pair the receipt prints under it, spelled
         // for the row's own scope (`person` → `-g`). The one state that asks for a decision must
         // offer that decision on the machine surface too.
@@ -912,6 +921,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
         })
         .expect("ListData serializes"),
         warnings: vec![],
+        messages: vec![],
         next_actions: vec![],
         receipt: None,
         error: None,
@@ -935,6 +945,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
         })
         .expect("DiffData serializes"),
         warnings: vec![],
+        messages: vec![],
         next_actions: vec![],
         receipt: None,
         error: None,
@@ -972,6 +983,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
         })
         .expect("LogData serializes"),
         warnings: vec![],
+        messages: vec![],
         next_actions: vec![],
         receipt: None,
         error: None,
@@ -986,6 +998,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
         ok: true,
         data: serde_json::json!({}),
         warnings: vec![],
+        messages: vec![],
         next_actions: vec![],
         receipt: Some(Receipt {
             schema_version: 1,
@@ -1015,6 +1028,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
         ok: false,
         data: serde_json::json!({}),
         warnings: vec![],
+        messages: vec![],
         next_actions: vec![topos::actions::next_action(
             ActionCode::RebaseAndRetry,
             argv(&["topos", "publish", "pr-describe"]),
@@ -1166,6 +1180,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
         })
         .expect("RemoveData serializes"),
         warnings: vec![],
+        messages: vec![],
         next_actions: vec![topos::actions::next_action(
             ActionCode::from("APPLY_DESCRIBED".to_owned()),
             argv(&["topos", "remove", "deploy", "--yes"]),
@@ -1198,6 +1213,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
         })
         .expect("RemoveData serializes"),
         warnings: vec![],
+        messages: vec![],
         next_actions: vec![topos::actions::next_action(
             ActionCode::from("UNDO".to_owned()),
             argv(&["topos", "add", "@acme/deploy"]),
@@ -1223,6 +1239,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
         })
         .expect("ProtectData serializes"),
         warnings: vec![],
+        messages: vec![],
         next_actions: vec![topos::actions::next_action(
             ActionCode::from("APPLY_DESCRIBED".to_owned()),
             argv(&["topos", "protect", "deploy", "--yes"]),
@@ -1252,6 +1269,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
         })
         .expect("ReviewIndexData serializes"),
         warnings: vec![],
+        messages: vec![],
         next_actions: vec![],
         receipt: None,
         error: None,
@@ -1269,6 +1287,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
         })
         .expect("InviteReadData serializes"),
         warnings: vec![],
+        messages: vec![],
         next_actions: vec![],
         receipt: None,
         error: None,
@@ -1314,6 +1333,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
         })
         .expect("PublishDescribeData serializes"),
         warnings: vec![],
+        messages: vec![],
         next_actions: vec![topos::actions::next_action(
             ActionCode::from("APPLY_DESCRIBED".to_owned()),
             argv(&["topos", "publish", "deploy", "--yes"]),
@@ -1362,6 +1382,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
         })
         .expect("PublishData serializes"),
         warnings: vec![],
+        messages: vec![],
         next_actions: vec![],
         receipt: None,
         error: None,
@@ -1375,6 +1396,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
         ok: false,
         data: serde_json::json!({}),
         warnings: vec![],
+        messages: vec![],
         next_actions: vec![],
         receipt: None,
         error: Some(WireError {
@@ -1441,6 +1463,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
         })
         .expect("PullData serializes"),
         warnings: vec![],
+        messages: vec![],
         next_actions: vec![],
         receipt: None,
         error: None,
@@ -1476,6 +1499,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
         })
         .expect("DiffData serializes"),
         warnings: vec![],
+        messages: vec![],
         next_actions: vec![topos::actions::next_action(
             ActionCode::FetchFullDiff,
             argv(&["topos", "diff", "pr-describe", "--max-bytes", "0", "--json"]),
@@ -1515,6 +1539,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
         })
         .expect("LogData serializes"),
         warnings: vec![],
+        messages: vec![],
         next_actions: vec![topos::actions::next_action(
             ActionCode::NextPage,
             argv(&[
@@ -1597,6 +1622,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
         })
         .expect("StatusData serializes"),
         warnings: vec![],
+        messages: vec![],
         next_actions: vec![],
         receipt: None,
         error: None,
@@ -1635,6 +1661,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
         })
         .expect("LoginData serializes"),
         warnings: vec![],
+        messages: vec![],
         next_actions: vec![topos::actions::next_action(
             ActionCode::from("ENROLL_RESUME".to_owned()),
             argv(&["topos", "login", "--json"]),
@@ -1674,6 +1701,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
         })
         .expect("LoginData serializes"),
         warnings: vec![],
+        messages: vec![],
         next_actions: vec![],
         receipt: None,
         error: None,
@@ -1693,6 +1721,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
         ok: false,
         data: serde_json::json!({}),
         warnings: vec![],
+        messages: vec![],
         next_actions: server_too_old_actions.clone(),
         receipt: None,
         error: Some(WireError {
@@ -1723,6 +1752,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
         })
         .expect("LogoutData serializes"),
         warnings: vec![],
+        messages: vec![],
         next_actions: vec![],
         receipt: None,
         error: None,
@@ -1745,6 +1775,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
         })
         .expect("PullData serializes"),
         warnings: vec![],
+        messages: vec![],
         next_actions: vec![topos::actions::next_action(
             ActionCode::from("LOGIN_WORKSPACE".to_owned()),
             argv(&["topos", "login", "<workspace-address>", "--json"]),

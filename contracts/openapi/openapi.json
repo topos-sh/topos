@@ -2600,6 +2600,13 @@
               }
             ]
           },
+          "messages": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Message"
+            },
+            "description": "The TYPED message channel — the same lines as `warnings`, in the same order, with the\nmachine-readable code and the kind separated from the prose a person reads. ADDITIVE: a\nproducer that emits nothing omits it, and an envelope without it still parses."
+          },
           "next_actions": {
             "type": "array",
             "items": {
@@ -2631,7 +2638,8 @@
             "type": "array",
             "items": {
               "type": "string"
-            }
+            },
+            "description": "The LEGACY line channel — one flat string per message, kept in shape and membership for\nconsumers that already match on it. Each entry is derived from the matching [`Message`]:\n`\"{code} {text}\"` when the message carries a code, the bare text when it does not.\nSuperseded by `messages`; it will be retired in a future contract version."
           }
         }
       },
@@ -2680,6 +2688,40 @@
             "description": "The connected workspace."
           }
         }
+      },
+      "Message": {
+        "type": "object",
+        "description": "One message: the machine-readable code (when the producer has one), what kind of thing it is,\nand the ONE sentence a person reads. `text` never carries the code — a code is a lookup key,\nnot prose, and the TTY prints `text` alone.",
+        "required": [
+          "kind",
+          "text"
+        ],
+        "properties": {
+          "code": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The stable SCREAMING_SNAKE code an agent branches on. Absent where the producer has no\ncode (a decision, a paging fact) — an open vocabulary, exactly like `WireError.code`."
+          },
+          "kind": {
+            "$ref": "#/components/schemas/MessageKind"
+          },
+          "text": {
+            "type": "string",
+            "description": "The line a person reads. Complete on its own; no code, no Rust type name."
+          }
+        }
+      },
+      "MessageKind": {
+        "type": "string",
+        "description": "What a [`Message`] IS, so a consumer never has to infer it from wording. `failure` is the only\nkind that says something did not happen; `decision` is a bundle waiting on a person; `advisory`\nannotates something that still worked; `disclosure` states a fact about work that succeeded.",
+        "enum": [
+          "failure",
+          "decision",
+          "advisory",
+          "disclosure"
+        ]
       },
       "NextAction": {
         "type": "object",
