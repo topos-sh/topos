@@ -29,13 +29,21 @@ caller.
   (the whole delivery predicate: assigned to you or to everyone, minus your declines — one
   positive row per provenance with a `self` flag, one negative per person per bundle; the
   baseline everyone-row is unassignable at the data layer), upstream provenance
-  (`bundle_upstream`/`version_upstream`), notices, proposals + comments, op receipts,
+  (`bundle_upstream`/`version_upstream`), `bundle_identity` (a bundle's SECOND name, when its
+  kind has one — the key that refuses a duplicate), notices, proposals + comments, op receipts,
   `audit_event`, `mail_event`.
 - **The DAL** (`app/lib/db/queries*.server.ts`) is the one sanctioned door to `web` AND the
   read-only `plane` custody mirror. Every function REQUIRES a branded actor as its first
   argument; mutating ops emit their audit row in the SAME transaction. One named exception: the
   mail transport's metadata-only `mail_event` send log is a system write with no actor. Policy is
   TypeScript here — no guarded SQL functions, no plane row-writes.
+- **Publishing a BRAND-NEW bundle happens once** (`app/lib/api/genesis.server.ts`): the session
+  lane's publish, add-from-GitHub and add-an-MCP-server all run one sequence — the kind's content
+  gate → the vault call → ONE transaction holding the registration, the identity claim, and
+  whatever that door adds (upstream rows, an import audit line, the op receipt). The gate and the
+  default destination come from the kind's record, never from the call site; the registration
+  precedes the claim (its key points at the bundle row) and a refused claim rolls both back, so a
+  refusal still means no catalog row was written.
 - **Auth guards fail closed** (`app/lib/auth/guards.server.ts` — the only minters of branded
   actors: `requireSession → requireMember → requireWorkspaceOwner`/`requireReviewer`,
   `requireDeviceActor`); the brand symbol is module-private. **Misses render 404, never 403.**
@@ -89,13 +97,17 @@ caller.
   and channel faces are members-only — anonymous/non-member gets the house 404,
   existence-blind. Uniform miss surface: the root ErrorBoundary → `error-screen.tsx` (no
   `error.data`, path, or stack).
-- **Two bases over ONE set of bundle pages** (`app/lib/bundle-base.ts`): the catalog `kind`
-  decides where a bundle is addressed — `skills/:skill` or `mcp/:server` — and the face + its
-  five subpages mount under BOTH (the MCP mount carries explicit route ids; the MOUNT is told
-  apart by param NAME, never by route id). Each mount is kind-FENCED: a member on the wrong base
-  is redirected to the canonical path (`bundle-base.server.ts`), everyone else already met the
-  404. The sidebar, the dashboard index and the breadcrumb registry read the same mapping;
-  channel curation deliberately carries both kinds in one set and labels them.
+- **ONE RECORD PER KIND** (`app/lib/bundle-base.ts` — `BUNDLE_KINDS`): everything the product
+  knows about a kind of bundle, written once. Base · noun · section label · route param · its own
+  way in · where a genesis publish reaches by default · whether its bytes face a content gate ·
+  its rail and list marks. The route table BUILDS its per-kind mounts from it (`skills/:skill`,
+  `mcp/:server` — the face + its six subpages once per kind; every mount past the first carries
+  an explicit route id from the same record, and the MOUNT is told apart by param NAME, never by
+  route id). The rail's one section component, the dashboard index, the breadcrumb registrations
+  and the genesis publish all read the same records, so a kind cannot be half-present. Each mount
+  is kind-FENCED: a member on the wrong base is redirected to the canonical path
+  (`bundle-base.server.ts`), everyone else already met the 404. Channel curation deliberately
+  carries both kinds in one set and labels them.
 - **Machine discovery** (origin-rooted in both tenancies): `/llms.txt`,
   `/.well-known/agent-skills/index.json` (+ `/.well-known/skills/` alias) serving the built-in
   `topos` skill; its sha256 is computed in `agent-skills.server.ts` from the same bytes served —
@@ -110,20 +122,25 @@ caller.
   `app/lib/mcp/` — a remote `streamable-http` endpoint over https, no `{placeholder}`, no
   credential (the shapes live in the repo-root `tests/fixtures/mcp/`, compiled into
   `secret-patterns.generated.ts`), and an embedded registry name no other bundle here claims.
-  Both publish doors run the same gate before any custody call: the session lane's
+  Every publish door runs the same gate before any custody call: the session lane's
   publish/propose and the `mcp/new` page — the MCP section's own way in (built-in list ·
   registry name · SSRF-guarded URL — the guard DIALS the addresses it vetted (`https.request`
   with our own `lookup`, so nothing resolves a second time) · paste). The built-in list is
   committed data the loader ships whole, documents included, so picking one opens its confirm
   dialog with no round trip; the publish re-derives those bytes from the list. The three typed
-  sources keep their server-side preview. The embedded name is re-claimed under one per-workspace
-  lock by every door that MOVES a pointer onto an mcp version — publish, re-publish, unarchive,
-  review approve, revert; the wire doors word that refusal once (`mcpNameTakenRefusal`), pointing
-  at the bundle already holding the name. `mcp/new` mints a NEW bundle per import and its
-  destination field RESTS ON NO CHANNEL — an import lands catalog-only and reaches nobody until a
-  channel is chosen, here or later (`NO_CHANNEL`, the genesis destination distinct from the
-  default-channel `null`; every channel INCLUDING the default is an ordinary named option, so no
-  empty value stands in for one). When a channel IS chosen the page discloses what the publish did
+  sources keep their server-side preview. The embedded name is a CLAIMED ROW
+  (`web.bundle_identity`, keyed `(workspace, kind, identity)`): every door that MOVES a pointer
+  onto an mcp version claims it in the same transaction as the move — publish, re-publish,
+  unarchive, review approve, revert, all through `movePointerWithKindPrecondition` — and the
+  key's conflict IS the refusal, worded once (`mcpNameTakenRefusal`) pointing at the bundle
+  already holding it. Archiving and deleting release it. Names that predate the row are recorded
+  by an idempotent boot backfill (the bytes live in the vault, so no migration can read them);
+  a document it cannot read gets no row and is NAMED in the log, never skipped silently.
+  `mcp/new` mints a NEW bundle per import and its destination field RESTS ON NO CHANNEL — an
+  import lands catalog-only and reaches nobody until a channel is chosen, here or later. That is
+  this kind's own default (`NO_CHANNEL`, distinct from the default-channel `null`), read from its
+  record rather than decided at the call site; every channel INCLUDING the default is an ordinary
+  named option, so no empty value stands in for one. When a channel IS chosen the page discloses what the publish did
   to the REACH: a curated channel withholds a member's placement, and the bundle face says so.
   `…/registry/v0.1/servers[/{name}/versions[/latest]]` serves the workspace's catalog in the
   official read-API shape, member-gated by cookie OR bearer, uniform-404 otherwise.

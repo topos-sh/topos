@@ -15,7 +15,7 @@ import {
   findReceipt,
   inFinalTx,
   insertReceiptInTx,
-  mcpNameClaimRefusalInTx,
+  movePointerWithKindPrecondition,
   publishTargetOf,
 } from "@/lib/db/queries.custody.server";
 import { revertPointer } from "@/lib/plane/custody.server";
@@ -128,20 +128,16 @@ export async function action({ request }: ActionFunctionArgs): Promise<Response>
       attribution: author,
       message,
     });
-  // A REVERT IS A NAME CLAIM TOO when the bundle is an MCP server: the good version's tree comes
-  // forward, registry name and all, and that name must be no other active bundle's — the rule
-  // every publishing door enforces. The claim and the move ride ONE transaction holding the
-  // per-workspace name lock (a publish cannot take the name in between); every other kind reverts
-  // exactly as before.
-  const claimed =
-    target.kind === "mcp"
-      ? await inFinalTx(async (tx) => {
-          const refusal = await mcpNameClaimRefusalInTx(tx, actor, target.bundleId, good);
-          return refusal === null
-            ? ({ refusal: null, reverted: await carryForward() } as const)
-            : ({ refusal } as const);
-        })
-      : ({ refusal: null, reverted: await carryForward() } as const);
+  // Whatever this bundle's KIND requires before its `current` may move happens first, in the same
+  // transaction as the move (an MCP server's tree carries a registry name forward, and that name
+  // must be no other active bundle's).
+  const claimed = await movePointerWithKindPrecondition({
+    kind: target.kind,
+    actor,
+    bundleId: target.bundleId,
+    versionId: good,
+    move: carryForward,
+  });
   if (claimed.refusal !== null) {
     const envelope = deniedEnvelope(
       "revert",
@@ -153,7 +149,7 @@ export async function action({ request }: ActionFunctionArgs): Promise<Response>
     await inFinalTx((tx) => insertReceiptInTx(tx, actor, head.opId, raw, envelope));
     return envelopeResponse(envelope);
   }
-  const reverted = claimed.reverted;
+  const reverted = claimed.moved;
   if (reverted.kind === "conflict") {
     const receipt = buildReceipt({
       ...receiptBase,

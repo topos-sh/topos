@@ -9,9 +9,9 @@ import { planeCurrentPointer } from "@/lib/db/schema.custody";
  * what each one's `current` points at. The DOCUMENT itself is not here — bytes live in the
  * vault and are read through the custody lane (app/lib/mcp/catalog.server.ts joins the two).
  *
- * Both callers are workspace-scoped by the actor they carry: the registry lane serving this
- * workspace's catalog, and the publish gate proving no two bundles claim the same embedded
- * server name.
+ * Its one caller is workspace-scoped by the actor it carries: the registry lane serving this
+ * workspace's catalog. (Embedded-name uniqueness is no longer a scan — it is an indexed claim,
+ * app/lib/db/bundle-identity.server.ts.)
  */
 
 /** One catalog row a `kind: 'mcp'` bundle contributes, with the version its `current` names. */
@@ -28,37 +28,20 @@ export interface McpBundleRow {
  * A ceiling on how many MCP bundles one pass reads documents for. Every row past this costs a
  * vault round-trip pair (version meta + the `server.json` object), warmed by an immutable
  * per-version cache, so the cap bounds the WORST case rather than an expected size — a real
- * workspace catalog is tens of servers. Callers that need a COMPLETE answer (the embedded-name
- * uniqueness gate) compare against `mcpBundleCount` and refuse rather than guess when the
- * catalog outgrows one pass; the honest fix at that scale is an indexed embedded name, not a
- * bigger scan.
+ * workspace catalog is tens of servers.
+ *
+ * Only the REGISTRY LANE scans documents now, and it serves what it can read. Uniqueness — the
+ * one caller that needed a COMPLETE answer, and could only refuse when the catalog outgrew a
+ * pass — is an indexed row (`web.bundle_identity`), which is what that older comment called the
+ * honest fix.
  */
 export const MAX_MCP_BUNDLES_SCANNED = 500;
 
 type Tx = Parameters<Parameters<ReturnType<typeof getDb>["transaction"]>[0]>[0];
 
-/**
- * The one client a scan's reads run on. Every caller that scans UNDER the advisory lock passes
- * the transaction that holds it: the lock-holder's reads must ride the client it already owns —
- * a second `getDb()` checkout there is a pool client acquired while one is held, and N
- * concurrent publishes of one workspace would exhaust the pool with the lock-holder starved
- * behind its own waiters. Absent (the unlocked pre-checks, the registry lane), the shared pool
- * answers.
- */
+/** The one client a scan's reads run on. The registry lane lets the shared pool answer; the
+ *  parameter stays so a caller inside a transaction can read its own uncommitted rows. */
 export type McpDbClient = ReturnType<typeof getDb> | Tx;
-
-/**
- * Serialize this workspace's embedded-name decisions. The uniqueness rule reads BYTES (a
- * version's document says what name it claims), so there is no column to put a unique index on
- * — the lock is what makes "scan, then register" atomic against another publish doing the same
- * thing at the same moment. Every door that ends up REGISTERING or RESTORING an `mcp` bundle
- * takes it inside its final transaction and re-runs the scan under it — ON the same transaction
- * client (see [`McpDbClient`]); a transaction-scoped lock needs no release path (a rollback
- * drops it with everything else).
- */
-export async function lockMcpNamesInTx(tx: Tx, workspaceId: string): Promise<void> {
-  await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${workspaceId} || ':mcp-name'))`);
-}
 
 /**
  * Every ACTIVE `kind: 'mcp'` bundle in the actor's workspace that has something published,
@@ -92,20 +75,4 @@ export async function mcpBundlesWithCurrent(
     versionId: row.versionId,
     updatedAtMs: Number(row.updatedAtMs),
   }));
-}
-
-/** How many published, active `kind: 'mcp'` bundles the workspace holds — the completeness
- * check a capped scan compares itself against. */
-export async function mcpBundleCount(
-  actor: MemberActor | SessionActor,
-  db: McpDbClient = getDb(),
-): Promise<number> {
-  const rows = await db.execute(sql`
-    SELECT count(*)::int AS n
-    FROM web.bundle b
-    JOIN plane.current_pointer cp
-      ON cp.workspace_id = b.workspace_id AND cp.bundle_id = b.id
-    WHERE b.workspace_id = ${actor.workspaceId} AND b.kind = 'mcp' AND b.status = 'active'
-  `);
-  return Number((rows.rows[0] as { n: number | string } | undefined)?.n ?? 0);
 }

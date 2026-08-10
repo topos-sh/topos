@@ -1,3 +1,4 @@
+import { Fragment } from "react";
 import type { LoaderFunctionArgs, MetaFunction } from "react-router";
 import { Link, useLoaderData } from "react-router";
 import { NoSkills } from "@/components/empty-states";
@@ -11,7 +12,7 @@ import { composition } from "@/composition.server";
 import { serverEnv } from "@/env.server";
 import { actorFromSession, memberInScope } from "@/lib/auth/guards.server";
 import { getAuth } from "@/lib/auth/server";
-import { baseForKind, bundlePath } from "@/lib/bundle-base";
+import { BUNDLE_KINDS, baseForKind, bundlePath } from "@/lib/bundle-base";
 import { theWorkspace } from "@/lib/db/identity.server";
 import { rosterOf } from "@/lib/db/queries.roster.server";
 import { type SkillIndexRow, skillIndexOf } from "@/lib/db/queries.server";
@@ -141,9 +142,12 @@ function DashboardPage({
   onboarding: OnboardingState | null;
 }) {
   const wsPath = useWsPath();
-  // The catalog holds both kinds; the page addresses each in its own section.
-  const skills = index.filter((row) => baseForKind(row.kind) === "skills");
-  const servers = index.filter((row) => baseForKind(row.kind) === "mcp");
+  // The catalog holds every kind; the page addresses each in its own section, in the order the
+  // kind records are written — the same order the rail uses, so the two never disagree.
+  const sections = BUNDLE_KINDS.map((record) => ({
+    record,
+    rows: index.filter((row) => baseForKind(row.kind) === record.base),
+  }));
   return (
     <div className="space-y-8">
       <PageHeader
@@ -159,14 +163,16 @@ function DashboardPage({
           <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
             <code className="font-mono">{slug}</code>
             <span aria-hidden="true">·</span>
-            <span>{skills.length === 1 ? "1 skill" : `${skills.length} skills`}</span>
-            {servers.length > 0 && (
-              <>
-                <span aria-hidden="true">·</span>
-                <span>
-                  {servers.length === 1 ? "1 MCP server" : `${servers.length} MCP servers`}
-                </span>
-              </>
+            {/* The LEADING kind is always counted — a catalog with no skills says so rather
+                than going quiet. Every kind after it appears only once it holds something, so a
+                workspace that uses one kind never reads a line of zeroes about the others. */}
+            {sections.map(({ record, rows }, position) =>
+              position === 0 || rows.length > 0 ? (
+                <Fragment key={record.kind}>
+                  {position > 0 && <span aria-hidden="true">·</span>}
+                  <span>{`${rows.length} ${record.noun}${rows.length === 1 ? "" : "s"}`}</span>
+                </Fragment>
+              ) : null,
             )}
             <span aria-hidden="true">·</span>
             <span>{memberCount === 1 ? "1 member" : `${memberCount} members`}</span>
@@ -174,16 +180,19 @@ function DashboardPage({
         }
         actions={
           <>
-            {/* The two ways to put something in this catalog from the web: a skill's bytes from
-                a public repository, and an MCP server's address. Both land as ordinary bundles
+            {/* Every way to put something in this catalog from the web: a skill's bytes from a
+                public repository, an MCP server's address. All of them land as ordinary bundles
                 the moment they are published, which is why they sit together here rather than
                 anywhere the catalog is not. */}
-            <Link to={wsPath("skills/import")} className={buttonClasses("quiet")}>
-              Add from GitHub
-            </Link>
-            <Link to={wsPath("mcp/new")} className={buttonClasses("quiet")}>
-              Add an MCP server
-            </Link>
+            {BUNDLE_KINDS.map((record) => (
+              <Link
+                key={record.kind}
+                to={wsPath(record.newPagePath)}
+                className={buttonClasses("quiet")}
+              >
+                {record.newPageLabel}
+              </Link>
+            ))}
             <Link to={wsPath("settings")} className={buttonClasses("quiet")}>
               Settings
             </Link>
@@ -198,44 +207,31 @@ function DashboardPage({
         // empty-state card would — showing both would say it twice.
         (onboarding ? null : <NoSkills shareAddress={shareAddress} />)}
 
-      {/* Two kinds, two sections — a skill and an MCP server are read for different reasons, so
-          the index never runs them together. Each renders only when it holds something. */}
-      {skills.length > 0 && (
-        <section aria-labelledby="skill-index-heading" className="space-y-3">
-          <div className="flex items-center justify-between gap-3">
-            <SectionHeading>
-              <span id="skill-index-heading">Skills</span>
-            </SectionHeading>
-            <span className="text-faint text-xs">Published skills appear here automatically.</span>
-          </div>
-          <Card className="overflow-hidden">
-            <ul>
-              {skills.map((row) => (
-                <CatalogRow key={row.skillId} row={row} />
-              ))}
-            </ul>
-          </Card>
-        </section>
-      )}
-
-      {servers.length > 0 && (
-        <section aria-labelledby="mcp-index-heading" className="space-y-3">
-          <div className="flex items-center justify-between gap-3">
-            <SectionHeading>
-              <span id="mcp-index-heading">MCP servers</span>
-            </SectionHeading>
-            <span className="text-faint text-xs">
-              Delivered as a tool endpoint in each member&apos;s agent configs.
-            </span>
-          </div>
-          <Card className="overflow-hidden">
-            <ul>
-              {servers.map((row) => (
-                <CatalogRow key={row.skillId} row={row} />
-              ))}
-            </ul>
-          </Card>
-        </section>
+      {/* One section per kind — a skill and an MCP server are read for different reasons, so the
+          index never runs them together. Each renders only when it holds something: a heading
+          standing over nothing tells a reader less than no heading at all. */}
+      {sections.map(({ record, rows }) =>
+        rows.length === 0 ? null : (
+          <section
+            key={record.kind}
+            aria-labelledby={`${record.kind}-index-heading`}
+            className="space-y-3"
+          >
+            <div className="flex items-center justify-between gap-3">
+              <SectionHeading>
+                <span id={`${record.kind}-index-heading`}>{record.sectionLabel}</span>
+              </SectionHeading>
+              <span className="text-faint text-xs">{record.indexNote}</span>
+            </div>
+            <Card className="overflow-hidden">
+              <ul>
+                {rows.map((row) => (
+                  <CatalogRow key={row.skillId} row={row} />
+                ))}
+              </ul>
+            </Card>
+          </section>
+        ),
       )}
 
       <section aria-labelledby="address-heading" className="space-y-2">

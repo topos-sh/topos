@@ -41,8 +41,9 @@ import {
   SidebarTrigger,
 } from "@/components/ui/sidebar";
 import { authClient } from "@/lib/auth/client";
+import { bundlePath, kindEntry } from "@/lib/bundle-base";
 import { fetchMemberships, membershipsQueryKey } from "@/lib/query/memberships";
-import type { SidebarWorkspace } from "@/lib/shell/chrome.server";
+import type { SidebarSection, SidebarWorkspace } from "@/lib/shell/chrome.server";
 import { wsHref } from "@/lib/ws-path";
 
 /**
@@ -153,12 +154,15 @@ export function AppSidebar({
       <SidebarContent>
         {workspace !== null && (
           <>
-            <SkillsSection
-              workspace={workspace}
-              wsSegment={wsSegment}
-              pathname={location.pathname}
-            />
-            <McpSection workspace={workspace} wsSegment={wsSegment} pathname={location.pathname} />
+            {workspace.sections.map((section) => (
+              <CatalogSection
+                key={section.kind}
+                section={section}
+                shareAddress={workspace.shareAddress}
+                wsSegment={wsSegment}
+                pathname={location.pathname}
+              />
+            ))}
             <ChannelsSection
               workspace={workspace}
               wsSegment={wsSegment}
@@ -305,100 +309,78 @@ function WorkspaceIdentity({
   );
 }
 
-/** The workspace's SKILLS (active, name-sorted) with a `+ new` that opens the publish dialog —
- * which offers skills alone. Names only — the dashboard stays the fuller index. */
-function SkillsSection({
-  workspace,
-  wsSegment,
-  pathname,
-}: {
-  workspace: SidebarWorkspace;
-  wsSegment: string | null;
-  pathname: string;
-}) {
-  return (
-    <SidebarGroup>
-      <SidebarGroupLabel>Skills</SidebarGroupLabel>
-      <PublishDialog
-        shareAddress={workspace.shareAddress}
-        trigger={
-          <SidebarGroupAction aria-label="Publish a skill from your agent">
-            <Plus />
-          </SidebarGroupAction>
-        }
-      />
-      <SidebarMenu>
-        {workspace.skills.length === 0 ? (
-          <li className="px-2 py-1 text-faint text-xs group-data-[collapsible=icon]:hidden">
-            No skills yet.
-          </li>
-        ) : (
-          workspace.skills.map((skill) => {
-            const href = wsHref(wsSegment, `skills/${skill.name}`);
-            return (
-              <SidebarMenuItem key={skill.name}>
-                <SidebarMenuButton
-                  asChild
-                  tooltip={skill.label}
-                  isActive={isActivePath(pathname, href)}
-                  className="data-[active=true]:bg-accent-wash! data-[active=true]:text-ink!"
-                >
-                  <Link to={href}>
-                    <Package />
-                    <span>{skill.label}</span>
-                  </Link>
-                </SidebarMenuButton>
-              </SidebarMenuItem>
-            );
-          })
-        )}
-      </SidebarMenu>
-    </SidebarGroup>
-  );
-}
+/** The rail row icon per kind — the one place a kind record's icon NAME becomes a component,
+ *  mirroring `NAV_ICONS` above. An unknown name falls back to the plain bundle mark. */
+const RAIL_ICONS: Record<string, ElementType> = {
+  package: Package,
+  plug: Plug,
+};
 
 /**
- * The workspace's MCP SERVERS (active, name-sorted) with a `+ new` linking to the add-a-server
- * page. It renders even when empty — the section header carries the only `+` in the rail, and a
- * section that hides until it has something in it hides the way to put the first thing in it.
- * That is also how the Skills section above behaves.
+ * ONE catalog section of the rail (active bundles of one kind, name-sorted) with a section-header
+ * `+ new`. Everything that differs between the sections — the heading, the row icon, what the `+`
+ * does and says, the note when there is nothing yet, the base its links build under — comes from
+ * that kind's record (app/lib/bundle-base.ts), so the sections cannot drift apart and a new kind
+ * gets a rail section without a new component.
+ *
+ * A section RENDERS WHEN EMPTY: its header carries the only `+`, and a section that hides until it
+ * has something in it hides the way to put the first thing in it.
+ *
+ * The `+` is the one genuinely structural difference, so it is a named choice in the record rather
+ * than a shared default: a skill arrives from the member's own agent, so the rail opens the publish
+ * dialog and teaches the command; a server is named on a page, so the rail links to it.
  */
-function McpSection({
-  workspace,
+function CatalogSection({
+  section,
+  shareAddress,
   wsSegment,
   pathname,
 }: {
-  workspace: SidebarWorkspace;
+  section: SidebarSection;
+  shareAddress: string;
   wsSegment: string | null;
   pathname: string;
 }) {
+  const record = kindEntry(section.kind);
+  const Icon = RAIL_ICONS[record.railIcon] ?? Package;
   return (
     <SidebarGroup>
-      <SidebarGroupLabel>MCP servers</SidebarGroupLabel>
-      <SidebarGroupAction asChild aria-label="Add an MCP server">
-        <Link to={wsHref(wsSegment, "mcp/new")}>
-          <Plus />
-        </Link>
-      </SidebarGroupAction>
+      <SidebarGroupLabel>{record.sectionLabel}</SidebarGroupLabel>
+      {record.railNewAction === "publish-dialog" ? (
+        <PublishDialog
+          shareAddress={shareAddress}
+          trigger={
+            <SidebarGroupAction aria-label={record.newActionLabel}>
+              <Plus />
+            </SidebarGroupAction>
+          }
+        />
+      ) : (
+        <SidebarGroupAction asChild aria-label={record.newActionLabel}>
+          <Link to={wsHref(wsSegment, record.newPagePath)}>
+            <Plus />
+          </Link>
+        </SidebarGroupAction>
+      )}
       <SidebarMenu>
-        {workspace.servers.length === 0 ? (
+        {section.rows.length === 0 ? (
           <li className="px-2 py-1 text-faint text-xs group-data-[collapsible=icon]:hidden">
-            No MCP servers yet.
+            {record.railEmptyNote}
           </li>
         ) : (
-          workspace.servers.map((server) => {
-            const href = wsHref(wsSegment, `mcp/${server.name}`);
+          section.rows.map((row) => {
+            const href = wsHref(wsSegment, bundlePath(record.base, row.name));
             return (
-              <SidebarMenuItem key={server.name}>
+              <SidebarMenuItem key={row.name}>
                 <SidebarMenuButton
                   asChild
-                  tooltip={server.label}
+                  tooltip={row.label}
                   isActive={isActivePath(pathname, href)}
                   className="data-[active=true]:bg-accent-wash! data-[active=true]:text-ink!"
                 >
                   <Link to={href}>
-                    <Plug />
-                    <span>{server.label}</span>
+                    <Icon />
+                    <span>{row.label}</span>
                   </Link>
                 </SidebarMenuButton>
               </SidebarMenuItem>

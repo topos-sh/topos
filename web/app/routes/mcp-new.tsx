@@ -11,18 +11,11 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { publishGenesisBundle } from "@/lib/api/genesis.server";
 import { requireMemberInScope } from "@/lib/auth/guards.server";
 import { bundlePath } from "@/lib/bundle-base";
-import { auditInTx, mintBundleId } from "@/lib/db/identity.server";
+import { auditInTx } from "@/lib/db/identity.server";
 import { channelsOf } from "@/lib/db/queries.channels.server";
-import {
-  type GenesisRegistration,
-  inFinalTx,
-  NO_CHANNEL,
-  registerGenesisBundleInTx,
-} from "@/lib/db/queries.custody.server";
-import { lockMcpNamesInTx } from "@/lib/db/queries.mcp.server";
-import { mcpNameTaken } from "@/lib/mcp/catalog.server";
 import {
   type CuratedMcpRow,
   curatedDocumentFor,
@@ -36,15 +29,9 @@ import {
   type McpSourceKind,
   unwrapServerDocument,
 } from "@/lib/mcp/fetch.server";
-import {
-  type McpGateRefusal,
-  mcpCandidateRefusal,
-  mcpNameTakenRefusal,
-  SERVER_JSON,
-} from "@/lib/mcp/publish-gate.server";
+import { type McpGateRefusal, SERVER_JSON } from "@/lib/mcp/publish-gate.server";
 import { type McpSummary, suggestedNameFor, validateServerJson } from "@/lib/mcp/validate.server";
 import { useSubmittingIntent } from "@/lib/pending";
-import { publishVersion } from "@/lib/plane/custody.server";
 import { allowUpstreamFetch } from "@/lib/rate-limit.server";
 import { useWsPath } from "@/lib/ws-path";
 import { wsPathServer } from "@/lib/ws-url.server";
@@ -285,85 +272,62 @@ export async function action({ request, params }: ActionFunctionArgs) {
         content_base64: Buffer.from(document, "utf8").toString("base64"),
       },
     ];
-    // The SAME gate the session lane runs, on the same bytes, before any custody call — a
-    // refused document leaves nothing behind, and the web door gets no exemption from the
-    // embedded-name uniqueness rule.
-    const gate = await mcpCandidateRefusal(actor, files, null);
-    if (gate.refusal !== null) {
-      return refuseGate(gate.refusal);
-    }
     const validated = validateServerJson(document);
     if (!validated.ok) {
       return refuseHere(validated.message, validated.code);
     }
-    const bundleId = mintBundleId();
-    const published = await publishVersion(workspace.id, bundleId, {
-      files,
-      attribution: actor.display,
-      message: `imported MCP server ${validated.summary.name}`,
+    // THE ORDINARY GENESIS PUBLISH — the same sequence the session lane and add-from-GitHub run
+    // (kind gate → vault → registration + identity claim in one transaction). This door's only
+    // additions are its own audit line and the birth name: the document's tail segment, or
+    // whatever the member typed over it, folded through the catalog's own mint.
+    //
+    // AN EMPTY DESTINATION IS A DESTINATION. Importing a server is not the same act as handing
+    // it to people, and nothing arriving without a channel may be read as consent to reach the
+    // whole workspace — so the empty value means NO channel, which is also what this kind's
+    // record says a genesis publish defaults to. It never means the default channel.
+    const landed = await publishGenesisBundle({
+      actor,
+      kind: "mcp",
+      candidate: {
+        files,
+        attribution: actor.display,
+        message: `imported MCP server ${validated.summary.name}`,
+      },
+      displayName: name.length > 0 ? name : suggestedNameFor(validated.summary.name),
+      ...(channel.length > 0 ? { destination: channel } : {}),
+      alsoInTx: (tx, registered) =>
+        auditInTx(tx, {
+          workspaceId: workspace.id,
+          actor: { userId: actor.userId, display: actor.display },
+          kind: "mcp_imported",
+          subject: registered.bundleId,
+          outcome: "ok",
+          details: {
+            server: validated.summary.name,
+            version: validated.summary.version,
+            url: validated.summary.url,
+          },
+        }),
     });
-    if (published.kind !== "ok") {
+    if (landed.kind === "refused") {
+      return refuseGate(landed.refusal);
+    }
+    if (landed.kind !== "ok") {
       return refuseHere("The publish did not land — try again.", undefined, 500);
     }
-    const landed = await inFinalTx<
-      | { refused: McpGateRefusal }
-      | { refused: null; name: string; placement: GenesisRegistration["placement"] }
-    >(async (tx) => {
-      // The embedded name, looked at again under the lock every registering door takes: the
-      // gate above answered before the vault call, so another publish could have claimed the
-      // name in between. On a collision this transaction registers NOTHING and the page says
-      // so — the published bytes stand in the vault with no catalog row, which is the same
-      // sequencing the session lane has (custody first, catalog second).
-      await lockMcpNamesInTx(tx, workspace.id);
-      // On the HELD client — a pool checkout under the lock is the exhaustion shape.
-      const taken = await mcpNameTaken(actor, validated.summary.name, bundleId, tx);
-      if (taken.kind !== "free") {
-        return { refused: mcpNameTakenRefusal(validated.summary.name, taken) };
-      }
-      // The birth name folds from the document's tail segment (or whatever the member typed
-      // over it) through the catalog's own mint — same rules, same collision suffixes.
-      //
-      // AN EMPTY DESTINATION IS A DESTINATION. Importing a server is not the same act as
-      // handing it to people: the field rests on "no channel", and nothing arriving without one
-      // may be read as consent to reach the whole workspace. So the empty value maps to
-      // `NO_CHANNEL` — catalog only — and never to the default-channel `null`.
-      const registration = await registerGenesisBundleInTx(
-        tx,
-        actor,
-        bundleId,
-        name.length > 0 ? name : suggestedNameFor(validated.summary.name),
-        channel.length > 0 ? channel : NO_CHANNEL,
-        "mcp",
-      );
-      await auditInTx(tx, {
-        workspaceId: workspace.id,
-        actor: { userId: actor.userId, display: actor.display },
-        kind: "mcp_imported",
-        subject: bundleId,
-        outcome: "ok",
-        details: {
-          server: validated.summary.name,
-          version: validated.summary.version,
-          url: validated.summary.url,
-        },
-      });
-      return { refused: null, name: registration.name, placement: registration.placement };
-    });
-    if (landed.refused !== null) {
-      return refuseGate(landed.refused);
-    }
+    const registered = landed;
     // WHAT ACTUALLY HAPPENED TO THE REACH. The publish landed; the PLACEMENT is a separate
     // outcome and may have been withheld (a curated channel takes a member's placement) or found
     // nothing to place into. The dialog promised that a chosen channel's agents get that address,
     // so a withheld placement must be said out loud on the page the redirect lands on rather than
     // read as a silent success. Choosing NO channel produces no outcome at all — nothing was
     // promised, and the server's own page already says it is in no channel.
-    const path = wsPathServer(workspace.name, bundlePath("mcp", landed.name));
-    if (landed.placement === undefined || landed.placement === "placed") {
+    const path = wsPathServer(workspace.name, bundlePath("mcp", registered.name));
+    if (registered.placement === undefined || registered.placement === "placed") {
       throw redirect(path);
     }
     // Only a NAMED channel can be withheld now, so the note's subject is the one on the form.
-    const query = new URLSearchParams({ placement: landed.placement, channel });
+    const query = new URLSearchParams({ placement: registered.placement, channel });
     throw redirect(`${path}?${query.toString()}`);
   }
 

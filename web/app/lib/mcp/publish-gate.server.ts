@@ -1,7 +1,6 @@
 import { Buffer } from "node:buffer";
-import type { MemberActor, SessionActor } from "@/lib/auth/guards.server";
 import { bundlePath } from "@/lib/bundle-base";
-import { type McpNameCheck, mcpNameTaken } from "@/lib/mcp/catalog.server";
+import { type IdentityHolder, identityHolder } from "@/lib/db/bundle-identity.server";
 import { validateCandidateFiles } from "@/lib/mcp/validate.server";
 
 /**
@@ -18,15 +17,14 @@ import { validateCandidateFiles } from "@/lib/mcp/validate.server";
  *
  * The second is what keeps the registry read lane unambiguous: `…/servers/{name}` resolves
  * against the embedded names, so two bundles declaring one name would make an agent's lookup a
- * coin flip. `MCP_NAME_TAKEN` covers both a proven collision and a catalog this tier could not
- * read end to end — the answer either way is "that name is not available here", and guessing
- * the other way would let the ambiguity in.
+ * coin flip. It is an indexed read of the recorded claims (app/lib/db/bundle-identity.server.ts),
+ * not a scan of the published documents.
  *
  * The name check here answers BEFORE the custody call, which is what a refusal needs — and is
  * therefore too early to be the last word: two publishes of one name can both pass it. So the
  * gate hands the validated name back on success, and every caller that goes on to REGISTER
- * re-runs `mcpNameTaken` inside its final transaction under `lockMcpNamesInTx`, wording the
- * refusal with `mcpNameTakenRefusal` so both looks say the same thing.
+ * CLAIMS that name inside its final transaction, where the identity key admits one claimant and
+ * the conflict IS the refusal — worded by `mcpNameTakenRefusal`, so both looks say the same thing.
  */
 
 /** The file an MCP bundle IS — at the bundle root; only the allowed siblings may stand beside it. */
@@ -46,8 +44,8 @@ export interface McpGateRefusal {
 
 /**
  * What the gate decided: a refusal, or the embedded registry name the candidate validated to.
- * The name comes back because the caller needs it again — the locked re-check before it
- * registers reads THIS name, not a second parse of the same bytes.
+ * The name comes back because the caller needs it again — the claim it makes before it
+ * registers records THIS name, not a second parse of the same bytes.
  */
 export type McpGateOutcome = { refusal: McpGateRefusal } | { refusal: null; serverName: string };
 
@@ -58,27 +56,17 @@ export interface CandidateFile {
 }
 
 /**
- * How a non-free name is worded — one place, so the pre-check and every caller's locked
- * re-check refuse in the same words. A proven collision names the bundle holding it AND points
- * at it: the next thing anyone does with this answer is go look at that server, so the path
- * rides the message (for a machine reading the wire) and the `at` field (for a surface that can
- * render a real link). A catalog that could not be read end to end says exactly that rather than
- * dressing itself as a collision, and points nowhere.
+ * How a taken name is worded — ONE place, so the pre-check and every caller's claim refuse in
+ * the same words at every door. The refusal names the bundle holding it AND points at it: the
+ * next thing anyone does with this answer is go look at that server, so the path rides the
+ * message (for a machine reading the wire) and the `at` field (for a surface that can render a
+ * real link).
  */
-export function mcpNameTakenRefusal(
-  serverName: string,
-  taken: Exclude<McpNameCheck, { kind: "free" }>,
-): McpGateRefusal {
-  if (taken.kind !== "taken") {
-    return {
-      code: "MCP_NAME_TAKEN",
-      message: `this workspace's MCP catalog could not be read end to end, so ${serverName} cannot be confirmed free`,
-    };
-  }
-  const at = bundlePath("mcp", taken.by.name);
+export function mcpNameTakenRefusal(serverName: string, heldBy: IdentityHolder): McpGateRefusal {
+  const at = bundlePath("mcp", heldBy.name);
   return {
     code: "MCP_NAME_TAKEN",
-    message: `${serverName} is already published in this workspace as ${taken.by.name} — view /${at}`,
+    message: `${serverName} is already published in this workspace as ${heldBy.name} — view /${at}`,
     at,
   };
 }
@@ -88,7 +76,7 @@ export function mcpNameTakenRefusal(
  * name check, since a new version of a server is not a collision with itself.
  */
 export async function mcpCandidateRefusal(
-  actor: MemberActor | SessionActor,
+  actor: { workspaceId: string },
   files: CandidateFile[],
   bundleId: string | null,
 ): Promise<McpGateOutcome> {
@@ -100,9 +88,9 @@ export async function mcpCandidateRefusal(
   if (!validated.ok) {
     return { refusal: { code: validated.code, message: validated.message } };
   }
-  const taken = await mcpNameTaken(actor, validated.summary.name, bundleId);
-  if (taken.kind !== "free") {
-    return { refusal: mcpNameTakenRefusal(validated.summary.name, taken) };
+  const held = await identityHolder(actor.workspaceId, "mcp", validated.summary.name, bundleId);
+  if (held !== null) {
+    return { refusal: mcpNameTakenRefusal(validated.summary.name, held) };
   }
   return { refusal: null, serverName: validated.summary.name };
 }

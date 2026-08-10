@@ -69,8 +69,8 @@ describe("the mail_event send log", () => {
     // SMTP variables, and re-import the module graph so the memoized env re-parses.
     // DATABASE_URL still points at the scratch database, so the fresh pool the fresh DAL
     // opens writes the same real table.
-    const { getPool } = await import("@/lib/db/index.server");
-    await getPool().end();
+    const { endPool } = await import("@/lib/db/index.server");
+    await endPool();
     vi.resetModules();
     for (const key of Object.keys(SMTP_ENV)) {
       delete process.env[key];

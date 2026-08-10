@@ -402,6 +402,48 @@ export const bundleNameHint = webSchema.table(
 );
 
 /**
+ * A BUNDLE'S SECOND NAME — the identity its own KIND keys on, when its kind has one.
+ *
+ * A catalog name is what people type; some kinds also carry a name their MACHINE consumers
+ * resolve. An MCP server's `server.json` declares a registry name, and the workspace's registry
+ * lane answers `…/servers/{name}` with it — so two bundles declaring one name would make an
+ * agent's lookup a coin flip. That name lives in the BYTES, which no query can reach, so this
+ * table is where the claim is RECORDED: one row per bundle that holds one, written in the same
+ * transaction as the pointer move that makes it true, deleted when the bundle archives or is
+ * deleted (both free the name for someone else).
+ *
+ * The PRIMARY KEY is the rule: (workspace, kind, identity) is unique, so a second claimant is
+ * refused BY THE DATABASE. That is what this table is for — the refusal used to come from
+ * scanning every published document under a per-workspace advisory lock, which is a lock and a
+ * bounded scan standing in for an index. `kind` is part of the key rather than assumed, so a
+ * later kind's identity namespace is its own and cannot collide with an MCP server's.
+ *
+ * NO check constraint on `kind`: the closed vocabulary is stated once, on `bundle`, and the
+ * composite FK below ties every row here to a bundle that already satisfies it.
+ */
+export const bundleIdentity = webSchema.table(
+  "bundle_identity",
+  {
+    workspaceId: text("workspace_id").notNull(),
+    bundleId: text("bundle_id").notNull(),
+    /** The kind whose namespace this identity lives in — `bundle.kind`, carried here. */
+    kind: text("kind").notNull(),
+    /** The name that kind's consumers resolve (an MCP server's embedded registry name). */
+    identity: text("identity").notNull(),
+  },
+  (table) => [
+    primaryKey({ columns: [table.workspaceId, table.kind, table.identity] }),
+    // The bundle-keyed reads: what this bundle claims (to release or replace it).
+    index("bundle_identity_bundle_idx").on(table.workspaceId, table.bundleId),
+    foreignKey({
+      name: "bundle_identity_bundle_fk",
+      columns: [table.bundleId, table.workspaceId],
+      foreignColumns: [bundle.id, bundle.workspaceId],
+    }).onDelete("cascade"),
+  ],
+);
+
+/**
  * A bundle's UPSTREAM — the external origin it was imported from (a fork that remembers its
  * parent): host + repo + path, recorded at publish when the published copy carries import
  * provenance, or by the web add-from-GitHub flow. One upstream per bundle; the server-side

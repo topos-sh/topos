@@ -1,12 +1,11 @@
 import { and, asc, eq, sql } from "drizzle-orm";
 import type { MemberActor, OwnerActor } from "@/lib/auth/guards.server";
+import { kindEntry } from "@/lib/bundle-base";
+import { releaseBundleIdentityInTx } from "@/lib/db/bundle-identity.server";
 import { auditInTx } from "@/lib/db/identity.server";
 import { getDb } from "@/lib/db/index.server";
-import { isReservedBundleName } from "@/lib/db/queries.custody.server";
-import { lockMcpNamesInTx } from "@/lib/db/queries.mcp.server";
+import { claimCurrentNameInTx, isReservedBundleName } from "@/lib/db/queries.custody.server";
 import { bundle, bundleNameHint, channelBundle, notice, proposal } from "@/lib/db/schema.app";
-import { planeCurrentPointer } from "@/lib/db/schema.custody";
-import { mcpNameTaken, serverDocumentOf } from "@/lib/mcp/catalog.server";
 import { deleteBundleBytes, purgeVersionBytes } from "@/lib/plane/custody.server";
 
 /**
@@ -181,6 +180,10 @@ export async function archiveBundle(actor: OwnerActor, bundleId: string): Promis
     await tx
       .delete(channelBundle)
       .where(and(eq(channelBundle.workspaceId, ws), eq(channelBundle.bundleId, bundleId)));
+    // …and FREES its second name, the way the rename above frees its catalog name: an archived
+    // server serves nothing, so the registry name it held is another bundle's to take. Unarchive
+    // claims it back, and refuses if someone did.
+    await releaseBundleIdentityInTx(tx, ws, bundleId);
     await closeOpenProposalsInTx(
       tx,
       ws,
@@ -198,37 +201,6 @@ export async function archiveBundle(actor: OwnerActor, bundleId: string): Promis
     });
     return { outcome: "archived", archivedName } as const;
   });
-}
-
-/**
- * What an `mcp` bundle's CURRENT version says its registry name is. THREE answers, because a
- * caller deciding whether a name can be claimed must tell them apart:
- *
- *  · `none`       — no `current` pointer at all. Nothing is served for this bundle under any
- *                   registry name, so there is no claim to make and nothing to be ambiguous
- *                   with. Absence of a name, not an unreadable one.
- *  · `unreadable` — a live `current` whose document this tier cannot read end to end (bytes the
- *                   vault will not serve, no `server.json` in the version, or a document today's
- *                   gate refuses). It proves nothing about what would be served, so a caller
- *                   fails closed on it — and says THAT, not that some name is taken.
- *  · `name`       — the embedded registry name, read from the stored bytes.
- */
-type EmbeddedName = { kind: "none" } | { kind: "unreadable" } | { kind: "name"; name: string };
-
-async function embeddedServerName(tx: Tx, ws: string, bundleId: string): Promise<EmbeddedName> {
-  const pointer = await tx
-    .select({ versionId: planeCurrentPointer.versionId })
-    .from(planeCurrentPointer)
-    .where(and(eq(planeCurrentPointer.workspaceId, ws), eq(planeCurrentPointer.bundleId, bundleId)))
-    .limit(1);
-  const versionId = pointer[0]?.versionId;
-  if (versionId === undefined) {
-    return { kind: "none" };
-  }
-  const document = await serverDocumentOf(ws, bundleId, versionId);
-  return typeof document?.name === "string"
-    ? { kind: "name", name: document.name }
-    : { kind: "unreadable" };
 }
 
 export type UnarchiveOutcome =
@@ -278,18 +250,13 @@ export async function unarchiveBundle(
     // it claims no registry name and can collide with nothing. Refusing it would strand a
     // never-published MCP bundle in the archive with no way out — the name it cannot claim is
     // one it never had.
-    if (row.kind === "mcp") {
-      await lockMcpNamesInTx(tx, ws);
-      const embedded = await embeddedServerName(tx, ws, bundleId);
-      if (embedded.kind === "unreadable") {
+    if (kindEntry(row.kind).hasContentGate) {
+      const claim = await claimCurrentNameInTx(tx, actor, bundleId);
+      if (claim === "unreadable") {
         return { outcome: "mcp_document_unreadable" } as const;
       }
-      if (embedded.kind === "name") {
-        // On the HELD client — a pool checkout under the lock is the exhaustion shape.
-        const claimed = await mcpNameTaken(actor, embedded.name, bundleId, tx);
-        if (claimed.kind !== "free") {
-          return { outcome: "mcp_name_taken" } as const;
-        }
+      if (claim === "taken") {
+        return { outcome: "mcp_name_taken" } as const;
       }
     }
     await tx
@@ -341,6 +308,9 @@ export async function deleteBundle(
       .update(bundle)
       .set({ status: "deleted", deletedAt: new Date() })
       .where(and(eq(bundle.workspaceId, ws), eq(bundle.id, bundleId)));
+    // The row survives as a tombstone, so the FK cascade never fires — release the name here.
+    // (Archive already did; a delete of something archived out-of-band still ends up correct.)
+    await releaseBundleIdentityInTx(tx, ws, bundleId);
     await auditInTx(tx, {
       workspaceId: ws,
       actor: { userId: actor.userId, display: actor.display },

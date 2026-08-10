@@ -1,5 +1,5 @@
 import { Link, type Params, useMatches } from "react-router";
-import { baseOf, bundlePath, sectionLabel } from "@/lib/bundle-base";
+import { BUNDLE_KINDS, baseOf, bundlePath, sectionLabel } from "@/lib/bundle-base";
 import type { SidebarWorkspace } from "@/lib/shell/chrome.server";
 import { wsHref } from "@/lib/ws-path";
 
@@ -140,6 +140,37 @@ const bundleFile: CrumbBuilder = ({ data, params }) => {
 };
 
 /**
+ * The bundle pages' entries, one per MOUNT. Each of these modules is mounted once per kind, and
+ * the route table gives every mount past the first an explicit id built from that kind's record —
+ * so the ids to register under are derived from the same records the table builds from, and a new
+ * kind cannot end up with pages whose trail silently degrades to root-only. The builders
+ * themselves are kind-agnostic: they read the section off the route PARAMS.
+ *
+ * Neither section has an index page, so the head each builder emits is an unlinked segment.
+ */
+function bundleRegistrations(): Record<string, CrumbBuilder> {
+  /** The page modules that mount per kind: the file's derived id stem, and its trail builder. */
+  const pages: [stem: string, page: string, build: CrumbBuilder][] = [
+    ["skill-current", "current", bundleCurrent],
+    ["skill-history", "history", bundleHistory],
+    ["skill-proposals", "proposals", bundleProposals],
+    ["skill-settings", "settings", bundleSettings],
+    ["proposal-review", "proposal-review", bundleReview],
+    ["version-files", "versions", bundleVersion],
+    ["file-view", "file-view", bundleFile],
+  ];
+  const out: Record<string, CrumbBuilder> = {};
+  for (const [stem, page, build] of pages) {
+    for (const kind of BUNDLE_KINDS) {
+      // A `null` prefix marks the mount that keeps React Router's file-derived id; every other
+      // mount carries the explicit id the table gave it.
+      out[kind.routeIdPrefix === null ? `routes/${stem}` : `${kind.routeIdPrefix}-${page}`] = build;
+    }
+  }
+  return out;
+}
+
+/**
  * THE registry — route module id (React Router derives it from the route file: `routes/<name>`, or
  * the explicit id the table gave a second mount) →
  * its crumb tail. This is the single place breadcrumb knowledge is recorded; adding a page's trail
@@ -159,23 +190,9 @@ const REGISTRY: Record<string, CrumbBuilder> = {
   "routes/channel-history": ({ params }) => channelTab(params, "History"),
   "routes/channel-settings": ({ params }) => channelTab(params, "Settings"),
 
-  // Bundles. Neither section has an index page, so its head is an unlinked segment — and each
-  // page module mounts TWICE (under `skills/` and under `mcp/`), so every builder is registered
-  // under both ids and reads the section off the route params.
-  "routes/skill-current": bundleCurrent,
-  "mcp-current": bundleCurrent,
-  "routes/skill-history": bundleHistory,
-  "mcp-history": bundleHistory,
-  "routes/skill-proposals": bundleProposals,
-  "mcp-proposals": bundleProposals,
-  "routes/skill-settings": bundleSettings,
-  "mcp-settings": bundleSettings,
-  "routes/proposal-review": bundleReview,
-  "mcp-proposal-review": bundleReview,
-  "routes/version-files": bundleVersion,
-  "mcp-versions": bundleVersion,
-  "routes/file-view": bundleFile,
-  "mcp-file-view": bundleFile,
+  // Bundles: spread in from `bundleRegistrations` below — each page module mounts once per kind,
+  // so each builder is registered under every one of those mounts' ids.
+  ...bundleRegistrations(),
 
   // The MCP section's way in (the Skills one, add-from-GitHub, carries no trail today).
   "routes/mcp-new": () => [{ label: "MCP servers" }, { label: "Add an MCP server" }],

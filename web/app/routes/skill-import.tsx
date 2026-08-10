@@ -1,12 +1,10 @@
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
 import { data, Form, Link, redirect, useActionData, useLoaderData } from "react-router";
 import { BusyFields, buttonClasses, Card, PageHeader, SectionHeading } from "@/components/ui";
+import { publishGenesisBundle } from "@/lib/api/genesis.server";
 import { requireMemberInScope } from "@/lib/auth/guards.server";
-import { mintBundleId } from "@/lib/db/identity.server";
-import { inFinalTx, registerGenesisBundleInTx } from "@/lib/db/queries.custody.server";
 import { fetchUpstreamTree, governedCopiesOf, resolveTreeSource } from "@/lib/db/upstream.server";
 import { useSubmittingIntent } from "@/lib/pending";
-import { publishVersion } from "@/lib/plane/custody.server";
 import { allowUpstreamFetch } from "@/lib/rate-limit.server";
 import { useWsPath } from "@/lib/ws-path";
 import { workspaceAddress, wsPathServer } from "@/lib/ws-url.server";
@@ -234,45 +232,52 @@ export async function action({ request, params }: ActionFunctionArgs) {
         { status: 400 },
       );
     }
-    const bundleId = mintBundleId();
-    const published = await publishVersion(workspace.id, bundleId, {
-      files: tree.files.map((f) => ({
-        path: f.path,
-        mode: f.executable ? "100755" : "100644",
-        content_base64: f.bytes.toString("base64"),
-      })),
-      attribution: actor.display,
-      message: `imported from ${repo}@${commit.slice(0, 12)}`,
+    // THE ORDINARY GENESIS PUBLISH — the same sequence the session lane and add-an-MCP-server
+    // run. This door's own additions are the provenance rows (a fork that remembers its parent)
+    // and its import audit line; the destination is this kind's default, which for a skill is
+    // the workspace's default channel.
+    const landed = await publishGenesisBundle({
+      actor,
+      kind: "skill",
+      candidate: {
+        files: tree.files.map((f) => ({
+          path: f.path,
+          mode: f.executable ? "100755" : "100644",
+          content_base64: f.bytes.toString("base64"),
+        })),
+        attribution: actor.display,
+        message: `imported from ${repo}@${commit.slice(0, 12)}`,
+      },
+      displayName: name,
+      alsoInTx: async (tx, registered) => {
+        const { sql } = await import("drizzle-orm");
+        await tx.execute(sql`
+          INSERT INTO web.bundle_upstream (bundle_id, workspace_id, host, repo, path, license,
+                                           last_seen_commit, last_checked_at)
+          VALUES (${registered.bundleId}, ${workspace.id}, 'github.com', ${repo}, ${subdir},
+                  ${tree.license}, ${commit}, now())
+          ON CONFLICT (bundle_id) DO NOTHING
+        `);
+        await tx.execute(sql`
+          INSERT INTO web.version_upstream (workspace_id, bundle_id, version_id, commit)
+          VALUES (${workspace.id}, ${registered.bundleId}, ${registered.versionId}, ${commit})
+          ON CONFLICT (bundle_id, version_id) DO NOTHING
+        `);
+        await tx.execute(sql`
+          INSERT INTO web.audit_event (workspace_id, actor_user_id, actor_display, kind, subject,
+                                       outcome, details)
+          VALUES (${workspace.id}, ${actor.userId}, ${actor.display}, 'skill_imported',
+                  ${registered.bundleId}, 'ok', ${JSON.stringify({ repo, subdir, commit })}::jsonb)
+        `);
+      },
     });
-    if (published.kind !== "ok") {
+    if (landed.kind !== "ok") {
       return data<PublishError>(
         { form: "publish", error: "The publish did not land — try again." },
         { status: 500 },
       );
     }
-    const { sql } = await import("drizzle-orm");
-    const registered = await inFinalTx(async (tx) => {
-      const registration = await registerGenesisBundleInTx(tx, actor, bundleId, name, null);
-      await tx.execute(sql`
-        INSERT INTO web.bundle_upstream (bundle_id, workspace_id, host, repo, path, license,
-                                         last_seen_commit, last_checked_at)
-        VALUES (${bundleId}, ${workspace.id}, 'github.com', ${repo}, ${subdir},
-                ${tree.license}, ${commit}, now())
-        ON CONFLICT (bundle_id) DO NOTHING
-      `);
-      await tx.execute(sql`
-        INSERT INTO web.version_upstream (workspace_id, bundle_id, version_id, commit)
-        VALUES (${workspace.id}, ${bundleId}, ${published.value.version_id}, ${commit})
-        ON CONFLICT (bundle_id, version_id) DO NOTHING
-      `);
-      await tx.execute(sql`
-        INSERT INTO web.audit_event (workspace_id, actor_user_id, actor_display, kind, subject,
-                                     outcome, details)
-        VALUES (${workspace.id}, ${actor.userId}, ${actor.display}, 'skill_imported',
-                ${bundleId}, 'ok', ${JSON.stringify({ repo, subdir, commit })}::jsonb)
-      `);
-      return registration;
-    });
+    const registered = landed;
     throw redirect(wsPathServer(workspace.name, `skills/${registered.name}`));
   }
 

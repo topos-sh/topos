@@ -14,7 +14,7 @@ import {
 import { baseOf, bundleNameOf, bundlePath, useBundleBase } from "@/lib/bundle-base";
 import { requireCanonicalBase } from "@/lib/bundle-base.server";
 import { recordAdminEvent } from "@/lib/db/audit.server";
-import { inFinalTx, mcpNameClaimRefusalInTx } from "@/lib/db/queries.custody.server";
+import { movePointerWithKindPrecondition } from "@/lib/db/queries.custody.server";
 import { purgeVersion } from "@/lib/db/queries.lifecycle.server";
 import { skillIndexRow } from "@/lib/db/queries.server";
 import { resolveSkillName } from "@/lib/db/resolve.server";
@@ -202,20 +202,16 @@ async function revertAction(request: Request, ws: string, skill: string, form: F
       // deterministic message keeps a double-submit's retry converging on the same commit.
       message: `Revert to ${good}`,
     });
-  // A REVERT IS A NAME CLAIM TOO when the bundle is an MCP server: the good version's tree comes
-  // forward, registry name and all, and that name must be no other active bundle's — the rule
-  // every publishing door enforces. The claim and the move ride ONE transaction holding the
-  // per-workspace name lock (a publish cannot take the name in between); every other kind reverts
-  // exactly as before.
-  const claimed =
-    row.kind === "mcp"
-      ? await inFinalTx(async (tx) => {
-          const refusal = await mcpNameClaimRefusalInTx(tx, actor, row.skillId, good);
-          return refusal === null
-            ? ({ refusal: null, reverted: await carryForward() } as const)
-            : ({ refusal } as const);
-        })
-      : ({ refusal: null, reverted: await carryForward() } as const);
+  // Whatever this bundle's KIND requires before its `current` may move happens first, in the same
+  // transaction as the move (an MCP server's tree carries a registry name forward, and that name
+  // must be no other active bundle's).
+  const claimed = await movePointerWithKindPrecondition({
+    kind: row.kind,
+    actor,
+    bundleId: row.skillId,
+    versionId: good,
+    move: carryForward,
+  });
   if (claimed.refusal !== null) {
     await recordAdminEvent(actor, {
       kind: "revert",
@@ -225,7 +221,7 @@ async function revertAction(request: Request, ws: string, skill: string, form: F
     });
     return data<RevertActionData>({ status: "denied", reason: claimed.refusal.message });
   }
-  const outcome = claimed.reverted;
+  const outcome = claimed.moved;
   if (outcome.kind === "fault") {
     await recordAdminEvent(actor, {
       kind: "revert",

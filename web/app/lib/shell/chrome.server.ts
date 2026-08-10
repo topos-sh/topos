@@ -1,6 +1,6 @@
 import { composition } from "@/composition.server";
 import { requireMember, type UserActor } from "@/lib/auth/guards.server";
-import { baseForKind } from "@/lib/bundle-base";
+import { BUNDLE_KINDS, type BundleKind, baseForKind } from "@/lib/bundle-base";
 import { channelsOf } from "@/lib/db/queries.channels.server";
 import { membershipsFor, skillIndexOf, type WorkspaceMembership } from "@/lib/db/queries.server";
 import { destinationPathname } from "@/lib/destination-path";
@@ -40,6 +40,14 @@ export interface SidebarChannel {
   isDefault: boolean;
 }
 
+/** One rail section: the kind it lists, and this workspace's bundles of that kind. The rail
+ *  renders these in the order they arrive — which is the order the kind records are written in,
+ *  the same order the dashboard and the route table use. */
+export interface SidebarSection {
+  kind: BundleKind;
+  rows: SidebarSkill[];
+}
+
 /**
  * The active workspace's sidebar context — present only when a workspace is in scope (a signed-in
  * member on a workspace-scoped page); null off-workspace (a signed-in non-member, an anonymous
@@ -55,11 +63,9 @@ export interface SidebarWorkspace {
   /** The FULL shareable address the publish dialog composes its `topos login` line from
    *  (single → the bare origin, multi → `<origin>/<name>`). */
   shareAddress: string;
-  /** The `kind: 'skill'` catalog, name-sorted — the Skills section. */
-  skills: SidebarSkill[];
-  /** The `kind: 'mcp'` catalog, name-sorted — the MCP servers section. Split HERE, once, so no
-   *  component filters a mixed list. */
-  servers: SidebarSkill[];
+  /** The catalog, name-sorted, split ONE SECTION PER KIND — split HERE, once, so no component
+   *  filters a mixed list and no section can be forgotten when a kind is added. */
+  sections: SidebarSection[];
   channels: SidebarChannel[];
 }
 
@@ -137,7 +143,8 @@ export async function loadChrome(request: Request, actor: UserActor): Promise<Ch
       channelsOf(member),
     ]);
     // ONE catalog read, split by kind: a skill and an MCP server are addressed in different
-    // sections, so the rail never mixes them.
+    // sections, so the rail never mixes them. The split walks the kind records rather than
+    // naming the kinds, so the rail gains a section the moment the product gains a kind.
     const entry = (s: (typeof skills)[number]) => ({
       name: s.name,
       label: s.displayName ?? s.name,
@@ -147,8 +154,10 @@ export async function loadChrome(request: Request, actor: UserActor): Promise<Ch
       displayName: active.displayName,
       address: active.address,
       shareAddress: workspaceAddress(request, active.address),
-      skills: skills.filter((s) => baseForKind(s.kind) === "skills").map(entry),
-      servers: skills.filter((s) => baseForKind(s.kind) === "mcp").map(entry),
+      sections: BUNDLE_KINDS.map((record) => ({
+        kind: record.kind,
+        rows: skills.filter((s) => baseForKind(s.kind) === record.base).map(entry),
+      })),
       channels: channels.map((c) => ({ name: c.name, isDefault: c.isDefault })),
     };
   }

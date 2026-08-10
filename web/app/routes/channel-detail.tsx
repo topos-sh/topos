@@ -1,4 +1,4 @@
-import { Check, ChevronsUpDown, Package, Plug, Plus } from "lucide-react";
+import { Check, ChevronsUpDown, Plus } from "lucide-react";
 import { Fragment, useState } from "react";
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
 import {
@@ -10,6 +10,7 @@ import {
   useLoaderData,
   useNavigation,
 } from "react-router";
+import { bundleIconForBase, bundleIconForKind } from "@/components/bundle-icon";
 import { ChannelHeader } from "@/components/channel/channel-header";
 import { ChannelTabs } from "@/components/channel/channel-tabs";
 import { ConfirmButton } from "@/components/confirm";
@@ -31,7 +32,7 @@ import {
   requireWorkspaceOwner,
 } from "@/lib/auth/guards.server";
 import { getAuth } from "@/lib/auth/server";
-import { baseForKind, bundlePath, groupByBase } from "@/lib/bundle-base";
+import { baseForKind, bundlePath, groupByBase, kindEntry } from "@/lib/bundle-base";
 import { recordAdminEvent } from "@/lib/db/audit.server";
 import {
   type ChannelDetail as ChannelDetailData,
@@ -541,7 +542,10 @@ function SkillRow({
           <span className="min-w-0 truncate font-medium text-ink text-sm">
             {skill.displayName ?? skill.name}
           </span>
-          {baseForKind(skill.kind) === "mcp" && <Chip tone="neutral">MCP server</Chip>}
+          {/* A channel holds both kinds; the ones a reader does not already assume say so. */}
+          {kindEntry(skill.kind).listChip !== null && (
+            <Chip tone="neutral">{kindEntry(skill.kind).listChip}</Chip>
+          )}
         </Link>
       ) : (
         <div className="flex min-w-0 flex-1 items-center gap-2 px-4 py-3">
@@ -601,6 +605,9 @@ function AddSkillForm({ channelId, addable }: { channelId: string; addable: Adda
   const fetcher = useFetcher<SkillCurationActionData>();
   const [stagedId, setStagedId] = useState<string | null>(null);
   const staged = addable.find((skill) => skill.skillId === stagedId);
+  // The staged row wears its own kind's mark, so the closed trigger already says which
+  // section the chosen bundle came from.
+  const StagedMark = bundleIconForKind(staged?.kind);
   const groups = groupByBase(addable);
   const pending = fetcher.state !== "idle";
   const error =
@@ -618,10 +625,8 @@ function AddSkillForm({ channelId, addable }: { channelId: string; addable: Adda
             >
               {staged === undefined ? (
                 <Plus className="size-4 shrink-0 text-faint" aria-hidden="true" />
-              ) : baseForKind(staged.kind) === "mcp" ? (
-                <Plug className="size-4 shrink-0 text-faint" aria-hidden="true" />
               ) : (
-                <Package className="size-4 shrink-0 text-faint" aria-hidden="true" />
+                <StagedMark className="size-4 shrink-0 text-faint" aria-hidden="true" />
               )}
               <span className="min-w-0 flex-1 truncate text-left font-medium">
                 {staged === undefined ? "Choose one" : (staged.displayName ?? staged.name)}
@@ -630,30 +635,34 @@ function AddSkillForm({ channelId, addable }: { channelId: string; addable: Adda
             </button>
           </DropdownMenuTrigger>
           <DropdownMenuContent align="start" className="min-w-56">
-            {groups.map((group, index) => (
-              <Fragment key={group.base}>
-                {index > 0 && <DropdownMenuSeparator />}
-                <DropdownMenuGroup aria-label={group.label}>
-                  <DropdownMenuLabel className="font-normal text-faint text-xs">
-                    {group.label}
-                  </DropdownMenuLabel>
-                  {group.rows.map((skill) => (
-                    <DropdownMenuItem
-                      key={skill.skillId}
-                      onSelect={() => setStagedId(skill.skillId)}
-                    >
-                      {group.base === "mcp" ? <Plug /> : <Package />}
-                      <span className="min-w-0 flex-1 truncate">
-                        {skill.displayName ?? skill.name}
-                      </span>
-                      {skill.skillId === stagedId && (
-                        <Check className="ml-auto size-4 text-accent" />
-                      )}
-                    </DropdownMenuItem>
-                  ))}
-                </DropdownMenuGroup>
-              </Fragment>
-            ))}
+            {groups.map((group, index) => {
+              // One mark per group — every row under a heading wears its kind's own.
+              const Mark = bundleIconForBase(group.base);
+              return (
+                <Fragment key={group.base}>
+                  {index > 0 && <DropdownMenuSeparator />}
+                  <DropdownMenuGroup aria-label={group.label}>
+                    <DropdownMenuLabel className="font-normal text-faint text-xs">
+                      {group.label}
+                    </DropdownMenuLabel>
+                    {group.rows.map((skill) => (
+                      <DropdownMenuItem
+                        key={skill.skillId}
+                        onSelect={() => setStagedId(skill.skillId)}
+                      >
+                        <Mark />
+                        <span className="min-w-0 flex-1 truncate">
+                          {skill.displayName ?? skill.name}
+                        </span>
+                        {skill.skillId === stagedId && (
+                          <Check className="ml-auto size-4 text-accent" />
+                        )}
+                      </DropdownMenuItem>
+                    ))}
+                  </DropdownMenuGroup>
+                </Fragment>
+              );
+            })}
           </DropdownMenuContent>
         </DropdownMenu>
         <fetcher.Form method="post">

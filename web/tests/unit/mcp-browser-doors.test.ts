@@ -2,6 +2,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vites
 import {
   bootWorkspace,
   createScratchDb,
+  recordSeededIdentities,
   type ScratchDb,
   seatUser,
   seedBundle,
@@ -147,6 +148,9 @@ async function seedPublishedServer(
     { path: "server.json", content: JSON.stringify(document, null, 2) },
   ]);
   vault.point(wsId, bundleId, versionId, 1);
+  // A seeded server stands as if published, so the name it serves is on record — which is what
+  // a later approve or roll-back is checked against.
+  await recordSeededIdentities();
 }
 
 /** A candidate version standing in the vault, pointed at by nothing — a proposal's bytes. */

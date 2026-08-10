@@ -124,6 +124,13 @@ async function seedPublishedServer(
   vault.seed(wsId, bundleId, versionId, [
     { path: "server.json", content: JSON.stringify(document, null, 2) },
   ]);
+  // A seeded server stands as if it had been published here — and a published server's registry
+  // name is RECORDED, or nothing holds it against the next publish. The boot backfill is exactly
+  // the step that records the name of a server that already exists, so the fixture runs the real
+  // one rather than writing the row itself (which would let the row and the bytes drift apart).
+  const { backfillBundleIdentities } = await import("@/lib/db/bundle-identity.server");
+  const report = await backfillBundleIdentities();
+  expect(report.unreadable).toEqual([]);
 }
 
 const errorOf = (envelope: Record<string, unknown>) =>
@@ -228,22 +235,21 @@ describe("what an MCP candidate must carry", () => {
 });
 
 describe("the embedded name is unique per workspace", () => {
-  const OTHER_VERSION = versionIdFor("s_held");
+  // Its OWN registry name: an earlier case in this file publishes WEATHER for real and therefore
+  // holds that name for the rest of the run, which is the point of the claim.
+  const HELD = { ...WEATHER, name: "io.github.acme/held" };
 
   beforeAll(async () => {
-    // An MCP bundle already published here, its document readable through the vault — the
-    // state the uniqueness check actually reads.
-    await seedBundle(db, wsId, "s_held", "weather-held", { kind: "mcp", versionId: OTHER_VERSION });
-    vault.seed(wsId, "s_held", OTHER_VERSION, [
-      { path: "server.json", content: JSON.stringify(WEATHER, null, 2) },
-    ]);
+    // An MCP bundle already published here, its claim on record — the state the uniqueness
+    // check actually reads.
+    await seedPublishedServer("s_held", "weather-held", HELD);
   });
 
   it("a second bundle claiming the same server name is DENIED MCP_NAME_TAKEN", async () => {
     const envelope = await runFlow({
       skillId: "s_dupe",
       kind: "mcp",
-      files: [serverJsonFile(WEATHER)],
+      files: [serverJsonFile(HELD)],
     });
     expect(errorOf(envelope)?.code).toBe("MCP_NAME_TAKEN");
     // The refusal names the bundle that holds it AND says where it lives, so the answer is one
@@ -267,7 +273,7 @@ describe("the embedded name is unique per workspace", () => {
       skillId: "s_held",
       kind: "mcp",
       expected: 1,
-      files: [serverJsonFile({ ...WEATHER, version: "1.1.0" })],
+      files: [serverJsonFile({ ...HELD, version: "1.1.0" })],
     });
     expect(envelope.ok).toBe(true);
     expect(vault.calls).toEqual([{ route: "publish", ws: wsId, bundle: "s_held" }]);
@@ -279,28 +285,26 @@ describe("the embedded name is unique per workspace", () => {
       kind: "mcp",
       expected: 1,
       forceProposal: true,
-      files: [
-        serverJsonFile({ ...WEATHER, remotes: [{ type: "sse", url: "https://a.example/s" }] }),
-      ],
+      files: [serverJsonFile({ ...HELD, remotes: [{ type: "sse", url: "https://a.example/s" }] })],
     });
     expect(errorOf(envelope)?.code).toBe("MCP_NO_STREAMABLE_REMOTE");
     expect(vault.calls).toEqual([]);
   });
 
   it("an archived MCP bundle holds no name (it delivers nothing)", async () => {
-    const archivedVersion = versionIdFor("s_gone");
-    await seedBundle(db, wsId, "s_gone", "tides-old", {
-      kind: "mcp",
-      status: "archived",
-      versionId: archivedVersion,
-    });
-    vault.seed(wsId, "s_gone", archivedVersion, [
-      { path: "server.json", content: JSON.stringify({ ...WEATHER, name: "io.github.acme/surf" }) },
-    ]);
+    // Published first (so its name IS claimed), then archived through the REAL ceremony — the
+    // release is archive's job, so this proves archive does it. Seeding it archived from the
+    // start would prove nothing: an unclaimed name is free either way.
+    const SURF = { ...WEATHER, name: "io.github.acme/surf" };
+    await seedPublishedServer("s_gone", "tides-old", SURF);
+    const { archiveBundle } = await import("@/lib/db/queries.lifecycle.server");
+    expect((await archiveBundle(asOwner(wsId, "u_auth", "Author"), "s_gone")).outcome).toBe(
+      "archived",
+    );
     const envelope = await runFlow({
       skillId: "s_surf",
       kind: "mcp",
-      files: [serverJsonFile({ ...WEATHER, name: "io.github.acme/surf" })],
+      files: [serverJsonFile(SURF)],
     });
     expect(envelope.ok).toBe(true);
   });
@@ -309,11 +313,11 @@ describe("the embedded name is unique per workspace", () => {
 /**
  * The name check answers before the custody call, which makes it a PRE-check: by the time a
  * bundle is actually registered, another publish may have taken the name. Every door that
- * registers therefore looks again inside its final transaction, under one per-workspace
- * advisory lock. These two are the arms that lock: the publish flow, and the unarchive that
- * re-claims a name archiving had freed.
+ * registers therefore CLAIMS inside its final transaction, where the identity key — not a
+ * comparison — decides. These two are the arms that claim: the publish flow, and the unarchive
+ * that re-takes a name archiving had freed.
  */
-describe("the locked re-check", () => {
+describe("the claim inside the final transaction", () => {
   it("two concurrent genesis publishes of one embedded name serialize", async () => {
     const RACE = { ...WEATHER, name: "io.github.acme/race" };
     await seedCustody("s_race_a", RACE);
@@ -398,7 +402,7 @@ describe("the locked re-check", () => {
 /**
  * ITEM PAIR (deny before custody, the re-publish arm): a RE-publish whose document claims a name
  * another bundle here already holds refuses at the PRE-check — before `publishVersion`, so its
- * `current` never moves against a name the workspace then denies it. The locked re-check stays
+ * `current` never moves against a name the workspace then denies it. The claim stays
  * the authority for the narrowed race window (see the named residual in publish-flow); this pins
  * the common case: no custody call at all on a provable collision.
  */
@@ -424,66 +428,79 @@ describe("the pre-check refuses a re-publish before custody moves", () => {
 });
 
 /**
- * ITEM PAIR (the locked scan rides the held client): every catalog read under
- * `lockMcpNamesInTx` must run on the transaction that HOLDS the lock — a `getDb()` read there
- * checks a second client out of the pool while the first sits locked, and N concurrent
- * same-workspace publishes exhaust the pool with the lock-holder starved behind its own
- * waiters. Two behavioral proofs, no mocks: transaction-visibility (a row the holding
- * transaction wrote but has not committed is visible ONLY on its own client), and the whole
- * flow completing with every other pool client held.
+ * THE CLAIM IS THE REFUSAL — the properties the identity row has to have, proven behaviorally
+ * against real Postgres rather than by reading the SQL.
+ *
+ * Uniqueness used to be a per-workspace advisory lock around a capped scan of every published
+ * document; it is now one row whose key admits a single claimant. Two things must hold for that
+ * swap to be safe: a claim must be ATOMIC WITH the transaction that made it true (an uncommitted
+ * claim already excludes a rival, and a rollback frees the name), and a claim must never RAISE —
+ * a duplicate is an answer a person reads, so a unique-violation would take down the ceremony
+ * carrying it instead of refusing.
  */
-describe("the locked scan rides the held transaction client", () => {
-  it("sees rows the holding transaction wrote but has not committed", async () => {
-    const { mcpNameTaken } = await import("@/lib/mcp/catalog.server");
-    const { lockMcpNamesInTx, mcpBundleCount } = await import("@/lib/db/queries.mcp.server");
+describe("the identity claim", () => {
+  it("excludes a rival while uncommitted, and frees the name when the transaction rolls back", async () => {
+    const { claimBundleIdentityInTx, identityHolder } = await import(
+      "@/lib/db/bundle-identity.server"
+    );
     const { getDb } = await import("@/lib/db/index.server");
     const { sql } = await import("drizzle-orm");
-    const actor = asSession(wsId, "u_auth", "cs_auth", "member");
-    const GHOST = { ...WEATHER, name: "io.github.acme/ghost" };
-    const versionId = versionIdFor("s_ghost");
-    vault.seed(wsId, "s_ghost", versionId, [
-      { path: "server.json", content: JSON.stringify(GHOST, null, 2) },
-    ]);
-    const baseline = await mcpBundleCount(actor);
+    const NAME = "io.github.acme/ghost";
 
     await expect(
       getDb().transaction(async (tx) => {
-        await lockMcpNamesInTx(tx, wsId);
-        // A registration THIS transaction wrote and has not committed — visible only on the
-        // held client. Before the fix both reads ran on a fresh pool client and missed it.
         await tx.execute(sql`
           INSERT INTO web.bundle (id, workspace_id, name, kind, status)
           VALUES ('s_ghost', ${wsId}, 'ghost', 'mcp', 'active')`);
         await tx.execute(sql`
-          INSERT INTO plane.version (workspace_id, bundle_id, version_id, commit_id, author_display)
-          VALUES (${wsId}, 's_ghost', ${versionId}, ${versionId}, 'seed')`);
-        await tx.execute(sql`
-          INSERT INTO plane.current_pointer (workspace_id, bundle_id, version_id, moved_by_display)
-          VALUES (${wsId}, 's_ghost', ${versionId}, 'seed')`);
-        expect(await mcpBundleCount(actor, tx)).toBe(baseline + 1);
-        const taken = await mcpNameTaken(actor, "io.github.acme/ghost", null, tx);
-        expect(taken.kind).toBe("taken");
+          INSERT INTO web.bundle (id, workspace_id, name, kind, status)
+          VALUES ('s_rival', ${wsId}, 'rival', 'mcp', 'active')`);
+        const first = await claimBundleIdentityInTx(tx, wsId, "s_ghost", "mcp", NAME);
+        expect(first.ok).toBe(true);
+        // The rival asks for the same name on the same (uncommitted) transaction: refused, and
+        // told WHOSE it is — and, crucially, the transaction is still usable afterwards.
+        const second = await claimBundleIdentityInTx(tx, wsId, "s_rival", "mcp", NAME);
+        expect(second.ok).toBe(false);
+        expect(second.ok === false && second.heldBy?.name).toBe("ghost");
+        // Re-claiming your OWN name is not a collision with yourself.
+        expect((await claimBundleIdentityInTx(tx, wsId, "s_ghost", "mcp", NAME)).ok).toBe(true);
         throw new Error("rollback — leave no trace");
       }),
     ).rejects.toThrow("rollback");
 
-    // The rolled-back registration is gone from the pool's view, as it always was.
-    const { mcpNameTaken: fresh } = await import("@/lib/mcp/catalog.server");
-    expect(
-      (await fresh(asSession(wsId, "u_auth", "cs_auth", "member"), "io.github.acme/ghost", null))
-        .kind,
-    ).toBe("free");
+    // Rolled back, so the name was never taken: nothing to clean up, nothing left claimed.
+    expect(await identityHolder(wsId, "mcp", NAME, null)).toBeNull();
   });
 
-  it("a re-publish's locked scan completes with every other pool client held", async () => {
+  it("moves a bundle's claim when it renames itself, leaving the old name free", async () => {
+    const { claimBundleIdentityInTx, identityHolder } = await import(
+      "@/lib/db/bundle-identity.server"
+    );
+    const { getDb } = await import("@/lib/db/index.server");
+    const { sql } = await import("drizzle-orm");
+    const OLD = "io.github.acme/before";
+    const NEW = "io.github.acme/after";
+    await getDb().transaction(async (tx) => {
+      await tx.execute(sql`
+        INSERT INTO web.bundle (id, workspace_id, name, kind, status)
+        VALUES ('s_rename', ${wsId}, 'rename', 'mcp', 'active')`);
+      await claimBundleIdentityInTx(tx, wsId, "s_rename", "mcp", OLD);
+      await claimBundleIdentityInTx(tx, wsId, "s_rename", "mcp", NEW);
+    });
+    expect((await identityHolder(wsId, "mcp", NEW, null))?.name).toBe("rename");
+    // A re-publish that renames the server RELEASES the name it used to answer to.
+    expect(await identityHolder(wsId, "mcp", OLD, null)).toBeNull();
+  });
+
+  it("a re-publish's final transaction completes with every other pool client held", async () => {
     const { getPool } = await import("@/lib/db/index.server");
     const RESERVE = { ...WEATHER, name: "io.github.acme/reserve" };
     await seedPublishedServer("s_reserve", "reserve", RESERVE);
 
     const pool = getPool();
     const max = (pool as unknown as { options: { max?: number } }).options.max ?? 10;
-    // Hold every client but ONE — the final transaction takes that one, and the locked scan
-    // must ride it. Before the fix the scan waited on a second checkout that could never come.
+    // Hold every client but ONE — the final transaction takes that one, and everything it does
+    // must ride it. A second checkout from inside that transaction could never come.
     const held = await Promise.all(Array.from({ length: max - 1 }, () => pool.connect()));
     try {
       const envelope = await runFlow({

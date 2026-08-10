@@ -10,6 +10,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vites
 import {
   bootWorkspace,
   createScratchDb,
+  recordSeededIdentities,
   type ScratchDb,
   seatUser,
   seedBundle,
@@ -330,6 +331,9 @@ describe("the publish", () => {
         content: JSON.stringify({ ...WEATHER, name: "io.github.acme/tides" }, null, 2),
       },
     ]);
+    // Seeded as if published, so the name it serves is ON RECORD — which is what the page
+    // checks a new import against.
+    await recordSeededIdentities();
     const { status, body } = await post({
       intent: "publish",
       document: JSON.stringify({ ...WEATHER, name: "io.github.acme/tides" }, null, 2),
@@ -354,6 +358,9 @@ describe("the publish", () => {
         content: JSON.stringify({ ...WEATHER, name: "io.github.acme/shoals" }, null, 2),
       },
     ]);
+    // Seeded as if published, so the name it serves is ON RECORD — which is what the page
+    // checks a new import against.
+    await recordSeededIdentities();
     const document = `${JSON.stringify({ ...WEATHER, name: "io.github.acme/shoals" }, null, 2)}\n`;
     const { status, body } = await post({
       intent: "publish",
@@ -455,6 +462,9 @@ describe("publishing a picked row", () => {
     vault.seed(wsId, "s_picked_taken", versionId, [
       { path: "server.json", content: JSON.stringify({ ...WEATHER, name }, null, 2) },
     ]);
+    // Seeded as if published, so the name it serves is ON RECORD — which is what the page
+    // checks a new import against.
+    await recordSeededIdentities();
     const { status, body } = await post({
       intent: "publish",
       server: name,

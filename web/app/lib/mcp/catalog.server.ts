@@ -1,9 +1,9 @@
 import type { MemberActor, SessionActor } from "@/lib/auth/guards.server";
+import { identitiesByBundle } from "@/lib/db/bundle-identity.server";
 import {
   MAX_MCP_BUNDLES_SCANNED,
   type McpBundleRow,
   type McpDbClient,
-  mcpBundleCount,
   mcpBundlesWithCurrent,
 } from "@/lib/db/queries.mcp.server";
 import { MAX_SERVER_JSON_BYTES, validateServerJson } from "@/lib/mcp/validate.server";
@@ -15,12 +15,12 @@ import { custodyObjectCapped, custodyVersionMeta } from "@/lib/plane/reads.serve
  * for those versions. Two callers need it and need it identically:
  *
  *  · the REGISTRY LANE, which serves each document in the official read-API envelope, and
- *  · the PUBLISH GATE, which refuses a second bundle claiming a server name already taken here.
+ *  · the backfill that records what an already-published server calls itself.
  *
  * A version is immutable and content-addressed, so the parsed document is cached per
  * (workspace, bundle, version) and a hit can never be stale — the same reasoning the version
  * metadata cache runs on. That is what keeps a scan of the whole catalog cheap enough to do on
- * every MCP publish.
+ * a whole-catalog pass cheap.
  */
 
 /** One server the workspace publishes: the catalog row plus the document it currently holds. */
@@ -35,12 +35,6 @@ export interface McpCatalogEntry {
 /** The result of one capped pass over the catalog. */
 export interface McpCatalogScan {
   entries: McpCatalogEntry[];
-  /**
-   * True when the catalog holds more published MCP bundles than this pass read, or when a
-   * document could not be read at all — either way the pass proves nothing about what it did
-   * NOT see, and a caller asking "is this name free" must refuse rather than assume.
-   */
-  incomplete: boolean;
 }
 
 const CACHE_CAP = 500;
@@ -104,16 +98,10 @@ export async function serverDocumentOf(
 }
 
 /**
- * One capped pass over the workspace's published MCP servers. Rows whose document cannot be
- * read are DROPPED from the entries and mark the pass incomplete — the registry lane serves
- * what it can prove, and the uniqueness gate refuses what it cannot.
+ * One capped pass over the workspace's published MCP servers. Rows whose document cannot be read
+ * are DROPPED: the registry lane serves what it can prove.
  *
- * `db` is the client the CATALOG reads run on. A caller scanning under `lockMcpNamesInTx` MUST
- * pass the transaction that holds the lock — the reads then ride the held client instead of
- * checking a second one out of the pool while the first sits locked (the pool-exhaustion shape).
- * The vault reads below are HTTP, not pool clients, and stay as they are. Note the two reads run
- * SEQUENTIALLY on a transaction client (one session, no pipelining) — the `Promise.all` here is
- * ordering, not parallelism, when `db` is a transaction.
+ * `db` is the client the CATALOG reads run on; the vault reads below are HTTP, not pool clients.
  */
 export async function scanMcpCatalog(
   actor: MemberActor | SessionActor,
@@ -121,86 +109,43 @@ export async function scanMcpCatalog(
   db?: McpDbClient,
 ): Promise<McpCatalogScan> {
   const ws = actor.workspaceId;
-  const [rows, total] = await Promise.all([
-    mcpBundlesWithCurrent(actor, limit, db),
-    mcpBundleCount(actor, db),
-  ]);
-  let incomplete = total > rows.length;
+  const rows = await mcpBundlesWithCurrent(actor, limit, db);
   const entries: McpCatalogEntry[] = [];
   for (const row of rows) {
     const server = await serverDocumentOf(ws, row.bundleId, row.versionId);
     if (server === null || typeof server.name !== "string") {
-      incomplete = true;
       continue;
     }
     entries.push({ row, server, serverName: server.name });
   }
-  return { entries, incomplete };
+  return { entries };
 }
 
 /**
  * Decorate the session-lane catalog listing with each ACTIVE `kind: 'mcp'` entry's EMBEDDED
- * server name (`server.name` from the CURRENT version's document — the same source the registry
- * lane serves, never recomputed elsewhere). It used to be what let the CLI resolve a
- * registry-shaped `add` against the connected workspaces before the official registry; that door
- * is gone, and NO client reads the field today — it stands for registry-shape consumers of this
- * listing. Best-effort and additive by design: a document this tier cannot read right now just
- * leaves its entry undecorated (the wire field is optional), and the pass reads at most
- * [`MAX_MCP_BUNDLES_SCANNED`] documents — each warmed by the immutable per-version cache, so a
- * steady-state listing costs no vault round-trips.
+ * server name — read from the RECORDED claim (`web.bundle_identity`), which is the same name the
+ * registry lane serves and the one the workspace holds it against. It used to be what let the
+ * CLI resolve a registry-shaped `add` against the connected workspaces before the official
+ * registry; that door is gone, and NO client reads the field today — it stands for
+ * registry-shape consumers of this listing.
+ *
+ * One indexed read for the whole listing, no vault round-trips and no per-pass cap: the claim
+ * IS the recorded answer. Additive by design — an entry with no recorded claim (a server whose
+ * document was unreadable when its name was last due to be recorded) is left undecorated, and
+ * the wire field is optional.
  */
 export async function withMcpServerNames<
   T extends { skill_id: string; kind: string; status: string; version_id: string },
 >(ws: string, entries: T[]): Promise<(T & { mcp_server_name?: string })[]> {
-  let budget = MAX_MCP_BUNDLES_SCANNED;
-  const out: (T & { mcp_server_name?: string })[] = [];
-  for (const entry of entries) {
-    if (entry.kind !== "mcp" || entry.status !== "active" || budget <= 0) {
-      out.push(entry);
-      continue;
+  if (!entries.some((entry) => entry.kind === "mcp" && entry.status === "active")) {
+    return entries;
+  }
+  const identities = await identitiesByBundle(ws, "mcp");
+  return entries.map((entry) => {
+    if (entry.kind !== "mcp" || entry.status !== "active") {
+      return entry;
     }
-    budget -= 1;
-    const document = await serverDocumentOf(ws, entry.skill_id, entry.version_id);
-    out.push(
-      document !== null && typeof document.name === "string"
-        ? { ...entry, mcp_server_name: document.name }
-        : entry,
-    );
-  }
-  return out;
-}
-
-export type McpNameCheck =
-  | { kind: "free" }
-  | { kind: "taken"; by: McpBundleRow }
-  | { kind: "indeterminate" };
-
-/**
- * Is `serverName` free in this workspace, ignoring `exceptBundleId` (the bundle being
- * republished — a new version of the same server is not a collision with itself)?
- *
- * Uniqueness is on the EMBEDDED name, not the catalog name, because that is the identity the
- * registry read API resolves: two bundles declaring `io.github.acme/weather` would make
- * `…/servers/io.github.acme%2Fweather/versions/latest` ambiguous, and an agent would get
- * whichever one sorted first. So the collision is refused at the door instead of resolved by
- * accident. An INDETERMINATE answer (a scan that could not see the whole catalog) is not a
- * free one — the gate fails toward the refusal.
- *
- * `db`: the locked re-checks pass their transaction so the scan reads on the HELD client (see
- * [`scanMcpCatalog`]); the unlocked pre-checks omit it.
- */
-export async function mcpNameTaken(
-  actor: MemberActor | SessionActor,
-  serverName: string,
-  exceptBundleId: string | null,
-  db?: McpDbClient,
-): Promise<McpNameCheck> {
-  const scan = await scanMcpCatalog(actor, MAX_MCP_BUNDLES_SCANNED, db);
-  const hit = scan.entries.find(
-    (entry) => entry.serverName === serverName && entry.row.bundleId !== exceptBundleId,
-  );
-  if (hit !== undefined) {
-    return { kind: "taken", by: hit.row };
-  }
-  return scan.incomplete ? { kind: "indeterminate" } : { kind: "free" };
+    const name = identities.get(entry.skill_id);
+    return name === undefined ? entry : { ...entry, mcp_server_name: name };
+  });
 }

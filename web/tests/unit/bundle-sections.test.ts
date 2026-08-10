@@ -77,15 +77,21 @@ async function face(
   }
 }
 
-describe("the rail's two sections", () => {
-  it("splits the catalog by kind — a server is in servers and NOT in skills", async () => {
+describe("the rail's sections", () => {
+  it("splits the catalog by kind — a server is in its own section and NOT among the skills", async () => {
     const { loadChrome } = await import("@/lib/shell/chrome.server");
     const { asUser } = await import("./helpers/scratch-db");
+    const { BUNDLE_KINDS } = await import("@/lib/bundle-base");
     const chrome = await loadChrome(new Request(`${ORIGIN}/`), asUser(MEMBER.id, MEMBER.name));
     const workspace = chrome.workspace;
     expect(workspace).not.toBeNull();
-    expect(workspace?.skills.map((s) => s.name)).toEqual(["pr-describe"]);
-    expect(workspace?.servers.map((s) => s.name)).toEqual(["weather"]);
+    // ONE section per defined kind, in the records' own order — the rail cannot silently lose a
+    // section when a kind is added, and the order it renders in is the order they are written.
+    expect(workspace?.sections.map((s) => s.kind)).toEqual(BUNDLE_KINDS.map((k) => k.kind));
+    const rowsOf = (kind: string) =>
+      workspace?.sections.find((s) => s.kind === kind)?.rows.map((r) => r.name);
+    expect(rowsOf("skill")).toEqual(["pr-describe"]);
+    expect(rowsOf("mcp")).toEqual(["weather"]);
   });
 });
 

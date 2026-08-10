@@ -1,4 +1,5 @@
 import { index, layout, prefix, type RouteConfigEntry, route } from "@react-router/dev/routes";
+import { BUNDLE_KINDS } from "../lib/bundle-base";
 
 /**
  * The product app's route table as DATA — the first of the four composition seams.
@@ -46,13 +47,13 @@ export function ossRoutes(options: OssRoutesOptions = {}): RouteConfigEntry[] {
   // A skill and an MCP server are the SAME page module under TWO bases: the kind decides which
   // one addresses a given bundle, and each mount fences itself (app/lib/bundle-base.server.ts).
   // The mount is told apart by its PARAM NAME (`:skill` vs `:server`), never by route id — a
-  // downstream build re-roots these modules, which renames ids.
+  // downstream build re-roots these modules, which renames ids. Both mounts are BUILT from the
+  // per-kind records (app/lib/bundle-base.ts), so a kind cannot be half-addressable.
   const faceChildren: RouteConfigEntry[] = [
     tenancy === "multi"
       ? route(":ws", file("workspace-dashboard.tsx"))
       : index(file("workspace-dashboard.tsx")),
-    route(faceSub(tenancy, "skills/:skill"), file("skill-current.tsx")),
-    route(faceSub(tenancy, "mcp/:server"), file("skill-current.tsx"), { id: "mcp-current" }),
+    ...bundleMounts(BUNDLE_FACE, file, (sub) => faceSub(tenancy, sub)),
     route(faceSub(tenancy, "channels/:channel"), file("channel-detail.tsx")),
   ];
 
@@ -185,6 +186,56 @@ function faceSub(tenancy: "single" | "multi", sub: string): string {
   return tenancy === "multi" ? `:ws/${sub}` : sub;
 }
 
+/** One page of a bundle: the path tail under `<base>/:<param>`, the module, and the name its
+ *  second mount's route id is built from. */
+interface BundlePage {
+  /** The id suffix a second mount takes (`mcp-history`) — also how the breadcrumb registry
+   *  spells its double registration. */
+  page: string;
+  /** Appended to `<base>/:<param>`; empty for the face itself. */
+  tail: string;
+  file: string;
+}
+
+/** The shareable FACE — the bundle's canonical page, mounted under face-shell.tsx. */
+const BUNDLE_FACE: readonly BundlePage[] = [
+  { page: "current", tail: "", file: "skill-current.tsx" },
+];
+
+/** The member-only sub-pages, one mount per kind. */
+const BUNDLE_SUBPAGES: readonly BundlePage[] = [
+  { page: "history", tail: "/history", file: "skill-history.tsx" },
+  { page: "proposals", tail: "/proposals", file: "skill-proposals.tsx" },
+  { page: "proposal-review", tail: "/proposals/:versionId", file: "proposal-review.tsx" },
+  { page: "settings", tail: "/settings", file: "skill-settings.tsx" },
+  { page: "versions", tail: "/versions/:versionId", file: "version-files.tsx" },
+  { page: "file-view", tail: "/versions/:versionId/files/*", file: "file-view.tsx" },
+];
+
+/**
+ * Mount each page once PER KIND: `<base>/:<param><tail>`, in the registry's order (skills, then
+ * MCP). The first kind's mount keeps React Router's file-derived id; every further mount of the
+ * same module needs an explicit one, which the kind's record supplies — those strings are chrome
+ * keys (the breadcrumb registry looks a match up by id), so they are named data, not incidental.
+ *
+ * `at` roots each path for the tree it is going into: the faces carry their own `:ws` segment in
+ * multi tenancy, while the member children are prefixed wholesale further down.
+ */
+function bundleMounts(
+  pages: readonly BundlePage[],
+  file: (p: string) => string,
+  at: (sub: string) => string,
+): RouteConfigEntry[] {
+  return BUNDLE_KINDS.flatMap((kind) =>
+    pages.map((page) => {
+      const path = at(`${kind.base}/:${kind.paramName}${page.tail}`);
+      return kind.routeIdPrefix === null
+        ? route(path, file(page.file))
+        : route(path, file(page.file), { id: `${kind.routeIdPrefix}-${page.page}` });
+    }),
+  );
+}
+
 /** The member-only pages, mounted origin-rooted (single) or under `/:ws` (multi). */
 function memberWorkspaceChildren(
   tenancy: "single" | "multi",
@@ -197,13 +248,13 @@ function memberWorkspaceChildren(
     // The disclosure page: what this workspace can and cannot read from a member's machines,
     // limits first, with that member's own reported rows as the proof.
     route("visibility", file("visibility.tsx")),
-    // Add-from-GitHub: server-side fetch → preview → publish WITH upstream provenance.
-    route("skills/import", file("skill-import.tsx")),
-    // Add-an-MCP-server — the MCP section's own way in (its `+ new`): pick from the built-in
-    // list, or name / fetch / paste a document → publish as a `kind: 'mcp'` bundle whose one
-    // file is the server document. Nothing here offers a skill, and the Skills `+` offers no
-    // server.
-    route("mcp/new", file("mcp-new.tsx")),
+    // EACH SECTION'S OWN WAY IN, one per kind, from the same records that build the mounts
+    // below — so a kind can never gain pages without gaining the door that fills them. Skills:
+    // add-from-GitHub (server-side fetch → preview → publish WITH upstream provenance). MCP:
+    // pick from the built-in list, or name / fetch / paste a document → publish as a
+    // `kind: 'mcp'` bundle whose one file is the server document. Neither door offers the other
+    // kind. Each path's STATIC first pair of segments outranks its kind's `:<param>` mount.
+    ...BUNDLE_KINDS.map((kind) => route(kind.newPagePath, file(kind.newPageFile))),
     route("members", file("workspace-members.tsx")),
     route("settings/archive", file("workspace-archive.tsx")),
     route("settings", file("workspace-settings.tsx")),
@@ -218,26 +269,10 @@ function memberWorkspaceChildren(
     route("channels/new", file("channel-new.tsx")),
     route("channels/:channel/history", file("channel-history.tsx")),
     route("channels/:channel/settings", file("channel-settings.tsx")),
-    // The skill subpages (the skill FACE itself is under face-shell). Member-only.
-    route("skills/:skill/history", file("skill-history.tsx")),
-    route("skills/:skill/proposals", file("skill-proposals.tsx")),
-    route("skills/:skill/proposals/:versionId", file("proposal-review.tsx")),
-    route("skills/:skill/settings", file("skill-settings.tsx")),
-    route("skills/:skill/versions/:versionId", file("version-files.tsx")),
-    route("skills/:skill/versions/:versionId/files/*", file("file-view.tsx")),
-    // The SAME subpages under the MCP base — one module each, kind-fenced, so a server's tabs
-    // stay inside the MCP section instead of walking the reader back into Skills. The static
-    // `mcp/new` above outranks `mcp/:server`, exactly as `skills/import` does.
-    route("mcp/:server/history", file("skill-history.tsx"), { id: "mcp-history" }),
-    route("mcp/:server/proposals", file("skill-proposals.tsx"), { id: "mcp-proposals" }),
-    route("mcp/:server/proposals/:versionId", file("proposal-review.tsx"), {
-      id: "mcp-proposal-review",
-    }),
-    route("mcp/:server/settings", file("skill-settings.tsx"), { id: "mcp-settings" }),
-    route("mcp/:server/versions/:versionId", file("version-files.tsx"), { id: "mcp-versions" }),
-    route("mcp/:server/versions/:versionId/files/*", file("file-view.tsx"), {
-      id: "mcp-file-view",
-    }),
+    // The bundle sub-pages (the FACE itself is under face-shell), one mount per kind: ONE module
+    // each, kind-fenced, so a server's tabs stay inside the MCP section instead of walking the
+    // reader back into Skills. Member-only.
+    ...bundleMounts(BUNDLE_SUBPAGES, file, (sub) => sub),
   ];
   return tenancy === "multi" ? prefix(":ws", children) : children;
 }

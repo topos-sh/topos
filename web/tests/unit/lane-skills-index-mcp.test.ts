@@ -3,6 +3,7 @@ import {
   asSession,
   bootWorkspace,
   createScratchDb,
+  recordSeededIdentities,
   type ScratchDb,
   seedBundle,
   versionIdFor,
@@ -45,6 +46,9 @@ async function seedServer(
       { path: "server.json", content: JSON.stringify(opts.document, null, 2) },
     ]);
   }
+  // A seeded server stands as if published, so the name it serves is on record — which is where
+  // the listing now reads it from, instead of re-reading every document through the vault.
+  await recordSeededIdentities();
 }
 
 beforeAll(async () => {

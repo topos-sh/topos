@@ -92,7 +92,12 @@ const CANDIDATE = {
  * owns that rule), so every case whose effective kind is 'mcp' hands over a real document —
  * otherwise these tests would be asserting the kind gate through a document refusal.
  */
-const MCP_CANDIDATE = {
+/**
+ * An MCP-shaped candidate whose embedded registry name is the BUNDLE'S OWN. A workspace admits
+ * one bundle per registry name, so cases here that are about the KIND tag — not about naming —
+ * must each carry their own, or the second one is refused for a reason this file is not testing.
+ */
+const mcpCandidateFor = (bundleId: string) => ({
   ...CANDIDATE,
   files: [
     {
@@ -100,7 +105,7 @@ const MCP_CANDIDATE = {
       mode: "100644",
       content_base64: Buffer.from(
         JSON.stringify({
-          name: "io.github.acme/widget",
+          name: `io.github.acme/${bundleId.replaceAll("_", "-")}`,
           description: "A widget server.",
           version: "1.0.0",
           remotes: [{ type: "streamable-http", url: "https://widget.acme.example/mcp" }],
@@ -109,7 +114,7 @@ const MCP_CANDIDATE = {
       ).toString("base64"),
     },
   ],
-};
+});
 
 /** Drive the shared flow the way both doors do, and give back the parsed envelope. */
 async function runFlow(args: {
@@ -129,7 +134,7 @@ async function runFlow(args: {
     opId: opId(),
     skillId: args.skillId,
     expected: args.expected ?? 0,
-    candidate: args.mcpCandidate === true ? MCP_CANDIDATE : CANDIDATE,
+    candidate: args.mcpCandidate === true ? mcpCandidateFor(args.skillId) : CANDIDATE,
     displayName: args.displayName ?? "Widget",
     channel: null,
     kind: args.kind ?? null,

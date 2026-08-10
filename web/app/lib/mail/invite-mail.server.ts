@@ -1,6 +1,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { serverEnv } from "@/env.server";
+import { kindEntry } from "@/lib/bundle-base";
 import { recordDevMail } from "@/lib/mail/dev-outbox.server";
 import { escapeHtml, mailDelivery, sendMail } from "@/lib/mail/transport.server";
 
@@ -61,7 +62,7 @@ function inviteLines({
   html: string;
 } {
   // The hint's kind is the catalog tag; the mail says what a person calls it.
-  const hintNoun = hint === undefined ? "" : hint.kind === "mcp" ? "MCP server" : hint.kind;
+  const hintNoun = hint === undefined ? "" : kindEntry(hint.kind).noun;
   const hintLead = hint === undefined ? "" : ` — starting with the ${hint.name} ${hintNoun}`;
   const subject = `You're invited to ${workspaceDisplayName} on Topos${hintLead}`;
   const intro =

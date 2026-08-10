@@ -16,7 +16,7 @@ import {
   inFinalTx,
   insertReceiptInTx,
   lockOpenProposalInTx,
-  mcpNameClaimRefusalInTx,
+  movePointerWithKindPrecondition,
   publishTargetOf,
   resolveProposalInTx,
 } from "@/lib/db/queries.custody.server";
@@ -145,20 +145,16 @@ export async function action({ request }: ActionFunctionArgs): Promise<Response>
         expected_generation: head.expected,
         attribution: actor.display,
       });
-    // AN APPROVE IS A NAME CLAIM when the bundle is an MCP server: promoting the candidate makes
-    // the registry name INSIDE it this workspace's, and that name must be no other active
-    // bundle's — the same rule publish, re-publish and unarchive each enforce. The claim and the
-    // move ride ONE transaction holding the per-workspace name lock, so a publish cannot take the
-    // name between the check and the move; every other kind moves the pointer exactly as before.
-    const claimed =
-      target.kind === "mcp"
-        ? await inFinalTx(async (tx) => {
-            const refusal = await mcpNameClaimRefusalInTx(tx, actor, target.bundleId, proposalId);
-            return refusal === null
-              ? ({ refusal: null, moved: await promote() } as const)
-              : ({ refusal } as const);
-          })
-        : ({ refusal: null, moved: await promote() } as const);
+    // Whatever this bundle's KIND requires before its `current` may move happens first, in the
+    // same transaction as the move (promoting an MCP candidate makes the registry name inside it
+    // this workspace's, and that name must be no other active bundle's).
+    const claimed = await movePointerWithKindPrecondition({
+      kind: target.kind,
+      actor,
+      bundleId: target.bundleId,
+      versionId: proposalId,
+      move: promote,
+    });
     if (claimed.refusal !== null) {
       const envelope = deniedEnvelope(
         "review",
