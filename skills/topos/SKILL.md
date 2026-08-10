@@ -169,6 +169,10 @@ absolute), a project file spells relative paths inside the checkout. Hand-edit t
 next `topos update` converges it — a new entry installs, a dropped entry uninstalls (edited
 copies kept, disclosed).
 
+A CHANNEL row carries members of both kinds, so it takes two arrays: `dest` freezes its skill
+members' folders and `mcp_dest` freezes its MCP members' config files. Each narrows only its own
+kind; with no `mcp_dest` the channel's MCP members reach every MCP-capable agent.
+
 Two spellings are the GLOBAL file's alone (a project manifest is a repo fact): a two-segment
 `"topos.sh/acme" = "*"` row — everything that workspace currently gives you; `topos login` writes
 it on the machine's first connection, and a deleted one stays deleted — and `"<ref>" = "off"`,

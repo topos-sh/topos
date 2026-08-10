@@ -2677,6 +2677,10 @@ fn a_fault_at_any_write_never_tears_state_and_the_next_converge_heals() {
 /// `$HOME`) — the dest narrowing every machine-scope fixture rides.
 const SAFE: &str = "dest = [\"~/.cursor/mcp.json\", \"~/.openclaw/openclaw.json\"]";
 
+/// The same two files spelled for a CHANNEL row, whose MCP members are narrowed by `mcp_dest`
+/// alone — its `dest` names folders for the skill members.
+const SAFE_CHANNEL: &str = "mcp_dest = [\"~/.cursor/mcp.json\", \"~/.openclaw/openclaw.json\"]";
+
 /// Seed the fake home so cursor + openclaw detect (their detect dirs exist).
 fn seed_harness_dirs(home: &Path) {
     std::fs::create_dir_all(home.join(".cursor")).unwrap();
@@ -3093,7 +3097,7 @@ fn a_channel_drop_removes_the_entries_everywhere() {
         }],
     };
     rig.write_global(&format!(
-        "[bundles]\n\"{HOST}/{WS_NAME}/channels/tools\" = {{ {SAFE} }}\n"
+        "[bundles]\n\"{HOST}/{WS_NAME}/channels/tools\" = {{ {SAFE_CHANNEL} }}\n"
     ));
     let ctx = rig.ctx_at(Some(&rig.work.0));
     sweep(&ctx, &plane, &dir);
@@ -3401,6 +3405,18 @@ fn a_dest_naming_only_unknown_files_reaches_no_agent_and_says_so() {
         "a bundle reaching nothing is never filed as an advisory: {:?}",
         out.advisories
     );
+    // The line reads whole with the code taken off the front, which is how the TTY prints it. It
+    // used to lead with the scope label, so the receipt said `person:` — the resolver's word for
+    // the machine-wide scope, and never a person's.
+    assert_eq!(
+        crate::render::plain_coded_line(loud[0]),
+        &loud[0]["MCP_DEST_NO_AGENT ".len()..],
+        "{loud:?}"
+    );
+    assert!(
+        crate::render::plain_coded_line(loud[0]).starts_with("\"alpha\" reaches no agent"),
+        "{loud:?}"
+    );
 
     // The ROW says it too — on the settled sweep, where the row is otherwise up to date and a
     // compact receipt would have dropped it entirely.
@@ -3575,6 +3591,407 @@ fn one_bundles_dest_advisory_never_swallows_anothers_reaches_no_agent() {
         "the bundle reaching nothing is warned in its own right: {:?}",
         out.warnings
     );
+}
+
+// =================================================================================================
+// A CHANNEL narrows its two kinds SEPARATELY. A channel is the one row whose members can be of
+// both kinds, so one array could never speak for them: `dest` names placement FOLDERS for its
+// skill members, `mcp_dest` names CONFIG FILES for its mcp members, and neither says anything
+// about the other's kind.
+// =================================================================================================
+
+/// A catalog entry for an ordinary SKILL — the mcp fixture with its kind flipped, so one channel
+/// can hold a member of each kind.
+fn skill_catalog_entry(skill_id: &str, name: &str, v: &Version) -> WireSkillIndexEntry {
+    let mut e = mcp_catalog_entry(skill_id, name, v);
+    e.kind = "skill".into();
+    e
+}
+
+/// A `tools` channel carrying exactly these catalog entries.
+fn channel_of(members: Vec<WireSkillIndexEntry>) -> FakeDirectory {
+    FakeDirectory {
+        channels: vec![WireChannelEntry {
+            name: "tools".into(),
+            mode: "open".into(),
+            builtin: false,
+            included: true,
+            skills: members
+                .iter()
+                .map(|e| WireChannelSkill {
+                    skill_id: e.skill_id.clone(),
+                    name: e.name.clone(),
+                })
+                .collect(),
+        }],
+        skills: members,
+    }
+}
+
+/// A checkout whose committed manifest holds `body`, with the project MCP surfaces of claude-code,
+/// codex and opencode seeded so they engage hermetically (their project files are
+/// checkout-relative; the home-rooted ones are `seed_harness_dirs`'s).
+fn project_with(tag: &str, body: &str) -> Scratch {
+    let proj = Scratch::new(tag);
+    std::fs::create_dir_all(proj.0.join(".git")).unwrap();
+    std::fs::create_dir_all(proj.0.join(".codex")).unwrap();
+    std::fs::write(proj.0.join(".codex/config.toml"), b"").unwrap();
+    std::fs::write(proj.0.join("opencode.json"), b"").unwrap();
+    std::fs::write(proj.0.join(crate::manifest::MANIFEST_FILE), body).unwrap();
+    proj
+}
+
+/// The skill + server pair every channel test below expands — ids deliberately unequal to their
+/// display names, so nothing can pass while confusing one for the other.
+fn skill_and_server() -> (Version, Version) {
+    (
+        mk_version(&[("SKILL.md", b"# deploy\n")]),
+        mk_version(&[(
+            "server.json",
+            server_json("https://mcp.example/a").as_bytes(),
+        )]),
+    )
+}
+
+/// **D6 — `dest` places the skills, and a channel with no `mcp_dest` narrows nothing.** The
+/// channel's `dest` freezes where its SKILL members land; its MCP member is untouched by that
+/// array and reaches every MCP-capable agent, which is what "no narrowing" has always meant. A
+/// healthy delivery says nothing about either.
+#[test]
+fn a_channel_dest_places_its_skills_while_its_servers_reach_every_agent() {
+    let rig = Rig::new("ch-dest");
+    rig.seed_session();
+    seed_harness_dirs(&rig.home.0);
+    std::fs::create_dir_all(rig.home.0.join(".claude")).unwrap();
+    // PROJECT scope: every MCP surface is checkout-relative there, so "every agent" is hermetic.
+    let proj = project_with(
+        "ch-dest-co",
+        &format!(
+            "[bundles]\n\"{HOST}/{WS_NAME}/channels/tools\" = {{ dest = [\"prompts/skills\"] }}\n"
+        ),
+    );
+    let (sk, sv) = skill_and_server();
+    let plane = FakePlane::new()
+        .with_version("s_dep", &sk)
+        .with_version("s_a", &sv);
+    let dir = channel_of(vec![
+        skill_catalog_entry("s_dep", "deploy", &sk),
+        mcp_catalog_entry("s_a", "alpha", &sv),
+    ]);
+    let ctx = rig.ctx_at(Some(&proj.0));
+    let out = sweep(&ctx, &plane, &dir);
+
+    // The SKILL member is frozen to the folder the channel names, and to nowhere else.
+    assert!(
+        proj.0.join("prompts/skills/deploy/SKILL.md").exists(),
+        "{:?} / {:?}",
+        out.data.skills,
+        out.warnings
+    );
+    assert!(
+        !proj.0.join(".claude/skills/deploy").exists(),
+        "the default project dirs get nothing — the channel froze its skills' destination"
+    );
+    // The MCP member reached every project surface: the channel's `dest` said nothing about it.
+    for rel in [
+        ".mcp.json",
+        ".codex/config.toml",
+        ".cursor/mcp.json",
+        "opencode.json",
+    ] {
+        let text =
+            std::fs::read_to_string(proj.0.join(rel)).unwrap_or_else(|e| panic!("{rel}: {e}"));
+        assert!(text.contains("topos-eng-alpha"), "{rel}: {text}");
+    }
+    assert!(
+        !proj.0.join("prompts/skills/alpha").exists(),
+        "a server is never placed as a folder"
+    );
+    assert!(
+        !out.warnings
+            .iter()
+            .chain(out.advisories.iter())
+            .any(|w| w.contains("MCP_DEST")),
+        "a healthy channel is silent: {:?} / {:?}",
+        out.warnings,
+        out.advisories
+    );
+    assert!(out.failed_bundles.is_empty(), "{:?}", out.failed_bundles);
+}
+
+/// **F5 — a channel that narrows a server to NOTHING is a failure, said out loud.** The old code
+/// asked for this narrowing with warnings switched off, so one typo delivered the server nowhere
+/// while the receipt read healthy. It is the ordinary one-bundle-one-bucket outcome now: nothing
+/// is placed, the bundle is counted failed under its IDENTITY, its success row stands down, and
+/// the line names the channel it came through plus both ways out. The channel's SKILL members are
+/// untouched — the arrays are separate, and so are their fates.
+#[test]
+fn a_channels_typoed_mcp_dest_fails_the_server_and_names_the_channel() {
+    let rig = Rig::new("ch-zero");
+    rig.seed_session();
+    seed_harness_dirs(&rig.home.0);
+    let (sk, sv) = skill_and_server();
+    let plane = FakePlane::new()
+        .with_version("s_dep", &sk)
+        .with_version("s_a", &sv);
+    let dir = channel_of(vec![
+        skill_catalog_entry("s_dep", "deploy", &sk),
+        mcp_catalog_entry("s_a", "alpha", &sv),
+    ]);
+    rig.write_global(&format!(
+        "[bundles]\n\"{HOST}/{WS_NAME}/channels/tools\" = \
+         {{ mcp_dest = [\"~/.cursor/mcp.jsonn\"] }}\n"
+    ));
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    let out = sweep(&ctx, &plane, &dir);
+
+    // Fail-closed: not one config file was written, detected agents and all.
+    assert!(!rig.home.0.join(".cursor/mcp.json").exists());
+    assert!(!rig.home.0.join(".openclaw/openclaw.json").exists());
+
+    // The line, verbatim — one code, the channel as provenance INSIDE it.
+    let loud: Vec<&String> = out
+        .warnings
+        .iter()
+        .filter(|w| w.contains("MCP_DEST_NO_AGENT"))
+        .collect();
+    assert_eq!(loud.len(), 1, "{:?}", out.warnings);
+    assert_eq!(
+        loud[0],
+        "MCP_DEST_NO_AGENT \"alpha\" (via channel \"tools\") reaches no agent — the channel's \
+         mcp_dest in topos.toml names no MCP config file; add one to that mcp_dest, or drop \
+         mcp_dest so it reaches every MCP-capable agent"
+    );
+    // …and the TTY prints it as prose: the sentence reads whole with the code taken off.
+    assert_eq!(
+        crate::render::plain_coded_line(loud[0]),
+        "\"alpha\" (via channel \"tools\") reaches no agent — the channel's mcp_dest in \
+         topos.toml names no MCP config file; add one to that mcp_dest, or drop mcp_dest so it \
+         reaches every MCP-capable agent"
+    );
+    assert!(
+        !out.advisories.iter().any(|w| w.contains("MCP_DEST")),
+        "a server reaching nothing is never filed as an advisory: {:?}",
+        out.advisories
+    );
+
+    // ONE BUNDLE, ONE BUCKET: the tally counts the SERVER under its identity (the run exits
+    // non-zero on exactly this), and the row that would have read `installed` stands down.
+    assert_eq!(
+        out.failed_bundles,
+        [("person".to_owned(), "s_a".to_owned())]
+            .into_iter()
+            .collect(),
+        "the skill member is no part of this: {:?}",
+        out.failed_bundles
+    );
+    assert!(
+        !out.data.skills.iter().any(|s| s.skill == "alpha"),
+        "the server's success row stood down: {:?}",
+        out.data.skills
+    );
+    // The SKILL member delivered, and keeps its own row.
+    assert!(
+        out.data.skills.iter().any(|s| s.skill == "deploy"),
+        "{:?}",
+        out.data.skills
+    );
+    // The fix is a file edit, so no argv-shaped action is offered — the sentence IS the remedy.
+    assert!(out.fault_actions.is_empty(), "{:?}", out.fault_actions);
+}
+
+/// **A channel's `mcp_dest` that maps SOME of its entries still delivers, and stays quiet.** A
+/// bundle row's unmapped entry earns an advisory because that row is one machine's own choice; a
+/// channel is curated for a whole team, so an entry aimed at an agent this particular machine
+/// never installed is ordinary — not news.
+#[test]
+fn a_channels_partly_mapping_mcp_dest_delivers_narrowed_with_no_advisory() {
+    let rig = Rig::new("ch-partial");
+    rig.seed_session();
+    seed_harness_dirs(&rig.home.0);
+    let (_, sv) = skill_and_server();
+    let plane = FakePlane::new().with_version("s_a", &sv);
+    let dir = channel_of(vec![mcp_catalog_entry("s_a", "alpha", &sv)]);
+    rig.write_global(&format!(
+        "[bundles]\n\"{HOST}/{WS_NAME}/channels/tools\" = \
+         {{ mcp_dest = [\"~/.cursor/mcp.json\", \"~/.typo/mcp.json\"] }}\n"
+    ));
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    let out = sweep(&ctx, &plane, &dir);
+
+    assert!(
+        std::fs::read_to_string(rig.home.0.join(".cursor/mcp.json"))
+            .unwrap()
+            .contains("topos-eng-alpha"),
+        "the entries that DID map still deliver"
+    );
+    assert!(
+        !rig.home.0.join(".openclaw/openclaw.json").exists(),
+        "the narrowing held: openclaw was not named"
+    );
+    assert!(
+        !out.warnings
+            .iter()
+            .chain(out.advisories.iter())
+            .any(|w| w.contains("MCP_DEST")),
+        "no advisory is owed on a channel: {:?} / {:?}",
+        out.warnings,
+        out.advisories
+    );
+    assert!(out.failed_bundles.is_empty(), "{:?}", out.failed_bundles);
+}
+
+/// **A channel's `dest` is a FOLDER even when it is spelled like a config file — and its servers
+/// never read it.** This is the whole point of the split: before it, fixing a server by adding a
+/// config path to `dest` moved the channel's skills into a directory of that name. The skill
+/// members still take it as a folder (that is what `dest` means to them); the server ignores it
+/// and reaches every MCP-capable agent, none of which is the file `dest` happens to name.
+#[test]
+fn a_config_file_path_in_a_channels_dest_is_a_folder_to_skills_and_nothing_to_servers() {
+    let rig = Rig::new("ch-crossed");
+    rig.seed_session();
+    seed_harness_dirs(&rig.home.0);
+    std::fs::create_dir_all(rig.home.0.join(".claude")).unwrap();
+    // `.openclaw/openclaw.json` is a real MCP config spelling — and openclaw has no PROJECT
+    // surface, so nothing in this checkout could ever read it as one.
+    let proj = project_with(
+        "ch-crossed-co",
+        &format!(
+            "[bundles]\n\"{HOST}/{WS_NAME}/channels/tools\" = \
+             {{ dest = [\".openclaw/openclaw.json\"] }}\n"
+        ),
+    );
+    let (sk, sv) = skill_and_server();
+    let plane = FakePlane::new()
+        .with_version("s_dep", &sk)
+        .with_version("s_a", &sv);
+    let dir = channel_of(vec![
+        skill_catalog_entry("s_dep", "deploy", &sk),
+        mcp_catalog_entry("s_a", "alpha", &sv),
+    ]);
+    let ctx = rig.ctx_at(Some(&proj.0));
+    let out = sweep(&ctx, &plane, &dir);
+
+    // To the SKILL member it is a directory, and its copy is inside it.
+    let as_folder = proj.0.join(".openclaw/openclaw.json");
+    assert!(
+        as_folder.join("deploy/SKILL.md").exists(),
+        "{:?} / {:?}",
+        out.data.skills,
+        out.warnings
+    );
+    assert!(as_folder.is_dir(), "never a config file topos wrote");
+    // To the SERVER it is nothing at all: it reached every project surface, unnarrowed.
+    for rel in [
+        ".mcp.json",
+        ".codex/config.toml",
+        ".cursor/mcp.json",
+        "opencode.json",
+    ] {
+        let text =
+            std::fs::read_to_string(proj.0.join(rel)).unwrap_or_else(|e| panic!("{rel}: {e}"));
+        assert!(text.contains("topos-eng-alpha"), "{rel}: {text}");
+    }
+    assert!(out.failed_bundles.is_empty(), "{:?}", out.failed_bundles);
+}
+
+/// **One line per (scope, bundle identity, channel).** The dedupe is keyed on the IDENTITY for the
+/// same reason the failed tally is: two servers narrowed to nothing by one channel are two facts
+/// about two bundles, and a key that collapsed them would leave a server reaching nobody with
+/// nothing said about it. Both are counted, both are named, neither is said twice.
+#[test]
+fn each_server_a_channel_strands_is_named_once_and_counted_once() {
+    let rig = Rig::new("ch-dedupe");
+    rig.seed_session();
+    seed_harness_dirs(&rig.home.0);
+    let va = mk_version(&[(
+        "server.json",
+        server_json("https://mcp.example/a").as_bytes(),
+    )]);
+    let vb = mk_version(&[(
+        "server.json",
+        server_json("https://mcp.example/b").as_bytes(),
+    )]);
+    let plane = FakePlane::new()
+        .with_version("s_a", &va)
+        .with_version("s_b", &vb);
+    let dir = channel_of(vec![
+        mcp_catalog_entry("s_a", "alpha", &va),
+        mcp_catalog_entry("s_b", "beta", &vb),
+    ]);
+    rig.write_global(&format!(
+        "[bundles]\n\"{HOST}/{WS_NAME}/channels/tools\" = \
+         {{ mcp_dest = [\"~/.typo/mcp.json\"] }}\n"
+    ));
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    let out = sweep(&ctx, &plane, &dir);
+
+    let loud: Vec<&String> = out
+        .warnings
+        .iter()
+        .filter(|w| w.contains("MCP_DEST_NO_AGENT"))
+        .collect();
+    assert_eq!(loud.len(), 2, "{:?}", out.warnings);
+    for name in ["alpha", "beta"] {
+        assert_eq!(
+            loud.iter()
+                .filter(|w| w.contains(&format!("\"{name}\" (via channel \"tools\")")))
+                .count(),
+            1,
+            "{name}: {loud:?}"
+        );
+    }
+    assert_eq!(
+        out.failed_bundles,
+        [
+            ("person".to_owned(), "s_a".to_owned()),
+            ("person".to_owned(), "s_b".to_owned())
+        ]
+        .into_iter()
+        .collect()
+    );
+    assert!(
+        out.data.skills.is_empty(),
+        "both success rows stood down: {:?}",
+        out.data.skills
+    );
+}
+
+/// `mcp_dest` is the CHANNEL's word alone — a bundle row's own kind already says which thing its
+/// `dest` means, so the field refuses there exactly as any other unknown key on that shape does:
+/// by naming what the shape takes.
+#[test]
+fn mcp_dest_on_a_bundle_row_refuses_like_any_other_illegal_field() {
+    use crate::manifest::document::{ManifestScope, parse_manifest};
+    let refusal = |text: &str| {
+        parse_manifest(text, ManifestScope::Global)
+            .expect_err("mcp_dest does not fit a bundle row")
+            .message
+    };
+    let workspace = refusal(&format!(
+        "[bundles]\n\"{HOST}/{WS_NAME}/alpha\" = {{ mcp_dest = [\"~/.cursor/mcp.json\"] }}\n"
+    ));
+    assert_eq!(
+        workspace,
+        "`mcp_dest` does not fit a workspace bundle — \
+         `acme.test/eng/alpha` takes `version`, `dest`, `name`"
+    );
+    let local = refusal(
+        "[bundles]\n\"~/servers/x\" = { kind = \"mcp\", mcp_dest = [\"~/.cursor/mcp.json\"] }\n",
+    );
+    assert_eq!(
+        local,
+        "`mcp_dest` does not fit a local folder — `~/servers/x` takes `dest`, `name`, `kind`"
+    );
+    // …and it IS legal on a channel, beside `dest`.
+    parse_manifest(
+        &format!(
+            "[bundles]\n\"{HOST}/{WS_NAME}/channels/tools\" = \
+             {{ dest = [\"~/.claude/skills\"], mcp_dest = [\"~/.cursor/mcp.json\"] }}\n"
+        ),
+        ManifestScope::Global,
+    )
+    .unwrap();
 }
 
 /// A workspace SKILL row whose `dest` names a skills FOLDER — exactly what

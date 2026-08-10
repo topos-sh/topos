@@ -2458,14 +2458,14 @@ fn primary_rank(s: &PullSkill) -> u8 {
 
 /// The codes whose line is written to read as ENGLISH once the code is taken off the front — the
 /// TTY prints them that way, and the `--json` `warnings` array keeps the coded string it always
-/// carried. Two entries, not a policy: a person reading a receipt should not have to skip a
-/// machine word to reach the sentence, and these are the two that shipped one into prose.
+/// carried. A short list, not a policy: a person reading a receipt should not have to skip a
+/// machine word to reach the sentence, and these are the ones that shipped one into prose.
 ///
 /// This is deliberately an ALLOWLIST rather than "strip any leading SCREAMING_SNAKE token". Most
 /// coded lines do not read whole without their code (the code IS the subject of the sentence), so
 /// a blanket rule would mangle them. Settling one convention for every coded line — which channel
 /// carries the code, and how prose is written around it — is the message-contract follow-up.
-const PLAIN_ON_TTY: [&str; 2] = ["MCP_FILE_REMOVED", "PATH_MISSING"];
+const PLAIN_ON_TTY: [&str; 3] = ["MCP_FILE_REMOVED", "PATH_MISSING", "MCP_DEST_NO_AGENT"];
 
 /// A coded line as the TTY says it: the code taken off the front for the allowlisted codes above,
 /// verbatim for everything else.

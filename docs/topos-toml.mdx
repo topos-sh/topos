@@ -99,6 +99,7 @@ The table form carries the same version alongside a few placement fields:
 "topos.sh/acme/code-review" = { version = "*", dest = [".agents/skills"] }
 "topos.sh/acme/db-migrations" = { version = "*", name = "acme-db-migrations" }
 "github.com/acme/monorepo/deploy" = { version = "*", subdir = "tools/skills/deploy" }
+"topos.sh/acme/channels/backend" = { dest = [".agents/skills"], mcp_dest = [".cursor/mcp.json"] }
 "./tools/weather" = { kind = "mcp" }
 ```
 
@@ -106,6 +107,7 @@ The table form carries the same version alongside a few placement fields:
 |---|---|---|
 | `version` | a workspace skill, a GitHub skill | exactly the plain-string form |
 | `dest` | every shape except a whole-workspace line | the destinations this line is frozen to |
+| `mcp_dest` | a channel | the MCP config files this channel's server members are frozen to |
 | `name` | a workspace skill, a GitHub skill, a local folder | renames the delivered folder |
 | `subdir` | a GitHub skill | the literal directory inside the repo |
 | `kind` | a local folder, a GitHub skill | what the bundle *is* when nothing else can say — `"mcp"` marks a folder holding a `server.json` |
@@ -124,6 +126,11 @@ uninstalled — with an edited copy kept in place, disclosed. `dest` is also wha
 skills folder, so a copy aimed at one agent stays there across updates — and what
 `topos remove … -a <agent>` subtracts from, one destination at a time, the row surviving with the
 rest.
+
+A channel line is the one line whose members can be of both kinds, so it takes **two** arrays and
+each narrows only its own. `dest` names the folders the channel's skills land in. `mcp_dest` names
+the MCP config files the channel's servers land in — and a channel with no `mcp_dest` reaches every
+MCP-capable agent on the machine, whatever its `dest` says.
 
 Anything a shape does not accept refuses by naming what it does accept, so a typo cannot silently
 drop a skill you thought you had.
@@ -149,13 +156,16 @@ local folder above rewrites the row to exactly that spelling, kind field and all
 row tagged `kind = "mcp"` refuses when the file loads: an MCP server is delivered from a workspace,
 so publish the bundle there and name it by its workspace address instead.
 
-An MCP line's `dest` entries name each agent's own MCP config, and they must come from the set
+An MCP line's `dest` entries — and a channel line's `mcp_dest` entries — name each agent's own MCP
+config, and they must come from the set
 topos knows how to edit — `~/.claude/skills/topos-mcp` (a Topos-owned plugin *directory*, not a
 file), `~/.codex/config.toml`, `~/.cursor/mcp.json`, `~/.config/opencode/opencode.json`,
 `~/.openclaw/openclaw.json`, `~/.hermes/config.yaml` in your machine's file; `.mcp.json`,
 `.codex/config.toml`, `.cursor/mcp.json`, `opencode.json` in a committed one (an agent whose env
 override moves its config still counts — the resolved path matches too). A destination outside
-that set refuses, because its format must be known to edit it.
+that set refuses, because its format must be known to edit it. A channel is the exception, because
+it expands to members that may not exist yet: an `mcp_dest` naming nothing topos can edit loads
+fine and fails at delivery, per server, naming the channel it came through.
 
 ## Which commands write which lines
 

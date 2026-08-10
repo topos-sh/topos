@@ -13,8 +13,8 @@
 //! stays on its line — through regrouping and through the version-table collapse alike — and a
 //! comment above a section header stays with it.
 //! Values normalize too — a fields table carrying ONLY `version` collapses to the plain version
-//! string, and inline tables render single-line in canonical field order (version, dest, name,
-//! subdir, kind).
+//! string, and inline tables render single-line in canonical field order (version, dest,
+//! mcp_dest, name, subdir, kind).
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
@@ -180,6 +180,7 @@ fn push_row(
 fn normal_value_item(v: &EntryValue) -> Item {
     if let EntryValue::Fields(f) = v
         && f.dest.is_none()
+        && f.mcp_dest.is_none()
         && f.name.is_none()
         && f.subdir.is_none()
         && f.kind.is_none()

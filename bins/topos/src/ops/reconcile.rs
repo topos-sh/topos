@@ -473,6 +473,11 @@ struct Sweep {
     /// `dest` entries already warned about as unknown MCP config files (one line per entry per
     /// run).
     mcp_warned_dests: HashSet<String>,
+    /// `(scope label, bundle identity)` an mcp member resolved through a CHANNEL whose `mcp_dest`
+    /// maps zero config files: it was placed nowhere, so it counts as failed and its receipt row
+    /// stands down. Held aside rather than applied where it is found, because the row's index is
+    /// not known until the sync that pushes it has run.
+    mcp_zero_reach: std::collections::BTreeSet<(String, String)>,
     /// The delivery cache was unreadable this run: the mcp hold computation is blind, so removal
     /// convergence is withheld entirely (freeze, never guess).
     mcp_blind: bool,
@@ -2011,14 +2016,18 @@ fn reconcile_thing<'a>(
                     picked: false,
                 },
             ));
-            // `warn_unknown` rides the row's KIND: a SKILL row's dest entries are placement
-            // FOLDERS (`~/.codex/skills`), not MCP config files — only an mcp row's dest can
-            // mean config files, so only it may warn about an unknown one.
+            // The VOICE rides the row's KIND: a SKILL row's dest entries are placement FOLDERS
+            // (`~/.codex/skills`), not MCP config files — only an mcp row's dest can mean config
+            // files, so only it may warn about an unknown one.
             let narrowing = mcp_filter(
                 sc,
-                Some(row),
+                row.fields().dest,
                 &display,
-                mcp,
+                if mcp {
+                    &DestVoice::Row
+                } else {
+                    &DestVoice::Silent
+                },
                 &mut sweep.mcp_warned_dests,
                 &mut sweep.advisories,
                 &mut sweep.warnings,
@@ -2129,11 +2138,25 @@ fn reconcile_thing<'a>(
     }
 }
 
-/// Resolve one demand's MCP config-file narrowing AND say what it cost. `warn_unknown` is true
-/// only for rows whose dest can ONLY mean config files (an mcp bundle row, a local mcp row); a
-/// SKILL row's dest names placement folders and a CHANNEL's dest may name folders for its skill
-/// members, so their unmapped entries stay silent. `bundle` is the display name every line leads
-/// with.
+/// WHOSE destinations a narrowing is resolving — which decides what its unmapped entries are
+/// allowed to say. The array itself is the same grammar either way; only the voice differs.
+enum DestVoice<'a> {
+    /// A BUNDLE row's `dest` where the row's kind says it can only mean config files (an mcp
+    /// bundle row, a local mcp row): unmapped entries beside working ones are an advisory, and a
+    /// dest that maps none of them is the warning.
+    Row,
+    /// A CHANNEL's `mcp_dest`, narrowing ONE mcp member. A channel expands to members of both
+    /// kinds, so a partly-mapping array is not the same news as it is on a row: the entries that
+    /// did map still deliver every member, and no advisory is owed. Zero-map is a FAILURE — the
+    /// member reaches nobody — deduped per (scope, bundle identity, channel).
+    Channel { channel: &'a str, identity: &'a str },
+    /// The destinations are FOLDERS (a skill row's `dest`, a channel's `dest`) — this resolution
+    /// says nothing about them at all.
+    Silent,
+}
+
+/// Resolve one demand's MCP config-file narrowing AND say what it cost. `bundle` is the display
+/// name every line leads with; `voice` says whose array this is (see [`DestVoice`]).
 ///
 /// The two outcomes are told apart because they are not the same news. A dest that maps SOME of
 /// its entries still delivers, so the dropped entries are an advisory beside a working row. A dest
@@ -2142,20 +2165,47 @@ fn reconcile_thing<'a>(
 /// `unreachable`) rather than reading like a healthy install.
 fn mcp_filter(
     sc: &ScopeCtx<'_>,
-    row: Option<&PlanRow>,
+    dest: Option<Vec<String>>,
     bundle: &str,
-    warn_unknown: bool,
+    voice: &DestVoice<'_>,
     warned: &mut HashSet<String>,
     advisories: &mut Vec<String>,
     warnings: &mut Vec<String>,
 ) -> McpNarrowing {
     let scope = manifest_scope_of(sc);
-    let narrowing = mcp_dest_narrowing(row.and_then(|r| r.fields().dest), scope);
+    let narrowing = mcp_dest_narrowing(dest, scope);
     let label = &sc.label;
-    if !warn_unknown || narrowing.unknown.is_empty() {
+    if matches!(voice, DestVoice::Silent) || narrowing.unknown.is_empty() {
         return McpNarrowing {
             filter: narrowing.filter,
             unreachable: None,
+        };
+    }
+    if let DestVoice::Channel { channel, identity } = voice {
+        if !narrowing.reaches_nothing() {
+            // The array named files this machine has AND files it does not; the members still
+            // reach the ones it does. A channel is curated for a whole team, so an entry aimed at
+            // an agent this particular machine never installed is ordinary — not news.
+            return McpNarrowing {
+                filter: narrowing.filter,
+                unreachable: None,
+            };
+        }
+        // Deduped by (scope, bundle IDENTITY, channel): one channel narrowing one bundle to
+        // nothing is one fact, and a name key would let a workspace `linear` and a local `linear`
+        // standing in one scope swallow each other's line.
+        let clause = CHANNEL_MCP_DEST_NO_AGENT.to_owned();
+        if warned.insert(format!(
+            "no-agent\u{1f}{label}\u{1f}{identity}\u{1f}{channel}"
+        )) {
+            warnings.push(format!(
+                "MCP_DEST_NO_AGENT \"{bundle}\" (via channel \"{channel}\") reaches no agent — \
+                 {clause}"
+            ));
+        }
+        return McpNarrowing {
+            filter: narrowing.filter,
+            unreachable: Some(clause),
         };
     }
     if narrowing.reaches_nothing() {
@@ -2165,8 +2215,10 @@ fn mcp_filter(
         // same spelling swallow it — the exact silence this warning exists to end. (Its own key
         // space, so it can never collide with the per-entry advisory keys either.)
         if warned.insert(format!("no-agent\u{1f}{label}\u{1f}{bundle}")) {
+            // No scope label: the TTY prints this line with its code taken off the front, and
+            // `person` is the resolver's word for the machine-wide scope, not a person's.
             warnings.push(format!(
-                "MCP_DEST_NO_AGENT {label}: \"{bundle}\" reaches no agent — {clause}"
+                "MCP_DEST_NO_AGENT \"{bundle}\" reaches no agent — {clause}"
             ));
         }
         return McpNarrowing {
@@ -2187,6 +2239,11 @@ fn mcp_filter(
         unreachable: None,
     }
 }
+
+/// What a channel's zero-mapping `mcp_dest` costs, and both ways out of it. The fix is a file
+/// edit, so the sentence IS the remedy — there is no argv that writes this array.
+const CHANNEL_MCP_DEST_NO_AGENT: &str = "the channel's mcp_dest in topos.toml names no MCP config file; add one to that mcp_dest, or \
+     drop mcp_dest so it reaches every MCP-capable agent";
 
 /// What [`mcp_filter`] hands one demand: the harness narrowing itself, plus the clause the row
 /// must state when that narrowing leaves the bundle reaching NOTHING.
@@ -2324,9 +2381,9 @@ fn local_mcp_demand(
         Ok(Some(bytes)) => {
             let narrowing = mcp_filter(
                 sc,
-                Some(row),
+                row.fields().dest,
                 display,
-                true,
+                &DestVoice::Row,
                 &mut sweep.mcp_warned_dests,
                 &mut sweep.advisories,
                 &mut sweep.warnings,
@@ -2488,19 +2545,37 @@ fn reconcile_set<'a>(
                     },
                 ));
                 let display = target.name.clone();
-                // The channel row's dest governs every member — config files narrow its mcp
-                // members, folders freeze its skill members' placement (a folder entry is not
-                // an unknown FILE on a channel, so no warning fires for it).
+                // TWO arrays, one per kind. A channel carries members of both kinds, so one `dest`
+                // could not speak for them: it FREEZES the skill members' placement folders, and
+                // `mcp_dest` — and only `mcp_dest` — narrows the mcp members to config files. A
+                // channel with no `mcp_dest` does not narrow its mcp members at all.
                 let dest = if mcp { None } else { row.fields().dest };
+                let voice = if mcp {
+                    DestVoice::Channel {
+                        channel,
+                        identity: target.skill_id.as_str(),
+                    }
+                } else {
+                    DestVoice::Silent
+                };
                 let narrowing = mcp_filter(
                     sc,
-                    Some(row),
+                    if mcp { row.fields().mcp_dest } else { None },
                     &display,
-                    false,
+                    &voice,
                     &mut sweep.mcp_warned_dests,
                     &mut sweep.advisories,
                     &mut sweep.warnings,
                 );
+                // ONE BUNDLE, ONE BUCKET: a narrowing that maps nothing places this member
+                // nowhere, so it is counted a failed bundle and its receipt row stands down —
+                // exactly what a converge that could not place already does. Marked by identity
+                // here and resolved in [`run_mcp_converge`], where the row's index is known.
+                if narrowing.unreachable.is_some() {
+                    sweep
+                        .mcp_zero_reach
+                        .insert((sc.label.clone(), target.skill_id.clone()));
+                }
                 let st = SyncTarget {
                     mcp_dest_filter: narrowing.filter,
                     mcp_unreachable: narrowing.unreachable,
@@ -4980,8 +5055,20 @@ fn run_mcp_converge(
     // dropped in ONE pass below, because until then their positions are what `Sweep::mcp_rows`
     // joins on.
     let mut stood_down: BTreeSet<usize> = BTreeSet::new();
+    // A channel's `mcp_dest` that maps NO config file is the same fact as a converge that could
+    // not place: the member reaches nobody. It is resolved HERE, beside the converge's own, so
+    // both take the one road — the identity index to the row, and the identity-keyed tally.
+    for key in std::mem::take(&mut sweep.mcp_zero_reach) {
+        if let Some(at) = sweep.mcp_rows.get(&key) {
+            stood_down.insert(*at);
+        }
+        sweep.failed_bundles.insert(key);
+    }
     let Some(roots) = env.ctx.roots.clone() else {
-        return merged; // no machine roots: no config surface is resolvable
+        // No machine roots: no config surface is resolvable. The rows marked above still leave —
+        // nothing placed them, and a row that stayed would report a healthy install.
+        drop_stood_down(sweep, &stood_down);
+        return merged;
     };
     // The MACHINE-LEVEL holds every scope shares: cached deliveries of workspaces that produced
     // no fresh snapshot this run (unreached, pending, ended, or logged out), and members of a
@@ -5269,18 +5356,23 @@ fn run_mcp_converge(
             }
         }
     }
-    // ONE BUNDLE, ONE BUCKET, resolved: the rows marked above leave now that every index into
-    // `sweep.rows` has been read. Rows pushed after a marking only ever APPEND, so the positions
-    // held here still name the rows they were taken for.
-    if !stood_down.is_empty() {
-        let mut at = 0;
-        sweep.rows.retain(|_| {
-            let keep = !stood_down.contains(&at);
-            at += 1;
-            keep
-        });
-    }
+    drop_stood_down(sweep, &stood_down);
     merged
+}
+
+/// ONE BUNDLE, ONE BUCKET, resolved: the marked rows leave now that every index into `sweep.rows`
+/// has been read. Rows pushed after a marking only ever APPEND, so the positions held here still
+/// name the rows they were taken for.
+fn drop_stood_down(sweep: &mut Sweep, stood_down: &BTreeSet<usize>) {
+    if stood_down.is_empty() {
+        return;
+    }
+    let mut at = 0;
+    sweep.rows.retain(|_| {
+        let keep = !stood_down.contains(&at);
+        at += 1;
+        keep
+    });
 }
 
 // =================================================================================================

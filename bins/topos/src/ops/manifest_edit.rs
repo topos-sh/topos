@@ -945,6 +945,9 @@ pub(super) fn feed_items(ctx: &Ctx<'_>, connect: &SessionConnect<'_>) -> Vec<Fee
 // ---------------------------------------------------------------------------------------------
 
 /// What a `remove` token resolved to in the target file.
+// A handful of these exist per invocation, each carrying the row it speaks for; boxing a variant
+// would buy indirection and nothing else.
+#[allow(clippy::large_enum_variant)]
 enum Arm {
     /// The file spells this row — drop the line.
     RowDrop { row: PlanRow, name: String },
@@ -3336,9 +3339,10 @@ fn join_notes(lead: String, tail: Option<String>) -> String {
 
 /// What a set split writes on each surviving member row, and how the describe words it: the set
 /// line's pin/fields filtered to what the member's shape legally carries —
-/// `(member value, carried field names, dropped field names)`. Today every set-legal field
-/// (`dest`, a repo set's commit pin) is member-legal too, so `dropped` stays empty;
-/// the filter is still real, so a future set-only field is DISCLOSED rather than silently lost.
+/// `(member value, carried field names, dropped field names)`. `dest` and a repo set's commit pin
+/// are member-legal and carry; a channel's `mcp_dest` is SET-ONLY (a member row's own kind decides
+/// what its `dest` means, so there is nothing for a second array to say there) and is disclosed as
+/// dropped rather than silently lost.
 fn split_carriage(set: &PlanRow) -> (EntryValue, Vec<&'static str>, Vec<&'static str>) {
     use crate::manifest::document::{EntryFields, legal_fields};
     // A representative member shape: a channel's members are workspace bundles, a repo set's
@@ -3389,6 +3393,9 @@ fn split_carriage(set: &PlanRow) -> (EntryValue, Vec<&'static str>, Vec<&'static
                 out.version = f.version.clone();
             });
             take("dest", f.dest.is_some(), &mut || out.dest = f.dest.clone());
+            take("mcp_dest", f.mcp_dest.is_some(), &mut || {
+                out.mcp_dest = f.mcp_dest.clone();
+            });
             take("name", f.name.is_some(), &mut || out.name = f.name.clone());
             take("subdir", f.subdir.is_some(), &mut || {
                 out.subdir = f.subdir.clone();
@@ -3439,9 +3446,13 @@ fn undo_for(arms: &[Arm], global: bool, sugar_host: Option<&str>) -> Vec<String>
             EntryValue::Pin(p) => format!("{}@{p}", row.reference),
             // A fields row carrying ONLY destinations (and a pin) is respellable — the `-a`/
             // `--dest` flags reconstruct exactly the set that left. Anything else the `add`
-            // grammar cannot respell (a name override, a subdir, a kind), so no undo.
+            // grammar cannot respell (a name override, a subdir, a kind, a channel's `mcp_dest` —
+            // no flag writes that array), so no undo.
             EntryValue::Fields(f) => {
-                let respellable = f.name.is_none() && f.subdir.is_none() && f.kind.is_none();
+                let respellable = f.name.is_none()
+                    && f.subdir.is_none()
+                    && f.kind.is_none()
+                    && f.mcp_dest.is_none();
                 let Some(dest) = f.dest.as_ref().filter(|_| respellable) else {
                     return Vec::new();
                 };

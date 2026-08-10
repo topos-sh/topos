@@ -37,6 +37,12 @@
 //! `path`, `harness`, any `[defaults.<kind>]` table — refuse at load with the exact per-row
 //! `dest` rewrite ([`ManifestError::migration`] errors close the TTY with `nothing changed`).
 //!
+//! A CHANNEL row carries members of BOTH kinds, so one array cannot speak for them: its `dest`
+//! names placement FOLDERS for its skill members and `mcp_dest` names CONFIG FILES for its mcp
+//! members. Each narrows only its own kind, and a channel with no `mcp_dest` does not narrow its
+//! mcp members at all. A bundle row needs no such split — its kind already says which one `dest`
+//! means.
+//!
 //! [`ManifestEditor`] edits format-preserving over `toml_edit` with a hard INVERSE property:
 //! adding a row and removing it restores the input byte-for-byte, and vice versa — see
 //! [`ManifestEditor::set_row`] / [`ManifestEditor::remove_row`]. Deterministic reorganization
@@ -68,6 +74,10 @@ pub(crate) struct EntryFields {
     /// The row's destinations — dialect-legal directory strings (config FILES for an MCP row).
     /// `Some` freezes placement to exactly these; absent means every agent, now and later.
     pub dest: Option<Vec<String>>,
+    /// A CHANNEL row's MCP-member destinations — the config files its `kind = "mcp"` members are
+    /// narrowed to. Legal on a channel alone, because it is the only row whose members can be of
+    /// both kinds; absent means its mcp members reach every MCP-capable agent.
+    pub mcp_dest: Option<Vec<String>>,
     pub name: Option<String>,
     pub subdir: Option<String>,
     pub kind: Option<String>,
@@ -160,7 +170,7 @@ fn migrate(key: Option<&str>, message: impl Into<String>) -> ManifestError {
 
 /// The complete field vocabulary — what a key must be to count as a mis-shelved FIELD (the
 /// section-as-entry teaching) rather than an unknown word.
-const FIELD_NAMES: [&str; 5] = ["version", "dest", "name", "subdir", "kind"];
+const FIELD_NAMES: [&str; 6] = ["version", "dest", "mcp_dest", "name", "subdir", "kind"];
 
 /// The RETIRED field spellings — met at load, each refuses with its exact `dest` rewrite.
 const RETIRED_FIELDS: [&str; 2] = ["path", "harness"];
@@ -172,7 +182,7 @@ pub(crate) fn legal_fields(shape: &KeyShape) -> &'static [&'static str] {
         KeyShape::RepoSkill { .. } => &["version", "dest", "name", "subdir", "kind"],
         KeyShape::LocalPath { .. } => &["dest", "name", "kind"],
         KeyShape::RepoSet { .. } => &["dest"],
-        KeyShape::Channel { .. } => &["dest"],
+        KeyShape::Channel { .. } => &["dest", "mcp_dest"],
         KeyShape::Feed { .. } => &[],
     }
 }
@@ -341,9 +351,10 @@ fn fields_check(
     f: &EntryFields,
 ) -> Result<(), ManifestError> {
     let legal = legal_fields(shape);
-    let present: [(&str, bool); 5] = [
+    let present: [(&str, bool); 6] = [
         ("version", f.version.is_some()),
         ("dest", f.dest.is_some()),
+        ("mcp_dest", f.mcp_dest.is_some()),
         ("name", f.name.is_some()),
         ("subdir", f.subdir.is_some()),
         ("kind", f.kind.is_some()),
@@ -377,15 +388,7 @@ fn fields_check(
         }
     }
     if let Some(dest) = &f.dest {
-        if dest.is_empty() {
-            return Err(at(
-                reference,
-                "a dest names at least one destination; drop the field to reach every agent",
-            ));
-        }
-        for entry in dest {
-            dest_entry_check(reference, scope, entry)?;
-        }
+        dest_list_check(reference, "dest", scope, dest)?;
         // A local MCP row's kind is knowable at load — its dest entries are config FILES and
         // must come from the descriptor table (an unknown file's format cannot be edited).
         // Workspace rows learn their kind at delivery; the reconcile enforces the same rule.
@@ -398,6 +401,41 @@ fn fields_check(
                 }
             }
         }
+    }
+    // A channel's `mcp_dest` takes the same path dialect and nothing more. Which files it names is
+    // NOT settled here: a channel expands at delivery, so whether it has any mcp member at all is
+    // unknowable at load — an entry no harness claims is the reconcile's to report, against the
+    // members that actually resolved, rather than a refusal that would take the channel's skill
+    // members down with it.
+    if let Some(mcp_dest) = &f.mcp_dest {
+        dest_list_check(reference, "mcp_dest", scope, mcp_dest)?;
+    }
+    Ok(())
+}
+
+/// One destination array's shape rules: it names at least one entry, and every entry speaks the
+/// scope's path dialect. `field` is the spelling the refusal quotes, so `dest` and `mcp_dest`
+/// teach with their own word.
+fn dest_list_check(
+    reference: &str,
+    field: &str,
+    scope: ManifestScope,
+    entries: &[String],
+) -> Result<(), ManifestError> {
+    if entries.is_empty() {
+        // `mcp_dest` opens on a vowel SOUND ("em-cee-pee"), so the article is spelled for the word
+        // rather than for its first letter.
+        let article = if field == "mcp_dest" { "an" } else { "a" };
+        return Err(at(
+            reference,
+            format!(
+                "{article} {field} names at least one destination; drop the field to reach every \
+                 agent"
+            ),
+        ));
+    }
+    for entry in entries {
+        dest_entry_check(reference, field, scope, entry)?;
     }
     Ok(())
 }
@@ -412,18 +450,19 @@ fn fields_check(
 /// As the grammar's per-entry rule: machine files name machine paths, project files relative
 /// contained ones.
 pub(crate) fn check_dest_entry(entry: &str, scope: ManifestScope) -> Result<(), ManifestError> {
-    dest_entry_check("dest", scope, entry)
+    dest_entry_check("dest", "dest", scope, entry)
 }
 
 fn dest_entry_check(
     reference: &str,
+    field: &str,
     scope: ManifestScope,
     entry: &str,
 ) -> Result<(), ManifestError> {
     if entry.trim().is_empty() {
         return Err(at(
             reference,
-            "`dest` entries are non-empty directory strings",
+            format!("`{field}` entries are non-empty directory strings"),
         ));
     }
     match scope {
@@ -432,7 +471,7 @@ fn dest_entry_check(
                 return Err(at(
                     reference,
                     format!(
-                        "dest entry `{entry}` is relative — the machine-wide file names machine \
+                        "{field} entry `{entry}` is relative — the machine-wide file names machine \
                          paths: `~/`-prefixed or absolute",
                     ),
                 ));
@@ -443,7 +482,7 @@ fn dest_entry_check(
                 return Err(at(
                     reference,
                     format!(
-                        "dest entry `{entry}` leaves the checkout — a project file names \
+                        "{field} entry `{entry}` leaves the checkout — a project file names \
                          relative paths inside it (no `..`, no `~`, not absolute)",
                     ),
                 ));
@@ -853,7 +892,8 @@ fn fields_of(
                 }
                 f.version = Some(s.to_string());
             }
-            "dest" => f.dest = Some(dest_of(reference, v)?),
+            "dest" => f.dest = Some(dest_of(reference, "dest", v)?),
+            "mcp_dest" => f.mcp_dest = Some(dest_of(reference, "mcp_dest", v)?),
             "name" => {
                 f.name = Some(
                     v.as_str()
@@ -881,13 +921,18 @@ fn fields_of(
     Ok(f)
 }
 
-/// Parse a `dest` value: an array of destination strings (emptiness and dialect are
+/// Parse a `dest`/`mcp_dest` value: an array of destination strings (emptiness and dialect are
 /// [`fields_check`]'s judgment — this is only the type gate).
-fn dest_of(reference: &str, v: &Value) -> Result<Vec<String>, ManifestError> {
+fn dest_of(reference: &str, field: &str, v: &Value) -> Result<Vec<String>, ManifestError> {
+    let example = if field == "mcp_dest" {
+        "~/.cursor/mcp.json"
+    } else {
+        "~/.claude/skills"
+    };
     let type_err = || {
         at(
             reference,
-            "`dest` is an array of destination paths (e.g. `[\"~/.claude/skills\"]`)",
+            format!("`{field}` is an array of destination paths (e.g. `[\"{example}\"]`)"),
         )
     };
     let arr = v.as_array().ok_or_else(type_err)?;
@@ -903,7 +948,8 @@ fn dest_of(reference: &str, v: &Value) -> Result<Vec<String>, ManifestError> {
 /// - `harness` on an MCP-shaped row (a local row with `kind = "mcp"`, a workspace bundle, a
 ///   channel — where it only ever drove MCP narrowing) maps each slug through the MCP
 ///   descriptor table's config-file paths; on a forge row (repo skill / repo set) through the
-///   harness registry's skills roots. A slug that maps nowhere is named as unmapped.
+///   harness registry's skills roots. A slug that maps nowhere is named as unmapped. On a CHANNEL
+///   the rewrite lands in `mcp_dest`, the field that does that narrowing now.
 /// - `path` carries its directory value(s) over verbatim.
 fn retired_field(
     reference: &str,
@@ -959,6 +1005,13 @@ fn retired_field(
         KeyShape::WorkspaceBundle { .. } | KeyShape::Channel { .. }
     ) || (matches!(shape, KeyShape::LocalPath { .. })
         && row_kind == Some(crate::bundle_kind::BundleKind::Mcp.as_str()));
+    // A channel's `harness` only ever narrowed its MCP members, and that job is `mcp_dest`'s now —
+    // its `dest` speaks for the skill members. The rewrite names the field that does the same work.
+    let into = if matches!(shape, KeyShape::Channel { .. }) {
+        "mcp_dest"
+    } else {
+        "dest"
+    };
     let map_slug = |s: &str| -> Option<String> {
         if forge {
             super::dest::skills_dest_spelling(s, scope)
@@ -973,10 +1026,12 @@ fn retired_field(
     let (rewrite, unmapped) = super::dest::rewrite_slugs(&slugs, map_slug);
     let mut message = match &rewrite {
         Some(list) => {
-            format!("`{spelled}` on \"{reference}\" is now written as dest — use dest = [{list}]")
+            format!(
+                "`{spelled}` on \"{reference}\" is now written as {into} — use {into} = [{list}]"
+            )
         }
         None => format!(
-            "`{spelled}` on \"{reference}\" is now written as dest — name each destination \
+            "`{spelled}` on \"{reference}\" is now written as {into} — name each destination \
              directly"
         ),
     };
@@ -1350,6 +1405,13 @@ pub(crate) fn value_item(v: &EntryValue) -> Item {
                     a.push(x.as_str());
                 }
                 t.insert("dest", Value::Array(a));
+            }
+            if let Some(d) = &f.mcp_dest {
+                let mut a = Array::new();
+                for x in d {
+                    a.push(x.as_str());
+                }
+                t.insert("mcp_dest", Value::Array(a));
             }
             if let Some(s) = &f.name {
                 t.insert("name", s.as_str().into());
@@ -1777,6 +1839,18 @@ db-conventions = { dest = ["~/.agents/skills", "~/.claude/knowledge"] }
             "{e}"
         );
         assert!(!e.migration, "an empty dest is not a retired spelling");
+        // A channel's second array refuses the same way, in its own word.
+        let e = parse_manifest(
+            "[bundles]\n\"topos.sh/acme/channels/backend\" = { mcp_dest = [] }\n",
+            ManifestScope::Global,
+        )
+        .unwrap_err();
+        assert!(
+            e.message.contains(
+                "an mcp_dest names at least one destination; drop the field to reach every agent"
+            ),
+            "{e}"
+        );
     }
 
     #[test]
@@ -2140,13 +2214,14 @@ db-conventions = { dest = ["~/.agents/skills", "~/.claude/knowledge"] }
     #[test]
     fn the_editor_spells_values_canonically() {
         // The deterministic spelling the inverse property is defined against — canonical field
-        // order: version, dest, name, subdir, kind.
+        // order: version, dest, mcp_dest, name, subdir, kind.
         let mut ed = ManifestEditor::open_or_new(ManifestScope::Global);
         ed.set_row(
             "github.com/o/r/tools",
             &EntryValue::Fields(EntryFields {
                 version: Some("8c1f0a2".into()),
                 dest: Some(vec!["~/.claude/skills".into(), "~/.codex/skills".into()]),
+                mcp_dest: None,
                 name: Some("tooling".into()),
                 subdir: Some("skills/tools".into()),
                 kind: Some("skill".into()),
@@ -2158,6 +2233,23 @@ db-conventions = { dest = ["~/.agents/skills", "~/.claude/knowledge"] }
             "[bundles]\n\"github.com/o/r/tools\" = { version = \"8c1f0a2\", dest = \
              [\"~/.claude/skills\", \"~/.codex/skills\"], name = \"tooling\", subdir = \
              \"skills/tools\", kind = \"skill\" }\n"
+        );
+        // A channel spells BOTH arrays, in that order — `dest` for its skill members' folders,
+        // `mcp_dest` for its mcp members' config files.
+        let mut ed = ManifestEditor::open_or_new(ManifestScope::Global);
+        ed.set_row(
+            "topos.sh/acme/channels/backend",
+            &EntryValue::Fields(EntryFields {
+                dest: Some(vec!["~/.claude/skills".into()]),
+                mcp_dest: Some(vec!["~/.cursor/mcp.json".into()]),
+                ..EntryFields::default()
+            }),
+        )
+        .unwrap();
+        assert_eq!(
+            ed.rendered(),
+            "[bundles]\n\"topos.sh/acme/channels/backend\" = { dest = [\"~/.claude/skills\"], \
+             mcp_dest = [\"~/.cursor/mcp.json\"] }\n"
         );
     }
 
