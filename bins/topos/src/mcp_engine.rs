@@ -910,6 +910,50 @@ impl SurfaceOutcome {
             notices: Vec::new(),
         }
     }
+
+    /// topos's OWN ownership record could not be saved for this surface, so the config file was
+    /// never opened. The fault is the record; the consequence is this file — and the line says
+    /// both, in that order, because "the ledger" is not something a person has a folder for while
+    /// the config file is. The short CAUSE rides each state's note (a receipt puts it after a
+    /// dash); the whole sentence, keyed by the file, rides the machine channel.
+    fn ledger_unwritable(
+        desired: &[McpEntry],
+        h: &KnownHarness,
+        path: &Path,
+        detail: &str,
+    ) -> Self {
+        let cause = format!("topos could not save its record of the entries it owns ({detail})");
+        Self {
+            states: desired
+                .iter()
+                .map(|e| {
+                    (
+                        e.key.clone(),
+                        agent_state(h.slug, TargetOutcome::Unprovable, Some(&cause), Some(path)),
+                    )
+                })
+                .collect(),
+            wrote: BTreeSet::new(),
+            warnings: vec![crate::message::failure(
+                "MCP_CUSTODY_WRITE_FAILED",
+                format!(
+                    "{}: topos could not save its record of the entries it owns there ({detail}), \
+                     so it wrote nothing to that file.",
+                    path.display()
+                ),
+            )],
+            notices: Vec::new(),
+        }
+    }
+}
+
+/// Why one surface's journaled write did not land. The LEDGER arm is kept apart because it is the
+/// one fault whose cause is topos's own bookkeeping rather than the person's config — and a line
+/// that says "this file could not be read" about a file topos read perfectly well sends someone
+/// to fix the wrong thing.
+enum WriteFault {
+    Ledger(String),
+    Other(String),
 }
 
 /// **The containment rail, re-run at the WRITE boundary.** A project surface was proven inside the
@@ -936,7 +980,7 @@ fn journaled_write(
     path: &Path,
     intents: BTreeMap<String, PendingIntent>,
     write: &dyn Fn() -> std::io::Result<()>,
-) -> Result<(), String> {
+) -> Result<(), WriteFault> {
     // ONE journal, and journalling REPLACES it. So a surface may only journal into an EMPTY one:
     // intents standing here belong to an earlier surface whose record write failed (or to a config
     // write whose outcome is unknown), and they are the only description of work that has not
@@ -947,18 +991,15 @@ fn journaled_write(
     // intents blindly (correct only for the write this process just performed), so it would record
     // custody for another surface's bytes that may never have been written.
     if custody.has_pending() {
-        return Err(format!(
+        return Err(WriteFault::Other(format!(
             "an earlier config write is not finished yet, so topos skipped {} this run — the next \
              'topos update' finishes it",
             path.display()
-        ));
+        )));
     }
     if let Err(e) = custody.journal(io.fs, io.layout, intents) {
         custody.drop_journal(io.fs, io.layout);
-        return Err(format!(
-            "topos could not save its own record of the entries ({})",
-            e.detail()
-        ));
+        return Err(WriteFault::Ledger(e.detail()));
     }
     if let Err(e) = write() {
         // The config write FAILED — which is not the same as "nothing landed". A replace is
@@ -968,7 +1009,10 @@ fn journaled_write(
         // Clearing them here on the assumption that the error means "no bytes moved" is exactly
         // how a live entry ends up with no record — permanently unremovable, read as a hand edit
         // by every run afterwards. One extra recovery pass is the whole cost of not guessing.
-        return Err(format!("writing {} failed ({e})", path.display()));
+        return Err(WriteFault::Other(format!(
+            "writing {} failed ({e})",
+            path.display()
+        )));
     }
     // Promote: pending → each bundle's own rows, exactly as recovery would.
     custody.promote_journal();
@@ -976,14 +1020,14 @@ fn journaled_write(
     if !failures.is_empty() {
         // The rows moved in memory and the intents are still journaled ON DISK — the next run's
         // recovery promotes them again. Disclose, never lose.
-        return Err(format!(
+        return Err(WriteFault::Other(format!(
             "{} — the next 'topos update' finishes it",
             failures
                 .iter()
                 .map(|f| f.text.as_str())
                 .collect::<Vec<_>>()
                 .join("; ")
-        ));
+        )));
     }
     Ok(())
 }
@@ -1230,7 +1274,12 @@ fn converge_surface(
                     }
                     surface
                 }
-                Err(reason) => SurfaceOutcome::unprovable(desired, h, path, &reason),
+                Err(WriteFault::Ledger(detail)) => {
+                    SurfaceOutcome::ledger_unwritable(desired, h, path, &detail)
+                }
+                Err(WriteFault::Other(reason)) => {
+                    SurfaceOutcome::unprovable(desired, h, path, &reason)
+                }
             }
         }
     }

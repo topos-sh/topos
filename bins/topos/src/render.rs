@@ -729,7 +729,16 @@ pub(crate) fn add_tty(data: &AddData) -> String {
     // The disclosure a plain row write did not carry: a file born by this act, a row NOT written
     // (the feed already delivers it), an `off` switch deleted instead, a standing web decline.
     if let Some(note) = &data.note {
-        out.push_str(&format!("note: {note}\n"));
+        // ONE CLAUSE PER LINE — the same rule the removal receipt follows: a note that needs a
+        // list (the per-config outcomes of an MCP converge) leads with its first line and indents
+        // the rest, instead of running every clause together behind separators.
+        let mut lines = note.lines();
+        if let Some(first) = lines.next() {
+            out.push_str(&format!("note: {first}\n"));
+            for line in lines {
+                out.push_str(&format!("      {line}\n"));
+            }
+        }
     }
     // A SET reference (a channel, a feed, a whole repo) has no bytes of its own — the "Adopted @
     // <version>" line would be a fabrication, so the receipt states what the row expands to.

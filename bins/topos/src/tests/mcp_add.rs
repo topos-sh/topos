@@ -247,7 +247,9 @@ fn the_add_converge_matches_the_sweeps_unnarrowed_reach() {
     write_bundle(&src, &good_server());
     let ctx = rig.ctx_at(Some(&proj.0));
 
-    let data = ops::add_mcp(&ctx, &src.display().to_string(), false, &Default::default()).unwrap();
+    let data = ops::add_mcp(&ctx, &src.display().to_string(), false, &Default::default())
+        .unwrap()
+        .data;
     for rel in [
         ".mcp.json",
         ".codex/config.toml",
@@ -278,7 +280,9 @@ fn the_add_receipt_carries_the_reload_note_and_says_when_nobody_is_reached() {
     let src = rig.work.0.join("weather");
     write_bundle(&src, &good_server());
     let ctx = rig.ctx_at(Some(&rig.work.0));
-    let data = ops::add_mcp(&ctx, &src.display().to_string(), true, &Default::default()).unwrap();
+    let data = ops::add_mcp(&ctx, &src.display().to_string(), true, &Default::default())
+        .unwrap()
+        .data;
     let note = data.note.clone().unwrap_or_default();
     assert!(
         note.contains("~/.cursor/mcp.json: server entry — restart Cursor"),
@@ -292,7 +296,9 @@ fn the_add_receipt_carries_the_reload_note_and_says_when_nobody_is_reached() {
     let src = rig.work.0.join("weather");
     write_bundle(&src, &good_server());
     let ctx = rig.ctx_at(Some(&rig.work.0));
-    let data = ops::add_mcp(&ctx, &src.display().to_string(), true, &Default::default()).unwrap();
+    let data = ops::add_mcp(&ctx, &src.display().to_string(), true, &Default::default())
+        .unwrap()
+        .data;
     assert!(
         data.mcp.as_ref().is_some_and(|m| m.agents.is_empty()),
         "{:?}",
@@ -326,7 +332,9 @@ fn a_local_folder_applies_immediately_with_a_kind_row() {
     write_bundle(&dir, &good_server());
     let ctx = rig.ctx_at(Some(&rig.work.0));
 
-    let data = ops::add_mcp(&ctx, dir.to_str().unwrap(), true, &Default::default()).unwrap();
+    let data = ops::add_mcp(&ctx, dir.to_str().unwrap(), true, &Default::default())
+        .unwrap()
+        .data;
     // It went through the ordinary adopt: a real record with a real version identity.
     assert!(data.skill_id.is_some(), "the folder was adopted");
     assert!(data.version_id.is_some(), "the adopt minted a version");
@@ -736,7 +744,9 @@ fn a_stray_sibling_refuses_at_the_adopt_gate() {
     // The allowed pair adopts — and the store gains the durable kind marker beside its docs.
     std::fs::remove_file(dir.join("topos-mcp.toml")).unwrap();
     std::fs::write(dir.join("README.md"), b"How to use this server.\n").unwrap();
-    let data = ops::add_mcp(&ctx, dir.to_str().unwrap(), true, &Default::default()).unwrap();
+    let data = ops::add_mcp(&ctx, dir.to_str().unwrap(), true, &Default::default())
+        .unwrap()
+        .data;
     let sid = crate::id::SkillId::parse(data.skill_id.as_deref().unwrap()).unwrap();
     let marker = std::fs::read_to_string(rig.layout().published(&sid).kind).expect("kind.json");
     assert!(marker.contains("\"mcp\""), "{marker}");
@@ -1199,7 +1209,9 @@ fn mcp_selection_narrows_add_and_remove_by_config_file() {
         agents: vec!["cursor".to_owned(), "codex".to_owned()],
         dests: Vec::new(),
     };
-    let data = ops::add_mcp(&ctx, dir.to_str().unwrap(), true, &sel).unwrap();
+    let data = ops::add_mcp(&ctx, dir.to_str().unwrap(), true, &sel)
+        .unwrap()
+        .data;
     assert_eq!(
         data.dest,
         vec![
@@ -1573,5 +1585,113 @@ fn the_teardown_retires_its_own_mcp_entries_and_leaves_a_hand_edited_one() {
     assert_eq!(
         applied.mcp_drifted,
         vec![cursor.to_string_lossy().into_owned()]
+    );
+}
+
+// =================================================================================================
+// The add's DELIVERY half — what an inline converge that could not write says, and exits
+// =================================================================================================
+
+/// An add whose converge reached NO agent is not a success with a note about it: the row landed
+/// and nothing was delivered. It used to print `ok: true`, exit 0, carry an empty `warnings`, and
+/// bury the cause in one prose blob that repeated it once per surface — and mislabelled it, saying
+/// a config file "could not be read" when the config read perfectly well and topos's OWN ledger
+/// was the thing it could not write.
+#[test]
+fn an_add_that_reached_no_agent_says_so_once_and_fails() {
+    let rig = Rig::new("ledger-locked");
+    rig.write_global("[bundles]\n");
+    std::fs::create_dir_all(rig.home.0.join(".cursor")).unwrap();
+    std::fs::create_dir_all(rig.home.0.join(".codex")).unwrap();
+    std::fs::write(rig.home.0.join(".codex/config.toml"), b"model = \"o3\"\n").unwrap();
+    let ctx = rig.ctx_at(None);
+    // One clean add first, so the scope's state dir exists to be locked down.
+    let first = rig.work.0.join("weather");
+    write_bundle(&first, &good_server());
+    ops::add_mcp(
+        &ctx,
+        &first.display().to_string(),
+        true,
+        &Default::default(),
+    )
+    .unwrap();
+
+    // The ownership ledger's directory goes read-only: topos can still READ its record and every
+    // agent config, and can write neither the journal nor the record.
+    let state = rig.layout().state_dir();
+    let restore = std::fs::metadata(&state).unwrap().permissions();
+    let mut locked = restore.clone();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        locked.set_mode(0o500);
+    }
+    std::fs::set_permissions(&state, locked).unwrap();
+
+    let second = rig.work.0.join("tides");
+    write_bundle(&second, &good_server().replace("weather", "tides"));
+    let added = ops::add_mcp(
+        &ctx,
+        &second.display().to_string(),
+        true,
+        &Default::default(),
+    )
+    .expect("the ROW still lands — the demand is durable whatever the configs did");
+    std::fs::set_permissions(&state, restore).unwrap();
+
+    // Every failed surface rides the typed channel, one message each.
+    assert!(
+        !added.messages.is_empty(),
+        "the converge failures are not silent"
+    );
+    for m in &added.messages {
+        assert_eq!(m.kind, topos_types::MessageKind::Failure, "{m:?}");
+    }
+    assert!(added.reached_nobody, "nothing was placed anywhere");
+    // The per-surface line names the CONFIG FILE and the real fault — topos's own record, not a
+    // file it read without trouble.
+    let cursor = rig.home.0.join(".cursor/mcp.json");
+    let surface = added
+        .messages
+        .iter()
+        .find(|m| m.text.starts_with(&format!("{}:", cursor.display())))
+        .unwrap_or_else(|| panic!("a line for {}: {:?}", cursor.display(), added.messages));
+    assert!(
+        surface
+            .text
+            .contains("topos could not save its record of the entries it owns there ("),
+        "{}",
+        surface.text
+    );
+    assert!(
+        surface
+            .text
+            .ends_with("), so it wrote nothing to that file."),
+        "{}",
+        surface.text
+    );
+    for m in &added.messages {
+        assert!(
+            !m.text.contains("could not be read"),
+            "the config read fine — the ledger is the fault: {}",
+            m.text
+        );
+    }
+    // The receipt states BOTH facts and the working remedy — and the cause exactly ONCE, however
+    // many surfaces met it.
+    let note = added.data.note.clone().unwrap_or_default();
+    assert!(
+        note.contains("\"tides\" was recorded, and it reached no agent — "),
+        "{note}"
+    );
+    assert!(
+        note.ends_with(". Run 'topos update' to finish the delivery."),
+        "{note}"
+    );
+    assert_eq!(
+        note.matches("topos could not save its record of the entries it owns")
+            .count(),
+        1,
+        "the shared cause is stated once, not once per surface: {note}"
     );
 }

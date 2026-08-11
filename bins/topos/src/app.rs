@@ -11,7 +11,6 @@ use serde::Serialize;
 use topos_harness::triggers::TriggerAdapter;
 use topos_harness::{ClaudeCode, ConfigStore, HarnessAdapter, OpenClaw, registry, triggers};
 use topos_types::HarnessId;
-use topos_types::results::AddData;
 
 use crate::cli::{AuthCmd, Cli, Command};
 use crate::ctx::Ctx;
@@ -605,14 +604,14 @@ fn run_command(
                 let result = ops::add_mcp(&ctx, &source, global, &selection);
                 // The arming sweep + the built-in ride an APPLIED import exactly as they ride any
                 // other adopt receipt (the same trigger-arming moment).
-                let result = result.map(|mut data| {
-                    if data.currency.is_some() {
-                        data.triggers = breadth_arm(&ctx.roots, harness.as_ref(), &fs);
+                let result = result.map(|mut added| {
+                    if added.data.currency.is_some() {
+                        added.data.triggers = breadth_arm(&ctx.roots, harness.as_ref(), &fs);
                         if let Err(e) = ops::ensure_builtin(&ctx) {
                             let _ = diag.note(cmd_name, &e);
                         }
                     }
-                    data
+                    added
                 });
                 return finish_add_mcp(json, cmd_name, result, &diag);
             }
@@ -1989,6 +1988,25 @@ fn finish_pull(
 
 #[cfg(test)]
 mod sweep_verdict_tests {
+    /// An `add --kind mcp` whose converge failed used to print `ok: true` and exit 0 — the row had
+    /// landed, so the verb called itself done while nothing had been delivered anywhere.
+    #[test]
+    fn an_mcp_add_that_delivered_nothing_is_not_ok_and_a_partial_one_still_exits_non_zero() {
+        let failure = crate::message::failure("MCP_CUSTODY_WRITE_FAILED", "x".to_owned());
+        // Clean: ok, exit 0.
+        assert_eq!(super::mcp_add_verdict(false, &[]), (true, false));
+        // Reached SOME agent, failed on others: still ok (the server is somewhere), exit non-zero.
+        assert_eq!(
+            super::mcp_add_verdict(false, std::slice::from_ref(&failure)),
+            (true, true)
+        );
+        // Reached NOBODY: not ok, exit non-zero.
+        assert_eq!(
+            super::mcp_add_verdict(true, std::slice::from_ref(&failure)),
+            (false, true)
+        );
+    }
+
     /// `ok` and the exit status are ONE answer. A sweep that could not carry a bundle forward
     /// used to print `ok: true` in the envelope and exit non-zero on the same run — and an agent
     /// reading `ok` is exactly the caller that channel exists for.
@@ -2418,14 +2436,22 @@ fn finish_add_reference(
 fn finish_add_mcp(
     json: bool,
     command: &str,
-    result: Result<Box<AddData>, ClientError>,
+    result: Result<ops::McpAdded, ClientError>,
     diag: &Diag<'_>,
 ) -> ExitCode {
     match result {
-        Ok(data) => {
+        Ok(ops::McpAdded {
+            data,
+            messages,
+            reached_nobody,
+        }) => {
+            let (ok, failed) = mcp_add_verdict(reached_nobody, &messages);
             if json {
                 let value = serde_json::to_value(&data).unwrap_or_default();
                 let mut envelope = render::ok_envelope(command, value);
+                envelope.ok = ok;
+                envelope.warnings = crate::message::legacy_lines(&messages);
+                envelope.messages = messages;
                 // The receipt is a SERVER's: its undo takes a server off this machine, and the
                 // caution has to say so rather than borrowing a skill's sentence.
                 envelope.next_actions =
@@ -2434,10 +2460,24 @@ fn finish_add_mcp(
             } else {
                 println!("{}", render::add_tty(&data));
             }
-            ExitCode::SUCCESS
+            if failed {
+                ExitCode::FAILURE
+            } else {
+                ExitCode::SUCCESS
+            }
         }
         Err(e) => emit_err(json, command, &e, diag),
     }
+}
+
+/// `(ok, exit-is-failure)` for an `add --kind mcp` — the ONE derivation both surfaces read.
+///
+/// The row is durable, so `ok` follows DELIVERY: an add that reached no agent at all is not a
+/// success with a note about it. A PARTIAL reach keeps `ok: true` — some agent has the server —
+/// and still exits non-zero, the sweep's own rule, so an agent watching a loop learns the run is
+/// not converging instead of reading 0 forever.
+fn mcp_add_verdict(reached_nobody: bool, messages: &[topos_types::Message]) -> (bool, bool) {
+    (!reached_nobody, !messages.is_empty())
 }
 
 /// The multi-`add` finisher — one `add` receipt per imported (skill × harness) combination.

@@ -118,6 +118,23 @@ pub(crate) fn classify_mcp_source(
 // The verb
 // =================================================================================================
 
+/// What `add --kind mcp` answers with: the receipt, plus the delivery half's typed failures.
+///
+/// The two are separate because they answer separate questions. The RECEIPT says what was
+/// recorded — a durable row, true whatever the configs did. The MESSAGES say what could not be
+/// delivered, and they are what the exit status and `ok` are computed from: an add whose entries
+/// reached no agent at all is not a success, and one that reached some is a success that still
+/// has to exit non-zero (the sweep's own rule) so an agent watching a loop learns something is
+/// not converging.
+#[derive(Debug)]
+pub(crate) struct McpAdded {
+    pub data: Box<AddData>,
+    /// One `failure` per surface the converge could not write.
+    pub messages: Vec<topos_types::Message>,
+    /// Every planned surface failed: the row landed and NOTHING was delivered.
+    pub reached_nobody: bool,
+}
+
 /// `topos add --kind mcp <path> [-g]`. The one door applies immediately with an undo-led receipt;
 /// `--yes` is parsed by the CLI and changes nothing here.
 ///
@@ -131,7 +148,7 @@ pub(crate) fn add_mcp(
     source: &str,
     global: bool,
     selection: &super::dest_select::Selection,
-) -> Result<Box<AddData>, ClientError> {
+) -> Result<McpAdded, ClientError> {
     let host = medit::manifest_host(ctx);
     let exists = |p: &Path| ctx.fs.exists(p);
     match classify_mcp_source(source, host.as_deref(), &exists) {
@@ -191,7 +208,7 @@ pub(crate) fn fold_workspace_mcp(
     };
     let (filter, _) = row_narrowing(ctx, target, &data.name);
     let agents = engaged_agents(ctx, target, global, filter.as_deref());
-    fold_receipt(data, &summary, None, agents, &[], &[]);
+    fold_receipt(data, &summary, None, agents, &ConvergeReceipt::default());
 }
 
 // -------------------------------------------------------------------------------------------------
@@ -209,7 +226,7 @@ fn adopt_local(
     dir: &Path,
     global: bool,
     selection: &super::dest_select::Selection,
-) -> Result<Box<AddData>, ClientError> {
+) -> Result<McpAdded, ClientError> {
     let server = dir.join("server.json");
     if ctx.fs.read_opt(&server)?.is_none() {
         return Err(ClientError::InvalidArgument(format!(
@@ -250,40 +267,77 @@ fn adopt_local(
     let (filter, _) = row_narrowing(ctx, &scope.target, &data.name);
     let agents = engaged_agents(ctx, &scope.target, global, filter.as_deref());
     let bundle_id = data.skill_id.clone().unwrap_or_default();
-    let (lines, resolved) = converge_one(ctx, &scope.target, &bundle_id, &data.name);
-    fold_receipt(&mut data, &summary, Some(dir), agents, &lines, &resolved);
-    Ok(Box::new(data))
+    let converge = converge_one(ctx, &scope.target, &bundle_id, &data.name);
+    fold_receipt(&mut data, &summary, Some(dir), agents, &converge);
+    Ok(McpAdded {
+        reached_nobody: converge.reached_nobody(),
+        messages: converge.messages,
+        data: Box::new(data),
+    })
 }
 
 // -------------------------------------------------------------------------------------------------
 // The converge + the receipt
 // -------------------------------------------------------------------------------------------------
 
+/// What the add's inline converge answered — the receipt's lines, the config files it resolved,
+/// and the typed FAILURES.
+///
+/// The failures ride the same channel the sweep's do (one `failure` per failed surface, derived
+/// into the legacy `warnings` array by the finisher), because an add whose entries reached no
+/// agent is not a success with a note about it: the row landed, and NOTHING was delivered. They
+/// used to exist only as clauses inside one prose blob, on an `ok: true` envelope that exited 0.
+#[derive(Default)]
+pub(crate) struct ConvergeReceipt {
+    /// The per-config receipt lines, one clause each.
+    lines: Vec<String>,
+    /// The config files as they RESOLVED on this machine.
+    resolved: Vec<String>,
+    /// One typed failure per surface that could not be written.
+    messages: Vec<topos_types::Message>,
+    /// The SHORT cause behind each failure, de-duplicated in order — what a receipt puts after a
+    /// dash, where the message carries the whole sentence keyed by its file.
+    causes: Vec<String>,
+    /// How many surfaces now hold this bundle's entry. Zero with failures standing is the state
+    /// that makes the whole add a failure.
+    placed: usize,
+}
+
+impl ConvergeReceipt {
+    /// The add landed a row and delivered NOTHING: every surface it planned failed. Distinct from
+    /// a machine with no MCP-capable agent on it (nothing failed there — there was nothing to
+    /// reach), which stays an ordinary success.
+    fn reached_nobody(&self) -> bool {
+        self.placed == 0 && !self.messages.is_empty()
+    }
+}
+
 /// Run the edited scope's MCP config convergence for ONE bundle, right now, so the receipt names
 /// the per-agent placements instead of deferring the fact to the next sweep. Removals are OFF: an
 /// add converges what it just asked for and never touches another bundle's entries.
 ///
-/// Best-effort by construction — the row already landed, and the next sweep reaches the same end
-/// state; every failure becomes a receipt line rather than a failed add.
+/// The ROW is durable either way — the next sweep reaches the same end state — so nothing here
+/// fails the add. What a failure does do is ride the typed channel and set the exit status, which
+/// is the difference between "delivery is pending" and "delivery silently did not happen".
 fn converge_one(
     ctx: &Ctx<'_>,
     target: &EditTarget,
     bundle_id: &str,
     name: &str,
-) -> (Vec<String>, Vec<String>) {
+) -> ConvergeReceipt {
     let Some(roots) = ctx.roots.clone() else {
-        return (Vec::new(), Vec::new());
+        return ConvergeReceipt::default();
     };
     let Some((layout, project_root)) = super::manifest_edit::mcp_scope_target(ctx, target) else {
-        return (Vec::new(), Vec::new());
+        return ConvergeReceipt::default();
     };
     // The dir the row points at IS the bundle; read its document back from disk, so what gets
     // placed is exactly what a later `update` will read.
     let Some(dir) = row_dir_of(ctx, target, name) else {
-        return (Vec::new(), Vec::new());
+        return ConvergeReceipt::default();
     };
     let Ok(Some(server_json)) = ctx.fs.read_opt(&dir.join("server.json")) else {
-        return (Vec::new(), Vec::new());
+        return ConvergeReceipt::default();
     };
     let detected: BTreeSet<String> = topos_harness::registry::detected_harnesses(
         &roots.home,
@@ -321,21 +375,51 @@ fn converge_one(
         &HashSet::new(),
         false,
     );
-    let mut lines: Vec<String> = filter_warnings;
-    // The config files as they RESOLVED on this machine — the same `~`-abbreviated paths the
-    // per-agent lines name. An env override moves these away from the row's own spelling, and
-    // the receipt's headline has to follow the bytes.
-    let mut resolved: Vec<String> = Vec::new();
+    let mut out = ConvergeReceipt {
+        lines: filter_warnings,
+        messages: outcome.warnings,
+        ..ConvergeReceipt::default()
+    };
     for bundle in outcome.bundles {
         let mut states = bundle.states;
         super::sync_engine::prettify_state_files(ctx, &mut states);
-        resolved.extend(states.iter().filter_map(|s| s.file.clone()));
-        lines.extend(states.iter().map(agent_line));
+        // The config files as they RESOLVED on this machine — the same `~`-abbreviated paths the
+        // per-agent lines name. An env override moves these away from the row's own spelling, and
+        // the receipt's headline has to follow the bytes.
+        out.resolved
+            .extend(states.iter().filter_map(|s| s.file.clone()));
+        for state in &states {
+            if stands(state.state) {
+                out.placed += 1;
+            } else if let Some(cause) = &state.note
+                && !out.causes.contains(cause)
+            {
+                // The SHORT cause, de-duplicated: eleven surfaces failing for one reason is one
+                // reason, and a receipt that repeats it eleven times is a wall, not an answer.
+                out.causes.push(cause.clone());
+            }
+        }
+        out.lines.extend(states.iter().map(agent_line));
     }
-    resolved.dedup();
-    lines.extend(outcome.notices.iter().map(|n| n.text.clone()));
-    lines.extend(outcome.warnings.iter().map(|w| w.text.clone()));
-    (lines, resolved)
+    out.resolved.dedup();
+    out.lines
+        .extend(outcome.notices.iter().map(|n| n.text.clone()));
+    out.lines
+        .extend(out.messages.iter().map(|w| w.text.clone()));
+    out
+}
+
+/// Whether a converge outcome means the bundle's entry now STANDS in that config file — the only
+/// question "did this reach an agent" is asking. A hand-edited entry counts: something is there,
+/// and it is the person's.
+fn stands(state: TargetOutcome) -> bool {
+    matches!(
+        state,
+        TargetOutcome::Created
+            | TargetOutcome::Refreshed
+            | TargetOutcome::Current
+            | TargetOutcome::Drifted
+    )
 }
 
 /// One config outcome as an add-receipt line, KEYED BY THE CONFIG FILE the entry landed in —
@@ -528,16 +612,16 @@ fn fold_receipt(
     summary: &McpSummary,
     bundle_dir: Option<&Path>,
     agents: Vec<String>,
-    lines: &[String],
-    resolved: &[String],
+    converge: &ConvergeReceipt,
 ) {
     let nobody = agents.is_empty();
+    let (lines, resolved) = (&converge.lines, &converge.resolved);
     // Only when it actually MOVED. The field's whole meaning is "your row says one thing and this
     // machine put it somewhere else", so it needs a row spelling to differ FROM: on a bare add
     // there is no `dest`, every resolved file trivially differs from the empty list, and the guard
     // let the receipt claim a move that the row never proposed. No `dest` ⇒ nothing to contradict.
-    if !data.dest.is_empty() && !resolved.is_empty() && resolved != data.dest {
-        data.dest_resolved = resolved.to_vec();
+    if !data.dest.is_empty() && !resolved.is_empty() && *resolved != data.dest {
+        data.dest_resolved = resolved.clone();
     }
     data.mcp = Some(summarize(summary, bundle_dir, agents));
     let auth = match summary.auth_hint {
@@ -551,8 +635,22 @@ fn fold_receipt(
             summary.name, summary.version, summary.url, summary.transport
         ),
     );
-    if !lines.is_empty() {
-        medit::push_note(data, lines.join(" · "));
+    if converge.reached_nobody() {
+        // NOTHING was delivered. The row is real and the fix is one command, so the receipt states
+        // both facts and the cause ONCE — not once per surface behind separators, which is what a
+        // reader met when eleven agents failed for one reason.
+        medit::push_note(
+            data,
+            format!(
+                "\"{}\" was recorded, and it reached no agent — {}. Run 'topos update' to finish \
+                 the delivery.",
+                data.name,
+                converge.causes.join("; ")
+            ),
+        );
+    } else if !lines.is_empty() {
+        // ONE CLAUSE PER LINE — surfaces differ here, so each says its own thing.
+        medit::push_note(data, lines.join("\n"));
     }
     if nobody {
         medit::push_note(
