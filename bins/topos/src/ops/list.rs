@@ -26,7 +26,7 @@
 //! source that has stopped answering rides the tail, because a row keeps reading `current` while
 //! its repository goes unreachable.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use topos_harness::coverage;
@@ -1154,16 +1154,20 @@ fn agent_view(
 
 /// Discover skills sitting in a known harness's skill dir (across the baked registry) that no
 /// tracked skill already records — the `add`-able inventory. Dedups a physically-shared dir (e.g.
-/// `.agents/skills`) to one row by canonical path. Real-fs (like the adapters' own `discover`),
-/// so a per-dir scan failure is silently skipped, never an error. `pub(crate)` so `add <skill>`
-/// name resolution shares the SAME discovered inventory `list` prints (one source of truth for
-/// what a name can resolve to).
+/// `.agents/skills`) to one row by canonical path, and answers each row's FOLDER with the installed
+/// agents that read it ([`registry::folder_reader_slugs`] — the one attribution query), so a shared
+/// folder names every claimant instead of the one discovery happened to walk it under. Real-fs
+/// (like the adapters' own `discover`), so a per-dir scan failure is silently skipped, never an
+/// error. `pub(crate)` so `add <skill>` name resolution shares the SAME discovered inventory `list`
+/// prints (one source of truth for what a name can resolve to).
 pub(crate) fn discover_untracked(
     ctx: &Ctx<'_>,
     roots: &DiscoveryRoots,
 ) -> Result<Vec<UntrackedEntry>, ClientError> {
     let tracked = tracked_placement_paths(ctx, roots)?;
     let mut seen: HashSet<PathBuf> = HashSet::new();
+    // One registry sweep per FOLDER, not per entry — a folder's readers are the same for all of them.
+    let mut readers: HashMap<PathBuf, Vec<String>> = HashMap::new();
     let mut out: Vec<UntrackedEntry> = Vec::new();
     for d in registry::discover_all(&roots.home, roots.cwd.as_deref()) {
         let canon = d.path.canonicalize().unwrap_or_else(|_| d.path.clone());
@@ -1178,12 +1182,18 @@ pub(crate) fn discover_untracked(
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| d.path.to_string_lossy().into_owned());
+        let folder = d.path.parent().map(Path::to_path_buf).unwrap_or_default();
+        let folder_readers = readers
+            .entry(folder.clone())
+            .or_insert_with(|| {
+                registry::folder_reader_slugs(&folder, &roots.home, roots.cwd.as_deref())
+            })
+            .clone();
         out.push(UntrackedEntry {
             name,
             path: d.path.to_string_lossy().into_owned(),
-            harness: d.harness_slug,
-            harness_name: d.harness_name,
-            adapter_supported: d.adapter_supported,
+            folder: folder.to_string_lossy().into_owned(),
+            readers: folder_readers,
             scope: match d.scope {
                 SkillScope::User => "user",
                 SkillScope::Project => "project",
@@ -1195,14 +1205,8 @@ pub(crate) fn discover_untracked(
     // each folder's entries must arrive contiguous (name-first interleaved the folders and
     // reprinted a folder header per row).
     out.sort_by(|a, b| {
-        let folder = |p: &str| {
-            Path::new(p)
-                .parent()
-                .map(Path::to_path_buf)
-                .unwrap_or_default()
-        };
-        folder(&a.path)
-            .cmp(&folder(&b.path))
+        a.folder
+            .cmp(&b.folder)
             .then_with(|| a.name.cmp(&b.name))
             .then_with(|| a.path.cmp(&b.path))
     });
@@ -2579,7 +2583,8 @@ mod tests {
             out.data
                 .untracked
                 .iter()
-                .any(|u| u.name == "improbable-zebra" && u.harness == "cursor"),
+                .any(|u| u.name == "improbable-zebra"
+                    && u.readers.iter().any(|slug| slug == "cursor")),
             "{:?}",
             out.data.untracked
         );

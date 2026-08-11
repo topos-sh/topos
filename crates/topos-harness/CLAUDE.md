@@ -89,6 +89,13 @@ never learns which machinery served which harness.
   driver's discretion.
 - **`registry`** — the ONE baked ~76-harness table: every row carries its skills dirs, detection
   probes, MCP surfaces, and shared-dir claim, so a capability is a column rather than a table.
+  Which harnesses topos can PLACE into and ARM is NOT a column — it is decided per port
+  (`HarnessAdapter` impls, `triggers::adapter_for_slug`). Attribution is ONE query,
+  `folder_readers` (with its `folder_reader_slugs` spelling): every INSTALLED harness whose user
+  dir — or project dir under `cwd` — IS a given folder, table order in, sorted by slug out. It
+  shares `discover_all`'s presence gate, so a shared dir names every installed claimant instead of
+  the first row that claims it, and the untracked listing, `add`'s `<name>@<slug>` resolution, and
+  `publish`'s `@<slug>` check all read the same answer.
   It owns the crate's ONE root vocabulary (`Root`) + resolver (`resolve_root`/`resolve_spec`/
   `config_root` — every env override read in one place) and the ONE skill-directory probe
   (`discover_skill_dirs`, over `child_dirs` + `is_skill_dir`, which a deeper shape composes rather

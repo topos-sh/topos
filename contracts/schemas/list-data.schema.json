@@ -903,39 +903,37 @@
       ]
     },
     "UntrackedEntry": {
-      "description": "A discovered-but-unadopted skill — known only by where it lives, not by any topos version yet.\nDiscovery spans every harness in the baked registry, so `harness` is an open **slug** string (not the\nclosed [`crate::HarnessId`] — topos discovers far more harnesses than it has full adapters for).",
+      "description": "A discovered-but-unmanaged skill — known only by where it lives, not by any topos version yet.\nA skill dir belongs to a FOLDER, and a folder is read by zero or more installed agents; there is\nno single owning harness, so the entry carries the folder and its readers rather than one slug.",
       "type": "object",
       "properties": {
-        "adapter_supported": {
-          "description": "True iff topos has a full adapter for this harness (so `add` can arm live auto-updates). False = the\nskill is still adoptable (`topos add` tracks + shares its bytes), but auto-update lands later.",
-          "type": "boolean"
-        },
-        "harness": {
-          "description": "The harness's registry slug (e.g. `claude-code`, `cursor`, `windsurf`).",
-          "type": "string"
-        },
-        "harness_name": {
-          "description": "The harness's human-readable name (e.g. `Claude Code`, `Cursor`).",
+        "folder": {
+          "description": "The skills folder holding it — the parent of [`Self::path`].",
           "type": "string"
         },
         "name": {
           "type": "string"
         },
         "path": {
-          "description": "The harness dir it was found in.",
+          "description": "The skill dir itself.",
           "type": "string"
         },
+        "readers": {
+          "description": "The registry slugs of every INSTALLED agent that reads [`Self::folder`], sorted. These are the\n`<name>@<slug>` / `-a <slug>` tokens. Every entry of one folder carries the same list.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
         "scope": {
-          "description": "Where the skill dir was found: `user` (a global harness home) or `project` (the current repo).",
+          "description": "Where the skill dir was found: `user` (a global agent home) or `project` (the current repo).",
           "type": "string"
         }
       },
       "required": [
         "name",
         "path",
-        "harness",
-        "harness_name",
-        "adapter_supported",
+        "folder",
+        "readers",
         "scope"
       ]
     },

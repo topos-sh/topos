@@ -1269,11 +1269,17 @@ fn list_discovers_untracked_registry_skills_then_dedups_an_adopted_one() {
     let found = data
         .untracked
         .iter()
-        .find(|u| u.harness == "cursor" && u.name == "my-skill")
+        .find(|u| u.readers.iter().any(|s| s == "cursor") && u.name == "my-skill")
         .expect("cursor skill discovered as untracked");
-    assert!(!found.adapter_supported, "cursor is discover-and-add only");
     assert_eq!(found.scope, "user");
     assert!(found.path.contains("my-skill"));
+    // The folder is the entry's own, and its readers are the folder's — cursor alone reads
+    // `~/.cursor/skills`, so this row's bracket is exactly one slug.
+    assert_eq!(
+        found.folder,
+        skill_dir.parent().unwrap().to_string_lossy().into_owned()
+    );
+    assert_eq!(found.readers, vec!["cursor".to_owned()]);
 
     // The bare list itemizes no discoveries — they ride the ONE summary line instead.
     let bare = ops::list_with(

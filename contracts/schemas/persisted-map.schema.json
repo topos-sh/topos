@@ -28,7 +28,7 @@
       ]
     },
     "harness_slug": {
-      "description": "The harness's registry slug (e.g. `claude-code`, `cursor`) the adopted dir was attributed to —\nrecorded even when topos has no full adapter for it, so a later adapter can retroactively arm\nauto-updates for an already-adopted skill. A superset of [`Self::harness`]: set whenever the source sits\nunder a known harness skill dir. **Additive optional.**",
+      "description": "The registry slug (e.g. `claude-code`, `cursor`) of the agent this placement serves, when ONE\nagent owns it: the recognized harness, or the sole installed reader of the folder an added dir\nsits in. A folder several agents read has no single owner and a folder none reads has none at\nall — both leave this unset. A superset of [`Self::harness`]. **Additive optional.**",
       "type": [
         "string",
         "null"
@@ -112,7 +112,7 @@
           "type": "boolean"
         },
         "agent": {
-          "description": "The registry slug of the harness a `native` placement serves; `None` for `shared` (and for a\nplain adopted dir under no known harness).",
+          "description": "The registry slug of the harness a `native` placement serves; `None` for `shared`, and for a\ndir added in place that no single installed agent owns (the user's own chosen location).",
           "type": [
             "string",
             "null"

@@ -337,8 +337,8 @@ pub(crate) fn add_with_name(
     // always fits — the parse is the type-level proof the path joins below demand).
     let skill_id = crate::id::SkillId::parse(&ctx.ids.new_skill_id())?;
     // A name-resolved `add <skill>` forces the discovered name (what `list` showed, what `publish`/`diff`
-    // will resolve) — so an adopt-only registry harness never tracks the bytes under a divergent
-    // frontmatter name. Absent an override: a recognized harness skill is keyed by its DIRECTORY name (the
+    // will resolve) — so a folder the active adapter does not recognize never tracks the bytes under a
+    // divergent frontmatter name. Absent an override: a recognized harness skill is keyed by its DIRECTORY name (the
     // command name the harness invokes); a plain dir keeps the frontmatter-first-then-basename order.
     let name = match name_override {
         Some(n) => n.to_owned(),
@@ -420,13 +420,17 @@ pub(crate) fn add_with_name(
             draft_observed: None,
         },
     )?;
-    // Attribute the harness. Either the adapter recognized it (adopt-in-place; auto-update armed below), OR
-    // the baked registry places the source under a known harness's skill dir — recorded for forward-compat
-    // even when topos has no full adapter for it (a later adapter can arm auto-updates for this adopted skill).
-    // A plain dir under no harness stays `None` on every field.
+    // Which agent this placement SERVES. Either the active adapter recognized the dir as its own
+    // (adopt-in-place; auto-update armed below), or the folder is read by exactly ONE installed
+    // agent, which makes it that agent's dir. A folder several agents read has no single owner and a
+    // folder none reads has none at all — both stay `None`, the agent-less shape the placement engine
+    // already treats as the user's own chosen location.
     let harness_slug = match &recognized {
         Some(_) => Some(ctx.harness.id().slug().to_owned()),
-        None => registry_attribution(&source_abs).map(|a| a.slug),
+        None => match folder_readers(&source_abs).as_slice() {
+            [sole] => Some(sole.clone()),
+            _ => None,
+        },
     };
 
     // Record the placement: the harness skill dir for a recognized skill (the path the harness reads),
@@ -1467,9 +1471,9 @@ pub(crate) fn resolve_add_target(
         // No workspace disclosure here: this entry point serves the verbs that resolve a LOCAL
         // directory (`publish`'s auto-add, `remove`'s path arm), where a team's copy of the name
         // is not one of the ways out. The bare-`add` ladder ([`plan_bare_add`]) enriches it.
-        NameResolution::AmbiguousHarness(harnesses) => Err(ClientError::AmbiguousHarness {
+        NameResolution::AmbiguousFolders(folders) => Err(ClientError::AmbiguousHarness {
             name: name.to_owned(),
-            harnesses,
+            folders,
             workspace: None,
         }),
         NameResolution::AmbiguousScope { harness, paths } => Err(ClientError::AmbiguousScope {
@@ -1799,11 +1803,11 @@ pub(crate) fn plan_bare_add(
             name: name.to_owned(),
             published: confirmed_cached_match(ctx, connect, name, workspace),
         }),
-        NameResolution::AmbiguousHarness(harnesses) => Err(ClientError::AmbiguousHarness {
+        NameResolution::AmbiguousFolders(folders) => Err(ClientError::AmbiguousHarness {
             name: name.to_owned(),
-            harnesses,
-            // Every discovered dir of this name is a candidate — the refusal lists harnesses, not
-            // paths, so the identical-bytes proof reads the inventory itself.
+            folders,
+            // Every discovered dir of this name is a candidate — the refusal lists the folders, not
+            // the skill dirs, so the identical-bytes proof reads the inventory itself.
             workspace: workspace_hint(
                 &published_matches(ctx, connect, name, workspace),
                 &paths_named(name, &untracked),
@@ -1915,15 +1919,17 @@ enum NameResolution {
     Resolved(String),
     /// A bare name (no `@harness`) that no placement carries.
     NoMatch,
-    /// `@harness` was given but that harness holds no such skill; `available` are the slugs that DO (sorted).
+    /// `@harness` was given but no folder that agent reads holds the skill; `available` are the slugs
+    /// of every agent that DOES read a folder holding it (sorted, deduped).
     HarnessNotFound {
         harness: String,
         available: Vec<String>,
     },
-    /// The name sits under more than one harness — the sorted, deduped slugs the caller picks from.
-    AmbiguousHarness(Vec<String>),
-    /// The name matches more than one directory within a SINGLE harness (e.g. user + project scope) —
-    /// `@harness` cannot split them, so the caller adopts one by path.
+    /// The name sits in more than one FOLDER — the folder paths the caller picks between (a skills
+    /// folder holds one dir per name, so the folders are distinct).
+    AmbiguousFolders(Vec<String>),
+    /// `@harness` was given and that agent reads more than one folder holding the name — the slug
+    /// cannot split them, so the caller picks one by path.
     AmbiguousScope { harness: String, paths: Vec<String> },
 }
 
@@ -1937,19 +1943,23 @@ pub(crate) fn split_target(target: &str) -> (&str, Option<&str>) {
     }
 }
 
-/// The pure matcher over the discovered inventory. `harness` filters by registry slug; without it, a
-/// same-name collision across harnesses is [`NameResolution::AmbiguousHarness`] and a collision within one
-/// harness is [`NameResolution::AmbiguousScope`].
+/// The pure matcher over the discovered inventory. `harness` selects the entries whose folder that
+/// agent READS (the registry's one attribution answer, carried on every entry); without it, a
+/// same-name collision is [`NameResolution::AmbiguousFolders`], and a slug that still spans folders is
+/// [`NameResolution::AmbiguousScope`].
 fn resolve_name(name: &str, harness: Option<&str>, untracked: &[UntrackedEntry]) -> NameResolution {
     let by_name: Vec<&UntrackedEntry> = untracked.iter().filter(|u| u.name == name).collect();
     match harness {
         Some(h) => {
-            let in_h: Vec<&UntrackedEntry> =
-                by_name.iter().copied().filter(|u| u.harness == h).collect();
+            let in_h: Vec<&UntrackedEntry> = by_name
+                .iter()
+                .copied()
+                .filter(|u| u.readers.iter().any(|slug| slug == h))
+                .collect();
             match in_h.as_slice() {
                 [] => NameResolution::HarnessNotFound {
                     harness: h.to_owned(),
-                    available: distinct_sorted_slugs(&by_name),
+                    available: distinct_sorted_readers(&by_name),
                 },
                 [one] => NameResolution::Resolved(one.path.clone()),
                 many => NameResolution::AmbiguousScope {
@@ -1962,23 +1972,16 @@ fn resolve_name(name: &str, harness: Option<&str>, untracked: &[UntrackedEntry])
             [] => NameResolution::NoMatch,
             [one] => NameResolution::Resolved(one.path.clone()),
             many => {
-                let slugs = distinct_sorted_slugs(many);
-                if slugs.len() == 1 {
-                    NameResolution::AmbiguousScope {
-                        harness: slugs.into_iter().next().expect("len == 1"),
-                        paths: many.iter().map(|u| u.path.clone()).collect(),
-                    }
-                } else {
-                    NameResolution::AmbiguousHarness(slugs)
-                }
+                NameResolution::AmbiguousFolders(many.iter().map(|u| u.folder.clone()).collect())
             }
         },
     }
 }
 
-/// The distinct harness slugs across a set of entries, sorted (deterministic error copy).
-fn distinct_sorted_slugs(entries: &[&UntrackedEntry]) -> Vec<String> {
-    let mut slugs: Vec<String> = entries.iter().map(|u| u.harness.clone()).collect();
+/// Every agent that reads a folder holding one of these entries, sorted + deduped (deterministic
+/// error copy) — the `@<slug>` tokens that CAN select something.
+fn distinct_sorted_readers(entries: &[&UntrackedEntry]) -> Vec<String> {
+    let mut slugs: Vec<String> = entries.iter().flat_map(|u| u.readers.clone()).collect();
     slugs.sort();
     slugs.dedup();
     slugs
@@ -2165,12 +2168,18 @@ fn recognize(ctx: &Ctx<'_>, canonical_source: &Path) -> Option<DiscoveredPlaceme
         .find(|d| d.path.canonicalize().is_ok_and(|c| c == *canonical_source))
 }
 
-/// Which known harness's skill dir `source_abs` sits under (baked registry), using the real env home + cwd.
-/// Best-effort provenance: no `$HOME` ⇒ no attribution.
-fn registry_attribution(source_abs: &Path) -> Option<topos_harness::registry::HarnessAttribution> {
-    let home = std::env::var_os("HOME").map(std::path::PathBuf::from)?;
+/// The installed agents that read the folder holding `source_abs` — the registry's ONE attribution
+/// answer, resolved against the real env home + cwd. Best-effort provenance: no `$HOME` (or no
+/// parent) ⇒ nobody.
+pub(crate) fn folder_readers(source_abs: &Path) -> Vec<String> {
+    let Some(home) = std::env::var_os("HOME").map(std::path::PathBuf::from) else {
+        return Vec::new();
+    };
+    let Some(folder) = source_abs.parent() else {
+        return Vec::new();
+    };
     let cwd = std::env::current_dir().ok();
-    topos_harness::registry::attribute_path(source_abs, &home, cwd.as_deref())
+    topos_harness::registry::folder_reader_slugs(folder, &home, cwd.as_deref())
 }
 
 /// Consult each ACTIVE session's catalog for a GOVERNED copy of `spec`'s source — the dedup
@@ -2252,14 +2261,15 @@ fn reject_overlap(source: &Path, home: &Path) -> Result<(), ClientError> {
 mod tests {
     use super::*;
 
-    /// One discovered untracked row — only the fields name resolution reads matter.
-    fn ue(name: &str, harness: &str, path: &str) -> UntrackedEntry {
+    /// One discovered untracked row: a skill dir, its folder, and the agents that read the folder —
+    /// only the fields name resolution reads matter.
+    fn ue(name: &str, readers: &[&str], path: &str) -> UntrackedEntry {
+        let p = std::path::Path::new(path);
         UntrackedEntry {
             name: name.to_owned(),
             path: path.to_owned(),
-            harness: harness.to_owned(),
-            harness_name: harness.to_owned(),
-            adapter_supported: false,
+            folder: p.parent().unwrap_or(p).to_string_lossy().into_owned(),
+            readers: readers.iter().map(|s| (*s).to_owned()).collect(),
             scope: "user".to_owned(),
         }
     }
@@ -2280,7 +2290,7 @@ mod tests {
 
     #[test]
     fn a_single_discovered_placement_resolves_to_its_path() {
-        let inv = vec![ue("deploy", "claude-code", "/h/.claude/skills/deploy")];
+        let inv = vec![ue("deploy", &["claude-code"], "/h/.claude/skills/deploy")];
         assert_eq!(
             resolve_name("deploy", None, &inv),
             NameResolution::Resolved("/h/.claude/skills/deploy".to_owned())
@@ -2293,17 +2303,20 @@ mod tests {
     }
 
     #[test]
-    fn a_name_in_two_harnesses_is_ambiguous_until_disambiguated() {
+    fn a_name_in_two_folders_is_ambiguous_until_disambiguated() {
         let inv = vec![
-            ue("deploy", "claude-code", "/h/.claude/skills/deploy"),
-            ue("deploy", "cursor", "/h/.cursor/skills/deploy"),
+            ue("deploy", &["claude-code"], "/h/.claude/skills/deploy"),
+            ue("deploy", &["cursor"], "/h/.cursor/skills/deploy"),
         ];
-        // Bare name → ambiguous across the two (sorted) slugs.
+        // Bare name → ambiguous across the two FOLDERS (what the caller picks between).
         assert_eq!(
             resolve_name("deploy", None, &inv),
-            NameResolution::AmbiguousHarness(vec!["claude-code".to_owned(), "cursor".to_owned()])
+            NameResolution::AmbiguousFolders(vec![
+                "/h/.claude/skills".to_owned(),
+                "/h/.cursor/skills".to_owned()
+            ])
         );
-        // `@harness` picks the one.
+        // `@harness` picks the folder that agent reads.
         assert_eq!(
             resolve_name("deploy", Some("cursor"), &inv),
             NameResolution::Resolved("/h/.cursor/skills/deploy".to_owned())
@@ -2311,33 +2324,63 @@ mod tests {
     }
 
     #[test]
-    fn a_name_twice_in_one_harness_is_a_scope_ambiguity_at_harness_not_split() {
-        // Same name, same harness slug, two directories (user + project) — `@harness` cannot split them.
+    fn a_slug_reading_two_folders_cannot_split_them() {
+        // One agent reads both folders (its user dir and this project's dir) — `@harness` selects
+        // both, so the caller picks by path.
         let inv = vec![
-            ue("deploy", "claude-code", "/h/.claude/skills/deploy"),
-            ue("deploy", "claude-code", "/proj/.claude/skills/deploy"),
+            ue("deploy", &["claude-code"], "/h/.claude/skills/deploy"),
+            ue("deploy", &["claude-code"], "/proj/.claude/skills/deploy"),
         ];
-        let scope = NameResolution::AmbiguousScope {
-            harness: "claude-code".to_owned(),
-            paths: vec![
-                "/h/.claude/skills/deploy".to_owned(),
-                "/proj/.claude/skills/deploy".to_owned(),
-            ],
-        };
-        assert_eq!(resolve_name("deploy", None, &inv), scope);
-        assert_eq!(resolve_name("deploy", Some("claude-code"), &inv), scope);
+        assert_eq!(
+            resolve_name("deploy", Some("claude-code"), &inv),
+            NameResolution::AmbiguousScope {
+                harness: "claude-code".to_owned(),
+                paths: vec![
+                    "/h/.claude/skills/deploy".to_owned(),
+                    "/proj/.claude/skills/deploy".to_owned(),
+                ],
+            }
+        );
+        // Bare, it is still just two folders.
+        assert_eq!(
+            resolve_name("deploy", None, &inv),
+            NameResolution::AmbiguousFolders(vec![
+                "/h/.claude/skills".to_owned(),
+                "/proj/.claude/skills".to_owned()
+            ])
+        );
+    }
+
+    #[test]
+    fn a_shared_folder_answers_to_every_agent_that_reads_it() {
+        // The shared dir: BOTH slugs select the same single entry, and neither is ambiguous.
+        let inv = vec![ue("deploy", &["warp", "zed"], "/h/.agents/skills/deploy")];
+        for slug in ["warp", "zed"] {
+            assert_eq!(
+                resolve_name("deploy", Some(slug), &inv),
+                NameResolution::Resolved("/h/.agents/skills/deploy".to_owned())
+            );
+        }
+        // An agent that does NOT read the folder is told who does.
+        assert_eq!(
+            resolve_name("deploy", Some("cursor"), &inv),
+            NameResolution::HarnessNotFound {
+                harness: "cursor".to_owned(),
+                available: vec!["warp".to_owned(), "zed".to_owned()],
+            }
+        );
     }
 
     #[test]
     fn a_bare_name_with_no_placement_is_no_match() {
-        let inv = vec![ue("deploy", "claude-code", "/h/.claude/skills/deploy")];
+        let inv = vec![ue("deploy", &["claude-code"], "/h/.claude/skills/deploy")];
         assert_eq!(resolve_name("lint", None, &inv), NameResolution::NoMatch);
     }
 
     #[test]
     fn a_wrong_harness_reports_where_the_skill_actually_lives() {
-        let inv = vec![ue("deploy", "claude-code", "/h/.claude/skills/deploy")];
-        // Named in a harness that lacks it → HarnessNotFound, listing where it IS.
+        let inv = vec![ue("deploy", &["claude-code"], "/h/.claude/skills/deploy")];
+        // Named for an agent that does not read the folder → HarnessNotFound, listing who does.
         assert_eq!(
             resolve_name("deploy", Some("cursor"), &inv),
             NameResolution::HarnessNotFound {
@@ -2382,9 +2425,9 @@ mod tests {
     #[test]
     fn paths_named_collects_every_local_candidate_of_one_name() {
         let inv = vec![
-            ue("deploy", "claude-code", "/h/.claude/skills/deploy"),
-            ue("deploy", "cursor", "/h/.cursor/skills/deploy"),
-            ue("lint", "claude-code", "/h/.claude/skills/lint"),
+            ue("deploy", &["claude-code"], "/h/.claude/skills/deploy"),
+            ue("deploy", &["cursor"], "/h/.cursor/skills/deploy"),
+            ue("lint", &["claude-code"], "/h/.claude/skills/lint"),
         ];
         assert_eq!(
             paths_named("deploy", &inv),

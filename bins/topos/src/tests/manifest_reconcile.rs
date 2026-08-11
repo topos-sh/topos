@@ -9324,7 +9324,7 @@ fn a_name_several_workspaces_publish_refuses_naming_every_spelling() {
     // spelling — advertising only one would settle an ambiguity nobody resolved.
     untracked_skill(&rig.work.0, BARE, b"# deploy\n");
     let err = bare_plan(&rig, &plane, &dir, BARE, true).unwrap_err();
-    assert_eq!(err.code(), "AMBIGUOUS_SCOPE");
+    assert_eq!(err.code(), "AMBIGUOUS_HARNESS");
     let envelope = crate::render::err_envelope("add", &["add".to_owned()], &err);
     let subscribes: Vec<_> = envelope
         .next_actions
@@ -9346,12 +9346,13 @@ fn a_name_several_workspaces_publish_refuses_naming_every_spelling() {
 #[test]
 fn a_local_ambiguity_discloses_the_team_copy_and_judges_the_bytes() {
     let (rig, plane, dir, _v) = bare_rig("bare-scope");
-    // The same name in the home AND project dirs of ONE harness — `@harness` cannot split them.
+    // The same name in the home AND project skills folders — two folders, so the bare name is
+    // ambiguous between them.
     untracked_skill(&rig.home.0, BARE, b"# deploy\n");
     untracked_skill(&rig.work.0, BARE, b"# deploy\n");
 
     let err = bare_plan(&rig, &plane, &dir, BARE, true).unwrap_err();
-    assert_eq!(err.code(), "AMBIGUOUS_SCOPE");
+    assert_eq!(err.code(), "AMBIGUOUS_HARNESS");
     let message = err.to_string();
     assert!(
         message.contains("byte-identical") && message.contains(&format!("{HOST}/{WS_NAME}/{BARE}")),

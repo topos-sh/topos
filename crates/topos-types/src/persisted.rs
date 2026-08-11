@@ -131,10 +131,10 @@ pub struct PlacementMap {
     /// The harness layer the placement sits in (e.g. `"user"`), when a harness was recognized.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub harness_layer: Option<String>,
-    /// The harness's registry slug (e.g. `claude-code`, `cursor`) the adopted dir was attributed to —
-    /// recorded even when topos has no full adapter for it, so a later adapter can retroactively arm
-    /// auto-updates for an already-adopted skill. A superset of [`Self::harness`]: set whenever the source sits
-    /// under a known harness skill dir. **Additive optional.**
+    /// The registry slug (e.g. `claude-code`, `cursor`) of the agent this placement serves, when ONE
+    /// agent owns it: the recognized harness, or the sole installed reader of the folder an added dir
+    /// sits in. A folder several agents read has no single owner and a folder none reads has none at
+    /// all — both leave this unset. A superset of [`Self::harness`]. **Additive optional.**
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub harness_slug: Option<String>,
 }
@@ -146,8 +146,8 @@ pub struct PlacementMap {
 pub struct PlacementState {
     /// Whether this dir is the shared cross-agent skills dir or one harness's own skills dir.
     pub kind: PlacementKind,
-    /// The registry slug of the harness a `native` placement serves; `None` for `shared` (and for a
-    /// plain adopted dir under no known harness).
+    /// The registry slug of the harness a `native` placement serves; `None` for `shared`, and for a
+    /// dir added in place that no single installed agent owns (the user's own chosen location).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent: Option<String>,
     /// sha256 of the bytes topos wrote into THIS dir; `None` = the target is recorded but was never

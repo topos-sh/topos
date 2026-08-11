@@ -801,23 +801,21 @@ pub struct BucketTruncation {
     pub total: u64,
 }
 
-/// A discovered-but-unadopted skill — known only by where it lives, not by any topos version yet.
-/// Discovery spans every harness in the baked registry, so `harness` is an open **slug** string (not the
-/// closed [`crate::HarnessId`] — topos discovers far more harnesses than it has full adapters for).
+/// A discovered-but-unmanaged skill — known only by where it lives, not by any topos version yet.
+/// A skill dir belongs to a FOLDER, and a folder is read by zero or more installed agents; there is
+/// no single owning harness, so the entry carries the folder and its readers rather than one slug.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
 pub struct UntrackedEntry {
     pub name: String,
-    /// The harness dir it was found in.
+    /// The skill dir itself.
     pub path: String,
-    /// The harness's registry slug (e.g. `claude-code`, `cursor`, `windsurf`).
-    pub harness: String,
-    /// The harness's human-readable name (e.g. `Claude Code`, `Cursor`).
-    pub harness_name: String,
-    /// True iff topos has a full adapter for this harness (so `add` can arm live auto-updates). False = the
-    /// skill is still adoptable (`topos add` tracks + shares its bytes), but auto-update lands later.
-    pub adapter_supported: bool,
-    /// Where the skill dir was found: `user` (a global harness home) or `project` (the current repo).
+    /// The skills folder holding it — the parent of [`Self::path`].
+    pub folder: String,
+    /// The registry slugs of every INSTALLED agent that reads [`Self::folder`], sorted. These are the
+    /// `<name>@<slug>` / `-a <slug>` tokens. Every entry of one folder carries the same list.
+    pub readers: Vec<String>,
+    /// Where the skill dir was found: `user` (a global agent home) or `project` (the current repo).
     pub scope: String,
 }
 
@@ -1033,8 +1031,9 @@ pub struct AddData {
     /// directory tracked in place. Disclosed so the agent can see whether auto-update was armed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub harness: Option<crate::HarnessId>,
-    /// The harness's registry slug the adopted dir was attributed to (e.g. `cursor`), even for a harness
-    /// topos has no full adapter for (then `harness` is `None`). Provenance/disclosure only.
+    /// The registry slug (e.g. `cursor`) of the agent that owns the added dir, when ONE does: the
+    /// recognized harness, or the sole installed reader of its folder (then `harness` may be `None`).
+    /// Unset for a folder several agents read, or none. Provenance/disclosure only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub harness_slug: Option<String>,
     /// The auto-update-trigger outcome, present when adopting into a recognized harness attempted a
@@ -1544,12 +1543,12 @@ pub struct PublishData {
     derive(schemars::JsonSchema, utoipa::ToSchema)
 )]
 pub struct AddedNote {
-    /// The name the skill was adopted under (what `list` / `diff` / `publish` now resolve it by).
+    /// The name the skill was added under (what `list` / `diff` / `publish` now resolve it by).
     pub name: String,
-    /// The harness registry slug the adopted directory was attributed to (e.g. `claude-code`), or `None`
-    /// for a plain directory adopted in place under no known harness.
+    /// The folder the added directory sits in, or `None` when it has no parent. A folder, never an
+    /// agent: a skills folder may be read by several agents, and which ones is a separate query.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub harness_slug: Option<String>,
+    pub folder: Option<String>,
 }
 
 /// `publish --propose` (opens a PR; uploads a full candidate **without moving `current`**). Returns

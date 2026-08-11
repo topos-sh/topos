@@ -1229,15 +1229,11 @@ pub(crate) fn list_tty(out: &ListOutcome) -> String {
     // The untracked LISTING (under `--untracked`), grouped by folder.
     if !data.untracked.is_empty() {
         s.push_str("Untracked skills — `topos add <name>` manages one:\n");
-        let mut last_folder: Option<String> = None;
+        let mut last_folder: Option<&str> = None;
         for u in &data.untracked {
-            let folder = std::path::Path::new(&u.path)
-                .parent()
-                .map(|p| p.display().to_string())
-                .unwrap_or_default();
-            if last_folder.as_deref() != Some(folder.as_str()) {
-                s.push_str(&format!("  {folder}:\n"));
-                last_folder = Some(folder);
+            if last_folder != Some(u.folder.as_str()) {
+                s.push_str(&untracked_folder_line(u));
+                last_folder = Some(&u.folder);
             }
             s.push_str(&untracked_row(u));
         }
@@ -1389,21 +1385,22 @@ fn remote_row(r: &RemoteSkill) -> String {
     )
 }
 
-/// One untracked-discovery row (already grouped by folder): `<name>  [<harness-name> · <slug>]`,
-/// plus an adopt-only note for a harness topos has no full adapter for — it can still be `add`ed
-/// (the bytes track + share), but live auto-updates for that harness land later. The **slug** is
-/// shown because it is the `<skill>@<harness>` token `add` takes to disambiguate a name found in
-/// more than one harness.
-fn untracked_row(u: &UntrackedEntry) -> String {
-    let support = if u.adapter_supported {
-        ""
+/// The header of one untracked-discovery group: the folder, then the slugs of every installed agent
+/// that reads it. The slugs sit on the FOLDER because that is what they describe — every skill in
+/// the folder is read by the same agents — and they are machine tokens, not display names: they are
+/// what `<name>@<slug>` and `-a <slug>` take. A folder with no installed reader carries no bracket.
+fn untracked_folder_line(u: &UntrackedEntry) -> String {
+    if u.readers.is_empty() {
+        format!("  {}:\n", u.folder)
     } else {
-        "  (adopt-only — live auto-updates land later)"
-    };
-    format!(
-        "    {}  [{} · {}]{}\n",
-        u.name, u.harness_name, u.harness, support
-    )
+        format!("  {}  [{}]:\n", u.folder, u.readers.join(", "))
+    }
+}
+
+/// One untracked-discovery row: the skill's name. Where it lives and who reads it are the group's
+/// folder line, so a row says the one thing that varies between rows.
+fn untracked_row(u: &UntrackedEntry) -> String {
+    format!("    {}\n", u.name)
 }
 
 /// One inventory row: `<skill>  <skill>@<short>` + the draft flag + the STATUS / SOURCE / CAUSE
@@ -2867,11 +2864,12 @@ pub(crate) fn invite_tty(data: &InvitationData) -> String {
 }
 
 /// The one-line disclosure that a `publish` ADDED the skill to topos first (the auto-add convenience) —
-/// honest plumbing ("it also adopted this skill"), naming the harness it was attributed to when known. It
-/// states only the adoption; the line that FOLLOWS conveys what the publish then did.
+/// honest plumbing ("it also added this skill"), naming the FOLDER it came from. A folder is the fact
+/// the line can state; which agents read it is a different question. It states only the add; the line
+/// that FOLLOWS conveys what the publish then did.
 fn added_line(added: &AddedNote) -> String {
-    match &added.harness_slug {
-        Some(slug) => format!("Added '{}' from {slug} to topos.", added.name),
+    match &added.folder {
+        Some(folder) => format!("Added '{}' from {folder} to topos.", added.name),
         None => format!("Added '{}' to topos.", added.name),
     }
 }
@@ -7113,20 +7111,26 @@ mod tests {
                     },
                 ],
                 untracked: vec![
+                    // A folder several installed agents share: every reader on the folder line.
                     UntrackedEntry {
-                        name: "zebra".to_owned(),
-                        path: "/home/u/.cursor/skills/zebra".to_owned(),
-                        harness: "cursor".to_owned(),
-                        harness_name: "Cursor".to_owned(),
-                        adapter_supported: false,
+                        name: "ant".to_owned(),
+                        path: "/home/u/.agents/skills/ant".to_owned(),
+                        folder: "/home/u/.agents/skills".to_owned(),
+                        readers: vec!["warp".to_owned(), "zed".to_owned()],
                         scope: "user".to_owned(),
                     },
                     UntrackedEntry {
-                        name: "yak".to_owned(),
-                        path: "/home/u/.claude/skills/yak".to_owned(),
-                        harness: "claude-code".to_owned(),
-                        harness_name: "Claude Code".to_owned(),
-                        adapter_supported: true,
+                        name: "bee".to_owned(),
+                        path: "/home/u/.agents/skills/bee".to_owned(),
+                        folder: "/home/u/.agents/skills".to_owned(),
+                        readers: vec!["warp".to_owned(), "zed".to_owned()],
+                        scope: "user".to_owned(),
+                    },
+                    UntrackedEntry {
+                        name: "zebra".to_owned(),
+                        path: "/home/u/.cursor/skills/zebra".to_owned(),
+                        folder: "/home/u/.cursor/skills".to_owned(),
+                        readers: vec!["cursor".to_owned()],
                         scope: "user".to_owned(),
                     },
                 ],
@@ -7146,14 +7150,22 @@ mod tests {
             text.contains("0 skills machine-wide — `topos list -g`"),
             "{text}"
         );
-        // The full listing, grouped by folder.
-        assert!(text.contains("/home/u/.cursor/skills:"), "{text}");
+        // The full listing, grouped by folder: the readers ride the FOLDER line (every installed
+        // agent that reads it, comma-separated), and a row carries the skill's name and nothing else.
         assert!(
-            text.contains("zebra  [Cursor · cursor]  (adopt-only — live auto-updates land later)"),
+            text.contains("  /home/u/.agents/skills  [warp, zed]:\n    ant\n    bee\n"),
             "{text}"
         );
-        assert!(text.contains("/home/u/.claude/skills:"), "{text}");
-        assert!(text.contains("yak  [Claude Code · claude-code]"), "{text}");
+        assert!(
+            text.contains("  /home/u/.cursor/skills  [cursor]:\n    zebra"),
+            "{text}"
+        );
+        // The one folder header per group — never reprinted per row.
+        assert_eq!(
+            text.matches("/home/u/.agents/skills  [").count(),
+            1,
+            "{text}"
+        );
     }
 
     #[test]
@@ -7805,7 +7817,7 @@ mod tests {
             &crate::error::ClientError::HarnessMismatch {
                 name: "pwn --yes".to_owned(),
                 requested: "cursor".to_owned(),
-                tracked: "claude-code".to_owned(),
+                folders: vec!["/home/u/.claude/skills".to_owned()],
             },
         );
         assert_eq!(

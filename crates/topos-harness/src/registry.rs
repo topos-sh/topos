@@ -5,15 +5,17 @@
 //! harness is filling a column, not adding a table.
 //!
 //! The queries over the real filesystem are read-only: [`discover_all`] (what skills are on this
-//! machine), [`attribute_path`] (which harness owns a given skill dir, for `add`-time attribution), and
+//! machine), [`folder_readers`] (which INSTALLED harnesses read a given skills dir — the one
+//! attribution answer both the untracked listing and `add`'s `@<slug>` resolution join on), and
 //! [`detected_harnesses`] (which agents are installed here). Skill *directories* are read only to
 //! confirm a root `SKILL.md` exists — never the bytes, never the frontmatter — through the one shared
 //! [`discover_skill_dirs`] probe every adapter's `discover()` also runs.
 //!
 //! A harness's richer behavior stays its adapter's (Hermes's `<category>/<name>` nesting composes the
-//! shared probe's two halves rather than restating them; Claude Code's config edit is its own). Only
-//! `claude-code`, `openclaw`, and `hermes-agent` carry [`KnownHarness::adapter_supported`] `= true`
-//! (topos can *place + follow* those); every other row is discover-and-`add` only.
+//! shared probe's two halves rather than restating them; Claude Code's config edit is its own). This
+//! table serves discovery, attribution, the MCP config surfaces, and the shared-dir coverage claim;
+//! which harnesses topos can PLACE into and ARM is decided per port elsewhere
+//! ([`crate::HarnessAdapter`] impls and [`crate::triggers::adapter_for_slug`]), never by a column here.
 //!
 //! Per-harness home overrides (`$CLAUDE_CONFIG_DIR`, `$CODEX_HOME`, `$HERMES_HOME`, `$VIBE_HOME`,
 //! `$AUTOHAND_HOME`, `$GROK_HOME`, `$XDG_CONFIG_HOME`, plus `$APPDATA` / `$FLATPAK_XDG_CONFIG_HOME` for
@@ -43,10 +45,6 @@ pub struct KnownHarness {
     pub slug: &'static str,
     /// The human-facing name (e.g. `Claude Code`, `Cursor`).
     pub display_name: &'static str,
-    /// `true` ONLY for the three harnesses topos ships a full [`HarnessAdapter`](crate::HarnessAdapter)
-    /// for — `claude-code`, `openclaw`, `hermes-agent` — meaning topos can place + follow their skills.
-    /// Everything else is discover-and-`add` only.
-    pub adapter_supported: bool,
     /// The user/global skills dir(s) — resolved via [`resolve_spec`]. Usually one; `openclaw` has three
     /// (`.openclaw` / `.clawdbot` / `.moltbot`); the two cwd-only harnesses (`eve`, `promptscript`) have
     /// none (no global scope).
@@ -95,22 +93,7 @@ pub struct DiscoveredSkill {
     pub harness_slug: String,
     /// The owning harness's [`KnownHarness::display_name`].
     pub harness_name: String,
-    /// The owning harness's [`KnownHarness::adapter_supported`].
-    pub adapter_supported: bool,
     /// Whether the skill sits in a user- or project-scope dir.
-    pub scope: SkillScope,
-}
-
-/// Which known harness owns a path, for `add`-time attribution (see [`attribute_path`]).
-#[derive(Debug, Clone)]
-pub struct HarnessAttribution {
-    /// The owning harness's [`KnownHarness::slug`].
-    pub slug: String,
-    /// The owning harness's [`KnownHarness::display_name`].
-    pub name: String,
-    /// The owning harness's [`KnownHarness::adapter_supported`].
-    pub adapter_supported: bool,
-    /// Whether the path sits under a user- or project-scope dir.
     pub scope: SkillScope,
 }
 
@@ -319,7 +302,6 @@ const fn flatpak(suffix: &'static str) -> DirSpec {
 const fn kh(
     slug: &'static str,
     display_name: &'static str,
-    adapter_supported: bool,
     user_dirs: &'static [DirSpec],
     project_dir: &'static str,
     detect_dirs: &'static [DirSpec],
@@ -327,7 +309,6 @@ const fn kh(
     KnownHarness {
         slug,
         display_name,
-        adapter_supported,
         user_dirs,
         project_dir,
         detect_dirs,
@@ -359,7 +340,6 @@ static HARNESSES: &[KnownHarness] = &[
     kh(
         "aider-desk",
         "AiderDesk",
-        false,
         &[home(".aider-desk/skills")],
         ".aider-desk/skills",
         &[home(".aider-desk")],
@@ -367,7 +347,6 @@ static HARNESSES: &[KnownHarness] = &[
     kh(
         "amp",
         "Amp",
-        false,
         &[cfg("agents/skills")],
         ".agents/skills",
         &[cfg("amp")],
@@ -377,7 +356,6 @@ static HARNESSES: &[KnownHarness] = &[
     kh(
         "antigravity",
         "Antigravity",
-        false,
         &[home(".gemini/antigravity/skills")],
         ".agents/skills",
         &[home(".gemini/antigravity")],
@@ -385,7 +363,6 @@ static HARNESSES: &[KnownHarness] = &[
     kh(
         "antigravity-cli",
         "Antigravity CLI",
-        false,
         &[home(".gemini/antigravity-cli/skills")],
         ".agents/skills",
         &[home(".gemini/antigravity-cli")],
@@ -393,7 +370,6 @@ static HARNESSES: &[KnownHarness] = &[
     kh(
         "astrbot",
         "AstrBot",
-        false,
         &[home(".astrbot/data/skills")],
         "data/skills",
         &[cwd("data/skills"), home(".astrbot")],
@@ -401,7 +377,6 @@ static HARNESSES: &[KnownHarness] = &[
     kh(
         "autohand-code",
         "Autohand Code CLI",
-        false,
         &[autohand_home("skills")],
         ".autohand/skills",
         &[autohand_home("")],
@@ -409,7 +384,6 @@ static HARNESSES: &[KnownHarness] = &[
     kh(
         "augment",
         "Augment",
-        false,
         &[home(".augment/skills")],
         ".augment/skills",
         &[home(".augment")],
@@ -417,7 +391,6 @@ static HARNESSES: &[KnownHarness] = &[
     kh(
         "bob",
         "IBM Bob",
-        false,
         &[home(".bob/skills")],
         ".bob/skills",
         &[home(".bob")],
@@ -425,7 +398,6 @@ static HARNESSES: &[KnownHarness] = &[
     kh(
         "claude-code",
         "Claude Code",
-        true,
         &[claude_home("skills")],
         ".claude/skills",
         &[claude_home("")],
@@ -443,7 +415,6 @@ static HARNESSES: &[KnownHarness] = &[
     kh(
         "openclaw",
         "OpenClaw",
-        true,
         &[
             home(".openclaw/skills"),
             home(".clawdbot/skills"),
@@ -466,7 +437,6 @@ static HARNESSES: &[KnownHarness] = &[
     kh(
         "cline",
         "Cline",
-        false,
         &[home(".agents/skills")],
         ".agents/skills",
         &[home(".cline")],
@@ -477,7 +447,6 @@ static HARNESSES: &[KnownHarness] = &[
     kh(
         "codearts-agent",
         "CodeArts Agent",
-        false,
         &[home(".codeartsdoer/skills")],
         ".codeartsdoer/skills",
         &[home(".codeartsdoer")],
@@ -485,7 +454,6 @@ static HARNESSES: &[KnownHarness] = &[
     kh(
         "codebuddy",
         "CodeBuddy",
-        false,
         &[home(".codebuddy/skills")],
         ".codebuddy/skills",
         &[cwd(".codebuddy"), home(".codebuddy")],
@@ -493,7 +461,6 @@ static HARNESSES: &[KnownHarness] = &[
     kh(
         "codemaker",
         "Codemaker",
-        false,
         &[home(".codemaker/skills")],
         ".codemaker/skills",
         &[home(".codemaker")],
@@ -501,7 +468,6 @@ static HARNESSES: &[KnownHarness] = &[
     kh(
         "codestudio",
         "Code Studio",
-        false,
         &[home(".codestudio/skills")],
         ".codestudio/skills",
         &[home(".codestudio")],
@@ -509,7 +475,6 @@ static HARNESSES: &[KnownHarness] = &[
     kh(
         "codex",
         "Codex",
-        false,
         &[codex_home("skills")],
         ".agents/skills",
         &[codex_home(""), abs("etc/codex")],
@@ -529,7 +494,6 @@ static HARNESSES: &[KnownHarness] = &[
     kh(
         "command-code",
         "Command Code",
-        false,
         &[home(".commandcode/skills")],
         ".commandcode/skills",
         &[home(".commandcode")],
@@ -537,7 +501,6 @@ static HARNESSES: &[KnownHarness] = &[
     kh(
         "continue",
         "Continue",
-        false,
         &[home(".continue/skills")],
         ".continue/skills",
         &[cwd(".continue"), home(".continue")],
@@ -545,7 +508,6 @@ static HARNESSES: &[KnownHarness] = &[
     kh(
         "cortex",
         "Cortex Code",
-        false,
         &[home(".snowflake/cortex/skills")],
         ".cortex/skills",
         &[home(".snowflake/cortex")],
@@ -553,7 +515,6 @@ static HARNESSES: &[KnownHarness] = &[
     kh(
         "crush",
         "Crush",
-        false,
         &[home(".config/crush/skills")],
         ".crush/skills",
         &[home(".config/crush")],
@@ -564,7 +525,6 @@ static HARNESSES: &[KnownHarness] = &[
     kh(
         "cursor",
         "Cursor",
-        false,
         &[home(".cursor/skills")],
         ".agents/skills",
         &[home(".cursor")],
@@ -580,7 +540,6 @@ static HARNESSES: &[KnownHarness] = &[
     kh(
         "deepagents",
         "Deep Agents",
-        false,
         &[home(".deepagents/agent/skills")],
         ".agents/skills",
         &[home(".deepagents")],
@@ -588,7 +547,6 @@ static HARNESSES: &[KnownHarness] = &[
     kh(
         "devin",
         "Devin for Terminal",
-        false,
         &[cfg("devin/skills")],
         ".devin/skills",
         &[cfg("devin")],
@@ -596,7 +554,6 @@ static HARNESSES: &[KnownHarness] = &[
     kh(
         "dexto",
         "Dexto",
-        false,
         &[home(".agents/skills")],
         ".agents/skills",
         &[home(".dexto")],
@@ -604,16 +561,14 @@ static HARNESSES: &[KnownHarness] = &[
     kh(
         "droid",
         "Droid",
-        false,
         &[home(".factory/skills")],
         ".factory/skills",
         &[home(".factory")],
     ),
-    kh("eve", "Eve", false, &[], "agent/skills", &[cwd("agent")]),
+    kh("eve", "Eve", &[], "agent/skills", &[cwd("agent")]),
     kh(
         "firebender",
         "Firebender",
-        false,
         &[home(".firebender/skills")],
         ".agents/skills",
         &[home(".firebender")],
@@ -621,7 +576,6 @@ static HARNESSES: &[KnownHarness] = &[
     kh(
         "forgecode",
         "ForgeCode",
-        false,
         &[home(".forge/skills")],
         ".forge/skills",
         &[home(".forge")],
@@ -629,7 +583,6 @@ static HARNESSES: &[KnownHarness] = &[
     kh(
         "gemini-cli",
         "Gemini CLI",
-        false,
         &[home(".gemini/skills")],
         ".agents/skills",
         &[home(".gemini")],
@@ -639,7 +592,6 @@ static HARNESSES: &[KnownHarness] = &[
     kh(
         "github-copilot",
         "GitHub Copilot",
-        false,
         &[home(".copilot/skills")],
         ".agents/skills",
         &[home(".copilot")],
@@ -649,7 +601,6 @@ static HARNESSES: &[KnownHarness] = &[
     kh(
         "goose",
         "Goose",
-        false,
         &[cfg("goose/skills")],
         ".goose/skills",
         &[cfg("goose")],
@@ -661,7 +612,6 @@ static HARNESSES: &[KnownHarness] = &[
     kh(
         "grok",
         "Grok Build",
-        false,
         &[grok_home("skills")],
         ".grok/skills",
         &[grok_home("")],
@@ -669,7 +619,6 @@ static HARNESSES: &[KnownHarness] = &[
     kh(
         "hermes-agent",
         "Hermes Agent",
-        true,
         &[hermes_home("skills")],
         ".hermes/skills",
         &[hermes_home("")],
@@ -685,7 +634,6 @@ static HARNESSES: &[KnownHarness] = &[
     kh(
         "inference-sh",
         "inference.sh",
-        false,
         &[home(".inferencesh/skills")],
         ".inferencesh/skills",
         &[home(".inferencesh")],
@@ -693,7 +641,6 @@ static HARNESSES: &[KnownHarness] = &[
     kh(
         "jazz",
         "Jazz",
-        false,
         &[home(".jazz/skills")],
         ".jazz/skills",
         &[home(".jazz"), cwd(".jazz")],
@@ -701,7 +648,6 @@ static HARNESSES: &[KnownHarness] = &[
     kh(
         "junie",
         "Junie",
-        false,
         &[home(".junie/skills")],
         ".junie/skills",
         &[home(".junie")],
@@ -709,7 +655,6 @@ static HARNESSES: &[KnownHarness] = &[
     kh(
         "iflow-cli",
         "iFlow CLI",
-        false,
         &[home(".iflow/skills")],
         ".iflow/skills",
         &[home(".iflow")],
@@ -717,7 +662,6 @@ static HARNESSES: &[KnownHarness] = &[
     kh(
         "kilo",
         "Kilo Code",
-        false,
         &[home(".kilocode/skills")],
         ".kilocode/skills",
         &[home(".kilocode")],
@@ -725,7 +669,6 @@ static HARNESSES: &[KnownHarness] = &[
     kh(
         "kimchi",
         "Kimchi",
-        false,
         // A literal `~/.config` dir, NOT the XDG-overridable config home (`crush` is the precedent) —
         // upstream joins it onto `home`, so `$XDG_CONFIG_HOME` does not move it.
         &[home(".config/kimchi/harness/skills")],
@@ -735,7 +678,6 @@ static HARNESSES: &[KnownHarness] = &[
     kh(
         "kimi-code-cli",
         "Kimi Code CLI",
-        false,
         &[home(".agents/skills")],
         ".agents/skills",
         &[home(".kimi-code"), home(".kimi")],
@@ -743,7 +685,6 @@ static HARNESSES: &[KnownHarness] = &[
     kh(
         "kiro-cli",
         "Kiro CLI",
-        false,
         &[home(".kiro/skills")],
         ".kiro/skills",
         &[home(".kiro")],
@@ -751,7 +692,6 @@ static HARNESSES: &[KnownHarness] = &[
     kh(
         "kode",
         "Kode",
-        false,
         &[home(".kode/skills")],
         ".kode/skills",
         &[home(".kode")],
@@ -759,7 +699,6 @@ static HARNESSES: &[KnownHarness] = &[
     kh(
         "lingma",
         "Lingma",
-        false,
         &[home(".lingma/skills")],
         ".lingma/skills",
         &[home(".lingma")],
@@ -767,7 +706,6 @@ static HARNESSES: &[KnownHarness] = &[
     kh(
         "loaf",
         "Loaf",
-        false,
         &[home(".agents/skills")],
         ".agents/skills",
         &[home(".loaf")],
@@ -775,7 +713,6 @@ static HARNESSES: &[KnownHarness] = &[
     kh(
         "mcpjam",
         "MCPJam",
-        false,
         &[home(".mcpjam/skills")],
         ".mcpjam/skills",
         &[home(".mcpjam")],
@@ -783,7 +720,6 @@ static HARNESSES: &[KnownHarness] = &[
     kh(
         "minimax-code",
         "MiniMax Code",
-        false,
         &[home(".minimax/skills")],
         ".minimax/skills",
         // Present when either the home config dir OR the macOS app bundle exists — the `.app` path is
@@ -793,7 +729,6 @@ static HARNESSES: &[KnownHarness] = &[
     kh(
         "mistral-vibe",
         "Mistral Vibe",
-        false,
         &[vibe_home("skills")],
         ".vibe/skills",
         &[vibe_home("")],
@@ -801,7 +736,6 @@ static HARNESSES: &[KnownHarness] = &[
     kh(
         "moxby",
         "Moxby",
-        false,
         &[home(".moxby/skills")],
         ".moxby/skills",
         &[home(".moxby")],
@@ -809,7 +743,6 @@ static HARNESSES: &[KnownHarness] = &[
     kh(
         "mux",
         "Mux",
-        false,
         &[home(".mux/skills")],
         ".mux/skills",
         &[home(".mux")],
@@ -817,7 +750,6 @@ static HARNESSES: &[KnownHarness] = &[
     kh(
         "opencode",
         "OpenCode",
-        false,
         &[cfg("opencode/skills")],
         ".agents/skills",
         &[cfg("opencode")],
@@ -838,7 +770,6 @@ static HARNESSES: &[KnownHarness] = &[
     kh(
         "openhands",
         "OpenHands",
-        false,
         &[home(".openhands/skills")],
         ".openhands/skills",
         &[home(".openhands")],
@@ -846,7 +777,6 @@ static HARNESSES: &[KnownHarness] = &[
     kh(
         "ona",
         "Ona",
-        false,
         &[home(".ona/skills")],
         ".ona/skills",
         &[home(".ona")],
@@ -854,7 +784,6 @@ static HARNESSES: &[KnownHarness] = &[
     kh(
         "pi",
         "Pi",
-        false,
         &[home(".pi/agent/skills")],
         ".pi/skills",
         &[home(".pi/agent")],
@@ -862,7 +791,6 @@ static HARNESSES: &[KnownHarness] = &[
     kh(
         "qoder",
         "Qoder",
-        false,
         &[home(".qoder/skills")],
         ".qoder/skills",
         &[home(".qoder")],
@@ -870,7 +798,6 @@ static HARNESSES: &[KnownHarness] = &[
     kh(
         "qoder-cn",
         "Qoder CN",
-        false,
         &[home(".qoder-cn/skills")],
         ".qoder/skills",
         &[home(".qoder-cn")],
@@ -878,7 +805,6 @@ static HARNESSES: &[KnownHarness] = &[
     kh(
         "qwen-code",
         "Qwen Code",
-        false,
         &[home(".qwen/skills")],
         ".qwen/skills",
         &[home(".qwen")],
@@ -886,7 +812,6 @@ static HARNESSES: &[KnownHarness] = &[
     kh(
         "replit",
         "Replit",
-        false,
         &[cfg("agents/skills")],
         ".agents/skills",
         &[cwd(".replit")],
@@ -894,7 +819,6 @@ static HARNESSES: &[KnownHarness] = &[
     kh(
         "reasonix",
         "Reasonix",
-        false,
         &[home(".reasonix/skills")],
         ".reasonix/skills",
         &[home(".reasonix")],
@@ -902,7 +826,6 @@ static HARNESSES: &[KnownHarness] = &[
     kh(
         "rovodev",
         "Rovo Dev",
-        false,
         &[home(".rovodev/skills")],
         ".rovodev/skills",
         &[home(".rovodev")],
@@ -910,7 +833,6 @@ static HARNESSES: &[KnownHarness] = &[
     kh(
         "roo",
         "Roo Code",
-        false,
         &[home(".roo/skills")],
         ".roo/skills",
         &[home(".roo")],
@@ -918,7 +840,6 @@ static HARNESSES: &[KnownHarness] = &[
     kh(
         "tabnine-cli",
         "Tabnine CLI",
-        false,
         &[home(".tabnine/agent/skills")],
         ".tabnine/agent/skills",
         &[home(".tabnine")],
@@ -926,7 +847,6 @@ static HARNESSES: &[KnownHarness] = &[
     kh(
         "terramind",
         "Terramind",
-        false,
         &[home(".terramind/skills")],
         ".terramind/skills",
         &[home(".terramind")],
@@ -934,7 +854,6 @@ static HARNESSES: &[KnownHarness] = &[
     kh(
         "tinycloud",
         "Tinycloud",
-        false,
         &[home(".tinycloud/skills")],
         ".tinycloud/skills",
         &[home(".tinycloud")],
@@ -942,7 +861,6 @@ static HARNESSES: &[KnownHarness] = &[
     kh(
         "trae",
         "Trae",
-        false,
         &[home(".trae/skills")],
         ".trae/skills",
         &[home(".trae")],
@@ -950,7 +868,6 @@ static HARNESSES: &[KnownHarness] = &[
     kh(
         "trae-cn",
         "Trae CN",
-        false,
         &[home(".trae-cn/skills")],
         ".trae/skills",
         &[home(".trae-cn")],
@@ -958,7 +875,6 @@ static HARNESSES: &[KnownHarness] = &[
     kh(
         "warp",
         "Warp",
-        false,
         &[home(".agents/skills")],
         ".agents/skills",
         &[home(".warp")],
@@ -966,7 +882,6 @@ static HARNESSES: &[KnownHarness] = &[
     kh(
         "windsurf",
         "Windsurf",
-        false,
         &[home(".codeium/windsurf/skills")],
         ".windsurf/skills",
         &[home(".codeium/windsurf")],
@@ -974,7 +889,6 @@ static HARNESSES: &[KnownHarness] = &[
     kh(
         "zed",
         "Zed",
-        false,
         &[home(".agents/skills")],
         ".agents/skills",
         &[cfg("zed"), appdata("Zed"), flatpak("zed")],
@@ -982,7 +896,6 @@ static HARNESSES: &[KnownHarness] = &[
     kh(
         "zcode",
         "ZCode",
-        false,
         &[home(".zcode/skills")],
         ".zcode/skills",
         // Present when either the home config dir OR the macOS app bundle exists (the reference probes
@@ -992,7 +905,6 @@ static HARNESSES: &[KnownHarness] = &[
     kh(
         "zencoder",
         "Zencoder",
-        false,
         &[home(".zencoder/skills")],
         ".zencoder/skills",
         &[home(".zencoder")],
@@ -1000,7 +912,6 @@ static HARNESSES: &[KnownHarness] = &[
     kh(
         "zenflow",
         "Zenflow",
-        false,
         &[home(".zencoder/skills")],
         ".zencoder/skills",
         &[home(".zencoder")],
@@ -1008,7 +919,6 @@ static HARNESSES: &[KnownHarness] = &[
     kh(
         "neovate",
         "Neovate",
-        false,
         &[home(".neovate/skills")],
         ".neovate/skills",
         &[home(".neovate")],
@@ -1016,7 +926,6 @@ static HARNESSES: &[KnownHarness] = &[
     kh(
         "pochi",
         "Pochi",
-        false,
         &[home(".pochi/skills")],
         ".pochi/skills",
         &[home(".pochi")],
@@ -1024,7 +933,6 @@ static HARNESSES: &[KnownHarness] = &[
     kh(
         "promptscript",
         "PromptScript",
-        false,
         &[],
         ".agents/skills",
         &[cwd(".promptscript"), cwd("promptscript.yaml")],
@@ -1032,7 +940,6 @@ static HARNESSES: &[KnownHarness] = &[
     kh(
         "adal",
         "AdaL",
-        false,
         &[home(".adal/skills")],
         ".adal/skills",
         &[home(".adal")],
@@ -1040,7 +947,6 @@ static HARNESSES: &[KnownHarness] = &[
     kh(
         "universal",
         "Universal",
-        false,
         &[cfg("agents/skills")],
         ".agents/skills",
         &[],
@@ -1073,7 +979,7 @@ pub const fn home_rooted_mcp_row(
     project: Option<(&'static str, McpDialect)>,
     reload_note: &'static str,
 ) -> KnownHarness {
-    kh(slug, display_name, false, &[], "", &[]).with_mcp(McpSurfaces {
+    kh(slug, display_name, &[], "", &[]).with_mcp(McpSurfaces {
         user: Some(McpSurface {
             dir: home(user_suffix),
             dialect: user_dialect,
@@ -1179,30 +1085,44 @@ fn probe(dir: &Path, scope: SkillScope, harness: &KnownHarness, out: &mut Vec<Di
                 path,
                 harness_slug: harness.slug.to_owned(),
                 harness_name: harness.display_name.to_owned(),
-                adapter_supported: harness.adapter_supported,
                 scope,
             }),
     );
 }
 
-/// Which known harness owns `path` — does `path` sit directly under a harness skills dir? For `add`-time
-/// attribution. Returns the first matching harness in table order (user scope preferred over project
-/// within a row), or `None` if `path` is under no known harness dir. Unlike [`discover_all`] this does NOT
-/// gate on the harness looking installed — the path itself is the evidence.
+/// Every INSTALLED harness that reads the skills dir `dir` — THE attribution answer, and the one
+/// every surface joins on: the untracked listing's folder line, `add`'s `<name>@<slug>` resolution,
+/// and the `@<slug>`-matches-this-folder question a verb asks about a tracked placement.
+///
+/// A folder is read by a harness when one of that harness's resolved user dirs — or its project dir
+/// under `cwd` — IS `dir`. The presence gate is [`discover_all`]'s exactly (a detect dir exists), so a
+/// harness that is not installed here never claims a folder someone else's skills sit in; a shared
+/// dir (`~/.agents/skills`) honestly answers with EVERY installed claimant instead of picking one by
+/// table order. Rows are read in table order and returned SORTED BY SLUG, so the answer does not
+/// depend on where a harness happens to sit in the baked table.
 #[must_use]
-pub fn attribute_path(path: &Path, home: &Path, cwd: Option<&Path>) -> Option<HarnessAttribution> {
-    let parent = path.parent()?;
-    for harness in HARNESSES {
-        for spec in harness.user_dirs {
-            if resolve_spec(spec, home, cwd).as_deref() == Some(parent) {
-                return Some(attribution(harness, SkillScope::User));
-            }
-        }
-        if project_dir_of(harness, cwd).as_deref() == Some(parent) {
-            return Some(attribution(harness, SkillScope::Project));
-        }
-    }
-    None
+pub fn folder_readers(dir: &Path, home: &Path, cwd: Option<&Path>) -> Vec<&'static KnownHarness> {
+    let mut out: Vec<&'static KnownHarness> = HARNESSES
+        .iter()
+        .filter(|h| is_present(h, home, cwd))
+        .filter(|h| {
+            h.user_dirs
+                .iter()
+                .any(|spec| resolve_spec(spec, home, cwd).as_deref() == Some(dir))
+                || project_dir_of(h, cwd).as_deref() == Some(dir)
+        })
+        .collect();
+    out.sort_unstable_by_key(|h| h.slug);
+    out
+}
+
+/// [`folder_readers`] as owned slugs — the spelling every wire field and `@<slug>` token uses.
+#[must_use]
+pub fn folder_reader_slugs(dir: &Path, home: &Path, cwd: Option<&Path>) -> Vec<String> {
+    folder_readers(dir, home, cwd)
+        .into_iter()
+        .map(|h| h.slug.to_owned())
+        .collect()
 }
 
 /// Every known harness that looks INSTALLED on this machine — the rows whose detect dirs exist
@@ -1221,7 +1141,7 @@ pub fn detected_harnesses(home: &Path, cwd: Option<&Path>) -> Vec<&'static Known
 /// `home`/`cwd` — the base onto which `add`'s remote import joins `<skill_name>/`. `None` when the slug is
 /// unknown, or the scope has no dir for that harness (a cwd-only harness at `User`, or `Project` with no
 /// `cwd`). The `User` dir is the harness's FIRST user dir — its canonical global skills location. This is
-/// the WRITE counterpart of [`discover_all`]/[`attribute_path`], so an imported skill lands exactly where
+/// the WRITE counterpart of [`discover_all`]/[`folder_readers`], so an imported skill lands exactly where
 /// discovery would later find it.
 #[must_use]
 pub fn skills_root(
@@ -1396,15 +1316,6 @@ pub fn discover_skill_dirs(dir: &Path) -> Vec<PathBuf> {
     out
 }
 
-fn attribution(harness: &KnownHarness, scope: SkillScope) -> HarnessAttribution {
-    HarnessAttribution {
-        slug: harness.slug.to_owned(),
-        name: harness.display_name.to_owned(),
-        adapter_supported: harness.adapter_supported,
-        scope,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1505,14 +1416,6 @@ mod tests {
         slugs.dedup();
         assert_eq!(slugs.len(), unique, "slugs are unique");
 
-        // adapter_supported is true for EXACTLY the three harnesses topos ships a full adapter for.
-        let supported: Vec<&str> = all
-            .iter()
-            .filter(|h| h.adapter_supported)
-            .map(|h| h.slug)
-            .collect();
-        assert_eq!(supported, vec!["claude-code", "openclaw", "hermes-agent"]);
-
         // `zcode` sits between `zed` and `zencoder` in upstream file order — and row order fixes the
         // shared-dir tie-break, so pin the neighbours, not just the membership.
         let pos = |slug: &str| all.iter().position(|h| h.slug == slug);
@@ -1526,7 +1429,6 @@ mod tests {
         // config dir and the absolute macOS app-bundle both mark it present.
         let zc = &all[zcode];
         assert_eq!(zc.display_name, "ZCode");
-        assert!(!zc.adapter_supported);
         assert_eq!(zc.project_dir(), ".zcode/skills");
         assert_eq!(zc.user_dir_specs(), vec!["home/.zcode/skills".to_owned()]);
         assert_eq!(
@@ -1560,7 +1462,6 @@ mod tests {
         // `grok` carries its own env-overridable root (`$GROK_HOME`), so its specs render `grokHome`.
         let gr = &all[grok];
         assert_eq!(gr.display_name, "Grok Build");
-        assert!(!gr.adapter_supported);
         assert_eq!(gr.project_dir(), ".grok/skills");
         assert_eq!(gr.user_dir_specs(), vec!["grokHome/skills".to_owned()]);
         assert_eq!(gr.detect_dir_specs(), vec!["grokHome".to_owned()]);
@@ -1625,7 +1526,6 @@ mod tests {
             .expect("openclaw skill discovered");
         assert_eq!(oc.harness_slug, "openclaw");
         assert_eq!(oc.harness_name, "OpenClaw");
-        assert!(oc.adapter_supported, "openclaw has a full adapter");
         assert_eq!(oc.scope, SkillScope::User);
         assert_eq!(oc.path, home.path().join(".openclaw/skills/openclaw-skill"));
 
@@ -1635,7 +1535,6 @@ mod tests {
             .expect("augment skill discovered");
         assert_eq!(ag.harness_slug, "augment");
         assert_eq!(ag.harness_name, "Augment");
-        assert!(!ag.adapter_supported, "augment is discover+add only");
         assert_eq!(ag.scope, SkillScope::User);
 
         assert_eq!(mine.len(), 2, "exactly the two real skills under this home");
@@ -1662,42 +1561,89 @@ mod tests {
         let ps = find(&found, "proj-skill").expect("project skill discovered");
         assert_eq!(ps.harness_slug, "droid");
         assert_eq!(ps.scope, SkillScope::Project);
-        assert!(!ps.adapter_supported);
         assert_eq!(ps.path, cwd.path().join(".factory/skills/proj-skill"));
     }
 
+    /// The slugs of `folder_readers` — the shape every caller consumes.
+    fn readers(dir: &Path, home: &Path, cwd: Option<&Path>) -> Vec<String> {
+        folder_reader_slugs(dir, home, cwd)
+    }
+
     #[test]
-    fn attribute_path_maps_known_dirs_and_rejects_the_rest() {
-        let home = TempTree::new("attr-home");
+    fn folder_readers_names_every_installed_claimant_and_ignores_the_rest() {
+        let home = TempTree::new("readers-home");
 
-        // A user-scope path under a uniquely-owned dir → that harness, User scope. (No dir need exist —
-        // the path itself is the evidence; attribution does not gate on "installed".)
-        let user = home.path().join(".augment/skills/my-skill");
-        let a = attribute_path(&user, home.path(), None).expect("augment owns .augment/skills");
-        assert_eq!(a.slug, "augment");
-        assert_eq!(a.name, "Augment");
-        assert!(!a.adapter_supported);
-        assert_eq!(a.scope, SkillScope::User);
+        // A folder no installed harness reads answers with nobody — the presence gate decides, not
+        // table order (`cline`, `dexto`, `warp` and `zed` all claim this dir in the table).
+        let shared = home.path().join(".agents/skills");
+        assert!(readers(&shared, home.path(), None).is_empty());
 
-        // An adapter-supported harness attributes with the flag set.
-        let oc = home.path().join(".openclaw/skills/oc");
-        let a = attribute_path(&oc, home.path(), None).expect("openclaw owns .openclaw/skills");
-        assert_eq!(a.slug, "openclaw");
-        assert!(a.adapter_supported);
+        // Two claimants of the SHARED dir installed → BOTH, sorted by slug. `dexto` claims the same
+        // folder and is not installed, so it never appears.
+        home.mkdir(".warp");
+        home.mkdir(".cline");
+        let found = readers(&shared, home.path(), None);
+        let mut sorted = found.clone();
+        sorted.sort();
+        assert_eq!(found, sorted, "readers come back sorted by slug");
+        assert!(found.contains(&"cline".to_owned()), "{found:?}");
+        assert!(found.contains(&"warp".to_owned()), "{found:?}");
+        assert!(!found.contains(&"dexto".to_owned()), "{found:?}");
 
-        // A project-scope path under a uniquely-owned project dir → Project scope.
-        let cwd = TempTree::new("attr-cwd");
-        let proj = cwd.path().join(".factory/skills/dep-skill");
-        let a = attribute_path(&proj, home.path(), Some(cwd.path()))
-            .expect("droid owns .factory/skills");
-        assert_eq!(a.slug, "droid");
-        assert_eq!(a.scope, SkillScope::Project);
+        // A uniquely-owned user dir answers with exactly its one installed owner.
+        home.mkdir(".augment");
+        assert_eq!(
+            readers(&home.path().join(".augment/skills"), home.path(), None),
+            vec!["augment".to_owned()]
+        );
 
-        // A project path with no cwd supplied → unattributable.
-        assert!(attribute_path(&proj, home.path(), None).is_none());
+        // The PROJECT dir of an installed harness resolves under `cwd` — and is nobody's without one.
+        let cwd = TempTree::new("readers-cwd");
+        home.mkdir(".factory");
+        let proj = cwd.path().join(".factory/skills");
+        assert_eq!(
+            readers(&proj, home.path(), Some(cwd.path())),
+            vec!["droid".to_owned()]
+        );
+        assert!(readers(&proj, home.path(), None).is_empty());
 
-        // A path under no known harness dir → None.
-        let stray = home.path().join("some/random/place/x");
-        assert!(attribute_path(&stray, home.path(), None).is_none());
+        // A folder under no known harness dir is read by nobody.
+        assert!(
+            readers(&home.path().join("some/random/place"), home.path(), None).is_empty(),
+            "a stray folder has no readers"
+        );
+    }
+
+    #[test]
+    fn every_discovered_folder_is_read_by_the_harness_that_discovered_it() {
+        // Attribution and discovery are ONE query: whatever folder `discover_all` yields a skill
+        // from, `folder_readers` of that folder names the harness discovery attributed it to —
+        // never a different, absent claimant.
+        let home = TempTree::new("consistency-home");
+        home.mkdir(".cline");
+        home.mkdir(".warp");
+        home.skill(".agents/skills/shared-skill");
+        home.mkdir(".augment");
+        home.skill(".augment/skills/augment-skill");
+        let cwd = TempTree::new("consistency-cwd");
+        home.mkdir(".factory");
+        cwd.skill(".factory/skills/proj-skill");
+
+        let found = discover_all(home.path(), Some(cwd.path()));
+        let mine: Vec<&DiscoveredSkill> = found
+            .iter()
+            .filter(|d| d.path.starts_with(home.path()) || d.path.starts_with(cwd.path()))
+            .collect();
+        assert_eq!(mine.len(), 3, "the three fixtures, once each: {mine:?}");
+        for d in mine {
+            let folder = d.path.parent().expect("a skill dir has a parent");
+            let readers = readers(folder, home.path(), Some(cwd.path()));
+            assert!(
+                readers.contains(&d.harness_slug),
+                "{} attributed to {} but read by {readers:?}",
+                d.path.display(),
+                d.harness_slug
+            );
+        }
     }
 }

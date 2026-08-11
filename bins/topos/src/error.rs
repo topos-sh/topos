@@ -358,29 +358,32 @@ pub(crate) enum ClientError {
          different directory by path (`topos add ./<dir>`)"
     )]
     AlreadyTrackedName { name: String },
-    /// `publish <skill>@<harness>` named a harness that differs from the one the ALREADY-TRACKED skill of
-    /// that name was adopted from. The auto-add convenience cannot re-adopt a tracked name, and a mismatched
-    /// `@<harness>` suffix likely means a DIFFERENT copy was intended — refused so a stray suffix never
-    /// silently publishes the tracked bytes. Slugs shown VERBATIM (the tracked one, and the user's token).
+    /// `publish <skill>@<harness>` named an agent that reads NONE of the folders the ALREADY-TRACKED
+    /// skill of that name stands in. The auto-add convenience cannot re-add a tracked name, and a
+    /// mismatched `@<harness>` suffix likely means a DIFFERENT copy was intended — refused so a stray
+    /// suffix never silently publishes the tracked bytes. The folders are the user's own directories
+    /// and the slug is the user's own token, both shown VERBATIM.
     #[error(
-        "skill '{name}' is already tracked from harness '{tracked}', not '{requested}' — publish it as \
-         `topos publish {name}`, or adopt the '{requested}' copy under a different name first"
+        "skill '{name}' is tracked in {}, which '{requested}' does not read — publish it as \
+         `topos publish {name}`",
+        if folders.is_empty() { "no agent folder".to_owned() } else { folders.join(", ") }
     )]
     HarnessMismatch {
         name: String,
         requested: String,
-        tracked: String,
+        folders: Vec<String>,
     },
-    /// `add <skill>` resolved a name that sits under more than one harness's skill dir. The caller must
-    /// disambiguate with `<skill>@<harness>`. The `harnesses` are the registry slugs, shown VERBATIM.
-    /// `workspace` carries the same-name disclosure when a connected workspace publishes the name too.
+    /// `add <skill>` resolved a name that sits in more than one skills FOLDER. The caller must
+    /// disambiguate with `<skill>@<harness>` (which selects by the agents that read a folder) or by
+    /// path. The `folders` are the user's own directories, shown VERBATIM. `workspace` carries the
+    /// same-name disclosure when a connected workspace publishes the name too.
     #[error(
-        "the skill name '{name}' is found in {} harnesses ({}) — disambiguate with `topos add {name}@<harness>`{}",
-        harnesses.len(), harnesses.join(", "), workspace_sentence(name, workspace.as_ref())
+        "the skill name '{name}' is found in {} folders ({}) — disambiguate with `topos add {name}@<harness>`{}",
+        folders.len(), folders.join(", "), workspace_sentence(name, workspace.as_ref())
     )]
     AmbiguousHarness {
         name: String,
-        harnesses: Vec<String>,
+        folders: Vec<String>,
         workspace: Option<WorkspaceHint>,
     },
     /// `add <skill>[@<harness>]` resolved to more than one directory within a SINGLE harness (a name in

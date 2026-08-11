@@ -709,17 +709,24 @@ fn ensure_name(
         ));
     }
     match resolve_skill(ctx, bare) {
-        // Uniquely tracked → publish it. A `@<harness>` that names a DIFFERENT harness than the tracked
-        // skill's likely means a different copy was intended — refuse rather than publish these bytes.
+        // Uniquely tracked → publish it. A `@<harness>` naming an agent that reads NONE of the
+        // folders this skill stands in likely means a different copy was intended — refuse rather
+        // than publish these bytes. The question is asked of the PATHS, through the registry's one
+        // attribution answer, so a folder several agents share matches every one of them.
         Ok((id, lock)) => {
             if let Some(requested) = harness {
                 let map: PlacementMap = doc::read_map(ctx.fs, &ctx.layout.published(&id).map)?
                     .ok_or_else(|| ClientError::Corrupt("missing placement map".to_owned()))?;
-                if map.harness_slug.as_deref() != Some(requested) {
+                let read_by_requested = map.placements.iter().any(|p| {
+                    super::add::folder_readers(std::path::Path::new(p))
+                        .iter()
+                        .any(|slug| slug == requested)
+                });
+                if !read_by_requested {
                     return Err(ClientError::HarnessMismatch {
                         name: lock.name,
                         requested: requested.to_owned(),
-                        tracked: map.harness_slug.unwrap_or_else(|| "<none>".to_owned()),
+                        folders: placement_folders(&map),
                     });
                 }
             }
@@ -754,12 +761,34 @@ fn ensure_name(
                 data.name.clone(),
                 Some(AddedNote {
                     name: data.name,
-                    harness_slug: data.harness_slug,
+                    folder: parent_folder(&path),
                 }),
             ))
         }
         Err(e) => Err(e),
     }
+}
+
+/// The folder a source directory sits in — what the auto-add disclosure names.
+fn parent_folder(source: &std::path::Path) -> Option<String> {
+    Some(source.parent()?.to_string_lossy().into_owned())
+}
+
+/// The distinct FOLDERS a tracked skill's placements stand in, in placement order — what a refusal
+/// names instead of one guessed agent (a folder is the fact; who reads it is a query over the fact).
+fn placement_folders(map: &PlacementMap) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for p in &map.placements {
+        let folder = std::path::Path::new(p)
+            .parent()
+            .unwrap_or(std::path::Path::new(p))
+            .to_string_lossy()
+            .into_owned();
+        if !out.contains(&folder) {
+            out.push(folder);
+        }
+    }
+    out
 }
 
 /// The `<dir>` arm of [`ensure_tracked`]: publish the tracked skill already at this directory, else adopt it
@@ -783,7 +812,7 @@ fn ensure_path(
         data.name.clone(),
         Some(AddedNote {
             name: data.name,
-            harness_slug: data.harness_slug,
+            folder: parent_folder(p),
         }),
     ))
 }

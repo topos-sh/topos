@@ -2264,16 +2264,16 @@
           "name"
         ],
         "properties": {
-          "harness_slug": {
+          "folder": {
             "type": [
               "string",
               "null"
             ],
-            "description": "The harness registry slug the adopted directory was attributed to (e.g. `claude-code`), or `None`\nfor a plain directory adopted in place under no known harness."
+            "description": "The folder the added directory sits in, or `None` when it has no parent. A folder, never an\nagent: a skills folder may be read by several agents, and which ones is a separate query."
           },
           "name": {
             "type": "string",
-            "description": "The name the skill was adopted under (what `list` / `diff` / `publish` now resolve it by)."
+            "description": "The name the skill was added under (what `list` / `diff` / `publish` now resolve it by)."
           }
         }
       },

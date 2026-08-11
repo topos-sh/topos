@@ -180,8 +180,11 @@ fn an_untracked_dir_is_adopted_in_place_and_disclosed() {
     assert_eq!(name, "deploy");
     let added = added.expect("a fresh dir adopt discloses the add");
     assert_eq!(added.name, "deploy");
-    // A plain temp dir under no harness dir carries no harness slug.
-    assert_eq!(added.harness_slug, None);
+    // The disclosure names the FOLDER the dir came from, never an agent.
+    assert_eq!(
+        added.folder.as_deref(),
+        dir.parent().and_then(|p| p.to_str())
+    );
     // It is now tracked — a second ensure_tracked publishes it without re-adopting.
     let (name2, added2) = ops::ensure_tracked(&rig.ctx(), None, dir.to_str().unwrap()).unwrap();
     assert_eq!(name2, "deploy");
@@ -208,7 +211,7 @@ fn an_already_tracked_name_is_the_fast_path() {
 fn a_harness_suffix_that_disagrees_with_the_tracked_skill_is_refused() {
     let rig = Rig::new("mismatch");
     let src = Scratch::new("mismatch-src");
-    // Adopt a plain dir (no harness attribution → harness_slug None).
+    // A plain temp dir: no installed agent reads its folder, so `@claude-code` matches nothing.
     let dir = mk_skill(&src.0, "deploy");
     ops::add(&rig.ctx(), &dir).unwrap();
 
@@ -217,11 +220,17 @@ fn a_harness_suffix_that_disagrees_with_the_tracked_skill_is_refused() {
         ClientError::HarnessMismatch {
             name,
             requested,
-            tracked,
+            folders,
         } => {
             assert_eq!(name, "deploy");
             assert_eq!(requested, "claude-code");
-            assert_eq!(tracked, "<none>");
+            // The refusal names WHERE the skill stands — the folder, not a guessed agent. The
+            // placement is the CANONICAL source dir, so its folder is the canonical parent.
+            let canonical = dir.canonicalize().unwrap();
+            assert_eq!(
+                folders,
+                vec![canonical.parent().unwrap().to_string_lossy().into_owned()]
+            );
         }
         other => panic!("expected HarnessMismatch, got {other:?}"),
     }

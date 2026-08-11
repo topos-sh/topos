@@ -491,13 +491,17 @@ fn end_to_end_add_by_name_resolves_a_discovered_skill() {
     std::fs::create_dir_all(&skill).unwrap();
     std::fs::write(skill.join("SKILL.md"), "# deploy\n\nShip it.\n").unwrap();
 
-    // `topos list --untracked` discovers it, tagged with the registry slug (the `@harness`
-    // token); the bare list carries only the one summary line.
+    // `topos list --untracked` discovers it, with the FOLDER it sits in and the installed agents
+    // that read that folder (the `@<slug>` tokens); the bare list carries only the one summary line.
     let v = run_disc(&home, &disc, &claude, &["--json", "list", "--untracked"]);
     let untracked = v["data"]["untracked"].as_array().expect("untracked array");
     assert_eq!(untracked.len(), 1, "{untracked:?}");
     assert_eq!(untracked[0]["name"], "deploy");
-    assert_eq!(untracked[0]["harness"], "claude-code");
+    assert_eq!(
+        untracked[0]["folder"],
+        claude.join("skills").to_string_lossy().into_owned()
+    );
+    assert_eq!(untracked[0]["readers"], serde_json::json!(["claude-code"]));
     let v = run_disc(&home, &disc, &claude, &["--json", "list"]);
     assert_eq!(v["data"]["untracked_summary"]["skills"], 1, "{v}");
 
