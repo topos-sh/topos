@@ -233,6 +233,14 @@ pub trait TriggerAdapter {
     fn offline_probe_refusal(&self) -> Option<&'static str> {
         None
     }
+    /// The config file this trigger lives in — the path a person must fix by hand when a scrub
+    /// DEGRADES. [`Self::artifacts`] cannot answer it: that surface discloses only what is
+    /// provably topos's RIGHT NOW, and a config topos could not read or write is exactly the one
+    /// it cannot prove anything about. `None` (the default) is the trigger that lives in the
+    /// harness's own program instead of a file.
+    fn config_file(&self) -> Option<PathBuf> {
+        None
+    }
     /// Whether removing this trigger must reach OUTSIDE the filesystem, into the harness's own
     /// program. A filesystem artifact is scrubbed unconditionally — it can outlive the harness that
     /// read it — while an out-of-process scrub is attempted only where the harness still looks

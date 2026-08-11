@@ -117,7 +117,8 @@ impl<'a> JsonHooks<'a> {
             EditPlan::Write(bytes, state, note) => {
                 match self.cfg.replace(&self.config_path(), &bytes) {
                     Ok(()) => self.out(state, true, note),
-                    Err(_) => self.out(TriggerState::Degraded, false, None),
+                    // A degrade says WHY, so the receipt that names the file can name the fix too.
+                    Err(e) => self.out(TriggerState::Degraded, false, Some(crate::io_reason(&e))),
                 }
             }
         }
@@ -133,15 +134,21 @@ impl TriggerAdapter for JsonHooks<'_> {
         match self.read() {
             Ok(current) => self.apply(plan_install(self.spec, current.as_deref())),
             // Unreadable (e.g. a permission error) — degrade honestly, never blind-overwrite.
-            Err(_) => self.out(TriggerState::Degraded, false, None),
+            Err(e) => self.out(TriggerState::Degraded, false, Some(crate::io_reason(&e))),
         }
     }
 
     fn remove(&self) -> TriggerReport {
         match self.read() {
             Ok(current) => self.apply(plan_remove(self.spec, current.as_deref())),
-            Err(_) => self.out(TriggerState::Degraded, false, None),
+            Err(e) => self.out(TriggerState::Degraded, false, Some(crate::io_reason(&e))),
         }
+    }
+
+    /// The shared config the trigger is merged into — named whether or not it is provably ours
+    /// right now, because a config topos could not read is exactly the one it cannot prove.
+    fn config_file(&self) -> Option<PathBuf> {
+        Some(self.config_path())
     }
 
     /// Presence = a sentinel-marked entry in a well-formed config, right now. A missing,
@@ -267,7 +274,9 @@ fn plan_remove(spec: &'static JsonHooksSpec, current: Option<&[u8]>) -> EditPlan
     let mut root = match parse(current) {
         Parsed::Fresh => return EditPlan::Leave(TriggerState::Inactive, None), // nothing to remove
         Parsed::Value(v) => v,
-        Parsed::Malformed => return EditPlan::Leave(TriggerState::Degraded, None),
+        Parsed::Malformed => {
+            return EditPlan::Leave(TriggerState::Degraded, Some(crate::UNPROVABLE_REASON));
+        }
     };
     let Some(entries) = entries_existing_mut(&mut root, spec) else {
         return EditPlan::Leave(TriggerState::Inactive, None); // no well-typed event key → nothing ours
@@ -284,7 +293,7 @@ fn plan_remove(spec: &'static JsonHooksSpec, current: Option<&[u8]>) -> EditPlan
             prune_empty(&mut root, spec);
             match serialize(&root) {
                 Some(bytes) => EditPlan::Write(bytes, TriggerState::Inactive, None),
-                None => EditPlan::Leave(TriggerState::Degraded, None),
+                None => EditPlan::Leave(TriggerState::Degraded, Some(crate::UNPROVABLE_REASON)),
             }
         }
     }

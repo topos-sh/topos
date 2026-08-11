@@ -93,7 +93,8 @@ impl<'a> FileDrop<'a> {
     fn write_canonical(&self) -> TriggerReport {
         match self.cfg.replace(&self.path, &self.canonical) {
             Ok(()) => self.out(TriggerState::Active, true, self.spec.note),
-            Err(_) => self.out(TriggerState::Degraded, false, None),
+            // A degrade says WHY, so the receipt that names the file can name the fix too.
+            Err(e) => self.out(TriggerState::Degraded, false, Some(crate::io_reason(&e))),
         }
     }
 }
@@ -106,7 +107,7 @@ impl TriggerAdapter for FileDrop<'_> {
     fn install(&self) -> TriggerReport {
         match self.cfg.read(&self.path) {
             // Unreadable (e.g. a permission error) — degrade honestly, never blind-overwrite.
-            Err(_) => self.out(TriggerState::Degraded, false, None),
+            Err(e) => self.out(TriggerState::Degraded, false, Some(crate::io_reason(&e))),
             Ok(None) => self.write_canonical(),
             Ok(Some(bytes)) if self.is_ours(&bytes) => {
                 if bytes == self.canonical {
@@ -122,7 +123,7 @@ impl TriggerAdapter for FileDrop<'_> {
 
     fn remove(&self) -> TriggerReport {
         match self.cfg.read(&self.path) {
-            Err(_) => self.out(TriggerState::Degraded, false, None),
+            Err(e) => self.out(TriggerState::Degraded, false, Some(crate::io_reason(&e))),
             Ok(None) => self.out(TriggerState::Inactive, false, None), // already clean
             Ok(Some(bytes)) if !self.is_ours(&bytes) => {
                 self.out(TriggerState::AlreadyPresentUnmanaged, false, None) // never unlink foreign
@@ -133,13 +134,19 @@ impl TriggerAdapter for FileDrop<'_> {
                     self.out(TriggerState::Inactive, false, None)
                 }
                 // A failed unlink leaves the artifact live — disclosed, never claimed clean.
-                Err(_) => self.out(TriggerState::Degraded, false, None),
+                Err(e) => self.out(TriggerState::Degraded, false, Some(crate::io_reason(&e))),
             },
         }
     }
 
     fn present(&self) -> bool {
         matches!(self.cfg.read(&self.path), Ok(Some(bytes)) if self.is_ours(&bytes))
+    }
+
+    /// The dropped file's own path — named on a DEGRADE whether or not it is provably ours,
+    /// which is the one thing [`TriggerAdapter::artifacts`] cannot do.
+    fn config_file(&self) -> Option<PathBuf> {
+        Some(self.path.clone())
     }
 
     /// The dropped file, disclosed ONLY while it is marker-confirmed ours — a foreign file on our

@@ -131,6 +131,10 @@ impl TriggerAdapter for Goose<'_> {
         self.file.present()
     }
 
+    fn config_file(&self) -> Option<std::path::PathBuf> {
+        self.file.config_file()
+    }
+
     fn artifacts(&self) -> Vec<TriggerArtifact> {
         // Only the artifact topos wrote — goose's own config (the enablement evidence) is read, never
         // owned, so it is never disclosed as ours.

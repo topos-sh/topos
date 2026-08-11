@@ -165,22 +165,52 @@ impl<'a> Triggers<'a> {
     /// artifact is noise on an uninstall receipt. An OUT-OF-PROCESS scrub is never filtered: it
     /// dialed the harness's own program, which is work that happened and carries no path to prove
     /// it, and the preview named that artifact — so the receipt answers for it either way.
-    pub(crate) fn scrub_others(&self) -> Vec<TriggerReport> {
+    pub(crate) fn scrub_others(&self) -> Vec<Scrubbed> {
         let mut out = Vec::new();
         self.for_each_other(|adapter| {
             let reaches_out_of_process = adapter
                 .artifacts()
                 .iter()
                 .any(TriggerArtifact::is_out_of_process);
-            let removed = adapter.remove();
+            let removed = Scrubbed::of(adapter, adapter.remove());
             if reaches_out_of_process
-                || removed.state != TriggerState::Inactive
-                || removed.touched_path.is_some()
+                || removed.report.state != TriggerState::Inactive
+                || removed.report.touched_path.is_some()
             {
                 out.push(removed);
             }
         });
         out
+    }
+
+    /// Scrub the ACTIVE harness's trigger, carrying the same file disclosure the breadth rows do.
+    pub(crate) fn scrub_active(&self) -> Scrubbed {
+        Scrubbed::of(self.active, self.active.remove())
+    }
+}
+
+/// One trigger scrub's outcome plus the config file it would have edited.
+///
+/// The path is NOT folded into [`TriggerReport::touched_path`], whose whole meaning is "the file
+/// this run edited" — a degraded scrub edited nothing, and a report claiming otherwise would be
+/// the lie the receipt is trying to stop telling. It is a second field because it answers a second
+/// question: not what happened, but WHERE the thing that did not happen still stands.
+pub(crate) struct Scrubbed {
+    pub report: TriggerReport,
+    /// The harness's config file, when its trigger lives in one — named whether or not the file
+    /// is provably topos's right now, because a config topos could not read is exactly the one it
+    /// cannot prove anything about. `None` = the trigger lives in the harness's own program.
+    pub config_file: Option<String>,
+}
+
+impl Scrubbed {
+    fn of(adapter: &dyn TriggerAdapter, report: TriggerReport) -> Self {
+        Self {
+            config_file: adapter
+                .config_file()
+                .map(|p| p.to_string_lossy().into_owned()),
+            report,
+        }
     }
 }
 
@@ -546,19 +576,28 @@ mod tests {
         let out =
             Triggers::machine(active.as_ref(), home.0.clone(), &cfg, &NoBinary).scrub_others();
         assert!(
-            out.iter().any(|r| r.agent == "cursor"
-                && r.state == TriggerState::Inactive
-                && r.touched_path.is_some()),
+            out.iter().any(|s| s.report.agent == "cursor"
+                && s.report.state == TriggerState::Inactive
+                && s.report.touched_path.is_some()),
             "the armed agent's scrub is disclosed"
         );
         assert!(
-            !out.iter()
-                .any(|r| r.touched_path.is_none() && r.state == TriggerState::Inactive),
+            !out.iter().any(
+                |s| s.report.touched_path.is_none() && s.report.state == TriggerState::Inactive
+            ),
             "clean no-ops stay off the receipt"
         );
         assert!(
-            !out.iter().any(|r| r.agent == "claude-code"),
+            !out.iter().any(|s| s.report.agent == "claude-code"),
             "the active harness is the verb's own scrub, never swept twice"
+        );
+        // Every FILE-backed row names the config it lives in — the path a degraded scrub points a
+        // person at, which the report itself cannot carry (nothing was edited).
+        assert!(
+            out.iter()
+                .find(|s| s.report.agent == "cursor")
+                .is_some_and(|s| s.config_file.is_some()),
+            "a file-backed trigger names its config"
         );
     }
 
@@ -641,7 +680,7 @@ mod tests {
         touched.extend(
             scrubbed
                 .iter()
-                .filter_map(|r| r.touched_path.clone())
+                .filter_map(|s| s.report.touched_path.clone())
                 .map(PathBuf::from),
         );
         assert!(
@@ -659,11 +698,11 @@ mod tests {
         // artifact, so the receipt is where the promise is answered.
         let openclaw = scrubbed
             .iter()
-            .find(|r| r.agent == "openclaw")
+            .find(|s| s.report.agent == "openclaw")
             .expect("a removed scheduler job is work that happened — it belongs on the receipt");
-        assert_eq!(openclaw.state, TriggerState::Inactive);
+        assert_eq!(openclaw.report.state, TriggerState::Inactive);
         assert!(
-            openclaw.touched_path.is_none(),
+            openclaw.report.touched_path.is_none(),
             "a scheduler job is no file — the row carries no path"
         );
     }

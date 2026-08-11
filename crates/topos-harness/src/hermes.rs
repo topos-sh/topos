@@ -233,9 +233,22 @@ impl<'a> Hermes<'a> {
             EditPlan::Leave(state) => self.report(state, false),
             EditPlan::Write(bytes, state) => match self.cfg.replace(&self.config_path(), &bytes) {
                 Ok(()) => self.report(state, true),
-                Err(_) => self.report(TriggerState::Degraded, false),
+                // A degrade says WHY, so a receipt naming the file can name the fix too.
+                Err(e) => self.degraded(crate::io_reason(&e)),
             },
         }
+    }
+
+    /// A scrub/arm that could NOT happen, with the short reason a receipt puts in parentheses.
+    fn degraded(&self, reason: &'static str) -> TriggerReport {
+        crate::trigger_report(
+            HarnessId::Hermes.slug(),
+            CurrencyKind::SessionStart,
+            TriggerState::Degraded,
+            None,
+            MARKER_ID,
+            Some(reason),
+        )
     }
 
     /// Build the report through the crate's ONE constructor, so the honest kind rule (only a
@@ -342,15 +355,20 @@ impl TriggerAdapter for Hermes<'_> {
                 self.apply(plan_install(current.as_deref(), live))
             }
             // Unreadable (e.g. a permission error) — degrade honestly, never blind-overwrite.
-            Err(_) => self.report(TriggerState::Degraded, false),
+            Err(e) => self.degraded(crate::io_reason(&e)),
         }
     }
 
     fn remove(&self) -> TriggerReport {
         match self.read_config() {
             Ok(current) => self.apply(plan_remove(current.as_deref())),
-            Err(_) => self.report(TriggerState::Degraded, false),
+            Err(e) => self.degraded(crate::io_reason(&e)),
         }
+    }
+
+    /// Hermes keeps its trigger in its own config file, so a degraded scrub has a path to name.
+    fn config_file(&self) -> Option<PathBuf> {
+        Some(self.config_path())
     }
 
     /// The trigger IS a line in the config file, so the offline read is the honest probe: a

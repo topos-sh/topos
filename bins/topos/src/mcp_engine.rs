@@ -1647,6 +1647,89 @@ fn recorded_reach(custody: &ScopeEntries, skill_id: &str) -> Option<Vec<String>>
 }
 
 // =================================================================================================
+// The whole-scope ledger read — what a TEARDOWN would reach, answered without writing a byte.
+// =================================================================================================
+
+/// The MCP config files this scope's ownership ledger records entries in, split the way a scrub
+/// would treat them.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct RecordedSurfaces {
+    /// Files holding at least one ledger-recorded entry that still matches what topos wrote —
+    /// the entries a scrub takes out.
+    pub owned: Vec<String>,
+    /// Files holding at least one ledger-recorded entry whose bytes no longer match the record —
+    /// hand-edited, so a scrub leaves it exactly where it is.
+    pub drifted: Vec<String>,
+}
+
+/// Read-only: which config files this scope's LEDGER records topos entries in, and which of those
+/// hold an entry someone has since edited by hand.
+///
+/// It asks the converge's own ownership question — does what stands in the file still fingerprint
+/// to what the ledger recorded? — through the same `observe` + fingerprint pair, and answers it
+/// with no lock and no write. That is what lets `uninstall`'s PREVIEW promise exactly the files
+/// its apply will touch, and name the ones it will leave alone.
+///
+/// An unreadable ledger answers nothing at all (the same fail-closed rule the converge takes: with
+/// no record, topos cannot tell its own entries from yours and will not guess).
+pub(crate) fn recorded_surfaces(
+    io: &ScopeIo<'_>,
+    descriptors: &[&'static KnownHarness],
+) -> RecordedSurfaces {
+    let mut out = RecordedSurfaces::default();
+    let Ok(custody) = ScopeEntries::load(io.fs, io.layout) else {
+        return out;
+    };
+    for h in descriptors {
+        let crate::placement::ConfigSurface::Ready { file, dialect, .. } =
+            crate::placement::config_surface(h, &io.home, io.project_root.as_deref())
+        else {
+            continue;
+        };
+        let recorded = custody.prior_for(h.slug, &file);
+        if recorded.is_empty() {
+            continue;
+        }
+        let Ok(current) = io.fs.read_opt(&file) else {
+            continue;
+        };
+        let observed = mcp::observe(dialect, current.as_deref());
+        if !observed.parseable {
+            continue;
+        }
+        let path = file.to_string_lossy().into_owned();
+        let mut owned = false;
+        let mut drifted = false;
+        for (key, fingerprint) in &recorded {
+            match observed.entries.get(key) {
+                Some(live) if live == fingerprint => owned = true,
+                Some(_) => drifted = true,
+                None => {} // already gone — nothing to remove and nothing to leave
+            }
+        }
+        if owned {
+            out.owned.push(path.clone());
+        }
+        if drifted {
+            out.drifted.push(path);
+        }
+    }
+    out.owned.sort();
+    out.owned.dedup();
+    out.drifted.sort();
+    out.drifted.dedup();
+    out
+}
+
+/// Every bundle this scope's ledger holds entries for — the teardown's removal set, in a stable
+/// order. Empty when the ledger cannot be read (fail closed: no record, no removal).
+pub(crate) fn recorded_bundles(io: &ScopeIo<'_>) -> Vec<String> {
+    ScopeEntries::load(io.fs, io.layout)
+        .map(|custody| custody.placed_bundles().into_iter().collect())
+        .unwrap_or_default()
+}
+
+// =================================================================================================
 // The store-read helper the reconcile's demand sites share.
 // =================================================================================================
 

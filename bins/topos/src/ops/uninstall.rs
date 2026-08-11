@@ -2,20 +2,28 @@
 //!
 //! Bare = a DESCRIBE of exactly what goes: EVERY harness auto-update-trigger artifact the apply
 //! reaches, not just the active harness's — each named by its path, or, where a harness keeps the
-//! trigger in its own program instead of a file, by what the scrub will dial there — the
-//! `~/.topos/` sidecar tree (which holds the signed-in credential), and the note that SKILL FILES IN
-//! AGENT DIRS STAY (uninstall never deletes a skill byte). `--yes` scrubs the active harness's
-//! trigger, deletes the built-in skill's copies and then the `~/.topos/` tree via the fs seam, and
-//! LAST scrubs every other supported harness's trigger (all reports surfaced honestly) — last
-//! because those deletions can fail, and a teardown that dies halfway must not have disarmed the
-//! machine's other agents on its way. The `topos` binary is NOT self-deleted (a package manager may
-//! own it) — its path is disclosed with a "remove it with your installer (or `rm <path>`)" note. A
-//! maintenance command: it needs no sign-in, mints no identity, and touches no plane.
+//! trigger in its own program instead of a file, by what the scrub will dial there — the MCP config
+//! files topos placed server entries into, the `~/.topos/` sidecar tree (which holds the signed-in
+//! credential), and the note that SKILL FILES IN AGENT DIRS STAY (uninstall never deletes a skill
+//! byte).
+//!
+//! `--yes` deletes the built-in skill's copies, retires topos's own MCP config entries, deletes the
+//! `~/.topos/` tree via the fs seam, and LAST scrubs the auto-update triggers — the active
+//! harness's and then every other supported harness's (all reports surfaced honestly). The trigger
+//! scrubs go LAST because the deletions before them can fail, and **a teardown that dies halfway
+//! must not have disarmed a single agent on its way**: an agent left un-updated with nothing removed
+//! to show for it is the worst of both outcomes. The MCP scrub is the one destructive act that must
+//! precede the sidecar delete, because the ownership ledger that proves which entries are topos's
+//! lives inside the tree being deleted — after it, nothing could ever tell them from a hand edit.
+//!
+//! The `topos` binary is NOT self-deleted (a package manager may own it) — its path is disclosed
+//! with a "remove it with your installer (or `rm <path>`)" note. A maintenance command: it needs no
+//! sign-in, mints no identity, and touches no plane.
 
 use std::path::PathBuf;
 
 use serde::Serialize;
-use topos_types::TriggerReport;
+use topos_types::{Message, TriggerReport, TriggerState};
 
 use crate::ctx::Ctx;
 use crate::error::ClientError;
@@ -41,23 +49,43 @@ pub(crate) struct UninstallDescribe {
     /// so they go with the teardown; YOUR skill files still stay untouched.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub builtin_dirs: Vec<String>,
+    /// The MCP config files the apply will take topos-placed server entries OUT of. Those entries
+    /// point live agents at servers, and the ledger proving they are topos's dies with the sidecar
+    /// — so the preview names every file it will edit.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub mcp_files: Vec<String>,
+    /// The MCP config files holding a topos entry someone edited by hand. Those are LEFT — the
+    /// never-clobber rule does not lapse because the command is a teardown — and the preview says
+    /// so, so a person is not surprised by a leftover.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub mcp_drifted: Vec<String>,
 }
 
-/// The applied `uninstall` — what was removed.
-#[derive(Debug, Clone, Serialize)]
+/// The applied `uninstall` — what was removed. On a teardown that FAILED partway this is the
+/// receipt of the work that actually landed, spelled exactly as the success receipt spells it.
+#[derive(Debug, Clone, Default, Serialize)]
 pub(crate) struct UninstallApplied {
     /// The ACTIVE harness's trigger scrub report (surfaced honestly — `Inactive` when nothing was
-    /// armed).
-    pub hook: TriggerReport,
+    /// armed). Absent on a teardown that failed before the scrubs ran: the trigger is still armed,
+    /// and a report saying otherwise would be the falsehood this field exists to prevent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hook: Option<TriggerReport>,
     /// The breadth scrub's outcomes — other agents whose trigger the sweep removed (or could not,
     /// disclosed); clean no-ops stay off the receipt.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub triggers: Vec<TriggerReport>,
-    /// Whether the `~/.topos/` sidecar tree was deleted (false = there was nothing to delete).
+    /// Whether the `~/.topos/` sidecar tree was deleted (false = there was nothing to delete, or
+    /// the teardown never got that far).
     pub sidecar_removed: bool,
     /// The built-in `topos` skill's placed copies that were removed (topos-authored artifacts).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub builtin_dirs: Vec<String>,
+    /// The MCP config files topos-placed server entries were removed from.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub mcp_files: Vec<String>,
+    /// The MCP config files whose hand-edited topos entries were LEFT in place.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub mcp_drifted: Vec<String>,
     /// The running binary's own path — left in place; the human removes it with their installer.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub binary_path: Option<String>,
@@ -70,19 +98,49 @@ pub(crate) enum UninstallOutcome {
         describe: UninstallDescribe,
         yes_argv: Vec<String>,
     },
-    Applied(UninstallApplied),
+    Applied {
+        applied: UninstallApplied,
+        /// One `failure` per thing the teardown could NOT remove — empty on a clean teardown, and
+        /// the ONE value the finisher reads for `ok`, the exit status, and the headline. A
+        /// teardown that left a trigger armed did not uninstall topos, whatever else it managed.
+        messages: Vec<Message>,
+    },
+}
+
+/// A teardown that FAILED partway: the error, plus the receipt of the destructive work that had
+/// already landed. `partial` is `None` only where nothing had been touched at all (the sidecar
+/// fence, a bare describe) — reporting an empty receipt there would answer a question nobody
+/// asked. Everywhere else the failure path owes the same rows the success path prints: the whole
+/// complaint about the old behaviour was a teardown that deleted things and then said nothing but
+/// "a filesystem operation failed".
+#[derive(Debug)]
+pub(crate) struct UninstallFailure {
+    pub error: ClientError,
+    /// Boxed: the receipt is the wide half of this pair, and every non-teardown verb pays for the
+    /// `Result`'s error size on its own hot path.
+    pub partial: Option<Box<UninstallApplied>>,
+}
+
+impl From<ClientError> for Box<UninstallFailure> {
+    fn from(error: ClientError) -> Self {
+        Box::new(UninstallFailure {
+            error,
+            partial: None,
+        })
+    }
 }
 
 /// `uninstall [--yes]`. `binary_path` is the running executable's path (the composition root passes
 /// `std::env::current_exe()`), disclosed but never deleted.
 ///
 /// # Errors
-/// An [`FsOps`](crate::fs_seam::FsOps) failure removing the sidecar tree.
+/// An [`FsOps`](crate::fs_seam::FsOps) failure removing the sidecar tree — carrying the receipt of
+/// whatever the teardown had already removed.
 pub(crate) fn uninstall(
     ctx: &Ctx<'_>,
     binary_path: Option<PathBuf>,
     yes: bool,
-) -> Result<UninstallOutcome, ClientError> {
+) -> Result<UninstallOutcome, Box<UninstallFailure>> {
     // The whole machine's trigger artifacts — the ACTIVE harness's plus every other one the apply
     // scrubs — so the describe can never name less than `--yes` touches. Rendered through the
     // artifact's own `Display`, the ONE spelling every disclosure surface prints.
@@ -107,12 +165,16 @@ pub(crate) fn uninstall(
             "`{sidecar_path}` does not look like a topos sidecar (none of skills/, identity/, \
              ops/, state/, locks/, or log.jsonl inside) — refusing to delete it. If TOPOS_HOME is \
              set, point it at the real topos home"
-        )));
+        ))
+        .into());
     }
 
     // The built-in `topos` skill's placed copies (best-effort read — a torn/newer sidecar must
     // never block the one command that deletes it).
     let builtin_dirs = super::builtin::placement_dirs(ctx).unwrap_or_default();
+    // The MCP config files this machine's ownership ledger records entries in — read-only, and the
+    // same split the apply acts on, so the preview promises exactly what the scrub does.
+    let surfaces = mcp_surfaces(ctx);
 
     if !yes {
         return Ok(UninstallOutcome::Described {
@@ -122,6 +184,8 @@ pub(crate) fn uninstall(
                 sidecar_present,
                 binary_path: binary,
                 builtin_dirs,
+                mcp_files: surfaces.owned,
+                mcp_drifted: surfaces.drifted,
             },
             yes_argv: vec![
                 "topos".to_owned(),
@@ -132,39 +196,193 @@ pub(crate) fn uninstall(
     }
 
     // ---- APPLY (`--yes`) ----
-    // The ACTIVE harness's trigger goes first (its artifact lives in the harness home, not
-    // `~/.topos/`), then the built-in skill's placed copies (topos-authored, recorded in the sidecar
-    // we are about to delete), then the sidecar tree itself. Idempotent: a second run finds nothing
-    // to remove.
-    let hook = ctx.triggers.active().remove();
-    let mut builtin_removed = Vec::new();
+    // The order is the module doc's: the built-in skill's placed copies, then topos's own MCP
+    // config entries (BEFORE the ledger that proves they are topos's is deleted with the tree),
+    // then the sidecar itself, and only after all of that the trigger scrubs.
+    //
+    // `applied` is built up as the work lands, so a failure hands back the receipt of exactly what
+    // was done rather than nothing at all.
+    let mut applied = UninstallApplied {
+        binary_path: binary,
+        ..UninstallApplied::default()
+    };
     for dir in &builtin_dirs {
         let p = std::path::Path::new(dir);
         if ctx.fs.exists(p) {
-            ctx.fs.remove_dir_all(p)?;
-            builtin_removed.push(dir.clone());
+            ctx.fs.remove_dir_all(p).map_err(|e| {
+                Box::new(UninstallFailure {
+                    error: fs_failure(e, dir),
+                    partial: Some(Box::new(applied.clone())),
+                })
+            })?;
+            applied.builtin_dirs.push(dir.clone());
         }
     }
-    let sidecar_removed = if ctx.fs.exists(home) {
-        ctx.fs.remove_dir_all(home)?;
-        true
-    } else {
-        false
-    };
-    // The breadth scrub runs LAST — after every fallible deletion above has SUCCEEDED. Those
+    // Retire topos's own MCP entries through the SAME owned-entry mechanics `remove` uses: the
+    // sentinel-clean rows the ledger records go, a hand-edited one is left byte-identical and
+    // disclosed. Best-effort — a teardown is not blocked by an agent's config, and every failure
+    // becomes a line rather than a dead uninstall.
+    let mcp_messages = scrub_mcp_entries(ctx, &mut applied);
+    if ctx.fs.exists(home) {
+        ctx.fs.remove_dir_all(home).map_err(|e| {
+            Box::new(UninstallFailure {
+                error: fs_failure(e, &sidecar_path),
+                partial: Some(Box::new(applied.clone())),
+            })
+        })?;
+        applied.sidecar_removed = true;
+    }
+    // The trigger scrubs run LAST — after every fallible deletion above has SUCCEEDED. Those
     // deletions can fail (a permission error, an unremovable tree), and this verb fails with them;
-    // disarming the machine's other agents on the way out of a teardown that did not happen would
-    // leave them silently un-updated with nothing removed to show for it. The set is exactly the one
-    // the describe disclosed.
+    // disarming this machine's agents on the way out of a teardown that did not happen would leave
+    // them silently un-updated with nothing removed to show for it. The breadth set is exactly the
+    // one the describe disclosed.
+    let active = ctx.triggers.scrub_active();
     let breadth = ctx.triggers.scrub_others();
+    // Any trigger still armed means the teardown did not finish, whatever else it managed. The
+    // messages are the ONE value the finisher reads for `ok`, the exit status and the headline.
+    let mut messages: Vec<Message> = std::iter::once(&active)
+        .chain(breadth.iter())
+        .filter_map(trigger_failure)
+        .collect();
+    messages.extend(mcp_messages);
+    applied.hook = Some(active.report);
+    applied.triggers = breadth.into_iter().map(|s| s.report).collect();
 
-    Ok(UninstallOutcome::Applied(UninstallApplied {
-        hook,
-        triggers: breadth,
-        sidecar_removed,
-        builtin_dirs: builtin_removed,
-        binary_path: binary,
-    }))
+    Ok(UninstallOutcome::Applied { applied, messages })
+}
+
+/// A filesystem failure with the PATH folded into the diagnostic detail. `safe_message` still
+/// redacts the sentence a person reads, and this is what the appended log event (and the
+/// `details:` pointer under it) carries: "a filesystem operation failed" with nothing else on the
+/// record left a failed teardown unactionable.
+fn fs_failure(e: std::io::Error, path: &str) -> ClientError {
+    ClientError::IoKind {
+        kind: e.kind(),
+        context: format!("removing {path}: {e}"),
+    }
+}
+
+/// One trigger the scrub could NOT complete, as the failure line the receipt and the machine
+/// channel share. `Degraded` is the only unscrubbed state: a foreign hook was never topos's to
+/// remove, and every other state is a scrub that happened.
+fn trigger_failure(scrubbed: &crate::ops::Scrubbed) -> Option<Message> {
+    if scrubbed.report.state != TriggerState::Degraded {
+        return None;
+    }
+    let agent = &scrubbed.report.agent;
+    Some(crate::message::failure(
+        "TRIGGER_NOT_REMOVED",
+        match &scrubbed.config_file {
+            Some(path) => format!(
+                "{agent}: the auto-update trigger could not be removed from {path} ({}) — remove \
+                 it by hand, or fix the permission and run 'topos uninstall' again.",
+                scrubbed
+                    .report
+                    .note
+                    .as_deref()
+                    .unwrap_or("topos could not edit that file")
+            ),
+            // The trigger lives in the harness's OWN scheduler, so there is no file to fix and no
+            // permission to change: the only way in is the harness's own command, and topos could
+            // not reach it.
+            None => format!(
+                "{agent}: the scheduled update job could not be checked or removed — the {agent} \
+                 command is not available on this machine. If {} is installed, remove the job with \
+                 its own scheduler.",
+                display_name(agent)
+            ),
+        },
+    ))
+}
+
+/// A harness's display name from the ONE registry table, falling back to its slug.
+fn display_name(slug: &str) -> String {
+    topos_harness::registry::known_harnesses()
+        .iter()
+        .find(|h| h.slug == slug)
+        .map_or_else(|| slug.to_owned(), |h| h.display_name.to_owned())
+}
+
+/// The MACHINE scope's MCP config view, for both phases. A project checkout keeps its own store
+/// and its own ledger, and `uninstall` deletes neither — so this scope is the machine's, and only
+/// the machine's. No roots (no `$HOME`) means no config surface resolves at all.
+fn mcp_io<'a>(ctx: &'a Ctx<'a>) -> Option<crate::mcp_engine::ScopeIo<'a>> {
+    let roots = ctx.roots.as_ref()?;
+    Some(crate::mcp_engine::ScopeIo {
+        fs: ctx.fs,
+        layout: &ctx.layout,
+        home: roots.home.clone(),
+        project_root: None,
+    })
+}
+
+/// The read-only split the DESCRIBE promises: the MCP config files this teardown will take
+/// topos-placed entries out of, and the ones whose hand-edited entries it will leave.
+fn mcp_surfaces(ctx: &Ctx<'_>) -> crate::mcp_engine::RecordedSurfaces {
+    let Some(io) = mcp_io(ctx) else {
+        return crate::mcp_engine::RecordedSurfaces::default();
+    };
+    crate::mcp_engine::recorded_surfaces(&io, &topos_harness::mcp::descriptor::mcp_harnesses())
+}
+
+/// Retire every ledger-recorded topos MCP entry from this machine's agent configs, bundle by
+/// bundle, through the SAME [`crate::mcp_engine::remove_bundle`] mechanics the `remove` verb runs:
+/// only prior-matched keys move, a drifted entry is left byte-identical, and a wholly-topos-owned
+/// file follows the existing last-entry-deletion rule. Nothing here is special-cased for the
+/// teardown — the never-clobber rules do not lapse because the command is `uninstall`.
+///
+/// Best-effort by construction: the rows land on the receipt and the failures on the message
+/// channel; neither blocks the teardown, which has a sidecar to delete either way.
+fn scrub_mcp_entries(ctx: &Ctx<'_>, applied: &mut UninstallApplied) -> Vec<Message> {
+    let Some(io) = mcp_io(ctx) else {
+        return Vec::new();
+    };
+    let descriptors = topos_harness::mcp::descriptor::mcp_harnesses();
+    let detected: std::collections::BTreeSet<String> = topos_harness::registry::detected_harnesses(
+        &io.home,
+        ctx.roots.as_ref().and_then(|r| r.cwd.as_deref()),
+    )
+    .iter()
+    .map(|h| h.slug.to_owned())
+    .collect();
+    let mut messages = Vec::new();
+    for bundle_id in crate::mcp_engine::recorded_bundles(&io) {
+        let name = bundle_display_name(ctx, &bundle_id);
+        let outcome =
+            crate::mcp_engine::remove_bundle(&io, &descriptors, &detected, &bundle_id, &name);
+        for removed in &outcome.removed {
+            let Some(file) = removed.state.file.clone() else {
+                continue;
+            };
+            match removed.state.state {
+                topos_types::results::TargetOutcome::Drifted => applied.mcp_drifted.push(file),
+                _ => applied.mcp_files.push(file),
+            }
+        }
+        messages.extend(outcome.warnings);
+    }
+    for rows in [&mut applied.mcp_files, &mut applied.mcp_drifted] {
+        rows.sort();
+        rows.dedup();
+    }
+    messages
+}
+
+/// The word a person calls a bundle, read off its own record; the opaque id is the fallback for a
+/// record this teardown can no longer read (which is exactly the state an uninstall runs in).
+fn bundle_display_name(ctx: &Ctx<'_>, bundle_id: &str) -> String {
+    crate::id::SkillId::parse(bundle_id)
+        .ok()
+        .and_then(|sid| {
+            crate::doc::read_doc::<topos_types::persisted::Lock>(
+                ctx.fs,
+                &ctx.layout.published(&sid).lock,
+            )
+            .ok()
+            .flatten()
+        })
+        .map_or_else(|| bundle_id.to_owned(), |lock| lock.name)
 }
 
 /// Whether `home` looks like a topos sidecar: any of the layout's own entries present, or an
@@ -291,6 +509,27 @@ mod tests {
         slug: &'static str,
         artifact: TriggerArtifact,
         removed: Rc<Cell<u32>>,
+        /// What the scrub reports — `Inactive` for a clean removal, `Degraded` for one that could
+        /// not happen (the receipt's whole subject in the partial-teardown rigs).
+        state: TriggerState,
+        /// The reason a degraded scrub carries, exactly as a real adapter's `note` does.
+        note: Option<&'static str>,
+        /// The config file this trigger lives in — `None` models a trigger living in the
+        /// harness's own program.
+        config: Option<PathBuf>,
+    }
+    impl OtherTrigger {
+        /// A clean, file-less breadth trigger (the historic rig's shape).
+        fn clean(slug: &'static str, artifact: TriggerArtifact, removed: Rc<Cell<u32>>) -> Self {
+            Self {
+                slug,
+                artifact,
+                removed,
+                state: TriggerState::Inactive,
+                note: None,
+                config: None,
+            }
+        }
     }
     impl TriggerAdapter for OtherTrigger {
         fn slug(&self) -> &'static str {
@@ -313,6 +552,10 @@ mod tests {
         fn present(&self) -> bool {
             true
         }
+
+        fn config_file(&self) -> Option<PathBuf> {
+            self.config.clone()
+        }
     }
     impl OtherTrigger {
         fn report(&self) -> TriggerReport {
@@ -321,8 +564,8 @@ mod tests {
                 currency_kind: CurrencyKind::ExplicitPullOnly,
                 touched_path: None,
                 marker_id: "topos:test:other".into(),
-                state: TriggerState::Inactive,
-                note: None,
+                state: self.state,
+                note: self.note.map(str::to_owned),
             }
         }
     }
@@ -412,7 +655,7 @@ mod tests {
                 );
                 assert_eq!(yes_argv.last().map(String::as_str), Some("--yes"));
             }
-            UninstallOutcome::Applied(_) => panic!("a bare uninstall describes"),
+            UninstallOutcome::Applied { .. } => panic!("a bare uninstall describes"),
         }
         // A describe mutates nothing: the sidecar home stays, the hook was never scrubbed.
         assert!(
@@ -450,10 +693,14 @@ mod tests {
 
         let out = uninstall(&ctx, Some(PathBuf::from("/usr/local/bin/topos")), true).unwrap();
         match out {
-            UninstallOutcome::Applied(applied) => {
+            UninstallOutcome::Applied { applied, messages } => {
                 assert_eq!(harness.removed.get(), 1, "the auto-update hook is scrubbed");
-                assert_eq!(applied.hook.state, TriggerState::Inactive);
+                assert_eq!(
+                    applied.hook.as_ref().map(|h| h.state),
+                    Some(TriggerState::Inactive)
+                );
                 assert!(applied.sidecar_removed, "the sidecar tree is deleted");
+                assert!(messages.is_empty(), "a clean teardown reports no failure");
             }
             UninstallOutcome::Described { .. } => panic!("--yes applies"),
         }
@@ -466,7 +713,7 @@ mod tests {
         // A SECOND run is graceful: nothing to delete (the tree is already gone).
         let out = uninstall(&ctx, None, true).unwrap();
         match out {
-            UninstallOutcome::Applied(applied) => {
+            UninstallOutcome::Applied { applied, .. } => {
                 assert!(!applied.sidecar_removed, "nothing left to remove");
             }
             UninstallOutcome::Described { .. } => panic!("--yes applies"),
@@ -493,9 +740,13 @@ mod tests {
         let ctx = ctx_with(&fs, &ids, &clock, &harness, &plane, &follow, &home.0);
 
         for yes in [false, true] {
-            let err = uninstall(&ctx, None, yes).expect_err("the fence refuses");
-            assert_eq!(err.code(), "INVALID_ARGUMENT", "yes={yes}");
-            let msg = crate::render::safe_message(&err);
+            let failure = uninstall(&ctx, None, yes).expect_err("the fence refuses");
+            assert_eq!(failure.error.code(), "INVALID_ARGUMENT", "yes={yes}");
+            assert!(
+                failure.partial.is_none(),
+                "nothing was touched, so there is no receipt to print"
+            );
+            let msg = crate::render::safe_message(&failure.error);
             assert!(msg.contains("does not look like a topos sidecar"), "{msg}");
             assert!(msg.contains("TOPOS_HOME"), "{msg}");
         }
@@ -529,13 +780,13 @@ mod tests {
         let plane = InertPlane;
         let follow = InertFollow;
         let removed = Rc::new(Cell::new(0));
-        let others: Vec<Box<dyn TriggerAdapter>> = vec![Box::new(OtherTrigger {
-            slug: "openclaw",
-            artifact: TriggerArtifact::OutOfProcess {
+        let others: Vec<Box<dyn TriggerAdapter>> = vec![Box::new(OtherTrigger::clean(
+            "openclaw",
+            TriggerArtifact::OutOfProcess {
                 harness: "OpenClaw",
             },
-            removed: Rc::clone(&removed),
-        })];
+            Rc::clone(&removed),
+        ))];
         let ctx = ctx_with_triggers(
             &fs,
             &ids,
@@ -561,12 +812,16 @@ mod tests {
         assert_eq!(removed.get(), 0, "a describe scrubs nothing");
     }
 
-    /// The teardown ORDER: the breadth scrub runs only after every fallible deletion SUCCEEDED. A
-    /// deletion that fails aborts the verb — and must leave every OTHER harness's trigger armed,
-    /// because disarming a machine's agents is not a thing to do on the way out of a teardown that
-    /// did not happen.
+    /// The teardown ORDER: EVERY trigger scrub runs only after every fallible deletion SUCCEEDED.
+    /// A deletion that fails aborts the verb — and must leave the machine fully armed, the ACTIVE
+    /// harness included, because disarming a machine's agents is not a thing to do on the way out
+    /// of a teardown that did not happen. The active scrub used to run first, so exactly the
+    /// harness the person is sitting in front of was the one left silently un-updated.
+    ///
+    /// And the failure OWES A RECEIPT: it deleted the built-in copies on its way down, and used to
+    /// report nothing but "a filesystem operation failed" with no path anywhere.
     #[test]
-    fn a_failed_deletion_leaves_every_other_harnesss_trigger_armed() {
+    fn a_failed_deletion_leaves_every_harnesss_trigger_armed_and_still_reports_its_work() {
         use topos_types::persisted::{PlacementKind, PlacementMap, PlacementState, SwapCapability};
 
         let home = Scratch::new();
@@ -615,11 +870,11 @@ mod tests {
         let plane = InertPlane;
         let follow = InertFollow;
         let removed = Rc::new(Cell::new(0));
-        let others: Vec<Box<dyn TriggerAdapter>> = vec![Box::new(OtherTrigger {
-            slug: "cursor",
-            artifact: TriggerArtifact::Path(home.0.join("cursor-hooks.json")),
-            removed: Rc::clone(&removed),
-        })];
+        let others: Vec<Box<dyn TriggerAdapter>> = vec![Box::new(OtherTrigger::clean(
+            "cursor",
+            TriggerArtifact::Path(home.0.join("cursor-hooks.json")),
+            Rc::clone(&removed),
+        ))];
         let ctx = ctx_with_triggers(
             &fs,
             &ids,
@@ -631,16 +886,136 @@ mod tests {
             crate::ops::Triggers::machine_of(&harness, &others),
         );
 
-        uninstall(&ctx, None, true).expect_err("the failed deletion fails the verb");
+        let failure = uninstall(&ctx, None, true).expect_err("the failed deletion fails the verb");
 
         assert_eq!(
             removed.get(),
             0,
             "the breadth scrub never ran — the other harness keeps its trigger"
         );
+        assert_eq!(
+            harness.removed.get(),
+            0,
+            "the ACTIVE harness keeps its trigger too — a failed teardown disarms nobody"
+        );
         assert!(
             home.0.join("identity/credentials.json").exists(),
             "the sidecar tree is intact: the verb died before its delete"
         );
+        // The receipt of the work that DID happen — the same rows the success receipt spells.
+        let partial = failure
+            .partial
+            .expect("a failure that deleted things owes a receipt");
+        assert!(
+            partial.hook.is_none(),
+            "no scrub ran, so the receipt claims none"
+        );
+        assert!(!partial.sidecar_removed);
+        // The error names the failing PATH in its diagnostic detail (the log + `details:` pointer),
+        // where "a filesystem operation failed" alone left nothing to act on.
+        assert_eq!(failure.error.code(), "IO_ERROR");
+        assert!(
+            failure
+                .error
+                .detail()
+                .contains(&placement.to_string_lossy().into_owned()),
+            "the detail names the path that failed: {}",
+            failure.error.detail()
+        );
+    }
+
+    /// A teardown that could not scrub a trigger DID NOT uninstall topos. It used to print
+    /// `Uninstalled topos.`, exit 0 and hand `--json` an `ok: true` with an empty `warnings` —
+    /// while an agent on that machine went on auto-updating from a topos that was supposedly gone.
+    #[test]
+    fn a_trigger_it_could_not_scrub_makes_the_teardown_incomplete() {
+        let home = Scratch::new();
+        std::fs::create_dir_all(home.0.join("identity")).unwrap();
+
+        let fs = RealFs;
+        let ids = SeqIds::new("s");
+        let clock = FixedClock(1);
+        let harness = FakeHarness {
+            config: home.0.join("harness-settings.json"),
+            removed: Cell::new(0),
+        };
+        let plane = InertPlane;
+        let follow = InertFollow;
+        let cursor_config = home.0.join("cursor-hooks.json");
+        let removed = Rc::new(Cell::new(0));
+        let others: Vec<Box<dyn TriggerAdapter>> = vec![
+            // A config file topos could read but not write.
+            Box::new(OtherTrigger {
+                slug: "cursor",
+                artifact: TriggerArtifact::Path(cursor_config.clone()),
+                removed: Rc::clone(&removed),
+                state: TriggerState::Degraded,
+                note: Some("permission denied"),
+                config: Some(cursor_config.clone()),
+            }),
+            // A trigger living in the harness's OWN scheduler, unreachable from here.
+            Box::new(OtherTrigger {
+                slug: "openclaw",
+                artifact: TriggerArtifact::OutOfProcess {
+                    harness: "OpenClaw",
+                },
+                removed: Rc::clone(&removed),
+                state: TriggerState::Degraded,
+                note: None,
+                config: None,
+            }),
+        ];
+        let ctx = ctx_with_triggers(
+            &fs,
+            &ids,
+            &clock,
+            &harness,
+            &plane,
+            &follow,
+            &home.0,
+            crate::ops::Triggers::machine_of(&harness, &others),
+        );
+
+        let out = uninstall(&ctx, None, true).unwrap();
+        let UninstallOutcome::Applied { applied, messages } = out else {
+            panic!("--yes applies")
+        };
+        assert_eq!(messages.len(), 2, "one failure per harness: {messages:?}");
+        for m in &messages {
+            assert_eq!(m.kind, topos_types::MessageKind::Failure);
+            assert_eq!(m.code.as_deref(), Some("TRIGGER_NOT_REMOVED"));
+        }
+        let mut cursor_line = format!(
+            "cursor: the auto-update trigger could not be removed from {}",
+            cursor_config.display()
+        );
+        cursor_line.push_str(" (permission denied) — remove it by hand, or fix the permission ");
+        cursor_line.push_str("and run 'topos uninstall' again.");
+        assert_eq!(messages[0].text, cursor_line);
+        let mut openclaw_line =
+            String::from("openclaw: the scheduled update job could not be checked or removed — ");
+        openclaw_line.push_str("the openclaw command is not available on this machine. If ");
+        openclaw_line.push_str("OpenClaw is installed, remove the job with its own scheduler.");
+        assert_eq!(messages[1].text, openclaw_line);
+        // The degraded JSON rows carry the same reason as a note.
+        assert_eq!(
+            applied
+                .triggers
+                .iter()
+                .find(|t| t.agent == "cursor")
+                .and_then(|t| t.note.as_deref()),
+            Some("permission denied")
+        );
+        // The headline does not claim completion, and each failure states its own way out.
+        let tty = crate::render::uninstall_applied_tty(&applied, &messages, false);
+        assert!(
+            tty.starts_with("Uninstall incomplete — topos could not remove everything it placed."),
+            "{tty}"
+        );
+        assert!(tty.contains("permission denied"), "{tty}");
+        assert!(tty.contains("its own scheduler."), "{tty}");
+        // A CLEAN teardown still leads with the plain headline and carries no failures.
+        let clean = crate::render::uninstall_applied_tty(&applied, &[], true);
+        assert!(clean.starts_with("Uninstalled topos."), "{clean}");
     }
 }

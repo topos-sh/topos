@@ -105,7 +105,7 @@ impl<'a> Codex<'a> {
             EditPlan::Write(bytes, state, note) => {
                 match self.cfg.replace(&self.config_path(), &bytes) {
                     Ok(()) => self.out(state, true, note),
-                    Err(_) => self.out(TriggerState::Degraded, false, None),
+                    Err(e) => self.out(TriggerState::Degraded, false, Some(crate::io_reason(&e))),
                 }
             }
         }
@@ -120,15 +120,20 @@ impl TriggerAdapter for Codex<'_> {
     fn install(&self) -> TriggerReport {
         match self.cfg.read(&self.config_path()) {
             Ok(current) => self.apply(plan_install(current.as_deref())),
-            Err(_) => self.out(TriggerState::Degraded, false, None),
+            Err(e) => self.out(TriggerState::Degraded, false, Some(crate::io_reason(&e))),
         }
     }
 
     fn remove(&self) -> TriggerReport {
         match self.cfg.read(&self.config_path()) {
             Ok(current) => self.apply(plan_remove(current.as_deref())),
-            Err(_) => self.out(TriggerState::Degraded, false, None),
+            Err(e) => self.out(TriggerState::Degraded, false, Some(crate::io_reason(&e))),
         }
+    }
+
+    /// `config.toml` — the file a degraded scrub points a person at.
+    fn config_file(&self) -> Option<PathBuf> {
+        Some(self.config_path())
     }
 
     /// Presence = the sentinel anchor with our byte-verified block, right now. Anything
@@ -268,7 +273,9 @@ fn plan_remove(current: Option<&[u8]>) -> EditPlan {
         None => return EditPlan::Leave(TriggerState::Inactive, None), // nothing to remove
         Some(bytes) => match std::str::from_utf8(bytes) {
             Ok(t) => t,
-            Err(_) => return EditPlan::Leave(TriggerState::Degraded, None),
+            Err(_) => {
+                return EditPlan::Leave(TriggerState::Degraded, Some(crate::UNPROVABLE_REASON));
+            }
         },
     };
     let lines = split_lines(text);
@@ -294,7 +301,7 @@ fn plan_remove(current: Option<&[u8]>) -> EditPlan {
         }
         // The sentinel is there but the block does not byte-verify (a hand edit): deleting on a
         // guess could take user bytes with it — Degraded, zero writes.
-        _ => EditPlan::Leave(TriggerState::Degraded, None),
+        _ => EditPlan::Leave(TriggerState::Degraded, Some(crate::UNPROVABLE_REASON)),
     }
 }
 

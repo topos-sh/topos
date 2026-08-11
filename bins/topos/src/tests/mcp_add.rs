@@ -1469,3 +1469,109 @@ fn a_folder_holding_both_markers_refuses_and_names_both_kinds() {
     ops::adopt_path(&ctx, &scope.target, &dir, ops::KindDeclared::Yes)
         .expect("an explicit kind adopts the folder");
 }
+
+// =================================================================================================
+// The TEARDOWN — `uninstall` and the config entries only the sidecar's ledger can account for
+// =================================================================================================
+
+/// An MCP entry topos placed is LIVE WIRING: it points a running agent at a server. The ledger
+/// that proves which entries are topos's lives in `~/.topos/`, so an uninstall that deleted the
+/// tree and left the entries left them unaccountable forever — no later run could tell them from
+/// a hand edit. The teardown now retires them first, through the SAME owned-entry mechanics
+/// `remove` uses: a clean entry goes, a hand-edited one stays byte-identical, and BOTH facts are
+/// named in the preview before anything happens.
+#[test]
+fn the_teardown_retires_its_own_mcp_entries_and_leaves_a_hand_edited_one() {
+    let rig = Rig::new("teardown-mcp");
+    rig.write_global("[bundles]\n");
+    // Two USER-scope MCP surfaces, both detected off the fake home.
+    std::fs::create_dir_all(rig.home.0.join(".cursor")).unwrap();
+    std::fs::create_dir_all(rig.home.0.join(".codex")).unwrap();
+    // A line of the person's own, so the file is not WHOLLY topos-owned: the last-entry-deletion
+    // rule then keeps it, and the assertion is about the ENTRY rather than the file.
+    std::fs::write(rig.home.0.join(".codex/config.toml"), b"model = \"o3\"\n").unwrap();
+    let src = rig.work.0.join("weather");
+    write_bundle(&src, &good_server());
+    let ctx = rig.ctx_at(None);
+    ops::add_mcp(&ctx, &src.display().to_string(), true, &Default::default()).unwrap();
+
+    let cursor = rig.home.0.join(".cursor/mcp.json");
+    let codex = rig.home.0.join(".codex/config.toml");
+    for f in [&cursor, &codex] {
+        assert!(
+            std::fs::read_to_string(f)
+                .unwrap()
+                .contains("https://weather.acme.example/mcp"),
+            "the add placed an entry in {}",
+            f.display()
+        );
+    }
+    // HAND-EDIT the cursor entry: its bytes no longer fingerprint to what topos wrote, so it is
+    // the person's now — a teardown may not take it.
+    let drifted = std::fs::read_to_string(&cursor)
+        .unwrap()
+        .replace("weather.acme.example", "weather.mine.example");
+    std::fs::write(&cursor, &drifted).unwrap();
+
+    // The PREVIEW names every file it will open, and says which entries it will leave.
+    let described = ops::uninstall(&ctx, None, false).unwrap();
+    let ops::UninstallOutcome::Described { describe, yes_argv } = described else {
+        panic!("a bare uninstall describes")
+    };
+    assert_eq!(
+        describe.mcp_files,
+        vec![codex.to_string_lossy().into_owned()],
+        "the clean surface is named for removal"
+    );
+    assert_eq!(
+        describe.mcp_drifted,
+        vec![cursor.to_string_lossy().into_owned()],
+        "the hand-edited surface is named as one it will leave"
+    );
+    let preview = crate::render::uninstall_describe_tty(&describe, &yes_argv);
+    assert!(
+        preview.contains(&format!(
+            "  · remove topos-placed MCP server entries from {}",
+            codex.display()
+        )),
+        "{preview}"
+    );
+    assert!(
+        preview.contains(&format!(
+            "  · leave the hand-edited entries in {} in place",
+            cursor.display()
+        )),
+        "{preview}"
+    );
+    // Nothing has changed yet.
+    assert_eq!(std::fs::read_to_string(&cursor).unwrap(), drifted);
+
+    let applied = ops::uninstall(&ctx, None, true).unwrap();
+    let ops::UninstallOutcome::Applied { applied, messages } = applied else {
+        panic!("--yes applies")
+    };
+    assert!(messages.is_empty(), "{messages:?}");
+    assert!(!rig.layout().home().exists(), "the sidecar tree is gone");
+    let codex_after = std::fs::read_to_string(&codex).unwrap();
+    assert!(
+        !codex_after.contains("weather.acme.example"),
+        "the entry topos owned is gone from the clean surface: {codex_after}"
+    );
+    assert!(
+        codex_after.contains("model = \"o3\""),
+        "every byte that was not topos's is still there: {codex_after}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&cursor).unwrap(),
+        drifted,
+        "the hand-edited entry is byte-identical — a teardown clobbers nothing"
+    );
+    assert_eq!(
+        applied.mcp_files,
+        vec![codex.to_string_lossy().into_owned()]
+    );
+    assert_eq!(
+        applied.mcp_drifted,
+        vec![cursor.to_string_lossy().into_owned()]
+    );
+}

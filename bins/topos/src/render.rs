@@ -1959,6 +1959,19 @@ pub(crate) fn uninstall_describe_tty(
             d.builtin_dirs.join(", ")
         ));
     }
+    // The MCP config edits, one row per FILE. These are live wiring — an entry topos placed points
+    // an agent at a server — and the ledger that proves which entries are topos's dies with the
+    // sidecar, so the preview says exactly which files it opens and which entries it leaves.
+    for path in &d.mcp_files {
+        s.push_str(&format!(
+            "\n  · remove topos-placed MCP server entries from {path}"
+        ));
+    }
+    for path in &d.mcp_drifted {
+        s.push_str(&format!(
+            "\n  · leave the hand-edited entries in {path} in place"
+        ));
+    }
     s.push_str("\n  · leave every SKILL FILE in your agent dirs untouched — uninstall deletes no skill bytes");
     if let Some(bin) = &d.binary_path {
         s.push_str(&format!(
@@ -1973,26 +1986,58 @@ pub(crate) fn uninstall_describe_tty(
 }
 
 /// The applied `uninstall`'s TTY — what was removed, the hook scrub surfaced honestly.
-pub(crate) fn uninstall_applied_tty(d: &crate::ops::UninstallApplied) -> String {
-    let mut s = String::from("Uninstalled topos.");
+///
+/// `complete` is the ONE thing the headline reads: a run that left an agent's auto-update trigger
+/// armed — or that died on a filesystem error partway — did not uninstall topos, whatever else it
+/// managed, and the first line must not say it did. `failures` are the things it could not remove,
+/// each stating its own way out under the rows. The ROWS are identical on both paths: they report
+/// the work that landed, which is true however the run ended.
+pub(crate) fn uninstall_applied_tty(
+    d: &crate::ops::UninstallApplied,
+    failures: &[topos_types::Message],
+    complete: bool,
+) -> String {
+    let mut s = String::from(if complete {
+        "Uninstalled topos."
+    } else {
+        "Uninstall incomplete — topos could not remove everything it placed."
+    });
     if !d.builtin_dirs.is_empty() {
         s.push_str(&format!(
             "\n  · removed the built-in `topos` skill's copies: {}",
             d.builtin_dirs.join(", ")
         ));
     }
-    let hook_line = match (d.hook.state, d.hook.touched_path.as_deref()) {
-        (TriggerState::Degraded, _) => {
-            "\n  · couldn't edit the harness config — remove the topos auto-update hook manually"
-                .to_owned()
-        }
-        (TriggerState::AlreadyPresentUnmanaged, _) => {
-            "\n  · left your hand-rolled auto-update hook untouched".to_owned()
-        }
-        (_, Some(path)) => format!("\n  · scrubbed the auto-update hook from {path}"),
-        (_, None) => "\n  · no auto-update hook was installed — nothing to scrub".to_owned(),
-    };
-    s.push_str(&hook_line);
+    // The MCP config edits, keyed by the FILE the entries lived in — receipts speak in
+    // destinations. A hand-edited entry SURVIVING is the fact a person must not miss, so it is
+    // stated in its own row rather than folded into the removal's.
+    for path in &d.mcp_files {
+        s.push_str(&format!(
+            "\n  · removed topos-placed MCP server entries from {path}"
+        ));
+    }
+    for path in &d.mcp_drifted {
+        s.push_str(&format!(
+            "\n  · left the hand-edited entries in {path} in place"
+        ));
+    }
+    // Absent = the teardown died before the scrubs ran, and the trigger is still armed. Saying
+    // nothing is the honest answer; the error above it is what happened.
+    if let Some(hook) = &d.hook {
+        let hook_line = match (hook.state, hook.touched_path.as_deref()) {
+            (TriggerState::Degraded, _) => {
+                "\n  · couldn't edit the harness config — remove the topos auto-update hook \
+                 manually"
+                    .to_owned()
+            }
+            (TriggerState::AlreadyPresentUnmanaged, _) => {
+                "\n  · left your hand-rolled auto-update hook untouched".to_owned()
+            }
+            (_, Some(path)) => format!("\n  · scrubbed the auto-update hook from {path}"),
+            (_, None) => "\n  · no auto-update hook was installed — nothing to scrub".to_owned(),
+        };
+        s.push_str(&hook_line);
+    }
     // The breadth scrub's rows — only agents with something to say (a real scrub, or a survival
     // disclosure); clean no-ops never reach this receipt.
     for t in &d.triggers {
@@ -2012,6 +2057,11 @@ pub(crate) fn uninstall_applied_tty(d: &crate::ops::UninstallApplied) -> String 
         s.push_str("\n  · deleted topos's own files at ~/.topos (credential included)");
     } else {
         s.push_str("\n  · topos kept no files here to delete");
+    }
+    // Each failure's own sentence carries the way out — the file to fix, or the harness command to
+    // run. The code stays on the typed channel.
+    for f in failures {
+        s.push_str(&format!("\n{}", f.text));
     }
     if let Some(bin) = &d.binary_path {
         s.push_str(&format!(

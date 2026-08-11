@@ -179,7 +179,13 @@ fn run_command(
             triggers: triggers.clone(),
             plane: &inert_plane,
             follow: &inert_follow,
-            roots: None,
+            // The teardown reaches the machine's agent CONFIGS as well as its own tree — the MCP
+            // entries topos placed are retired before the ledger proving they are topos's is
+            // deleted with the sidecar — and those surfaces resolve under `$HOME`.
+            roots: std::env::var_os("HOME").map(|h| crate::ctx::AgentRoots {
+                home: PathBuf::from(h),
+                cwd: std::env::current_dir().ok(),
+            }),
             // The teardown is entirely local (delete `~/.topos/`, scrub the triggers) — nothing to
             // report activity about.
             progress: crate::progress::silent(),
@@ -2695,11 +2701,12 @@ fn finish_protect(
     }
 }
 
-/// `uninstall`'s finisher — the two-phase pair (describe / applied).
+/// `uninstall`'s finisher — the two-phase pair (describe / applied), plus the teardown that died
+/// partway and still owes a receipt for what it removed.
 fn finish_uninstall(
     json: bool,
     command: &str,
-    result: Result<ops::UninstallOutcome, ClientError>,
+    result: Result<ops::UninstallOutcome, Box<ops::UninstallFailure>>,
     diag: &Diag<'_>,
 ) -> ExitCode {
     match result {
@@ -2714,16 +2721,56 @@ fn finish_uninstall(
             }
             ExitCode::SUCCESS
         }
-        Ok(ops::UninstallOutcome::Applied(applied)) => {
+        Ok(ops::UninstallOutcome::Applied { applied, messages }) => {
+            // ONE binding for `ok`, the exit status and the headline: a teardown that left an
+            // agent's trigger armed did not uninstall topos, and the three surfaces must not be
+            // able to disagree about that.
+            let failed = !messages.is_empty();
             if json {
                 let value = serde_json::to_value(&applied).unwrap_or_default();
-                println!("{}", render::to_json(&render::ok_envelope(command, value)));
+                let mut envelope = render::ok_envelope(command, value);
+                envelope.ok = !failed;
+                envelope.warnings = crate::message::legacy_lines(&messages);
+                envelope.messages = messages;
+                println!("{}", render::to_json(&envelope));
             } else {
-                println!("{}", render::uninstall_applied_tty(&applied));
+                println!(
+                    "{}",
+                    render::uninstall_applied_tty(&applied, &messages, !failed)
+                );
             }
-            ExitCode::SUCCESS
+            if failed {
+                ExitCode::FAILURE
+            } else {
+                ExitCode::SUCCESS
+            }
         }
-        Err(e) => emit_err(json, command, &e, diag),
+        // A teardown that FAILED still owes the receipt of the destructive work it already did —
+        // the same rows the success receipt spells. The envelope carries it as `data`, so a JSON
+        // consumer reads the same document on both paths; the TTY prints it under the refusal.
+        Err(failure) => {
+            let ops::UninstallFailure { error, partial } = *failure;
+            let logged = diag.note(command, &error);
+            if json {
+                let mut envelope = render::err_envelope(command, diag.argv, &error);
+                if let Some(applied) = &partial {
+                    envelope.data = serde_json::to_value(applied).unwrap_or_default();
+                }
+                println!("{}", render::to_json(&envelope));
+            } else {
+                eprintln!("{}", render::err_tty(&error));
+                if let Some(applied) = &partial {
+                    eprintln!("{}", render::uninstall_applied_tty(applied, &[], false));
+                }
+                if let Some(hint) = render::err_hint_tty(command, diag.argv, &error) {
+                    eprintln!("{hint}");
+                }
+                if logged {
+                    eprintln!("details: {}", diag.log_path.display());
+                }
+            }
+            ExitCode::FAILURE
+        }
     }
 }
 

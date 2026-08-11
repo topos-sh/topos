@@ -59,7 +59,7 @@ pub(crate) use add::{
 pub(crate) use add_mcp::add_mcp;
 #[cfg(test)]
 pub(crate) use arm::INERT_TRIGGER;
-pub(crate) use arm::{Triggers, arm_detected, probe_detected};
+pub(crate) use arm::{Scrubbed, Triggers, arm_detected, probe_detected};
 pub(crate) use builtin::{ensure_builtin, is_builtin, restore_builtin};
 pub(crate) use connect::device_challenge;
 pub(crate) use dest_select::Selection;
@@ -129,7 +129,9 @@ pub(crate) use revert::{RevertOutcome, revert};
 pub(crate) use review::{ReviewConnectors, ReviewOutcome, ReviewVerdict, review_dispatch};
 pub(crate) use self_update::{SelfUpdateAction, SelfUpdateOpts, SelfUpdateOutcome, self_update};
 pub(crate) use status::status_snapshot;
-pub(crate) use uninstall::{UninstallApplied, UninstallDescribe, UninstallOutcome, uninstall};
+pub(crate) use uninstall::{
+    UninstallApplied, UninstallDescribe, UninstallFailure, UninstallOutcome, uninstall,
+};
 pub(crate) use version_check::{version_check_env_allows, version_nag};
 
 use topos_core::digest::to_hex;

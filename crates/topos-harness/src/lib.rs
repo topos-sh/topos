@@ -218,6 +218,27 @@ pub(crate) fn trigger_report(
     }
 }
 
+/// Why a config file could not be read or written, as the short lowercase phrase a receipt puts
+/// in parentheses. Derived from the OS ERROR KIND alone — the OS message is not ours to print and
+/// reads differently on every platform, while the kind is what a person can act on. A degraded
+/// scrub carries this as its report `note`, so the receipt can say WHY the trigger is still armed
+/// instead of only that it is.
+pub(crate) fn io_reason(e: &io::Error) -> &'static str {
+    match e.kind() {
+        io::ErrorKind::PermissionDenied => "permission denied",
+        io::ErrorKind::ReadOnlyFilesystem => "the filesystem is read-only",
+        io::ErrorKind::NotADirectory | io::ErrorKind::IsADirectory => {
+            "the path is not the kind of file topos expected"
+        }
+        io::ErrorKind::StorageFull => "the disk is full",
+        _ => "topos could not edit that file",
+    }
+}
+
+/// The reason a config topos COULD read still could not be scrubbed: nothing in it is provably
+/// the entry topos wrote, so a rewrite could take bytes that are not topos's.
+pub(crate) const UNPROVABLE_REASON: &str = "topos could not prove which entry in it is its own";
+
 /// The narrow filesystem port a trigger adapter needs to read + atomically replace a harness
 /// **config** file (e.g. `~/.claude/settings.json`) — never a skill bundle. Defined here in the low
 /// crate and implemented by the CLI (the high crate) over its one fault-injectable syscall seam, so the
