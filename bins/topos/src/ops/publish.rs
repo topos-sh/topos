@@ -92,7 +92,7 @@ fn landed_undo_is_restorative(followed: bool, expected_generation: u64) -> bool 
 /// [`ClientError::Enrollment`] if not enrolled (run `topos login <workspace-address>` first);
 /// [`ClientError::InvalidArgument`] if the source is remote/unsupported (add it first);
 /// [`ClientError::HarnessMismatch`] if a `@<harness>` names a different harness than the tracked skill;
-/// the `add`-family errors ([`ClientError::AmbiguousHarness`] / [`ClientError::NoUntrackedSkill`] / …) when
+/// the `add`-family errors ([`ClientError::AmbiguousSource`] / [`ClientError::NoUntrackedSkill`] / …) when
 /// resolving an untracked source; [`ClientError::ApprovalMismatch`] if a `@<digest>` pin does not match the
 /// scanned bytes; [`ClientError::PublishBlocked`] if an unresolved merge conflict is present;
 /// [`ClientError::NoChanges`] when the draft is byte-identical to the published `current` (a published

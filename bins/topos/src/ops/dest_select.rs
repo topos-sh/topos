@@ -105,7 +105,7 @@ impl Selection {
     /// # Errors
     /// [`ClientError::UnknownAgent`] / [`ClientError::SelectionRefused`], exactly as
     /// [`Selection::skill_entries`] raises them for the `-a` half.
-    fn copy_tokens(&self, scope: ManifestScope) -> Result<Vec<String>, ClientError> {
+    pub(crate) fn copy_tokens(&self, scope: ManifestScope) -> Result<Vec<String>, ClientError> {
         let mut out: Vec<String> = Vec::new();
         for slug in &self.agents {
             let entry = crate::manifest::dest::skills_dest_spelling(slug, scope);
@@ -312,7 +312,7 @@ pub(crate) fn select_copy(
 /// Whether a typed token names this copy — matched against the four spellings it answers to (the
 /// recorded folder, the display path, and either absolute), each compared after the same light
 /// normalization (`./` prefix, trailing slashes) so a pasted path is not refused over punctuation.
-fn names_copy(token: &str, dir: &Path, spelling: &CopySpelling) -> bool {
+pub(crate) fn names_copy(token: &str, dir: &Path, spelling: &CopySpelling) -> bool {
     let want = norm(token);
     let parent = dir.parent().unwrap_or(dir);
     [

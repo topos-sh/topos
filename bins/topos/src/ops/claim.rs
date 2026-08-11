@@ -73,10 +73,19 @@ pub(crate) fn claim(
     refuse_wrong_scope(ctx, scope, &dir, &target)?;
     refuse_mcp(&sctx, &target)?;
 
+    // WHAT THE ROW WRITE BELOW WILL ADD, decided BEFORE the record is written so the record can
+    // carry it in the SAME write. The two are one fact — "the claim put this entry there" — and
+    // recording it afterwards made it a third write a crash could strand: the detach would then
+    // subtract nothing, the row would keep the root, and the next sweep would re-materialize an
+    // engine copy moments after the receipt said the folder just stops updating. Recording it
+    // speculatively is safe the other way: a crash before the row write leaves a stamp naming an
+    // entry the row lacks, and subtracting an entry that is not there is a no-op.
+    let planned_dest = planned_dest_entry(ctx, scope, &target, &dir)?;
+
     // THE RECORD HALF, under this record's writer flock. The ownership questions are asked INSIDE
     // it and immediately before the append, over the map this very call then rewrites — a check
     // outside the lock is a check against a map another writer may already have moved.
-    let (state, twin, repaired) = {
+    let (state, twin, repaired, stamped) = {
         let sp = scope.layout.published(&target.id);
         let _guard = crate::sidecar::lock_skill(sctx.fs, &scope.layout, &target.id)?;
         let Some(mut map) = doc::read_map(sctx.fs, &sp.map)? else {
@@ -86,17 +95,28 @@ pub(crate) fn claim(
             )));
         };
         // THE FOLDER'S OWN CLAIMANTS: this record is the already-a-place answer (which still
-        // repairs the row below), any other record in either scope is the refusal — two engines
-        // would otherwise converge one directory.
-        match standing_index(&map, &dir) {
-            Some(idx) => (
-                claim_state(&sctx, &map, &target.lock, idx),
-                None,
-                Repaired::Standing,
-            ),
+        // repairs every half below), any other record in either scope is the refusal — two
+        // engines would otherwise converge one directory.
+        let (idx, repaired, stamped) = match standing_index(&map, &dir) {
+            Some(idx) => {
+                // VERIFY AND REPAIR: a run that crashed before its row write left a record with
+                // no stamp. Set, never cleared — an earlier run's answer outranks this one's.
+                let stamp = planned_dest.is_some()
+                    && map
+                        .placement_state
+                        .get(idx)
+                        .is_some_and(|st| st.claim.as_ref().is_none_or(|c| c.added_dest.is_none()));
+                if stamp && let Some(st) = map.placement_state.get_mut(idx) {
+                    st.claim = Some(PlacementClaim {
+                        added_dest: planned_dest.clone(),
+                    });
+                    doc::write_map(sctx.fs, &sp.map, &map)?;
+                }
+                (idx, Repaired::Standing, stamp)
+            }
             None => {
                 refuse_taken(ctx, &sctx, scope, &dir, &target)?;
-                let scanned = scan_claim(&dir)?;
+                let scanned = scan_claim(ctx, &dir)?;
                 let baseline = claim_baseline(&sctx, &sp, &target.lock, &scanned)?;
                 map.placements.push(dir.to_string_lossy().into_owned());
                 map.placement_state.push(PlacementState {
@@ -112,39 +132,49 @@ pub(crate) fn claim(
                     swap_capability: SwapCapability::Unsupported,
                     // The person's own folder: never retired by a clean.
                     adopted_source: true,
-                    // …and a CLAIM, which is what makes it a target of every plan.
-                    claim: Some(PlacementClaim { added_dest: None }),
+                    // …and a CLAIM, which is what makes it a target of every plan — carrying, in
+                    // this same write, the row entry the call is about to add.
+                    claim: Some(PlacementClaim {
+                        added_dest: planned_dest.clone(),
+                    }),
                 });
                 doc::write_map(sctx.fs, &sp.map, &map)?;
-                let idx = map.placements.len() - 1;
-                let state = claim_state(&sctx, &map, &target.lock, idx);
-                let twin = retire_twin(&sctx, &target, &dir, &map)?;
-                (state, twin, Repaired::Fresh)
+                (map.placements.len() - 1, Repaired::Fresh, false)
             }
-        }
+        };
+        // The TWIN check rides BOTH paths, for the reason the row write does: a run that crashed
+        // after the record write would otherwise leave the duplicate standing forever.
+        let state = claim_state(&sctx, &map, &target.lock, idx);
+        let twin = retire_twin(&sctx, &target, &dir, &map)?;
+        (state, twin, repaired, stamped)
     };
+    let retired_twin = twin.as_ref().is_some_and(|t| t.removed);
 
     let mut data = receipt(ctx, &target, &dir, state, twin);
-    if repaired == Repaired::Standing {
-        super::manifest_edit::push_note(
-            &mut data,
-            format!(
-                "{} is already one of {}'s folders — nothing changed",
-                crate::ops::inventory::pretty(ctx, &dir),
-                target.lock.name
-            ),
-        );
-    }
     // A DEST-FROZEN row plans from its own entries alone, so a record-only claim would starve: the
     // folder joins the row's destinations through the ordinary additive write. It runs on the
     // ALREADY-A-PLACE path too, which is what makes a re-run REPAIR a claim that crashed between
     // the two writes — the row write is idempotent, and says so when there was nothing to add.
     let added = extend_row_dest(ctx, scope, &target, &dir, &mut data)?;
-    // What the claim ADDED to the row is recorded on the placement itself, because its detach must
-    // subtract exactly that: a row that already named this folder's root was not changed by the
-    // claim, and taking that entry back would drop copies the claim never touched.
-    if let Some(entry) = added {
-        stamp_added_dest(&sctx, scope, &target, &dir, &entry)?;
+    // A FRESH claim RECORDED A PLACEMENT — a real change, whatever the row write found. The row's
+    // redundancy note would contradict the headline above it, and it names the ROW's source
+    // folder, which beside a claim receipt reads as a statement about the folder just claimed. It
+    // is not; the claim receipt is the whole answer.
+    //
+    // NOTHING CHANGED is a whole answer too, and then it is the whole lead — said only where every
+    // half of the claim found its work already done.
+    let nothing_changed =
+        repaired == Repaired::Standing && added.is_none() && !stamped && !retired_twin;
+    if nothing_changed {
+        data.unchanged = true;
+        data.note = Some(format!(
+            "{} is already one of {}'s folders — nothing changed",
+            crate::ops::inventory::pretty(ctx, &dir),
+            target.lock.name
+        ));
+    } else {
+        data.unchanged = false;
+        data.note = None;
     }
     Ok(data)
 }
@@ -165,32 +195,46 @@ fn standing_index(map: &PlacementMap, dir: &Path) -> Option<usize> {
         .position(|p| Path::new(p).canonicalize().is_ok_and(|c| c == *dir))
 }
 
-/// Record on the claimed placement the `dest` entry the row write added — read-modify-write under
-/// the flock, over the map as it is NOW (the row write released the flock in between).
-fn stamp_added_dest(
-    sctx: &Ctx<'_>,
+/// The `dest` entry the row write is ABOUT to add — the claimed folder's root, when the standing
+/// row is destination-frozen and does not already name it. `None` for every other shape, which is
+/// exactly the set of cases where the claim puts nothing on the row and its detach must take
+/// nothing back.
+///
+/// Read before the record is written, so the record can carry it in ONE write (see [`claim`]).
+///
+/// # Errors
+/// A manifest read failure, or a file the grammar refuses.
+fn planned_dest_entry(
+    ctx: &Ctx<'_>,
     scope: &AddScope,
     target: &ClaimTarget,
     dir: &Path,
-    entry: &str,
-) -> Result<(), ClientError> {
-    let sp = scope.layout.published(&target.id);
-    let _guard = crate::sidecar::lock_skill(sctx.fs, &scope.layout, &target.id)?;
-    let Some(mut map) = doc::read_map(sctx.fs, &sp.map)? else {
-        return Ok(());
+) -> Result<Option<String>, ClientError> {
+    let Some(reference) = row_reference(scope, target) else {
+        return Ok(None);
     };
-    let Some(idx) = standing_index(&map, dir) else {
-        return Ok(());
+    let Some(row) = standing_row(ctx, scope, &reference)? else {
+        return Ok(None);
     };
-    let Some(state) = map.placement_state.get_mut(idx) else {
-        return Ok(());
+    let Some(dest) = row.fields().dest else {
+        return Ok(None); // the row reaches every agent; the claim adds no rule to it
     };
-    // NEVER CLEARED, only set: a repair run whose row write found the entry already there must not
-    // erase what the first run recorded putting there.
-    state.claim = Some(PlacementClaim {
-        added_dest: Some(entry.to_owned()),
-    });
-    doc::write_map(sctx.fs, &sp.map, &map)
+    let Some(parent) = dir.parent() else {
+        return Ok(None);
+    };
+    let entry = super::manifest_edit::dest_spelling(ctx, &scope.target, parent);
+    Ok((!dest.contains(&entry)).then_some(entry))
+}
+
+/// The row key this record's own source takes in the invoked scope's file — a reference verbatim,
+/// a folder through the one path-key derivation the row write itself uses.
+fn row_reference(scope: &AddScope, target: &ClaimTarget) -> Option<String> {
+    match target.origin.as_ref()? {
+        RecordOrigin::Reference(reference) => Some(reference.clone()),
+        RecordOrigin::Folder(source) => {
+            Some(super::manifest_edit::path_row_key(&scope.target, source))
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -424,7 +468,12 @@ fn other_scope_stores(ctx: &Ctx<'_>, scope: &AddScope) -> Vec<(crate::sidecar::L
             continue; // the scope this claim IS acting in — already asked, above
         }
         if let Some(layout) = crate::sidecar::existing_project_store(ctx.fs, &dir) {
-            out.push((layout, format!("{}/topos.toml", dir.display())));
+            // Spelled as the machine file beside it is — the reader compares two paths in one
+            // sentence, and only one of them being abbreviated makes them look unrelated.
+            out.push((
+                layout,
+                crate::ops::inventory::pretty(ctx, &dir.join("topos.toml")),
+            ));
         }
     }
     out
@@ -432,10 +481,15 @@ fn other_scope_stores(ctx: &Ctx<'_>, scope: &AddScope) -> Vec<(crate::sidecar::L
 
 /// Scan the folder, refusing an unreadable one BEFORE anything is written: one Unscannable
 /// placement wedges the whole bundle's sync, so the claim fails toward the gate.
-fn scan_claim(dir: &Path) -> Result<ScannedBundle, ClientError> {
+///
+/// EVERY scanner reject becomes the can't-read refusal, naming the folder and the reason — a
+/// hazard the scanner found and a directory the kernel refused to open are the same news to the
+/// person, and the second used to escape as a bare "a filesystem operation failed", classified
+/// transient, inviting an agent to loop on a `chmod 000` that will answer identically forever.
+fn scan_claim(ctx: &Ctx<'_>, dir: &Path) -> Result<ScannedBundle, ClientError> {
     scan::scan(dir).map_err(|e| match e {
         ClientError::Scan(reason) => ClientError::ClaimUnscannable {
-            dir: dir.display().to_string(),
+            dir: crate::ops::inventory::pretty(ctx, dir),
             reason,
         },
         other => other,
@@ -618,9 +672,11 @@ fn receipt(
         currency: None,
         triggers: Vec::new(),
         origin: None,
+        // The RECORD's source, absolute where it is a folder — the wire's own form. The TTY
+        // abbreviates it under the home, once, in the renderer.
         source: target.origin.as_ref().map(|o| match o {
             RecordOrigin::Reference(r) => r.clone(),
-            RecordOrigin::Folder(folder) => crate::ops::inventory::pretty(ctx, folder),
+            RecordOrigin::Folder(folder) => folder.display().to_string(),
         }),
         manifest: None,
         scope: None,
@@ -634,6 +690,7 @@ fn receipt(
         dest_resolved: Vec::new(),
         dest_change: None,
         display: None,
+        unchanged: false,
         claim: Some(ClaimReceipt {
             folder: crate::ops::inventory::pretty(ctx, dir),
             state,
@@ -657,14 +714,10 @@ fn extend_row_dest(
     dir: &Path,
     data: &mut AddData,
 ) -> Result<Option<String>, ClientError> {
-    let reference = match &target.origin {
-        Some(RecordOrigin::Reference(reference)) => reference.clone(),
-        // A folder-adopted record's row IS its source folder; a claim adds a second place through
-        // the record, and the row's key still names the original.
-        Some(RecordOrigin::Folder(source)) => {
-            super::manifest_edit::path_row_key(&scope.target, source)
-        }
-        None => return Ok(None),
+    // A folder-adopted record's row IS its source folder; a claim adds a second place through the
+    // record, and the row's key still names the original.
+    let Some(reference) = row_reference(scope, target) else {
+        return Ok(None);
     };
     let Some(row) = standing_row(ctx, scope, &reference)? else {
         return Ok(None);

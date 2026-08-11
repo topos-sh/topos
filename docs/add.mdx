@@ -95,7 +95,7 @@ the same way — what was added and which file asks for it now, then where it ca
 
 ```
 added coolify-deploy to this project (./topos.toml) (undo: topos remove ./tools/coolify-deploy)
-source: /Users/robin/.claude/skills/gstack/coolify-deploy
+source: ~/work/acme-api/tools/coolify-deploy
 ```
 
 The rest of the grammar — exact pins, placement, the `off` value, grouped keys, `topos fmt` — is
@@ -175,9 +175,10 @@ first, then spread to its other folders and offered by `topos publish`. The rece
 never a workspace catalog, and never the other scope. A folder some other skill already holds
 refuses by name rather than letting two records fight over one directory. If topos had already
 placed its own copy next to yours under a suffixed name, that duplicate goes with the claim,
-unless you had edited it.
+unless you had edited it. Running the same claim twice changes nothing, and says so.
 
-The inverse is `remove <skill> --dest <folder>`:
+The inverse is `remove <skill> --dest <folder>` — which answers to the folder itself or to the
+folder holding it, spelled either way:
 
 ```
 removed ~/.codex/skills/coolify-deploy from coolify-deploy — the folder and its files stay; it just stops updating

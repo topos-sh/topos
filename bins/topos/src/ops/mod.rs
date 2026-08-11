@@ -109,7 +109,7 @@ pub(crate) use pull::{
 };
 pub(crate) use reconcile::{
     CacheFollow, ForgeCadence, ManifestUpdateOpts, SessionRoutedPlane, SessionTransports,
-    UpdateScope, forge_imports, manifest_update,
+    UpdateScope, forge_imports, manifest_update, moved_bytes,
 };
 // The one-time orphan resolution's fact composer — re-exported so the receipt-copy tests pin its
 // exact shapes.

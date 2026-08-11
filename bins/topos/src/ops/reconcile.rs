@@ -6285,6 +6285,17 @@ pub(crate) struct ForgeImport {
     pub members: Vec<String>,
 }
 
+/// Whether a reported action MOVED BYTES on disk — the difference between an invocation that did
+/// something and one that found everything already in place.
+///
+/// The ONE derivation, because two receipts read it: an add whose manifest row was redundant may
+/// only lead with "nothing changed" when the delivery agreed, and `up to date` is precisely the
+/// action that agrees. Every other reported state either wrote a folder or reports a standing
+/// condition the person needs told.
+pub(crate) fn moved_bytes(action: PullAction) -> bool {
+    !matches!(action, PullAction::UpToDate)
+}
+
 /// Every forge-imported skill a store tracks (an `origin.json` beside its docs), whatever the
 /// origin. Best-effort: unreadable entries are skipped.
 pub(crate) fn forge_imports(ctx: &Ctx<'_>) -> Vec<ForgeImport> {

@@ -1142,6 +1142,12 @@ pub struct AddData {
     /// version was minted. Absent for every other add. **INFERRED** (additive-only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub claim: Option<ClaimReceipt>,
+    /// This add changed NOTHING — the file already spelled exactly this row, or the folder was
+    /// already one of the bundle's places. The receipt then leads with that fact instead of an
+    /// installed/added headline above a note retracting it: an act that did not happen may not
+    /// head the answer. `note` carries the sentence. **INFERRED** (additive-only).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub unchanged: bool,
 }
 
 /// `add <path> --as <bundle>` — the folder is recorded as one of the bundle's places, byte for

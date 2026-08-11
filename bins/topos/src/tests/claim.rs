@@ -787,6 +787,460 @@ fn the_detach_receipt_says_the_folder_stays() {
     );
 }
 
+#[test]
+fn a_detach_answers_to_every_spelling_the_copy_has() {
+    // NAMING AN EXISTING COPY is not writing a manifest line: a pasted absolute path, the
+    // `~/`-spelled root, and the claimed FOLDER's own path all name the folder they obviously
+    // name. Matching the manifest dialect verbatim refused three of the four — and then, on a row
+    // with no destinations, refused with "nothing has synced" while `list` showed two placements.
+    let agents_abs = |rig: &Rig| rig.work.0.join("agents").to_string_lossy().into_owned();
+    let copy_abs = |rig: &Rig| {
+        rig.work
+            .0
+            .join("agents/pr-describe")
+            .to_string_lossy()
+            .into_owned()
+    };
+    for spelling in [
+        Box::new(|_: &Rig| "~/agents".to_owned()) as Box<dyn Fn(&Rig) -> String>,
+        Box::new(agents_abs),
+        Box::new(|_: &Rig| "~/agents/pr-describe".to_owned()),
+        Box::new(copy_abs),
+    ] {
+        let rig = Rig::new("spellings");
+        let source = rig.folder("pr-describe", "# pr\n");
+        rig.adopt(&source);
+        let copy = rig.folder("agents/pr-describe", "# pr\n");
+        let ctx = rig.ctx();
+        ops::claim(&ctx, &rig.scope(&ctx), &copy, "pr-describe").unwrap();
+
+        let token = spelling(&rig);
+        let out = ops::remove_global(
+            &ctx,
+            &no_sessions,
+            &["pr-describe".to_owned()],
+            None,
+            true,
+            &ops::Selection::new(&[], std::slice::from_ref(&token)),
+        )
+        .unwrap_or_else(|e| panic!("`--dest {token}` must name the copy: {e}"));
+        let ops::RemoveOutcome::Applied(applied) = out else {
+            panic!("a detach applies immediately");
+        };
+        assert_eq!(applied.items[0].kind, RemoveKind::ClaimDetached, "{token}");
+        assert!(copy.join("SKILL.md").exists(), "the bytes stay ({token})");
+    }
+}
+
+#[test]
+fn a_dest_that_names_no_copy_says_which_copies_there_are() {
+    // The honest not-found. A row with no destinations resolves an EMPTY set (every placement is
+    // a folder the person owns, which no destination set speaks for), and the zero-state refusal
+    // used to state that nothing had synced — a plain falsehood beside `list`.
+    let rig = Rig::new("miss");
+    let source = rig.folder("pr-describe", "# pr\n");
+    rig.adopt(&source);
+    let copy = rig.folder("agents/pr-describe", "# pr\n");
+    let ctx = rig.ctx();
+    ops::claim(&ctx, &rig.scope(&ctx), &copy, "pr-describe").unwrap();
+
+    let err = ops::remove_global(
+        &ctx,
+        &no_sessions,
+        &["pr-describe".to_owned()],
+        None,
+        true,
+        &ops::Selection::new(&[], &["~/nowhere".to_owned()]),
+    )
+    .unwrap_err();
+    let said = err.to_string();
+    assert!(
+        said.starts_with("no copy of 'pr-describe' is in --dest ~/nowhere"),
+        "{said}"
+    );
+    assert!(said.contains("~/agents/pr-describe"), "{said}");
+    assert!(!said.contains("nothing has synced"), "{said}");
+}
+
+#[test]
+#[cfg(unix)]
+fn a_folder_the_kernel_refuses_to_open_answers_the_cant_read_shape() {
+    use std::os::unix::fs::PermissionsExt;
+    // Running as root ignores the mode bits, so the folder would read fine and prove nothing.
+    if std::env::var("USER").as_deref() == Ok("root") {
+        return;
+    }
+    let rig = Rig::new("eacces");
+    let source = rig.folder("pr-describe", "# pr\n");
+    rig.adopt(&source);
+    let copy = rig.folder("agents/pr-describe", "# pr\n");
+    std::fs::set_permissions(&copy, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+    let ctx = rig.ctx();
+    let err = ops::claim(&ctx, &rig.scope(&ctx), &copy, "pr-describe").unwrap_err();
+    std::fs::set_permissions(&copy, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    // The scanner-hazard answer, for the same news: the folder, and why it cannot be read.
+    assert_eq!(err.code(), "SCAN_REJECTED");
+    let said = err.to_string();
+    assert!(
+        said.starts_with("can't add ~/agents/pr-describe — the folder can't be read ("),
+        "{said}"
+    );
+    assert!(said.contains("permission denied"), "{said}");
+    // And PERMANENT: `chmod 000` answers identically next run, so no agent is sent round again.
+    assert_eq!(
+        err.outcome(),
+        topos_types::TerminalOutcome::PermanentFailure
+    );
+}
+
+#[test]
+fn an_add_that_changed_nothing_leads_with_that_and_nothing_else() {
+    // AN ACT THAT DID NOT HAPPEN MAY NOT HEAD THE ANSWER. A repeat claim printed the full
+    // `added … as a copy … updates land here from now on` lead and retracted it one line down.
+    let rig = Rig::new("unchanged");
+    let source = rig.folder("pr-describe", "# pr\n");
+    rig.adopt(&source);
+    let copy = rig.folder("agents/pr-describe", "# pr\n");
+    let ctx = rig.ctx();
+    let scope = rig.scope(&ctx);
+    ops::claim(&ctx, &scope, &copy, "pr-describe").unwrap();
+
+    let again = ops::claim(&ctx, &scope, &copy, "pr-describe").unwrap();
+    assert!(again.unchanged);
+    let tty = crate::render::add_tty(&again);
+    let mut lines = tty.lines();
+    assert_eq!(
+        lines.next(),
+        Some("~/agents/pr-describe is already one of pr-describe's folders — nothing changed")
+    );
+    assert!(lines.next().unwrap().starts_with("source: "), "{tty}");
+    assert_eq!(lines.next(), None, "{tty}");
+    assert!(!tty.contains("added "), "{tty}");
+
+    // The same rule on the destination receipt: a `-a` naming what the row already spells.
+    let mut data = ops::add_scope(&ctx, true)
+        .and_then(|scope| {
+            let mut d = again.clone();
+            d.unchanged = false;
+            d.note = None;
+            ops::note_added_path_dest_in(
+                &ctx,
+                &mut d,
+                &scope.target,
+                &source,
+                &["~/claude".to_owned()],
+            )?;
+            // The SECOND time, naming exactly what the row now spells.
+            let mut again = d.clone();
+            again.note = None;
+            ops::note_added_path_dest_in(
+                &ctx,
+                &mut again,
+                &scope.target,
+                &source,
+                &["~/claude".to_owned()],
+            )?;
+            Ok(again)
+        })
+        .unwrap();
+    data.claim = None;
+    assert!(data.unchanged, "the row already spelled it");
+    let tty = crate::render::add_tty(&data);
+    assert!(
+        tty.starts_with("`") && tty.contains("nothing changed"),
+        "{tty}"
+    );
+    assert!(!tty.contains("installed ("), "{tty}");
+}
+
+#[test]
+fn a_dest_a_row_already_reaches_freezes_nothing_and_says_so() {
+    // A row that names NO destinations reaches EVERY agent. Naming one it already reaches asks for
+    // nothing — and the extend arm, having materialized the current set to append to, wrote that
+    // set back as the row's frozen `dest`. The file silently changed shape, and an agent set up
+    // tomorrow would stop receiving. The documented promise is the opposite: naming a destination
+    // the line already has changes nothing, and says so.
+    let rig = Rig::new("already-reached");
+    let source = rig.folder("pr-describe", "# pr\n");
+    let added = rig.adopt(&source);
+    let id = added.skill_id.clone().unwrap();
+    // A copy TOPOS placed, so the row's current resolved set is `~/agents`.
+    let agents = rig.work.0.join("agents");
+    let placed = agents.join("pr-describe");
+    std::fs::create_dir_all(&placed).unwrap();
+    std::fs::write(placed.join("SKILL.md"), "# pr\n").unwrap();
+    record_engine_copy(&rig, &id, &placed);
+
+    let ctx = rig.ctx();
+    let scope = rig.scope(&ctx);
+    let before = rig.manifest();
+    assert!(
+        !before.contains("dest"),
+        "the row reaches every agent: {before}"
+    );
+    let mut data = added.clone();
+    data.note = None;
+    data.undo = Vec::new();
+    ops::note_added_path_dest_in(
+        &ctx,
+        &mut data,
+        &scope.target,
+        &source,
+        &["~/agents".to_owned()],
+    )
+    .unwrap();
+
+    assert_eq!(rig.manifest(), before, "the row is untouched, and unfrozen");
+    assert!(data.unchanged, "and the answer says so");
+    let tty = crate::render::add_tty(&data);
+    assert!(tty.contains("nothing changed"), "{tty}");
+    assert!(!tty.contains("installed ("), "{tty}");
+}
+
+#[test]
+fn a_name_the_other_scope_adopted_from_a_folder_is_never_adopted_twice() {
+    // ONE FOLDER, ONE ENGINE. The machine store adopted `~/skills/deploy` in place; a bare
+    // `topos add deploy` inside a project used to resolve that record and adopt THE SAME
+    // DIRECTORY into the project store — the two-engines-one-directory state the claim door
+    // refuses outright. A reference is re-recordable (each scope lands its own copies); a folder
+    // is not, and the honest answer names the file that already asks for it.
+    let rig = Rig::new("cross-folder");
+    let source = rig.folder("skills/deploy", "# deploy\n");
+    rig.adopt(&source);
+
+    let project = rig.work.0.join("repo");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(project.join("topos.toml"), "[bundles]\n").unwrap();
+    let pctx = Ctx {
+        roots: Some(AgentRoots {
+            home: rig.work.0.clone(),
+            cwd: Some(project.clone()),
+        }),
+        ..rig.ctx()
+    };
+    let roots = ops::DiscoveryRoots {
+        home: rig.work.0.clone(),
+        cwd: Some(project.clone()),
+    };
+    let err = ops::plan_bare_add(
+        &pctx,
+        &no_sessions,
+        &roots,
+        "deploy",
+        ops::BareAdd {
+            subscribe: true,
+            dest_selected: false,
+            global: false,
+            workspace: None,
+        },
+    )
+    .unwrap_err();
+    assert_eq!(err.code(), "ALREADY_TRACKED");
+    let said = err.to_string();
+    assert!(
+        said.starts_with("deploy is already added machine-wide"),
+        "{said}"
+    );
+    assert!(said.contains("source: "), "{said}");
+    // And the project store recorded nothing.
+    assert!(
+        crate::sidecar::existing_project_store(pctx.fs, &project).is_none(),
+        "no second record was minted"
+    );
+}
+
+#[test]
+fn a_fresh_claim_over_a_row_that_already_names_the_root_states_the_claim() {
+    // The row already names the folder's root, so the row write is redundant — but a PLACEMENT was
+    // recorded, which is a real change. The receipt must lead with the claim, carry no
+    // nothing-changed note (the row's note names the row's SOURCE folder, which beside a claim
+    // headline reads as a statement about the folder just claimed), and record adding nothing.
+    let rig = Rig::new("fresh-redundant-row");
+    let source = rig.folder("pr-describe", "# pr\n");
+    let ctx = rig.ctx();
+    let scope = rig.scope(&ctx);
+    let sctx = ops::ctx_with_layout(&ctx, &scope.layout);
+    let mut data = ops::adopt_path(&sctx, &scope.target, &source, ops::KindDeclared::Yes).unwrap();
+    ops::note_added_path_dest_in(
+        &ctx,
+        &mut data,
+        &scope.target,
+        &source,
+        &["~/agents".to_owned()],
+    )
+    .unwrap();
+    let id = data.skill_id.clone().unwrap();
+
+    let copy = rig.folder("agents/pr-describe", "# pr\n");
+    let claimed = ops::claim(&ctx, &scope, &copy, "pr-describe").unwrap();
+    assert!(!claimed.unchanged, "a placement was recorded");
+    assert!(claimed.note.is_none(), "{:?}", claimed.note);
+    let tty = crate::render::add_tty(&claimed);
+    assert!(
+        tty.starts_with("added ~/agents/pr-describe as a copy of pr-describe"),
+        "{tty}"
+    );
+    assert!(!tty.contains("nothing changed"), "{tty}");
+    // And the row gained nothing, so its detach takes nothing back.
+    assert!(
+        rig.map(&id)
+            .placement_state
+            .last()
+            .unwrap()
+            .claim
+            .as_ref()
+            .expect("a claim marker")
+            .added_dest
+            .is_none()
+    );
+}
+
+#[test]
+fn a_crash_before_the_row_write_still_leaves_the_detach_exact() {
+    // THE WINDOW: the record is written, the row is not. The stamp rides the SAME map write as the
+    // placement, so it is already there — a detach can never under-subtract — and the re-run
+    // repairs the row half. A twin the crashed run never reached retires on that same re-run.
+    let rig = Rig::new("crash-window");
+    let source = rig.folder("pr-describe", "# pr\n");
+    let ctx = rig.ctx();
+    let scope = rig.scope(&ctx);
+    let sctx = ops::ctx_with_layout(&ctx, &scope.layout);
+    let mut data = ops::adopt_path(&sctx, &scope.target, &source, ops::KindDeclared::Yes).unwrap();
+    ops::note_added_path_dest_in(
+        &ctx,
+        &mut data,
+        &scope.target,
+        &source,
+        &["~/claude".to_owned()],
+    )
+    .unwrap();
+    let id = data.skill_id.clone().unwrap();
+
+    let agents = rig.work.0.join("agents");
+    let copy = agents.join("pr-describe");
+    std::fs::create_dir_all(&copy).unwrap();
+    std::fs::write(copy.join("SKILL.md"), "# pr\n").unwrap();
+    ops::claim(&ctx, &scope, &copy, "pr-describe").unwrap();
+    let complete = rig.manifest();
+
+    // The crash, staged: the record (stamp included) stands, the row does not.
+    std::fs::write(
+        rig.home.0.join("topos.toml"),
+        complete.replace(", \"~/agents\"", ""),
+    )
+    .unwrap();
+    // The stamp survived the crash — which is what keeps a detach from under-subtracting.
+    assert_eq!(
+        rig.map(&id)
+            .placement_state
+            .last()
+            .unwrap()
+            .claim
+            .as_ref()
+            .unwrap()
+            .added_dest
+            .as_deref(),
+        Some("~/agents")
+    );
+    // A twin the crashed run never got to.
+    let twin = agents.join("pr-describe-eng");
+    std::fs::create_dir_all(&twin).unwrap();
+    std::fs::write(twin.join("SKILL.md"), "# pr\n").unwrap();
+    record_engine_copy(&rig, &id, &twin);
+
+    let again = ops::claim(&ctx, &scope, &copy, "pr-describe").unwrap();
+    assert_eq!(rig.manifest(), complete, "the row half is repaired");
+    assert!(!twin.exists(), "and the duplicate retires on the re-run");
+    assert!(!again.unchanged, "a repair is not nothing");
+
+    // The detach is exact either way: the row loses ~/agents and keeps ~/claude.
+    let out = ops::remove_global(
+        &ctx,
+        &no_sessions,
+        &["pr-describe".to_owned()],
+        None,
+        true,
+        &ops::Selection::new(&[], &["~/agents".to_owned()]),
+    )
+    .unwrap();
+    assert!(matches!(out, ops::RemoveOutcome::Applied(_)));
+    let file = rig.manifest();
+    assert!(!file.contains("~/agents"), "{file}");
+    assert!(file.contains("~/claude"), "{file}");
+}
+
+#[test]
+fn the_row_entry_a_claim_will_add_is_recorded_with_the_placement_not_after_it() {
+    // ONE FACT, ONE WRITE. Recording "the claim put this entry there" AFTER the row write made it
+    // a third write that could be lost — and the loss is permanent, because the re-run's row write
+    // then finds the entry already present and reports adding nothing, so the stamp never lands.
+    // A detach would under-subtract forever: the row keeps the root, and the next sweep
+    // re-materializes an engine copy right after the receipt said the folder stops updating.
+    let rig = Rig::new("stamp-with-placement");
+    let source = rig.folder("pr-describe", "# pr\n");
+    let ctx = rig.ctx();
+    let scope = rig.scope(&ctx);
+    let sctx = ops::ctx_with_layout(&ctx, &scope.layout);
+    let mut data = ops::adopt_path(&sctx, &scope.target, &source, ops::KindDeclared::Yes).unwrap();
+    ops::note_added_path_dest_in(
+        &ctx,
+        &mut data,
+        &scope.target,
+        &source,
+        &["~/claude".to_owned()],
+    )
+    .unwrap();
+    let id = data.skill_id.clone().unwrap();
+    let copy = rig.folder("agents/pr-describe", "# pr\n");
+
+    // The row write FAILS — an unwritable manifest DIRECTORY (the editor stages a sibling and
+    // renames it into place) is the deterministic stand-in for a crash between the two writes.
+    let home = rig.home.0.clone();
+    let mut perms = std::fs::metadata(&home).unwrap().permissions();
+    let restore = perms.clone();
+    perms.set_readonly(true);
+    std::fs::set_permissions(&home, perms).unwrap();
+    let failed = ops::claim(&ctx, &scope, &copy, "pr-describe");
+    std::fs::set_permissions(&home, restore).unwrap();
+    assert!(failed.is_err(), "the row write could not land");
+
+    // THE RECORD ALREADY CARRIES IT: the placement and its stamp were one write.
+    let map = rig.map(&id);
+    let stamped = map
+        .placement_state
+        .iter()
+        .zip(&map.placements)
+        .find(|(_, p)| Path::new(p) == copy)
+        .map(|(st, _)| st.claim.as_ref().and_then(|c| c.added_dest.clone()));
+    assert_eq!(
+        stamped,
+        Some(Some("~/agents".to_owned())),
+        "the stamp rides the placement write, not a later one"
+    );
+
+    // The re-run repairs the row half, and the detach is then exact.
+    ops::claim(&ctx, &scope, &copy, "pr-describe").unwrap();
+    assert!(rig.manifest().contains("~/agents"));
+    let out = ops::remove_global(
+        &ctx,
+        &no_sessions,
+        &["pr-describe".to_owned()],
+        None,
+        true,
+        &ops::Selection::new(&[], &["~/agents".to_owned()]),
+    )
+    .unwrap();
+    assert!(matches!(out, ops::RemoveOutcome::Applied(_)));
+    let file = rig.manifest();
+    assert!(
+        !file.contains("~/agents"),
+        "the root the claim added leaves: {file}"
+    );
+    assert!(file.contains("~/claude"), "{file}");
+}
+
 /// The rig has no sessions, so no transport is ever built.
 fn no_sessions(_s: &crate::sessions::Session) -> ops::SessionTransports {
     unreachable!("the claim suite runs with no sessions")
@@ -1136,8 +1590,9 @@ fn a_detach_takes_back_only_what_the_claim_put_on_the_row() {
 #[test]
 fn a_record_only_detach_never_writes_the_manifest() {
     // Nothing to edit means nothing to write: a record-only detach must not fail on a file it has
-    // no business opening, nor rewrite one its receipt says it left alone. A read-only file is the
-    // sharpest proof — any write attempt fails loudly.
+    // no business opening, nor rewrite one its receipt says it left alone. An unwritable manifest
+    // DIRECTORY is the sharp proof — the editor stages a sibling and renames it in, so a
+    // read-only file alone would not stop it.
     let rig = Rig::new("no-write");
     let source = rig.folder("pr-describe", "# pr\n");
     rig.adopt(&source);
@@ -1147,9 +1602,10 @@ fn a_record_only_detach_never_writes_the_manifest() {
 
     let manifest = rig.home.0.join("topos.toml");
     let before = std::fs::read_to_string(&manifest).unwrap();
-    let mut perms = std::fs::metadata(&manifest).unwrap().permissions();
+    let mut perms = std::fs::metadata(&rig.home.0).unwrap().permissions();
+    let restore = perms.clone();
     perms.set_readonly(true);
-    std::fs::set_permissions(&manifest, perms).unwrap();
+    std::fs::set_permissions(&rig.home.0, perms).unwrap();
     let out = ops::remove_global(
         &ctx,
         &no_sessions,
@@ -1158,10 +1614,7 @@ fn a_record_only_detach_never_writes_the_manifest() {
         true,
         &ops::Selection::new(&[], &["~/agents".to_owned()]),
     );
-    let mut perms = std::fs::metadata(&manifest).unwrap().permissions();
-    #[allow(clippy::permissions_set_readonly_false)]
-    perms.set_readonly(false);
-    std::fs::set_permissions(&manifest, perms).unwrap();
+    std::fs::set_permissions(&rig.home.0, restore).unwrap();
 
     assert!(
         matches!(out, Ok(ops::RemoveOutcome::Applied(_))),
@@ -1268,8 +1721,13 @@ fn a_re_run_repairs_a_row_the_first_claim_did_not_finish_writing() {
     let again = ops::claim(&ctx, &scope, &copy, "pr-describe").unwrap();
     assert_eq!(rig.manifest(), complete, "the row is repaired");
     assert_eq!(rig.map(&id).placements.len(), 2, "and no second placement");
-    let note = again.note.clone().unwrap_or_default();
-    assert!(note.contains("already one of"), "{note}");
+    // A repair CHANGED something, so it does not claim otherwise: the ordinary claim receipt.
+    assert!(!again.unchanged);
+    assert!(
+        crate::render::add_tty(&again).starts_with("added ~/agents/pr-describe as a copy of"),
+        "{}",
+        crate::render::add_tty(&again)
+    );
 }
 
 #[test]

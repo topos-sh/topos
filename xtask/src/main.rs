@@ -475,6 +475,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
             dest_resolved: Vec::new(),
             dest_change: None,
             claim: None,
+            unchanged: false,
         })
         .expect("AddData serializes"),
         warnings: vec![],
@@ -522,6 +523,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
             dest_resolved: Vec::new(),
             dest_change: None,
             claim: None,
+            unchanged: false,
         })
         .expect("AddData serializes"),
         warnings: vec![],
@@ -573,6 +575,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
             dest_resolved: Vec::new(),
             dest_change: None,
             claim: None,
+            unchanged: false,
         })
         .expect("AddData serializes"),
         warnings: vec![],
@@ -667,6 +670,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
                     removed: true,
                 }),
             }),
+            unchanged: false,
         })
         .expect("AddData serializes"),
         warnings: vec![],
@@ -822,6 +826,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
             dest_resolved: Vec::new(),
             dest_change: None,
             claim: None,
+            unchanged: false,
         })
         .expect("AddData serializes"),
         warnings: vec![],
@@ -880,6 +885,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
                 frozen: Vec::new(),
             }),
             claim: None,
+            unchanged: false,
         })
         .expect("AddData serializes"),
         warnings: vec![],

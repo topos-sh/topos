@@ -454,20 +454,34 @@ fn finish_workspace(
     // expansion succeeded). A transport drop, a plane failure, or a failed materialize clears
     // the destination shape instead, so the ordinary row-recorded receipt prints with the honest
     // note — the row is the durable demand either way, and the next sweep lands the copies.
+    use topos_types::results::{PullAction, PullSkill};
+    let out = outcome.as_ref().ok();
+    // A row proves THIS reference's bytes only when the reconcile stamped it with the
+    // session's workspace id — a same-named local or forge row reconciled in the same scope
+    // says nothing about the workspace delivery.
+    let owned = |r: &PullSkill| {
+        r.workspace_id.as_deref() == Some(resolved.session.workspace_id.as_str())
+            && match &resolved.entry {
+                Some(_) => r.skill == resolved.name,
+                // A channel's members carry their own names.
+                None => true,
+            }
+    };
+    // A REDUNDANT ROW is only the whole story when the delivery moved nothing either. This very
+    // invocation can leave the file untouched and still land bytes — a merge onto a new current,
+    // a first placement at a destination the row already named — and a receipt leading with
+    // "nothing changed" would be answering about the file while the folders changed under it.
+    if data.unchanged
+        && out.is_some_and(|o| {
+            o.data
+                .skills
+                .iter()
+                .any(|r| owned(r) && super::reconcile::moved_bytes(r.action))
+        })
+    {
+        data.unchanged = false;
+    }
     if !data.dest.is_empty() {
-        use topos_types::results::{PullAction, PullSkill};
-        let out = outcome.as_ref().ok();
-        // A row proves THIS reference's bytes only when the reconcile stamped it with the
-        // session's workspace id — a same-named local or forge row reconciled in the same scope
-        // says nothing about the workspace delivery.
-        let owned = |r: &PullSkill| {
-            r.workspace_id.as_deref() == Some(resolved.session.workspace_id.as_str())
-                && match &resolved.entry {
-                    Some(_) => r.skill == resolved.name,
-                    // A channel's members carry their own names.
-                    None => true,
-                }
-        };
         // Bytes provably PRESENT: installed / current / fast-forwarded / refreshed — and the draft
         // outcomes (merged; a settled draft synced across folders), where the person's bytes stand
         // placed.
@@ -657,6 +671,7 @@ fn set_data(name: &str) -> AddData {
         dest_resolved: Vec::new(),
         dest_change: None,
         claim: None,
+        unchanged: false,
         display: None,
     }
 }

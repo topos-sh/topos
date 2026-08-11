@@ -397,7 +397,7 @@ pub(crate) enum ClientError {
     /// store work: the same command will meet the same absence, so an agent that read `retryable`
     /// would loop on it — which is exactly what the generic canonicalize failure this replaces
     /// invited. The `path` is the user's own token, shown VERBATIM.
-    #[error("{path} does not exist — nothing was added.")]
+    #[error("{path} does not exist — nothing was added")]
     SourceMissing { path: String },
     /// A skill with this id already exists on disk — `add` fails closed rather than overwrite/merge.
     #[error("a skill with this id already exists")]
@@ -912,10 +912,9 @@ pub(crate) enum ClientError {
     /// them into this sentence made a paste-ready command read as prose and hid the `--via` form's
     /// token boundary.
     ///
-    /// `global` preserves the refused invocation's `-g` in every rebuilt command, exactly as
-    /// [`WorkspaceHint::global`] does for the spellings it names: the two manifests are two
-    /// different files, so an offered command that drops the flag edits the OTHER one. A wrong
-    /// offered command is worse than none.
+    /// `global` preserves the refused invocation's `-g` in every rebuilt command, the way every
+    /// scope-carrying answer here does: the two manifests are two different files, so an offered
+    /// command that drops the flag edits the OTHER one. A wrong offered command is worse than none.
     #[error("'{name}' is ambiguous here — more than one reference answers to it")]
     AmbiguousTarget {
         name: String,

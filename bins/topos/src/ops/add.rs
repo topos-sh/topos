@@ -384,6 +384,7 @@ fn unclaimed_record(
         dest_resolved: Vec::new(),
         dest_change: None,
         claim: None,
+        unchanged: false,
         display: None,
         // The receipt would otherwise read as a fresh adopt while carrying a version older than
         // this run: say what actually happened.
@@ -654,6 +655,7 @@ pub(crate) fn add_with_name(
         dest_resolved: Vec::new(),
         dest_change: None,
         claim: None,
+        unchanged: false,
         display: None,
     })
 }
@@ -2105,6 +2107,7 @@ pub(crate) fn extend_folder_dest(
         dest_resolved: Vec::new(),
         dest_change: None,
         claim: None,
+        unchanged: false,
         display: None,
         note: None,
     };
@@ -2196,19 +2199,31 @@ fn plan_from_standing(
         [] => Ok(None),
         // The name means what the other scope already means by it: record THAT source here — an
         // ordinary add through the door its shape belongs to.
-        [one] => Ok(Some(match &one.origin {
-            Some(RecordOrigin::Folder(dir)) => BareAddPlan::Adopt {
-                path: dir.clone(),
-                name: name.to_owned(),
-                // No courtesy probe: this add's source is not a guess, it is the record.
-                published: None,
-            },
-            Some(RecordOrigin::Reference(reference)) => BareAddPlan::Reference {
+        [one] => match &one.origin {
+            // A REFERENCE is re-recordable: both scopes may subscribe to one workspace bundle,
+            // and each lands its own copies in its own dirs from its own store.
+            Some(RecordOrigin::Reference(reference)) => Ok(Some(BareAddPlan::Reference {
                 reference: reference.clone(),
                 note: None,
-            },
+            })),
+            // A FOLDER is not. There is exactly ONE of it, and adopting it here would put a
+            // second store's engine on the same directory — the state the claim door refuses
+            // outright, for the same reason: two engines converging one folder. So the answer is
+            // the honest one, naming the file that already asks for it; the person can look
+            // there, or claim a copy of their own.
+            Some(RecordOrigin::Folder(_)) => Err(ClientError::AlreadyAdded {
+                name: name.to_owned(),
+                scope: if global {
+                    ReceiptScope::Project
+                } else {
+                    ReceiptScope::Machine
+                },
+                from: Some(one.token(ctx)),
+                // The claim options belong to a bundle standing HERE; this one does not.
+                candidates: Vec::new(),
+            }),
             None => unreachable!("spellable() keeps only records with an origin"),
-        })),
+        },
         several => Err(records_chooser(ctx, name, global, several)),
     }
 }

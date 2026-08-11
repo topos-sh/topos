@@ -769,8 +769,27 @@ fn added_lead(data: &AddData) -> String {
 /// line at all) only where the receipt genuinely has no source to name.
 fn source_line(data: &AddData) -> String {
     match &data.source {
-        Some(source) => format!("source: {source}\n"),
+        Some(source) => format!("source: {}\n", tty_path(source)),
         None => String::new(),
+    }
+}
+
+/// A path as the TERMINAL spells it: `~/`-abbreviated under this machine's home, verbatim
+/// otherwise (and a reference, which holds no leading path, passes straight through).
+///
+/// ONE derivation for every printed path, because the surfaces used to disagree about the same
+/// folder — a plain add's `source:` printed it in full while the already-added answer and the
+/// claim receipt printed `~/…`, so two receipts about one directory did not look like one
+/// directory. The WIRE keeps the absolute form: a machine reading `source` resolves it without a
+/// shell, and `~/` is a shell's to expand.
+fn tty_path(raw: &str) -> String {
+    let Some(home) = std::env::var_os("HOME").map(std::path::PathBuf::from) else {
+        return raw.to_owned();
+    };
+    match std::path::Path::new(raw).strip_prefix(&home) {
+        Ok(rest) if rest.as_os_str().is_empty() => "~".to_owned(),
+        Ok(rest) => format!("~/{}", rest.display()),
+        Err(_) => raw.to_owned(),
     }
 }
 
@@ -822,6 +841,18 @@ fn add_claim_tty(data: &AddData, claim: &topos_types::results::ClaimReceipt) -> 
 }
 
 pub(crate) fn add_tty(data: &AddData) -> String {
+    // NOTHING CHANGED IS THE WHOLE ANSWER, so it is the whole lead. An `added …` / `+ … installed`
+    // headline above a note retracting it announces an act that did not happen, and the reader has
+    // to get to the second line to learn the first one was not true. The `source:` line still
+    // rides: which bundle this was about is exactly what a reader checks next.
+    if data.unchanged {
+        let mut out = match &data.note {
+            Some(note) => format!("{note}\n"),
+            None => String::new(),
+        };
+        out.push_str(&source_line(data));
+        return out.trim_end().to_owned();
+    }
     // The identity claim has its own two lines: no row was written for it, so the file-naming
     // lead every other add prints would name a file this act never touched.
     if let Some(claim) = &data.claim {
@@ -4914,6 +4945,7 @@ mod tests {
             dest_resolved: Vec::new(),
             dest_change: None,
             claim: None,
+            unchanged: false,
             // The local source's tell: no workspace qualifies it.
             display: None,
         };
@@ -5045,6 +5077,7 @@ mod tests {
             dest_resolved: Vec::new(),
             dest_change: None,
             claim: None,
+            unchanged: false,
             display: None,
         };
         // A local folder adopted into this project: the row's own `./…` spelling never surfaces —

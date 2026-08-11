@@ -662,29 +662,38 @@ fn a_corrupt_sidecar_doc_still_reports_corrupt_state() {
 }
 
 #[test]
-fn an_io_error_is_redacted_on_the_surface_and_detailed_in_the_log() {
+fn a_folder_that_cannot_be_read_refuses_by_name_and_is_detailed_in_the_log() {
     let home = scratch("iodiag");
     // A REGULAR FILE where a bundle folder belongs: the walk's `read_dir` fails with the OS's own
-    // "not a directory", which is exactly the untyped io fault this test is about. (A path that is
-    // not there at all is its own typed refusal — see the add door's `SOURCE_MISSING`.)
+    // "not a directory". That is not a transient io fault — the same path answers the same way
+    // forever — so it earns the scan family's typed refusal, which names the folder and the reason
+    // VERBATIM (a rejected folder is useless news without the thing that caused it). The redaction
+    // rail the untyped io family still rides is unit-tested at its own producer.
     let not_a_dir = home.join("not-a-folder");
     std::fs::create_dir_all(&home).unwrap();
     std::fs::write(&not_a_dir, b"just a file\n").unwrap();
-    let missing = not_a_dir.display().to_string();
+    let named = not_a_dir.display().to_string();
     // A folder's manifest first: the scope resolves BEFORE the source is read, so without one the
-    // add would refuse on the scope rather than reaching the io fault this test is about.
+    // add would refuse on the scope rather than reaching the read this test is about.
     let out = run_raw(&home, &["init", "--json"], false);
     assert!(out.status.success(), "init should exit 0");
 
-    // --json: the fixed message on stdout; the full context (path + cause) in the diagnostics log.
-    let out = run_raw(&home, &["add", &missing, "--json"], false);
+    let out = run_raw(&home, &["add", &named, "--json"], false);
     assert!(!out.status.success());
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("JSON stdout");
-    assert_eq!(v["error"]["code"], "IO_ERROR");
-    assert_eq!(
-        v["error"]["context"]["message"],
-        "a filesystem operation failed"
+    assert_eq!(v["error"]["code"], "SCAN_REJECTED");
+    assert_eq!(v["error"]["outcome"], "PERMANENT_FAILURE");
+    assert_eq!(v["error"]["retryable"], false);
+    let message = v["error"]["context"]["message"]
+        .as_str()
+        .expect("a message");
+    assert!(
+        message.starts_with("the skill directory was rejected — the folder root: "),
+        "{message}"
     );
+    assert!(message.contains("not a directory"), "{message}");
+
+    // The diagnostics log still carries the whole chain, path and all.
     let log = std::fs::read_to_string(home.join("log.jsonl")).expect("the diagnostics log exists");
     let event: serde_json::Value = log
         .lines()
@@ -692,30 +701,19 @@ fn an_io_error_is_redacted_on_the_surface_and_detailed_in_the_log() {
         .find(|e: &serde_json::Value| e["action"] == "error")
         .expect("an error event landed");
     assert_eq!(event["verb"], "add");
-    assert_eq!(event["code"], "IO_ERROR");
-    let detail = event["detail"].as_str().expect("detail");
-    assert!(detail.contains(&missing), "{detail}");
+    assert_eq!(event["code"], "SCAN_REJECTED");
 
-    // TTY: redacted line + the pointer at the log; the path never reaches stderr un-asked.
-    let out = run_raw(&home, &["add", &missing], false);
+    // TTY: the same sentence, and never the retry invitation a transient fault earns.
+    let out = run_raw(&home, &["add", &named], false);
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        stderr.contains("error: a filesystem operation failed"),
+        stderr.contains("error: the skill directory was rejected — the folder root: "),
         "{stderr}"
     );
-    assert!(stderr.contains("details: "), "{stderr}");
-    assert!(stderr.contains("log.jsonl"), "{stderr}");
-    assert!(!stderr.contains(&missing), "stays redacted: {stderr}");
-
-    // TOPOS_DEBUG=1: the full chain ALSO reaches stderr, while stdout stays the clean envelope.
-    let out = run_raw(&home, &["add", &missing, "--json"], true);
-    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("JSON stdout");
-    assert_eq!(
-        v["error"]["context"]["message"],
-        "a filesystem operation failed"
+    assert!(
+        !stderr.contains("running it again is safe"),
+        "a permanent refusal never invites a retry: {stderr}"
     );
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(stderr.contains(&missing), "{stderr}");
 
     let _ = std::fs::remove_dir_all(&home);
 }

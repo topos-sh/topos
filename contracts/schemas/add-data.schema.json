@@ -187,6 +187,10 @@
         "$ref": "#/$defs/TriggerReport"
       }
     },
+    "unchanged": {
+      "description": "This add changed NOTHING — the file already spelled exactly this row, or the folder was\nalready one of the bundle's places. The receipt then leads with that fact instead of an\ninstalled/added headline above a note retracting it: an act that did not happen may not\nhead the answer. `note` carries the sentence. **INFERRED** (additive-only).",
+      "type": "boolean"
+    },
     "undo": {
       "description": "The paste-ready inverse (`topos remove <ref>`). Empty when nothing is undoable. **Additive.**",
       "type": "array",

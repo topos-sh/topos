@@ -1887,14 +1887,14 @@ fn adding_a_folder_that_is_not_there_is_a_permanent_refusal() {
     assert!(!e.retryable, "{e:?}");
     assert_eq!(
         e.context["message"].as_str().unwrap(),
-        format!("{} does not exist — nothing was added.", missing.display())
+        format!("{} does not exist — nothing was added", missing.display())
     );
     // The TTY says the same sentence, and never invites the retry.
     let tty = render::err_tty(&err);
     assert_eq!(
         tty,
         format!(
-            "error: {} does not exist — nothing was added.",
+            "error: {} does not exist — nothing was added",
             missing.display()
         )
     );

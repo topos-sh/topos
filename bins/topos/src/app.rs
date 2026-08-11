@@ -584,7 +584,16 @@ fn run_command(
             // else rather than reinterpreted — a claim over a workspace reference or a repo would
             // be a guess about what the person meant.
             if let Some(as_bundle) = as_bundle {
-                let result = claim_arm(&ctx, &source, &as_bundle, &skill, kind, &selection, global);
+                let result = claim_arm(
+                    &ctx,
+                    &source,
+                    &as_bundle,
+                    &skill,
+                    kind,
+                    &selection,
+                    workspace.as_deref(),
+                    global,
+                );
                 return finish(json, cmd_name, result, render::add_tty, &diag);
             }
             // `--kind` declares WHAT is being added, so it is read before every resolution ladder
@@ -849,21 +858,26 @@ fn run_command(
                         // row this scope already spells for it gains them, exactly as a bare name
                         // standing here does.
                         if !selection.is_empty()
-                            && let Some(d) = ops::extend_folder_dest(&ctx, &scope, &p, &selection)?
+                            && let Some(mut d) =
+                                ops::extend_folder_dest(&ctx, &scope, &p, &selection)?
                         {
-                            let _ = ops::manifest_update(
-                                &ctx,
-                                &connect_session_transports,
-                                None,
-                                &ops::ManifestUpdateOpts {
-                                    targets: vec![d.name.clone()],
-                                    scope: if global {
-                                        ops::UpdateScope::Machine
-                                    } else {
-                                        ops::UpdateScope::Here
+                            let targets = vec![d.name.clone()];
+                            clear_unchanged_if_bytes_moved(
+                                &mut d,
+                                ops::manifest_update(
+                                    &ctx,
+                                    &connect_session_transports,
+                                    None,
+                                    &ops::ManifestUpdateOpts {
+                                        targets,
+                                        scope: if global {
+                                            ops::UpdateScope::Machine
+                                        } else {
+                                            ops::UpdateScope::Here
+                                        },
+                                        ..Default::default()
                                     },
-                                    ..Default::default()
-                                },
+                                ),
                             );
                             return Ok(d);
                         }
@@ -885,19 +899,23 @@ fn run_command(
                             )?;
                             // The dest copies land NOW through the same narrowed update the
                             // workspace arm runs (best-effort; the row is durable demand).
-                            let _ = ops::manifest_update(
-                                &ctx,
-                                &connect_session_transports,
-                                None,
-                                &ops::ManifestUpdateOpts {
-                                    targets: vec![d.name.clone()],
-                                    scope: if global {
-                                        ops::UpdateScope::Machine
-                                    } else {
-                                        ops::UpdateScope::Here
+                            let targets = vec![d.name.clone()];
+                            clear_unchanged_if_bytes_moved(
+                                &mut d,
+                                ops::manifest_update(
+                                    &ctx,
+                                    &connect_session_transports,
+                                    None,
+                                    &ops::ManifestUpdateOpts {
+                                        targets,
+                                        scope: if global {
+                                            ops::UpdateScope::Machine
+                                        } else {
+                                            ops::UpdateScope::Here
+                                        },
+                                        ..Default::default()
                                     },
-                                    ..Default::default()
-                                },
+                                ),
                             );
                             d.dest = entries;
                         }
@@ -969,26 +987,30 @@ fn run_command(
                                 ops::add_scope(&ctx, global).and_then(|scope| {
                                     // The record is found by the FOLDER, so a second bundle of the
                                     // same name in this store cannot answer for it.
-                                    let Some(d) =
+                                    let Some(mut d) =
                                         ops::extend_folder_dest(&ctx, &scope, &dir, &selection)?
                                     else {
                                         return Err(ClientError::NoSuchSkill {
                                             name: dir.display().to_string(),
                                         });
                                     };
-                                    let _ = ops::manifest_update(
-                                        &ctx,
-                                        &connect_session_transports,
-                                        None,
-                                        &ops::ManifestUpdateOpts {
-                                            targets: vec![d.name.clone()],
-                                            scope: if global {
-                                                ops::UpdateScope::Machine
-                                            } else {
-                                                ops::UpdateScope::Here
+                                    let targets = vec![d.name.clone()];
+                                    clear_unchanged_if_bytes_moved(
+                                        &mut d,
+                                        ops::manifest_update(
+                                            &ctx,
+                                            &connect_session_transports,
+                                            None,
+                                            &ops::ManifestUpdateOpts {
+                                                targets,
+                                                scope: if global {
+                                                    ops::UpdateScope::Machine
+                                                } else {
+                                                    ops::UpdateScope::Here
+                                                },
+                                                ..Default::default()
                                             },
-                                            ..Default::default()
-                                        },
+                                        ),
                                     );
                                     Ok(d)
                                 })
@@ -1028,19 +1050,23 @@ fn run_command(
                                         &path,
                                         &entries,
                                     )?;
-                                    let _ = ops::manifest_update(
-                                        &ctx,
-                                        &connect_session_transports,
-                                        None,
-                                        &ops::ManifestUpdateOpts {
-                                            targets: vec![d.name.clone()],
-                                            scope: if global {
-                                                ops::UpdateScope::Machine
-                                            } else {
-                                                ops::UpdateScope::Here
+                                    let targets = vec![d.name.clone()];
+                                    clear_unchanged_if_bytes_moved(
+                                        &mut d,
+                                        ops::manifest_update(
+                                            &ctx,
+                                            &connect_session_transports,
+                                            None,
+                                            &ops::ManifestUpdateOpts {
+                                                targets,
+                                                scope: if global {
+                                                    ops::UpdateScope::Machine
+                                                } else {
+                                                    ops::UpdateScope::Here
+                                                },
+                                                ..Default::default()
                                             },
-                                            ..Default::default()
-                                        },
+                                        ),
                                     );
                                     d.dest = entries;
                                 }
@@ -3495,6 +3521,7 @@ pub(crate) fn pull_with_name_fallback(
 /// three flags it refuses would be asking for something else entirely: `-s` picks members out of a
 /// repository, `--kind` says what a NEW bundle is, and `-a`/`--dest` ask for copies somewhere the
 /// claim is not about. Refusing by name beats silently ignoring a flag someone typed on purpose.
+#[allow(clippy::too_many_arguments)]
 fn claim_arm(
     ctx: &Ctx<'_>,
     source: &str,
@@ -3502,11 +3529,36 @@ fn claim_arm(
     skill: &[String],
     kind: Option<crate::bundle_kind::BundleKind>,
     selection: &ops::Selection,
+    workspace: Option<&str>,
     global: bool,
 ) -> Result<topos_types::results::AddData, ClientError> {
-    let path = claim_grammar(source, as_bundle, skill, kind, selection)?;
+    let path = claim_grammar(source, as_bundle, skill, kind, selection, workspace)?;
     let scope = ops::add_scope(ctx, global)?;
     ops::claim(ctx, &scope, &path, as_bundle)
+}
+
+/// A REDUNDANT ROW is only the whole story when the delivery moved nothing either. The row write
+/// knows the file did not change; only the narrowed update that follows knows whether folders did,
+/// and a receipt leading with "nothing changed" over a copy that just landed would be answering
+/// about the file while the disk changed under it.
+///
+/// Best-effort exactly as the update itself is: an update that could not run proves no movement,
+/// and the row — the durable demand — is what the receipt reports either way.
+fn clear_unchanged_if_bytes_moved(
+    data: &mut topos_types::results::AddData,
+    outcome: Result<ops::PullOutcome, ClientError>,
+) {
+    if !data.unchanged {
+        return;
+    }
+    if outcome.is_ok_and(|o| {
+        o.data
+            .skills
+            .iter()
+            .any(|r| r.skill == data.name && ops::moved_bytes(r.action))
+    }) {
+        data.unchanged = false;
+    }
 }
 
 /// The PURE half of [`claim_arm`]: the folder a `--as` invocation is about, or the refusal its
@@ -3518,6 +3570,7 @@ fn claim_grammar(
     skill: &[String],
     kind: Option<crate::bundle_kind::BundleKind>,
     selection: &ops::Selection,
+    workspace: Option<&str>,
 ) -> Result<PathBuf, ClientError> {
     let crate::source::SourceSpec::LocalPath(path) = crate::source::classify(source) else {
         return Err(ClientError::InvalidArgument(format!(
@@ -3544,6 +3597,13 @@ fn claim_grammar(
         return Err(ClientError::SelectionRefused(
             "`--as` brings the folder you named under management — `-a`/`--dest` ask for copies \
              somewhere else; run them as two commands"
+                .into(),
+        ));
+    }
+    if workspace.is_some() {
+        return Err(ClientError::InvalidArgument(
+            "`--workspace` picks which workspace an ambient command means — `--as` names a bundle \
+             this scope already manages, and reads no catalog; drop `--workspace`"
                 .into(),
         ));
     }
@@ -3650,25 +3710,27 @@ mod tests {
         let none = ops::Selection::default();
         // A FOLDER, and the path spelling is handed back runnable.
         assert_eq!(
-            claim_grammar("./skills/review", "review", &[], None, &none).unwrap(),
+            claim_grammar("./skills/review", "review", &[], None, &none, None).unwrap(),
             std::path::PathBuf::from("./skills/review")
         );
         // A bare name (or a reference) is not a folder — the refusal spells the path form.
-        let err = claim_grammar("review", "review", &[], None, &none).unwrap_err();
+        let err = claim_grammar("review", "review", &[], None, &none, None).unwrap_err();
         assert!(
             err.to_string().contains("`topos add ./review --as review`"),
             "{err}"
         );
-        // Each of the three flags asks a DIFFERENT question, and says so rather than being
-        // ignored: a repo member pick, a NEW bundle's kind, and copies somewhere else.
+        // Each of the four flags asks a DIFFERENT question, and says so rather than being
+        // ignored: a repo member pick, a NEW bundle's kind, copies somewhere else, and which
+        // workspace an ambient command means — none of which a claim about one folder is.
         for err in [
-            claim_grammar("./x", "review", &["one".to_owned()], None, &none).unwrap_err(),
+            claim_grammar("./x", "review", &["one".to_owned()], None, &none, None).unwrap_err(),
             claim_grammar(
                 "./x",
                 "review",
                 &[],
                 Some(crate::bundle_kind::BundleKind::Skill),
                 &none,
+                None,
             )
             .unwrap_err(),
             claim_grammar(
@@ -3677,8 +3739,10 @@ mod tests {
                 &[],
                 None,
                 &ops::Selection::new(&["codex".to_owned()], &[]),
+                None,
             )
             .unwrap_err(),
+            claim_grammar("./x", "review", &[], None, &none, Some("w_eng")).unwrap_err(),
         ] {
             assert!(err.to_string().contains("--as"), "{err}");
         }

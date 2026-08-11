@@ -68,8 +68,8 @@ struct WalkedFile {
 ///
 /// # Errors
 /// [`ClientError::Scan`] on a filesystem-level reject (symlink/device/non-regular/non-UTF-8) or a kernel
-/// path/collision reject; [`ClientError::EmptyBundle`] if nothing adoptable remains; [`ClientError::Io`]
-/// on a read failure.
+/// path/collision reject — a dir or file that cannot be READ is that same family, and permanent;
+/// [`ClientError::EmptyBundle`] if nothing adoptable remains.
 pub(crate) fn scan(root: &Path) -> Result<ScannedBundle, ClientError> {
     let walked = walk_files(root)?;
     if walked.is_empty() {
@@ -79,7 +79,7 @@ pub(crate) fn scan(root: &Path) -> Result<ScannedBundle, ClientError> {
     let mut files = Vec::with_capacity(walked.len());
     for w in &walked {
         let bytes = std::fs::read(&w.abs)
-            .map_err(|e| ClientError::Io(format!("read {}: {e}", w.abs.display())))?;
+            .map_err(|e| ClientError::Scan(format!("{}: {}", w.path, reason(&e))))?;
         files.push(ScannedFile {
             path: w.path.clone(),
             mode: w.mode,
@@ -125,7 +125,7 @@ pub(crate) fn scan(root: &Path) -> Result<ScannedBundle, ClientError> {
 /// before overwriting it and snapshots any uncaptured edit — so a missed draft is never a lost byte.)
 ///
 /// # Errors
-/// As [`scan`] (the same walk + rejects), plus [`ClientError::Io`] on a miss's read failure.
+/// As [`scan`] (the same walk + rejects, a read failure among them).
 pub(crate) fn drift_digest(
     root: &Path,
     prev: Option<&BTreeMap<String, FileStat>>,
@@ -154,7 +154,7 @@ pub(crate) fn drift_digest(
             Some(sha) => sha,
             None => {
                 let bytes = std::fs::read(&w.abs)
-                    .map_err(|e| ClientError::Io(format!("read {}: {e}", w.abs.display())))?;
+                    .map_err(|e| ClientError::Scan(format!("{}: {}", w.path, reason(&e))))?;
                 digest::sha256(&bytes)
             }
         };
@@ -191,10 +191,16 @@ fn walk_files(root: &Path) -> Result<Vec<WalkedFile>, ClientError> {
 }
 
 fn walk(dir: &Path, prefix: &str, out: &mut Vec<WalkedFile>) -> Result<(), ClientError> {
+    // A DIRECTORY THAT CANNOT BE READ IS NOT ADOPTABLE — the same family as every other
+    // filesystem-level reject, and permanent: `chmod 000` will meet the same answer next run, so
+    // classifying it as a transient io fault told an agent to loop on it. The reason stays
+    // bundle-relative, and carries the kernel's own words.
     let mut entries: Vec<_> = std::fs::read_dir(dir)
-        .map_err(|e| ClientError::Io(format!("read_dir {}: {e}", dir.display())))?
+        .map_err(|e| ClientError::Scan(format!("{}: {}", located(prefix), reason(&e))))?
         .collect::<Result<_, _>>()
-        .map_err(|e| ClientError::Io(format!("{e}")))?;
+        .map_err(|e: std::io::Error| {
+            ClientError::Scan(format!("{}: {}", located(prefix), reason(&e)))
+        })?;
     entries.sort_by_key(std::fs::DirEntry::file_name);
 
     for entry in entries {
@@ -208,7 +214,7 @@ fn walk(dir: &Path, prefix: &str, out: &mut Vec<WalkedFile>) -> Result<(), Clien
 
         // Never follow a symlink — inspect the link itself.
         let meta = std::fs::symlink_metadata(&path)
-            .map_err(|e| ClientError::Io(format!("stat {}: {e}", path.display())))?;
+            .map_err(|e| ClientError::Scan(format!("{}: {}", join(prefix, &name), reason(&e))))?;
         let ft = meta.file_type();
 
         if ft.is_symlink() {
@@ -275,6 +281,18 @@ fn join(prefix: &str, name: &str) -> String {
 
 /// The bundle-relative name of the directory a reject happened in — for the one reject whose
 /// offender cannot be spelled (a name that is not UTF-8).
+/// An OS error as a REJECT REASON reads it: the kernel's own words, lowercased and without the
+/// `(os error N)` tail the terminal has no use for.
+fn reason(e: &std::io::Error) -> String {
+    let text = e.to_string();
+    let text = text.split(" (os error").next().unwrap_or(&text).trim();
+    let mut chars = text.chars();
+    match chars.next() {
+        Some(first) => first.to_lowercase().collect::<String>() + chars.as_str(),
+        None => text.to_owned(),
+    }
+}
+
 fn located(prefix: &str) -> &str {
     if prefix.is_empty() {
         "the folder root"

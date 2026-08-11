@@ -80,8 +80,9 @@ generated `docs/cli.md` (`cargo xtask gen-cli-ref`).
   historical digest for a stale copy, or the lock's digest AFTER snapshotting bytes no version
   explains, so the copy scans Modified and rides the draft engine. The row also carries the
   `PlacementClaim` marker, which is what two invariants key on: a claimed folder is a target of
-  EVERY dir plan (`placement::keep_claimed`, applied at the end of all four planners — the claim's
-  promise is currency, and no planner reaches a folder the PERSON named by right), and its detach
+  EVERY dir plan (`placement::keep_claimed`, at the end of the three planners that choose targets;
+  the classic plan keeps every prior placement already — the claim's promise is currency, and no
+  planner reaches a folder the PERSON named by right), and its detach
   subtracts from the manifest row exactly the `dest` entry the claim recorded ADDING, never merely
   the root the folder sits under. Resolution is scope-strict over that one store (never a catalog);
   the folder's other claimants refuse across the machine store AND every ancestor project store

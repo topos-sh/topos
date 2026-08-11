@@ -533,8 +533,11 @@ pub(super) fn write_row(
     let value = &value;
     if prior.as_ref() == Some(value) {
         // The redundancy disclosure: the file already spells exactly this row — which is also how
-        // a `-a` naming only destinations the row already has says that it changed nothing.
+        // a `-a` naming only destinations the row already has says that it changed nothing. It is
+        // the WHOLE answer, so the receipt leads with it rather than heading an install that did
+        // not happen with a note underneath retracting it.
         data.undo = Vec::new();
+        data.unchanged = true;
         push_note(
             data,
             format!("`{reference}` is already recorded in this file — nothing changed"),
@@ -707,11 +710,6 @@ fn extend_dest(
             merged.mcp_dest = Some(base);
         }
     }
-    if added.is_empty() {
-        // Nothing new to record. The merged value equals the prior row exactly when the add
-        // carried nothing else either, and `write_row`'s redundancy arm then says so.
-        return Ok((EntryValue::Fields(merged), None));
-    }
     // A MIXED MUTATION IS NOT A DESTINATION-ONLY ACT. `add <ref>@<new-pin> --dest B` moves the pin
     // AND adds a folder; a receipt that spoke only of the folder left the moved pin unsaid, and
     // its `remove --dest B` inverse left it moved. Anything beyond the destinations having changed
@@ -720,7 +718,27 @@ fn extend_dest(
     let mut without_dest = merged.clone();
     without_dest.dest = prior_fields.dest.clone();
     without_dest.mcp_dest = prior_fields.mcp_dest.clone();
-    if without_dest != prior_fields {
+    let dest_only = without_dest == prior_fields;
+    if added.is_empty() {
+        // NOTHING NEW TO RECORD IS A TRUE NO-OP, and the row goes back exactly as it stood.
+        //
+        // A row that names NO destinations reaches every agent, and this arm materialized its
+        // current set to append to — so returning the merged value where nothing WAS appended
+        // froze "every agent" into whatever the machine happened to reach today. The person had
+        // asked for a destination the row already reaches, which is a request for nothing; an
+        // agent set up tomorrow would silently stop receiving. (`write_row`'s redundancy arm then
+        // answers `nothing changed`, which is the documented promise for naming a destination a
+        // line already has.) A MIXED add still carries its other change through.
+        return Ok((
+            if dest_only {
+                prior.clone()
+            } else {
+                EntryValue::Fields(merged)
+            },
+            None,
+        ));
+    }
+    if !dest_only {
         return Ok((EntryValue::Fields(merged), None));
     }
     Ok((
@@ -1905,6 +1923,7 @@ fn narrow_one(
                 ws.as_ref(),
                 &row_dest,
                 &entries,
+                &record_copies(ctx, target, Some(&row), &name),
             )?;
             if remaining.is_empty() {
                 // The last destination: the whole row goes (never a bare row).
@@ -1979,6 +1998,7 @@ fn narrow_one(
                 ws.as_ref(),
                 &current,
                 &entries,
+                &record_copies(ctx, target, None, &name),
             )?;
             if remaining.is_empty() {
                 return Ok(Arm::OffWrite {
@@ -2071,7 +2091,12 @@ fn claim_detach(
     if kind.is_mcp() {
         return Ok(None);
     }
-    let entries = selection.skill_entries(target.scope)?;
+    // NAMING AN EXISTING COPY, not writing a row: the tokens go through the resolution that
+    // question already has ([`super::dest_select::copy_tokens`] + [`names_copy`]), so a pasted
+    // absolute path, the `~/`-spelled root, and the claimed folder's own path all name the copy
+    // they obviously name. The manifest dialect is the wrong question here — it asks what a FILE
+    // may record, and nothing is being recorded about a folder that only stops being managed.
+    let tokens = selection.copy_tokens(target.scope)?;
     let Some(sctx) = scope_store_ctx(ctx, target) else {
         return Ok(None);
     };
@@ -2087,9 +2112,9 @@ fn claim_detach(
         _ => None,
     };
     let mut dirs: Vec<String> = Vec::new();
-    let mut roots: Vec<String> = Vec::new();
     // The entries the CLAIMS THEMSELVES put on the row — never merely the roots they sit under.
     let mut added: Vec<String> = Vec::new();
+    let mut matched: Vec<&String> = Vec::new();
     for (p, st) in map.placements.iter().zip(&map.placement_state) {
         let Some(claim) = &st.claim else {
             continue; // topos's own dir, or the bundle's adopted source — not a claim
@@ -2098,23 +2123,29 @@ fn claim_detach(
         if source.as_deref() == Some(canonical_or(dir).as_path()) {
             continue;
         }
-        let Some(parent) = dir.parent() else { continue };
-        let spelled = dest_display(ctx, target, parent);
-        if !entries.contains(&spelled) {
+        let spelling = super::dest_select::copy_spellings(&sctx, dir);
+        let hits: Vec<&String> = tokens
+            .iter()
+            .filter(|t| super::dest_select::names_copy(t, dir, &spelling))
+            .collect();
+        if hits.is_empty() {
             continue;
         }
-        dirs.push(p.clone());
-        if !roots.contains(&spelled) {
-            roots.push(spelled);
+        for t in hits {
+            if !matched.contains(&t) {
+                matched.push(t);
+            }
         }
+        dirs.push(p.clone());
         if let Some(entry) = claim.added_dest.clone()
             && !added.contains(&entry)
         {
             added.push(entry);
         }
     }
-    // MIXED, or nothing claimed at all: the ordinary narrow owns the answer.
-    if dirs.is_empty() || roots.len() != entries.len() {
+    // MIXED, or nothing claimed at all: the ordinary narrow owns the answer. A token that names no
+    // claimed folder is somebody else's question, and answering half of one would be worse.
+    if dirs.is_empty() || matched.len() != tokens.len() {
         return Ok(None);
     }
     let reference = row.map_or_else(
@@ -2161,6 +2192,33 @@ fn claim_detach(
     }))
 }
 
+/// The bundle's recorded copies as a receipt spells them — every placement, including the adopted
+/// and claimed folders no destination set speaks for. Best-effort: this feeds a refusal's list, and
+/// an unreadable record simply names none.
+fn record_copies(
+    ctx: &Ctx<'_>,
+    target: &EditTarget,
+    row: Option<&PlanRow>,
+    name: &str,
+) -> Vec<String> {
+    let Some(sctx) = scope_store_ctx(ctx, target) else {
+        return Vec::new();
+    };
+    let Some(sid) = row_record(ctx, target, row, name).and_then(|s| SkillId::parse(&s).ok()) else {
+        return Vec::new();
+    };
+    crate::doc::read_map(sctx.fs, &sctx.layout.published(&sid).map)
+        .ok()
+        .flatten()
+        .map(|map| {
+            map.placements
+                .iter()
+                .map(|p| super::dest_select::copy_spellings(&sctx, Path::new(p)).display)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// The row key an arm names, for the shapes that carry one.
 fn arm_reference(arm: &Arm) -> Option<&str> {
     match arm {
@@ -2187,6 +2245,12 @@ fn claim_origin(ctx: &Ctx<'_>, sctx: &Ctx<'_>, sid: &SkillId) -> Option<String> 
 /// Split a destination set into `(subtract, remaining)` against the selection's entries — every
 /// selected entry must name a destination the set holds, or the refusal says why (the
 /// shared-copy answer when the coverage table explains the miss).
+///
+/// `copies` are the bundle's recorded copies as a receipt spells them — what the zero-state
+/// refusal names when the resolved destination set is empty but copies DO stand (every one of
+/// them a folder the person adopted or claimed, which no destination set speaks for). Saying
+/// "nothing has synced" there is a plain falsehood, and `list` one line up says otherwise.
+#[allow(clippy::too_many_arguments)]
 fn split_dest(
     ctx: &Ctx<'_>,
     target: &EditTarget,
@@ -2195,13 +2259,21 @@ fn split_dest(
     ws: Option<&(String, String)>,
     dest: &[String],
     entries: &[String],
+    copies: &[String],
 ) -> Result<(Vec<String>, Vec<String>), ClientError> {
     let global = target.scope == ManifestScope::Global;
-    // NO recorded copies at all: there is nothing to subtract FROM, and the ordinary refusal
-    // below would trail off into an empty list. The honest zero-state names both ways out.
-    // (Reachable only from the ROW arm — the feed-delivered arm pre-checks with its own
-    // wording, since "its row was added" would be a fabrication there.)
+    // NO destination set to subtract FROM, and the ordinary refusal below would trail off into an
+    // empty list. Which zero-state it is depends on whether anything stands: copies the row's
+    // destinations do not speak for get named, so the reader can retype one; nothing at all is
+    // the honest not-yet-synced answer, with both ways out.
     if dest.is_empty() {
+        if !copies.is_empty() {
+            return Err(ClientError::SelectionRefused(format!(
+                "no copy of '{name}' is in {} — its copies are: {}",
+                selection.argv_tail().join(" "),
+                copies.join(", ")
+            )));
+        }
         return Err(ClientError::SelectionRefused(format!(
             "'{name}' has no recorded copies in this scope yet — its row was added but nothing \
              has synced; run `topos update` first, or remove the whole row (`topos remove{} \
