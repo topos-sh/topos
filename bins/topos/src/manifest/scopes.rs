@@ -68,14 +68,7 @@ impl PlanRow {
 
     /// The row's fields view — a plain version string reads as `version` alone.
     pub(crate) fn fields(&self) -> EntryFields {
-        match &self.value {
-            EntryValue::Fields(f) => f.clone(),
-            EntryValue::Pin(p) => EntryFields {
-                version: Some(p.clone()),
-                ..EntryFields::default()
-            },
-            EntryValue::Star | EntryValue::Off => EntryFields::default(),
-        }
+        self.value.fields()
     }
 
     /// The version pin the row spells, if any (`"*"` and absent both mean track-current).

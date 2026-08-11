@@ -52,10 +52,10 @@ mod uninstall;
 mod version_check;
 
 pub(crate) use add::{
-    AddRemoteOpts, BareAddPlan, KeepAsYoursOutcome, KindDeclared, OriginDoc, add, add_remote,
-    add_remote_fetched, add_with_name, adopt_path, adopt_path_any_kind, governed_copy_suggestion,
-    keep_as_yours, origin_dir_or_self, plan_bare_add, resolve_add_target, split_target,
-    tracked_skill_at,
+    AddRemoteOpts, BareAdd, BareAddPlan, KeepAsYoursOutcome, KindDeclared, OriginDoc, add,
+    add_remote, add_remote_fetched, add_with_name, adopt_path, adopt_path_any_kind,
+    extend_folder_dest, governed_copy_suggestion, keep_as_yours, origin_dir, origin_dir_or_self,
+    plan_bare_add, refuse_unflagged_mcp_dir, resolve_add_target, split_target, tracked_skill_at,
 };
 pub(crate) use add_mcp::{McpAdded, add_mcp};
 #[cfg(test)]
@@ -406,6 +406,37 @@ fn resolve_skill_scoped(
     workspace: Option<&str>,
     followed_only: bool,
 ) -> Result<(SkillId, Lock), ClientError> {
+    let matches = skills_named_scoped(ctx, name, workspace, followed_only)?;
+    match matches.len() {
+        0 => Err(ClientError::NoSuchSkill {
+            name: name.to_owned(),
+        }),
+        1 => Ok(matches.into_iter().next().expect("len == 1")),
+        count => Err(ClientError::AmbiguousName {
+            name: name.to_owned(),
+            count,
+        }),
+    }
+}
+
+/// EVERY record of one store carrying `name`, in id order — the list behind the count
+/// [`resolve_skill_scoped`] collapses to. A caller that has to SHOW the collision (the bare-add
+/// chooser) needs the records themselves, and re-walking the store for them would be a second
+/// answer to the same question.
+///
+/// # Errors
+/// A store read failure.
+pub(crate) fn skills_named(ctx: &Ctx<'_>, name: &str) -> Result<Vec<(SkillId, Lock)>, ClientError> {
+    skills_named_scoped(ctx, name, None, false)
+}
+
+/// [`skills_named`] with the two filters [`resolve_skill_scoped`] documents.
+fn skills_named_scoped(
+    ctx: &Ctx<'_>,
+    name: &str,
+    workspace: Option<&str>,
+    followed_only: bool,
+) -> Result<Vec<(SkillId, Lock)>, ClientError> {
     // The skill_id → workspace_id join comes from the follow-state; only read it when a filter needs it.
     let followed = if workspace.is_some() || followed_only {
         ctx.follow.followed()
@@ -450,16 +481,7 @@ fn resolve_skill_scoped(
     }
     // Deterministic across same-name skills.
     matches.sort_by(|a, b| a.0.as_str().cmp(b.0.as_str()));
-    match matches.len() {
-        0 => Err(ClientError::NoSuchSkill {
-            name: name.to_owned(),
-        }),
-        1 => Ok(matches.into_iter().next().expect("len == 1")),
-        count => Err(ClientError::AmbiguousName {
-            name: name.to_owned(),
-            count,
-        }),
-    }
+    Ok(matches)
 }
 
 /// The workspace a FOLLOWED skill lives in (its expected signed-pointer scope), from the follow-state —

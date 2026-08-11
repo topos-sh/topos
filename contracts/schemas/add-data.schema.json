@@ -30,6 +30,17 @@
         "type": "string"
       }
     },
+    "dest_change": {
+      "description": "What this add did to the destinations a row ALREADY recorded. Absent when the row was born\nby this add — that receipt leads with what landed — and absent when the add named no\ndestination at all. **INFERRED** (additive-only).",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/DestChange"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "dest_resolved": {
       "description": "Where those destinations RESOLVED to on this machine, when that differs from how the\nmanifest spells them.\n\n`dest` is the row's own spelling and must stay it — a manifest line is portable, and\n`~/.codex/config.toml` is what belongs in the file. But an env override (`$CODEX_HOME`,\n`$XDG_CONFIG_HOME`, `$CLAUDE_CONFIG_DIR`) moves where that spelling actually lands, and a\nreceipt naming the default pointed at a file that does not exist on the machine it was\nprinted on. Empty ⇒ nothing moved and the row's own spelling IS the resolved one.\n**INFERRED** (additive-only).",
       "type": "array",
@@ -204,6 +215,29 @@
           "type": "string",
           "const": "explicit_pull_only"
         }
+      ]
+    },
+    "DestChange": {
+      "description": "The destination set of a STANDING row, changed by an add. Destinations EXTEND: what the row\nalready recorded stays, and what this add named joins it.",
+      "type": "object",
+      "properties": {
+        "added": {
+          "description": "The destinations this add ADDED, in the order the row now spells them.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "frozen": {
+          "description": "The WHOLE set the row names now — stated only where this add was the first to freeze a row\nthat had been reaching every agent, so the reader sees exactly what replaced \"everywhere\".\nEmpty when the row already named destinations.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "added"
       ]
     },
     "GovernedCopy": {

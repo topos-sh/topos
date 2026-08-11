@@ -417,12 +417,12 @@ fn fixtures() -> Vec<(&'static str, String)> {
     use topos_types::persisted::{ConflictPathKind, ConflictReason};
     use topos_types::requests::{WireDelivery, WireDeliverySkill, WireNotice, WireVia};
     use topos_types::results::{
-        AddData, ConflictHolds, ConflictPathReport, ConflictPlacement, DiffData, DiffPatchInfo,
-        DiffSource, EnrollmentPending, InviteReadData, ListData, LogData, LoginData, LogoutData,
-        MergeReport, ProtectData, PublishData, PublishDescribeData, PublishGate, PublishedMatch,
-        PullAction, PullData, PullSkill, ReceiptScope, RemoveData, RemoveItem, RemoveKind,
-        ReviewIndexData, ReviewIndexEntry, SkillEntry, SkillStatus, StatusData, StatusScope,
-        StatusScopeSummary, StatusTrigger, WorkspaceSyncReport,
+        AddData, ConflictHolds, ConflictPathReport, ConflictPlacement, DestChange, DiffData,
+        DiffPatchInfo, DiffSource, EnrollmentPending, InviteReadData, ListData, LogData, LoginData,
+        LogoutData, MergeReport, ProtectData, PublishData, PublishDescribeData, PublishGate,
+        PublishedMatch, PullAction, PullData, PullSkill, ReceiptScope, RemoveData, RemoveItem,
+        RemoveKind, ReviewIndexData, ReviewIndexEntry, SkillEntry, SkillStatus, StatusData,
+        StatusScope, StatusScopeSummary, StatusTrigger, WorkspaceSyncReport,
     };
     use topos_types::results::{AttentionCount, ListScope, McpServerSummary};
     use topos_types::{ActionCode, Affected, JsonEnvelope, Receipt, TerminalOutcome, WireError};
@@ -472,6 +472,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
             dest: Vec::new(),
             display: None,
             dest_resolved: Vec::new(),
+            dest_change: None,
         })
         .expect("AddData serializes"),
         warnings: vec![],
@@ -517,6 +518,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
             dest: Vec::new(),
             display: None,
             dest_resolved: Vec::new(),
+            dest_change: None,
         })
         .expect("AddData serializes"),
         warnings: vec![],
@@ -566,6 +568,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
             dest: Vec::new(),
             display: None,
             dest_resolved: Vec::new(),
+            dest_change: None,
         })
         .expect("AddData serializes"),
         warnings: vec![],
@@ -578,10 +581,16 @@ fn fixtures() -> Vec<(&'static str, String)> {
         error: None,
     };
 
-    // (c) Nothing local carries the name and SEVERAL workspaces publish it — the refusal names
-    //     every spelling, machine-readably in `data.references` and as one runnable action each.
-    let ws_refs = ["topos.sh/acme/code-review", "topos.sh/beta/code-review"];
-    let ambiguous_workspace_actions: Vec<_> = ws_refs
+    // (c) THE CHOOSER — the one shape every `add` ambiguity ends in, whatever mix produced it: a
+    //     workspace publishes the name and two folders on this machine carry it too. Each way out
+    //     rides `data.candidates` and one runnable action, in the order the TTY prints them
+    //     (remote spellings first, then local paths).
+    let add_candidates = [
+        "topos.sh/acme/code-review",
+        "~/.claude/skills/code-review",
+        "~/.codex/skills/code-review",
+    ];
+    let ambiguous_actions: Vec<_> = add_candidates
         .iter()
         .map(|r| {
             topos::actions::next_action(
@@ -590,43 +599,26 @@ fn fixtures() -> Vec<(&'static str, String)> {
             )
         })
         .collect();
-    let add_ambiguous_workspace = JsonEnvelope {
+    let add_ambiguous = JsonEnvelope {
         schema_version: 1,
         command: "add".to_owned(),
         ok: false,
-        data: serde_json::json!({ "references": ws_refs }),
+        data: serde_json::json!({ "candidates": add_candidates }),
         warnings: vec![],
         messages: vec![],
-        next_actions: ambiguous_workspace_actions.clone(),
+        next_actions: ambiguous_actions.clone(),
         receipt: None,
         error: Some(WireError {
-            code: "AMBIGUOUS_WORKSPACE".to_owned(),
+            code: "AMBIGUOUS_NAME".to_owned(),
             outcome: TerminalOutcome::AmbiguousName,
             retryable: false,
             affected: Affected::default(),
             expected_generation: None,
             current_generation: None,
-            context: serde_json::json!({
-                "message": "'code-review' is published in 2 of the workspaces this machine is \
-                            connected to (topos.sh/acme/code-review, topos.sh/beta/code-review) — \
-                            name the one you mean (`topos add <reference>`)"
-            }),
-            next_actions: ambiguous_workspace_actions,
+            context: serde_json::json!({ "message": "code-review is ambiguous, pick one:" }),
+            next_actions: ambiguous_actions,
         }),
     };
-
-    // (d) The LOCAL ambiguity, enriched: two directories carry the name in one harness, and a
-    //     workspace publishes it too — so the refusal offers the inventory read AND the subscribe.
-    let ambiguous_scope_actions = vec![
-        topos::actions::next_action(
-            ActionCode::DisambiguateName,
-            argv(&["topos", "list", "--json"]),
-        ),
-        topos::actions::next_action(
-            ActionCode::from("RUN_COMMAND".to_owned()),
-            argv(&["topos", "add", "topos.sh/acme/code-review", "--json"]),
-        ),
-    ];
     // The LOCAL MCP DOOR — `topos add --kind mcp ./team-weather -g`. This is now the only door
     // that adopts a server from bytes on this machine (a workspace reference is the other way in,
     // and needs no flag at all). The folder IS the bundle: adopted in place, so the row points at
@@ -683,6 +675,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
                 agents: vec!["Claude Code".to_owned(), "Cursor".to_owned()],
             }),
             dest_resolved: Vec::new(),
+            dest_change: None,
         })
         .expect("AddData serializes"),
         warnings: vec![],
@@ -698,33 +691,65 @@ fn fixtures() -> Vec<(&'static str, String)> {
         error: None,
     };
 
-    let add_ambiguous_scope = JsonEnvelope {
+    // DESTINATIONS EXTEND — `topos add -g coolify-deploy -a cursor` on a bundle this machine
+    // already has. Nothing is adopted again and no version is minted; the row that already stood
+    // gains one destination, `dest_change.added` names exactly it, and the undo takes back only
+    // that. `frozen` stays absent because the row already named destinations.
+    let add_dest_extended = JsonEnvelope {
         schema_version: 1,
         command: "add".to_owned(),
-        ok: false,
-        data: serde_json::json!({}),
+        ok: true,
+        data: serde_json::to_value(AddData {
+            skill_id: Some("topos_a9b7ee2b".to_owned()),
+            name: "coolify-deploy".to_owned(),
+            version_id: Some(fx_version.to_owned()),
+            bundle_digest: Some(fx_digest.to_owned()),
+            tracked: true,
+            harness: None,
+            harness_slug: None,
+            currency: None,
+            triggers: Vec::new(),
+            origin: None,
+            source: Some("topos.sh/acme/coolify-deploy".to_owned()),
+            manifest: Some("/home/ada/.topos/topos.toml".to_owned()),
+            scope: Some(ReceiptScope::Machine),
+            reference: Some("topos.sh/acme/coolify-deploy".to_owned()),
+            undo: argv(&[
+                "topos",
+                "remove",
+                "-g",
+                "coolify-deploy",
+                "--dest",
+                "~/.cursor/skills",
+            ]),
+            governed_copy: None,
+            published_match: None,
+            note: None,
+            mcp: None,
+            dest: vec!["~/.cursor/skills".to_owned()],
+            display: None,
+            dest_resolved: Vec::new(),
+            dest_change: Some(DestChange {
+                added: vec!["~/.cursor/skills".to_owned()],
+                frozen: Vec::new(),
+            }),
+        })
+        .expect("AddData serializes"),
         warnings: vec![],
         messages: vec![],
-        next_actions: ambiguous_scope_actions.clone(),
+        next_actions: vec![topos::actions::next_action(
+            ActionCode::from("UNDO".to_owned()),
+            argv(&[
+                "topos",
+                "remove",
+                "-g",
+                "coolify-deploy",
+                "--dest",
+                "~/.cursor/skills",
+            ]),
+        )],
         receipt: None,
-        error: Some(WireError {
-            code: "AMBIGUOUS_SCOPE".to_owned(),
-            outcome: TerminalOutcome::AmbiguousName,
-            retryable: false,
-            affected: Affected::default(),
-            expected_generation: None,
-            current_generation: None,
-            context: serde_json::json!({
-                "message": "the skill 'code-review' in harness 'claude-code' matches 2 directories \
-                            (/home/ada/.claude/skills/code-review, \
-                            /work/acme-api/.claude/skills/code-review) — adopt one by path (`topos \
-                            add <dir>`); every local copy above is byte-identical to what \
-                            `topos.sh/acme/code-review` serves today — `topos add \
-                            topos.sh/acme/code-review` subscribes to the team's copy, while \
-                            adopting a path forks it into a new, unmanaged skill"
-            }),
-            next_actions: ambiguous_scope_actions,
-        }),
+        error: None,
     };
 
     // A clean `pull` that found one followed skill already current.
@@ -1811,11 +1836,8 @@ fn fixtures() -> Vec<(&'static str, String)> {
         ("json/add.ok", emit_json(&add_ok)),
         ("json/add.subscribed", emit_json(&add_subscribed)),
         ("json/add.published-match", emit_json(&add_published_match)),
-        (
-            "json/add.ambiguous-workspace",
-            emit_json(&add_ambiguous_workspace),
-        ),
-        ("json/add.ambiguous-scope", emit_json(&add_ambiguous_scope)),
+        ("json/add.ambiguous", emit_json(&add_ambiguous)),
+        ("json/add.dest-extended", emit_json(&add_dest_extended)),
         ("json/add.mcp-adopted", emit_json(&add_mcp_adopted)),
         ("json/list.ok", emit_json(&list_ok)),
         ("json/diff.ok", emit_json(&diff_ok)),

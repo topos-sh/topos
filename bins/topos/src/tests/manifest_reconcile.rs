@@ -2900,13 +2900,12 @@ fn a_signed_out_workspaces_leftover_resolves_once_then_retires() {
                 &connect(&plane, &dir),
                 &roots,
                 "alpha",
-                false,
-                false,
-                None
+                bare_opts(true)
             ),
-            Err(ClientError::AlreadyTrackedName { .. })
+            Ok(ops::BareAddPlan::Reference { .. })
         ),
-        "before the resolution the record still resolves the bare name"
+        "before the resolution the record still resolves the bare name — to the workspace \
+         spelling it was delivered under"
     );
 
     let out = sweep(&ctx, &plane, &dir);
@@ -2986,9 +2985,7 @@ fn a_signed_out_workspaces_leftover_resolves_once_then_retires() {
                 &connect(&plane, &dir),
                 &roots,
                 "alpha",
-                false,
-                false,
-                None
+                bare_opts(true)
             ),
             Err(ClientError::NoUntrackedSkill { .. })
         ),
@@ -5349,6 +5346,322 @@ fn a_replaced_row_value_offers_only_the_exact_inverse() {
         data.note.as_deref().unwrap_or("").contains("no undo"),
         "{:?}",
         data.note
+    );
+}
+
+/// [`applied_add`] carrying a `-a`/`--dest` selection — the destination-extending form.
+fn applied_dest_add(
+    ctx: &Ctx<'_>,
+    plane: &FakePlane,
+    dir: &FakeDirectory,
+    raw: &str,
+    dests: &[&str],
+) -> topos_types::results::AddData {
+    let selection = crate::ops::dest_select::Selection::new(
+        &[],
+        &dests.iter().map(|d| (*d).to_owned()).collect::<Vec<_>>(),
+    );
+    match ops::add_reference(
+        ctx,
+        &connect(plane, dir),
+        None,
+        raw,
+        true,
+        false,
+        &selection,
+        None,
+    )
+    .unwrap()
+    {
+        ops::AddRefOutcome::Applied(d) => *d,
+        ops::AddRefOutcome::Described { .. } => panic!("a workspace reference applies"),
+    }
+}
+
+#[test]
+fn destinations_extend_on_a_re_add_and_the_undo_takes_back_only_the_new_ones() {
+    let (rig, plane, dir, _v) = add_rig("dest-extend");
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    let reference = format!("{HOST}/{WS_NAME}/deploy");
+    let manifest = rig.layout().home().join(crate::manifest::MANIFEST_FILE);
+
+    // The row already names ONE destination (written by hand — the person's own freeze).
+    rig.write_global(&format!(
+        "[bundles]\n\"{reference}\" = {{ dest = [\"~/.codex/skills\"] }}\n"
+    ));
+    let data = applied_dest_add(&ctx, &plane, &dir, &reference, &["~/.cursor/skills"]);
+    let text = std::fs::read_to_string(&manifest).unwrap();
+    assert!(
+        text.contains("\"~/.codex/skills\", \"~/.cursor/skills\""),
+        "the standing entry survives and the new one is appended: {text}"
+    );
+    assert_eq!(
+        data.dest_change.as_ref().map(|c| c.added.clone()),
+        Some(vec!["~/.cursor/skills".to_owned()]),
+        "the receipt names ONLY what it added"
+    );
+    assert!(
+        data.dest_change
+            .as_ref()
+            .is_some_and(|c| c.frozen.is_empty()),
+        "the row already named destinations, so there is no freeze to disclose"
+    );
+    assert_eq!(
+        data.undo,
+        vec![
+            "topos".to_owned(),
+            "remove".to_owned(),
+            "-g".to_owned(),
+            "deploy".to_owned(),
+            "--dest".to_owned(),
+            "~/.cursor/skills".to_owned(),
+        ],
+        "the inverse subtracts the new destination, never the whole set — and names the bundle \
+         the way the add named it"
+    );
+
+    // The SAME destination again changes nothing, and says so.
+    let before = std::fs::read_to_string(&manifest).unwrap();
+    let data = applied_dest_add(&ctx, &plane, &dir, &reference, &["~/.cursor/skills"]);
+    assert!(data.dest_change.is_none(), "{:?}", data.dest_change);
+    assert!(data.undo.is_empty(), "{:?}", data.undo);
+    assert!(
+        data.note
+            .as_deref()
+            .unwrap_or_default()
+            .contains("nothing changed"),
+        "{:?}",
+        data.note
+    );
+    assert_eq!(
+        before,
+        std::fs::read_to_string(&manifest).unwrap(),
+        "a fully-duplicate add writes nothing"
+    );
+
+    // A brand-new row born WITH a destination is a whole-row add, so its inverse is the row drop.
+    rig.write_global("[bundles]\n");
+    let data = applied_dest_add(&ctx, &plane, &dir, &reference, &["~/.codex/skills"]);
+    assert_eq!(
+        data.undo,
+        vec![
+            "topos".to_owned(),
+            "remove".to_owned(),
+            "-g".to_owned(),
+            "deploy".to_owned(),
+        ]
+    );
+}
+
+#[test]
+fn the_first_destination_on_a_row_that_reached_everywhere_writes_out_what_it_reaches() {
+    // A row with NO `dest` reaches every agent. Freezing it to just the new entry would silently
+    // stop the copies it already places, so its CURRENT set is written out beside the new one and
+    // the receipt lists the whole result.
+    let rig = Rig::new("dest-materialize");
+    rig.seed_session();
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let v = one_file(b"# deploy\n");
+    let plane = FakePlane::new(log).with_version("s_deploy", &v);
+    plane.serves(vec![delivered("s_deploy", "deploy", &v)]);
+    let dir = FakeDirectory::new(vec![catalog_entry("s_deploy", "deploy", &v)], Vec::new());
+    let reference = format!("{HOST}/{WS_NAME}/deploy");
+    rig.write_global(&format!("[bundles]\n\"{reference}\" = \"*\"\n"));
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    // Place it, so the row HAS a current resolved set to write out.
+    sweep(&ctx, &plane, &dir);
+    let placed = ops::dest_select::Selection::new(&[], &[]);
+    assert!(placed.is_empty());
+
+    let data = applied_dest_add(&ctx, &plane, &dir, &reference, &["~/.cursor/skills"]);
+    let change = data
+        .dest_change
+        .clone()
+        .expect("the materialize is disclosed");
+    assert_eq!(change.added, vec!["~/.cursor/skills".to_owned()]);
+    let recorded: Vec<&str> = change.frozen.iter().map(String::as_str).collect();
+    assert!(
+        recorded.contains(&"~/.cursor/skills") && recorded.len() > 1,
+        "the whole set is named, the new entry included: {recorded:?}"
+    );
+    let text =
+        std::fs::read_to_string(rig.layout().home().join(crate::manifest::MANIFEST_FILE)).unwrap();
+    for entry in &recorded {
+        assert!(text.contains(entry), "{entry} is recorded: {text}");
+    }
+    // The row reached every agent, so no subtraction spells it back: the exact inverse is the
+    // prior value's own restore.
+    assert_eq!(
+        data.undo,
+        vec![
+            "topos".to_owned(),
+            "add".to_owned(),
+            "-g".to_owned(),
+            reference.clone(),
+        ],
+        "{:?}",
+        data.undo
+    );
+}
+
+#[test]
+fn an_off_switch_is_never_extended_and_never_advertises_a_subtraction() {
+    // An `"off"` row is the row's own NEGATION, not a destination set. Treating it as one
+    // advertised `remove --dest X` as the inverse — which removes the last destination, drops the
+    // row, and resumes the feed EVERYWHERE, the opposite of the state it claimed to restore.
+    let (rig, plane, dir, _v) = add_rig("off-dest");
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    let reference = format!("{HOST}/{WS_NAME}/deploy");
+    rig.write_global(&format!("[bundles]\n\"{reference}\" = \"off\"\n"));
+
+    let data = applied_dest_add(&ctx, &plane, &dir, &reference, &["~/.cursor/skills"]);
+    assert!(
+        data.dest_change.is_none(),
+        "an off switch is not a destination set: {:?}",
+        data.dest_change
+    );
+    assert!(
+        data.undo.is_empty(),
+        "no undo beats a wrong one: {:?}",
+        data.undo
+    );
+    assert!(
+        data.note.as_deref().unwrap_or_default().contains("no undo"),
+        "and the receipt says why: {:?}",
+        data.note
+    );
+}
+
+#[test]
+fn a_pin_move_beside_a_destination_is_a_replacement_not_an_extend() {
+    // `add <ref>@<new-pin> --dest B` changes TWO things. A destination-only receipt left the moved
+    // pin unsaid and offered an inverse that left it moved; the ordinary replaced-prior path names
+    // the pin and offers only an undo that verifiably restores it.
+    let (rig, plane, dir, _v) = add_rig("pin-and-dest");
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    let reference = format!("{HOST}/{WS_NAME}/deploy");
+    let old = "a".repeat(64);
+    let new = "b".repeat(64);
+    rig.write_global(&format!("[bundles]\n\"{reference}\" = \"{old}\"\n"));
+
+    let data = applied_dest_add(
+        &ctx,
+        &plane,
+        &dir,
+        &format!("{reference}@{new}"),
+        &["~/.cursor/skills"],
+    );
+    assert!(
+        data.dest_change.is_none(),
+        "not a destination-only act: {:?}",
+        data.dest_change
+    );
+    assert_eq!(
+        data.undo,
+        vec![
+            "topos".to_owned(),
+            "add".to_owned(),
+            "-g".to_owned(),
+            format!("{reference}@{old}"),
+        ],
+        "the undo restores the PIN the add moved — an `add`-shaped restore keeps the canonical \
+         reference, because a bare name would resolve to the record now standing instead"
+    );
+    assert!(
+        data.note
+            .as_deref()
+            .unwrap_or_default()
+            .contains("prior pin"),
+        "{:?}",
+        data.note
+    );
+    // Both changes landed, whatever the receipt classified the act as.
+    let text =
+        std::fs::read_to_string(rig.layout().home().join(crate::manifest::MANIFEST_FILE)).unwrap();
+    assert!(
+        text.contains(&new) && text.contains("~/.cursor/skills"),
+        "{text}"
+    );
+}
+
+#[test]
+fn a_frozen_rows_current_set_comes_from_the_row_not_from_a_name_two_bundles_share() {
+    // Resolving "where does this bundle live now" by BARE NAME collapsed on a collision, and an
+    // empty current set reads as "reaches nowhere" — so the freeze would have dropped every copy
+    // the bundle really had. The row's own identity cannot collide.
+    let rig = Rig::new("dest-qualified");
+    rig.seed_session();
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let v = one_file(b"# deploy\n");
+    let plane = FakePlane::new(log).with_version("s_deploy", &v);
+    plane.serves(vec![delivered("s_deploy", "deploy", &v)]);
+    let dir = FakeDirectory::new(vec![catalog_entry("s_deploy", "deploy", &v)], Vec::new());
+    let reference = format!("{HOST}/{WS_NAME}/deploy");
+    rig.write_global(&format!("[bundles]\n\"{reference}\" = \"*\"\n"));
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    sweep(&ctx, &plane, &dir);
+
+    // A SECOND, unrelated bundle of the same name, adopted from a folder into the same store —
+    // exactly the collision that made the bare-name lookup ambiguous.
+    let twin = untracked_skill(&rig.home.0, "deploy", b"# a different deploy\n");
+    ops::add_with_name(
+        &ctx,
+        &twin,
+        Some("deploy"),
+        true,
+        crate::bundle_kind::BundleKind::Skill,
+    )
+    .unwrap();
+
+    let data = applied_dest_add(&ctx, &plane, &dir, &reference, &["~/.cursor/skills"]);
+    let change = data.dest_change.expect("the row froze");
+    assert!(
+        change.frozen.len() > 1,
+        "the workspace bundle's OWN copies were written out beside the new folder: {:?}",
+        change.frozen
+    );
+    assert!(change.frozen.contains(&"~/.cursor/skills".to_owned()));
+}
+
+#[test]
+fn the_governance_transfer_carries_the_rows_destinations_onto_the_workspace_row() {
+    // Governance moves; LOCAL STATE STAYS. A path row frozen to two folders is the person's
+    // standing decision about where this machine puts the bytes — the workspace taking over the
+    // version history says nothing about that, so the freeze rides onto the new row.
+    let rig = Rig::new("govern-dest");
+    rig.seed_session();
+    let folder = untracked_skill(&rig.home.0, "deploy", b"# deploy\n");
+    rig.write_global(&format!(
+        "[bundles]\n\"{}\" = {{ dest = [\"~/.codex/skills\", \"~/.cursor/skills\"] }}\n",
+        folder.display()
+    ));
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    let outcome =
+        ops::rewrite_to_governed(&ctx, "deploy", HOST, WS_NAME, std::slice::from_ref(&folder))
+            .expect("the rewrite reads and writes the machine file");
+    assert!(matches!(outcome, ops::GovernedOutcome::Rewritten(_)));
+    let text =
+        std::fs::read_to_string(rig.layout().home().join(crate::manifest::MANIFEST_FILE)).unwrap();
+    assert_eq!(
+        text,
+        format!(
+            "[bundles]\n\"{HOST}/{WS_NAME}/deploy\" = {{ dest = [\"~/.codex/skills\", \
+             \"~/.cursor/skills\"] }}\n"
+        ),
+        "the path row is gone and the workspace row carries the same two folders"
+    );
+
+    // A row with NO freeze keeps the plain `"*"` — there is no local state to carry.
+    let plain = Rig::new("govern-plain");
+    plain.seed_session();
+    let bare = untracked_skill(&plain.home.0, "deploy", b"# deploy\n");
+    plain.write_global(&format!("[bundles]\n\"{}\" = \"*\"\n", bare.display()));
+    let pctx = plain.ctx_at(Some(&plain.work.0));
+    ops::rewrite_to_governed(&pctx, "deploy", HOST, WS_NAME, &[bare]).unwrap();
+    assert_eq!(
+        std::fs::read_to_string(plain.layout().home().join(crate::manifest::MANIFEST_FILE))
+            .unwrap(),
+        format!("[bundles]\n\"{HOST}/{WS_NAME}/deploy\" = \"*\"\n")
     );
 }
 
@@ -9121,10 +9434,21 @@ fn plan_bare_add_in(
         &connect(plane, dir),
         &roots,
         target,
-        subscribe,
-        false,
-        workspace,
+        ops::BareAdd {
+            workspace,
+            ..bare_opts(subscribe)
+        },
     )
+}
+
+/// A project-scope invocation naming NO destinations — the ordinary bare `add <name>`.
+fn bare_opts(subscribe: bool) -> ops::BareAdd<'static> {
+    ops::BareAdd {
+        subscribe,
+        dest_selected: false,
+        global: false,
+        workspace: None,
+    }
 }
 
 /// A SECOND connected workspace, on its own server — what makes a bare name ambiguous across
@@ -9152,14 +9476,14 @@ fn seed_second_session(rig: &Rig) {
 fn a_name_only_a_workspace_publishes_resolves_to_its_reference() {
     let (rig, plane, dir, _v) = bare_rig("bare-ws-only");
     match bare_plan(&rig, &plane, &dir, BARE, true).unwrap() {
-        ops::BareAddPlan::Subscribe {
-            reference,
-            workspace,
-        } => {
+        ops::BareAddPlan::Reference { reference, note } => {
             // The CANONICAL host-qualified spelling — unambiguous however many servers this
             // machine is logged into.
             assert_eq!(reference, format!("{HOST}/{WS_NAME}/{BARE}"));
-            assert_eq!(workspace, WS_NAME);
+            assert!(
+                note.unwrap_or_default().contains(WS_NAME),
+                "the answer says which workspace resolved the name"
+            );
         }
         other => panic!("the workspace's copy is the only thing that name can mean: {other:?}"),
     }
@@ -9197,28 +9521,67 @@ fn seed_delivered_bare(rig: &Rig) {
 }
 
 #[test]
-fn a_local_directory_wins_and_the_receipt_names_the_workspace_spelling() {
+fn a_local_folder_and_a_team_copy_of_one_name_are_a_chooser() {
     let (rig, plane, dir, _v) = bare_rig("bare-both");
-    // The SAME bytes the workspace serves, sitting untracked in the home agent dir — and the
-    // delivery history that nominates the workspace for the receipt's disclosure.
+    // The SAME bytes the workspace serves, sitting untracked in the home agent dir. Two things
+    // answer to the name and they are DIFFERENT bundles — adopting the folder would fork the
+    // team's process silently, so neither is picked for the person.
     seed_delivered_bare(&rig);
     let path = untracked_skill(&rig.home.0, BARE, b"# deploy\n");
-    let ctx = rig.ctx_at(Some(&rig.work.0));
 
-    let published = match bare_plan(&rig, &plane, &dir, BARE, true).unwrap() {
+    let err = bare_plan(&rig, &plane, &dir, BARE, true).unwrap_err();
+    assert_eq!(err.code(), "AMBIGUOUS_NAME");
+    let envelope = crate::render::err_envelope("add", &["add".to_owned()], &err);
+    assert_eq!(
+        envelope.data["candidates"],
+        serde_json::json!([
+            format!("{HOST}/{WS_NAME}/{BARE}"),
+            path.display().to_string(),
+        ]),
+        "the remote spelling first, then the folder — ABSOLUTE, because an agent execs this"
+    );
+    assert_eq!(
+        envelope.next_actions.len(),
+        2,
+        "one runnable command per way out: {:?}",
+        envelope.next_actions
+    );
+
+    // NOTHING publishes the name: the one local folder is the only candidate, and it adopts with
+    // no disclosure to make.
+    let rig3 = Rig::new("bare-local-only");
+    rig3.seed_session();
+    let only = untracked_skill(&rig3.home.0, BARE, b"# deploy\n");
+    let empty = FakeDirectory::new(Vec::new(), Vec::new());
+    match bare_plan(&rig3, &plane, &empty, BARE, true).unwrap() {
         ops::BareAddPlan::Adopt {
             path: p,
             name,
             published,
         } => {
-            assert_eq!(p, path, "the bytes in front of you are what you asked for");
+            assert_eq!(p, only);
             assert_eq!(name, BARE);
+            assert!(published.is_none());
+        }
+        other => panic!("the one local copy is the only candidate: {other:?}"),
+    }
+}
+
+#[test]
+fn a_form_that_cannot_subscribe_still_discloses_the_team_spelling_on_its_adopt() {
+    // An `-s` member pick is about a repo, so it never resolves a name toward a workspace — and
+    // the local adopt it narrows keeps the bounded courtesy disclosure, judged against the bytes
+    // that actually landed.
+    let (rig, plane, dir, _v) = bare_rig("bare-disclose");
+    seed_delivered_bare(&rig);
+    let path = untracked_skill(&rig.home.0, BARE, b"# deploy\n");
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    let published = match bare_plan(&rig, &plane, &dir, BARE, false).unwrap() {
+        ops::BareAddPlan::Adopt { published, .. } => {
             published.expect("the one workspace publishing the name is disclosed")
         }
         other => panic!("a local copy adopts in place: {other:?}"),
     };
-    // The receipt judges the workspace's current version against the bytes that just landed —
-    // the ONE confirming catalog read carried the digest.
     let data = ops::add_with_name(
         &ctx,
         &path,
@@ -9239,7 +9602,7 @@ fn a_local_directory_wins_and_the_receipt_names_the_workspace_spelling() {
     seed_delivered_bare(&rig2);
     let drifted = untracked_skill(&rig2.home.0, BARE, b"# deploy (mine)\n");
     let ctx2 = rig2.ctx_at(Some(&rig2.work.0));
-    let published2 = match bare_plan(&rig2, &plane, &dir, BARE, true).unwrap() {
+    let published2 = match bare_plan(&rig2, &plane, &dir, BARE, false).unwrap() {
         ops::BareAddPlan::Adopt { published, .. } => published.expect("still disclosed"),
         other => panic!("a local copy adopts in place: {other:?}"),
     };
@@ -9262,27 +9625,39 @@ fn a_local_directory_wins_and_the_receipt_names_the_workspace_spelling() {
     let rig3 = Rig::new("bare-both-undelivered");
     rig3.seed_session();
     untracked_skill(&rig3.home.0, BARE, b"# deploy\n");
-    match bare_plan(&rig3, &plane, &dir, BARE, true).unwrap() {
+    match bare_plan(&rig3, &plane, &dir, BARE, false).unwrap() {
         ops::BareAddPlan::Adopt { published, .. } => assert!(published.is_none()),
         other => panic!("a local copy adopts in place: {other:?}"),
     }
 }
 
+/// Every candidate spelling an ambiguity answer offers, in print order.
+fn chooser_candidates(err: &ClientError) -> Vec<String> {
+    let envelope = crate::render::err_envelope("add", &["add".to_owned()], err);
+    envelope.data["candidates"]
+        .as_array()
+        .expect("the chooser carries its candidates")
+        .iter()
+        .map(|c| c.as_str().expect("a spelling").to_owned())
+        .collect()
+}
+
 #[test]
-fn a_name_several_workspaces_publish_refuses_naming_every_spelling() {
+fn a_name_several_workspaces_publish_offers_every_spelling() {
     let (rig, plane, dir, _v) = bare_rig("bare-two-ws");
     seed_second_session(&rig);
 
     let err = bare_plan(&rig, &plane, &dir, BARE, true).unwrap_err();
-    assert_eq!(err.code(), "AMBIGUOUS_WORKSPACE");
-    let message = err.to_string();
-    for reference in [
-        format!("{HOST}/{WS_NAME}/{BARE}"),
-        format!("beta.test/ops/{BARE}"),
-    ] {
-        assert!(message.contains(&reference), "{message}");
-    }
-    // The machine-readable half: one runnable subscribe per spelling, and the references in `data`.
+    assert_eq!(err.code(), "AMBIGUOUS_NAME");
+    assert_eq!(
+        chooser_candidates(&err),
+        vec![
+            format!("{HOST}/{WS_NAME}/{BARE}"),
+            format!("beta.test/ops/{BARE}"),
+        ],
+        "remote spellings, sorted"
+    );
+    // The machine-readable half: one runnable command per spelling.
     let envelope = crate::render::err_envelope("add", &["add".to_owned()], &err);
     assert_eq!(
         envelope.next_actions.len(),
@@ -9290,96 +9665,63 @@ fn a_name_several_workspaces_publish_refuses_naming_every_spelling() {
         "{:?}",
         envelope.next_actions
     );
-    assert_eq!(
-        envelope.data["references"],
-        serde_json::json!([
-            format!("{HOST}/{WS_NAME}/{BARE}"),
-            format!("beta.test/ops/{BARE}")
-        ]),
-        "sorted by the spelling the message prints"
-    );
 
     // The global `--workspace` selector settles it: only the named workspace is probed, so the
-    // same machine subscribes deterministically to the one that was ASKED — never the other.
+    // same machine records deterministically the one that was ASKED — never the other.
     match plan_bare_add_in(&rig, &plane, &dir, BARE, true, Some("w_ops")).unwrap() {
-        ops::BareAddPlan::Subscribe {
-            reference,
-            workspace,
-        } => {
+        ops::BareAddPlan::Reference { reference, .. } => {
             assert_eq!(reference, format!("beta.test/ops/{BARE}"));
-            assert_eq!(workspace, "ops");
         }
         other => panic!("the selector names the workspace: {other:?}"),
     }
 
-    // With a LOCAL copy in hand the adopt still wins — and carries no suggestion, because naming
-    // one of two teams' copies beside an adopt that already landed would be a guess.
-    untracked_skill(&rig.home.0, BARE, b"# deploy\n");
-    match bare_plan(&rig, &plane, &dir, BARE, true).unwrap() {
-        ops::BareAddPlan::Adopt { published, .. } => assert!(published.is_none()),
-        other => panic!("a local copy adopts in place: {other:?}"),
-    }
-
-    // A LOCAL ambiguity on top of the two workspaces: the hint's runnable subscribes cover EVERY
-    // spelling — advertising only one would settle an ambiguity nobody resolved.
-    untracked_skill(&rig.work.0, BARE, b"# deploy\n");
+    // A LOCAL copy on top of the two workspaces joins the same list — three things answer to the
+    // name, and the folder is spelled in its portable form after the remote pair.
+    let local = untracked_skill(&rig.home.0, BARE, b"# deploy\n");
     let err = bare_plan(&rig, &plane, &dir, BARE, true).unwrap_err();
-    assert_eq!(err.code(), "AMBIGUOUS_HARNESS");
-    let envelope = crate::render::err_envelope("add", &["add".to_owned()], &err);
-    let subscribes: Vec<_> = envelope
-        .next_actions
-        .iter()
-        .filter(|a| a.argv.len() == 4 && a.argv[1] == "add")
-        .map(|a| a.argv[2].clone())
-        .collect();
     assert_eq!(
-        subscribes,
+        chooser_candidates(&err),
         vec![
             format!("{HOST}/{WS_NAME}/{BARE}"),
-            format!("beta.test/ops/{BARE}")
-        ],
-        "{:?}",
-        envelope.next_actions
+            format!("beta.test/ops/{BARE}"),
+            local.display().to_string(),
+        ]
     );
 }
 
 #[test]
-fn a_local_ambiguity_discloses_the_team_copy_and_judges_the_bytes() {
+fn a_name_in_two_folders_offers_both_and_the_team_copy_beside_them() {
     let (rig, plane, dir, _v) = bare_rig("bare-scope");
-    // The same name in the home AND project skills folders — two folders, so the bare name is
-    // ambiguous between them.
-    untracked_skill(&rig.home.0, BARE, b"# deploy\n");
-    untracked_skill(&rig.work.0, BARE, b"# deploy\n");
+    // The same name in the home AND project skills folders, and a workspace publishes it too:
+    // three ways out, all in one list.
+    let home = untracked_skill(&rig.home.0, BARE, b"# deploy\n");
+    let project = untracked_skill(&rig.work.0, BARE, b"# deploy\n");
 
     let err = bare_plan(&rig, &plane, &dir, BARE, true).unwrap_err();
-    assert_eq!(err.code(), "AMBIGUOUS_HARNESS");
-    let message = err.to_string();
-    assert!(
-        message.contains("byte-identical") && message.contains(&format!("{HOST}/{WS_NAME}/{BARE}")),
-        "every copy matches the served version, so the message collapses toward the subscribe: \
-         {message}"
-    );
-    // The subscribe rides beside the inventory read as a runnable action.
-    let envelope = crate::render::err_envelope("add", &["add".to_owned()], &err);
+    assert_eq!(err.code(), "AMBIGUOUS_NAME");
     assert_eq!(
-        envelope.next_actions.last().map(|a| a.argv.clone()),
-        Some(vec![
-            "topos".to_owned(),
-            "add".to_owned(),
+        chooser_candidates(&err),
+        vec![
             format!("{HOST}/{WS_NAME}/{BARE}"),
-            "--json".to_owned(),
-        ]),
-        "{:?}",
-        envelope.next_actions
+            home.display().to_string(),
+            project.display().to_string(),
+        ],
+        "the remote spelling first, then the folders sorted — every one ABSOLUTE in argv"
     );
-
-    // One copy DRIFTS: the disclosure stands, the identical claim does not.
-    untracked_skill(&rig.work.0, BARE, b"# deploy (mine)\n");
-    let message = bare_plan(&rig, &plane, &dir, BARE, true)
-        .unwrap_err()
-        .to_string();
-    assert!(!message.contains("byte-identical"), "{message}");
-    assert!(message.contains("is also published in"), "{message}");
+    // Every line is a runnable command carrying that one candidate.
+    let envelope = crate::render::err_envelope("add", &["add".to_owned()], &err);
+    let offered: Vec<String> = envelope
+        .next_actions
+        .iter()
+        .map(|a| a.argv.join(" "))
+        .collect();
+    assert_eq!(
+        offered,
+        chooser_candidates(&err)
+            .iter()
+            .map(|c| format!("topos add {c} --json"))
+            .collect::<Vec<_>>()
+    );
 }
 
 #[test]
@@ -9439,7 +9781,7 @@ fn a_cache_only_match_subscribes_and_an_unanswering_session_is_skipped() {
     )
     .unwrap();
     match bare_plan(&rig, &plane, &dir, BARE, true).unwrap() {
-        ops::BareAddPlan::Subscribe { reference, .. } => {
+        ops::BareAddPlan::Reference { reference, .. } => {
             assert_eq!(reference, format!("{HOST}/{WS_NAME}/{BARE}"));
         }
         other => panic!("the cache alone is enough to spell the reference: {other:?}"),
@@ -9448,7 +9790,7 @@ fn a_cache_only_match_subscribes_and_an_unanswering_session_is_skipped() {
     // holds a served VERSION id, which is a different hash from a bundle digest.
     let path = untracked_skill(&rig.home.0, BARE, b"# deploy\n");
     let ctx = rig.ctx_at(Some(&rig.work.0));
-    let published = match bare_plan(&rig, &plane, &dir, BARE, true).unwrap() {
+    let published = match bare_plan(&rig, &plane, &dir, BARE, false).unwrap() {
         ops::BareAddPlan::Adopt { published, .. } => published.expect("disclosed"),
         other => panic!("a local copy adopts in place: {other:?}"),
     };
@@ -9467,17 +9809,516 @@ fn a_cache_only_match_subscribes_and_an_unanswering_session_is_skipped() {
     );
 }
 
+// =================================================================================================
+// A bare name resolves STANDING first: what the two scopes already know it to be.
+// =================================================================================================
+
+/// A rig whose MACHINE store already holds `alpha`, delivered by the workspace's feed, plus a
+/// stray untracked folder of the same name in an agent dir — the shape a real machine is in.
+fn standing_rig(tag: &str) -> (Rig, FakePlane, FakeDirectory) {
+    let rig = Rig::new(tag);
+    rig.seed_session();
+    rig.seed_feed();
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let v = one_file(b"# alpha\n");
+    let plane = FakePlane::new(log).with_version("s_alpha", &v);
+    plane.serves(vec![delivered("s_alpha", "alpha", &v)]);
+    let dir = FakeDirectory::new(vec![catalog_entry("s_alpha", "alpha", &v)], Vec::new());
+    sweep(&rig.ctx_at(Some(&rig.work.0)), &plane, &dir);
+    untracked_skill(&rig.home.0, "alpha", b"# a stray copy\n");
+    (rig, plane, dir)
+}
+
+#[test]
+fn a_name_this_scope_already_records_answers_already_added_not_ambiguous() {
+    let (rig, plane, dir) = standing_rig("standing-here");
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    let roots = ops::DiscoveryRoots {
+        home: rig.home.0.clone(),
+        cwd: Some(rig.work.0.clone()),
+    };
+    // The machine scope holds it AND a stray folder of the same name sits in an agent dir. The
+    // standing record answers first, so the stray never enters a count — no ambiguity at all.
+    let err = ops::plan_bare_add(
+        &ctx,
+        &connect(&plane, &dir),
+        &roots,
+        "alpha",
+        ops::BareAdd {
+            global: true,
+            ..bare_opts(true)
+        },
+    )
+    .unwrap_err();
+    assert_eq!(err.code(), "ALREADY_TRACKED");
+    assert_eq!(
+        err.to_string(),
+        format!(
+            "alpha is already added machine-wide (~/.topos/topos.toml)\nsource: \
+             {HOST}/{WS_NAME}/alpha"
+        )
+    );
+}
+
+#[test]
+fn a_name_the_other_scope_records_is_added_here_from_that_source() {
+    let (rig, plane, dir) = standing_rig("standing-other");
+    // A project covering the cwd: nothing stands in ITS scope, so the name means what the machine
+    // already means by it — recorded HERE, with no question asked.
+    let proj = project("standing-other-proj", "[bundles]\n");
+    let ctx = rig.ctx_at(Some(&proj.0));
+    let roots = ops::DiscoveryRoots {
+        home: rig.home.0.clone(),
+        cwd: Some(proj.0.clone()),
+    };
+    match ops::plan_bare_add(
+        &ctx,
+        &connect(&plane, &dir),
+        &roots,
+        "alpha",
+        bare_opts(true),
+    )
+    .unwrap()
+    {
+        ops::BareAddPlan::Reference { reference, note } => {
+            assert_eq!(reference, format!("{HOST}/{WS_NAME}/alpha"));
+            assert!(note.is_none(), "nothing to explain — {note:?}");
+        }
+        other => panic!("the other scope's record resolves the name: {other:?}"),
+    }
+}
+
+/// A bare `add <name> -a/--dest …` — the invocation that asks about DESTINATIONS, not existence.
+fn plan_dest_add(
+    rig: &Rig,
+    plane: &FakePlane,
+    dir: &FakeDirectory,
+    cwd: &std::path::Path,
+    name: &str,
+    global: bool,
+) -> Result<ops::BareAddPlan, ClientError> {
+    let ctx = rig.ctx_at(Some(cwd));
+    let roots = ops::DiscoveryRoots {
+        home: rig.home.0.clone(),
+        cwd: Some(cwd.to_path_buf()),
+    };
+    ops::plan_bare_add(
+        &ctx,
+        &connect(plane, dir),
+        &roots,
+        name,
+        ops::BareAdd {
+            subscribe: true,
+            dest_selected: true,
+            global,
+            workspace: None,
+        },
+    )
+}
+
+#[test]
+fn a_standing_name_with_a_destination_extends_its_row_instead_of_answering_already_added() {
+    let (rig, plane, dir) = standing_rig("standing-extend");
+    // MACHINE scope: the bundle stands here, and the invocation named a folder. "Already added"
+    // would be true and useless — the row this file spells gains the destination instead.
+    match plan_dest_add(&rig, &plane, &dir, &rig.work.0, "alpha", true).unwrap() {
+        ops::BareAddPlan::Reference { reference, note } => {
+            assert_eq!(reference, format!("{HOST}/{WS_NAME}/alpha"));
+            assert!(note.is_none(), "{note:?}");
+        }
+        other => panic!("the standing row is what gains the destination: {other:?}"),
+    }
+    // Without the flags, the same invocation is still the already-added answer.
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    let roots = ops::DiscoveryRoots {
+        home: rig.home.0.clone(),
+        cwd: Some(rig.work.0.clone()),
+    };
+    assert_eq!(
+        ops::plan_bare_add(
+            &ctx,
+            &connect(&plane, &dir),
+            &roots,
+            "alpha",
+            ops::BareAdd {
+                global: true,
+                ..bare_opts(true)
+            },
+        )
+        .unwrap_err()
+        .code(),
+        "ALREADY_TRACKED"
+    );
+
+    // THE SET-LINE MEMBER. `alpha` has no row of its own here — the workspace FEED line delivers
+    // it, exactly as a channel line would. There is no row to extend, so the reference arm writes
+    // the member its OWN row carrying the destination: the same move `remove`'s per-agent refusal
+    // teaches, reached without anyone having to be told about it.
+    let data = applied_dest_add(
+        &ctx,
+        &plane,
+        &dir,
+        &format!("{HOST}/{WS_NAME}/alpha"),
+        &["~/.cursor/skills"],
+    );
+    assert!(
+        data.dest_change.is_none(),
+        "a row born here is not an extend: {:?}",
+        data.dest_change
+    );
+    let text =
+        std::fs::read_to_string(rig.layout().home().join(crate::manifest::MANIFEST_FILE)).unwrap();
+    assert!(
+        text.contains(&format!(
+            "\"{HOST}/{WS_NAME}/alpha\" = {{ dest = [\"~/.cursor/skills\"] }}"
+        )),
+        "the member gained its own row, frozen to the folder that was named: {text}"
+    );
+
+    // PROJECT scope: nothing stands in the project, so the name still resolves through the other
+    // scope — an ordinary add of that reference, carrying the flags exactly as a spelled-out
+    // reference would.
+    let proj = project("standing-extend-proj", "[bundles]\n");
+    match plan_dest_add(&rig, &plane, &dir, &proj.0, "alpha", false).unwrap() {
+        ops::BareAddPlan::Reference { reference, .. } => {
+            assert_eq!(reference, format!("{HOST}/{WS_NAME}/alpha"));
+        }
+        other => panic!("the other scope's record resolves the name: {other:?}"),
+    }
+}
+
+#[test]
+fn a_standing_folder_with_a_destination_extends_that_folders_own_row() {
+    // The same rule for a bundle adopted from a folder: no second adopt, no new version — the
+    // path row this scope already spells gains the destination, and the receipt says which.
+    let rig = Rig::new("standing-extend-folder");
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    let folder = untracked_skill(&rig.home.0, "alpha", b"# alpha\n");
+    let mut adopted = ops::add_with_name(
+        &ctx,
+        &folder,
+        Some("alpha"),
+        true,
+        crate::bundle_kind::BundleKind::Skill,
+    )
+    .unwrap();
+    let scope = ops::add_scope(&ctx, true).unwrap();
+    ops::note_added_path_in(&ctx, &mut adopted, &scope.target, &folder).unwrap();
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let plane = FakePlane::new(log);
+    let dir = FakeDirectory::new(Vec::new(), Vec::new());
+
+    let ops::BareAddPlan::ExtendFolderDest { dir: planned } =
+        plan_dest_add(&rig, &plane, &dir, &rig.work.0, "alpha", true).unwrap()
+    else {
+        panic!("the standing folder's own row gains the destination");
+    };
+    assert_eq!(planned, folder);
+
+    // The row named NO destinations, so the first one written out has to say what it froze.
+    let selection = ops::dest_select::Selection::new(&[], &["~/.cursor/skills".to_owned()]);
+    let data = ops::extend_folder_dest(&ctx, &scope, &folder, &selection)
+        .unwrap()
+        .expect("the folder is tracked here");
+    let change = data.dest_change.clone().expect("the row gained a folder");
+    assert_eq!(change.added, vec!["~/.cursor/skills".to_owned()]);
+    // The record was adopted IN PLACE and topos has placed no copy of it anywhere: the source
+    // folder is the person's own and no freeze manages it, so there is no standing reach to
+    // write out beside the new entry — nothing is quietly narrowed, and nothing is claimed.
+    assert!(change.frozen.is_empty(), "{:?}", change.frozen);
+    assert_eq!(
+        data.undo,
+        vec![
+            "topos".to_owned(),
+            "add".to_owned(),
+            "-g".to_owned(),
+            folder.display().to_string(),
+        ],
+        "the row named NO destinations, so this add FROZE it — subtracting would leave a frozen \
+         row, and only the prior value's own restore puts back `\"*\"`"
+    );
+    // No adopt happened, so nothing was armed and no version was minted a second time.
+    assert!(data.currency.is_none());
+    assert_eq!(data.version_id, adopted.version_id);
+
+    // The SAME destination again changes nothing, and says so.
+    let again = ops::extend_folder_dest(&ctx, &scope, &folder, &selection)
+        .unwrap()
+        .expect("the folder is tracked here");
+    assert!(again.dest_change.is_none());
+    assert!(again.undo.is_empty());
+    assert!(
+        again
+            .note
+            .as_deref()
+            .unwrap_or_default()
+            .contains("nothing changed"),
+        "{:?}",
+        again.note
+    );
+
+    // A SECOND destination joins the first — neither replaces the other.
+    let more = ops::dest_select::Selection::new(&[], &["~/.zed/skills".to_owned()]);
+    let data = ops::extend_folder_dest(&ctx, &scope, &folder, &more)
+        .unwrap()
+        .expect("the folder is tracked here");
+    assert_eq!(
+        data.dest_change.expect("a second folder").added,
+        vec!["~/.zed/skills".to_owned()]
+    );
+    let text =
+        std::fs::read_to_string(rig.layout().home().join(crate::manifest::MANIFEST_FILE)).unwrap();
+    assert!(
+        text.contains("~/.cursor/skills") && text.contains("~/.zed/skills"),
+        "{text}"
+    );
+}
+
+#[test]
+fn a_member_pick_asks_about_a_repo_so_the_standing_rungs_stay_out_of_it() {
+    // `-s <member>` says the source is a REPO holding several skills. A standing record is not
+    // one, and letting it answer turned `add <name> -s <member>` into a re-add of something else
+    // entirely — the selector silently dropped.
+    let (rig, plane, dir) = standing_rig("standing-selector");
+    let proj = project("standing-selector-proj", "[bundles]\n");
+    let ctx = rig.ctx_at(Some(&proj.0));
+    let roots = ops::DiscoveryRoots {
+        home: rig.home.0.clone(),
+        cwd: Some(proj.0.clone()),
+    };
+    // Bare: the machine's record resolves the name into this project.
+    assert!(matches!(
+        ops::plan_bare_add(
+            &ctx,
+            &connect(&plane, &dir),
+            &roots,
+            "alpha",
+            bare_opts(true)
+        ),
+        Ok(ops::BareAddPlan::Reference { .. })
+    ));
+    // With `-s`, the standing record never answers: resolution falls to the local inventory the
+    // selector is about, and the machine's copy of the bundle is not consulted at all.
+    match ops::plan_bare_add(
+        &ctx,
+        &connect(&plane, &dir),
+        &roots,
+        "alpha",
+        bare_opts(false),
+    ) {
+        Ok(ops::BareAddPlan::Adopt { .. }) => {}
+        other => panic!("a member pick resolves against the inventory alone: {other:?}"),
+    }
+    // And with nothing in the inventory either, the answer is about the name this machine tracks
+    // — never a silent re-add of something the selector was not asked about.
+    let bare_rig = Rig::new("standing-selector-empty");
+    bare_rig.seed_session();
+    let bctx = bare_rig.ctx_at(Some(&bare_rig.work.0));
+    let folder = untracked_skill(&bare_rig.home.0, "beta", b"# beta\n");
+    ops::add_with_name(
+        &bctx,
+        &folder,
+        Some("beta"),
+        true,
+        crate::bundle_kind::BundleKind::Skill,
+    )
+    .unwrap();
+    let broots = ops::DiscoveryRoots {
+        home: bare_rig.home.0.clone(),
+        cwd: Some(bare_rig.work.0.clone()),
+    };
+    assert_eq!(
+        ops::plan_bare_add(
+            &bctx,
+            &connect(&plane, &dir),
+            &broots,
+            "beta",
+            bare_opts(false)
+        )
+        .unwrap_err()
+        .code(),
+        "ALREADY_TRACKED"
+    );
+}
+
+#[test]
+fn a_folder_that_is_gone_names_nothing_and_is_never_offered() {
+    // A candidate is a line to paste. An adopted folder someone deleted would paste into a
+    // missing-source refusal, and a `source:` line pointing at it sends a reader nowhere.
+    let rig = Rig::new("standing-vanished");
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    let folder = untracked_skill(&rig.home.0, "alpha", b"# alpha\n");
+    ops::add_with_name(
+        &ctx,
+        &folder,
+        Some("alpha"),
+        true,
+        crate::bundle_kind::BundleKind::Skill,
+    )
+    .unwrap();
+    std::fs::remove_dir_all(&folder).unwrap();
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let plane = FakePlane::new(log);
+    let dir = FakeDirectory::new(Vec::new(), Vec::new());
+    let roots = ops::DiscoveryRoots {
+        home: rig.home.0.clone(),
+        cwd: Some(rig.work.0.clone()),
+    };
+    let err = ops::plan_bare_add(
+        &ctx,
+        &connect(&plane, &dir),
+        &roots,
+        "alpha",
+        ops::BareAdd {
+            global: true,
+            ..bare_opts(true)
+        },
+    )
+    .unwrap_err();
+    // The record still STANDS — it is added — but nothing on this machine can name where it came
+    // from, so the answer says less rather than something false.
+    assert_eq!(err.code(), "ALREADY_TRACKED");
+    assert_eq!(
+        err.to_string(),
+        "alpha is already added machine-wide (~/.topos/topos.toml)",
+        "no `source:` line for a folder that is not there"
+    );
+}
+
+#[test]
+fn a_path_re_add_naming_destinations_extends_instead_of_refusing_as_already_tracked() {
+    // `topos add ./foo --dest B` on a folder this scope already tracks is about WHERE the copies
+    // live. It used to reach `adopt_path`, which refuses a second adopt of one folder — so the
+    // union could never happen through the path door at all.
+    let rig = Rig::new("path-re-add");
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    let folder = untracked_skill(&rig.home.0, "alpha", b"# alpha\n");
+    let mut adopted = ops::add_with_name(
+        &ctx,
+        &folder,
+        Some("alpha"),
+        true,
+        crate::bundle_kind::BundleKind::Skill,
+    )
+    .unwrap();
+    let scope = ops::add_scope(&ctx, true).unwrap();
+    ops::note_added_path_dest_in(
+        &ctx,
+        &mut adopted,
+        &scope.target,
+        &folder,
+        &["~/.codex/skills".to_owned()],
+    )
+    .unwrap();
+
+    // The SAME folder again, naming a second destination: the standing row gains it.
+    let selection = ops::dest_select::Selection::new(&[], &["~/.cursor/skills".to_owned()]);
+    let data = ops::extend_folder_dest(&ctx, &scope, &folder, &selection)
+        .unwrap()
+        .expect("the folder is tracked in this scope");
+    assert_eq!(
+        data.dest_change.expect("the row gained a folder").added,
+        vec!["~/.cursor/skills".to_owned()]
+    );
+    let text =
+        std::fs::read_to_string(rig.layout().home().join(crate::manifest::MANIFEST_FILE)).unwrap();
+    assert!(
+        text.contains("\"~/.codex/skills\", \"~/.cursor/skills\""),
+        "the standing destination survives and the new one is appended: {text}"
+    );
+
+    // A folder NOTHING here tracks is not a re-add at all — the caller adopts as it always would.
+    let fresh = untracked_skill(&rig.home.0, "beta", b"# beta\n");
+    assert!(
+        ops::extend_folder_dest(&ctx, &scope, &fresh, &selection)
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[test]
+fn a_locally_adopted_record_answers_with_the_folder_its_bytes_live_in() {
+    let rig = Rig::new("standing-local");
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    let folder = untracked_skill(&rig.home.0, "alpha", b"# alpha\n");
+    ops::add_with_name(
+        &ctx,
+        &folder,
+        Some("alpha"),
+        true,
+        crate::bundle_kind::BundleKind::Skill,
+    )
+    .unwrap();
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let plane = FakePlane::new(log);
+    let dir = FakeDirectory::new(Vec::new(), Vec::new());
+    let roots = ops::DiscoveryRoots {
+        home: rig.home.0.clone(),
+        cwd: Some(rig.work.0.clone()),
+    };
+    let err = ops::plan_bare_add(
+        &ctx,
+        &connect(&plane, &dir),
+        &roots,
+        "alpha",
+        ops::BareAdd {
+            global: true,
+            ..bare_opts(true)
+        },
+    )
+    .unwrap_err();
+    // The `source:` line is the folder, in the spelling that stays portable.
+    assert_eq!(
+        err.to_string(),
+        format!(
+            "alpha is already added machine-wide (~/.topos/topos.toml)\nsource: ~/{}",
+            folder.strip_prefix(&rig.home.0).unwrap().display()
+        )
+    );
+
+    // A SECOND record of the same name in the same store: no single answer, so the chooser — one
+    // runnable re-add per record, each naming the folder it stands for.
+    let second = untracked_skill(&rig.work.0, "alpha", b"# another alpha\n");
+    ops::add_with_name(
+        &ctx,
+        &second,
+        Some("alpha"),
+        true,
+        crate::bundle_kind::BundleKind::Skill,
+    )
+    .unwrap();
+    let err = ops::plan_bare_add(
+        &ctx,
+        &connect(&plane, &dir),
+        &roots,
+        "alpha",
+        ops::BareAdd {
+            global: true,
+            ..bare_opts(true)
+        },
+    )
+    .unwrap_err();
+    assert_eq!(err.code(), "AMBIGUOUS_NAME");
+    let mut expected = vec![
+        format!("~/{}", folder.strip_prefix(&rig.home.0).unwrap().display()),
+        second.display().to_string(),
+    ];
+    expected.sort();
+    assert_eq!(chooser_candidates(&err), expected);
+}
+
 #[test]
 fn a_bare_name_subscribe_records_the_canonical_row_and_its_inverse() {
     let (rig, plane, dir, _v) = bare_rig("bare-e2e");
     let ctx = rig.ctx_at(Some(&rig.work.0));
-    let ops::BareAddPlan::Subscribe {
+    let ops::BareAddPlan::Reference {
         reference,
-        workspace,
+        note: resolution,
     } = bare_plan(&rig, &plane, &dir, BARE, true).unwrap()
     else {
         panic!("nothing local carries the name");
     };
+    let resolution = resolution.expect("the resolution is disclosed");
 
     // With NO manifest covering this folder the subscribe refuses toward the two scopes — it
     // never invents a file. `topos init` is what creates one.
@@ -9515,10 +10356,7 @@ fn a_bare_name_subscribe_records_the_canonical_row_and_its_inverse() {
             panic!("a workspace reference applies immediately")
         }
     };
-    ops::push_note(
-        &mut data,
-        format!("resolved '{BARE}' to {reference} — {workspace} publishes it"),
-    );
+    ops::push_note(&mut data, resolution);
 
     let manifest = rig.work.0.join(crate::manifest::MANIFEST_FILE);
     assert_eq!(data.manifest.as_deref(), Some(manifest.to_str().unwrap()));

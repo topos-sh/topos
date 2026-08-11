@@ -1055,40 +1055,183 @@ fn add_minting_is_deterministic_and_names_from_frontmatter() {
     assert_golden("add.ok", "add", serde_json::to_value(&a1).unwrap());
 }
 
+/// The whole chooser as a TTY prints it: the statement, then its lines — the two halves the
+/// composition root writes to stderr back to back.
+fn chooser_tty(err: &crate::error::ClientError, argv: &[&str]) -> String {
+    let argv: Vec<String> = argv.iter().map(|a| (*a).to_owned()).collect();
+    let mut out = crate::render::err_tty(err);
+    if let Some(lines) = crate::render::err_hint_tty("add", &argv, err) {
+        out.push('\n');
+        out.push_str(&lines);
+    }
+    out
+}
+
+/// A chooser over the given candidate spellings, in the order a surface prints them.
+fn chooser_err(name: &str, global: bool, candidates: &[&str]) -> crate::error::ClientError {
+    crate::error::ClientError::AmbiguousSource {
+        name: name.to_owned(),
+        token: name.to_owned(),
+        verb: "add".to_owned(),
+        candidates: candidates
+            .iter()
+            .map(|c| crate::error::TargetCandidate::plain(*c))
+            .collect(),
+        global,
+    }
+}
+
 #[test]
-fn the_bare_name_refusals_match_their_committed_envelopes() {
-    // Several connected workspaces publish the name: the spellings ride `data.references` AND one
-    // runnable subscribe each, so an agent picks a reference instead of re-reading the sentence.
+fn the_bare_name_chooser_matches_its_committed_envelope() {
+    // ONE shape for every add ambiguity, whatever mix produced it: the spellings ride
+    // `data.candidates` AND one runnable command each, so an agent picks a line instead of
+    // re-reading a sentence.
     assert_golden_err(
-        "add.ambiguous-workspace",
+        "add.ambiguous",
         "add",
-        &crate::error::ClientError::AmbiguousWorkspace {
-            name: "code-review".to_owned(),
-            references: vec![
-                "topos.sh/acme/code-review".to_owned(),
-                "topos.sh/beta/code-review".to_owned(),
+        &chooser_err(
+            "code-review",
+            false,
+            &[
+                "topos.sh/acme/code-review",
+                "~/.claude/skills/code-review",
+                "~/.codex/skills/code-review",
             ],
-            global: false,
-        },
+        ),
     );
-    // The LOCAL ambiguity with the same-name disclosure: the inventory read still resolves the
-    // local pick, and the subscribe rides beside it as the other real way out.
-    assert_golden_err(
-        "add.ambiguous-scope",
-        "add",
-        &crate::error::ClientError::AmbiguousScope {
-            name: "code-review".to_owned(),
-            harness: "claude-code".to_owned(),
-            paths: vec![
-                "/home/ada/.claude/skills/code-review".to_owned(),
-                "/work/acme-api/.claude/skills/code-review".to_owned(),
-            ],
-            workspace: Some(crate::error::WorkspaceHint {
-                references: vec!["topos.sh/acme/code-review".to_owned()],
-                identical: true,
-                global: false,
-            }),
-        },
+}
+
+#[test]
+fn the_chooser_prints_its_statement_then_one_runnable_line_per_candidate() {
+    // FINAL copy: no `error:` prefix (this is an answer, not a failure), no trailing hint, and
+    // every line is a command that can be pasted as it stands — `~/` unquoted, so the shell
+    // expands it.
+    let err = chooser_err(
+        "frontend-design",
+        false,
+        &[
+            "topos.sh/ideamotive/frontend-design",
+            "~/.agents/skills/frontend-design",
+            "~/.claude/skills/frontend-design",
+            "~/.codex/skills/frontend-design",
+        ],
+    );
+    assert_eq!(
+        chooser_tty(&err, &["add", "frontend-design"]),
+        "frontend-design is ambiguous, pick one:\n  \
+         topos add topos.sh/ideamotive/frontend-design\n  \
+         topos add ~/.agents/skills/frontend-design\n  \
+         topos add ~/.claude/skills/frontend-design\n  \
+         topos add ~/.codex/skills/frontend-design"
+    );
+}
+
+#[test]
+fn a_chooser_line_is_the_whole_invocation_with_only_the_target_swapped() {
+    // AN OFFERED COMMAND IS THE WHOLE REQUEST. Keeping only the verb and the candidate turned
+    // `-a cursor` into an install for every agent and `--propose` into a direct publish — an act
+    // nobody asked for. Every other token the person typed rides through exactly as typed.
+    let err = chooser_err(
+        "code-review",
+        false,
+        &["topos.sh/acme/code-review", "topos.sh/beta/code-review"],
+    );
+    let argv = ["add", "code-review", "-a", "cursor", "--json"].map(str::to_owned);
+    let envelope = crate::render::err_envelope("add", &argv, &err);
+    assert_eq!(
+        envelope
+            .next_actions
+            .iter()
+            .map(|a| a.argv.join(" "))
+            .collect::<Vec<_>>(),
+        vec![
+            "topos add topos.sh/acme/code-review -a cursor --json".to_owned(),
+            "topos add topos.sh/beta/code-review -a cursor --json".to_owned(),
+        ],
+        "the selector survives: {:?}",
+        envelope.next_actions
+    );
+
+    // `--yes` is the ONE token dropped: consent was given to a target now known to be ambiguous,
+    // and a candidate is a source the caller has not seen described.
+    let argv = ["publish", "code-review", "--propose", "--yes"].map(str::to_owned);
+    let envelope = crate::render::err_envelope("publish", &argv, &err);
+    assert_eq!(
+        envelope.next_actions[0].argv.join(" "),
+        "topos publish topos.sh/acme/code-review --propose --json"
+    );
+
+    // An invocation whose target token is nowhere in the argv falls back to the plain spelling
+    // the error carries for exactly that case.
+    let envelope = crate::render::err_envelope("add", &["add".to_owned()], &err);
+    assert_eq!(
+        envelope.next_actions[0].argv.join(" "),
+        "topos add topos.sh/acme/code-review --json"
+    );
+}
+
+#[test]
+fn a_folder_candidate_is_absolute_in_argv_and_abbreviated_only_when_printed() {
+    // An agent EXECS `argv`. A `~/…` token there is a shell's to expand, and this binary resolves
+    // a source path itself — so the offered command would have refused as a missing source.
+    let candidate =
+        crate::error::TargetCandidate::folder("/home/ada/.claude/skills/x", "~/.claude/skills/x");
+    let err = crate::error::ClientError::AmbiguousSource {
+        name: "x".to_owned(),
+        token: "x".to_owned(),
+        verb: "add".to_owned(),
+        candidates: vec![candidate],
+        global: false,
+    };
+    let argv = ["add", "x"].map(str::to_owned);
+    let envelope = crate::render::err_envelope("add", &argv, &err);
+    assert_eq!(
+        envelope.next_actions[0].argv,
+        vec![
+            "topos".to_owned(),
+            "add".to_owned(),
+            "/home/ada/.claude/skills/x".to_owned(),
+            "--json".to_owned(),
+        ],
+        "argv stays absolute"
+    );
+    assert_eq!(
+        envelope.data["candidates"],
+        serde_json::json!(["/home/ada/.claude/skills/x"]),
+        "the machine-readable half is the argv form too"
+    );
+    // The PRINTED line reads shorter, and a shell expands it back to exactly that argv.
+    assert_eq!(
+        chooser_tty(&err, &["add", "x"]),
+        "x is ambiguous, pick one:\n  topos add ~/.claude/skills/x"
+    );
+}
+
+#[test]
+fn the_already_added_answer_reads_like_the_receipt_it_mirrors() {
+    // The add receipt's own two lines, in the past tense — no `error:` prefix, no trailing hint.
+    let project = crate::error::ClientError::AlreadyAdded {
+        name: "coolify-deploy".to_owned(),
+        scope: topos_types::results::ReceiptScope::Project,
+        from: Some("topos.sh/ideamotive/coolify-deploy".to_owned()),
+    };
+    assert_eq!(
+        crate::render::err_tty(&project),
+        "coolify-deploy is already added to this project (./topos.toml)\nsource: \
+         topos.sh/ideamotive/coolify-deploy"
+    );
+    assert_eq!(project.code(), "ALREADY_TRACKED");
+    assert!(crate::render::err_hint_tty("add", &["add".to_owned()], &project).is_none());
+    // The machine file has its own one spelling, and a record nothing can name says less rather
+    // than something vague.
+    let machine = crate::error::ClientError::AlreadyAdded {
+        name: "coolify-deploy".to_owned(),
+        scope: topos_types::results::ReceiptScope::Machine,
+        from: None,
+    };
+    assert_eq!(
+        crate::render::err_tty(&machine),
+        "coolify-deploy is already added machine-wide (~/.topos/topos.toml)"
     );
 }
 
@@ -1108,52 +1251,27 @@ fn the_server_floor_refusal_matches_its_committed_envelope() {
 
 #[test]
 fn a_global_add_refusal_keeps_g_in_every_spelled_follow_up() {
-    // `add -g <name>` refused: following a spelled subscribe must land the row machine-wide, not
-    // silently in this folder's manifest — both the prose and every runnable argv carry `-g`.
-    let err = crate::error::ClientError::AmbiguousWorkspace {
-        name: "code-review".to_owned(),
-        references: vec![
-            "topos.sh/acme/code-review".to_owned(),
-            "topos.sh/beta/code-review".to_owned(),
-        ],
-        global: true,
-    };
-    assert!(
-        err.to_string().contains("`topos add -g <reference>`"),
-        "{err}"
+    // `add -g <name>` refused: following a spelled line must land the row machine-wide, not
+    // silently in this folder's manifest — every offered command, on both surfaces, carries `-g`.
+    let err = chooser_err(
+        "code-review",
+        true,
+        &["topos.sh/acme/code-review", "topos.sh/beta/code-review"],
     );
     let envelope = crate::render::err_envelope("add", &["add".to_owned()], &err);
+    assert_eq!(
+        envelope.next_actions.len(),
+        2,
+        "{:?}",
+        envelope.next_actions
+    );
     for action in &envelope.next_actions {
         assert_eq!(action.argv[2], "-g", "{:?}", action.argv);
     }
-
-    let hinted = crate::error::ClientError::AmbiguousScope {
-        name: "code-review".to_owned(),
-        harness: "claude-code".to_owned(),
-        paths: vec!["/home/ada/.claude/skills/code-review".to_owned()],
-        workspace: Some(crate::error::WorkspaceHint {
-            references: vec!["topos.sh/acme/code-review".to_owned()],
-            identical: false,
-            global: true,
-        }),
-    };
-    assert!(
-        hinted
-            .to_string()
-            .contains("`topos add -g topos.sh/acme/code-review`"),
-        "{hinted}"
-    );
-    let envelope = crate::render::err_envelope("add", &["add".to_owned()], &hinted);
-    let subscribe = envelope.next_actions.last().expect("the subscribe rides");
     assert_eq!(
-        subscribe.argv,
-        vec![
-            "topos".to_owned(),
-            "add".to_owned(),
-            "-g".to_owned(),
-            "topos.sh/acme/code-review".to_owned(),
-            "--json".to_owned(),
-        ]
+        chooser_tty(&err, &["add", "-g", "code-review"]),
+        "code-review is ambiguous, pick one:\n  topos add -g topos.sh/acme/code-review\n  topos \
+         add -g topos.sh/beta/code-review"
     );
 }
 

@@ -37,12 +37,14 @@ generated `docs/cli.md` (`cargo xtask gen-cli-ref`).
   harness into `reloadSkills`).
 - **`add`/`remove` are exact file inverses** (property-tested). `add` is source-polymorphic
   (workspace refs, a path adopted in place, a forge import, `add topos` for the built-in); a BARE
-  NAME resolves against both the untracked local inventory and the connected workspaces' catalogs
-  — one local dir adopts in place, a name only a workspace publishes subscribes to its canonical
-  reference, and either side ambiguous refuses naming every way out. `-a <agent>`/`--dest
-  <folder>` on `add` freeze the row's `dest` (the `ops/dest_select` resolution: `-a` is registry/
-  descriptor sugar for the scope-correct folder or config file; unknown slugs refuse with the
-  registry list, closing `nothing changed`);
+  NAME resolves STANDING first — a name the invoked scope already records answers `ALREADY_TRACKED`
+  with the record's own source, and one the OTHER scope records is added here from that same source
+  — and only then discovery: the untracked local inventory ∪ the connected workspaces' catalogs,
+  where exactly one candidate acts and two or more become THE CHOOSER (`AMBIGUOUS_NAME`, one
+  runnable `topos add <full-reference>` per candidate on both surfaces). `-a <agent>`/`--dest
+  <folder>` on `add` freeze the row's `dest` and EXTEND it on a re-add (the `ops/dest_select`
+  resolution: `-a` is registry/descriptor sugar for the scope-correct folder or config file;
+  unknown slugs refuse with the registry list, closing `nothing changed`);
   `remove` drops the row / writes `"off"` / rewrites a set line minus its members — a row edit
   uninstalls its copies EAGERLY (one scope reconcile in the same invocation; edited copies kept
   in place) — and `-a`/`--dest` on `remove` SUBTRACT destinations from the row's `dest`

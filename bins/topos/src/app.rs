@@ -834,6 +834,29 @@ fn run_command(
                 crate::source::SourceSpec::LocalPath(p) => {
                     ops::add_scope(&ctx, global).and_then(|scope| {
                         let sctx = ops::ctx_with_layout(&ctx, &scope.layout);
+                        // A RE-ADD NAMING DESTINATIONS is about where the copies live, not about
+                        // adopting the folder again — which is what `adopt_path` would refuse. The
+                        // row this scope already spells for it gains them, exactly as a bare name
+                        // standing here does.
+                        if !selection.is_empty()
+                            && let Some(d) = ops::extend_folder_dest(&ctx, &scope, &p, &selection)?
+                        {
+                            let _ = ops::manifest_update(
+                                &ctx,
+                                &connect_session_transports,
+                                None,
+                                &ops::ManifestUpdateOpts {
+                                    targets: vec![d.name.clone()],
+                                    scope: if global {
+                                        ops::UpdateScope::Machine
+                                    } else {
+                                        ops::UpdateScope::Here
+                                    },
+                                    ..Default::default()
+                                },
+                            );
+                            return Ok(d);
+                        }
                         // The selection resolves (and refuses) BEFORE the adopt, so an unknown
                         // agent leaves nothing half-landed.
                         let entries = selection.skill_entries(scope.target.scope)?;
@@ -871,31 +894,32 @@ fn run_command(
                         Ok(d)
                     })
                 }
-                // A bare NAME resolves against BOTH namespaces — the untracked local inventory and
-                // the connected workspaces' catalogs — so a name only the team publishes is not a
-                // dead end, and a name both carry says so on the receipt.
+                // A bare NAME resolves STANDING first — what the two scopes already know it to be
+                // — and only then the two discovery namespaces: the untracked local inventory and
+                // the connected workspaces' catalogs.
                 crate::source::SourceSpec::LocalName(name) => match list_discovery() {
                     Some(roots) => {
-                        // The `-a`/`--dest` selection does NOT suppress the subscribe arm — the
+                        // The `-a`/`--dest` selection does NOT suppress the workspace half — the
                         // reference arm records it on the row; only a `-s` member pick (which is
-                        // about a repo) does.
+                        // about a repo) does. It DOES change what a name already standing here
+                        // means: the act is about destinations, so the row extends.
                         match ops::plan_bare_add(
                             &ctx,
                             &connect_session_transports,
                             &roots,
                             &name,
-                            single_skill.is_none(),
-                            global,
-                            workspace.as_deref(),
+                            ops::BareAdd {
+                                subscribe: single_skill.is_none(),
+                                dest_selected: !selection.is_empty(),
+                                global,
+                                workspace: workspace.as_deref(),
+                            },
                         ) {
-                            // Nothing local carries the name and exactly ONE workspace publishes
-                            // it: record the canonical reference through the ordinary reference
-                            // arm — same row, same delivery, same receipt shape — and teach the
-                            // grammar in a note, so the next add can be spelled directly.
-                            Ok(ops::BareAddPlan::Subscribe {
-                                reference,
-                                workspace,
-                            }) => {
+                            // The name resolved to a REFERENCE — the bundle standing in the other
+                            // scope, or the one workspace publishing a name nothing local carries.
+                            // It goes through the ordinary reference arm: same row, same delivery,
+                            // same receipt shape.
+                            Ok(ops::BareAddPlan::Reference { reference, note }) => {
                                 let result = ops::add_reference(
                                     &ctx,
                                     &connect_session_transports,
@@ -908,14 +932,9 @@ fn run_command(
                                 );
                                 let result = result.map(|outcome| match outcome {
                                     ops::AddRefOutcome::Applied(mut data) => {
-                                        ops::push_note(
-                                            &mut data,
-                                            format!(
-                                                "resolved '{name}' to {reference} — no untracked \
-                                                 skill of that name is on this machine, and \
-                                                 {workspace} publishes it"
-                                            ),
-                                        );
+                                        if let Some(note) = note {
+                                            ops::push_note(&mut data, note);
+                                        }
                                         // The arming sweep + the built-in ride an APPLIED add,
                                         // exactly as on the spelled-out reference arm above.
                                         if data.currency.is_some() {
@@ -931,6 +950,39 @@ fn run_command(
                                 });
                                 return finish_add_reference(json, cmd_name, result, &diag);
                             }
+                            // The bundle already stands HERE, adopted from a folder, and the
+                            // invocation named destinations: the row gains them. Nothing is
+                            // adopted again, so no trigger is armed and no version is minted —
+                            // the copies land through the same narrowed update every other
+                            // destination-carrying arm runs.
+                            Ok(ops::BareAddPlan::ExtendFolderDest { dir }) => {
+                                ops::add_scope(&ctx, global).and_then(|scope| {
+                                    // The record is found by the FOLDER, so a second bundle of the
+                                    // same name in this store cannot answer for it.
+                                    let Some(d) =
+                                        ops::extend_folder_dest(&ctx, &scope, &dir, &selection)?
+                                    else {
+                                        return Err(ClientError::NoSuchSkill {
+                                            name: dir.display().to_string(),
+                                        });
+                                    };
+                                    let _ = ops::manifest_update(
+                                        &ctx,
+                                        &connect_session_transports,
+                                        None,
+                                        &ops::ManifestUpdateOpts {
+                                            targets: vec![d.name.clone()],
+                                            scope: if global {
+                                                ops::UpdateScope::Machine
+                                            } else {
+                                                ops::UpdateScope::Here
+                                            },
+                                            ..Default::default()
+                                        },
+                                    );
+                                    Ok(d)
+                                })
+                            }
                             // Adopt the resolved dir UNDER its resolved name — so
                             // `list`/`add`/`publish`/`diff` agree on the name even for a harness
                             // the active adapter does not recognize.
@@ -941,6 +993,14 @@ fn run_command(
                             }) => ops::add_scope(&ctx, global).and_then(|scope| {
                                 let sctx = ops::ctx_with_layout(&ctx, &scope.layout);
                                 let entries = selection.skill_entries(scope.target.scope)?;
+                                // The server-bundle guard arms on SILENCE here exactly as it does
+                                // on the path arm: a folder a name resolved to can be an MCP
+                                // bundle too, and adopting one as a skill delivers raw JSON into
+                                // skills dirs. It asks about the folder that will really be
+                                // adopted — for a link shell, the folder its links point into.
+                                if declared == ops::KindDeclared::No {
+                                    ops::refuse_unflagged_mcp_dir(&sctx, &ops::origin_dir(&path)?)?;
+                                }
                                 let mut d = ops::add_with_name(
                                     &sctx,
                                     &path,

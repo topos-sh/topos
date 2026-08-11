@@ -128,8 +128,9 @@ skill from a project refuses toward `-g`. `-g` edits `~/.topos/topos.toml` inste
 `add -g @<workspace>` adopts that whole feed, `remove -g <name>` writes the machine-local `off`
 row (and `add -g <name>` deletes it again). By default a skill reaches every agent on the
 machine; `-a <agent>` / `--dest <folder>` freeze the row to exactly those destinations (recorded
-as `dest = [...]`, so updates keep landing there), and the same flags on `remove` SUBTRACT a
-destination — the row keeps the rest, and removing the last one removes the row. Removing a row
+as `dest = [...]`, so updates keep landing there). The same flags on a later `add` EXTEND that set
+— what is recorded stays and the new ones join it — and on `remove` they SUBTRACT a
+destination: the row keeps the rest, and removing the last one removes the row. Removing a row
 also uninstalls the copies it placed, in the same command (an edited copy stays in place,
 disclosed). `~/.topos/topos.toml` is always the machine's whole
 truth: a workspace's feed flows only while its `"<host>/<workspace>" = "*"` line is in the file.

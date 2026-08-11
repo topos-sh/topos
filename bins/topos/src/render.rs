@@ -4,8 +4,8 @@
 use topos_types::requests::InvitationData;
 use topos_types::results::{
     AddData, AddedNote, AgentView, ConflictHolds, DiffData, LogData, ProposeData, PublishData,
-    PullData, PullSkill, ReceiptScope, RemoteSkill, RemoveData, RemoveItem, RemoveKind, RevertData,
-    ReviewData, ReviewDecision, SkillEntry, UntrackedEntry,
+    PullData, PullSkill, RemoteSkill, RemoveData, RemoveItem, RemoveKind, RevertData, ReviewData,
+    ReviewDecision, SkillEntry, UntrackedEntry,
 };
 use topos_types::{
     ActionCode, Affected, CurrencyKind, JsonEnvelope, NextAction, TerminalOutcome, TriggerState,
@@ -31,10 +31,10 @@ pub(crate) fn ok_envelope(command: &str, data: serde_json::Value) -> JsonEnvelop
     }
 }
 
-/// A failure envelope carrying the stable code, outcome, and machine-actionable next steps. An
-/// [`ClientError::AmbiguousTarget`] additionally surfaces its paste-ready qualified spellings as
-/// `data.candidates` — the machine-readable half of the ambiguity refusal — and an
-/// [`ClientError::AmbiguousWorkspace`] its canonical references the same way, as `data.references`.
+/// A failure envelope carrying the stable code, outcome, and machine-actionable next steps. The
+/// two ambiguity families — [`ClientError::AmbiguousTarget`] and the add-side
+/// [`ClientError::AmbiguousSource`] — additionally surface their paste-ready spellings as
+/// `data.candidates`, the machine-readable half of the refusal.
 pub(crate) fn err_envelope(command: &str, argv: &[String], err: &ClientError) -> JsonEnvelope {
     let outcome = err.outcome();
     let next_actions = next_actions(command, argv, err);
@@ -45,12 +45,10 @@ pub(crate) fn err_envelope(command: &str, argv: &[String], err: &ClientError) ->
     let data = match err {
         // The RENDERED spelling of each candidate — the string this field has always carried;
         // the structure behind it is the client's, and the wire shape does not move for it.
-        ClientError::AmbiguousTarget { candidates, .. } => {
+        ClientError::AmbiguousTarget { candidates, .. }
+        | ClientError::AmbiguousSource { candidates, .. } => {
             let candidates: Vec<String> = candidates.iter().map(|c| c.spelling()).collect();
             serde_json::json!({ "candidates": candidates })
-        }
-        ClientError::AmbiguousWorkspace { references, .. } => {
-            serde_json::json!({ "references": references })
         }
         _ => serde_json::json!({}),
     };
@@ -83,39 +81,20 @@ pub(crate) fn err_envelope(command: &str, argv: &[String], err: &ClientError) ->
 /// to rebuild with, and the whole invocation to judge whether rebuilding can be FAITHFUL at all.
 pub(crate) fn next_actions(command: &str, argv: &[String], err: &ClientError) -> Vec<NextAction> {
     match err {
-        // A LOCAL ambiguity whose name a connected workspace ALSO publishes has more than one
-        // real way out, so it carries them all: the inventory read that resolves the local pick,
-        // and one runnable subscribe PER hinted reference — advertising only the first would hand
-        // an agent an arbitrary workspace as if the ambiguity had been settled.
-        ClientError::AmbiguousHarness {
-            workspace: Some(hint),
-            ..
-        }
-        | ClientError::AmbiguousScope {
-            workspace: Some(hint),
-            ..
-        } => {
-            let mut out = vec![disambiguate_with_list()];
-            out.extend(
-                hint.references
-                    .iter()
-                    .map(|reference| subscribe_action(reference, hint.global)),
-            );
-            out
-        }
-        // Several workspaces publish the name: one executable subscribe per spelling, so the
-        // agent picks a reference instead of re-parsing the sentence that listed them.
-        ClientError::AmbiguousWorkspace {
-            references, global, ..
-        } => references
+        // THE chooser: one runnable command per candidate, always — the whole point of the answer
+        // is that every way out is spelled, and the reader (human or agent) picks a line.
+        ClientError::AmbiguousSource { candidates, .. } => candidates
             .iter()
-            .map(|reference| subscribe_action(reference, *global))
+            .map(|candidate| {
+                crate::actions::next_action(
+                    ActionCode::from("RUN_COMMAND".to_owned()),
+                    candidate_command(argv, err, &candidate.argv_tokens()),
+                )
+            })
             .collect(),
         // Every "look at the discovered inventory to resolve this" error points the agent at `list` — the
-        // ambiguity shapes plus the not-found cases from `add <skill>` name resolution.
+        // count-only ambiguity plus the not-found cases from `add <skill>` name resolution.
         ClientError::AmbiguousName { .. }
-        | ClientError::AmbiguousHarness { .. }
-        | ClientError::AmbiguousScope { .. }
         | ClientError::NoUntrackedSkill { .. }
         | ClientError::HarnessNotFound(_) => vec![disambiguate_with_list()],
         // A review verdict on a no-longer-open proposal — point the agent at the open inbox.
@@ -371,26 +350,88 @@ pub(crate) fn next_actions(command: &str, argv: &[String], err: &ClientError) ->
         ClientError::AmbiguousTarget {
             candidates, global, ..
         } => match (command, is_lone_target_invocation(argv)) {
-            ("remove" | "add", true) => candidates
-                .iter()
-                .map(|candidate| {
-                    let mut rebuilt = vec!["topos".to_owned(), command.to_owned()];
-                    if *global {
-                        rebuilt.push("-g".to_owned());
-                    }
-                    // The candidate's OWN tokens — the reference always exactly one of them, so a
-                    // path holding whitespace (or a `--yes`) can never become argv of its own.
-                    rebuilt.extend(candidate.argv_tokens());
-                    rebuilt.push("--json".to_owned());
-                    crate::actions::next_action(ActionCode::from("RUN_COMMAND".to_owned()), rebuilt)
-                })
-                .collect(),
+            ("remove" | "add", true) => candidate_actions(command, *global, candidates),
             _ => Vec::new(),
         },
         // Everything else: a refusal whose PROSE names one of the STATIC command spellings
         // mirrors it structurally. Prose text is never tokenized into argv — see the allowlist.
         other => mirror_prose_commands(&safe_message(other)),
     }
+}
+
+/// One runnable command per ambiguity candidate: the verb that refused, the invocation's own `-g`,
+/// then the candidate's OWN argv tokens — the reference always exactly one of them, so a path
+/// holding whitespace (or a `--yes`) can never become argv of its own.
+fn candidate_actions(
+    verb: &str,
+    global: bool,
+    candidates: &[crate::error::TargetCandidate],
+) -> Vec<NextAction> {
+    candidates
+        .iter()
+        .map(|candidate| {
+            let mut rebuilt = vec!["topos".to_owned(), verb.to_owned()];
+            if global {
+                rebuilt.push("-g".to_owned());
+            }
+            rebuilt.extend(candidate.argv_tokens());
+            rebuilt.push("--json".to_owned());
+            crate::actions::next_action(ActionCode::from("RUN_COMMAND".to_owned()), rebuilt)
+        })
+        .collect()
+}
+
+/// The command ONE chooser candidate stands for: THE REFUSED INVOCATION, with the ambiguous
+/// positional swapped for this candidate's tokens and nothing else touched.
+///
+/// Carrying the flags is the whole point. A rebuild that kept only the verb and the candidate
+/// turned `publish foo --propose` into a direct publish and `add foo -a cursor` into an install
+/// for every agent — offering an act nobody asked for, which is worse than offering nothing. The
+/// swap needs no flag table and no guess at which token is a flag's VALUE: every token but the one
+/// the person typed as the target rides through exactly as typed.
+///
+/// Two tokens are dropped. `--json` is the agent half of the same action and is re-appended here.
+/// `--yes` is dropped deliberately — consent was given to a target the caller has now been told
+/// was ambiguous, and a candidate is a source they have not seen described; they can re-run with
+/// it themselves. (This is the discipline [`is_lone_target_invocation`] states for the other
+/// ambiguity family, kept here without having to withhold the offer at all.)
+///
+/// An invocation whose target token is not in `argv` falls back to the plain `verb + candidate`
+/// spelling the error carries for exactly that case.
+fn candidate_command(argv: &[String], err: &ClientError, tokens: &[String]) -> Vec<String> {
+    let ClientError::AmbiguousSource {
+        token,
+        verb,
+        global,
+        ..
+    } = err
+    else {
+        return Vec::new();
+    };
+    if !argv.iter().any(|a| a == token) {
+        let mut fallback = vec!["topos".to_owned(), verb.clone()];
+        if *global {
+            fallback.push("-g".to_owned());
+        }
+        fallback.extend(tokens.iter().cloned());
+        fallback.push("--json".to_owned());
+        return fallback;
+    }
+    let mut rebuilt = vec!["topos".to_owned()];
+    let mut swapped = false;
+    for arg in argv {
+        if arg == "--json" || arg == "--yes" {
+            continue;
+        }
+        if !swapped && arg == token {
+            rebuilt.extend(tokens.iter().cloned());
+            swapped = true;
+            continue;
+        }
+        rebuilt.push(arg.clone());
+    }
+    rebuilt.push("--json".to_owned());
+    rebuilt
 }
 
 /// Whether the refused invocation was EXACTLY its verb plus the ONE ambiguous token — the only
@@ -483,19 +524,6 @@ fn disambiguate_with_list() -> NextAction {
         ActionCode::DisambiguateName,
         vec!["topos".into(), "list".into(), "--json".into()],
     )
-}
-
-/// One runnable subscribe for a workspace-disambiguation refusal — carrying the refused
-/// invocation's `-g`, so following the action lands the row in the scope that was asked, never
-/// silently the other one.
-fn subscribe_action(reference: &str, global: bool) -> NextAction {
-    let mut argv = vec!["topos".to_owned(), "add".to_owned()];
-    if global {
-        argv.push("-g".to_owned());
-    }
-    argv.push(reference.to_owned());
-    argv.push("--json".to_owned());
-    crate::actions::next_action(ActionCode::from("RUN_COMMAND".to_owned()), argv)
 }
 
 /// The STATIC command spellings a refusal's prose may name, each with its READY argv — the whole
@@ -710,12 +738,7 @@ pub(crate) fn init_tty(data: &topos_types::results::InitData) -> String {
 /// noise of. The paste-ready inverse rides it, as it always has.
 fn added_lead(data: &AddData) -> String {
     let mut lead = match data.scope {
-        Some(ReceiptScope::Project) => {
-            format!("added {} to this project (./topos.toml)", data.name)
-        }
-        Some(ReceiptScope::Machine) => {
-            format!("added {} machine-wide (~/.topos/topos.toml)", data.name)
-        }
+        Some(scope) => format!("added {} {}", data.name, crate::error::scope_file(scope)),
         // No row was recorded (an internal adopt) — there is no file to name.
         None => format!("added {}", data.name),
     };
@@ -905,7 +928,14 @@ fn add_dest_receipt(data: &AddData) -> String {
         (false, [one]) => format!("installed ({one})"),
         (false, many) => format!("installed ({})", subject.targets(many.len())),
     };
-    let mut s = format!("+ {name}   {column}\n");
+    // A row that ALREADY stood gained destinations; it was not installed here for the first time,
+    // and a `+ … installed (…)` headline over that reads as a new arrival. The change itself is
+    // the answer.
+    let lead = match &data.dest_change {
+        Some(change) => dest_change_lead(name, change),
+        None => format!("+ {name}   {column}"),
+    };
+    let mut s = format!("{lead}\n");
     // The same second line every other add answer carries — the destination receipt says where
     // the copy went, and this says what it is a copy OF.
     s.push_str(&source_line(data));
@@ -917,6 +947,30 @@ fn add_dest_receipt(data: &AddData) -> String {
         s.push_str(&format!("\nnote: {note}"));
     }
     s
+}
+
+/// The lead line of an add that changed a STANDING row's destinations.
+///
+/// A first freeze has to say what it froze: the row reached every agent a moment ago, so the whole
+/// set that replaced "everywhere" is listed, one per line — otherwise nobody could tell what
+/// quietly stopped being implied. A row that already named destinations only gained some, and
+/// naming those is the whole story.
+fn dest_change_lead(name: &str, change: &topos_types::results::DestChange) -> String {
+    if change.frozen.is_empty() {
+        return format!("added {} to {name}'s destinations", change.added.join(", "));
+    }
+    let plural = if change.added.len() == 1 {
+        "one"
+    } else {
+        "ones"
+    };
+    let mut lead = format!(
+        "{name} reached every agent — recorded its current destinations plus the new {plural}:"
+    );
+    for entry in &change.frozen {
+        lead.push_str(&format!("\n  {entry}"));
+    }
+    lead
 }
 
 /// The describe an `add` of a git source always returns: what the source holds, what would be
@@ -1945,9 +1999,15 @@ fn argv_line(argv: &[String]) -> String {
 /// metacharacters, quotes, or an empty string — is wrapped in single quotes with any embedded single quote
 /// escaped as `'\''`.
 fn shell_quote(arg: &str) -> String {
+    // `~` rides bare: a `~/`-spelled folder is the one portable way to write a path under this
+    // machine's home, and quoting it costs the reader the expansion while buying nothing — the
+    // shell hands topos the absolute path, and topos reads the literal `~/` form too.
     let safe = |c: char| {
         c.is_ascii_alphanumeric()
-            || matches!(c, '_' | '@' | '%' | '+' | '=' | ':' | ',' | '.' | '/' | '-')
+            || matches!(
+                c,
+                '_' | '@' | '%' | '+' | '=' | ':' | ',' | '.' | '/' | '-' | '~'
+            )
     };
     if !arg.is_empty() && arg.chars().all(safe) {
         arg.to_owned()
@@ -4133,6 +4193,16 @@ fn append_proposals_trailer(mut out: String, awaiting: u32) -> String {
 }
 
 pub(crate) fn err_tty(err: &ClientError) -> String {
+    // AMBIGUITY IS AN ANSWER, not a failure: the statement alone here, and the runnable lines
+    // under it from [`err_hint_tty`] — which is the surface that HOLDS the invocation those lines
+    // are rebuilt from. No `error:` prefix: the reader is not being told something went wrong,
+    // they are being asked which of these they meant.
+    //
+    // The name this scope already records is the same case — the add receipt's own two lines, in
+    // the past tense, with nothing prefixed as though something had failed.
+    if let ClientError::AmbiguousSource { .. } | ClientError::AlreadyAdded { .. } = err {
+        return safe_message(err);
+    }
     // A manifest refusal (a retired spelling, or any grammar fault in a user-authored file)
     // closes with the one line that says the load stopped BEFORE anything moved — the file was
     // only read (the `--json` envelope is untouched: its `message` stays the single-sentence
@@ -4242,11 +4312,29 @@ pub(crate) fn err_hint_tty(command: &str, argv: &[String], err: &ClientError) ->
     // divergent-copies menu is the same case, one step further: its last line IS the whole-bundle
     // discard the action offers, and repeating it under the menu would read as a fourth option. The
     // behind refusal is the same case at its simplest: it prints its one command already.
+    // THE CHOOSER's lines: the same commands `next_actions` carries, under no lead-in at all —
+    // they are the answer's own list, not a suggestion appended to a refusal. Each is spelled for
+    // a READER: a folder under this home reads as `~/…`, which a shell expands back to exactly the
+    // argv the agent surface got. One list, two spellings, never two lists.
+    if let ClientError::AmbiguousSource { candidates, .. } = err {
+        let lines: Vec<String> = candidates
+            .iter()
+            .map(|c| {
+                format!(
+                    "  {}",
+                    hint_line(&candidate_command(argv, err, &c.printed_tokens()))
+                )
+            })
+            .collect();
+        return (!lines.is_empty()).then(|| lines.join("\n"));
+    }
+    // The already-added answer has nothing to add at all — better no line than a vague line.
     if matches!(
         err,
         ClientError::SharedCopyOnly { .. }
             | ClientError::PlacementsDiverged { .. }
             | ClientError::PublishBehind { .. }
+            | ClientError::AlreadyAdded { .. }
     ) {
         return None;
     }
@@ -4729,6 +4817,7 @@ mod tests {
             mcp: None,
             dest,
             dest_resolved: Vec::new(),
+            dest_change: None,
             // The local source's tell: no workspace qualifies it.
             display: None,
         };
@@ -4784,6 +4873,50 @@ mod tests {
             "{}",
             add_tty(&moved_many)
         );
+
+        // A row that ALREADY stood gained a destination — it did not arrive here for the first
+        // time, so the change is the answer and `+ … installed (…)` never appears.
+        let mut extended = local(vec!["~/.cursor/skills".to_owned()]);
+        extended.name = "coolify-deploy".to_owned();
+        extended.source = Some("topos.sh/ideamotive/coolify-deploy".to_owned());
+        extended.undo = vec![
+            "topos".to_owned(),
+            "remove".to_owned(),
+            "-g".to_owned(),
+            "coolify-deploy".to_owned(),
+            "--dest".to_owned(),
+            "~/.cursor/skills".to_owned(),
+        ];
+        extended.dest_change = Some(topos_types::results::DestChange {
+            added: vec!["~/.cursor/skills".to_owned()],
+            frozen: Vec::new(),
+        });
+        assert_eq!(
+            add_tty(&extended),
+            "added ~/.cursor/skills to coolify-deploy's destinations\n\
+             source: topos.sh/ideamotive/coolify-deploy\n\
+             (undo: topos remove -g coolify-deploy --dest ~/.cursor/skills)"
+        );
+
+        // The FIRST destination on a row that had reached every agent says what it froze, one
+        // folder per line — otherwise nobody could tell what quietly stopped being implied.
+        let mut frozen = extended.clone();
+        frozen.dest_change = Some(topos_types::results::DestChange {
+            added: vec!["~/.codex/skills".to_owned()],
+            frozen: vec![
+                "~/.agents/skills".to_owned(),
+                "~/.claude/skills".to_owned(),
+                "~/.codex/skills".to_owned(),
+            ],
+        });
+        assert!(
+            add_tty(&frozen).starts_with(
+                "coolify-deploy reached every agent — recorded its current destinations plus the \
+                 new one:\n  ~/.agents/skills\n  ~/.claude/skills\n  ~/.codex/skills\n"
+            ),
+            "{}",
+            add_tty(&frozen)
+        );
     }
 
     /// EVERY add answer opens the same way: what was added and which of the two files asks for it
@@ -4814,6 +4947,7 @@ mod tests {
             mcp: None,
             dest: Vec::new(),
             dest_resolved: Vec::new(),
+            dest_change: None,
             display: None,
         };
         // A local folder adopted into this project: the row's own `./…` spelling never surfaces —

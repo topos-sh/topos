@@ -1132,6 +1132,28 @@ pub struct AddData {
     /// **INFERRED** (additive-only).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub dest_resolved: Vec<String>,
+    /// What this add did to the destinations a row ALREADY recorded. Absent when the row was born
+    /// by this add — that receipt leads with what landed — and absent when the add named no
+    /// destination at all. **INFERRED** (additive-only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dest_change: Option<DestChange>,
+}
+
+/// The destination set of a STANDING row, changed by an add. Destinations EXTEND: what the row
+/// already recorded stays, and what this add named joins it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(
+    feature = "contract-derives",
+    derive(schemars::JsonSchema, utoipa::ToSchema)
+)]
+pub struct DestChange {
+    /// The destinations this add ADDED, in the order the row now spells them.
+    pub added: Vec<String>,
+    /// The WHOLE set the row names now — stated only where this add was the first to freeze a row
+    /// that had been reaching every agent, so the reader sees exactly what replaced "everywhere".
+    /// Empty when the row already named destinations.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub frozen: Vec<String>,
 }
 
 /// The describe a bare `add` of a git source returns: the source, what was discovered in it, and

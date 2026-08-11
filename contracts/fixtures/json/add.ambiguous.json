@@ -3,9 +3,10 @@
   "command": "add",
   "ok": false,
   "data": {
-    "references": [
+    "candidates": [
       "topos.sh/acme/code-review",
-      "topos.sh/beta/code-review"
+      "~/.claude/skills/code-review",
+      "~/.codex/skills/code-review"
     ]
   },
   "warnings": [],
@@ -24,18 +25,27 @@
       "argv": [
         "topos",
         "add",
-        "topos.sh/beta/code-review",
+        "~/.claude/skills/code-review",
+        "--json"
+      ]
+    },
+    {
+      "code": "RUN_COMMAND",
+      "argv": [
+        "topos",
+        "add",
+        "~/.codex/skills/code-review",
         "--json"
       ]
     }
   ],
   "error": {
-    "code": "AMBIGUOUS_WORKSPACE",
+    "code": "AMBIGUOUS_NAME",
     "outcome": "AMBIGUOUS_NAME",
     "retryable": false,
     "affected": {},
     "context": {
-      "message": "'code-review' is published in 2 of the workspaces this machine is connected to (topos.sh/acme/code-review, topos.sh/beta/code-review) — name the one you mean (`topos add <reference>`)"
+      "message": "code-review is ambiguous, pick one:"
     },
     "next_actions": [
       {
@@ -52,7 +62,16 @@
         "argv": [
           "topos",
           "add",
-          "topos.sh/beta/code-review",
+          "~/.claude/skills/code-review",
+          "--json"
+        ]
+      },
+      {
+        "code": "RUN_COMMAND",
+        "argv": [
+          "topos",
+          "add",
+          "~/.codex/skills/code-review",
           "--json"
         ]
       }

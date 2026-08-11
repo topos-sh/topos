@@ -3,6 +3,7 @@
 
 use topos_gitstore::{GitstoreError, VerifyError};
 use topos_types::TerminalOutcome;
+use topos_types::results::ReceiptScope;
 
 use topos_core::digest::RejectReason;
 
@@ -78,30 +79,6 @@ impl FetchFault {
     }
 }
 
-/// The same-name disclosure a local-ambiguity refusal carries when the name the user typed is ALSO
-/// published in a connected workspace: the canonical references to subscribe to, and whether the
-/// local copies are provably the same bytes as the one version those references serve.
-///
-/// `identical` is a claim, so it is made only on proof — exactly one reference, its live catalog
-/// digest in hand, and every local candidate scanning to it. A cache-only match, several
-/// workspaces, or an unreadable directory all leave it `false`: the disclosure still names the
-/// team-managed spelling, it just does not say the bytes agree.
-#[derive(Debug, Clone)]
-pub(crate) struct WorkspaceHint {
-    /// The canonical host-qualified references (`<host>/<workspace>/<name>`), sorted.
-    pub references: Vec<String>,
-    /// Every local candidate is byte-identical to the ONE reference's current version.
-    pub identical: bool,
-    /// The refused invocation carried `-g` — every subscribe this hint spells must carry it too,
-    /// or following the guidance would silently move the row to the other manifest scope.
-    pub global: bool,
-}
-
-/// The `topos add` spelling that preserves the refused invocation's scope.
-fn add_spelling(global: bool) -> &'static str {
-    if global { "topos add -g" } else { "topos add" }
-}
-
 /// ONE thing an ambiguous target could have meant, kept as STRUCTURE rather than as a sentence:
 /// the reference itself, plus — for a member a set line delivers — the set that member removal
 /// must name to select it.
@@ -114,13 +91,23 @@ fn add_spelling(global: bool) -> &'static str {
 /// [`spelling`](Self::spelling) is the human/wire text, [`argv_tokens`](Self::argv_tokens) the
 /// executable form in which the reference is ALWAYS exactly one token.
 ///
+/// THE REFERENCE IS ARGV, ALWAYS. It is the token this binary reads back unchanged — an absolute
+/// path, never a `~/…` only a SHELL expands. An agent execs `argv` directly, so a home-abbreviated
+/// token there resolves to nothing and the offered command fails as a missing source. Where a
+/// person reads a shorter form better, that form rides [`display`](Self::display) and reaches the
+/// TTY alone.
+///
 /// Ordering is derived over `(reference, via)` — which is the spelling order too, since a
 /// reference holds no byte below `-`/space that could reorder the pair — so a sorted candidate
 /// list reads the same on both surfaces.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct TargetCandidate {
-    /// The candidate's own reference — one argv token, whatever it contains.
+    /// The candidate's own reference — one argv token, whatever it contains, in the form this
+    /// binary resolves without a shell's help.
     pub reference: String,
+    /// How a PRINTED line spells it, when a person reads that better than the argv form (`~/…`
+    /// for a folder under this machine's home). `None` ⇒ the reference itself. Never argv.
+    pub display: Option<String>,
     /// The SET line whose member rewrite this candidate selects (`--via <set-reference>`), for a
     /// bundle no row of its own spells. `None` for a candidate that is a row (or a resource).
     pub via: Option<String>,
@@ -131,6 +118,19 @@ impl TargetCandidate {
     pub(crate) fn plain(reference: impl Into<String>) -> Self {
         Self {
             reference: reference.into(),
+            display: None,
+            via: None,
+        }
+    }
+
+    /// A FOLDER candidate: the absolute path a command must carry, and the `~/`-abbreviated form a
+    /// printed line reads better as.
+    pub(crate) fn folder(absolute: impl Into<String>, display: impl Into<String>) -> Self {
+        let absolute = absolute.into();
+        let display = display.into();
+        Self {
+            display: (display != absolute).then_some(display),
+            reference: absolute,
             via: None,
         }
     }
@@ -139,18 +139,30 @@ impl TargetCandidate {
     pub(crate) fn via(reference: impl Into<String>, set: impl Into<String>) -> Self {
         Self {
             reference: reference.into(),
+            display: None,
             via: Some(set.into()),
         }
     }
 
     /// The rendered spelling — what the envelope's `data.candidates` carries. Exactly the text
     /// the two parts read as on a command line, so a consumer that has always read these strings
-    /// sees no change.
+    /// sees no change. It is the ARGV form: a machine reading this field is going to run it.
     pub(crate) fn spelling(&self) -> String {
         match &self.via {
             Some(set) => format!("{} --via {set}", self.reference),
             None => self.reference.clone(),
         }
+    }
+
+    /// The candidate's tokens as a PRINTED line spells them — [`argv_tokens`](Self::argv_tokens)
+    /// with the folder abbreviation applied. A shell expands the `~/` back to exactly the argv
+    /// form, so the two lines run the same command.
+    pub(crate) fn printed_tokens(&self) -> Vec<String> {
+        let mut tokens = self.argv_tokens();
+        if let (Some(display), Some(first)) = (&self.display, tokens.first_mut()) {
+            *first = display.clone();
+        }
+        tokens
     }
 
     /// The EXECUTABLE form: the reference as ONE token, then the selector as its own two. This is
@@ -161,33 +173,6 @@ impl TargetCandidate {
             None => vec![self.reference.clone()],
         }
     }
-}
-
-/// The clause an ambiguity refusal appends when a connected workspace publishes the same name —
-/// empty when none does, so the two messages stay byte-identical to their pre-disclosure form.
-/// Proven-identical bytes get the stronger reading (there is nothing to keep locally); otherwise
-/// the clause states the choice without judging it.
-fn workspace_sentence(name: &str, hint: Option<&WorkspaceHint>) -> String {
-    let Some(hint) = hint else {
-        return String::new();
-    };
-    let Some(first) = hint.references.first() else {
-        return String::new();
-    };
-    let add = add_spelling(hint.global);
-    if hint.identical {
-        return format!(
-            "; every local copy above is byte-identical to what `{first}` serves today — \
-             `{add} {first}` subscribes to the team's copy, while adopting a path forks it \
-             into a new, unmanaged skill"
-        );
-    }
-    format!(
-        "; '{name}' is also published in {} — `{add} {first}` subscribes to the team's copy \
-         (delivered and kept current by topos), while the paths above adopt a local copy as a \
-         new, unmanaged skill",
-        hint.references.join(", ")
-    )
 }
 
 /// The floor clause of an update-required refusal: the version the server named, when it named one
@@ -226,6 +211,26 @@ fn already_tracked_message(name: &str, dir: &str, claim: &Option<TrackedBy>) -> 
             "'{name}' already tracks {dir} — edit it in place (`topos diff {name}` shows your \
              changes), or drop it first with `topos remove {name}`"
         ),
+    }
+}
+
+/// WHICH of the two manifests an add answer is about, in the one PORTABLE spelling both the
+/// receipt and the already-added refusal name it by. The absolute path a reader's own cwd would
+/// make of it is noise: there is exactly one project file and exactly one machine file, and this
+/// is what each is called.
+pub(crate) fn scope_file(scope: ReceiptScope) -> &'static str {
+    match scope {
+        ReceiptScope::Project => "to this project (./topos.toml)",
+        ReceiptScope::Machine => "machine-wide (~/.topos/topos.toml)",
+    }
+}
+
+/// The [`ClientError::AlreadyAdded`] answer — the add receipt's own two lines, in the past tense.
+fn already_added_message(name: &str, scope: ReceiptScope, from: &Option<String>) -> String {
+    let lead = format!("{name} is already added {}", scope_file(scope));
+    match from {
+        Some(source) => format!("{lead}\nsource: {source}"),
+        None => lead,
     }
 }
 
@@ -367,6 +372,21 @@ pub(crate) enum ClientError {
          different directory by path (`topos add ./<dir>`)"
     )]
     AlreadyTrackedName { name: String },
+    /// A bare `add <name>` whose name ALREADY stands in the scope the invocation is acting in —
+    /// the answer to "add this", not a failure to do it. It reads exactly like the add receipt it
+    /// mirrors: what is added and which of the two files asks for it, then where that bundle comes
+    /// from, in the one spelling that stays runnable.
+    ///
+    /// `from` — the value the `source:` line carries — is absent only where the record names no
+    /// reference this machine can spell (no workspace, no upstream, and no folder left on disk):
+    /// better no line than a vague one. The code stays `ALREADY_TRACKED`, so an agent branches on
+    /// it exactly as it always has.
+    #[error("{}", already_added_message(.name, *.scope, .from))]
+    AlreadyAdded {
+        name: String,
+        scope: ReceiptScope,
+        from: Option<String>,
+    },
     /// `publish <skill>@<harness>` named an agent that reads NONE of the folders the ALREADY-TRACKED
     /// skill of that name stands in. The auto-add convenience cannot re-add a tracked name, and a
     /// mismatched `@<harness>` suffix likely means a DIFFERENT copy was intended — refused so a stray
@@ -382,47 +402,31 @@ pub(crate) enum ClientError {
         requested: String,
         folders: Vec<String>,
     },
-    /// `add <skill>` resolved a name that sits in more than one skills FOLDER. The caller must
-    /// disambiguate with `<skill>@<harness>` (which selects by the agents that read a folder) or by
-    /// path. The `folders` are the user's own directories, shown VERBATIM. `workspace` carries the
-    /// same-name disclosure when a connected workspace publishes the name too.
-    #[error(
-        "the skill name '{name}' is found in {} folders ({}) — disambiguate with `topos add {name}@<harness>`{}",
-        folders.len(), folders.join(", "), workspace_sentence(name, workspace.as_ref())
-    )]
-    AmbiguousHarness {
+    /// ONE shape for every ambiguity a SOURCE positional meets: the name resolved to more than one
+    /// thing — several untracked folders on this machine, several connected workspaces publishing
+    /// it, several records standing under it, or any mix. The refusal is an ANSWER, not a failure:
+    /// it states the choice and then spells one RUNNABLE command per candidate, so the reader
+    /// picks a line instead of translating prose into an invocation.
+    ///
+    /// The message carries the statement alone. The candidates are argv, so they ride the surfaces
+    /// AS argv — the envelope's `data.candidates` and one `next_actions` entry each — and the TTY
+    /// prints exactly those commands under the statement.
+    ///
+    /// AN OFFERED COMMAND IS THE WHOLE REQUEST. The rebuild is the refused invocation with the
+    /// ambiguous positional swapped for one candidate and NOTHING else touched, so a
+    /// `publish foo --propose` offers a proposal and an `add foo -a cursor` still installs for
+    /// cursor alone — dropping those flags would offer an act nobody asked for. `token` is the
+    /// positional as the person typed it (`foo`, `foo@codex`), which is what the swap finds.
+    ///
+    /// `verb` and `global` serve the FALLBACK spelling, for the surface that has no argv to rebuild
+    /// from: the verb that refused (so a `publish` never sends its reader to `add`) and the `-g`
+    /// that decides which of the two manifests the offered command would edit.
+    #[error("{name} is ambiguous, pick one:")]
+    AmbiguousSource {
         name: String,
-        folders: Vec<String>,
-        workspace: Option<WorkspaceHint>,
-    },
-    /// `add <skill>[@<harness>]` resolved to more than one directory within a SINGLE harness (a name in
-    /// both the user- and project-scope dir, say). `@<harness>` cannot split them, so the caller adopts one
-    /// explicitly by path. The `paths` are the user's own directories, shown VERBATIM. `workspace` carries
-    /// the same-name disclosure when a connected workspace publishes the name too.
-    #[error(
-        "the skill '{name}' in harness '{harness}' matches {} directories ({}) — adopt one by path (`topos add <dir>`){}",
-        paths.len(), paths.join(", "), workspace_sentence(name, workspace.as_ref())
-    )]
-    AmbiguousScope {
-        name: String,
-        harness: String,
-        paths: Vec<String>,
-        workspace: Option<WorkspaceHint>,
-    },
-    /// `add <name>` found no untracked local skill of that name, and MORE than one connected workspace
-    /// publishes it — the machine cannot pick between two teams' copies, so it names both spellings and
-    /// refuses. The `references` are the canonical host-qualified forms, shown VERBATIM (a workspace
-    /// address is a path-safe identifier, never a secret); they also ride the envelope's
-    /// `data.references` and one `next_actions` entry each. `global` preserves the refused
-    /// invocation's `-g` in every spelled follow-up, so the row lands in the scope that was asked.
-    #[error(
-        "'{name}' is published in {} of the workspaces this machine is connected to ({}) — name the one \
-         you mean (`{} <reference>`)",
-        references.len(), references.join(", "), add_spelling(*global)
-    )]
-    AmbiguousWorkspace {
-        name: String,
-        references: Vec<String>,
+        token: String,
+        verb: String,
+        candidates: Vec<TargetCandidate>,
         global: bool,
     },
     /// `add <skill>@<harness>` named a harness that holds no untracked skill of that name. The message
@@ -974,15 +978,19 @@ impl ClientError {
             ClientError::SourceMissing { .. } => "SOURCE_MISSING",
             ClientError::SkillExists => "SKILL_EXISTS",
             ClientError::AlreadyTracked { .. } => "ALREADY_TRACKED",
-            ClientError::AmbiguousName { .. } => "AMBIGUOUS_NAME",
+            // ONE code for the whole ambiguity family: the count-only form, the chooser every
+            // add-side resolution collapses into, and the workspace-resource one below all read
+            // AMBIGUOUS_NAME, so an agent branches once and reads `data.candidates` for the rest.
+            ClientError::AmbiguousName { .. } | ClientError::AmbiguousSource { .. } => {
+                "AMBIGUOUS_NAME"
+            }
             ClientError::NoSuchSkill { .. } => "NO_SUCH_SKILL",
             ClientError::NoUntrackedSkill { .. } => "NO_UNTRACKED_SKILL",
-            // The name-oriented twin of AlreadyTracked shares its code (agents branch the same on either).
-            ClientError::AlreadyTrackedName { .. } => "ALREADY_TRACKED",
+            // The name-oriented twins of AlreadyTracked share its code (agents branch the same on any).
+            ClientError::AlreadyTrackedName { .. } | ClientError::AlreadyAdded { .. } => {
+                "ALREADY_TRACKED"
+            }
             ClientError::HarnessMismatch { .. } => "HARNESS_MISMATCH",
-            ClientError::AmbiguousHarness { .. } => "AMBIGUOUS_HARNESS",
-            ClientError::AmbiguousScope { .. } => "AMBIGUOUS_SCOPE",
-            ClientError::AmbiguousWorkspace { .. } => "AMBIGUOUS_WORKSPACE",
             ClientError::HarnessNotFound(_) => "HARNESS_NOT_FOUND",
             ClientError::PathNotName { .. } => "PATH_NOT_NAME",
             ClientError::PlacementUnsupported { .. } => "PLACEMENT_UNSUPPORTED",
@@ -1077,13 +1085,10 @@ impl ClientError {
     /// The terminal outcome the agent branches on.
     pub(crate) fn outcome(&self) -> TerminalOutcome {
         match self {
-            // Every name-ambiguity shape (across tracked skills, across harnesses, across scopes) is the
-            // same terminal class — the agent disambiguates and retries.
+            // Every name-ambiguity shape (across tracked skills, and the one chooser every add-side
+            // ambiguity collapses into) is the same terminal class — the agent picks and retries.
             ClientError::AmbiguousName { .. }
-            | ClientError::AmbiguousHarness { .. }
-            | ClientError::AmbiguousScope { .. }
-            // A name several connected workspaces publish is the same class — pick a spelling, retry.
-            | ClientError::AmbiguousWorkspace { .. }
+            | ClientError::AmbiguousSource { .. }
             // A repo holding several skills (or several dirs of one name) is the same "disambiguate and
             // retry" class — as is a workspace-resource name matching across workspaces or kinds.
             | ClientError::AmbiguousSkillInRepo { .. }

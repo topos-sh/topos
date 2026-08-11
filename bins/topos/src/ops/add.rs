@@ -17,11 +17,13 @@ use topos_harness::DiscoveredPlacement;
 use topos_harness::registry::SkillScope;
 use topos_types::PERSISTED_SCHEMA_VERSION;
 use topos_types::persisted::{Lock, LockedFile, PlacementMap, SwapCapability, SyncState};
-use topos_types::results::{AddData, KeepAsYoursData, KeepReason, SkillOrigin, UntrackedEntry};
+use topos_types::results::{
+    AddData, KeepAsYoursData, KeepReason, ReceiptScope, SkillOrigin, UntrackedEntry,
+};
 
 use crate::bundle_kind::BundleKind;
 use crate::ctx::Ctx;
-use crate::error::{ClientError, TrackedBy, WorkspaceHint};
+use crate::error::{ClientError, TargetCandidate, TrackedBy};
 use crate::git_source::{GitTarballSource, RepoFile, extract_tree};
 use crate::id::SkillId;
 use crate::scan::{self, ScannedBundle};
@@ -380,6 +382,7 @@ fn unclaimed_record(
         mcp: None,
         dest: Vec::new(),
         dest_resolved: Vec::new(),
+        dest_change: None,
         display: None,
         // The receipt would otherwise read as a fresh adopt while carrying a version older than
         // this run: say what actually happened.
@@ -647,6 +650,7 @@ pub(crate) fn add_with_name(
         // Set by the `-a`/`--dest` arms at the composition root (the row's frozen destinations).
         dest: Vec::new(),
         dest_resolved: Vec::new(),
+        dest_change: None,
         display: None,
     })
 }
@@ -1547,9 +1551,9 @@ fn write_skill_dir(
 /// harness the active adapter does not recognize (whose bytes would otherwise be named from frontmatter).
 ///
 /// # Errors
-/// The name-resolution family — [`ClientError::AmbiguousHarness`] / [`ClientError::AmbiguousScope`] /
-/// [`ClientError::HarnessNotFound`] / [`ClientError::NoUntrackedSkill`] / [`ClientError::AlreadyTrackedName`]
-/// / [`ClientError::PathNotName`] — or a discovery read failure.
+/// The name-resolution family — [`ClientError::AmbiguousSource`] / [`ClientError::HarnessNotFound`] /
+/// [`ClientError::NoUntrackedSkill`] / [`ClientError::AlreadyTrackedName`] / [`ClientError::PathNotName`]
+/// — or a discovery read failure.
 pub(crate) fn resolve_add_target(
     ctx: &Ctx<'_>,
     roots: &super::DiscoveryRoots,
@@ -1569,20 +1573,14 @@ pub(crate) fn resolve_add_target(
     let untracked = super::list::discover_untracked(ctx, roots)?;
     match resolve_name(name, harness, &untracked) {
         NameResolution::Resolved(path) => Ok((std::path::PathBuf::from(path), name.to_owned())),
-        // No workspace disclosure here: this entry point serves the verbs that resolve a LOCAL
+        // No workspace candidates here: this entry point serves the verbs that resolve a LOCAL
         // directory (`publish`'s auto-add, `remove`'s path arm), where a team's copy of the name
-        // is not one of the ways out. The bare-`add` ladder ([`plan_bare_add`]) enriches it.
-        NameResolution::AmbiguousFolders(folders) => Err(ClientError::AmbiguousHarness {
-            name: name.to_owned(),
-            folders,
-            workspace: None,
-        }),
-        NameResolution::AmbiguousScope { harness, paths } => Err(ClientError::AmbiguousScope {
-            name: name.to_owned(),
-            harness,
-            paths,
-            workspace: None,
-        }),
+        // is not one of the ways out. The bare-`add` ladder ([`plan_bare_add`]) adds them.
+        // The chooser is spelled for the verb that refused — a `publish` never sends its reader
+        // off to a different command than the one they were running.
+        NameResolution::Ambiguous(paths) => {
+            Err(chooser(ctx, name, target, verb, false, Vec::new(), paths))
+        }
         // `@harness` matched no untracked placement. If the name is nowhere untracked but IS already
         // tracked, this is a re-add — report `ALREADY_TRACKED` the same as the bare form (so an agent
         // branches identically whether or not it typed `@harness`). Otherwise it's a genuine miss.
@@ -1834,7 +1832,7 @@ fn confirmed_cached_match(
         })
 }
 
-/// What a bare `add <name>` resolved to across BOTH namespaces (see [`plan_bare_add`]).
+/// What a bare `add <name>` resolved to (see [`plan_bare_add`]).
 #[derive(Debug)]
 pub(crate) enum BareAddPlan {
     /// A local untracked directory to adopt in place — with the workspace spelling to disclose on
@@ -1844,45 +1842,76 @@ pub(crate) enum BareAddPlan {
         name: String,
         published: Option<PublishedName>,
     },
-    /// Nothing local carries the name and exactly one connected workspace publishes it — the
-    /// canonical reference to record, through the ordinary reference arm.
-    Subscribe {
+    /// A REFERENCE to record through the ordinary reference arm: the bundle already stands in the
+    /// other scope under this name, or nothing local carries it and exactly one connected
+    /// workspace publishes it. `note` is the disclosure that add answer carries, when the way the
+    /// name resolved is worth stating.
+    Reference {
         reference: String,
-        workspace: String,
+        note: Option<String>,
     },
+    /// The bundle already stands in THIS scope, adopted from a folder, and the invocation named
+    /// destinations: nothing is adopted again and no version is minted — the row this file already
+    /// spells gains what was named. (A standing bundle with a REFERENCE origin needs no arm of its
+    /// own: its reference goes through [`BareAddPlan::Reference`], where the ordinary row write
+    /// extends it.)
+    ExtendFolderDest { dir: PathBuf },
 }
 
-/// Resolve a bare `add <name>` against the untracked local inventory AND the connected workspaces'
-/// catalogs — the two halves of the bare-name namespace.
+/// What the invocation SAID, beside the name it said it about.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct BareAdd<'a> {
+    /// The fully-bare gate: an `-s` member pick is about a repo, so a form carrying one never
+    /// resolves a name toward a workspace.
+    pub subscribe: bool,
+    /// The invocation named DESTINATIONS (`-a`/`--dest`). The act is then about where this
+    /// bundle's copies live, so a name that already stands here EXTENDS its row instead of
+    /// answering that it is already added — which would be true, and useless.
+    pub dest_selected: bool,
+    /// The invocation's `-g`: it picks which scope is "this" one, and rides every spelled
+    /// follow-up so a chosen line lands in the file that was asked for.
+    pub global: bool,
+    /// The global `--workspace` selector (an id): set, the catalog half probes only that session.
+    pub workspace: Option<&'a str>,
+}
+
+/// Resolve a bare `add <name>` — STANDING first, discovery second.
 ///
-/// The local half decides first and alone where it can: exactly one untracked directory adopts in
-/// place, as it always has. The workspace half is what a bare name could never reach before —
-/// when nothing local carries the name and exactly one workspace publishes it, the only thing that
-/// name can honestly mean is the team's copy, so the plan subscribes to it. Where BOTH namespaces
-/// answer, the local adopt still wins (the bytes in front of you are what you asked for) and the
-/// workspace spelling rides the receipt; where either is ambiguous, the refusal names every way
-/// out it knows, including the subscribe.
+/// A bare name is what someone calls a bundle they already know, so what they already have is the
+/// first thing consulted, in this order:
 ///
-/// `subscribe` is the fully-bare gate: an `-s`/`-a` selector narrows a local adopt, so a form
-/// carrying one keeps today's answers exactly. (A `<name>@<harness>` suffix cannot reach the
-/// subscribe arm at all — the harness filter resolves to its own typed refusals.) `global` is the
-/// invocation's `-g`, carried into every refusal so the spelled follow-ups keep its scope.
-/// `workspace` is the global `--workspace` selector (an id): set, the workspace half probes only
-/// that session — the selector picks which workspace an ambient verb means.
+/// 1. **Standing in the scope this invocation acts in** — the answer is [`ClientError::AlreadyAdded`],
+///    which reads like the receipt it mirrors. Several records of one name there is the chooser.
+///    An invocation naming DESTINATIONS asks a different question, so it gets a different answer:
+///    the standing row EXTENDS (`opts.dest_selected`), because "already added" says nothing about
+///    the folder the person just asked for.
+/// 2. **Standing in the OTHER scope** — the name resolves to that record's own reference and is
+///    recorded HERE, an ordinary add with nothing to ask. Reading the other scope is how a bare
+///    name resolves at all; the WRITE stays scope-strict, in the file this invocation named. Any
+///    `-a`/`--dest` rides that write exactly as it would on the spelled-out reference.
+/// 3. **Neither** — the two discovery namespaces: untracked directories on this machine and the
+///    connected workspaces' catalogs. Exactly ONE candidate across both acts; two or more is the
+///    chooser. Nothing at all is the ordinary not-found.
+///
+/// A `<name>@<harness>` suffix names a local folder by the agents that read it, so it skips the
+/// standing rungs entirely — it is a question about the inventory.
 ///
 /// # Errors
-/// The name-resolution family of [`resolve_add_target`], the two ambiguity shapes ENRICHED with
-/// the workspace disclosure, plus [`ClientError::AmbiguousWorkspace`] when several workspaces
-/// publish a name nothing local carries.
+/// [`ClientError::AlreadyAdded`] for a name this scope already records, [`ClientError::AmbiguousSource`]
+/// for every ambiguity, plus the name-resolution family of [`resolve_add_target`].
 pub(crate) fn plan_bare_add(
     ctx: &Ctx<'_>,
     connect: &super::reconcile::SessionConnect<'_>,
     roots: &super::DiscoveryRoots,
     target: &str,
-    subscribe: bool,
-    global: bool,
-    workspace: Option<&str>,
+    opts: BareAdd<'_>,
 ) -> Result<BareAddPlan, ClientError> {
+    let BareAdd {
+        subscribe,
+        global,
+        workspace,
+        ..
+    } = opts;
     let (name, harness) = split_target(target);
     // The same residual guard [`resolve_add_target`] carries: a `~`-prefixed bare token is never a
     // discovered skill NAME, so it gets path guidance rather than a confusing not-found — and the
@@ -1893,40 +1922,61 @@ pub(crate) fn plan_bare_add(
             verb: "add".to_owned(),
         });
     }
+    // THE STANDING RUNGS ANSWER A BARE NAME. Two forms say the question is about something else
+    // and skip them: `<name>@<harness>` asks the local INVENTORY which folder an agent reads, and
+    // `-s <member>` says the source is a REPO holding several skills. A standing record is neither
+    // — letting one answer silently dropped the selector the person typed.
+    if harness.is_none()
+        && subscribe
+        && let Some(plan) = plan_from_standing(ctx, name, opts)?
+    {
+        return Ok(plan);
+    }
     let untracked = super::list::discover_untracked(ctx, roots)?;
-    // The full fan-out probe (one catalog read per active session) runs only where its answer
-    // DECIDES something — the subscribe arm and the two ambiguity refusals. A clean local resolve
-    // stays a local act: its courtesy disclosure is bounded to at most one read, in
-    // [`confirmed_cached_match`], never the sum of every unreachable session's timeout.
+    // COUNTING candidates means knowing them all, so the arms that count run the full fan-out
+    // probe (one catalog read per active session). The narrowed forms that cannot reach a
+    // workspace at all still pay only the bounded courtesy read in [`confirmed_cached_match`].
     match resolve_name(name, harness, &untracked) {
-        NameResolution::Resolved(path) => Ok(BareAddPlan::Adopt {
+        // A form that cannot resolve toward a workspace: the one local directory is the answer,
+        // with the bounded courtesy disclosure.
+        NameResolution::Resolved(path) if !subscribe => Ok(BareAddPlan::Adopt {
             path: PathBuf::from(path),
             name: name.to_owned(),
             published: confirmed_cached_match(ctx, connect, name, workspace),
         }),
-        NameResolution::AmbiguousFolders(folders) => Err(ClientError::AmbiguousHarness {
-            name: name.to_owned(),
-            folders,
-            // Every discovered dir of this name is a candidate — the refusal lists the folders, not
-            // the skill dirs, so the identical-bytes proof reads the inventory itself.
-            workspace: workspace_hint(
-                &published_matches(ctx, connect, name, workspace),
-                &paths_named(name, &untracked),
+        NameResolution::Resolved(path) => {
+            let published = published_matches(ctx, connect, name, workspace);
+            if published.is_empty() {
+                return Ok(BareAddPlan::Adopt {
+                    path: PathBuf::from(path),
+                    name: name.to_owned(),
+                    // Nothing publishes it, so there is nothing to disclose.
+                    published: None,
+                });
+            }
+            // A folder in front of you and a team's copy of the same name are two different
+            // bundles, and picking the folder for you forks the team's process silently.
+            Err(chooser(
+                ctx,
+                name,
+                target,
+                "add",
                 global,
-            ),
-        }),
-        NameResolution::AmbiguousScope { harness, paths } => {
-            let workspace = workspace_hint(
-                &published_matches(ctx, connect, name, workspace),
-                &paths,
+                published.iter().map(|p| p.reference.clone()).collect(),
+                vec![path],
+            ))
+        }
+        NameResolution::Ambiguous(paths) => {
+            let published = published_matches(ctx, connect, name, workspace);
+            Err(chooser(
+                ctx,
+                name,
+                target,
+                "add",
                 global,
-            );
-            Err(ClientError::AmbiguousScope {
-                name: name.to_owned(),
-                harness,
+                published.iter().map(|p| p.reference.clone()).collect(),
                 paths,
-                workspace,
-            })
+            ))
         }
         NameResolution::HarnessNotFound { harness, available } => {
             if available.is_empty() && tracked_by_name(ctx, name)? {
@@ -1940,11 +1990,6 @@ pub(crate) fn plan_bare_add(
             }
         }
         NameResolution::NoMatch => {
-            if tracked_by_name(ctx, name)? {
-                return Err(ClientError::AlreadyTrackedName {
-                    name: name.to_owned(),
-                });
-            }
             if Path::new(name).exists() {
                 // A bare word that is a real cwd entry but no skill — the user likely meant a path.
                 return Err(ClientError::PathNotName {
@@ -1952,20 +1997,38 @@ pub(crate) fn plan_bare_add(
                     verb: "add".to_owned(),
                 });
             }
-            let published = published_matches(ctx, connect, name, workspace);
+            let published = if subscribe {
+                published_matches(ctx, connect, name, workspace)
+            } else {
+                Vec::new()
+            };
             match published.as_slice() {
-                [one] if subscribe => Ok(BareAddPlan::Subscribe {
+                [one] => Ok(BareAddPlan::Reference {
                     reference: one.reference.clone(),
-                    workspace: one.workspace.clone(),
+                    note: Some(format!(
+                        "resolved '{name}' to {} — no untracked skill of that name is on this \
+                         machine, and {} publishes it",
+                        one.reference, one.workspace
+                    )),
                 }),
                 // Several teams publish the name: naming one for the user would be a guess about
-                // whose process they meant. Both spellings, and the user picks.
-                [_, _, ..] if subscribe => Err(ClientError::AmbiguousWorkspace {
-                    name: name.to_owned(),
-                    references: published.iter().map(|p| p.reference.clone()).collect(),
+                // whose process they meant. Every spelling, and the user picks.
+                [_, _, ..] => Err(chooser(
+                    ctx,
+                    name,
+                    target,
+                    "add",
                     global,
+                    published.iter().map(|p| p.reference.clone()).collect(),
+                    Vec::new(),
+                )),
+                // Nothing discovery can offer. A form that SKIPPED the standing rungs (`-s`) can
+                // still be about a name this machine already tracks, and "no untracked skill of
+                // that name" would be a true sentence answering the wrong question.
+                [] if tracked_by_name(ctx, name)? => Err(ClientError::AlreadyTrackedName {
+                    name: name.to_owned(),
                 }),
-                _ => Err(ClientError::NoUntrackedSkill {
+                [] => Err(ClientError::NoUntrackedSkill {
                     name: name.to_owned(),
                 }),
             }
@@ -1973,43 +2036,389 @@ pub(crate) fn plan_bare_add(
     }
 }
 
-/// The same-name disclosure for a LOCAL ambiguity, or `None` when no connected workspace publishes
-/// the name. `identical` is claimed only on proof: exactly one reference, its live catalog digest
-/// in hand, and every local candidate scanning to that digest — an unreadable directory or a
-/// cache-only match leaves the weaker (still useful) disclosure standing.
-fn workspace_hint(
-    published: &[PublishedName],
-    candidates: &[String],
-    global: bool,
-) -> Option<WorkspaceHint> {
-    if published.is_empty() {
-        return None;
-    }
-    let served = match published {
-        [one] => one.bundle_digest.as_deref(),
-        _ => None,
+/// The DESTINATION-ONLY add: the folder-adopted bundle already stands in the scope this invocation
+/// acts in, and the invocation named where its copies should ALSO live. Nothing is adopted and no
+/// version is minted — the row this file already spells for that folder gains the destinations
+/// ([`super::manifest_edit::write_row`] extends them), and the caller's narrowed update lands the
+/// copies, exactly as it does on every other destination-carrying arm.
+///
+/// The row is found the way the original add wrote it: from the SAME source folder, so the key
+/// this write computes is the key that is already there. The RECORD is found the same way — by
+/// the folder, never by a name two bundles could share.
+///
+/// `Ok(None)` when no record in this scope claims the folder: it is not a re-add at all, and the
+/// caller adopts as it always would.
+///
+/// # Errors
+/// The selection's own resolution errors; a store read or manifest write failure.
+pub(crate) fn extend_folder_dest(
+    ctx: &Ctx<'_>,
+    scope: &super::manifest_edit::AddScope,
+    dir: &Path,
+    selection: &super::dest_select::Selection,
+) -> Result<Option<AddData>, ClientError> {
+    let sctx = super::pull::ctx_with_layout(ctx, &scope.layout);
+    let dir = &origin_dir(dir)?;
+    let Some(id) = tracked_skill_at(&sctx, dir)? else {
+        return Ok(None);
     };
-    let identical = served.is_some_and(|digest| {
-        !candidates.is_empty()
-            && candidates
-                .iter()
-                .all(|p| scan::scan(Path::new(p)).is_ok_and(|b| to_hex(&b.bundle_digest) == digest))
-    });
-    Some(WorkspaceHint {
-        references: published.iter().map(|p| p.reference.clone()).collect(),
-        identical,
-        global,
-    })
+    let Ok(sid) = SkillId::parse(&id) else {
+        return Ok(None);
+    };
+    let Some(lock) = doc::read_doc::<Lock>(sctx.fs, &sctx.layout.published(&sid).lock)? else {
+        return Ok(None);
+    };
+    // WHAT the bundle is decides the vocabulary its destinations are spelled in. The row already
+    // stands, so a folder that never placed anything is not a fail-closed case here: the same
+    // classifier the row writers use, read as the ordinary skill when nothing answers.
+    let kind =
+        crate::bundle_kind::classify(&sctx, sid.as_str(), &placements_of(&sctx, &sid)).or_skill();
+    let entries = if kind.is_mcp() {
+        selection.mcp_entries(scope.target.scope)?
+    } else {
+        selection.skill_entries(scope.target.scope)?
+    };
+    let mut data = AddData {
+        skill_id: Some(sid.into_string()),
+        name: lock.name,
+        version_id: Some(lock.base_commit),
+        bundle_digest: Some(lock.bundle_digest),
+        tracked: true,
+        harness: None,
+        harness_slug: None,
+        // Nothing was adopted, so no trigger was armed and no arming sweep rides this receipt.
+        currency: None,
+        triggers: Vec::new(),
+        origin: None,
+        source: Some(dir.display().to_string()),
+        manifest: None,
+        scope: None,
+        reference: None,
+        undo: Vec::new(),
+        governed_copy: None,
+        published_match: None,
+        mcp: None,
+        dest: entries.clone(),
+        dest_resolved: Vec::new(),
+        dest_change: None,
+        display: None,
+        note: None,
+    };
+    super::manifest_edit::note_added_path_kind_dest_in(
+        ctx,
+        &mut data,
+        &scope.target,
+        dir,
+        // The row already spells its own kind; naming it again writes the same field.
+        kind.tag().and(Some(kind)),
+        &entries,
+    )?;
+    Ok(Some(data))
 }
 
-/// Every discovered untracked directory carrying `name` — the local candidate set behind an
-/// identical-bytes proof for a refusal that lists harnesses rather than paths.
-fn paths_named(name: &str, untracked: &[UntrackedEntry]) -> Vec<String> {
-    untracked
-        .iter()
-        .filter(|u| u.name == name)
-        .map(|u| u.path.clone())
+/// A record's recorded placements — the second rung the kind classifier reads. An unreadable map
+/// is an empty set, which is what an unplaced record honestly is.
+fn placements_of(sctx: &Ctx<'_>, sid: &SkillId) -> Vec<String> {
+    crate::doc::read_map(sctx.fs, &sctx.layout.published(sid).map)
+        .ok()
+        .flatten()
+        .map(|m| m.placements)
+        .unwrap_or_default()
+}
+
+/// Rungs 1 and 2 of [`plan_bare_add`]: what the two manifest scopes' STORES already know this name
+/// to be. `Ok(None)` means neither scope has heard of it and discovery decides.
+///
+/// # Errors
+/// [`ClientError::AlreadyAdded`] (rung 1), [`ClientError::AmbiguousSource`] when either scope holds
+/// several records of the name, or a store read failure.
+fn plan_from_standing(
+    ctx: &Ctx<'_>,
+    name: &str,
+    opts: BareAdd<'_>,
+) -> Result<Option<BareAddPlan>, ClientError> {
+    let global = opts.global;
+    let here = standing_records(ctx, invoked_store(ctx, global).as_ref(), name)?;
+    if !here.is_empty() {
+        // ONE thing the answer can name, or none at all, is "already added"; two or more is the
+        // pick. A record whose source nothing on this machine can spell still COUNTS as standing
+        // — it is added, and saying so with no `source:` line beats saying it is not there.
+        //
+        // DEDUPED FIRST, then counted. Several records can share ONE source — a forge import
+        // lands a record per destination — and counting before the dedup called that ambiguous
+        // while the pick it then offered held a single line. The question is how many things the
+        // name could MEAN, which is how many distinct sources answer to it.
+        let named = spellable(&here);
+        if named.len() > 1 {
+            return Err(records_chooser(ctx, name, global, &named));
+        }
+        // DESTINATIONS were named: the question is where this bundle's copies live, not whether
+        // it is here. The row this file already spells gains them.
+        if opts.dest_selected
+            && let Some(one) = named.first()
+        {
+            return Ok(Some(
+                match one.origin.as_ref().expect("a spellable record") {
+                    RecordOrigin::Reference(reference) => BareAddPlan::Reference {
+                        reference: reference.clone(),
+                        note: None,
+                    },
+                    RecordOrigin::Folder(dir) => BareAddPlan::ExtendFolderDest { dir: dir.clone() },
+                },
+            ));
+        }
+        return Err(ClientError::AlreadyAdded {
+            name: name.to_owned(),
+            scope: if global {
+                ReceiptScope::Machine
+            } else {
+                ReceiptScope::Project
+            },
+            from: named.first().map(|r| r.token(ctx)),
+        });
+    }
+    let mut other: Vec<StandingRecord> = Vec::new();
+    for layout in other_stores(ctx, global) {
+        other.extend(standing_records(ctx, Some(&layout), name)?);
+    }
+    let other = spellable(&other);
+    match other.as_slice() {
+        // Nothing over there this add could re-spell: discovery gets its turn.
+        [] => Ok(None),
+        // The name means what the other scope already means by it: record THAT source here — an
+        // ordinary add through the door its shape belongs to.
+        [one] => Ok(Some(match &one.origin {
+            Some(RecordOrigin::Folder(dir)) => BareAddPlan::Adopt {
+                path: dir.clone(),
+                name: name.to_owned(),
+                // No courtesy probe: this add's source is not a guess, it is the record.
+                published: None,
+            },
+            Some(RecordOrigin::Reference(reference)) => BareAddPlan::Reference {
+                reference: reference.clone(),
+                note: None,
+            },
+            None => unreachable!("spellable() keeps only records with an origin"),
+        })),
+        several => Err(records_chooser(ctx, name, global, several)),
+    }
+}
+
+/// The DISTINCT sources standing under one name: the records an offered command can actually name,
+/// one per origin. Both halves matter — a record nothing can spell cannot appear on a runnable
+/// line, and several records of ONE source (a forge import lands one per destination) are one
+/// thing the name means, not an ambiguity between identical spellings.
+fn spellable(records: &[StandingRecord]) -> Vec<&StandingRecord> {
+    let mut out: Vec<&StandingRecord> = Vec::new();
+    for record in records.iter().filter(|r| r.origin.is_some()) {
+        if !out.iter().any(|kept| kept.origin == record.origin) {
+            out.push(record);
+        }
+    }
+    out
+}
+
+/// The STORE the invocation writes into, for reading purposes only — never created here (a scope
+/// with no store yet has tracked nothing, which is the honest answer). `None` when no `topos.toml`
+/// covers this folder at all: the add below will refuse on its own terms.
+fn invoked_store(ctx: &Ctx<'_>, global: bool) -> Option<crate::sidecar::Layout> {
+    if global {
+        return Some(ctx.layout.clone());
+    }
+    let target = super::manifest_edit::project_target(ctx).ok().flatten()?;
+    crate::sidecar::existing_project_store(ctx.fs, &target.dir)
+}
+
+/// The stores the invocation does NOT write, nearest first — the machine store for a project
+/// invocation, the cwd chain's project stores for `-g`. Reading these is how a bare name resolves;
+/// nothing here is ever written.
+fn other_stores(ctx: &Ctx<'_>, global: bool) -> Vec<crate::sidecar::Layout> {
+    if !global {
+        return vec![ctx.layout.clone()];
+    }
+    let Some(roots) = &ctx.roots else {
+        return Vec::new();
+    };
+    let Some(cwd) = roots.cwd.as_deref() else {
+        return Vec::new();
+    };
+    crate::manifest::scopes::manifest_dirs_up(ctx.fs, cwd, Some(&roots.home))
+        .into_iter()
+        .filter_map(|dir| crate::sidecar::existing_project_store(ctx.fs, &dir))
         .collect()
+}
+
+/// WHERE a tracked record's bytes come from — the three things a bundle can be, and the ONE fact
+/// that decides both how it is spelled and which door re-adds it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RecordOrigin {
+    /// A governed reference: a workspace bundle (`<host>/<ws>/<name>`) or a forge import
+    /// (`github.com/<owner>/<repo>/<name>`). Re-added through the reference arm.
+    Reference(String),
+    /// A folder on this machine, adopted in place. Re-added through the path arm.
+    Folder(PathBuf),
+}
+
+/// One record standing under a bare name. `origin` is `None` for a record nothing on this machine
+/// can name — it still counts as standing, it just cannot appear on a runnable line.
+struct StandingRecord {
+    origin: Option<RecordOrigin>,
+}
+
+impl StandingRecord {
+    /// The argv token an offered command carries, and the `source:` line of an answer about this
+    /// record — a reference verbatim, a folder in the one spelling that stays portable.
+    ///
+    /// # Panics
+    /// Only ever called on a record [`spellable`] kept.
+    fn token(&self, ctx: &Ctx<'_>) -> String {
+        match self.origin.as_ref().expect("a spellable record") {
+            RecordOrigin::Reference(r) => r.clone(),
+            RecordOrigin::Folder(dir) => spell_home(ctx, dir),
+        }
+    }
+}
+
+/// Every record in ONE store carrying `name`, each resolved to where its bytes come from.
+///
+/// # Errors
+/// A store read failure.
+fn standing_records(
+    ctx: &Ctx<'_>,
+    layout: Option<&crate::sidecar::Layout>,
+    name: &str,
+) -> Result<Vec<StandingRecord>, ClientError> {
+    let Some(layout) = layout else {
+        return Ok(Vec::new());
+    };
+    let sctx = super::pull::ctx_with_layout(ctx, layout);
+    let mut out = Vec::new();
+    for (id, lock) in super::skills_named(&sctx, name)? {
+        out.push(StandingRecord {
+            origin: record_origin(ctx, &sctx, &id, &lock),
+        });
+    }
+    Ok(out)
+}
+
+/// Where a tracked record came from — the one join every surface that has to name a record's
+/// origin makes: a DELIVERED record is its workspace's canonical spelling, a forge import is its
+/// `<host>/<owner>/<repo>/<skill>` key, and a locally adopted one is the folder its bytes live in.
+/// `None` where none of the three answers, which is a record nothing on this machine can name.
+///
+/// The workspace join comes from the delivery cache, which is machine-wide (in the HOME sidecar):
+/// a project store's own layout is the checkout's, so that read goes through the outer ctx. A
+/// WITHDRAWN row is not an answer — the workspace does not serve that name any more, so a command
+/// spelling it would refuse, and the next rung gets its chance.
+fn record_origin(ctx: &Ctx<'_>, sctx: &Ctx<'_>, id: &SkillId, lock: &Lock) -> Option<RecordOrigin> {
+    let cache = crate::sync_status::read(ctx.fs, &ctx.layout).unwrap_or_default();
+    for entry in cache.workspaces.values() {
+        if let (Some(host), Some(workspace)) =
+            (entry.host.as_deref(), entry.workspace_name.as_deref())
+            && entry
+                .delivered
+                .get(id.as_str())
+                .is_some_and(|d| !d.withdrawn)
+        {
+            return Some(RecordOrigin::Reference(format!(
+                "{host}/{workspace}/{}",
+                lock.name
+            )));
+        }
+    }
+    if let Ok(Some(origin)) = doc::read_doc::<OriginDoc>(sctx.fs, &sctx.layout.published(id).origin)
+    {
+        return Some(RecordOrigin::Reference(format!(
+            "{}/{}",
+            origin.origin.source, lock.name
+        )));
+    }
+    let map = crate::doc::read_map(sctx.fs, &sctx.layout.published(id).map)
+        .ok()
+        .flatten()?;
+    map.placements
+        .iter()
+        .zip(&map.placement_state)
+        .find(|(_, st)| st.adopted_source)
+        // A folder that is GONE names nothing: an offered `topos add <that folder>` would refuse
+        // as a missing source, and a `source:` line pointing at it would send a reader somewhere
+        // there is nothing to look at. The record still stands — it just cannot be spelled.
+        .filter(|(dir, _)| ctx.fs.exists(Path::new(dir)))
+        .map(|(dir, _)| RecordOrigin::Folder(PathBuf::from(dir)))
+}
+
+/// The chooser over STANDING records — the same shape every other add ambiguity ends in, with
+/// each record's own re-add spelling as one line.
+fn records_chooser(
+    ctx: &Ctx<'_>,
+    name: &str,
+    global: bool,
+    records: &[&StandingRecord],
+) -> ClientError {
+    let mut remote = Vec::new();
+    let mut local = Vec::new();
+    for record in records {
+        match record.origin {
+            Some(RecordOrigin::Reference(_)) => remote.push(record.token(ctx)),
+            Some(RecordOrigin::Folder(_)) => local.push(record.token(ctx)),
+            None => {}
+        }
+    }
+    // The standing rungs are only reached by a BARE name (an `@harness` suffix skips them), so
+    // the name IS the token the person typed.
+    chooser(ctx, name, name, "add", global, remote, local)
+}
+
+/// THE ambiguity answer, built once for every surface that meets one: remote spellings first, then
+/// local paths, each group sorted and deduped, every line one runnable command.
+///
+/// `local` arrives as ABSOLUTE directories and stays absolute in argv — a `~/` prefix is a SHELL's
+/// to expand, and this binary resolves a source path itself, so a home-abbreviated token would
+/// name nothing at all. The abbreviation is made here once, as a DISPLAY carried beside the argv
+/// form, and reaches the printed line alone.
+///
+/// `token` is the positional as the person typed it, so a rebuilt command can swap exactly that
+/// one and leave the rest of their invocation standing.
+fn chooser(
+    ctx: &Ctx<'_>,
+    name: &str,
+    token: &str,
+    verb: &str,
+    global: bool,
+    remote: Vec<String>,
+    local: Vec<String>,
+) -> ClientError {
+    let mut remote = remote;
+    remote.sort();
+    remote.dedup();
+    let mut local = local;
+    local.sort();
+    local.dedup();
+    let mut candidates: Vec<crate::error::TargetCandidate> =
+        remote.into_iter().map(TargetCandidate::plain).collect();
+    candidates.extend(local.into_iter().map(|dir| {
+        let display = spell_home(ctx, Path::new(&dir));
+        TargetCandidate::folder(dir, display)
+    }));
+    ClientError::AmbiguousSource {
+        name: name.to_owned(),
+        token: token.to_owned(),
+        verb: verb.to_owned(),
+        candidates,
+        global,
+    }
+}
+
+/// A folder as a PRINTED line spells it: `~/`-abbreviated under this machine's home, absolute
+/// otherwise. Display only — never argv (see [`chooser`]).
+fn spell_home(ctx: &Ctx<'_>, dir: &Path) -> String {
+    let Some(roots) = &ctx.roots else {
+        return dir.display().to_string();
+    };
+    match dir.strip_prefix(&roots.home) {
+        Ok(rest) => format!("~/{}", rest.display()),
+        Err(_) => dir.display().to_string(),
+    }
 }
 
 /// The outcome of matching a name (+ optional harness slug) against the discovered untracked inventory —
@@ -2026,12 +2435,10 @@ enum NameResolution {
         harness: String,
         available: Vec<String>,
     },
-    /// The name sits in more than one FOLDER — the folder paths the caller picks between (a skills
-    /// folder holds one dir per name, so the folders are distinct).
-    AmbiguousFolders(Vec<String>),
-    /// `@harness` was given and that agent reads more than one folder holding the name — the slug
-    /// cannot split them, so the caller picks one by path.
-    AmbiguousScope { harness: String, paths: Vec<String> },
+    /// The name sits in more than one untracked DIRECTORY — the paths the caller picks between.
+    /// One shape whether or not an `@harness` filter narrowed the set: the way out is the same
+    /// either way, which is to name one of them.
+    Ambiguous(Vec<String>),
 }
 
 /// Split `<skill>[@<harness>]` on the LAST `@` (a harness slug never contains one). A degenerate token
@@ -2044,38 +2451,28 @@ pub(crate) fn split_target(target: &str) -> (&str, Option<&str>) {
     }
 }
 
-/// The pure matcher over the discovered inventory. `harness` selects the entries whose folder that
-/// agent READS (the registry's one attribution answer, carried on every entry); without it, a
-/// same-name collision is [`NameResolution::AmbiguousFolders`], and a slug that still spans folders is
-/// [`NameResolution::AmbiguousScope`].
+/// The pure matcher over the discovered inventory. `harness` NARROWS the entries to the ones whose
+/// folder that agent READS (the registry's one attribution answer, carried on every entry); the
+/// counting that follows is identical with or without it, because the answer to "which of these
+/// did you mean" is the same list of directories either way.
 fn resolve_name(name: &str, harness: Option<&str>, untracked: &[UntrackedEntry]) -> NameResolution {
     let by_name: Vec<&UntrackedEntry> = untracked.iter().filter(|u| u.name == name).collect();
-    match harness {
-        Some(h) => {
-            let in_h: Vec<&UntrackedEntry> = by_name
-                .iter()
-                .copied()
-                .filter(|u| u.readers.iter().any(|slug| slug == h))
-                .collect();
-            match in_h.as_slice() {
-                [] => NameResolution::HarnessNotFound {
-                    harness: h.to_owned(),
-                    available: distinct_sorted_readers(&by_name),
-                },
-                [one] => NameResolution::Resolved(one.path.clone()),
-                many => NameResolution::AmbiguousScope {
-                    harness: h.to_owned(),
-                    paths: many.iter().map(|u| u.path.clone()).collect(),
-                },
-            }
-        }
-        None => match by_name.as_slice() {
-            [] => NameResolution::NoMatch,
-            [one] => NameResolution::Resolved(one.path.clone()),
-            many => {
-                NameResolution::AmbiguousFolders(many.iter().map(|u| u.folder.clone()).collect())
-            }
+    let matched: Vec<&UntrackedEntry> = match harness {
+        Some(h) => by_name
+            .iter()
+            .copied()
+            .filter(|u| u.readers.iter().any(|slug| slug == h))
+            .collect(),
+        None => by_name.clone(),
+    };
+    match (matched.as_slice(), harness) {
+        ([], Some(h)) => NameResolution::HarnessNotFound {
+            harness: h.to_owned(),
+            available: distinct_sorted_readers(&by_name),
         },
+        ([], None) => NameResolution::NoMatch,
+        ([one], _) => NameResolution::Resolved(one.path.clone()),
+        (many, _) => NameResolution::Ambiguous(many.iter().map(|u| u.path.clone()).collect()),
     }
 }
 
@@ -2409,12 +2806,12 @@ mod tests {
             ue("deploy", &["claude-code"], "/h/.claude/skills/deploy"),
             ue("deploy", &["cursor"], "/h/.cursor/skills/deploy"),
         ];
-        // Bare name → ambiguous across the two FOLDERS (what the caller picks between).
+        // Bare name → ambiguous across the two DIRECTORIES, which is what a printed line names.
         assert_eq!(
             resolve_name("deploy", None, &inv),
-            NameResolution::AmbiguousFolders(vec![
-                "/h/.claude/skills".to_owned(),
-                "/h/.cursor/skills".to_owned()
+            NameResolution::Ambiguous(vec![
+                "/h/.claude/skills/deploy".to_owned(),
+                "/h/.cursor/skills/deploy".to_owned()
             ])
         );
         // `@harness` picks the folder that agent reads.
@@ -2427,29 +2824,18 @@ mod tests {
     #[test]
     fn a_slug_reading_two_folders_cannot_split_them() {
         // One agent reads both folders (its user dir and this project's dir) — `@harness` selects
-        // both, so the caller picks by path.
+        // both, so the caller picks by path. Narrowed or not, the answer is the same shape: the
+        // directories that are still on the table.
         let inv = vec![
             ue("deploy", &["claude-code"], "/h/.claude/skills/deploy"),
             ue("deploy", &["claude-code"], "/proj/.claude/skills/deploy"),
         ];
-        assert_eq!(
-            resolve_name("deploy", Some("claude-code"), &inv),
-            NameResolution::AmbiguousScope {
-                harness: "claude-code".to_owned(),
-                paths: vec![
-                    "/h/.claude/skills/deploy".to_owned(),
-                    "/proj/.claude/skills/deploy".to_owned(),
-                ],
-            }
-        );
-        // Bare, it is still just two folders.
-        assert_eq!(
-            resolve_name("deploy", None, &inv),
-            NameResolution::AmbiguousFolders(vec![
-                "/h/.claude/skills".to_owned(),
-                "/proj/.claude/skills".to_owned()
-            ])
-        );
+        let both = NameResolution::Ambiguous(vec![
+            "/h/.claude/skills/deploy".to_owned(),
+            "/proj/.claude/skills/deploy".to_owned(),
+        ]);
+        assert_eq!(resolve_name("deploy", Some("claude-code"), &inv), both);
+        assert_eq!(resolve_name("deploy", None, &inv), both);
     }
 
     #[test]
@@ -2512,6 +2898,33 @@ mod tests {
         assert!(!is_path_shaped("deploy"));
     }
 
+    #[test]
+    fn standing_records_of_one_source_count_once_and_unnameable_ones_never_count() {
+        let record = |origin: Option<RecordOrigin>| StandingRecord { origin };
+        let reference = |r: &str| Some(RecordOrigin::Reference(r.to_owned()));
+        // A forge import lands one record PER DESTINATION. They are one thing the name means, not
+        // an ambiguity between two identical spellings — counting before the dedup called it
+        // ambiguous and then offered a "pick one" list holding a single line.
+        let same_source = vec![
+            record(reference("github.com/acme/tools/deploy")),
+            record(reference("github.com/acme/tools/deploy")),
+        ];
+        assert_eq!(spellable(&same_source).len(), 1);
+        // Two GENUINELY different sources under one name stay two.
+        let two_sources = vec![
+            record(reference("github.com/acme/tools/deploy")),
+            record(Some(RecordOrigin::Folder(PathBuf::from(
+                "/h/skills/deploy",
+            )))),
+        ];
+        assert_eq!(spellable(&two_sources).len(), 2);
+        // A record nothing can name is never offered — a printed line has to be runnable — but it
+        // is not counted away either: its caller still knows the name STANDS.
+        let unnameable = vec![record(None), record(reference("acme.test/eng/deploy"))];
+        assert_eq!(spellable(&unnameable).len(), 1);
+        assert!(spellable(&[record(None)]).is_empty());
+    }
+
     /// One probed workspace match; `digest` `None` is the cache-only shape (no live catalog read).
     fn pn(host: &str, workspace: &str, name: &str, digest: Option<&str>) -> PublishedName {
         PublishedName {
@@ -2521,65 +2934,6 @@ mod tests {
             reference: format!("{host}/{workspace}/{name}"),
             bundle_digest: digest.map(str::to_owned),
         }
-    }
-
-    #[test]
-    fn paths_named_collects_every_local_candidate_of_one_name() {
-        let inv = vec![
-            ue("deploy", &["claude-code"], "/h/.claude/skills/deploy"),
-            ue("deploy", &["cursor"], "/h/.cursor/skills/deploy"),
-            ue("lint", &["claude-code"], "/h/.claude/skills/lint"),
-        ];
-        assert_eq!(
-            paths_named("deploy", &inv),
-            vec![
-                "/h/.claude/skills/deploy".to_owned(),
-                "/h/.cursor/skills/deploy".to_owned()
-            ]
-        );
-        assert!(paths_named("ghost", &inv).is_empty());
-    }
-
-    #[test]
-    fn the_workspace_hint_claims_identical_bytes_only_on_proof() {
-        // No workspace publishes the name: the two ambiguity refusals stay exactly as they were.
-        assert!(workspace_hint(&[], &["/h/.claude/skills/deploy".to_owned()], false).is_none());
-        // A CACHE-ONLY match carries no digest — the spelling is disclosed, the bytes are not
-        // claimed (the served version id it does hold is a different hash entirely).
-        let cached = workspace_hint(
-            &[pn("acme.test", "eng", "deploy", None)],
-            &["/h/.claude/skills/deploy".to_owned()],
-            false,
-        )
-        .expect("a match is disclosed");
-        assert_eq!(cached.references, vec!["acme.test/eng/deploy".to_owned()]);
-        assert!(!cached.identical);
-        // SEVERAL workspaces: no single version to be identical TO, whatever digests are in hand.
-        let several = workspace_hint(
-            &[
-                pn("acme.test", "eng", "deploy", Some("aa")),
-                pn("acme.test", "ops", "deploy", Some("aa")),
-            ],
-            &["/h/.claude/skills/deploy".to_owned()],
-            false,
-        )
-        .expect("both spellings are disclosed");
-        assert_eq!(several.references.len(), 2);
-        assert!(!several.identical);
-        // A candidate directory that cannot be scanned (it does not exist) proves nothing.
-        let unreadable = workspace_hint(
-            &[pn("acme.test", "eng", "deploy", Some("aa"))],
-            &["/nonexistent/deploy".to_owned()],
-            false,
-        )
-        .expect("the spelling is still disclosed");
-        assert!(!unreadable.identical);
-        // No candidates at all is not "every candidate agrees" — it is nothing to compare.
-        assert!(
-            !workspace_hint(&[pn("acme.test", "eng", "deploy", Some("aa"))], &[], false)
-                .expect("disclosed")
-                .identical
-        );
     }
 
     #[test]

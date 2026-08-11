@@ -365,7 +365,7 @@ fn add_workspace(
                 "the feed already delivers it — this row pins what this machine takes".to_owned(),
             );
         }
-        shape_dest_receipt(ctx, &mut data, &resolved, &dest_entries, true);
+        shape_dest_receipt(ctx, &mut data, &resolved, &dest_entries);
         return Ok(finish_workspace(
             ctx, connect, data, &resolved, &target, true,
         ));
@@ -375,7 +375,7 @@ fn add_workspace(
         return Err(ClientError::NoManifest);
     };
     medit::write_row(ctx, &mut data, &target, &resolved.canonical, &value)?;
-    shape_dest_receipt(ctx, &mut data, &resolved, &dest_entries, false);
+    shape_dest_receipt(ctx, &mut data, &resolved, &dest_entries);
     Ok(finish_workspace(
         ctx, connect, data, &resolved, &target, false,
     ))
@@ -390,7 +390,6 @@ fn shape_dest_receipt(
     data: &mut AddData,
     resolved: &Resolved,
     dest_entries: &[String],
-    global: bool,
 ) {
     if dest_entries.is_empty() {
         return;
@@ -402,15 +401,14 @@ fn shape_dest_receipt(
         &resolved.session.workspace_name,
         &resolved.name,
     ));
-    // The fresh-row undo (`remove <canonical reference>`) re-spells as the bare name — the
-    // receipt's promised inverse, byte for byte.
-    if data.undo == medit::undo_add(&resolved.canonical, global) {
-        let mut undo = vec!["topos".to_owned(), "remove".to_owned()];
-        if global {
-            undo.push("-g".to_owned());
-        }
-        undo.push(resolved.name.clone());
-        data.undo = undo;
+    // A REMOVE undo names its target as the bare name — the receipt's promised inverse, byte for
+    // byte, whether the inverse drops the whole row (a fresh add) or subtracts just the
+    // destinations this add added (an extend). Only a remove: an `add`-shaped restore undo means
+    // the row's PRIOR value, and a bare name would resolve to the record now standing instead.
+    if data.undo.get(1).map(String::as_str) == Some("remove")
+        && let Some(slot) = data.undo.iter().position(|t| *t == resolved.canonical)
+    {
+        data.undo[slot] = resolved.name.clone();
     }
 }
 
@@ -657,6 +655,7 @@ fn set_data(name: &str) -> AddData {
         mcp: None,
         dest: Vec::new(),
         dest_resolved: Vec::new(),
+        dest_change: None,
         display: None,
     }
 }
@@ -1425,7 +1424,7 @@ pub(crate) enum GovernedOutcome {
 pub(crate) fn find_path_line(
     ctx: &Ctx<'_>,
     skill_dirs: &[std::path::PathBuf],
-) -> Result<Option<(std::path::PathBuf, String)>, ClientError> {
+) -> Result<Option<(std::path::PathBuf, crate::manifest::scopes::PlanRow)>, ClientError> {
     // Canonicalize the placement dirs once (macOS `/var` → `/private/var`); a dir that no longer
     // exists keeps its lexical form.
     let dirs: Vec<std::path::PathBuf> = skill_dirs
@@ -1451,7 +1450,7 @@ pub(crate) fn find_path_line(
             dirs.contains(&resolved)
         });
         let Some(row) = hit else { continue };
-        return Ok(Some((path, row.reference.clone())));
+        return Ok(Some((path, row.clone())));
     }
     Ok(None)
 }
@@ -1503,6 +1502,13 @@ pub(crate) fn path_row_kind(
 /// act. The match is by RESOLVED PATH, never by name (two dirs may share a basename); an
 /// already-present canonical row keeps its own value.
 ///
+/// THE ROW'S SETTINGS SURVIVE THE TRANSFER. Governance moves; local state does not. A path row
+/// frozen to two destinations is the person's standing decision about where this machine puts the
+/// bytes, and the workspace taking over the VERSION history says nothing about that — so `dest`
+/// rides onto the new row and the next reconcile plans the same folders. The fields that were
+/// about the LOCAL folder do not ride: `kind` is catalog-borne once a workspace serves the bundle,
+/// and `name` is the row key's own leaf now.
+///
 /// LOCK, THEN RESOLVE. The row this rewrite acts on is a decision read FROM a file, and it is
 /// only true of the file the writer lock now guards — so the probe that names the file runs
 /// first (a lock needs a path), the lock is taken, and the row is RE-RESOLVED under it. A row a
@@ -1514,6 +1520,20 @@ pub(crate) fn path_row_kind(
 ///
 /// # Errors
 /// A manifest read/write failure.
+/// The value the governed row takes over from the path row it replaces: the placement freeze, and
+/// only that. A workspace bundle's legal fields are `version` / `dest` / `name`, and of those only
+/// `dest` is a LOCAL decision — the version is now the workspace's to serve, and the name is the
+/// key. No freeze at all leaves the plain `"*"` this rewrite has always written.
+fn carried_value(row: &crate::manifest::scopes::PlanRow) -> EntryValue {
+    match row.fields().dest.filter(|d| !d.is_empty()) {
+        Some(dest) => EntryValue::Fields(crate::manifest::document::EntryFields {
+            dest: Some(dest),
+            ..Default::default()
+        }),
+        None => EntryValue::Star,
+    }
+}
+
 pub(crate) fn rewrite_to_governed(
     ctx: &Ctx<'_>,
     skill_name: &str,
@@ -1532,12 +1552,13 @@ pub(crate) fn rewrite_to_governed(
         let _guard = medit::lock_manifest(ctx, &path)?;
         // RE-RESOLVE under the lock: the unlocked probe above only chose which file to lock.
         let found = find_path_line(ctx, skill_dirs)?;
-        let Some((found_path, from)) = found else {
+        let Some((found_path, row)) = found else {
             // The row is gone — a completed concurrent removal. Write nothing.
             return Ok(GovernedOutcome::RowRemoved {
                 manifest: path.display().to_string(),
             });
         };
+        let from = row.reference.clone();
         if found_path != path {
             // The row moved to a different file (removed here, spelled there) — lock THAT one.
             path = found_path;
@@ -1559,7 +1580,7 @@ pub(crate) fn rewrite_to_governed(
         editor.remove_row(&from);
         if !already_governed {
             editor
-                .set_row(&canonical, &EntryValue::Star)
+                .set_row(&canonical, &carried_value(&row))
                 .map_err(|e| ClientError::InvalidArgument(e.message))?;
         }
         match editor.write(ctx.fs, &path) {

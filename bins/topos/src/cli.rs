@@ -213,8 +213,9 @@ pub(crate) enum Command {
     /// `-a <agent>` (repeatable) installs it for just those agents, and `--dest <folder>`
     /// (repeatable) installs into an exact folder — together they freeze the row to exactly
     /// those destinations, recorded in the file so updates keep landing there. For an MCP
-    /// source `-a` picks whose config file gets the entry. Re-adding a source with `-a`/`--dest`
-    /// replaces its recorded destinations with the new set.
+    /// source `-a` picks whose config file gets the entry. Adding `-a`/`--dest` to something you
+    /// already have EXTENDS its destinations: the copies it already has stay, and the new ones
+    /// are added. To take a destination away, use `remove -a`/`--dest`.
     Add {
         /// What to add: a workspace skill, channel, or feed; a local folder; or a GitHub repo.
         source: String,

@@ -513,10 +513,10 @@ pub(crate) fn publish_describe(
                 .map(std::path::PathBuf::from)
                 .collect::<Vec<_>>(),
         )? {
-            Some((path, from)) => (
+            Some((path, row)) => (
                 Some(path.display().to_string()),
                 Some(format!("{}/{}/{skill_name}", l.host, l.workspace_name)),
-                Some(from),
+                Some(row.reference),
             ),
             None => (None, None, None),
         },

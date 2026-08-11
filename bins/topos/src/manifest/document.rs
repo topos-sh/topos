@@ -97,6 +97,20 @@ pub(crate) enum EntryValue {
 }
 
 impl EntryValue {
+    /// The value as FIELDS — a plain version string reads as `version` alone, and the two
+    /// value-only spellings as nothing at all. The one place a value is widened to the table form
+    /// every field-reading caller wants.
+    pub(crate) fn fields(&self) -> EntryFields {
+        match self {
+            EntryValue::Fields(f) => f.clone(),
+            EntryValue::Pin(p) => EntryFields {
+                version: Some(p.clone()),
+                ..EntryFields::default()
+            },
+            EntryValue::Star | EntryValue::Off => EntryFields::default(),
+        }
+    }
+
     /// The bundle kind this value DECLARES, against the closed vocabulary: an absent `kind` field
     /// (and every non-table spelling) is the default skill; `None` means the row names a kind this
     /// build does not own, which is not a skill either.

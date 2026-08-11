@@ -46,7 +46,7 @@
 
 use std::path::{Path, PathBuf};
 
-use topos_types::results::{AddData, RemoveData, RemoveItem, RemoveKind};
+use topos_types::results::{AddData, DestChange, RemoveData, RemoveItem, RemoveKind};
 
 use crate::bundle_kind::BundleKind;
 use crate::ctx::Ctx;
@@ -499,6 +499,10 @@ pub(super) fn undo_add(reference: &str, global: bool) -> Vec<String> {
 ///   for a prior pin; a prior fields table has no single restoring command, so no undo is
 ///   offered and the note says why (no undo beats a wrong one).
 ///
+/// DESTINATIONS EXTEND, they never replace ([`extend_dest`]): `-a`/`--dest` on a row that already
+/// names destinations ADDS to them, and the undo subtracts only what this add put there.
+/// Narrowing is `remove -a`/`--dest`, and a hand edit of the file still replaces outright.
+///
 /// # Errors
 /// [`ClientError::InvalidArgument`] when the row is illegal for the file (the editor's own typed
 /// refusal — e.g. a feed row while its grouping section stands); a filesystem failure.
@@ -525,8 +529,11 @@ pub(super) fn write_row(
     // folder the caller already resolved (canonical, links followed) — never overwritten here,
     // because the row's `./…` spelling means nothing away from the file that holds it.
     data.source.get_or_insert_with(|| reference.to_owned());
+    let (value, extend) = extend_dest(ctx, target, &data.name, reference, prior.as_ref(), value)?;
+    let value = &value;
     if prior.as_ref() == Some(value) {
-        // The redundancy disclosure: the file already spells exactly this row.
+        // The redundancy disclosure: the file already spells exactly this row — which is also how
+        // a `-a` naming only destinations the row already has says that it changed nothing.
         data.undo = Vec::new();
         push_note(
             data,
@@ -538,6 +545,35 @@ pub(super) fn write_row(
         .set_row(reference, value)
         .map_err(|e| ClientError::InvalidArgument(e.message))?;
     editor.write(ctx.fs, &target.path)?;
+    // An EXTEND is not a replace, so it does not read as one: the row kept everything it had and
+    // the receipt leads with the destinations it gained.
+    //
+    // THE INVERSE IS OFFERED ONLY WHERE IT VERIFIABLY RESTORES. Subtracting the new entries puts
+    // a row that ALREADY named destinations back exactly as it was. A row that named none was
+    // reaching every agent, and this add FROZE it — subtraction would leave a frozen row, so the
+    // inverse is the prior value's own restore (`"*"`, or the pin it carried), and where no single
+    // command spells the prior value there is no undo at all.
+    if let Some(extend) = extend {
+        data.undo = match (extend.froze, &prior) {
+            (false, _) => undo_dest_add(reference, global, &extend.change.added),
+            (true, Some(EntryValue::Star)) => restore_add(reference, None, global),
+            (true, Some(EntryValue::Pin(p))) => restore_add(reference, Some(p), global),
+            (true, _) => Vec::new(),
+        };
+        data.dest_change = Some(extend.change);
+        if data.undo.is_empty() {
+            push_note(
+                data,
+                format!(
+                    "'{}' reached every agent through a row no single command re-spells — no undo \
+                     is offered; edit {} by hand to put it back",
+                    data.name,
+                    target.path.display()
+                ),
+            );
+        }
+        return Ok(());
+    }
     match &prior {
         None => {
             data.undo = undo_add(reference, global);
@@ -575,6 +611,178 @@ pub(super) fn write_row(
         }
     }
     Ok(())
+}
+
+/// DESTINATIONS EXTEND. A `-a`/`--dest` add over a standing row unions its entries onto what the
+/// row already names, kind-correct array by kind-correct array (`dest` for a bundle's folders or
+/// an mcp bundle's config files, `mcp_dest` for a channel's mcp members) and preserving the file's
+/// own entry order — appending is the only edit; nothing already recorded is dropped.
+///
+/// A row that named NO destinations reached every agent, so freezing it to the new entry alone
+/// would be a silent narrowing. Its CURRENT resolved set is materialized first (the mirror of
+/// remove's own narrow) and the new entries appended, and the receipt names the whole set.
+/// Nothing to materialize — a row with no copies placed yet, a channel, a scope with no store —
+/// leaves the new entries as the whole set, which is what the add asked for.
+///
+/// AN `"off"` SWITCH IS NOT A DESTINATION SET. It is the row's own negation — the bundle is not
+/// delivered here at all — so an add over one is a re-activation, never an extend, and it takes
+/// the ordinary replaced-prior path whose answer already says no single command restores an
+/// `"off"`. Calling it an extend advertised `remove --dest <new>` as the inverse, and that removes
+/// the last destination, drops the row, and resumes the feed EVERYWHERE — the opposite of the
+/// state it claimed to restore.
+///
+/// Returns the value to write and, when this WAS a destination-only act over a standing row, what
+/// it changed.
+///
+/// # Errors
+/// A store read failure while resolving the current destination set.
+fn extend_dest(
+    ctx: &Ctx<'_>,
+    target: &EditTarget,
+    name: &str,
+    reference: &str,
+    prior: Option<&EntryValue>,
+    value: &EntryValue,
+) -> Result<(EntryValue, Option<DestExtend>), ClientError> {
+    let (Some(prior), EntryValue::Fields(fields)) = (prior, value) else {
+        return Ok((value.clone(), None));
+    };
+    if fields.dest.is_none() && fields.mcp_dest.is_none() {
+        return Ok((value.clone(), None));
+    }
+    if matches!(prior, EntryValue::Off) {
+        return Ok((value.clone(), None));
+    }
+    let prior_fields = prior.fields();
+    // AN EXTEND KEEPS THE ROW. It starts from what the file already spells and overlays only the
+    // fields this add actually names, so a hand-written `subdir`, a channel's `mcp_dest`, or any
+    // other standing setting survives an add that was only ever about destinations.
+    let mut merged = crate::manifest::document::EntryFields {
+        version: fields.version.clone().or(prior_fields.version.clone()),
+        dest: prior_fields.dest.clone(),
+        mcp_dest: prior_fields.mcp_dest.clone(),
+        name: fields.name.clone().or(prior_fields.name.clone()),
+        subdir: fields.subdir.clone().or(prior_fields.subdir.clone()),
+        kind: fields.kind.clone().or(prior_fields.kind.clone()),
+    };
+    let mut added: Vec<String> = Vec::new();
+    let mut materialized: Vec<String> = Vec::new();
+    // The bundle's kind decides the vocabulary its `dest` is spelled in — folders or config files
+    // — and so decides what "its current destinations" even means. The row is rebuilt from the
+    // reference and what stands, because an MCP bundle filed under a LOCAL path resolves its
+    // recorded entries through that very row key.
+    let ws = workspace_of(reference);
+    let row = plan_row(reference, prior)?;
+    let kind = row_kind(ctx, target, row.as_ref(), ws.as_ref(), name);
+    for (asked, standing, is_row_dest) in [
+        (&fields.dest, &prior_fields.dest, true),
+        (&fields.mcp_dest, &prior_fields.mcp_dest, false),
+    ] {
+        let Some(asked) = asked else { continue };
+        let mut base = match standing {
+            Some(standing) => standing.clone(),
+            // Only the row's OWN `dest` has a resolved set to read; a channel's `mcp_dest` names
+            // a filter over members, which no single bundle's placements can speak for.
+            None if is_row_dest => {
+                let current = current_dest_roots(ctx, target, row.as_ref(), name, kind)?;
+                materialized = current.clone();
+                current
+            }
+            None => Vec::new(),
+        };
+        for entry in asked {
+            if !base.contains(entry) {
+                base.push(entry.clone());
+                added.push(entry.clone());
+            }
+        }
+        if is_row_dest {
+            merged.dest = Some(base);
+            materialized = if materialized.is_empty() {
+                Vec::new()
+            } else {
+                merged.dest.clone().unwrap_or_default()
+            };
+        } else {
+            merged.mcp_dest = Some(base);
+        }
+    }
+    if added.is_empty() {
+        // Nothing new to record. The merged value equals the prior row exactly when the add
+        // carried nothing else either, and `write_row`'s redundancy arm then says so.
+        return Ok((EntryValue::Fields(merged), None));
+    }
+    // A MIXED MUTATION IS NOT A DESTINATION-ONLY ACT. `add <ref>@<new-pin> --dest B` moves the pin
+    // AND adds a folder; a receipt that spoke only of the folder left the moved pin unsaid, and
+    // its `remove --dest B` inverse left it moved. Anything beyond the destinations having changed
+    // hands the whole write back to the ordinary replaced-prior path, which names the prior value
+    // and offers only an undo that verifiably restores it.
+    let mut without_dest = merged.clone();
+    without_dest.dest = prior_fields.dest.clone();
+    without_dest.mcp_dest = prior_fields.mcp_dest.clone();
+    if without_dest != prior_fields {
+        return Ok((EntryValue::Fields(merged), None));
+    }
+    Ok((
+        EntryValue::Fields(merged),
+        Some(DestExtend {
+            change: DestChange {
+                added,
+                frozen: materialized,
+            },
+            // The row NAMED destinations before ⇒ subtracting the new ones restores it exactly.
+            // A row that named none has changed SHAPE (from "every agent" to a fixed set), and no
+            // subtraction spells that back.
+            froze: prior_fields.dest.is_none(),
+        }),
+    ))
+}
+
+/// What a destination-only add did, and whether its inverse can be a subtraction.
+struct DestExtend {
+    change: DestChange,
+    /// The row named NO destinations before, so this add FROZE it: subtracting the new entries
+    /// would leave a frozen row, not the "reaches every agent" the row used to be. The exact
+    /// inverse is then the prior VALUE's own restore, where one is spellable at all.
+    froze: bool,
+}
+
+/// The STANDING row as the plan sees it — the shape a kind lookup and a placement read both ask
+/// for. `None` for a reference the grammar cannot classify, which is a row no editor could have
+/// written in the first place.
+fn plan_row(reference: &str, value: &EntryValue) -> Result<Option<PlanRow>, ClientError> {
+    Ok(keys::classify_key(reference).ok().map(|shape| PlanRow {
+        reference: reference.to_owned(),
+        shape,
+        value: value.clone(),
+    }))
+}
+
+/// The `(host, workspace)` a reference names, for the kind lookup — `None` for anything that is
+/// not a workspace bundle.
+fn workspace_of(reference: &str) -> Option<(String, String)> {
+    match keys::classify_key(reference) {
+        Ok(KeyShape::WorkspaceBundle {
+            host, workspace, ..
+        }) => Some((host, workspace)),
+        _ => None,
+    }
+}
+
+/// The inverse of a destination EXTEND: `topos remove [-g] <ref> --dest <new>` naming ONLY what
+/// this add put there. The whole-row `remove` would drop destinations that predate it — no undo
+/// beats a wrong one, and this one is exact.
+fn undo_dest_add(reference: &str, global: bool, added: &[String]) -> Vec<String> {
+    let mut argv = vec!["topos".to_owned(), "remove".to_owned()];
+    if global {
+        argv.push("-g".to_owned());
+    }
+    argv.push(reference.to_owned());
+    for entry in added {
+        argv.push("--dest".to_owned());
+        argv.push(entry.clone());
+    }
+    argv
 }
 
 /// The paste-ready RE-ADD that restores a replaced row's prior value: `topos add [-g] <ref>` for
@@ -1893,6 +2101,13 @@ fn qualified_name(ctx: &Ctx<'_>, ws: Option<&(String, String)>, name: &str) -> S
 /// PARENT root (the adopted-in-place source dir excluded: it is the person's own and no freeze
 /// manages it), spelled in the scope's dest dialect. For an MCP bundle: the config FILES its
 /// per-agent entries live in.
+///
+/// THE ROW NAMES THE RECORD, not the bare name ([`row_record`]). Two names collide more often than
+/// they should and the cost was not symmetric: a bare-name lookup that hit an AMBIGUITY answered
+/// with the empty set, and an empty current set reads as "this bundle reaches nowhere" — so a
+/// freeze materialized from it would have quietly dropped every copy the bundle really had. On
+/// the MCP side the bare name went the other way and swept in EVERY cached record of that name,
+/// so another workspace's bundle contributed its config files to this one's set.
 fn current_dest_roots(
     ctx: &Ctx<'_>,
     target: &EditTarget,
@@ -1908,24 +2123,14 @@ fn current_dest_roots(
     };
     if mcp {
         // The bundle's own custody rows name the config files its entries live in — filtered by
-        // every identity the bundle may be filed under (its cached skill id, the scope store's
-        // tracked id, and — for a local row — the line-keyed local identity).
+        // every identity THIS bundle may be filed under: the id the row resolves to, and — for a
+        // local row — the line-keyed local identity.
         let Some(layout) = mcp_scope_store(ctx, target) else {
             return Ok(Vec::new());
         };
         let mut ids: Vec<String> = Vec::new();
-        let cache = crate::sync_status::read(ctx.fs, &ctx.layout).unwrap_or_default();
-        for entry in cache.workspaces.values() {
-            for (sid, d) in &entry.delivered {
-                if d.name == name && !ids.contains(sid) {
-                    ids.push(sid.clone());
-                }
-            }
-        }
-        if let Some(sctx) = scope_store_ctx(ctx, target)
-            && let Ok((sid, _)) = super::resolve_skill(&sctx, name)
-        {
-            ids.push(sid.as_str().to_owned());
+        if let Some(sid) = row_record(ctx, target, row, name) {
+            ids.push(sid);
         }
         if let Some(r) = row.filter(|r| matches!(r.shape, KeyShape::LocalPath { .. })) {
             ids.push(crate::config_custody::local_identity(&r.reference));
@@ -1941,7 +2146,7 @@ fn current_dest_roots(
     let Some(sctx) = scope_store_ctx(ctx, target) else {
         return Ok(Vec::new());
     };
-    let Ok((sid, _lock)) = super::resolve_skill(&sctx, name) else {
+    let Some(sid) = row_record(ctx, target, row, name).and_then(|s| SkillId::parse(&s).ok()) else {
         return Ok(Vec::new());
     };
     let Some(map) = crate::doc::read_map(sctx.fs, &sctx.layout.published(&sid).map)? else {
@@ -1961,6 +2166,59 @@ fn current_dest_roots(
         }
     }
     Ok(out)
+}
+
+/// THE RECORD A ROW NAMES, resolved by the row's own QUALIFIED identity — the id, as a string,
+/// or `None` when nothing in this scope answers for it.
+///
+/// A bare name is the wrong key for this question. Two bundles can share one, and the two failure
+/// modes are both silent: a skills lookup collapses to "no copies anywhere" (which a freeze then
+/// materializes from, dropping every real copy), and an MCP lookup collapses the other way and
+/// pulls in the other bundle's config files. Each row shape carries a key that cannot collide:
+///
+/// - a WORKSPACE row is `<host>/<ws>/<bundle>` — the delivery cache holds exactly one record for
+///   that triple;
+/// - a FORGE row's record is the one whose recorded upstream is that repo, under that name;
+/// - a LOCAL PATH row's record is the one whose adopted-in-place folder IS the row's folder.
+///
+/// The bare-name resolve is the last resort, for a row shape with no identity of its own (and for
+/// a caller with no row at all) — where it is no worse than what it replaced.
+fn row_record(
+    ctx: &Ctx<'_>,
+    target: &EditTarget,
+    row: Option<&PlanRow>,
+    name: &str,
+) -> Option<String> {
+    let sctx = scope_store_ctx(ctx, target)?;
+    match row.map(|r| &r.shape) {
+        Some(KeyShape::WorkspaceBundle {
+            host,
+            workspace,
+            bundle,
+        }) => {
+            let cache = crate::sync_status::read(ctx.fs, &ctx.layout).ok()?;
+            cache.workspaces.values().find_map(|entry| {
+                (entry.host.as_deref() == Some(host.as_str())
+                    && entry.workspace_name.as_deref() == Some(workspace.as_str()))
+                .then(|| {
+                    entry
+                        .delivered
+                        .iter()
+                        .find(|(_, d)| d.name == *bundle)
+                        .map(|(sid, _)| sid.clone())
+                })
+                .flatten()
+            })
+        }
+        Some(KeyShape::LocalPath { raw }) => {
+            let dir = canonical_or(&row_dir(ctx, target, raw));
+            super::tracked_skill_at(&sctx, &dir).ok().flatten()
+        }
+        // A forge row, a channel, a feed, or no row at all: the name is the only key there is.
+        _ => super::resolve_skill(&sctx, name)
+            .ok()
+            .map(|(sid, _)| sid.as_str().to_owned()),
+    }
 }
 
 /// A path in the scope's dest dialect: `~/`-abbreviated under the machine home for the global
