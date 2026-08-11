@@ -199,10 +199,12 @@ fn walk(dir: &Path, prefix: &str, out: &mut Vec<WalkedFile>) -> Result<(), Clien
 
     for entry in entries {
         let path = entry.path();
+        // Every reject below names the offender BUNDLE-RELATIVE — the reason reaches the
+        // terminal, so a host path may never ride it.
         let name = entry
             .file_name()
             .into_string()
-            .map_err(|_| ClientError::Scan(format!("non-UTF-8 name under {}", dir.display())))?;
+            .map_err(|_| ClientError::Scan(format!("non-UTF-8 name under {}", located(prefix))))?;
 
         // Never follow a symlink — inspect the link itself.
         let meta = std::fs::symlink_metadata(&path)
@@ -210,7 +212,10 @@ fn walk(dir: &Path, prefix: &str, out: &mut Vec<WalkedFile>) -> Result<(), Clien
         let ft = meta.file_type();
 
         if ft.is_symlink() {
-            return Err(ClientError::Scan(format!("symlink: {name}")));
+            return Err(ClientError::Scan(format!(
+                "symlink: {}",
+                join(prefix, &name)
+            )));
         }
         if ft.is_dir() {
             // Drop the VCS dir; recurse everything else.
@@ -223,7 +228,10 @@ fn walk(dir: &Path, prefix: &str, out: &mut Vec<WalkedFile>) -> Result<(), Clien
         }
         if !ft.is_file() {
             // device / fifo / socket / anything else non-regular.
-            return Err(ClientError::Scan(format!("not a regular file: {name}")));
+            return Err(ClientError::Scan(format!(
+                "not a regular file: {}",
+                join(prefix, &name)
+            )));
         }
         // A regular file. Drop the macOS dropping; keep the rest byte-exact.
         if name == ".DS_Store" {
@@ -262,6 +270,16 @@ fn join(prefix: &str, name: &str) -> String {
         name.to_owned()
     } else {
         format!("{prefix}/{name}")
+    }
+}
+
+/// The bundle-relative name of the directory a reject happened in — for the one reject whose
+/// offender cannot be spelled (a name that is not UTF-8).
+fn located(prefix: &str) -> &str {
+    if prefix.is_empty() {
+        "the folder root"
+    } else {
+        prefix
     }
 }
 

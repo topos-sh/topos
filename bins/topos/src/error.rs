@@ -302,9 +302,18 @@ pub(crate) enum ClientError {
     #[error("the server sent a response topos could not read — {0}")]
     WireInvalid(String),
     /// The scan of a real skill dir hit a filesystem-level reject (symlink / device / non-regular file /
-    /// non-UTF-8 name) or a kernel path reject (absolute / `..` / NUL / collision).
+    /// non-UTF-8 name) or a kernel path reject (absolute / `..` / NUL / collision). The reason is
+    /// a bundle-relative name or the kernel's own fixed words, so the whole `Display` is a safe
+    /// terminal line (see [`crate::render::safe_message`]).
     #[error("the skill directory was rejected — {0}")]
     Scan(String),
+    /// The folder `add` was pointed at is a LINK SHELL — its root `SKILL.md` links elsewhere —
+    /// and the folder it stands for could not be resolved: the link is broken, or the shell also
+    /// holds files of its own, which makes "the original" a question only the person can answer.
+    /// The `SCAN_REJECTED` family: like every other scan reject, the folder as it stands is not
+    /// adoptable.
+    #[error("can't add {name} — {reason}")]
+    LinkedSource { name: String, reason: String },
     /// The bundle has no files (after excluding `.git/` + `.DS_Store`) — not a skill.
     #[error("the skill directory has no files to adopt")]
     EmptyBundle,
@@ -955,7 +964,9 @@ impl ClientError {
             ClientError::Corrupt(_) => "CORRUPT_STATE",
             // Same closed-vocabulary code; only the safe MESSAGE differs (wire, not sidecar).
             ClientError::WireInvalid(_) => "CORRUPT_STATE",
-            ClientError::Scan(_) => "SCAN_REJECTED",
+            // An unresolvable link shell is the same family: the folder as it stands cannot be
+            // scanned, so an agent branches on one code for every "this folder is not adoptable".
+            ClientError::Scan(_) | ClientError::LinkedSource { .. } => "SCAN_REJECTED",
             ClientError::EmptyBundle => "EMPTY_BUNDLE",
             ClientError::SourceOverlap => "SOURCE_OVERLAP",
             // Its own word beside SOURCE_OVERLAP: both are refusals ABOUT the source a path-shaped
@@ -1191,7 +1202,9 @@ impl From<std::io::Error> for ClientError {
 
 impl From<RejectReason> for ClientError {
     fn from(r: RejectReason) -> Self {
-        ClientError::Scan(format!("{r:?}"))
+        // The kernel's own words, not its variant names: the whole `Scan` Display reaches the
+        // terminal, and `CaseFoldCollision` is not a sentence.
+        ClientError::Scan(r.to_string())
     }
 }
 

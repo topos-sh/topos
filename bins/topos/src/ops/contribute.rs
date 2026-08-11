@@ -147,8 +147,7 @@ pub(crate) fn fetch_verified_bundle(
             content_sha256: digest::sha256(&f.bytes),
         })
         .collect();
-    let bundle_digest =
-        digest::bundle_digest(&manifest).map_err(|r| ClientError::Scan(format!("{r:?}")))?;
+    let bundle_digest = digest::bundle_digest(&manifest)?;
     let recomputed = identity::commit_id(&Commit {
         parents: &v.parents,
         tree: bundle_digest,

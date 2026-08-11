@@ -13,7 +13,9 @@
       "workspace": "acme"
     },
     "reference": "./tools/pr-describe",
+    "scope": "project",
     "skill_id": "topos_t00",
+    "source": "/work/acme-api/tools/pr-describe",
     "tracked": true,
     "undo": [
       "topos",

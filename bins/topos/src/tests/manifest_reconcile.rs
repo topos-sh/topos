@@ -11537,7 +11537,9 @@ fn an_agent_selected_add_freezes_the_row_and_prints_the_destination_receipt() {
     // The FINAL receipt copy, byte for byte.
     assert_eq!(
         crate::render::add_tty(&data),
-        "+ @eng/deploy   installed (~/.codex/skills)\n(undo: topos remove -g deploy)"
+        "+ @eng/deploy   installed (~/.codex/skills)\n\
+         source: acme.test/eng/deploy\n\
+         (undo: topos remove -g deploy)"
     );
 }
 

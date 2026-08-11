@@ -4,8 +4,8 @@
 use topos_types::requests::InvitationData;
 use topos_types::results::{
     AddData, AddedNote, AgentView, ConflictHolds, DiffData, LogData, ProposeData, PublishData,
-    PullData, PullSkill, RemoteSkill, RemoveData, RemoveItem, RemoveKind, RevertData, ReviewData,
-    ReviewDecision, SkillEntry, UntrackedEntry,
+    PullData, PullSkill, ReceiptScope, RemoteSkill, RemoveData, RemoveItem, RemoveKind, RevertData,
+    ReviewData, ReviewDecision, SkillEntry, UntrackedEntry,
 };
 use topos_types::{
     ActionCode, Affected, CurrencyKind, JsonEnvelope, NextAction, TerminalOutcome, TriggerState,
@@ -570,9 +570,11 @@ pub(crate) fn safe_message(err: &ClientError) -> String {
         ClientError::Verify(_) => "an integrity check failed".to_owned(),
         ClientError::Corrupt(_) => "topos's own state on this machine is unreadable".to_owned(),
         ClientError::WireInvalid(_) => "the server sent a response topos could not read".to_owned(),
-        ClientError::Scan(_) => "the skill directory was rejected".to_owned(),
         // The remaining Display strings are fixed text, a user-supplied name, or (InvalidArgument)
-        // usage guidance written by this code — safe to show verbatim.
+        // usage guidance written by this code — safe to show verbatim. `Scan` is among them: every
+        // reason is a bundle-relative name inside the folder the person themselves named, or the
+        // kernel's own fixed words — and a rejected folder is useless news without the file that
+        // caused it.
         other => other.to_string(),
     }
 }
@@ -703,29 +705,48 @@ pub(crate) fn init_tty(data: &topos_types::results::InitData) -> String {
     out
 }
 
+/// The FIRST line of every add receipt: what was added, and which of the two files now asks for
+/// it — named by its one portable spelling, never by the absolute path a reader's own cwd makes
+/// noise of. The paste-ready inverse rides it, as it always has.
+fn added_lead(data: &AddData) -> String {
+    let mut lead = match data.scope {
+        Some(ReceiptScope::Project) => {
+            format!("added {} to this project (./topos.toml)", data.name)
+        }
+        Some(ReceiptScope::Machine) => {
+            format!("added {} machine-wide (~/.topos/topos.toml)", data.name)
+        }
+        // No row was recorded (an internal adopt) — there is no file to name.
+        None => format!("added {}", data.name),
+    };
+    if !data.undo.is_empty() {
+        lead.push_str(&format!(" (undo: {})", argv_line(&data.undo)));
+    }
+    lead
+}
+
+/// The SECOND line of every add receipt: where this bundle comes from, in the one spelling that
+/// stays runnable — a workspace or forge reference, or the folder on this machine. Empty (no
+/// line at all) only where the receipt genuinely has no source to name.
+fn source_line(data: &AddData) -> String {
+    match &data.source {
+        Some(source) => format!("source: {source}\n"),
+        None => String::new(),
+    }
+}
+
 pub(crate) fn add_tty(data: &AddData) -> String {
     // A `-a`/`--dest` add prints the DESTINATION receipt whatever the SOURCE was: the person
     // named where the copy should land, so where it landed is the receipt's first claim — the
     // `+` row with the destination, then the undo-led inverse. A workspace bundle names itself
     // by its qualified `display`; a local folder or a forge import has none, and the plain name
     // is what the person typed anyway. The gate is the SELECTION, never the source kind: a
-    // silent "Adopted" line after `-a codex` answers a question nobody asked.
+    // receipt that never names the folder after `-a codex` answers a question nobody asked.
     if !data.dest.is_empty() {
         return add_dest_receipt(data);
     }
-    let mut out = String::new();
-    // The MANIFEST edited comes FIRST (the trust rail's first half: which file's line asked for
-    // it), with the paste-ready inverse.
-    if let (Some(manifest), Some(reference)) = (&data.manifest, &data.reference) {
-        out.push_str(&format!(
-            "{manifest}: added \"{reference}\"{}\n",
-            if data.undo.is_empty() {
-                String::new()
-            } else {
-                format!(" (undo: {})", data.undo.join(" "))
-            }
-        ));
-    }
+    let mut out = format!("{}\n", added_lead(data));
+    out.push_str(&source_line(data));
     // The disclosure a plain row write did not carry: a file born by this act, a row NOT written
     // (the feed already delivers it), an `off` switch deleted instead, a standing web decline.
     if let Some(note) = &data.note {
@@ -740,8 +761,8 @@ pub(crate) fn add_tty(data: &AddData) -> String {
             }
         }
     }
-    // A SET reference (a channel, a feed, a whole repo) has no bytes of its own — the "Adopted @
-    // <version>" line would be a fabrication, so the receipt states what the row expands to.
+    // A SET reference (a channel, a feed, a whole repo) has no bytes of its own, so the receipt
+    // closes by stating what the row expands to instead.
     if data.skill_id.is_none() {
         let sentence = match data
             .reference
@@ -765,11 +786,8 @@ pub(crate) fn add_tty(data: &AddData) -> String {
         out.push_str(&sentence);
         return out.trim_end().to_owned();
     }
-    out.push_str(&format!(
-        "Adopted '{}' @ {}",
-        data.name,
-        data.version_id.as_deref().map_or("?", short)
-    ));
+    // Everything below appends `\n`-led clauses to the receipt's last line.
+    out.truncate(out.trim_end().len());
     // Provenance of a remote import (honest, never a trust claim) — where the bytes came from + license.
     if let Some(o) = &data.origin {
         out.push_str("\nImported from ");
@@ -887,7 +905,11 @@ fn add_dest_receipt(data: &AddData) -> String {
         (false, [one]) => format!("installed ({one})"),
         (false, many) => format!("installed ({})", subject.targets(many.len())),
     };
-    let mut s = format!("+ {name}   {column}");
+    let mut s = format!("+ {name}   {column}\n");
+    // The same second line every other add answer carries — the destination receipt says where
+    // the copy went, and this says what it is a copy OF.
+    s.push_str(&source_line(data));
+    s.truncate(s.trim_end().len());
     if !data.undo.is_empty() {
         s.push_str(&format!("\n(undo: {})", argv_line(&data.undo)));
     }
@@ -4324,7 +4346,7 @@ mod tests {
     use topos_types::results::{
         AgentView, BehindElsewhere, ConflictHolds, ConflictPathReport, ListData, LogData,
         MergeReport, MergeResolution, ProposeData, PublishData, PullAction, PullData, PullSkill,
-        RemoteSkill, RemoveData, RemoveItem, RemoveKind, SkillEntry, UntrackedEntry,
+        ReceiptScope, RemoteSkill, RemoveData, RemoveItem, RemoveKind, SkillEntry, UntrackedEntry,
     };
 
     use crate::ops::ListOutcome;
@@ -4691,7 +4713,9 @@ mod tests {
             currency: None,
             triggers: Vec::new(),
             origin: None,
+            source: Some("/home/u/work/my-skill".to_owned()),
             manifest: Some("/home/u/.topos/topos.toml".to_owned()),
+            scope: Some(ReceiptScope::Machine),
             reference: Some("~/work/my-skill".to_owned()),
             undo: vec![
                 "topos".to_owned(),
@@ -4711,7 +4735,9 @@ mod tests {
         let one = add_tty(&local(vec!["~/.codex/skills".to_owned()]));
         assert_eq!(
             one,
-            "+ my-skill   installed (~/.codex/skills)\n(undo: topos remove -g my-skill)"
+            "+ my-skill   installed (~/.codex/skills)\n\
+             source: /home/u/work/my-skill\n\
+             (undo: topos remove -g my-skill)"
         );
         // Several destinations count, in the skill's own noun.
         let many = add_tty(&local(vec![
@@ -4722,10 +4748,14 @@ mod tests {
             many.contains("+ my-skill   installed (2 folders)"),
             "{many}"
         );
-        // A selection-free adopt is untouched: it still leads with the manifest row it wrote.
+        // A selection-free adopt takes the ordinary lead — what was added, which file asks for it
+        // now, and where it came from — and never claims a destination nobody named.
         let bare = add_tty(&local(Vec::new()));
-        assert!(bare.contains("Adopted 'my-skill' @"), "{bare}");
-        assert!(!bare.contains("installed ("), "{bare}");
+        assert_eq!(
+            bare,
+            "added my-skill machine-wide (~/.topos/topos.toml) (undo: topos remove -g my-skill)\n\
+             source: /home/u/work/my-skill"
+        );
 
         // AN ENV OVERRIDE MOVED THE FILE. `dest` stays the row's portable spelling — that is what
         // belongs in a manifest — but the headline follows the BYTES. It used to print the
@@ -4754,6 +4784,84 @@ mod tests {
             "{}",
             add_tty(&moved_many)
         );
+    }
+
+    /// EVERY add answer opens the same way: what was added and which of the two files asks for it
+    /// now, then where it came from. The lead names the file by its one portable spelling — a
+    /// reader's own absolute path is noise — and `source:` carries the reference where a
+    /// workspace or a forge governs the bundle, the folder where the bytes are the person's own.
+    #[test]
+    fn every_add_receipt_leads_with_what_was_added_and_says_where_it_came_from() {
+        let base = || topos_types::results::AddData {
+            skill_id: Some("topos_a9b7ee2b".to_owned()),
+            name: "coolify-deploy".to_owned(),
+            version_id: Some("a".repeat(64)),
+            bundle_digest: Some("b".repeat(64)),
+            tracked: true,
+            harness: None,
+            harness_slug: None,
+            currency: None,
+            triggers: Vec::new(),
+            origin: None,
+            source: Some("/home/u/.claude/skills/gstack/coolify-deploy".to_owned()),
+            manifest: Some("/work/api/topos.toml".to_owned()),
+            scope: Some(ReceiptScope::Project),
+            reference: Some("./tools/coolify-deploy".to_owned()),
+            undo: Vec::new(),
+            governed_copy: None,
+            published_match: None,
+            note: None,
+            mcp: None,
+            dest: Vec::new(),
+            dest_resolved: Vec::new(),
+            display: None,
+        };
+        // A local folder adopted into this project: the row's own `./…` spelling never surfaces —
+        // it means nothing away from the file that holds it.
+        assert_eq!(
+            add_tty(&base()),
+            "added coolify-deploy to this project (./topos.toml)\n\
+             source: /home/u/.claude/skills/gstack/coolify-deploy"
+        );
+        // The machine-wide file has one spelling too, and the inverse rides the same line.
+        let machine = topos_types::results::AddData {
+            scope: Some(ReceiptScope::Machine),
+            source: Some("topos.sh/ideamotive/coolify-deploy".to_owned()),
+            reference: Some("topos.sh/ideamotive/coolify-deploy".to_owned()),
+            undo: vec![
+                "topos".to_owned(),
+                "remove".to_owned(),
+                "-g".to_owned(),
+                "topos.sh/ideamotive/coolify-deploy".to_owned(),
+            ],
+            ..base()
+        };
+        assert_eq!(
+            add_tty(&machine),
+            "added coolify-deploy machine-wide (~/.topos/topos.toml) (undo: topos remove -g \
+             topos.sh/ideamotive/coolify-deploy)\n\
+             source: topos.sh/ideamotive/coolify-deploy"
+        );
+        // A SET row has no bytes of its own — the closing sentence still comes after the same two
+        // lines, and the source is the reference the row expands.
+        let channel = topos_types::results::AddData {
+            skill_id: None,
+            version_id: None,
+            bundle_digest: None,
+            name: "backend".to_owned(),
+            source: Some("topos.sh/acme/channels/backend".to_owned()),
+            reference: Some("topos.sh/acme/channels/backend".to_owned()),
+            ..base()
+        };
+        let text = add_tty(&channel);
+        assert!(
+            text.starts_with(
+                "added backend to this project (./topos.toml)\n\
+                 source: topos.sh/acme/channels/backend\n"
+            ),
+            "{text}"
+        );
+        assert!(text.contains("Added the 'backend' channel"), "{text}");
     }
 
     /// A minimal typed `mcp` block — enough for the receipt to know the bundle is a server (which

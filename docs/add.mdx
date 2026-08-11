@@ -90,9 +90,16 @@ folder, and delivers in the same command:
 
 **Commit that file**: everyone who works in the repo then gets the same skills, delivered to their
 agents automatically. A line pointing at a folder in the repo vendors that skill outright — a
-teammate clones, runs `topos update`, and has it, with no workspace involved. Every receipt names
-the file it edited and the exact undo. The rest of the grammar — exact pins, placement, the `off`
-value, grouped keys, `topos fmt` — is on [topos.toml](/docs/topos-toml).
+teammate clones, runs `topos update`, and has it, with no workspace involved. Every receipt reads
+the same way — what was added and which file asks for it now, then where it came from:
+
+```
+added coolify-deploy to this project (./topos.toml) (undo: topos remove ./tools/coolify-deploy)
+source: /Users/robin/.claude/skills/gstack/coolify-deploy
+```
+
+The rest of the grammar — exact pins, placement, the `off` value, grouped keys, `topos fmt` — is
+on [topos.toml](/docs/topos-toml).
 
 With no `topos.toml` covering the folder you are standing in, `add` stops and says so, pointing at
 `topos init` here or `-g` for your machine. It never creates a file behind your back, and never
@@ -138,6 +145,11 @@ ending in the exact command that expands it.
 Skills go into the folders your agents actually read — `~/.claude/skills/<name>`, the shared
 `~/.agents/skills/<name>`, or a project's own agent directories. The full table:
 [Supported agents](/docs/harnesses).
+
+Some of those folders are links rather than files — one bundle installs itself once and links each
+skill into every agent's directory. Adding one of those adds the **original**: the folder the bytes
+actually live in, which is what the line records and what the `source:` line names. Nothing in
+either folder changes.
 
 ## Pick which agents get it
 

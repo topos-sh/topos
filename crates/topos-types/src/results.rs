@@ -1006,6 +1006,18 @@ pub struct SkillOrigin {
     pub license: Option<String>,
 }
 
+/// Which of the two unblended manifests an add recorded into. Same vocabulary as
+/// [`ListScope::scope`]. **INFERRED value set.**
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
+#[serde(rename_all = "lowercase")]
+pub enum ReceiptScope {
+    /// The nearest `topos.toml` covering the working directory.
+    Project,
+    /// This machine's own `~/.topos/topos.toml` (`-g`).
+    Machine,
+}
+
 /// `add` (local, offline — no plane op, `receipt: null`). **INFERRED.**
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
@@ -1049,10 +1061,24 @@ pub struct AddData {
     /// locally-adopted skill (a path or a discovered name).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub origin: Option<SkillOrigin>,
+    /// WHERE THIS BUNDLE COMES FROM, in the spelling that identifies it forever: the full
+    /// reference where a workspace or a forge governs it (`topos.sh/acme/code-review`,
+    /// `github.com/owner/repo`), and the canonical folder on this machine where the bytes are the
+    /// person's own. One derivation for every arm — the receipt's `source:` line is this value
+    /// verbatim. Absent only for an internal adopt that recorded no row. **INFERRED**
+    /// (additive-only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
     /// The MANIFEST this add edited — the trust rail's first half: a `topos.toml` path. Absent when
     /// no manifest line was written (an internal adopt). **Additive.**
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub manifest: Option<String>,
+    /// WHICH file it was, as a receipt names it: this folder's `./topos.toml` or the machine-wide
+    /// `~/.topos/topos.toml`. Written together with `manifest` and absent wherever that is — the
+    /// path is the machine-readable fact, this is the one a person reads. **INFERRED**
+    /// (additive-only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<ReceiptScope>,
     /// The reference the manifest line stores (canonical where resolvable). **Additive.**
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reference: Option<String>,

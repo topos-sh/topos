@@ -86,6 +86,24 @@ pub enum RejectReason {
     CaseFoldCollision,
 }
 
+/// One lowercase clause per reason, naming the RULE and never a path — the reason reaches a
+/// terminal (the client folds it into its own refusal line), so it may carry nothing but fixed
+/// words. `Debug` names the variant; this names what happened.
+impl core::fmt::Display for RejectReason {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(match self {
+            RejectReason::EmptyPath => "a file path has an empty component",
+            RejectReason::AbsolutePath => "a file path is absolute",
+            RejectReason::ParentTraversal => "a file path has a `..` component",
+            RejectReason::DotComponent => "a file path has a `.` component",
+            RejectReason::ControlChar => "a file path has a control character",
+            RejectReason::DuplicatePath => "two files share one path",
+            RejectReason::NfcCollision => "two file names collide under Unicode normalization",
+            RejectReason::CaseFoldCollision => "two file names collide when letter case is ignored",
+        })
+    }
+}
+
 /// sha256 of raw bytes — the one file-hash implementation; the client hashes each file through this,
 /// so the manifest's `content_sha256` and the kernel agree by construction.
 pub fn sha256(bytes: &[u8]) -> [u8; 32] {
@@ -323,6 +341,34 @@ mod tests {
         assert_ne!(
             normalize_for_collision("a.topos-mine"),
             normalize_for_collision("a.topos-mine-1")
+        );
+    }
+
+    /// The reason's own words reach a terminal, so every variant spells a rule in lowercase
+    /// prose — never a variant name, never a path.
+    #[test]
+    fn every_reject_reason_reads_as_a_lowercase_clause() {
+        for r in [
+            RejectReason::EmptyPath,
+            RejectReason::AbsolutePath,
+            RejectReason::ParentTraversal,
+            RejectReason::DotComponent,
+            RejectReason::ControlChar,
+            RejectReason::DuplicatePath,
+            RejectReason::NfcCollision,
+            RejectReason::CaseFoldCollision,
+        ] {
+            let text = alloc::format!("{r}");
+            assert!(text.contains(' '), "{r:?} reads as a variant name: {text}");
+            assert!(
+                text.chars().next().is_some_and(char::is_lowercase),
+                "{r:?} is not lowercase: {text}"
+            );
+            assert!(!text.ends_with('.'), "{r:?} carries punctuation: {text}");
+        }
+        assert_eq!(
+            alloc::format!("{}", RejectReason::AbsolutePath),
+            "a file path is absolute"
         );
     }
 

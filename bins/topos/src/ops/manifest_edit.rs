@@ -468,6 +468,15 @@ pub(crate) fn push_note(data: &mut AddData, line: impl Into<String>) {
     });
 }
 
+/// Which of the two manifests a receipt is about — the wire word behind the one spelling every
+/// add answer names its file by.
+pub(super) fn receipt_scope(target: &EditTarget) -> topos_types::results::ReceiptScope {
+    match target.scope {
+        ManifestScope::Global => topos_types::results::ReceiptScope::Machine,
+        ManifestScope::Project => topos_types::results::ReceiptScope::Project,
+    }
+}
+
 /// The paste-ready inverse of an add: `topos remove [-g] <reference>`.
 pub(super) fn undo_add(reference: &str, global: bool) -> Vec<String> {
     let mut argv = vec!["topos".to_owned(), "remove".to_owned()];
@@ -509,7 +518,13 @@ pub(super) fn write_row(
         push_note(data, note);
     }
     data.manifest = Some(target.path.display().to_string());
+    data.scope = Some(receipt_scope(target));
     data.reference = Some(reference.to_owned());
+    // The `source:` line, derived ONCE for every arm that records a row: a reference IS the
+    // source wherever a workspace or a forge governs the bundle. A path row's source is the
+    // folder the caller already resolved (canonical, links followed) — never overwritten here,
+    // because the row's `./…` spelling means nothing away from the file that holds it.
+    data.source.get_or_insert_with(|| reference.to_owned());
     if prior.as_ref() == Some(value) {
         // The redundancy disclosure: the file already spells exactly this row.
         data.undo = Vec::new();
@@ -680,18 +695,22 @@ fn note_added_path_row_in(
     kind: Option<BundleKind>,
     dest: Option<&[String]>,
 ) -> Result<(), ClientError> {
-    // Canonicalize best-effort (symlinks resolve; a vanished dir keeps the typed spelling).
-    let source_abs = source.canonicalize().unwrap_or_else(|_| {
-        if source.is_absolute() {
-            source.to_path_buf()
-        } else {
-            ctx.roots
-                .as_ref()
-                .and_then(|r| r.cwd.as_ref())
-                .map(|c| c.join(source))
-                .unwrap_or_else(|| source.to_path_buf())
-        }
-    });
+    // Canonicalize best-effort (symlinks resolve; a vanished dir keeps the typed spelling), then
+    // follow a LINK SHELL to the folder it stands for — the row must name the folder the adopt
+    // actually recorded, or the next reconcile would demand a directory topos does not track.
+    let source_abs = match source.canonicalize() {
+        Ok(canon) => super::origin_dir_or_self(&canon),
+        Err(_) if source.is_absolute() => source.to_path_buf(),
+        Err(_) => ctx
+            .roots
+            .as_ref()
+            .and_then(|r| r.cwd.as_ref())
+            .map(|c| c.join(source))
+            .unwrap_or_else(|| source.to_path_buf()),
+    };
+    // The `source:` line for a path row is the FOLDER, canonical — never the row's portable
+    // `./…` spelling, which is only meaningful beside the file that holds it.
+    data.source = Some(source_abs.display().to_string());
     // Compare BOTH paths canonically: a source under the manifest's folder ALWAYS records the
     // dir-relative `./path`, never an absolute one (the file itself still lands at `target.path` —
     // the dir is canonicalized only to compute the spelling).

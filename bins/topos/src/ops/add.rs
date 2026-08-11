@@ -85,6 +85,92 @@ fn refuse_missing_source(ctx: &Ctx<'_>, source: &Path) -> Result<(), ClientError
     })
 }
 
+/// The bundle-root marker every skill folder carries — and the one file [`origin_dir`] follows.
+const SKILL_FILE: &str = "SKILL.md";
+
+/// The FOLDER a named source really stands for.
+///
+/// An agent's skills dir often holds a LINK SHELL: a real directory whose only entries are links
+/// into one other folder (`SKILL.md -> …/gstack/codex/SKILL.md`). Discovery lists it — its root
+/// `SKILL.md` resolves to a regular file — so `add` has to take it, and what it takes is the
+/// ORIGINAL: the folder those links point into, adopted in place exactly as if it had been named.
+/// The scanner stays symlink-rejecting; the dereference happens HERE, once, before any scan, so
+/// the folder that IS scanned holds nothing but real files.
+///
+/// Everything else is the identity. A folder whose root `SKILL.md` is a regular file is its own
+/// origin, and so is a shape this rule does not recognize (links scattered over several folders,
+/// a link to something that is not a sibling of a real `SKILL.md`) — returned unchanged, for the
+/// scanner to refuse by name.
+///
+/// # Errors
+/// [`ClientError::LinkedSource`] when the root `SKILL.md` link is broken or cyclic, or when the
+/// shell also holds files of its own — then there are two folders, and only the person knows
+/// which one they meant.
+pub(crate) fn origin_dir(dir: &Path) -> Result<PathBuf, ClientError> {
+    let here = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
+    let marker = here.join(SKILL_FILE);
+    let Ok(meta) = std::fs::symlink_metadata(&marker) else {
+        return Ok(here); // no root SKILL.md — not this shape (and not this function's refusal)
+    };
+    if !meta.file_type().is_symlink() {
+        return Ok(here);
+    }
+    let name = dir_basename(&here).unwrap_or_else(|| here.display().to_string());
+    // `canonicalize` walks the whole chain, so a cycle and a missing target both land here.
+    let Ok(target) = marker.canonicalize() else {
+        return Err(ClientError::LinkedSource {
+            name,
+            reason: format!("its {SKILL_FILE} link is broken (target missing)"),
+        });
+    };
+    let Some(parent) = target.parent() else {
+        return Ok(here);
+    };
+    let Ok(read) = std::fs::read_dir(&here) else {
+        return Ok(here);
+    };
+    let mut one_parent = true;
+    for entry in read.flatten() {
+        let path = entry.path();
+        let Ok(entry_meta) = std::fs::symlink_metadata(&path) else {
+            return Ok(here);
+        };
+        let leaf = entry.file_name();
+        // The two the scanner itself drops — a stray one of those is not "files of its own".
+        if leaf == ".DS_Store" || leaf == ".git" {
+            continue;
+        }
+        if !entry_meta.file_type().is_symlink() {
+            return Err(ClientError::LinkedSource {
+                name,
+                reason: format!(
+                    "{SKILL_FILE} links to a different folder ({}) but {} holds its own files \
+                     too; add one folder by path",
+                    parent.display(),
+                    here.display()
+                ),
+            });
+        }
+        if path.canonicalize().ok().as_deref().and_then(Path::parent) != Some(parent) {
+            one_parent = false;
+        }
+    }
+    // The original has to be an ordinary skill folder: a REGULAR `SKILL.md`, which is what the
+    // scan will read. A link pointing at anything else leaves the shell as it was.
+    let regular_marker =
+        std::fs::symlink_metadata(parent.join(SKILL_FILE)).is_ok_and(|m| m.file_type().is_file());
+    if one_parent && regular_marker {
+        return Ok(parent.to_path_buf());
+    }
+    Ok(here)
+}
+
+/// [`origin_dir`] for a reader that has nothing to refuse — a listing, which shows a shell it
+/// cannot resolve exactly as it finds it.
+pub(crate) fn origin_dir_or_self(dir: &Path) -> PathBuf {
+    origin_dir(dir).unwrap_or_else(|_| dir.to_path_buf())
+}
+
 /// Adopt the skill rooted at `source`, naming it from the source itself (a recognized harness dir's name,
 /// else frontmatter-then-basename) — the direct-path entry point (a path-shaped positional).
 ///
@@ -96,7 +182,7 @@ fn refuse_missing_source(ctx: &Ctx<'_>, source: &Path) -> Result<(), ClientError
 /// store/io failure.
 pub(crate) fn add(ctx: &Ctx<'_>, source: &Path) -> Result<AddData, ClientError> {
     refuse_missing_source(ctx, source)?;
-    refuse_unflagged_mcp_dir(ctx, source)?;
+    refuse_unflagged_mcp_dir(ctx, &origin_dir(source)?)?;
     add_with_name(ctx, source, None, true, BundleKind::Skill)
 }
 
@@ -125,7 +211,10 @@ pub(crate) fn adopt_path(
     declared: KindDeclared,
 ) -> Result<AddData, ClientError> {
     if declared == KindDeclared::No {
-        refuse_unflagged_mcp_dir(ctx, source)?;
+        // The guard asks about the folder that will actually be adopted — for a link shell, the
+        // folder its links point into ([`origin_dir`]) — or a shell over a server bundle would
+        // slip past it and land as a skill.
+        refuse_unflagged_mcp_dir(ctx, &origin_dir(source)?)?;
     }
     adopt_path_any_kind(ctx, target, source, BundleKind::Skill)
 }
@@ -141,6 +230,9 @@ pub(crate) fn adopt_path_any_kind(
     // REFUSAL-FIRST, before the re-link's own revive/stamp/log: a folder that is not there at all,
     // then a record standing for this folder under a DIFFERENT kind (neither is re-linkable).
     refuse_missing_source(ctx, source)?;
+    // A link shell IS the folder its links point into, from here down: the kind guard and the
+    // re-link both ask about a record keyed by the ORIGIN, which is what the adopt records.
+    let source = &origin_dir(source)?;
     refuse_kind_change(ctx, source, kind)?;
     match unclaimed_record(ctx, target, source)? {
         Some(data) => {
@@ -276,8 +368,11 @@ fn unclaimed_record(
         currency: recognize(ctx, &source_abs).map(|_| ctx.triggers.active().install()),
         triggers: Vec::new(),
         origin: None,
-        // Set by the manifest-edit step at the composition root, exactly as on a fresh adopt.
+        // All three set by the manifest-edit step at the composition root, exactly as on a
+        // fresh adopt.
+        source: None,
         manifest: None,
+        scope: None,
         reference: None,
         undo: Vec::new(),
         governed_copy: None,
@@ -315,6 +410,9 @@ pub(crate) fn add_with_name(
     // Establish the home, then refuse a source that overlaps it (canonicalized — catches symlinks), so
     // uninstall can never delete user bytes and the footprint oracle never collapses.
     ctx.fs.create_dir_all(ctx.layout.home())?;
+    // The ONE adoption core, so the record always keys the folder the bytes really live in —
+    // whichever door called it.
+    let source = &origin_dir(source)?;
     reject_overlap(source, ctx.layout.home())?;
 
     let bundle = scan::scan(source)?;
@@ -530,8 +628,11 @@ pub(crate) fn add_with_name(
         triggers: Vec::new(),
         // Set by the remote-import wrapper ([`add_remote`]); a local adopt has no upstream.
         origin: None,
-        // Set by the manifest-edit step at the composition root (the verb records the demand line).
+        // All three set by the manifest-edit step at the composition root (the verb records the
+        // demand line, and the row's key decides how the receipt spells the source).
+        source: None,
         manifest: None,
+        scope: None,
         reference: None,
         undo: Vec::new(),
         governed_copy: None,

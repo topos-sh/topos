@@ -193,8 +193,11 @@ pub(crate) enum Command {
     /// GitHub repo (`owner/repo` for every skill in it, `owner/repo/name` for one). Records one
     /// line in the nearest `topos.toml` at or above this folder — or in your machine-wide file
     /// (`~/.topos/topos.toml`) with `-g` — and installs right away. With no `topos.toml` covering
-    /// this folder it stops and says so: `topos init` creates one here, or add `-g`. A plain name
-    /// is looked for both in the skills already sitting in your agents' folders and in the
+    /// this folder it stops and says so: `topos init` creates one here, or add `-g`. Every answer
+    /// names the file it recorded into and, on a second line, the source it recorded: a workspace
+    /// or GitHub reference, or the folder on this machine. A folder whose `SKILL.md` is a link
+    /// into another folder adds that original — the folder the bytes actually live in. A plain
+    /// name is looked for both in the skills already sitting in your agents' folders and in the
     /// catalogs of the workspaces you are connected to — when only a workspace has it, that is
     /// what you get. A GitHub source shows what it found and waits for `--yes`, every time — a
     /// skill is instructions your agent will follow, and that listing is there to be read.

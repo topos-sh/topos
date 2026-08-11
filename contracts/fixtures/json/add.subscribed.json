@@ -8,7 +8,9 @@
     "name": "code-review",
     "note": "resolved 'code-review' to topos.sh/acme/code-review — no untracked skill of that name is on this machine, and acme publishes it",
     "reference": "topos.sh/acme/code-review",
+    "scope": "project",
     "skill_id": "s_codereview",
+    "source": "topos.sh/acme/code-review",
     "tracked": true,
     "undo": [
       "topos",

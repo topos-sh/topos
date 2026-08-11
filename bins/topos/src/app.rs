@@ -692,7 +692,7 @@ fn run_command(
                     result,
                     |_| {
                         "Restored the built-in `topos` skill on this machine \
-                         (undo: topos remove topos --yes)."
+                         (undo: topos remove topos --yes).\nsource: built-in"
                             .to_owned()
                     },
                     &diag,

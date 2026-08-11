@@ -149,7 +149,9 @@ fn add_feed(
         && editor.row(&reference).is_some()
     {
         data.manifest = Some(target.path.display().to_string());
+        data.scope = Some(medit::receipt_scope(&target));
         data.reference = Some(reference.clone());
+        data.source = Some(reference.clone());
         medit::push_note(
             &mut data,
             format!("already adopting {workspace}'s feed here — nothing changed"),
@@ -295,7 +297,9 @@ fn add_workspace(
             editor.remove_row(&resolved.canonical);
             editor.write(ctx.fs, &target.path)?;
             data.manifest = Some(target.path.display().to_string());
+            data.scope = Some(medit::receipt_scope(&target));
             data.reference = Some(resolved.canonical.clone());
+            data.source = Some(resolved.canonical.clone());
             data.undo = medit::undo_add(&resolved.canonical, true);
             medit::push_note(
                 &mut data,
@@ -642,7 +646,9 @@ fn set_data(name: &str) -> AddData {
         currency: None,
         triggers: Vec::new(),
         origin: None,
+        source: None,
         manifest: None,
+        scope: None,
         reference: None,
         undo: Vec::new(),
         governed_copy: None,

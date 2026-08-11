@@ -1171,7 +1171,10 @@ pub(crate) fn discover_untracked(
     let mut out: Vec<UntrackedEntry> = Vec::new();
     for d in registry::discover_all(&roots.home, roots.cwd.as_deref()) {
         let canon = d.path.canonicalize().unwrap_or_else(|_| d.path.clone());
-        if tracked.contains(&canon) {
+        // A LINK SHELL stands for the folder its links point into, and `add` adopts THAT — so a
+        // shell whose original is already managed is a second window onto a tracked skill, not an
+        // adoptable one. A shell whose original is untracked keeps listing: it is addable.
+        if tracked.contains(&super::origin_dir_or_self(&canon)) {
             continue; // already adopted or delivered — not "untracked"
         }
         if !seen.insert(canon) {

@@ -24,6 +24,8 @@
     "name": "team-weather",
     "note": "MCP server io.github.acme/weather v1.4.0 — https://weather.acme.example/mcp over streamable-http, auth oauth · /home/ada/.cursor/mcp.json: server entry — restart Cursor",
     "reference": "/home/ada/work/team-weather",
+    "scope": "machine",
+    "source": "/home/ada/work/team-weather",
     "tracked": true,
     "undo": [
       "topos",

@@ -420,9 +420,9 @@ fn fixtures() -> Vec<(&'static str, String)> {
         AddData, ConflictHolds, ConflictPathReport, ConflictPlacement, DiffData, DiffPatchInfo,
         DiffSource, EnrollmentPending, InviteReadData, ListData, LogData, LoginData, LogoutData,
         MergeReport, ProtectData, PublishData, PublishDescribeData, PublishGate, PublishedMatch,
-        PullAction, PullData, PullSkill, RemoveData, RemoveItem, RemoveKind, ReviewIndexData,
-        ReviewIndexEntry, SkillEntry, SkillStatus, StatusData, StatusScope, StatusScopeSummary,
-        StatusTrigger, WorkspaceSyncReport,
+        PullAction, PullData, PullSkill, ReceiptScope, RemoveData, RemoveItem, RemoveKind,
+        ReviewIndexData, ReviewIndexEntry, SkillEntry, SkillStatus, StatusData, StatusScope,
+        StatusScopeSummary, StatusTrigger, WorkspaceSyncReport,
     };
     use topos_types::results::{AttentionCount, ListScope, McpServerSummary};
     use topos_types::{ActionCode, Affected, JsonEnvelope, Receipt, TerminalOutcome, WireError};
@@ -457,7 +457,11 @@ fn fixtures() -> Vec<(&'static str, String)> {
             // Adopted from a local dir, not a remote source — no upstream origin.
             origin: None,
             // The fixture adopt writes no manifest line (no machine roots in the fixture rig).
+            // The row write is where a receipt learns its `source:` and which file it names, so
+            // all three are absent together here — every real add records a row and carries them.
+            source: None,
             manifest: None,
+            scope: None,
             reference: None,
             undo: Vec::new(),
             governed_copy: None,
@@ -496,7 +500,9 @@ fn fixtures() -> Vec<(&'static str, String)> {
             currency: None,
             triggers: Vec::new(),
             origin: None,
+            source: Some("topos.sh/acme/code-review".to_owned()),
             manifest: Some("/work/acme-api/topos.toml".to_owned()),
+            scope: Some(ReceiptScope::Project),
             reference: Some("topos.sh/acme/code-review".to_owned()),
             undo: argv(&["topos", "remove", "topos.sh/acme/code-review"]),
             governed_copy: None,
@@ -540,7 +546,11 @@ fn fixtures() -> Vec<(&'static str, String)> {
             currency: None,
             triggers: Vec::new(),
             origin: None,
+            // The row spells the folder relative to the file that holds it; the `source:` line
+            // spells it canonically, which is the form that means the same thing anywhere.
+            source: Some("/work/acme-api/tools/pr-describe".to_owned()),
             manifest: Some("/work/acme-api/topos.toml".to_owned()),
+            scope: Some(ReceiptScope::Project),
             reference: Some("./tools/pr-describe".to_owned()),
             undo: argv(&["topos", "remove", "./tools/pr-describe"]),
             governed_copy: None,
@@ -644,7 +654,9 @@ fn fixtures() -> Vec<(&'static str, String)> {
             currency: None,
             triggers: Vec::new(),
             origin: None,
+            source: Some("/home/ada/work/team-weather".to_owned()),
             manifest: Some("/home/ada/.topos/topos.toml".to_owned()),
+            scope: Some(ReceiptScope::Machine),
             reference: Some("/home/ada/work/team-weather".to_owned()),
             undo: argv(&["topos", "remove", "-g", "/home/ada/work/team-weather"]),
             governed_copy: None,

@@ -54,7 +54,8 @@ mod version_check;
 pub(crate) use add::{
     AddRemoteOpts, BareAddPlan, KeepAsYoursOutcome, KindDeclared, OriginDoc, add, add_remote,
     add_remote_fetched, add_with_name, adopt_path, adopt_path_any_kind, governed_copy_suggestion,
-    keep_as_yours, plan_bare_add, resolve_add_target, split_target, tracked_skill_at,
+    keep_as_yours, origin_dir_or_self, plan_bare_add, resolve_add_target, split_target,
+    tracked_skill_at,
 };
 pub(crate) use add_mcp::{McpAdded, add_mcp};
 #[cfg(test)]

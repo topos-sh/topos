@@ -1318,6 +1318,68 @@ fn list_discovers_untracked_registry_skills_then_dedups_an_adopted_one() {
     );
 }
 
+/// Discovery follows a link shell's `SKILL.md` to a regular file and lists it, so the listing has
+/// to answer for the ORIGINAL too: once that folder is managed, the shell is a second window onto
+/// a tracked skill, not an adoptable one. A shell whose original nobody tracks keeps listing —
+/// naming it to `add` is exactly how it gets adopted.
+#[test]
+fn a_link_shell_stops_listing_once_its_original_is_tracked() {
+    let h = Harness::new("shell-list");
+    let user_home = Scratch::new("shell-list-userhome");
+    let skills = user_home.0.join(".cursor").join("skills");
+    let bundle = Scratch::new("shell-list-bundle");
+
+    // Two shells in the agent's folder; their originals live outside any discovered root.
+    let mut origins = Vec::new();
+    for name in ["managed", "loose"] {
+        let origin = bundle.0.join(name);
+        std::fs::create_dir_all(&origin).unwrap();
+        std::fs::write(origin.join("SKILL.md"), format!("# {name}\n")).unwrap();
+        let shell = skills.join(name);
+        std::fs::create_dir_all(&shell).unwrap();
+        std::os::unix::fs::symlink(origin.join("SKILL.md"), shell.join("SKILL.md")).unwrap();
+        origins.push(origin);
+    }
+
+    let untracked = |names: &Harness| {
+        ops::list_with(
+            &names.ctx(),
+            &ops::ListRequest {
+                untracked: true,
+                ..ops::ListRequest::default()
+            },
+            Some(ops::DiscoveryRoots {
+                home: user_home.0.clone(),
+                cwd: None,
+            }),
+            None,
+            ops::RowPage::unlimited(),
+        )
+        .unwrap()
+        .data
+        .untracked
+        .iter()
+        .map(|u| u.name.clone())
+        .collect::<Vec<_>>()
+    };
+
+    let before = untracked(&h);
+    assert!(before.contains(&"managed".to_owned()), "{before:?}");
+    assert!(before.contains(&"loose".to_owned()), "{before:?}");
+
+    ops::add(&h.ctx(), &origins[0]).unwrap();
+
+    let after = untracked(&h);
+    assert!(
+        !after.contains(&"managed".to_owned()),
+        "the shell of a tracked original is not adoptable: {after:?}"
+    );
+    assert!(
+        after.contains(&"loose".to_owned()),
+        "a shell nobody tracks is still adoptable: {after:?}"
+    );
+}
+
 #[test]
 fn footprint_oracle_equals_the_created_set_and_catches_a_stray_write() {
     let src = editable_source();
@@ -1387,8 +1449,150 @@ fn add_rejects_a_symlink_and_writes_nothing() {
         matches!(err, crate::error::ClientError::Scan(_)),
         "got {err:?}"
     );
+    // THE REASON REACHES THE TERMINAL. A scan reason is a bundle-relative name inside the folder
+    // the person themselves named, so redacting it bought nothing and cost the reader the one
+    // fact that makes the refusal actionable: WHICH file.
+    let text = render::err_tty(&err);
+    assert!(text.contains("symlink: link"), "{text}");
     // Nothing tracked.
     assert!(store_records(&h.ctx()).is_empty());
+}
+
+/// A nested reject names its file by the path the bundle knows it as, never by a host path.
+#[test]
+fn a_nested_scan_reject_names_the_bundle_relative_path() {
+    let src = Scratch::new("sym-nested");
+    let root = src.0.join("skill");
+    std::fs::create_dir_all(root.join("scripts")).unwrap();
+    std::fs::write(root.join("SKILL.md"), b"# s\n").unwrap();
+    std::os::unix::fs::symlink("/etc/hosts", root.join("scripts/deploy.sh")).unwrap();
+
+    let h = Harness::new("sym-nested-home");
+    let err = ops::add(&h.ctx(), &root).unwrap_err();
+    let text = render::err_tty(&err);
+    assert!(text.contains("symlink: scripts/deploy.sh"), "{text}");
+    assert!(
+        !text.contains(src.0.to_str().unwrap()),
+        "leaked a host path: {text}"
+    );
+}
+
+/// The real folder plus a LINK SHELL beside it: `<root>/original/<name>/` holds the bytes, and
+/// `<root>/agents/<name>/` is a real directory whose entries are links into it — the shape an
+/// agent's skills dir grows when one bundle installs itself once and links each skill.
+fn link_shell(root: &Path, name: &str) -> (PathBuf, PathBuf) {
+    let origin = root.join("original").join(name);
+    std::fs::create_dir_all(&origin).unwrap();
+    std::fs::write(origin.join("SKILL.md"), b"# real\n").unwrap();
+    let shell = root.join("agents").join(name);
+    std::fs::create_dir_all(&shell).unwrap();
+    std::os::unix::fs::symlink(origin.join("SKILL.md"), shell.join("SKILL.md")).unwrap();
+    (origin, shell)
+}
+
+/// Discovery lists a link shell (its root `SKILL.md` resolves to a regular file) and the scanner
+/// rejects every symlink — so the two halves used to disagree: `list` offered a folder `add`
+/// refused. `add` now takes the folder the links point INTO, silently, and records THAT: the
+/// row's key, the placement, and the receipt's `source:` all name the original.
+#[test]
+fn add_of_a_link_shell_adopts_the_folder_it_points_at() {
+    let src = Scratch::new("shell");
+    let (origin, shell) = link_shell(&src.0, "codex");
+
+    let h = Harness::new("shell-home");
+    let ctx = h.ctx();
+    let mut data = ops::add(&ctx, &shell).unwrap();
+    ops::note_added_path(&ctx, &mut data, &shell, true).unwrap();
+
+    let origin_c = origin.canonicalize().unwrap();
+    assert_eq!(data.name, "codex");
+    assert_eq!(data.source.as_deref(), Some(origin_c.to_str().unwrap()));
+    // The manifest row keys the ORIGINAL — a row naming the shell would demand a folder topos
+    // does not track.
+    let text = std::fs::read_to_string(h.ctx().layout.home().join("topos.toml")).unwrap();
+    assert!(
+        text.contains(origin_c.to_str().unwrap()),
+        "the row names the original: {text}"
+    );
+    // And so does the placement the record holds.
+    let sid = sid(data.skill_id.as_deref().unwrap());
+    let map = doc::read_map(&h.fs, &h.ctx().layout.published(&sid).map)
+        .unwrap()
+        .expect("the adopt wrote a placement map");
+    assert_eq!(
+        map.placements,
+        vec![origin_c.to_string_lossy().into_owned()]
+    );
+}
+
+/// A shell that ALSO holds files of its own is two folders, and only the person knows which they
+/// meant — refused by name, with both spellings on the line.
+#[test]
+fn add_of_a_mixed_link_shell_refuses_naming_both_folders() {
+    let src = Scratch::new("shell-mixed");
+    let (origin, shell) = link_shell(&src.0, "codex");
+    std::fs::write(shell.join("notes.md"), b"mine\n").unwrap();
+
+    let h = Harness::new("shell-mixed-home");
+    let err = ops::add(&h.ctx(), &shell).unwrap_err();
+    assert_eq!(err.code(), "SCAN_REJECTED");
+    let text = render::err_tty(&err);
+    assert!(text.contains("can't add codex"), "{text}");
+    assert!(
+        text.contains(origin.canonicalize().unwrap().to_str().unwrap()),
+        "{text}"
+    );
+    assert!(text.contains("add one folder by path"), "{text}");
+    assert!(store_records(&h.ctx()).is_empty());
+}
+
+/// A shell whose link points at nothing says exactly that — never the scanner's generic reject,
+/// and never a half-adopted record.
+#[test]
+fn add_of_a_broken_link_shell_says_the_link_is_broken() {
+    let src = Scratch::new("shell-broken");
+    let shell = src.0.join("agents").join("codex");
+    std::fs::create_dir_all(&shell).unwrap();
+    std::os::unix::fs::symlink(src.0.join("gone/SKILL.md"), shell.join("SKILL.md")).unwrap();
+
+    let h = Harness::new("shell-broken-home");
+    let err = ops::add(&h.ctx(), &shell).unwrap_err();
+    assert_eq!(err.code(), "SCAN_REJECTED");
+    assert!(
+        render::err_tty(&err).contains("can't add codex — its SKILL.md link is broken"),
+        "{}",
+        render::err_tty(&err)
+    );
+    assert!(store_records(&h.ctx()).is_empty());
+}
+
+/// A DIRECTORY-level symlink is a different shape and keeps its own (unchanged) answer: the
+/// canonicalize resolves it, and the folder behind it is what gets adopted.
+#[test]
+fn add_through_a_directory_symlink_adopts_the_folder_behind_it() {
+    let src = Scratch::new("shell-dir");
+    let origin = src.0.join("original").join("codex");
+    std::fs::create_dir_all(&origin).unwrap();
+    std::fs::write(origin.join("SKILL.md"), b"# real\n").unwrap();
+    let link = src.0.join("codex-link");
+    std::os::unix::fs::symlink(&origin, &link).unwrap();
+
+    let h = Harness::new("shell-dir-home");
+    let data = ops::add(&h.ctx(), &link).unwrap();
+    let sid = sid(data.skill_id.as_deref().unwrap());
+    let map = doc::read_map(&h.fs, &h.ctx().layout.published(&sid).map)
+        .unwrap()
+        .expect("the adopt wrote a placement map");
+    assert_eq!(
+        map.placements,
+        vec![
+            origin
+                .canonicalize()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned()
+        ]
+    );
 }
 
 #[test]
