@@ -881,7 +881,7 @@ mod tests {
             ]
         );
         assert!(
-            candidates.iter().all(|c| c.via.is_none()),
+            candidates.iter().all(|c| c.selector.is_none()),
             "a workspace resource stands on its own reference"
         );
         // The wire code is the shared AMBIGUOUS_NAME.

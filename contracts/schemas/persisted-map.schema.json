@@ -88,6 +88,19 @@
         "hermes"
       ]
     },
+    "PlacementClaim": {
+      "description": "What an identity claim recorded about the folder it brought under management.\n\nIts presence is the fact the PLANNERS read: a claimed folder is ALWAYS a target, whatever the\nrow's shape or the scope's detection says, because \"updates land here from now on\" is the\nclaim's whole promise. (An adopted SOURCE folder makes no such promise — it is where the person\nworks, and a destination-frozen row does not manage it.)",
+      "type": "object",
+      "properties": {
+        "added_dest": {
+          "description": "The row `dest` entry the claim ADDED, when the row was destination-frozen and did not\nalready name this folder's root.\n\nThe DETACH subtracts exactly this and nothing else. \"The row names this folder's root\" is\nnot the same fact as \"the claim put it there\": a row that already named the root was not\nchanged by the claim, and taking the entry back would drop copies the claim never touched\n— and, where it was the row's only destination, the row with them. **Additive.**",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
     "PlacementKind": {
       "description": "What a placement dir IS — the shared cross-agent convention dir, or one harness's native skills\ndir. **INFERRED value set.**",
       "oneOf": [
@@ -116,6 +129,17 @@
           "type": [
             "string",
             "null"
+          ]
+        },
+        "claim": {
+          "description": "The identity CLAIM that brought this dir under management (`add <path> --as <bundle>`),\nwhen one did. `None` for every dir topos chose itself AND for the folder an in-place adopt\ntook as the bundle's own source — both are `adopted_source`, and only this tells them\napart. **Additive.**",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PlacementClaim"
+            },
+            {
+              "type": "null"
+            }
           ]
         },
         "kind": {

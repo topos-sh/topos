@@ -151,6 +151,41 @@ skill into every agent's directory. Adding one of those adds the **original**: t
 actually live in, which is what the line records and what the `source:` line names. Nothing in
 either folder changes.
 
+## A copy you already have
+
+```bash
+topos add ~/.codex/skills/coolify-deploy --as coolify-deploy -g
+```
+
+Sometimes the skill is already sitting in an agent's folder — you copied it there yourself, or it
+arrived before topos did. `--as` brings that folder under management **as the skill you already
+have**, instead of recreating it beside itself:
+
+```
+added ~/.codex/skills/coolify-deploy as a copy of coolify-deploy — nothing in it changed; updates land here from now on
+source: topos.sh/ideamotive/coolify-deploy
+```
+
+Nothing in the folder is touched at claim time. What happens next depends only on what the bytes
+are: identical to the current version, it is simply one more place the skill is; an older version,
+and the next update brings it current; anything else becomes **your draft** of that skill — saved
+first, then spread to its other folders and offered by `topos publish`. The receipt says which.
+
+`--as` takes a folder and the name (or full reference) of a skill this scope already manages —
+never a workspace catalog, and never the other scope. A folder some other skill already holds
+refuses by name rather than letting two records fight over one directory. If topos had already
+placed its own copy next to yours under a suffixed name, that duplicate goes with the claim,
+unless you had edited it.
+
+The inverse is `remove <skill> --dest <folder>`:
+
+```
+removed ~/.codex/skills/coolify-deploy from coolify-deploy — the folder and its files stay; it just stops updating
+```
+
+Adding a skill you already have says so — and, when unmanaged folders on this machine provably
+hold a version of it, lists them as exactly these commands.
+
 ## Pick which agents get it
 
 ```bash

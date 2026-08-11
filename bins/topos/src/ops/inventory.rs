@@ -1798,6 +1798,7 @@ pub(crate) mod testkit {
                                 pre_existing_sha: None,
                                 swap_capability: SwapCapability::Unsupported,
                                 adopted_source: false,
+                                claim: None,
                             })
                             .collect(),
                     },

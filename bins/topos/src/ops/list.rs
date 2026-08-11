@@ -1399,6 +1399,7 @@ mod tests {
                     pre_existing_sha: None,
                     swap_capability: SwapCapability::Unsupported,
                     adopted_source: true,
+                    claim: None,
                 }],
             },
         )
@@ -1643,6 +1644,7 @@ mod tests {
             pre_existing_sha: None,
             swap_capability: SwapCapability::Unsupported,
             adopted_source: adopted,
+            claim: None,
         };
         let mut placements = vec![source.to_string_lossy().into_owned()];
         let mut state = vec![placement(None, true)];

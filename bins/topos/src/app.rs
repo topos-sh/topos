@@ -571,12 +571,22 @@ fn run_command(
             agent,
             dest,
             kind,
+            as_bundle,
             global,
             yes,
         } => {
             // The `-a`/`--dest` SELECTION, verbatim — resolved per arm below (a skill source
             // freezes skills folders, an MCP source config files).
             let selection = ops::Selection::new(&agent, &dest);
+            // THE IDENTITY CLAIM, ahead of every resolution ladder: `--as` says the positional is
+            // a FOLDER that already holds a copy of a bundle this scope manages, which is a
+            // different question from every one the ladders answer. It is refused for anything
+            // else rather than reinterpreted — a claim over a workspace reference or a repo would
+            // be a guess about what the person meant.
+            if let Some(as_bundle) = as_bundle {
+                let result = claim_arm(&ctx, &source, &as_bundle, &skill, kind, &selection, global);
+                return finish(json, cmd_name, result, render::add_tty, &diag);
+            }
             // `--kind` declares WHAT is being added, so it is read before every resolution ladder
             // below: an MCP server is a tool endpoint, not a skill folder, and none of the
             // ladder's answers (untracked discovery, the keep-as-yours fork, the workspace
@@ -3478,6 +3488,68 @@ pub(crate) fn pull_with_name_fallback(
     }
 }
 
+/// `add <path> --as <bundle>` — the grammar half of the identity claim, at the composition root
+/// where the argv still is what the person typed.
+///
+/// The claim is about a FOLDER and about a bundle that is ALREADY added here, and each of the
+/// three flags it refuses would be asking for something else entirely: `-s` picks members out of a
+/// repository, `--kind` says what a NEW bundle is, and `-a`/`--dest` ask for copies somewhere the
+/// claim is not about. Refusing by name beats silently ignoring a flag someone typed on purpose.
+fn claim_arm(
+    ctx: &Ctx<'_>,
+    source: &str,
+    as_bundle: &str,
+    skill: &[String],
+    kind: Option<crate::bundle_kind::BundleKind>,
+    selection: &ops::Selection,
+    global: bool,
+) -> Result<topos_types::results::AddData, ClientError> {
+    let path = claim_grammar(source, as_bundle, skill, kind, selection)?;
+    let scope = ops::add_scope(ctx, global)?;
+    ops::claim(ctx, &scope, &path, as_bundle)
+}
+
+/// The PURE half of [`claim_arm`]: the folder a `--as` invocation is about, or the refusal its
+/// argv already earns — decided from the tokens alone, so nothing is read before a wrong command
+/// is answered.
+fn claim_grammar(
+    source: &str,
+    as_bundle: &str,
+    skill: &[String],
+    kind: Option<crate::bundle_kind::BundleKind>,
+    selection: &ops::Selection,
+) -> Result<PathBuf, ClientError> {
+    let crate::source::SourceSpec::LocalPath(path) = crate::source::classify(source) else {
+        return Err(ClientError::InvalidArgument(format!(
+            "`--as` names the bundle a FOLDER is already a copy of — spell '{source}' as a path \
+             (`topos add {} --as {as_bundle}`)",
+            crate::error::path_token(source)
+        )));
+    };
+    if !skill.is_empty() {
+        return Err(ClientError::InvalidArgument(
+            "`-s` picks which skills to take from a repository that holds several — `--as` names \
+             one folder on this machine; drop `-s`"
+                .into(),
+        ));
+    }
+    if kind.is_some() {
+        return Err(ClientError::InvalidArgument(
+            "`--kind` says what a NEW bundle is — `--as` names one that is already added, and its \
+             kind was recorded when it was; drop `--kind`"
+                .into(),
+        ));
+    }
+    if !selection.is_empty() {
+        return Err(ClientError::SelectionRefused(
+            "`--as` brings the folder you named under management — `-a`/`--dest` ask for copies \
+             somewhere else; run them as two commands"
+                .into(),
+        ));
+    }
+    Ok(path)
+}
+
 /// The breadth arming sweep, run at the composition root — the one layer holding the real ports
 /// (`RealFs` is both the `ConfigStore` and the `CommandRunner`) and the resolved machine roots.
 /// `None` roots (no `$HOME`) arms nothing: detection needs a home, and the active adapter's own
@@ -3558,8 +3630,8 @@ fn list_discovery() -> Option<ops::DiscoveryRoots> {
 mod tests {
     use super::{
         DEFAULT_WEB_ORIGIN, PendingDisclosure, WaitPolicy, block_on_pending, build_pull_scope,
-        list_page_argv, next_page_action, parse_rfc3339_utc_millis, resolve_web_origin,
-        waiting_line,
+        claim_grammar, list_page_argv, next_page_action, parse_rfc3339_utc_millis,
+        resolve_web_origin, waiting_line,
     };
     use std::process::ExitCode;
 
@@ -3570,6 +3642,45 @@ mod tests {
     impl Clock for TestClock {
         fn now_unix_millis(&self) -> u64 {
             self.0
+        }
+    }
+
+    #[test]
+    fn a_claim_takes_a_folder_and_refuses_every_flag_that_asks_for_something_else() {
+        let none = ops::Selection::default();
+        // A FOLDER, and the path spelling is handed back runnable.
+        assert_eq!(
+            claim_grammar("./skills/review", "review", &[], None, &none).unwrap(),
+            std::path::PathBuf::from("./skills/review")
+        );
+        // A bare name (or a reference) is not a folder — the refusal spells the path form.
+        let err = claim_grammar("review", "review", &[], None, &none).unwrap_err();
+        assert!(
+            err.to_string().contains("`topos add ./review --as review`"),
+            "{err}"
+        );
+        // Each of the three flags asks a DIFFERENT question, and says so rather than being
+        // ignored: a repo member pick, a NEW bundle's kind, and copies somewhere else.
+        for err in [
+            claim_grammar("./x", "review", &["one".to_owned()], None, &none).unwrap_err(),
+            claim_grammar(
+                "./x",
+                "review",
+                &[],
+                Some(crate::bundle_kind::BundleKind::Skill),
+                &none,
+            )
+            .unwrap_err(),
+            claim_grammar(
+                "./x",
+                "review",
+                &[],
+                None,
+                &ops::Selection::new(&["codex".to_owned()], &[]),
+            )
+            .unwrap_err(),
+        ] {
+            assert!(err.to_string().contains("--as"), "{err}");
         }
     }
 

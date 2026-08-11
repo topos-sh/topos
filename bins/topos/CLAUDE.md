@@ -73,6 +73,27 @@ generated `docs/cli.md` (`cargo xtask gen-cli-ref`).
   known-MCP-file table), the normal form, scope discovery. `ops/manifest_edit` picks the file a
   verb edits and owns file birth + the writer-lock + compare-and-swap discipline every manifest
   mutation rides.
+- `ops/claim` — `add <path> --as <bundle>`: a folder that ALREADY holds a copy of a bundle the
+  invoked scope manages becomes one of its places. No version is minted and nothing in the folder
+  is written; the whole mechanic is the BASELINE the new `map.json` row carries (a row with none
+  scans Foreign and is frozen out of every plan forever) — the current digest, the matching
+  historical digest for a stale copy, or the lock's digest AFTER snapshotting bytes no version
+  explains, so the copy scans Modified and rides the draft engine. The row also carries the
+  `PlacementClaim` marker, which is what two invariants key on: a claimed folder is a target of
+  EVERY dir plan (`placement::keep_claimed`, applied at the end of all four planners — the claim's
+  promise is currency, and no planner reaches a folder the PERSON named by right), and its detach
+  subtracts from the manifest row exactly the `dest` entry the claim recorded ADDING, never merely
+  the root the folder sits under. Resolution is scope-strict over that one store (never a catalog);
+  the folder's other claimants refuse across the machine store AND every ancestor project store
+  (two engines would converge one directory); the record half runs under the per-skill flock with
+  the ownership questions asked inside it; a dest-frozen row gains the folder through the same
+  additive `dest` write an `-a` add makes; and a clean collision-suffixed twin beside the claimed
+  folder retires with it. The two writes (record, then row) are ordered so a RE-RUN repairs a crash
+  between them — the already-a-place path verifies and repairs rather than returning early, and
+  reads its receipt's state off the record. The inverse is `remove <bundle> --dest <folder>`
+  (`manifest_edit`'s `Arm::ClaimDetach`, reachable from a row, an off-switch, and a set line alike):
+  the record forgets the folder, the bytes stay, and a detach with nothing to edit writes no
+  manifest at all.
 - `ops/` — the verbs: `add`, `remove`, `reconcile` (update), `sync_engine`, `publish`, `review`,
   `revert`, `protect`, `invite`, `login`/`loopback`, `status`, `auth`, `list`, `diff`, `log`,
   `init`, `fmt`, `uninstall`, `builtin` (the embedded meta-skill from `skills/topos/`),

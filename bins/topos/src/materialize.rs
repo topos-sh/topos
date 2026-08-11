@@ -1369,6 +1369,7 @@ mod tests {
                     pre_existing_sha: None,
                     swap_capability: cap,
                     adopted_source: false,
+                    claim: None,
                 })
                 .collect(),
             harness: None,

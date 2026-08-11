@@ -50,6 +50,12 @@ pub(crate) fn err_envelope(command: &str, argv: &[String], err: &ClientError) ->
             let candidates: Vec<String> = candidates.iter().map(|c| c.spelling()).collect();
             serde_json::json!({ "candidates": candidates })
         }
+        // The already-added answer's OPTIONS are the same machine-readable half — when there are
+        // any. Nothing provable to offer leaves the envelope exactly as it was.
+        ClientError::AlreadyAdded { candidates, .. } if !candidates.is_empty() => {
+            let candidates: Vec<String> = candidates.iter().map(|c| c.spelling()).collect();
+            serde_json::json!({ "candidates": candidates })
+        }
         _ => serde_json::json!({}),
     };
     JsonEnvelope {
@@ -92,6 +98,16 @@ pub(crate) fn next_actions(command: &str, argv: &[String], err: &ClientError) ->
                 )
             })
             .collect(),
+        // The already-added answer's OPTIONS are not a rebuild of the refused invocation — the
+        // question they answer is a different one ("this copy too?"), so each is spelled whole:
+        // the verb, the scope the answer is about, and the candidate's own tokens.
+        ClientError::AlreadyAdded {
+            scope, candidates, ..
+        } => candidate_actions(
+            "add",
+            *scope == topos_types::results::ReceiptScope::Machine,
+            candidates,
+        ),
         // Every "look at the discovered inventory to resolve this" error points the agent at `list` — the
         // count-only ambiguity plus the not-found cases from `add <skill>` name resolution.
         ClientError::AmbiguousName { .. }
@@ -758,7 +774,59 @@ fn source_line(data: &AddData) -> String {
     }
 }
 
+/// The IDENTITY CLAIM's receipt (`add <path> --as <bundle>`): the folder is now one of this
+/// bundle's places, and the tail says what that means for the bytes already in it — nothing
+/// changed at claim time, and what the next update will do about it depends only on what they are.
+///
+/// The `source:` line is the same one every other add answer carries; the twin line, when one is
+/// there, is a second fact about a second folder and gets a line of its own.
+fn add_claim_tty(data: &AddData, claim: &topos_types::results::ClaimReceipt) -> String {
+    use topos_types::results::ClaimState;
+    let name = &data.name;
+    let tail = match claim.state {
+        ClaimState::Current => "nothing in it changed; updates land here from now on".to_owned(),
+        ClaimState::Older => {
+            "it holds an older version; the next update brings it current".to_owned()
+        }
+        // THE SPREAD IS REAL and must be disclosed exactly here: a settled draft is copied onto
+        // this bundle's other folders, and `publish` offers it to the team.
+        ClaimState::Edited => format!(
+            "its edits become your draft of this skill: they will reach its other folders and \
+             `topos publish` will offer them (`topos diff {name}` shows them)"
+        ),
+        // No spread to promise: the copies disagree, so nothing syncs until one is chosen.
+        ClaimState::Frozen => format!(
+            "its edits differ from another folder's, so nothing syncs until one is chosen (`topos \
+             update {name} --reset` discards every copy's edits)"
+        ),
+    };
+    let mut out = format!("added {} as a copy of {name} — {tail}\n", claim.folder);
+    out.push_str(&source_line(data));
+    if let Some(twin) = &claim.twin {
+        out.push_str(&if twin.removed {
+            format!(
+                "removed the duplicate {} (unedited copy of the same skill)\n",
+                twin.folder
+            )
+        } else {
+            format!(
+                "kept the duplicate {} — it is edited, so both copies stay\n",
+                twin.folder
+            )
+        });
+    }
+    if let Some(note) = &data.note {
+        out.push_str(&format!("note: {note}\n"));
+    }
+    out.trim_end().to_owned()
+}
+
 pub(crate) fn add_tty(data: &AddData) -> String {
+    // The identity claim has its own two lines: no row was written for it, so the file-naming
+    // lead every other add prints would name a file this act never touched.
+    if let Some(claim) = &data.claim {
+        return add_claim_tty(data, claim);
+    }
     // A `-a`/`--dest` add prints the DESTINATION receipt whatever the SOURCE was: the person
     // named where the copy should land, so where it landed is the receipt's first claim — the
     // `+` row with the destination, then the undo-led inverse. A workspace bundle names itself
@@ -2677,6 +2745,13 @@ fn remove_kind_line(item: &RemoveItem, applied: bool) -> String {
                 item.name
             )
         }
+        // A CLAIMED folder is the person's own — topos never created it, and detaching it is the
+        // exact inverse of the claim: the record forgets the folder and not one byte moves.
+        RemoveKind::ClaimDetached => format!(
+            "removed {} from {} — the folder and its files stay; it just stops updating",
+            item.kept_dirs.join(", "),
+            item.name
+        ),
         RemoveKind::FeedRemoved => {
             let manifest = item.manifest.as_deref().unwrap_or("topos.toml");
             let verb = if applied { "removed" } else { "would remove" };
@@ -4328,13 +4403,33 @@ pub(crate) fn err_hint_tty(command: &str, argv: &[String], err: &ClientError) ->
             .collect();
         return (!lines.is_empty()).then(|| lines.join("\n"));
     }
-    // The already-added answer has nothing to add at all — better no line than a vague line.
+    // The already-added answer's OPTIONS read the same way the chooser's do — the answer's own
+    // list under the sentence that counted them, not a suggestion appended to a refusal. Each
+    // folder is spelled for a READER (`~/…`), which a shell expands back to the agent's argv.
+    if let ClientError::AlreadyAdded {
+        scope, candidates, ..
+    } = err
+    {
+        let global = *scope == topos_types::results::ReceiptScope::Machine;
+        let lines: Vec<String> = candidates
+            .iter()
+            .map(|c| {
+                let mut argv = vec!["topos".to_owned(), "add".to_owned()];
+                if global {
+                    argv.push("-g".to_owned());
+                }
+                argv.extend(c.printed_tokens());
+                format!("  {}", hint_line(&argv))
+            })
+            .collect();
+        // Nothing provable to offer: better no line than a vague line.
+        return (!lines.is_empty()).then(|| lines.join("\n"));
+    }
     if matches!(
         err,
         ClientError::SharedCopyOnly { .. }
             | ClientError::PlacementsDiverged { .. }
             | ClientError::PublishBehind { .. }
-            | ClientError::AlreadyAdded { .. }
     ) {
         return None;
     }
@@ -4818,6 +4913,7 @@ mod tests {
             dest,
             dest_resolved: Vec::new(),
             dest_change: None,
+            claim: None,
             // The local source's tell: no workspace qualifies it.
             display: None,
         };
@@ -4948,6 +5044,7 @@ mod tests {
             dest: Vec::new(),
             dest_resolved: Vec::new(),
             dest_change: None,
+            claim: None,
             display: None,
         };
         // A local folder adopted into this project: the row's own `./…` spelling never surfaces —

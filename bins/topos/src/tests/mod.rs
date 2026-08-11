@@ -3,6 +3,7 @@
 //! the crash/durability gate, the follow/enrollment flow, the pull/apply sync engine, and the verbs.
 
 mod builtin_skill;
+mod claim;
 mod durability;
 mod manifest_reconcile;
 mod mcp_add;

@@ -115,6 +115,11 @@
           "const": "manifest-narrowed"
         },
         {
+          "description": "A DETACHED claim (`-a`/`--dest` naming a folder brought in with `add … --as`): the record\nstops managing that folder and the bytes stay exactly where they are. The row is touched\nonly to take back the destination the claim itself put on it. **Additive.**",
+          "type": "string",
+          "const": "claim-detached"
+        },
+        {
           "description": "An untracked local copy in an agent dir → permanent delete (no other copy exists).",
           "type": "string",
           "const": "untracked-local"

@@ -289,6 +289,7 @@ pub(crate) fn plan_targets(
             }
         }
     }
+    keep_claimed(&mut plan, prior);
 
     if plan.targets.is_empty() {
         // Detection found harnesses but none of them resolves to a dir here (every uncovered one is
@@ -297,6 +298,24 @@ pub(crate) fn plan_targets(
         return classic_plan(ctx, skill_id, naming, prior, adopt);
     }
     plan
+}
+
+/// A CLAIMED folder is a target of every plan, whatever the row's shape or the scope's detection
+/// says. The claim's whole promise is that updates land there from now on, and the four dir
+/// planners each reach their targets a different way — detection keys, project keys, the row's
+/// frozen `dest` roots — none of which a folder the PERSON named is guaranteed to sit under. So the
+/// invariant is applied once, here, at the end of each of them.
+///
+/// An adopted SOURCE folder is deliberately NOT swept in: it is where the person works, it makes no
+/// currency promise, and a destination-frozen row that never named it does not manage it. Only the
+/// claim's own marker ([`topos_types::persisted::PlacementClaim`]) opts a folder in.
+fn keep_claimed(plan: &mut PlacementPlan, prior: Option<&PlacementMap>) {
+    let Some(map) = prior else { return };
+    for (dir, st) in map.placements.iter().zip(&map.placement_state) {
+        if st.claim.is_some() && !plan.holds_dir(Path::new(dir)) {
+            plan.push_dir(PathBuf::from(dir), st.kind, st.agent.clone());
+        }
+    }
 }
 
 /// What a PROJECT-scope prior record yields for one `(kind, agent)` key: nothing recorded, a
@@ -476,6 +495,7 @@ pub(crate) fn project_plan(
             }
         }
     }
+    keep_claimed(&mut plan, prior);
     plan
 }
 
@@ -557,6 +577,7 @@ pub(crate) fn dest_plan(
         }
         plan.push_dir(dir, PlacementKind::Native, None);
     }
+    keep_claimed(&mut plan, prior);
     plan
 }
 
@@ -1125,6 +1146,7 @@ pub(crate) fn reconcile_map(prior: &PlacementMap, plan: &PlacementPlan) -> Place
                 pre_existing_sha: None,
                 swap_capability: SwapCapability::Unsupported,
                 adopted_source: false,
+                claim: None,
             };
             continue;
         }
@@ -1136,6 +1158,7 @@ pub(crate) fn reconcile_map(prior: &PlacementMap, plan: &PlacementPlan) -> Place
             pre_existing_sha: None,
             swap_capability: SwapCapability::Unsupported,
             adopted_source: false,
+            claim: None,
         });
     }
     next
@@ -1828,6 +1851,7 @@ mod tests {
                 pre_existing_sha: pre_existing.map(str::to_owned),
                 swap_capability: SwapCapability::AtomicExchange,
                 adopted_source: false,
+                claim: None,
             }],
             harness: None,
             harness_layer: None,

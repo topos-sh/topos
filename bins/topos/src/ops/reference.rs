@@ -656,6 +656,7 @@ fn set_data(name: &str) -> AddData {
         dest: Vec::new(),
         dest_resolved: Vec::new(),
         dest_change: None,
+        claim: None,
         display: None,
     }
 }

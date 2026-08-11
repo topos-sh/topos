@@ -383,6 +383,7 @@ fn unclaimed_record(
         dest: Vec::new(),
         dest_resolved: Vec::new(),
         dest_change: None,
+        claim: None,
         display: None,
         // The receipt would otherwise read as a fresh adopt while carrying a version older than
         // this run: say what actually happened.
@@ -567,6 +568,7 @@ pub(crate) fn add_with_name(
                 pre_existing_sha: None,
                 swap_capability: SwapCapability::Unsupported,
                 adopted_source: adopted_in_place,
+                claim: None,
             }],
             harness,
             harness_layer,
@@ -651,6 +653,7 @@ pub(crate) fn add_with_name(
         dest: Vec::new(),
         dest_resolved: Vec::new(),
         dest_change: None,
+        claim: None,
         display: None,
     })
 }
@@ -1928,7 +1931,7 @@ pub(crate) fn plan_bare_add(
     // — letting one answer silently dropped the selector the person typed.
     if harness.is_none()
         && subscribe
-        && let Some(plan) = plan_from_standing(ctx, name, opts)?
+        && let Some(plan) = plan_from_standing(ctx, roots, name, opts)?
     {
         return Ok(plan);
     }
@@ -2101,6 +2104,7 @@ pub(crate) fn extend_folder_dest(
         dest: entries.clone(),
         dest_resolved: Vec::new(),
         dest_change: None,
+        claim: None,
         display: None,
         note: None,
     };
@@ -2134,6 +2138,7 @@ fn placements_of(sctx: &Ctx<'_>, sid: &SkillId) -> Vec<String> {
 /// several records of the name, or a store read failure.
 fn plan_from_standing(
     ctx: &Ctx<'_>,
+    roots: &super::DiscoveryRoots,
     name: &str,
     opts: BareAdd<'_>,
 ) -> Result<Option<BareAddPlan>, ClientError> {
@@ -2167,6 +2172,7 @@ fn plan_from_standing(
                 },
             ));
         }
+        let standing = named.first();
         return Err(ClientError::AlreadyAdded {
             name: name.to_owned(),
             scope: if global {
@@ -2174,7 +2180,10 @@ fn plan_from_standing(
             } else {
                 ReceiptScope::Project
             },
-            from: named.first().map(|r| r.token(ctx)),
+            from: standing.map(|r| r.token(ctx)),
+            candidates: standing
+                .map(|r| claimable_copies(ctx, roots, r, name, global))
+                .unwrap_or_default(),
         });
     }
     let mut other: Vec<StandingRecord> = Vec::new();
@@ -2251,7 +2260,7 @@ fn other_stores(ctx: &Ctx<'_>, global: bool) -> Vec<crate::sidecar::Layout> {
 /// WHERE a tracked record's bytes come from — the three things a bundle can be, and the ONE fact
 /// that decides both how it is spelled and which door re-adds it.
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum RecordOrigin {
+pub(super) enum RecordOrigin {
     /// A governed reference: a workspace bundle (`<host>/<ws>/<name>`) or a forge import
     /// (`github.com/<owner>/<repo>/<name>`). Re-added through the reference arm.
     Reference(String),
@@ -2263,6 +2272,10 @@ enum RecordOrigin {
 /// can name — it still counts as standing, it just cannot appear on a runnable line.
 struct StandingRecord {
     origin: Option<RecordOrigin>,
+    /// The record itself, in the store that holds it — what a byte-proof offer is judged against.
+    id: SkillId,
+    lock: Lock,
+    layout: crate::sidecar::Layout,
 }
 
 impl StandingRecord {
@@ -2296,9 +2309,75 @@ fn standing_records(
     for (id, lock) in super::skills_named(&sctx, name)? {
         out.push(StandingRecord {
             origin: record_origin(ctx, &sctx, &id, &lock),
+            id,
+            lock,
+            layout: layout.clone(),
         });
     }
     Ok(out)
+}
+
+/// The UNMANAGED folders on this machine whose bytes are PROVABLY a version of the bundle that
+/// already stands here — each offered as a runnable claim (`add [-g] <folder> --as <reference>`).
+///
+/// BYTE PROOF ONLY. A same-named folder is not evidence of anything: agents' skills dirs are full
+/// of same-named, unrelated bundles, and an offer built on the name alone would invite the person
+/// to merge two histories that never met. So each candidate is scanned and matched against this
+/// record's own current version or any version in its history; anything else is simply not listed.
+/// (An explicit `--as` needs no such proof — the person is the one making the claim.)
+///
+/// SCOPE, as everywhere: a project-invoked answer offers only folders inside the checkout, and `-g`
+/// only the machine's own. Best-effort throughout — discovery or a store read that fails offers
+/// nothing rather than half a list.
+fn claimable_copies(
+    ctx: &Ctx<'_>,
+    roots: &super::DiscoveryRoots,
+    record: &StandingRecord,
+    name: &str,
+    global: bool,
+) -> Vec<TargetCandidate> {
+    // A record nothing can spell has no `--as` value, so there is no line to print.
+    let Some(origin) = &record.origin else {
+        return Vec::new();
+    };
+    let (as_argv, as_display) = match origin {
+        RecordOrigin::Reference(reference) => (reference.clone(), reference.clone()),
+        RecordOrigin::Folder(dir) => (dir.to_string_lossy().into_owned(), spell_home(ctx, dir)),
+    };
+    let Ok(untracked) = super::list::discover_untracked(ctx, roots) else {
+        return Vec::new();
+    };
+    let want_scope = if global { "user" } else { "project" };
+    let sctx = super::pull::ctx_with_layout(ctx, &record.layout);
+    let sp = sctx.layout.published(&record.id);
+    let store = Store::open(&sp.store).ok();
+    let mut out: Vec<TargetCandidate> = Vec::new();
+    for entry in untracked.iter().filter(|u| u.name == name) {
+        if entry.scope != want_scope {
+            continue;
+        }
+        let dir = origin_dir_or_self(Path::new(&entry.path));
+        let Ok(scanned) = scan::scan(&dir) else {
+            continue;
+        };
+        let digest = to_hex(&scanned.bundle_digest);
+        let known = digest == record.lock.bundle_digest
+            || store
+                .as_ref()
+                .is_some_and(|s| super::claim::digest_in_history(s, &digest).unwrap_or(false));
+        if !known {
+            continue;
+        }
+        out.push(TargetCandidate::claim(
+            dir.to_string_lossy().into_owned(),
+            spell_home(ctx, &dir),
+            as_argv.clone(),
+            as_display.clone(),
+        ));
+    }
+    out.sort();
+    out.dedup();
+    out
 }
 
 /// Where a tracked record came from — the one join every surface that has to name a record's
@@ -2310,7 +2389,12 @@ fn standing_records(
 /// a project store's own layout is the checkout's, so that read goes through the outer ctx. A
 /// WITHDRAWN row is not an answer — the workspace does not serve that name any more, so a command
 /// spelling it would refuse, and the next rung gets its chance.
-fn record_origin(ctx: &Ctx<'_>, sctx: &Ctx<'_>, id: &SkillId, lock: &Lock) -> Option<RecordOrigin> {
+pub(super) fn record_origin(
+    ctx: &Ctx<'_>,
+    sctx: &Ctx<'_>,
+    id: &SkillId,
+    lock: &Lock,
+) -> Option<RecordOrigin> {
     let cache = crate::sync_status::read(ctx.fs, &ctx.layout).unwrap_or_default();
     for entry in cache.workspaces.values() {
         if let (Some(host), Some(workspace)) =
@@ -2379,7 +2463,7 @@ fn records_chooser(
 ///
 /// `token` is the positional as the person typed it, so a rebuilt command can swap exactly that
 /// one and leave the rest of their invocation standing.
-fn chooser(
+pub(super) fn chooser(
     ctx: &Ctx<'_>,
     name: &str,
     token: &str,
@@ -2411,7 +2495,7 @@ fn chooser(
 
 /// A folder as a PRINTED line spells it: `~/`-abbreviated under this machine's home, absolute
 /// otherwise. Display only — never argv (see [`chooser`]).
-fn spell_home(ctx: &Ctx<'_>, dir: &Path) -> String {
+pub(super) fn spell_home(ctx: &Ctx<'_>, dir: &Path) -> String {
     let Some(roots) = &ctx.roots else {
         return dir.display().to_string();
     };
@@ -2900,7 +2984,19 @@ mod tests {
 
     #[test]
     fn standing_records_of_one_source_count_once_and_unnameable_ones_never_count() {
-        let record = |origin: Option<RecordOrigin>| StandingRecord { origin };
+        let record = |origin: Option<RecordOrigin>| StandingRecord {
+            origin,
+            id: SkillId::parse("topos_00000000000000000000000000000000").expect("a valid id"),
+            lock: Lock {
+                schema_version: PERSISTED_SCHEMA_VERSION,
+                skill_id: "topos_00000000000000000000000000000000".to_owned(),
+                name: "deploy".to_owned(),
+                base_commit: String::new(),
+                bundle_digest: String::new(),
+                files: Vec::new(),
+            },
+            layout: crate::sidecar::Layout::new(Path::new("/h/.topos")),
+        };
         let reference = |r: &str| Some(RecordOrigin::Reference(r.to_owned()));
         // A forge import lands one record PER DESTINATION. They are one thing the name means, not
         // an ambiguity between two identical spellings — counting before the dedup called it

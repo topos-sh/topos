@@ -417,12 +417,13 @@ fn fixtures() -> Vec<(&'static str, String)> {
     use topos_types::persisted::{ConflictPathKind, ConflictReason};
     use topos_types::requests::{WireDelivery, WireDeliverySkill, WireNotice, WireVia};
     use topos_types::results::{
-        AddData, ConflictHolds, ConflictPathReport, ConflictPlacement, DestChange, DiffData,
-        DiffPatchInfo, DiffSource, EnrollmentPending, InviteReadData, ListData, LogData, LoginData,
-        LogoutData, MergeReport, ProtectData, PublishData, PublishDescribeData, PublishGate,
-        PublishedMatch, PullAction, PullData, PullSkill, ReceiptScope, RemoveData, RemoveItem,
-        RemoveKind, ReviewIndexData, ReviewIndexEntry, SkillEntry, SkillStatus, StatusData,
-        StatusScope, StatusScopeSummary, StatusTrigger, WorkspaceSyncReport,
+        AddData, ClaimReceipt, ClaimState, ClaimTwin, ConflictHolds, ConflictPathReport,
+        ConflictPlacement, DestChange, DiffData, DiffPatchInfo, DiffSource, EnrollmentPending,
+        InviteReadData, ListData, LogData, LoginData, LogoutData, MergeReport, ProtectData,
+        PublishData, PublishDescribeData, PublishGate, PublishedMatch, PullAction, PullData,
+        PullSkill, ReceiptScope, RemoveData, RemoveItem, RemoveKind, ReviewIndexData,
+        ReviewIndexEntry, SkillEntry, SkillStatus, StatusData, StatusScope, StatusScopeSummary,
+        StatusTrigger, WorkspaceSyncReport,
     };
     use topos_types::results::{AttentionCount, ListScope, McpServerSummary};
     use topos_types::{ActionCode, Affected, JsonEnvelope, Receipt, TerminalOutcome, WireError};
@@ -473,6 +474,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
             display: None,
             dest_resolved: Vec::new(),
             dest_change: None,
+            claim: None,
         })
         .expect("AddData serializes"),
         warnings: vec![],
@@ -519,6 +521,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
             display: None,
             dest_resolved: Vec::new(),
             dest_change: None,
+            claim: None,
         })
         .expect("AddData serializes"),
         warnings: vec![],
@@ -569,6 +572,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
             display: None,
             dest_resolved: Vec::new(),
             dest_change: None,
+            claim: None,
         })
         .expect("AddData serializes"),
         warnings: vec![],
@@ -619,6 +623,147 @@ fn fixtures() -> Vec<(&'static str, String)> {
             next_actions: ambiguous_actions,
         }),
     };
+    // THE IDENTITY CLAIM — `topos add -g ~/.codex/skills/coolify-deploy --as coolify-deploy`.
+    // A folder that already held a copy of a bundle this machine manages becomes one of its
+    // places: no version is minted, no row is written (this bundle's row names no destinations),
+    // and NOTHING in the folder changes. The typed `claim` block carries the two facts the
+    // receipt speaks from — what the folder's bytes turned out to be, and the duplicate the
+    // engine had placed beside it, which held no edits and retired with the claim.
+    let add_claimed = JsonEnvelope {
+        schema_version: 1,
+        command: "add".to_owned(),
+        ok: true,
+        data: serde_json::to_value(AddData {
+            skill_id: Some("topos_t00".to_owned()),
+            name: "coolify-deploy".to_owned(),
+            version_id: Some(fx_version.to_owned()),
+            bundle_digest: Some(fx_digest.to_owned()),
+            tracked: true,
+            harness: None,
+            harness_slug: None,
+            currency: None,
+            triggers: Vec::new(),
+            origin: None,
+            // The RECORD's source, not the claimed folder's — the claim did not change where this
+            // bundle comes from.
+            source: Some("topos.sh/ideamotive/coolify-deploy".to_owned()),
+            manifest: None,
+            scope: None,
+            reference: None,
+            undo: Vec::new(),
+            governed_copy: None,
+            published_match: None,
+            note: None,
+            mcp: None,
+            dest: Vec::new(),
+            display: None,
+            dest_resolved: Vec::new(),
+            dest_change: None,
+            claim: Some(ClaimReceipt {
+                folder: "~/.codex/skills/coolify-deploy".to_owned(),
+                state: ClaimState::Current,
+                twin: Some(ClaimTwin {
+                    folder: "~/.agents/skills/coolify-deploy-ideamotive".to_owned(),
+                    removed: true,
+                }),
+            }),
+        })
+        .expect("AddData serializes"),
+        warnings: vec![],
+        messages: vec![],
+        // No undo action: the inverse (`remove <bundle> --dest <folder>`) belongs to the folder,
+        // not to the bundle, and the receipt does not offer a command it did not compute.
+        next_actions: vec![],
+        receipt: None,
+        error: None,
+    };
+
+    // THE ALREADY-ADDED ANSWER, with its options — a bare `topos add -g coolify-deploy` for a
+    // bundle this machine already has, beside two unmanaged folders whose bytes are PROVABLY a
+    // version of it. Each rides `data.candidates` and one runnable claim, spelled whole.
+    let claim_candidates = [
+        "/home/ada/.agents/skills/coolify-deploy --as topos.sh/ideamotive/coolify-deploy",
+        "/home/ada/.codex/skills/coolify-deploy --as topos.sh/ideamotive/coolify-deploy",
+    ];
+    let claim_actions: Vec<_> = claim_candidates
+        .iter()
+        .map(|c| {
+            let mut tokens = vec!["topos".to_owned(), "add".to_owned(), "-g".to_owned()];
+            tokens.extend(c.split(' ').map(str::to_owned));
+            tokens.push("--json".to_owned());
+            topos::actions::next_action(ActionCode::from("RUN_COMMAND".to_owned()), tokens)
+        })
+        .collect();
+    let add_already_added = JsonEnvelope {
+        schema_version: 1,
+        command: "add".to_owned(),
+        ok: false,
+        data: serde_json::json!({ "candidates": claim_candidates }),
+        warnings: vec![],
+        messages: vec![],
+        next_actions: claim_actions.clone(),
+        receipt: None,
+        error: Some(WireError {
+            code: "ALREADY_TRACKED".to_owned(),
+            outcome: TerminalOutcome::PermanentFailure,
+            retryable: false,
+            affected: Affected::default(),
+            expected_generation: None,
+            current_generation: None,
+            context: serde_json::json!({
+                "message": "coolify-deploy is already added machine-wide (~/.topos/topos.toml)\nsource: topos.sh/ideamotive/coolify-deploy\n2 unmanaged copies look like it — manage any as the same skill:"
+            }),
+            next_actions: claim_actions,
+        }),
+    };
+
+    // THE CLAIM'S INVERSE — `topos remove -g coolify-deploy --dest ~/.codex/skills`. The record
+    // stops managing the folder; `kept_dirs` names it and `bytes_kept` says what that means. No
+    // manifest is named: this bundle's row spelled no destinations, so no file was opened.
+    let remove_claim_detached = JsonEnvelope {
+        schema_version: 1,
+        command: "remove".to_owned(),
+        ok: true,
+        data: serde_json::to_value(RemoveData {
+            items: vec![RemoveItem {
+                name: "coolify-deploy".to_owned(),
+                kind: RemoveKind::ClaimDetached,
+                manifest: None,
+                workspace_id: None,
+                agent_dirs: Vec::new(),
+                kept_dirs: vec!["~/.codex/skills/coolify-deploy".to_owned()],
+                bytes_kept: true,
+                note: None,
+            }],
+            applied: true,
+            undo: argv(&[
+                "topos",
+                "add",
+                "-g",
+                "/home/ada/.codex/skills/coolify-deploy",
+                "--as",
+                "topos.sh/ideamotive/coolify-deploy",
+            ]),
+            uninstalled: Vec::new(),
+        })
+        .expect("RemoveData serializes"),
+        warnings: vec![],
+        messages: vec![],
+        next_actions: vec![topos::actions::next_action(
+            ActionCode::from("UNDO".to_owned()),
+            argv(&[
+                "topos",
+                "add",
+                "-g",
+                "/home/ada/.codex/skills/coolify-deploy",
+                "--as",
+                "topos.sh/ideamotive/coolify-deploy",
+            ]),
+        )],
+        receipt: None,
+        error: None,
+    };
+
     // The LOCAL MCP DOOR — `topos add --kind mcp ./team-weather -g`. This is now the only door
     // that adopts a server from bytes on this machine (a workspace reference is the other way in,
     // and needs no flag at all). The folder IS the bundle: adopted in place, so the row points at
@@ -676,6 +821,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
             }),
             dest_resolved: Vec::new(),
             dest_change: None,
+            claim: None,
         })
         .expect("AddData serializes"),
         warnings: vec![],
@@ -733,6 +879,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
                 added: vec!["~/.cursor/skills".to_owned()],
                 frozen: Vec::new(),
             }),
+            claim: None,
         })
         .expect("AddData serializes"),
         warnings: vec![],
@@ -1838,6 +1985,12 @@ fn fixtures() -> Vec<(&'static str, String)> {
         ("json/add.published-match", emit_json(&add_published_match)),
         ("json/add.ambiguous", emit_json(&add_ambiguous)),
         ("json/add.dest-extended", emit_json(&add_dest_extended)),
+        ("json/add.claimed", emit_json(&add_claimed)),
+        ("json/add.already-added", emit_json(&add_already_added)),
+        (
+            "json/remove.claim-detached",
+            emit_json(&remove_claim_detached),
+        ),
         ("json/add.mcp-adopted", emit_json(&add_mcp_adopted)),
         ("json/list.ok", emit_json(&list_ok)),
         ("json/diff.ok", emit_json(&diff_ok)),

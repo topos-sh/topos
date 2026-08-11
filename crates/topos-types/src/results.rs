@@ -1137,6 +1137,62 @@ pub struct AddData {
     /// destination at all. **INFERRED** (additive-only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dest_change: Option<DestChange>,
+    /// The IDENTITY CLAIM this add recorded (`--as`): a folder that already held a copy of a
+    /// bundle this scope manages is now one of its places. Nothing in the folder changed and no
+    /// version was minted. Absent for every other add. **INFERRED** (additive-only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claim: Option<ClaimReceipt>,
+}
+
+/// `add <path> --as <bundle>` — the folder is recorded as one of the bundle's places, byte for
+/// byte as it stands.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(
+    feature = "contract-derives",
+    derive(schemars::JsonSchema, utoipa::ToSchema)
+)]
+pub struct ClaimReceipt {
+    /// The claimed folder, as a printed line spells it (`~/`-abbreviated under the machine home).
+    pub folder: String,
+    /// What the folder's bytes turned out to be, against the bundle's own history.
+    pub state: ClaimState,
+    /// A DUPLICATE of the same bundle beside the claimed folder — the copy the engine had placed
+    /// under its collision-suffixed name. Absent when there was none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub twin: Option<ClaimTwin>,
+}
+
+/// What a claimed folder holds, against the bundle's version history. **INFERRED value set.**
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(
+    feature = "contract-derives",
+    derive(schemars::JsonSchema, utoipa::ToSchema)
+)]
+#[serde(rename_all = "kebab-case")]
+pub enum ClaimState {
+    /// Exactly the version the bundle is on — the folder is already current.
+    Current,
+    /// Exactly an OLDER version in the bundle's history — the next update brings it current.
+    Older,
+    /// Bytes no version explains: they become this bundle's draft (snapshotted first).
+    Edited,
+    /// Edited, AND another folder holds different edits — the placement freeze. Nothing syncs
+    /// until one copy is chosen.
+    Frozen,
+}
+
+/// The duplicate copy beside a claimed folder: the engine's own placement under its
+/// collision-suffixed name.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(
+    feature = "contract-derives",
+    derive(schemars::JsonSchema, utoipa::ToSchema)
+)]
+pub struct ClaimTwin {
+    /// The duplicate's folder, as a printed line spells it.
+    pub folder: String,
+    /// `true` when it was retired (it held no edits); `false` when it was kept because it did.
+    pub removed: bool,
 }
 
 /// The destination set of a STANDING row, changed by an add. Destinations EXTEND: what the row
@@ -1839,6 +1895,10 @@ pub enum RemoveKind {
     /// A NARROWED removal (`-a`/`--dest`): the named destination(s) were subtracted from the
     /// row's `dest` and that copy uninstalled; the row survives with the rest. **Additive.**
     ManifestNarrowed,
+    /// A DETACHED claim (`-a`/`--dest` naming a folder brought in with `add … --as`): the record
+    /// stops managing that folder and the bytes stay exactly where they are. The row is touched
+    /// only to take back the destination the claim itself put on it. **Additive.**
+    ClaimDetached,
     /// An untracked local copy in an agent dir → permanent delete (no other copy exists).
     UntrackedLocal,
     /// A tracked, never-published local skill → permanent delete (the sidecar entry drops too).

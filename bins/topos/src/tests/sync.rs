@@ -5286,6 +5286,7 @@ fn add_replica(rig: &Rig, id: &str, dir: &Path, files: &[(&str, FileMode, &[u8])
         pre_existing_sha: None,
         swap_capability: SwapCapability::Unsupported,
         adopted_source: false,
+        claim: None,
     });
     doc::write_map(&rig.fs, &sp.map, &map).unwrap();
 }
@@ -5307,6 +5308,7 @@ fn add_stale_replica(rig: &Rig, id: &str, dir: &Path, files: &[(&str, FileMode, 
         pre_existing_sha: None,
         swap_capability: SwapCapability::Unsupported,
         adopted_source: false,
+        claim: None,
     });
     doc::write_map(&rig.fs, &sp.map, &map).unwrap();
 }
@@ -5453,6 +5455,7 @@ fn a_converge_landing_survives_the_same_runs_settled_fanout() {
         pre_existing_sha: None,
         swap_capability: SwapCapability::Unsupported,
         adopted_source: false,
+        claim: None,
     });
     doc::write_map(&rig.fs, &sp.map, &map).unwrap();
 
@@ -5623,6 +5626,7 @@ fn a_heal_riding_along_with_a_settled_fanout_is_named_on_the_row() {
         pre_existing_sha: None,
         swap_capability: SwapCapability::Unsupported,
         adopted_source: false,
+        claim: None,
     });
     doc::write_map(&rig.fs, &sp.map, &map).unwrap();
 

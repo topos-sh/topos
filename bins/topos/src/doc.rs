@@ -81,6 +81,7 @@ pub(crate) fn read_map(fs: &dyn FsOps, path: &Path) -> Result<Option<PlacementMa
                 pre_existing_sha: map.pre_existing_sha.clone(),
                 swap_capability: map.swap_capability,
                 adopted_source: false,
+                claim: None,
             })
             .collect();
     }

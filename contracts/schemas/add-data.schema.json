@@ -12,6 +12,17 @@
       ],
       "pattern": "^[0-9a-f]{64}$"
     },
+    "claim": {
+      "description": "The IDENTITY CLAIM this add recorded (`--as`): a folder that already held a copy of a\nbundle this scope manages is now one of its places. Nothing in the folder changed and no\nversion was minted. Absent for every other add. **INFERRED** (additive-only).",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ClaimReceipt"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "currency": {
       "description": "The auto-update-trigger outcome, present when adopting into a recognized harness attempted a\nsession-start trigger install — the honest disclosure of the (only) write `add` makes outside\n`~/.topos/`. `None` for a plain directory.",
       "anyOf": [
@@ -197,6 +208,78 @@
     "tracked"
   ],
   "$defs": {
+    "ClaimReceipt": {
+      "description": "`add <path> --as <bundle>` — the folder is recorded as one of the bundle's places, byte for\nbyte as it stands.",
+      "type": "object",
+      "properties": {
+        "folder": {
+          "description": "The claimed folder, as a printed line spells it (`~/`-abbreviated under the machine home).",
+          "type": "string"
+        },
+        "state": {
+          "description": "What the folder's bytes turned out to be, against the bundle's own history.",
+          "$ref": "#/$defs/ClaimState"
+        },
+        "twin": {
+          "description": "A DUPLICATE of the same bundle beside the claimed folder — the copy the engine had placed\nunder its collision-suffixed name. Absent when there was none.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ClaimTwin"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "folder",
+        "state"
+      ]
+    },
+    "ClaimState": {
+      "description": "What a claimed folder holds, against the bundle's version history. **INFERRED value set.**",
+      "oneOf": [
+        {
+          "description": "Exactly the version the bundle is on — the folder is already current.",
+          "type": "string",
+          "const": "current"
+        },
+        {
+          "description": "Exactly an OLDER version in the bundle's history — the next update brings it current.",
+          "type": "string",
+          "const": "older"
+        },
+        {
+          "description": "Bytes no version explains: they become this bundle's draft (snapshotted first).",
+          "type": "string",
+          "const": "edited"
+        },
+        {
+          "description": "Edited, AND another folder holds different edits — the placement freeze. Nothing syncs\nuntil one copy is chosen.",
+          "type": "string",
+          "const": "frozen"
+        }
+      ]
+    },
+    "ClaimTwin": {
+      "description": "The duplicate copy beside a claimed folder: the engine's own placement under its\ncollision-suffixed name.",
+      "type": "object",
+      "properties": {
+        "folder": {
+          "description": "The duplicate's folder, as a printed line spells it.",
+          "type": "string"
+        },
+        "removed": {
+          "description": "`true` when it was retired (it held no edits); `false` when it was kept because it did.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "folder",
+        "removed"
+      ]
+    },
     "CurrencyKind": {
       "description": "What fires the update check for a harness — drives HONEST receipt copy (\"current by next session\",\n\"within about a minute\", …). `ExplicitPullOnly` is the honest-degrade floor.",
       "oneOf": [

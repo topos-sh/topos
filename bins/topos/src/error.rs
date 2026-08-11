@@ -79,9 +79,25 @@ impl FetchFault {
     }
 }
 
+/// The FLAG half of a candidate: a reference alone does not always name one thing, and what
+/// narrows it is a flag with a value of its own — `--via <set>` for a member a set line delivers,
+/// `--as <bundle>` for a folder that is a copy of a bundle already added here.
+///
+/// The value is ARGV, like the reference beside it; `display` is the shorter form a printed line
+/// reads better as (see [`TargetCandidate`]).
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct CandidateSelector {
+    /// The long flag that carries the value (`--via`, `--as`).
+    pub flag: &'static str,
+    /// The value, as ONE argv token.
+    pub value: String,
+    /// How a PRINTED line spells it. `None` ⇒ the value itself. Never argv.
+    pub display: Option<String>,
+}
+
 /// ONE thing an ambiguous target could have meant, kept as STRUCTURE rather than as a sentence:
-/// the reference itself, plus — for a member a set line delivers — the set that member removal
-/// must name to select it.
+/// the reference itself, plus — where one is needed — the flag that narrows it to exactly this
+/// candidate.
 ///
 /// The structure is the point. A reference is not always a tidy token: a local folder reference is
 /// a PATH, and a path may contain whitespace. Rebuilding a command by splitting a rendered
@@ -97,7 +113,7 @@ impl FetchFault {
 /// person reads a shorter form better, that form rides [`display`](Self::display) and reaches the
 /// TTY alone.
 ///
-/// Ordering is derived over `(reference, via)` — which is the spelling order too, since a
+/// Ordering is derived over `(reference, selector)` — which is the spelling order too, since a
 /// reference holds no byte below `-`/space that could reorder the pair — so a sorted candidate
 /// list reads the same on both surfaces.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -108,18 +124,18 @@ pub(crate) struct TargetCandidate {
     /// How a PRINTED line spells it, when a person reads that better than the argv form (`~/…`
     /// for a folder under this machine's home). `None` ⇒ the reference itself. Never argv.
     pub display: Option<String>,
-    /// The SET line whose member rewrite this candidate selects (`--via <set-reference>`), for a
-    /// bundle no row of its own spells. `None` for a candidate that is a row (or a resource).
-    pub via: Option<String>,
+    /// The flag that narrows the reference to exactly this candidate. `None` for a candidate the
+    /// reference alone names.
+    pub selector: Option<CandidateSelector>,
 }
 
 impl TargetCandidate {
-    /// A candidate that stands on its own reference — no set line to name.
+    /// A candidate that stands on its own reference — no flag to name.
     pub(crate) fn plain(reference: impl Into<String>) -> Self {
         Self {
             reference: reference.into(),
             display: None,
-            via: None,
+            selector: None,
         }
     }
 
@@ -131,7 +147,7 @@ impl TargetCandidate {
         Self {
             display: (display != absolute).then_some(display),
             reference: absolute,
-            via: None,
+            selector: None,
         }
     }
 
@@ -140,27 +156,52 @@ impl TargetCandidate {
         Self {
             reference: reference.into(),
             display: None,
-            via: Some(set.into()),
+            selector: Some(CandidateSelector {
+                flag: "--via",
+                value: set.into(),
+                display: None,
+            }),
         }
+    }
+
+    /// A CLAIM candidate: the folder to bring under management (absolute in argv, `~/`-abbreviated
+    /// when printed) and the `--as <bundle>` it is a copy of.
+    pub(crate) fn claim(
+        absolute: impl Into<String>,
+        display: impl Into<String>,
+        bundle: impl Into<String>,
+        bundle_display: impl Into<String>,
+    ) -> Self {
+        let mut candidate = Self::folder(absolute, display);
+        let value = bundle.into();
+        let bundle_display = bundle_display.into();
+        candidate.selector = Some(CandidateSelector {
+            flag: "--as",
+            display: (bundle_display != value).then_some(bundle_display),
+            value,
+        });
+        candidate
     }
 
     /// The rendered spelling — what the envelope's `data.candidates` carries. Exactly the text
     /// the two parts read as on a command line, so a consumer that has always read these strings
     /// sees no change. It is the ARGV form: a machine reading this field is going to run it.
     pub(crate) fn spelling(&self) -> String {
-        match &self.via {
-            Some(set) => format!("{} --via {set}", self.reference),
-            None => self.reference.clone(),
-        }
+        self.argv_tokens().join(" ")
     }
 
     /// The candidate's tokens as a PRINTED line spells them — [`argv_tokens`](Self::argv_tokens)
-    /// with the folder abbreviation applied. A shell expands the `~/` back to exactly the argv
-    /// form, so the two lines run the same command.
+    /// with the abbreviations applied. A shell expands the `~/` back to exactly the argv form, so
+    /// the two lines run the same command.
     pub(crate) fn printed_tokens(&self) -> Vec<String> {
         let mut tokens = self.argv_tokens();
         if let (Some(display), Some(first)) = (&self.display, tokens.first_mut()) {
             *first = display.clone();
+        }
+        if let (Some(selector), Some(last)) = (&self.selector, tokens.last_mut())
+            && let Some(display) = &selector.display
+        {
+            *last = display.clone();
         }
         tokens
     }
@@ -168,8 +209,8 @@ impl TargetCandidate {
     /// The EXECUTABLE form: the reference as ONE token, then the selector as its own two. This is
     /// what a rebuilt next action extends its argv with — never a split of the spelling.
     pub(crate) fn argv_tokens(&self) -> Vec<String> {
-        match &self.via {
-            Some(set) => vec![self.reference.clone(), "--via".to_owned(), set.clone()],
+        match &self.selector {
+            Some(s) => vec![self.reference.clone(), s.flag.to_owned(), s.value.clone()],
             None => vec![self.reference.clone()],
         }
     }
@@ -225,12 +266,38 @@ pub(crate) fn scope_file(scope: ReceiptScope) -> &'static str {
     }
 }
 
-/// The [`ClientError::AlreadyAdded`] answer — the add receipt's own two lines, in the past tense.
-fn already_added_message(name: &str, scope: ReceiptScope, from: &Option<String>) -> String {
-    let lead = format!("{name} is already added {}", scope_file(scope));
-    match from {
-        Some(source) => format!("{lead}\nsource: {source}"),
-        None => lead,
+/// The [`ClientError::AlreadyAdded`] answer — the add receipt's own two lines, in the past tense,
+/// plus the offer line when unmanaged copies on this machine PROVABLY hold this bundle's bytes.
+/// The offered commands themselves ride the candidates (one runnable line each, both surfaces).
+fn already_added_message(
+    name: &str,
+    scope: ReceiptScope,
+    from: &Option<String>,
+    candidates: &[TargetCandidate],
+) -> String {
+    let mut out = format!("{name} is already added {}", scope_file(scope));
+    if let Some(source) = from {
+        out.push_str(&format!("\nsource: {source}"));
+    }
+    match candidates.len() {
+        0 => {}
+        1 => out.push_str("\n1 unmanaged copy looks like it — manage it as the same skill:"),
+        n => out.push_str(&format!(
+            "\n{n} unmanaged copies look like it — manage any as the same skill:"
+        )),
+    }
+    out
+}
+
+/// The [`ClientError::ClaimTaken`] sentence: a folder another record already manages. Two shapes,
+/// and the difference is which file the other record answers to — the OTHER scope's is named,
+/// because that is the whole reason the claim cannot land here.
+fn claim_taken_message(dir: &str, claim: &str, owner: &str, manifest: &Option<String>) -> String {
+    match manifest {
+        None => format!("can't add {dir} as {claim} — this folder belongs to {owner}"),
+        Some(file) => {
+            format!("can't add {dir} as {claim} — this folder already belongs to {owner} in {file}")
+        }
     }
 }
 
@@ -381,12 +448,44 @@ pub(crate) enum ClientError {
     /// reference this machine can spell (no workspace, no upstream, and no folder left on disk):
     /// better no line than a vague one. The code stays `ALREADY_TRACKED`, so an agent branches on
     /// it exactly as it always has.
-    #[error("{}", already_added_message(.name, *.scope, .from))]
+    ///
+    /// `candidates` are the unmanaged folders on this machine whose bytes are PROVABLY a version
+    /// of this very bundle — each a runnable `add <folder> --as <reference>` that brings the copy
+    /// under the same identity. Byte proof only: a same-named folder holding something else is
+    /// never offered, because the offer would be a guess about what the person meant.
+    #[error("{}", already_added_message(.name, *.scope, .from, .candidates))]
     AlreadyAdded {
         name: String,
         scope: ReceiptScope,
         from: Option<String>,
+        candidates: Vec<TargetCandidate>,
     },
+    /// `add <path> --as <bundle>` over a folder ANOTHER record already manages — in this scope, or
+    /// (naming its file) in the other one. Two engines would otherwise converge one directory.
+    #[error("{}", claim_taken_message(.dir, .claim, .owner, .manifest))]
+    ClaimTaken {
+        /// The folder, as a printed line spells it.
+        dir: String,
+        /// The bundle the claim named.
+        claim: String,
+        /// The bundle that already holds the folder.
+        owner: String,
+        /// The OTHER scope's manifest, when that is where the owner answers to. `None` for a
+        /// collision inside the invoked scope.
+        manifest: Option<String>,
+    },
+    /// `add <path> --as <bundle>` over a folder that cannot be read. ONE unscannable placement
+    /// wedges the whole bundle's sync, so the claim fails toward the gate instead of landing a
+    /// row that stops every later update. `reason` is the scanner's own bundle-relative words.
+    #[error("can't add {dir} — the folder can't be read ({reason})")]
+    ClaimUnscannable { dir: String, reason: String },
+    /// `add <path> --as <bundle>` naming an MCP server: it is delivered as config entries, not as
+    /// a folder, so there is no folder copy for a claim to be about.
+    #[error(
+        "'{name}' is an MCP server — it lives in agents' config files, not folders; there is no \
+         folder copy to manage"
+    )]
+    ClaimNotAFolder { name: String },
     /// `publish <skill>@<harness>` named an agent that reads NONE of the folders the ALREADY-TRACKED
     /// skill of that name stands in. The auto-add convenience cannot re-add a tracked name, and a
     /// mismatched `@<harness>` suffix likely means a DIFFERENT copy was intended — refused so a stray
@@ -986,10 +1085,17 @@ impl ClientError {
             }
             ClientError::NoSuchSkill { .. } => "NO_SUCH_SKILL",
             ClientError::NoUntrackedSkill { .. } => "NO_UNTRACKED_SKILL",
-            // The name-oriented twins of AlreadyTracked share its code (agents branch the same on any).
-            ClientError::AlreadyTrackedName { .. } | ClientError::AlreadyAdded { .. } => {
-                "ALREADY_TRACKED"
-            }
+            // The name-oriented twins of AlreadyTracked share its code (agents branch the same on
+            // any) — including a claim over a folder another record already holds, which is that
+            // same fact met from the `--as` door.
+            ClientError::AlreadyTrackedName { .. }
+            | ClientError::AlreadyAdded { .. }
+            | ClientError::ClaimTaken { .. } => "ALREADY_TRACKED",
+            // A folder the scanner cannot read is the same "this folder is not adoptable" family
+            // every other scan reject carries.
+            ClientError::ClaimUnscannable { .. } => "SCAN_REJECTED",
+            // A claim aimed at a bundle that has no folder copy is a wrong argv, nothing more.
+            ClientError::ClaimNotAFolder { .. } => "INVALID_ARGUMENT",
             ClientError::HarnessMismatch { .. } => "HARNESS_MISMATCH",
             ClientError::HarnessNotFound(_) => "HARNESS_NOT_FOUND",
             ClientError::PathNotName { .. } => "PATH_NOT_NAME",

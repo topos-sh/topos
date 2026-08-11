@@ -21,6 +21,7 @@ mod add_mcp;
 mod arm;
 mod auth;
 mod builtin;
+mod claim;
 mod connect;
 mod contribute;
 pub(crate) mod dest_select;
@@ -62,6 +63,9 @@ pub(crate) use add_mcp::{McpAdded, add_mcp};
 pub(crate) use arm::INERT_TRIGGER;
 pub(crate) use arm::{Scrubbed, Triggers, arm_detected, probe_detected};
 pub(crate) use builtin::{ensure_builtin, is_builtin, restore_builtin};
+pub(crate) use claim::claim;
+#[cfg(test)]
+pub(crate) use claim::digest_in_history;
 pub(crate) use connect::device_challenge;
 pub(crate) use dest_select::Selection;
 // The RFC-3339 emitter round-trips against the render parser's test.
@@ -82,6 +86,8 @@ pub(crate) use inventory::ScopeView;
 pub(crate) use invite::{InviteConnectors, InviteOutcome, invite};
 pub(crate) use list::{DiscoveryRoots, ListOutcome, ListRequest, list_with};
 pub(crate) use login::{LoginConnectors, login as session_login, logout as session_logout};
+#[cfg(test)]
+pub(crate) use manifest_edit::AddScope;
 pub(crate) use manifest_edit::{
     add_scope, dest_for_selected_agents, manifest_host, note_added_path_dest_in,
     note_added_path_in, note_added_remote, off_row_for, push_note, reference_shaped, remove_global,

@@ -113,6 +113,7 @@ topos add @<workspace>/channels/<name>   # a whole channel
 topos add owner/repo              # every skill in a GitHub repo, tracking its default branch
 topos add owner/repo/<name>       # one skill from a repo; @<commit> pins
 topos add ./dir                   # adopt a local folder in place
+topos add ./dir --as <name>       # manage a folder that already holds a copy of <name>
 topos add <src> -a codex          # install for ONE agent (repeatable; recorded on the row)
 topos add <src> --dest <folder>   # install into an exact folder (repeatable; unions with -a)
 topos remove <name>               # the inverse — drops the row AND uninstalls its copies now
@@ -142,6 +143,15 @@ stays in place, disclosed on the receipt (`kept <name> — <path> is edited`), a
 add -g @<workspace>)` closes the receipt. Hand-deleting the line does the same thing at the next
 `topos update`. A bare `add -g` of something a standing feed line already gives writes nothing
 and says so.
+`--as <bundle>` brings a folder that ALREADY holds a copy of a skill you have under that same
+skill: nothing in the folder changes, no version is minted, and the next update reconciles it
+against the history topos already keeps — current bytes just become one more place the skill is,
+older bytes catch up, and bytes nothing explains become your draft (snapshotted first, then
+offered by `topos publish`). It takes a folder, and only a skill this scope already manages; a
+folder another skill holds refuses by name. `remove <name> --dest <folder>` is the exact inverse:
+the folder and its files stay, it just stops updating. When a bare `add <name>` answers that the
+skill is already added, it lists exactly the unmanaged folders whose bytes it can PROVE are a
+version of it, each as a runnable `--as` line.
 In a checkout, managed copies land in the project's own agent dirs and keep themselves out of
 commits (each placed dir carries its own ignore file; the version history of a project row lives in
 that checkout's own `.topos/`, so the machine store and home agent dirs never mention it). COMMIT

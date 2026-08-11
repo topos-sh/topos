@@ -6167,6 +6167,22 @@ pub(super) fn clean_by_choice(
     retire_split(ctx, sid, &lock, &map, &targets)
 }
 
+/// Retire exactly the named placements BY CHOICE, for a caller that already holds the skill's
+/// writer flock and has already decided WHICH — the identity claim's twin retirement, whose
+/// candidate is one duplicate directory it proved clean under that same lock.
+///
+/// # Errors
+/// A scan, store, or filesystem failure from [`retire_split`].
+pub(super) fn retire_placements(
+    ctx: &Ctx<'_>,
+    sid: &SkillId,
+    lock: &Lock,
+    map: &PlacementMap,
+    indices: &[usize],
+) -> Result<Option<ByChoiceClean>, ClientError> {
+    retire_split(ctx, sid, lock, map, indices)
+}
+
 /// Retire exactly `indices` of one bundle's placements BY CHOICE: an UNEDITED copy leaves through
 /// the ordinary park-then-verify rail; a copy whose bytes differ from its recorded baseline — or
 /// one that cannot be read at all, which fails toward keeping — is KEPT IN PLACE (an edited copy
@@ -6226,6 +6242,21 @@ fn retire_split(
         removed,
         kept,
     }))
+}
+
+/// Stop managing exactly these recorded folders, bytes untouched — the identity claim's exact
+/// inverse. Takes the skill's writer flock itself (unlike [`release_records`], whose callers
+/// already hold it mid-retirement).
+///
+/// # Errors
+/// A lock or map write failure.
+pub(super) fn detach_placements(
+    ctx: &Ctx<'_>,
+    sid: &SkillId,
+    paths: &[String],
+) -> Result<(), ClientError> {
+    let _guard = crate::sidecar::lock_skill(ctx.fs, &ctx.layout, sid)?;
+    release_records(ctx, sid, paths)
 }
 
 /// Release the RECORDS of kept copies (by their recorded raw paths): the bytes stay on disk,

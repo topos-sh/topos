@@ -1697,7 +1697,10 @@ pub(crate) fn store_bundle_digest_opt(
 
 /// The `bundle_digest` of a present stored version (recomputed via the tree-structure walk → kernel digest
 /// over the recorded content ids). Used to pin `render_verified`.
-fn store_bundle_digest(store: &Store, version_id: [u8; 32]) -> Result<[u8; 32], ClientError> {
+pub(super) fn store_bundle_digest(
+    store: &Store,
+    version_id: [u8; 32],
+) -> Result<[u8; 32], ClientError> {
     let leaves = store.read_tree_structure(version_id)?;
     let mut entries = Vec::with_capacity(leaves.len());
     for leaf in &leaves {

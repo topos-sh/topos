@@ -919,15 +919,7 @@ fn note_added_path_row_in(
     // The `source:` line for a path row is the FOLDER, canonical — never the row's portable
     // `./…` spelling, which is only meaningful beside the file that holds it.
     data.source = Some(source_abs.display().to_string());
-    // Compare BOTH paths canonically: a source under the manifest's folder ALWAYS records the
-    // dir-relative `./path`, never an absolute one (the file itself still lands at `target.path` —
-    // the dir is canonicalized only to compute the spelling).
-    let dir_c = canonical_or(&target.dir);
-    let reference = if target.scope == ManifestScope::Project && source_abs.starts_with(&dir_c) {
-        path_reference(&dir_c, &source_abs)
-    } else {
-        source_abs.display().to_string()
-    };
+    let reference = path_row_key(target, &source_abs);
     let value = match (kind, dest) {
         (None, None) => EntryValue::Star,
         (kind, dest) => EntryValue::Fields(crate::manifest::document::EntryFields {
@@ -955,6 +947,48 @@ pub(crate) fn note_added_path(
 ) -> Result<(), ClientError> {
     let target = edit_target(ctx, global)?.ok_or(ClientError::NoManifest)?;
     note_added_path_in(ctx, data, &target, source)
+}
+
+/// The KEY a local-path row takes in `target`'s file — the ONE derivation the row write and every
+/// later lookup of that row share.
+///
+/// Compared BOTH ways canonically: a source under the manifest's folder ALWAYS records the
+/// dir-relative `./path`, never an absolute one (the file itself still lands at `target.path` —
+/// the dir is canonicalized only to compute the spelling).
+pub(super) fn path_row_key(target: &EditTarget, source_abs: &Path) -> String {
+    let dir_c = canonical_or(&target.dir);
+    if target.scope == ManifestScope::Project && source_abs.starts_with(&dir_c) {
+        path_reference(&dir_c, source_abs)
+    } else {
+        source_abs.display().to_string()
+    }
+}
+
+/// The VALUE `target`'s file already spells for `reference`, or `None` when it spells no such row
+/// (or has no file at all).
+///
+/// # Errors
+/// A read failure, or a manifest the grammar refuses (typed, naming the file).
+pub(super) fn row_value(
+    ctx: &Ctx<'_>,
+    target: &EditTarget,
+    reference: &str,
+) -> Result<Option<EntryValue>, ClientError> {
+    let Some(text) = read_text(ctx, &target.path)? else {
+        return Ok(None);
+    };
+    let doc = crate::manifest::document::parse_manifest(&text, target.scope)
+        .map_err(|e| corrupt(&target.path, &e))?;
+    Ok(doc
+        .rows
+        .into_iter()
+        .find(|row| row.reference == reference)
+        .map(|row| row.value))
+}
+
+/// A path in the scope's own `dest` dialect — see [`dest_display`].
+pub(super) fn dest_spelling(ctx: &Ctx<'_>, target: &EditTarget, path: &Path) -> String {
+    dest_display(ctx, target, path)
 }
 
 /// The manifest spelling of an adopted local path: relative to the manifest's folder when the
@@ -1239,6 +1273,27 @@ enum Arm {
         /// What the bundle IS — the vocabulary its destinations are spelled in.
         kind: BundleKind,
     },
+    /// A `-a`/`--dest` DETACH of a CLAIMED folder — one the person brought under management with
+    /// `add <path> --as <bundle>`. The record forgets the folder and NOT ONE BYTE MOVES: topos
+    /// never created it, so there is nothing of its making to retire. The row is touched only to
+    /// take back the destination the claim itself put on it, which is the claim's exact inverse.
+    ClaimDetach {
+        /// The standing row the claim's own destination entry rides — `None` for a bundle no row
+        /// of this file spells (then nothing here is edited at all).
+        row: Option<PlanRow>,
+        /// The row key, for the write and the reproof.
+        reference: String,
+        name: String,
+        /// The record whose placements are dropped.
+        record: SkillId,
+        /// The claimed placement dirs, as recorded.
+        dirs: Vec<String>,
+        /// The row's value after subtracting the claim's entries — `None` leaves the file
+        /// untouched, which is the whole answer for a row that never named destinations.
+        value: Option<EntryValue>,
+        /// The bundle's own re-claim spelling, for the receipt's inverse.
+        origin: Option<String>,
+    },
 }
 
 impl Arm {
@@ -1246,7 +1301,8 @@ impl Arm {
         match self {
             Arm::RowDrop { name, .. }
             | Arm::OffWrite { name, .. }
-            | Arm::DestNarrow { name, .. } => name.clone(),
+            | Arm::DestNarrow { name, .. }
+            | Arm::ClaimDetach { name, .. } => name.clone(),
             Arm::FeedDrop { workspace, .. } => workspace.clone(),
             Arm::SetSplit { names, .. } => names.join(", "),
         }
@@ -1801,6 +1857,13 @@ fn narrow_one(
     selection: &super::dest_select::Selection,
 ) -> Result<Arm, ClientError> {
     let global = target.scope == ManifestScope::Global;
+    // A CLAIMED folder is not a destination the engine fills — it is the person's own directory,
+    // recorded as one of the bundle's places. Subtracting it must not route through the narrow's
+    // materialize-and-freeze arm, which would write out a destination set the claim never asked
+    // for and leave the add/remove pair no longer exact inverses.
+    if let Some(detach) = claim_detach(ctx, target, &arm, selection)? {
+        return Ok(detach);
+    }
     match arm {
         Arm::FeedDrop { reference, .. } => Err(ClientError::SelectionRefused(format!(
             "`{reference}` is a whole feed and reaches every agent — narrow a single skill \
@@ -1942,7 +2005,182 @@ fn narrow_one(
                 kind,
             })
         }
-        narrowed @ Arm::DestNarrow { .. } => Ok(narrowed),
+        narrowed @ (Arm::DestNarrow { .. } | Arm::ClaimDetach { .. }) => Ok(narrowed),
+    }
+}
+
+/// The CLAIM-DETACH read of a narrowing selection: does every folder it names belong to this
+/// bundle because someone CLAIMED it (`add <path> --as <bundle>`)?
+///
+/// `Ok(None)` for everything else — an ordinary destination, an MCP bundle (whose destinations are
+/// config files, which no claim is about), a bundle with no record here, and a MIXED selection
+/// naming both a claimed folder and an engine-filled destination, which stays the ordinary
+/// narrow's business.
+///
+/// The record's OWN source folder is never a candidate: for a local-path row that folder IS the
+/// row, and dropping its placement would leave the row demanding a bundle with nowhere to be.
+///
+/// # Errors
+/// The selection's own resolution errors; a store read failure.
+fn claim_detach(
+    ctx: &Ctx<'_>,
+    target: &EditTarget,
+    arm: &Arm,
+    selection: &super::dest_select::Selection,
+) -> Result<Option<Arm>, ClientError> {
+    let (row, name, ws) = match arm {
+        Arm::RowDrop { row, name } => {
+            let ws = match &row.shape {
+                KeyShape::WorkspaceBundle {
+                    host, workspace, ..
+                } => Some((host.clone(), workspace.clone())),
+                _ => None,
+            };
+            (Some(row), name, ws)
+        }
+        Arm::OffWrite {
+            reference,
+            name,
+            workspace,
+        } => {
+            let host = match keys::classify_key(reference) {
+                Ok(KeyShape::WorkspaceBundle { host, .. }) => host,
+                _ => String::new(),
+            };
+            (None, name, Some((host, workspace.clone())))
+        }
+        // A SET line (a channel, a whole repo) delivers the bundle and no row of its own spells
+        // it — but a CLAIM is scope-store state, not a line, so its inverse is reachable here and
+        // nowhere else: the split refusal below would otherwise leave a documented inverse with no
+        // command behind it. ONE named bundle only; a split naming several has no single folder.
+        Arm::SetSplit { set, names, .. } => {
+            let [one] = names.as_slice() else {
+                return Ok(None);
+            };
+            let ws = match &set.shape {
+                KeyShape::Channel {
+                    host, workspace, ..
+                } => Some((host.clone(), workspace.clone())),
+                _ => None,
+            };
+            (None, one, ws)
+        }
+        _ => return Ok(None),
+    };
+    let kind = row_kind(ctx, target, row, ws.as_ref(), name);
+    if kind.is_mcp() {
+        return Ok(None);
+    }
+    let entries = selection.skill_entries(target.scope)?;
+    let Some(sctx) = scope_store_ctx(ctx, target) else {
+        return Ok(None);
+    };
+    let Some(sid) = row_record(ctx, target, row, name).and_then(|s| SkillId::parse(&s).ok()) else {
+        return Ok(None);
+    };
+    let Some(map) = crate::doc::read_map(sctx.fs, &sctx.layout.published(&sid).map)? else {
+        return Ok(None);
+    };
+    // The row's OWN folder, for a local-path row — the one adopted dir a detach may never drop.
+    let source = match row.map(|r| &r.shape) {
+        Some(KeyShape::LocalPath { raw }) => Some(canonical_or(&row_dir(ctx, target, raw))),
+        _ => None,
+    };
+    let mut dirs: Vec<String> = Vec::new();
+    let mut roots: Vec<String> = Vec::new();
+    // The entries the CLAIMS THEMSELVES put on the row — never merely the roots they sit under.
+    let mut added: Vec<String> = Vec::new();
+    for (p, st) in map.placements.iter().zip(&map.placement_state) {
+        let Some(claim) = &st.claim else {
+            continue; // topos's own dir, or the bundle's adopted source — not a claim
+        };
+        let dir = Path::new(p);
+        if source.as_deref() == Some(canonical_or(dir).as_path()) {
+            continue;
+        }
+        let Some(parent) = dir.parent() else { continue };
+        let spelled = dest_display(ctx, target, parent);
+        if !entries.contains(&spelled) {
+            continue;
+        }
+        dirs.push(p.clone());
+        if !roots.contains(&spelled) {
+            roots.push(spelled);
+        }
+        if let Some(entry) = claim.added_dest.clone()
+            && !added.contains(&entry)
+        {
+            added.push(entry);
+        }
+    }
+    // MIXED, or nothing claimed at all: the ordinary narrow owns the answer.
+    if dirs.is_empty() || roots.len() != entries.len() {
+        return Ok(None);
+    }
+    let reference = row.map_or_else(
+        || {
+            arm_reference(arm)
+                .map(str::to_owned)
+                .unwrap_or_else(|| name.clone())
+        },
+        |r| r.reference.clone(),
+    );
+    // THE ROW LOSES EXACTLY WHAT THE CLAIM PUT ON IT — read off each placement's own record, not
+    // inferred from the row naming the folder's root. A row that already named the root was not
+    // changed by the claim: subtracting it would drop copies the claim never touched, and where it
+    // was the row's only destination the ordinary narrow would then drop the ROW, uninstalling
+    // every copy of a bundle the person only asked to stop managing one folder of.
+    let value = match row.and_then(|r| r.fields().dest) {
+        Some(dest) if dest.iter().any(|d| added.contains(d)) => {
+            let remaining: Vec<String> = dest
+                .iter()
+                .filter(|d| !added.contains(d))
+                .cloned()
+                .collect();
+            // Unreachable by construction — a claim only ever APPENDS to a non-empty `dest`, so
+            // what it added can never be the whole set. Fail toward touching nothing rather than
+            // toward a bare row (which would resurrect copies everywhere) or a silent row drop.
+            if remaining.is_empty() {
+                None
+            } else {
+                let mut fields = row.expect("a dest came from a row").fields();
+                fields.dest = Some(remaining);
+                Some(EntryValue::Fields(fields))
+            }
+        }
+        _ => None,
+    };
+    Ok(Some(Arm::ClaimDetach {
+        origin: claim_origin(ctx, &sctx, &sid),
+        row: row.cloned(),
+        reference,
+        name: name.clone(),
+        record: sid,
+        dirs,
+        value,
+    }))
+}
+
+/// The row key an arm names, for the shapes that carry one.
+fn arm_reference(arm: &Arm) -> Option<&str> {
+    match arm {
+        Arm::RowDrop { row, .. } => Some(&row.reference),
+        Arm::OffWrite { reference, .. } | Arm::DestNarrow { reference, .. } => Some(reference),
+        _ => None,
+    }
+}
+
+/// The `--as` value a detached folder's RE-CLAIM would carry — the record's own source spelling.
+fn claim_origin(ctx: &Ctx<'_>, sctx: &Ctx<'_>, sid: &SkillId) -> Option<String> {
+    let lock = crate::doc::read_doc::<topos_types::persisted::Lock>(
+        sctx.fs,
+        &sctx.layout.published(sid).lock,
+    )
+    .ok()
+    .flatten()?;
+    match super::add::record_origin(ctx, sctx, sid, &lock)? {
+        super::add::RecordOrigin::Reference(r) => Some(r),
+        super::add::RecordOrigin::Folder(dir) => Some(dir.to_string_lossy().into_owned()),
     }
 }
 
@@ -2707,6 +2945,9 @@ fn apply_arms(
                     DraftState::Clean => removal_note,
                 }
             }
+            // A detach loses nothing — the folder and every byte in it stay — so there is no
+            // loss guard to trip and nothing the stock line does not already say.
+            Arm::ClaimDetach { .. } => None,
             Arm::DestNarrow {
                 name,
                 subtract,
@@ -2864,16 +3105,25 @@ fn apply_arms(
                 Arm::OffWrite { .. } => RemoveKind::ManifestExcluded,
                 Arm::FeedDrop { .. } => RemoveKind::FeedRemoved,
                 Arm::DestNarrow { .. } => RemoveKind::ManifestNarrowed,
+                Arm::ClaimDetach { .. } => RemoveKind::ClaimDetached,
                 _ => RemoveKind::ManifestRemoved,
             },
-            manifest: Some(target.path.display().to_string()),
+            // A DETACH that edits no row must not name a file it never opened.
+            manifest: match arm {
+                Arm::ClaimDetach { value: None, .. } => None,
+                _ => Some(target.path.display().to_string()),
+            },
             workspace_id: None,
             agent_dirs: Vec::new(),
             // A row edit names no folders in either direction — what left rides
             // `RemoveData::uninstalled`, and what stayed is an edited copy the uninstall reports
             // as kept. The adopted-source disclosure belongs to the classic arm, which is the one
-            // that deletes folders at all.
-            kept_dirs: Vec::new(),
+            // that deletes folders at all — and to the detach, whose whole point is the folder
+            // that stays.
+            kept_dirs: match arm {
+                Arm::ClaimDetach { dirs, .. } => dirs.iter().map(|d| pretty_path(ctx, d)).collect(),
+                _ => Vec::new(),
+            },
             bytes_kept: true,
             note: note.clone(),
         })
@@ -2929,15 +3179,22 @@ fn apply_arms(
         // A file that does not exist yet is BORN by the edit — nothing to prove against.
         None => open_for_edit(ctx, target)?,
     };
+    // A DETACH that edits no row must not rewrite the file: it would fail on a manifest this act
+    // has no business opening, and a successful one would touch a document the receipt says it
+    // left alone. Every other arm sets this; the record-only detach is the one that does not.
+    let mut edited = false;
     for arm in &arms {
         match arm {
             Arm::RowDrop { row, .. } => {
+                edited = true;
                 editor.remove_row(&row.reference);
             }
             Arm::FeedDrop { reference, .. } => {
+                edited = true;
                 editor.remove_row(reference);
             }
             Arm::OffWrite { reference, .. } => {
+                edited = true;
                 editor
                     .set_row(reference, &EntryValue::Off)
                     .map_err(|e| ClientError::InvalidArgument(e.message))?;
@@ -2945,16 +3202,31 @@ fn apply_arms(
             Arm::DestNarrow {
                 reference, value, ..
             } => {
+                edited = true;
                 editor
                     .set_row(reference, value)
                     .map_err(|e| ClientError::InvalidArgument(e.message))?;
             }
+            // The row is touched ONLY where the claim put something on it; the record-side drop
+            // happens after the write, below.
+            Arm::ClaimDetach {
+                reference,
+                value: Some(value),
+                ..
+            } => {
+                edited = true;
+                editor
+                    .set_row(reference, value)
+                    .map_err(|e| ClientError::InvalidArgument(e.message))?;
+            }
+            Arm::ClaimDetach { value: None, .. } => {}
             Arm::SetSplit {
                 set,
                 names,
                 members,
                 keeps_own,
             } => {
+                edited = true;
                 editor.remove_row(&set.reference);
                 // Each NEW member row carries the SET line's pin/fields where the member's
                 // shape allows them (disclosed in the describe) — a split must not silently
@@ -2981,7 +3253,21 @@ fn apply_arms(
             }
         }
     }
-    editor.write(ctx.fs, &target.path)?;
+    if edited {
+        editor.write(ctx.fs, &target.path)?;
+    }
+
+    // THE DETACH's own half, after the file is settled: the record forgets the claimed folders.
+    // No bytes move — topos never created those directories — so there is nothing to park, snapshot,
+    // or verify; the map simply stops managing them.
+    for arm in &arms {
+        let Arm::ClaimDetach { record, dirs, .. } = arm else {
+            continue;
+        };
+        if let Some(sctx) = scope_store_ctx(ctx, target) {
+            super::reconcile::detach_placements(&sctx, record, dirs)?;
+        }
+    }
 
     let mut items = items;
     // An MCP bundle's row drop (or off-switch) converges the affected scope's CONFIG entries
@@ -3120,8 +3406,9 @@ fn eager_plan(ctx: &Ctx<'_>, target: &EditTarget, arms: &[Arm]) -> EagerPlan {
                     workspace: None,
                 });
             }
-            // A split re-homes its survivors to their own rows — nothing leaves.
-            Arm::SetSplit { .. } => {}
+            // A split re-homes its survivors to their own rows — nothing leaves. Neither does a
+            // detach: the folder is the person's own, and no copy of anything is uninstalled.
+            Arm::SetSplit { .. } | Arm::ClaimDetach { .. } => {}
         }
     }
     plan
@@ -3610,7 +3897,10 @@ fn mcp_bundle_of_arm(
             }) => ws_bundle(&host, &workspace, &bundle),
             _ => None,
         },
-        Arm::FeedDrop { .. } | Arm::SetSplit { .. } | Arm::DestNarrow { .. } => None,
+        Arm::FeedDrop { .. }
+        | Arm::SetSplit { .. }
+        | Arm::DestNarrow { .. }
+        | Arm::ClaimDetach { .. } => None,
     }
 }
 
@@ -3661,6 +3951,14 @@ fn prove_unchanged(
                     .any(|r| r.reference == row.reference && r.value == row.value),
                 None => !rows.iter().any(|r| r.reference == *reference),
             },
+            // A detach that edits no row proves nothing about the file — it is a record act. One
+            // that DOES is a decision about that row's exact value, and drift refuses, exactly as
+            // it does for the narrow beside it.
+            Arm::ClaimDetach { value: None, .. } => true,
+            Arm::ClaimDetach { row, .. } => row.as_ref().is_some_and(|row| {
+                rows.iter()
+                    .any(|r| r.reference == row.reference && r.value == row.value)
+            }),
             Arm::SetSplit {
                 set,
                 names,
@@ -3907,6 +4205,17 @@ fn undo_for(arms: &[Arm], global: bool, sugar_host: Option<&str>) -> Vec<String>
                 Some((host, ws)) if sugar_host == Some(host.as_str()) => format!("@{ws}/{name}"),
                 _ => reference.clone(),
             }
+        }
+        // A DETACH's inverse is the claim that made it: the folder, and the bundle it is a copy
+        // of. It restores the whole prior state — the placement row with its baseline re-derived
+        // from the same bytes, and the row entry the claim itself added — so it is offered. ONE
+        // folder only: two claims in one command have no single re-claim spelling.
+        Arm::ClaimDetach { dirs, origin, .. } => {
+            let ([dir], Some(origin)) = (dirs.as_slice(), origin.as_ref()) else {
+                return Vec::new();
+            };
+            tail = vec!["--as".to_owned(), origin.clone()];
+            dir.clone()
         }
         Arm::SetSplit { .. } => return Vec::new(),
     };

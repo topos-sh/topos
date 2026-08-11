@@ -168,6 +168,32 @@ pub struct PlacementState {
     /// byte-identical. Sticky for the life of the record. **Additive.**
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub adopted_source: bool,
+    /// The identity CLAIM that brought this dir under management (`add <path> --as <bundle>`),
+    /// when one did. `None` for every dir topos chose itself AND for the folder an in-place adopt
+    /// took as the bundle's own source — both are `adopted_source`, and only this tells them
+    /// apart. **Additive.**
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claim: Option<PlacementClaim>,
+}
+
+/// What an identity claim recorded about the folder it brought under management.
+///
+/// Its presence is the fact the PLANNERS read: a claimed folder is ALWAYS a target, whatever the
+/// row's shape or the scope's detection says, because "updates land here from now on" is the
+/// claim's whole promise. (An adopted SOURCE folder makes no such promise — it is where the person
+/// works, and a destination-frozen row does not manage it.)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
+pub struct PlacementClaim {
+    /// The row `dest` entry the claim ADDED, when the row was destination-frozen and did not
+    /// already name this folder's root.
+    ///
+    /// The DETACH subtracts exactly this and nothing else. "The row names this folder's root" is
+    /// not the same fact as "the claim put it there": a row that already named the root was not
+    /// changed by the claim, and taking the entry back would drop copies the claim never touched
+    /// — and, where it was the row's only destination, the row with them. **Additive.**
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub added_dest: Option<String>,
 }
 
 /// What a placement dir IS — the shared cross-agent convention dir, or one harness's native skills

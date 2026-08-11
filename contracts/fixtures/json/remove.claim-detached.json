@@ -1,0 +1,42 @@
+{
+  "schema_version": 1,
+  "command": "remove",
+  "ok": true,
+  "data": {
+    "applied": true,
+    "items": [
+      {
+        "bytes_kept": true,
+        "kept_dirs": [
+          "~/.codex/skills/coolify-deploy"
+        ],
+        "kind": "claim-detached",
+        "name": "coolify-deploy"
+      }
+    ],
+    "undo": [
+      "topos",
+      "add",
+      "-g",
+      "/home/ada/.codex/skills/coolify-deploy",
+      "--as",
+      "topos.sh/ideamotive/coolify-deploy"
+    ]
+  },
+  "warnings": [],
+  "next_actions": [
+    {
+      "code": "UNDO",
+      "argv": [
+        "topos",
+        "add",
+        "-g",
+        "/home/ada/.codex/skills/coolify-deploy",
+        "--as",
+        "topos.sh/ideamotive/coolify-deploy"
+      ],
+      "mutates": true,
+      "needs_network": true
+    }
+  ]
+}

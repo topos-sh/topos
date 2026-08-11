@@ -234,6 +234,10 @@ pub(crate) enum Command {
         /// server.json. Only needed for a local folder — a workspace bundle carries its own kind.
         #[arg(long, value_name = "KIND")]
         kind: Option<crate::bundle_kind::BundleKind>,
+        /// Manage this folder as a copy of a skill you already have (its name, or its full
+        /// reference). Nothing in the folder changes; updates land here from now on. Folders only.
+        #[arg(long = "as", value_name = "BUNDLE")]
+        as_bundle: Option<String>,
         /// Add it machine-wide (your `~/.topos/topos.toml`) instead of to this folder's file.
         #[arg(long, short = 'g')]
         global: bool,

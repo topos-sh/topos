@@ -8828,6 +8828,7 @@ fn a_prior_placement_that_no_longer_resolves_inside_the_checkout_is_refused() {
             pre_existing_sha: None,
             swap_capability: topos_types::persisted::SwapCapability::AtomicExchange,
             adopted_source: false,
+            claim: None,
         }],
         materialized_sha: "a".repeat(64),
         pre_existing_sha: None,
@@ -9270,6 +9271,7 @@ fn seed_store_row(layout: &Layout, id: &str, placement: &std::path::Path) {
                 pre_existing_sha: None,
                 swap_capability: SwapCapability::RenameDance,
                 adopted_source: false,
+                claim: None,
             }],
             harness: None,
             harness_layer: None,
@@ -14023,6 +14025,7 @@ fn add_managed_copy(rig: &Rig, id: &crate::id::SkillId, dir: &std::path::Path, b
         pre_existing_sha: None,
         swap_capability: SwapCapability::Unsupported,
         adopted_source: false,
+        claim: None,
     });
     crate::doc::write_map(&rig.fs, &sp.map, &map).unwrap();
 }

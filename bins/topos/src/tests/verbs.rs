@@ -1214,6 +1214,7 @@ fn the_already_added_answer_reads_like_the_receipt_it_mirrors() {
         name: "coolify-deploy".to_owned(),
         scope: topos_types::results::ReceiptScope::Project,
         from: Some("topos.sh/ideamotive/coolify-deploy".to_owned()),
+        candidates: Vec::new(),
     };
     assert_eq!(
         crate::render::err_tty(&project),
@@ -1228,10 +1229,64 @@ fn the_already_added_answer_reads_like_the_receipt_it_mirrors() {
         name: "coolify-deploy".to_owned(),
         scope: topos_types::results::ReceiptScope::Machine,
         from: None,
+        candidates: Vec::new(),
     };
     assert_eq!(
         crate::render::err_tty(&machine),
         "coolify-deploy is already added machine-wide (~/.topos/topos.toml)"
+    );
+}
+
+#[test]
+fn the_already_added_answer_offers_every_copy_its_bytes_explain() {
+    // The OPTIONS half: unmanaged folders whose bytes are provably a version of this very bundle,
+    // each a runnable claim. `-g` rides every line, and the folders read `~/…` while the argv the
+    // agent surface gets stays absolute.
+    let copy = |dir: &str| {
+        crate::error::TargetCandidate::claim(
+            format!("/home/ada/{dir}"),
+            format!("~/{dir}"),
+            "topos.sh/ideamotive/coolify-deploy",
+            "topos.sh/ideamotive/coolify-deploy",
+        )
+    };
+    let err = crate::error::ClientError::AlreadyAdded {
+        name: "coolify-deploy".to_owned(),
+        scope: topos_types::results::ReceiptScope::Machine,
+        from: Some("topos.sh/ideamotive/coolify-deploy".to_owned()),
+        candidates: vec![
+            copy(".agents/skills/coolify-deploy"),
+            copy(".codex/skills/coolify-deploy"),
+        ],
+    };
+    assert_eq!(
+        crate::render::err_tty(&err),
+        "coolify-deploy is already added machine-wide (~/.topos/topos.toml)\nsource: \
+         topos.sh/ideamotive/coolify-deploy\n2 unmanaged copies look like it — manage any as the \
+         same skill:"
+    );
+    assert_eq!(
+        crate::render::err_hint_tty("add", &["add".to_owned()], &err),
+        Some(
+            "  topos add -g ~/.agents/skills/coolify-deploy --as \
+             topos.sh/ideamotive/coolify-deploy\n  topos add -g ~/.codex/skills/coolify-deploy \
+             --as topos.sh/ideamotive/coolify-deploy"
+                .to_owned()
+        )
+    );
+    // The committed example IS what the agent surface emits: the candidates as argv, one runnable
+    // claim each, and the counted sentence in the message.
+    assert_golden_err("add.already-added", "add", &err);
+    // ONE copy says so in the singular, and speaks about that copy rather than "any".
+    let one = crate::error::ClientError::AlreadyAdded {
+        name: "coolify-deploy".to_owned(),
+        scope: topos_types::results::ReceiptScope::Machine,
+        from: None,
+        candidates: vec![copy(".codex/skills/coolify-deploy")],
+    };
+    assert!(
+        crate::render::err_tty(&one)
+            .ends_with("1 unmanaged copy looks like it — manage it as the same skill:")
     );
 }
 
