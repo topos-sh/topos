@@ -786,6 +786,10 @@ fn tty_path(raw: &str) -> String {
     let Some(home) = std::env::var_os("HOME").map(std::path::PathBuf::from) else {
         return raw.to_owned();
     };
+    // The ONE home read on this side, resolved the same way the roots are: a `$HOME` carrying a
+    // symlink would otherwise fail to prefix the resolved paths every producer hands over, and the
+    // abbreviation would silently stop happening.
+    let home = home.canonicalize().unwrap_or(home);
     match std::path::Path::new(raw).strip_prefix(&home) {
         Ok(rest) if rest.as_os_str().is_empty() => "~".to_owned(),
         Ok(rest) => format!("~/{}", rest.display()),
@@ -1572,10 +1576,14 @@ fn untracked_folder_line(u: &UntrackedEntry) -> String {
     }
 }
 
-/// One untracked-discovery row: the skill's name. Where it lives and who reads it are the group's
-/// folder line, so a row says the one thing that varies between rows.
+/// One untracked-discovery row: the skill's name — and, for a LINK SHELL, the folder its bytes
+/// really live in, because that is the folder an `add` of this row takes. Where it lives and who
+/// reads it are the group's folder line, so a row says the one thing that varies between rows.
 fn untracked_row(u: &UntrackedEntry) -> String {
-    format!("    {}\n", u.name)
+    match &u.original {
+        Some(original) => format!("    {}  → {}\n", u.name, tty_path(original)),
+        None => format!("    {}\n", u.name),
+    }
 }
 
 /// One inventory row: `<skill>  <skill>@<short>` + the draft flag + the STATUS / SOURCE / CAUSE
@@ -7490,6 +7498,7 @@ mod tests {
                         folder: "/home/u/.agents/skills".to_owned(),
                         readers: vec!["warp".to_owned(), "zed".to_owned()],
                         scope: "user".to_owned(),
+                        original: None,
                     },
                     UntrackedEntry {
                         name: "bee".to_owned(),
@@ -7497,6 +7506,16 @@ mod tests {
                         folder: "/home/u/.agents/skills".to_owned(),
                         readers: vec!["warp".to_owned(), "zed".to_owned()],
                         scope: "user".to_owned(),
+                        original: None,
+                    },
+                    // A LINK SHELL: the row says where its bytes really are.
+                    UntrackedEntry {
+                        name: "codex".to_owned(),
+                        path: "/home/u/.agents/skills/codex".to_owned(),
+                        folder: "/home/u/.agents/skills".to_owned(),
+                        readers: vec!["warp".to_owned(), "zed".to_owned()],
+                        scope: "user".to_owned(),
+                        original: Some("/home/u/.claude/skills/gstack/codex".to_owned()),
                     },
                     UntrackedEntry {
                         name: "zebra".to_owned(),
@@ -7504,6 +7523,7 @@ mod tests {
                         folder: "/home/u/.cursor/skills".to_owned(),
                         readers: vec!["cursor".to_owned()],
                         scope: "user".to_owned(),
+                        original: None,
                     },
                 ],
                 signed_in: false,
@@ -7526,6 +7546,13 @@ mod tests {
         // agent that reads it, comma-separated), and a row carries the skill's name and nothing else.
         assert!(
             text.contains("  /home/u/.agents/skills  [warp, zed]:\n    ant\n    bee\n"),
+            "{text}"
+        );
+        // …and a LINK SHELL's row carries the folder an `add` of it would really take. The home
+        // this test runs under is not `/home/u`, so the origin prints in full — the abbreviation
+        // is `tty_path`'s one rule, exercised where a test can pin the home.
+        assert!(
+            text.contains("    codex  \u{2192} /home/u/.claude/skills/gstack/codex\n"),
             "{text}"
         );
         assert!(

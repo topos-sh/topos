@@ -913,6 +913,13 @@
         "name": {
           "type": "string"
         },
+        "original": {
+          "description": "The folder this entry's bytes really live in, when [`Self::path`] is a LINK SHELL onto\nanother folder (a symlinked dir, or a dir whose `SKILL.md` links out) — the folder an `add`\nof this entry takes. Absent when the entry IS its own origin, which is the ordinary case.\nAbsolute here; the terminal abbreviates it under the home.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "path": {
           "description": "The skill dir itself.",
           "type": "string"

@@ -413,70 +413,25 @@ fn refuse_taken(
 ) -> Result<(), ClientError> {
     let spelled = crate::ops::inventory::pretty(ctx, dir);
     if let Some(id) = tracked_skill_at(sctx, dir)? {
-        let owner = SkillId::parse(&id)
-            .ok()
-            .and_then(|sid| read_lock(sctx, &sid).ok().flatten())
-            .map_or_else(|| id.clone(), |lock| lock.name);
         return Err(ClientError::ClaimTaken {
             dir: spelled,
-            claim: target.lock.name.clone(),
-            owner,
+            claim: Some(target.lock.name.clone()),
+            owner: super::add::record_name(sctx, &id),
             manifest: None,
         });
     }
-    // THE CROSS-SCOPE PROBE. Both stores manage folders, and neither knows about the other's rows:
-    // a folder recorded over there would be converged by two engines at once.
-    for (layout, file) in other_scope_stores(ctx, scope) {
-        let octx = super::pull::ctx_with_layout(ctx, &layout);
-        let Some(id) = tracked_skill_at(&octx, dir)? else {
-            continue;
-        };
-        let owner = SkillId::parse(&id)
-            .ok()
-            .and_then(|sid| read_lock(&octx, &sid).ok().flatten())
-            .map_or_else(|| id.clone(), |lock| lock.name);
-        return Err(ClientError::ClaimTaken {
-            dir: spelled,
-            claim: target.lock.name.clone(),
-            owner,
-            manifest: Some(file),
-        });
-    }
-    Ok(())
-}
-
-/// Every store this invocation does NOT write, each with the manifest file a reader would go to.
-///
-/// The machine store AND every project store up the cwd chain except the invoked one — a nested
-/// checkout is not one scope, it is two, and the outer one's sweep converges the folders its own
-/// rows name. Taking only the nearest pair would let an inner claim double-claim a folder the
-/// outer project already manages.
-fn other_scope_stores(ctx: &Ctx<'_>, scope: &AddScope) -> Vec<(crate::sidecar::Layout, String)> {
-    let mut out: Vec<(crate::sidecar::Layout, String)> = Vec::new();
-    if scope.target.scope == ManifestScope::Project {
-        out.push((ctx.layout.clone(), "~/.topos/topos.toml".to_owned()));
-    }
-    let Some(roots) = &ctx.roots else {
-        return out;
-    };
-    let Some(cwd) = roots.cwd.as_deref() else {
-        return out;
-    };
-    let invoked = (scope.target.scope == ManifestScope::Project).then(|| scope.target.dir.clone());
-    for dir in crate::manifest::scopes::manifest_dirs_up(ctx.fs, cwd, Some(&roots.home)) {
-        if invoked.as_deref() == Some(dir.as_path()) {
-            continue; // the scope this claim IS acting in — already asked, above
-        }
-        if let Some(layout) = crate::sidecar::existing_project_store(ctx.fs, &dir) {
-            // Spelled as the machine file beside it is — the reader compares two paths in one
-            // sentence, and only one of them being abbreviated makes them look unrelated.
-            out.push((
-                layout,
-                crate::ops::inventory::pretty(ctx, &dir.join("topos.toml")),
-            ));
-        }
-    }
-    out
+    // THE CROSS-SCOPE PROBE — the one the path door asks too ([`super::add::refuse_other_scope`]).
+    // Both stores manage folders, and neither knows about the other's rows: a folder recorded over
+    // there would be converged by two engines at once.
+    // The target is proven a folder bundle above ([`refuse_mcp`]), so the probe asks its full
+    // question: a record in either scope would converge this directory.
+    super::add::refuse_other_scope(
+        ctx,
+        scope,
+        dir,
+        Some(&target.lock.name),
+        crate::bundle_kind::BundleKind::Skill,
+    )
 }
 
 /// Scan the folder, refusing an unreadable one BEFORE anything is written: one Unscannable

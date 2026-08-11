@@ -21,6 +21,46 @@ pub(crate) struct AgentRoots {
     pub cwd: Option<PathBuf>,
 }
 
+impl AgentRoots {
+    /// The roots in the ONE spelling every surface compares and prints in — see [`resolved_root`].
+    pub(crate) fn new(home: PathBuf, cwd: Option<PathBuf>) -> Self {
+        Self {
+            home: resolved_root(home),
+            cwd: cwd.map(resolved_root),
+        }
+    }
+}
+
+/// A machine root in the ONE spelling every lexical compare and printed path uses.
+///
+/// `$HOME` is whatever the environment says — often through a symlink — while the kernel hands back
+/// an already-resolved working directory, and discovery answers in resolved paths. Two spellings of
+/// one home meant a listing showing the same directory twice and a `~/…` abbreviation that silently
+/// stopped matching. So EVERY root resolves here: the detection roots ([`AgentRoots::new`]) and the
+/// sidecar home the layout is built on, which are compared against each other by prefix and must
+/// therefore agree. Nothing downstream canonicalizes again.
+///
+/// A path not yet on disk (a first run's `~/.topos`) resolves through its NEAREST EXISTING
+/// ancestor with the remainder re-joined, so its spelling already matches what it will canonicalize
+/// to once created — a home whose own directory has not been made yet must not print differently
+/// from the same home one command later.
+pub(crate) fn resolved_root(path: PathBuf) -> PathBuf {
+    if let Ok(resolved) = path.canonicalize() {
+        return resolved;
+    }
+    let mut tail: Vec<std::ffi::OsString> = Vec::new();
+    let mut here = path.as_path();
+    while let (Some(parent), Some(name)) = (here.parent(), here.file_name()) {
+        tail.push(name.to_os_string());
+        if let Ok(mut resolved) = parent.canonicalize() {
+            resolved.extend(tail.iter().rev());
+            return resolved;
+        }
+        here = parent;
+    }
+    path
+}
+
 /// Everything a verb needs, behind seams so the same code is deterministic under test and real in prod.
 pub(crate) struct Ctx<'a> {
     pub fs: &'a dyn FsOps,

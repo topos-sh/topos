@@ -516,12 +516,12 @@ fn an_explicit_skill_word_adopts_a_server_folder_as_a_skill() {
     let scope = ops::add_scope(&ctx, true).unwrap();
 
     // Silence still refuses — the guard's whole reason for standing.
-    let err = ops::adopt_path(&ctx, &scope.target, &dir, ops::KindDeclared::No)
+    let err = ops::adopt_path(&ctx, &scope, &dir, ops::KindDeclared::No)
         .expect_err("unflagged, the server folder refuses");
     assert_eq!(err.code(), "KIND_REQUIRED");
 
     // The person's own word wins.
-    let data = ops::adopt_path(&ctx, &scope.target, &dir, ops::KindDeclared::Yes)
+    let data = ops::adopt_path(&ctx, &scope, &dir, ops::KindDeclared::Yes)
         .expect("`--kind skill` adopts the folder as a skill");
     assert_eq!(data.name, "weather");
     assert!(
@@ -657,7 +657,7 @@ fn the_file_verbs_still_serve_a_skill() {
     std::fs::write(src.join("SKILL.md"), b"# notes\n").unwrap();
     let ctx = rig.ctx_at(Some(&rig.work.0));
     let scope = ops::add_scope(&ctx, true).unwrap();
-    ops::adopt_path(&ctx, &scope.target, &src, ops::KindDeclared::No).expect("the skill adopts");
+    ops::adopt_path(&ctx, &scope, &src, ops::KindDeclared::No).expect("the skill adopts");
 
     // A clean skill diffs (to nothing) rather than refusing.
     ops::diff(
@@ -1361,7 +1361,7 @@ fn an_mcp_record_cannot_be_re_linked_as_a_skill() {
     std::fs::write(dir.join("SKILL.md"), b"# weather\n").unwrap();
 
     let scope = ops::add_scope(&ctx, true).unwrap();
-    let err = ops::adopt_path(&ctx, &scope.target, &dir, ops::KindDeclared::No)
+    let err = ops::adopt_path(&ctx, &scope, &dir, ops::KindDeclared::No)
         .expect_err("the record is an mcp one");
     let detail = err.detail();
     assert!(
@@ -1478,7 +1478,7 @@ fn a_folder_holding_both_markers_refuses_and_names_both_kinds() {
 
     // The declared word still wins — silence was the only thing being guarded.
     let scope = ops::add_scope(&ctx, true).unwrap();
-    ops::adopt_path(&ctx, &scope.target, &dir, ops::KindDeclared::Yes)
+    ops::adopt_path(&ctx, &scope, &dir, ops::KindDeclared::Yes)
         .expect("an explicit kind adopts the folder");
 }
 

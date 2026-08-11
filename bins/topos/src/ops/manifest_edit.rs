@@ -296,6 +296,50 @@ pub(crate) struct AddScope {
     pub layout: crate::sidecar::Layout,
 }
 
+/// Every store this invocation does NOT write, each with the manifest file a reader would go to.
+///
+/// The machine store AND every project store up the cwd chain except the invoked one — a nested
+/// checkout is not one scope, it is two, and the outer one's sweep converges the folders its own
+/// rows name. Taking only the nearest pair would let an inner add double-adopt a folder the outer
+/// project already manages.
+///
+/// THE ONE OWNERSHIP PROBE both folder doors ask: the claim (`add <path> --as <bundle>`) and the
+/// plain path adopt. Neither store knows about the other's rows, so a folder recorded over there
+/// would be converged by two engines at once — the state neither door may create.
+///
+/// `ctx` is the OUTER context (its layout is the machine store); `scope` is what this invocation
+/// resolved to write.
+pub(crate) fn other_scope_stores(
+    ctx: &Ctx<'_>,
+    scope: &AddScope,
+) -> Vec<(crate::sidecar::Layout, String)> {
+    let mut out: Vec<(crate::sidecar::Layout, String)> = Vec::new();
+    if scope.target.scope == ManifestScope::Project {
+        out.push((ctx.layout.clone(), "~/.topos/topos.toml".to_owned()));
+    }
+    let Some(roots) = &ctx.roots else {
+        return out;
+    };
+    let Some(cwd) = roots.cwd.as_deref() else {
+        return out;
+    };
+    let invoked = (scope.target.scope == ManifestScope::Project).then(|| scope.target.dir.clone());
+    for dir in crate::manifest::scopes::manifest_dirs_up(ctx.fs, cwd, Some(&roots.home)) {
+        if invoked.as_deref() == Some(dir.as_path()) {
+            continue; // the scope this invocation IS acting in — its own store answers first
+        }
+        if let Some(layout) = crate::sidecar::existing_project_store(ctx.fs, &dir) {
+            // Spelled as the machine file beside it is — the reader compares two paths in one
+            // sentence, and only one of them being abbreviated makes them look unrelated.
+            out.push((
+                layout,
+                crate::ops::inventory::pretty(ctx, &dir.join("topos.toml")),
+            ));
+        }
+    }
+    out
+}
+
 /// A path's canonical form, best-effort: symlinks resolved when the path exists, else the path
 /// itself. Two paths must be canonicalized the SAME way before comparing — canonicalizing only
 /// one side makes a symlinked prefix (macOS `/var` → `/private/var`) a spurious mismatch.

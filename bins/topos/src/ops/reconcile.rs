@@ -6733,7 +6733,7 @@ fn note_item_failure(
         None,
         ctx.clock.now_unix_millis(),
     );
-    eprintln!("topos update: {name}: {}", crate::render::safe_message(e));
+    crate::out::errln!("topos update: {name}: {}", crate::render::safe_message(e));
     warnings.push(item_failure(name, e));
 }
 

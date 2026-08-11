@@ -251,8 +251,7 @@ fn adopt_local(
     // The `-a`/`--dest` selection resolves to config FILES at this scope — refused whole before
     // the adopt when an entry names no known file.
     let dest_entries = selection.mcp_entries(scope.target.scope)?;
-    let sctx = super::ctx_with_layout(ctx, &scope.layout);
-    let mut data = super::adopt_path_any_kind(&sctx, &scope.target, dir, BundleKind::Mcp)?;
+    let mut data = super::adopt_path_any_kind(ctx, &scope, dir, BundleKind::Mcp)?;
     medit::note_added_path_kind_dest_in(
         ctx,
         &mut data,

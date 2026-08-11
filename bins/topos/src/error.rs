@@ -292,11 +292,21 @@ fn already_added_message(
 /// The [`ClientError::ClaimTaken`] sentence: a folder another record already manages. Two shapes,
 /// and the difference is which file the other record answers to — the OTHER scope's is named,
 /// because that is the whole reason the claim cannot land here.
-fn claim_taken_message(dir: &str, claim: &str, owner: &str, manifest: &Option<String>) -> String {
+fn claim_taken_message(
+    dir: &str,
+    claim: &Option<String>,
+    owner: &str,
+    manifest: &Option<String>,
+) -> String {
+    // `--as <bundle>` says what the folder was to become; a plain path adopt asked to manage the
+    // folder outright and has no such word.
+    let as_bundle = claim
+        .as_ref()
+        .map_or_else(String::new, |c| format!(" as {c}"));
     match manifest {
-        None => format!("can't add {dir} as {claim} — this folder belongs to {owner}"),
+        None => format!("can't add {dir}{as_bundle} — this folder belongs to {owner}"),
         Some(file) => {
-            format!("can't add {dir} as {claim} — this folder already belongs to {owner} in {file}")
+            format!("can't add {dir}{as_bundle} — this folder already belongs to {owner} in {file}")
         }
     }
 }
@@ -460,14 +470,15 @@ pub(crate) enum ClientError {
         from: Option<String>,
         candidates: Vec<TargetCandidate>,
     },
-    /// `add <path> --as <bundle>` over a folder ANOTHER record already manages — in this scope, or
-    /// (naming its file) in the other one. Two engines would otherwise converge one directory.
+    /// A folder ANOTHER record already manages — in this scope, or (naming its file) in the other
+    /// one. Two engines would otherwise converge one directory. Both folder doors raise it: the
+    /// claim (`add <path> --as <bundle>`) and the plain path adopt.
     #[error("{}", claim_taken_message(.dir, .claim, .owner, .manifest))]
     ClaimTaken {
         /// The folder, as a printed line spells it.
         dir: String,
-        /// The bundle the claim named.
-        claim: String,
+        /// The bundle a `--as` named; `None` for a plain path adopt, which named no bundle.
+        claim: Option<String>,
         /// The bundle that already holds the folder.
         owner: String,
         /// The OTHER scope's manifest, when that is where the owner answers to. `None` for a

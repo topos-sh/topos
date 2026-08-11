@@ -10533,8 +10533,7 @@ fn scoped_path_add(
     global: bool,
 ) -> Result<topos_types::results::AddData, ClientError> {
     let scope = ops::add_scope(ctx, global)?;
-    let sctx = ops::ctx_with_layout(ctx, &scope.layout);
-    let mut data = ops::adopt_path(&sctx, &scope.target, source, ops::KindDeclared::No)?;
+    let mut data = ops::adopt_path(ctx, &scope, source, ops::KindDeclared::No)?;
     ops::note_added_path_in(ctx, &mut data, &scope.target, source)?;
     Ok(data)
 }
@@ -13336,8 +13335,7 @@ fn a_local_adopt_with_dest_places_a_copy_at_the_selected_folder() {
     std::fs::write(src.join("SKILL.md"), b"# mine\n").unwrap();
     let ctx = rig.ctx_at(Some(&rig.work.0));
     let scope = ops::add_scope(&ctx, true).unwrap();
-    let sctx = ops::ctx_with_layout(&ctx, &scope.layout);
-    let mut d = ops::adopt_path(&sctx, &scope.target, &src, ops::KindDeclared::No).unwrap();
+    let mut d = ops::adopt_path(&ctx, &scope, &src, ops::KindDeclared::No).unwrap();
     ops::note_added_path_dest_in(
         &ctx,
         &mut d,
@@ -13519,8 +13517,7 @@ fn a_local_path_whole_row_remove_deletes_managed_copies_and_spares_the_source() 
     std::fs::write(src.join("SKILL.md"), b"# mine\n").unwrap();
     let ctx = rig.ctx_at(Some(&rig.work.0));
     let scope = ops::add_scope(&ctx, true).unwrap();
-    let sctx = ops::ctx_with_layout(&ctx, &scope.layout);
-    let mut d = ops::adopt_path(&sctx, &scope.target, &src, ops::KindDeclared::No).unwrap();
+    let mut d = ops::adopt_path(&ctx, &scope, &src, ops::KindDeclared::No).unwrap();
     ops::note_added_path_dest_in(
         &ctx,
         &mut d,

@@ -817,6 +817,12 @@ pub struct UntrackedEntry {
     pub readers: Vec<String>,
     /// Where the skill dir was found: `user` (a global agent home) or `project` (the current repo).
     pub scope: String,
+    /// The folder this entry's bytes really live in, when [`Self::path`] is a LINK SHELL onto
+    /// another folder (a symlinked dir, or a dir whose `SKILL.md` links out) — the folder an `add`
+    /// of this entry takes. Absent when the entry IS its own origin, which is the ordinary case.
+    /// Absolute here; the terminal abbreviates it under the home.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub original: Option<String>,
 }
 
 /// A skill row. `<skill>@<version_id>` identity + `draft` are PINNED; the other field names INFERRED.

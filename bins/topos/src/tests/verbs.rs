@@ -101,7 +101,9 @@ impl Scratch {
         let dir = std::env::temp_dir().join(format!("topos-vt-{tag}-{}-{n}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        Self(dir)
+        // Canonical, so recorded/derived/discovered paths compare equal on macOS's symlinked
+        // `$TMPDIR` (the same rule every other rig here takes).
+        Self(dir.canonicalize().unwrap_or(dir))
     }
 }
 impl Drop for Scratch {
@@ -1737,6 +1739,134 @@ fn add_of_a_broken_link_shell_says_the_link_is_broken() {
         render::err_tty(&err)
     );
     assert!(store_records(&h.ctx()).is_empty());
+}
+
+/// The listing's promise is that `topos add <name>` manages one, so a shell it cannot resolve is
+/// not listed: a MIXED shell (own files beside the link) is two folders, and `add` refuses it.
+/// A healthy shell keeps listing — and says where its bytes really are.
+#[test]
+fn a_mixed_link_shell_is_not_listed_and_a_healthy_one_names_its_original() {
+    let h = Harness::new("shell-listing");
+    let user_home = Scratch::new("shell-listing-userhome");
+    let skills = user_home.0.join(".cursor").join("skills");
+    let bundle = Scratch::new("shell-listing-bundle");
+
+    // Two shells in the agent's folder: one healthy, one holding a file of its own.
+    for name in ["healthy", "mixed"] {
+        let origin = bundle.0.join(name);
+        std::fs::create_dir_all(&origin).unwrap();
+        std::fs::write(origin.join("SKILL.md"), format!("# {name}\n")).unwrap();
+        let shell = skills.join(name);
+        std::fs::create_dir_all(&shell).unwrap();
+        std::os::unix::fs::symlink(origin.join("SKILL.md"), shell.join("SKILL.md")).unwrap();
+    }
+    std::fs::write(skills.join("mixed").join("notes.md"), b"mine\n").unwrap();
+    // …and a plain folder, which must be unaffected by any of this.
+    let plain = skills.join("plain");
+    std::fs::create_dir_all(&plain).unwrap();
+    std::fs::write(plain.join("SKILL.md"), b"# plain\n").unwrap();
+
+    let listed = ops::list_with(
+        &h.ctx(),
+        &ops::ListRequest {
+            untracked: true,
+            ..ops::ListRequest::default()
+        },
+        Some(ops::DiscoveryRoots {
+            home: user_home.0.clone(),
+            cwd: None,
+        }),
+        None,
+        ops::RowPage::unlimited(),
+    )
+    .unwrap()
+    .data
+    .untracked;
+    let names: Vec<&str> = listed.iter().map(|u| u.name.as_str()).collect();
+    assert!(names.contains(&"healthy"), "{names:?}");
+    assert!(names.contains(&"plain"), "{names:?}");
+    assert!(
+        !names.contains(&"mixed"),
+        "a shell `add` refuses is not offered as adoptable: {names:?}"
+    );
+
+    // THE SHELL SAYS WHERE ITS BYTES ARE — the folder an `add` of it would really take, absolute
+    // on the wire. An ordinary folder is its own origin and carries nothing.
+    let healthy = listed.iter().find(|u| u.name == "healthy").unwrap();
+    assert_eq!(
+        healthy.original.as_deref(),
+        Some(
+            bundle
+                .0
+                .join("healthy")
+                .canonicalize()
+                .unwrap()
+                .to_str()
+                .unwrap()
+        ),
+        "{healthy:?}"
+    );
+    // …and that is exactly what the WIRE carries: the absolute path on a shell row, the field
+    // absent entirely on an ordinary one (a `~` is a shell's to expand, never a machine's).
+    let wire = serde_json::to_value(healthy).unwrap();
+    assert_eq!(
+        wire["original"].as_str(),
+        healthy.original.as_deref(),
+        "{wire}"
+    );
+    assert!(
+        wire["original"]
+            .as_str()
+            .is_some_and(|p| Path::new(p).is_absolute()),
+        "{wire}"
+    );
+    let plain_wire =
+        serde_json::to_value(listed.iter().find(|u| u.name == "plain").unwrap()).unwrap();
+    assert!(plain_wire.get("original").is_none(), "{plain_wire}");
+}
+
+/// A shell whose link target is GONE is invisible to every probe (`is_file()` follows the link),
+/// so a bare name that matches one used to answer "no untracked skill of that name" about a folder
+/// the person is looking at. The folder's own refusal answers instead, naming the folder.
+#[test]
+fn a_bare_name_answers_for_a_broken_shell_discovery_cannot_see() {
+    let h = Harness::new("shell-bare");
+    let user_home = Scratch::new("shell-bare-userhome");
+    let skills = user_home.0.join(".cursor").join("skills");
+    let shell = skills.join("gonelink");
+    std::fs::create_dir_all(&shell).unwrap();
+    std::os::unix::fs::symlink(user_home.0.join("gone/SKILL.md"), shell.join("SKILL.md")).unwrap();
+
+    fn no_sessions(_s: &crate::sessions::Session) -> ops::SessionTransports {
+        unreachable!("no session is enrolled in this rig")
+    }
+    let roots = ops::DiscoveryRoots {
+        home: user_home.0.clone(),
+        cwd: None,
+    };
+    let err = ops::plan_bare_add(
+        &h.ctx(),
+        &no_sessions,
+        &roots,
+        "gonelink",
+        ops::BareAdd {
+            subscribe: true,
+            dest_selected: false,
+            global: true,
+            workspace: None,
+        },
+    )
+    .unwrap_err();
+    assert_eq!(err.code(), "SCAN_REJECTED");
+    let text = render::err_tty(&err);
+    assert!(
+        text.contains("its SKILL.md link is broken (target missing)"),
+        "{text}"
+    );
+    assert!(
+        text.contains(shell.to_str().unwrap()),
+        "the answer names the folder, not the bare word: {text}"
+    );
 }
 
 /// A DIRECTORY-level symlink is a different shape and keeps its own (unchanged) answer: the

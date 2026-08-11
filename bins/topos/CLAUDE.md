@@ -86,7 +86,9 @@ generated `docs/cli.md` (`cargo xtask gen-cli-ref`).
   subtracts from the manifest row exactly the `dest` entry the claim recorded ADDING, never merely
   the root the folder sits under. Resolution is scope-strict over that one store (never a catalog);
   the folder's other claimants refuse across the machine store AND every ancestor project store
-  (two engines would converge one directory); the record half runs under the per-skill flock with
+  (two engines would converge one directory) — ONE probe, `manifest_edit::other_scope_stores` +
+  `add::refuse_other_scope`, which the plain path adopt asks too, and which only a server bundle
+  (no directory to converge, either side) passes; the record half runs under the per-skill flock with
   the ownership questions asked inside it; a dest-frozen row gains the folder through the same
   additive `dest` write an `-a` add makes; and a clean collision-suffixed twin beside the claimed
   folder retires with it. The two writes (record, then row) are ordered so a RE-RUN repairs a crash
@@ -188,6 +190,12 @@ generated `docs/cli.md` (`cargo xtask gen-cli-ref`).
   fs-level hazards before the kernel digest). `config_io` + `ctx` — the injected `ConfigStore` seam
   and the two harness ports a verb holds apart (`ctx.harness` = placement, `ctx.triggers` =
   auto-update triggers). `actions` — the one `NextAction` construction fn.
+- `out` — the process's two STREAMS, and the only place either is written (`outln!`/`errln!`). A
+  closed reader (`topos list | head`) is not a failure: the write is dropped and that stream
+  remembers it — `println!` would panic there, and the `SIGPIPE` cure needs `unsafe`, which is
+  forbidden here. The two latches are SEPARATE, and only stdout's ends the run at exit 0 (its
+  reader has the answer); a gone stderr reader silences diagnostics and touches neither the exit
+  code nor stdout. Every other write error still panics, as `std`'s macros do.
 - `progress` — the ACTIVITY seam: a stderr-only transient line naming what is in flight while a
   fetch runs. One phase at a time, opened through an RAII guard; a verb's label (`updating docs
   (2 of 3)`) wins over a transport's (`contacting topos.sh`), which opens only when idle; byte

@@ -33,7 +33,10 @@ impl Scratch {
         let dir = std::env::temp_dir().join(format!("topos-e2e-{tag}-{}-{n}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("create scratch dir");
-        Self(dir)
+        // Canonical from birth, as the composition root resolves its own roots: `$TMPDIR` sits
+        // behind the macOS `/var` symlink, and the sidecar home and the detection roots are
+        // compared lexically — a rig spelling them differently would not be the real shape.
+        Self(dir.canonicalize().expect("canonical scratch dir"))
     }
 }
 
@@ -227,10 +230,10 @@ impl SessionInstall {
             triggers: ops::Triggers::active_only(&harness),
             plane: &routed,
             follow: &cache,
-            roots: Some(AgentRoots {
-                home: self.root.0.join("home"),
-                cwd: cwd.map(Path::to_path_buf),
-            }),
+            roots: Some(AgentRoots::new(
+                self.root.0.join("home"),
+                cwd.map(Path::to_path_buf),
+            )),
         };
         f(&ctx)
     }
@@ -341,6 +344,27 @@ impl SessionInstall {
             ops::note_added_path(ctx, &mut data, dir, false).map_err(err_str)?;
             Ok(data)
         })
+    }
+
+    /// `topos add <dir> --as <bundle>` — the identity claim, in the scope `cwd` stands in: a folder
+    /// that already holds a copy of a bundle this scope manages becomes one of its places.
+    pub fn claim(
+        &self,
+        dir: &Path,
+        as_bundle: &str,
+        cwd: Option<&Path>,
+    ) -> Result<AddData, String> {
+        self.with_ctx(cwd, |ctx| {
+            let scope = ops::add_scope(ctx, false).map_err(err_str)?;
+            ops::claim(ctx, &scope, dir, as_bundle).map_err(err_str)
+        })
+    }
+
+    /// An add receipt exactly as a terminal prints it — for a suite asserting the LINE a person
+    /// reads, not just the typed outcome behind it.
+    #[must_use]
+    pub fn add_receipt_tty(data: &AddData) -> String {
+        crate::render::add_tty(data)
     }
 
     /// `topos remove <targets…> --yes` — the manifest arm; `Ok(true)` when it claimed the tokens.

@@ -95,7 +95,11 @@ never learns which machinery served which harness.
   dir — or project dir under `cwd` — IS a given folder, table order in, sorted by slug out. It
   shares `discover_all`'s presence gate, so a shared dir names every installed claimant instead of
   the first row that claims it, and the untracked listing, `add`'s `<name>@<slug>` resolution, and
-  `publish`'s `@<slug>` check all read the same answer.
+  `publish`'s `@<slug>` check all read the same answer. Discovery resolves its ROOTS once and
+  canonicalizes them there (`skills_roots_owned`, shared by `discover_all` and the public
+  `skills_roots` a caller probes for what discovery cannot confirm) — `$HOME` arrives with its
+  symlinks and a `cwd` arrives already resolved, so one spelling at that boundary is what keeps
+  every discovered path, every exclusion compare, and `folder_readers` agreeing on one directory.
   It owns the crate's ONE root vocabulary (`Root`) + resolver (`resolve_root`/`resolve_spec`/
   `config_root` — every env override read in one place) and the ONE skill-directory probe
   (`discover_skill_dirs`, over `child_dirs` + `is_skill_dir`, which a deeper shape composes rather

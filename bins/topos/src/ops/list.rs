@@ -1171,10 +1171,18 @@ pub(crate) fn discover_untracked(
     let mut out: Vec<UntrackedEntry> = Vec::new();
     for d in registry::discover_all(&roots.home, roots.cwd.as_deref()) {
         let canon = d.path.canonicalize().unwrap_or_else(|_| d.path.clone());
-        // A LINK SHELL stands for the folder its links point into, and `add` adopts THAT — so a
-        // shell whose original is already managed is a second window onto a tracked skill, not an
+        // A LINK SHELL stands for the folder its links point into, and `add` adopts THAT. The
+        // resolution is the ONE classifier: a shell it REFUSES — a broken link, or one holding its
+        // own files beside the link, where there are two folders and only the person knows which —
+        // is not adoptable AS IT STANDS, and this listing's promise is that `topos add <name>`
+        // manages one. It stays discoverable by name: the bare-name add answers with the same
+        // refusal (`super::broken_shell_refusal`) rather than "no untracked skill of that name".
+        let Ok(origin) = super::origin_dir(&canon) else {
+            continue;
+        };
+        // A shell whose original is already managed is a second window onto a tracked skill, not an
         // adoptable one. A shell whose original is untracked keeps listing: it is addable.
-        if tracked.contains(&super::origin_dir_or_self(&canon)) {
+        if tracked.contains(&origin) {
             continue; // already adopted or delivered — not "untracked"
         }
         if !seen.insert(canon) {
@@ -1202,6 +1210,9 @@ pub(crate) fn discover_untracked(
                 SkillScope::Project => "project",
             }
             .to_owned(),
+            // A SHELL says where its bytes really are — the folder resolved once above, never a
+            // second resolution. Absent for an entry that is its own origin.
+            original: (origin != d.path).then(|| origin.to_string_lossy().into_owned()),
         });
     }
     // Deterministic order: FOLDER first, then name — the TTY groups the listing by folder, so

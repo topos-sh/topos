@@ -1,7 +1,8 @@
 //! Post-review hardening journeys over real HTTP against the real web app: a PINNED workspace
 //! reference (`@ws/name@<digest>`) delivers exactly its pinned version while the unpinned line
-//! tracks `current`, and `publish --to` REFUSES a channel that does not exist (the pointed
-//! workspace-slug near-miss included) without ever minting one.
+//! tracks `current`, `publish --to` REFUSES a channel that does not exist (the pointed
+//! workspace-slug near-miss included) without ever minting one, and the claim RETIRES the
+//! collision-suffixed twin a real delivery placed beside a person's own same-named folder.
 
 mod common;
 
@@ -157,4 +158,112 @@ fn a_pinned_reference_delivers_its_version_and_publish_to_never_mints_a_channel(
         !page.body.contains("backend"),
         "the refused --to never minted a channel"
     );
+}
+
+/// THE TWIN RETIREMENT, over the real engine. A person already keeps their own copy of a bundle in
+/// an agent's skills dir; the workspace then delivers that same bundle, the placement ladder finds
+/// the name taken and lands the engine's copy beside it as `<name>-<workspace>`. Claiming the
+/// person's folder makes the duplicate pure duplication — so it retires, and from then on THEIR
+/// folder is what the sweep keeps current.
+///
+/// Only a composed run reaches this: the collision is produced by a real delivery through the real
+/// placement ladder, and the workspace suffix comes from the enrolled session's own address.
+#[test]
+fn a_claim_retires_the_twin_a_real_delivery_placed_beside_it() {
+    let stack = start_stack("twin");
+    let owner = stack.claim_owner(OWNER_EMAIL);
+
+    // ── the author publishes v1 ──────────────────────────────────────────────────────────────
+    let author = install("twin-author");
+    stack.login_begin_and_approve(&author, &owner);
+    author.login(None).expect("login resume");
+    let cwd = author.root().canonicalize().expect("canonical root");
+    let src = cwd.join("twinny");
+    write_skill(&src, "# twinny\n\nStep: one\n");
+    author.adopt_dir(&src, Some(&cwd)).expect("adopt");
+    match author
+        .publish("twinny", false, None, Some("v1"), Some(&cwd))
+        .expect("publish v1")
+    {
+        topos::test_support::PublishView::Published { .. } => {}
+        other => panic!("v1 lands directly: {other:?}"),
+    }
+
+    // ── the person's OWN copy, by hand, under the name the workspace publishes ────────────────
+    let dev = install("twin-dev");
+    stack.login_begin_and_approve(&dev, &owner);
+    dev.login(None).expect("login resume");
+    let dev_cwd = dev.root().canonicalize().expect("canonical root");
+    let proj = dev_cwd.join("proj");
+    std::fs::create_dir_all(proj.join(".git")).expect("a git checkout");
+    let mine = proj.join(".claude").join("skills").join("twinny");
+    // Their own copy of the same bundle, with a note of their own beside it — so it is NOT
+    // byte-identical to what the workspace publishes, and the delivery cannot simply adopt it.
+    write_skill(&mine, "# twinny\n\nStep: one\n");
+    std::fs::write(mine.join("notes.md"), "mine\n").expect("their own file");
+
+    // The delivery cannot have that dir, so the ladder suffixes with the workspace address.
+    let added = dev
+        .add_reference(&format!("@{WS_NAME}/twinny"), false, Some(&proj))
+        .expect("the workspace reference delivers");
+    assert_eq!(added.name, "twinny");
+    let twin = proj
+        .join(".claude")
+        .join("skills")
+        .join(format!("twinny-{WS_NAME}"));
+    assert!(
+        twin.join("SKILL.md").is_file(),
+        "the engine's copy landed beside the person's own folder: {:?}",
+        std::fs::read_dir(proj.join(".claude").join("skills")).map(|d| d
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect::<Vec<_>>())
+    );
+    assert_eq!(
+        std::fs::read_to_string(mine.join("SKILL.md")).expect("the person's copy is untouched"),
+        "# twinny\n\nStep: one\n"
+    );
+
+    // ── the claim: their folder becomes the bundle's place, and the duplicate retires ─────────
+    let claimed = dev
+        .claim(&mine, "twinny", Some(&proj))
+        .expect("the claim lands");
+    let receipt = topos::test_support::SessionInstall::add_receipt_tty(&claimed);
+    assert!(
+        receipt.contains(&format!(
+            "removed the duplicate {} (unedited copy of the same skill)",
+            twin.display()
+        )),
+        "the receipt says exactly what it removed: {receipt}"
+    );
+    assert!(!twin.exists(), "the twin directory is gone");
+    assert!(
+        mine.join("SKILL.md").is_file(),
+        "the claimed folder is untouched — nothing was recreated or moved"
+    );
+
+    // ── and THEIR folder is what the next sweep keeps current ────────────────────────────────
+    let placed = cwd.join(".claude").join("skills").join("twinny");
+    let draft = if placed.join("SKILL.md").is_file() {
+        placed
+    } else {
+        src.clone()
+    };
+    std::fs::write(draft.join("SKILL.md"), "# twinny\n\nStep: two\n").expect("edit the draft");
+    author
+        .publish("twinny", false, None, Some("v2"), Some(&cwd))
+        .expect("publish v2");
+
+    dev.update(&[], Some(&proj)).expect("the project sweep");
+    assert_eq!(
+        std::fs::read_to_string(mine.join("SKILL.md")).expect("still there"),
+        "# twinny\n\nStep: two\n",
+        "the claimed folder converged — the claim's whole promise"
+    );
+    assert_eq!(
+        std::fs::read_to_string(mine.join("notes.md")).expect("their own file survives"),
+        "mine\n",
+        "…without destroying the local edit that made it a draft"
+    );
+    assert!(!twin.exists(), "and the duplicate never came back");
 }

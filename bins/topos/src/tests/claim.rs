@@ -153,8 +153,7 @@ impl Rig {
     fn adopt(&self, dir: &Path) -> topos_types::results::AddData {
         let ctx = self.ctx();
         let scope = ops::add_scope(&ctx, true).unwrap();
-        let sctx = ops::ctx_with_layout(&ctx, &scope.layout);
-        let mut data = ops::adopt_path(&sctx, &scope.target, dir, ops::KindDeclared::Yes).unwrap();
+        let mut data = ops::adopt_path(&ctx, &scope, dir, ops::KindDeclared::Yes).unwrap();
         ops::note_added_path_in(&ctx, &mut data, &scope.target, dir).unwrap();
         data
     }
@@ -434,8 +433,7 @@ fn a_folder_the_project_store_records_refuses_naming_that_file() {
         ..rig.ctx()
     };
     let pscope = ops::add_scope(&pctx, false).unwrap();
-    let sctx = ops::ctx_with_layout(&pctx, &pscope.layout);
-    let mut data = ops::adopt_path(&sctx, &pscope.target, &inside, ops::KindDeclared::Yes).unwrap();
+    let mut data = ops::adopt_path(&pctx, &pscope, &inside, ops::KindDeclared::Yes).unwrap();
     ops::note_added_path_in(&pctx, &mut data, &pscope.target, &inside).unwrap();
 
     // A machine-wide record of another name, and a `-g` claim over the project's folder.
@@ -474,9 +472,7 @@ fn a_folder_the_other_scope_records_refuses_naming_its_file() {
         ..rig.ctx()
     };
     let pscope = ops::add_scope(&pctx, false).unwrap();
-    let sctx = ops::ctx_with_layout(&pctx, &pscope.layout);
-    let mut data =
-        ops::adopt_path(&sctx, &pscope.target, &outside, ops::KindDeclared::Yes).unwrap();
+    let mut data = ops::adopt_path(&pctx, &pscope, &outside, ops::KindDeclared::Yes).unwrap();
     ops::note_added_path_in(&pctx, &mut data, &pscope.target, &outside).unwrap();
 
     // Machine-wide, a different bundle — and a `-g` claim over the folder the project holds.
@@ -513,8 +509,7 @@ fn a_folder_outside_the_project_refuses_toward_the_machine_file() {
         ..rig.ctx()
     };
     let pscope = ops::add_scope(&pctx, false).unwrap();
-    let sctx = ops::ctx_with_layout(&pctx, &pscope.layout);
-    let mut data = ops::adopt_path(&sctx, &pscope.target, &inside, ops::KindDeclared::Yes).unwrap();
+    let mut data = ops::adopt_path(&pctx, &pscope, &inside, ops::KindDeclared::Yes).unwrap();
     ops::note_added_path_in(&pctx, &mut data, &pscope.target, &inside).unwrap();
 
     let outside = rig.folder("elsewhere/deploy", "# deploy\n");
@@ -562,14 +557,8 @@ fn an_mcp_bundle_has_no_folder_copy_to_claim() {
     .unwrap();
     let ctx = rig.ctx();
     let scope = ops::add_scope(&ctx, true).unwrap();
-    let sctx = ops::ctx_with_layout(&ctx, &scope.layout);
-    let mut data = ops::adopt_path_any_kind(
-        &sctx,
-        &scope.target,
-        &dir,
-        crate::bundle_kind::BundleKind::Mcp,
-    )
-    .unwrap();
+    let mut data =
+        ops::adopt_path_any_kind(&ctx, &scope, &dir, crate::bundle_kind::BundleKind::Mcp).unwrap();
     ops::note_added_path_in(&ctx, &mut data, &scope.target, &dir).unwrap();
     let name = data.name.clone();
 
@@ -692,9 +681,7 @@ fn claim_then_detach_restores_the_record_and_the_file_byte_for_byte() {
         let source = rig.folder("pr-describe", "# pr\n");
         let ctx = rig.ctx();
         let scope = rig.scope(&ctx);
-        let sctx = ops::ctx_with_layout(&ctx, &scope.layout);
-        let mut data =
-            ops::adopt_path(&sctx, &scope.target, &source, ops::KindDeclared::Yes).unwrap();
+        let mut data = ops::adopt_path(&ctx, &scope, &source, ops::KindDeclared::Yes).unwrap();
         if pinned {
             let dest = vec![rig.work.0.join("agents").to_string_lossy().into_owned()];
             ops::note_added_path_dest_in(&ctx, &mut data, &scope.target, &source, &dest).unwrap();
@@ -1061,8 +1048,7 @@ fn a_fresh_claim_over_a_row_that_already_names_the_root_states_the_claim() {
     let source = rig.folder("pr-describe", "# pr\n");
     let ctx = rig.ctx();
     let scope = rig.scope(&ctx);
-    let sctx = ops::ctx_with_layout(&ctx, &scope.layout);
-    let mut data = ops::adopt_path(&sctx, &scope.target, &source, ops::KindDeclared::Yes).unwrap();
+    let mut data = ops::adopt_path(&ctx, &scope, &source, ops::KindDeclared::Yes).unwrap();
     ops::note_added_path_dest_in(
         &ctx,
         &mut data,
@@ -1106,8 +1092,7 @@ fn a_crash_before_the_row_write_still_leaves_the_detach_exact() {
     let source = rig.folder("pr-describe", "# pr\n");
     let ctx = rig.ctx();
     let scope = rig.scope(&ctx);
-    let sctx = ops::ctx_with_layout(&ctx, &scope.layout);
-    let mut data = ops::adopt_path(&sctx, &scope.target, &source, ops::KindDeclared::Yes).unwrap();
+    let mut data = ops::adopt_path(&ctx, &scope, &source, ops::KindDeclared::Yes).unwrap();
     ops::note_added_path_dest_in(
         &ctx,
         &mut data,
@@ -1182,8 +1167,7 @@ fn the_row_entry_a_claim_will_add_is_recorded_with_the_placement_not_after_it() 
     let source = rig.folder("pr-describe", "# pr\n");
     let ctx = rig.ctx();
     let scope = rig.scope(&ctx);
-    let sctx = ops::ctx_with_layout(&ctx, &scope.layout);
-    let mut data = ops::adopt_path(&sctx, &scope.target, &source, ops::KindDeclared::Yes).unwrap();
+    let mut data = ops::adopt_path(&ctx, &scope, &source, ops::KindDeclared::Yes).unwrap();
     ops::note_added_path_dest_in(
         &ctx,
         &mut data,
@@ -1325,8 +1309,7 @@ fn a_project_invoked_answer_never_offers_a_home_folder() {
         ..rig.ctx()
     };
     let scope = ops::add_scope(&ctx, false).unwrap();
-    let sctx = ops::ctx_with_layout(&ctx, &scope.layout);
-    let mut data = ops::adopt_path(&sctx, &scope.target, &source, ops::KindDeclared::Yes).unwrap();
+    let mut data = ops::adopt_path(&ctx, &scope, &source, ops::KindDeclared::Yes).unwrap();
     ops::note_added_path_in(&ctx, &mut data, &scope.target, &source).unwrap();
 
     // A byte-identical copy in the HOME tree, and one inside the checkout.
@@ -1371,8 +1354,7 @@ fn a_claim_on_a_dest_pinned_row_extends_the_row_with_the_folder() {
     let source = rig.folder("pr-describe", "# pr\n");
     let ctx = rig.ctx();
     let scope = rig.scope(&ctx);
-    let sctx = ops::ctx_with_layout(&ctx, &scope.layout);
-    let mut data = ops::adopt_path(&sctx, &scope.target, &source, ops::KindDeclared::Yes).unwrap();
+    let mut data = ops::adopt_path(&ctx, &scope, &source, ops::KindDeclared::Yes).unwrap();
     ops::note_added_path_dest_in(
         &ctx,
         &mut data,
@@ -1492,7 +1474,7 @@ fn a_claimed_folder_in_a_project_is_planned_for_a_delivered_bundle() {
     };
     let scope = ops::add_scope(&pctx, false).unwrap();
     let sctx = ops::ctx_with_layout(&pctx, &scope.layout);
-    let mut data = ops::adopt_path(&sctx, &scope.target, &source, ops::KindDeclared::Yes).unwrap();
+    let mut data = ops::adopt_path(&pctx, &scope, &source, ops::KindDeclared::Yes).unwrap();
     ops::note_added_path_in(&pctx, &mut data, &scope.target, &source).unwrap();
     let id = data.skill_id.clone().unwrap();
 
@@ -1530,8 +1512,7 @@ fn a_detach_takes_back_only_what_the_claim_put_on_the_row() {
     let source = rig.folder("pr-describe", "# pr\n");
     let ctx = rig.ctx();
     let scope = rig.scope(&ctx);
-    let sctx = ops::ctx_with_layout(&ctx, &scope.layout);
-    let mut data = ops::adopt_path(&sctx, &scope.target, &source, ops::KindDeclared::Yes).unwrap();
+    let mut data = ops::adopt_path(&ctx, &scope, &source, ops::KindDeclared::Yes).unwrap();
     // TWO destinations, so the subtraction has something to get wrong: with the row's own entry
     // taken as evidence, `~/agents` leaves and the copy under it is uninstalled; with only one
     // destination the same mistake drops the row itself.
@@ -1697,8 +1678,7 @@ fn a_re_run_repairs_a_row_the_first_claim_did_not_finish_writing() {
     let source = rig.folder("pr-describe", "# pr\n");
     let ctx = rig.ctx();
     let scope = rig.scope(&ctx);
-    let sctx = ops::ctx_with_layout(&ctx, &scope.layout);
-    let mut data = ops::adopt_path(&sctx, &scope.target, &source, ops::KindDeclared::Yes).unwrap();
+    let mut data = ops::adopt_path(&ctx, &scope, &source, ops::KindDeclared::Yes).unwrap();
     ops::note_added_path_dest_in(
         &ctx,
         &mut data,
@@ -1774,9 +1754,7 @@ fn an_ancestor_project_that_records_the_folder_refuses_a_nested_claim() {
         ..rig.ctx()
     };
     let oscope = ops::add_scope(&octx, false).unwrap();
-    let osctx = ops::ctx_with_layout(&octx, &oscope.layout);
-    let mut data =
-        ops::adopt_path(&osctx, &oscope.target, &shared, ops::KindDeclared::Yes).unwrap();
+    let mut data = ops::adopt_path(&octx, &oscope, &shared, ops::KindDeclared::Yes).unwrap();
     ops::note_added_path_in(&octx, &mut data, &oscope.target, &shared).unwrap();
 
     // The INNER project has a bundle of its own, and claims the outer's folder for it.
@@ -1788,11 +1766,10 @@ fn an_ancestor_project_that_records_the_folder_refuses_a_nested_claim() {
         ..rig.ctx()
     };
     let iscope = ops::add_scope(&ictx, false).unwrap();
-    let isctx = ops::ctx_with_layout(&ictx, &iscope.layout);
     let mine = inner.join("skills/mine");
     std::fs::create_dir_all(&mine).unwrap();
     std::fs::write(mine.join("SKILL.md"), "# mine\n").unwrap();
-    let mut data = ops::adopt_path(&isctx, &iscope.target, &mine, ops::KindDeclared::Yes).unwrap();
+    let mut data = ops::adopt_path(&ictx, &iscope, &mine, ops::KindDeclared::Yes).unwrap();
     ops::note_added_path_in(&ictx, &mut data, &iscope.target, &mine).unwrap();
 
     let err = ops::claim(&ictx, &iscope, &shared, "mine").unwrap_err();
@@ -1800,4 +1777,118 @@ fn an_ancestor_project_that_records_the_folder_refuses_a_nested_claim() {
     let said = err.to_string();
     assert!(said.contains("already belongs to deploy in "), "{said}");
     assert!(said.ends_with("outer/topos.toml"), "{said}");
+}
+
+// ---------------------------------------------------------------------------------------------
+// The PATH door asks the same ownership question — a plain `add <path>` over a folder the other
+// scope already manages is the same two-engines state, met without a `--as`.
+// ---------------------------------------------------------------------------------------------
+
+/// A project checkout with its own manifest, and a ctx standing in it.
+fn project_at<'a>(rig: &'a Rig, dir: &Path) -> (Ctx<'a>, ops::AddScope) {
+    std::fs::create_dir_all(dir).unwrap();
+    std::fs::write(dir.join("topos.toml"), "[bundles]\n").unwrap();
+    let ctx = Ctx {
+        roots: Some(AgentRoots {
+            home: rig.work.0.clone(),
+            cwd: Some(dir.to_path_buf()),
+        }),
+        ..rig.ctx()
+    };
+    let scope = ops::add_scope(&ctx, false).unwrap();
+    (ctx, scope)
+}
+
+#[test]
+fn a_path_add_refuses_a_folder_the_machine_scope_already_manages() {
+    // The plain path door, from a project, over a folder `~/.topos/topos.toml` already installs:
+    // adopting it here would put a second store's engine on one directory — the state the claim
+    // door has always refused, reached without a `--as`.
+    let rig = Rig::new("path-cross");
+    let shared = rig.folder("deploy", "# deploy\n");
+    rig.adopt(&shared); // machine-wide
+
+    let project = rig.work.0.join("proj");
+    let (pctx, pscope) = project_at(&rig, &project);
+    let err = ops::adopt_path(&pctx, &pscope, &shared, ops::KindDeclared::Yes).unwrap_err();
+    assert_eq!(err.code(), "ALREADY_TRACKED");
+    let said = err.to_string();
+    // The claim door's own sentence, minus the `as <bundle>` a path add never typed — and naming
+    // the file the owner answers to, which is the only place the person can act on it.
+    assert!(
+        said.contains("already belongs to deploy in ~/.topos/topos.toml"),
+        "{said}"
+    );
+    assert!(!said.contains(" as "), "no bundle was named: {said}");
+    // NOTHING landed: the project store has no record for the folder.
+    let playout = crate::sidecar::existing_project_store(&rig.fs, &project);
+    assert!(
+        playout.is_none_or(|l| ops::tracked_skill_at(
+            &ops::ctx_with_layout(&pctx, &l),
+            &shared.canonicalize().unwrap()
+        )
+        .unwrap()
+        .is_none()),
+        "the refusal is before any write"
+    );
+}
+
+#[test]
+fn a_global_path_add_refuses_a_folder_a_project_already_manages() {
+    // The `-g` mirror: the machine file may not adopt a folder a checkout's own store installs.
+    let rig = Rig::new("path-cross-g");
+    let project = rig.work.0.join("proj");
+    let (pctx, pscope) = project_at(&rig, &project);
+    let inside = project.join("skills/deploy");
+    std::fs::create_dir_all(&inside).unwrap();
+    std::fs::write(inside.join("SKILL.md"), "# deploy\n").unwrap();
+    let mut data = ops::adopt_path(&pctx, &pscope, &inside, ops::KindDeclared::Yes).unwrap();
+    ops::note_added_path_in(&pctx, &mut data, &pscope.target, &inside).unwrap();
+
+    // `-g` from inside the same checkout.
+    let gscope = ops::add_scope(&pctx, true).unwrap();
+    let err = ops::adopt_path(&pctx, &gscope, &inside, ops::KindDeclared::Yes).unwrap_err();
+    assert_eq!(err.code(), "ALREADY_TRACKED");
+    let said = err.to_string();
+    assert!(said.contains("already belongs to deploy in "), "{said}");
+    assert!(said.ends_with("proj/topos.toml"), "{said}");
+}
+
+#[test]
+fn a_path_add_refuses_a_folder_an_ancestor_project_already_manages() {
+    // A nested checkout is TWO scopes: the ancestor's sweep converges the folders its rows name,
+    // so the inner project may not adopt one of them either.
+    let rig = Rig::new("path-nested");
+    let outer = rig.work.0.join("outer");
+    let inner = outer.join("inner");
+    let (octx, oscope) = project_at(&rig, &outer);
+    let (ictx, iscope) = project_at(&rig, &inner);
+    let shared = inner.join("shared/deploy");
+    std::fs::create_dir_all(&shared).unwrap();
+    std::fs::write(shared.join("SKILL.md"), "# deploy\n").unwrap();
+    let mut data = ops::adopt_path(&octx, &oscope, &shared, ops::KindDeclared::Yes).unwrap();
+    ops::note_added_path_in(&octx, &mut data, &oscope.target, &shared).unwrap();
+
+    let err = ops::adopt_path(&ictx, &iscope, &shared, ops::KindDeclared::Yes).unwrap_err();
+    assert_eq!(err.code(), "ALREADY_TRACKED");
+    let said = err.to_string();
+    assert!(said.contains("already belongs to deploy in "), "{said}");
+    assert!(said.ends_with("outer/topos.toml"), "{said}");
+}
+
+#[test]
+fn a_path_add_in_the_scope_that_manages_the_folder_keeps_its_own_answer() {
+    // The SAME-SCOPE case is this scope's own business, and its own answer stands: the row is
+    // still there, so the re-add is the already-tracked refusal that names the row — never the
+    // cross-scope sentence about another file.
+    let rig = Rig::new("path-same");
+    let shared = rig.folder("deploy", "# deploy\n");
+    rig.adopt(&shared);
+    let ctx = rig.ctx();
+    let scope = ops::add_scope(&ctx, true).unwrap();
+    let err = ops::adopt_path(&ctx, &scope, &shared, ops::KindDeclared::Yes).unwrap_err();
+    assert_eq!(err.code(), "ALREADY_TRACKED");
+    let said = err.to_string();
+    assert!(said.contains("'deploy' already tracks "), "{said}");
+    assert!(!said.contains("belongs to"), "{said}");
 }

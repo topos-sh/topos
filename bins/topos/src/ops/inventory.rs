@@ -1642,7 +1642,10 @@ pub(crate) mod testkit {
             let dir = std::env::temp_dir().join(format!("topos-inv-{}-{n}", std::process::id()));
             let _ = std::fs::remove_dir_all(&dir);
             std::fs::create_dir_all(&dir).unwrap();
-            Self(dir)
+            // CANONICAL from birth, like every other rig here: `$TMPDIR` sits behind the macOS
+            // `/var` symlink and discovery answers in resolved paths, so a fixture spelled the
+            // other way would compare unequal to its own discovered folders.
+            Self(dir.canonicalize().unwrap_or(dir))
         }
 
         pub(crate) fn layout(&self) -> Layout {

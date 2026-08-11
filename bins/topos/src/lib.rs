@@ -46,6 +46,7 @@ pub(crate) mod mcp_validate;
 pub mod message;
 pub(crate) mod op_wal;
 pub(crate) mod ops;
+pub(crate) mod out;
 pub(crate) mod placement;
 pub(crate) mod plane;
 pub(crate) mod plane_http;

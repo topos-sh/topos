@@ -53,7 +53,11 @@ what only a cross-crate composed run can prove.
   arm puts a copy behind (a go-back): the direct publish refuses, the `--propose` lands.
   Binary-driven too: the placement dirs and the workbench path resolve against the environment.
 - **`tests/hardening_e2e.rs`** — pinned references delivering exactly their version and holding
-  across sweeps; `publish --to` refusing nonexistent channels without minting one.
+  across sweeps; `publish --to` refusing nonexistent channels without minting one; and the TWIN
+  RETIREMENT, whose collision only a composed run produces — a real delivery meets the person's own
+  same-named folder, the placement ladder lands `<name>-<workspace>` beside it, and the claim
+  retires that duplicate (the receipt names it) while the claimed folder converges on the next
+  sweep with the local edit intact.
 - **`tests/uniform_e2e.rs`** — the NON-ORACLE discipline over real HTTP: byte-identical uniform
   404s across foreign/never-existed workspaces, wrong paths, garbage credentials; the
   `session_approval` knob's born-pending lane (exactly two typed answers until approval).

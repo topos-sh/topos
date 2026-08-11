@@ -20,7 +20,9 @@ fn scratch(tag: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("topos-cli-{tag}-{}-{n}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
-    dir
+    // Canonical from birth: `$TMPDIR` sits behind the macOS `/var` symlink, and the binary answers
+    // in resolved paths — a fixture spelled the other way would compare unequal to its own dirs.
+    dir.canonicalize().unwrap()
 }
 
 fn copy_tree(src: &Path, dst: &Path) {
@@ -1140,5 +1142,173 @@ fn selecting_members_of_an_mcp_source_is_refused_by_name() {
         msg.contains("-s") && msg.contains("one document") && msg.contains("drop `-s`"),
         "the refusal names the flag and why it cannot apply: {msg}"
     );
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+#[test]
+fn a_home_reached_through_a_symlink_lists_one_spelling() {
+    // `$HOME` is whatever the environment says — often a symlink — while the working directory the
+    // kernel reports is already resolved. One listing used to show the same home under two
+    // spellings, which reads as two machines. Only a real process proves it: the roots resolve
+    // from the environment.
+    let scratch = scratch("symhome");
+    let real = scratch.join("real");
+    for (dir, name) in [(".cursor/skills", "one"), (".augment/skills", "two")] {
+        let d = real.join(dir).join(name);
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::write(d.join("SKILL.md"), format!("---\nname: {name}\n---\nhi\n")).unwrap();
+    }
+    let link = scratch.join("link");
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    let real_c = real.canonicalize().unwrap();
+
+    let out = Command::new(bin())
+        .env("TOPOS_HOME", scratch.join("topos"))
+        .env("HOME", &link)
+        .env("CLAUDE_CONFIG_DIR", scratch.join(".claude-isolated"))
+        .current_dir(work_dir(&scratch))
+        .args(["list", "--untracked"])
+        .output()
+        .expect("spawn topos");
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "{text}");
+    let folders: Vec<&str> = text
+        .lines()
+        .filter(|l| l.starts_with("  /") && l.trim_end().ends_with(':'))
+        .collect();
+    assert_eq!(folders.len(), 2, "both agents' folders are listed: {text}");
+    for line in &folders {
+        assert!(
+            line.trim_start().starts_with(real_c.to_str().unwrap()),
+            "every folder under the ONE resolved home: {text}"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&scratch);
+}
+
+#[test]
+fn the_machine_file_prints_as_itself_under_a_symlinked_home() {
+    // `$HOME` through a symlink, `TOPOS_HOME` unset — so the sidecar home is derived from `$HOME`
+    // and then compared, lexically, against the detection root. Resolve one side only and the
+    // strip misses: the machine file starts printing as an absolute path on every surface that
+    // names it. Only a real process proves it — both roots come from the environment.
+    let scratch = scratch("symhome-manifest");
+    let real = scratch.join("real");
+    std::fs::create_dir_all(real.join(".topos")).unwrap();
+    std::fs::write(real.join(".topos").join("topos.toml"), "[bundles]\n").unwrap();
+    let cwd = real.join("cwd");
+    std::fs::create_dir_all(&cwd).unwrap();
+    let link = scratch.join("link");
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+
+    let run = |args: &[&str]| -> String {
+        let out = Command::new(bin())
+            .env_remove("TOPOS_HOME")
+            .env("HOME", &link)
+            .env("CLAUDE_CONFIG_DIR", scratch.join(".claude-isolated"))
+            .current_dir(link.join("cwd"))
+            .args(args)
+            .output()
+            .expect("spawn topos");
+        assert!(out.status.success(), "{args:?}: {out:?}");
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+    for args in [["list"].as_slice(), ["status"].as_slice()] {
+        let text = run(args);
+        assert!(
+            text.contains("~/.topos/topos.toml"),
+            "{args:?} names the machine file as itself: {text}"
+        );
+        assert!(
+            !text.contains(real.to_str().unwrap()),
+            "{args:?} leaked an absolute home path: {text}"
+        );
+    }
+    // The wire says the same thing — the manifest label is one derivation, not a render-side one.
+    let v: serde_json::Value = serde_json::from_str(&run(&["list", "--json"])).expect("json");
+    assert_eq!(
+        v["data"]["scopes"][0]["manifest"], "~/.topos/topos.toml",
+        "{v}"
+    );
+    let _ = std::fs::remove_dir_all(&scratch);
+}
+
+#[test]
+fn a_gone_stderr_reader_silences_only_stderr() {
+    // `topos add … 2> >(head)`: the DIAGNOSTICS reader left, which says nothing about the command
+    // or about stdout. A shared closed-pipe latch made this exit 0 — reporting a failed command as
+    // a success — and swallowed the outcome still being written to stdout.
+    let home = scratch("stderr-pipe");
+    let mut child = Command::new(bin())
+        .env("TOPOS_HOME", &home)
+        .env("CLAUDE_CONFIG_DIR", home.join(".claude-isolated"))
+        // The debug channel puts a line on stderr BEFORE the envelope reaches stdout, which is the
+        // exact order that made a shared latch swallow the answer.
+        .env("TOPOS_DEBUG", "1")
+        .current_dir(work_dir(&home))
+        .args(["add", "-g", "./nope", "--json"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn topos");
+    drop(child.stderr.take().expect("stderr is piped"));
+    let out = child.wait_with_output().expect("the run ends");
+    assert!(
+        !out.status.success(),
+        "a failed command stays failed: {:?}",
+        out.status.code()
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let v: serde_json::Value =
+        serde_json::from_str(stdout.trim()).unwrap_or_else(|_| panic!("non-JSON stdout: {stdout}"));
+    assert_eq!(v["ok"], false, "{v}");
+    assert_eq!(v["error"]["code"], "SOURCE_MISSING", "{v}");
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+#[test]
+fn a_reader_that_leaves_ends_the_run_cleanly() {
+    // `topos list | head` — the reader takes what it wants and closes the pipe mid-print. The
+    // process must not die printing into it: `println!` panics on a broken pipe (exit 101, a
+    // panic message on stderr), and `unsafe_code` is forbidden here, so the SIGPIPE cure is not
+    // available. Only a real process proves it — the write has to meet a closed file descriptor.
+    let home = scratch("brokenpipe");
+    // A discovery root with two skills, so the listing is several lines long: the panic needs a
+    // write AFTER the reader is gone.
+    let skills = home.join(".claude-isolated").join("skills");
+    for name in ["alpha", "beta"] {
+        let dir = skills.join(name);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("SKILL.md"),
+            format!("---\nname: {name}\n---\nhi\n"),
+        )
+        .unwrap();
+    }
+    for args in [
+        ["list", "--untracked"].as_slice(),
+        ["list", "--untracked", "--json"].as_slice(),
+    ] {
+        let mut child = Command::new(bin())
+            .env("TOPOS_HOME", &home)
+            .env("HOME", &home)
+            .env("CLAUDE_CONFIG_DIR", home.join(".claude-isolated"))
+            .current_dir(work_dir(&home))
+            .args(args)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("spawn topos");
+        // THE READER LEAVES: dropping our end of the pipe is what `head` does after its last line.
+        drop(child.stdout.take().expect("stdout is piped"));
+        let out = child.wait_with_output().expect("the run ends");
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(!err.contains("panicked"), "{args:?} panicked: {err}");
+        assert!(
+            out.status.success(),
+            "{args:?} exits clean, not {:?}",
+            out.status.code()
+        );
+    }
     let _ = std::fs::remove_dir_all(&home);
 }

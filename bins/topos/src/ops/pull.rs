@@ -803,7 +803,7 @@ fn note_skill_failure(
         Some(skill_id),
         ctx.clock.now_unix_millis(),
     );
-    eprintln!(
+    crate::out::errln!(
         "topos pull: skill {skill_id}: {}",
         crate::render::safe_message(e)
     );

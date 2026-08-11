@@ -208,7 +208,7 @@ pub(crate) fn add(ctx: &Ctx<'_>, source: &Path) -> Result<AddData, ClientError> 
 /// As [`add`], plus a `target` manifest that cannot be read or parsed.
 pub(crate) fn adopt_path(
     ctx: &Ctx<'_>,
-    target: &EditTarget,
+    scope: &super::manifest_edit::AddScope,
     source: &Path,
     declared: KindDeclared,
 ) -> Result<AddData, ClientError> {
@@ -216,37 +216,52 @@ pub(crate) fn adopt_path(
         // The guard asks about the folder that will actually be adopted — for a link shell, the
         // folder its links point into ([`origin_dir`]) — or a shell over a server bundle would
         // slip past it and land as a skill.
-        refuse_unflagged_mcp_dir(ctx, &origin_dir(source)?)?;
+        let sctx = super::pull::ctx_with_layout(ctx, &scope.layout);
+        refuse_unflagged_mcp_dir(&sctx, &origin_dir(source)?)?;
     }
-    adopt_path_any_kind(ctx, target, source, BundleKind::Skill)
+    adopt_path_any_kind(ctx, scope, source, BundleKind::Skill)
 }
 
 /// [`adopt_path`] minus the server-bundle guard — `add --kind mcp`'s own local door, which adopts
 /// exactly that shape deliberately (the flag IS the declaration the guard asks for).
+///
+/// `ctx` is the OUTER context and `scope` what the invocation resolved to write, exactly as the
+/// claim door takes them: the record and the row belong to the scope, and the ownership question
+/// spans both stores.
 pub(crate) fn adopt_path_any_kind(
     ctx: &Ctx<'_>,
-    target: &EditTarget,
+    scope: &super::manifest_edit::AddScope,
     source: &Path,
     kind: BundleKind,
 ) -> Result<AddData, ClientError> {
+    let sctx = &super::pull::ctx_with_layout(ctx, &scope.layout);
     // REFUSAL-FIRST, before the re-link's own revive/stamp/log: a folder that is not there at all,
     // then a record standing for this folder under a DIFFERENT kind (neither is re-linkable).
-    refuse_missing_source(ctx, source)?;
-    // A link shell IS the folder its links point into, from here down: the kind guard and the
-    // re-link both ask about a record keyed by the ORIGIN, which is what the adopt records.
+    refuse_missing_source(sctx, source)?;
+    // A link shell IS the folder its links point into, from here down: the kind guard, the
+    // ownership probe, and the re-link all ask about a record keyed by the ORIGIN, which is what
+    // the adopt records.
     let source = &origin_dir(source)?;
-    refuse_kind_change(ctx, source, kind)?;
-    match unclaimed_record(ctx, target, source)? {
+    // A FOLDER THE OTHER SCOPE ALREADY MANAGES is the two-engines state the claim door refuses,
+    // met from the path door — including the re-link below, which would put this store's engine on
+    // the folder just as an adopt would. Asked only when THIS store has nothing for the folder: a
+    // record here is this scope's own business, and its own answer (the re-link, or the
+    // already-tracked refusal) is the one the person needs.
+    if tracked_skill_at(sctx, source)?.is_none() {
+        refuse_other_scope(ctx, scope, source, None, kind)?;
+    }
+    refuse_kind_change(sctx, source, kind)?;
+    match unclaimed_record(sctx, &scope.target, source)? {
         Some(data) => {
             // A RE-LINKED record predates this door's marker when it was written by an older
             // build; stamping it here is the same first-write-wins belt the mint takes — and the
             // guard above has already proven no standing marker disagrees with `kind`.
             if let Some(Ok(sid)) = data.skill_id.as_deref().map(crate::id::SkillId::parse) {
-                crate::bundle_kind::write_kind_marker(ctx, &sid, kind);
+                crate::bundle_kind::write_kind_marker(sctx, &sid, kind);
             }
             Ok(data)
         }
-        None => add_with_name(ctx, source, None, true, kind),
+        None => add_with_name(sctx, source, None, true, kind),
     }
 }
 
@@ -2033,12 +2048,50 @@ pub(crate) fn plan_bare_add(
                 [] if tracked_by_name(ctx, name)? => Err(ClientError::AlreadyTrackedName {
                     name: name.to_owned(),
                 }),
-                [] => Err(ClientError::NoUntrackedSkill {
-                    name: name.to_owned(),
-                }),
+                // A folder DISCOVERY CANNOT SEE, standing right where the person is looking: a
+                // shell whose `SKILL.md` link is broken has no regular marker file, so no probe
+                // confirms it as a skill. Answering "no untracked skill of that name" about a
+                // folder of exactly that name is the one thing worse than refusing. Probed only
+                // here, on the path where there is nothing else to say.
+                [] => Err(broken_shell_refusal(ctx, roots, name).unwrap_or(
+                    ClientError::NoUntrackedSkill {
+                        name: name.to_owned(),
+                    },
+                )),
             }
         }
     }
+}
+
+/// A folder of this NAME that discovery skipped because it is a link shell it cannot resolve — the
+/// refusal that shell's own folder earns, or `None` when no skills root holds one.
+///
+/// Both shapes [`origin_dir`] refuses answer here, and each is the whole truth about that folder: a
+/// broken `SKILL.md` link (invisible to every probe — `is_file()` follows the link) and a shell
+/// holding its own files beside the link (delisted by [`super::list::discover_untracked`], because
+/// as it stands there is no single folder to manage). ONE classifier decides both; this only asks
+/// it about the folders a bare name could mean.
+///
+/// The refusal names the FOLDER, not the bare word: several roots can hold that name, and the
+/// person needs to know which directory the answer is about.
+fn broken_shell_refusal(
+    ctx: &Ctx<'_>,
+    roots: &super::DiscoveryRoots,
+    name: &str,
+) -> Option<ClientError> {
+    for root in topos_harness::registry::skills_roots(&roots.home, roots.cwd.as_deref()) {
+        let dir = root.join(name);
+        if !dir.is_dir() {
+            continue;
+        }
+        if let Err(ClientError::LinkedSource { reason, .. }) = origin_dir(&dir) {
+            return Some(ClientError::LinkedSource {
+                name: spell_home(ctx, &dir),
+                reason,
+            });
+        }
+    }
+    None
 }
 
 /// The DESTINATION-ONLY add: the folder-adopted bundle already stands in the scope this invocation
@@ -2697,6 +2750,65 @@ fn tracked_name(ctx: &Ctx<'_>, skill_id: &str) -> Option<String> {
     Some(lock.name)
 }
 
+/// What a refusal CALLS the record holding a folder: its own name, and the store id only when
+/// nothing else can be read — the one degradation every ownership answer takes.
+pub(super) fn record_name(sctx: &Ctx<'_>, skill_id: &str) -> String {
+    tracked_name(sctx, skill_id).unwrap_or_else(|| skill_id.to_owned())
+}
+
+/// ANOTHER SCOPE's store already manages this folder — the refusal both folder doors take.
+///
+/// The stores are [`super::manifest_edit::other_scope_stores`]; `claim` is the bundle a `--as`
+/// named, or `None` for a plain path adopt, which is asking to manage the folder outright. Either
+/// way the refusal names the file the owner answers to: that is where the folder is governed from,
+/// and the only place a person can act on it.
+///
+/// `dir` is the ORIGIN — the folder the bytes really live in, resolved by [`origin_dir`] before
+/// this is asked, exactly as the record write keys it.
+///
+/// TWO ENGINES CONVERGING ONE DIRECTORY is the whole hazard, so `kind` decides whether there is
+/// one: a server bundle is delivered as config ENTRIES and places no directory at all, so one
+/// `server.json` folder may legitimately stand in both scopes, each minting its own config key.
+/// The refusal arms the moment either side would place the folder.
+///
+/// # Errors
+/// [`ClientError::ClaimTaken`] naming the owning bundle and its manifest; a store read failure.
+pub(super) fn refuse_other_scope(
+    ctx: &Ctx<'_>,
+    scope: &super::manifest_edit::AddScope,
+    dir: &Path,
+    claim: Option<&str>,
+    kind: BundleKind,
+) -> Result<(), ClientError> {
+    for (layout, file) in super::manifest_edit::other_scope_stores(ctx, scope) {
+        let octx = super::pull::ctx_with_layout(ctx, &layout);
+        let Some(id) = tracked_skill_at(&octx, dir)? else {
+            continue;
+        };
+        if kind.is_mcp() && record_is_mcp(&octx, &id) {
+            continue; // neither side places this folder — nothing to converge, nothing to refuse
+        }
+        return Err(ClientError::ClaimTaken {
+            dir: crate::ops::inventory::pretty(ctx, dir),
+            claim: claim.map(str::to_owned),
+            owner: record_name(&octx, &id),
+            manifest: Some(file),
+        });
+    }
+    Ok(())
+}
+
+/// Whether the record `id` in `sctx`'s store is a server bundle — the one classifier, read as the
+/// ordinary skill when nothing answers (which is what an unplaceable record honestly is here).
+fn record_is_mcp(sctx: &Ctx<'_>, id: &str) -> bool {
+    let Ok(sid) = SkillId::parse(id) else {
+        return false;
+    };
+    crate::bundle_kind::classify(sctx, sid.as_str(), &placements_of(sctx, &sid))
+        .or_skill()
+        .is_mcp()
+}
+
 /// The manifest file whose row already installs `canonical_dir`. The scope THIS store belongs to
 /// is consulted first — the add was routed to it, so its file is the one that made the folder
 /// tracked — and the other scope only as a fallback. A project store never claims to speak for
@@ -2868,6 +2980,7 @@ mod tests {
             folder: p.parent().unwrap_or(p).to_string_lossy().into_owned(),
             readers: readers.iter().map(|s| (*s).to_owned()).collect(),
             scope: "user".to_owned(),
+            original: None,
         }
     }
 

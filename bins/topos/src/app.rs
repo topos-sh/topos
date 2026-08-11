@@ -17,6 +17,7 @@ use crate::ctx::Ctx;
 use crate::error::ClientError;
 use crate::fs_seam::{FsOps, RealFs};
 use crate::ids::{Clock, RealClock, RealIds};
+use crate::out::{errln, outln};
 use crate::plane::{
     ContributeSource, DirectorySource, EnrollSource, GovernanceSource, ReconcileTransport,
 };
@@ -30,7 +31,22 @@ use crate::{identity, logfile, ops, render};
 /// runs on the quiet sweep (the session-start hook path gains zero latency and zero noise), on
 /// `self-update`/`upgrade` (they ARE the release surface), on `uninstall` (it would recreate the
 /// state dir the command just deleted), or on a failed command.
+///
+/// THE OUTCOME'S READER LEAVING ends the run cleanly: `topos list | head` closes the pipe
+/// mid-print, and every write from there on is dropped (the `out` module) so the last word is an
+/// exit code, not a panic. Exit 0 — that reader has everything it asked for, which is what a
+/// well-behaved CLI calls success. STDOUT alone decides this: a gone stderr reader has only stopped
+/// listening to diagnostics, and turning that into a success would report a failed command as one.
 pub fn run() -> ExitCode {
+    let code = dispatch();
+    if crate::out::stdout_closed() {
+        return ExitCode::SUCCESS;
+    }
+    code
+}
+
+/// [`run`] minus the closed-pipe verdict — parse argv, dispatch, then the passive version check.
+fn dispatch() -> ExitCode {
     let cli = Cli::parse();
     // The invocation AS TYPED, past the binary name. The composition root is the only place that
     // legitimately holds it, and the error surfaces need it: a refusal that offers a rebuilt
@@ -59,7 +75,7 @@ pub fn run() -> ExitCode {
         let probe = crate::plane_http::UreqVersionProbe::new();
         if let Some(line) = ops::version_nag(&fs, &layout, now_ms, &probe) {
             // stderr ONLY — stdout already carries the command's document (`--json` stays byte-clean).
-            eprintln!("{line}");
+            errln!("{line}");
         }
     }
     code
@@ -181,9 +197,8 @@ fn run_command(
             // The teardown reaches the machine's agent CONFIGS as well as its own tree — the MCP
             // entries topos placed are retired before the ledger proving they are topos's is
             // deleted with the sidecar — and those surfaces resolve under `$HOME`.
-            roots: std::env::var_os("HOME").map(|h| crate::ctx::AgentRoots {
-                home: PathBuf::from(h),
-                cwd: std::env::current_dir().ok(),
+            roots: std::env::var_os("HOME").map(|h| {
+                crate::ctx::AgentRoots::new(PathBuf::from(h), std::env::current_dir().ok())
             }),
             // The teardown is entirely local (delete `~/.topos/`, scrub the triggers) — nothing to
             // report activity about.
@@ -222,9 +237,8 @@ fn run_command(
             triggers: triggers.clone(),
             plane: &inert_plane,
             follow: &inert_follow,
-            roots: std::env::var_os("HOME").map(|h| crate::ctx::AgentRoots {
-                home: PathBuf::from(h),
-                cwd: std::env::current_dir().ok(),
+            roots: std::env::var_os("HOME").map(|h| {
+                crate::ctx::AgentRoots::new(PathBuf::from(h), std::env::current_dir().ok())
             }),
             // `status` (and the bare-`topos` orientation over it) promises OFFLINE: it dials
             // nothing, so it has no activity to report. The silent sink makes that structural
@@ -254,7 +268,7 @@ fn run_command(
     // Recovery's typed disclosures (a refused park-journal entry) ride stderr — diagnostics,
     // never the envelope, so `--json` stdout stays the one document.
     for warning in &recovery_warnings {
-        eprintln!("topos: {}", warning.text);
+        errln!("topos: {}", warning.text);
     }
 
     // The plane + follow-state sources — SESSIONS are the identity: the routed plane sends each
@@ -322,10 +336,8 @@ fn run_command(
         // The machine roots the placement engine detects agents against — the same `$HOME` + cwd
         // resolution untracked discovery uses. Absent `$HOME` degrades to the classic single-dir
         // placement (the active adapter's), never an error.
-        roots: std::env::var_os("HOME").map(|h| crate::ctx::AgentRoots {
-            home: PathBuf::from(h),
-            cwd: std::env::current_dir().ok(),
-        }),
+        roots: std::env::var_os("HOME")
+            .map(|h| crate::ctx::AgentRoots::new(PathBuf::from(h), std::env::current_dir().ok())),
         progress: &*progress,
     };
 
@@ -500,7 +512,7 @@ fn run_command(
             if opener.is_some() && bound.is_none() {
                 // Never a silent downgrade to the phishable path: a person who expected the
                 // browser hand-off should know they are now typing a code for a reason.
-                eprintln!(
+                errln!(
                     "note: could not open a local listener — falling back to the typed-code login."
                 );
             }
@@ -852,7 +864,6 @@ fn run_command(
             let result = match crate::source::classify(&source) {
                 crate::source::SourceSpec::LocalPath(p) => {
                     ops::add_scope(&ctx, global).and_then(|scope| {
-                        let sctx = ops::ctx_with_layout(&ctx, &scope.layout);
                         // A RE-ADD NAMING DESTINATIONS is about where the copies live, not about
                         // adopting the folder again — which is what `adopt_path` would refuse. The
                         // row this scope already spells for it gains them, exactly as a bare name
@@ -886,7 +897,7 @@ fn run_command(
                         let entries = selection.skill_entries(scope.target.scope)?;
                         // The server-bundle guard arms on SILENCE: `--kind skill` on a
                         // `server.json`-rooted folder adopts it as a skill, the person's own word.
-                        let mut d = ops::adopt_path(&sctx, &scope.target, &p, declared)?;
+                        let mut d = ops::adopt_path(&ctx, &scope, &p, declared)?;
                         if entries.is_empty() {
                             ops::note_added_path_in(&ctx, &mut d, &scope.target, &p)?;
                         } else {
@@ -1635,7 +1646,7 @@ fn run_command(
                         let lines = ops::quiet_hook_lines(&fs, &ctx.layout, now, &out);
                         let changed = ops::sweep_changed_bytes(&out.data) || builtin_changed;
                         if let Some(doc) = ops::hook_output_json(dialect, changed, &lines) {
-                            println!("{doc}");
+                            outln!("{doc}");
                         }
                         ExitCode::SUCCESS
                     }
@@ -1650,7 +1661,7 @@ fn run_command(
                         if let Some(doc) =
                             ops::hook_output_json(dialect, false, std::slice::from_ref(&line))
                         {
-                            println!("{doc}");
+                            outln!("{doc}");
                         }
                         ExitCode::SUCCESS
                     }
@@ -1857,9 +1868,9 @@ fn finish<T: Serialize>(
         Ok(data) => {
             if json {
                 let value = serde_json::to_value(&data).unwrap_or_default();
-                println!("{}", render::to_json(&render::ok_envelope(command, value)));
+                outln!("{}", render::to_json(&render::ok_envelope(command, value)));
             } else {
-                println!("{}", tty(&data));
+                outln!("{}", tty(&data));
             }
             ExitCode::SUCCESS
         }
@@ -1883,9 +1894,9 @@ fn finish_auth_status(
                 let value = serde_json::to_value(&data).unwrap_or_default();
                 let mut envelope = render::ok_envelope(command, value);
                 envelope.next_actions = next_actions;
-                println!("{}", render::to_json(&envelope));
+                outln!("{}", render::to_json(&envelope));
             } else {
-                println!("{}", render::auth_status_tty(&data));
+                outln!("{}", render::auth_status_tty(&data));
             }
             ExitCode::SUCCESS
         }
@@ -1924,11 +1935,11 @@ fn finish_status(
                 let value = serde_json::to_value(&data).unwrap_or_default();
                 let mut envelope = render::ok_envelope(command, value);
                 envelope.next_actions = next_actions;
-                println!("{}", render::to_json(&envelope));
+                outln!("{}", render::to_json(&envelope));
             } else if bare && data.sessions.is_empty() {
-                println!("{}", render::welcome_tty(&data));
+                outln!("{}", render::welcome_tty(&data));
             } else {
-                println!("{}", render::status_tty(&data));
+                outln!("{}", render::status_tty(&data));
             }
             ExitCode::SUCCESS
         }
@@ -1936,14 +1947,14 @@ fn finish_status(
         // the diagnostics log and no `details:` pointer is printed (there is no written detail).
         Err(e) => {
             if json {
-                println!(
+                outln!(
                     "{}",
                     render::to_json(&render::err_envelope(command, argv, &e))
                 );
             } else {
-                eprintln!("{}", render::err_tty(&e));
+                errln!("{}", render::err_tty(&e));
                 if let Some(hint) = render::err_hint_tty(command, argv, &e) {
-                    eprintln!("{hint}");
+                    errln!("{hint}");
                 }
             }
             ExitCode::FAILURE
@@ -2046,7 +2057,7 @@ fn finish_pull(
                 envelope.warnings = crate::message::legacy_lines(&messages);
                 envelope.messages = messages;
                 envelope.next_actions = next_actions;
-                println!("{}", render::to_json(&envelope));
+                outln!("{}", render::to_json(&envelope));
             } else {
                 let mut text = render::pull_tty(
                     &out.data,
@@ -2070,7 +2081,7 @@ fn finish_pull(
                          — ask a teammate for the address.",
                     );
                 }
-                println!("{text}");
+                outln!("{text}");
             }
             if failed {
                 ExitCode::FAILURE
@@ -2278,9 +2289,9 @@ fn finish_list(
                 envelope.warnings = crate::message::legacy_lines(&messages);
                 envelope.messages = messages;
                 envelope.next_actions = next_actions;
-                println!("{}", render::to_json(&envelope));
+                outln!("{}", render::to_json(&envelope));
             } else {
-                println!("{}", render::list_tty(&out));
+                outln!("{}", render::list_tty(&out));
             }
             ExitCode::SUCCESS
         }
@@ -2374,12 +2385,12 @@ fn finish_diff(
     match result {
         Ok(data) => {
             if json {
-                println!(
+                outln!(
                     "{}",
                     render::to_json(&diff_envelope(command, &data, full_argv))
                 );
             } else {
-                println!("{}", render::diff_tty(&data));
+                outln!("{}", render::diff_tty(&data));
             }
             ExitCode::SUCCESS
         }
@@ -2443,9 +2454,9 @@ fn finish_log(
                 envelope.warnings = crate::message::legacy_lines(&messages);
                 envelope.messages = messages;
                 envelope.next_actions = next_actions;
-                println!("{}", render::to_json(&envelope));
+                outln!("{}", render::to_json(&envelope));
             } else {
-                println!("{}", render::log_tty(&data));
+                outln!("{}", render::log_tty(&data));
             }
             ExitCode::SUCCESS
         }
@@ -2468,18 +2479,18 @@ fn finish_keep_as_yours(
                 let value = serde_json::json!({ "describe": data });
                 let mut envelope = render::ok_envelope(command, value);
                 envelope.next_actions = render::describe_next_actions(vec![yes_argv.clone()]);
-                println!("{}", render::to_json(&envelope));
+                outln!("{}", render::to_json(&envelope));
             } else {
-                println!("{}", render::keep_as_yours_describe_tty(&data, &yes_argv));
+                outln!("{}", render::keep_as_yours_describe_tty(&data, &yes_argv));
             }
             ExitCode::SUCCESS
         }
         ops::KeepAsYoursOutcome::Forked(data) => {
             if json {
                 let value = serde_json::to_value(&data).unwrap_or_default();
-                println!("{}", render::to_json(&render::ok_envelope(command, value)));
+                outln!("{}", render::to_json(&render::ok_envelope(command, value)));
             } else {
-                println!("{}", render::add_tty(&data));
+                outln!("{}", render::add_tty(&data));
             }
             ExitCode::SUCCESS
         }
@@ -2506,9 +2517,9 @@ fn finish_add_reference(
                     &data.undo,
                     crate::actions::Subject::of_receipt(&data),
                 );
-                println!("{}", render::to_json(&envelope));
+                outln!("{}", render::to_json(&envelope));
             } else {
-                println!("{}", render::add_tty(&data));
+                outln!("{}", render::add_tty(&data));
             }
             ExitCode::SUCCESS
         }
@@ -2517,9 +2528,9 @@ fn finish_add_reference(
                 let value = serde_json::json!({ "describe": data });
                 let mut envelope = render::ok_envelope(command, value);
                 envelope.next_actions = render::describe_next_actions(vec![yes_argv.clone()]);
-                println!("{}", render::to_json(&envelope));
+                outln!("{}", render::to_json(&envelope));
             } else {
-                println!("{}", render::add_describe_tty(&data, &yes_argv));
+                outln!("{}", render::add_describe_tty(&data, &yes_argv));
             }
             ExitCode::SUCCESS
         }
@@ -2552,9 +2563,9 @@ fn finish_add_mcp(
                 // caution has to say so rather than borrowing a skill's sentence.
                 envelope.next_actions =
                     render::undo_next_actions(&data.undo, crate::actions::Subject::McpServer);
-                println!("{}", render::to_json(&envelope));
+                outln!("{}", render::to_json(&envelope));
             } else {
-                println!("{}", render::add_tty(&data));
+                outln!("{}", render::add_tty(&data));
             }
             if failed {
                 ExitCode::FAILURE
@@ -2591,23 +2602,23 @@ fn finish_add_many(
                 let value = serde_json::json!({ "describe": data });
                 let mut envelope = render::ok_envelope(command, value);
                 envelope.next_actions = render::describe_next_actions(vec![yes_argv.clone()]);
-                println!("{}", render::to_json(&envelope));
+                outln!("{}", render::to_json(&envelope));
             } else {
-                println!("{}", render::add_describe_tty(&data, &yes_argv));
+                outln!("{}", render::add_describe_tty(&data, &yes_argv));
             }
             ExitCode::SUCCESS
         }
         Ok(ops::AddManyOutcome::Applied(items)) => {
             if json {
                 let value = serde_json::json!({ "added": items });
-                println!("{}", render::to_json(&render::ok_envelope(command, value)));
+                outln!("{}", render::to_json(&render::ok_envelope(command, value)));
             } else {
                 let body = items
                     .iter()
                     .map(render::add_tty)
                     .collect::<Vec<_>>()
                     .join("\n");
-                println!("{body}");
+                outln!("{body}");
             }
             ExitCode::SUCCESS
         }
@@ -2628,9 +2639,9 @@ fn finish_remove(
                 let value = serde_json::json!({ "describe": data });
                 let mut envelope = render::ok_envelope(command, value);
                 envelope.next_actions = render::describe_next_actions(vec![yes_argv.clone()]);
-                println!("{}", render::to_json(&envelope));
+                outln!("{}", render::to_json(&envelope));
             } else {
-                println!("{}", render::remove_describe_tty(&data, &yes_argv));
+                outln!("{}", render::remove_describe_tty(&data, &yes_argv));
             }
             ExitCode::SUCCESS
         }
@@ -2645,9 +2656,9 @@ fn finish_remove(
                     &data.undo,
                     crate::actions::Subject::of_removal(&data.uninstalled),
                 );
-                println!("{}", render::to_json(&envelope));
+                outln!("{}", render::to_json(&envelope));
             } else {
-                println!("{}", render::remove_applied_tty(&data));
+                outln!("{}", render::remove_applied_tty(&data));
             }
             ExitCode::SUCCESS
         }
@@ -2668,9 +2679,9 @@ fn finish_reset(
                 let value = serde_json::json!({ "describe": { "items": items } });
                 let mut envelope = render::ok_envelope(command, value);
                 envelope.next_actions = render::describe_next_actions(vec![yes_argv.clone()]);
-                println!("{}", render::to_json(&envelope));
+                outln!("{}", render::to_json(&envelope));
             } else {
-                println!("{}", render::reset_describe_tty(&items, &yes_argv));
+                outln!("{}", render::reset_describe_tty(&items, &yes_argv));
             }
             ExitCode::SUCCESS
         }
@@ -2682,9 +2693,9 @@ fn finish_reset(
                 // conflicted row does — the state that still asks for a decision must offer that
                 // decision on the machine surface too.
                 envelope.next_actions = render::reset_next_actions(&items);
-                println!("{}", render::to_json(&envelope));
+                outln!("{}", render::to_json(&envelope));
             } else {
-                println!("{}", render::reset_applied_tty(&items));
+                outln!("{}", render::reset_applied_tty(&items));
             }
             ExitCode::SUCCESS
         }
@@ -2703,9 +2714,9 @@ fn finish_invite(
         Ok(ops::InviteOutcome::Read(data)) => {
             if json {
                 let value = serde_json::to_value(&data).unwrap_or_default();
-                println!("{}", render::to_json(&render::ok_envelope(command, value)));
+                outln!("{}", render::to_json(&render::ok_envelope(command, value)));
             } else {
-                println!("{}", render::invite_read_tty(&data));
+                outln!("{}", render::invite_read_tty(&data));
             }
             ExitCode::SUCCESS
         }
@@ -2714,18 +2725,18 @@ fn finish_invite(
                 let value = serde_json::json!({ "describe": describe });
                 let mut envelope = render::ok_envelope(command, value);
                 envelope.next_actions = render::describe_next_actions(vec![yes_argv.clone()]);
-                println!("{}", render::to_json(&envelope));
+                outln!("{}", render::to_json(&envelope));
             } else {
-                println!("{}", render::invite_describe_tty(&describe, &yes_argv));
+                outln!("{}", render::invite_describe_tty(&describe, &yes_argv));
             }
             ExitCode::SUCCESS
         }
         Ok(ops::InviteOutcome::Applied(data)) => {
             if json {
                 let value = serde_json::to_value(&data).unwrap_or_default();
-                println!("{}", render::to_json(&render::ok_envelope(command, value)));
+                outln!("{}", render::to_json(&render::ok_envelope(command, value)));
             } else {
-                println!("{}", render::invite_tty(&data));
+                outln!("{}", render::invite_tty(&data));
             }
             ExitCode::SUCCESS
         }
@@ -2747,9 +2758,9 @@ fn finish_review(
         Ok(ops::ReviewOutcome::Inbox(data)) => {
             if json {
                 let value = serde_json::to_value(&data).unwrap_or_default();
-                println!("{}", render::to_json(&render::ok_envelope(command, value)));
+                outln!("{}", render::to_json(&render::ok_envelope(command, value)));
             } else {
-                println!("{}", render::review_inbox_tty(&data));
+                outln!("{}", render::review_inbox_tty(&data));
             }
             ExitCode::SUCCESS
         }
@@ -2786,18 +2797,18 @@ fn finish_review(
                 envelope.warnings = crate::message::legacy_lines(&messages);
                 envelope.messages = messages;
                 envelope.next_actions = next_actions;
-                println!("{}", render::to_json(&envelope));
+                outln!("{}", render::to_json(&envelope));
             } else {
-                println!("{}", render::review_describe_tty(&data, &next_argvs));
+                outln!("{}", render::review_describe_tty(&data, &next_argvs));
             }
             ExitCode::SUCCESS
         }
         Ok(ops::ReviewOutcome::Applied(data)) => {
             if json {
                 let value = serde_json::to_value(&data).unwrap_or_default();
-                println!("{}", render::to_json(&render::ok_envelope(command, value)));
+                outln!("{}", render::to_json(&render::ok_envelope(command, value)));
             } else {
-                println!("{}", render::review_tty(&data));
+                outln!("{}", render::review_tty(&data));
             }
             ExitCode::SUCCESS
         }
@@ -2818,18 +2829,18 @@ fn finish_protect(
                 let value = serde_json::json!({ "describe": data });
                 let mut envelope = render::ok_envelope(command, value);
                 envelope.next_actions = render::describe_next_actions(vec![yes_argv.clone()]);
-                println!("{}", render::to_json(&envelope));
+                outln!("{}", render::to_json(&envelope));
             } else {
-                println!("{}", render::protect_describe_tty(&data, &yes_argv));
+                outln!("{}", render::protect_describe_tty(&data, &yes_argv));
             }
             ExitCode::SUCCESS
         }
         Ok(ops::ProtectOutcome::Applied(data)) => {
             if json {
                 let value = serde_json::to_value(&data).unwrap_or_default();
-                println!("{}", render::to_json(&render::ok_envelope(command, value)));
+                outln!("{}", render::to_json(&render::ok_envelope(command, value)));
             } else {
-                println!("{}", render::protect_applied_tty(&data));
+                outln!("{}", render::protect_applied_tty(&data));
             }
             ExitCode::SUCCESS
         }
@@ -2851,9 +2862,9 @@ fn finish_uninstall(
                 let value = serde_json::json!({ "describe": describe });
                 let mut envelope = render::ok_envelope(command, value);
                 envelope.next_actions = render::describe_next_actions(vec![yes_argv.clone()]);
-                println!("{}", render::to_json(&envelope));
+                outln!("{}", render::to_json(&envelope));
             } else {
-                println!("{}", render::uninstall_describe_tty(&describe, &yes_argv));
+                outln!("{}", render::uninstall_describe_tty(&describe, &yes_argv));
             }
             ExitCode::SUCCESS
         }
@@ -2868,9 +2879,9 @@ fn finish_uninstall(
                 envelope.ok = !failed;
                 envelope.warnings = crate::message::legacy_lines(&messages);
                 envelope.messages = messages;
-                println!("{}", render::to_json(&envelope));
+                outln!("{}", render::to_json(&envelope));
             } else {
-                println!(
+                outln!(
                     "{}",
                     render::uninstall_applied_tty(&applied, &messages, !failed)
                 );
@@ -2892,17 +2903,17 @@ fn finish_uninstall(
                 if let Some(applied) = &partial {
                     envelope.data = serde_json::to_value(applied).unwrap_or_default();
                 }
-                println!("{}", render::to_json(&envelope));
+                outln!("{}", render::to_json(&envelope));
             } else {
-                eprintln!("{}", render::err_tty(&error));
+                errln!("{}", render::err_tty(&error));
                 if let Some(applied) = &partial {
-                    eprintln!("{}", render::uninstall_applied_tty(applied, &[], false));
+                    errln!("{}", render::uninstall_applied_tty(applied, &[], false));
                 }
                 if let Some(hint) = render::err_hint_tty(command, diag.argv, &error) {
-                    eprintln!("{hint}");
+                    errln!("{hint}");
                 }
                 if logged {
-                    eprintln!("details: {}", diag.log_path.display());
+                    errln!("details: {}", diag.log_path.display());
                 }
             }
             ExitCode::FAILURE
@@ -2923,27 +2934,27 @@ fn finish_revert(
                 let value = serde_json::json!({ "describe": data });
                 let mut envelope = render::ok_envelope(command, value);
                 envelope.next_actions = render::describe_next_actions(vec![yes_argv.clone()]);
-                println!("{}", render::to_json(&envelope));
+                outln!("{}", render::to_json(&envelope));
             } else {
-                println!("{}", render::revert_describe_tty(&data, &yes_argv));
+                outln!("{}", render::revert_describe_tty(&data, &yes_argv));
             }
             ExitCode::SUCCESS
         }
         Ok(ops::RevertOutcome::NoOp(data)) => {
             if json {
                 let value = serde_json::to_value(&data).unwrap_or_default();
-                println!("{}", render::to_json(&render::ok_envelope(command, value)));
+                outln!("{}", render::to_json(&render::ok_envelope(command, value)));
             } else {
-                println!("{}", render::revert_noop_tty(&data));
+                outln!("{}", render::revert_noop_tty(&data));
             }
             ExitCode::SUCCESS
         }
         Ok(ops::RevertOutcome::Applied(data)) => {
             if json {
                 let value = serde_json::to_value(&data).unwrap_or_default();
-                println!("{}", render::to_json(&render::ok_envelope(command, value)));
+                outln!("{}", render::to_json(&render::ok_envelope(command, value)));
             } else {
-                println!("{}", render::revert_tty(&data));
+                outln!("{}", render::revert_tty(&data));
             }
             ExitCode::SUCCESS
         }
@@ -3018,9 +3029,9 @@ fn finish_session_login(
                 let value = serde_json::to_value(&data).unwrap_or_default();
                 let mut envelope = render::ok_envelope(command, value);
                 envelope.next_actions = next_actions;
-                println!("{}", render::to_json(&envelope));
+                outln!("{}", render::to_json(&envelope));
             } else {
-                println!("{}", render::session_login_tty(&data));
+                outln!("{}", render::session_login_tty(&data));
             }
             ExitCode::SUCCESS
         }
@@ -3039,9 +3050,9 @@ fn finish_session_logout(
         Ok(data) => {
             if json {
                 let value = serde_json::to_value(&data).unwrap_or_default();
-                println!("{}", render::to_json(&render::ok_envelope(command, value)));
+                outln!("{}", render::to_json(&render::ok_envelope(command, value)));
             } else {
-                println!("{}", render::session_logout_tty(&data));
+                outln!("{}", render::session_logout_tty(&data));
             }
             ExitCode::SUCCESS
         }
@@ -3183,12 +3194,13 @@ fn block_on_pending<T>(
     // still reaches the terminal on the waiting line, as the glance check against what the page
     // shows (the human-verifiable cross-check, now that an approval can arrive from anywhere).
     if loopback.is_none() {
-        eprintln!(
+        errln!(
             "Open: {}\nCode: {} (the page shows the same code — confirm it matches)",
-            disc.verification_uri, disc.user_code,
+            disc.verification_uri,
+            disc.user_code,
         );
     }
-    eprintln!(
+    errln!(
         "Ctrl-C is safe — the same command resumes this login; `--wait <seconds>` caps the wait."
     );
     // The loopback arm: auto-open, and let the redirect wake the poll. Every fault here is
@@ -3207,12 +3219,12 @@ fn block_on_pending<T>(
             .map(|out| out.success)
             .unwrap_or(false);
         if opened {
-            eprintln!("Opening your browser to approve.");
+            errln!("Opening your browser to approve.");
         } else {
             // The open failed; the flow is unharmed. This URL needs no typing and returns the
             // approval straight to this terminal — and approving anywhere else still completes
             // here on the next poll, so nothing is stranded either way.
-            eprintln!(
+            errln!(
                 "Could not open a browser. Open this URL to approve:\n  {url}\n\
                  (it returns you here immediately; approving elsewhere finishes this login too, \
                  on the next check)"
@@ -3224,7 +3236,7 @@ fn block_on_pending<T>(
     let interval = disc.poll_interval();
     // The waiting line: ONE static print (no per-second rewrite, no countdown — the device-flow
     // precedent waits quietly), carrying the glance code.
-    eprintln!("{}", waiting_line(&disc.user_code));
+    errln!("{}", waiting_line(&disc.user_code));
     // …and a phase HELD OPEN for the length of the wait: a repainting sink shows a live spinner
     // beneath it, a plain sink says it once — and on either, the held phase keeps every poll's
     // transport fallback ("contacting …") from re-announcing itself each interval, so a piped
@@ -3314,9 +3326,9 @@ fn finish_publish_describe(
                 let value = serde_json::json!({ "describe": data });
                 let mut envelope = render::ok_envelope(command, value);
                 envelope.next_actions = render::describe_next_actions(vec![yes_argv.clone()]);
-                println!("{}", render::to_json(&envelope));
+                outln!("{}", render::to_json(&envelope));
             } else {
-                println!("{}", render::publish_describe_tty(&data, &yes_argv));
+                outln!("{}", render::publish_describe_tty(&data, &yes_argv));
             }
             ExitCode::SUCCESS
         }
@@ -3338,18 +3350,18 @@ fn finish_publish(
         Ok(ops::PublishOutcome::Published(data)) => {
             if json {
                 let value = serde_json::to_value(&data).unwrap_or_default();
-                println!("{}", render::to_json(&render::ok_envelope(command, value)));
+                outln!("{}", render::to_json(&render::ok_envelope(command, value)));
             } else {
-                println!("{}", render::publish_tty(&data));
+                outln!("{}", render::publish_tty(&data));
             }
             ExitCode::SUCCESS
         }
         Ok(ops::PublishOutcome::Proposed(data)) => {
             if json {
                 let value = serde_json::to_value(&data).unwrap_or_default();
-                println!("{}", render::to_json(&render::ok_envelope(command, value)));
+                outln!("{}", render::to_json(&render::ok_envelope(command, value)));
             } else {
-                println!("{}", render::propose_tty(&data));
+                outln!("{}", render::propose_tty(&data));
             }
             ExitCode::SUCCESS
         }
@@ -3377,7 +3389,7 @@ impl Diag<'_> {
     /// `TOPOS_DEBUG=1` (stderr only — stdout stays the clean envelope).
     fn note(&self, command: &str, err: &ClientError) -> bool {
         if std::env::var_os("TOPOS_DEBUG").is_some_and(|v| v == "1") {
-            eprintln!("topos {command} [{}]: {}", err.code(), err.detail());
+            errln!("topos {command} [{}]: {}", err.code(), err.detail());
         }
         logfile::append_error_event(
             self.fs,
@@ -3396,22 +3408,22 @@ impl Diag<'_> {
 fn emit_err(json: bool, command: &str, err: &ClientError, diag: &Diag<'_>) -> ExitCode {
     let logged = diag.note(command, err);
     if json {
-        println!(
+        outln!(
             "{}",
             render::to_json(&render::err_envelope(command, diag.argv, err))
         );
     } else {
-        eprintln!("{}", render::err_tty(err));
+        errln!("{}", render::err_tty(err));
         // The way out, between the refusal and the pointer: the SAME next actions the `--json`
         // envelope computes, as runnable lines (and the transience clause where the typed outcome
         // says the failure is retryable). One source of truth — never a second hint table. The
         // verb rides along: an ambiguity's ways out ARE this invocation, re-spelled per candidate.
         if let Some(hint) = render::err_hint_tty(command, diag.argv, err) {
-            eprintln!("{hint}");
+            errln!("{hint}");
         }
         // Point a human at the detail the fixed message withheld — only when it actually landed.
         if logged {
-            eprintln!("details: {}", diag.log_path.display());
+            errln!("details: {}", diag.log_path.display());
         }
     }
     ExitCode::FAILURE
@@ -3664,15 +3676,24 @@ fn trigger_for<'a>(
         .expect("every selectable harness is a trigger-capable registry row")
 }
 
-/// `$TOPOS_HOME`, else `$HOME/.topos` (`./.topos` as a last resort).
+/// `$TOPOS_HOME`, else `$HOME/.topos` (`./.topos` as a last resort) — through the SAME root
+/// resolution the detection roots take (`crate::ctx::resolved_root`).
+///
+/// One boundary for both, because they are compared against each other lexically: the sidecar paths
+/// this home builds (`~/.topos/topos.toml`, the log) are printed by stripping the detection home's
+/// prefix, and a `$HOME` carrying a symlink resolved on one side only made that strip miss — the
+/// machine file then printed as an absolute path on every surface that names it.
 fn resolve_home() -> PathBuf {
-    if let Some(home) = std::env::var_os("TOPOS_HOME") {
-        return PathBuf::from(home);
-    }
-    std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".topos")
+    let home = std::env::var_os("TOPOS_HOME").map_or_else(
+        || {
+            std::env::var_os("HOME")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from("."))
+                .join(".topos")
+        },
+        PathBuf::from,
+    );
+    crate::ctx::resolved_root(home)
 }
 
 /// The discovery roots for `list`/`add`: the user home (every harness's global skill dir resolves
@@ -3680,9 +3701,12 @@ fn resolve_home() -> PathBuf {
 /// discovery rather than an error.
 fn list_discovery() -> Option<ops::DiscoveryRoots> {
     let home = std::env::var_os("HOME").map(PathBuf::from)?;
+    // Through the ctx roots' own constructor: discovery compares these paths against tracked
+    // placements and prints them, so they take the one spelling rule and take it exactly once.
+    let roots = crate::ctx::AgentRoots::new(home, std::env::current_dir().ok());
     Some(ops::DiscoveryRoots {
-        home,
-        cwd: std::env::current_dir().ok(),
+        home: roots.home,
+        cwd: roots.cwd,
     })
 }
 

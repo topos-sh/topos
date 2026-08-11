@@ -1171,7 +1171,7 @@ fn rewrite_pending_note(ctx: &Ctx<'_>, skill_name: &str, e: &ClientError) -> Str
         ctx.clock.now_unix_millis(),
     );
     let safe = crate::render::safe_message(e);
-    eprintln!("topos publish: {skill_name}: the manifest rewrite did not land: {safe}");
+    crate::out::errln!("topos publish: {skill_name}: the manifest rewrite did not land: {safe}");
     format!(
         "the publish landed, but the manifest's local-path line could not be rewritten to the \
          governed reference ({safe}) — the next `topos update` (or re-running this publish) \

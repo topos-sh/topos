@@ -1052,28 +1052,64 @@ impl KnownHarness {
 #[must_use]
 pub fn discover_all(home: &Path, cwd: Option<&Path>) -> Vec<DiscoveredSkill> {
     let mut out = Vec::new();
+    for (dir, harness, scope) in skills_roots_owned(home, cwd) {
+        probe(&dir, scope, harness, &mut out);
+    }
+    out.sort_by(|a, b| a.path.cmp(&b.path)); // read_dir order is OS-dependent — pin it
+    out
+}
+
+/// Every skills ROOT discovery walks on this machine, deduped, in table order — the boundary a
+/// caller probes for a folder [`discover_all`] cannot confirm (a skill dir whose `SKILL.md` link
+/// is broken is not a skill dir, and is invisible to every listing).
+#[must_use]
+pub fn skills_roots(home: &Path, cwd: Option<&Path>) -> Vec<PathBuf> {
+    skills_roots_owned(home, cwd)
+        .into_iter()
+        .map(|(dir, _, _)| dir)
+        .collect()
+}
+
+/// The roots with their owning row + scope — [`discover_all`]'s own iteration, shared so the walk
+/// and the roots a caller probes can never diverge.
+///
+/// THE ONE SPELLING IS DECIDED HERE. A root is resolved once and canonicalized once: `$HOME` is
+/// whatever the environment says (symlinks and all) while a `cwd` arrives already resolved by the
+/// kernel, so two roots naming ONE directory used to reach a listing under two different paths.
+/// Canonicalizing at the boundary makes every discovered path, every folder line, and every
+/// exclusion compare in the same spelling — and lets `probed` dedup a dir reached by two names,
+/// so a shared dir is still walked once and attributed to the first present harness in table order.
+fn skills_roots_owned(
+    home: &Path,
+    cwd: Option<&Path>,
+) -> Vec<(PathBuf, &'static KnownHarness, SkillScope)> {
+    let mut out = Vec::new();
     let mut probed: HashSet<PathBuf> = HashSet::new();
     for harness in HARNESSES {
         if !is_present(harness, home, cwd) {
             continue;
         }
         for spec in harness.user_dirs {
-            // `probed` dedups the same resolved dir across harnesses, so a shared dir is walked once and
-            // attributed to the first present harness in table order.
-            if let Some(dir) = resolve_spec(spec, home, cwd)
+            if let Some(dir) = resolve_spec(spec, home, cwd).map(resolved_dir)
                 && probed.insert(dir.clone())
             {
-                probe(&dir, SkillScope::User, harness, &mut out);
+                out.push((dir, harness, SkillScope::User));
             }
         }
-        if let Some(dir) = project_dir_of(harness, cwd)
+        if let Some(dir) = project_dir_of(harness, cwd).map(resolved_dir)
             && probed.insert(dir.clone())
         {
-            probe(&dir, SkillScope::Project, harness, &mut out);
+            out.push((dir, harness, SkillScope::Project));
         }
     }
-    out.sort_by(|a, b| a.path.cmp(&b.path)); // read_dir order is OS-dependent — pin it
     out
+}
+
+/// A resolved directory in the ONE spelling every discovery answer and folder comparison uses:
+/// canonical where it exists, the path itself where it does not (nothing to resolve, nothing to
+/// compare against either).
+fn resolved_dir(dir: PathBuf) -> PathBuf {
+    dir.canonicalize().unwrap_or(dir)
 }
 
 /// Attribute every skill dir under `dir` (the shared [`discover_skill_dirs`] probe) to `harness`.
@@ -1102,14 +1138,18 @@ fn probe(dir: &Path, scope: SkillScope, harness: &KnownHarness, out: &mut Vec<Di
 /// depend on where a harness happens to sit in the baked table.
 #[must_use]
 pub fn folder_readers(dir: &Path, home: &Path, cwd: Option<&Path>) -> Vec<&'static KnownHarness> {
+    // Both sides through [`resolved_dir`]: the caller's folder comes from a listing (canonical) or
+    // from a tracked placement (canonical), and a row's own dirs resolve from `$HOME` — comparing
+    // one spelling against the other loses every reader under a symlinked home.
+    let want = resolved_dir(dir.to_path_buf());
     let mut out: Vec<&'static KnownHarness> = HARNESSES
         .iter()
         .filter(|h| is_present(h, home, cwd))
         .filter(|h| {
             h.user_dirs
                 .iter()
-                .any(|spec| resolve_spec(spec, home, cwd).as_deref() == Some(dir))
-                || project_dir_of(h, cwd).as_deref() == Some(dir)
+                .any(|spec| resolve_spec(spec, home, cwd).map(resolved_dir) == Some(want.clone()))
+                || project_dir_of(h, cwd).map(resolved_dir) == Some(want.clone())
         })
         .collect();
     out.sort_unstable_by_key(|h| h.slug);
@@ -1331,7 +1371,10 @@ mod tests {
                 std::env::temp_dir().join(format!("topos-reg-{tag}-{}-{n}", std::process::id()));
             let _ = std::fs::remove_dir_all(&dir);
             std::fs::create_dir_all(&dir).unwrap();
-            Self(dir)
+            // CANONICAL from birth: the platform temp dir is itself reached through a symlink on
+            // macOS (`/tmp` → `/private/tmp`), and discovery answers in canonical paths — a fixture
+            // spelled the other way would compare unequal to its own discovered dirs.
+            Self(dir.canonicalize().unwrap())
         }
         fn path(&self) -> &Path {
             &self.0
@@ -1645,5 +1688,56 @@ mod tests {
                 d.harness_slug
             );
         }
+    }
+
+    #[test]
+    fn a_home_reached_through_a_symlink_answers_in_one_spelling() {
+        // The shape a real machine hits: `$HOME` carries a symlink while the `cwd` the kernel
+        // reports is already resolved, so two roots naming ONE directory used to reach a listing
+        // under two different paths. Every answer here is canonical — and the readers query still
+        // matches when it is asked in the OTHER spelling.
+        let real = TempTree::new("symlink-real");
+        real.mkdir(".augment");
+        real.skill(".augment/skills/augment-skill");
+        let link = real.path().with_file_name(format!(
+            "{}-link",
+            real.path().file_name().unwrap().to_str().unwrap()
+        ));
+        let _ = std::fs::remove_file(&link);
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(real.path(), &link).unwrap();
+        #[cfg(not(unix))]
+        return;
+
+        let found = discover_all(&link, None);
+        let mine: Vec<&DiscoveredSkill> = found
+            .iter()
+            .filter(|d| d.path.starts_with(real.path()))
+            .collect();
+        assert_eq!(
+            mine.len(),
+            1,
+            "the fixture, under the REAL spelling: {found:?}"
+        );
+        assert!(
+            !found.iter().any(|d| d.path.starts_with(&link)),
+            "nothing is reported through the link spelling: {found:?}"
+        );
+        assert_eq!(
+            skills_roots(&link, None)
+                .into_iter()
+                .filter(|r| r.starts_with(real.path()))
+                .collect::<Vec<_>>(),
+            vec![real.path().join(".augment/skills")],
+            "the roots a caller probes are the same one spelling"
+        );
+        // …and the folder the listing prints still resolves its readers, asked either way.
+        let folder = real.path().join(".augment/skills");
+        assert_eq!(readers(&folder, &link, None), vec!["augment".to_owned()]);
+        assert_eq!(
+            readers(&link.join(".augment/skills"), &link, None),
+            vec!["augment".to_owned()]
+        );
+        let _ = std::fs::remove_file(&link);
     }
 }
