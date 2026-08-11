@@ -128,7 +128,7 @@ services:
   plane:
     # Pinned to one release (see the header). Override with TOPOS_VERSION, or build from source with
     # the docker-compose.build.yml override.
-    image: ghcr.io/topos-sh/topos-plane:${TOPOS_VERSION:-v0.1.29}
+    image: ghcr.io/topos-sh/topos-plane:${TOPOS_VERSION:-v0.1.30}
     restart: unless-stopped
     # NO `ports:` — the plane is internal-only. The web app reaches it at http://plane:8787 over the
     # compose network; nothing outside the network can. (The image already binds 0.0.0.0:8787.)
@@ -153,7 +153,7 @@ services:
   web:
     # The same release as the plane — one TOPOS_VERSION moves both, and they are only ever tested
     # together.
-    image: ghcr.io/topos-sh/topos-web:${TOPOS_VERSION:-v0.1.29}
+    image: ghcr.io/topos-sh/topos-web:${TOPOS_VERSION:-v0.1.30}
     restart: unless-stopped
     depends_on:
       db:
