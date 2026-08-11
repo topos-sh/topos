@@ -414,11 +414,11 @@ export interface components {
          */
         AddedNote: {
             /**
-             * @description The harness registry slug the adopted directory was attributed to (e.g. `claude-code`), or `None`
-             *     for a plain directory adopted in place under no known harness.
+             * @description The folder the added directory sits in, or `None` when it has no parent. A folder, never an
+             *     agent: a skills folder may be read by several agents, and which ones is a separate query.
              */
-            harness_slug?: string | null;
-            /** @description The name the skill was adopted under (what `list` / `diff` / `publish` now resolve it by). */
+            folder?: string | null;
+            /** @description The name the skill was added under (what `list` / `diff` / `publish` now resolve it by). */
             name: string;
         };
         /** @description What an outcome refers to (every field optional — a policy flip has no skill/version). */
