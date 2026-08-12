@@ -59,6 +59,13 @@ fn dispatch() -> ExitCode {
         .skip(1)
         .filter_map(|a| a.into_string().ok())
         .collect();
+    // The two DOCUMENT flags, intercepted before any dispatch: they read no state, touch no file,
+    // dial nothing, and answer identically on a broken install. `--skill` first — an agent that
+    // asked for both wants the teaching document.
+    if let Some(doc) = document_flag(&cli) {
+        outln!("{doc}");
+        return ExitCode::SUCCESS;
+    }
     // No subcommand: on a TTY, orient (the status snapshot / the unenrolled welcome, exit 0);
     // piped or under `--json`, keep the classic usage error (stderr, exit 2) so scripts fail
     // loudly. The version nag never rides the bare invocation — orientation stays offline.
@@ -95,6 +102,29 @@ fn version_check_applies(command: &Command) -> bool {
             // `status` promises "offline, nothing dialed" — the passive probe would break it.
             | Command::Status { .. }
     )
+}
+
+/// The stand-alone DOCUMENT flags (`--skill`, `--schema`) — the text to print, or `None` when
+/// neither was asked for.
+///
+/// Both answer from bytes compiled INTO the binary, which is the whole point: they work on a
+/// machine with no sidecar, no login, and no detected harness, so an agent can always be handed
+/// the teaching document and the `--json` contract even where placement is impossible (a foreign
+/// `topos` dir, a `remove topos` opt-out, an unknown agent). `--skill` wins when both are set —
+/// whoever asked for both asked to be taught first.
+fn document_flag(cli: &Cli) -> Option<String> {
+    let mut text = if cli.skill {
+        ops::builtin_skill_md().to_owned()
+    } else if cli.schema {
+        crate::schema_doc::schema_doc()
+    } else {
+        return None;
+    };
+    // Each document carries its own trailing newline; `outln!` supplies the line ending.
+    if text.ends_with('\n') {
+        text.pop();
+    }
+    Some(text)
 }
 
 /// The bare `topos` invocation (no subcommand). A TTY gets the orientation render — the same
@@ -3752,7 +3782,7 @@ fn list_discovery() -> Option<ops::DiscoveryRoots> {
 mod tests {
     use super::{
         DEFAULT_WEB_ORIGIN, PendingDisclosure, WaitPolicy, block_on_pending, build_pull_scope,
-        claim_grammar, list_page_argv, next_page_action, parse_rfc3339_utc_millis,
+        claim_grammar, document_flag, list_page_argv, next_page_action, parse_rfc3339_utc_millis,
         resolve_web_origin, waiting_line,
     };
     use std::process::ExitCode;
@@ -3765,6 +3795,33 @@ mod tests {
         fn now_unix_millis(&self) -> u64 {
             self.0
         }
+    }
+
+    /// The document flags pick their text (and their precedence), and neither one is chosen when
+    /// neither was asked for — the ordinary run must never be swallowed by this interception.
+    #[test]
+    fn the_document_flags_pick_their_text_and_stay_out_of_the_way() {
+        let cli = |skill: bool, schema: bool| crate::cli::Cli {
+            json: false,
+            workspace: None,
+            skill,
+            schema,
+            command: None,
+        };
+        assert!(document_flag(&cli(false, false)).is_none());
+        // Exactly the embedded bytes, minus the trailing newline `outln!` supplies.
+        let skill = document_flag(&cli(true, false)).expect("--skill answers");
+        assert_eq!(
+            format!("{skill}\n"),
+            ops::builtin_skill_md(),
+            "--skill re-prints the embedded SKILL.md"
+        );
+        let schema = document_flag(&cli(false, true)).expect("--schema answers");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&schema).expect("--schema is one JSON document");
+        assert!(parsed["schemas"]["json-envelope"].is_object());
+        // Both set: the teaching document wins.
+        assert_eq!(document_flag(&cli(true, true)).as_deref(), Some(&*skill));
     }
 
     #[test]

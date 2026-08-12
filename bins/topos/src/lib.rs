@@ -55,6 +55,7 @@ pub(crate) mod release;
 pub(crate) mod render;
 pub(crate) mod resolve;
 pub(crate) mod scan;
+pub(crate) mod schema_doc;
 // Session state (login/logout) — see the manifest note above.
 #[allow(dead_code)]
 pub(crate) mod sessions;

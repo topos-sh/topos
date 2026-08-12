@@ -61,8 +61,16 @@ describe("the agent-skills discovery index", () => {
     expect(skill.digest).toBe(digest);
   });
 
-  it("serves all three skill files as markdown, and a constant 404 for any other name", async () => {
-    for (const name of ["SKILL.md", "INSTALL.md", "reference.md"]) {
+  it("serves every skill file as markdown, and a constant 404 for any other name", async () => {
+    for (const name of [
+      "SKILL.md",
+      "INSTALL.md",
+      "reference.md",
+      "manifest.md",
+      "mcp.md",
+      "distilling.md",
+      "team-setup.md",
+    ]) {
       const res = await fetchFile(name);
       expect(res.status).toBe(200);
       expect(res.headers.get("content-type")).toBe("text/markdown; charset=utf-8");

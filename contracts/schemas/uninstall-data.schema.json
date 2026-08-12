@@ -1,0 +1,141 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "UninstallApplied",
+  "description": "The applied `uninstall` — what was removed. On a teardown that FAILED partway this is the\nreceipt of the work that actually landed, spelled exactly as the success receipt spells it.\n**INFERRED** (additive-only).",
+  "type": "object",
+  "properties": {
+    "binary_path": {
+      "description": "The running binary's own path — left in place; the human removes it with their installer.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "builtin_dirs": {
+      "description": "The built-in `topos` skill's placed copies that were removed (topos-authored artifacts).",
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "hook": {
+      "description": "The ACTIVE harness's trigger scrub report (surfaced honestly — `Inactive` when nothing was\narmed). Absent on a teardown that failed before the scrubs ran: the trigger is still armed,\nand a report saying otherwise would be the falsehood this field exists to prevent.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/TriggerReport"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "mcp_drifted": {
+      "description": "The MCP config files whose hand-edited topos entries were LEFT in place.",
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "mcp_files": {
+      "description": "The MCP config files topos-placed server entries were removed from.",
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "sidecar_removed": {
+      "description": "Whether the `~/.topos/` sidecar tree was deleted (false = there was nothing to delete, or\nthe teardown never got that far).",
+      "type": "boolean"
+    },
+    "triggers": {
+      "description": "The breadth scrub's outcomes — other agents whose trigger the sweep removed (or could not,\ndisclosed); clean no-ops stay off the receipt.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/TriggerReport"
+      }
+    }
+  },
+  "required": [
+    "sidecar_removed"
+  ],
+  "$defs": {
+    "CurrencyKind": {
+      "description": "What fires the update check for a harness — drives HONEST receipt copy (\"current by next session\",\n\"within about a minute\", …). `ExplicitPullOnly` is the honest-degrade floor.",
+      "oneOf": [
+        {
+          "description": "A session-boundary hook runs the sweep (Claude Code's SessionStart; Hermes's\n`on_session_start`/`on_session_reset`) — updates are current when a session begins.",
+          "type": "string",
+          "const": "session_start"
+        },
+        {
+          "description": "A harness-scheduled recurring job runs the sweep (OpenClaw's silent cron) — updates land\nwithin the cadence while the harness's scheduler is running.",
+          "type": "string",
+          "const": "scheduled"
+        },
+        {
+          "description": "No automatic trigger is provably live — updates land on an explicit `topos update`.",
+          "type": "string",
+          "const": "explicit_pull_only"
+        }
+      ]
+    },
+    "TriggerReport": {
+      "description": "The result of (un)installing ONE agent's auto-update trigger — what was touched + the marker, so\nre-install is idempotent (the marker is a managed sentinel block in the config edit, NEVER in skill\nbytes). The one shape every trigger reports in, whichever machinery served it.",
+      "type": "object",
+      "properties": {
+        "agent": {
+          "description": "The agent's registry slug (`claude-code`, `cursor`, `hermes-agent`).",
+          "type": "string"
+        },
+        "currency_kind": {
+          "description": "Only an `active` state carries a live kind; every other state advertises the explicit-pull floor.",
+          "$ref": "#/$defs/CurrencyKind"
+        },
+        "marker_id": {
+          "description": "`topos` + agent slug + schema version + command identity.",
+          "type": "string"
+        },
+        "note": {
+          "description": "The consent step still owed, or the evidence-level caveat — `None` when nothing needs saying.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "state": {
+          "$ref": "#/$defs/TriggerState"
+        },
+        "touched_path": {
+          "description": "The config file edited (never a skill dir).",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "agent",
+        "currency_kind",
+        "marker_id",
+        "state"
+      ]
+    },
+    "TriggerState": {
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "active",
+            "inactive",
+            "degraded"
+          ]
+        },
+        {
+          "description": "An equivalent command exists without our marker — adopt-or-leave, never blind-append.",
+          "type": "string",
+          "const": "already_present_unmanaged"
+        }
+      ]
+    }
+  }
+}

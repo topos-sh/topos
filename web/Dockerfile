@@ -28,7 +28,7 @@ RUN bun install --frozen-lockfile
 #     `../scripts/install.sh`, resolved against the process cwd = this WORKDIR).
 #   ../docker-compose.yml — the bytes `GET /compose.yml` serves, so a server hands out the very
 #     deployment file that stands up its own release (COMPOSE_YML_PATH, same resolution rule).
-#   ../skills/topos — the built-in skill's three files, which the `.well-known/agent-skills`
+#   ../skills/topos — the built-in skill's files, which the `.well-known/agent-skills`
 #     discovery lane reads at request time (env.server.ts BUILTIN_SKILL_DIR default
 #     `../skills/topos`). Without it that lane throws on every unauthenticated request.
 COPY contracts/openapi/openapi.json /app/contracts/openapi/openapi.json

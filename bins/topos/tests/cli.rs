@@ -1266,6 +1266,70 @@ fn a_gone_stderr_reader_silences_only_stderr() {
     let _ = std::fs::remove_dir_all(&home);
 }
 
+/// `topos --skill` and `topos --schema` — the two stand-alone DOCUMENT flags. Each prints ONE
+/// document on stdout, exits 0, and leaves the machine exactly as it found it: no sidecar tree, no
+/// device identity, no envelope wrapping. Only a real process proves the last part, because the
+/// interception has to happen before the composition root mints anything.
+#[test]
+fn the_document_flags_print_their_bytes_and_touch_nothing() {
+    let home = scratch("documents");
+    // A sidecar path that does NOT exist yet — every other verb would create it on first use.
+    let sidecar = home.join("sidecar");
+    let run_doc = |args: &[&str]| -> std::process::Output {
+        Command::new(bin())
+            .env("TOPOS_HOME", &sidecar)
+            .env("HOME", &home)
+            .env("CLAUDE_CONFIG_DIR", home.join(".claude-isolated"))
+            .current_dir(work_dir(&home))
+            .args(args)
+            .output()
+            .expect("spawn topos")
+    };
+
+    // `--skill` IS the committed source, byte for byte — the same bytes placement would write, so
+    // an agent that can only be handed text gets exactly what a placed copy holds.
+    let out = run_doc(&["--skill"]);
+    assert!(out.status.success(), "--skill exits 0");
+    assert_eq!(
+        String::from_utf8(out.stdout).expect("utf-8"),
+        include_str!("../../../skills/topos/SKILL.md"),
+        "--skill prints the embedded SKILL.md verbatim — no envelope, no banner"
+    );
+
+    // `--schema` is ONE JSON document over every committed schema, keyed by file stem.
+    let out = run_doc(&["--schema"]);
+    assert!(out.status.success(), "--schema exits 0");
+    let doc: serde_json::Value = serde_json::from_slice(&out.stdout).expect("--schema prints JSON");
+    let schemas = doc["schemas"].as_object().expect("one `schemas` object");
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../contracts/schemas");
+    let committed = std::fs::read_dir(&dir)
+        .expect("contracts/schemas is readable")
+        .filter_map(|e| e.ok()?.file_name().to_str().map(str::to_owned))
+        .filter(|n| n.ends_with(".schema.json"))
+        .count();
+    assert_eq!(
+        schemas.len(),
+        committed,
+        "every committed schema is carried"
+    );
+    for name in [
+        "json-envelope",
+        "auth-status-data",
+        "uninstall-describe-data",
+        "uninstall-data",
+    ] {
+        assert!(schemas.contains_key(name), "{name} is in the document");
+    }
+
+    // Neither flag touched the machine: no sidecar tree was created, so nothing was read, minted,
+    // or recovered on the way to printing.
+    assert!(
+        !sidecar.exists(),
+        "the document flags create no sidecar state"
+    );
+    let _ = std::fs::remove_dir_all(&home);
+}
+
 #[test]
 fn a_reader_that_leaves_ends_the_run_cleanly() {
     // `topos list | head` — the reader takes what it wants and closes the pipe mid-print. The

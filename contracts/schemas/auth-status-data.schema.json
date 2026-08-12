@@ -1,0 +1,124 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "AuthStatusData",
+  "description": "`auth status` result — per-SESSION access health (each probed under that session's own\ncredential), the active agent's trigger health, and the reporting posture. **INFERRED**\n(additive-only).",
+  "type": "object",
+  "properties": {
+    "hook_armed": {
+      "description": "Whether the session-start auto-update trigger is armed in the active harness's config.",
+      "type": "boolean"
+    },
+    "principal": {
+      "description": "The principal the first successful probe answered with.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "reporting": {
+      "description": "Per-workspace reporting posture, read from local state (no network).",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/AuthReportingStatus"
+      }
+    },
+    "server": {
+      "description": "The server base of the first live session, for orientation.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "signed_in": {
+      "description": "Whether any live session exists (the signed-in state).",
+      "type": "boolean"
+    },
+    "workspaces": {
+      "description": "One row per session this installation holds.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/AuthWorkspaceStatus"
+      }
+    }
+  },
+  "required": [
+    "signed_in",
+    "workspaces",
+    "hook_armed",
+    "reporting"
+  ],
+  "$defs": {
+    "AuthReportingStatus": {
+      "description": "One workspace's reporting posture in an [`AuthStatusData`] (from the local sync-status\ndocument). **INFERRED** (additive-only).",
+      "type": "object",
+      "properties": {
+        "last_delivery_at": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64"
+        },
+        "last_report_at": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64"
+        },
+        "stale": {
+          "description": "Whether the last delivery is older than the window (the sessions page shows the same).",
+          "type": "boolean"
+        },
+        "staleness_window_ms": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "workspace_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "workspace_id",
+        "staleness_window_ms",
+        "stale"
+      ]
+    },
+    "AuthWorkspaceStatus": {
+      "description": "One session's access health in an [`AuthStatusData`]. **INFERRED** (additive-only).",
+      "type": "object",
+      "properties": {
+        "credential": {
+          "description": "Whether this session's credential is stored locally (always true for a live session row).",
+          "type": "boolean"
+        },
+        "display_name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "health": {
+          "description": "The probe verdict: `healthy` / `pending — awaiting owner approval` / `no access — ended,\nremoved, or gone` / `unreachable` / `ended`.",
+          "type": "string"
+        },
+        "role": {
+          "description": "The role the probe answered (healthy only).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "workspace_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "workspace_id",
+        "credential",
+        "health"
+      ]
+    }
+  }
+}

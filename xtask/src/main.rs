@@ -258,6 +258,22 @@ fn schemas() -> Vec<(&'static str, String)> {
             "status-data",
             emit(schemars::schema_for!(topos_types::results::StatusData)),
         ),
+        (
+            "auth-status-data",
+            emit(schemars::schema_for!(topos_types::results::AuthStatusData)),
+        ),
+        (
+            "uninstall-describe-data",
+            emit(schemars::schema_for!(
+                topos_types::results::UninstallDescribe
+            )),
+        ),
+        (
+            "uninstall-data",
+            emit(schemars::schema_for!(
+                topos_types::results::UninstallApplied
+            )),
+        ),
         // On-disk persisted client documents.
         (
             "persisted-sync",

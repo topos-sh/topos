@@ -119,6 +119,15 @@ These work before or after any command.
 | `--json` | Print one JSON object instead of human text — for agents and scripts. Never prompts |
 | `--workspace <WORKSPACE>` | Pick which workspace to act in when this machine is logged into more than one. Takes the workspace's name or id. With a single login it is inferred |
 
+## Documents topos prints
+
+Each of these is the whole command: it prints one document and exits, reading nothing and dialing nothing.
+
+| Flag | What it does |
+|---|---|
+| `--skill` | Print the built-in topos skill — the document that teaches an agent to drive this CLI — and exit. Works anywhere, including where topos cannot place it for your agents |
+| `--schema` | Print the JSON Schema for every shape `--json` can answer with, as one document, and exit |
+
 ## Everyday commands
 
 These act on this machine only.

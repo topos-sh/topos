@@ -4,8 +4,6 @@
 //! uniform 404 reads "no access — ended, removed, or gone"), hook health, and the reporting
 //! posture (`state/sync_status.json`).
 
-use serde::Serialize;
-
 use crate::ctx::Ctx;
 use crate::error::ClientError;
 use crate::sessions::{self, SESSION_ENDED};
@@ -14,6 +12,11 @@ use crate::sync_status;
 use super::connect::DirectoryConnect;
 use super::reconcile::SessionConnect;
 
+// The three payload shapes live in `topos-types` (the ONE contract crate): the committed
+// JSON-Schema is generated from there, and `topos --schema` serves it. This module keeps only the
+// computation.
+pub(crate) use topos_types::results::{AuthReportingStatus, AuthStatusData, AuthWorkspaceStatus};
+
 /// The network seams `auth status` needs: the per-session transports (the probes ride each
 /// session's OWN credential). The legacy directory connector rides along until the composed rigs
 /// finish their session migration.
@@ -21,51 +24,6 @@ pub(crate) struct AuthConnectors<'a> {
     #[allow(dead_code)]
     pub directory: &'a DirectoryConnect<'a>,
     pub session: &'a SessionConnect<'a>,
-}
-
-/// One session's access health.
-#[derive(Debug, Clone, Serialize)]
-pub(crate) struct AuthWorkspaceStatus {
-    pub workspace_id: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub display_name: Option<String>,
-    /// Whether this session's credential is stored locally (always true for a live session row).
-    pub credential: bool,
-    /// The probe verdict: `healthy` / `pending — awaiting owner approval` / `no access — ended,
-    /// removed, or gone` / `unreachable` / `ended`.
-    pub health: String,
-    /// The role the probe answered (healthy only).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub role: Option<String>,
-}
-
-/// One workspace's reporting posture (from `state/sync_status.json`).
-#[derive(Debug, Clone, Serialize)]
-pub(crate) struct AuthReportingStatus {
-    pub workspace_id: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub last_delivery_at: Option<i64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub last_report_at: Option<i64>,
-    pub staleness_window_ms: u64,
-    /// Whether the last delivery is older than the window (the sessions page shows the same).
-    pub stale: bool,
-}
-
-/// `auth status`'s `--json` data — side-effect-free.
-#[derive(Debug, Clone, Serialize)]
-pub(crate) struct AuthStatusData {
-    /// The server base of the first live session, for orientation.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub server: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub principal: Option<String>,
-    /// Whether any live session exists (the signed-in state).
-    pub signed_in: bool,
-    pub workspaces: Vec<AuthWorkspaceStatus>,
-    /// Whether the session-start auto-update hook is armed in the harness config.
-    pub hook_armed: bool,
-    pub reporting: Vec<AuthReportingStatus>,
 }
 
 /// `auth status` — per-session access probes + hook health + reporting posture.

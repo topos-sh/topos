@@ -34,7 +34,10 @@ pub fn cli_command() -> clap::Command {
 #[command(
     name = "topos",
     version,
-    about = "Shared skills for your team's AI agents"
+    about = "Shared skills for your team's AI agents",
+    after_help = "Two documents print on their own, with no command: `topos --skill` (how to drive \
+                  this CLI, for an agent's context) and `topos --schema` (the JSON contract behind \
+                  --json)."
 )]
 pub(crate) struct Cli {
     /// Print one JSON object instead of human text — for agents and scripts. Never prompts.
@@ -45,6 +48,15 @@ pub(crate) struct Cli {
     /// workspace's name or id. With a single login it is inferred.
     #[arg(long, global = true, value_name = "WORKSPACE")]
     pub(crate) workspace: Option<String>,
+
+    /// Print the built-in topos skill — the document that teaches an agent to drive this CLI —
+    /// and exit. Works anywhere, including where topos cannot place it for your agents.
+    #[arg(long)]
+    pub(crate) skill: bool,
+
+    /// Print the JSON Schema for every shape `--json` can answer with, as one document, and exit.
+    #[arg(long)]
+    pub(crate) schema: bool,
 
     /// Optional so a bare `topos` can orient instead of erroring: on a TTY it renders the status
     /// (or the unenrolled welcome) and exits 0; piped/scripted it keeps the classic usage error on
@@ -606,6 +618,28 @@ mod tests {
         assert!(bare.command.is_none());
         let bare_json = Cli::try_parse_from(["topos", "--json"]).unwrap();
         assert!(bare_json.command.is_none() && bare_json.json);
+    }
+
+    /// The two stand-alone DOCUMENT flags, and the scoping that keeps them out of the way of the
+    /// `--skill` SELECTOR the subcommands already own.
+    #[test]
+    fn the_document_flags_parse_at_the_root_and_never_shadow_a_verbs_own_skill_flag() {
+        let skill = Cli::try_parse_from(["topos", "--skill"]).unwrap();
+        assert!(skill.skill && !skill.schema && skill.command.is_none());
+        let schema = Cli::try_parse_from(["topos", "--schema"]).unwrap();
+        assert!(schema.schema && !schema.skill && schema.command.is_none());
+
+        // Inside a verb, `--skill` is that verb's own value-taking selector — clap resolves by
+        // scope, so the root flag can never swallow `topos list --skill docs`.
+        let listed = Cli::try_parse_from(["topos", "list", "--skill", "docs"]).unwrap();
+        assert!(!listed.skill, "the root flag stays unset inside a verb");
+        assert!(matches!(
+            listed.command,
+            Some(Command::List { skill, .. }) if skill == ["docs"]
+        ));
+        // …and the selector still demands its value rather than parsing as the bare root flag.
+        let bare = Cli::try_parse_from(["topos", "list", "--skill"]).unwrap_err();
+        assert_eq!(bare.kind(), ErrorKind::InvalidValue);
     }
 
     #[test]

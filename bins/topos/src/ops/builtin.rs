@@ -1,8 +1,10 @@
 //! The BUILT-IN `topos` skill — the meta-skill that teaches an agent what topos is and how to
 //! drive it. Its source lives at the repo TOP LEVEL (`skills/topos/` — an authored `SKILL.md` +
-//! `INSTALL.md`, downloadable straight from the public repo by skill installers), and the binary
-//! embeds THOSE files: one source of truth, so a downloaded copy and a binary-placed copy carry
-//! the same authored bytes. The bundle's third file is the generated verb reference `docs/cli.md`
+//! `INSTALL.md`, plus the four detail files `SKILL.md` defers to by name — `manifest.md`,
+//! `mcp.md`, `distilling.md`, `team-setup.md`; all downloadable straight from the public repo by
+//! skill installers), and the binary embeds THOSE files: one source of truth, so a downloaded copy
+//! and a binary-placed copy carry the same authored bytes. The bundle's last file is the generated
+//! verb reference `docs/cli.md`
 //! carries, rendered from this binary's real clap tree. It lands through the ordinary placement
 //! engine at the moments the auto-update triggers arm, and re-syncs on every bare sweep. It is
 //! FORCE-SYNCED to the binary: it documents THIS binary's verb surface, so any divergence — a
@@ -47,9 +49,16 @@ const BUILTIN_MESSAGE: &str = "topos: builtin";
 
 /// The authored halves of the bundle, embedded from the repo-top-level source (`skills/topos/` —
 /// the SAME files a skill installer downloads from the public repo, so placed and downloaded
-/// copies match byte-for-byte).
+/// copies match byte-for-byte). `SKILL.md` is the entry document; the four DETAIL files are the
+/// depth it defers to by name ("read `manifest.md` next to this file"), so an agent pays for a
+/// section's words only when it needs them — and every one of them must be placed, or the
+/// deferral dead-ends.
 const SKILL_MD: &str = include_str!("../../../../skills/topos/SKILL.md");
 const INSTALL_MD: &str = include_str!("../../../../skills/topos/INSTALL.md");
+const DISTILLING_MD: &str = include_str!("../../../../skills/topos/distilling.md");
+const MANIFEST_MD: &str = include_str!("../../../../skills/topos/manifest.md");
+const MCP_MD: &str = include_str!("../../../../skills/topos/mcp.md");
+const TEAM_SETUP_MD: &str = include_str!("../../../../skills/topos/team-setup.md");
 
 /// The provenance line the public SKILL.md carries in its frontmatter (a `metadata` entry, which
 /// skill installers copy verbatim). A pre-existing `topos` placement dir WITH the marker is a
@@ -57,6 +66,13 @@ const INSTALL_MD: &str = include_str!("../../../../skills/topos/INSTALL.md");
 /// snapshot-first; the silent sweep never writes it. Without it the dir is someone else's and the
 /// Foreign freeze stands everywhere.
 const PROVENANCE_MARKER: &str = "topos: builtin";
+
+/// The embedded `SKILL.md`, verbatim — what `topos --skill` prints. The bytes must reach an agent
+/// even where PLACEMENT cannot: a foreign `topos` dir, a durable `remove topos` opt-out, no
+/// detected harness at all. Same bytes either way; this door just needs no filesystem.
+pub(crate) fn skill_md() -> &'static str {
+    SKILL_MD
+}
 
 /// Whether a skill id names the built-in (ordinary minted ids are `topos_<hex>`, so the bare name
 /// can never collide).
@@ -161,12 +177,15 @@ pub(crate) fn write_state(ctx: &Ctx<'_>, state: &BuiltinState) -> Result<(), Cli
 // The rendered bundle — deterministic for a given binary.
 // ---------------------------------------------------------------------------------------------
 
-/// Render the bundle bytes from the binary: the embedded `SKILL.md` + `INSTALL.md` (verbatim —
-/// carrying no version stamp, so the committed source IS the placed bytes) + the generated verb
-/// reference (the same renderer `cargo xtask gen-cli-ref` writes `docs/cli.md` with — one
-/// implementation, so the placed reference can never drift from what this binary parses).
+/// Render the bundle bytes from the binary: the embedded `SKILL.md` + `INSTALL.md` + the four
+/// detail files (verbatim — carrying no version stamp, so the committed source IS the placed
+/// bytes) + the generated verb reference (the same renderer `cargo xtask gen-cli-ref` writes
+/// `docs/cli.md` with — one implementation, so the placed reference can never drift from what this
+/// binary parses).
 fn rendered_bundle() -> Result<ScannedBundle, ClientError> {
-    // Sorted by raw path bytes, the scanner's invariant ("I" < "S" < "r").
+    // Sorted by raw path bytes, the scanner's invariant (uppercase before lowercase:
+    // "INSTALL.md" < "SKILL.md" < "distilling.md" < "manifest.md" < "mcp.md" < "reference.md"
+    // < "team-setup.md").
     let files = vec![
         ScannedFile {
             path: "INSTALL.md".to_owned(),
@@ -179,9 +198,29 @@ fn rendered_bundle() -> Result<ScannedBundle, ClientError> {
             bytes: SKILL_MD.as_bytes().to_vec(),
         },
         ScannedFile {
+            path: "distilling.md".to_owned(),
+            mode: FileMode::Regular,
+            bytes: DISTILLING_MD.as_bytes().to_vec(),
+        },
+        ScannedFile {
+            path: "manifest.md".to_owned(),
+            mode: FileMode::Regular,
+            bytes: MANIFEST_MD.as_bytes().to_vec(),
+        },
+        ScannedFile {
+            path: "mcp.md".to_owned(),
+            mode: FileMode::Regular,
+            bytes: MCP_MD.as_bytes().to_vec(),
+        },
+        ScannedFile {
             path: "reference.md".to_owned(),
             mode: FileMode::Regular,
             bytes: crate::cli_ref::cli_ref_md().into_bytes(),
+        },
+        ScannedFile {
+            path: "team-setup.md".to_owned(),
+            mode: FileMode::Regular,
+            bytes: TEAM_SETUP_MD.as_bytes().to_vec(),
         },
     ];
     let entries: Vec<ManifestEntry> = files

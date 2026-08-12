@@ -22,74 +22,15 @@
 
 use std::path::PathBuf;
 
-use serde::Serialize;
-use topos_types::{Message, TriggerReport, TriggerState};
+use topos_types::{Message, TriggerState};
 
 use crate::ctx::Ctx;
 use crate::error::ClientError;
 
-/// The bare `uninstall` DESCRIBE — what `--yes` would remove (nothing has changed).
-#[derive(Debug, Clone, Serialize)]
-pub(crate) struct UninstallDescribe {
-    /// Every artifact the auto-update-trigger scrub would REACH, across EVERY harness the apply
-    /// touches — not just the active one, and not only the ones that leave a file behind: a path
-    /// where the trigger is one, and the named registration where it lives in the harness's own
-    /// program (empty = nothing anywhere). Rendered rows, in the disclosure's own order and
-    /// wording — the preview says what the apply will attempt, so a person reads the same sentence
-    /// the receipt answers for.
-    pub trigger_artifacts: Vec<String>,
-    /// The `~/.topos/` sidecar tree that would be deleted (the signed-in credential lives inside it).
-    pub sidecar_path: String,
-    /// Whether the sidecar tree currently exists (a fresh/already-removed install has none).
-    pub sidecar_present: bool,
-    /// The running binary's own path — NOT deleted; disclosed so the human can remove it themselves.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub binary_path: Option<String>,
-    /// The BUILT-IN `topos` skill's placed copies — topos-authored artifacts (like the hook entry),
-    /// so they go with the teardown; YOUR skill files still stay untouched.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub builtin_dirs: Vec<String>,
-    /// The MCP config files the apply will take topos-placed server entries OUT of. Those entries
-    /// point live agents at servers, and the ledger proving they are topos's dies with the sidecar
-    /// — so the preview names every file it will edit.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub mcp_files: Vec<String>,
-    /// The MCP config files holding a topos entry someone edited by hand. Those are LEFT — the
-    /// never-clobber rule does not lapse because the command is a teardown — and the preview says
-    /// so, so a person is not surprised by a leftover.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub mcp_drifted: Vec<String>,
-}
-
-/// The applied `uninstall` — what was removed. On a teardown that FAILED partway this is the
-/// receipt of the work that actually landed, spelled exactly as the success receipt spells it.
-#[derive(Debug, Clone, Default, Serialize)]
-pub(crate) struct UninstallApplied {
-    /// The ACTIVE harness's trigger scrub report (surfaced honestly — `Inactive` when nothing was
-    /// armed). Absent on a teardown that failed before the scrubs ran: the trigger is still armed,
-    /// and a report saying otherwise would be the falsehood this field exists to prevent.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub hook: Option<TriggerReport>,
-    /// The breadth scrub's outcomes — other agents whose trigger the sweep removed (or could not,
-    /// disclosed); clean no-ops stay off the receipt.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub triggers: Vec<TriggerReport>,
-    /// Whether the `~/.topos/` sidecar tree was deleted (false = there was nothing to delete, or
-    /// the teardown never got that far).
-    pub sidecar_removed: bool,
-    /// The built-in `topos` skill's placed copies that were removed (topos-authored artifacts).
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub builtin_dirs: Vec<String>,
-    /// The MCP config files topos-placed server entries were removed from.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub mcp_files: Vec<String>,
-    /// The MCP config files whose hand-edited topos entries were LEFT in place.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub mcp_drifted: Vec<String>,
-    /// The running binary's own path — left in place; the human removes it with their installer.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub binary_path: Option<String>,
-}
+// The two payload shapes live in `topos-types` (the ONE contract crate): the committed
+// JSON-Schema is generated from there, and `topos --schema` serves it. This module keeps only the
+// teardown itself.
+pub(crate) use topos_types::results::{UninstallApplied, UninstallDescribe};
 
 /// The verb's outcome — the two-phase pair.
 #[derive(Debug)]
