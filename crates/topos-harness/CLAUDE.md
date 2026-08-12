@@ -85,7 +85,8 @@ never learns which machinery served which harness.
   (`Probed`/`Docs`/`Unknown` — no evidence = not covered, fail closed): the claim is a registry-row
   column, over an automatic derivation for a row carrying none.
 - **`mcp`** — pure MCP-server config placement for six harnesses; bytes in → an `EditPlan` out,
-  the CLI owns ALL file I/O. The surfaces (user/project + dialect + reload copy) are a registry-row
+  the CLI owns ALL file I/O. The surfaces (user/project + dialect + reload copy + the read-only
+  `conflict_paths` a harness ALSO reads servers from) are a registry-row
   column; `descriptor` holds the dialect vocabulary + the filtered views, over three editing
   drivers: `jsonc_edit` (Cursor / Claude-project /
   OpenCode strict JSON + OpenClaw JSONC — and the Claude Code plugin dir's `.mcp.json` — through
@@ -100,7 +101,13 @@ never learns which machinery served which harness.
   verification surprise yields `Unprovable` with ZERO byte changes. `apply` refuses BEFORE
   planning an edit when the input does not re-serialize byte-identical through its own dialect
   (a BOM, unusual line endings): the round-trip precondition is the dispatcher's, not each
-  driver's discretion.
+  driver's discretion. Beside ownership sits the question ownership cannot answer — WHAT ELSE IS
+  ALREADY THERE: `observe_entries` reads every entry a surface holds, whoever wrote it, as a name
+  plus the server it points at (`canonical_address`: scheme+host lowercased, default port dropped,
+  bare root path equal to none, query and fragment significant), optionally at a `.`-separated
+  `selector` whose `*` spans a level (`projects.*.mcpServers`). An entry whose shape is not read
+  keeps its name and claims no address; an unreadable surface answers `None`, which is never an
+  empty answer.
 - **`registry`** — the ONE ~76-harness table: every row carries its skills dirs, detection
   probes, MCP surfaces, and shared-dir claim, so a capability is a column rather than a table.
   **The rows are DATA** — `registry.toml` at the crate root, `include_str!`d in, parsed by
@@ -110,7 +117,8 @@ never learns which machinery served which harness.
   then a downloaded `registry.toml` strictly newer than the bundled one, then the bundled table —
   leaking the rows so every `&'static` signature is unchanged; each failure downgrades exactly
   one level with one stderr warning. The fences are all client-side and all red-tested:
-  `schema_version` equality, a `min_engine_version` ceiling (`REGISTRY_ENGINE_VERSION`),
+  `schema_version` equality, a `min_engine_version` ceiling (`REGISTRY_ENGINE_VERSION` — a new
+  COLUMN ships behind a bump, so a build that cannot act on it keeps its own bundled table),
   strictly-greater dotted-numeric versions with equal-version-different-bytes an ERROR, the
   known-slugs-only rule (a downloaded row naming a slug the BUNDLED table does not define is
   skipped — remote data never adds a write target, and a new harness still needs a release; the
@@ -118,7 +126,9 @@ never learns which machinery served which harness.
   on every command until it self-updates — an OVERRIDE's skipped row is warned about by the loader,
   because that file is one a person wrote), path validation on every downloaded dir (including the
   bare home dir, which is never a dir a fenced row may name), no absolute root outside the bundled
-  table, and a 256 KB ceiling. The refresher is the client's (`topos::harness_registry`, on the
+  table — and NO BUNDLED ROW NAMES ONE EITHER, because the served copy is those same bytes and a
+  single refused dir refuses the whole file (the landability gate in `registry::format`'s suite is
+  what keeps the refresh lane able to land) — and a 256 KB ceiling. The refresher is the client's (`topos::harness_registry`, on the
   forge lane's clock); there is no hot reload — the next process reads what landed.
   `TOPOS_HARNESS_REGISTRY=bundled` skips both machine-local levels — the workspace's
   `.cargo/config.toml` sets it, so everything cargo runs in a checkout answers for the commit.

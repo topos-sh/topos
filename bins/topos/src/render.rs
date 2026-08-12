@@ -6565,6 +6565,47 @@ mod tests {
         );
     }
 
+    /// **A collision is never folded away.** An entry topos does not own standing where a
+    /// placement belongs is a fact about a bundle that is NOT installed, and it stays true — and
+    /// so stays printed — on every sweep until someone acts on it. Folding it into "all up to
+    /// date" the way a settled surface folds would announce a server the agent has never had.
+    #[test]
+    fn a_standing_collision_keeps_its_line_on_a_sweep_that_changed_nothing() {
+        use topos_types::results::TargetOutcome;
+        let out = one_row(mcp_row(
+            "deepwiki",
+            vec![
+                agent_state(
+                    "claude-code",
+                    Some("~/.claude.json"),
+                    TargetOutcome::Conflicting,
+                    Some(
+                        "an entry for this server already exists here and topos does not manage it",
+                    ),
+                ),
+                agent_state(
+                    "cursor",
+                    Some("~/.cursor/mcp.json"),
+                    TargetOutcome::Current,
+                    None,
+                ),
+            ],
+        ));
+        assert!(out.contains("deepwiki   up to date\n"), "{out}");
+        assert!(
+            out.contains(
+                "    ~/.claude.json: held by another entry — an entry for this server already \
+                 exists here and topos does not manage it\n"
+            ),
+            "{out}"
+        );
+        assert!(
+            !out.contains("~/.cursor/mcp.json"),
+            "the settled sibling still stays out of the way: {out}"
+        );
+        assert_ne!(out, "Checked 1 bundle: all up to date.");
+    }
+
     /// A row that WROTE keeps its whole block: a write-time receipt has to say where the bytes
     /// landed, what stayed unchanged beside them, and what the reach cost — the withheld surface
     /// included. And every one of those lines reads in the shared vocabulary, never the raw wire
