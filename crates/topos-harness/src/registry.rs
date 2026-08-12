@@ -912,11 +912,30 @@ mod tests {
         assert_eq!(zcode, zed + 1, "zcode follows zed");
         assert_eq!(zencoder, zcode + 1, "zcode precedes zencoder");
 
-        // The new row's dir specs, through the raw accessor (also the accessor's own coverage).
+        // The new row's dir specs, through the raw accessor (also the accessor's own coverage):
+        // the home config dir marks it present. The macOS app-bundle probe beside it is GONE —
+        // an absolute path is refused at every fenced origin, and the served table is these bytes.
         let zc = &all[zcode];
         assert_eq!(zc.display_name, "ZCode");
         assert_eq!(zc.project_dir(), ".zcode/skills");
         assert_eq!(zc.user_dir_specs(), vec!["home/.zcode/skills".to_owned()]);
+        assert_eq!(
+            zc.detect_dirs.iter().map(|s| s.raw()).collect::<Vec<_>>(),
+            vec!["home/.zcode".to_owned()]
+        );
+
+        // …and NO row names an absolute path, whatever the grammar allows: one would make the
+        // served copy unreadable to every client (see `format`'s landability gate).
+        for row in all {
+            for spec in row.user_dirs().iter().chain(row.detect_dirs) {
+                assert_ne!(
+                    spec.root(),
+                    Root::Abs,
+                    "{}: a bundled row names an absolute path",
+                    row.slug
+                );
+            }
+        }
 
         // The same neighbour discipline for the three rows added after the first port: each sits exactly
         // where upstream's file puts it, so the shared-dir tie-break stays the reference table's.
@@ -953,10 +972,16 @@ mod tests {
             vec!["home/.config/kimchi/harness/skills".to_owned()]
         );
 
+        // `minimax-code` probes its home dir; the macOS app bundle beside it is gone with every
+        // other absolute path.
         let mm = &all[minimax];
         assert_eq!(mm.display_name, "MiniMax Code");
         assert_eq!(mm.project_dir(), ".minimax/skills");
         assert_eq!(mm.user_dir_specs(), vec!["home/.minimax/skills".to_owned()]);
+        assert_eq!(
+            mm.detect_dirs.iter().map(|s| s.raw()).collect::<Vec<_>>(),
+            vec!["home/.minimax".to_owned()]
+        );
     }
 
     #[test]
