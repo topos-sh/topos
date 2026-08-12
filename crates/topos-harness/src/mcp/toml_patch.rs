@@ -165,6 +165,50 @@ pub fn observe(current: Option<&[u8]>) -> Observed {
     }
 }
 
+/// Every entry under the servers table — foreign ones included (see
+/// [`super::observe_entries`]). `selector` overrides `mcp_servers` with a `.`-separated table
+/// path; a `*` component has no meaning in this dialect and answers UNREADABLE rather than
+/// guessing at one.
+#[must_use]
+pub fn observe_entries(
+    current: Option<&[u8]>,
+    selector: Option<&str>,
+) -> Option<Vec<super::SeenEntry>> {
+    // The selector is judged FIRST: one this dialect cannot mean is unreadable whatever the file
+    // holds — an empty answer would read as "nothing is there".
+    let path: Vec<&str> = selector.map_or_else(|| vec![SERVERS_KEY], |s| s.split('.').collect());
+    if path.iter().any(|c| *c == "*" || c.is_empty()) {
+        return None;
+    }
+    if effectively_absent(current) {
+        return Some(Vec::new());
+    }
+    let text = std::str::from_utf8(current.unwrap_or_default()).ok()?;
+    let doc = text.parse::<DocumentMut>().ok()?;
+    let mut table: &dyn toml_edit::TableLike = doc.as_table();
+    for (i, key) in path.iter().enumerate() {
+        let Some(item) = table.get(key) else {
+            return Some(Vec::new()); // the path does not exist: nothing is there
+        };
+        let Some(child) = item.as_table_like() else {
+            return None; // present but not a table: this file is not readable in this shape
+        };
+        if i + 1 == path.len() {
+            return Some(
+                child
+                    .iter()
+                    .map(|(name, value)| super::SeenEntry {
+                        name: name.to_owned(),
+                        address: super::entry_address(&item_to_value(value)),
+                    })
+                    .collect(),
+            );
+        }
+        table = child;
+    }
+    Some(Vec::new())
+}
+
 /// Whether the file holds content beyond topos's own `[mcp_servers.topos-*]` tables. The check
 /// is the driver's own scrub: remove every managed-looking child (and the emptied parent) and
 /// ask whether anything still renders. A comment attached to one of OUR tables travels with it —

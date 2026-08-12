@@ -22,8 +22,8 @@
 # `min_engine_version` is what a reader must PROVIDE to be allowed to read this file.
 
 schema_version = 1
-version = "2026.8.13.1"
-min_engine_version = 1
+version = "2026.8.13.2"
+min_engine_version = 2
 
 [[harness]]
 slug = "aider-desk"
@@ -96,6 +96,32 @@ reload_note = "loads next session; /reload-plugins reloads live; sign in with /m
 # driver; `plugin_dir` renders the constant `.claude-plugin/plugin.json` beside it.
 user = { dir = "claudeHome/skills/topos-mcp", dialect = "claude-plugin-dir" }
 project = { path = ".mcp.json", dialect = "claude-project-json" }
+
+# READ-ONLY. Claude Code also keeps MCP servers in `~/.claude.json` — once at user scope and once
+# per project it remembers — and de-duplicates servers BY URL, with those scopes winning over the
+# plugin dir topos writes. An entry placed over one of them would never appear in the agent while
+# topos reported it installed, so both slots are read before a placement and never written.
+# `.claude.json` sits beside the config dir, so it is named under BOTH roots: `$HOME` when Claude
+# Code is at its default, and the config dir itself when `$CLAUDE_CONFIG_DIR` moves it.
+[[harness.mcp.conflict_paths]]
+file = "home/.claude.json"
+dialect = "claude-project-json"
+selector = "mcpServers"
+
+[[harness.mcp.conflict_paths]]
+file = "home/.claude.json"
+dialect = "claude-project-json"
+selector = "projects.*.mcpServers"
+
+[[harness.mcp.conflict_paths]]
+file = "claudeHome/.claude.json"
+dialect = "claude-project-json"
+selector = "mcpServers"
+
+[[harness.mcp.conflict_paths]]
+file = "claudeHome/.claude.json"
+dialect = "claude-project-json"
+selector = "projects.*.mcpServers"
 
 [[harness]]
 # Verified against a live containerized install of openclaw@2026.7.1 on 2026-07-16:

@@ -137,6 +137,111 @@ pub struct Observed {
     pub parseable: bool,
 }
 
+/// ONE entry as a surface HOLDS it, whoever wrote it — the observation a collision question is
+/// asked of. Deliberately two fields: a name to compare against the key topos would mint, and the
+/// server it points at. Nothing else about a foreign entry is parsed, or would be honest to parse.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SeenEntry {
+    /// The entry's key in the surface's own slot.
+    pub name: String,
+    /// The server address the entry names, canonicalized ([`canonical_address`]). `None` when the
+    /// entry carries no address this build can read — a command-run server, a shape nobody here
+    /// models, a value that is not a URL. Two `None`s are never a match.
+    pub address: Option<String>,
+}
+
+/// **The ONE spelling of a server address**, so "the same server" is a question with an answer:
+/// scheme and host lowercased, a default port (80 on http, 443 on https) dropped, a bare root path
+/// (`/`) equal to none at all. Query and fragment are SIGNIFICANT — plenty of MCP endpoints
+/// distinguish tenants that way, and calling two of them one server would refuse a placement
+/// nobody's entry actually conflicts with.
+///
+/// `None` for anything that is not an absolute `scheme://host` URL: an address nothing can be
+/// compared against never matches, including another one just like it.
+#[must_use]
+pub fn canonical_address(raw: &str) -> Option<String> {
+    let raw = raw.trim();
+    let (scheme, rest) = raw.split_once("://")?;
+    if scheme.is_empty() || rest.is_empty() {
+        return None;
+    }
+    let scheme = scheme.to_ascii_lowercase();
+    // The authority runs to the first `/`, `?` or `#`; everything after it is kept verbatim.
+    let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let (authority, tail) = rest.split_at(end);
+    if authority.is_empty() {
+        return None;
+    }
+    // Userinfo keeps its case (it is a credential, not a name); the host does not.
+    let (userinfo, hostport) = match authority.rsplit_once('@') {
+        Some((user, host)) => (Some(user), host),
+        None => (None, authority),
+    };
+    if hostport.is_empty() {
+        return None;
+    }
+    let (host, port) = match hostport.rsplit_once(':') {
+        // An IPv6 literal's colons live inside the brackets — a `]` after the split point means
+        // this colon was one of them, not a port separator.
+        Some((h, p)) if !p.contains(']') => (h, Some(p)),
+        _ => (hostport, None),
+    };
+    let host = host.to_ascii_lowercase();
+    let default_port = match scheme.as_str() {
+        "http" => Some("80"),
+        "https" => Some("443"),
+        _ => None,
+    };
+    let port = match port {
+        Some(p) if Some(p) == default_port || p.is_empty() => String::new(),
+        Some(p) => format!(":{p}"),
+        None => String::new(),
+    };
+    // A bare root is no path at all; a deeper path keeps every byte, trailing slash included.
+    let tail = if tail == "/" { "" } else { tail };
+    let userinfo = userinfo.map_or_else(String::new, |u| format!("{u}@"));
+    Some(format!("{scheme}://{userinfo}{host}{port}{tail}"))
+}
+
+/// **Every entry a surface holds, foreign ones included** — the observation the ownership ledger
+/// cannot make on its own ([`observe`] answers only for managed-LOOKING keys, so an entry under
+/// somebody else's name pointing at the same server is invisible to it).
+///
+/// `selector` names the slot when it is not the dialect's own: a `.`-separated path whose `*`
+/// stands for every key at that level (`projects.*.mcpServers`). `None` reads the dialect's
+/// native slot.
+///
+/// `None` means UNREADABLE — the surface could not be parsed in its dialect, or the selector
+/// cannot be honoured here. It is not an empty answer: a caller may not conclude that nothing is
+/// there.
+#[must_use]
+pub fn observe_entries(
+    dialect: McpDialect,
+    current: Option<&[u8]>,
+    selector: Option<&str>,
+) -> Option<Vec<SeenEntry>> {
+    match dialect {
+        McpDialect::ClaudeProjectJson
+        | McpDialect::CursorJson
+        | McpDialect::OpencodeJson
+        | McpDialect::OpenclawJson
+        | McpDialect::ClaudePluginDir => jsonc_edit::observe_entries(dialect, current, selector),
+        McpDialect::CodexToml => toml_patch::observe_entries(current, selector),
+        McpDialect::HermesYaml => yaml_splice::observe_entries(current, selector),
+    }
+}
+
+/// The address inside one entry's parsed value, canonicalized. The key is whichever address
+/// spelling the entry carries — harnesses disagree about the name (`url` here, `serverUrl` or
+/// `httpUrl` or `uri` elsewhere), and an entry a foreign tool wrote uses ITS spelling, not ours.
+pub(crate) fn entry_address(value: &Value) -> Option<String> {
+    let obj = value.as_object()?;
+    ["url", "serverUrl", "httpUrl", "uri"]
+        .iter()
+        .find_map(|k| obj.get(*k).and_then(Value::as_str))
+        .and_then(canonical_address)
+}
+
 /// Compute MCP placements for one config surface (routes to the driver). For
 /// [`McpDialect::ClaudePluginDir`] pass the plugin dir's `.mcp.json` bytes — the strict JSON
 /// driver patches it like any other surface; the constant manifest beside it
@@ -705,6 +810,225 @@ mod tests {
         assert_eq!(
             v.as_object().unwrap().keys().collect::<Vec<_>>(),
             ["auth", "headers", "transport", "url"]
+        );
+    }
+
+    #[test]
+    fn one_server_has_one_canonical_address() {
+        let same = |a: &str, b: &str| {
+            let (ca, cb) = (canonical_address(a), canonical_address(b));
+            assert!(ca.is_some(), "{a}");
+            assert_eq!(ca, cb, "{a} vs {b}");
+        };
+        // Scheme and host are case-insensitive; the path is not.
+        same("HTTPS://MCP.Example.COM/mcp", "https://mcp.example.com/mcp");
+        // A default port is no port at all — and a non-default one is part of the address.
+        same(
+            "https://mcp.example.com:443/mcp",
+            "https://mcp.example.com/mcp",
+        );
+        same(
+            "http://mcp.example.com:80/mcp",
+            "http://mcp.example.com/mcp",
+        );
+        assert_ne!(
+            canonical_address("https://mcp.example.com:8443/mcp"),
+            canonical_address("https://mcp.example.com/mcp")
+        );
+        // A bare root is no path; a deeper trailing slash is a different path.
+        same("https://mcp.example.com/", "https://mcp.example.com");
+        assert_ne!(
+            canonical_address("https://mcp.example.com/mcp/"),
+            canonical_address("https://mcp.example.com/mcp")
+        );
+        // http and https are two addresses, and the query is part of the server you reach.
+        assert_ne!(
+            canonical_address("http://mcp.example.com/mcp"),
+            canonical_address("https://mcp.example.com/mcp")
+        );
+        assert_ne!(
+            canonical_address("https://mcp.example.com/mcp?tenant=a"),
+            canonical_address("https://mcp.example.com/mcp?tenant=b")
+        );
+        assert_ne!(
+            canonical_address("https://mcp.example.com/mcp#a"),
+            canonical_address("https://mcp.example.com/mcp")
+        );
+        // An IPv6 literal's own colons are not a port.
+        same("https://[2001:DB8::1]/mcp", "https://[2001:db8::1]/mcp");
+        assert_eq!(
+            canonical_address("https://[2001:db8::1]:8443/mcp").as_deref(),
+            Some("https://[2001:db8::1]:8443/mcp")
+        );
+        // Nothing comparable is never a match — not even with itself.
+        for not_an_address in ["", "   ", "mcp.example.com/mcp", "https://", "://x", "npx"] {
+            assert_eq!(
+                canonical_address(not_an_address),
+                None,
+                "{not_an_address:?}"
+            );
+        }
+    }
+
+    /// The observation a collision question needs: EVERY entry, whoever wrote it, with the server
+    /// it points at — including the address spellings other tools use.
+    #[test]
+    fn every_entry_is_seen_with_its_address_whoever_wrote_it() {
+        // Sorted: the ORDER is whatever each dialect's parser hands back, and no caller reads it.
+        let names = |seen: &[SeenEntry]| {
+            let mut names = seen.iter().map(|e| e.name.clone()).collect::<Vec<_>>();
+            names.sort();
+            names
+        };
+        let address = |seen: &[SeenEntry], name: &str| {
+            seen.iter()
+                .find(|e| e.name == name)
+                .unwrap_or_else(|| panic!("{name}: {seen:?}"))
+                .address
+                .clone()
+        };
+
+        let cursor = b"{\n  \"mcpServers\": {\n    \"theirs\": { \"url\": \"HTTPS://MCP.Example/x/\" },\n    \"topos-eng-x\": { \"url\": \"https://mcp.example/x\" },\n    \"local\": { \"command\": \"npx\" }\n  }\n}\n";
+        let seen = observe_entries(McpDialect::CursorJson, Some(cursor), None).expect("readable");
+        assert_eq!(names(&seen), ["local", "theirs", "topos-eng-x"]);
+        assert_eq!(
+            address(&seen, "theirs").as_deref(),
+            Some("https://mcp.example/x/")
+        );
+        assert_eq!(
+            address(&seen, "local"),
+            None,
+            "a command-run server has no address to compare"
+        );
+
+        // The other spellings a foreign entry may use for the same fact.
+        for (key, dialect, text) in [
+            (
+                "serverUrl",
+                McpDialect::CursorJson,
+                "{\"mcpServers\":{\"a\":{\"serverUrl\":\"https://mcp.example/x\"}}}",
+            ),
+            (
+                "httpUrl",
+                McpDialect::CursorJson,
+                "{\"mcpServers\":{\"a\":{\"httpUrl\":\"https://mcp.example/x\"}}}",
+            ),
+            (
+                "uri",
+                McpDialect::CursorJson,
+                "{\"mcpServers\":{\"a\":{\"uri\":\"https://mcp.example/x\"}}}",
+            ),
+        ] {
+            let seen = observe_entries(dialect, Some(text.as_bytes()), None).expect("readable");
+            assert_eq!(
+                address(&seen, "a").as_deref(),
+                Some("https://mcp.example/x"),
+                "{key}"
+            );
+        }
+
+        // Every other dialect answers for its own slot.
+        let toml = b"[mcp_servers.theirs]\nurl = \"https://mcp.example/x\"\n";
+        let seen = observe_entries(McpDialect::CodexToml, Some(toml), None).expect("readable");
+        assert_eq!(names(&seen), ["theirs"]);
+        assert_eq!(
+            address(&seen, "theirs").as_deref(),
+            Some("https://mcp.example/x")
+        );
+        let yaml = b"mcp_servers:\n  theirs: {url: \"https://mcp.example/x\"}\n  block:\n    url: https://mcp.example/y\n";
+        let seen = observe_entries(McpDialect::HermesYaml, Some(yaml), None).expect("readable");
+        assert_eq!(names(&seen), ["block", "theirs"]);
+        assert_eq!(
+            address(&seen, "theirs").as_deref(),
+            Some("https://mcp.example/x")
+        );
+        assert_eq!(
+            address(&seen, "block"),
+            None,
+            "a shape this parser does not read keeps its name and claims no address"
+        );
+
+        // An absent surface holds nothing; an unreadable one answers NOTHING KNOWN — the two are
+        // never the same answer.
+        assert_eq!(
+            observe_entries(McpDialect::CursorJson, None, None),
+            Some(Vec::new())
+        );
+        assert_eq!(
+            observe_entries(McpDialect::CursorJson, Some(b"{ not json"), None),
+            None
+        );
+    }
+
+    /// A SELECTOR reads a slot that is not the dialect's own — the shape `~/.claude.json` keeps,
+    /// where every project the file remembers holds its own `mcpServers` map.
+    #[test]
+    fn a_selector_reads_the_slot_it_names_including_a_wildcard_level() {
+        const CLAUDE_JSON: &str = r#"{
+  "mcpServers": { "user-scope": { "type": "http", "url": "https://mcp.example/one" } },
+  "projects": {
+    "/home/me/a": { "mcpServers": { "in-a": { "url": "https://mcp.example/two" } } },
+    "/home/me/b": { "mcpServers": { "in-b": { "url": "https://mcp.example/three" } } },
+    "/home/me/c": { "allowedTools": [] }
+  }
+}
+"#;
+        let at = |selector: &str| {
+            observe_entries(
+                McpDialect::ClaudeProjectJson,
+                Some(CLAUDE_JSON.as_bytes()),
+                Some(selector),
+            )
+            .expect("readable")
+            .into_iter()
+            .map(|e| (e.name, e.address.unwrap_or_default()))
+            .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            at("mcpServers"),
+            [(
+                "user-scope".to_owned(),
+                "https://mcp.example/one".to_owned()
+            )]
+        );
+        assert_eq!(
+            at("projects.*.mcpServers"),
+            [
+                ("in-a".to_owned(), "https://mcp.example/two".to_owned()),
+                ("in-b".to_owned(), "https://mcp.example/three".to_owned()),
+            ],
+            "every project's own map, and a project holding none is simply silent"
+        );
+        // A path that does not exist holds nothing; a path that is present but wrong-shaped is
+        // unreadable, never empty.
+        assert_eq!(at("nowhere.at.all"), Vec::new());
+        assert_eq!(
+            observe_entries(
+                McpDialect::ClaudeProjectJson,
+                Some(b"{\"mcpServers\": 7}"),
+                Some("mcpServers")
+            ),
+            None
+        );
+        // The TOML dialect reads a dotted table path, and refuses a wildcard it cannot mean.
+        assert_eq!(
+            observe_entries(
+                McpDialect::CodexToml,
+                Some(b"[projects.a.mcp_servers.x]\nurl = \"https://mcp.example/x\"\n"),
+                Some("projects.a.mcp_servers")
+            )
+            .expect("readable")
+            .len(),
+            1
+        );
+        assert_eq!(
+            observe_entries(McpDialect::CodexToml, Some(b""), Some("a.*.b")),
+            None
+        );
+        // The Hermes splicer reads exactly one block — a selector there is refused, not guessed.
+        assert_eq!(
+            observe_entries(McpDialect::HermesYaml, Some(b"mcp_servers:\n"), Some("x")),
+            None
         );
     }
 

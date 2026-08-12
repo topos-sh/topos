@@ -235,6 +235,68 @@ pub fn observe(dialect: McpDialect, current: Option<&[u8]>) -> Observed {
     }
 }
 
+/// Every entry in the surface's slot — foreign ones included (see
+/// [`super::observe_entries`]). `selector` overrides the dialect's own key path with a
+/// `.`-separated one whose `*` stands for every key at that level.
+#[must_use]
+pub fn observe_entries(
+    dialect: McpDialect,
+    current: Option<&[u8]>,
+    selector: Option<&str>,
+) -> Option<Vec<super::SeenEntry>> {
+    let spec = dialect_spec(dialect)?;
+    if effectively_absent(current) {
+        return Some(Vec::new());
+    }
+    let text = std::str::from_utf8(current.unwrap_or_default()).ok()?;
+    let view = parse_view(&spec, text).ok()?;
+    let mut out = Vec::new();
+    match selector {
+        None => collect_entries(entries_view(&view, spec.path).ok()?, &mut out),
+        Some(selector) => {
+            let path: Vec<&str> = selector.split('.').collect();
+            walk_selector(&view, &path, &mut out)?;
+        }
+    }
+    Some(out)
+}
+
+/// One entries object, as `(name, address)` rows.
+fn collect_entries(map: Option<&Map<String, Value>>, out: &mut Vec<super::SeenEntry>) {
+    for (name, value) in map.into_iter().flatten() {
+        out.push(super::SeenEntry {
+            name: name.clone(),
+            address: super::entry_address(value),
+        });
+    }
+}
+
+/// Walk a selector path, `*` standing for every key at that level. A component that is present but
+/// not an object is UNREADABLE (`None`) — never silently skipped; an ABSENT one is simply nothing
+/// there.
+fn walk_selector(value: &Value, path: &[&str], out: &mut Vec<super::SeenEntry>) -> Option<()> {
+    let obj = value.as_object()?;
+    let Some((head, rest)) = path.split_first() else {
+        collect_entries(Some(obj), out);
+        return Some(());
+    };
+    if *head == "*" {
+        for child in obj.values() {
+            // A wildcard level spans a whole map of things this file happens to hold (every
+            // project it remembers); one member that is not an object is that member's business,
+            // not proof the file is unreadable.
+            if child.is_object() {
+                walk_selector(child, rest, out)?;
+            }
+        }
+        return Some(());
+    }
+    match obj.get(*head) {
+        None => Some(()),
+        Some(child) => walk_selector(child, rest, out),
+    }
+}
+
 /// Whether the file holds content beyond a topos-created document: any top-level key outside the
 /// dialect's own fresh-file shape, any non-`topos-` entry in the managed slot, or a syntax
 /// (comments, extensions, garbage) topos never writes — a topos-created file is STRICT JSON in
