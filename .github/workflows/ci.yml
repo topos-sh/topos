@@ -125,16 +125,25 @@ jobs:
             exit 0
           fi
           read_version() { sed -n 's/^version = "\(.*\)"$/\1/p' | head -1; }
-          before=$(git show "$base:$file" | read_version)
           after=$(read_version < "$file")
-          echo "$file changed: $before -> $after"
-          python3 - "$before" "$after" <<'PY'
+          # A table that did not exist at the base is the FIRST one: there is no prior version to
+          # be greater than, so the guard only asks that the version it states is readable.
+          if git cat-file -e "$base:$file" 2>/dev/null; then
+            before=$(git show "$base:$file" | read_version)
+          else
+            before=
+          fi
+          echo "$file changed: ${before:-<new file>} -> $after"
+          python3 - "${before:-}" "$after" <<'PY'
           import sys
           def parts(v):
               if not v or any(not s.isdigit() for s in v.split(".")):
                   sys.exit(f"harness registry version {v!r} is not dotted-numeric")
               return [int(s) for s in v.split(".")]
-          before, after = parts(sys.argv[1]), parts(sys.argv[2])
+          after = parts(sys.argv[2])
+          if not sys.argv[1]:
+              sys.exit(0)  # a brand-new table: nothing to be newer than
+          before = parts(sys.argv[1])
           width = max(len(before), len(after))
           before += [0] * (width - len(before))
           after += [0] * (width - len(after))
