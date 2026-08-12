@@ -32,9 +32,11 @@
 //! BUNDLED set is warned about and skipped, so downstream data can never introduce a write target
 //! the binary has no compiled trigger, adapter, or id for. Its dirs are re-validated too —
 //! relative, `/`-separated, no `..`, no empty or `.` components, a conservative charset, and no
-//! absolute root at all (only the bundled table may name one, and today only codex's `/etc/codex`
-//! and the two macOS app bundles do). A file that names no known harness is refused rather than
-//! believed: an empty table is indistinguishable from a machine with no agents on it.
+//! absolute root at all (the grammar spells one, and only the bundled table may carry it — but
+//! no bundled row does, because the SERVED copy is those same bytes and every client reads them
+//! under exactly these fences; `the_bundled_table_is_landable_as_a_downloaded_copy` is the gate).
+//! A file that names no known harness is refused rather than believed: an empty table is
+//! indistinguishable from a machine with no agents on it.
 //!
 //! The consequence worth stating plainly: a downloaded table can SHRINK (a row it omits stops being
 //! known). That is the deliberate cost of "the file is the table" — a delivery decision, not a
@@ -1136,9 +1138,29 @@ mod tests {
             assert!(e.message().contains(needle), "{dir}: {e}");
             assert!(e.message().contains("cursor"), "{dir}: {e}");
         }
-        // The BUNDLED table may name an absolute root (codex's `/etc/codex` does).
+        // The GRAMMAR still allows an absolute root in the bundled table — no row uses one
+        // (`the_bundled_table_is_landable_as_a_downloaded_copy` is why), but the fence is the
+        // origin's, not the parser's.
         let text = one_row("cursor", "9.0.0").replace("[\"home/.x/skills\"]", "[\"/etc/codex\"]");
         assert!(parse_registry(&text, Origin::Bundled).is_ok());
+    }
+
+    /// **The bundled table has to survive the DOWNLOADED fences, or the refresh lane is dead.**
+    /// The web app serves these exact bytes, a client reads them at [`Origin::Downloaded`], and a
+    /// single refused dir refuses the WHOLE file — so one absolute path in one row is enough to
+    /// make every refresh a permanent no-op that only says so in a state document. This is the
+    /// gate that keeps the served copy landable; a row that needs a path the fence refuses does
+    /// not get an exception, it gets a different probe.
+    #[test]
+    fn the_bundled_table_is_landable_as_a_downloaded_copy() {
+        let parsed = parse_registry(BUNDLED, Origin::Downloaded)
+            .expect("the served copy IS the bundled bytes — it must pass the fenced rules");
+        assert_eq!(
+            parsed.row_count(),
+            bundled().rows.len(),
+            "every bundled row survives the fences"
+        );
+        assert!(parsed.warnings().is_empty(), "{:?}", parsed.warnings());
     }
 
     /// Review follow-up: the bare home dir is the one root a fenced row may never name — a skills

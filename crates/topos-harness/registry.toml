@@ -7,9 +7,12 @@
 # matching harness" tie-break for a shared dir — moving a row changes behaviour.
 #
 # Every dir is `<root-tag>/<suffix>`: `home`, `configHome`, `codexHome`, `claudeHome`, `vibeHome`,
-# `hermesHome`, `autohandHome`, `grokHome`, `cwd`, `APPDATA`, `FLATPAK_XDG_CONFIG_HOME`, or a
-# leading `/` for an absolute path (which only THIS file, the built-in table, may name). Each root
-# resolves through its own env override, falling back to a `home`-relative default.
+# `hermesHome`, `autohandHome`, `grokHome`, `cwd`, `APPDATA` or `FLATPAK_XDG_CONFIG_HOME`. Each
+# root resolves through its own env override, falling back to a `home`-relative default.
+# NO ROW MAY NAME AN ABSOLUTE PATH. The grammar still spells one (a leading `/`) and only this
+# file could carry it — but these bytes are also the SERVED copy, which every client reads under
+# the fenced rules that refuse absolute paths, and one refused dir refuses the whole file. A row
+# that wants a system-install probe gets a home-rooted one instead.
 #
 # `version` is dotted numeric and MUST be bumped by hand on every edit: a downloaded copy is
 # accepted only when it is strictly newer than the copy the reading binary was built with, and a
@@ -19,7 +22,7 @@
 # `min_engine_version` is what a reader must PROVIDE to be allowed to read this file.
 
 schema_version = 1
-version = "2026.8.12.1"
+version = "2026.8.13.1"
 min_engine_version = 1
 
 [[harness]]
@@ -149,11 +152,13 @@ detect_dirs = ["home/.codestudio"]
 [[harness]]
 # Verified against a live codex-cli 0.144.4 binary on 2026-07-16: no `.agents/skills` path
 # literal exists in the build; its only user skills root is `$CODEX_HOME/skills`.
+# The Linux system-install probe (`/etc/codex`) is deliberately GONE: an absolute path makes this
+# file unreadable at every fenced origin, and this file is also the served one.
 slug = "codex"
 display_name = "Codex"
 user_dirs = ["codexHome/skills"]
 project_dir = ".agents/skills"
-detect_dirs = ["codexHome", "/etc/codex"]
+detect_dirs = ["codexHome"]
 shared_dir = { level = "probed", covered = false }
 
 [harness.mcp]
@@ -389,13 +394,13 @@ project_dir = ".mcpjam/skills"
 detect_dirs = ["home/.mcpjam"]
 
 [[harness]]
-# Present when either the home config dir OR the macOS app bundle exists — the `.app` path is
-# joined onto the filesystem root, like `zcode`'s.
+# Detected by its home config dir. The macOS app-bundle probe is deliberately GONE: an absolute
+# path makes this file unreadable at every fenced origin, and this file is also the served one.
 slug = "minimax-code"
 display_name = "MiniMax Code"
 user_dirs = ["home/.minimax/skills"]
 project_dir = ".minimax/skills"
-detect_dirs = ["home/.minimax", "/Applications/MiniMax Code.app"]
+detect_dirs = ["home/.minimax"]
 
 [[harness]]
 slug = "mistral-vibe"
@@ -562,13 +567,14 @@ project_dir = ".agents/skills"
 detect_dirs = ["configHome/zed", "APPDATA/Zed", "FLATPAK_XDG_CONFIG_HOME/zed"]
 
 [[harness]]
-# Present when either the home config dir OR the macOS app bundle exists (the reference probes
-# both) — the `.app` path is joined onto the filesystem root, like `codex`'s `/etc/codex`.
+# Detected by its home config dir. The macOS app-bundle probe the reference also uses is
+# deliberately GONE: an absolute path makes this file unreadable at every fenced origin, and this
+# file is also the served one.
 slug = "zcode"
 display_name = "ZCode"
 user_dirs = ["home/.zcode/skills"]
 project_dir = ".zcode/skills"
-detect_dirs = ["home/.zcode", "/Applications/ZCode.app"]
+detect_dirs = ["home/.zcode"]
 
 [[harness]]
 slug = "zencoder"
