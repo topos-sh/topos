@@ -247,11 +247,16 @@ pub(crate) fn next_actions(command: &str, argv: &[String], err: &ClientError) ->
                 retry_machine_wide(command, argv),
             ),
         ],
-        // "upgrade topos" in prose is `topos self-update` structurally.
-        ClientError::UnknownSchemaVersion { .. } => vec![crate::actions::next_action(
-            ActionCode::from("UPDATE_CLI".to_owned()),
-            vec!["topos".into(), "self-update".into()],
-        )],
+        // "upgrade topos" in prose is `topos self-update` structurally — but only when the format
+        // is genuinely NEWER than this build. A format below the floor has no reader in any build,
+        // so no runnable action is offered.
+        ClientError::UnknownSchemaVersion { found, max } if found > max => {
+            vec![crate::actions::next_action(
+                ActionCode::from("UPDATE_CLI".to_owned()),
+                vec!["topos".into(), "self-update".into()],
+            )]
+        }
+        ClientError::UnknownSchemaVersion { .. } => vec![],
         // The server refused this build: the only way forward is a newer one. The floor it named
         // rides the message, not the argv — `self-update` lands the latest, which clears any floor.
         ClientError::UpdateRequired { .. } => vec![crate::actions::next_action(
@@ -9049,7 +9054,7 @@ mod tests {
         assert_eq!(actions[0].code.as_str(), "LOGIN_WORKSPACE");
         assert_eq!(actions[0].needs, vec!["workspace-address"]);
 
-        // "upgrade topos" is `topos self-update`, structurally.
+        // "upgrade topos" is `topos self-update`, structurally — for a NEWER format only.
         let actions = super::next_actions(
             "list",
             &typed(&["list"]),
@@ -9057,6 +9062,15 @@ mod tests {
         );
         assert_eq!(actions.len(), 1, "{actions:?}");
         assert_eq!(actions[0].code.as_str(), "UPDATE_CLI");
+
+        // A format BELOW the floor has no reader in any build: no runnable action, and the
+        // message states the fact without promising an update that cannot help.
+        let below = crate::error::ClientError::UnknownSchemaVersion { found: 0, max: 2 };
+        let actions = super::next_actions("list", &typed(&["list"]), &below);
+        assert!(actions.is_empty(), "{actions:?}");
+        let text = below.to_string();
+        assert!(!text.contains("newer topos"), "{text}");
+        assert!(!text.contains("self-update"), "{text}");
 
         // Divergent placements name the loss-led reset (a describe — nothing dropped yet).
         let actions = super::next_actions(

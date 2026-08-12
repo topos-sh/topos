@@ -282,6 +282,23 @@ fn required_version(min: Option<&str>) -> String {
     }
 }
 
+/// The [`ClientError::UnknownSchemaVersion`] sentence, honest about the direction: a format ABOVE
+/// this build's range was written by a newer topos and `self-update` fixes it; one BELOW the floor
+/// has no reader in any build, so the message states the fact and offers no remedy it cannot keep.
+fn unknown_schema_message(found: u32, max: u32) -> String {
+    if found > max {
+        format!(
+            "this machine's topos state was written by a newer topos (format {found}; this build \
+             reads up to {max}) — update this install with `topos self-update`"
+        )
+    } else {
+        format!(
+            "this machine's topos state is in format {found}, which this build does not read \
+             (it reads 1 through {max})"
+        )
+    }
+}
+
 /// WHAT already claims a directory an `add` was asked to adopt: the manifest FILE holding the row
 /// that installs it, and whether that file is the machine one — which the drop command has to
 /// spell with `-g` or it would act on the other scope.
@@ -532,12 +549,11 @@ pub(crate) enum ClientError {
     /// A read-side integrity failure (verify-on-read).
     #[error("an integrity check failed — {0}")]
     Verify(#[from] VerifyError),
-    /// A persisted document carries an unknown/newer `schema_version` — fail closed; the doc is **never**
-    /// handed to serde and **never** deleted (an upgrade is required, not a corruption).
-    #[error(
-        "this machine's topos state was written by a newer topos (format {found}; this build \
-         reads up to {max}) — update this install with `topos self-update`"
-    )]
+    /// A persisted document carries a `schema_version` outside the readable range — fail closed;
+    /// the doc is **never** handed to serde and **never** deleted. A format ABOVE the range was
+    /// written by a newer topos (an upgrade fixes it); one BELOW the floor has no reader in any
+    /// build (the message states the fact and offers no false remedy).
+    #[error("{}", unknown_schema_message(*found, *max))]
     UnknownSchemaVersion { found: u32, max: u32 },
     /// A persisted document could not be parsed or is internally inconsistent (genuine corruption — not a
     /// mere version mismatch). Recovery reports it; it never fabricates the missing state.
