@@ -241,7 +241,10 @@ topos publish --propose <skill>   # always propose (a reviewer approves first)
 A bundle a person has BOTH in this project and machine-wide publishes from whichever copy holds
 the edits; the describe and the receipt name that folder whenever it is not the one you stand in,
 and `-g` names the machine copy outright. When both copies hold edits the one you stand in ships
-and the other is named with the command that shares it. A copy already at the published version is
+and the other is named with what it takes to share it: a landed publish leaves that copy BEHIND, so
+the receipt names the update first and then the publish; a proposal leaves it one publish away.
+Two copies holding the SAME edit are one edit — nothing is disclosed. A copy already at the
+published version is
 not an error: `publish` says `already published — your copy matches current`, exits 0, and — when
 the edits are in the other scope's copy — prints the one command that shares them. Never retry a
 publish against that answer.

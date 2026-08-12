@@ -723,7 +723,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
             expected_generation: None,
             current_generation: None,
             context: serde_json::json!({
-                "message": "coolify-deploy is already added machine-wide (~/.topos/topos.toml)\nsource: topos.sh/ideamotive/coolify-deploy\n'coolify-deploy' is in 3 folders here:\n  ~/.agents/skills/coolify-deploy — edited (adopting it makes these your draft)\n  ~/.claude/skills/coolify-deploy — edited differently\n  ~/.codex/skills/coolify-deploy — matches the published current\nname the one to adopt: topos add -g <folder> --as topos.sh/ideamotive/coolify-deploy"
+                "message": "coolify-deploy is already added machine-wide (~/.topos/topos.toml)\nsource: topos.sh/ideamotive/coolify-deploy\n'coolify-deploy' is also in 3 unmanaged folders here:\n  ~/.agents/skills/coolify-deploy — edited (adopting it makes these your draft)\n  ~/.claude/skills/coolify-deploy — edited differently\n  ~/.codex/skills/coolify-deploy — matches the published current\nname the one to adopt: topos add -g <folder> --as topos.sh/ideamotive/coolify-deploy"
             }),
             next_actions: claim_actions,
         }),

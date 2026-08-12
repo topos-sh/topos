@@ -334,10 +334,27 @@ fn already_added_message(
     if let Some(source) = from {
         out.push_str(&format!("\nsource: {source}"));
     }
-    if let Some(block) = folder_listing(name, candidates, scope == ReceiptScope::Machine) {
+    if let Some(block) = folder_listing(
+        name,
+        candidates,
+        scope == ReceiptScope::Machine,
+        Tracked::Already,
+    ) {
         out.push_str(&format!("\n{block}"));
     }
     out
+}
+
+/// Whether the name the folder listing is about is ALREADY managed here. It changes one word of the
+/// heading and nothing else: an already-added bundle stands in its own managed folder too, so
+/// "'x' is in 2 folders here" undercounts by exactly the copy the reader already knows about —
+/// these two are the OTHER ones, and what is on offer is adopting one of them as well.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Tracked {
+    /// The name is already added in this scope (the already-added answer).
+    Already,
+    /// Nothing manages the name here (the untracked chooser).
+    Not,
 }
 
 /// THE FOLDER LISTING — the one answer every surface gives when a bare name stands in more than
@@ -357,12 +374,26 @@ fn already_added_message(
 /// three folders deep.
 ///
 /// `None` when there is nothing to list — the answer above it is then the whole answer.
-fn folder_listing(name: &str, candidates: &[TargetCandidate], global: bool) -> Option<String> {
+fn folder_listing(
+    name: &str,
+    candidates: &[TargetCandidate],
+    global: bool,
+    tracked: Tracked,
+) -> Option<String> {
     if candidates.is_empty() {
         return None;
     }
     let plural = if candidates.len() == 1 { "" } else { "s" };
-    let mut out = format!("'{name}' is in {} folder{plural} here:", candidates.len());
+    // `also` / `unmanaged` where the name already stands in a managed folder of its own: without
+    // them the count reads as every copy on the machine, and the reader counts one more than the
+    // sentence names. The untracked chooser has no such copy — every folder it lists is the answer.
+    let mut out = match tracked {
+        Tracked::Already => format!(
+            "'{name}' is also in {} unmanaged folder{plural} here:",
+            candidates.len()
+        ),
+        Tracked::Not => format!("'{name}' is in {} folder{plural} here:", candidates.len()),
+    };
     let mut said_draft = false;
     for candidate in candidates {
         let folder = candidate.display.as_deref().unwrap_or(&candidate.reference);
@@ -426,7 +457,7 @@ fn ambiguous_source_message(
     global: bool,
 ) -> String {
     if lists_folders(verb, candidates)
-        && let Some(block) = folder_listing(name, candidates, global)
+        && let Some(block) = folder_listing(name, candidates, global, Tracked::Not)
     {
         return block;
     }
@@ -775,8 +806,18 @@ pub(crate) enum ClientError {
     },
     /// The compare-and-set saw a base the team has moved past (`CONFLICT`) — the local view is stale. The
     /// agent pulls (rebases) and re-shows the diff before retrying; never a silent retry.
+    ///
+    /// `global` is the SCOPE of the copy that refused, carried for the reason
+    /// [`ClientError::PublishBehind`] carries one: the way out is an `update` of THAT copy, and a
+    /// publish standing in a checkout routinely acts on the machine's. Offered bare there, the
+    /// rebase would run the project's copy and the publish would refuse all over again — the loop
+    /// this field exists to close.
     #[error("the team moved past the version you started from — update to rebase, then retry")]
-    Conflict { skill: String, current: Option<u64> },
+    Conflict {
+        skill: String,
+        current: Option<u64>,
+        global: bool,
+    },
     /// The plane denied the op (`DENIED`) — not rostered, four-eyes self-approve, or an already-resolved
     /// proposal. Carries the wire code for the agent to branch on; never a secret.
     #[error("the server refused this operation ({0})")]

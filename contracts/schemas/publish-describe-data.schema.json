@@ -21,7 +21,7 @@
       "type": "boolean"
     },
     "from_placement": {
-      "description": "The folder the bytes WOULD be read from, as a person reads it\n(`project/.agents/skills/coolify-deploy`) — present only when a `--dest`/`-a` selection\nnamed ONE of several EDITED copies. A single edited copy needs no such line: it is the\ndraft, and naming its folder would say nothing. **INFERRED** (additive-only).",
+      "description": "The folder the bytes WOULD be read from, as a person reads it\n(`project/.agents/skills/coolify-deploy`), present when it was a CHOICE — one of several\nedited copies (`--dest`), or a copy in a scope other than the one the command stood in. A\nsingle edited copy in the standing scope needs no such line: it is the draft, and naming its\nfolder would say nothing. **INFERRED** (additive-only).",
       "type": [
         "string",
         "null"
@@ -75,7 +75,7 @@
       ]
     },
     "other_edited": {
-      "description": "The other EDITED copies this publish would leave alone — each keeps its bytes and becomes\nan ordinary draft ahead of the version published. Populated on the same condition as\n`from_placement`. **INFERRED** (additive-only).",
+      "description": "The other EDITED copies IN THIS SCOPE this publish would leave alone — each keeps its bytes\nand becomes an ordinary draft ahead of the version published. Populated by a `--dest`\nselection among several edited copies (a cross-scope ship discloses the other scope's copy\nthrough `other_scope_draft` instead). **INFERRED** (additive-only).",
       "type": "array",
       "items": {
         "type": "string"
@@ -114,7 +114,7 @@
       ]
     },
     "review": {
-      "description": "The whole `topos diff …` command that reads the exact copy this publish would ship —\nspelled for the folder and the scope that resolved, so it is runnable as printed.\n**INFERRED** (additive-only).",
+      "description": "The whole `topos diff …` command that reads the exact copy this publish would ship —\nspelled for the folder and the scope that resolved, so it is runnable as printed. Absent on\na GENESIS publish: there is no earlier version for a diff to be against, so the command\nwould print nothing. **INFERRED** (additive-only).",
       "type": [
         "string",
         "null"

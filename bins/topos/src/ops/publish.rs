@@ -312,6 +312,11 @@ pub(crate) fn publish_describe(
         other,
         cross_scope,
     } = super::resolve_skill_stored(ctx, &skill_name, workspace, scope)?;
+    // THE SCOPE THIS PUBLISH ACTS IN — read off the store the resolution chose, not off the
+    // directory the command was typed in. Every refusal below spells its way out for this scope
+    // (`topos update -g …` for the machine copy), and a refusal that offers the other scope's
+    // command sends the reader to a copy the publish never touched — and back here again.
+    let global = !store.is_project_scope();
     // The OTHER scope's copy, when it holds edits this publish will not ship — read before the ctx
     // below is re-pointed at the resolved store, because it is that other store's own state.
     let other_draft = other_scope_draft(ctx, other.as_ref());
@@ -345,14 +350,14 @@ pub(crate) fn publish_describe(
     if doc::read_doc::<ConflictState>(ctx.fs, &sp.conflict)?.is_some() {
         return Err(ClientError::PublishBlocked {
             skill: skill_name.clone(),
-            global: !ctx.layout.is_project_scope(),
+            global,
         });
     }
     // Its neighbour: a copy that does not include the served `current` (the ordinary behind state).
     // Shipping from here would land bytes with the team's change nowhere inside, and the plane's own
     // lineage fence refuses it anyway. The DESCRIBE refuses too, and refuses FIRST — a preview of a
     // publish the apply will refuse is two steps to reach one answer.
-    behind_guard(ctx, &sp, &skill_name, propose)?;
+    behind_guard(ctx, &sp, &skill_name, propose, global)?;
 
     // Scan the live draft ONCE → the byte-exact digest the apply would ship; the optional `@<digest>` pin
     // gates it here too (refuse on mismatch), so a describe never previews bytes the apply would refuse.
@@ -369,6 +374,8 @@ pub(crate) fn publish_describe(
     };
     let scanned = scan::scan(&placement)?;
     let digest_hex = to_hex(&scanned.bundle_digest);
+    // The other scope's copy is only NEWS while its bytes differ from these.
+    let other_draft = unless_identical(other_draft, &digest_hex);
     if let Some(pin) = &pin
         && digest_hex != *pin
     {
@@ -558,12 +565,16 @@ pub(crate) fn publish_describe(
         None => (None, None, None),
     };
 
-    let from_machine = cross_scope && !store.is_project_scope();
+    let from_machine = cross_scope && global;
     let (from_placement, other_edited) = from_disclosure(
         picked.as_ref(),
         cross_scope.then(|| shipped_from(ctx, &placement)),
     );
-    let review = Some(review_command(&skill_name, from_machine, picked.as_ref()));
+    // The read is offered only where there is something to read. A GENESIS publish has no prior
+    // version to compare against — the lock names the bytes the adopt just recorded, so
+    // `topos diff` there prints nothing at all, and a `review:` line pointing at an empty answer is
+    // worse than no line.
+    let review = (!genesis).then(|| review_command(&skill_name, from_machine, picked.as_ref()));
     Ok(PublishPreview::Describe(Box::new(PublishDescribeData {
         skill: skill_name,
         skill_id: id.into_string(),
@@ -608,18 +619,36 @@ fn no_changes(skill: String, other_draft: Option<ScopeDraft>) -> PublishNoChange
 
 /// The other scope's DRAFT as a disclosure names it: the folder that copy stands in, spelled at ITS
 /// OWN scope (`project/…` inside the checkout, `~/…` on the machine), and which scope that is —
-/// which is also what decides whether the command that shares it carries `-g`.
+/// which is also what decides whether the command that shares it carries `-g`. The draft's own
+/// DIGEST rides along, for the one question the folder cannot answer (see [`unless_identical`]).
 ///
 /// `None` when the other store holds no edits: there is then nothing being left behind, and a line
 /// about a copy that matches `current` would be noise.
-fn other_scope_draft(ctx: &Ctx<'_>, other: Option<&super::OtherStore>) -> Option<ScopeDraft> {
+fn other_scope_draft(
+    ctx: &Ctx<'_>,
+    other: Option<&super::OtherStore>,
+) -> Option<(ScopeDraft, String)> {
     let other = other.filter(|o| o.drafted)?;
     let octx = super::pull::ctx_with_layout(ctx, &other.layout);
-    let dir = super::store_draft_dir(&octx, &other.id, &other.lock)?;
-    Some(ScopeDraft {
-        folder: super::dest_select::copy_spellings(&octx, &dir).display,
-        machine: !other.layout.is_project_scope(),
-    })
+    let draft = super::store_draft(&octx, &other.id, &other.lock)?;
+    Some((
+        ScopeDraft {
+            folder: super::dest_select::copy_spellings(&octx, &draft.dir).display,
+            machine: !other.layout.is_project_scope(),
+        },
+        draft.digest,
+    ))
+}
+
+/// The other scope's draft, WITHHELD when its bytes are the bytes being shipped. The same edit made
+/// in both places is one edit: this publish carries it, the other copy is already at it, and the
+/// next sweep settles that copy clean without anyone doing anything. Every sentence the disclosure
+/// could print there — "keeps its edits", "update it onto this version, then share it" — describes
+/// work that does not exist.
+fn unless_identical(other: Option<(ScopeDraft, String)>, shipped: &str) -> Option<ScopeDraft> {
+    other
+        .filter(|(_, digest)| digest != shipped)
+        .map(|(draft, _)| draft)
 }
 
 /// The folder these bytes were read from, as a person reads it — spelled at the store that owns
@@ -633,6 +662,9 @@ fn shipped_from(ctx: &Ctx<'_>, placement: &std::path::Path) -> String {
 /// machine copy answered from inside a checkout (a bare `diff` there reads the project's), and the
 /// picked copy's own `--dest` spelling when a selection named one — so the command reaches that
 /// folder however the selection was written.
+///
+/// The caller withholds it on a GENESIS publish: there is no earlier version for a diff to be
+/// against.
 fn review_command(
     skill: &str,
     machine: bool,
@@ -964,6 +996,10 @@ fn enrolled_publish(
         other,
         cross_scope,
     } = super::resolve_skill_stored(ctx, skill_name, workspace, scope)?;
+    // THE SCOPE THIS PUBLISH ACTS IN — the store the resolution chose, never the directory the
+    // command was typed in (see the describe's twin of this line): every refusal below spells its
+    // way out for THIS copy.
+    let global = !store.is_project_scope();
     // The OTHER scope's copy, when it holds edits this publish will not ship — read before the ctx
     // below is re-pointed at the resolved store, because it is that other store's own state.
     let other_draft = other_scope_draft(ctx, other.as_ref());
@@ -1012,12 +1048,12 @@ fn enrolled_publish(
     if doc::read_doc::<ConflictState>(ctx.fs, &sp.conflict)?.is_some() {
         return Err(ClientError::PublishBlocked {
             skill: skill_name.to_owned(),
-            global: !ctx.layout.is_project_scope(),
+            global,
         });
     }
     // Its neighbour: this copy does not include the served `current`. Refused here, before the
     // transport is built and before a byte of the draft is scanned — the same answer the describe gave.
-    behind_guard(ctx, &sp, skill_name, propose)?;
+    behind_guard(ctx, &sp, skill_name, propose, global)?;
 
     let legacy_transport;
     let transport: &dyn crate::plane::ContributeSource = match &lane {
@@ -1048,6 +1084,8 @@ fn enrolled_publish(
     };
     let scanned = scan::scan(&placement)?;
     let digest_hex = to_hex(&scanned.bundle_digest);
+    // The other scope's copy is only NEWS while its bytes differ from these.
+    let other_draft = unless_identical(other_draft, &digest_hex);
     if let Some(pin) = pin
         && digest_hex != pin
     {
@@ -1122,6 +1160,7 @@ fn enrolled_publish(
             scanned.bundle_digest,
             message,
             bundle_kind.tag(),
+            global,
         )? {
             Some(rec) => rec,
             // NO-CHANGE means an earlier publish of these bytes already LANDED — the retry a
@@ -1163,7 +1202,8 @@ fn enrolled_publish(
     };
     let disclosure = ScopeDisclosure {
         cross_from: cross_scope.then(|| shipped_from(ctx, &placement)),
-        from_machine: cross_scope && !store.is_project_scope(),
+        from_machine: cross_scope && global,
+        global,
         other_draft,
     };
     let mut outcome = map_outcome(
@@ -1500,6 +1540,10 @@ fn is_behind(sync: &SyncState) -> bool {
 /// pointer, so no fence applies to it and nothing of the team's can be replaced by it. Refusing it would
 /// block the one act a behind copy can always safely take — asking the team to look.
 ///
+/// `global` is the RESOLVED store's scope, handed in by the caller rather than re-derived from
+/// `ctx` — the one command this refusal offers (`topos update[ -g] <skill>`) must drive the copy
+/// the publish resolved, and a publish standing in a checkout routinely resolves the machine's.
+///
 /// # Errors
 /// [`ClientError::PublishBehind`] naming the skill; [`ClientError::Corrupt`] when `sync.json` is missing.
 fn behind_guard(
@@ -1507,13 +1551,14 @@ fn behind_guard(
     sp: &sidecar::SkillPaths,
     skill: &str,
     propose: bool,
+    global: bool,
 ) -> Result<(), ClientError> {
     let sync: SyncState = doc::read_doc(ctx.fs, &sp.sync)?
         .ok_or_else(|| ClientError::Corrupt("missing sync state".to_owned()))?;
     if !propose && is_behind(&sync) {
         return Err(ClientError::PublishBehind {
             skill: skill.to_owned(),
-            global: !ctx.layout.is_project_scope(),
+            global,
         });
     }
     Ok(())
@@ -1529,6 +1574,10 @@ fn behind_guard(
 /// `Ok(None)` = there is NOTHING to ship: the draft is byte-identical to the published `current` (a
 /// published skill only — a genesis skill's first publish is never a no-op). The caller reports the
 /// converged state as the success it is.
+///
+/// `global` is the RESOLVED store's scope, passed in for the same reason [`behind_guard`] takes it:
+/// the behind refusal names the copy the publish acts on, which is not always the copy the reader
+/// is standing next to.
 ///
 /// # Errors
 /// [`ClientError::Conflict`] if the local state is behind (a newer `current` not yet applied — pull to
@@ -1546,6 +1595,7 @@ fn build_publish_op(
     digest: [u8; 32],
     message: Option<&str>,
     bundle_kind: Option<String>,
+    global: bool,
 ) -> Result<Option<OpRecord>, ClientError> {
     // The commit message: `-m <message>` when given (folded into `commit_id`, so it changes the version
     // identity), else the default. It also rides the local store commit, so a WAL replay re-renders the
@@ -1565,7 +1615,7 @@ fn build_publish_op(
     if !propose && is_behind(&sync) {
         return Err(ClientError::PublishBehind {
             skill: lock.name.clone(),
-            global: !ctx.layout.is_project_scope(),
+            global,
         });
     }
 
@@ -1662,6 +1712,9 @@ struct ScopeDisclosure {
     cross_from: Option<String>,
     /// Whether that folder is the MACHINE copy's, read from inside a project checkout.
     from_machine: bool,
+    /// The RESOLVED store's scope — machine or a checkout's. It is not a receipt line; it is what a
+    /// refusal raised after the write (the plane's lineage fence) spells its way out for.
+    global: bool,
     /// The other scope's copy, when it carries edits this publish did not ship.
     other_draft: Option<ScopeDraft>,
 }
@@ -1826,6 +1879,10 @@ fn map_outcome(
         TerminalOutcome::Conflict => Err(ClientError::Conflict {
             skill: skill_name.to_owned(),
             current: receipt.error.as_ref().and_then(|e| e.current_generation),
+            // The plane's own lineage fence, caught where the local behind guard could not see it
+            // (this machine's `observed` was current until the write asked). Same scope, same
+            // answer: the copy that refused is the one to rebase.
+            global: disclosure.global,
         }),
         TerminalOutcome::Denied => Err(ClientError::Denied(denied_code(receipt))),
         // Any other terminal class (RetryableFailure / Unavailable / PermanentFailure / …) is surfaced

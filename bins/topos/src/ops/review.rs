@@ -493,6 +493,9 @@ fn map_outcome(
         TerminalOutcome::Conflict => Err(ClientError::Conflict {
             skill: skill_of(target),
             current: receipt.error.as_ref().and_then(|e| e.current_generation),
+            // A verdict acts on the store this ctx names — `review` does no cross-scope store
+            // resolution — so the rebase it offers is spelled for that same store.
+            global: !ctx.layout.is_project_scope(),
         }),
         TerminalOutcome::Denied => Err(denied_review_error(receipt, target)),
         // A terminal PERMANENT_FAILURE on a review verdict is USUALLY the target proposal no longer being

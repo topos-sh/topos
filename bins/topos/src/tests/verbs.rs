@@ -1306,6 +1306,9 @@ fn the_already_added_answer_reads_like_the_receipt_it_mirrors() {
     );
 }
 
+/// The already-added answer lists the folders the name ALSO stands in, and says so: the bundle is
+/// already managed in a folder of its own, so a bare "'x' is in 3 folders here" would undercount by
+/// exactly the copy the reader already has — these are the unmanaged ones, on offer to adopt too.
 #[test]
 fn the_already_added_answer_lists_every_folder_the_name_is_in() {
     // THE FOLDER LISTING, byte-exact: every folder on one line with what its bytes are, then the
@@ -1337,11 +1340,11 @@ fn the_already_added_answer_lists_every_folder_the_name_is_in() {
     assert_eq!(
         crate::render::err_tty(&err),
         "coolify-deploy is already added machine-wide (~/.topos/topos.toml)\nsource: \
-         topos.sh/ideamotive/coolify-deploy\n'coolify-deploy' is in 3 folders here:\n  \
-         ~/.agents/skills/coolify-deploy — edited (adopting it makes these your draft)\n  \
-         ~/.claude/skills/coolify-deploy — edited differently\n  ~/.codex/skills/coolify-deploy — \
-         matches the published current\nname the one to adopt: topos add -g <folder> --as \
-         topos.sh/ideamotive/coolify-deploy"
+         topos.sh/ideamotive/coolify-deploy\n'coolify-deploy' is also in 3 unmanaged folders \
+         here:\n  ~/.agents/skills/coolify-deploy — edited (adopting it makes these your \
+         draft)\n  ~/.claude/skills/coolify-deploy — edited differently\n  \
+         ~/.codex/skills/coolify-deploy — matches the published current\nname the one to adopt: \
+         topos add -g <folder> --as topos.sh/ideamotive/coolify-deploy"
     );
     // The listing IS the answer and it ends in its own command — nothing goes under it. A second
     // list of the same folders spelled as commands is exactly the shape this one replaced.
@@ -1374,8 +1377,8 @@ fn the_already_added_answer_lists_every_folder_the_name_is_in() {
     assert_eq!(
         crate::render::err_tty(&one),
         "coolify-deploy is already added machine-wide (~/.topos/topos.toml)\n'coolify-deploy' is \
-         in 1 folder here:\n  ~/.codex/skills/coolify-deploy\nname the one to adopt: topos add -g \
-         <folder> --as topos.sh/ideamotive/coolify-deploy"
+         also in 1 unmanaged folder here:\n  ~/.codex/skills/coolify-deploy\nname the one to \
+         adopt: topos add -g <folder> --as topos.sh/ideamotive/coolify-deploy"
     );
 }
 

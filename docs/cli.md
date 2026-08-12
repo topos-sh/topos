@@ -125,7 +125,7 @@ These act on this machine only.
 
 ### `topos status`
 
-Check topos's health: your workspace logins and sessions, whether the auto-update triggers are armed, which `topos.toml` governs where you stand, and what needs attention — updates pending, deliveries not applied yet, edits of your own — each with the command that resolves it. `-g` reports your machine-wide set instead; `--all` both. For the skill inventory use `topos list`, and `topos list <skill>` for one skill in depth. Works offline and changes nothing. A bare `topos` on a terminal shows the same thing
+Check topos's health: your workspace logins and sessions, whether the auto-update triggers are armed, which `topos.toml` governs where you stand, and what needs attention — updates pending, deliveries not applied yet, edits of your own — each with the command that resolves it. `-g` reports your machine-wide set instead; `--all` both. For the skill inventory use `topos list`, and `topos list <skill>` for one skill in depth. Works offline and changes nothing. A bare `topos` on a terminal shows the same thing.
 
 ```
 topos status [OPTIONS]
@@ -139,7 +139,7 @@ topos status [OPTIONS]
 
 ### `topos login`
 
-Log this machine in to topos. Opens your browser for a one-click approval, where you choose (or create) the workspace to join. The first login to a workspace records its feed line (`"<host>/<workspace>" = "*"`) in `~/.topos/topos.toml` — from then on, whatever that workspace delivers to you installs here and stays updated by itself; delete the line (`topos remove -g @<workspace>`) and it stays deleted — login never re-adds it. Bare `topos login` uses topos.sh; name your own server when self-hosting, a workspace to go straight to it, or paste an invitation link. To join another workspace, log in again — already logged in to that server, it takes no browser
+Log this machine in to topos. Opens your browser for a one-click approval, where you choose (or create) the workspace to join. The first login to a workspace records its feed line (`"<host>/<workspace>" = "*"`) in `~/.topos/topos.toml` — from then on, whatever that workspace delivers to you installs here and stays updated by itself; delete the line (`topos remove -g @<workspace>`) and it stays deleted — login never re-adds it. Bare `topos login` uses topos.sh; name your own server when self-hosting, a workspace to go straight to it, or paste an invitation link. To join another workspace, log in again — already logged in to that server, it takes no browser.
 
 ```
 topos login [OPTIONS] [ADDRESS]
@@ -153,7 +153,7 @@ topos login [OPTIONS] [ADDRESS]
 
 ### `topos logout`
 
-Disconnect this machine from a workspace. Installed skills, your edits, and manifests stay — they just stop updating. `topos login <workspace-address>` reconnects
+Disconnect this machine from a workspace. Installed skills, your edits, and manifests stay — they just stop updating. `topos login <workspace-address>` reconnects.
 
 ```
 topos logout [OPTIONS]
@@ -166,7 +166,7 @@ topos logout [OPTIONS]
 
 ### `topos init`
 
-Create a `topos.toml` in this folder. The file lists the skills everyone working in this project should have — commit it, and teammates' agents pick up the same set by themselves. With `-g`, creates your machine's own `~/.topos/topos.toml` instead, header only — `topos login` writes a workspace's feed line on this machine's first connection to it, and `topos add -g` records the rest. If the file already exists, nothing changes
+Create a `topos.toml` in this folder. The file lists the skills everyone working in this project should have — commit it, and teammates' agents pick up the same set by themselves. With `-g`, creates your machine's own `~/.topos/topos.toml` instead, header only — `topos login` writes a workspace's feed line on this machine's first connection to it, and `topos add -g` records the rest. If the file already exists, nothing changes.
 
 ```
 topos init [OPTIONS]
@@ -179,7 +179,7 @@ topos init [OPTIONS]
 
 ### `topos fmt`
 
-Tidy a `topos.toml`: group and sort its lines into the standard layout. Comments survive; meaning never changes. Formats this folder's file, or your machine-wide one with `-g`
+Tidy a `topos.toml`: group and sort its lines into the standard layout. Comments survive; meaning never changes. Formats this folder's file, or your machine-wide one with `-g`.
 
 ```
 topos fmt [OPTIONS]
@@ -192,7 +192,7 @@ topos fmt [OPTIONS]
 
 ### `topos add`
 
-Get skills and keep them updated. The source can be a skill or channel from your workspace (`code-review`, `@acme/code-review`, `@acme/channels/backend`), a whole workspace's feed (`@acme`, with `-g`), a local folder (`./tools/my-skill`), or a public GitHub repo (`owner/repo` for every skill in it, `owner/repo/name` for one). Records one line in the nearest `topos.toml` at or above this folder — or in your machine-wide file (`~/.topos/topos.toml`) with `-g` — and installs right away. With no `topos.toml` covering this folder it stops and says so: `topos init` creates one here, or add `-g`. Every answer names the file it recorded into and, on a second line, the source it recorded: a workspace or GitHub reference, or the folder on this machine. A folder whose `SKILL.md` is a link into another folder adds that original — the folder the bytes actually live in. A plain name is looked for both in the skills already sitting in your agents' folders and in the catalogs of the workspaces you are connected to — when only a workspace has it, that is what you get. A GitHub source shows what it found and waits for `--yes`, every time — a skill is instructions your agent will follow, and that listing is there to be read. `add topos` restores the built-in topos skill. `--kind mcp` says the source is an MCP SERVER instead — a folder whose root holds a `server.json` — and your agents get it as a tool endpoint in their own MCP config rather than as a skill folder; it applies immediately, and the receipt leads with the undo, which names the folder you added (`topos remove -g <folder>` for a machine-wide add). A folder that is plainly a server bundle refuses without the flag rather than landing as a skill, and `--kind skill` on one adopts it as a skill anyway. Anything your workspace publishes needs no flag at all — the catalog already records what each bundle is. By default a skill reaches every agent on the machine; `-a <agent>` (repeatable) installs it for just those agents, and `--dest <folder>` (repeatable) installs into an exact folder — together they freeze the row to exactly those destinations, recorded in the file so updates keep landing there. For an MCP source `-a` picks whose config file gets the entry. Adding `-a`/`--dest` to something you already have EXTENDS its destinations: the copies it already has stay, and the new ones are added. To take a destination away, use `remove -a`/`--dest`
+Get skills and keep them updated. The source can be a skill or channel from your workspace (`code-review`, `@acme/code-review`, `@acme/channels/backend`), a whole workspace's feed (`@acme`, with `-g`), a local folder (`./tools/my-skill`), or a public GitHub repo (`owner/repo` for every skill in it, `owner/repo/name` for one). Records one line in the nearest `topos.toml` at or above this folder — or in your machine-wide file (`~/.topos/topos.toml`) with `-g` — and installs right away. With no `topos.toml` covering this folder it stops and says so: `topos init` creates one here, or add `-g`. Every answer names the file it recorded into and, on a second line, the source it recorded: a workspace or GitHub reference, or the folder on this machine. A folder whose `SKILL.md` is a link into another folder adds that original — the folder the bytes actually live in. A plain name is looked for both in the skills already sitting in your agents' folders and in the catalogs of the workspaces you are connected to — when only a workspace has it, that is what you get. A GitHub source shows what it found and waits for `--yes`, every time — a skill is instructions your agent will follow, and that listing is there to be read. `add topos` restores the built-in topos skill. `--kind mcp` says the source is an MCP SERVER instead — a folder whose root holds a `server.json` — and your agents get it as a tool endpoint in their own MCP config rather than as a skill folder; it applies immediately, and the receipt leads with the undo, which names the folder you added (`topos remove -g <folder>` for a machine-wide add). A folder that is plainly a server bundle refuses without the flag rather than landing as a skill, and `--kind skill` on one adopts it as a skill anyway. Anything your workspace publishes needs no flag at all — the catalog already records what each bundle is. By default a skill reaches every agent on the machine; `-a <agent>` (repeatable) installs it for just those agents, and `--dest <folder>` (repeatable) installs into an exact folder — together they freeze the row to exactly those destinations, recorded in the file so updates keep landing there. For an MCP source `-a` picks whose config file gets the entry. Adding `-a`/`--dest` to something you already have EXTENDS its destinations: the copies it already has stay, and the new ones are added. To take a destination away, use `remove -a`/`--dest`.
 
 ```
 topos add [OPTIONS] <SOURCE>
@@ -212,7 +212,7 @@ topos add [OPTIONS] <SOURCE>
 
 ### `topos remove`
 
-Stop getting skills here — the inverse of `add`. Edits the same file `add` would: the nearest `topos.toml` at or above this folder, or your machine-wide file with `-g` (dropping a line, or switching one feed-delivered skill "off" on this machine). It never reaches across that line — a skill your machine-wide file delivers is refused here, pointing at `-g`. Removing a line also uninstalls the copies it placed, in the same command — a copy you edited stays in place, disclosed. With `-a <agent>` or `--dest <folder>` only THAT destination is removed: the row keeps the rest, and removing the last one removes the row. Prints exactly what changed and how to undo it; asks first only when removing would lose local work or rewrite a whole channel/repo line
+Stop getting skills here — the inverse of `add`. Edits the same file `add` would: the nearest `topos.toml` at or above this folder, or your machine-wide file with `-g` (dropping a line, or switching one feed-delivered skill "off" on this machine). It never reaches across that line — a skill your machine-wide file delivers is refused here, pointing at `-g`. Removing a line also uninstalls the copies it placed, in the same command — a copy you edited stays in place, disclosed. With `-a <agent>` or `--dest <folder>` only THAT destination is removed: the row keeps the rest, and removing the last one removes the row. Prints exactly what changed and how to undo it; asks first only when removing would lose local work or rewrite a whole channel/repo line.
 
 ```
 topos remove [OPTIONS] [SKILL]...
@@ -230,7 +230,7 @@ topos remove [OPTIONS] [SKILL]...
 
 ### `topos update`
 
-Fetch and apply the latest version of what you asked for, where you are standing: this folder's `topos.toml` when one covers it, and otherwise your machine-wide set (your own `topos.toml` and the skills your workspaces give you). `-g` updates the machine-wide set even from inside a project. The background auto-update that runs at the start of each agent session always covers both, so nothing goes stale while you work in one folder. Running it by hand checks everything now, including your GitHub lines — the background sweep checks those a few times a day rather than every session. Safe to run any time. `topos update <skill>` updates one skill; `topos update <skill>@<version>` puts that version's bytes back on this machine only
+Fetch and apply the latest version of what you asked for, where you are standing: this folder's `topos.toml` when one covers it, and otherwise your machine-wide set (your own `topos.toml` and the skills your workspaces give you). `-g` updates the machine-wide set even from inside a project. The background auto-update that runs at the start of each agent session always covers both, so nothing goes stale while you work in one folder. Running it by hand checks everything now, including your GitHub lines — the background sweep checks those a few times a day rather than every session. Safe to run any time. `topos update <skill>` updates one skill; `topos update <skill>@<version>` puts that version's bytes back on this machine only.
 
 ```
 topos update [OPTIONS] [TARGETS]...
@@ -252,7 +252,7 @@ topos update [OPTIONS] [TARGETS]...
 
 ### `topos list`
 
-See what's installed where you stand, per scope: each skill with its version, where it comes from, and its state. Inside a project the rows are that folder's `topos.toml`'s; `-g` lists your machine-wide set, `--all` both. `topos list <skill>` answers one skill in depth — which file and line (or which workspace's feed) delivers it, and where its files are. `--untracked` lists skills found in your agents' folders that topos does not manage yet; `-a <agent>` shows one agent's skill folders exactly as that agent reads them; `--remote` lists what your workspaces offer (needs a login). Works offline except `--remote`
+See what's installed where you stand, per scope: each skill with its version, where it comes from, and its state. Inside a project the rows are that folder's `topos.toml`'s; `-g` lists your machine-wide set, `--all` both. `topos list <skill>` answers one skill in depth — which file and line (or which workspace's feed) delivers it, and where its files are. `--untracked` lists skills found in your agents' folders that topos does not manage yet; `-a <agent>` shows one agent's skill folders exactly as that agent reads them; `--remote` lists what your workspaces offer (needs a login). Works offline except `--remote`.
 
 ```
 topos list [OPTIONS] [NAME]
@@ -275,7 +275,7 @@ topos list [OPTIONS] [NAME]
 
 ### `topos diff`
 
-Show what changed in a skill. Bare: your local edits against the version you last applied. With a version id: that version against the team's current. `<a>..<b>` compares two versions. Reads the copy where you are standing; `-g` reads your machine-wide copy even from inside a project. When the skill sits in more than one folder, `--dest <folder>` (or `-a <agent>`) reads the edits in that one — still against the version you last applied, so two such runs compare like for like
+Show what changed in a skill. Bare: your local edits against the version you last applied. With a version id: that version against the team's current. `<a>..<b>` compares two versions. Reads the copy where you are standing; `-g` reads your machine-wide copy even from inside a project. When the skill sits in more than one folder, `--dest <folder>` (or `-a <agent>`) reads the edits in that one — still against the version you last applied, so two such runs compare like for like.
 
 ```
 topos diff [OPTIONS] <SKILL> [REF]
@@ -293,7 +293,7 @@ topos diff [OPTIONS] <SKILL> [REF]
 
 ### `topos log`
 
-Show a skill's history — every version with its message and id
+Show a skill's history — every version with its message and id.
 
 ```
 topos log [OPTIONS] <SKILL>
@@ -311,7 +311,7 @@ These reach your workspace, so each one previews first or confirms via its flag.
 
 ### `topos publish`
 
-Share a skill with your team. A bare run is a preview — it shows where the skill would land and whether review is required, and changes nothing; add `--yes` to apply. Publishing again ships a new version; on a skill that requires review, a publish opens a proposal instead. Needs a login. When you have edited the same skill in more than one folder, a bare publish stops and asks which one you mean; `--dest <folder>` (or `-a <agent>`) answers it. The copy you do not pick keeps its edits and becomes an ordinary draft. A skill you have both in this project and machine-wide publishes from whichever copy holds the edits, and says which folder that was; `-g` names your machine-wide copy. A copy that already matches the published version is not an error — it says so and stops
+Share a skill with your team. A bare run is a preview — it shows where the skill would land and whether review is required, and changes nothing; add `--yes` to apply. Publishing again ships a new version; on a skill that requires review, a publish opens a proposal instead. Needs a login. When you have edited the same skill in more than one folder, a bare publish stops and asks which one you mean; `--dest <folder>` (or `-a <agent>`) answers it. The copy you do not pick keeps its edits and becomes an ordinary draft. A skill you have both in this project and machine-wide publishes from whichever copy holds the edits, and says which folder that was; `-g` names your machine-wide copy. A copy that already matches the published version is not an error — it says so and stops.
 
 ```
 topos publish [OPTIONS] <TARGET>
@@ -331,7 +331,7 @@ topos publish [OPTIONS] <TARGET>
 
 ### `topos review`
 
-See and settle proposals. Bare: your review inbox. With a proposal (`<skill>@<version>`): its diff. Add a verdict to settle it — `--approve` ships it, `--reject -m <reason>` declines it, `--withdraw` retracts your own
+See and settle proposals. Bare: your review inbox. With a proposal (`<skill>@<version>`): its diff. Add a verdict to settle it — `--approve` ships it, `--reject -m <reason>` declines it, `--withdraw` retracts your own.
 
 ```
 topos review [OPTIONS] [TARGET]
@@ -350,7 +350,7 @@ topos review [OPTIONS] [TARGET]
 
 ### `topos revert`
 
-Roll the team back to an earlier version of a skill. `--to` names the good version to return to; everyone picks it up at their next update. Nothing is deleted, so a revert can itself be reverted. To roll back only this machine, use `topos update <skill>@<version>` instead
+Roll the team back to an earlier version of a skill. `--to` names the good version to return to; everyone picks it up at their next update. Nothing is deleted, so a revert can itself be reverted. To roll back only this machine, use `topos update <skill>@<version>` instead.
 
 ```
 topos revert [OPTIONS] <SKILL>
@@ -365,7 +365,7 @@ topos revert [OPTIONS] <SKILL>
 
 ### `topos protect`
 
-Require review before a skill changes — or curation before a channel's contents change. `topos protect <skill>` turns it on; `topos protect <skill> open` turns it off (owners only)
+Require review before a skill changes — or curation before a channel's contents change. `topos protect <skill>` turns it on; `topos protect <skill> open` turns it off (owners only).
 
 ```
 topos protect [OPTIONS] <TARGET> [LEVEL]
@@ -380,7 +380,7 @@ topos protect [OPTIONS] <TARGET> [LEVEL]
 
 ### `topos invite`
 
-Invite teammates by email. Each address gets a single-use link that adds them to the workspace — they can accept in the browser, hand the mail to their agent, or run `topos login <invite-url>`. Owners only; the server must have mail configured. A bare `invite` just prints the workspace address
+Invite teammates by email. Each address gets a single-use link that adds them to the workspace — they can accept in the browser, hand the mail to their agent, or run `topos login <invite-url>`. Owners only; the server must have mail configured. A bare `invite` just prints the workspace address.
 
 ```
 topos invite [OPTIONS] [EMAIL]...
@@ -399,7 +399,7 @@ The binary and the installation itself.
 
 ### `topos self-update`
 
-Update the `topos` binary itself to the latest release. The download's checksum and signature are always verified, and the swap is atomic. Your skills are untouched — they update with `topos update`
+Update the `topos` binary itself to the latest release. The download's checksum and signature are always verified, and the swap is atomic. Your skills are untouched — they update with `topos update`.
 
 ```
 topos self-update [OPTIONS]
@@ -413,7 +413,7 @@ topos self-update [OPTIONS]
 
 ### `topos auth`
 
-Check your sign-in state: `topos auth status`
+Check your sign-in state: `topos auth status`.
 
 ```
 topos auth <COMMAND>
@@ -422,12 +422,12 @@ topos auth <COMMAND>
 
 #### `topos auth status`
 
-Show each workspace login and whether it still works, plus the state of the auto-update hooks. Changes nothing
+Show each workspace login and whether it still works, plus the state of the auto-update hooks. Changes nothing.
 
 
 ### `topos uninstall`
 
-Remove topos from this machine. Deletes the auto-update hooks and topos's own state (`~/.topos/`, logins included); installed skill files are never touched. A bare run shows what would go; `--yes` applies. The binary itself is left in place — its path is printed so you can delete it with whatever installed it
+Remove topos from this machine. Deletes the auto-update hooks and topos's own state (`~/.topos/`, logins included); installed skill files are never touched. A bare run shows what would go; `--yes` applies. The binary itself is left in place — its path is printed so you can delete it with whatever installed it.
 
 ```
 topos uninstall [OPTIONS]

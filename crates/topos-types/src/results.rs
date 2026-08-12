@@ -1642,14 +1642,16 @@ pub struct PublishData {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub undo: Option<String>,
     /// The folder the published bytes were read from, as a person reads it
-    /// (`project/.agents/skills/coolify-deploy`) — present only when a `--dest`/`-a` selection
-    /// named ONE of several EDITED copies. A single edited copy needs no such line: it is the
-    /// draft, and naming its folder would say nothing. **INFERRED** (additive-only).
+    /// (`project/.agents/skills/coolify-deploy`), present when it was a CHOICE — one of several
+    /// edited copies (`--dest`), or a copy in a scope other than the one the command stood in. A
+    /// single edited copy in the standing scope needs no such line: it is the draft, and naming its
+    /// folder would say nothing. **INFERRED** (additive-only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub from_placement: Option<String>,
-    /// The other EDITED copies, untouched by this publish — each keeps its bytes and becomes an
-    /// ordinary draft ahead of the version just published. Populated on the same condition as
-    /// `from_placement`. **INFERRED** (additive-only).
+    /// The other EDITED copies IN THIS SCOPE, untouched by this publish — each keeps its bytes and
+    /// becomes an ordinary draft ahead of the version just published. Populated by a `--dest`
+    /// selection among several edited copies (a cross-scope ship discloses the other scope's copy
+    /// through `other_scope_draft` instead). **INFERRED** (additive-only).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub other_edited: Vec<String>,
     /// An honesty note about the bundle's GitHub origin, when one is recorded: publishing does
@@ -2186,14 +2188,16 @@ pub struct PublishDescribeData {
     /// Whether this publish restores an ancestor's bytes (a revert-shaped publish, same gate).
     pub is_revert: bool,
     /// The folder the bytes WOULD be read from, as a person reads it
-    /// (`project/.agents/skills/coolify-deploy`) — present only when a `--dest`/`-a` selection
-    /// named ONE of several EDITED copies. A single edited copy needs no such line: it is the
-    /// draft, and naming its folder would say nothing. **INFERRED** (additive-only).
+    /// (`project/.agents/skills/coolify-deploy`), present when it was a CHOICE — one of several
+    /// edited copies (`--dest`), or a copy in a scope other than the one the command stood in. A
+    /// single edited copy in the standing scope needs no such line: it is the draft, and naming its
+    /// folder would say nothing. **INFERRED** (additive-only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub from_placement: Option<String>,
-    /// The other EDITED copies this publish would leave alone — each keeps its bytes and becomes
-    /// an ordinary draft ahead of the version published. Populated on the same condition as
-    /// `from_placement`. **INFERRED** (additive-only).
+    /// The other EDITED copies IN THIS SCOPE this publish would leave alone — each keeps its bytes
+    /// and becomes an ordinary draft ahead of the version published. Populated by a `--dest`
+    /// selection among several edited copies (a cross-scope ship discloses the other scope's copy
+    /// through `other_scope_draft` instead). **INFERRED** (additive-only).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub other_edited: Vec<String>,
     /// The paste-able share line (`<address>/skills/<name>`), when the workspace address is known.
@@ -2256,8 +2260,9 @@ pub struct PublishDescribeData {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub other_scope_draft: Option<ScopeDraft>,
     /// The whole `topos diff …` command that reads the exact copy this publish would ship —
-    /// spelled for the folder and the scope that resolved, so it is runnable as printed.
-    /// **INFERRED** (additive-only).
+    /// spelled for the folder and the scope that resolved, so it is runnable as printed. Absent on
+    /// a GENESIS publish: there is no earlier version for a diff to be against, so the command
+    /// would print nothing. **INFERRED** (additive-only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub review: Option<String>,
 }

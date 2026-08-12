@@ -1284,7 +1284,7 @@ fn the_already_added_answer_lists_every_folder_and_offers_only_provable_bytes() 
     // as the draft adopting it would create.
     let listing = err.to_string();
     assert!(
-        listing.contains("'pr-describe' is in 2 folders here:"),
+        listing.contains("'pr-describe' is also in 2 unmanaged folders here:"),
         "{listing}"
     );
     assert!(
