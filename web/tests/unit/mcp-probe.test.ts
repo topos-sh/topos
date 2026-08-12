@@ -282,6 +282,11 @@ describe("the line a catalog shows", () => {
 
 // ── The row, and the promise that writing it can never cost a publish ────────────────────────
 
+let signedIn: { user: { id: string; name: string; email: string } } | null = null;
+vi.mock("@/lib/auth/server", () => ({
+  getAuth: () => ({ api: { getSession: async () => signedIn } }),
+}));
+
 let db: ScratchDb;
 let vault: StubVault;
 let wsId = "";
@@ -432,5 +437,41 @@ describe("recording what was seen", () => {
         exploding,
       ),
     ).resolves.toEqual({ outcome: "not_responding", detail: "no answer" });
+  });
+});
+
+describe("what the bundle page carries", () => {
+  /** The face's loader, for a bundle addressed under the MCP base. */
+  async function faceOf(name: string, base: "mcp" | "skills") {
+    const { loader } = await import("@/routes/skill-current");
+    return (await loader({
+      request: new Request(`http://x/${base}/${name}`),
+      params: base === "mcp" ? { server: name } : { skill: name },
+      context: {},
+    } as never)) as { probeLine: string | null };
+  }
+
+  it("says what the probe saw, and says the honest thing when nothing was recorded", async () => {
+    signedIn = { user: MEMBER };
+    const actor = asSession(wsId, MEMBER.id, "cs_probe", "owner");
+    await seedBundle(db, wsId, "s_face_probed", "probed", { kind: "mcp" });
+    await seedBundle(db, wsId, "s_face_quiet", "unprobed", { kind: "mcp" });
+    await seedBundle(db, wsId, "s_face_skill", "runbook", { kind: "skill" });
+    await probeAndRecord(
+      actor,
+      {
+        bundleId: "s_face_probed",
+        versionId: versionIdFor("s_face_probed"),
+        endpoint: "https://93.184.216.34/mcp",
+      },
+      answer(401, "no", { "www-authenticate": "Bearer" }),
+    );
+
+    expect((await faceOf("probed", "mcp")).probeLine).toMatch(/^sign-in required, checked /);
+    // A version nobody asked about — a fact about this plane, never about the server.
+    expect((await faceOf("unprobed", "mcp")).probeLine).toBe("not checked yet");
+    // A skill has no server to ask about, so it carries no line at all.
+    expect((await faceOf("runbook", "skills")).probeLine).toBe(null);
+    signedIn = null;
   });
 });

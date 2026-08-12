@@ -45,6 +45,23 @@ const TIDES = {
   version: "0.2.0",
   remotes: [{ type: "streamable-http", url: "https://tides.acme.example/mcp" }],
 };
+/** A PACKAGE-ONLY server: no address at all. The lane re-validates every document on the way out,
+ *  so this one proves that what the gate accepts, the read lane still serves. */
+const FILES = {
+  name: "io.github.acme/files",
+  description: "Files the agent is pointed at, over stdio.",
+  version: "2.1.0",
+  packages: [
+    {
+      registryType: "npm",
+      identifier: "@acme/mcp-files",
+      version: "2.1.0",
+      runtimeHint: "npx",
+      transport: { type: "stdio" },
+      environmentVariables: [{ name: "ACME_API_TOKEN", isSecret: true, isRequired: true }],
+    },
+  ],
+};
 
 async function get(path: string, headers: Record<string, string> = {}): Promise<Response> {
   const { loader } = await import("@/routes/mcp-registry");
@@ -74,6 +91,7 @@ beforeAll(async () => {
   for (const [id, name, document] of [
     ["s_weather", "weather", WEATHER],
     ["s_tides", "tides", TIDES],
+    ["s_files", "files", FILES],
   ] as const) {
     const versionId = versionIdFor(id);
     await seedBundle(db, wsId, id, name, { kind: "mcp", versionId });
@@ -118,7 +136,7 @@ describe("the door", () => {
     const res = await get("/registry/v0.1/servers", { authorization: "Bearer cs_mem" });
     expect(res.status).toBe(200);
     const body = (await res.json()) as { metadata: { count: number } };
-    expect(body.metadata.count).toBe(2);
+    expect(body.metadata.count).toBe(3);
   });
 
   it("a non-GET method on the path is the same uniform miss", async () => {
@@ -140,15 +158,19 @@ describe("the list", () => {
       servers: { server: Record<string, unknown>; _meta: Record<string, unknown> }[];
       metadata: { count: number };
     };
-    expect(body.metadata.count).toBe(2);
+    expect(body.metadata.count).toBe(3);
     expect(body.servers.map((s) => s.server.name)).toEqual([
-      // Catalog-name order: tides before weather.
+      // Catalog-name order: files, tides, weather.
+      "io.github.acme/files",
       "io.github.acme/tides",
       "io.github.acme/weather",
     ]);
     // The document is served VERBATIM — an agent parses what the publisher wrote.
-    expect(body.servers[1]?.server).toEqual(WEATHER);
-    const meta = body.servers[1]?._meta as { "sh.topos/catalog": Record<string, unknown> };
+    expect(body.servers[2]?.server).toEqual(WEATHER);
+    // …and a PACKAGE-ONLY document survives the re-validation this lane runs on the way out: a
+    // stored server with no address is as servable as one with an address.
+    expect(body.servers[0]?.server).toEqual(FILES);
+    const meta = body.servers[2]?._meta as { "sh.topos/catalog": Record<string, unknown> };
     expect(meta["sh.topos/catalog"]).toMatchObject({
       bundleId: "s_weather",
       versionId: versionIdFor("s_weather"),
@@ -160,7 +182,7 @@ describe("the list", () => {
     const res = await get("/registry/v0.1/servers");
     const body = (await res.json()) as { servers: { server: { name: string } }[] };
     expect(body.servers.map((s) => s.server.name)).not.toContain("runbook");
-    expect(body.servers).toHaveLength(2);
+    expect(body.servers).toHaveLength(3);
   });
 });
 
