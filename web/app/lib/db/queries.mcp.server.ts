@@ -1,8 +1,10 @@
 import { and, asc, eq, sql } from "drizzle-orm";
 import type { MemberActor, SessionActor } from "@/lib/auth/guards.server";
 import { getDb } from "@/lib/db/index.server";
-import { bundle } from "@/lib/db/schema.app";
+import type { PublishActor } from "@/lib/db/queries.custody.server";
+import { bundle, mcpProbe } from "@/lib/db/schema.app";
 import { planeCurrentPointer } from "@/lib/db/schema.custody";
+import type { McpProbeOutcome, McpProbeRecord } from "@/lib/mcp/probe-state";
 
 /**
  * The MCP half of the data access layer: which bundles in a workspace are `kind: 'mcp'` and
@@ -75,4 +77,71 @@ export async function mcpBundlesWithCurrent(
     versionId: row.versionId,
     updatedAtMs: Number(row.updatedAtMs),
   }));
+}
+
+// ── The advisory probe's one row per version ────────────────────────────────────────────────
+
+/** What one probe writes down. The vocabulary is the probe's own (app/lib/mcp/probe-state.ts). */
+export interface McpProbeWrite {
+  bundleId: string;
+  versionId: string;
+  outcome: McpProbeOutcome;
+  detail: string | null;
+}
+
+/**
+ * Record what the plane saw when it asked. Idempotent by (bundle, version): a re-probe of the same
+ * immutable bytes REPLACES the older answer rather than accumulating a history nobody reads — the
+ * question is "does this work now", and the row carries its own timestamp.
+ *
+ * NO AUDIT ROW, and deliberately: an audit line records what a PERSON did, and nobody did this.
+ * The publish that preceded it is already audited; this is the plane's own observation of somebody
+ * else's server, the same kind of write as the mail transport's metadata-only send log. The actor
+ * is still required — it is what scopes the row to a workspace the caller actually stands in —
+ * and it is the PUBLISH doors' actor, since the probe only ever follows one of their publishes.
+ */
+export async function recordMcpProbe(actor: PublishActor, write: McpProbeWrite): Promise<void> {
+  await getDb()
+    .insert(mcpProbe)
+    .values({
+      workspaceId: actor.workspaceId,
+      bundleId: write.bundleId,
+      versionId: write.versionId,
+      outcome: write.outcome,
+      detail: write.detail,
+    })
+    .onConflictDoUpdate({
+      target: [mcpProbe.bundleId, mcpProbe.versionId],
+      set: { outcome: write.outcome, detail: write.detail, probedAt: sql`now()` },
+      // The bundle's own workspace, never the caller's word for it: the composite key is what
+      // stops a row from being rewritten from another workspace's request.
+      setWhere: eq(mcpProbe.workspaceId, actor.workspaceId),
+    });
+}
+
+/** The probe recorded for one version, or null — which reads as "not checked yet". */
+export async function mcpProbeFor(
+  actor: MemberActor | SessionActor,
+  bundleId: string,
+  versionId: string,
+): Promise<McpProbeRecord | null> {
+  const rows = await getDb()
+    .select({ outcome: mcpProbe.outcome, probedAt: mcpProbe.probedAt })
+    .from(mcpProbe)
+    .where(
+      and(
+        eq(mcpProbe.workspaceId, actor.workspaceId),
+        eq(mcpProbe.bundleId, bundleId),
+        eq(mcpProbe.versionId, versionId),
+      ),
+    )
+    .limit(1);
+  const row = rows[0];
+  if (row === undefined) {
+    return null;
+  }
+  return {
+    outcome: row.outcome as McpProbeOutcome,
+    probedAt: row.probedAt.toISOString(),
+  };
 }

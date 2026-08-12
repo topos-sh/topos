@@ -502,6 +502,48 @@ export const versionUpstream = webSchema.table(
   ],
 );
 
+/**
+ * WHAT THIS PLANE SAW WHEN IT ASKED — one advisory probe per published MCP version.
+ *
+ * A publish records what the workspace now holds; it says nothing about whether the server on the
+ * other end of that address is up, or whether the address is even reachable from here. So after a
+ * version lands, and strictly AFTER its transaction commits, the app asks the endpoint once and
+ * writes down what came back. It is a REPORT, never a gate: a probe that fails, times out, or
+ * never runs at all leaves the version exactly as published, and a version with no row here reads
+ * as "not checked yet" rather than as anything about the server.
+ *
+ * Keyed by version, like `version_upstream` beside it: a version is immutable and
+ * content-addressed, so one answer per version is one answer per set of bytes, and re-publishing
+ * the same document from another workspace gets its own row rather than inheriting a verdict.
+ * `outcome` carries its OWN small vocabulary (see app/lib/mcp/probe.server.ts) — nothing here
+ * feeds delivery status, which keeps its closed set of words.
+ */
+export const mcpProbe = webSchema.table(
+  "mcp_probe",
+  {
+    workspaceId: text("workspace_id").notNull(),
+    bundleId: text("bundle_id").notNull(),
+    versionId: text("version_id").notNull(),
+    /** `responding` · `sign_in_required` · `not_verifiable` · `not_responding`. */
+    outcome: text("outcome").notNull(),
+    /** One short machine-written note (a status code, a timeout) — never a body, never a header. */
+    detail: text("detail"),
+    probedAt: timestamp("probed_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (table) => [
+    primaryKey({ columns: [table.bundleId, table.versionId] }),
+    foreignKey({
+      name: "mcp_probe_bundle_fk",
+      columns: [table.bundleId, table.workspaceId],
+      foreignColumns: [bundle.id, bundle.workspaceId],
+    }).onDelete("cascade"),
+    check(
+      "mcp_probe_outcome_check",
+      sql`${table.outcome} IN ('responding', 'sign_in_required', 'not_verifiable', 'not_responding')`,
+    ),
+  ],
+);
+
 // ── Channels — named, curated BUNDLE SETS (nothing else; never access control) ──────────────
 
 /**

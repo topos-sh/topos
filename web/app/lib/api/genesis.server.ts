@@ -10,6 +10,7 @@ import {
   type PublishActor,
   registerGenesisBundleInTx,
 } from "@/lib/db/queries.custody.server";
+import { schedulePublishProbe } from "@/lib/mcp/probe.server";
 import {
   type McpGateRefusal,
   mcpCandidateRefusal,
@@ -140,12 +141,16 @@ export async function publishGenesisBundle<T = undefined>(
   // THE KIND'S GATE, before any custody call — a refused candidate must leave no ingested bytes
   // behind. A kind with no content gate passes straight through.
   let identity: string | null = null;
+  // The address the gate read out of the document, kept for the advisory probe below rather than
+  // parsed a second time out of the vault.
+  let endpoint: string | null = null;
   if (record.hasContentGate) {
     const gate = await mcpCandidateRefusal(args.actor, args.candidate.files, bundleId);
     if (gate.refusal !== null) {
       return { kind: "refused", refusal: gate.refusal };
     }
     identity = gate.serverName;
+    endpoint = gate.endpoint;
   }
 
   const published = await publishVersion(ws, bundleId, {
@@ -198,6 +203,18 @@ export async function publishGenesisBundle<T = undefined>(
   );
   if (landed.refused !== null) {
     return { kind: "refused", refusal: landed.refused };
+  }
+  // THE ADVISORY PROBE, and only now: the bundle is registered, the pointer has moved, and this
+  // call cannot change any of it. It asks the server the document names whether anything answers
+  // there, records the answer beside the version, and is not waited on — a report about somebody
+  // else's uptime must not lengthen the act that produced it, and its failure must not be visible
+  // at all. All three genesis doors ride this one line.
+  if (record.hasContentGate) {
+    schedulePublishProbe(args.actor, {
+      bundleId,
+      versionId: landed.value.landing.versionId,
+      endpoint,
+    });
   }
   return { kind: "ok", ...landed.value.landing, extra: landed.value.extra };
 }

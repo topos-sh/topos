@@ -43,11 +43,19 @@ export interface McpGateRefusal {
 }
 
 /**
- * What the gate decided: a refusal, or the embedded registry name the candidate validated to.
- * The name comes back because the caller needs it again — the claim it makes before it
- * registers records THIS name, not a second parse of the same bytes.
+ * What the gate decided: a refusal, or the facts the candidate validated to. They come back
+ * because the caller needs them again — the claim it makes before it registers records THIS name,
+ * not a second parse of the same bytes, and the advisory probe that runs after the publish has
+ * committed asks THIS endpoint rather than re-reading the document out of the vault.
  */
-export type McpGateOutcome = { refusal: McpGateRefusal } | { refusal: null; serverName: string };
+export type McpGateOutcome =
+  | { refusal: McpGateRefusal }
+  | {
+      refusal: null;
+      serverName: string;
+      /** The remote address the document places, or null when it offers only packages. */
+      endpoint: string | null;
+    };
 
 /** The candidate shape both doors already hold (the wire's, and the import page's own). */
 export interface CandidateFile {
@@ -92,5 +100,9 @@ export async function mcpCandidateRefusal(
   if (held !== null) {
     return { refusal: mcpNameTakenRefusal(validated.summary.name, held) };
   }
-  return { refusal: null, serverName: validated.summary.name };
+  return {
+    refusal: null,
+    serverName: validated.summary.name,
+    endpoint: validated.summary.url,
+  };
 }

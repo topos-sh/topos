@@ -23,6 +23,7 @@ import {
   publishTargetOf,
   registerGenesisBundleInTx,
 } from "@/lib/db/queries.custody.server";
+import { schedulePublishProbe } from "@/lib/mcp/probe.server";
 import {
   type McpGateRefusal,
   mcpCandidateRefusal,
@@ -179,6 +180,9 @@ export async function publishFlow(args: PublishFlowArgs): Promise<Response> {
   // The name this candidate's document claims, once the gate has accepted it — carried down to
   // the final transaction, where the claim itself is made.
   let mcpServerName: string | null = null;
+  // …and the address it places, carried down to the advisory probe that runs once the version is
+  // durable. Null for a package-only document, which has no address for this plane to ask.
+  let mcpEndpoint: string | null = null;
   if (!isGenesis && kindEntry(effectiveKind).hasContentGate) {
     const gate = await mcpCandidateRefusal(actor, candidate.files, target?.bundleId ?? skillId);
     if (gate.refusal !== null) {
@@ -198,6 +202,7 @@ export async function publishFlow(args: PublishFlowArgs): Promise<Response> {
       return envelopeResponse(envelope);
     }
     mcpServerName = gate.serverName;
+    mcpEndpoint = gate.endpoint;
   }
 
   // I-COMMIT-PARITY: the commit frame's author + message are the WIRE's — the device derived
@@ -260,6 +265,16 @@ export async function publishFlow(args: PublishFlowArgs): Promise<Response> {
       await insertReceiptInTx(tx, actor, opId, raw, env);
       return env;
     });
+    // A PROPOSED version's bytes are as final as a published one's — they are just not `current`
+    // yet — so it is probed here, at the moment it exists. Approving it later moves a pointer and
+    // creates no new version, so nothing to probe happens then.
+    if (mcpServerName !== null) {
+      schedulePublishProbe(actor, {
+        bundleId: target.bundleId,
+        versionId: committed.value.version_id,
+        endpoint: mcpEndpoint,
+      });
+    }
     return envelopeResponse(envelope);
   }
 
@@ -495,6 +510,20 @@ export async function publishFlow(args: PublishFlowArgs): Promise<Response> {
       return built;
     },
   );
+  // THE ADVISORY PROBE for a re-publish, once the pointer has moved and the receipt is durable.
+  // Not waited on, and it can change nothing above it (app/lib/mcp/probe.server.ts).
+  //
+  // NOT PROBED, named rather than left to be discovered: the upstream checker's imports
+  // (app/lib/db/upstream.server.ts commits versions for GitHub-imported SKILLS, a kind with no
+  // endpoint), and every path that moves a pointer without creating a version — review approval,
+  // revert, unarchive — where the version already carries the answer from when it was made.
+  if (landed.refused === null && mcpServerName !== null) {
+    schedulePublishProbe(actor, {
+      bundleId,
+      versionId: published.value.version_id,
+      endpoint: mcpEndpoint,
+    });
+  }
   if (landed.refused !== null) {
     // The claim refused and its transaction rolled back — nothing was registered, nothing placed.
     // The receipt is the one thing that must still land, so it gets its own transaction.

@@ -284,19 +284,26 @@ describe("checkBundleUpstream — external changes ALWAYS propose", () => {
        VALUES ('s_mcp_bad', $1, 'github.com', 'owner/mcp', '', NULL)`,
       [wsId],
     );
-    // Valid JSON, valid registry shape — and a LOCAL server, which a shared bundle may not be.
-    // Only the real document gate refuses this, so passing proves the gate ran.
-    const local = JSON.stringify({
-      name: "io.github.owner/local",
-      description: "Runs on your machine.",
+    // Valid JSON, valid registry shape — and a package pinned to `latest`, which is not a
+    // version at all. Only the real document gate refuses this, so passing proves the gate ran.
+    const unpinned = JSON.stringify({
+      name: "io.github.owner/floating",
+      description: "Installed from whatever the registry serves today.",
       version: "1.0.0",
-      packages: [{ registryType: "npm", identifier: "local-mcp", version: "1.0.0" }],
+      packages: [
+        {
+          registryType: "npm",
+          identifier: "floating-mcp",
+          version: "latest",
+          transport: { type: "stdio" },
+        },
+      ],
     });
     const before = committedBodies.length;
-    const gz = fixtureTarball("e".repeat(40), { "server.json": local });
+    const gz = fixtureTarball("e".repeat(40), { "server.json": unpinned });
     const refused = await upstream.checkBundleUpstream(wsId, "s_mcp_bad", async () => gz);
     expect(refused.outcome).toBe("error");
-    expect(refused.outcome === "error" && refused.message).toMatch(/local/i);
+    expect(refused.outcome === "error" && refused.message).toMatch(/latest/i);
     // NOTHING crossed the custody boundary, and no proposal opened against the refusal.
     expect(committedBodies).toHaveLength(before);
     expect(await db.q(`SELECT 1 FROM web.proposal WHERE bundle_id = 's_mcp_bad'`)).toHaveLength(0);

@@ -1,3 +1,4 @@
+import { Buffer } from "node:buffer";
 import { lookup } from "node:dns/promises";
 import { request as httpsRequest } from "node:https";
 import { isIPv4 } from "node:net";
@@ -318,6 +319,17 @@ function assertJsonish(response: Response): void {
   }
 }
 
+/** What one dial sends, when it is not the plain GET the import arms make. */
+export interface DialRequest {
+  method?: "GET" | "POST";
+  /** Extra request headers — merged over the defaults, never replacing `accept-encoding`. */
+  headers?: Record<string, string>;
+  /** A request body, for the POST arm. Sent as-is; the caller states its content type. */
+  body?: string;
+  /** How long the whole exchange may take. */
+  timeoutMs?: number;
+}
+
 /**
  * THE CONNECTION ITSELF, made to the addresses the guard vetted and to no others.
  *
@@ -332,33 +344,41 @@ function assertJsonish(response: Response): void {
  * The IncomingMessage is handed back as an ordinary `Response` so the status, content-type and
  * body-cap rules below stay one implementation.
  */
-function dial(vetted: VettedUrl): Promise<Response> {
+function dial(vetted: VettedUrl, options: DialRequest = {}): Promise<Response> {
   const { url, addresses } = vetted;
   const hostname = url.hostname.replace(/^\[|\]$/g, "");
+  const body = options.body;
   return new Promise<Response>((resolve, reject) => {
     const request = httpsRequest(
       {
         hostname,
         port: url.port === "" ? 443 : Number(url.port),
         path: `${url.pathname}${url.search}`,
-        method: "GET",
+        method: options.method ?? "GET",
         // `identity` because this client does not decompress: a body that arrived compressed is
         // refused below rather than handed to the validator as bytes it cannot read.
-        headers: { accept: "application/json", "accept-encoding": "identity" },
+        headers: {
+          accept: "application/json",
+          ...options.headers,
+          "accept-encoding": "identity",
+          ...(body === undefined
+            ? {}
+            : { "content-length": String(Buffer.byteLength(body, "utf8")) }),
+        },
         // No pooling: every request gets its own socket, so no earlier connection to this host
         // can carry this one.
         agent: false,
-        signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
-        lookup: (_host, options, callback) => {
+        signal: AbortSignal.timeout(options.timeoutMs ?? FETCH_TIMEOUT_MS),
+        lookup: (_host, lookupOptions, callback) => {
           const wanted =
-            options.family === 4 || options.family === 6
-              ? addresses.filter((entry) => entry.family === options.family)
+            lookupOptions.family === 4 || lookupOptions.family === 6
+              ? addresses.filter((entry) => entry.family === lookupOptions.family)
               : addresses;
           if (wanted.length === 0 || wanted[0] === undefined) {
             callback(new Error("no vetted address"), "", 0);
             return;
           }
-          if (options.all === true) {
+          if (lookupOptions.all === true) {
             callback(null, wanted as never, 0);
             return;
           }
@@ -388,8 +408,67 @@ function dial(vetted: VettedUrl): Promise<Response> {
       },
     );
     request.on("error", reject);
+    if (body !== undefined) {
+      request.write(body);
+    }
     request.end();
   });
+}
+
+/**
+ * The SAME guarded connection, opened by a caller that is not fetching a document: one request to
+ * a vetted address, with its own method, headers, body and clock. Everything the import arms rely
+ * on holds here too — https only, every resolved address proved public, the socket dialled at
+ * exactly those addresses, no redirect followed, no connection reuse — because it is one
+ * implementation, not a second one with the same intentions.
+ *
+ * The `Response` comes back whole (status, headers, an unread body stream) so the CALLER decides
+ * what a status means. A probe's rules are not a fetch's: a 401 is a healthy answer to it and an
+ * error to the import page.
+ */
+export async function guardedRequest(vetted: VettedUrl, options: DialRequest): Promise<Response> {
+  return await dial(vetted, options);
+}
+
+/**
+ * Read at most `cap` bytes of a response body, then stop reading — for callers that need the text
+ * whatever it turns out to be (a probe reads answers that are not documents). Over-long bodies are
+ * TRUNCATED rather than refused: the first kilobytes are what any classification reads, and a
+ * hostile endpoint must not be able to hold the socket open by streaming forever.
+ */
+export async function readAtMost(response: Response, cap: number): Promise<string> {
+  const body = response.body;
+  if (body === null) {
+    return "";
+  }
+  const reader = body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) {
+        break;
+      }
+      chunks.push(value);
+      total += value.byteLength;
+      if (total >= cap) {
+        await reader.cancel();
+        break;
+      }
+    }
+  } catch {
+    // A body that stops mid-stream is read as far as it got — what arrived is still evidence.
+  }
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  // LOSSY on purpose, unlike the document fetch: this text is classified and thrown away, never
+  // stored or hashed, so a stray byte must not turn a readable answer into an exception.
+  return new TextDecoder("utf-8").decode(bytes.subarray(0, cap));
 }
 
 async function httpGet(vetted: VettedUrl): Promise<FetchedDocument> {

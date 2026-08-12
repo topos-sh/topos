@@ -30,7 +30,8 @@ caller.
   positive row per provenance with a `self` flag, one negative per person per bundle; the
   baseline everyone-row is unassignable at the data layer), upstream provenance
   (`bundle_upstream`/`version_upstream`), `bundle_identity` (a bundle's SECOND name, when its
-  kind has one — the key that refuses a duplicate), notices, proposals + comments, op receipts,
+  kind has one — the key that refuses a duplicate), `mcp_probe` (one advisory probe result per
+  published MCP version — a report, never a gate), notices, proposals + comments, op receipts,
   `audit_event`, `mail_event`.
 - **The DAL** (`app/lib/db/queries*.server.ts`) is the one sanctioned door to `web` AND the
   read-only `plane` custody mirror. Every function REQUIRES a branded actor as its first
@@ -131,7 +132,15 @@ caller.
   embedded registry name no other bundle here claims. `registryType` is open-world: what a given
   machine can set up is the client's answer at render time, not a refusal for everyone. The rules
   are mirrored in `bins/topos/src/mcp_validate.rs` and pinned by the shared vectors, so a change
-  here without a vector fails both suites.
+  here without a vector fails both suites. **The advisory probe** (`app/lib/mcp/probe.server.ts`)
+  runs strictly AFTER a publish transaction commits, over the same SSRF-guarded transport (POST
+  `initialize`, bounded JSON/SSE read, no redirect followed): 401/403 = sign-in-required and
+  healthy (outranks the body) · silence/5xx/429 = not responding, never a protocol verdict ·
+  a private or unresolvable address = "not verifiable from cloud" (NEUTRAL — internal servers are
+  first-class). It records one row per version (`web.mcp_probe`, its OWN four-word vocabulary) and
+  can never block, roll back, or slow a publish; a version with no row reads "not checked yet".
+  Hooked at the genesis path (all three doors), the re-publish arm and the propose arm; pointer
+  moves (review approve · revert · unarchive) create no version and are not probed.
   Every publish door runs the same gate before any custody call: the session lane's
   publish/propose and the `mcp/new` page — the MCP section's own way in (built-in list ·
   registry name · SSRF-guarded URL — the guard DIALS the addresses it vetted (`https.request`
