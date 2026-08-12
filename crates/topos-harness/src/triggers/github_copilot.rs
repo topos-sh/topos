@@ -1,102 +1,127 @@
-//! `github-copilot` — one topos-owned hook file at `<root>/hooks/topos.json` (production root:
-//! `~/.copilot`): `{"hooks": {"sessionStart": [{"type": "command", "bash": <the guarded sweep>,
-//! "timeoutSec": 60}]}, "version": 1}`. JSON has no comments, so the ownership block rides a
-//! top-level `"_comment"` field carrying the marker id, the managed-by warning, and the removal
-//! command.
+//! `github-copilot` — the session-start auto-update hook in `<root>/settings.json` (production
+//! root: `~/.copilot`), in Copilot's OWN hook shape rather than the Claude-Code one: a FLAT entry
+//! array per event (no matcher groups) whose entries name the command under `bash` and the
+//! timeout under `timeoutSec` — `{"type": "command", "bash": …, "timeoutSec": 60}` — under the
+//! uppercase `"SessionStart"` event key.
+//!
+//! **The location and the spelling both moved.** An earlier build dropped a topos-owned
+//! `hooks/topos.json` under a lowercase `sessionStart` key; Copilot reads its hooks from
+//! `settings.json`, and the lowercase event name is retired. topos writes the current shape and
+//! nothing else: no migration, no cleanup — the old dropped file is dead bytes at a path topos no
+//! longer touches.
+//!
+//! Ownership still keys on the `# topos:currency` sentinel the guarded sweep line carries: the
+//! command runs under `bash`, so the trailing comment is inert exactly as it is in every other
+//! shell-string surface here.
 //!
 //! **Evidence level: vendor docs, unverified** — the shape is the one Copilot CLI's published
-//! hooks documentation describes; no live build was probed. The docs describe per-file ADDITIVE
-//! loading from the hooks dir and no per-hook consent gate, so the file in place reports
-//! `Active` carrying the docs-level note.
+//! hooks documentation describes, corroborated by herdr's shipped Copilot integration
+//! (Apache-2.0), which registers exactly these keys in this file; no live build was probed. The
+//! docs describe no per-hook consent gate, so a registered entry reports `Active` carrying the
+//! docs-level note.
 
 use std::path::{Path, PathBuf};
 
-use topos_types::CurrencyKind;
+use topos_types::{CurrencyKind, TriggerState};
 
 use crate::ConfigStore;
 
-use super::file_drop::{FileDrop, FileDropSpec};
+use super::cc_hooks::{JsonHooks, JsonHooksSpec};
 
-pub(crate) static SPEC: FileDropSpec = FileDropSpec {
+pub(crate) static SPEC: JsonHooksSpec = JsonHooksSpec {
     slug: "github-copilot",
-    marker_id: "topos:github-copilot:currency:1",
-    marker_needle: "topos:github-copilot:currency",
+    // Schema 2 = the flat entry in `settings.json` (schema 1 was the dropped `hooks/topos.json`).
+    marker_id: "topos:github-copilot:currency:2",
+    config_file: "settings.json",
+    events_path: &["hooks"],
+    event: "SessionStart",
+    grouped: false,
+    matcher: None,
+    handler_type: true,
+    command_key: "bash",
+    timeout: Some(("timeoutSec", 60)),
+    handler_async: false,
+    hook_dialect: None,
+    root_seed: None,
     live_kind: CurrencyKind::SessionStart,
+    placed_state: TriggerState::Active,
     note: Some("vendor docs, unverified"),
 };
-
-/// The canonical hook file (2-space pretty, keys alphabetical, trailing newline — the family's
-/// writer style). The `bash` command is the one guarded, sentinel-marked sweep line.
-const HOOK_FILE: &str = r#"{
-  "_comment": "topos:github-copilot:currency:1 — Managed by topos; hand edits are overwritten. Remove with `topos uninstall`.",
-  "hooks": {
-    "sessionStart": [
-      {
-        "bash": "command -v topos >/dev/null 2>&1 && topos update --quiet || true  # topos:currency",
-        "timeoutSec": 60,
-        "type": "command"
-      }
-    ]
-  },
-  "version": 1
-}
-"#;
 
 /// Production root: `~/.copilot` under the passed home (no env override in the registry table).
 pub(crate) fn resolve_root(home: &Path) -> PathBuf {
     home.join(".copilot")
 }
 
-/// The adapter over an explicit root (tests inject; production resolves).
-pub(crate) fn in_root<'a>(root: &Path, cfg: &'a dyn ConfigStore) -> FileDrop<'a> {
-    FileDrop::new(&SPEC, root.join("hooks").join("topos.json"), HOOK_FILE, cfg)
-}
-
-pub(crate) fn adapter<'a>(home: &Path, cfg: &'a dyn ConfigStore) -> FileDrop<'a> {
-    in_root(&resolve_root(home), cfg)
+pub(crate) fn adapter<'a>(home: &Path, cfg: &'a dyn ConfigStore) -> JsonHooks<'a> {
+    JsonHooks::new(&SPEC, resolve_root(home), cfg)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::super::testutil::{DiskConfig, MemConfig, TempHome};
-    use super::super::{SHELL_SWEEP_LINE, TriggerAdapter};
+    use super::super::testutil::MemConfig;
+    use super::super::{SENTINEL, SHELL_SWEEP_LINE, TriggerAdapter};
     use super::*;
-    use topos_types::TriggerState;
 
-    const PATH: &str = "/cop/hooks/topos.json";
-
-    fn a<'c>(cfg: &'c MemConfig) -> FileDrop<'c> {
-        in_root(Path::new("/cop"), cfg)
+    fn a<'c>(cfg: &'c MemConfig) -> JsonHooks<'c> {
+        JsonHooks::new(&SPEC, PathBuf::from("/cop"), cfg)
     }
 
-    #[test]
-    fn the_canonical_file_is_valid_json_in_the_documented_shape() {
-        let root: serde_json::Value = serde_json::from_str(HOOK_FILE).expect("valid JSON");
-        let hook = &root["hooks"]["sessionStart"][0];
-        assert_eq!(hook["type"], "command");
-        assert_eq!(hook["bash"].as_str().unwrap(), SHELL_SWEEP_LINE);
-        assert_eq!(hook["timeoutSec"], 60);
-        assert_eq!(root["version"], 1);
-        let comment = root["_comment"].as_str().unwrap();
-        assert!(comment.contains(SPEC.marker_id), "the marker id");
-        assert!(
-            comment.contains("Managed by topos"),
-            "the managed-by warning"
-        );
-        assert!(comment.contains("topos uninstall"), "the removal command");
-    }
+    const CONFIG: &str = "/cop/settings.json";
+
+    /// The exact bytes a fresh install produces: Copilot's flat entry, its own `bash` and
+    /// `timeoutSec` keys, the uppercase event.
+    const FRESH_INSTALL: &str = "\
+{
+  \"hooks\": {
+    \"SessionStart\": [
+      {
+        \"bash\": \"command -v topos >/dev/null 2>&1 && topos update --quiet || true  # topos:currency\",
+        \"timeoutSec\": 60,
+        \"type\": \"command\"
+      }
+    ]
+  }
+}
+";
 
     #[test]
-    fn fresh_install_places_the_file_and_reports_active_with_the_docs_note() {
+    fn fresh_install_writes_the_exact_hook_and_reports_active() {
         let cfg = MemConfig::default();
         let report = a(&cfg).install();
         assert_eq!(report.agent, "github-copilot");
+        assert_eq!(report.marker_id, "topos:github-copilot:currency:2");
         assert_eq!(report.state, TriggerState::Active);
         assert_eq!(report.currency_kind, CurrencyKind::SessionStart);
         assert_eq!(report.note.as_deref(), Some("vendor docs, unverified"));
-        assert_eq!(report.touched_path.as_deref(), Some(PATH));
-        assert_eq!(cfg.text(PATH).as_deref(), Some(HOOK_FILE));
+        assert_eq!(report.touched_path.as_deref(), Some(CONFIG));
+        assert_eq!(cfg.text(CONFIG).as_deref(), Some(FRESH_INSTALL));
         assert_eq!(cfg.writes(), 1);
+
+        // The command carries the sentinel — inert under `bash`, and the whole of ownership.
+        let root: serde_json::Value = serde_json::from_str(&cfg.text(CONFIG).unwrap()).unwrap();
+        let entry = &root["hooks"]["SessionStart"][0];
+        assert_eq!(entry["bash"].as_str().unwrap(), SHELL_SWEEP_LINE);
+        assert!(entry.get("command").is_none(), "Copilot's key is `bash`");
+        assert!(entry.get("timeout").is_none(), "…and `timeoutSec`");
+    }
+
+    /// The entry lives in `settings.json` — the retired drop file is never written, and a copy
+    /// sitting there is not evidence of anything.
+    #[test]
+    fn the_hook_lands_in_settings_json_and_never_in_the_retired_drop_file() {
+        const RETIRED: &str = "/cop/hooks/topos.json";
+        let cfg = MemConfig::default();
+        let adapter = a(&cfg);
+        adapter.install();
+        assert!(cfg.text(RETIRED).is_none(), "no file is ever dropped");
+        assert_eq!(adapter.config_file().as_deref(), Some(Path::new(CONFIG)));
+
+        let stale = MemConfig::with_file(RETIRED, FRESH_INSTALL);
+        assert!(
+            !a(&stale).present(),
+            "a copy at the retired path is never claimed as a live trigger"
+        );
     }
 
     #[test]
@@ -104,34 +129,82 @@ mod tests {
         let cfg = MemConfig::default();
         a(&cfg).install();
         let report = a(&cfg).install();
+        assert_eq!(report.state, TriggerState::Active);
         assert!(report.touched_path.is_none());
         assert_eq!(cfg.writes(), 1, "second install writes nothing");
     }
 
+    /// An entry an earlier build wrote — recognized by the sentinel in the `bash` command alone —
+    /// is rewritten to the canonical flat entry in place, never duplicated beside.
     #[test]
-    fn a_foreign_file_on_our_path_is_adopt_or_leave() {
-        let cfg = MemConfig::with_file(PATH, "{\"hooks\": {\"sessionStart\": []}}\n");
-        let report = a(&cfg).install();
-        assert_eq!(report.state, TriggerState::AlreadyPresentUnmanaged);
-        assert_eq!(cfg.writes(), 0);
-        assert_eq!(
-            a(&cfg).remove().state,
-            TriggerState::AlreadyPresentUnmanaged
+    fn a_stale_managed_entry_migrates_in_place() {
+        let cfg = MemConfig::with_file(
+            CONFIG,
+            "{\"hooks\":{\"SessionStart\":[{\"type\":\"command\",\"bash\":\"topos pull --quiet  # topos:currency\",\"timeoutSec\":5}]}}",
         );
-        assert!(!a(&cfg).present());
+        let report = a(&cfg).install();
+        assert_eq!(report.state, TriggerState::Active);
+        assert_eq!(cfg.writes(), 1);
+        let text = cfg.text(CONFIG).unwrap();
+        assert_eq!(text.matches(SENTINEL).count(), 1, "rewritten, not doubled");
+        assert_eq!(text, FRESH_INSTALL);
+        a(&cfg).install();
+        assert_eq!(cfg.writes(), 1, "idempotent after the migration");
     }
 
     #[test]
-    fn remove_unlinks_only_ours_then_is_idempotent() {
-        let home = TempHome::new();
-        let cfg = DiskConfig;
-        let adapter = in_root(&home.0, &cfg);
+    fn a_hand_rolled_topos_hook_is_adopt_or_leave() {
+        let cfg = MemConfig::with_file(
+            CONFIG,
+            "{\"hooks\":{\"SessionStart\":[{\"type\":\"command\",\"bash\":\"topos update --quiet\",\"timeoutSec\":10}]}}",
+        );
+        let report = a(&cfg).install();
+        assert_eq!(report.state, TriggerState::AlreadyPresentUnmanaged);
+        assert_eq!(cfg.writes(), 0, "never blind-append beside a user's hook");
+    }
+
+    #[test]
+    fn malformed_config_degrades_with_zero_writes() {
+        let bad = MemConfig::with_file(CONFIG, "not json at all");
+        assert_eq!(a(&bad).install().state, TriggerState::Degraded);
+        assert_eq!(a(&bad).remove().state, TriggerState::Degraded);
+        assert_eq!(bad.writes(), 0);
+        assert_eq!(bad.text(CONFIG).as_deref(), Some("not json at all"));
+    }
+
+    #[test]
+    fn remove_scrubs_only_our_entry_then_is_idempotent() {
+        let cfg = MemConfig::with_file(
+            CONFIG,
+            "{\"hooks\":{\"SessionStart\":[{\"type\":\"command\",\"bash\":\"echo mine\"}],\"Stop\":[]},\"model\":\"gpt-5\"}",
+        );
+        a(&cfg).install();
+
+        let report = a(&cfg).remove();
+        assert_eq!(report.state, TriggerState::Inactive);
+        let root: serde_json::Value = serde_json::from_str(&cfg.text(CONFIG).unwrap()).unwrap();
+        assert_eq!(root["model"], "gpt-5", "the sibling key survives");
+        let entries = root["hooks"]["SessionStart"].as_array().unwrap();
+        assert_eq!(entries.len(), 1, "only ours was scrubbed");
+        assert_eq!(entries[0]["bash"], "echo mine");
+        assert!(
+            root["hooks"]["Stop"].is_array(),
+            "a sibling event we never touched survives"
+        );
+
+        let writes = cfg.writes();
+        assert_eq!(a(&cfg).remove().state, TriggerState::Inactive);
+        assert_eq!(cfg.writes(), writes, "second remove writes nothing");
+    }
+
+    #[test]
+    fn present_is_honest() {
+        let cfg = MemConfig::default();
+        let adapter = a(&cfg);
+        assert!(!adapter.present());
         adapter.install();
         assert!(adapter.present());
-        let report = adapter.remove();
-        assert_eq!(report.state, TriggerState::Inactive);
-        assert!(!home.0.join("hooks").join("topos.json").exists());
-        assert_eq!(adapter.remove().state, TriggerState::Inactive, "idempotent");
+        adapter.remove();
         assert!(!adapter.present());
     }
 }

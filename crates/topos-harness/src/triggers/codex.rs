@@ -1,70 +1,89 @@
-//! `codex` — the session-start auto-update hook in `<root>/config.toml` (production root:
-//! `$CODEX_HOME` else `~/.codex`). The config is TOML and no TOML dependency exists in this
-//! crate, so the edit mirrors the Hermes YAML discipline: a **line-anchored merge** handling
-//! ONLY provable shapes, byte-preserving everywhere else, failing closed (`Degraded`, ZERO
-//! writes) on anything it cannot prove.
+//! `codex` — the session-start auto-update hook in `<root>/hooks.json` (production root:
+//! `$CODEX_HOME` else `~/.codex`), plus the ONE switch that makes codex read hooks at all:
+//! `hooks = true` under `[features]` in `<root>/config.toml`.
 //!
-//! Install appends, at EOF, one sentinel-marked block:
+//! Two surfaces, one trigger:
 //!
-//! ```toml
-//! # topos:currency
-//! [[hooks.SessionStart]]
-//! [[hooks.SessionStart.hooks]]
-//! type = "command"
-//! command = "command -v topos >/dev/null 2>&1 && topos update --quiet || true"
-//! ```
+//! - **`hooks.json`** is an ordinary member of the strict-JSON family ([`super::cc_hooks`]):
+//!   Claude-Code-shaped matcher-free groups under a top-level `"hooks"` map, event key
+//!   `"SessionStart"`, handler `{"type": "command", "command": <the guarded sweep>,
+//!   "timeout": 60}` — so the sentinel-keyed ownership, adopt-or-leave, in-place migration and
+//!   prune-only-what-we-emptied removal are the same machinery every other JSON harness runs.
+//! - **`config.toml`** gets `hooks = true` inserted right after an existing top-level
+//!   `[features]` header, or appended as a new `[features]` table at EOF. The edit is a
+//!   line-anchored merge in the Hermes YAML discipline (no TOML dependency here): every other
+//!   line re-emits byte-for-byte, and anything it cannot prove — non-UTF-8 bytes, a leading
+//!   byte-order mark hiding the first line's true content — fails closed with ZERO writes.
 //!
-//! — and ONLY when the existing file holds no hooks table (no line whose trim starts with
-//! `[hooks` or `[[hooks`, and no top-level-looking `hooks =` assignment, which an appended block
-//! would duplicate) and no sentinel already. A present sentinel with our exact contiguous block
-//! is a true no-op; a sentinel in any other shape, or any existing hooks table, fails closed /
-//! adopts-or-leaves. Remove scrubs exactly the contiguous block it wrote — anchored on the
-//! sentinel comment line through the block's last `command = …` line and byte-verified against
-//! the canonical block before deleting — otherwise `Degraded`, zero writes.
+//! Codex's hooks used to live in a `[[hooks.SessionStart]]` block topos appended to `config.toml`
+//! itself. That mechanism is gone. There is no migration and no cleanup: a block an earlier build
+//! wrote is dead bytes in a file this adapter no longer writes hooks into.
 //!
-//! **Evidence level:** the hook configuration struct names were verified against a live
-//! codex-cli 0.144.4 binary (2026-07-16); the exact TOML nesting above is INFERRED from those
-//! structs, not probed end-to-end.
+//! **The feature switch is the one harness-owned knob topos sets.** It is codex's master switch
+//! for the mechanism topos was just asked to arm — not its consent: consent is the per-definition
+//! trust codex asks for in its own UI, which topos never writes and cannot read. A `hooks` key
+//! already under `[features]` is rewritten to `true` rather than duplicated beside; a removal
+//! leaves the switch exactly as it found it, because turning codex's whole hook system off would
+//! reach far past the one entry a scrub owns.
+//!
+//! **Evidence level:** the two surfaces and their shapes are taken from herdr's shipped Codex
+//! integration (Apache-2.0), which writes this `hooks.json` schema and this `[features]` flag; no
+//! live build was probed here.
 //!
 //! **Consent posture — `Active` is NEVER claimed:** codex gates hooks behind persisted
-//! per-definition trust granted in its own UI, and that trust store is not readable evidence.
-//! A successful install reports `Inactive` + the explicit-pull floor with a note naming the
-//! step still owed; the kind when the hook would fire is `SessionStart`. This adapter never
-//! writes codex's trust state.
+//! per-definition trust granted in its own UI, and that trust store is not readable evidence. A
+//! successful install reports `Inactive` + the explicit-pull floor with a note naming the step
+//! still owed; the kind when the hook would fire is `SessionStart`. This adapter never writes
+//! codex's trust state.
 
 use std::path::{Path, PathBuf};
 
 use topos_types::{CurrencyKind, TriggerState};
 
-use crate::{ConfigStore, trigger_report};
+use crate::ConfigStore;
 
 use crate::registry::{self, Root};
 
-use super::{GUARDED_SWEEP, SENTINEL, TriggerAdapter, TriggerArtifact, TriggerReport};
+use super::cc_hooks::{JsonHooks, JsonHooksSpec};
+use super::toml_lines::{is_key_line, split_lines, table_header, terminator};
+use super::{TriggerAdapter, TriggerArtifact, TriggerReport};
 
-/// Codex's user config file, under the resolved root.
+/// Codex's user config file, under the resolved root — the `[features]` switch lives here.
 const CONFIG_FILENAME: &str = "config.toml";
-
-/// The structured marker identity reported in [`TriggerReport::marker_id`].
-const MARKER_ID: &str = "topos:codex:currency:1";
 
 /// The consent step still owed after a successful registration (codex's own trust prompt).
 const NOTE: &str =
     "trust the hook inside Codex (it will prompt) — until then, explicit `topos update`";
 
-/// The exact block install appends (also the whole fresh-file config): the sentinel anchor line,
-/// the two array-of-tables headers, and the guarded sweep — quoted, WITHOUT the in-command
-/// sentinel suffix (the anchor line is the sentinel here; TOML has no inert in-string comment).
-/// Composed from the shared consts so the one sweep spelling can never drift per-surface.
-fn block() -> String {
-    format!(
-        "{SENTINEL}\n[[hooks.SessionStart]]\n[[hooks.SessionStart.hooks]]\ntype = \"command\"\ncommand = \"{GUARDED_SWEEP}\"\n"
-    )
-}
+/// The hook entry itself. Schema 2 = the `hooks.json` entry (schema 1 was the retired
+/// `config.toml` block). `placed_state` is `Inactive` by construction: codex's trust prompt is
+/// owed no matter how the write went.
+pub(crate) static SPEC: JsonHooksSpec = JsonHooksSpec {
+    slug: "codex",
+    marker_id: "topos:codex:currency:2",
+    config_file: "hooks.json",
+    events_path: &["hooks"],
+    event: "SessionStart",
+    grouped: true,
+    matcher: None,
+    handler_type: true,
+    command_key: "command",
+    timeout: Some(("timeout", 60)),
+    handler_async: false,
+    // Unmarked, deliberately: codex validates hook output against a strict schema and fails the
+    // whole session-start hook on an unknown field.
+    hook_dialect: None,
+    root_seed: None,
+    live_kind: CurrencyKind::SessionStart, // what fires when live; never reported live (see above)
+    placed_state: TriggerState::Inactive,
+    note: Some(NOTE),
+};
 
-/// The `codex` [`TriggerAdapter`]. Holds the resolved config root (injected, so tests never
-/// touch a real `~/.codex`) and the [`ConfigStore`] port.
+/// The `codex` [`TriggerAdapter`]: the shared JSON-hooks engine over `hooks.json`, wrapped with
+/// the `config.toml` feature-switch edit. The wrapper owns nothing the base does — every
+/// classification, ownership and scrub decision about the entry is the base's.
 pub(crate) struct Codex<'a> {
+    hooks: JsonHooks<'a>,
     root: PathBuf,
     cfg: &'a dyn ConfigStore,
 }
@@ -81,34 +100,42 @@ pub(crate) fn adapter<'a>(home: &Path, cfg: &'a dyn ConfigStore) -> Codex<'a> {
 
 impl<'a> Codex<'a> {
     pub(crate) fn new(root: PathBuf, cfg: &'a dyn ConfigStore) -> Self {
-        Self { root, cfg }
+        Self {
+            hooks: JsonHooks::new(&SPEC, root.clone(), cfg),
+            root,
+            cfg,
+        }
     }
 
     fn config_path(&self) -> PathBuf {
         self.root.join(CONFIG_FILENAME)
     }
 
-    fn out(&self, state: TriggerState, touched: bool, note: Option<&'static str>) -> TriggerReport {
-        trigger_report(
-            "codex",
-            CurrencyKind::SessionStart, // what fires when live; never reported live (see above)
-            state,
-            touched.then(|| self.config_path().to_string_lossy().into_owned()),
-            MARKER_ID,
-            note,
-        )
+    /// Set `[features] hooks = true` in `config.toml`. `Ok(true)` = the file was written,
+    /// `Ok(false)` = it already said so (a true no-op), `Err(reason)` = unreadable or an
+    /// unprovable shape, ZERO writes either way.
+    fn arm_hooks_feature(&self) -> Result<bool, &'static str> {
+        let path = self.config_path();
+        let current = self.cfg.read(&path).map_err(|e| crate::io_reason(&e))?;
+        match plan_feature(current.as_deref()) {
+            FeaturePlan::Leave => Ok(false),
+            FeaturePlan::Unprovable => Err(crate::UNPROVABLE_REASON),
+            FeaturePlan::Write(bytes) => match self.cfg.replace(&path, &bytes) {
+                Ok(()) => Ok(true),
+                Err(e) => Err(crate::io_reason(&e)),
+            },
+        }
     }
 
-    fn apply(&self, plan: EditPlan) -> TriggerReport {
-        match plan {
-            EditPlan::Leave(state, note) => self.out(state, false, note),
-            EditPlan::Write(bytes, state, note) => {
-                match self.cfg.replace(&self.config_path(), &bytes) {
-                    Ok(()) => self.out(state, true, note),
-                    Err(e) => self.out(TriggerState::Degraded, false, Some(crate::io_reason(&e))),
-                }
-            }
-        }
+    fn degraded(&self, touched: Option<String>, reason: &'static str) -> TriggerReport {
+        crate::trigger_report(
+            SPEC.slug,
+            SPEC.live_kind,
+            TriggerState::Degraded,
+            touched,
+            SPEC.marker_id,
+            Some(reason),
+        )
     }
 }
 
@@ -117,247 +144,224 @@ impl TriggerAdapter for Codex<'_> {
         "codex"
     }
 
+    /// The entry first, the switch second. A registration that could not place the entry never
+    /// touches `config.toml` at all: enabling codex's hook system is only ever a step toward
+    /// arming OUR trigger, never a thing done on its own.
     fn install(&self) -> TriggerReport {
-        match self.cfg.read(&self.config_path()) {
-            Ok(current) => self.apply(plan_install(current.as_deref())),
-            Err(e) => self.out(TriggerState::Degraded, false, Some(crate::io_reason(&e))),
+        let mut report = self.hooks.install();
+        if !matches!(report.state, TriggerState::Active | TriggerState::Inactive) {
+            return report; // Degraded, or somebody's own hook adopted-or-left
         }
-    }
-
-    fn remove(&self) -> TriggerReport {
-        match self.cfg.read(&self.config_path()) {
-            Ok(current) => self.apply(plan_remove(current.as_deref())),
-            Err(e) => self.out(TriggerState::Degraded, false, Some(crate::io_reason(&e))),
-        }
-    }
-
-    /// `config.toml` — the file a degraded scrub points a person at.
-    fn config_file(&self) -> Option<PathBuf> {
-        Some(self.config_path())
-    }
-
-    /// Presence = the sentinel anchor with our byte-verified block, right now. Anything
-    /// unreadable or tampered answers `false`.
-    fn present(&self) -> bool {
-        let Ok(Some(bytes)) = self.cfg.read(&self.config_path()) else {
-            return false;
-        };
-        let Ok(text) = std::str::from_utf8(&bytes) else {
-            return false;
-        };
-        let lines = split_lines(text);
-        matches!(sentinel_indices(&lines)[..], [i] if block_verified(&lines, i))
-    }
-
-    /// The TOML config, disclosed ONLY while it actually holds our verified block — and never as a
-    /// path `uninstall` deletes (the block is scrubbed line-surgically, the file kept).
-    fn artifacts(&self) -> Vec<TriggerArtifact> {
-        if self.present() {
-            vec![TriggerArtifact::Path(self.config_path())]
-        } else {
-            Vec::new()
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------------------------
-// The pure line-anchored merge — bytes in → an edit plan out. No I/O; no TOML parse: exactly the
-// shapes provable by line anchors, everything else fails closed.
-// ---------------------------------------------------------------------------------------------
-
-enum EditPlan {
-    Write(Vec<u8>, TriggerState, Option<&'static str>),
-    Leave(TriggerState, Option<&'static str>),
-}
-
-/// Split preserving each line's bytes (terminators included), so untouched lines re-emit
-/// verbatim and the block verify is byte-exact.
-fn split_lines(text: &str) -> Vec<&str> {
-    text.split_inclusive('\n').collect()
-}
-
-fn sentinel_indices(lines: &[&str]) -> Vec<usize> {
-    lines
-        .iter()
-        .enumerate()
-        .filter(|(_, l)| l.trim() == SENTINEL)
-        .map(|(i, _)| i)
-        .collect()
-}
-
-/// Whether the lines from `start` are byte-for-byte our canonical block.
-fn block_verified(lines: &[&str], start: usize) -> bool {
-    let block = block();
-    let n = block.split_inclusive('\n').count();
-    start + n <= lines.len() && lines[start..start + n].concat() == block
-}
-
-/// A line that puts a `hooks` table (or array-of-tables) in play — appending our block beside it
-/// is never provable. The prefix match is deliberately broad (`[hooks…` of any spelling): fail
-/// closed beats guessing.
-fn is_hooks_table_line(trimmed: &str) -> bool {
-    trimmed.starts_with("[hooks") || trimmed.starts_with("[[hooks")
-}
-
-/// A `hooks = …` assignment (or a quoted `"hooks"` key) — an appended `[[hooks.…]]` header would
-/// duplicate the key and break codex's parse, so this too is never provable.
-fn is_hooks_key_line(trimmed: &str) -> bool {
-    trimmed.starts_with("\"hooks\"")
-        || trimmed.starts_with("'hooks'")
-        || trimmed
-            .strip_prefix("hooks")
-            .is_some_and(|rest| rest.trim_start().starts_with('='))
-}
-
-/// Whether any line puts a hooks surface in play (outside our own verified block, which callers
-/// rule out first by the sentinel check).
-fn has_foreign_hooks(lines: &[&str]) -> bool {
-    lines.iter().any(|l| {
-        let t = l.trim();
-        is_hooks_table_line(t) || is_hooks_key_line(t)
-    })
-}
-
-/// A hand-rolled topos hook somewhere in that foreign hooks surface — adopt-or-leave rather than
-/// a plain degrade.
-fn mentions_topos_command(text: &str) -> bool {
-    text.contains("topos update") || text.contains("topos pull")
-}
-
-fn plan_install(current: Option<&[u8]>) -> EditPlan {
-    let placed = TriggerState::Inactive; // NEVER Active: codex's trust prompt is still owed
-    let text = match current {
-        None => return EditPlan::Write(block().into_bytes(), placed, Some(NOTE)),
-        Some(bytes) => match std::str::from_utf8(bytes) {
-            Ok(t) if t.trim().is_empty() => {
-                return EditPlan::Write(block().into_bytes(), placed, Some(NOTE));
+        match self.arm_hooks_feature() {
+            // The entry's own path stays the disclosed one when both were written; a run that
+            // only had the switch left to set names the file it actually touched.
+            Ok(wrote) => {
+                if wrote && report.touched_path.is_none() {
+                    report.touched_path = Some(self.config_path().to_string_lossy().into_owned());
+                }
+                report
             }
+            // The entry may well be on disk — but a trigger codex will not read is not armed, and
+            // the receipt names the file a person has to fix.
+            Err(reason) => self.degraded(report.touched_path, reason),
+        }
+    }
+
+    /// Scrub the entry; leave the feature switch. `hooks = true` governs codex's whole hook
+    /// system, so turning it off on the way out could silence hooks that were never ours.
+    fn remove(&self) -> TriggerReport {
+        self.hooks.remove()
+    }
+
+    /// `hooks.json` — the file our entry lives in, and the one a degraded scrub points a person
+    /// at. (`config.toml` holds a shared switch, not our artifact.)
+    fn config_file(&self) -> Option<PathBuf> {
+        self.hooks.config_file()
+    }
+
+    /// Presence = our sentinel-marked entry in a well-formed `hooks.json`, right now. The feature
+    /// switch is deliberately not part of the answer: a person who turned it off still has our
+    /// entry sitting there, and a scrub must keep reaching it.
+    fn present(&self) -> bool {
+        self.hooks.present()
+    }
+
+    /// `hooks.json` while it holds our entry — and never `config.toml`, whose switch a scrub
+    /// leaves standing.
+    fn artifacts(&self) -> Vec<TriggerArtifact> {
+        self.hooks.artifacts()
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// The pure line-anchored TOML merge for the feature switch — bytes in → an edit plan out. No
+// I/O; no TOML parse: exactly the shapes provable by line anchors, everything else fails closed.
+// ---------------------------------------------------------------------------------------------
+
+/// What the feature-switch edit does: write the post-image bytes, leave the file untouched (it
+/// already says `hooks = true`), or refuse to reason about it at all.
+enum FeaturePlan {
+    Write(Vec<u8>),
+    Leave,
+    Unprovable,
+}
+
+/// The switch as topos writes it, and the whole of a from-scratch `config.toml`.
+const FEATURE_TABLE: &str = "[features]\nhooks = true\n";
+const FEATURE_KEY_LINE: &str = "hooks = true";
+
+/// Whether an assignment line already states `true` — the value read up to a trailing comment (a
+/// boolean can hold neither a quote nor a `#`). A switch already on is left ALONE rather than
+/// re-stated, so a person's indentation and their comment beside it survive every re-arm.
+fn states_true(line: &str) -> bool {
+    line.split_once('=')
+        .is_some_and(|(_, value)| value.split('#').next().unwrap_or("").trim() == "true")
+}
+
+/// Plan the `[features] hooks = true` edit over the existing `config.toml` bytes.
+///
+/// Absent or blank → the table IS the file. Otherwise: an existing `hooks` key under the
+/// top-level `[features]` table is set to `true` in place; else the line is inserted directly
+/// after the first `[features]` header (a key must land inside its own table, and the top is the
+/// one position that is always inside it); else the table is appended at EOF, where a fresh
+/// top-level table can never fall into somebody else's.
+fn plan_feature(current: Option<&[u8]>) -> FeaturePlan {
+    let text = match current {
+        None => return FeaturePlan::Write(FEATURE_TABLE.into()),
+        Some(bytes) => match std::str::from_utf8(bytes) {
+            Ok(t) if t.trim().is_empty() => return FeaturePlan::Write(FEATURE_TABLE.into()),
             Ok(t) => t,
-            Err(_) => return EditPlan::Leave(TriggerState::Degraded, None),
+            Err(_) => return FeaturePlan::Unprovable,
         },
     };
     // A byte-order mark hides the first line's true content from the line anchors — never
     // reasoned about.
     if text.starts_with('\u{feff}') {
-        return EditPlan::Leave(TriggerState::Degraded, None);
+        return FeaturePlan::Unprovable;
     }
-    let lines = split_lines(text);
-    match sentinel_indices(&lines)[..] {
-        [] => {}
-        // Sentinel present with our exact block → a true no-op (still honestly not live).
-        [i] if block_verified(&lines, i) => return EditPlan::Leave(placed, Some(NOTE)),
-        // Sentinel in any other shape (tampered block, duplicates) → never touched.
-        _ => return EditPlan::Leave(TriggerState::Degraded, None),
-    }
-    if has_foreign_hooks(&lines) {
-        // An existing hooks surface we did not write: a hand-rolled topos hook is
-        // adopt-or-leave; anything else is unprovable — either way, zero writes.
-        return if mentions_topos_command(text) {
-            EditPlan::Leave(TriggerState::AlreadyPresentUnmanaged, None)
-        } else {
-            EditPlan::Leave(TriggerState::Degraded, None)
-        };
-    }
-    // Provably clean: append at EOF (terminating an unterminated last line first — the
-    // `[[hooks.…]]` headers are absolute paths, so an EOF append is always top-level).
-    let mut out = text.as_bytes().to_vec();
-    if !out.ends_with(b"\n") {
-        out.push(b'\n');
-    }
-    out.extend_from_slice(block().as_bytes());
-    EditPlan::Write(out, placed, Some(NOTE))
-}
 
-fn plan_remove(current: Option<&[u8]>) -> EditPlan {
-    let text = match current {
-        None => return EditPlan::Leave(TriggerState::Inactive, None), // nothing to remove
-        Some(bytes) => match std::str::from_utf8(bytes) {
-            Ok(t) => t,
-            Err(_) => {
-                return EditPlan::Leave(TriggerState::Degraded, Some(crate::UNPROVABLE_REASON));
-            }
-        },
-    };
     let lines = split_lines(text);
-    match sentinel_indices(&lines)[..] {
-        [] => {
-            if has_foreign_hooks(&lines) && mentions_topos_command(text) {
-                EditPlan::Leave(TriggerState::AlreadyPresentUnmanaged, None)
-            } else {
-                EditPlan::Leave(TriggerState::Inactive, None)
+    let mut header_at = None;
+    let mut key_at = None;
+    let mut in_features = false;
+    for (i, line) in lines.iter().enumerate() {
+        if let Some(header) = table_header(line) {
+            in_features = header == "[features]";
+            if in_features && header_at.is_none() {
+                header_at = Some(i);
             }
+            continue;
         }
-        [i] if block_verified(&lines, i) => {
-            // Scrub exactly the contiguous block we wrote — every other byte verbatim.
-            let n = block().split_inclusive('\n').count();
-            let mut out = String::with_capacity(text.len());
-            for (idx, line) in lines.iter().enumerate() {
-                if (i..i + n).contains(&idx) {
-                    continue;
-                }
+        if in_features && key_at.is_none() && is_key_line(line, "hooks") {
+            key_at = Some(i);
+        }
+    }
+
+    if let Some(i) = key_at {
+        if states_true(lines[i]) {
+            return FeaturePlan::Leave; // already on → a true no-op, whatever its spelling
+        }
+        // The switch is codex's, and this is the line that states it: set it, never duplicate it.
+        let replacement = format!("{FEATURE_KEY_LINE}{}", terminator(lines[i]));
+        let mut out = String::with_capacity(text.len() + replacement.len());
+        for (idx, line) in lines.iter().enumerate() {
+            if idx == i {
+                out.push_str(&replacement);
+            } else {
                 out.push_str(line);
             }
-            EditPlan::Write(out.into_bytes(), TriggerState::Inactive, None)
         }
-        // The sentinel is there but the block does not byte-verify (a hand edit): deleting on a
-        // guess could take user bytes with it — Degraded, zero writes.
-        _ => EditPlan::Leave(TriggerState::Degraded, Some(crate::UNPROVABLE_REASON)),
+        return FeaturePlan::Write(out.into_bytes());
     }
+
+    if let Some(i) = header_at {
+        let term = terminator(lines[i]);
+        let mut out = String::with_capacity(text.len() + FEATURE_KEY_LINE.len() + 2);
+        for (idx, line) in lines.iter().enumerate() {
+            out.push_str(line);
+            if idx == i {
+                // A header that ends the file unterminated needs one before the key can follow.
+                if !line.ends_with('\n') {
+                    out.push_str(term);
+                }
+                out.push_str(FEATURE_KEY_LINE);
+                out.push_str(term);
+            }
+        }
+        return FeaturePlan::Write(out.into_bytes());
+    }
+
+    // No `[features]` table at all: append one at EOF, separated by a blank line (a top-level
+    // table header is absolute, so an EOF append can never land inside another table).
+    let mut out = text.trim_end_matches('\n').to_owned();
+    if !out.is_empty() {
+        out.push_str("\n\n");
+    }
+    out.push_str(FEATURE_TABLE);
+    FeaturePlan::Write(out.into_bytes())
 }
 
 #[cfg(test)]
 mod tests {
     use super::super::testutil::{ErrConfig, MemConfig};
+    use super::super::{SENTINEL, SHELL_SWEEP_LINE};
     use super::*;
 
     fn a<'c>(cfg: &'c MemConfig) -> Codex<'c> {
         Codex::new(PathBuf::from("/x"), cfg)
     }
 
+    const HOOKS: &str = "/x/hooks.json";
     const CONFIG: &str = "/x/config.toml";
 
-    /// The byte-exact block fixture — what a fresh install writes, pinned as a literal so a
-    /// drift in the composed `block()` (or the shared consts) fails loudly here.
-    const BLOCK_FIXTURE: &str = r#"# topos:currency
-[[hooks.SessionStart]]
-[[hooks.SessionStart.hooks]]
-type = "command"
-command = "command -v topos >/dev/null 2>&1 && topos update --quiet || true"
-"#;
+    /// The byte-exact entry a fresh install writes, pinned as a literal so a drift in the shared
+    /// consts or the family's writer style fails loudly here.
+    const HOOKS_FIXTURE: &str = "\
+{
+  \"hooks\": {
+    \"SessionStart\": [
+      {
+        \"hooks\": [
+          {
+            \"command\": \"command -v topos >/dev/null 2>&1 && topos update --quiet || true  # topos:currency\",
+            \"timeout\": 60,
+            \"type\": \"command\"
+          }
+        ]
+      }
+    ]
+  }
+}
+";
 
     #[test]
-    fn fresh_install_writes_exactly_the_block_and_never_claims_active() {
+    fn fresh_install_writes_the_entry_and_the_switch_and_never_claims_active() {
         let cfg = MemConfig::default();
         let report = a(&cfg).install();
         assert_eq!(report.agent, "codex");
-        assert_eq!(report.marker_id, MARKER_ID);
+        assert_eq!(report.marker_id, "topos:codex:currency:2");
         // Codex gates hooks behind its own trust prompt — Active is never claimed.
         assert_eq!(report.state, TriggerState::Inactive);
         assert_eq!(report.currency_kind, CurrencyKind::ExplicitPullOnly);
         assert!(report.note.as_deref().unwrap().contains("trust the hook"));
-        assert_eq!(report.touched_path.as_deref(), Some(CONFIG));
-        assert_eq!(cfg.text(CONFIG).as_deref(), Some(BLOCK_FIXTURE));
-        assert_eq!(cfg.writes(), 1);
-        // The block's command is the guarded sweep, quoted, without an in-string sentinel.
-        assert!(block().contains(&format!("command = \"{GUARDED_SWEEP}\"")));
-    }
-
-    #[test]
-    fn install_appends_at_eof_and_terminates_an_unterminated_last_line() {
-        let cfg = MemConfig::with_file(CONFIG, "model = \"gpt-5-codex\""); // no trailing newline
-        let report = a(&cfg).install();
-        assert_eq!(report.state, TriggerState::Inactive);
         assert_eq!(
-            cfg.text(CONFIG),
-            Some(format!("model = \"gpt-5-codex\"\n{BLOCK_FIXTURE}")),
+            report.touched_path.as_deref(),
+            Some(HOOKS),
+            "the entry's own file is the disclosed one"
         );
+        assert_eq!(cfg.text(HOOKS).as_deref(), Some(HOOKS_FIXTURE));
+        assert_eq!(
+            cfg.text(CONFIG).as_deref(),
+            Some("[features]\nhooks = true\n")
+        );
+        assert_eq!(cfg.writes(), 2, "one file each, no more");
     }
 
     #[test]
     fn install_is_idempotent_a_true_no_op_on_rerun() {
-        let cfg = MemConfig::with_file(CONFIG, "model = \"gpt-5-codex\"\n");
+        let cfg = MemConfig::default();
         a(&cfg).install();
-        let after_first = cfg.text(CONFIG);
+        let after_first = (cfg.text(HOOKS), cfg.text(CONFIG));
         let report = a(&cfg).install();
         assert_eq!(report.state, TriggerState::Inactive);
         assert!(
@@ -365,91 +369,195 @@ command = "command -v topos >/dev/null 2>&1 && topos update --quiet || true"
             "the consent note rides the no-op too"
         );
         assert!(report.touched_path.is_none());
-        assert_eq!(cfg.writes(), 1, "second install writes nothing");
-        assert_eq!(cfg.text(CONFIG), after_first);
+        assert_eq!(cfg.writes(), 2, "second install writes nothing");
+        assert_eq!((cfg.text(HOOKS), cfg.text(CONFIG)), after_first);
     }
 
+    /// The switch goes directly under an existing `[features]` header — inside the table it
+    /// belongs to — and every other line of the user's config re-emits byte-for-byte.
     #[test]
-    fn any_existing_hooks_surface_fails_closed_or_adopts() {
-        // A foreign hooks table with no topos command → unprovable, zero writes.
-        for shape in [
-            "[hooks]\nfoo = 1\n",
-            "[[hooks.SessionStart]]\ncommand = \"echo hi\"\n",
-            "hooks = { }\n",
-            "\"hooks\" = { }\n",
+    fn the_switch_lands_inside_an_existing_features_table() {
+        let before =
+            "model = \"gpt-5-codex\"\n\n[features]\nweb_search = true\n\n[tui]\nmouse = false\n";
+        let cfg = MemConfig::with_file(CONFIG, before);
+        a(&cfg).install();
+        assert_eq!(
+            cfg.text(CONFIG).as_deref(),
+            Some(
+                "model = \"gpt-5-codex\"\n\n[features]\nhooks = true\nweb_search = true\n\n[tui]\nmouse = false\n"
+            )
+        );
+    }
+
+    /// With no `[features]` table the whole table is appended at EOF, after a blank line and an
+    /// added terminator for an unterminated last line.
+    #[test]
+    fn the_switch_appends_a_features_table_at_eof() {
+        let cfg = MemConfig::with_file(CONFIG, "model = \"gpt-5-codex\""); // no trailing newline
+        a(&cfg).install();
+        assert_eq!(
+            cfg.text(CONFIG).as_deref(),
+            Some("model = \"gpt-5-codex\"\n\n[features]\nhooks = true\n")
+        );
+    }
+
+    /// A `hooks` key already under `[features]` is the line topos sets — never a duplicate key
+    /// beside it, which is what would break codex's parse. A `hooks` key in some OTHER table is
+    /// somebody else's setting and does not count.
+    #[test]
+    fn an_existing_hooks_key_is_set_in_place() {
+        let cfg = MemConfig::with_file(CONFIG, "[features]\nhooks = false\n");
+        a(&cfg).install();
+        let after = cfg.text(CONFIG).unwrap();
+        assert_eq!(after, "[features]\nhooks = true\n");
+        assert_eq!(after.matches("hooks =").count(), 1, "set, not duplicated");
+
+        // Already true → the config is not rewritten at all (only the entry is written), and a
+        // switch a person spelled their own way — indented, with their comment beside it — is
+        // left exactly as they wrote it.
+        for already_on in [
+            "[features]\nhooks = true\nweb_search = true\n",
+            "[features]\n  hooks = true  # on purpose\n",
         ] {
-            let cfg = MemConfig::with_file(CONFIG, shape);
-            let report = a(&cfg).install();
-            assert_eq!(report.state, TriggerState::Degraded, "{shape:?}");
-            assert_eq!(cfg.writes(), 0);
-            assert_eq!(cfg.text(CONFIG).as_deref(), Some(shape), "byte-untouched");
+            let cfg = MemConfig::with_file(CONFIG, already_on);
+            a(&cfg).install();
+            assert_eq!(cfg.text(CONFIG).as_deref(), Some(already_on));
+            assert_eq!(cfg.writes(), 1, "the entry only");
         }
-        // A hand-rolled topos hook inside a hooks table → adopt-or-leave.
+
+        // A same-named key under a different table is not the switch.
+        let cfg = MemConfig::with_file(CONFIG, "[sandbox]\nhooks = false\n");
+        a(&cfg).install();
+        assert_eq!(
+            cfg.text(CONFIG).as_deref(),
+            Some("[sandbox]\nhooks = false\n\n[features]\nhooks = true\n")
+        );
+    }
+
+    /// CRLF in, CRLF out: an inserted line takes the terminator of the line it follows.
+    #[test]
+    fn an_inserted_line_keeps_the_files_own_line_endings() {
+        let cfg = MemConfig::with_file(CONFIG, "[features]\r\nweb_search = true\r\n");
+        a(&cfg).install();
+        assert_eq!(
+            cfg.text(CONFIG).as_deref(),
+            Some("[features]\r\nhooks = true\r\nweb_search = true\r\n")
+        );
+    }
+
+    /// A config topos cannot reason about is never written — and the whole registration says so,
+    /// because an entry codex will not read is not an armed trigger.
+    #[test]
+    fn an_unprovable_config_degrades_and_is_never_rewritten() {
+        // Non-UTF-8 bytes: nothing for the line anchors to stand on.
+        let cfg = MemConfig::default();
+        cfg.set_raw(CONFIG, b"\xff\xfe not text");
+        let report = a(&cfg).install();
+        assert_eq!(report.state, TriggerState::Degraded);
+        assert_eq!(report.currency_kind, CurrencyKind::ExplicitPullOnly);
+        assert!(report.note.is_some(), "a degrade says why");
+        assert_eq!(
+            report.touched_path.as_deref(),
+            Some(HOOKS),
+            "the entry that DID land is still disclosed"
+        );
+        assert_eq!(cfg.writes(), 1, "the entry only — config.toml is untouched");
+
+        // A byte-order mark hides the first line's true content from the anchors.
+        let bom = "\u{feff}[features]\nweb_search = true\n";
+        let cfg = MemConfig::with_file(CONFIG, bom);
+        assert_eq!(a(&cfg).install().state, TriggerState::Degraded);
+        assert_eq!(cfg.text(CONFIG).as_deref(), Some(bom), "byte-untouched");
+    }
+
+    /// A malformed `hooks.json` stops the whole install: the switch is only ever set on the way
+    /// to arming our own entry, never on its own.
+    #[test]
+    fn a_malformed_hooks_file_degrades_before_the_switch_is_touched() {
+        let cfg = MemConfig::with_file(HOOKS, "{ nope");
+        let report = a(&cfg).install();
+        assert_eq!(report.state, TriggerState::Degraded);
+        assert_eq!(cfg.writes(), 0);
+        assert!(cfg.text(CONFIG).is_none(), "config.toml is never created");
+    }
+
+    /// Somebody's own sweep hook is adopted-or-left — and their machine's `config.toml` stays
+    /// untouched too, since topos armed nothing there.
+    #[test]
+    fn a_hand_rolled_topos_hook_is_adopt_or_leave() {
         let cfg = MemConfig::with_file(
-            CONFIG,
-            "[[hooks.SessionStart]]\ncommand = \"topos update --quiet\"\n",
+            HOOKS,
+            "{\"hooks\":{\"SessionStart\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"topos update --quiet\"}]}]}}",
         );
         let report = a(&cfg).install();
         assert_eq!(report.state, TriggerState::AlreadyPresentUnmanaged);
         assert_eq!(cfg.writes(), 0);
+        assert!(cfg.text(CONFIG).is_none());
         assert_eq!(
             a(&cfg).remove().state,
             TriggerState::AlreadyPresentUnmanaged
         );
     }
 
+    /// A stale managed entry — recognized by the sentinel alone — is rewritten in place.
     #[test]
-    fn a_tampered_sentinel_block_degrades_with_zero_writes() {
-        // The sentinel line survives but the block was hand-edited: neither install nor remove
-        // will guess at a deletion.
-        let tampered = "# topos:currency\n[[hooks.SessionStart]]\ncommand = \"something else\"\n";
-        let cfg = MemConfig::with_file(CONFIG, tampered);
-        assert_eq!(a(&cfg).install().state, TriggerState::Degraded);
-        assert_eq!(a(&cfg).remove().state, TriggerState::Degraded);
-        assert_eq!(cfg.writes(), 0);
-        assert_eq!(cfg.text(CONFIG).as_deref(), Some(tampered));
-        assert!(
-            !a(&cfg).present(),
-            "a tampered block is not provable presence"
+    fn a_stale_managed_entry_migrates_in_place() {
+        let cfg = MemConfig::with_file(
+            HOOKS,
+            "{\"hooks\":{\"SessionStart\":[{\"matcher\":\"startup\",\"hooks\":[{\"type\":\"command\",\"command\":\"topos pull --quiet  # topos:currency\"}]}]}}",
         );
+        assert_eq!(a(&cfg).install().state, TriggerState::Inactive);
+        let text = cfg.text(HOOKS).unwrap();
+        assert_eq!(text.matches(SENTINEL).count(), 1, "never duplicated");
+        assert!(text.contains(SHELL_SWEEP_LINE));
     }
 
+    /// The scrub takes our entry and leaves the switch standing: `hooks = true` governs codex's
+    /// whole hook system, and hooks that were never ours may depend on it.
     #[test]
-    fn non_utf8_bytes_degrade_with_zero_writes() {
-        let cfg = MemConfig::default();
-        cfg.set_raw(CONFIG, b"\xff\xfe not text");
-        assert_eq!(a(&cfg).install().state, TriggerState::Degraded);
-        assert_eq!(a(&cfg).remove().state, TriggerState::Degraded);
-        assert_eq!(cfg.writes(), 0);
-    }
-
-    #[test]
-    fn remove_scrubs_exactly_the_block_then_is_idempotent() {
-        let before = "model = \"gpt-5-codex\"\nsandbox = \"strict\"\n";
+    fn remove_scrubs_the_entry_and_leaves_the_switch_then_is_idempotent() {
+        let before = "model = \"gpt-5-codex\"\n";
         let cfg = MemConfig::with_file(CONFIG, before);
         a(&cfg).install();
 
         let report = a(&cfg).remove();
         assert_eq!(report.state, TriggerState::Inactive);
         assert_eq!(report.currency_kind, CurrencyKind::ExplicitPullOnly);
+        let root: serde_json::Value = serde_json::from_str(&cfg.text(HOOKS).unwrap()).unwrap();
+        assert!(
+            root.get("hooks").is_none(),
+            "the map we created is pruned back"
+        );
         assert_eq!(
             cfg.text(CONFIG).as_deref(),
-            Some(before),
-            "the user's bytes are restored exactly"
+            Some("model = \"gpt-5-codex\"\n\n[features]\nhooks = true\n"),
+            "the feature switch survives the scrub"
         );
 
         let writes = cfg.writes();
-        let again = a(&cfg).remove();
-        assert_eq!(again.state, TriggerState::Inactive);
+        assert_eq!(a(&cfg).remove().state, TriggerState::Inactive);
         assert_eq!(cfg.writes(), writes, "second remove writes nothing");
 
-        // A remove over an absent file is a clean no-op too.
+        // A remove over an absent install is a clean no-op that creates nothing.
         let absent = MemConfig::default();
         assert_eq!(a(&absent).remove().state, TriggerState::Inactive);
-        assert!(
-            absent.text(CONFIG).is_none(),
-            "remove never creates the file"
+        assert!(absent.text(HOOKS).is_none());
+        assert!(absent.text(CONFIG).is_none());
+    }
+
+    /// Disclosure: the entry's file, only while it holds our entry — never `config.toml`, which
+    /// a scrub does not reach.
+    #[test]
+    fn only_the_hooks_file_is_ever_disclosed() {
+        let cfg = MemConfig::default();
+        let adapter = a(&cfg);
+        assert!(adapter.artifacts().is_empty());
+        adapter.install();
+        assert_eq!(
+            adapter.artifacts(),
+            vec![TriggerArtifact::Path(PathBuf::from(HOOKS))]
         );
+        assert_eq!(adapter.config_file().as_deref(), Some(Path::new(HOOKS)));
     }
 
     #[test]

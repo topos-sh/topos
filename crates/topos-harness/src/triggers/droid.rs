@@ -1,11 +1,18 @@
-//! `droid` — the session-start auto-update hook in `<root>/hooks.json` (production root:
+//! `droid` — the session-start auto-update hook in `<root>/settings.json` (production root:
 //! `~/.factory`): a Claude-Code-COMPATIBLE schema — top-level `"hooks"` → `"SessionStart"` →
 //! matcher groups wrapping handler arrays — with the handler like Claude Code's minus `async`
 //! (unsupported there per the docs): `{"type": "command", "command": …, "timeout": 60}`.
 //!
+//! **The file moved.** Factory reads its hooks from `settings.json`; `hooks.json` is where an
+//! older Droid looked, and an entry left there is simply never read. topos writes the current
+//! location and nothing else: no migration, no cleanup — a `hooks.json` an earlier build wrote
+//! is dead bytes in a file topos no longer touches.
+//!
 //! **Evidence level: vendor docs, unverified** — the schema compatibility is the one Droid's
-//! published hooks documentation claims; no live build was probed. The docs describe no
-//! per-hook consent gate, so a placed entry reports `Active` carrying the docs-level note.
+//! published hooks documentation claims, and the file location is corroborated by herdr's
+//! shipped Factory integration (Apache-2.0), which writes `settings.json` and migrates the old
+//! `hooks.json` away; no live build was probed here. The docs describe no per-hook consent gate,
+//! so a placed entry reports `Active` carrying the docs-level note.
 
 use std::path::{Path, PathBuf};
 
@@ -17,13 +24,16 @@ use super::cc_hooks::{JsonHooks, JsonHooksSpec};
 
 pub(crate) static SPEC: JsonHooksSpec = JsonHooksSpec {
     slug: "droid",
-    marker_id: "topos:droid:currency:1",
-    config_file: "hooks.json",
+    // Schema 2 = the entry in `settings.json` (schema 1 sat in the retired `hooks.json`).
+    marker_id: "topos:droid:currency:2",
+    config_file: "settings.json",
     events_path: &["hooks"],
     event: "SessionStart",
     grouped: true,
+    matcher: None,
     handler_type: true,
-    timeout: Some(60),
+    command_key: "command",
+    timeout: Some(("timeout", 60)),
     handler_async: false,
     hook_dialect: None,
     root_seed: None,
@@ -51,7 +61,7 @@ mod tests {
         JsonHooks::new(&SPEC, PathBuf::from("/d"), cfg)
     }
 
-    const CONFIG: &str = "/d/hooks.json";
+    const CONFIG: &str = "/d/settings.json";
 
     /// The exact bytes a fresh install produces — the Claude-Code-compatible group shape, the
     /// handler without `async` (unsupported per the docs).
@@ -78,7 +88,7 @@ mod tests {
         let cfg = MemConfig::default();
         let report = a(&cfg).install();
         assert_eq!(report.agent, "droid");
-        assert_eq!(report.marker_id, "topos:droid:currency:1");
+        assert_eq!(report.marker_id, "topos:droid:currency:2");
         assert_eq!(report.state, TriggerState::Active);
         assert_eq!(report.currency_kind, CurrencyKind::SessionStart);
         assert_eq!(report.note.as_deref(), Some("vendor docs, unverified"));
@@ -88,6 +98,29 @@ mod tests {
             "droid's handler never carries async (unsupported per the docs)"
         );
         assert_eq!(cfg.writes(), 1);
+    }
+
+    /// The entry lives in `settings.json` — the file Factory reads today. The retired
+    /// `hooks.json` is never written, and an entry sitting there is not evidence of anything.
+    #[test]
+    fn the_hook_lands_in_settings_json_and_never_in_the_retired_hooks_file() {
+        const RETIRED: &str = "/d/hooks.json";
+        let cfg = MemConfig::default();
+        let adapter = a(&cfg);
+        adapter.install();
+        assert_eq!(cfg.text(CONFIG).as_deref(), Some(FRESH_INSTALL));
+        assert!(cfg.text(RETIRED).is_none(), "the old file is never written");
+        assert_eq!(
+            adapter.config_file().as_deref(),
+            Some(Path::new(CONFIG)),
+            "the file a person is pointed at is the one topos edits"
+        );
+
+        let stale = MemConfig::with_file(RETIRED, FRESH_INSTALL);
+        assert!(
+            !a(&stale).present(),
+            "an entry in the retired file is never claimed as a live trigger"
+        );
     }
 
     #[test]
