@@ -739,12 +739,31 @@ export interface components {
              */
             converted_from?: string | null;
             /**
+             * @description Whether the proposed bytes came from the MACHINE copy while the command stood in a project
+             *     checkout — the cross-scope ship, which `from_placement` names the folder of. **INFERRED**
+             *     (additive-only).
+             */
+            from_machine?: boolean;
+            /**
+             * @description The folder these bytes were read from, present when it was a CHOICE — one of several edited
+             *     copies (`--dest`), or a copy in a scope other than the one the command stood in. The same
+             *     field the direct publish carries: a proposal ships bytes too, so it owes the same answer.
+             *     **INFERRED** (additive-only).
+             */
+            from_placement?: string | null;
+            /**
              * @description The GOVERNANCE-TRANSFER receipt half on the PROPOSAL arm: the manifest whose local-path
              *     line this publish rewrote to the governed workspace reference (delivery follows once the
              *     proposal is approved). Absent when no manifest referenced the bundle by path. **INFERRED**
              *     (additive-only).
              */
             manifest?: string | null;
+            /**
+             * @description The edited copies in this scope the proposal left alone (populated beside
+             *     `from_placement`). **INFERRED** (additive-only).
+             */
+            other_edited?: string[];
+            other_scope_draft?: null | components["schemas"]["ScopeDraft"];
             /**
              * @description The channel named by `--to` that no longer existed at the proposal's write (the
              *     in-transaction refusal — never a silent mint). **INFERRED** (additive-only).
@@ -859,10 +878,17 @@ export interface components {
              */
             current_generation: number;
             /**
+             * @description Whether the shipped bytes came from the MACHINE copy while the command stood in a project
+             *     checkout — the cross-scope ship, which `from_placement` names the folder of. False for the
+             *     ordinary same-scope publish. **INFERRED** (additive-only).
+             */
+            from_machine?: boolean;
+            /**
              * @description The folder the published bytes were read from, as a person reads it
-             *     (`project/.agents/skills/coolify-deploy`) — present only when a `--dest`/`-a` selection
-             *     named ONE of several EDITED copies. A single edited copy needs no such line: it is the
-             *     draft, and naming its folder would say nothing. **INFERRED** (additive-only).
+             *     (`project/.agents/skills/coolify-deploy`), present when it was a CHOICE — one of several
+             *     edited copies (`--dest`), or a copy in a scope other than the one the command stood in. A
+             *     single edited copy in the standing scope needs no such line: it is the draft, and naming its
+             *     folder would say nothing. **INFERRED** (additive-only).
              */
             from_placement?: string | null;
             /**
@@ -898,11 +924,13 @@ export interface components {
              */
             origin_note?: string | null;
             /**
-             * @description The other EDITED copies, untouched by this publish — each keeps its bytes and becomes an
-             *     ordinary draft ahead of the version just published. Populated on the same condition as
-             *     `from_placement`. **INFERRED** (additive-only).
+             * @description The other EDITED copies IN THIS SCOPE, untouched by this publish — each keeps its bytes and
+             *     becomes an ordinary draft ahead of the version just published. Populated by a `--dest`
+             *     selection among several edited copies (a cross-scope ship discloses the other scope's copy
+             *     through `other_scope_draft` instead). **INFERRED** (additive-only).
              */
             other_edited?: string[];
+            other_scope_draft?: null | components["schemas"]["ScopeDraft"];
             /**
              * @description The channel named by `--to` that no longer EXISTED at the write (deleted between the
              *     client's existence check and the transaction — the in-transaction refusal, never a silent
@@ -1123,6 +1151,23 @@ export interface components {
             skill_id: string;
             /** @description The target workspace id. */
             workspace_id: string;
+        };
+        /**
+         * @description A bundle's copy in the scope this command did NOT act in — disclosed beside a publish that left
+         *     it alone, so the edits it holds are never silently invisible. One command shares them, and which
+         *     one it is follows from `machine`. **INFERRED** (additive-only).
+         */
+        ScopeDraft: {
+            /**
+             * @description The folder that copy stands in, as a person reads it
+             *     (`~/.claude/skills/coolify-deploy` · `project/.agents/skills/coolify-deploy`).
+             */
+            folder: string;
+            /**
+             * @description Whether it is the MACHINE copy (`false` = a project checkout's) — which decides both the
+             *     word the line uses and whether the command that shares it carries `-g`.
+             */
+            machine: boolean;
         };
         /**
          * @description The closed set of terminal outcomes the agent branches on. SCREAMING_SNAKE on the wire.
