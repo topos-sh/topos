@@ -151,24 +151,15 @@ impl PlacementPlan {
     }
 }
 
-/// One covered harness riding the shared target (describe disclosure: which agents the one shared
-/// copy reaches, and whether that claim is vendor-docs-level rather than live-probed).
-#[derive(Debug, Clone)]
-pub(crate) struct CoveredAgent {
-    #[allow(dead_code)]
-    pub slug: String,
-    #[allow(dead_code)]
-    pub docs_level: bool,
-}
-
 /// The full placement plan for one bundle at one scope — WHAT SHOULD STAND. Its targets are the
 /// demand; what topos actually put there is CUSTODY, and that lives in the bundle's own record
 /// (`map.json` for dirs, `entries.json` for config entries), never here.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct PlacementPlan {
     pub targets: Vec<PlannedTarget>,
-    /// The harnesses the shared target covers (empty when no shared target is planned).
-    pub shared_covers: Vec<CoveredAgent>,
+    /// Whether a shared target is planned — i.e. at least one detected harness rides the one
+    /// shared copy (the rest take native copies of their own).
+    pub shared_covered: bool,
     /// PROJECT scope only: the candidate roots [`within_project`] refused — each already rendered
     /// as its typed disclosure ([`escape_line`]). The placement is skipped, never redirected; the
     /// caller surfaces the lines so a silent non-delivery is impossible.
@@ -222,15 +213,12 @@ pub(crate) fn plan_targets(
     for h in detected {
         let support = coverage::shared_dir_support(h.slug);
         if support.covered() {
-            plan.shared_covers.push(CoveredAgent {
-                slug: h.slug.to_owned(),
-                docs_level: support.docs_level(),
-            });
+            plan.shared_covered = true;
         } else {
             native.push(h);
         }
     }
-    if !plan.shared_covers.is_empty() {
+    if plan.shared_covered {
         let dir = prior_dir(ctx, prior, PlacementKind::Shared, None, adopt).unwrap_or_else(|| {
             adopt_override(
                 ctx,
@@ -408,15 +396,12 @@ pub(crate) fn project_plan(
     for h in &detected {
         let support = coverage::shared_dir_support(h.slug);
         if support.covered() {
-            plan.shared_covers.push(CoveredAgent {
-                slug: h.slug.to_owned(),
-                docs_level: support.docs_level(),
-            });
+            plan.shared_covered = true;
         } else {
             native.push(h);
         }
     }
-    if !plan.shared_covers.is_empty() {
+    if plan.shared_covered {
         let shared_root = project_dir.join(".agents/skills");
         match prior_in(PlacementKind::Shared, None) {
             PriorProjectDir::Reuse(dir) => plan.push_dir(dir, PlacementKind::Shared, None),

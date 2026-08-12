@@ -10,8 +10,7 @@
 //! workspace-scoped bearer credential), the lane-side second connect, the session self-end, the
 //! publish/propose/revert/review writes, the current/version/object/catalog/proposals reads, the
 //! delivery + applied-state report, the describe reads (me / channels / review inbox /
-//! log), and the row ops (channel curation / protection / notices-ack
-//! / invitations).
+//! log), and the row ops (protection / notices-ack / invitations).
 
 #![allow(dead_code)] // contract-only: referenced by the OpenAPI derive, routed by the web app.
 
@@ -59,46 +58,6 @@ pub(crate) fn get_me() {}
     ),
 )]
 pub(crate) fn get_channels() {}
-
-#[utoipa::path(
-    put,
-    path = "/v1/workspaces/{ws}/channels/{ch}/skills/{skill}",
-    tag = "writes",
-    params(
-        ("ws" = String, Path, description = "Workspace id."),
-        ("ch" = String, Path, description = "The channel name (created on first placement, member-level self-serve)."),
-        ("skill" = String, Path, description = "The skill's immutable id to place into the channel."),
-        ("Authorization" = String, Header, description = "`Bearer <workspace credential>`."),
-    ),
-    responses(
-        (status = 200, description = "The curation outcome (placed / created, or a 200 DENIED CURATED_ROLE_REQUIRED / BAD_NAME / SKILL_NOT_ACTIVE).", body = JsonEnvelope),
-        (status = 404, description = "Missing/blank credential, unknown/revoked one, or non-member (indistinguishable).", body = JsonEnvelope),
-        (status = 426, description = "The caller's topos release is below this server's floor — the envelope names the floor and carries the `self-update` next action.", body = JsonEnvelope),
-        (status = 429, description = "Rate limited (Retry-After header).", body = JsonEnvelope),
-        (status = 500, description = "Integrity / internal store fault.", body = JsonEnvelope),
-    ),
-)]
-pub(crate) fn channel_place() {}
-
-#[utoipa::path(
-    delete,
-    path = "/v1/workspaces/{ws}/channels/{ch}/skills/{skill}",
-    tag = "writes",
-    params(
-        ("ws" = String, Path, description = "Workspace id."),
-        ("ch" = String, Path, description = "The channel name."),
-        ("skill" = String, Path, description = "The skill's immutable id to remove from the channel."),
-        ("Authorization" = String, Header, description = "`Bearer <workspace credential>`."),
-    ),
-    responses(
-        (status = 200, description = "The curation outcome (removed / not_placed, or a 200 DENIED CURATED_ROLE_REQUIRED).", body = JsonEnvelope),
-        (status = 404, description = "Missing/blank credential, unknown/revoked one, or non-member (indistinguishable).", body = JsonEnvelope),
-        (status = 426, description = "The caller's topos release is below this server's floor — the envelope names the floor and carries the `self-update` next action.", body = JsonEnvelope),
-        (status = 429, description = "Rate limited (Retry-After header).", body = JsonEnvelope),
-        (status = 500, description = "Integrity / internal store fault.", body = JsonEnvelope),
-    ),
-)]
-pub(crate) fn channel_unplace() {}
 
 #[utoipa::path(
     put,

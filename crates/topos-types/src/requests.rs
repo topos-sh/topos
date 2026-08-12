@@ -700,22 +700,6 @@ pub enum DeviceAuthPollStatus {
     Granted,
 }
 
-/// The first-destination HINT an accepted invitation named — decorated onto a `granted` poll (and
-/// the direct-accept answer) so the logged-in client's first `add` can target it. `kind` is the
-/// bundle catalog's own tag (`skill` today) or the literal `channel` — displayed and routed on,
-/// never trusted as authority.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(
-    feature = "contract-derives",
-    derive(schemars::JsonSchema, utoipa::ToSchema)
-)]
-pub struct DeviceAuthHint {
-    /// What the hinted thing is: the catalog's `kind` tag, or `channel`.
-    pub kind: String,
-    /// The hinted bundle's or channel's name in the joined workspace.
-    pub name: String,
-}
-
 /// The workspace context a `granted` poll carries — everything the CLI needs to record what it
 /// logged into (the id it scopes requests by, the address slug it joined at, and a display name).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -760,10 +744,6 @@ pub struct DeviceAuthPollResponse {
     /// approval recorded (a seat picked, an invitation accepted, or a workspace created there).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace: Option<DeviceAuthWorkspace>,
-    /// The invitation's first-destination hint — present only on a `granted` poll whose flow
-    /// carried an invite token naming one.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub hint: Option<DeviceAuthHint>,
 }
 
 /// `POST /v1/login/connect` body — the LANE-SIDE second connect: an already-credentialed machine
@@ -1227,7 +1207,6 @@ mod tests {
             session_id: None,
             session_status: None,
             workspace: None,
-            hint: None,
         };
         let v = serde_json::to_value(&pending).unwrap();
         assert_eq!(v["status"], "pending");
@@ -1243,10 +1222,6 @@ mod tests {
                 workspace_id: "w_acme".to_owned(),
                 name: "acme".to_owned(),
                 display_name: "Acme".to_owned(),
-            }),
-            hint: Some(DeviceAuthHint {
-                kind: "skill".to_owned(),
-                name: "deploy".to_owned(),
             }),
         };
         let v = serde_json::to_value(&granted).unwrap();

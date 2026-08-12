@@ -65,5 +65,6 @@ Reads run autocommit at READ COMMITTED.
 
 Postgres-only (`sqlx` pure-Rust). Dependencies: `topos-core`, `topos-gitstore`, `thiserror`,
 `sqlx`, `tokio` (`time`+`rt`), `getrandom`, `tracing`. Nothing signs, nothing hashes a credential.
-The `test-fixtures` feature exposes only `Authority::from_pool` + the embedded `MIGRATOR`; the
+The `test-fixtures` feature exposes only `Authority::from_pool`, `Authority::with_large_limits`,
+and the embedded `MIGRATOR`; the
 production build never enables it, and the client takes NO edge to this crate (`check-arch`).

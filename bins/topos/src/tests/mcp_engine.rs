@@ -398,20 +398,11 @@ impl DirectorySource for FakeDirectory {
     fn skill_log(&self, _ws: &str, _s: &str) -> Result<WireSkillLog, ClientError> {
         unreachable!()
     }
-    fn channel_place(&self, _ws: &str, _c: &str, _s: &str) -> Result<(), ClientError> {
-        unreachable!()
-    }
-    fn channel_unplace(&self, _ws: &str, _c: &str, _s: &str) -> Result<(), ClientError> {
-        unreachable!()
-    }
     fn protect_skill(&self, _ws: &str, _s: &str, _l: &str) -> Result<(), ClientError> {
         unreachable!()
     }
     fn protect_channel(&self, _ws: &str, _c: &str, _l: &str) -> Result<(), ClientError> {
         unreachable!()
-    }
-    fn ack_notices(&self, _ws: &str, _ids: &[String]) -> Result<(), ClientError> {
-        Ok(())
     }
 }
 struct NoContribute;

@@ -4,10 +4,8 @@
 //! not-found. There is no read-by-bare-hash path anywhere: an object is served only through a
 //! bundle whose live (non-purged) version reaches it.
 
-use std::collections::HashMap;
-
-use topos_core::digest::{self, FileMode, ManifestEntry, RejectReason};
-use topos_gitstore::{LargeObjectStore, RenderedBundle, RenderedFile, Store};
+use topos_core::digest::FileMode;
+use topos_gitstore::{LargeObjectStore, Store};
 
 use crate::authority::{Authority, run_blocking};
 use crate::db::Location;
@@ -307,89 +305,6 @@ pub(crate) async fn log(
         .collect()
 }
 
-/// Assemble + verify a whole bundle for a version, dispatching each file to the store the database
-/// records — the whole-bundle assembly primitive (tests + any composing verification drive it).
-///
-/// **Tree-driven** — render anchors on the version's git **tree structure** (`(path, mode,
-/// git_oid)` per file). The offloaded subset is the workspace's present `large-local` rows, joined
-/// in memory by `git_oid → object_id`; each file's bytes come from the large store (offloaded) or
-/// git (git-resident), re-verified to its content id; the recomputed `bundle_digest` must then
-/// equal the pin.
-///
-/// # Errors
-/// [`AuthorityError::Integrity`] if a file's bytes are missing/corrupt in either store, a stored
-/// path is illegal, or the recomputed digest does not match `expected_bundle_digest`;
-/// [`AuthorityError::Internal`] on a database fault.
-#[cfg_attr(not(test), allow(dead_code))]
-pub(crate) async fn render_version(
-    authority: &Authority,
-    ws: &WorkspaceId,
-    version_id: [u8; 32],
-    expected_bundle_digest: [u8; 32],
-) -> Result<RenderedBundle> {
-    // The offloaded set for this workspace: git_oid -> object_id (small — big blobs are rare). A git-resident
-    // leaf is absent from this map and recovers its id by rehashing the git blob, with no DB dependency.
-    let offloaded: HashMap<[u8; 20], [u8; 32]> = authority
-        .db()
-        .large_local_objects(ws)
-        .await?
-        .into_iter()
-        .map(|(git_oid, object_id)| (git_oid, object_id.0))
-        .collect();
-
-    // The whole-bundle assembly (every blob read + re-hashed) runs on the blocking pool; the
-    // non-`Send` gix `Store` opens + drops inside the closure.
-    let git_dir = authority.workspace_git_dir(ws);
-    let large = authority.large_store(ws);
-    run_blocking(move || {
-        let store = Store::open(&git_dir).map_err(AuthorityError::integrity)?;
-        let structure = store
-            .read_tree_structure(version_id)
-            .map_err(AuthorityError::integrity)?;
-
-        let mut files = Vec::with_capacity(structure.len());
-        let mut manifest = Vec::with_capacity(structure.len());
-        for leaf in structure {
-            let (bytes, content_sha256) = match offloaded.get(&leaf.git_oid) {
-                Some(&object_id) => {
-                    // Offloaded: fetch from the large store (its `get` re-verifies sha256 == object_id).
-                    let bytes = large.get(object_id).map_err(AuthorityError::integrity)?;
-                    (bytes, object_id)
-                }
-                None => store
-                    .read_git_blob_verified(leaf.git_oid)
-                    .map_err(AuthorityError::integrity)?,
-            };
-            manifest.push(ManifestEntry {
-                path: leaf.path.clone(),
-                mode: leaf.mode,
-                content_sha256,
-            });
-            files.push(RenderedFile {
-                path: leaf.path,
-                mode: leaf.mode,
-                bytes,
-                content_sha256,
-            });
-        }
-
-        // Recompute the consent digest over the assembled real bytes and assert it equals the pin — the
-        // integrity gate that makes "reviewed-bytes == run-bytes" hold regardless of which store each blob
-        // came from.
-        let recomputed = digest::bundle_digest(&manifest)
-            .map_err(|r| AuthorityError::integrity(RenderPathRejected(r)))?;
-        if recomputed != expected_bundle_digest {
-            return Err(AuthorityError::integrity(RenderDigestMismatch));
-        }
-        files.sort_by(|a, b| a.path.as_bytes().cmp(b.path.as_bytes()));
-        Ok(RenderedBundle {
-            files,
-            bundle_digest: recomputed,
-        })
-    })
-    .await
-}
-
 #[derive(Debug, thiserror::Error)]
 #[error("a present object's git locator does not resolve to its content id")]
 struct GitLocatorMismatch;
@@ -409,11 +324,3 @@ struct VersionObjectMissing;
 #[derive(Debug, thiserror::Error)]
 #[error("a first-parent log hop has no version row in this bundle")]
 struct LogHopWithoutRow;
-
-#[derive(Debug, thiserror::Error)]
-#[error("recomputed bundle digest does not match the pinned digest")]
-struct RenderDigestMismatch;
-
-#[derive(Debug, thiserror::Error)]
-#[error("a rendered bundle path was rejected by the canonical rules: {0:?}")]
-struct RenderPathRejected(RejectReason);

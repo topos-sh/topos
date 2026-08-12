@@ -26,10 +26,10 @@ use topos_core::digest::{self, FileMode, to_hex};
 use topos_types::requests::{
     DeviceAuthPollRequest, DeviceAuthPollResponse, DeviceAuthPollStatus, DeviceAuthStartRequest,
     DeviceAuthStartResponse, DeviceAuthWorkspace, InvitationData, InvitationRequest,
-    LoginConnectRequest, LoginConnectResponse, NoticeAckRequest, ProposeRequest,
-    ProtectionSetRequest, PublishRequest, RevertRequest, ReviewRequest, WireChannelIndex,
-    WireFileMode, WireMe, WireProposalIndex, WireProposalList, WireProtocolCard, WireSkillIndex,
-    WireSkillLog, WireVersionMeta,
+    LoginConnectRequest, LoginConnectResponse, ProposeRequest, ProtectionSetRequest,
+    PublishRequest, RevertRequest, ReviewRequest, WireChannelIndex, WireFileMode, WireMe,
+    WireProposalIndex, WireProposalList, WireProtocolCard, WireSkillIndex, WireSkillLog,
+    WireVersionMeta,
 };
 use topos_types::{JsonEnvelope, TerminalOutcome, WireCurrentRecord};
 
@@ -1146,10 +1146,6 @@ fn map_poll_response(host: &str, status: u16, bytes: &[u8]) -> Result<DeviceAuth
                 credential,
                 session_id,
                 workspace: wire_workspace(workspace)?,
-                hint: resp.hint.map(|h| crate::plane::GrantHint {
-                    kind: h.kind,
-                    name: h.name,
-                }),
                 // The session's born status, as the grant declares it.
                 link_status: LinkStatus::from_wire(&session_status),
             })
@@ -1344,13 +1340,11 @@ impl ContributeSource for UreqDeviceClient {
 // success; `ok: false` is the typed refusal carrying the wire error's code/outcome verbatim).
 // =================================================================================================
 
-/// The HTTP method a directory row op rides (the routes are REST-shaped: PUT creates/asserts the
-/// row, DELETE removes it, POST carries a batch body).
+/// The HTTP method a directory row op rides. The routes are REST-shaped; the verbs that survive
+/// on this lane all PUT (create/assert the row).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RowMethod {
     Put,
-    Delete,
-    Post,
 }
 
 impl UreqDeviceClient {
@@ -1423,14 +1417,6 @@ impl UreqDeviceClient {
         let _phase = self.dialing();
         let resp = match method {
             RowMethod::Put => send(self.agent.put(&url).header("authorization", &auth))?,
-            RowMethod::Post => send(self.agent.post(&url).header("authorization", &auth))?,
-            // A row DELETE carries no body (the row IS the path).
-            RowMethod::Delete => self
-                .agent
-                .delete(&url)
-                .header("authorization", &auth)
-                .call()
-                .map_err(|e| ClientError::Plane(transport_reason(&self.host(), &e)))?,
         };
         let status = resp.status().as_u16();
         match classify(status) {
@@ -1557,42 +1543,6 @@ impl DirectorySource for UreqDeviceClient {
         )
     }
 
-    fn channel_place(
-        &self,
-        workspace_id: &str,
-        channel: &str,
-        skill_id: &str,
-    ) -> Result<(), ClientError> {
-        ensure_safe_ids_client(skill_id, workspace_id)?;
-        ensure_url_safe_channel(channel)?;
-        self.row_op(
-            RowMethod::Put,
-            workspace_id,
-            &format!("/v1/workspaces/{workspace_id}/channels/{channel}/skills/{skill_id}"),
-            None,
-            "channel place",
-            skill_id,
-        )
-    }
-
-    fn channel_unplace(
-        &self,
-        workspace_id: &str,
-        channel: &str,
-        skill_id: &str,
-    ) -> Result<(), ClientError> {
-        ensure_safe_ids_client(skill_id, workspace_id)?;
-        ensure_url_safe_channel(channel)?;
-        self.row_op(
-            RowMethod::Delete,
-            workspace_id,
-            &format!("/v1/workspaces/{workspace_id}/channels/{channel}/skills/{skill_id}"),
-            None,
-            "channel unplace",
-            skill_id,
-        )
-    }
-
     fn protect_skill(
         &self,
         workspace_id: &str,
@@ -1633,20 +1583,6 @@ impl DirectorySource for UreqDeviceClient {
             Some(&body),
             "protect",
             channel,
-        )
-    }
-
-    fn ack_notices(&self, workspace_id: &str, ids: &[String]) -> Result<(), ClientError> {
-        ensure_safe_ids_client("ack", workspace_id)?;
-        let body = serde_json::to_value(NoticeAckRequest { ids: ids.to_vec() })
-            .map_err(|e| ClientError::Corrupt(format!("ack body: {e}")))?;
-        self.row_op(
-            RowMethod::Post,
-            workspace_id,
-            &format!("/v1/workspaces/{workspace_id}/notices/ack"),
-            Some(&body),
-            "ack notices",
-            workspace_id,
         )
     }
 }

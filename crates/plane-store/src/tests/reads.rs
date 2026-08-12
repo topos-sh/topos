@@ -184,44 +184,6 @@ async fn the_reject_cap_refuses_oversize_blobs_at_ingest(pool: PgPool) {
 }
 
 #[sqlx::test]
-async fn render_version_reassembles_and_pins_the_digest(pool: PgPool) {
-    let fx = Fixture::new(pool, "render");
-    let (w, b) = (ws("w1"), bundle("b1"));
-    let (version, _) = fx
-        .authority
-        .publish(
-            &w,
-            &b,
-            crate::CandidateUpload {
-                files: vec![
-                    super::support::file("GUIDE.md", b"alpha"),
-                    super::support::file("scripts/run.sh", b"beta"),
-                ],
-                parent: None,
-                attribution: "Alice (test)".to_owned(),
-                message: "test: candidate".to_owned(),
-            },
-            None,
-            NOW,
-        )
-        .await
-        .expect("genesis");
-
-    let rendered = crate::read::render_version(
-        &fx.authority,
-        &w,
-        version.version_id.0,
-        version.bundle_digest,
-    )
-    .await
-    .expect("render");
-    assert_eq!(rendered.bundle_digest, version.bundle_digest);
-    assert_eq!(rendered.files.len(), 2);
-    assert_eq!(rendered.files[0].path, "GUIDE.md");
-    assert_eq!(rendered.files[0].bytes, b"alpha");
-}
-
-#[sqlx::test]
 async fn storage_stats_sums_present_bytes_per_workspace(pool: PgPool) {
     let fx = Fixture::new(pool.clone(), "storage");
 

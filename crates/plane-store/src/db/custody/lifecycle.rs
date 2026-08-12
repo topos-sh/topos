@@ -322,35 +322,6 @@ impl Db {
             .collect()
     }
 
-    /// Every PRESENT **large-local** object in the workspace as `(git_oid, object_id)` — the
-    /// location-dispatching render's offloaded set. Render anchors on the version's git tree structure
-    /// (`(path, mode, git_oid)` per file); a tree entry whose `git_oid` is in this set is offloaded and is
-    /// fetched from the large store by its `object_id`, while a git-resident leaf recovers its id by rehash
-    /// with NO database dependency. Big blobs are rare, so this set is small.
-    pub(crate) async fn large_local_objects(
-        &self,
-        ws: &WorkspaceId,
-    ) -> Result<Vec<([u8; GIT_OID_LEN], ObjectId)>> {
-        let ws_s = ws.as_str();
-        let rows = sqlx::query!(
-            r#"SELECT git_oid AS "git_oid: Vec<u8>", object_id AS "object_id!: Vec<u8>"
-               FROM object_presence
-               WHERE workspace_id = $1 AND status = 'present' AND location = 'large-local'"#,
-            ws_s,
-        )
-        .fetch_all(self.pool())
-        .await
-        .map_err(AuthorityError::internal)?;
-        rows.into_iter()
-            .map(|r| {
-                Ok((
-                    git_oid_from_row(r.git_oid)?,
-                    object_id_from_row(r.object_id)?,
-                ))
-            })
-            .collect()
-    }
-
     /// The PRESENT objects among exactly the given `git_oid` locators, as `git_oid -> object_id` — the
     /// version-metadata read's join table. Each tree leaf's `git_oid` (the loose-object id for a
     /// git-resident blob, the tree-entry bridge key for an offloaded one — both stored in

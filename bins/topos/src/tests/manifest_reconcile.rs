@@ -549,19 +549,10 @@ impl DirectorySource for FakeDirectory {
     fn skill_log(&self, _ws: &str, _s: &str) -> Result<WireSkillLog, ClientError> {
         unreachable!()
     }
-    fn channel_place(&self, _ws: &str, _c: &str, _s: &str) -> Result<(), ClientError> {
-        unreachable!()
-    }
-    fn channel_unplace(&self, _ws: &str, _c: &str, _s: &str) -> Result<(), ClientError> {
-        unreachable!()
-    }
     fn protect_skill(&self, _ws: &str, _s: &str, _l: &str) -> Result<(), ClientError> {
         unreachable!()
     }
     fn protect_channel(&self, _ws: &str, _c: &str, _l: &str) -> Result<(), ClientError> {
-        unreachable!()
-    }
-    fn ack_notices(&self, _ws: &str, _ids: &[String]) -> Result<(), ClientError> {
         unreachable!()
     }
 }
@@ -10372,20 +10363,11 @@ impl DirectorySource for NamedDirectory {
     fn skill_log(&self, ws: &str, s: &str) -> Result<WireSkillLog, ClientError> {
         self.0.skill_log(ws, s)
     }
-    fn channel_place(&self, ws: &str, c: &str, s: &str) -> Result<(), ClientError> {
-        self.0.channel_place(ws, c, s)
-    }
-    fn channel_unplace(&self, ws: &str, c: &str, s: &str) -> Result<(), ClientError> {
-        self.0.channel_unplace(ws, c, s)
-    }
     fn protect_skill(&self, ws: &str, s: &str, l: &str) -> Result<(), ClientError> {
         self.0.protect_skill(ws, s, l)
     }
     fn protect_channel(&self, ws: &str, c: &str, l: &str) -> Result<(), ClientError> {
         self.0.protect_channel(ws, c, l)
-    }
-    fn ack_notices(&self, ws: &str, ids: &[String]) -> Result<(), ClientError> {
-        self.0.ack_notices(ws, ids)
     }
 }
 
@@ -12290,20 +12272,11 @@ impl DirectorySource for ChannelsDropAfterFirst {
     fn skill_log(&self, ws: &str, s: &str) -> Result<WireSkillLog, ClientError> {
         self.inner.skill_log(ws, s)
     }
-    fn channel_place(&self, ws: &str, c: &str, s: &str) -> Result<(), ClientError> {
-        self.inner.channel_place(ws, c, s)
-    }
-    fn channel_unplace(&self, ws: &str, c: &str, s: &str) -> Result<(), ClientError> {
-        self.inner.channel_unplace(ws, c, s)
-    }
     fn protect_skill(&self, ws: &str, s: &str, l: &str) -> Result<(), ClientError> {
         self.inner.protect_skill(ws, s, l)
     }
     fn protect_channel(&self, ws: &str, c: &str, l: &str) -> Result<(), ClientError> {
         self.inner.protect_channel(ws, c, l)
-    }
-    fn ack_notices(&self, ws: &str, ids: &[String]) -> Result<(), ClientError> {
-        self.inner.ack_notices(ws, ids)
     }
 }
 

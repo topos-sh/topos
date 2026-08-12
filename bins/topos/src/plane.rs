@@ -333,31 +333,6 @@ pub(crate) trait DirectorySource {
     /// As [`me`](Self::me).
     fn skill_log(&self, workspace_id: &str, skill_id: &str) -> Result<WireSkillLog, ClientError>;
 
-    /// `PUT /v1/workspaces/{ws}/channels/{ch}/skills/{skill}` — place a skill's reference into a
-    /// channel (created on first placement; a curated channel gates by role).
-    ///
-    /// # Errors
-    /// As [`me`](Self::me).
-    #[allow(dead_code)]
-    fn channel_place(
-        &self,
-        workspace_id: &str,
-        channel: &str,
-        skill_id: &str,
-    ) -> Result<(), ClientError>;
-
-    /// `DELETE /v1/workspaces/{ws}/channels/{ch}/skills/{skill}` — remove a skill's reference.
-    ///
-    /// # Errors
-    /// As [`me`](Self::me).
-    #[allow(dead_code)]
-    fn channel_unplace(
-        &self,
-        workspace_id: &str,
-        channel: &str,
-        skill_id: &str,
-    ) -> Result<(), ClientError>;
-
     /// `PUT /v1/workspaces/{ws}/skills/{skill}/protection` — set a bundle's protection level
     /// (`reviewed` / `open`; tightening takes reviewer+, loosening an owner — the server decides).
     ///
@@ -380,14 +355,6 @@ pub(crate) trait DirectorySource {
         channel: &str,
         level: &str,
     ) -> Result<(), ClientError>;
-
-    /// `POST /v1/workspaces/{ws}/notices/ack` — mark the caller's own notices read, by id (the
-    /// verb-lane twin of [`DeliverySource::ack_notices`] — same route, the verbs' connector).
-    ///
-    /// # Errors
-    /// As [`me`](Self::me).
-    #[allow(dead_code)]
-    fn ack_notices(&self, workspace_id: &str, ids: &[String]) -> Result<(), ClientError>;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -436,16 +403,6 @@ pub(crate) struct EnrolledWorkspace {
     pub display_name: String,
 }
 
-/// The first-destination hint an accepted invitation named — the post-enrollment subscribe's
-/// target (`kind` is the catalog's tag — `skill` today — or the literal `channel`).
-#[derive(Debug, Clone)]
-pub(crate) struct GrantHint {
-    #[allow(dead_code)]
-    pub kind: String,
-    #[allow(dead_code)]
-    pub name: String,
-}
-
 /// A GRANTED login poll: the SESSION's workspace-scoped bearer credential (the promoted flow
 /// code), the minted session's id, and the workspace the human chose in the browser. Hand-written
 /// `Debug` redacts the credential.
@@ -458,9 +415,6 @@ pub(crate) struct EnrolledGrant {
     /// The workspace the approval recorded — a seat picked, an invitation accepted, or a
     /// workspace created there. The CLI never chose it.
     pub workspace: EnrolledWorkspace,
-    /// The invitation's first-destination hint — present when the flow carried an invite token
-    /// whose (now accepted) invitation named one.
-    pub hint: Option<GrantHint>,
     /// The session's born status. PENDING ⇒ persist the session, then the waiting receipt — no
     /// delivery read (nothing flows over a pending session).
     pub link_status: LinkStatus,
@@ -472,7 +426,6 @@ impl std::fmt::Debug for EnrolledGrant {
             .field("credential", &"<redacted>")
             .field("session_id", &self.session_id)
             .field("workspace", &self.workspace)
-            .field("hint", &self.hint)
             .field("link_status", &self.link_status)
             .finish()
     }

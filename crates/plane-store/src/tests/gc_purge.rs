@@ -216,7 +216,7 @@ async fn the_janitor_sweeps_abandoned_staging_quarantines(pool: PgPool) {
 
     // Simulate a crashed ingest: stage a candidate (upload row + quarantine dir) and stop — no
     // migrate, no commit.
-    let op = crate::OpId::parse("abandoned-op").expect("op id");
+    let op = crate::id::OpId::parse("abandoned-op").expect("op id");
     let staged = lifecycle::ingest(
         &fx.authority,
         &w,

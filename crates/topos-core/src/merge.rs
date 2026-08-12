@@ -1,5 +1,5 @@
-//! The pure author-merge POLICY: three-way file-set reconciliation + the outcome decision + the publish
-//! guard. **Metadata only** — this module reconciles `(path, mode, content_sha256)` triples and emits a
+//! The pure author-merge POLICY: three-way file-set reconciliation + the outcome decision.
+//! **Metadata only** — this module reconciles `(path, mode, content_sha256)` triples and emits a
 //! *plan*; it never sees file bytes, runs no content merge, and touches no filesystem. The byte-level
 //! three-way content merge (the `diffy` execution) lives in `topos-gitstore::merge`; the orchestration
 //! (rendering bytes, running the content merges, assembling + materializing the tree) lives in the client.
@@ -105,24 +105,6 @@ pub struct PlannedPath {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MergePlan {
     pub paths: Vec<PlannedPath>,
-}
-
-impl MergePlan {
-    /// The paths needing a byte-level content merge, in plan order — the client runs the gitstore merge
-    /// for each and feeds the verdicts back to [`decide_outcome`] **in this same order**.
-    pub fn content_merge_paths(&self) -> impl Iterator<Item = &PlannedPath> {
-        self.paths
-            .iter()
-            .filter(|p| matches!(p.plan, PathPlan::ContentMerge { .. }))
-    }
-
-    /// Whether any path is a structural file-set conflict (decided without running a byte merge).
-    #[must_use]
-    pub fn has_structural_conflict(&self) -> bool {
-        self.paths
-            .iter()
-            .any(|p| matches!(p.plan, PathPlan::FileSetConflict { .. }))
-    }
 }
 
 /// One path's byte-merge verdict from the gitstore executor, fed back to [`decide_outcome`].
@@ -342,34 +324,6 @@ pub fn decide_outcome(plan: &MergePlan, content_results: &[ContentMergeResult]) 
     } else {
         MergeOutcome::CleanCommitOnTip
     }
-}
-
-/// A durable record that a skill's working tree holds an unresolved merge conflict — the kernel view of
-/// the client's `conflict.json`. The commits/digest are carried for offline recovery + lineage
-/// diagnostics; the *gate* is the fact's mere presence (see [`publish_blocked`]).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ConflictFact<'a> {
-    /// The three-way base the conflict was computed against.
-    pub base_commit: &'a [u8; 32],
-    /// `current` (theirs) at the time the conflict was recorded.
-    pub current_commit: &'a [u8; 32],
-    /// The author's draft (mine) snapshot the conflict was computed from.
-    pub draft_commit: &'a [u8; 32],
-    /// The digest of the conflict tree written to disk (the heal signal + the recovery pin).
-    pub conflicted_digest: &'a [u8; 32],
-}
-
-/// Whether a publish must be refused because an unresolved conflict is on record.
-///
-/// **Presence is the gate** — a durable conflict fact means "blocked", period. The guard is deliberately
-/// NOT keyed on a byte/marker scan (a crafted bundle whose content merely *looks* like conflict markers
-/// can neither trip nor defeat it) and NOT self-invalidated by an incidental edit (an edit elsewhere in
-/// the bundle must not unblock a tree whose markers are still unresolved). The fact is cleared only by a
-/// clean resolution (a clean merge) or the disclosed escape — both of which produce a genuinely
-/// publishable candidate — so an author is never deadlocked.
-#[must_use]
-pub fn publish_blocked(conflict: Option<ConflictFact<'_>>) -> bool {
-    conflict.is_some()
 }
 
 #[cfg(test)]
@@ -593,11 +547,18 @@ mod tests {
             &[r("a", b"2"), r("b", b"2")],
         );
         let cm: Vec<&str> = plan
-            .content_merge_paths()
+            .paths
+            .iter()
+            .filter(|p| matches!(p.plan, PathPlan::ContentMerge { .. }))
             .map(|p| p.path.as_str())
             .collect();
         assert_eq!(cm, vec!["a", "b"]);
-        assert!(!plan.has_structural_conflict());
+        assert!(
+            !plan
+                .paths
+                .iter()
+                .any(|p| matches!(p.plan, PathPlan::FileSetConflict { .. }))
+        );
     }
 
     #[test]
@@ -710,17 +671,5 @@ mod tests {
                 assert_eq!(swap(p.plan.clone()), q.plan, "case {case}, path {}", p.path);
             }
         }
-    }
-
-    #[test]
-    fn publish_guard_is_presence_based() {
-        assert!(!publish_blocked(None));
-        let z = [0u8; 32];
-        assert!(publish_blocked(Some(ConflictFact {
-            base_commit: &z,
-            current_commit: &z,
-            draft_commit: &z,
-            conflicted_digest: &z,
-        })));
     }
 }

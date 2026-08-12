@@ -61,7 +61,7 @@ pub struct Commit<'a> {
 /// # Errors
 /// [`PreimageError::TooManyParents`] if more than two parents are supplied;
 /// [`PreimageError::FieldTooLong`] if a string field exceeds `u32::MAX` bytes.
-pub fn commit_preimage(commit: &Commit) -> Result<Vec<u8>, PreimageError> {
+fn commit_preimage(commit: &Commit) -> Result<Vec<u8>, PreimageError> {
     // Checked, like the length prefixes (no silent `as u8` truncation if the cap is ever raised).
     let parent_count = u8::try_from(commit.parents.len())
         .ok()
@@ -82,7 +82,8 @@ pub fn commit_preimage(commit: &Commit) -> Result<Vec<u8>, PreimageError> {
 /// The commit id (= `version_id`): `sha256` over the canonical commit frame.
 ///
 /// # Errors
-/// As [`commit_preimage`].
+/// [`PreimageError::TooManyParents`] if more than two parents are supplied;
+/// [`PreimageError::FieldTooLong`] if a string field exceeds `u32::MAX` bytes.
 pub fn commit_id(commit: &Commit) -> Result<[u8; 32], PreimageError> {
     Ok(sha256(&commit_preimage(commit)?))
 }

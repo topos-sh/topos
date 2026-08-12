@@ -47,8 +47,6 @@ const PUBLIC_ROUTES = [
   { method: "post", path: "/v1/reviews" },
   { method: "get", path: "/v1/workspaces/{ws}/channels" },
   { method: "put", path: "/v1/workspaces/{ws}/channels/{ch}/protection" },
-  { method: "delete", path: "/v1/workspaces/{ws}/channels/{ch}/skills/{skill}" },
-  { method: "put", path: "/v1/workspaces/{ws}/channels/{ch}/skills/{skill}" },
   { method: "get", path: "/v1/workspaces/{ws}/delivery" },
   { method: "post", path: "/v1/workspaces/{ws}/invitations" },
   { method: "get", path: "/v1/workspaces/{ws}/me" },
@@ -85,8 +83,8 @@ function buildPublicDocument(document) {
         `served route missing from the committed contract: ${method.toUpperCase()} ${path}`,
       );
     }
-    // Merge methods into the SAME path object — a path can carry more than one verb (PUT + DELETE on
-    // follows/membership/curation), and a per-entry overwrite would drop all but the last.
+    // Merge methods into the SAME path object — a path can carry more than one verb, and a
+    // per-entry overwrite would drop all but the last.
     paths[path] = { ...(paths[path] ?? {}), [method]: operation };
   }
   return {

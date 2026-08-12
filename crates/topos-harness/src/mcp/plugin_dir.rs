@@ -2,16 +2,20 @@
 //! parts. The surface is a topos-OWNED directory (`<claude home>/skills/topos-mcp/`) holding two
 //! files; its `.mcp.json` is an ordinary strict-JSON driver surface (`jsonc_edit`, top-level
 //! `mcpServers` — route through [`apply`](super::apply)/[`observe`](super::observe) like any
-//! dialect), while THIS module renders what the driver cannot know: the constant
-//! `.claude-plugin/plugin.json` manifest, and the whole-dir shape a fresh placement creates. The
-//! CLI owns all directory I/O (write, manifest upkeep, prune on the last entry's removal).
+//! dialect), while THIS module holds what the driver cannot know: the constant
+//! `.claude-plugin/plugin.json` manifest bytes and the two dir-relative paths. The CLI owns all
+//! directory I/O (write, manifest upkeep, prune on the last entry's removal).
+//!
+//! What production uses: [`manifest_bytes`] + [`PLUGIN_MANIFEST_PATH`] / [`PLUGIN_MCP_PATH`].
+//! [`render_plugin_dir`] has NO production caller — it is a second, independent implementation of
+//! the whole-dir shape, kept as the driver's **golden oracle**: the dispatcher tests assert the
+//! driver's own `.mcp.json` bytes equal this renderer's, so the two can never drift silently.
 //!
 //! Rendered files:
 //! - `.claude-plugin/plugin.json` — the constant plugin manifest.
 //! - `.mcp.json` — `{"mcpServers": {…}}`, entries in the Claude entry shape
 //!   (`{"type": "http", "url": …, "headers": …}`), keys sorted, 2-space indent, trailing
-//!   newline — byte-identical to what the JSON driver's fresh-file synthesis writes (asserted
-//!   in the dispatcher tests).
+//!   newline — byte-identical to what the JSON driver's fresh-file synthesis writes.
 
 use std::collections::BTreeMap;
 
@@ -27,6 +31,10 @@ pub const PLUGIN_MCP_PATH: &str = ".mcp.json";
 
 /// Render the whole plugin dir: `(dir-relative path, bytes)` for the manifest and the MCP
 /// config. Deterministic — same entries, same bytes.
+///
+/// **Test oracle, not a production path.** Nothing in the CLI calls this; the driver writes the
+/// `.mcp.json` and the caller writes [`manifest_bytes`]. It exists so the dispatcher tests can
+/// compare the driver's bytes against an independently-derived rendering of the same shape.
 #[must_use]
 pub fn render_plugin_dir(entries: &[McpEntry]) -> Vec<(String, Vec<u8>)> {
     vec![

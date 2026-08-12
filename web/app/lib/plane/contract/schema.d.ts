@@ -168,22 +168,6 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/v1/workspaces/{ws}/channels/{ch}/skills/{skill}": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put: operations["channel_place"];
-        post?: never;
-        delete: operations["channel_unplace"];
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
     "/v1/workspaces/{ws}/delivery": {
         parameters: {
             query?: never;
@@ -442,18 +426,6 @@ export interface components {
              */
             version_id: string;
         };
-        /**
-         * @description The first-destination HINT an accepted invitation named — decorated onto a `granted` poll (and
-         *     the direct-accept answer) so the logged-in client's first `add` can target it. `kind` is the
-         *     bundle catalog's own tag (`skill` today) or the literal `channel` — displayed and routed on,
-         *     never trusted as authority.
-         */
-        DeviceAuthHint: {
-            /** @description What the hinted thing is: the catalog's `kind` tag, or `channel`. */
-            kind: string;
-            /** @description The hinted bundle's or channel's name in the joined workspace. */
-            name: string;
-        };
         /** @description `POST /v1/login/token` body — poll a login flow for its outcome. */
         DeviceAuthPollRequest: {
             /** @description The SECRET flow code from `login/authorize`. */
@@ -471,7 +443,6 @@ export interface components {
              *     Returned once per poll; the server stores only its sha256.
              */
             credential?: string | null;
-            hint?: null | components["schemas"]["DeviceAuthHint"];
             /**
              * @description The minted SESSION's id (a session = user × workspace × installation; the credential is
              *     workspace-scoped). Present ONLY when `status` is `granted`.
@@ -2417,138 +2388,6 @@ export interface operations {
             };
             /** @description A level not valid for a channel (must be `curated` or `open`). */
             400: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["JsonEnvelope"];
-                };
-            };
-            /** @description Missing/blank credential, unknown/revoked one, or non-member (indistinguishable). */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["JsonEnvelope"];
-                };
-            };
-            /** @description The caller's topos release is below this server's floor — the envelope names the floor and carries the `self-update` next action. */
-            426: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["JsonEnvelope"];
-                };
-            };
-            /** @description Rate limited (Retry-After header). */
-            429: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["JsonEnvelope"];
-                };
-            };
-            /** @description Integrity / internal store fault. */
-            500: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["JsonEnvelope"];
-                };
-            };
-        };
-    };
-    channel_place: {
-        parameters: {
-            query?: never;
-            header: {
-                /** @description `Bearer <workspace credential>`. */
-                Authorization: string;
-            };
-            path: {
-                /** @description Workspace id. */
-                ws: string;
-                /** @description The channel name (created on first placement, member-level self-serve). */
-                ch: string;
-                /** @description The skill's immutable id to place into the channel. */
-                skill: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description The curation outcome (placed / created, or a 200 DENIED CURATED_ROLE_REQUIRED / BAD_NAME / SKILL_NOT_ACTIVE). */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["JsonEnvelope"];
-                };
-            };
-            /** @description Missing/blank credential, unknown/revoked one, or non-member (indistinguishable). */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["JsonEnvelope"];
-                };
-            };
-            /** @description The caller's topos release is below this server's floor — the envelope names the floor and carries the `self-update` next action. */
-            426: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["JsonEnvelope"];
-                };
-            };
-            /** @description Rate limited (Retry-After header). */
-            429: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["JsonEnvelope"];
-                };
-            };
-            /** @description Integrity / internal store fault. */
-            500: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["JsonEnvelope"];
-                };
-            };
-        };
-    };
-    channel_unplace: {
-        parameters: {
-            query?: never;
-            header: {
-                /** @description `Bearer <workspace credential>`. */
-                Authorization: string;
-            };
-            path: {
-                /** @description Workspace id. */
-                ws: string;
-                /** @description The channel name. */
-                ch: string;
-                /** @description The skill's immutable id to remove from the channel. */
-                skill: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description The curation outcome (removed / not_placed, or a 200 DENIED CURATED_ROLE_REQUIRED). */
-            200: {
                 headers: {
                     [name: string]: unknown;
                 };

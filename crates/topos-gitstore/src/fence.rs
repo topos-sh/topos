@@ -182,7 +182,7 @@ impl Store {
     ///
     /// # Errors
     /// [`GitstoreError::Gix`] on a tree-write failure.
-    pub fn write_tree(
+    pub(crate) fn write_tree(
         &self,
         entries: &[(&str, FileMode, [u8; GIT_OID_LEN])],
     ) -> Result<gix::ObjectId, GitstoreError> {

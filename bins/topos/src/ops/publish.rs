@@ -358,7 +358,6 @@ pub(crate) fn publish_describe(
         && digest_hex != *pin
     {
         return Err(ClientError::ApprovalMismatch {
-            skill: skill_name.clone(),
             expected: digest_hex,
             got: pin.clone(),
         });
@@ -1021,7 +1020,6 @@ fn enrolled_publish(
         && digest_hex != pin
     {
         return Err(ClientError::ApprovalMismatch {
-            skill: lock.name.clone(),
             expected: digest_hex,
             got: pin.to_owned(),
         });

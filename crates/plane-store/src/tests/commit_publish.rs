@@ -356,7 +356,7 @@ async fn a_two_parent_frame_never_becomes_a_version_so_approve_cannot_promote_it
 
     // The fence runs before the lease and before any commit object reaches the repo, so the empty
     // entry/object slices are never read — a refusal must leave no trace at all.
-    let op_id = crate::OpId::parse("cafebabecafebabecafebabecafebabe").expect("op id");
+    let op_id = crate::id::OpId::parse("cafebabecafebabecafebabecafebabe").expect("op id");
     let err = crate::lifecycle::stage_forward_commit(
         &fx.authority,
         &w,

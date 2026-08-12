@@ -57,7 +57,7 @@ pub(crate) use custody::{commit, gc, lifecycle, read, upload};
 pub use authority::{Authority, DEFAULT_LOG_LIMIT, PoolConfig};
 pub use commit::{BundleDeleteReport, CommittedVersion, PointerState, PurgeReport};
 pub use error::{AuthorityError, LivePointer, Result};
-pub use id::{BundleId, CommitId, IdError, ObjectId, OpId, WorkspaceId, validate_attribution};
+pub use id::{BundleId, CommitId, IdError, ObjectId, WorkspaceId};
 pub use read::{CurrentInfo, LogEntry, VersionFile, VersionMeta, WorkspaceStorage};
 pub use upload::{CandidateUpload, UploadedFile};
 

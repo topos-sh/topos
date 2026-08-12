@@ -14,8 +14,8 @@ DTOs → these types at the edge, so **`topos-core` does NOT depend on `topos-ty
   the post-fetch heal. The served pointer is the sync target; integrity is the content-addressed
   id re-verified by digest on apply.
 - the **author-merge policy** (`merge`) — the three-way file-set reconciliation over
-  `(path, mode, content_sha256)` → a per-path `MergePlan`, the `MergeOutcome` decision, and the
-  publish guard. Metadata only — the byte-level diff3 execution is `topos-gitstore`'s.
+  `(path, mode, content_sha256)` → a per-path `MergePlan` and the `MergeOutcome` decision.
+  Metadata only — the byte-level diff3 execution is `topos-gitstore`'s.
 
 ## Hard constraints
 

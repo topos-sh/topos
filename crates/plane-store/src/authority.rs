@@ -128,8 +128,10 @@ impl Authority {
     }
 
     /// Override the size-routing threshold + per-blob reject cap (operational config — neither ever enters
-    /// a manifest, digest, or id). A consuming server wires these from its config; tests use a tiny
-    /// threshold to force a placement.
+    /// a manifest, digest, or id). A **test-fixture knob**: no consuming server sets it — production runs
+    /// the defaults — and tests use a tiny threshold to force a placement. Compiled out of the production
+    /// build alongside [`Authority::from_pool`].
+    #[cfg(any(test, feature = "test-fixtures"))]
     #[must_use]
     pub fn with_large_limits(mut self, threshold: u64, reject_cap: u64) -> Self {
         self.large_threshold = threshold;

@@ -60,7 +60,7 @@ pub struct BundleId(String);
 /// **directory component** of the per-op quarantine objdir the janitor `rm -rf`s — hence the same
 /// no-leading-dot path-safe shape as [`WorkspaceId`].
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct OpId(String);
+pub(crate) struct OpId(String);
 
 /// `[A-Za-z0-9._-]` — the opaque-id charset, matching the schema CHECKs. ASCII-only: any non-ASCII
 /// byte has the high bit set and fails this test, so no separate check is needed.
@@ -126,14 +126,14 @@ impl OpId {
     ///
     /// # Errors
     /// [`IdError`] if the id is empty, too long, carries a disallowed character, or starts with a dot.
-    pub fn parse(s: &str) -> Result<Self, IdError> {
+    pub(crate) fn parse(s: &str) -> Result<Self, IdError> {
         validate(s)?;
         Ok(Self(s.to_owned()))
     }
 
     /// The id as a string slice — safe to use as a single path component.
     #[must_use]
-    pub fn as_str(&self) -> &str {
+    pub(crate) fn as_str(&self) -> &str {
         &self.0
     }
 }
@@ -144,7 +144,7 @@ impl OpId {
 ///
 /// # Errors
 /// [`IdError::Empty`] / [`IdError::TooLong`] / [`IdError::DisallowedChar`] on a shape violation.
-pub fn validate_attribution(s: &str) -> Result<(), IdError> {
+pub(crate) fn validate_attribution(s: &str) -> Result<(), IdError> {
     if s.is_empty() {
         return Err(IdError::Empty);
     }
@@ -184,12 +184,6 @@ pub struct CommitId(pub [u8; 32]);
 pub struct ObjectId(pub [u8; 32]);
 
 impl CommitId {
-    /// The raw 32 bytes.
-    #[must_use]
-    pub fn as_bytes(&self) -> &[u8; 32] {
-        &self.0
-    }
-
     /// The 64-char lowercase-hex spelling (the app-facing column value + the wire form).
     #[must_use]
     pub fn to_hex(&self) -> String {
@@ -205,12 +199,6 @@ impl CommitId {
 }
 
 impl ObjectId {
-    /// The raw 32 bytes.
-    #[must_use]
-    pub fn as_bytes(&self) -> &[u8; 32] {
-        &self.0
-    }
-
     /// The 64-char lowercase-hex spelling.
     #[must_use]
     pub fn to_hex(&self) -> String {

@@ -139,7 +139,7 @@ pub struct Observed {
 /// Compute MCP placements for one config surface (routes to the driver). For
 /// [`McpDialect::ClaudePluginDir`] pass the plugin dir's `.mcp.json` bytes — the strict JSON
 /// driver patches it like any other surface; the constant manifest beside it
-/// ([`plugin_dir::render_plugin_dir`]) is the caller's I/O.
+/// ([`plugin_dir::manifest_bytes`]) is the caller's I/O.
 ///
 /// THE DISPATCHER-ENFORCED byte-preservation precondition: before any edit lands, the parsed
 /// input must re-serialize byte-identical to the original through the driver's own editor —

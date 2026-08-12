@@ -794,11 +794,7 @@ pub(crate) enum ClientError {
         "the pinned @<digest> does not match the bytes — you pinned {got}, these bytes hash to \
          {expected}"
     )]
-    ApprovalMismatch {
-        skill: String,
-        expected: String,
-        got: String,
-    },
+    ApprovalMismatch { expected: String, got: String },
     /// The compare-and-set saw a base the team has moved past (`CONFLICT`) — the local view is stale. The
     /// agent pulls (rebases) and re-shows the diff before retrying; never a silent retry.
     ///

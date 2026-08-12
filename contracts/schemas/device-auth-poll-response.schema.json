@@ -11,17 +11,6 @@
         "null"
       ]
     },
-    "hint": {
-      "description": "The invitation's first-destination hint — present only on a `granted` poll whose flow\ncarried an invite token naming one.",
-      "anyOf": [
-        {
-          "$ref": "#/$defs/DeviceAuthHint"
-        },
-        {
-          "type": "null"
-        }
-      ]
-    },
     "session_id": {
       "description": "The minted SESSION's id (a session = user × workspace × installation; the credential is\nworkspace-scoped). Present ONLY when `status` is `granted`.",
       "type": [
@@ -56,24 +45,6 @@
     "status"
   ],
   "$defs": {
-    "DeviceAuthHint": {
-      "description": "The first-destination HINT an accepted invitation named — decorated onto a `granted` poll (and\nthe direct-accept answer) so the logged-in client's first `add` can target it. `kind` is the\nbundle catalog's own tag (`skill` today) or the literal `channel` — displayed and routed on,\nnever trusted as authority.",
-      "type": "object",
-      "properties": {
-        "kind": {
-          "description": "What the hinted thing is: the catalog's `kind` tag, or `channel`.",
-          "type": "string"
-        },
-        "name": {
-          "description": "The hinted bundle's or channel's name in the joined workspace.",
-          "type": "string"
-        }
-      },
-      "required": [
-        "kind",
-        "name"
-      ]
-    },
     "DeviceAuthPollStatus": {
       "description": "A login-flow poll status (snake_case). `granted` carries the credential + the joined\nworkspace; every other status carries only itself.",
       "oneOf": [

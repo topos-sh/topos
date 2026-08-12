@@ -1232,19 +1232,10 @@ mod tests {
         ) -> Result<topos_types::requests::WireSkillLog, ClientError> {
             unreachable!()
         }
-        fn channel_place(&self, _w: &str, _c: &str, _s: &str) -> Result<(), ClientError> {
-            unreachable!()
-        }
-        fn channel_unplace(&self, _w: &str, _c: &str, _s: &str) -> Result<(), ClientError> {
-            unreachable!()
-        }
         fn protect_skill(&self, _w: &str, _s: &str, _l: &str) -> Result<(), ClientError> {
             unreachable!()
         }
         fn protect_channel(&self, _w: &str, _c: &str, _l: &str) -> Result<(), ClientError> {
-            unreachable!()
-        }
-        fn ack_notices(&self, _w: &str, _ids: &[String]) -> Result<(), ClientError> {
             unreachable!()
         }
     }
@@ -1258,7 +1249,6 @@ mod tests {
                 name: "eng".to_owned(),
                 display_name: "Engineering".to_owned(),
             },
-            hint: None,
             link_status: status,
         })
     }
@@ -2002,7 +1992,6 @@ mod tests {
                     name: "engineering".to_owned(),
                     display_name: "Engineering".to_owned(),
                 },
-                hint: None,
                 link_status: LinkStatus::Active,
             })]);
             rig.with(|connectors| {

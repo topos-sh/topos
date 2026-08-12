@@ -9,9 +9,9 @@
 use utoipa::OpenApi;
 
 use topos_types::requests::{
-    DeviceAuthHint, DeviceAuthPollRequest, DeviceAuthPollResponse, DeviceAuthPollStatus,
-    DeviceAuthStartRequest, DeviceAuthStartResponse, DeviceAuthWorkspace, InvitationData,
-    InvitationRequest, LoginConnectRequest, LoginConnectResponse, NoticeAckRequest, ProposeRequest,
+    DeviceAuthPollRequest, DeviceAuthPollResponse, DeviceAuthPollStatus, DeviceAuthStartRequest,
+    DeviceAuthStartResponse, DeviceAuthWorkspace, InvitationData, InvitationRequest,
+    LoginConnectRequest, LoginConnectResponse, NoticeAckRequest, ProposeRequest,
     ProtectionSetRequest, PublishRequest, RevertRequest, ReviewRequest, WireAppliedReport,
     WireAppliedSkill, WireCandidate, WireChannelEntry, WireChannelIndex, WireChannelSkill,
     WireDelivery, WireDeliverySkill, WireFile, WireFileMode, WireLogProposal, WireLogVersion,
@@ -52,8 +52,6 @@ use topos_types::{
         crate::routes::door::get_proposals,
         crate::routes::door::get_log,
         // Row ops.
-        crate::routes::door::channel_place,
-        crate::routes::door::channel_unplace,
         crate::routes::door::set_skill_protection,
         crate::routes::door::set_channel_protection,
         crate::routes::door::ack_notices,
@@ -132,7 +130,6 @@ use topos_types::{
         DeviceAuthPollResponse,
         DeviceAuthPollStatus,
         DeviceAuthWorkspace,
-        DeviceAuthHint,
         LoginConnectRequest,
         LoginConnectResponse,
         // The publish provenance adjunct (a GitHub-imported bundle's origin).
