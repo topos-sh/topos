@@ -1304,7 +1304,7 @@ fn post_image_structurally_empty(io: &ScopeIo<'_>, dialect: McpDialect, path: &P
 /// carries.
 #[allow(clippy::too_many_arguments)]
 fn write_intents(
-    custody: &ScopeEntries,
+    custody: &ScopeEntries<'_>,
     slug: &str,
     path: &Path,
     fingerprints: &[(String, String)],
@@ -1312,7 +1312,9 @@ fn write_intents(
     provenance: &BTreeMap<String, (String, String)>,
     owns_file: bool,
 ) -> BTreeMap<String, PendingIntent> {
-    let file = path.display().to_string();
+    // The RESOLVED spelling, so a row written through a symlinked home is still recognized as
+    // this surface's on the next run (see `config_custody::canonical_file`).
+    let file = custody.canonical(path).display().to_string();
     let mut intents = BTreeMap::new();
     let next: BTreeMap<&str, &str> = fingerprints
         .iter()
@@ -1382,7 +1384,7 @@ fn write_intents(
 /// just tracks what the file provably holds — e.g. a prior key that vanished from the file).
 #[allow(clippy::too_many_arguments)]
 fn sync_ledger_entries(
-    custody: &mut ScopeEntries,
+    custody: &mut ScopeEntries<'_>,
     slug: &str,
     path: &Path,
     fingerprints: &[(String, String)],
@@ -1390,7 +1392,8 @@ fn sync_ledger_entries(
     provenance: &BTreeMap<String, (String, String)>,
     owns_file_default: bool,
 ) {
-    let file = path.display().to_string();
+    // The RESOLVED spelling — see [`write_intents`].
+    let file = custody.canonical(path).display().to_string();
     let next: BTreeMap<&str, &str> = fingerprints
         .iter()
         .map(|(k, f)| (k.as_str(), f.as_str()))

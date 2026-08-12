@@ -190,6 +190,15 @@ pub(crate) trait FsOps {
     fn read_dir(&self, dir: &Path) -> io::Result<Vec<PathBuf>>;
     /// Whether a path exists (following symlinks).
     fn exists(&self, path: &Path) -> bool;
+    /// Resolve `path` to its one absolute, symlink-free spelling (`realpath`). The path must
+    /// EXIST — a caller comparing two spellings of a file that may not be there yet resolves the
+    /// nearest existing ancestor instead (`crate::config_custody::canonical_file`).
+    ///
+    /// It is on the seam because it is the only way two recorded spellings of one file can be
+    /// proven the same object, and because a test needs to fault-inject the resolution: a
+    /// resolution that FAILS must leave the caller comparing the spellings it was given rather
+    /// than guessing they differ.
+    fn canonicalize(&self, path: &Path) -> io::Result<PathBuf>;
     /// Acquire an exclusive lock on `path` (creating it), blocking until held.
     fn lock_exclusive(&self, path: &Path) -> io::Result<LockGuard>;
     /// Try to acquire an exclusive lock without blocking; `None` if another holder has it.
@@ -761,6 +770,10 @@ impl FsOps for RealFs {
 
     fn exists(&self, path: &Path) -> bool {
         path.exists()
+    }
+
+    fn canonicalize(&self, path: &Path) -> io::Result<PathBuf> {
+        std::fs::canonicalize(path)
     }
 
     fn lock_exclusive(&self, path: &Path) -> io::Result<LockGuard> {
@@ -1710,6 +1723,9 @@ mod hook {
             self.maybe_fire(matched, nth);
             self.inner.exists(path)
         }
+        fn canonicalize(&self, path: &Path) -> io::Result<PathBuf> {
+            self.inner.canonicalize(path)
+        }
         fn path_kind(&self, path: &Path) -> io::Result<Option<PathKind>> {
             self.inner.path_kind(path)
         }
@@ -1888,6 +1904,11 @@ mod fault {
         }
         fn exists(&self, path: &Path) -> bool {
             self.inner.exists(path)
+        }
+        // A pure READ, like `read_opt`/`exists` beside it: the fault counter sizes MUTATIONS, and
+        // a resolution that failed would only send the caller back to the spelling it was given.
+        fn canonicalize(&self, path: &Path) -> io::Result<PathBuf> {
+            self.inner.canonicalize(path)
         }
         fn path_kind(&self, path: &Path) -> io::Result<Option<PathKind>> {
             self.inner.path_kind(path)
