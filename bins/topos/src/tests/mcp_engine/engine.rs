@@ -634,13 +634,95 @@ fn removal_converges_everywhere_and_deletes_only_wholly_owned_files() {
         "the user's server survives: {kept}"
     );
     assert!(!kept.contains("topos-eng-alpha"), "ours is gone: {kept}");
-    // The custody: no entries, the key retired — and NEVER reusable by another bundle.
+    // The custody: no entries, and — because nothing is left ANYWHERE under that key — the name
+    // itself is back in the pool. A reservation exists to stop a new bundle inheriting a standing
+    // entry (and the sign-in a harness filed under its name); with the entry gone there is
+    // nothing to inherit, and holding the name would only push the next mint onto a `-2`.
     let mut custody = ScopeEntries::load(&fs, &layout).unwrap();
     assert_eq!(custody.row_count(), 0);
-    assert_eq!(custody.doc.retired["topos-eng-alpha"], "s_a");
+    assert!(
+        custody.doc.retired.is_empty(),
+        "nothing stands under the key: {:?}",
+        custody.doc.retired
+    );
     assert_eq!(
         custody.mint_key("s_other", "alpha", Some("eng")),
-        "topos-eng-alpha-2"
+        "topos-eng-alpha"
+    );
+}
+
+/// **A reservation is held by a SURVIVING entry, and by nothing else.** Both branches, one story:
+/// a key someone else's entry still occupies stays reserved (a new bundle minted onto it would
+/// inherit that entry, and whatever sign-in the harness filed under the name); the moment that
+/// entry is gone the name goes back to the pool. topos never touches the survivor either way —
+/// it has no record of writing it.
+#[test]
+fn a_retired_name_is_reserved_while_something_stands_under_it_and_released_when_nothing_does() {
+    let home = Scratch::new("retire-release");
+    let fs = RealFs;
+    let layout = Layout::new(&home.0.join(".topos"));
+    let mut d = demand(
+        "s_a",
+        "alpha",
+        Some("eng"),
+        &server_json("https://mcp.example/a"),
+    );
+    d.reach = Some(vec!["cursor".into()]);
+    let io = person_io(&fs, &layout, &home.0);
+    mcp_engine::converge(
+        &io,
+        &plan(&io, vec![d]),
+        &synthetic(),
+        &all_slugs(),
+        &no_hold(),
+        true,
+    );
+
+    // A SECOND entry under the same key, in a file topos holds no row for — a hand-copied entry,
+    // or one an older topos left behind. Nothing about it is topos's to remove.
+    let codex = home.0.join(".codex/config.toml");
+    std::fs::create_dir_all(codex.parent().unwrap()).unwrap();
+    let leftover = "[mcp_servers.topos-eng-alpha]\nurl = \"https://mcp.example/old\"\n";
+    std::fs::write(&codex, leftover).unwrap();
+
+    // The bundle stops being demanded: its own entry leaves, the key retires — and the
+    // reservation STANDS, because the leftover still does.
+    mcp_engine::converge(&io, &[], &synthetic(), &all_slugs(), &no_hold(), true);
+    let mut custody = ScopeEntries::load(&fs, &layout).unwrap();
+    assert_eq!(
+        custody
+            .doc
+            .retired
+            .get("topos-eng-alpha")
+            .map(String::as_str),
+        Some("s_a"),
+        "an entry still stands under the key: {:?}",
+        custody.doc.retired
+    );
+    assert_eq!(
+        custody.mint_key("s_other", "alpha", Some("eng")),
+        "topos-eng-alpha-2",
+        "a new bundle never lands on an occupied name"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&codex).unwrap(),
+        leftover,
+        "topos never edited the entry it does not own"
+    );
+
+    // The person deletes it. The next sweep proves nothing is left under the key and gives the
+    // name back.
+    std::fs::remove_file(&codex).unwrap();
+    mcp_engine::converge(&io, &[], &synthetic(), &all_slugs(), &no_hold(), true);
+    let mut custody = ScopeEntries::load(&fs, &layout).unwrap();
+    assert!(
+        custody.doc.retired.is_empty(),
+        "the reservation is released: {:?}",
+        custody.doc.retired
+    );
+    assert_eq!(
+        custody.mint_key("s_new", "alpha", Some("eng")),
+        "topos-eng-alpha"
     );
 }
 
@@ -1180,7 +1262,8 @@ fn a_hand_deleted_plugin_dir_sheds_its_ledger_entries_on_the_next_converge() {
     // The user deletes the whole plugin dir by hand.
     std::fs::remove_dir_all(home.0.join(".claude/skills/topos-mcp")).unwrap();
 
-    // The demand drops: the custody must shed the phantom rows and retire the key.
+    // The demand drops: the custody must shed the phantom rows and give up the key. Nothing
+    // stands under the name anywhere (the dir went with the entry), so it is not reserved either.
     mcp_engine::converge(&io, &[], &synthetic(), &all_slugs(), &no_hold(), true);
     let custody = ScopeEntries::load(&fs, &layout).unwrap();
     assert!(
@@ -1188,13 +1271,13 @@ fn a_hand_deleted_plugin_dir_sheds_its_ledger_entries_on_the_next_converge() {
         "phantom entries survive a hand-deleted plugin dir: {custody:?}"
     );
     assert_eq!(
-        custody
-            .doc
-            .retired
-            .get("topos-eng-alpha")
-            .map(String::as_str),
-        Some("s_a"),
-        "{custody:?}"
+        custody.key_of("s_a"),
+        None,
+        "the bundle keeps no live key: {custody:?}"
+    );
+    assert!(
+        custody.doc.retired.is_empty(),
+        "and reserves no name it has nothing standing under: {custody:?}"
     );
 }
 
@@ -1958,10 +2041,13 @@ fn a_drifted_entry_outlives_the_record_and_is_still_cleaned_up_later() {
     );
     let doc = crate::config_custody::read(&fs, &layout).unwrap();
     assert!(!doc.unrecorded.contains_key("s_a"), "{doc:?}");
-    assert_eq!(
-        doc.retired.get("topos-eng-alpha").map(String::as_str),
-        Some("s_a"),
-        "and only now does the key retire: {doc:?}"
+    assert!(
+        !doc.keys.contains_key("s_a"),
+        "and only now does the key leave the bundle: {doc:?}"
+    );
+    assert!(
+        doc.retired.is_empty(),
+        "with the entry finally gone there is nothing left to reserve the name against: {doc:?}"
     );
 }
 

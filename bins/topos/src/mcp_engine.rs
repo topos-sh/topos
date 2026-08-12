@@ -606,7 +606,8 @@ pub(crate) fn converge(
     }
 
     // Retirement: a bundle with no remaining entries anywhere, not demanded and not held, gives
-    // its key back to the reserve.
+    // its key back to the reserve — and the reserve gives back every name nothing stands under
+    // any more (this run's and any earlier run's).
     let retire: Vec<String> = custody
         .keyed_bundles()
         .into_iter()
@@ -615,6 +616,10 @@ pub(crate) fn converge(
     if allow_removals {
         for bundle in retire {
             custody.retire_key(&bundle);
+        }
+        if !custody.doc.retired.is_empty() {
+            let standing = standing_keys(io, descriptors);
+            custody.release_retired(standing.as_ref());
         }
     }
 
@@ -741,8 +746,47 @@ pub(crate) fn remove_bundle(
     if !custody.has_entries_for(bundle_id) {
         custody.retire_key(bundle_id);
     }
+    if !custody.doc.retired.is_empty() {
+        let standing = standing_keys(io, descriptors);
+        custody.release_retired(standing.as_ref());
+    }
     out.warnings.extend(custody.flush(io.fs, io.layout));
     out
+}
+
+/// **Every managed-looking entry key this scope's config files are OBSERVED to hold** — the
+/// evidence a name reservation is measured against ([`ScopeEntries::release_retired`]). It reads
+/// the same surfaces the converge does, through the same dialect observation, and answers `None`
+/// the moment ONE of them cannot be read or parsed: absence is then unprovable, and a reservation
+/// dropped on an unreadable file is a name handed to a new bundle over an entry that may still be
+/// standing under it.
+///
+/// It sees keys, not ownership: a drifted entry, an unrecorded one, a foreign one and a leftover
+/// all count, because all four are what a re-minted name would inherit.
+fn standing_keys(
+    io: &ScopeIo<'_>,
+    descriptors: &[&'static KnownHarness],
+) -> Option<BTreeSet<String>> {
+    let mut keys = BTreeSet::new();
+    for h in descriptors {
+        let crate::placement::ConfigSurface::Ready { file, dialect, .. } =
+            crate::placement::config_surface(h, &io.home, io.project_root.as_deref())
+        else {
+            continue;
+        };
+        let Ok(current) = io.fs.read_opt(&file) else {
+            return None; // unreadable: nothing about this scope's names is provable
+        };
+        if current.is_none() {
+            continue; // no file, no entries — the one honest absence
+        }
+        let observed = mcp::observe(dialect, current.as_deref());
+        if !observed.parseable {
+            return None;
+        }
+        keys.extend(observed.entries.into_keys());
+    }
+    Some(keys)
 }
 
 /// Move a bundle's SURVIVING config rows out of its record, under the converge lock, because the
