@@ -268,3 +268,17 @@ when it is unset): `$CLAUDE_CONFIG_DIR` (Claude Code), `$HERMES_HOME` (Hermes Ag
 places **one** copy there instead of a native copy per agent, so several agents on one machine
 share the same files. Coverage fails closed: an agent whose support is unknown gets its own native
 copy.
+
+## Adding your harness
+
+Topos needs exactly two facts to deliver to a harness:
+
+1. **Which directories it reads** — the user-scope and project-scope folders it loads skills
+   from, and the directory whose existence marks it installed.
+2. **What fires its refresh** — a session-start hook, a plugin, or a scheduler that can run
+   `topos update --quiet`. The sweep self-throttles, so firing often is free.
+
+If you build or maintain an agent, you can make it topos-deliverable with a pull request to
+[`topos-sh/topos`](https://github.com/topos-sh/topos) naming those two facts — the registry is
+one table row, and a refresh trigger is usually a screenful of code following an existing
+pattern. Open an issue with the two facts if you'd rather we write the row.

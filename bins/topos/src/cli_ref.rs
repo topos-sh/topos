@@ -121,6 +121,25 @@ fn arg_label(arg: &clap::Arg) -> String {
     }
 }
 
+/// One flag section: the heading + blurb, then the two-column table. Nothing is emitted when the
+/// section has no flags, so an empty heading can never stand over an empty table.
+fn render_flag_table(out: &mut String, heading: &str, args: &[&clap::Arg]) {
+    if args.is_empty() {
+        return;
+    }
+    out.push_str(heading);
+    out.push_str("| Flag | What it does |\n|---|---|\n");
+    for arg in args {
+        let help = arg.get_help().map(|h| h.to_string()).unwrap_or_default();
+        out.push_str(&format!(
+            "| `{}` | {} |\n",
+            cell(&arg_label(arg)),
+            cell(&help)
+        ));
+    }
+    out.push('\n');
+}
+
 /// Render one command (recursing into any subcommands) into `out` at the given heading level.
 fn render_command(out: &mut String, path: &str, cmd: &clap::Command, level: usize) {
     let hashes = "#".repeat(level);
@@ -354,24 +373,25 @@ pub fn cli_ref_md() -> String {
     // The agent → folder tables, generated from the baked registry + the MCP descriptor table.
     render_agents(&mut out);
 
-    // Global options — rendered from the root command's own args (the `--json` + `--workspace` flags).
-    let globals: Vec<&clap::Arg> = root
+    // The root command's own args, split by REACH so neither table claims the other's behavior:
+    // the clap-global ones (`--json` + `--workspace`) attach to any verb, the rest stand alone.
+    let root_args: Vec<&clap::Arg> = root
         .get_arguments()
         .filter(|a| !a.is_hide_set() && !is_auto_help(a))
         .collect();
-    if !globals.is_empty() {
-        out.push_str("## Global options\n\nThese work before or after any command.\n\n");
-        out.push_str("| Flag | What it does |\n|---|---|\n");
-        for arg in globals {
-            let help = arg.get_help().map(|h| h.to_string()).unwrap_or_default();
-            out.push_str(&format!(
-                "| `{}` | {} |\n",
-                cell(&arg_label(arg)),
-                cell(&help)
-            ));
-        }
-        out.push('\n');
-    }
+    let (globals, standalone): (Vec<&clap::Arg>, Vec<&clap::Arg>) =
+        root_args.into_iter().partition(|a| a.is_global_set());
+    render_flag_table(
+        &mut out,
+        "## Global options\n\nThese work before or after any command.\n\n",
+        &globals,
+    );
+    render_flag_table(
+        &mut out,
+        "## Documents topos prints\n\nEach of these is the whole command: it prints one document \
+         and exits, reading nothing and dialing nothing.\n\n",
+        &standalone,
+    );
 
     // The verbs, grouped by scope (the known verb lists, not clap metadata).
     for (title, blurb, names) in [

@@ -1,0 +1,56 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "UninstallDescribe",
+  "description": "The bare `uninstall` DESCRIBE — what `--yes` would remove (nothing has changed).\n**INFERRED** (additive-only).",
+  "type": "object",
+  "properties": {
+    "binary_path": {
+      "description": "The running binary's own path — NOT deleted; disclosed so the human can remove it themselves.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "builtin_dirs": {
+      "description": "The BUILT-IN `topos` skill's placed copies — topos-authored artifacts (like the hook entry),\nso they go with the teardown; YOUR skill files still stay untouched.",
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "mcp_drifted": {
+      "description": "The MCP config files holding a topos entry someone edited by hand. Those are LEFT — the\nnever-clobber rule does not lapse because the command is a teardown — and the preview says\nso, so a person is not surprised by a leftover.",
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "mcp_files": {
+      "description": "The MCP config files the apply will take topos-placed server entries OUT of. Those entries\npoint live agents at servers, and the ledger proving they are topos's dies with the sidecar\n— so the preview names every file it will edit.",
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "sidecar_path": {
+      "description": "The `~/.topos/` sidecar tree that would be deleted (the signed-in credential lives inside it).",
+      "type": "string"
+    },
+    "sidecar_present": {
+      "description": "Whether the sidecar tree currently exists (a fresh/already-removed install has none).",
+      "type": "boolean"
+    },
+    "trigger_artifacts": {
+      "description": "Every artifact the auto-update-trigger scrub would REACH, across EVERY harness the apply\ntouches — not just the active one, and not only the ones that leave a file behind: a path\nwhere the trigger is one, and the named registration where it lives in the harness's own\nprogram (empty = nothing anywhere). Rendered rows, in the disclosure's own order and\nwording — the preview says what the apply will attempt, so a person reads the same sentence\nthe receipt answers for.",
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  },
+  "required": [
+    "trigger_artifacts",
+    "sidecar_path",
+    "sidecar_present"
+  ]
+}

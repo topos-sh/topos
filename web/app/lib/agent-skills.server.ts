@@ -16,8 +16,21 @@ import { serverEnv } from "@/env.server";
  * secret is hashed and nothing signs.
  */
 
-/** The three files of the built-in `topos` skill — SKILL.md first (the index's one entry). */
-const SKILL_FILES = ["SKILL.md", "INSTALL.md", "reference.md"] as const;
+/**
+ * The files of the built-in `topos` skill — SKILL.md first (the index's one entry), then the
+ * install guide, the generated verb reference, and the four detail documents SKILL.md defers to
+ * by name ("read `manifest.md` next to this file"). Every one must be served: a skill installer
+ * that downloads the entry document and not its siblings leaves each deferral dead-ended.
+ */
+const SKILL_FILES = [
+  "SKILL.md",
+  "INSTALL.md",
+  "reference.md",
+  "manifest.md",
+  "mcp.md",
+  "distilling.md",
+  "team-setup.md",
+] as const;
 
 const INDEX_SCHEMA = "https://schemas.agentskills.io/discovery/0.2.0/schema.json";
 /** Path-absolute per the discovery RFC (resolved against the index URL as base). */

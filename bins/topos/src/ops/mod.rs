@@ -62,7 +62,9 @@ pub(crate) use add_mcp::{McpAdded, add_mcp};
 #[cfg(test)]
 pub(crate) use arm::INERT_TRIGGER;
 pub(crate) use arm::{Scrubbed, Triggers, arm_detected, probe_detected};
-pub(crate) use builtin::{ensure_builtin, is_builtin, restore_builtin};
+pub(crate) use builtin::{
+    ensure_builtin, is_builtin, restore_builtin, skill_md as builtin_skill_md,
+};
 pub(crate) use claim::claim;
 #[cfg(test)]
 pub(crate) use claim::digest_in_history;
@@ -76,7 +78,7 @@ pub(crate) use auth::{AuthConnectors, AuthStatusData, status};
 #[cfg(test)]
 pub(crate) use builtin::{
     ensure_with as builtin_ensure_with, marker_in_frontmatter as builtin_marker_in_frontmatter,
-    placement_dirs as builtin_placement_dirs,
+    placement_dirs as builtin_placement_dirs, remove_builtin as builtin_remove,
 };
 pub(crate) use diff::{DiffBudget, diff, diff_resolved};
 pub(crate) use feed_migration::ensure_feed_migration;

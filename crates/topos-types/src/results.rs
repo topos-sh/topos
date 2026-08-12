@@ -2493,6 +2493,135 @@ pub struct StatusTrigger {
     pub note: Option<String>,
 }
 
+// =================================================================================================
+// `auth status` (the per-session access panel — side-effect-free).
+// =================================================================================================
+
+/// `auth status` result — per-SESSION access health (each probed under that session's own
+/// credential), the active agent's trigger health, and the reporting posture. **INFERRED**
+/// (additive-only).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
+pub struct AuthStatusData {
+    /// The server base of the first live session, for orientation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server: Option<String>,
+    /// The principal the first successful probe answered with.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub principal: Option<String>,
+    /// Whether any live session exists (the signed-in state).
+    pub signed_in: bool,
+    /// One row per session this installation holds.
+    pub workspaces: Vec<AuthWorkspaceStatus>,
+    /// Whether the session-start auto-update trigger is armed in the active harness's config.
+    pub hook_armed: bool,
+    /// Per-workspace reporting posture, read from local state (no network).
+    pub reporting: Vec<AuthReportingStatus>,
+}
+
+/// One session's access health in an [`AuthStatusData`]. **INFERRED** (additive-only).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
+pub struct AuthWorkspaceStatus {
+    pub workspace_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    /// Whether this session's credential is stored locally (always true for a live session row).
+    pub credential: bool,
+    /// The probe verdict: `healthy` / `pending — awaiting owner approval` / `no access — ended,
+    /// removed, or gone` / `unreachable` / `ended`.
+    pub health: String,
+    /// The role the probe answered (healthy only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
+}
+
+/// One workspace's reporting posture in an [`AuthStatusData`] (from the local sync-status
+/// document). **INFERRED** (additive-only).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
+pub struct AuthReportingStatus {
+    pub workspace_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_delivery_at: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_report_at: Option<i64>,
+    pub staleness_window_ms: u64,
+    /// Whether the last delivery is older than the window (the sessions page shows the same).
+    pub stale: bool,
+}
+
+// =================================================================================================
+// `uninstall` (the two-phase teardown: what would go, then what went).
+// =================================================================================================
+
+/// The bare `uninstall` DESCRIBE — what `--yes` would remove (nothing has changed).
+/// **INFERRED** (additive-only).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
+pub struct UninstallDescribe {
+    /// Every artifact the auto-update-trigger scrub would REACH, across EVERY harness the apply
+    /// touches — not just the active one, and not only the ones that leave a file behind: a path
+    /// where the trigger is one, and the named registration where it lives in the harness's own
+    /// program (empty = nothing anywhere). Rendered rows, in the disclosure's own order and
+    /// wording — the preview says what the apply will attempt, so a person reads the same sentence
+    /// the receipt answers for.
+    pub trigger_artifacts: Vec<String>,
+    /// The `~/.topos/` sidecar tree that would be deleted (the signed-in credential lives inside it).
+    pub sidecar_path: String,
+    /// Whether the sidecar tree currently exists (a fresh/already-removed install has none).
+    pub sidecar_present: bool,
+    /// The running binary's own path — NOT deleted; disclosed so the human can remove it themselves.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub binary_path: Option<String>,
+    /// The BUILT-IN `topos` skill's placed copies — topos-authored artifacts (like the hook entry),
+    /// so they go with the teardown; YOUR skill files still stay untouched.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub builtin_dirs: Vec<String>,
+    /// The MCP config files the apply will take topos-placed server entries OUT of. Those entries
+    /// point live agents at servers, and the ledger proving they are topos's dies with the sidecar
+    /// — so the preview names every file it will edit.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mcp_files: Vec<String>,
+    /// The MCP config files holding a topos entry someone edited by hand. Those are LEFT — the
+    /// never-clobber rule does not lapse because the command is a teardown — and the preview says
+    /// so, so a person is not surprised by a leftover.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mcp_drifted: Vec<String>,
+}
+
+/// The applied `uninstall` — what was removed. On a teardown that FAILED partway this is the
+/// receipt of the work that actually landed, spelled exactly as the success receipt spells it.
+/// **INFERRED** (additive-only).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
+pub struct UninstallApplied {
+    /// The ACTIVE harness's trigger scrub report (surfaced honestly — `Inactive` when nothing was
+    /// armed). Absent on a teardown that failed before the scrubs ran: the trigger is still armed,
+    /// and a report saying otherwise would be the falsehood this field exists to prevent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hook: Option<crate::TriggerReport>,
+    /// The breadth scrub's outcomes — other agents whose trigger the sweep removed (or could not,
+    /// disclosed); clean no-ops stay off the receipt.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub triggers: Vec<crate::TriggerReport>,
+    /// Whether the `~/.topos/` sidecar tree was deleted (false = there was nothing to delete, or
+    /// the teardown never got that far).
+    pub sidecar_removed: bool,
+    /// The built-in `topos` skill's placed copies that were removed (topos-authored artifacts).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub builtin_dirs: Vec<String>,
+    /// The MCP config files topos-placed server entries were removed from.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mcp_files: Vec<String>,
+    /// The MCP config files whose hand-edited topos entries were LEFT in place.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mcp_drifted: Vec<String>,
+    /// The running binary's own path — left in place; the human removes it with their installer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub binary_path: Option<String>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

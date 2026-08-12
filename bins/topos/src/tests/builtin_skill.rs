@@ -211,6 +211,26 @@ fn the_built_in_teaches_the_whole_stopped_merge_loop() {
     assert!(!flat.contains("freezes the copy"), "{flat}");
 }
 
+/// The four DETAIL files the entry document defers to by name, paired with the committed source
+/// the binary embeds. One list, so a fifth file cannot be added to the bundle and forgotten here.
+fn detail_files() -> [(&'static str, &'static str); 4] {
+    [
+        (
+            "distilling.md",
+            include_str!("../../../../skills/topos/distilling.md"),
+        ),
+        (
+            "manifest.md",
+            include_str!("../../../../skills/topos/manifest.md"),
+        ),
+        ("mcp.md", include_str!("../../../../skills/topos/mcp.md")),
+        (
+            "team-setup.md",
+            include_str!("../../../../skills/topos/team-setup.md"),
+        ),
+    ]
+}
+
 #[test]
 fn ensure_places_the_bundle_and_lists_it_as_built_in() {
     let rig = Rig::new("place");
@@ -243,6 +263,19 @@ fn ensure_places_the_bundle_and_lists_it_as_built_in() {
         crate::cli_ref::cli_ref_md(),
         "the placed reference IS the generated docs/cli.md bytes — one renderer"
     );
+    // The four DETAIL files SKILL.md defers to by name. Each must land, or the deferral
+    // ("read `manifest.md` next to this file") sends the agent to a file that is not there.
+    for (name, source) in detail_files() {
+        assert_eq!(
+            std::fs::read_to_string(shared.join(name)).unwrap(),
+            source,
+            "the placed {name} IS the committed top-level source"
+        );
+        assert!(
+            skill_md.contains(&format!("`{name}`")),
+            "SKILL.md sends the agent to {name} by name"
+        );
+    }
 
     // A second sweep is a byte-silent no-op.
     let sync = ops::ensure_builtin(&ctx).unwrap();
@@ -267,6 +300,53 @@ fn ensure_places_the_bundle_and_lists_it_as_built_in() {
         })
         .any(|lock| lock.name == "topos" && crate::ops::is_builtin(&lock.skill_id));
     assert!(held, "the built-in's store record stands");
+}
+
+/// The four detail files ride the SAME machinery as SKILL.md, end to end: force-synced back when
+/// one is deleted or hand-edited, and gone with the dir when the device opts out. They are the
+/// bundle's own bytes, not attachments — a sweep that restored the entry document and left a
+/// deleted `manifest.md` missing would leave every deferral in it dangling.
+#[test]
+fn the_detail_files_are_force_synced_and_go_with_the_opt_out() {
+    let rig = Rig::new("details");
+    rig.detect(".cline");
+    let inert_f = InertFollow;
+    let inert_p = InertPlane;
+    let ctx = rig.ctx(&inert_f, &inert_p);
+    ops::ensure_builtin(&ctx).unwrap();
+    let shared = rig.shared_copy();
+
+    // One deleted, one hand-edited — the two ways a placed file diverges.
+    std::fs::remove_file(shared.join("manifest.md")).unwrap();
+    std::fs::write(shared.join("mcp.md"), "# mine now\n").unwrap();
+
+    let sync = ops::ensure_builtin(&ctx).unwrap();
+    assert!(sync.changed, "the divergent copy is re-synced");
+    for (name, source) in detail_files() {
+        assert_eq!(
+            std::fs::read_to_string(shared.join(name)).unwrap(),
+            source,
+            "{name} is force-synced back to the binary's bytes"
+        );
+    }
+
+    // `topos remove topos --yes` — the durable opt-out takes the whole placed dir, detail files
+    // included, and the next sweep re-places nothing.
+    ops::builtin_remove(&ctx).unwrap();
+    assert!(!shared.exists(), "the placed dir goes whole");
+    let sync = ops::ensure_builtin(&ctx).unwrap();
+    assert!(!sync.changed && !shared.exists(), "the opt-out is durable");
+
+    // `topos add topos` is its literal inverse — every file comes back.
+    let sync = ops::restore_builtin(&ctx).unwrap();
+    assert!(sync.changed, "the restore lands bytes again");
+    for (name, source) in detail_files() {
+        assert_eq!(
+            std::fs::read_to_string(shared.join(name)).unwrap(),
+            source,
+            "{name} comes back with the restore"
+        );
+    }
 }
 
 /// **A state doc written by another binary still loads.** `state/builtin.json` is durable and

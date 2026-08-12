@@ -119,7 +119,7 @@ export function ossRoutes(options: OssRoutesOptions = {}): RouteConfigEntry[] {
     route("docs/*", file("docs-page.tsx"), { id: "docs-page" }),
     // The machine-discovery lane: llms.txt (the site guide convention) + the agent-skills
     // discovery index, whose ONE entry is the repo's downloadable `topos` skill. The skill's
-    // three files serve under the SAME well-known base so relative sibling references resolve;
+    // files serve under the SAME well-known base so relative sibling references resolve;
     // `.well-known/skills/` is the earlier index spelling, aliased byte-identically. All four
     // are deployment-scoped resource routes — origin-rooted in BOTH tenancy modes.
     route("llms.txt", file("llms-txt.ts")),
