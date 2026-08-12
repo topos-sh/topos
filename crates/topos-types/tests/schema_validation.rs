@@ -101,7 +101,7 @@ fn good_delivery() -> WireDelivery {
         }],
         proposals_awaiting: 1,
         staleness_window_ms: 604_800_000,
-        session_status: Some("active".into()),
+        session_status: "active".into(),
     }
 }
 
@@ -130,15 +130,33 @@ fn delivery_accepts_valid_and_rejects_bad_version_and_schema_version() {
         "schema_version != 1 must be rejected (const)"
     );
 
-    // `session_status` is OPTIONAL on the schema — a producer that omits it serves only
-    // active-equivalent access, and the body must still validate. The `declined` list is
-    // optional too (absent defaults empty).
+    // The `declined` list is optional (absent defaults empty) — a body that omits it validates.
     let mut minimal = good.clone();
-    minimal.as_object_mut().unwrap().remove("session_status");
     minimal.as_object_mut().unwrap().remove("declined");
     assert!(
         v.is_valid(&minimal),
-        "a delivery omitting session_status and declined must validate (defaulted)"
+        "a delivery omitting declined must validate (defaulted empty)"
+    );
+
+    // `session_status` is REQUIRED: the session's standing is not something a delivery may leave
+    // unsaid, and an absent one is never read as active.
+    let mut statusless = good.clone();
+    statusless.as_object_mut().unwrap().remove("session_status");
+    assert!(
+        !v.is_valid(&statusless),
+        "a delivery omitting session_status must be rejected"
+    );
+
+    // …and so is the entitled row's `kind`: a client BRANCHES on it, so a row that names none is
+    // refused rather than placed as a skill.
+    let mut kindless = good.clone();
+    kindless["skills"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("kind");
+    assert!(
+        !v.is_valid(&kindless),
+        "a delivered skill omitting kind must be rejected"
     );
 
     // An unknown extra field is ACCEPTED — schemars sets no `additionalProperties: false`, so the wire
@@ -199,18 +217,26 @@ fn the_protocol_card_accepts_a_version_declaration_and_its_absence() {
         card: "topos-protocol-card".into(),
         api_base_url: "https://topos.example/api".into(),
         server_version: Some("0.1.20".into()),
-        min_cli_version: Some("0.1.15".into()),
     })
     .unwrap();
-    assert!(v.is_valid(&good), "a card with both declarations validates");
+    assert!(v.is_valid(&good), "a card with its declaration validates");
 
-    // The declarations are ADDITIVE: the card a producer predating them serves still validates.
+    // The declaration is ADDITIVE: a card that omits it still validates.
     let bare = json!({
         "schema_version": 1,
         "card": "topos-protocol-card",
         "api_base_url": "https://topos.example/api",
     });
     assert!(v.is_valid(&bare), "an undeclared card must still validate");
+
+    // The card a server serves may carry further keys this build neither declares nor reads —
+    // the schema admits them (a superset body is not a contract violation).
+    let mut extra = good.clone();
+    extra["min_cli_version"] = json!("0.1.15");
+    assert!(
+        v.is_valid(&extra),
+        "an unread extra key must not invalidate"
+    );
 
     // A version is a string — a number would sail through a hand-rolled reader and fail nowhere.
     let mut bad = good.clone();

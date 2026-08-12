@@ -32,11 +32,8 @@
       "minimum": 0
     },
     "session_status": {
-      "description": "THIS session's standing — `\"active\"` or `\"pending\"`. A `\"pending\"` delivery carries empty\n`skills` / `notices` and `proposals_awaiting: 0` — no data flows over a pending session;\nthe client skips the workspace quietly and `topos status` shows the wait. Serde-defaulted\nso a producer predating the field still parses (absent reads as active-equivalent).",
-      "type": [
-        "string",
-        "null"
-      ]
+      "description": "THIS session's standing — `\"active\"` or `\"pending\"`. A `\"pending\"` delivery carries empty\n`skills` / `notices` and `proposals_awaiting: 0` — no data flows over a pending session;\nthe client skips the workspace quietly and `topos status` shows the wait.",
+      "type": "string"
     },
     "skills": {
       "description": "The entitled skills — everything this device should have (a possibly-empty list).",
@@ -46,10 +43,9 @@
       }
     },
     "staleness_window_ms": {
-      "description": "The workspace's staleness window (epoch milliseconds) — the ONE clock the fleet page and the\nclient's hook warning both read: a device whose last report is older than this is stale.\nAdditive: an older producer that omits it falls back to the one-week default (a whole delivery\nbody must never fail to parse over one new field).",
+      "description": "The workspace's staleness window (epoch milliseconds) — the ONE clock the fleet page and the\nclient's hook warning both read: a device whose last report is older than this is stale.",
       "type": "integer",
       "format": "uint64",
-      "default": 604800000,
       "minimum": 0
     },
     "workspace_id": {
@@ -62,7 +58,9 @@
     "workspace_id",
     "skills",
     "notices",
-    "proposals_awaiting"
+    "proposals_awaiting",
+    "staleness_window_ms",
+    "session_status"
   ],
   "$defs": {
     "WireDeclined": {
@@ -106,9 +104,8 @@
           "minimum": 0
         },
         "kind": {
-          "description": "The catalog's bundle kind (`\"skill\"` · `\"mcp\"`). An OPEN string on the wire and a CLOSED\nvocabulary at the server that mints it. Clients BRANCH on it: the kind chooses the delivery\nmechanics — skill-dir placement, or the MCP config converge — so a client that does not\nknow the kind a row names refuses that row rather than placing it as something else.\nAdditive: an older producer that omits it is serving skills.",
-          "type": "string",
-          "default": "skill"
+          "description": "The catalog's bundle kind (`\"skill\"` · `\"mcp\"`). An OPEN string on the wire and a CLOSED\nvocabulary at the server that mints it. Clients BRANCH on it: the kind chooses the delivery\nmechanics — skill-dir placement, or the MCP config converge — so a client that does not\nknow the kind a row names refuses that row rather than placing it as something else.",
+          "type": "string"
         },
         "name": {
           "description": "The catalog's user-facing name (the on-disk directory name for a fresh install).",
@@ -140,6 +137,7 @@
       "required": [
         "skill_id",
         "name",
+        "kind",
         "protection",
         "version_id",
         "bundle_digest",

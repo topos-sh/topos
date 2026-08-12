@@ -347,8 +347,6 @@ pub struct WireSkillIndexEntry {
     /// vocabulary at the server that mints it. Clients BRANCH on it: the kind chooses the delivery
     /// mechanics — skill-dir placement, or the MCP config converge — so a client that does not
     /// know the kind a row names refuses that row rather than placing it as something else.
-    /// Additive: an older producer that omits it is serving skills.
-    #[serde(default = "default_bundle_kind")]
     pub kind: String,
     /// The catalog lifecycle status — `"active"` / `"archived"` (a deleted skill has no `current` row and
     /// so no entry). An OPEN string, deliberately: a new state can land without a schema break.
@@ -437,8 +435,6 @@ pub struct WireDeliverySkill {
     /// vocabulary at the server that mints it. Clients BRANCH on it: the kind chooses the delivery
     /// mechanics — skill-dir placement, or the MCP config converge — so a client that does not
     /// know the kind a row names refuses that row rather than placing it as something else.
-    /// Additive: an older producer that omits it is serving skills.
-    #[serde(default = "default_bundle_kind")]
     pub kind: String,
     /// The unsigned, advisory display name (the author's folder name); absent ⇒ show `name`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -531,25 +527,11 @@ pub struct WireDelivery {
     pub proposals_awaiting: u64,
     /// The workspace's staleness window (epoch milliseconds) — the ONE clock the fleet page and the
     /// client's hook warning both read: a device whose last report is older than this is stale.
-    /// Additive: an older producer that omits it falls back to the one-week default (a whole delivery
-    /// body must never fail to parse over one new field).
-    #[serde(default = "default_staleness_window_ms")]
     pub staleness_window_ms: u64,
     /// THIS session's standing — `"active"` or `"pending"`. A `"pending"` delivery carries empty
     /// `skills` / `notices` and `proposals_awaiting: 0` — no data flows over a pending session;
-    /// the client skips the workspace quietly and `topos status` shows the wait. Serde-defaulted
-    /// so a producer predating the field still parses (absent reads as active-equivalent).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub session_status: Option<String>,
-}
-
-impl WireDelivery {
-    /// The effective session standing (`session_status`; absent = a producer that serves only
-    /// active-equivalent access).
-    #[must_use]
-    pub fn effective_status(&self) -> Option<&str> {
-        self.session_status.as_deref()
-    }
+    /// the client skips the workspace quietly and `topos status` shows the wait.
+    pub session_status: String,
 }
 
 /// One declined bundle in a [`WireDelivery`] — the caller's own web-recorded decline.
@@ -563,24 +545,6 @@ pub struct WireDeclined {
     pub skill_id: String,
     /// The bundle's catalog name (joined for narration).
     pub name: String,
-}
-
-/// The default bundle kind — the fallback when a producer predating the catalog `kind` omits it
-/// (everything such a producer serves is a skill).
-fn default_bundle_kind() -> String {
-    "skill".to_owned()
-}
-
-/// The default staleness window (one week, ms) — the fallback when a producer omits the field.
-fn default_staleness_window_ms() -> u64 {
-    604_800_000
-}
-
-/// The default device↔workspace link status — the fallback where a field is serde-defaulted
-/// ([`WireMe::link_status`]): a producer predating device links serves only active-equivalent
-/// access.
-fn default_link_status() -> String {
-    "active".to_owned()
 }
 
 /// One applied-state row a device reports: the skill and the version it currently holds after its
@@ -937,10 +901,6 @@ pub struct WireProtocolCard {
     /// the field — a client reads such a card as "nothing declared" and proceeds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub server_version: Option<String>,
-    /// The oldest CLI release this server still speaks to — the last wire-breaking release. Absent
-    /// from a producer that predates the field.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub min_cli_version: Option<String>,
 }
 
 /// `GET /v1/workspaces/{ws}/me` response — the caller's own membership describe: who you are here,
@@ -967,23 +927,9 @@ pub struct WireMe {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub invited_by: Option<String>,
     /// THIS session's status — `"active"` or `"pending"` (a pending session awaits an owner's
-    /// approval; no skill data flows over it). The session-wire spelling; read through
-    /// [`Self::effective_status`].
+    /// approval; no skill data flows over it).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_status: Option<String>,
-    /// The RETIRED device-link spelling of the same fact — parse-only fallback for a producer
-    /// predating sessions. Serde-defaulted to `"active"` (such a producer serves only
-    /// active-equivalent access).
-    #[serde(default = "default_link_status")]
-    pub link_status: String,
-}
-
-impl WireMe {
-    /// The one status read: the session spelling when served, else the legacy `link_status`.
-    #[must_use]
-    pub fn effective_status(&self) -> &str {
-        self.session_status.as_deref().unwrap_or(&self.link_status)
-    }
 }
 
 /// One skill reference inside a channel entry.
@@ -1059,12 +1005,9 @@ pub struct WireProposalEntry {
     pub stale: bool,
     /// Whether the CALLER authored this proposal — the server computes it from the resolved user id
     /// (never email equality). The client's inbox uses it to split the outbox (yours) from the inbox
-    /// (others') and to offer the author `--withdraw` instead of `--approve`. `Some` is AUTHORITATIVE
-    /// either way (a served `false` is a served "not yours" — never overridden client-side); only a
-    /// producer predating the field omits it (`None`), and only then does the client fall back to
-    /// comparing principals.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub yours: Option<bool>,
+    /// (others') and to offer the author `--withdraw` instead of `--approve`. AUTHORITATIVE in both
+    /// directions: a served `false` is a served "not yours", never overridden client-side.
+    pub yours: bool,
 }
 
 /// `GET /v1/workspaces/{ws}/proposals` response — every OPEN proposal in the workspace, author-message
@@ -1148,9 +1091,7 @@ pub struct WireSkillLog {
     pub name: String,
     /// The catalog's bundle kind (`"skill"` · `"mcp"`) — the same fact the catalog and delivery
     /// carry: an OPEN string on the wire, a CLOSED vocabulary at the server that mints it. A log
-    /// read renders it; the rows that DELIVER a bundle branch on it. Additive: an older producer
-    /// omits it.
-    #[serde(default = "default_bundle_kind")]
+    /// read renders it; the rows that DELIVER a bundle branch on it.
     pub kind: String,
     /// The skill's lifecycle status (`active` / `archived` / `deleted`).
     pub status: String,
@@ -1439,7 +1380,7 @@ mod tests {
             }],
             proposals_awaiting: 2,
             staleness_window_ms: 604_800_000,
-            session_status: Some("active".to_owned()),
+            session_status: "active".to_owned(),
         };
         let v = serde_json::to_value(&delivery).unwrap();
         assert_eq!(v["schema_version"], 1);
@@ -1482,7 +1423,7 @@ mod tests {
         .unwrap();
         assert!(pending.skills.is_empty() && pending.notices.is_empty());
         assert!(pending.declined.is_empty());
-        assert_eq!(pending.effective_status(), Some("pending"));
+        assert_eq!(pending.session_status, "pending");
     }
 
     #[test]
@@ -1543,32 +1484,6 @@ mod tests {
     }
 
     #[test]
-    fn link_status_defaults_ride_the_legacy_shapes() {
-        // `WireMe` DEFAULTS the link status to "active" (schema stability — a producer predating
-        // the session standing serves only active-equivalent access).
-        let me: WireMe = serde_json::from_value(serde_json::json!({
-            "workspace_id": "w_acme",
-            "name": "acme",
-            "display_name": "Acme",
-            "address": "https://topos.example/acme",
-            "principal": "alice@acme.com",
-            "role": "member",
-        }))
-        .unwrap();
-        assert_eq!(me.link_status, "active");
-        // The granted poll's absent session_status reads as active-equivalent (the consumer's
-        // one status read defaults it).
-        let poll: DeviceAuthPollResponse = serde_json::from_value(serde_json::json!({
-            "status": "granted",
-            "credential": "dc",
-            "session_id": "sn_1",
-            "workspace": { "workspace_id": "w_acme", "name": "acme", "display_name": "Acme" },
-        }))
-        .unwrap();
-        assert!(poll.session_status.is_none());
-    }
-
-    #[test]
     fn the_protocol_card_carries_its_version_declaration_and_reads_without_one() {
         // The two declarations ride the constant card so a client can judge, before it commits to
         // a login, whether the two ends still speak the same wire.
@@ -1577,25 +1492,25 @@ mod tests {
             card: "topos-protocol-card".to_owned(),
             api_base_url: "https://topos.example/api".to_owned(),
             server_version: Some("0.1.20".to_owned()),
-            min_cli_version: Some("0.1.15".to_owned()),
         };
         let v = serde_json::to_value(&card).unwrap();
         assert_eq!(v["server_version"], "0.1.20");
-        assert_eq!(v["min_cli_version"], "0.1.15");
         let back: WireProtocolCard = serde_json::from_value(v).unwrap();
         assert_eq!(back.server_version.as_deref(), Some("0.1.20"));
-        // A producer predating the fields still parses — they are absent, never zero-valued, and
-        // an undeclared version is never read as a claim about anything.
+        // A card that declares no version still parses — the field is absent, never zero-valued,
+        // and an undeclared version is never read as a claim about anything. (The card a server
+        // serves may carry further keys this build does not read; they are ignored, not refused.)
         let old: WireProtocolCard = serde_json::from_value(serde_json::json!({
             "schema_version": 1,
             "card": "topos-protocol-card",
             "api_base_url": "https://topos.example/api",
+            "min_cli_version": "0.1.15",
         }))
         .unwrap();
-        assert!(old.server_version.is_none() && old.min_cli_version.is_none());
+        assert!(old.server_version.is_none());
         // …and an undeclared version omits on the way out, so the card stays byte-identical to
         // what it has always been.
         let v = serde_json::to_value(&old).unwrap();
-        assert!(v.get("server_version").is_none() && v.get("min_cli_version").is_none());
+        assert!(v.get("server_version").is_none());
     }
 }

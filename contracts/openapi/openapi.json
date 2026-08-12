@@ -3703,7 +3703,9 @@
           "workspace_id",
           "skills",
           "notices",
-          "proposals_awaiting"
+          "proposals_awaiting",
+          "staleness_window_ms",
+          "session_status"
         ],
         "properties": {
           "declined": {
@@ -3733,11 +3735,8 @@
             "minimum": 0
           },
           "session_status": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "THIS session's standing — `\"active\"` or `\"pending\"`. A `\"pending\"` delivery carries empty\n`skills` / `notices` and `proposals_awaiting: 0` — no data flows over a pending session;\nthe client skips the workspace quietly and `topos status` shows the wait. Serde-defaulted\nso a producer predating the field still parses (absent reads as active-equivalent)."
+            "type": "string",
+            "description": "THIS session's standing — `\"active\"` or `\"pending\"`. A `\"pending\"` delivery carries empty\n`skills` / `notices` and `proposals_awaiting: 0` — no data flows over a pending session;\nthe client skips the workspace quietly and `topos status` shows the wait."
           },
           "skills": {
             "type": "array",
@@ -3749,7 +3748,7 @@
           "staleness_window_ms": {
             "type": "integer",
             "format": "int64",
-            "description": "The workspace's staleness window (epoch milliseconds) — the ONE clock the fleet page and the\nclient's hook warning both read: a device whose last report is older than this is stale.\nAdditive: an older producer that omits it falls back to the one-week default (a whole delivery\nbody must never fail to parse over one new field).",
+            "description": "The workspace's staleness window (epoch milliseconds) — the ONE clock the fleet page and the\nclient's hook warning both read: a device whose last report is older than this is stale.",
             "minimum": 0
           },
           "workspace_id": {
@@ -3764,6 +3763,7 @@
         "required": [
           "skill_id",
           "name",
+          "kind",
           "protection",
           "version_id",
           "bundle_digest",
@@ -3791,7 +3791,7 @@
           },
           "kind": {
             "type": "string",
-            "description": "The catalog's bundle kind (`\"skill\"` · `\"mcp\"`). An OPEN string on the wire and a CLOSED\nvocabulary at the server that mints it. Clients BRANCH on it: the kind chooses the delivery\nmechanics — skill-dir placement, or the MCP config converge — so a client that does not\nknow the kind a row names refuses that row rather than placing it as something else.\nAdditive: an older producer that omits it is serving skills."
+            "description": "The catalog's bundle kind (`\"skill\"` · `\"mcp\"`). An OPEN string on the wire and a CLOSED\nvocabulary at the server that mints it. Clients BRANCH on it: the kind chooses the delivery\nmechanics — skill-dir placement, or the MCP config converge — so a client that does not\nknow the kind a row names refuses that row rather than placing it as something else."
           },
           "name": {
             "type": "string",
@@ -4048,10 +4048,6 @@
             ],
             "description": "Who invited this principal (absent for a genesis owner)."
           },
-          "link_status": {
-            "type": "string",
-            "description": "The RETIRED device-link spelling of the same fact — parse-only fallback for a producer\npredating sessions. Serde-defaulted to `\"active\"` (such a producer serves only\nactive-equivalent access)."
-          },
           "name": {
             "type": "string",
             "description": "The workspace's ADDRESS name."
@@ -4069,7 +4065,7 @@
               "string",
               "null"
             ],
-            "description": "THIS session's status — `\"active\"` or `\"pending\"` (a pending session awaits an owner's\napproval; no skill data flows over it). The session-wire spelling; read through\n[`Self::effective_status`]."
+            "description": "THIS session's status — `\"active\"` or `\"pending\"` (a pending session awaits an owner's\napproval; no skill data flows over it)."
           },
           "workspace_id": {
             "type": "string",
@@ -4185,7 +4181,8 @@
           "proposer",
           "message",
           "created_at",
-          "stale"
+          "stale",
+          "yours"
         ],
         "properties": {
           "base_version_id": {
@@ -4221,11 +4218,8 @@
             "description": "The proposed version's commit id (64-char lowercase hex) — the review target handle."
           },
           "yours": {
-            "type": [
-              "boolean",
-              "null"
-            ],
-            "description": "Whether the CALLER authored this proposal — the server computes it from the resolved user id\n(never email equality). The client's inbox uses it to split the outbox (yours) from the inbox\n(others') and to offer the author `--withdraw` instead of `--approve`. `Some` is AUTHORITATIVE\neither way (a served `false` is a served \"not yours\" — never overridden client-side); only a\nproducer predating the field omits it (`None`), and only then does the client fall back to\ncomparing principals."
+            "type": "boolean",
+            "description": "Whether the CALLER authored this proposal — the server computes it from the resolved user id\n(never email equality). The client's inbox uses it to split the outbox (yours) from the inbox\n(others') and to offer the author `--withdraw` instead of `--approve`. AUTHORITATIVE in both\ndirections: a served `false` is a served \"not yours\", never overridden client-side."
           }
         }
       },
@@ -4278,13 +4272,6 @@
             "type": "string",
             "description": "The constant discriminant a client dispatches on (`\"topos-protocol-card\"`)."
           },
-          "min_cli_version": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "The oldest CLI release this server still speaks to — the last wire-breaking release. Absent\nfrom a producer that predates the field."
-          },
           "schema_version": {
             "type": "integer",
             "format": "int32",
@@ -4322,6 +4309,7 @@
         "required": [
           "skill_id",
           "name",
+          "kind",
           "status",
           "version_id",
           "bundle_digest",
@@ -4349,7 +4337,7 @@
           },
           "kind": {
             "type": "string",
-            "description": "The catalog's bundle kind (`\"skill\"` · `\"mcp\"`). An OPEN string on the wire and a CLOSED\nvocabulary at the server that mints it. Clients BRANCH on it: the kind chooses the delivery\nmechanics — skill-dir placement, or the MCP config converge — so a client that does not\nknow the kind a row names refuses that row rather than placing it as something else.\nAdditive: an older producer that omits it is serving skills."
+            "description": "The catalog's bundle kind (`\"skill\"` · `\"mcp\"`). An OPEN string on the wire and a CLOSED\nvocabulary at the server that mints it. Clients BRANCH on it: the kind chooses the delivery\nmechanics — skill-dir placement, or the MCP config converge — so a client that does not\nknow the kind a row names refuses that row rather than placing it as something else."
           },
           "name": {
             "type": "string",
@@ -4407,6 +4395,7 @@
         "required": [
           "skill_id",
           "name",
+          "kind",
           "status",
           "versions",
           "proposals"
@@ -4421,7 +4410,7 @@
           },
           "kind": {
             "type": "string",
-            "description": "The catalog's bundle kind (`\"skill\"` · `\"mcp\"`) — the same fact the catalog and delivery\ncarry: an OPEN string on the wire, a CLOSED vocabulary at the server that mints it. A log\nread renders it; the rows that DELIVER a bundle branch on it. Additive: an older producer\nomits it."
+            "description": "The catalog's bundle kind (`\"skill\"` · `\"mcp\"`) — the same fact the catalog and delivery\ncarry: an OPEN string on the wire, a CLOSED vocabulary at the server that mints it. A log\nread renders it; the rows that DELIVER a bundle branch on it."
           },
           "name": {
             "type": "string",

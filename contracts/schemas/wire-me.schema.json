@@ -19,11 +19,6 @@
         "null"
       ]
     },
-    "link_status": {
-      "description": "The RETIRED device-link spelling of the same fact — parse-only fallback for a producer\npredating sessions. Serde-defaulted to `\"active\"` (such a producer serves only\nactive-equivalent access).",
-      "type": "string",
-      "default": "active"
-    },
     "name": {
       "description": "The workspace's ADDRESS name.",
       "type": "string"
@@ -37,7 +32,7 @@
       "type": "string"
     },
     "session_status": {
-      "description": "THIS session's status — `\"active\"` or `\"pending\"` (a pending session awaits an owner's\napproval; no skill data flows over it). The session-wire spelling; read through\n[`Self::effective_status`].",
+      "description": "THIS session's status — `\"active\"` or `\"pending\"` (a pending session awaits an owner's\napproval; no skill data flows over it).",
       "type": [
         "string",
         "null"

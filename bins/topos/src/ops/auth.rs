@@ -54,7 +54,7 @@ pub(crate) fn status(
             let transports = (connectors.session)(s);
             match transports.directory.me(&s.workspace_id) {
                 Ok(me) => {
-                    let pending = me.effective_status() == "pending";
+                    let pending = me.session_status.as_deref() == Some("pending");
                     probed_principal.get_or_insert(me.principal);
                     if pending {
                         (

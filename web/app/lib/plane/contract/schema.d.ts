@@ -1318,20 +1318,17 @@ export interface components {
             /**
              * @description THIS session's standing — `"active"` or `"pending"`. A `"pending"` delivery carries empty
              *     `skills` / `notices` and `proposals_awaiting: 0` — no data flows over a pending session;
-             *     the client skips the workspace quietly and `topos status` shows the wait. Serde-defaulted
-             *     so a producer predating the field still parses (absent reads as active-equivalent).
+             *     the client skips the workspace quietly and `topos status` shows the wait.
              */
-            session_status?: string | null;
+            session_status: string;
             /** @description The entitled skills — everything this device should have (a possibly-empty list). */
             skills: components["schemas"]["WireDeliverySkill"][];
             /**
              * Format: int64
              * @description The workspace's staleness window (epoch milliseconds) — the ONE clock the fleet page and the
              *     client's hook warning both read: a device whose last report is older than this is stale.
-             *     Additive: an older producer that omits it falls back to the one-week default (a whole delivery
-             *     body must never fail to parse over one new field).
              */
-            staleness_window_ms?: number;
+            staleness_window_ms: number;
             /** @description The workspace this delivery is scoped to (echoed from the path). */
             workspace_id: string;
         };
@@ -1355,9 +1352,8 @@ export interface components {
              *     vocabulary at the server that mints it. Clients BRANCH on it: the kind chooses the delivery
              *     mechanics — skill-dir placement, or the MCP config converge — so a client that does not
              *     know the kind a row names refuses that row rather than placing it as something else.
-             *     Additive: an older producer that omits it is serving skills.
              */
-            kind?: string;
+            kind: string;
             /** @description The catalog's user-facing name (the on-disk directory name for a fresh install). */
             name: string;
             /**
@@ -1482,12 +1478,6 @@ export interface components {
             display_name: string;
             /** @description Who invited this principal (absent for a genesis owner). */
             invited_by?: string | null;
-            /**
-             * @description The RETIRED device-link spelling of the same fact — parse-only fallback for a producer
-             *     predating sessions. Serde-defaulted to `"active"` (such a producer serves only
-             *     active-equivalent access).
-             */
-            link_status?: string;
             /** @description The workspace's ADDRESS name. */
             name: string;
             /** @description The caller's principal (canonical form). */
@@ -1496,8 +1486,7 @@ export interface components {
             role: string;
             /**
              * @description THIS session's status — `"active"` or `"pending"` (a pending session awaits an owner's
-             *     approval; no skill data flows over it). The session-wire spelling; read through
-             *     [`Self::effective_status`].
+             *     approval; no skill data flows over it).
              */
             session_status?: string | null;
             /** @description The workspace id. */
@@ -1572,12 +1561,10 @@ export interface components {
             /**
              * @description Whether the CALLER authored this proposal — the server computes it from the resolved user id
              *     (never email equality). The client's inbox uses it to split the outbox (yours) from the inbox
-             *     (others') and to offer the author `--withdraw` instead of `--approve`. `Some` is AUTHORITATIVE
-             *     either way (a served `false` is a served "not yours" — never overridden client-side); only a
-             *     producer predating the field omits it (`None`), and only then does the client fall back to
-             *     comparing principals.
+             *     (others') and to offer the author `--withdraw` instead of `--approve`. AUTHORITATIVE in both
+             *     directions: a served `false` is a served "not yours", never overridden client-side.
              */
-            yours?: boolean | null;
+            yours: boolean;
         };
         /**
          * @description `GET /v1/workspaces/{ws}/proposals` response — every OPEN proposal in the workspace, author-message
@@ -1607,11 +1594,6 @@ export interface components {
             api_base_url: string;
             /** @description The constant discriminant a client dispatches on (`"topos-protocol-card"`). */
             card: string;
-            /**
-             * @description The oldest CLI release this server still speaks to — the last wire-breaking release. Absent
-             *     from a producer that predates the field.
-             */
-            min_cli_version?: string | null;
             /**
              * Format: int32
              * @description Always `1` for this contract version (the schema pins it `const`).
@@ -1655,9 +1637,8 @@ export interface components {
              *     vocabulary at the server that mints it. Clients BRANCH on it: the kind chooses the delivery
              *     mechanics — skill-dir placement, or the MCP config converge — so a client that does not
              *     know the kind a row names refuses that row rather than placing it as something else.
-             *     Additive: an older producer that omits it is serving skills.
              */
-            kind?: string;
+            kind: string;
             /** @description The catalog's user-facing name (a pre-catalog seeded pointer falls back to the skill id). */
             name: string;
             /**
@@ -1704,10 +1685,9 @@ export interface components {
             /**
              * @description The catalog's bundle kind (`"skill"` · `"mcp"`) — the same fact the catalog and delivery
              *     carry: an OPEN string on the wire, a CLOSED vocabulary at the server that mints it. A log
-             *     read renders it; the rows that DELIVER a bundle branch on it. Additive: an older producer
-             *     omits it.
+             *     read renders it; the rows that DELIVER a bundle branch on it.
              */
-            kind?: string;
+            kind: string;
             /** @description The skill's current catalog name (the archived spelling once archived). */
             name: string;
             /** @description The proposal events, newest first. */

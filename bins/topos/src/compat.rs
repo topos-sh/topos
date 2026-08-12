@@ -20,10 +20,12 @@ use crate::error::ClientError;
 /// This build's version, e.g. "0.1.0".
 pub(crate) const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// The oldest server this build can speak to. The floor sits at the release that made the login
-/// wire server-first (the authorize body's required `workspace` field was retired) — the last
-/// wire-breaking change; every wire type and lane route has been additive since. A wire-breaking
-/// release moves this floor in the same change.
+/// The oldest server this build can speak to. The floor sits at the last release that broke the
+/// wire in a way a client CANNOT DEGRADE THROUGH — the login wire going server-first (the
+/// authorize body's required `workspace` field was retired). Later removals that a client rides
+/// out on its own do not move it: a lane route has since been deleted whose loss costs an older
+/// client one best-effort field and no more. A break with no graceful degradation moves this floor
+/// in the same change.
 pub(crate) const MIN_SERVER_VERSION: &str = "0.1.15";
 
 /// The oldest server that RECORDS MCP bundle kinds — the floor a `kind = "mcp"` publish checks
@@ -184,7 +186,6 @@ mod tests {
             card: "topos-protocol-card".to_owned(),
             api_base_url: "https://topos.example/api".to_owned(),
             server_version: server_version.map(str::to_owned),
-            min_cli_version: None,
         };
         // Provably below the MCP floor: refused with OUR rendering of the version.
         let err = ensure_server_records_mcp(Some(&card(Some("v0.1.9")))).unwrap_err();
@@ -223,7 +224,6 @@ mod tests {
             card: "topos-protocol-card".to_owned(),
             api_base_url: "https://topos.example/api".to_owned(),
             server_version: server_version.map(str::to_owned),
-            min_cli_version: None,
         };
         assert!(ensure_server_supported(&card(None)).is_ok());
         assert!(ensure_server_supported(&card(Some(CURRENT_VERSION))).is_ok());

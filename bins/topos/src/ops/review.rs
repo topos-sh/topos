@@ -7,8 +7,9 @@
 //! `@hash`, its `bundle_digest` re-derived from the fetched bytes and asserted to reproduce the hash — so a
 //! tampered plane can't get the reviewer to sign over forged bytes) at `expected` = the FRESH `current`
 //! generation (which equals a reviewable proposal's base, so a reviewer who has not pulled is still
-//! correct). Viewing the change is `diff`; this verb decides. A bare `review` (no target / no verdict) is
-//! the two-phase describe — a MARKED SEAM until that leg lands.
+//! correct). Viewing the change is `diff`; this verb decides. A bare `review` (no target) is the
+//! inbox/outbox across every live session; a bare TARGET is the describe plus its verdict
+//! next-actions.
 
 use topos_core::digest::to_hex;
 use topos_types::persisted::{OpKind, OpRecord};
@@ -101,7 +102,6 @@ fn review_inbox(
     }
     // The server-computed `yours` is the one authority on the session wire (identity is the
     // session's user; no principal file exists client-side any more).
-    let me_principal: Option<String> = None;
     let mut inbox = Vec::new();
     let mut outbox = Vec::new();
     for ws in &su.universe {
@@ -126,16 +126,10 @@ fn review_inbox(
                 stale: p.stale,
             };
             // The server-computed `yours` (from the resolved user id) is authoritative in BOTH
-            // directions — a served `false` is never overridden by the principal comparison (emails
-            // are mutable and re-registrable, so a stale principal could mislabel someone else's
-            // proposal as yours). The comparison is the COMPAT fallback ONLY when the server predates
-            // the field (labeling only, never authorization — the plane re-decides every verdict).
-            let mine = p.yours.unwrap_or_else(|| {
-                me_principal
-                    .as_deref()
-                    .is_some_and(|me| me == crate::sessions::canonical_principal(&p.proposer))
-            });
-            if mine {
+            // directions — never second-guessed here (emails are mutable and re-registrable, so a
+            // client-side principal comparison could mislabel someone else's proposal as yours).
+            // Labeling only, never authorization — the plane re-decides every verdict.
+            if p.yours {
                 outbox.push(entry);
             } else {
                 inbox.push(entry);
@@ -225,14 +219,8 @@ fn review_describe(
         },
     };
     // Whose proposal is this? The server-computed `yours` is authoritative in BOTH directions
-    // (resolved user id, never email equality) — a served `false` is never overridden; the principal
-    // comparison is the COMPAT fallback ONLY for a server predating the field.
-    let me_principal: Option<String> = None;
-    let yours = proposal.yours.unwrap_or_else(|| {
-        me_principal
-            .as_deref()
-            .is_some_and(|me| me == crate::sessions::canonical_principal(&proposal.proposer))
-    });
+    // (resolved user id, never email equality) — a served `false` is never overridden.
+    let yours = proposal.yours;
 
     // The diff against current — the same plane-diff machinery `diff` runs (`current..<proposal>`),
     // under the caller's byte budget (the `--json` default cap / `--max-bytes`); a truncated body

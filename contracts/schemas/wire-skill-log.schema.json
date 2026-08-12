@@ -12,9 +12,8 @@
       ]
     },
     "kind": {
-      "description": "The catalog's bundle kind (`\"skill\"` · `\"mcp\"`) — the same fact the catalog and delivery\ncarry: an OPEN string on the wire, a CLOSED vocabulary at the server that mints it. A log\nread renders it; the rows that DELIVER a bundle branch on it. Additive: an older producer\nomits it.",
-      "type": "string",
-      "default": "skill"
+      "description": "The catalog's bundle kind (`\"skill\"` · `\"mcp\"`) — the same fact the catalog and delivery\ncarry: an OPEN string on the wire, a CLOSED vocabulary at the server that mints it. A log\nread renders it; the rows that DELIVER a bundle branch on it.",
+      "type": "string"
     },
     "name": {
       "description": "The skill's current catalog name (the archived spelling once archived).",
@@ -46,6 +45,7 @@
   "required": [
     "skill_id",
     "name",
+    "kind",
     "status",
     "versions",
     "proposals"

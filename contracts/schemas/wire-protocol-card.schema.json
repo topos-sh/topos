@@ -12,13 +12,6 @@
       "description": "The constant discriminant a client dispatches on (`\"topos-protocol-card\"`).",
       "type": "string"
     },
-    "min_cli_version": {
-      "description": "The oldest CLI release this server still speaks to — the last wire-breaking release. Absent\nfrom a producer that predates the field.",
-      "type": [
-        "string",
-        "null"
-      ]
-    },
     "schema_version": {
       "description": "Always `1` for this contract version (the schema pins it `const`).",
       "type": "integer",

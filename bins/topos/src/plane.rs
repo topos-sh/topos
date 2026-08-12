@@ -31,12 +31,12 @@ pub(crate) enum LinkStatus {
 }
 
 impl LinkStatus {
-    /// Parse a wire `session_status` field. Absent (an older producer) reads as ACTIVE — such a
-    /// producer serves only active-equivalent access; any present-but-unrecognized value reads as
-    /// the stricter PENDING.
-    pub(crate) fn from_wire(raw: Option<&str>) -> Self {
+    /// Parse a wire `session_status` field. Every producer serves it, so the value alone decides:
+    /// `"active"` is the one permissive answer and anything else reads as the stricter PENDING (an
+    /// unrecognized standing is never treated as permission to flow data).
+    pub(crate) fn from_wire(raw: &str) -> Self {
         match raw {
-            None | Some("active") => LinkStatus::Active,
+            "active" => LinkStatus::Active,
             _ => LinkStatus::Pending,
         }
     }

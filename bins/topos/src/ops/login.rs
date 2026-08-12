@@ -1073,12 +1073,6 @@ mod tests {
                 schema_version: 1,
                 card: "topos-protocol-card".to_owned(),
                 api_base_url: "https://topos.example.com/api".to_owned(),
-                // A server that names its version names the floor it holds too — the two
-                // declarations travel together.
-                min_cli_version: self
-                    .server_version
-                    .as_ref()
-                    .map(|_| crate::compat::MIN_SERVER_VERSION.to_owned()),
                 server_version: self.server_version.clone(),
             })
         }
@@ -1220,7 +1214,6 @@ mod tests {
                     role: "member".to_owned(),
                     invited_by: None,
                     session_status: Some("active".to_owned()),
-                    link_status: "active".to_owned(),
                 }),
                 None => Err(ClientError::Plane("unreachable".to_owned())),
             }

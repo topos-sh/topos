@@ -55,11 +55,8 @@
           "pattern": "^[0-9a-f]{64}$"
         },
         "yours": {
-          "description": "Whether the CALLER authored this proposal — the server computes it from the resolved user id\n(never email equality). The client's inbox uses it to split the outbox (yours) from the inbox\n(others') and to offer the author `--withdraw` instead of `--approve`. `Some` is AUTHORITATIVE\neither way (a served `false` is a served \"not yours\" — never overridden client-side); only a\nproducer predating the field omits it (`None`), and only then does the client fall back to\ncomparing principals.",
-          "type": [
-            "boolean",
-            "null"
-          ]
+          "description": "Whether the CALLER authored this proposal — the server computes it from the resolved user id\n(never email equality). The client's inbox uses it to split the outbox (yours) from the inbox\n(others') and to offer the author `--withdraw` instead of `--approve`. AUTHORITATIVE in both\ndirections: a served `false` is a served \"not yours\", never overridden client-side.",
+          "type": "boolean"
         }
       },
       "required": [
@@ -70,7 +67,8 @@
         "proposer",
         "message",
         "created_at",
-        "stale"
+        "stale",
+        "yours"
       ]
     }
   }

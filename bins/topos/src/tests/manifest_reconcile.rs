@@ -10383,7 +10383,6 @@ impl DirectorySource for NamedDirectory {
             role: "member".to_owned(),
             invited_by: None,
             session_status: Some(SESSION_ACTIVE.to_owned()),
-            link_status: SESSION_ACTIVE.to_owned(),
         })
     }
     fn channels_index(&self, ws: &str) -> Result<WireChannelIndex, ClientError> {

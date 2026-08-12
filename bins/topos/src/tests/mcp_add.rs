@@ -1064,7 +1064,6 @@ impl crate::plane::ContributeSource for OldServerPublish {
             card: "topos-protocol-card".to_owned(),
             api_base_url: format!("https://{HOST}/api"),
             server_version: Some("0.1.9".to_owned()),
-            min_cli_version: None,
         })
     }
 }

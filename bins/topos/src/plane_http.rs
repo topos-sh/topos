@@ -358,7 +358,7 @@ impl crate::plane::DeliverySource for UreqPlane {
         let body = self.bearer_get(&url, &cred)?;
         let wire: topos_types::requests::WireDelivery = serde_json::from_slice(&body)
             .map_err(|e| PlaneError::Malformed(format!("delivery body: {e}")))?;
-        let link_status = LinkStatus::from_wire(wire.effective_status());
+        let link_status = LinkStatus::from_wire(&wire.session_status);
         let mut skills = Vec::with_capacity(wire.skills.len());
         for ds in wire.skills {
             skills.push(crate::plane::DeliverySkill {
@@ -1129,12 +1129,17 @@ fn map_poll_response(host: &str, status: u16, bytes: &[u8]) -> Result<DeviceAuth
         DeviceAuthPollStatus::Denied => DeviceAuthPoll::Denied,
         DeviceAuthPollStatus::Expired => DeviceAuthPoll::Expired,
         DeviceAuthPollStatus::Granted => {
-            let (Some(credential), Some(session_id), Some(workspace)) =
-                (resp.credential, resp.session_id, resp.workspace)
-            else {
+            let (Some(credential), Some(session_id), Some(workspace), Some(session_status)) = (
+                resp.credential,
+                resp.session_id,
+                resp.workspace,
+                resp.session_status,
+            ) else {
                 // `granted` without its grant halves is a malformed response, not a silent re-poll.
+                // The minted session's STANDING is one of those halves: a grant that names no
+                // status is unreadable, never quietly read as permission to flow data.
                 return Err(ClientError::WireInvalid(
-                    "a granted login poll carried no credential/session/workspace".into(),
+                    "a granted login poll carried no credential/session/workspace/status".into(),
                 ));
             };
             DeviceAuthPoll::Granted(EnrolledGrant {
@@ -1145,8 +1150,8 @@ fn map_poll_response(host: &str, status: u16, bytes: &[u8]) -> Result<DeviceAuth
                     kind: h.kind,
                     name: h.name,
                 }),
-                // The session's born status; an older producer omits it (⇒ active).
-                link_status: LinkStatus::from_wire(resp.session_status.as_deref()),
+                // The session's born status, as the grant declares it.
+                link_status: LinkStatus::from_wire(&session_status),
             })
         }
     })
@@ -1190,7 +1195,7 @@ fn map_login_connect(
         credential: resp.credential,
         session_id: resp.session_id,
         workspace: wire_workspace(resp.workspace)?,
-        link_status: LinkStatus::from_wire(Some(&resp.session_status)),
+        link_status: LinkStatus::from_wire(&resp.session_status),
     })
 }
 
@@ -2996,6 +3001,7 @@ mod tests {
         if let Some(ws) = workspace_id {
             body["credential"] = serde_json::json!("devc_secret");
             body["session_id"] = serde_json::json!("sn_1");
+            body["session_status"] = serde_json::json!("active");
             body["workspace"] = serde_json::json!({
                 "workspace_id": ws,
                 "name": "acme",
@@ -3028,7 +3034,7 @@ mod tests {
         assert_eq!(grant.session_id, "sn_1");
         assert_eq!(grant.workspace.workspace_id, "w_acme");
         assert_eq!(grant.workspace.name, "acme");
-        assert_eq!(grant.link_status, LinkStatus::Active, "absent ⇒ active");
+        assert_eq!(grant.link_status, LinkStatus::Active);
         // The credential never surfaces in Debug.
         assert!(!format!("{grant:?}").contains("devc_secret"));
         // A non-200 is a transport-shaped error, never a silent pending.
@@ -3042,6 +3048,21 @@ mod tests {
     fn map_poll_response_refuses_a_bare_or_hostile_grant() {
         // `granted` without its credential/session/workspace halves is malformed, not a re-poll.
         let err = map_poll_response("topos.test", 200, &poll_json("granted", None)).unwrap_err();
+        assert!(matches!(err, ClientError::WireInvalid(_)), "got {err:?}");
+        // The minted session's STANDING is one of those halves: a grant that names no status is
+        // refused, never read as active — the fail-closed side of the one status read.
+        let mut statusless: serde_json::Value =
+            serde_json::from_slice(&poll_json("granted", Some("w_acme"))).expect("poll body");
+        statusless
+            .as_object_mut()
+            .expect("object")
+            .remove("session_status");
+        let err = map_poll_response(
+            "topos.test",
+            200,
+            &serde_json::to_vec(&statusless).expect("serialize"),
+        )
+        .unwrap_err();
         assert!(matches!(err, ClientError::WireInvalid(_)), "got {err:?}");
         // A hostile workspace id (it later keys URL splices + the session doc) fails the WHOLE poll,
         // as the WIRE flavor of the corrupt family (same CORRUPT_STATE code; the safe message names
@@ -3107,17 +3128,17 @@ mod tests {
         )
         .expect("a clean card parses");
         assert_eq!(ok.api_base_url, "https://topos.sh/api");
-        // A card predating the version declaration parses with neither field — this build reads
-        // that as "nothing declared", not as a claim.
-        assert!(ok.server_version.is_none() && ok.min_cli_version.is_none());
-        // A card that DOES declare them carries both through untouched (the floor check reads them
-        // afterwards; parsing judges nothing).
+        // A card that declares no version parses without it — this build reads that as "nothing
+        // declared", not as a claim.
+        assert!(ok.server_version.is_none());
+        // A card that DOES declare it carries it through untouched (the floor check reads it
+        // afterwards; parsing judges nothing), and the keys this build does not read — a served
+        // card carries more than it consumes — are ignored rather than refused.
         let declared = parse_card(
             br#"{"schema_version":1,"card":"topos-protocol-card","api_base_url":"https://topos.sh/api","server_version":"0.1.20","min_cli_version":"0.1.15"}"#,
         )
-        .expect("a card with the declarations parses");
+        .expect("a card with the declaration parses");
         assert_eq!(declared.server_version.as_deref(), Some("0.1.20"));
-        assert_eq!(declared.min_cli_version.as_deref(), Some("0.1.15"));
         // A card with an empty base, a wrong discriminant, or a non-card body is refused typed.
         for bad in [
             br#"{"schema_version":1,"card":"topos-protocol-card","api_base_url":"  "}"#.as_slice(),
