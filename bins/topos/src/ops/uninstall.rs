@@ -267,7 +267,10 @@ fn mcp_surfaces(ctx: &Ctx<'_>) -> crate::mcp_engine::RecordedSurfaces {
     let Some(io) = mcp_io(ctx) else {
         return crate::mcp_engine::RecordedSurfaces::default();
     };
-    crate::mcp_engine::recorded_surfaces(&io, &topos_harness::mcp::descriptor::mcp_harnesses())
+    crate::mcp_engine::recorded_surfaces(
+        &io,
+        &topos_harness::mcp::descriptor::mcp_harnesses_for_teardown(),
+    )
 }
 
 /// Retire every ledger-recorded topos MCP entry from this machine's agent configs, bundle by
@@ -282,7 +285,7 @@ fn scrub_mcp_entries(ctx: &Ctx<'_>, applied: &mut UninstallApplied) -> Vec<Messa
     let Some(io) = mcp_io(ctx) else {
         return Vec::new();
     };
-    let descriptors = topos_harness::mcp::descriptor::mcp_harnesses();
+    let descriptors = topos_harness::mcp::descriptor::mcp_harnesses_for_teardown();
     let detected: std::collections::BTreeSet<String> = topos_harness::registry::detected_harnesses(
         &io.home,
         ctx.roots.as_ref().and_then(|r| r.cwd.as_deref()),

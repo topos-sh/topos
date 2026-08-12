@@ -350,7 +350,7 @@ fn retire_mcp_entries(
     };
     let outcome = crate::mcp_engine::remove_bundle(
         &io,
-        &topos_harness::mcp::descriptor::mcp_harnesses(),
+        &topos_harness::mcp::descriptor::mcp_harnesses_for_teardown(),
         &detected,
         skill_id,
         &item.name,
