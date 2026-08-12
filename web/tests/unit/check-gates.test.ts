@@ -50,6 +50,56 @@ afterEach(() => {
   fixtures = [];
 });
 
+/** A planted violation and the substrings the gate's complaint must name. */
+interface FiringCase {
+  name: string;
+  files: Record<string, string>;
+  needles: string[];
+}
+
+/** The RED half, written once: the gate exits 1 and says what it caught. */
+function expectFires(script: string, fc: FiringCase): void {
+  const run = runGate(script, fixtureApp(fc.files));
+  expect(run.code).toBe(1);
+  for (const needle of fc.needles) {
+    expect(run.output).toContain(needle);
+  }
+}
+
+/** A case table as `%s` tuples: vitest truncates a `$name` interpolation at 40 characters, so a
+ * long title would report the same truncated text for two different cases. */
+function titled(cases: FiringCase[]): [string, FiringCase][] {
+  return cases.map((c) => [c.name, c]);
+}
+
+const BOUNDARY_VIOLATIONS: FiringCase[] = [
+  {
+    name: "randomBytes outside the two mints",
+    files: { "lib/rogue.server.ts": 'import { randomBytes } from "node:crypto";\n' },
+    needles: ["randomBytes"],
+  },
+  {
+    name: "the custody lane spelled outside app/lib/plane/",
+    files: {
+      "routes/rogue.ts":
+        'export function loader() { requireSessionActor(0); return "/internal/v1/workspaces"; }\n',
+    },
+    needles: ["/internal/v1"],
+  },
+  {
+    name: "a guardless data-reading route",
+    files: {
+      "routes/secret-page.tsx": "export async function loader() { return { leak: true }; }\n",
+    },
+    needles: ["without an auth guard"],
+  },
+  {
+    name: "the retired acting-email header",
+    files: { "lib/rogue.server.ts": 'headers.set("x-topos-acting-email", email);\n' },
+    needles: ["x-topos-acting-email"],
+  },
+];
+
 describe("check-boundary self-test", () => {
   it("passes a clean fixture", () => {
     const app = fixtureApp({
@@ -58,14 +108,7 @@ describe("check-boundary self-test", () => {
     expect(runGate(BOUNDARY, app).code).toBe(0);
   });
 
-  it("fires on randomBytes outside the two mints", () => {
-    const app = fixtureApp({
-      "lib/rogue.server.ts": 'import { randomBytes } from "node:crypto";\n',
-    });
-    const run = runGate(BOUNDARY, app);
-    expect(run.code).toBe(1);
-    expect(run.output).toContain("randomBytes");
-  });
+  it.each(titled(BOUNDARY_VIOLATIONS))("fires on %s", (_name, fc) => expectFires(BOUNDARY, fc));
 
   it("allows randomBytes in the identity mint", () => {
     const app = fixtureApp({
@@ -88,34 +131,6 @@ describe("check-boundary self-test", () => {
     expect(run.code).toBe(1);
     expect(run.output).toContain("sha256");
   });
-
-  it("fires on the custody lane spelled outside app/lib/plane/", () => {
-    const app = fixtureApp({
-      "routes/rogue.ts":
-        'export function loader() { requireSessionActor(0); return "/internal/v1/workspaces"; }\n',
-    });
-    const run = runGate(BOUNDARY, app);
-    expect(run.code).toBe(1);
-    expect(run.output).toContain("/internal/v1");
-  });
-
-  it("fires on a guardless data-reading route", () => {
-    const app = fixtureApp({
-      "routes/secret-page.tsx": "export async function loader() { return { leak: true }; }\n",
-    });
-    const run = runGate(BOUNDARY, app);
-    expect(run.code).toBe(1);
-    expect(run.output).toContain("without an auth guard");
-  });
-
-  it("fires on the retired acting-email header", () => {
-    const app = fixtureApp({
-      "lib/rogue.server.ts": 'headers.set("x-topos-acting-email", email);\n',
-    });
-    const run = runGate(BOUNDARY, app);
-    expect(run.code).toBe(1);
-    expect(run.output).toContain("x-topos-acting-email");
-  });
 });
 
 describe("check-boundary agent-skills digest carve-out (one exact expression)", () => {
@@ -133,57 +148,68 @@ describe("check-boundary agent-skills digest carve-out (one exact expression)", 
     expect(runGate(BOUNDARY, app).code).toBe(0);
   });
 
-  it('fires on createHash("sha1") — the algorithm is pinned', () => {
-    const app = fixtureApp({
-      [MODULE]:
-        'import { createHash } from "node:crypto";\n' +
-        // biome-ignore lint/suspicious/noTemplateCurlyInString: the template IS the fixture under test.
-        'const d = `sha256:${createHash("sha1").update(skillMd).digest("hex")}`;\n',
-    });
-    const run = runGate(BOUNDARY, app);
-    expect(run.code).toBe(1);
-    expect(run.output).toContain("createHash");
-  });
+  const CARVE_OUT_VIOLATIONS: FiringCase[] = [
+    {
+      name: 'createHash("sha1") — the algorithm is pinned',
+      files: {
+        [MODULE]:
+          'import { createHash } from "node:crypto";\n' +
+          // biome-ignore lint/suspicious/noTemplateCurlyInString: the template IS the fixture under test.
+          'const d = `sha256:${createHash("sha1").update(skillMd).digest("hex")}`;\n',
+      },
+      needles: ["createHash"],
+    },
+    {
+      name: "a SECOND createHash call site — the expression is allowed once",
+      files: {
+        [MODULE]:
+          SANCTIONED +
+          // biome-ignore lint/suspicious/noTemplateCurlyInString: the template IS the fixture under test.
+          'const again = `sha256:${createHash("sha256").update(other).digest("hex")}`;\n',
+      },
+      needles: ["createHash"],
+    },
+    {
+      name: "createHmac in that module",
+      files: { [MODULE]: `${SANCTIONED}import { createHmac } from "node:crypto";\n` },
+      needles: ["createHmac"],
+    },
+    {
+      name: "sign( in that module",
+      files: { [MODULE]: `${SANCTIONED}const s = sign(payload);\n` },
+      needles: ["sign("],
+    },
+    {
+      name: "a userland sha256 spelling in that module",
+      files: { [MODULE]: 'import { sha256 } from "./vendored";\nconst h = sha256(bytes);\n' },
+      needles: ["sha256"],
+    },
+  ];
 
-  it("fires on a SECOND createHash call site — the expression is allowed once", () => {
-    const app = fixtureApp({
-      [MODULE]:
-        SANCTIONED +
-        // biome-ignore lint/suspicious/noTemplateCurlyInString: the template IS the fixture under test.
-        'const again = `sha256:${createHash("sha256").update(other).digest("hex")}`;\n',
-    });
-    const run = runGate(BOUNDARY, app);
-    expect(run.code).toBe(1);
-    expect(run.output).toContain("createHash");
-  });
-
-  it("fires on createHmac in that module", () => {
-    const app = fixtureApp({
-      [MODULE]: `${SANCTIONED}import { createHmac } from "node:crypto";\n`,
-    });
-    const run = runGate(BOUNDARY, app);
-    expect(run.code).toBe(1);
-    expect(run.output).toContain("createHmac");
-  });
-
-  it("fires on sign( in that module", () => {
-    const app = fixtureApp({
-      [MODULE]: `${SANCTIONED}const s = sign(payload);\n`,
-    });
-    const run = runGate(BOUNDARY, app);
-    expect(run.code).toBe(1);
-    expect(run.output).toContain("sign(");
-  });
-
-  it("fires on a userland sha256 spelling in that module", () => {
-    const app = fixtureApp({
-      [MODULE]: 'import { sha256 } from "./vendored";\nconst h = sha256(bytes);\n',
-    });
-    const run = runGate(BOUNDARY, app);
-    expect(run.code).toBe(1);
-    expect(run.output).toContain("sha256");
-  });
+  it.each(titled(CARVE_OUT_VIOLATIONS))("fires on %s", (_name, fc) => expectFires(BOUNDARY, fc));
 });
+
+const EMAIL_VIOLATIONS: FiringCase[] = [
+  {
+    name: "an email equality branch, with file:line",
+    files: { "lib/rogue.server.ts": "const admit = user.email === invited.email;\n" },
+    needles: ["rogue.server.ts:1"],
+  },
+  {
+    name: "a Drizzle email predicate and a SQL template predicate",
+    files: {
+      "lib/rogue1.server.ts": "where(eq(user.email, presented))\n",
+      // biome-ignore lint/suspicious/noTemplateCurlyInString: the ${ IS the violation under test.
+      "lib/rogue2.server.ts": "sql`SELECT 1 FROM seats WHERE email = ${presented}`\n",
+    },
+    needles: ["rogue1.server.ts:1", "rogue2.server.ts:1"],
+  },
+  {
+    name: "the retired canonicalization defenses",
+    files: { "lib/rogue.server.ts": "export { normalizeEmail } from './old';\n" },
+    needles: ["normalizeEmail"],
+  },
+];
 
 describe("check-email-authz self-test", () => {
   it("passes a clean fixture (email as display data)", () => {
@@ -193,35 +219,7 @@ describe("check-email-authz self-test", () => {
     expect(runGate(EMAIL, app).code).toBe(0);
   });
 
-  it("fires on an email equality branch, with file:line", () => {
-    const app = fixtureApp({
-      "lib/rogue.server.ts": "const admit = user.email === invited.email;\n",
-    });
-    const run = runGate(EMAIL, app);
-    expect(run.code).toBe(1);
-    expect(run.output).toMatch(/rogue\.server\.ts:1/);
-  });
-
-  it("fires on a Drizzle email predicate and a SQL template predicate", () => {
-    const app = fixtureApp({
-      "lib/rogue1.server.ts": "where(eq(user.email, presented))\n",
-      // biome-ignore lint/suspicious/noTemplateCurlyInString: the ${ IS the violation under test.
-      "lib/rogue2.server.ts": "sql`SELECT 1 FROM seats WHERE email = ${presented}`\n",
-    });
-    const run = runGate(EMAIL, app);
-    expect(run.code).toBe(1);
-    expect(run.output).toContain("rogue1.server.ts:1");
-    expect(run.output).toContain("rogue2.server.ts:1");
-  });
-
-  it("fires on the retired canonicalization defenses", () => {
-    const app = fixtureApp({
-      "lib/rogue.server.ts": "export { normalizeEmail } from './old';\n",
-    });
-    const run = runGate(EMAIL, app);
-    expect(run.code).toBe(1);
-    expect(run.output).toContain("normalizeEmail");
-  });
+  it.each(titled(EMAIL_VIOLATIONS))("fires on %s", (_name, fc) => expectFires(EMAIL, fc));
 
   it("allows the three sanctioned lookups", () => {
     const app = fixtureApp({

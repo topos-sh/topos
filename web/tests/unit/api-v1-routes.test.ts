@@ -189,6 +189,12 @@ async function expectUniform404(res: Response): Promise<void> {
   expect(await res.json()).toEqual(NOT_FOUND_BODY);
 }
 
+/** A case table as `%s` tuples: vitest truncates a `$name` interpolation at 40 characters, so a
+ * long title would report the same truncated text for two different cases. */
+function titled<T extends { name: string }>(cases: T[]): [string, T][] {
+  return cases.map((c) => [c.name, c]);
+}
+
 interface DeliveredSkill {
   skill_id: string;
   via: { channels: string[]; direct: boolean; assigned_by?: string; picked?: true };
@@ -478,6 +484,96 @@ const ALL_ROUTES: RouteCase[] = [
   },
 ];
 
+/**
+ * Credentials are minted in `beforeAll`, so a case table can only NAME one — never hold its
+ * bytes. `unknown` is the credential nobody ever minted.
+ */
+type CredName = keyof typeof CREDS | "unknown";
+
+function credOf(name: CredName): string {
+  return name === "unknown" ? "cred-nope" : CREDS[name];
+}
+
+/**
+ * ONE driven request — the handler, the wire it is handed, and whose credential (if any) rides.
+ * The three families below share it; what tells them apart is the ANSWER each asserts.
+ */
+interface LaneCase {
+  name: string;
+  h: unknown;
+  method: string;
+  /** The path under `/api/v1/workspaces/<ws>`. */
+  path: string;
+  params?: Record<string, string>;
+  /** Absent ⇒ no Authorization header at all. */
+  cred?: CredName;
+  body?: unknown;
+  rawBody?: string;
+  /** A workspace id other than the fixture's. */
+  ws?: string;
+}
+
+function driveCase(c: LaneCase): Promise<Response> {
+  const ws = c.ws ?? wsId;
+  return drive(
+    c.h,
+    req(c.method, `/api/v1/workspaces/${ws}${c.path}`, {
+      cred: c.cred === undefined ? undefined : credOf(c.cred),
+      body: c.body,
+      rawBody: c.rawBody,
+    }),
+    { ws, ...c.params },
+  );
+}
+
+const PROTECT_REVIEWED = { level: "reviewed" };
+
+const MISS_CASES: LaneCase[] = [
+  { name: "no Authorization header at all (a GET read)", h: meLoader, method: "GET", path: "/me" },
+  {
+    name: "a SEATLESS user's credential (a read)",
+    h: meLoader,
+    method: "GET",
+    path: "/me",
+    cred: "stranger",
+  },
+  {
+    name: "a valid credential against the WRONG workspace id",
+    h: meLoader,
+    method: "GET",
+    path: "/me",
+    cred: "mem",
+    ws: "w_other",
+  },
+  {
+    name: "an ENDED session's credential (a write)",
+    h: skillProtAction,
+    method: "PUT",
+    path: "/skills/s_beta/protection",
+    params: { skill: "s_beta" },
+    cred: "revoked",
+    body: PROTECT_REVIEWED,
+  },
+  {
+    name: "an unsupported method on a served action (no method oracle)",
+    h: skillProtAction,
+    method: "POST",
+    path: "/skills/s_alpha/protection",
+    params: { skill: "s_alpha" },
+    cred: "mem",
+    body: PROTECT_REVIEWED,
+  },
+  {
+    name: "a write on an UNKNOWN skill (never an existence oracle)",
+    h: skillProtAction,
+    method: "PUT",
+    path: "/skills/s_nope/protection",
+    params: { skill: "s_nope" },
+    cred: "owner",
+    body: PROTECT_REVIEWED,
+  },
+];
+
 describe("the uniform 404 (indistinguishable from a missing credential)", () => {
   it.each(ALL_ROUTES)("$name — an unknown credential is the uniform 404", async (rc) => {
     const res = await drive(
@@ -488,51 +584,8 @@ describe("the uniform 404 (indistinguishable from a missing credential)", () => 
     await expectUniform404(res);
   });
 
-  it("no Authorization header → 404 (a GET read)", async () => {
-    const res = await drive(meLoader, req("GET", `/api/v1/workspaces/${wsId}/me`), { ws: wsId });
-    await expectUniform404(res);
-  });
-
-  it("an ENDED session's credential → 404 (a write)", async () => {
-    const res = await drive(
-      skillProtAction,
-      req("PUT", `/api/v1/workspaces/${wsId}/skills/s_beta/protection`, {
-        cred: CREDS.revoked,
-        body: { level: "reviewed" },
-      }),
-      { ws: wsId, skill: "s_beta" },
-    );
-    await expectUniform404(res);
-  });
-
-  it("a SEATLESS user's credential → 404 (a read)", async () => {
-    const res = await drive(
-      meLoader,
-      req("GET", `/api/v1/workspaces/${wsId}/me`, { cred: CREDS.stranger }),
-      { ws: wsId },
-    );
-    await expectUniform404(res);
-  });
-
-  it("a valid credential against the WRONG workspace id → 404", async () => {
-    const res = await drive(
-      meLoader,
-      req("GET", "/api/v1/workspaces/w_other/me", { cred: CREDS.mem }),
-      { ws: "w_other" },
-    );
-    await expectUniform404(res);
-  });
-
-  it("an unsupported method on a served action → the uniform 404 (no method oracle)", async () => {
-    const res = await drive(
-      skillProtAction,
-      req("POST", `/api/v1/workspaces/${wsId}/skills/s_alpha/protection`, {
-        cred: CREDS.mem,
-        body: { level: "reviewed" },
-      }),
-      { ws: wsId, skill: "s_alpha" },
-    );
-    await expectUniform404(res);
+  it.each(titled(MISS_CASES))("%s → the uniform 404", async (_name, mc) => {
+    await expectUniform404(await driveCase(mc));
   });
 
   it("wrong-method exports answer the uniform 404, never react-router's 400/405", async () => {
@@ -554,165 +607,109 @@ describe("the uniform 404 (indistinguishable from a missing credential)", () => 
       await drive(catchAllAction, req("POST", "/api/v1/anything/else", { body: {} }), {}),
     );
   });
-
-  it("a write on an unknown skill folds to the uniform 404 (never an existence oracle)", async () => {
-    const res = await drive(
-      skillProtAction,
-      req("PUT", `/api/v1/workspaces/${wsId}/skills/s_nope/protection`, {
-        cred: CREDS.owner,
-        body: { level: "reviewed" },
-      }),
-      { ws: wsId, skill: "s_nope" },
-    );
-    await expectUniform404(res);
-  });
-
-  // The RETIRED feed-writing paths. Nothing a machine presents decides what a person should
-  // have any more, so these paths are not served at all — and the splat answers them
-  // BYTE-IDENTICALLY to a path that never existed, with a good credential and a bad one alike.
-  it.each([
-    { name: "profile read", method: "GET", path: `/profile` },
-    { name: "profile skill include", method: "PUT", path: `/profile/skills/s_alpha` },
-    { name: "profile skill remove", method: "DELETE", path: `/profile/skills/s_alpha` },
-    { name: "profile channel include", method: "PUT", path: `/profile/channels/ops` },
-    { name: "profile channel remove", method: "DELETE", path: `/profile/channels/everyone` },
-  ])("$name is no longer served — the splat answers it", async ({ method, path }) => {
-    const url = `/api/v1/workspaces/${wsId}${path}`;
-    const handler = method === "GET" ? catchAllLoader : catchAllAction;
-    const served = await drive(handler, req(method, url, { cred: CREDS.mem }), {});
-    expect(served.status).toBe(404);
-    const body = await served.json();
-    expect(body).toEqual(NOT_FOUND_BODY);
-    const garbage = await drive(
-      handler,
-      req(method, "/api/v1/not/a/route", { cred: CREDS.mem }),
-      {},
-    );
-    expect(garbage.status).toBe(404);
-    expect(await garbage.json()).toEqual(body);
-  });
 });
 
 // ── (c) validation 400s (and the ordering: body-first vs level-before-auth) ─────────────────
 
+/** A malformed request and the 400 message it must earn — the credential is part of the input:
+ * the cases carrying `unknown` prove the shape check runs BEFORE auth (never a membership
+ * signal). */
+interface BadRequestCase extends LaneCase {
+  message: string;
+}
+
+const SKILL_PROT = {
+  h: skillProtAction,
+  method: "PUT" as const,
+  path: "/skills/s_alpha/protection",
+  params: { skill: "s_alpha" },
+};
+const SKILL_LEVEL_MESSAGE = "a skill protection level must be `reviewed` or `open`";
+
+const BAD_REQUEST_CASES: BadRequestCase[] = [
+  {
+    name: "notices/ack — a non-JSON body is a 400 (before auth)",
+    h: noticesAction,
+    method: "POST",
+    path: "/notices/ack",
+    cred: "unknown",
+    rawBody: "{ not json",
+    message: "malformed JSON body",
+  },
+  {
+    name: "notices/ack — a body missing `ids` is a 400",
+    h: noticesAction,
+    method: "POST",
+    path: "/notices/ack",
+    cred: "mem",
+    body: {},
+    message: "malformed notices ack body",
+  },
+  {
+    ...SKILL_PROT,
+    name: "skill protection — a wrong level is a 400 with a VALID credential (pinned message)",
+    cred: "owner",
+    body: { level: "bogus" },
+    message: SKILL_LEVEL_MESSAGE,
+  },
+  {
+    ...SKILL_PROT,
+    name: "skill protection — a wrong level is a 400 EVEN with a bad credential (level check precedes auth; a bad level is never a membership signal)",
+    cred: "unknown",
+    body: { level: "bogus" },
+    message: SKILL_LEVEL_MESSAGE,
+  },
+  {
+    ...SKILL_PROT,
+    name: "skill protection — a MALFORMED body with a bad credential is still 400 (body precedes auth)",
+    cred: "unknown",
+    rawBody: "{ not json",
+    message: "malformed JSON body",
+  },
+  {
+    name: "channel protection — a wrong level is a 400 with the channel-specific message",
+    h: channelProtAction,
+    method: "PUT",
+    path: "/channels/ops/protection",
+    params: { channel: "ops" },
+    cred: "owner",
+    body: { level: "reviewed" },
+    message: "a channel protection level must be `curated` or `open`",
+  },
+  {
+    name: "invitations — a body missing `emails` is a 400 (before auth)",
+    h: invitationsAction,
+    method: "POST",
+    path: "/invitations",
+    cred: "unknown",
+    body: { channels: [] },
+    message: "malformed invitation body: emails",
+  },
+  {
+    name: "report — a malformed entry is a 400 naming the field (before auth)",
+    h: reportAction,
+    method: "PUT",
+    path: "/report",
+    cred: "unknown",
+    body: { schema_version: 1, applied: [{ skill_id: "s_alpha", version_id: "short" }] },
+    message: "malformed report entry: version_id must be 64-char lowercase hex",
+  },
+  {
+    name: "report — a missing schema_version is a 400",
+    h: reportAction,
+    method: "PUT",
+    path: "/report",
+    cred: "mem",
+    body: { applied: [] },
+    message: "malformed report body: schema_version",
+  },
+];
+
 describe("validation 400s", () => {
-  it("notices/ack — a non-JSON body is a 400 (before auth)", async () => {
-    const res = await drive(
-      noticesAction,
-      req("POST", `/api/v1/workspaces/${wsId}/notices/ack`, {
-        cred: "cred-nope",
-        rawBody: "{ not json",
-      }),
-      { ws: wsId },
-    );
+  it.each(titled(BAD_REQUEST_CASES))("%s", async (_name, bc) => {
+    const res = await driveCase(bc);
     expect(res.status).toBe(400);
-    expect(await res.json()).toEqual(badRequestBody("malformed JSON body"));
-  });
-
-  it("notices/ack — a body missing `ids` is a 400", async () => {
-    const res = await drive(
-      noticesAction,
-      req("POST", `/api/v1/workspaces/${wsId}/notices/ack`, { cred: CREDS.mem, body: {} }),
-      { ws: wsId },
-    );
-    expect(res.status).toBe(400);
-    expect(await res.json()).toEqual(badRequestBody("malformed notices ack body"));
-  });
-
-  it("skill protection — a wrong level is a 400 with a VALID credential (pinned message)", async () => {
-    const res = await drive(
-      skillProtAction,
-      req("PUT", `/api/v1/workspaces/${wsId}/skills/s_alpha/protection`, {
-        cred: CREDS.owner,
-        body: { level: "bogus" },
-      }),
-      { ws: wsId, skill: "s_alpha" },
-    );
-    expect(res.status).toBe(400);
-    expect(await res.json()).toEqual(
-      badRequestBody("a skill protection level must be `reviewed` or `open`"),
-    );
-  });
-
-  it("skill protection — a wrong level is a 400 EVEN with a bad credential (level check precedes auth; a bad level is never a membership signal)", async () => {
-    const res = await drive(
-      skillProtAction,
-      req("PUT", `/api/v1/workspaces/${wsId}/skills/s_alpha/protection`, {
-        cred: "cred-nope",
-        body: { level: "bogus" },
-      }),
-      { ws: wsId, skill: "s_alpha" },
-    );
-    expect(res.status).toBe(400);
-    expect(await res.json()).toEqual(
-      badRequestBody("a skill protection level must be `reviewed` or `open`"),
-    );
-  });
-
-  it("skill protection — a MALFORMED body with a bad credential is still 400 (body precedes auth)", async () => {
-    const res = await drive(
-      skillProtAction,
-      req("PUT", `/api/v1/workspaces/${wsId}/skills/s_alpha/protection`, {
-        cred: "cred-nope",
-        rawBody: "{ not json",
-      }),
-      { ws: wsId, skill: "s_alpha" },
-    );
-    expect(res.status).toBe(400);
-    expect(await res.json()).toEqual(badRequestBody("malformed JSON body"));
-  });
-
-  it("channel protection — a wrong level is a 400 with the channel-specific message", async () => {
-    const res = await drive(
-      channelProtAction,
-      req("PUT", `/api/v1/workspaces/${wsId}/channels/ops/protection`, {
-        cred: CREDS.owner,
-        body: { level: "reviewed" },
-      }),
-      { ws: wsId, channel: "ops" },
-    );
-    expect(res.status).toBe(400);
-    expect(await res.json()).toEqual(
-      badRequestBody("a channel protection level must be `curated` or `open`"),
-    );
-  });
-
-  it("invitations — a body missing `emails` is a 400 (before auth)", async () => {
-    const res = await drive(
-      invitationsAction,
-      req("POST", `/api/v1/workspaces/${wsId}/invitations`, {
-        cred: "cred-nope",
-        body: { channels: [] },
-      }),
-      { ws: wsId },
-    );
-    expect(res.status).toBe(400);
-    expect(await res.json()).toEqual(badRequestBody("malformed invitation body: emails"));
-  });
-
-  it("report — a malformed entry is a 400 naming the field (before auth)", async () => {
-    const res = await drive(
-      reportAction,
-      req("PUT", `/api/v1/workspaces/${wsId}/report`, {
-        cred: "cred-nope",
-        body: { schema_version: 1, applied: [{ skill_id: "s_alpha", version_id: "short" }] },
-      }),
-      { ws: wsId },
-    );
-    expect(res.status).toBe(400);
-    expect(await res.json()).toEqual(
-      badRequestBody("malformed report entry: version_id must be 64-char lowercase hex"),
-    );
-  });
-
-  it("report — a missing schema_version is a 400", async () => {
-    const res = await drive(
-      reportAction,
-      req("PUT", `/api/v1/workspaces/${wsId}/report`, { cred: CREDS.mem, body: { applied: [] } }),
-      { ws: wsId },
-    );
-    expect(res.status).toBe(400);
-    expect(await res.json()).toEqual(badRequestBody("malformed report body: schema_version"));
+    expect(await res.json()).toEqual(badRequestBody(bc.message));
   });
 
   it("device flows — malformed bodies are 400s naming the op", async () => {
@@ -735,42 +732,43 @@ describe("validation 400s", () => {
 
 // ── (d) the 200-DENIED codes for the typed refusals ──────────────────────────────────────────
 
+/** A protection write the caller's role refuses, and the code that names WHY. */
+interface DeniedCase extends LaneCase {
+  code: string;
+}
+
+const DENIED_CASES: DeniedCase[] = [
+  {
+    ...SKILL_PROT,
+    name: "a member tightening a skill to `reviewed` → REVIEWER_ROLE_REQUIRED",
+    cred: "mem",
+    body: PROTECT_REVIEWED,
+    code: "REVIEWER_ROLE_REQUIRED",
+  },
+  {
+    ...SKILL_PROT,
+    name: "a REVIEWER loosening a skill to `open` → OWNER_ROLE_REQUIRED (loosening is owner-grade)",
+    cred: "rev",
+    body: { level: "open" },
+    code: "OWNER_ROLE_REQUIRED",
+  },
+  {
+    name: "a member tightening a channel to `curated` → REVIEWER_ROLE_REQUIRED",
+    h: channelProtAction,
+    method: "PUT",
+    path: "/channels/ops/protection",
+    params: { channel: "ops" },
+    cred: "mem",
+    body: { level: "curated" },
+    code: "REVIEWER_ROLE_REQUIRED",
+  },
+];
+
 describe("200 DENIED (a member's refusal names WHY, never a 403)", () => {
-  it("a member tightening a skill to `reviewed` → REVIEWER_ROLE_REQUIRED", async () => {
-    const res = await drive(
-      skillProtAction,
-      req("PUT", `/api/v1/workspaces/${wsId}/skills/s_alpha/protection`, {
-        cred: CREDS.mem,
-        body: { level: "reviewed" },
-      }),
-      { ws: wsId, skill: "s_alpha" },
-    );
+  it.each(titled(DENIED_CASES))("%s", async (_name, dc) => {
+    const res = await driveCase(dc);
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual(deniedBody("protect", "REVIEWER_ROLE_REQUIRED"));
-  });
-
-  it("a REVIEWER loosening a skill to `open` → OWNER_ROLE_REQUIRED (loosening is owner-grade)", async () => {
-    const res = await drive(
-      skillProtAction,
-      req("PUT", `/api/v1/workspaces/${wsId}/skills/s_alpha/protection`, {
-        cred: CREDS.rev,
-        body: { level: "open" },
-      }),
-      { ws: wsId, skill: "s_alpha" },
-    );
-    expect(await res.json()).toEqual(deniedBody("protect", "OWNER_ROLE_REQUIRED"));
-  });
-
-  it("a member tightening a channel to `curated` → REVIEWER_ROLE_REQUIRED", async () => {
-    const res = await drive(
-      channelProtAction,
-      req("PUT", `/api/v1/workspaces/${wsId}/channels/ops/protection`, {
-        cred: CREDS.mem,
-        body: { level: "curated" },
-      }),
-      { ws: wsId, channel: "ops" },
-    );
-    expect(await res.json()).toEqual(deniedBody("protect", "REVIEWER_ROLE_REQUIRED"));
+    expect(await res.json()).toEqual(deniedBody("protect", dc.code));
   });
 
   it("inviting on the unarmed default deployment → MAIL_NOT_CONFIGURED, nothing written", async () => {

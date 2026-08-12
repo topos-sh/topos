@@ -22,7 +22,7 @@ const MIGRATIONS_DIR = resolve(HERE, "..", "..", "..", "crates", "plane-store", 
 export type PlaneDdlTarget = Client | string | ClientConfig;
 
 /** The migration filenames, in apply order. */
-export function planeMigrationFiles(): string[] {
+function planeMigrationFiles(): string[] {
   return readdirSync(MIGRATIONS_DIR)
     .filter((name) => name.endsWith(".sql"))
     .sort();

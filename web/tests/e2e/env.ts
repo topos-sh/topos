@@ -56,8 +56,6 @@ export const E2E_ADMIN_URL =
 export const E2E_MAINTENANCE_URL =
   process.env.E2E_MAINTENANCE_URL ?? "postgres://postgres:postgres@localhost:5439/postgres";
 
-/** The in-repo plane SQL migrations — the tests' DDL source (no vendoring). */
-export const PLANE_MIGRATIONS_DIR = resolve(REPO_ROOT, "crates", "plane-store", "migrations");
 /** The in-repo checksummed installer the /install route serves. */
 export const INSTALL_SH_PATH = resolve(REPO_ROOT, "scripts", "install.sh");
 

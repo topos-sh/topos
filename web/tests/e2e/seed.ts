@@ -19,7 +19,6 @@ import { BASE_URL, E2E_ADMIN_URL, E2E_PASSWORD, PLANE_PORT } from "./env";
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 /** The dev outbox the app appends every rendered mail to (APP_ENV=test records always). */
 export const OUTBOX_FILE = path.resolve(HERE, "..", "..", ".outbox.jsonl");
-export const INVITE_EMAILS_FILE = path.resolve(HERE, "..", "..", ".invite-emails.jsonl");
 
 // ── Superuser SQL ────────────────────────────────────────────────────────────────────────────
 

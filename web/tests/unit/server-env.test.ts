@@ -58,21 +58,14 @@ describe("serverEnv", () => {
     expect(env.APP_ENV).toBe("production");
   });
 
-  it("rejects a missing PLANE_INTERNAL_TOKEN, naming it", async () => {
-    await expect(parseWith({ ...REQUIRED, PLANE_INTERNAL_TOKEN: undefined })).rejects.toSatisfy(
+  it.each([
+    "PLANE_INTERNAL_TOKEN",
+    "DATABASE_URL",
+  ])("rejects a missing %s, naming it", async (key) => {
+    await expect(parseWith({ ...REQUIRED, [key]: undefined })).rejects.toSatisfy(
       (error: unknown) => {
         const message = error instanceof Error ? error.message : String(error);
-        expect(message).toContain("PLANE_INTERNAL_TOKEN");
-        return true;
-      },
-    );
-  });
-
-  it("rejects a missing DATABASE_URL", async () => {
-    await expect(parseWith({ ...REQUIRED, DATABASE_URL: undefined })).rejects.toSatisfy(
-      (error: unknown) => {
-        const message = error instanceof Error ? error.message : String(error);
-        expect(message).toContain("DATABASE_URL");
+        expect(message).toContain(key);
         return true;
       },
     );
