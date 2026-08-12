@@ -1121,7 +1121,7 @@ pub(crate) enum ClientError {
     },
     /// An MCP server document the gate refused ([`crate::mcp_validate`]) — the shared, two-language
     /// rule set at `tests/fixtures/mcp/`. The code is the vector's own
-    /// (`MCP_INVALID` · `MCP_LOCAL_REFUSED` · `MCP_NO_STREAMABLE_REMOTE` · `MCP_INSECURE_URL` ·
+    /// (`MCP_INVALID` · `MCP_PACKAGE_UNPINNED` · `MCP_NO_STREAMABLE_REMOTE` · `MCP_INSECURE_URL` ·
     /// `MCP_URL_TEMPLATE` · `MCP_SECRET_REFUSED`), so an agent branches on the same word both
     /// tiers use; the message is this code's own sentence and is shown VERBATIM. It never quotes
     /// the document — a refusal for carrying a credential must not echo the credential.
