@@ -151,9 +151,32 @@ impl SessionInstall {
         &self.root.0
     }
 
-    /// The person-scope placement dir for a skill id (the work-harness layout).
-    pub fn work_dir(&self, skill_id: &str) -> PathBuf {
-        self.root.0.join("work").join(skill_id)
+    /// The person-scope placement dir for a skill NAME — the active harness's registry row
+    /// resolved under the install's own home, exactly as the planner resolves it (the row, not
+    /// the adapter, names the dir now that the table is data; the `WorkHarness` answer is the
+    /// planner's fallback only where no row can resolve). Asserted inside the fixture so a set
+    /// `$CLAUDE_CONFIG_DIR` fails loudly instead of pointing an assertion at a real machine.
+    pub fn skills_dir(&self, name: &str) -> PathBuf {
+        self.skills_root().join(name)
+    }
+
+    /// The person-scope skills ROOT itself — for a suite that scans placements rather than
+    /// naming one.
+    pub fn skills_root(&self) -> PathBuf {
+        let home = self.root.0.join("home");
+        let root = topos_harness::registry::skills_root(
+            HarnessId::ClaudeCode.slug(),
+            topos_harness::registry::SkillScope::User,
+            &home,
+            None,
+        )
+        .expect("claude-code has a user skills root");
+        assert!(
+            root.starts_with(&home),
+            "this rig needs $CLAUDE_CONFIG_DIR unset — the skills root resolved to {root:?}, \
+             outside the fixture home {home:?}"
+        );
+        root
     }
 
     fn layout(&self) -> Layout {
