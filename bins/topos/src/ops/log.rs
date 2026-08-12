@@ -12,7 +12,6 @@ use std::collections::HashSet;
 use serde_json::{Value, json};
 use topos_gitstore::Store;
 
-use super::connect::DirectoryConnect;
 use super::parse_hex32;
 use super::reconcile::SessionConnect;
 use crate::ctx::Ctx;
@@ -23,10 +22,8 @@ use topos_core::digest::to_hex;
 use topos_types::requests::{WireLogProposal, WireLogVersion};
 use topos_types::results::{LogData, SyncFault};
 
-/// The seam `log` needs — the directory connector reads the plane-side history.
+/// The seam `log` needs — the per-session transports read the plane-side history.
 pub(crate) struct LogConnectors<'a> {
-    #[allow(dead_code)]
-    pub directory: &'a DirectoryConnect<'a>,
     /// The per-session transports (each read rides its session's own credential).
     pub session: &'a SessionConnect<'a>,
 }

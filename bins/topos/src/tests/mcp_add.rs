@@ -948,13 +948,8 @@ fn publish_through(
         contribute: Box::new(rec.clone()),
         governance: Box::new(NoGovernance),
     };
-    let cc = |_base: &str, _tok: Option<&str>| -> Box<dyn crate::plane::ContributeSource> {
-        Box::new(RecordingPublish::default())
-    };
     ops::publish(
         ctx,
-        &cc,
-        None,
         Some(&session_connect),
         None,
         name,
@@ -1090,13 +1085,8 @@ fn an_mcp_publish_to_a_pre_mcp_server_refuses_before_the_wal() {
         contribute: Box::new(rec.clone()),
         governance: Box::new(NoGovernance),
     };
-    let cc = |_base: &str, _tok: Option<&str>| -> Box<dyn crate::plane::ContributeSource> {
-        Box::new(OldServerPublish::default())
-    };
     let err = ops::publish(
         &ctx,
-        &cc,
-        None,
         Some(&session_connect),
         None,
         "weather",

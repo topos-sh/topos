@@ -22,23 +22,12 @@
 use topos_types::requests::{InvitationData, InvitationRequest};
 use topos_types::results::{InviteDescribeData, InviteReadData};
 
-use super::connect::DirectoryConnect;
 use crate::ctx::Ctx;
 use crate::error::ClientError;
-use crate::plane::GovernanceSource;
 
-/// Builds the governance-write transport for a plane base URL — known only once a session lane
-/// resolves, so it can't be pre-built in the composition root. Production wires `UreqDeviceClient`;
-/// the tests wire a fake (no HTTP).
-pub(crate) type GovernanceConnect<'a> = dyn Fn(&str) -> Box<dyn GovernanceSource> + 'a;
-
-/// The seams `invite` needs — the governance connector (the roster POST) and the directory connector
-/// (the `/me` read the bare read + describe surface).
+/// The seam `invite` needs — the per-session transports carry both halves: the `/me` read behind the
+/// bare read + describe surface, and the roster POST.
 pub(crate) struct InviteConnectors<'a> {
-    #[allow(dead_code)]
-    pub governance: &'a GovernanceConnect<'a>,
-    #[allow(dead_code)]
-    pub directory: &'a DirectoryConnect<'a>,
     /// The per-session transports (the roster write rides the session's own credential).
     pub session: &'a super::reconcile::SessionConnect<'a>,
 }

@@ -18,9 +18,7 @@ use crate::error::ClientError;
 use crate::fs_seam::{FsOps, RealFs};
 use crate::ids::{Clock, RealClock, RealIds};
 use crate::out::{errln, outln};
-use crate::plane::{
-    ContributeSource, DirectorySource, EnrollSource, GovernanceSource, ReconcileTransport,
-};
+use crate::plane::{ContributeSource, DirectorySource, EnrollSource, GovernanceSource};
 use crate::plane_http::{UreqDeviceClient, UreqPlane};
 use crate::sidecar::{Layout, recover};
 use crate::{identity, logfile, ops, render};
@@ -402,19 +400,8 @@ fn run_command(
         progress: &*progress,
     };
 
-    // The credentialed device connectors — every credentialed route presents the device's ONE Bearer
-    // credential. Built as closures so `credentials.json` is re-read FRESH on each build: a `follow
-    // <address>` mints it mid-invocation (at the granted poll), and the continued describe/apply must
-    // see the freshly-minted credential.
-    let connect_governance = |base_url: &str| -> Box<dyn GovernanceSource> {
-        Box::new(
-            UreqDeviceClient::new(
-                base_url.to_owned(),
-                load_device_credential(ctx.fs, &ctx.layout),
-            )
-            .with_progress(Rc::clone(&progress)),
-        )
-    };
+    // The CONTRIBUTE connector — the one op (`revert`) that builds its write transport from a base
+    // URL plus the credential its caller resolved, rather than from a session lane.
     let connect_contribute =
         |base_url: &str, credential: Option<&str>| -> Box<dyn ContributeSource> {
             Box::new(
@@ -422,26 +409,6 @@ fn run_command(
                     .with_progress(Rc::clone(&progress)),
             )
         };
-    // The DIRECTORY connector (describe reads + subscription/curation/notice row ops) and the
-    // RECONCILE connector (delivery + fleet report + the per-skill read lane on one object) — both
-    // re-read the on-disk credential fresh per build, for the same mid-invocation reason as above.
-    let connect_directory = |base_url: &str| -> Box<dyn DirectorySource> {
-        Box::new(
-            UreqDeviceClient::new(
-                base_url.to_owned(),
-                load_device_credential(ctx.fs, &ctx.layout),
-            )
-            .with_progress(Rc::clone(&progress)),
-        )
-    };
-    // LEGACY connector shape kept for the mid-migration op signatures — creds-less (the session
-    // lanes carry the real credentials).
-    let connect_delivery = |base_url: &str| -> Box<dyn ReconcileTransport> {
-        Box::new(
-            UreqPlane::new(base_url.to_owned(), None, Default::default())
-                .with_progress(Rc::clone(&progress)),
-        )
-    };
     // The per-SESSION transports (the manifest model): one byte/delivery lane + one directory
     // lane per logged-in workspace, each under that session's OWN workspace-scoped credential.
     let connect_session_transports = |s: &crate::sessions::Session| -> ops::SessionTransports {
@@ -1224,8 +1191,6 @@ fn run_command(
             yes,
         } => {
             let connectors = ops::InviteConnectors {
-                governance: &connect_governance,
-                directory: &connect_directory,
                 session: &connect_session_transports,
             };
             let result = ops::invite(
@@ -1381,13 +1346,8 @@ fn run_command(
                 .map(|s| !s.sessions.is_empty())
                 .unwrap_or(false);
             if !yes && publish_sessions {
-                let connectors = ops::PublishDescribeConnectors {
-                    directory: &connect_directory,
-                    delivery: &connect_delivery,
-                };
                 let described = ops::publish_describe(
                     &ctx,
-                    &connectors,
                     Some(&connect_session_transports),
                     roots.as_ref(),
                     &target,
@@ -1424,8 +1384,6 @@ fn run_command(
             }
             let result = ops::publish(
                 &ctx,
-                &connect_contribute,
-                Some(&connect_directory),
                 Some(&connect_session_transports),
                 roots.as_ref(),
                 &target,
@@ -1460,8 +1418,6 @@ fn run_command(
                 None
             };
             let connectors = ops::ReviewConnectors {
-                directory: &connect_directory,
-                contribute: &connect_contribute,
                 session: &connect_session_transports,
             };
             let result = ops::review_dispatch(
@@ -1495,7 +1451,6 @@ fn run_command(
             offset,
         } => {
             let connectors = ops::LogConnectors {
-                directory: &connect_directory,
                 session: &connect_session_transports,
             };
             let page = ops::RowPage::resolve(limit, offset, json, ops::DEFAULT_JSON_LOG_LIMIT);
@@ -1847,7 +1802,6 @@ fn run_command(
                 );
             }
             let connectors = ops::RemoveConnectors {
-                directory: &connect_directory,
                 session: &connect_session_transports,
             };
             let roots = list_discovery();
@@ -1858,7 +1812,6 @@ fn run_command(
         // (bare tightens to the kind's protected level; an explicit `open` loosens).
         Command::Protect { target, level, yes } => {
             let connectors = ops::ProtectConnectors {
-                directory: &connect_directory,
                 session: &connect_session_transports,
             };
             let result = ops::protect(
@@ -1894,7 +1847,6 @@ fn run_command(
         }
         Command::Auth { cmd } => {
             let connectors = ops::AuthConnectors {
-                directory: &connect_directory,
                 session: &connect_session_transports,
             };
             match cmd {
@@ -1910,14 +1862,6 @@ fn run_command(
         // → `topos self-update`, so the retired spelling never silently does the wrong thing.
         Command::Upgrade => emit_err(json, cmd_name, &ClientError::UpgradeAmbiguous, &diag),
     }
-}
-
-/// Load the device's ONE Bearer credential from `credentials.json`. Best-effort (absent / corrupt ⇒
-/// `None`): a corrupt doc already failed the startup [`load_enrollment`] closed, and a missing
-/// credential surfaces downstream as a clear "not enrolled" at request time.
-fn load_device_credential(fs: &dyn FsOps, layout: &Layout) -> Option<String> {
-    let _ = (fs, layout);
-    None
 }
 
 /// The real release source for `topos upgrade` — the `ureq` GitHub transport. No base URL / creds: the

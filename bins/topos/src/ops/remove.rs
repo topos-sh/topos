@@ -27,20 +27,16 @@ use std::path::PathBuf;
 use topos_types::results::{RemoveData, RemoveItem, RemoveKind};
 
 use super::DiscoveryRoots;
-use super::connect::DirectoryConnect;
 use crate::ctx::Ctx;
 use crate::doc;
 use crate::error::ClientError;
 use crate::id::SkillId;
 use crate::resolve::{self, ParsedTarget, Resolution};
 
-/// The seams `remove` needs — the directory connector builds the resolution universe and writes the
-/// per-device exclusion row.
+/// The seam `remove` needs — the per-session transports build the resolution universe.
 pub(crate) struct RemoveConnectors<'a> {
     /// The per-session transports (the resolver universe reads ride each session's credential).
     pub session: &'a super::reconcile::SessionConnect<'a>,
-    #[allow(dead_code)]
-    pub directory: &'a DirectoryConnect<'a>,
 }
 
 /// The verb's outcome — the two-phase pair, plus the `--agent` per-agent exclusion (the shared

@@ -1380,7 +1380,6 @@ pub(crate) struct WriteLane {
     pub host: String,
     pub workspace_name: String,
     pub workspace_id: String,
-    pub base_url: String,
     pub transports: SessionTransports,
 }
 
@@ -1431,7 +1430,6 @@ pub(crate) fn resolve_session_lane(
         host: session.host.clone(),
         workspace_name: session.workspace_name.clone(),
         workspace_id: session.workspace_id.clone(),
-        base_url: session.base_url.clone(),
         transports,
     }))
 }

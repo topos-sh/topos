@@ -4520,16 +4520,10 @@ fn a_wedged_skills_sweep_failure_surfaces_in_its_topos_log() {
 
     // The REAL read path: `topos log <skill>` filters on the first-class skill_id field, so the wedged
     // skill's error event surfaces in its own log.
-    let dir = |_: &str| -> Box<dyn crate::plane::DirectorySource> {
-        unreachable!("local log builds no directory transport")
-    };
     let nosess = |_s: &crate::sessions::Session| -> ops::SessionTransports {
         unreachable!("local log builds no session transports")
     };
-    let connectors = ops::LogConnectors {
-        directory: &dir,
-        session: &nosess,
-    };
+    let connectors = ops::LogConnectors { session: &nosess };
     let log = ops::log(
         &rig.ctx(&plane, &foll),
         &connectors,

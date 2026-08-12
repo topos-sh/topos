@@ -458,18 +458,12 @@ fn an_overwritten_edit_is_kept_in_the_store_and_named_on_no_surface() {
     assert_quiet_surfaces(&ctx);
 
     // The history walks the built-in's own lineage; the snapshot hangs OFF it and never appears.
-    let dir_conn = |_: &str| -> Box<dyn crate::plane::DirectorySource> {
-        unreachable!("a local log builds no directory transport")
-    };
     let nosess = |_: &crate::sessions::Session| -> ops::SessionTransports {
         unreachable!("a local log builds no session transports")
     };
     let history = ops::log(
         &ctx,
-        &ops::LogConnectors {
-            directory: &dir_conn,
-            session: &nosess,
-        },
+        &ops::LogConnectors { session: &nosess },
         "topos",
         crate::ops::RowPage::unlimited(),
     )

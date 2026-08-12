@@ -18,8 +18,7 @@ use topos_types::results::{
 };
 use topos_types::{PERSISTED_SCHEMA_VERSION, TerminalOutcome};
 
-use super::connect::DirectoryConnect;
-use super::contribute::{self, ContributeConnect, ReviewSend};
+use super::contribute::{self, ReviewSend};
 use super::reconcile::SessionConnect;
 use super::{VersionRef, resolve_followed_skill_in_workspace, resolve_version_ref, workspace_of};
 use crate::ctx::Ctx;
@@ -32,13 +31,9 @@ use crate::{op_wal, sidecar};
 /// bytes, so no digest is fetched or sent (the wire review request carries none).
 const ZERO_HEX: &str = "0000000000000000000000000000000000000000000000000000000000000000";
 
-/// The seams `review` needs — the directory connector (the inbox / describe reads) and the contribute
-/// connector (the approve/reject/withdraw write).
+/// The seam `review` needs — the per-session transports carry the inbox / describe reads and the
+/// approve/reject/withdraw write alike.
 pub(crate) struct ReviewConnectors<'a> {
-    #[allow(dead_code)]
-    pub directory: &'a DirectoryConnect<'a>,
-    #[allow(dead_code)]
-    pub contribute: &'a ContributeConnect<'a>,
     /// The per-session transports (each read/write rides its session's own credential).
     pub session: &'a SessionConnect<'a>,
 }

@@ -1,10 +1,10 @@
-//! The shared connector types + cross-verb network helpers: the transport-builder closures the
+//! The shared connector type + cross-verb network helpers: the enrollment transport-builder the
 //! composition root supplies, the API-base re-root, the machine display name, and the
 //! session-based resolver universe.
 
 use crate::ctx::Ctx;
 use crate::error::ClientError;
-use crate::plane::{DirectorySource, EnrollSource, ReconcileTransport};
+use crate::plane::{DirectorySource, EnrollSource};
 use crate::resolve;
 use crate::sessions::{self, SESSION_ENDED};
 
@@ -13,15 +13,6 @@ use super::reconcile::SessionConnect;
 /// Builds the creds-free enrollment transport for a plane base URL (the login flow's card fetch +
 /// device-authorization routes are unauthenticated — they MINT the credential).
 pub(crate) type EnrollConnect<'a> = dyn Fn(&str) -> Box<dyn EnrollSource> + 'a;
-
-/// Builds a credentialed DIRECTORY transport (describe reads + row ops) for a base URL. LEGACY —
-/// the session model builds per-session transports through [`SessionConnect`]; this connector
-/// remains only for the composed rigs mid-migration.
-pub(crate) type DirectoryConnect<'a> = dyn Fn(&str) -> Box<dyn DirectorySource> + 'a;
-
-/// Builds a credentialed RECONCILE transport (delivery + report + the per-skill read lane on one
-/// object) for a base URL. LEGACY — see [`DirectoryConnect`].
-pub(crate) type DeliveryConnect<'a> = dyn Fn(&str) -> Box<dyn ReconcileTransport> + 'a;
 
 /// Assemble the resolver universe over the LIVE SESSIONS: one [`resolve::WorkspaceNames`] per
 /// session (address name, channel names, catalog skills), each read under that session's own

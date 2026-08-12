@@ -9,7 +9,6 @@ use crate::error::ClientError;
 use crate::sessions::{self, SESSION_ENDED};
 use crate::sync_status;
 
-use super::connect::DirectoryConnect;
 use super::reconcile::SessionConnect;
 
 // The three payload shapes live in `topos-types` (the ONE contract crate): the committed
@@ -17,12 +16,9 @@ use super::reconcile::SessionConnect;
 // computation.
 pub(crate) use topos_types::results::{AuthReportingStatus, AuthStatusData, AuthWorkspaceStatus};
 
-/// The network seams `auth status` needs: the per-session transports (the probes ride each
-/// session's OWN credential). The legacy directory connector rides along until the composed rigs
-/// finish their session migration.
+/// The network seam `auth status` needs: the per-session transports (the probes ride each
+/// session's OWN credential).
 pub(crate) struct AuthConnectors<'a> {
-    #[allow(dead_code)]
-    pub directory: &'a DirectoryConnect<'a>,
     pub session: &'a SessionConnect<'a>,
 }
 

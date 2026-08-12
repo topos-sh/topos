@@ -103,9 +103,7 @@ pub(crate) use manifest_edit::{
 // itself (see `add_scope`), so this backstop exists for the fixture rig and its own tests.
 #[cfg(any(test, feature = "test-fixtures"))]
 pub(crate) use manifest_edit::note_added_path;
-pub(crate) use publish::{
-    PublishDescribeConnectors, PublishOutcome, PublishPreview, publish, publish_describe,
-};
+pub(crate) use publish::{PublishOutcome, PublishPreview, publish, publish_describe};
 // The auto-add pre-step is driven internally by `publish`; the re-export exists only for its unit tests.
 pub(crate) use protect::{ProtectConnectors, ProtectOutcome, protect};
 #[cfg(test)]

@@ -10,17 +10,14 @@
 
 use topos_types::results::ProtectData;
 
-use super::connect::DirectoryConnect;
 use super::reconcile::SessionConnect;
 use crate::ctx::Ctx;
 use crate::error::ClientError;
 use crate::resolve::{self, Resolution, ResourceKind};
 
-/// The seams `protect` needs — the directory connector builds the universe and writes the
+/// The seam `protect` needs — the per-session transports build the universe and write the
 /// protection level.
 pub(crate) struct ProtectConnectors<'a> {
-    #[allow(dead_code)]
-    pub directory: &'a DirectoryConnect<'a>,
     /// The per-session transports (each read/write rides its session's own credential).
     pub session: &'a SessionConnect<'a>,
 }

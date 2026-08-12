@@ -488,13 +488,8 @@ impl SessionInstall {
     ) -> Result<PublishView, String> {
         self.with_ctx(cwd, |ctx| {
             let connect = connect_session();
-            let legacy = |_b: &str, _c: Option<&str>| -> Box<dyn crate::plane::ContributeSource> {
-                unreachable!("the session lane carries every publish")
-            };
             match ops::publish(
                 ctx,
-                &legacy,
-                None,
                 Some(&connect),
                 None,
                 target,
@@ -532,18 +527,7 @@ impl SessionInstall {
     ) -> Result<String, String> {
         self.with_ctx(None, |ctx| {
             let connect = connect_session();
-            let dir_legacy = |_b: &str| -> Box<dyn crate::plane::DirectorySource> {
-                unreachable!("the session lane carries every review read")
-            };
-            let contrib_legacy =
-                |_b: &str, _c: Option<&str>| -> Box<dyn crate::plane::ContributeSource> {
-                    unreachable!("the session lane carries every review write")
-                };
-            let connectors = ops::ReviewConnectors {
-                directory: &dir_legacy,
-                contribute: &contrib_legacy,
-                session: &connect,
-            };
+            let connectors = ops::ReviewConnectors { session: &connect };
             let verdict = match verdict {
                 "approve" => ops::ReviewVerdict::Approve,
                 "reject" => ops::ReviewVerdict::Reject {
@@ -569,13 +553,7 @@ impl SessionInstall {
     pub fn protect(&self, target: &str, level: Option<&str>) -> Result<(), String> {
         self.with_ctx(None, |ctx| {
             let connect = connect_session();
-            let dir_legacy = |_b: &str| -> Box<dyn crate::plane::DirectorySource> {
-                unreachable!("the session lane carries every protect write")
-            };
-            let connectors = ops::ProtectConnectors {
-                directory: &dir_legacy,
-                session: &connect,
-            };
+            let connectors = ops::ProtectConnectors { session: &connect };
             ops::protect(ctx, &connectors, target, level, None, true)
                 .map(|_| ())
                 .map_err(err_str)
@@ -586,17 +564,7 @@ impl SessionInstall {
     pub fn invite(&self, emails: &[&str]) -> Result<(), String> {
         self.with_ctx(None, |ctx| {
             let connect = connect_session();
-            let gov_legacy = |_b: &str| -> Box<dyn crate::plane::GovernanceSource> {
-                unreachable!("the session lane carries every invite")
-            };
-            let dir_legacy = |_b: &str| -> Box<dyn crate::plane::DirectorySource> {
-                unreachable!("the session lane carries every invite read")
-            };
-            let connectors = ops::InviteConnectors {
-                governance: &gov_legacy,
-                directory: &dir_legacy,
-                session: &connect,
-            };
+            let connectors = ops::InviteConnectors { session: &connect };
             let owned: Vec<String> = emails.iter().map(|e| (*e).to_owned()).collect();
             ops::invite(ctx, &connectors, owned, None, None, None, true)
                 .map(|_| ())

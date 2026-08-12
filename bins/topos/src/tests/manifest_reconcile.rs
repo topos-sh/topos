@@ -6235,13 +6235,8 @@ fn a_landed_publish_survives_a_failed_rewrite_and_the_next_update_converges_it()
         contribute: Box::new(OkPublish),
         governance: Box::new(NoGovernance),
     };
-    let cc = |_base: &str, _tok: Option<&str>| -> Box<dyn crate::plane::ContributeSource> {
-        Box::new(NoContribute)
-    };
     let outcome = ops::publish(
         &ctx,
-        &cc,
-        None,
         Some(&session_connect),
         None,
         "deploy",
@@ -6375,16 +6370,11 @@ fn a_landed_publish_leaves_its_own_version_current_before_any_sweep() {
         contribute: Box::new(OkPublish),
         governance: Box::new(NoGovernance),
     };
-    let cc = |_base: &str, _tok: Option<&str>| -> Box<dyn crate::plane::ContributeSource> {
-        Box::new(NoContribute)
-    };
 
     // Edit the copy and publish it — a clean landed publish (state ①).
     std::fs::write(src.join("SKILL.md"), b"# deploy, sharper\n").unwrap();
     let outcome = ops::publish(
         &ctx,
-        &cc,
-        None,
         Some(&session_connect),
         None,
         "deploy",
@@ -6481,13 +6471,8 @@ fn a_project_scope_pending_rewrite_converges_from_the_projects_own_store() {
         contribute: Box::new(OkPublish),
         governance: Box::new(NoGovernance),
     };
-    let cc = |_base: &str, _tok: Option<&str>| -> Box<dyn crate::plane::ContributeSource> {
-        Box::new(NoContribute)
-    };
     let outcome = ops::publish(
         &ctx,
-        &cc,
-        None,
         Some(&session_connect),
         None,
         "deploy",
@@ -6588,13 +6573,8 @@ fn a_removal_that_lands_mid_publish_is_never_silently_undone() {
         contribute: Box::new(OkPublish),
         governance: Box::new(NoGovernance),
     };
-    let cc = |_base: &str, _tok: Option<&str>| -> Box<dyn crate::plane::ContributeSource> {
-        Box::new(NoContribute)
-    };
     let outcome = ops::publish(
         &hooked,
-        &cc,
-        None,
         Some(&session_connect),
         None,
         "deploy",
@@ -6718,13 +6698,8 @@ fn a_genesis_propose_pending_rewrite_still_converges() {
         contribute: Box::new(OkPropose),
         governance: Box::new(NoGovernance),
     };
-    let cc = |_base: &str, _tok: Option<&str>| -> Box<dyn crate::plane::ContributeSource> {
-        Box::new(NoContribute)
-    };
     let outcome = ops::publish(
         &ctx,
-        &cc,
-        None,
         Some(&session_connect),
         None,
         "deploy",
@@ -10875,10 +10850,8 @@ fn a_project_remove_of_a_machine_delivered_skill_refuses_toward_g() {
         contribute: Box::new(NoContribute),
         governance: Box::new(NoGovernance),
     };
-    let dir_connect = |_: &str| -> Box<dyn DirectorySource> { Box::new(dir.clone()) };
     let connectors = ops::RemoveConnectors {
         session: &named_connect,
-        directory: &dir_connect,
     };
     let err = ops::remove(&ctx, &connectors, &["deploy".to_owned()], &[], None, true)
         .expect_err("what a workspace gives you is not this folder's to delete");
@@ -10950,12 +10923,8 @@ fn diff_and_log_resolve_a_project_stores_copy() {
     );
 
     // `log` walks the PROJECT store's git history (the version the sweep applied there).
-    let dirs = |_: &str| -> Box<dyn DirectorySource> { Box::new(dir.clone()) };
     let sessions = connect(&plane, &dir);
-    let connectors = ops::LogConnectors {
-        directory: &dirs,
-        session: &sessions,
-    };
+    let connectors = ops::LogConnectors { session: &sessions };
     let out = ops::log(&ctx, &connectors, "deploy", ops::RowPage::unlimited()).unwrap();
     let versions: Vec<&str> = out
         .events
@@ -11161,12 +11130,8 @@ fn reads_from_inside_a_project_answer_the_project_copy() {
         g.diff
     );
 
-    let dirs = |_: &str| -> Box<dyn DirectorySource> { Box::new(dir2.clone()) };
     let sessions = connect(&plane, &dir2);
-    let connectors = ops::LogConnectors {
-        directory: &dirs,
-        session: &sessions,
-    };
+    let connectors = ops::LogConnectors { session: &sessions };
     let out = ops::log(&ctx, &connectors, "deploy", ops::RowPage::unlimited()).unwrap();
     let versions: Vec<String> = out
         .events
@@ -11226,12 +11191,8 @@ fn a_project_copys_log_names_the_workspace_whose_last_exchange_failed() {
         follow: &cache_follow,
         ..rig.ctx_at(Some(&proj.0))
     };
-    let dirs = |_: &str| -> Box<dyn DirectorySource> { Box::new(dir.clone()) };
     let sessions = connect(&plane, &dir);
-    let connectors = ops::LogConnectors {
-        directory: &dirs,
-        session: &sessions,
-    };
+    let connectors = ops::LogConnectors { session: &sessions };
     let data = ops::log(&ctx, &connectors, "deploy", ops::RowPage::unlimited()).unwrap();
     let fault = data.sync_fault.clone().expect("the fault reaches `log`");
     assert_eq!(
@@ -11665,10 +11626,8 @@ fn a_ghost_remove_falls_through_and_a_still_claimed_name_keeps_the_refusal() {
         contribute: Box::new(NoContribute),
         governance: Box::new(NoGovernance),
     };
-    let dir_connect = |_: &str| -> Box<dyn DirectorySource> { Box::new(dir.clone()) };
     let connectors = ops::RemoveConnectors {
         session: &named_connect,
-        directory: &dir_connect,
     };
 
     // (a) STILL CLAIMED (the row is in the machine file): today's refusal, verbatim.
@@ -11789,10 +11748,8 @@ fn a_classic_delete_of_an_mcp_record_takes_its_config_entries_with_it() {
         contribute: Box::new(NoContribute),
         governance: Box::new(NoGovernance),
     };
-    let dir_connect = |_: &str| -> Box<dyn DirectorySource> { Box::new(dir.clone()) };
     let connectors = ops::RemoveConnectors {
         session: &named_connect,
-        directory: &dir_connect,
     };
     // The DESCRIBE names the whole blast radius BEFORE consent: the config files the apply will
     // edit are knowable from the ledger right now, and a `--yes` gate that mentions them only on
@@ -14279,14 +14236,9 @@ fn zz_a_per_copy_publish_leaves_the_other_copy_alone_and_resolves_the_freeze() {
         contribute: Box::new(OkPublish),
         governance: Box::new(NoGovernance),
     };
-    let cc = |_base: &str, _tok: Option<&str>| -> Box<dyn crate::plane::ContributeSource> {
-        Box::new(NoContribute)
-    };
     let publish = |sel: &ops::Selection| {
         ops::publish(
             &ctx,
-            &cc,
-            None,
             Some(&session_connect),
             None,
             &name,
@@ -14504,10 +14456,8 @@ fn a_name_whose_machine_row_still_stands_refuses_toward_the_machine_file() {
         contribute: Box::new(NoContribute),
         governance: Box::new(NoGovernance),
     };
-    let dir_connect = |_: &str| -> Box<dyn DirectorySource> { Box::new(dir.clone()) };
     let connectors = ops::RemoveConnectors {
         session: &named_connect,
-        directory: &dir_connect,
     };
 
     // The cwd carries no manifest of its own, so nothing here can drop that row.
@@ -14920,10 +14870,8 @@ fn a_record_no_row_demands_takes_the_classic_delete_and_spares_the_adopted_folde
         contribute: Box::new(NoContribute),
         governance: Box::new(NoGovernance),
     };
-    let dir_connect = |_: &str| -> Box<dyn DirectorySource> { Box::new(dir.clone()) };
     let connectors = ops::RemoveConnectors {
         session: &named_connect,
-        directory: &dir_connect,
     };
     let outcome = ops::remove(&ctx, &connectors, &["weather".to_owned()], &[], None, true)
         .expect("an undemanded record is the classic ladder's business");
@@ -15002,10 +14950,8 @@ fn a_parent_checkouts_row_refuses_the_nested_classic_delete() {
         contribute: Box::new(NoContribute),
         governance: Box::new(NoGovernance),
     };
-    let dir_connect = |_: &str| -> Box<dyn DirectorySource> { Box::new(dir.clone()) };
     let connectors = ops::RemoveConnectors {
         session: &named_connect,
-        directory: &dir_connect,
     };
 
     // (a) STANDING: the refusal names the file that actually carries the row.
@@ -15137,13 +15083,8 @@ fn publish_arm(
         },
         governance: Box::new(NoGovernance),
     };
-    let cc = |_base: &str, _tok: Option<&str>| -> Box<dyn crate::plane::ContributeSource> {
-        Box::new(NoContribute)
-    };
     ops::publish(
         ctx,
-        &cc,
-        None,
         Some(&session_connect),
         None,
         "deploy",
@@ -15168,16 +15109,8 @@ fn describe_at(
         contribute: Box::new(OkPublish),
         governance: Box::new(NoGovernance),
     };
-    let dirs = |_: &str| -> Box<dyn DirectorySource> { Box::new(seams.dir.clone()) };
-    let delivery =
-        |_: &str| -> Box<dyn crate::plane::ReconcileTransport> { Box::new(seams.plane.clone()) };
-    let connectors = ops::PublishDescribeConnectors {
-        directory: &dirs,
-        delivery: &delivery,
-    };
     ops::publish_describe(
         ctx,
-        &connectors,
         Some(&session_connect),
         None,
         "deploy",
@@ -15746,16 +15679,8 @@ fn a_genesis_publish_offers_no_read_of_an_empty_diff() {
         contribute: Box::new(OkPublish),
         governance: Box::new(NoGovernance),
     };
-    let dirs = |_: &str| -> Box<dyn DirectorySource> { Box::new(seams.dir.clone()) };
-    let delivery =
-        |_: &str| -> Box<dyn crate::plane::ReconcileTransport> { Box::new(seams.plane.clone()) };
-    let connectors = ops::PublishDescribeConnectors {
-        directory: &dirs,
-        delivery: &delivery,
-    };
     let preview = ops::publish_describe(
         &ctx,
-        &connectors,
         Some(&session_connect),
         None,
         "fresh",

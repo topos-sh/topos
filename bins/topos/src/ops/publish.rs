@@ -22,8 +22,7 @@ use topos_types::results::{
     PublishDescribeData, PublishGate, PublishNoChangesData, PublishResult, ScopeDraft,
 };
 
-use super::connect::{DeliveryConnect, DirectoryConnect};
-use super::contribute::{self, ContributeConnect, PUBLISH_MESSAGE};
+use super::contribute::{self, PUBLISH_MESSAGE};
 use super::sync_engine;
 use super::{
     DiscoveryRoots, add, add_with_name, parse_hex32, resolve_add_target, resolve_skill,
@@ -117,8 +116,6 @@ fn landed_undo_is_restorative(followed: bool, expected_generation: u64) -> bool 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn publish(
     ctx: &Ctx<'_>,
-    connect: &ContributeConnect<'_>,
-    directory: Option<&DirectoryConnect<'_>>,
     session: Option<&super::reconcile::SessionConnect<'_>>,
     roots: Option<&DiscoveryRoots>,
     target: &str,
@@ -157,8 +154,6 @@ pub(crate) fn publish(
 
     let outcome = enrolled_publish(
         ctx,
-        connect,
-        directory,
         session.filter(|_| has_sessions),
         &skill_name,
         propose,
@@ -245,15 +240,6 @@ pub(crate) fn check_channel_exists(
     Ok(())
 }
 
-/// The seams `publish`'s describe needs, both read only AFTER the local scan: the directory connector
-/// reads the workspace address (the share line); the delivery connector reads the
-/// FRESH per-skill protection the gate turns on — the one server fact the sidecar's cached follow-state
-/// (stamped at the last delivery reconcile) can misreport in either direction after an owner re-protects.
-pub(crate) struct PublishDescribeConnectors<'a> {
-    pub directory: &'a DirectoryConnect<'a>,
-    pub delivery: &'a DeliveryConnect<'a>,
-}
-
 /// The bare (no `--yes`) ENROLLED publish describe — what shipping this draft WOULD do: where it lands,
 /// the gate outcome, the share line, and the undo path. Mutates NOTHING at all — an
 /// untracked source is NOT adopted here (adopting mints a sidecar and arms the session-start hook, a
@@ -270,7 +256,6 @@ pub(crate) struct PublishDescribeConnectors<'a> {
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn publish_describe(
     ctx: &Ctx<'_>,
-    connectors: &PublishDescribeConnectors<'_>,
     session: Option<&super::reconcile::SessionConnect<'_>>,
     roots: Option<&DiscoveryRoots>,
     target: &str,
@@ -326,23 +311,16 @@ pub(crate) fn publish_describe(
     };
     let channel = normalize_channel_target(channel, lane.as_ref())?;
     let channel = channel.as_deref();
-    let (base_url, workspace_id) = match &lane {
-        Some(l) => (l.base_url.clone(), l.workspace_id.clone()),
-        None => return Err(ClientError::NotEnrolled),
+    // The lane a describe reads through — without one there is nothing to describe against.
+    let Some(lane) = lane else {
+        return Err(ClientError::NotEnrolled);
     };
+    let workspace_id = lane.workspace_id.clone();
     // Under a session lane the delivered set IS the follow-state (the cache-backed seam).
-    let cache_follow = lane
-        .as_ref()
-        .map(|_| super::reconcile::CacheFollow::load(ctx.fs, &ctx.layout));
-    let lane_ctx;
-    let ctx = match (&lane, &cache_follow) {
-        (Some(l), Some(cf)) => {
-            // The lane's transports + the cache follow seam + the skill's OWNING store.
-            lane_ctx = super::pull::ctx_with_store(ctx, &store, &*l.transports.plane, cf);
-            &lane_ctx
-        }
-        _ => ctx,
-    };
+    let cache_follow = super::reconcile::CacheFollow::load(ctx.fs, &ctx.layout);
+    // The lane's transports + the cache follow seam + the skill's OWNING store.
+    let lane_ctx = super::pull::ctx_with_store(ctx, &store, &*lane.transports.plane, &cache_follow);
+    let ctx = &lane_ctx;
     let sp = ctx.layout.published(&id);
     let _guard = sidecar::lock_skill(ctx.fs, &ctx.layout, &id)?;
 
@@ -391,11 +369,9 @@ pub(crate) fn publish_describe(
     let bundle_kind = crate::bundle_kind::classify(ctx, id.as_str(), &map.placements).or_skill();
     if bundle_kind.is_mcp() {
         gate_mcp_bundle(&scanned, &skill_name)?;
-        if let Some(l) = &lane {
-            crate::compat::ensure_server_records_mcp(
-                l.transports.contribute.protocol_card().as_ref(),
-            )?;
-        }
+        crate::compat::ensure_server_records_mcp(
+            lane.transports.contribute.protocol_card().as_ref(),
+        )?;
     }
 
     // A skill has a `current` to be identical TO when it is FOLLOWED (the bytes this client holds are
@@ -430,12 +406,8 @@ pub(crate) fn publish_describe(
     // offline. A genesis (unfollowed) skill has no server protection — its first publish keeps the
     // no-gate path.
     let review_required = match &follow_entry {
-        Some(fc) => match &lane {
-            Some(l) => fresh_review_required_via(&*l.transports.plane, &workspace_id, id.as_str())
-                .unwrap_or(fc.review_required),
-            None => fresh_review_required(connectors, &base_url, &workspace_id, id.as_str())
-                .unwrap_or(fc.review_required),
-        },
+        Some(fc) => fresh_review_required_via(&*lane.transports.plane, &workspace_id, id.as_str())
+            .unwrap_or(fc.review_required),
         None => false,
     };
     let gate = if propose || review_required {
@@ -449,19 +421,10 @@ pub(crate) fn publish_describe(
     let genesis = !followed && sync.observed == GENESIS;
 
     // Network reads AFTER the local scan: the workspace address (the share line).
-    let legacy_dir;
-    let directory: &dyn crate::plane::DirectorySource = match &lane {
-        Some(l) => &*l.transports.directory,
-        None => {
-            legacy_dir = (connectors.directory)(&base_url);
-            &*legacy_dir
-        }
-    };
+    let directory: &dyn crate::plane::DirectorySource = &*lane.transports.directory;
     // `--to` takes an EXISTING channel — the describe refuses exactly where the apply would
     // (never a described placement into a channel the apply would have silently minted).
-    if let Some(l) = &lane {
-        check_channel_exists(directory, l, channel)?;
-    }
+    check_channel_exists(directory, &lane, channel)?;
     let me = directory.me(&workspace_id).ok();
 
     // Only a genesis apply creates the DEFAULT `everyone` placement server-side; a bare
@@ -536,9 +499,7 @@ pub(crate) fn publish_describe(
                  truth",
                 o.origin.source
             );
-            if let Some(l) = &lane
-                && let Some(asym) = origin_asymmetry_note(ctx, &sp, &skill_name, l)?
-            {
+            if let Some(asym) = origin_asymmetry_note(ctx, &sp, &skill_name, &lane)? {
                 note.push_str("; ");
                 note.push_str(&asym);
             }
@@ -547,21 +508,21 @@ pub(crate) fn publish_describe(
         None => None,
     };
     // The PREDICTED governance transfer: the manifest line the apply would rewrite (read-only).
-    let (transfer_manifest, transfer_reference, transfer_from) = match &lane {
-        Some(l) => match super::find_path_line(
-            ctx,
-            &map.placements
-                .iter()
-                .map(std::path::PathBuf::from)
-                .collect::<Vec<_>>(),
-        )? {
-            Some((path, row)) => (
-                Some(path.display().to_string()),
-                Some(format!("{}/{}/{skill_name}", l.host, l.workspace_name)),
-                Some(row.reference),
-            ),
-            None => (None, None, None),
-        },
+    let (transfer_manifest, transfer_reference, transfer_from) = match super::find_path_line(
+        ctx,
+        &map.placements
+            .iter()
+            .map(std::path::PathBuf::from)
+            .collect::<Vec<_>>(),
+    )? {
+        Some((path, row)) => (
+            Some(path.display().to_string()),
+            Some(format!(
+                "{}/{}/{skill_name}",
+                lane.host, lane.workspace_name
+            )),
+            Some(row.reference),
+        ),
         None => (None, None, None),
     };
 
@@ -745,23 +706,13 @@ fn gate_mcp_bundle(scanned: &scan::ScannedBundle, skill_name: &str) -> Result<()
     Ok(())
 }
 
-/// The server's FRESH per-skill protection for the describe's gate — the delivery read carries it (each
-/// delivered skill's re-resolved `review_required` posture). It is the authoritative answer the apply will
-/// see, unlike the sidecar's cached follow-state, which is stamped at the last delivery reconcile and can
-/// lie in EITHER direction after an owner tightens or loosens `protect`. `None` on an offline/failed read
-/// or a skill the delivery does not name (a followed-but-excluded copy) — the caller falls back to the
-/// cached value, so the describe still works offline.
-fn fresh_review_required(
-    connectors: &PublishDescribeConnectors<'_>,
-    base_url: &str,
-    workspace_id: &str,
-    skill_id: &str,
-) -> Option<bool> {
-    let delivery = (connectors.delivery)(base_url);
-    fresh_review_required_via(&*delivery, workspace_id, skill_id)
-}
-
-/// [`fresh_review_required`] over an already-built delivery transport (the session lane's).
+/// The server's FRESH per-skill protection for the describe's gate, read over the session lane's delivery
+/// transport — the delivery read carries it (each delivered skill's re-resolved `review_required`
+/// posture). It is the authoritative answer the apply will see, unlike the sidecar's cached follow-state,
+/// which is stamped at the last delivery reconcile and can lie in EITHER direction after an owner tightens
+/// or loosens `protect`. `None` on an offline/failed read or a skill the delivery does not name (a
+/// followed-but-excluded copy) — the caller falls back to the cached value, so the describe still works
+/// offline.
 fn fresh_review_required_via(
     delivery: &dyn crate::plane::DeliverySource,
     workspace_id: &str,
@@ -967,13 +918,11 @@ fn stamp_added(mut outcome: PublishOutcome, added: Option<AddedNote>) -> Publish
 }
 
 /// The ENROLLED publish body. `pin` is the optional `@<digest>` consent — when present, the scanned
-/// bytes must match it; when absent, the computed digest ships as-is. `directory` feeds the receipt's
-/// teammate handoff line (a best-effort `me` read on a landed publish only — `None` skips it).
+/// bytes must match it; when absent, the computed digest ships as-is. The session lane's directory
+/// transport feeds the receipt's teammate handoff line (a best-effort `me` read on a landed publish).
 #[allow(clippy::too_many_arguments)]
 fn enrolled_publish(
     ctx: &Ctx<'_>,
-    connect: &ContributeConnect<'_>,
-    directory: Option<&DirectoryConnect<'_>>,
     session: Option<&super::reconcile::SessionConnect<'_>>,
     skill_name: &str,
     propose: bool,
@@ -1012,36 +961,24 @@ fn enrolled_publish(
     };
     let channel = normalize_channel_target(channel, lane.as_ref())?;
     let channel = channel.as_deref();
-    let (base_url, workspace_id) = match &lane {
-        Some(l) => (l.base_url.clone(), l.workspace_id.clone()),
-        None => {
-            return Err(ClientError::SessionRequired {
-                address: "<workspace-address>".to_owned(),
-                message: "not connected — run `topos login <workspace-address>` first".into(),
-            });
-        }
+    let Some(lane) = lane else {
+        return Err(ClientError::SessionRequired {
+            address: "<workspace-address>".to_owned(),
+            message: "not connected — run `topos login <workspace-address>` first".into(),
+        });
     };
+    let workspace_id = lane.workspace_id.clone();
     // `--to` takes an EXISTING channel — verified before any op is minted (never a silent
     // server-side create).
-    if let Some(l) = &lane {
-        check_channel_exists(&*l.transports.directory, l, channel)?;
-    }
+    check_channel_exists(&*lane.transports.directory, &lane, channel)?;
     // Under a session lane, the delivered set IS the follow-state (the cache-backed seam) — the
     // no-change and gate reads below see the same truth the reconcile writes.
     let outer_ctx = ctx;
-    let cache_follow = lane
-        .as_ref()
-        .map(|_| super::reconcile::CacheFollow::load(ctx.fs, &ctx.layout));
-    let lane_ctx;
-    let ctx = match (&lane, &cache_follow) {
-        (Some(l), Some(cf)) => {
-            // The lane's transports + the cache follow seam + the skill's OWNING store (home, or
-            // the project store the resolver located) — the per-skill work below runs there.
-            lane_ctx = super::pull::ctx_with_store(ctx, &store, &*l.transports.plane, cf);
-            &lane_ctx
-        }
-        _ => ctx,
-    };
+    let cache_follow = super::reconcile::CacheFollow::load(ctx.fs, &ctx.layout);
+    // The lane's transports + the cache follow seam + the skill's OWNING store (home, or the
+    // project store the resolver located) — the per-skill work below runs there.
+    let lane_ctx = super::pull::ctx_with_store(ctx, &store, &*lane.transports.plane, &cache_follow);
+    let ctx = &lane_ctx;
     let sp = ctx.layout.published(&id);
     let _guard = sidecar::lock_skill(ctx.fs, &ctx.layout, &id)?;
 
@@ -1056,14 +993,7 @@ fn enrolled_publish(
     // transport is built and before a byte of the draft is scanned — the same answer the describe gave.
     behind_guard(ctx, &sp, skill_name, propose, global)?;
 
-    let legacy_transport;
-    let transport: &dyn crate::plane::ContributeSource = match &lane {
-        Some(l) => &*l.transports.contribute,
-        None => {
-            legacy_transport = connect(&base_url, None);
-            &*legacy_transport
-        }
-    };
+    let transport: &dyn crate::plane::ContributeSource = &*lane.transports.contribute;
     let map: PlacementMap = doc::read_map(ctx.fs, &sp.map)?
         .ok_or_else(|| ClientError::Corrupt("missing placement map".to_owned()))?;
 
@@ -1169,20 +1099,18 @@ fn enrolled_publish(
             // re-attempted (idempotent: with no matching path line it is a no-op) BEFORE the
             // already-published answer is returned.
             None => {
-                if let Some(l) = &lane {
-                    let dirs: Vec<std::path::PathBuf> = map
-                        .placements
-                        .iter()
-                        .map(std::path::PathBuf::from)
-                        .collect();
-                    let _ = super::rewrite_to_governed(
-                        outer_ctx,
-                        &lock.name,
-                        &l.host,
-                        &l.workspace_name,
-                        &dirs,
-                    );
-                }
+                let dirs: Vec<std::path::PathBuf> = map
+                    .placements
+                    .iter()
+                    .map(std::path::PathBuf::from)
+                    .collect();
+                let _ = super::rewrite_to_governed(
+                    outer_ctx,
+                    &lock.name,
+                    &lane.host,
+                    &lane.workspace_name,
+                    &dirs,
+                );
                 return Ok(PublishOutcome::NoChanges(no_changes(
                     lock.name.clone(),
                     other_draft,
@@ -1192,15 +1120,7 @@ fn enrolled_publish(
     };
 
     let receipt = contribute::run_write(ctx, transport, &sp, &rec, None)?;
-    let legacy_dir;
-    let dir_ref: Option<&dyn crate::plane::DirectorySource> = match (&lane, directory) {
-        (Some(l), _) => Some(&*l.transports.directory),
-        (None, Some(c)) => {
-            legacy_dir = c(&base_url);
-            Some(&*legacy_dir)
-        }
-        (None, None) => None,
-    };
+    let dir_ref: &dyn crate::plane::DirectorySource = &*lane.transports.directory;
     let disclosure = ScopeDisclosure {
         cross_from: cross_scope.then(|| shipped_from(ctx, &placement)),
         from_machine: cross_scope && global,
@@ -1226,99 +1146,95 @@ fn enrolled_publish(
     // placement of the governed bundle (on the proposal arm, delivery follows approval); the
     // receipt states each part. Without the proposal arm the path line would sit forever — the
     // publish IS the transfer act, whichever gate it went through.
-    if let Some(l) = &lane {
-        let dirs: Vec<std::path::PathBuf> = map
-            .placements
-            .iter()
-            .map(std::path::PathBuf::from)
-            .collect();
-        // THE REMOTE HALF HAS LANDED. From here, a LOCAL failure (the manifest rewrite, the
-        // cache seed, the origin note) must never fail the command — the receipt would deny a
-        // publish the plane holds, and a retry resolves no-change. The rewrite failure is
-        // warned, carried truthfully on the receipt (`rewrite_pending`), and converged
-        // idempotently by the next `update` or publish re-run.
-        match &mut outcome {
-            PublishOutcome::Published(data) => {
-                match super::rewrite_to_governed(
-                    outer_ctx,
-                    &lock.name,
-                    &l.host,
-                    &l.workspace_name,
-                    &dirs,
-                ) {
-                    Ok(super::GovernedOutcome::Rewritten(rw)) => {
-                        data.manifest = Some(rw.manifest);
-                        data.reference = Some(rw.canonical);
-                        data.converted_from = Some(rw.from);
-                        // Seed the offline cache with the governed fact (list/remove/the write
-                        // lane answer correctly BEFORE the next sweep) — ONLY when a manifest
-                        // line now actually references the bundle (`via_manifest` must never
-                        // claim a line that does not exist); best-effort, never a failed publish.
-                        let _ = crate::sync_status::merge_delivered(
-                            outer_ctx.fs,
-                            &outer_ctx.layout,
-                            &l.workspace_id,
-                            &l.host,
-                            &l.workspace_name,
-                            id.as_str(),
-                            crate::sync_status::DeliveredSkill {
-                                name: lock.name.clone(),
-                                review_required: false,
-                                served_version: rec.candidate_commit.clone(),
-                                withdrawn: false,
-                                via_channels: Vec::new(),
-                                via_manifest: true,
-                                assigned_by: None,
-                                // The kind this publish SHIPPED, replayed from the op record.
-                                // A seed row is provenance, not authority — the next sweep's
-                                // delivery still brings the catalog's answer — but leaving it
-                                // blank made the very next `remove` of a just-published mcp
-                                // bundle miss its config converge.
-                                kind: rec.bundle_kind.clone(),
-                                harness_states: Vec::new(),
-                                picked: false,
-                            },
-                        );
-                    }
-                    Ok(super::GovernedOutcome::RowRemoved { manifest }) => {
-                        data.rewrite_skipped = Some(rewrite_skipped_note(&lock.name, &manifest));
-                    }
-                    Ok(super::GovernedOutcome::None) => {}
-                    Err(e) => {
-                        data.rewrite_pending =
-                            Some(rewrite_pending_note(outer_ctx, &lock.name, &e));
-                    }
+    let dirs: Vec<std::path::PathBuf> = map
+        .placements
+        .iter()
+        .map(std::path::PathBuf::from)
+        .collect();
+    // THE REMOTE HALF HAS LANDED. From here, a LOCAL failure (the manifest rewrite, the
+    // cache seed, the origin note) must never fail the command — the receipt would deny a
+    // publish the plane holds, and a retry resolves no-change. The rewrite failure is
+    // warned, carried truthfully on the receipt (`rewrite_pending`), and converged
+    // idempotently by the next `update` or publish re-run.
+    match &mut outcome {
+        PublishOutcome::Published(data) => {
+            match super::rewrite_to_governed(
+                outer_ctx,
+                &lock.name,
+                &lane.host,
+                &lane.workspace_name,
+                &dirs,
+            ) {
+                Ok(super::GovernedOutcome::Rewritten(rw)) => {
+                    data.manifest = Some(rw.manifest);
+                    data.reference = Some(rw.canonical);
+                    data.converted_from = Some(rw.from);
+                    // Seed the offline cache with the governed fact (list/remove/the write
+                    // lane answer correctly BEFORE the next sweep) — ONLY when a manifest
+                    // line now actually references the bundle (`via_manifest` must never
+                    // claim a line that does not exist); best-effort, never a failed publish.
+                    let _ = crate::sync_status::merge_delivered(
+                        outer_ctx.fs,
+                        &outer_ctx.layout,
+                        &lane.workspace_id,
+                        &lane.host,
+                        &lane.workspace_name,
+                        id.as_str(),
+                        crate::sync_status::DeliveredSkill {
+                            name: lock.name.clone(),
+                            review_required: false,
+                            served_version: rec.candidate_commit.clone(),
+                            withdrawn: false,
+                            via_channels: Vec::new(),
+                            via_manifest: true,
+                            assigned_by: None,
+                            // The kind this publish SHIPPED, replayed from the op record.
+                            // A seed row is provenance, not authority — the next sweep's
+                            // delivery still brings the catalog's answer — but leaving it
+                            // blank made the very next `remove` of a just-published mcp
+                            // bundle miss its config converge.
+                            kind: rec.bundle_kind.clone(),
+                            harness_states: Vec::new(),
+                            picked: false,
+                        },
+                    );
                 }
-                data.origin_note =
-                    origin_asymmetry_note(outer_ctx, &sp, &lock.name, l).unwrap_or_default();
-            }
-            PublishOutcome::Proposed(data) => {
-                match super::rewrite_to_governed(
-                    outer_ctx,
-                    &lock.name,
-                    &l.host,
-                    &l.workspace_name,
-                    &dirs,
-                ) {
-                    Ok(super::GovernedOutcome::Rewritten(rw)) => {
-                        data.manifest = Some(rw.manifest);
-                        data.reference = Some(rw.canonical);
-                        data.converted_from = Some(rw.from);
-                    }
-                    Ok(super::GovernedOutcome::RowRemoved { manifest }) => {
-                        data.rewrite_skipped = Some(rewrite_skipped_note(&lock.name, &manifest));
-                    }
-                    Ok(super::GovernedOutcome::None) => {}
-                    Err(e) => {
-                        data.rewrite_pending =
-                            Some(rewrite_pending_note(outer_ctx, &lock.name, &e));
-                    }
+                Ok(super::GovernedOutcome::RowRemoved { manifest }) => {
+                    data.rewrite_skipped = Some(rewrite_skipped_note(&lock.name, &manifest));
+                }
+                Ok(super::GovernedOutcome::None) => {}
+                Err(e) => {
+                    data.rewrite_pending = Some(rewrite_pending_note(outer_ctx, &lock.name, &e));
                 }
             }
-            // Unreachable here — the no-op arm returns above, having already re-attempted the
-            // rewrite itself (a landed publish of these bytes is what made it a no-op).
-            PublishOutcome::NoChanges(_) => {}
+            data.origin_note =
+                origin_asymmetry_note(outer_ctx, &sp, &lock.name, &lane).unwrap_or_default();
         }
+        PublishOutcome::Proposed(data) => {
+            match super::rewrite_to_governed(
+                outer_ctx,
+                &lock.name,
+                &lane.host,
+                &lane.workspace_name,
+                &dirs,
+            ) {
+                Ok(super::GovernedOutcome::Rewritten(rw)) => {
+                    data.manifest = Some(rw.manifest);
+                    data.reference = Some(rw.canonical);
+                    data.converted_from = Some(rw.from);
+                }
+                Ok(super::GovernedOutcome::RowRemoved { manifest }) => {
+                    data.rewrite_skipped = Some(rewrite_skipped_note(&lock.name, &manifest));
+                }
+                Ok(super::GovernedOutcome::None) => {}
+                Err(e) => {
+                    data.rewrite_pending = Some(rewrite_pending_note(outer_ctx, &lock.name, &e));
+                }
+            }
+        }
+        // Unreachable here — the no-op arm returns above, having already re-attempted the
+        // rewrite itself (a landed publish of these bytes is what made it a no-op).
+        PublishOutcome::NoChanges(_) => {}
     }
     Ok(outcome)
 }
@@ -1733,7 +1649,7 @@ fn map_outcome(
     rec: &OpRecord,
     receipt: &WriteReceipt,
     skill_name: &str,
-    directory: Option<&dyn crate::plane::DirectorySource>,
+    directory: &dyn crate::plane::DirectorySource,
     followed: bool,
     picked: Option<&super::dest_select::SelectedCopy>,
     disclosure: &ScopeDisclosure,
@@ -1742,11 +1658,7 @@ fn map_outcome(
     // best-effort read, AFTER the write; a failure just leaves the lines off, it never fails a
     // write the plane already holds. Each arm then composes exactly the lines it prints from that
     // one address, so no arm builds a line it goes on to drop.
-    let address = || {
-        directory
-            .and_then(|d| d.me(&rec.workspace_id).ok())
-            .map(|m| m.address)
-    };
+    let address = || directory.me(&rec.workspace_id).ok().map(|m| m.address);
     match receipt.outcome() {
         TerminalOutcome::Ok => {
             // A direct publish moved `current` — advance the local state (read-your-writes).

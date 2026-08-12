@@ -4442,13 +4442,9 @@ fn an_orphaned_record_whose_entries_still_stand_gets_one_line_in_list() {
         contribute: Box::new(NoContribute),
         governance: Box::new(NoGovernance),
     };
-    let dir_connect = |_: &str| -> Box<dyn DirectorySource> { Box::new(fdir.clone()) };
     let outcome = ops::remove(
         &ctx,
-        &ops::RemoveConnectors {
-            session: &named,
-            directory: &dir_connect,
-        },
+        &ops::RemoveConnectors { session: &named },
         &["wx".to_owned()],
         &[],
         None,
@@ -4706,13 +4702,9 @@ fn a_project_orphans_offered_command_reaches_the_project_record() {
         contribute: Box::new(NoContribute),
         governance: Box::new(NoGovernance),
     };
-    let dir_connect = |_: &str| -> Box<dyn DirectorySource> { Box::new(fdir.clone()) };
     ops::remove(
         &ctx,
-        &ops::RemoveConnectors {
-            session: &named,
-            directory: &dir_connect,
-        },
+        &ops::RemoveConnectors { session: &named },
         &["wx".to_owned()],
         &[],
         None,
