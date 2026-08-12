@@ -70,9 +70,8 @@ pub struct KnownHarness {
     pub slug: &'static str,
     /// The human-facing name (e.g. `Claude Code`, `Cursor`).
     pub display_name: &'static str,
-    /// The user/global skills dir(s) — resolved via [`resolve_spec`]. Usually one; `openclaw` has three
-    /// (`.openclaw` / `.clawdbot` / `.moltbot`); the two cwd-only harnesses (`eve`, `promptscript`) have
-    /// none (no global scope).
+    /// The user/global skills dir(s) — resolved via [`resolve_spec`]. Usually one; the two cwd-only
+    /// harnesses (`eve`, `promptscript`) have none (no global scope).
     user_dirs: &'static [DirSpec],
     /// The project/cwd-relative skills dir (a `/`-separated path joined onto the passed `cwd`).
     project_dir: &'static str,
@@ -393,9 +392,9 @@ impl KnownHarness {
         self.project_dir
     }
 
-    /// The user/global skills dir locations. Usually one; `openclaw` has three, the two cwd-only
-    /// harnesses (`eve`, `promptscript`) have none. The FIRST is the harness's canonical global skills
-    /// location (what [`skills_root`] writes).
+    /// The user/global skills dir locations. Usually one; the two cwd-only harnesses (`eve`,
+    /// `promptscript`) have none. The FIRST is the harness's canonical global skills location
+    /// (what [`skills_root`] writes).
     #[must_use]
     pub fn user_dirs(&self) -> &'static [DirSpec] {
         self.user_dirs
@@ -406,13 +405,6 @@ impl KnownHarness {
     #[must_use]
     pub fn user_dir_specs(&self) -> Vec<String> {
         self.user_dirs.iter().map(|s| s.raw()).collect()
-    }
-
-    /// Each "is this harness installed" detect dir as a canonical RAW spec string — same encoding as
-    /// [`Self::user_dir_specs`].
-    #[must_use]
-    pub fn detect_dir_specs(&self) -> Vec<String> {
-        self.detect_dirs.iter().map(|s| s.raw()).collect()
     }
 
     /// This harness's MCP-server config surfaces, or `None` when it has no MCP support.
@@ -920,19 +912,11 @@ mod tests {
         assert_eq!(zcode, zed + 1, "zcode follows zed");
         assert_eq!(zencoder, zcode + 1, "zcode precedes zencoder");
 
-        // The new row's dir specs, through the raw accessors (also the accessors' own coverage): the home
-        // config dir and the absolute macOS app-bundle both mark it present.
+        // The new row's dir specs, through the raw accessor (also the accessor's own coverage).
         let zc = &all[zcode];
         assert_eq!(zc.display_name, "ZCode");
         assert_eq!(zc.project_dir(), ".zcode/skills");
         assert_eq!(zc.user_dir_specs(), vec!["home/.zcode/skills".to_owned()]);
-        assert_eq!(
-            zc.detect_dir_specs(),
-            vec![
-                "home/.zcode".to_owned(),
-                "/Applications/ZCode.app".to_owned(),
-            ]
-        );
 
         // The same neighbour discipline for the three rows added after the first port: each sits exactly
         // where upstream's file puts it, so the shared-dir tie-break stays the reference table's.
@@ -959,7 +943,6 @@ mod tests {
         assert_eq!(gr.display_name, "Grok Build");
         assert_eq!(gr.project_dir(), ".grok/skills");
         assert_eq!(gr.user_dir_specs(), vec!["grokHome/skills".to_owned()]);
-        assert_eq!(gr.detect_dir_specs(), vec!["grokHome".to_owned()]);
 
         // `kimchi`'s dir is a LITERAL `~/.config` path, not the XDG-overridable config home.
         let km = &all[kimchi];
@@ -969,24 +952,11 @@ mod tests {
             km.user_dir_specs(),
             vec!["home/.config/kimchi/harness/skills".to_owned()]
         );
-        assert_eq!(
-            km.detect_dir_specs(),
-            vec!["home/.config/kimchi".to_owned()]
-        );
 
-        // `minimax-code` probes the home dir OR the macOS app bundle (a space in the suffix is fine —
-        // suffixes split on `/` only).
         let mm = &all[minimax];
         assert_eq!(mm.display_name, "MiniMax Code");
         assert_eq!(mm.project_dir(), ".minimax/skills");
         assert_eq!(mm.user_dir_specs(), vec!["home/.minimax/skills".to_owned()]);
-        assert_eq!(
-            mm.detect_dir_specs(),
-            vec![
-                "home/.minimax".to_owned(),
-                "/Applications/MiniMax Code.app".to_owned(),
-            ]
-        );
     }
 
     #[test]

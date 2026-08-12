@@ -20,9 +20,6 @@
 //! - [`merge`]    — the pure author-merge policy: the three-way file-set reconciliation over
 //!   `(path, mode, content_sha256)` → a per-path plan, the outcome decision, and the presence-based
 //!   publish guard. Metadata only — the byte-level diff3 execution lives outside the kernel.
-//!
-//! Still to land (each behind its golden vector): the generation CAS decision and the
-//! first-parent / same-bundle lineage asserts.
 #![cfg_attr(not(test), no_std)]
 // Purity AND panic-freedom are enforced by the compiler in production builds: the kernel may not
 // reach `std`, nor `unwrap`/`expect`/`panic!`. Tests keep them (assertions, fixture construction).

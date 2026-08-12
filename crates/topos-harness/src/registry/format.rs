@@ -1403,7 +1403,7 @@ mod tests {
                     .iter()
                     .map(OwnedDir::raw)
                     .collect::<Vec<_>>(),
-                row.detect_dir_specs(),
+                row.detect_dirs.iter().map(|s| s.raw()).collect::<Vec<_>>(),
                 "{}",
                 row.slug
             );

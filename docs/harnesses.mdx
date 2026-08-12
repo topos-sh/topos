@@ -170,7 +170,7 @@ resolve under `$HOME`; project-scope directories are relative to the directory y
 | Agent | Slug | User-scope dir | Project-scope dir | Support |
 |---|---|---|---|---|
 | Claude Code | `claude-code` | `~/.claude/skills` † | `.claude/skills` | auto-update |
-| OpenClaw | `openclaw` | `~/.openclaw/skills` ‡ | `skills` | auto-update |
+| OpenClaw | `openclaw` | `~/.openclaw/skills` | `skills` | auto-update |
 | Hermes Agent | `hermes-agent` | `~/.hermes/skills` † | `.hermes/skills` | auto-update |
 | Amp | `amp` | `~/.config/agents/skills` † | `.agents/skills` | auto-update |
 | Antigravity CLI | `antigravity-cli` | `~/.gemini/antigravity-cli/skills` | `.agents/skills` | auto-update |
@@ -250,8 +250,6 @@ resolve under `$HOME`; project-scope directories are relative to the directory y
 when it is unset): `$CLAUDE_CONFIG_DIR` (Claude Code), `$HERMES_HOME` (Hermes Agent),
 `$CODEX_HOME` (Codex), `$VIBE_HOME` (Mistral Vibe), `$AUTOHAND_HOME` (Autohand Code CLI),
 `$GROK_HOME` (Grok Build), and `$XDG_CONFIG_HOME` for the `~/.config`-based agents.
-
-‡ OpenClaw also probes `~/.clawdbot/skills` and `~/.moltbot/skills`.
 
 \* Trigger installed, but the agent requires its own one-time approval before running it.
 

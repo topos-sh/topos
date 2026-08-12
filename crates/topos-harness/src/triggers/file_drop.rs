@@ -6,8 +6,8 @@
 //! dirs) IF the path is absent or the existing file is marker-confirmed OURS — an ours-but-stale
 //! file byte-migrates to canonical, so a fix reaches installs that predate it. A foreign file at
 //! the path is adopt-or-leave (`AlreadyPresentUnmanaged`, ZERO writes). Remove unlinks ONLY a
-//! marker-confirmed ours (a direct `std::fs::remove_file`, best-effort — the same discipline the
-//! OpenClaw legacy-plugin scrub uses); `present` = the marker-confirmed file exists right now.
+//! marker-confirmed ours (a direct `std::fs::remove_file`, best-effort); `present` = the
+//! marker-confirmed file exists right now.
 //! Ownership keys on the per-instance marker needle ALONE — a schema-version-agnostic substring
 //! (a marker-id prefix, or the in-command sentinel where the format has no comment slot).
 //!

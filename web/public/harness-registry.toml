@@ -19,7 +19,7 @@
 # `min_engine_version` is what a reader must PROVIDE to be allowed to read this file.
 
 schema_version = 1
-version = "2026.8.11.1"
+version = "2026.8.12.1"
 min_engine_version = 1
 
 [[harness]]
@@ -99,9 +99,9 @@ project = { path = ".mcp.json", dialect = "claude-project-json" }
 # `~/.agents/skills` is a recognized skills root, higher precedence than `~/.openclaw/skills`.
 slug = "openclaw"
 display_name = "OpenClaw"
-user_dirs = ["home/.openclaw/skills", "home/.clawdbot/skills", "home/.moltbot/skills"]
+user_dirs = ["home/.openclaw/skills"]
 project_dir = "skills"
-detect_dirs = ["home/.openclaw", "home/.clawdbot", "home/.moltbot"]
+detect_dirs = ["home/.openclaw"]
 shared_dir = { level = "probed", covered = true }
 
 [harness.mcp]

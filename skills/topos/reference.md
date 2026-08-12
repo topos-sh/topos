@@ -74,7 +74,7 @@ Some folders are cross-agent conventions that several agents read, so each is na
 | `mux` | `~/.mux/skills` | `.mux/skills` |
 | `neovate` | `~/.neovate/skills` | `.neovate/skills` |
 | `ona` | `~/.ona/skills` | `.ona/skills` |
-| `openclaw` | `~/.openclaw/skills`, `~/.clawdbot/skills`, `~/.moltbot/skills` | `skills` |
+| `openclaw` | `~/.openclaw/skills` | `skills` |
 | `opencode` | `~/.config/opencode/skills` | shared |
 | `openhands` | `~/.openhands/skills` | `.openhands/skills` |
 | `pi` | `~/.pi/agent/skills` | `.pi/skills` |
