@@ -50,7 +50,7 @@ use std::sync::OnceLock;
 
 use toml_edit::{DocumentMut, Item, TableLike};
 
-use super::{DirSpec, KnownHarness, McpSurface, McpSurfaces, Root};
+use super::{DirSpec, KnownHarness, McpConflictPath, McpSurface, McpSurfaces, Root};
 use crate::coverage::SharedDirSupport;
 use crate::mcp::descriptor::McpDialect;
 
@@ -62,7 +62,12 @@ pub const SCHEMA_VERSION: u32 = 1;
 /// The ENGINE version this build provides: the ceiling on what a file may demand through its
 /// `min_engine_version`. A file that needs more is refused (and the level below it answers) — it is
 /// saying, honestly, that it carries semantics this binary does not implement.
-pub const REGISTRY_ENGINE_VERSION: u32 = 1;
+///
+/// 2 — the `[[harness.mcp.conflict_paths]]` sub-table: a row may name files a harness READS
+/// servers from that topos never writes. A build that cannot read the column would place entries
+/// on top of servers the agent already has and never say so, which is exactly the refusal
+/// `min_engine_version` exists for.
+pub const REGISTRY_ENGINE_VERSION: u32 = 2;
 
 /// The widest registry file anything here will read, fetch, or accept from disk. The real table is
 /// a few tens of kilobytes; this is the "no surprises" ceiling on a lane that runs unattended.
@@ -328,6 +333,15 @@ struct OwnedMcp {
     user: Option<(OwnedDir, McpDialect)>,
     project: Option<(String, McpDialect)>,
     reload_note: String,
+    conflict_paths: Vec<OwnedConflictPath>,
+}
+
+/// One read-only conflict file before it is leaked.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct OwnedConflictPath {
+    file: OwnedDir,
+    dialect: McpDialect,
+    selector: String,
 }
 
 // =================================================================================================
@@ -619,11 +633,64 @@ fn mcp_at(table: &dyn TableLike, origin: Origin) -> Result<Option<OwnedMcp>, Reg
             ))
         }
     };
+    let conflict_paths = conflict_paths_at(mcp, origin)?;
     Ok(Some(OwnedMcp {
         user,
         project,
         reload_note,
+        conflict_paths,
     }))
+}
+
+/// A row's `[[harness.mcp.conflict_paths]]` entries (absent ⇒ none, which is every row whose
+/// harness reads servers only where topos writes them). Each names a file, the dialect it speaks,
+/// and optionally the slot inside it. A malformed entry refuses the FILE rather than being
+/// skipped: a conflict path silently dropped is a placement that lands on a server the agent
+/// already has, which is the failure this column exists to prevent.
+fn conflict_paths_at(
+    mcp: &dyn TableLike,
+    origin: Origin,
+) -> Result<Vec<OwnedConflictPath>, RegistryError> {
+    let Some(found) = mcp.get("conflict_paths") else {
+        return Ok(Vec::new());
+    };
+    let entries: Vec<&dyn TableLike> = match (found.as_array_of_tables(), found.as_array()) {
+        (Some(tables), _) => tables.iter().map(|t| t as &dyn TableLike).collect(),
+        (None, Some(array)) => {
+            let mut out = Vec::with_capacity(array.len());
+            for (i, value) in array.iter().enumerate() {
+                out.push(value.as_inline_table().map(|t| t as &dyn TableLike).ok_or_else(|| {
+                    RegistryError(format!(
+                        "mcp.conflict_paths[{i}]: expected {{ file = …, dialect = …, selector = … }}"
+                    ))
+                })?);
+            }
+            out
+        }
+        (None, None) => {
+            return refuse("mcp.conflict_paths: expected an array of { file, dialect, selector }");
+        }
+    };
+    let mut out = Vec::with_capacity(entries.len());
+    for (i, entry) in entries.into_iter().enumerate() {
+        let at = |what: &str| RegistryError(format!("mcp.conflict_paths[{i}]: {what}"));
+        let file = str_at(entry, "file").map_err(|e| at(e.message()))?;
+        let dialect = str_at(entry, "dialect").map_err(|e| at(e.message()))?;
+        // The selector is OPTIONAL — a file whose entries sit in the dialect's own slot names none.
+        let selector = match entry.get("selector") {
+            None => String::new(),
+            Some(v) => v
+                .as_str()
+                .ok_or_else(|| at("selector: expected a string"))?
+                .to_owned(),
+        };
+        out.push(OwnedConflictPath {
+            file: parse_dir(file, origin).map_err(|e| at(&format!("file: {e}")))?,
+            dialect: parse_dialect(dialect).map_err(|e| at(&e))?,
+            selector,
+        });
+    }
+    Ok(out)
 }
 
 /// The kebab-case spelling of an [`McpDialect`] variant — the file's dialect vocabulary.
@@ -888,6 +955,16 @@ fn leak(rows: Vec<HarnessRow>) -> &'static [KnownHarness] {
                 }),
                 project: mcp.project.map(|(path, dialect)| (leak_str(path), dialect)),
                 reload_note: leak_str(mcp.reload_note),
+                conflict_paths: Vec::leak(
+                    mcp.conflict_paths
+                        .into_iter()
+                        .map(|c| McpConflictPath {
+                            file: leak_dir(c.file),
+                            dialect: c.dialect,
+                            selector: leak_str(c.selector),
+                        })
+                        .collect::<Vec<_>>(),
+                ),
             }),
             shared_dir: row.shared_dir,
         })
@@ -983,6 +1060,14 @@ pub(super) fn render_row(row: &KnownHarness) -> String {
                 quote(dialect_word(dialect))
             );
         }
+        for c in mcp.conflict_paths {
+            out.push_str("\n[[harness.mcp.conflict_paths]]\n");
+            let _ = writeln!(out, "file = {}", quote(&c.file.raw()));
+            let _ = writeln!(out, "dialect = {}", quote(dialect_word(c.dialect)));
+            if !c.selector.is_empty() {
+                let _ = writeln!(out, "selector = {}", quote(c.selector));
+            }
+        }
     }
     out
 }
@@ -1042,10 +1127,16 @@ mod tests {
 
     #[test]
     fn a_min_engine_version_past_this_build_refuses_the_file() {
-        let text =
-            one_row("cursor", "9.0.0").replace("min_engine_version = 1", "min_engine_version = 2");
+        let past = REGISTRY_ENGINE_VERSION + 1;
+        let text = one_row("cursor", "9.0.0").replace(
+            "min_engine_version = 1",
+            &format!("min_engine_version = {past}"),
+        );
         let e = parse_registry(&text, Origin::Downloaded).expect_err("refused");
-        assert!(e.message().contains("min_engine_version 2"), "{e}");
+        assert!(
+            e.message().contains(&format!("min_engine_version {past}")),
+            "{e}"
+        );
         // …and the engine this build DOES provide is named, so a person can tell which side is
         // behind.
         assert!(
@@ -1224,6 +1315,143 @@ mod tests {
         let e = parse_registry(&text, Origin::Downloaded).expect_err("refused");
         assert!(e.message().contains("telepathy"), "{e}");
         assert!(e.message().contains("cursor-json"), "{e}");
+    }
+
+    /// The read-only conflict files: parsed as a sub-table, fenced like every other path, and
+    /// REFUSING the file rather than skipping an entry it cannot read — a conflict path dropped in
+    /// silence is a placement that lands on a server the agent already has.
+    #[test]
+    fn conflict_paths_parse_as_a_sub_table_and_refuse_what_they_cannot_read() {
+        let with = |body: &str| {
+            format!(
+                "{}\n[harness.mcp]\nreload_note = \"x\"\nuser = {{ dir = \"home/.x/mcp.json\", \
+                 dialect = \"cursor-json\" }}\n{body}",
+                one_row("cursor", "9.0.0")
+            )
+        };
+        let parsed = parse_registry(
+            &with(
+                "\n[[harness.mcp.conflict_paths]]\nfile = \"home/.claude.json\"\ndialect = \
+                 \"claude-project-json\"\nselector = \"projects.*.mcpServers\"\n\n\
+                 [[harness.mcp.conflict_paths]]\nfile = \"home/.claude.json\"\ndialect = \
+                 \"claude-project-json\"\n",
+            ),
+            Origin::Downloaded,
+        )
+        .expect("two conflict paths");
+        let mcp = parsed.rows[0].mcp.as_ref().expect("an mcp block");
+        assert_eq!(
+            mcp.conflict_paths
+                .iter()
+                .map(|c| (c.file.raw(), c.selector.clone()))
+                .collect::<Vec<_>>(),
+            [
+                (
+                    "home/.claude.json".to_owned(),
+                    "projects.*.mcpServers".to_owned()
+                ),
+                ("home/.claude.json".to_owned(), String::new()),
+            ],
+            "the selector is optional — no selector means the dialect's own slot"
+        );
+        // The inline-array spelling of the same sub-table reads identically.
+        let inline = parse_registry(
+            &with(
+                "conflict_paths = [{ file = \"home/.claude.json\", dialect = \
+                 \"claude-project-json\" }]\n",
+            ),
+            Origin::Downloaded,
+        )
+        .expect("inline conflict paths");
+        assert_eq!(
+            inline.rows[0]
+                .mcp
+                .as_ref()
+                .expect("an mcp block")
+                .conflict_paths
+                .len(),
+            1
+        );
+
+        // Every refusal names the entry, and refuses the FILE.
+        for (body, needle) in [
+            (
+                "\n[[harness.mcp.conflict_paths]]\ndialect = \"cursor-json\"\n",
+                "file: missing",
+            ),
+            (
+                "\n[[harness.mcp.conflict_paths]]\nfile = \"home/.x.json\"\n",
+                "dialect: missing",
+            ),
+            (
+                "\n[[harness.mcp.conflict_paths]]\nfile = \"home/.x.json\"\ndialect = \
+                 \"telepathy\"\n",
+                "telepathy",
+            ),
+            (
+                "\n[[harness.mcp.conflict_paths]]\nfile = \"home/.x.json\"\ndialect = \
+                 \"cursor-json\"\nselector = 7\n",
+                "selector: expected a string",
+            ),
+            (
+                "\n[[harness.mcp.conflict_paths]]\nfile = \"/etc/claude.json\"\ndialect = \
+                 \"cursor-json\"\n",
+                "absolute",
+            ),
+            ("conflict_paths = \"nope\"\n", "expected an array"),
+        ] {
+            let e = parse_registry(&with(body), Origin::Downloaded).expect_err(body);
+            assert!(e.message().contains(needle), "{body}: {e}");
+            assert!(e.message().contains("conflict_paths"), "{body}: {e}");
+        }
+    }
+
+    /// The one row that names them today: Claude Code reads `~/.claude.json` at user scope and once
+    /// per project it remembers, so both slots are read before a placement — under both roots the
+    /// file can sit at.
+    #[test]
+    fn claude_code_names_the_file_it_also_reads_servers_from() {
+        let claude = bundled_harnesses()
+            .iter()
+            .find(|h| h.slug == "claude-code")
+            .expect("claude-code is in the table");
+        let paths: Vec<(String, String)> = claude
+            .mcp
+            .as_ref()
+            .expect("an mcp block")
+            .conflict_paths
+            .iter()
+            .map(|c| (c.file.raw(), c.selector.to_owned()))
+            .collect();
+        assert_eq!(
+            paths,
+            [
+                ("home/.claude.json".to_owned(), "mcpServers".to_owned()),
+                (
+                    "home/.claude.json".to_owned(),
+                    "projects.*.mcpServers".to_owned()
+                ),
+                (
+                    "claudeHome/.claude.json".to_owned(),
+                    "mcpServers".to_owned()
+                ),
+                (
+                    "claudeHome/.claude.json".to_owned(),
+                    "projects.*.mcpServers".to_owned()
+                ),
+            ]
+        );
+        // …and no other row claims to read a file topos does not write.
+        for row in bundled_harnesses() {
+            if row.slug == "claude-code" {
+                continue;
+            }
+            assert!(
+                row.mcp.as_ref().is_none_or(|m| m.conflict_paths.is_empty()),
+                "{}: an unexplained conflict path",
+                row.slug
+            );
+        }
     }
 
     #[test]
@@ -1444,6 +1672,18 @@ mod tests {
                         .as_ref()
                         .map(|(p, dialect)| (p.as_str(), *dialect)),
                     mine.project,
+                    "{}",
+                    row.slug
+                );
+                assert_eq!(
+                    back.conflict_paths
+                        .iter()
+                        .map(|c| (c.file.raw(), c.dialect, c.selector.clone()))
+                        .collect::<Vec<_>>(),
+                    mine.conflict_paths
+                        .iter()
+                        .map(|c| (c.file.raw(), c.dialect, c.selector.to_owned()))
+                        .collect::<Vec<_>>(),
                     "{}",
                     row.slug
                 );

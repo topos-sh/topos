@@ -98,6 +98,10 @@ pub struct McpSurfaces {
     pub project: Option<(&'static str, McpDialect)>,
     /// Receipt copy: how config changes get picked up.
     pub reload_note: &'static str,
+    /// Files this harness ALSO reads MCP servers from, which topos never writes — the places an
+    /// entry can already stand for the same server under a name topos would not recognize. Read
+    /// only to answer "is this server already here"; never edited, never owned.
+    pub conflict_paths: &'static [McpConflictPath],
 }
 
 /// A user-scope MCP config surface: where the file lives + the dialect it speaks.
@@ -106,6 +110,22 @@ pub struct McpSurface {
     /// The file's location, resolved like every other dir in this table ([`resolve_spec`]).
     pub dir: DirSpec,
     pub dialect: McpDialect,
+}
+
+/// One READ-ONLY place a harness also finds MCP servers — a file topos does not write, with the
+/// slot inside it that holds them. It exists so a placement can be refused BEFORE it lands on top
+/// of a server the agent already has: Claude Code, for one, reads `~/.claude.json` at user scope
+/// and once per project it remembers, and de-duplicates against the entries topos places
+/// elsewhere.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct McpConflictPath {
+    /// The file's location, resolved like every other dir in this table ([`resolve_spec`]).
+    pub file: DirSpec,
+    /// The syntax the file speaks — which reader answers for it.
+    pub dialect: McpDialect,
+    /// The slot the entries sit in: a `.`-separated path whose `*` stands for every key at that
+    /// level (`projects.*.mcpServers`). Empty = the dialect's own slot.
+    pub selector: &'static str,
 }
 
 /// One discovered skill directory in a known harness.
@@ -381,6 +401,30 @@ pub const fn home_rooted_mcp_row(
         }),
         project,
         reload_note,
+        conflict_paths: &[],
+    })
+}
+
+/// [`home_rooted_mcp_row`] with read-only conflict paths — the TEST fixture for a harness that
+/// also reads servers from a file topos never writes.
+#[must_use]
+pub const fn home_rooted_mcp_row_with_conflicts(
+    slug: &'static str,
+    display_name: &'static str,
+    user_suffix: &'static str,
+    user_dialect: McpDialect,
+    project: Option<(&'static str, McpDialect)>,
+    reload_note: &'static str,
+    conflict_paths: &'static [McpConflictPath],
+) -> KnownHarness {
+    kh(slug, display_name, &[], "", &[]).with_mcp(McpSurfaces {
+        user: Some(McpSurface {
+            dir: home(user_suffix),
+            dialect: user_dialect,
+        }),
+        project,
+        reload_note,
+        conflict_paths,
     })
 }
 
@@ -418,6 +462,28 @@ impl KnownHarness {
     #[must_use]
     pub fn mcp_user_path(&self, home: &Path) -> Option<PathBuf> {
         resolve_spec(&self.mcp.as_ref()?.user?.dir, home, None)
+    }
+
+    /// This row's READ-ONLY conflict files, resolved under `home`: `(path, dialect, selector)`,
+    /// where the selector is `None` for the dialect's own slot. Empty for every row that names
+    /// none — which is every row but the ones whose harness reads servers from a file topos does
+    /// not write.
+    #[must_use]
+    pub fn mcp_conflict_paths(
+        &self,
+        home: &Path,
+    ) -> Vec<(PathBuf, McpDialect, Option<&'static str>)> {
+        let Some(mcp) = self.mcp.as_ref() else {
+            return Vec::new();
+        };
+        mcp.conflict_paths
+            .iter()
+            .filter_map(|c| {
+                let path = resolve_spec(&c.file, home, None)?;
+                let selector = (!c.selector.is_empty()).then_some(c.selector);
+                Some((path, c.dialect, selector))
+            })
+            .collect()
     }
 
     /// This row's OWN shared-dir coverage claim ([`SharedDirSupport::Unknown`] = no claim; the query in

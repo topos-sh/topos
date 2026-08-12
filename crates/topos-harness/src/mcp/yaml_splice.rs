@@ -105,7 +105,7 @@ pub fn apply(
             // key occupies the slot without provable provenance — Foreign; inserting beside it
             // would mint a duplicate YAML key.
             let desired_keys: BTreeSet<&str> = desired.iter().map(|e| e.key.as_str()).collect();
-            for key in &region.plain_keys {
+            for (key, _) in &region.plain {
                 if !(key.starts_with(MANAGED_KEY_PREFIX) || desired_keys.contains(key.as_str())) {
                     continue;
                 }
@@ -169,6 +169,42 @@ pub fn observe(current: Option<&[u8]>) -> Observed {
     }
 }
 
+/// Every entry under `mcp_servers` — sentinel-marked and plain alike (see
+/// [`super::observe_entries`]). A `selector` cannot be honoured in this dialect (the splicer reads
+/// exactly one block, by construction), so one answers UNREADABLE rather than a wrong slot.
+///
+/// An entry whose line is outside the flow grammar this file parses keeps its NAME and answers no
+/// address: a name collision is still provable, and an address that was never read is never
+/// claimed to match.
+#[must_use]
+pub fn observe_entries(
+    current: Option<&[u8]>,
+    selector: Option<&str>,
+) -> Option<Vec<super::SeenEntry>> {
+    if selector.is_some() {
+        return None;
+    }
+    if effectively_absent(current) {
+        return Some(Vec::new());
+    }
+    let text = std::str::from_utf8(current.unwrap_or_default()).ok()?;
+    let Shape::Region(region) = analyze(text).ok()? else {
+        return Some(Vec::new());
+    };
+    let seen = |(name, value): (&String, &Option<Value>)| super::SeenEntry {
+        name: name.clone(),
+        address: value.as_ref().and_then(super::entry_address),
+    };
+    Some(
+        region
+            .managed
+            .iter()
+            .map(|(_, key, value)| seen((key, value)))
+            .chain(region.plain.iter().map(|(k, v)| seen((k, v))))
+            .collect(),
+    )
+}
+
 /// Whether the file holds content beyond what topos itself writes: anything but the one bare
 /// `mcp_servers:` key line, blank lines, and sentinel-managed entry lines at the child indent.
 /// Comments, plain child keys, other top-level keys, and every unprovable shape answer `true` —
@@ -215,8 +251,11 @@ struct Region {
     /// Sentinel-marked lines at the child indent: `(line_idx, key, parsed value)` — `None` value
     /// = unparsable (forced `Drifted`).
     managed: Vec<(usize, String, Option<Value>)>,
-    /// Plain (non-sentinel) mapping keys at the child indent, for collision detection.
-    plain_keys: Vec<String>,
+    /// Plain (non-sentinel) mapping entries at the child indent — the key, and its value where
+    /// the line is a flow mapping this parser reads. The KEY is what collision detection needs;
+    /// the value is read for one question only, "which server does this name point at"
+    /// ([`observe_entries`]), and is `None` for any shape beyond the flow grammar.
+    plain: Vec<(String, Option<Value>)>,
 }
 
 enum Shape {
@@ -305,7 +344,7 @@ fn analyze(text: &str) -> Result<Shape, String> {
         .map_or(DEFAULT_INDENT, indent_of);
 
     let mut managed: Vec<(usize, String, Option<Value>)> = Vec::new();
-    let mut plain_keys = Vec::new();
+    let mut plain: Vec<(String, Option<Value>)> = Vec::new();
     for (i, line) in lines.iter().enumerate().take(end).skip(key_idx + 1) {
         let trimmed = line.trim();
         if trimmed.ends_with(SENTINEL) {
@@ -336,12 +375,12 @@ fn analyze(text: &str) -> Result<Shape, String> {
         } else if !is_blank_or_comment(line) && indent_of(line) == child_indent {
             // A plain mapping key at the child indent (`key: …`) — recorded for collision
             // detection only; its content is never read further.
-            if let Some((key, _)) = line.trim().split_once(':')
+            if let Some((key, body)) = line.trim().split_once(':')
                 && !key.is_empty()
                 && !key.contains(char::is_whitespace)
                 && !key.starts_with('-')
             {
-                plain_keys.push(key.to_owned());
+                plain.push((key.to_owned(), parse_flow_mapping(body.trim())));
             }
         }
     }
@@ -349,7 +388,7 @@ fn analyze(text: &str) -> Result<Shape, String> {
         key_idx,
         child_indent,
         managed,
-        plain_keys,
+        plain,
     }))
 }
 
