@@ -895,6 +895,15 @@ fn collisions(
         .into_iter()
         .map(|(_, e)| e.key)
         .collect();
+    // Each desired entry's server, canonicalized once.
+    let wanted: Vec<(&str, Option<String>)> = desired
+        .iter()
+        .filter(|e| !ours_here.contains(&e.key))
+        .map(|e| (e.key.as_str(), mcp::canonical_address(&e.url)))
+        .collect();
+    if wanted.is_empty() {
+        return out; // every desired entry is already topos's here
+    }
     // The dest file first (its entries may be topos's), then the read-only files, in table order.
     let mut surfaces: Vec<(PathBuf, McpDialect, Option<&str>, bool)> =
         vec![(file.to_path_buf(), dialect, None, true)];
@@ -915,16 +924,15 @@ fn collisions(
                 continue; // topos's own entry, this bundle's or another's
             }
             let address = entry.address.as_deref();
-            for want in desired {
-                if ours_here.contains(&want.key) || out.contains_key(&want.key) {
+            for (key, wanted_address) in &wanted {
+                if out.contains_key(*key) {
                     continue;
                 }
-                let same_name = entry.name == want.key;
-                let same_server =
-                    address.is_some() && address == mcp::canonical_address(&want.url).as_deref();
+                let same_name = entry.name == *key;
+                let same_server = address.is_some() && address == wanted_address.as_deref();
                 if same_name || same_server {
                     out.insert(
-                        want.key.clone(),
+                        (*key).to_owned(),
                         Collision {
                             name: entry.name.clone(),
                             path: path.clone(),
