@@ -34,7 +34,6 @@ pub(crate) fn fmt_normal(text: &str, scope: ManifestScope) -> Result<String, Man
     let doc: DocumentMut = text.parse().map_err(|e| ManifestError {
         message: format!("not valid TOML: {e}"),
         key: None,
-        migration: false,
     })?;
     let parsed = parse_document(&doc, scope)?;
 

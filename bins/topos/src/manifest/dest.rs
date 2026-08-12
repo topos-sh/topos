@@ -5,8 +5,8 @@
 //! machine paths (`~/`-prefixed or absolute), a project file names relative paths inside the
 //! checkout. This module owns:
 //!
-//! - the DEFAULT spellings (no env resolution) the retired-`harness` rewrites and the `-a`
-//!   selector's recorded rows use — a harness slug's skills root (`~/.codex/skills` /
+//! - the DEFAULT spellings (no env resolution) the `-a` selector's recorded rows use — a harness
+//!   slug's skills root (`~/.codex/skills` /
 //!   `.agents/skills`) from the registry table, and an MCP-capable slug's config file
 //!   (`~/.codex/config.toml` / `.codex/config.toml`) from the descriptor table;
 //! - the KNOWN-MCP-FILE match: which harness a dest entry's config file belongs to, by default
@@ -99,46 +99,13 @@ pub(crate) fn skills_dest_spelling_of(h: &KnownHarness, scope: ManifestScope) ->
     }
 }
 
-/// Map a list of harness slugs through a spelling fn: the quoted, comma-joined rewrite list of
-/// what maps (or `None` when nothing does), plus the slugs that map nowhere.
-pub(crate) fn rewrite_slugs(
-    slugs: &[String],
-    map: impl Fn(&str) -> Option<String>,
-) -> (Option<String>, Vec<String>) {
-    let mut mapped = Vec::new();
-    let mut unmapped = Vec::new();
-    for slug in slugs {
-        match map(slug) {
-            Some(d) if !mapped.contains(&d) => mapped.push(d),
-            Some(_) => {}
-            None => unmapped.push(slug.clone()),
-        }
-    }
-    let list = (!mapped.is_empty()).then(|| quoted_list(&mapped));
-    (list, unmapped)
-}
-
-/// Quote + comma-join a rewrite list: `"a", "b"`.
+/// Quote + comma-join a destination list: `"a", "b"`.
 pub(crate) fn quoted_list(items: &[String]) -> String {
     items
         .iter()
         .map(|d| format!("\"{d}\""))
         .collect::<Vec<_>>()
         .join(", ")
-}
-
-/// The `"x" maps` / `"x" and "y" map` clause for slugs the rewrite could not place.
-pub(crate) fn maps_clause(unmapped: &[String]) -> String {
-    let names = unmapped
-        .iter()
-        .map(|s| format!("\"{s}\""))
-        .collect::<Vec<_>>()
-        .join(" and ");
-    if unmapped.len() == 1 {
-        format!("{names} maps")
-    } else {
-        format!("{names} map")
-    }
 }
 
 /// Every known MCP config-file spelling at `scope`, table order — the list an unknown-file

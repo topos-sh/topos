@@ -1140,20 +1140,12 @@ pub(crate) enum ClientError {
         /// words for it, and one for the server-folder shape.
         ambiguous: bool,
     },
-    /// A manifest spells a RETIRED placement field (`path` / `harness` / a `[defaults.<kind>]`
-    /// table) — the load refuses and the message teaches the exact per-row `dest` rewrite. Shown
-    /// VERBATIM (the message is this code's own teaching over the user's own file content, like
-    /// `InvalidArgument`); the TTY rendering closes with `nothing changed`, because the file was
-    /// only read.
-    #[error("{0}")]
-    ManifestMigration(String),
     /// A manifest a verb had to READ refuses the grammar (bad TOML, an unknown field, an illegal
     /// value, a `dest` entry in the wrong scope's dialect). The fault is the FILE's — a
     /// user-authored `topos.toml`, never topos's own state — so the message (the file, the
-    /// offending entry, the rule: the grammar's own teaching) is shown VERBATIM like the
-    /// retired-spelling family, and the TTY closes with `nothing changed`, because the file was
-    /// only read. Retired spellings keep their own [`ClientError::ManifestMigration`] shape;
-    /// genuinely unreadable topos state stays [`ClientError::Corrupt`].
+    /// offending entry, the rule: the grammar's own teaching) is shown VERBATIM like
+    /// `InvalidArgument`, and the TTY closes with `nothing changed`, because the file was only
+    /// read. Genuinely unreadable topos state stays [`ClientError::Corrupt`].
     #[error("{0}")]
     ManifestInvalid(String),
     /// A `-a` selector naming no known agent. `known` is the real registry's slugs, alphabetical,
@@ -1363,8 +1355,6 @@ impl ClientError {
             // machine-runnable. The code names the WORD that is missing, not the flag spelling
             // that used to carry it.
             ClientError::KindRequired { .. } => "KIND_REQUIRED",
-            // A retired manifest spelling: the fix is the row's `dest` rewrite in the message.
-            ClientError::ManifestMigration(_) => "MANIFEST_FIELD_RETIRED",
             // A user-authored manifest the grammar refuses: the message names the file, the
             // entry, and the rule — the same word the reconcile's freeze warnings use.
             ClientError::ManifestInvalid(_) => "MANIFEST_INVALID",

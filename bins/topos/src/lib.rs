@@ -37,9 +37,6 @@ pub(crate) mod id;
 pub(crate) mod identity;
 pub(crate) mod ids;
 pub(crate) mod logfile;
-// The manifest engine (the demand side of demand ∩ entitlement). The verb fold wires it in;
-// until every consumer lands, the allow keeps the intermediate tree warning-clean.
-#[allow(dead_code)]
 pub(crate) mod manifest;
 pub(crate) mod materialize;
 pub(crate) mod mcp_engine;
@@ -57,8 +54,6 @@ pub(crate) mod render;
 pub(crate) mod resolve;
 pub(crate) mod scan;
 pub(crate) mod schema_doc;
-// Session state (login/logout) — see the manifest note above.
-#[allow(dead_code)]
 pub(crate) mod sessions;
 pub(crate) mod sidecar;
 pub(crate) mod source;

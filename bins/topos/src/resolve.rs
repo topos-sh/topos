@@ -568,70 +568,6 @@ fn resolve_bare(
     }
 }
 
-/// One target of a multi-target batch: the positional token as typed (for errors + argv rebuilds)
-/// and the kind its selector forces (`--channel` / `--skill`), or `None` for a free positional.
-#[derive(Debug, Clone)]
-pub(crate) struct TargetSpec {
-    pub token: String,
-    pub forced: Option<ResourceKind>,
-}
-
-#[cfg(test)]
-impl TargetSpec {
-    /// A free-form (kind-inferred) target — the test rigs' positional shape.
-    pub(crate) fn free(token: &str) -> Self {
-        Self {
-            token: token.to_owned(),
-            forced: None,
-        }
-    }
-    /// A kind-forced target (the rigs' selector shape).
-    pub(crate) fn kinded(token: &str, kind: ResourceKind) -> Self {
-        Self {
-            token: token.to_owned(),
-            forced: Some(kind),
-        }
-    }
-}
-
-/// Resolve a whole batch ALL-OR-NONE: every target resolves, or the FIRST failure aborts the batch
-/// and nothing is applied. A selector-forced target narrows the scope to its kind; an unresolved
-/// target is the uniform [`not_found`] here (verbs that fold an enroll flow in — `follow` — run
-/// their single-target dispatch BEFORE this batch resolver).
-///
-/// # Errors
-/// The first target's resolution error, or [`not_found`] for the first unresolved one.
-#[allow(dead_code)] // The batch entry point for the multi-target verbs (remove / channel add / protect).
-pub(crate) fn resolve_all(
-    universe: &[WorkspaceNames],
-    specs: &[TargetSpec],
-    scope: KindScope,
-) -> Result<Vec<Resolution>, ClientError> {
-    let mut out = Vec::with_capacity(specs.len());
-    for spec in specs {
-        let narrowed = match spec.forced {
-            Some(ResourceKind::Channel) => KindScope {
-                workspaces: false,
-                skills: false,
-                ..scope
-            },
-            Some(ResourceKind::Skill) => KindScope {
-                workspaces: false,
-                channels: false,
-                ..scope
-            },
-            None => scope,
-        };
-        // A selector value is a NAME (optionally qualified); a URL there resolves like any address.
-        let parsed = parse_target(&spec.token)?;
-        match resolve_one(universe, &parsed, narrowed)? {
-            Some(r) => out.push(r),
-            None => return Err(not_found(&spec.token)),
-        }
-    }
-    Ok(out)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1031,40 +967,6 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.to_string().contains("local copy"), "{err}");
-    }
-
-    #[test]
-    fn resolve_all_is_all_or_none() {
-        let u = universe();
-        // A batch with one unresolvable target fails WHOLE — nothing to apply.
-        let specs = vec![TargetSpec::free("eng"), TargetSpec::free("nope")];
-        let err = resolve_all(&u, &specs, KindScope::SUBSCRIBABLE).unwrap_err();
-        assert_eq!(err.code(), "NOT_FOUND");
-        assert!(
-            err.to_string().contains("not found, or is not visible"),
-            "{err}"
-        );
-        // A fully-resolvable batch answers every target, selectors narrowing per spec.
-        let specs = vec![
-            TargetSpec::kinded("release", ResourceKind::Channel),
-            TargetSpec::kinded("docs", ResourceKind::Skill),
-        ];
-        let out = resolve_all(&u, &specs, KindScope::SUBSCRIBABLE).unwrap();
-        assert_eq!(out.len(), 2);
-        assert!(matches!(
-            out[0],
-            Resolution::Resource {
-                kind: ResourceKind::Channel,
-                ..
-            }
-        ));
-        assert!(matches!(
-            out[1],
-            Resolution::Resource {
-                kind: ResourceKind::Skill,
-                ..
-            }
-        ));
     }
 
     #[test]

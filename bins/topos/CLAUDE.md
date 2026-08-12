@@ -89,8 +89,7 @@ generated `docs/cli.md` (`cargo xtask gen-cli-ref`).
   the table. `TOPOS_NO_HARNESS_REGISTRY_UPDATE` switches the lane off.
 - `manifest/` (`keys`, `document`, `dest`, `normal`, `scopes`) — the reference grammar, the
   format-preserving `toml_edit` editor (property-tested exact inverse), the `dest` vocabulary
-  (default destination spellings, the retired-`path`/`harness`/`[defaults]` rewrites, the
-  known-MCP-file table), the normal form, scope discovery. `ops/manifest_edit` picks the file a
+  (default destination spellings, the known-MCP-file table), the normal form, scope discovery. `ops/manifest_edit` picks the file a
   verb edits and owns file birth + the writer-lock + compare-and-swap discipline every manifest
   mutation rides.
 - `ops/claim` — `add <path> --as <bundle>`: a folder that ALREADY holds a copy of a bundle the

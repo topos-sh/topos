@@ -353,12 +353,8 @@ fn canonical_or(p: &Path) -> PathBuf {
 
 /// The typed refusal a manifest the grammar rejects earns — always the MANIFEST family, never
 /// corrupt-state (a `topos.toml` is a user-authored file, and its faults are the file's, not
-/// topos's own state): a RETIRED spelling surfaces as the migration teaching, everything else as
-/// the grammar refusal, and BOTH close the TTY with `nothing changed`.
+/// topos's own state), and it closes the TTY with `nothing changed`.
 fn corrupt(path: &Path, e: &ManifestError) -> ClientError {
-    if e.migration {
-        return ClientError::ManifestMigration(format!("{}: {e}", path.display()));
-    }
     ClientError::ManifestInvalid(format!("{}: {e}", path.display()))
 }
 
@@ -389,8 +385,8 @@ pub(super) struct Opened {
 /// template. The birth is a real, committed write before the requested edit runs.
 ///
 /// # Errors
-/// A filesystem failure, or the typed manifest refusal ([`ClientError::ManifestInvalid`] /
-/// [`ClientError::ManifestMigration`]) when the existing file does not parse.
+/// A filesystem failure, or the typed manifest refusal ([`ClientError::ManifestInvalid`]) when
+/// the existing file does not parse.
 pub(super) fn open_for_edit(ctx: &Ctx<'_>, target: &EditTarget) -> Result<Opened, ClientError> {
     if let Some(text) = read_text(ctx, &target.path)? {
         let editor =

@@ -1442,7 +1442,7 @@ fn a_driven_manifest_that_fails_to_load_refuses_the_run_whole() {
 fn a_load_refusal_is_never_a_soft_failure() {
     for local in [
         ClientError::ManifestInvalid("topos.toml: not a reference".to_owned()),
-        ClientError::ManifestMigration("topos.toml: `path` is retired".to_owned()),
+        ClientError::ManifestInvalid("topos.toml: unknown field `path`".to_owned()),
     ] {
         assert!(
             !ops::quiet_soft_failure(&local),
@@ -1693,13 +1693,12 @@ fn a_frozen_project_manifest_refuses_and_never_falls_back_to_the_machine() {
     );
 }
 
-/// `update -g` over a global file spelling a RETIRED placement field refuses with the exact
-/// rewrite teaching — nonzero, `nothing changed`, and NO success-claiming receipt — instead of
-/// the old downgrade (a `MANIFEST_INVALID` warning under an "updated machine-wide" summary that
-/// claimed a sweep which never read the file).
+/// `update -g` over a global file spelling a field the grammar does not know refuses the file —
+/// nonzero, `nothing changed`, and NO success-claiming receipt — instead of a warning under an
+/// "updated machine-wide" summary that would claim a sweep which never read the file.
 #[test]
-fn update_g_over_a_retired_spelling_file_refuses_with_the_rewrite() {
-    let rig = Rig::new("retired-refuses");
+fn update_g_over_an_unreadable_file_refuses_naming_the_field() {
+    let rig = Rig::new("stale-refuses");
     rig.seed_session();
     rig.write_global(&format!(
         "[bundles]\n\"{HOST}/{WS_NAME}/deploy\" = {{ path = \"~/.claude/skills\" }}\n"
@@ -1717,11 +1716,11 @@ fn update_g_over_a_retired_spelling_file_refuses_with_the_rewrite() {
         },
     )
     .unwrap_err();
-    assert_eq!(err.code(), "MANIFEST_FIELD_RETIRED");
+    assert_eq!(err.code(), "MANIFEST_INVALID");
     let msg = crate::render::safe_message(&err);
     assert!(
-        msg.contains("is now written as dest — use dest = [\"~/.claude/skills\"]"),
-        "the exact rewrite teaching reaches the surfaces verbatim: {msg}"
+        msg.contains("unknown field `path` — a workspace bundle takes"),
+        "the grammar's own teaching reaches the surfaces verbatim: {msg}"
     );
     assert!(msg.contains("topos.toml"), "the file is named: {msg}");
     let tty = crate::render::err_tty(&err);
@@ -1816,7 +1815,7 @@ fn the_quiet_sweep_refuses_a_broken_manifest_hard() {
         },
     )
     .unwrap_err();
-    assert_eq!(err.code(), "MANIFEST_FIELD_RETIRED");
+    assert_eq!(err.code(), "MANIFEST_INVALID");
     assert!(
         !ops::quiet_soft_failure(&err),
         "a broken manifest is a local fault — the hook path must exit nonzero, not warn-and-0"

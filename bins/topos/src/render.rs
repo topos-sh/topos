@@ -4576,13 +4576,12 @@ pub(crate) fn err_tty(err: &ClientError) -> String {
     if let ClientError::AmbiguousSource { .. } | ClientError::AlreadyAdded { .. } = err {
         return safe_message(err);
     }
-    // A manifest refusal (a retired spelling, or any grammar fault in a user-authored file)
-    // closes with the one line that says the load stopped BEFORE anything moved — the file was
-    // only read (the `--json` envelope is untouched: its `message` stays the single-sentence
-    // teaching). A refused `-a`/`--dest` selection closes the same way, for the same reason:
-    // nothing was read past the argv.
-    if let ClientError::ManifestMigration(_)
-    | ClientError::ManifestInvalid(_)
+    // A manifest refusal (any grammar fault in a user-authored file) closes with the one line
+    // that says the load stopped BEFORE anything moved — the file was only read (the `--json`
+    // envelope is untouched: its `message` stays the single-sentence teaching). A refused
+    // `-a`/`--dest` selection closes the same way, for the same reason: nothing was read past
+    // the argv.
+    if let ClientError::ManifestInvalid(_)
     | ClientError::UnknownAgent { .. }
     | ClientError::SelectionRefused(_) = err
     {
@@ -4840,26 +4839,23 @@ mod tests {
         }
     }
 
-    /// A retired-manifest-spelling refusal's TTY shows the teaching VERBATIM and closes with the
-    /// one line that says the load stopped before anything moved — while an ordinary corrupt
-    /// state keeps its redacted single line.
+    /// A manifest-grammar refusal's TTY shows the teaching VERBATIM and closes with the one line
+    /// that says the load stopped before anything moved — while an ordinary corrupt state keeps
+    /// its redacted single line.
     #[test]
-    fn a_manifest_migration_refusal_closes_the_tty_with_nothing_changed() {
-        let err = crate::error::ClientError::ManifestMigration(
-            "./topos.toml: `harness = [\"codex\"]` on \"topos.sh/acme/linear\" is now written \
-             as dest — use dest = [\"~/.codex/config.toml\"]"
+    fn a_manifest_grammar_refusal_closes_the_tty_with_nothing_changed() {
+        let err = crate::error::ClientError::ManifestInvalid(
+            "./topos.toml: unknown field `harness` — a workspace bundle takes `version`, `dest`, \
+             `name`"
                 .to_owned(),
         );
         let tty = super::err_tty(&err);
         assert_eq!(tty.lines().last(), Some("nothing changed"), "{tty}");
-        assert!(
-            tty.contains("use dest = [\"~/.codex/config.toml\"]"),
-            "{tty}"
-        );
+        assert!(tty.contains("unknown field `harness`"), "{tty}");
         // The envelope's message stays the single-sentence teaching (no closing line).
         assert!(!safe_message(&err).contains("nothing changed"));
-        // The GRAMMAR refusal family closes the same way, verbatim: a dialect fault names the
-        // file, the entry, and the rule on both surfaces (never the corrupt-state fixed line).
+        // A dialect fault names the file, the entry, and the rule on both surfaces the same way
+        // (never the corrupt-state fixed line).
         let err = crate::error::ClientError::ManifestInvalid(
             "~/.topos/topos.toml: dest entry `skills` is relative — the machine-wide file names \
              machine paths: `~/`-prefixed or absolute"

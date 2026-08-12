@@ -232,12 +232,8 @@ pub(crate) fn person_plan(
 
 /// The typed refusal a manifest the grammar rejects earns — always the MANIFEST family, never
 /// corrupt-state (a `topos.toml` is a user-authored file, and its faults are the file's, not
-/// topos's own state): a RETIRED spelling surfaces as the migration teaching, everything else as
-/// the grammar refusal, and BOTH close the TTY with `nothing changed`.
+/// topos's own state), and it closes the TTY with `nothing changed`.
 fn grammar_refusal(path: &Path, e: &crate::manifest::document::ManifestError) -> ClientError {
-    if e.migration {
-        return ClientError::ManifestMigration(format!("{}: {e}", path.display()));
-    }
     ClientError::ManifestInvalid(format!("{}: {e}", path.display()))
 }
 

@@ -99,22 +99,6 @@ impl KeyShape {
         }
     }
 
-    /// ONE deliverable item — a local folder, a repo skill, a workspace bundle. The shapes a
-    /// version value fits.
-    pub(crate) fn is_thing(&self) -> bool {
-        matches!(
-            self,
-            KeyShape::LocalPath { .. }
-                | KeyShape::RepoSkill { .. }
-                | KeyShape::WorkspaceBundle { .. }
-        )
-    }
-
-    /// A SET something else expands — the feed, a channel, a whole repo.
-    pub(crate) fn is_set(&self) -> bool {
-        !self.is_thing()
-    }
-
     /// A git-forge shape (repo set or repo skill) — pins are commits, not version digests.
     pub(crate) fn is_forge(&self) -> bool {
         matches!(self, KeyShape::RepoSet { .. } | KeyShape::RepoSkill { .. })
@@ -702,17 +686,6 @@ mod tests {
         let skill = classify_key("github.com/o/r/s").unwrap();
         let local = classify_key("./tools/x").unwrap();
 
-        for (shape, thing) in [
-            (&feed, false),
-            (&bundle, true),
-            (&channel, false),
-            (&repo, false),
-            (&skill, true),
-            (&local, true),
-        ] {
-            assert_eq!(shape.is_thing(), thing, "{shape:?}");
-            assert_eq!(shape.is_set(), !thing, "{shape:?}");
-        }
         assert!(repo.is_forge() && skill.is_forge() && !bundle.is_forge());
 
         assert_eq!(feed.leaf_name(), "acme");
