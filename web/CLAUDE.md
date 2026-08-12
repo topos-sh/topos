@@ -139,8 +139,9 @@ caller.
   a private or unresolvable address = "not verifiable from cloud" (NEUTRAL — internal servers are
   first-class). It records one row per version (`web.mcp_probe`, its OWN four-word vocabulary) and
   can never block, roll back, or slow a publish; a version with no row reads "not checked yet".
-  Hooked at the genesis path (all three doors), the re-publish arm and the propose arm; pointer
-  moves (review approve · revert · unarchive) create no version and are not probed.
+  Hooked at the genesis path (all three doors), the re-publish arm and the propose arm; NOT at the
+  upstream checker's import (a system act with no actor to scope the row) and not at a pointer move
+  (review approve · revert · unarchive create no version).
   Every publish door runs the same gate before any custody call: the session lane's
   publish/propose and the `mcp/new` page — the MCP section's own way in (built-in list ·
   registry name · SSRF-guarded URL — the guard DIALS the addresses it vetted (`https.request`
