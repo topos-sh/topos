@@ -95,11 +95,26 @@ resolves by.
   the workspace, get `topos-<workspace>-<name>`.
 </Note>
 
+## If you have it in two places
+
+A skill can sit both in a project checkout and machine-wide, each with its own draft. A bare
+publish ships the copy you are standing in when it has edits, and the other one when that is where
+the edits are — the preview and the receipt name the folder whenever it is not the one you stand
+in. `-g` names your machine-wide copy outright. When both copies have edits, the one you stand in
+ships and the other is named with the command that shares it too.
+
+```bash
+topos publish pr-describe -g --yes    # the machine-wide copy, from inside a checkout
+```
+
+Publishing a copy that already matches the published version is not an error — it says
+`already published — your copy matches current` and stops. If the edits are in your other copy, it
+says which command shares them.
+
 ## If it refuses
 
 | Refusal | Fix |
 |---|---|
-| Nothing changed | There is no new version to ship |
 | Your copy is behind the team | `topos update <skill>`, then publish again |
 | `--to` names the workspace | `--to` takes a **channel**: `--to backend` |
 | No such channel | Create it in the browser first |

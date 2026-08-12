@@ -351,10 +351,6 @@ pub(crate) enum ClientError {
     /// what the user needs. Sidecar-document parse failures stay [`ClientError::Corrupt`].
     #[error("{0}")]
     InvalidArgument(String),
-    /// A `publish` whose draft is byte-identical to `current` — there is nothing to ship. Distinct from a
-    /// usage error so an agent can branch on "already published" without treating it as a mistake.
-    #[error("'{skill}' has no changes to publish — the draft matches current")]
-    NoChanges { skill: String },
     /// A write-side git store failure.
     #[error("the local skill store reported an error — {0}")]
     Gitstore(#[from] GitstoreError),
@@ -572,16 +568,15 @@ pub(crate) enum ClientError {
     /// thing to reach for.
     ///
     /// `global` is the SCOPE the frozen copies live in, and every command this refusal offers is
-    /// spelled for it — a machine-scope freeze says `topos update -g …`, because a bare `update`
-    /// read from inside a checkout drives the PROJECT and would find no copy to act on.
+    /// spelled for it — a machine-scope freeze says `topos update -g …` / `topos diff -g …`,
+    /// because those commands, read from inside a checkout, would drive the PROJECT and find no
+    /// copy to act on.
     #[error(
         "'{skill}' has different edits in {} folders ({}) — name the one to work with (`--dest \
-         <folder>` on `topos publish {skill}`, `topos diff {skill}`, or `topos update{} {skill} \
-         --reset`), or discard every copy's edits with `topos update{} {skill} --reset` (each copy \
-         is snapshotted first)",
+         <folder>` on publish, diff, or update --reset), or discard every copy's edits: `topos \
+         update{} {skill} --reset` (each copy is snapshotted first)",
         copies.len(),
         copies.iter().map(|c| c.display.as_str()).collect::<Vec<_>>().join(", "),
-        scope_flag(*global),
         scope_flag(*global)
     )]
     PlacementsDiverged {
@@ -1069,7 +1064,6 @@ impl ClientError {
             // set (which is closed on the client side; agents branch on `outcome`/`retryable`).
             ClientError::Io(_) | ClientError::IoKind { .. } => "IO_ERROR",
             ClientError::InvalidArgument(_) => "INVALID_ARGUMENT",
-            ClientError::NoChanges { .. } => "NO_CHANGES",
             ClientError::Gitstore(_) => "GIT_STORE_ERROR",
             ClientError::Verify(_) => "INTEGRITY_ERROR",
             ClientError::UnknownSchemaVersion { .. } => "UPGRADE_REQUIRED",

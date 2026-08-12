@@ -963,6 +963,7 @@ fn publish_through(
         None,
         None,
         &ops::Selection::default(),
+        ops::StoreScope::Here,
     )
 }
 
@@ -1105,6 +1106,7 @@ fn an_mcp_publish_to_a_pre_mcp_server_refuses_before_the_wal() {
         None,
         None,
         &ops::Selection::default(),
+        ops::StoreScope::Here,
     )
     .expect_err("a pre-MCP server refuses the mcp publish");
     assert_eq!(err.code(), "SERVER_TOO_OLD");

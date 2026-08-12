@@ -10,6 +10,7 @@
     "placements": [
       "everyone"
     ],
+    "review": "topos diff deploy",
     "share_line": "https://topos.sh/acme/skills/deploy",
     "skill": "deploy",
     "skill_id": "s_deploy",

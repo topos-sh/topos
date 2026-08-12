@@ -218,13 +218,14 @@ whose copy has no edits refuses too, rather than reporting a no-op as success. `
 `update` without `--reset` is a usage error, never a silently ignored flag.
 
 This is the answer to `PLACEMENTS_DIVERGED` — the freeze raised when the same bundle is edited
-differently in two or more folders. Its message lists each copy with the three commands above;
-publishing or dropping one leaves every other copy untouched, so with two copies the survivor is
-the single ordinary draft and with more the freeze stands until one is left. `diff --dest` reads a
-frozen bundle that a bare `diff` refuses, and `publish` still refuses without a selector: it never
-picks a copy for you. Two additive receipt fields carry the choice — `from_placement` (the folder
-published from) and `other_edited` (the copies left untouched) — both present only when more than
-one copy was edited.
+differently in two or more folders. Its message lists each copy with the read that shows what is
+in it, then the one sentence naming the three verbs `--dest` answers for and the discard that takes
+every copy's edits; publishing or dropping one leaves every other copy untouched, so with two
+copies the survivor is the single ordinary draft and with more the freeze stands until one is left.
+`diff --dest` reads a frozen bundle that a bare `diff` refuses, and `publish` still refuses without
+a selector: it never picks a copy for you. Two additive receipt fields carry the choice —
+`from_placement` (the folder published from) and `other_edited` (the copies left untouched) — the
+second present only when more than one copy was edited.
 
 `update --reset --dest` carries the same disclosure the other way round: `dest` names the copy the
 reset took and `others_kept` names the copies that kept their edits.
@@ -327,8 +328,15 @@ manages answers with `managed: false` plus the `folders` of unmanaged copies fou
 `agent_view` instead — one harness's skills directories exactly as that agent reads them, spanning
 both scopes — and `--remote` fills `remote` with each connected workspace's channels and skills,
 annotated with this machine's adoption state. A skill can legitimately have two independent copies,
-one for the project and one for the person, with separate drafts; publish from inside the checkout
-you edited.
+one for the project and one for the person, with separate drafts. `publish` resolves between them:
+the copy you stand in when it holds edits, otherwise the other one when THAT does — and whenever
+the bytes come from outside the scope you stand in, `from_placement` names the folder and
+`from_machine` says it was the machine's. When both copies hold edits the one you stand in ships
+and `other_scope_draft` (`{folder, machine}`) names the one left alone; `-g` publishes the machine
+copy outright, and a name only a checkout tracks is then `NO_SUCH_SKILL`. A copy already at the
+published version is not an error: the envelope is `ok: true` with `"result": "no_changes"`, and
+carries `other_scope_draft` plus a `RUN_COMMAND` next action when the edits are in the other
+scope's copy. Never retry a publish against that answer.
 
 ## Offering to share back
 

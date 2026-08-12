@@ -380,9 +380,16 @@ pub(crate) enum Command {
     /// instead. Needs a login. When you have edited the same skill in more than one folder,
     /// a bare publish stops and asks which one you mean; `--dest <folder>` (or `-a <agent>`)
     /// answers it. The copy you do not pick keeps its edits and becomes an ordinary draft.
+    /// A skill you have both in this project and machine-wide publishes from whichever copy
+    /// holds the edits, and says which folder that was; `-g` names your machine-wide copy.
+    /// A copy that already matches the published version is not an error — it says so and
+    /// stops.
     Publish {
         /// The skill to publish: a name, a folder, or `<name>@<version>` to pin the exact bytes.
         target: String,
+        /// Publish your machine-wide copy, even when run inside a project.
+        #[arg(long, short = 'g')]
+        global: bool,
         /// Publish this agent's copy of the skill (a slug like `codex`).
         #[arg(long, short = 'a', value_name = "SLUG", conflicts_with = "dest")]
         agent: Option<String>,

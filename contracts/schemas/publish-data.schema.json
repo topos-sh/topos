@@ -33,6 +33,10 @@
       "format": "uint64",
       "minimum": 0
     },
+    "from_machine": {
+      "description": "Whether the shipped bytes came from the MACHINE copy while the command stood in a project\ncheckout — the cross-scope ship, which `from_placement` names the folder of. False for the\nordinary same-scope publish. **INFERRED** (additive-only).",
+      "type": "boolean"
+    },
     "from_placement": {
       "description": "The folder the published bytes were read from, as a person reads it\n(`project/.agents/skills/coolify-deploy`) — present only when a `--dest`/`-a` selection\nnamed ONE of several EDITED copies. A single edited copy needs no such line: it is the\ndraft, and naming its folder would say nothing. **INFERRED** (additive-only).",
       "type": [
@@ -78,6 +82,17 @@
       "items": {
         "type": "string"
       }
+    },
+    "other_scope_draft": {
+      "description": "The OTHER scope's copy, when it carries edits this publish did not ship. **INFERRED**\n(additive-only).",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ScopeDraft"
+        },
+        {
+          "type": "null"
+        }
+      ]
     },
     "placement_missing": {
       "description": "The channel named by `--to` that no longer EXISTED at the write (deleted between the\nclient's existence check and the transaction — the in-transaction refusal, never a silent\nmint): the publish landed catalog-only; re-run `--to` once the channel exists. **INFERRED**\n(additive-only).",
@@ -170,6 +185,24 @@
       },
       "required": [
         "name"
+      ]
+    },
+    "ScopeDraft": {
+      "description": "A bundle's copy in the scope this command did NOT act in — disclosed beside a publish that left\nit alone, so the edits it holds are never silently invisible. One command shares them, and which\none it is follows from `machine`. **INFERRED** (additive-only).",
+      "type": "object",
+      "properties": {
+        "folder": {
+          "description": "The folder that copy stands in, as a person reads it\n(`~/.claude/skills/coolify-deploy` · `project/.agents/skills/coolify-deploy`).",
+          "type": "string"
+        },
+        "machine": {
+          "description": "Whether it is the MACHINE copy (`false` = a project checkout's) — which decides both the\nword the line uses and whether the command that shares it carries `-g`.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "folder",
+        "machine"
       ]
     }
   }

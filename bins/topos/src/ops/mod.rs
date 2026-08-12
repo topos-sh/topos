@@ -98,7 +98,9 @@ pub(crate) use manifest_edit::{
 pub(crate) use log::{LogConnectors, log};
 #[cfg(any(test, feature = "test-fixtures"))]
 pub(crate) use manifest_edit::note_added_path;
-pub(crate) use publish::{PublishDescribeConnectors, PublishOutcome, publish, publish_describe};
+pub(crate) use publish::{
+    PublishDescribeConnectors, PublishOutcome, PublishPreview, publish, publish_describe,
+};
 // The auto-add pre-step is driven internally by `publish`; the re-export exists only for its unit tests.
 pub(crate) use protect::{ProtectConnectors, ProtectOutcome, protect};
 #[cfg(test)]
@@ -241,53 +243,123 @@ fn resolve_skill_in_workspace(
     resolve_skill_scoped(ctx, name, workspace, false)
 }
 
-/// Resolve a NAME across the PER-SCOPE stores: the home store first, then each project store in
-/// the cwd's manifest chain (nearest first) — a project-delivered bundle keeps its engine state in
-/// the checkout's own store (`<project>/.topos/state/<user>/`), and a write verb run from inside
-/// the checkout must still find it. Returns the OWNING store's layout beside the hit (the caller
-/// runs the per-skill doc/store work against it); a miss everywhere keeps the home resolver's
-/// error shape.
+/// One store's answer for a name: the copy, and whether it carries edits.
+struct StoreHit {
+    layout: crate::sidecar::Layout,
+    id: SkillId,
+    lock: Lock,
+    drafted: bool,
+}
+
+/// The OTHER reachable store that also tracks the resolved name — what a publish leaves alone.
+pub(crate) struct OtherStore {
+    pub layout: crate::sidecar::Layout,
+    pub id: SkillId,
+    pub lock: Lock,
+    /// Whether that copy carries edits of its own.
+    pub drafted: bool,
+}
+
+/// A name resolved across the per-scope stores for a WRITE verb: which store answered, and what
+/// the other reachable one holds — the two facts the cross-scope disclosure is written from.
+pub(crate) struct StoredSkill {
+    /// The owning store's layout — every per-skill read and write then rides it.
+    pub layout: crate::sidecar::Layout,
+    pub id: SkillId,
+    pub lock: Lock,
+    /// The nearest OTHER reachable store tracking this name, when one does.
+    pub other: Option<OtherStore>,
+    /// Whether the store that answered is NOT the one the invocation STANDS in (the nearest
+    /// tracker). A publish that ships from another scope says so on both its surfaces.
+    pub cross_scope: bool,
+}
+
+/// Resolve a NAME across the PER-SCOPE stores, STANDING FIRST: the candidates are the cwd chain's
+/// project stores nearest first, then the machine's home store, and the first that tracks the name
+/// is the scope the invocation stands in.
+///
+/// Which copy a bare publish ships, in order: the STANDING copy when it is drafted; else the
+/// nearest other reachable copy that is drafted (the feed routinely lands a clean twin of a bundle
+/// the other scope also holds, and the edits are the thing being shared); else the standing copy.
+/// Several other drafted copies keep the nearest — the walk's own order, never a second rule.
+///
+/// [`StoreScope::Machine`] (`-g`) narrows the answer to the home store alone: a name only a project
+/// store tracks is then an honest miss, never silently answered by the copy the flag excluded.
 fn resolve_skill_stored(
     ctx: &Ctx<'_>,
     name: &str,
     workspace: Option<&str>,
-) -> Result<(crate::sidecar::Layout, SkillId, Lock), ClientError> {
-    // Home first — but a copy carrying a DRAFT outranks a clean twin: the feed routinely lands a
-    // clean person-scope copy of a bundle a checkout also delivers, and a publish run from
-    // inside that checkout must ship the EDITED copy, not the clean shadow.
-    let home_hit = match resolve_skill_in_workspace(ctx, name, workspace) {
-        Ok(pair) => Some(pair),
-        Err(ClientError::NoSuchSkill { .. }) => None,
-        Err(e) => return Err(e),
-    };
-    let home_drafted = home_hit
-        .as_ref()
-        .is_some_and(|(id, _)| store_has_draft(ctx, id));
-    let mut project_fallback: Option<(crate::sidecar::Layout, SkillId, Lock)> = None;
-    if !home_drafted
-        && let Some(roots) = &ctx.roots
+    scope: StoreScope,
+) -> Result<StoredSkill, ClientError> {
+    let mut layouts: Vec<crate::sidecar::Layout> = Vec::new();
+    if let Some(roots) = &ctx.roots
         && let Some(cwd) = roots.cwd.as_deref()
     {
         for dir in crate::manifest::scopes::manifest_dirs_up(ctx.fs, cwd, Some(&roots.home)) {
-            let Some(playout) = crate::sidecar::existing_project_store(ctx.fs, &dir) else {
-                continue;
-            };
-            let pctx = pull::ctx_with_layout(ctx, &playout);
-            if let Ok((id, lock)) = resolve_skill_in_workspace(&pctx, name, workspace) {
-                if store_has_draft(&pctx, &id) {
-                    return Ok((playout, id, lock));
-                }
-                if project_fallback.is_none() {
-                    project_fallback = Some((playout, id, lock));
-                }
+            if let Some(playout) = crate::sidecar::existing_project_store(ctx.fs, &dir) {
+                layouts.push(playout);
             }
         }
     }
-    if let Some((id, lock)) = home_hit {
-        return Ok((ctx.layout.clone(), id, lock));
+    // The machine store last — nearest-first ends at the widest scope.
+    layouts.push(ctx.layout.clone());
+
+    let mut hits: Vec<StoreHit> = Vec::new();
+    for layout in layouts {
+        let sctx = pull::ctx_with_layout(ctx, &layout);
+        match resolve_skill_in_workspace(&sctx, name, workspace) {
+            Ok((id, lock)) => {
+                let drafted = store_has_draft(&sctx, &id, &lock);
+                hits.push(StoreHit {
+                    layout,
+                    id,
+                    lock,
+                    drafted,
+                });
+            }
+            Err(ClientError::NoSuchSkill { .. }) => {}
+            // A store that cannot be read (an ambiguity inside it, a corrupt document) is ITS
+            // answer — reported when nothing nearer answered, and otherwise left alone: a broken
+            // farther store never overrides a copy already resolved.
+            Err(e) if hits.is_empty() => return Err(e),
+            Err(_) => break,
+        }
     }
-    project_fallback.ok_or(ClientError::NoSuchSkill {
-        name: name.to_owned(),
+    if hits.is_empty() {
+        return Err(ClientError::NoSuchSkill {
+            name: name.to_owned(),
+        });
+    }
+    let resolved = match scope {
+        StoreScope::Machine => hits
+            .iter()
+            .position(|h| !h.layout.is_project_scope())
+            .ok_or_else(|| ClientError::NoSuchSkill {
+                name: name.to_owned(),
+            })?,
+        // Nearest-first over the drafted copies — and `hits[0]` IS the standing scope, so the
+        // rule reads off the walk's own order rather than a second comparison.
+        StoreScope::Here => hits.iter().position(|h| h.drafted).unwrap_or(0),
+    };
+    // The OTHER copy a disclosure can NAME: the nearest hit in the other kind of scope. Two
+    // project stores in one cwd chain are not that — the command that would share the second one
+    // is the same bare `publish` that just resolved the first, so there is nothing to point at.
+    let other = hits
+        .iter()
+        .position(|h| h.layout.is_project_scope() != hits[resolved].layout.is_project_scope())
+        .map(|i| OtherStore {
+            layout: hits[i].layout.clone(),
+            id: hits[i].id.clone(),
+            lock: hits[i].lock.clone(),
+            drafted: hits[i].drafted,
+        });
+    let hit = hits.swap_remove(resolved);
+    Ok(StoredSkill {
+        layout: hit.layout,
+        id: hit.id,
+        lock: hit.lock,
+        other,
+        cross_scope: resolved != 0,
     })
 }
 
@@ -359,20 +431,45 @@ fn resolve_skill_here(
     Ok((ctx.layout.clone(), id, lock))
 }
 
-/// Whether a store's copy of `sid` carries LOCAL EDITS (any scanned placement modified against
-/// its pristine version). Best-effort — an unreadable map or scan reads as "no draft" here; the
-/// verbs' own loss-guards re-check with fail-toward-the-gate semantics.
-pub(crate) fn store_has_draft(ctx: &Ctx<'_>, sid: &SkillId) -> bool {
+/// The FOLDER holding a store's draft of `sid`, or `None` when that store's copy is at the
+/// published version.
+///
+/// A draft is bytes that differ from the LOCK — the same rule the sync engine classifies work
+/// trees by ([`sync_engine::compute_work`]), and the reason a per-placement `Modified` alone will
+/// not do: a settled draft (one the last sweep re-recorded, so every copy scans `Clean` at a digest
+/// the lock does not name) is still unshipped work. `Absent`/`Foreign`/`Unscannable` copies say
+/// nothing either way. Best-effort — an unreadable map or scan reads as "no draft"; the verbs' own
+/// loss-guards re-check with fail-toward-the-gate semantics.
+///
+/// An EDITED copy is preferred over a settled one when both are present: it is the folder a person
+/// has open, and the one a disclosure should name.
+pub(crate) fn store_draft_dir(
+    ctx: &Ctx<'_>,
+    sid: &SkillId,
+    lock: &Lock,
+) -> Option<std::path::PathBuf> {
+    use crate::placement::ScanStatus;
     let sp = ctx.layout.published(sid);
-    let Ok(Some(map)) = crate::doc::read_map(ctx.fs, &sp.map) else {
-        return false;
-    };
-    let Ok(scans) = crate::placement::scan_placements(ctx, &map) else {
-        return false;
+    let map = crate::doc::read_map(ctx.fs, &sp.map).ok()??;
+    let scans = crate::placement::scan_placements(ctx, &map).ok()?;
+    let ahead = |s: &crate::placement::PlacementScan| {
+        let digest = match &s.status {
+            ScanStatus::Clean { digest } => topos_core::digest::to_hex(digest),
+            ScanStatus::Modified { scanned } => topos_core::digest::to_hex(&scanned.bundle_digest),
+            ScanStatus::Absent | ScanStatus::Foreign | ScanStatus::Unscannable => return None,
+        };
+        (digest != lock.bundle_digest).then(|| s.dir.clone())
     };
     scans
         .iter()
-        .any(|s| matches!(s.status, crate::placement::ScanStatus::Modified { .. }))
+        .filter(|s| matches!(s.status, ScanStatus::Modified { .. }))
+        .find_map(&ahead)
+        .or_else(|| scans.iter().find_map(&ahead))
+}
+
+/// Whether a store's copy of `sid` is a DRAFT — see [`store_draft_dir`], the one definition.
+pub(crate) fn store_has_draft(ctx: &Ctx<'_>, sid: &SkillId, lock: &Lock) -> bool {
+    store_draft_dir(ctx, sid, lock).is_some()
 }
 
 /// The NAME a cwd-chain PROJECT store tracks for `source` when the home store does not — the
@@ -380,8 +477,8 @@ pub(crate) fn store_has_draft(ctx: &Ctx<'_>, sid: &SkillId) -> bool {
 /// skill. `None` for a home-tracked name, a path, or any miss (the caller's own resolution and
 /// error shapes stand).
 fn project_tracked_name(ctx: &Ctx<'_>, source: &str) -> Option<String> {
-    match resolve_skill_stored(ctx, source, None) {
-        Ok((store, _, lock)) if store.is_project_scope() => Some(lock.name),
+    match resolve_skill_stored(ctx, source, None, StoreScope::Here) {
+        Ok(hit) if hit.layout.is_project_scope() => Some(hit.lock.name),
         _ => None,
     }
 }

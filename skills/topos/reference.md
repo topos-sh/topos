@@ -311,7 +311,7 @@ These reach your workspace, so each one previews first or confirms via its flag.
 
 ### `topos publish`
 
-Share a skill with your team. A bare run is a preview — it shows where the skill would land and whether review is required, and changes nothing; add `--yes` to apply. Publishing again ships a new version; on a skill that requires review, a publish opens a proposal instead. Needs a login. When you have edited the same skill in more than one folder, a bare publish stops and asks which one you mean; `--dest <folder>` (or `-a <agent>`) answers it. The copy you do not pick keeps its edits and becomes an ordinary draft
+Share a skill with your team. A bare run is a preview — it shows where the skill would land and whether review is required, and changes nothing; add `--yes` to apply. Publishing again ships a new version; on a skill that requires review, a publish opens a proposal instead. Needs a login. When you have edited the same skill in more than one folder, a bare publish stops and asks which one you mean; `--dest <folder>` (or `-a <agent>`) answers it. The copy you do not pick keeps its edits and becomes an ordinary draft. A skill you have both in this project and machine-wide publishes from whichever copy holds the edits, and says which folder that was; `-g` names your machine-wide copy. A copy that already matches the published version is not an error — it says so and stops
 
 ```
 topos publish [OPTIONS] <TARGET>
@@ -320,6 +320,7 @@ topos publish [OPTIONS] <TARGET>
 | Argument / flag | What it does |
 |---|---|
 | `<TARGET>` | The skill to publish: a name, a folder, or `<name>@<version>` to pin the exact bytes |
+| `-g, --global` | Publish your machine-wide copy, even when run inside a project |
 | `-a, --agent <SLUG>` | Publish this agent's copy of the skill (a slug like `codex`) |
 | `--dest <FOLDER>` | Publish the copy in this exact folder — the folder as `topos list` prints it, or the one the `topos.toml` line names |
 | `--to <CHANNEL>` | Place the skill in this channel. It must already exist — channels are created in the browser. A brand-new skill with no `--to` lands in `everyone` |

@@ -420,10 +420,10 @@ fn fixtures() -> Vec<(&'static str, String)> {
         AddData, ClaimReceipt, ClaimState, ClaimTwin, ConflictHolds, ConflictPathReport,
         ConflictPlacement, DestChange, DiffData, DiffPatchInfo, DiffSource, EnrollmentPending,
         InviteReadData, ListData, LogData, LoginData, LogoutData, MergeReport, ProtectData,
-        PublishData, PublishDescribeData, PublishGate, PublishedMatch, PullAction, PullData,
-        PullSkill, ReceiptScope, RemoveData, RemoveItem, RemoveKind, ReviewIndexData,
-        ReviewIndexEntry, SkillEntry, SkillStatus, StatusData, StatusScope, StatusScopeSummary,
-        StatusTrigger, WorkspaceSyncReport,
+        PublishData, PublishDescribeData, PublishGate, PublishNoChangesData, PublishResult,
+        PublishedMatch, PullAction, PullData, PullSkill, ReceiptScope, RemoveData, RemoveItem,
+        RemoveKind, ReviewIndexData, ReviewIndexEntry, ScopeDraft, SkillEntry, SkillStatus,
+        StatusData, StatusScope, StatusScopeSummary, StatusTrigger, WorkspaceSyncReport,
     };
     use topos_types::results::{AttentionCount, ListScope, McpServerSummary};
     use topos_types::{ActionCode, Affected, JsonEnvelope, Receipt, TerminalOutcome, WireError};
@@ -1500,8 +1500,12 @@ fn fixtures() -> Vec<(&'static str, String)> {
             workspace_address: Some("topos.sh/acme".to_owned()),
             bundle_digest: "b".repeat(64),
             placements: vec!["everyone".to_owned()],
-            // ONE edited copy — nothing was chosen between, so no folder is named.
+            // ONE edited copy in the scope this stands in — nothing was chosen between, so no
+            // folder is named and no other scope's copy is left holding edits.
             from_placement: None,
+            from_machine: false,
+            other_scope_draft: None,
+            review: Some("topos diff deploy".to_owned()),
             other_edited: Vec::new(),
             gate: PublishGate::Lands,
             is_revert: false,
@@ -1567,8 +1571,11 @@ fn fixtures() -> Vec<(&'static str, String)> {
             workspace_address: Some("topos.sh/acme".to_owned()),
             share_line: Some("https://topos.sh/acme/skills/deploy".to_owned()),
             undo: Some("topos revert deploy --to aaaaaaaaaaaa".to_owned()),
-            // ONE edited copy — the receipt names no folder and leaves none behind.
+            // ONE edited copy — the receipt names no folder and leaves none behind, at this
+            // scope or the other one.
             from_placement: None,
+            from_machine: false,
+            other_scope_draft: None,
             other_edited: Vec::new(),
         })
         .expect("PublishData serializes"),
@@ -1579,30 +1586,31 @@ fn fixtures() -> Vec<(&'static str, String)> {
         error: None,
     };
 
-    // `publish <skill>` when the draft equals `current` — the NEGATIVE `NO_CHANGES` refusal (a permanent
-    // failure: there is nothing to ship, so no retry helps).
+    // `publish <skill>` when the copy equals `current` — a SUCCESS with nothing to ship
+    // (`result: no_changes`), not a refusal: the converged state is what the command asked for.
+    // Here the edits are in the OTHER scope's copy, so the answer points across and offers the one
+    // command that shares them.
     let publish_no_changes = JsonEnvelope {
         schema_version: 1,
         command: "publish".to_owned(),
-        ok: false,
-        data: serde_json::json!({}),
+        ok: true,
+        data: serde_json::to_value(PublishNoChangesData {
+            result: PublishResult::NoChanges,
+            skill: "deploy".to_owned(),
+            other_scope_draft: Some(ScopeDraft {
+                folder: "~/.claude/skills/deploy".to_owned(),
+                machine: true,
+            }),
+        })
+        .expect("PublishNoChangesData serializes"),
         warnings: vec![],
         messages: vec![],
-        next_actions: vec![],
+        next_actions: vec![topos::actions::next_action(
+            ActionCode::from("RUN_COMMAND".to_owned()),
+            argv(&["topos", "publish", "-g", "deploy", "--json"]),
+        )],
         receipt: None,
-        error: Some(WireError {
-            code: "NO_CHANGES".to_owned(),
-            outcome: TerminalOutcome::PermanentFailure,
-            retryable: false,
-            affected: Affected {
-                skill: Some("deploy".to_owned()),
-                ..Default::default()
-            },
-            expected_generation: None,
-            current_generation: None,
-            context: serde_json::json!({}),
-            next_actions: vec![],
-        }),
+        error: None,
     };
 
     // A bare `update` sweep whose workspace has gone STALE — the additive `sync` freshness rows + the

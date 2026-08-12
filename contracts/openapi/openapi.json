@@ -3011,6 +3011,10 @@
             "description": "The pointer's new generation after the move.",
             "minimum": 0
           },
+          "from_machine": {
+            "type": "boolean",
+            "description": "Whether the shipped bytes came from the MACHINE copy while the command stood in a project\ncheckout — the cross-scope ship, which `from_placement` names the folder of. False for the\nordinary same-scope publish. **INFERRED** (additive-only)."
+          },
           "from_placement": {
             "type": [
               "string",
@@ -3056,6 +3060,17 @@
               "type": "string"
             },
             "description": "The other EDITED copies, untouched by this publish — each keeps its bytes and becomes an\nordinary draft ahead of the version just published. Populated on the same condition as\n`from_placement`. **INFERRED** (additive-only)."
+          },
+          "other_scope_draft": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ScopeDraft",
+                "description": "The OTHER scope's copy, when it carries edits this publish did not ship. **INFERRED**\n(additive-only)."
+              }
+            ]
           },
           "placement_missing": {
             "type": [
@@ -3422,6 +3437,24 @@
           "workspace_id": {
             "type": "string",
             "description": "The target workspace id."
+          }
+        }
+      },
+      "ScopeDraft": {
+        "type": "object",
+        "description": "A bundle's copy in the scope this command did NOT act in — disclosed beside a publish that left\nit alone, so the edits it holds are never silently invisible. One command shares them, and which\none it is follows from `machine`. **INFERRED** (additive-only).",
+        "required": [
+          "folder",
+          "machine"
+        ],
+        "properties": {
+          "folder": {
+            "type": "string",
+            "description": "The folder that copy stands in, as a person reads it\n(`~/.claude/skills/coolify-deploy` · `project/.agents/skills/coolify-deploy`)."
+          },
+          "machine": {
+            "type": "boolean",
+            "description": "Whether it is the MACHINE copy (`false` = a project checkout's) — which decides both the\nword the line uses and whether the command that shares it carries `-g`."
           }
         }
       },

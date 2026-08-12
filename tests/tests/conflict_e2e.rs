@@ -646,11 +646,12 @@ fn a_merge_conflict_never_reaches_a_folder_an_agent_reads() {
         "up_to_date",
         "{after_publish}"
     );
-    // Republishing the landed bytes is an ordinary no-op refusal.
+    // Republishing the landed bytes is a SUCCESS with nothing to ship — the converged state is
+    // what the command asked for, so it exits 0 and says so.
     let noop = dev
         .run(&["publish", KEEP, "--yes", "--json"])
-        .refusal("republishing the landed bytes");
-    assert_eq!(noop["error"]["code"], "NO_CHANGES", "{noop}");
+        .data("republishing the landed bytes");
+    assert_eq!(noop["result"], "no_changes", "{noop}");
 
     // THE ROUND TRIP: what the TEAM receives. The author's own copy is now behind, and their next
     // ordinary update fast-forwards onto this person's resolution — carrying the author's OWN
