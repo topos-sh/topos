@@ -122,9 +122,16 @@ caller.
   fails on drift. `/docs/<page>.md` is the plain-markdown twin; `/docs/llms.txt` the index.
 - **The MCP lane:** `kind: 'mcp'` bundles carry `server.json` (required; an optional `README.md`
   is the only allowed sibling — both files' bytes run the credential scan), gated by
-  `app/lib/mcp/` — a remote `streamable-http` endpoint over https, no `{placeholder}`, no
-  credential (the shapes live in the repo-root `tests/fixtures/mcp/`, compiled into
-  `secret-patterns.generated.ts`), and an embedded registry name no other bundle here claims.
+  `app/lib/mcp/` — SOMETHING TO RUN (a remote `streamable-http` endpoint over https, or
+  `packages[]`, or both; neither refuses), every package PINNED to one immutable thing (exact
+  version · OCI tag-or-digest · `fileSha256`; `latest` and version ranges refuse), no
+  `{placeholder}` in the endpoint, no credential (the shapes live in the repo-root
+  `tests/fixtures/mcp/`, compiled into `secret-patterns.generated.ts`; a package env/flag may
+  NAME a credential slot — the machine fills it — but never arrive with the value in it), and an
+  embedded registry name no other bundle here claims. `registryType` is open-world: what a given
+  machine can set up is the client's answer at render time, not a refusal for everyone. The rules
+  are mirrored in `bins/topos/src/mcp_validate.rs` and pinned by the shared vectors, so a change
+  here without a vector fails both suites.
   Every publish door runs the same gate before any custody call: the session lane's
   publish/propose and the `mcp/new` page — the MCP section's own way in (built-in list ·
   registry name · SSRF-guarded URL — the guard DIALS the addresses it vetted (`https.request`

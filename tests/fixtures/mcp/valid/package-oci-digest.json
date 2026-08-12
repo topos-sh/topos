@@ -1,0 +1,14 @@
+{
+  "name": "io.github.acme/graph",
+  "description": "A graph server shipped as a container image.",
+  "version": "3.0.0",
+  "packages": [
+    {
+      "registryType": "oci",
+      "identifier": "ghcr.io/acme/mcp-graph@sha256:38a322ac9048b247abafd47dde02ea1360bf144675a943a28246778112f9eaf4",
+      "transport": {
+        "type": "stdio"
+      }
+    }
+  ]
+}

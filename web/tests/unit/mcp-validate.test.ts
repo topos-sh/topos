@@ -81,8 +81,8 @@ describe("the shared refusal vectors", () => {
     expect([...codes].sort()).toEqual([
       "MCP_INSECURE_URL",
       "MCP_INVALID",
-      "MCP_LOCAL_REFUSED",
       "MCP_NO_STREAMABLE_REMOTE",
+      "MCP_PACKAGE_UNPINNED",
       "MCP_SECRET_REFUSED",
       "MCP_URL_TEMPLATE",
       "ok",
@@ -119,9 +119,40 @@ describe("the accepted summary", () => {
       url: "https://weather.acme.example/mcp",
       transport: "streamable-http",
       headers: [],
+      packages: [],
       // Declaring nothing is NOT the same claim as declaring "none".
       authHint: null,
     });
+  });
+
+  it("reports a package-only bundle as having no address, and names what it installs", () => {
+    const result = validateServerJson(bytesOf("valid/package-npm.json"));
+    expect(result.ok).toBe(true);
+    // The two fields a surface must ask about before printing an address.
+    expect(result.ok === true && result.summary.url).toBe(null);
+    expect(result.ok === true && result.summary.transport).toBe(null);
+    expect(result.ok === true && result.summary.packages).toEqual([
+      {
+        registryType: "npm",
+        identifier: "@acme/mcp-files",
+        version: "2.1.0",
+        transport: "stdio",
+      },
+    ]);
+  });
+
+  it("keeps the placed remote when a document offers both an address and packages", () => {
+    const result = validateServerJson(bytesOf("valid/package-and-remote.json"));
+    expect(result.ok === true && result.summary.url).toBe("https://mail.acme.example/mcp");
+    expect(result.ok === true && result.summary.packages.map((p) => p.identifier)).toEqual([
+      "@acme/mcp-mail",
+    ]);
+  });
+
+  it("carries an OCI package's version inside its identifier, with no version field", () => {
+    const result = validateServerJson(bytesOf("valid/package-oci-digest.json"));
+    expect(result.ok === true && result.summary.packages[0]?.version).toBe(null);
+    expect(result.ok === true && result.summary.packages[0]?.registryType).toBe("oci");
   });
 
   it("keeps literal headers verbatim", () => {

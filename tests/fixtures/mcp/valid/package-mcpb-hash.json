@@ -1,0 +1,15 @@
+{
+  "name": "io.github.acme/desk",
+  "description": "A desktop bundle identified by the hash of its file.",
+  "version": "1.2.0",
+  "packages": [
+    {
+      "registryType": "mcpb",
+      "identifier": "https://github.com/acme/mcp-desk/releases/download/v1.2.0/mcp-desk.mcpb",
+      "fileSha256": "548b6500c68b938c594d5608273c644ed214e4653bfc066644f0cf5988e7bbe5",
+      "transport": {
+        "type": "stdio"
+      }
+    }
+  ]
+}

@@ -1,0 +1,11 @@
+{
+  "name": "io.github.acme/weather",
+  "description": "A server whose own version is a moving pointer.",
+  "version": "latest",
+  "remotes": [
+    {
+      "type": "streamable-http",
+      "url": "https://weather.acme.example/mcp"
+    }
+  ]
+}

@@ -1,10 +1,19 @@
 //! THE MCP SERVER-DOCUMENT GATE, client side — the exact mirror of the web tier's gate.
 //!
-//! What a shared MCP bundle IS, here: a REMOTE server an agent can reach over `streamable-http`
-//! with the exact bytes the workspace holds — no local install, no per-machine fill-in, and no
-//! credential anywhere in the document. Everything this refuses refuses for one of those three
-//! reasons, and every refusal is TYPED ([`McpRefusalCode`]) so the caller says plainly what is
-//! wrong instead of "invalid".
+//! What a shared MCP bundle IS, here: a server an agent can run from the exact bytes the workspace
+//! holds — either a REMOTE address every machine reaches over `streamable-http`, or a PACKAGE every
+//! machine installs at one pinned version — with no per-machine fill-in of the address itself and no
+//! credential anywhere in the document. Everything this refuses refuses for one of those reasons,
+//! and every refusal is TYPED ([`McpRefusalCode`]) so the caller says plainly what is wrong instead
+//! of "invalid".
+//!
+//! **What a package may be is the FORMAT's question, not this build's.** `registryType` is
+//! open-world — npm, pypi, oci, nuget, mcpb and whatever the registry adds next all publish — and a
+//! package transport may be stdio, streamable-http or sse. Whether THIS machine can set a given
+//! package up is answered where the entry is rendered, in plain words, not by refusing the document
+//! for everyone. The one rule this product adds on top of the format: a package names ONE immutable
+//! thing (an exact version, a digest, a hash), because "the same bytes everywhere" is the promise a
+//! version range breaks.
 //!
 //! **One source of truth, two languages.** The rules, the refusal codes, and the credential shapes
 //! live at the repo root — `tests/fixtures/mcp/{vectors,secret-patterns}.json`. The web tier
@@ -58,6 +67,38 @@ const CREDENTIAL_HEADER_NAMES: &[&str] = &[
     "private-token",
 ];
 
+/// The words that make a NAME say "a credential goes here" — read after folding the name to letters
+/// and digits, so `GITHUB_TOKEN`, `github-token` and `githubToken` are one word to this.
+///
+/// A package's environment variables and command-line flags are SLOTS: the machine that runs the
+/// server fills them from its own keychain, which is the arrangement this product wants. So a slot
+/// named for a credential passes — with `isSecret` on it or not. What does not pass is such a slot
+/// arriving with the VALUE already in it: those bytes travel to every machine in the workspace.
+/// (Remote headers answer to their own, stricter rules: topos writes them into every agent's config
+/// verbatim, so a slot there is unplaceable rather than merely unwise.) Mirrors the web tier exactly.
+const CREDENTIAL_NAME_WORDS: &[&str] = &[
+    "token",
+    "secret",
+    "password",
+    "passwd",
+    "apikey",
+    "credential",
+    "privatekey",
+    "accesskey",
+];
+
+/// Does this environment-variable / flag / package-header name say it holds a credential?
+fn looks_like_credential_name(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    if CREDENTIAL_HEADER_NAMES.contains(&lower.as_str()) {
+        return true;
+    }
+    let folded: String = lower.chars().filter(char::is_ascii_alphanumeric).collect();
+    CREDENTIAL_NAME_WORDS
+        .iter()
+        .any(|word| folded.contains(word))
+}
+
 /// The registry's name grammar: `<reverse.dns.namespace>/<server-name>`, exactly one slash.
 const NAME_MIN: usize = 3;
 const NAME_MAX: usize = 200;
@@ -75,9 +116,10 @@ const VERSION_MAX: usize = 255;
 pub(crate) enum McpRefusalCode {
     /// Not JSON, or the required registry fields are missing / malformed.
     Invalid,
-    /// A non-empty `packages[]`: the server installs and runs locally.
-    LocalRefused,
-    /// No `streamable-http` remote (sse-only, or no remotes at all).
+    /// A package names no single immutable thing — a version range, `latest`, an OCI reference
+    /// with neither tag nor digest, an MCPB download with no hash.
+    PackageUnpinned,
+    /// Nothing to deliver: no `streamable-http` remote AND no packages.
     NoStreamableRemote,
     /// The endpoint is plain http.
     InsecureUrl,
@@ -93,7 +135,7 @@ impl McpRefusalCode {
     pub(crate) fn as_str(self) -> &'static str {
         match self {
             McpRefusalCode::Invalid => "MCP_INVALID",
-            McpRefusalCode::LocalRefused => "MCP_LOCAL_REFUSED",
+            McpRefusalCode::PackageUnpinned => "MCP_PACKAGE_UNPINNED",
             McpRefusalCode::NoStreamableRemote => "MCP_NO_STREAMABLE_REMOTE",
             McpRefusalCode::InsecureUrl => "MCP_INSECURE_URL",
             McpRefusalCode::UrlTemplate => "MCP_URL_TEMPLATE",
@@ -148,6 +190,12 @@ impl McpAuthHint {
 }
 
 /// What a receipt shows and what a describe reports — DERIVED, never the document echoed whole.
+///
+/// `url` and `transport` are EMPTY when the document offers only packages: a bundle is allowed to
+/// be a thing every machine installs rather than a thing every machine dials, so a caller that
+/// prints an address asks which it is holding first. (Empty rather than an `Option` deliberately —
+/// the receipt types this feeds spell both fields as plain strings, and a summary that changed
+/// shape would be a wire change dressed up as a validator change.)
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct McpSummary {
     pub name: String,
@@ -407,11 +455,61 @@ fn looks_random(token: &str) -> bool {
     mixed && entropy_of(token) >= ENTROPY_THRESHOLD
 }
 
-/// The maximal runs of [`token_char`] at least 8 long — what the belt inspects. (The web tier's
-/// `[A-Za-z0-9_+=-]{8,}` global match yields exactly these.)
-fn token_runs(raw: &str) -> impl Iterator<Item = &str> {
-    raw.split(|c: char| !token_char(c))
-        .filter(|run| run.chars().count() >= 8)
+/// The maximal runs of [`token_char`] at least 8 long, each with the byte offset it starts at —
+/// what the belt inspects. (The web tier's `[A-Za-z0-9_+=-]{8,}` global match yields exactly these,
+/// and its `match.index` is this offset.)
+fn token_runs(raw: &str) -> Vec<(usize, &str)> {
+    let mut runs = Vec::new();
+    let mut start: Option<usize> = None;
+    for (i, c) in raw.char_indices() {
+        if token_char(c) {
+            start.get_or_insert(i);
+        } else if let Some(from) = start.take() {
+            let run = &raw[from..i];
+            if run.chars().count() >= 8 {
+                runs.push((from, run));
+            }
+        }
+    }
+    if let Some(from) = start {
+        let run = &raw[from..];
+        if run.chars().count() >= 8 {
+            runs.push((from, run));
+        }
+    }
+    runs
+}
+
+/// Is the run starting at `at` an INTEGRITY DIGEST rather than a credential?
+///
+/// A sha-256 is 64 hex characters, which is precisely the LONG HEX shape the entropy belt refuses —
+/// and the registry format puts sha-256 digests in two ordinary, published places: an OCI reference
+/// (`ghcr.io/acme/mcp@sha256:<hex>`) and an MCPB download's `fileSha256`. Both are the OPPOSITE of a
+/// secret: they are how a reader proves the bytes it fetched are the bytes the publisher named.
+/// Without this carve-out no pinned container image and no MCPB package could ever be published,
+/// which would make the pinning rule below unsatisfiable.
+///
+/// Two spellings, and only these two — read from the characters immediately BEFORE the run, so
+/// nothing about the run itself relaxes:
+///
+///  · `sha256:` directly in front of it (the OCI/registry digest spelling, wherever it appears);
+///  · a JSON key ENDING in `sha256`, then `": "`, then the run (`"fileSha256": "<hex>"`).
+fn is_integrity_digest(raw: &str, at: usize) -> bool {
+    let before = &raw[..at];
+    if before.len() >= 7 && before[before.len() - 7..].eq_ignore_ascii_case("sha256:") {
+        return true;
+    }
+    // `… "fileSha256"  :  " ` — the quote that opens the value, the colon, the quoted key.
+    let Some(rest) = before.strip_suffix('"') else {
+        return false;
+    };
+    let Some(rest) = rest.trim_end().strip_suffix(':') else {
+        return false;
+    };
+    let Some(rest) = rest.trim_end().strip_suffix('"') else {
+        return false;
+    };
+    rest.len() >= 6 && rest[rest.len() - 6..].eq_ignore_ascii_case("sha256")
 }
 
 /// The first credential the raw text carries, named for the refusal message — or `None`.
@@ -421,22 +519,40 @@ pub(crate) fn find_secret(raw: &str) -> Option<&'static str> {
             return Some(p.name);
         }
     }
-    if token_runs(raw).any(looks_random) {
+    if token_runs(raw)
+        .into_iter()
+        .any(|(at, run)| looks_random(run) && !is_integrity_digest(raw, at))
+    {
         return Some("high-entropy value");
     }
     None
 }
 
+/// A JSON key whose VALUE is an integrity digest by name — the `fileSha256` family.
+fn is_digest_key(key: &str) -> bool {
+    key.len() >= 6 && key[key.len() - 6..].eq_ignore_ascii_case("sha256")
+}
+
 /// The same scan over the PARSED document: every decoded string — keys and values, at any depth —
 /// runs the pattern + entropy belt. This is what the raw pass cannot see: a token spelled in
 /// `\uXXXX` escapes decodes to the credential the raw bytes never showed.
+///
+/// One question cannot be answered from a string alone: a 64-hex value under `fileSha256` is an
+/// integrity digest, and the raw pass reads that from the bytes in front of it where this pass has
+/// only the key. So a digest-keyed string value is skipped here, exactly as the web tier skips it.
 fn find_secret_deep(value: &Value) -> Option<&'static str> {
     match value {
         Value::String(s) => find_secret(s),
         Value::Array(list) => list.iter().find_map(find_secret_deep),
-        Value::Object(map) => map
-            .iter()
-            .find_map(|(k, v)| find_secret(k).or_else(|| find_secret_deep(v))),
+        Value::Object(map) => map.iter().find_map(|(k, v)| {
+            find_secret(k).or_else(|| {
+                if v.is_string() && is_digest_key(k) {
+                    None
+                } else {
+                    find_secret_deep(v)
+                }
+            })
+        }),
         _ => None,
     }
 }
@@ -631,6 +747,372 @@ fn check_remote(remote: &Value) -> Result<Vec<McpHeader>, McpRefusal> {
     Ok(headers)
 }
 
+// =================================================================================================
+// Packages: one immutable thing per entry
+// =================================================================================================
+
+/// The moving pointer the registry reserves — never a version anyone can pin to.
+const RESERVED_VERSION: &str = "latest";
+
+/// The transports a PACKAGE may declare (the schema's `LocalTransport`).
+const PACKAGE_TRANSPORTS: &[&str] = &["stdio", STREAMABLE_HTTP, "sse"];
+
+/// A dotted version-ish token: `1`, `1.2`, `1.2.3`, `v1.2`, `1.x`, `1.*` — with an optional
+/// `-prerelease` tail. The three range shapes below are built out of it.
+fn is_version_atom(token: &str, allow_wildcards: bool) -> bool {
+    let token = token.strip_prefix('v').unwrap_or(token);
+    let (core, pre) = match token.split_once('-') {
+        Some((core, pre)) => (core, Some(pre)),
+        None => (token, None),
+    };
+    if let Some(pre) = pre
+        && (pre.is_empty()
+            || !pre
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-')))
+    {
+        return false;
+    }
+    let parts: Vec<&str> = core.split('.').collect();
+    if parts.is_empty() || parts.len() > 4 {
+        return false;
+    }
+    parts.iter().all(|part| {
+        !part.is_empty()
+            && (part.chars().all(|c| c.is_ascii_digit())
+                || (allow_wildcards && matches!(*part, "x" | "X" | "*")))
+    })
+}
+
+/// Does this version string spell a RANGE rather than a version? Reimplemented from the official
+/// registry's own rules (modelcontextprotocol/registry — read, not vendored), because a range is a
+/// promise this product cannot keep: "the same bytes everywhere" ends the moment a machine resolves
+/// `^1.2.3` on the day it happens to install.
+///
+///  · comparator ranges — `^1.2.3` · `~1.2` · `>=1.0.0` · `<2` · `=1.0.0`
+///  · hyphen ranges — `1.2.3 - 1.4.0`
+///  · OR ranges — `1.2 || 1.3`
+///  · wildcards in a dotted version — `1.x` · `1.2.*` · `1.X`
+fn looks_like_version_range(version: &str) -> bool {
+    let trimmed = version.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    for op in ["^", "~", ">=", "<=", ">", "<", "="] {
+        if let Some(rest) = trimmed.strip_prefix(op)
+            && is_version_atom(rest.trim_start(), false)
+        {
+            return true;
+        }
+    }
+    if let Some((left, right)) = trimmed.split_once(" - ")
+        && is_version_atom(left.trim(), false)
+        && is_version_atom(right.trim(), false)
+    {
+        return true;
+    }
+    if trimmed.contains("||")
+        && trimmed
+            .split("||")
+            .all(|part| is_version_atom(part.trim(), false))
+    {
+        return true;
+    }
+    // A wildcard inside a dotted version implies range-like intent; a bare `x` does not (it is
+    // not a dotted version at all).
+    trimmed.contains('.')
+        && is_version_atom(trimmed, true)
+        && (trimmed.contains('x') || trimmed.contains('X') || trimmed.contains('*'))
+}
+
+/// 64 lowercase hex — the schema's own `fileSha256` shape.
+fn is_file_sha256(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .chars()
+            .all(|c| c.is_ascii_digit() || matches!(c, 'a'..='f'))
+}
+
+/// Does this OCI reference name ONE image? The version lives inside the identifier for this type
+/// (the registry's own rule: an OCI package carries no `version` field), so it is pinned by a digest
+/// — or, at least, by a tag that is not the moving `latest`. The reference's registry host may carry
+/// a port (`localhost:5000/x`), so the tag is looked for in the LAST path segment only.
+fn oci_reference_is_pinned(identifier: &str) -> bool {
+    if let Some((_, digest)) = identifier.rsplit_once("@sha256:")
+        && is_file_sha256(digest)
+    {
+        return true;
+    }
+    let last = identifier.rsplit('/').next().unwrap_or(identifier);
+    match last.rsplit_once(':') {
+        Some((before, tag)) => !before.is_empty() && !tag.is_empty() && tag != RESERVED_VERSION,
+        None => false,
+    }
+}
+
+/// One `KeyValueInput` / `Argument` that arrives with its VALUE filled in — the shape the
+/// credential rule judges. A slot with no value is a slot, which is fine.
+fn literal_value_of(entry: &Value) -> Option<&str> {
+    entry
+        .get("value")
+        .and_then(Value::as_str)
+        .filter(|v| !v.is_empty())
+}
+
+/// The named-slot rule, one sentence for environment variables, flags and package headers alike.
+///
+/// # Errors
+/// One [`McpRefusal`]; mirrors the web tier's `checkNamedSlot`.
+fn check_named_slot(entry: &Value, what: &str) -> Result<(), McpRefusal> {
+    let name = entry
+        .get("name")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if name.is_empty() {
+        return refuse(
+            McpRefusalCode::Invalid,
+            format!("every {what} needs a name"),
+        );
+    }
+    if looks_like_credential_name(name) && literal_value_of(entry).is_some() {
+        return refuse(
+            McpRefusalCode::SecretRefused,
+            format!(
+                "its {what} {name} arrives with the value filled in — a shared bundle names the \
+                 slot and lets each machine fill it"
+            ),
+        );
+    }
+    Ok(())
+}
+
+/// The `arguments[]` rules: STRUCTURED objects, per the registry schema — never bare strings.
+///
+/// # Errors
+/// One [`McpRefusal`]; mirrors the web tier's `checkArguments`.
+fn check_arguments(value: Option<&Value>, what: &str) -> Result<(), McpRefusal> {
+    let Some(value) = value.filter(|v| !v.is_null()) else {
+        return Ok(());
+    };
+    let Some(list) = value.as_array() else {
+        return refuse(
+            McpRefusalCode::Invalid,
+            format!("its {what} is a list of argument objects"),
+        );
+    };
+    for entry in list {
+        if !entry.is_object() {
+            return refuse(
+                McpRefusalCode::Invalid,
+                format!(
+                    "its {what} holds argument objects, not plain strings — each one states its \
+                     type"
+                ),
+            );
+        }
+        match entry.get("type").and_then(Value::as_str) {
+            Some("named") => check_named_slot(entry, "flag")?,
+            Some("positional") => {
+                let hint = entry
+                    .get("valueHint")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                if literal_value_of(entry).is_none() && hint.is_empty() {
+                    return refuse(
+                        McpRefusalCode::Invalid,
+                        "one of its positional arguments needs a value or a valueHint",
+                    );
+                }
+            }
+            _ => {
+                return refuse(
+                    McpRefusalCode::Invalid,
+                    format!("every {what} entry is a positional or a named argument"),
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+/// ONE `packages[]` entry, judged: the registry's required fields, a transport this format knows,
+/// structured arguments, credential-free filled-in slots, and — the rule this product adds — ONE
+/// IMMUTABLE THING per entry.
+///
+/// The pinning rule is per registry type because the formats pin differently: npm and pypi carry a
+/// `version` field, an OCI reference carries its tag or digest inside the identifier, and an MCPB
+/// download is identified by the hash of the file. A type this build has never heard of is still
+/// publishable (the vocabulary is open-world) and is held to the one rule that reads the same
+/// everywhere: a `version` it does state must name a single version.
+///
+/// # Errors
+/// One [`McpRefusal`]; the check order is the web tier's, exactly.
+fn check_package(entry: &Value) -> Result<(), McpRefusal> {
+    if !entry.is_object() {
+        return refuse(
+            McpRefusalCode::Invalid,
+            "every one of its packages is an object",
+        );
+    }
+    let registry_type = entry
+        .get("registryType")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if registry_type.is_empty() {
+        return refuse(
+            McpRefusalCode::Invalid,
+            "every package says which registry it comes from (registryType)",
+        );
+    }
+    let identifier = entry
+        .get("identifier")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if identifier.trim().is_empty() {
+        return refuse(McpRefusalCode::Invalid, "every package needs an identifier");
+    }
+    if identifier.chars().any(char::is_whitespace) {
+        return refuse(
+            McpRefusalCode::Invalid,
+            "a package identifier carries no spaces",
+        );
+    }
+    let transport_type = entry
+        .get("transport")
+        .filter(|t| t.is_object())
+        .and_then(|t| t.get("type"))
+        .and_then(Value::as_str);
+    let Some(transport_type) = transport_type else {
+        return refuse(
+            McpRefusalCode::Invalid,
+            "every package declares how it is spoken to (transport)",
+        );
+    };
+    if !PACKAGE_TRANSPORTS.contains(&transport_type) {
+        return refuse(
+            McpRefusalCode::Invalid,
+            format!(
+                "a package transport is stdio, {STREAMABLE_HTTP} or sse — {transport_type} is none \
+                 of those"
+            ),
+        );
+    }
+    let transport = entry.get("transport").unwrap_or(&Value::Null);
+    if transport_type != "stdio"
+        && transport
+            .get("url")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .is_empty()
+    {
+        return refuse(
+            McpRefusalCode::Invalid,
+            "a package that speaks http declares the URL it listens on",
+        );
+    }
+    // A package's own transport headers are the machine's to fill; a filled-in credential is not.
+    if let Some(headers) = transport.get("headers").filter(|h| !h.is_null()) {
+        let Some(list) = headers.as_array() else {
+            return refuse(McpRefusalCode::Invalid, "a transport's headers are a list");
+        };
+        for header in list {
+            if !header.is_object() {
+                return refuse(McpRefusalCode::Invalid, "every header is an object");
+            }
+            check_named_slot(header, "header")?;
+        }
+    }
+    if let Some(environment) = entry.get("environmentVariables").filter(|e| !e.is_null()) {
+        let Some(list) = environment.as_array() else {
+            return refuse(
+                McpRefusalCode::Invalid,
+                "its environmentVariables is a list of named variables",
+            );
+        };
+        for variable in list {
+            if !variable.is_object() {
+                return refuse(
+                    McpRefusalCode::Invalid,
+                    "every environment variable is an object with a name",
+                );
+            }
+            check_named_slot(variable, "environment variable")?;
+        }
+    }
+    check_arguments(entry.get("runtimeArguments"), "runtimeArguments")?;
+    check_arguments(entry.get("packageArguments"), "packageArguments")?;
+
+    let raw_version = entry.get("version").filter(|v| !v.is_null());
+    if let Some(v) = raw_version
+        && !v.is_string()
+    {
+        return refuse(McpRefusalCode::Invalid, "a package version is a string");
+    }
+    let version = raw_version
+        .and_then(Value::as_str)
+        .filter(|v| !v.is_empty());
+    let lowered = registry_type.to_ascii_lowercase();
+    match lowered.as_str() {
+        "oci" => {
+            if !oci_reference_is_pinned(identifier) {
+                return refuse(
+                    McpRefusalCode::PackageUnpinned,
+                    format!(
+                        "{identifier} names no one image — an OCI package pins itself with a digest \
+                         or a tag that is not {RESERVED_VERSION}"
+                    ),
+                );
+            }
+        }
+        "mcpb" => {
+            if !entry
+                .get("fileSha256")
+                .and_then(Value::as_str)
+                .is_some_and(is_file_sha256)
+            {
+                return refuse(
+                    McpRefusalCode::PackageUnpinned,
+                    "an MCPB package is identified by the sha-256 of its file (fileSha256) — \
+                     without it nobody can tell which bytes arrived",
+                );
+            }
+        }
+        "npm" | "pypi" if version.is_none() => {
+            return refuse(
+                McpRefusalCode::PackageUnpinned,
+                format!("a {lowered} package names the exact version every machine installs"),
+            );
+        }
+        _ => {}
+    }
+    if let Some(version) = version {
+        if version == RESERVED_VERSION {
+            return refuse(
+                McpRefusalCode::PackageUnpinned,
+                format!(
+                    "{RESERVED_VERSION} is not a version — it is whatever the registry serves today"
+                ),
+            );
+        }
+        if looks_like_version_range(version) {
+            return refuse(
+                McpRefusalCode::PackageUnpinned,
+                format!(
+                    "{version} is a range, not a version — a shared bundle installs the same bytes \
+                     on every machine"
+                ),
+            );
+        }
+        if version.chars().count() > VERSION_MAX {
+            return refuse(
+                McpRefusalCode::Invalid,
+                "a package version is too long to be one",
+            );
+        }
+    }
+    Ok(())
+}
+
 /// Validate one server document. `raw` is the bytes as fetched or read from disk — the scan reads
 /// THEM, not a re-serialization, so nothing a caller strips can hide a credential from it.
 ///
@@ -706,26 +1188,32 @@ pub(crate) fn validate_server_json(raw: &[u8]) -> Result<McpSummary, McpRefusal>
     if version.is_empty() || version.chars().count() > VERSION_MAX {
         return refuse(McpRefusalCode::Invalid, "its server.json needs a version");
     }
-
-    // A non-empty packages[] is the registry's way of saying "install and run this locally". That
-    // is a different kind of thing from a shared address, so it is refused rather than
-    // half-supported.
-    if root
-        .get("packages")
-        .and_then(Value::as_array)
-        .is_some_and(|p| !p.is_empty())
-    {
+    // ONE version, the server's own: `latest` names whatever is served today and a range names a
+    // set, and neither is a thing a workspace can pin its members to.
+    if version == RESERVED_VERSION || looks_like_version_range(version) {
         return refuse(
-            McpRefusalCode::LocalRefused,
-            "this server installs and runs locally (it lists packages) — topos shares remote \
-             servers",
+            McpRefusalCode::Invalid,
+            format!(
+                "its version names one version — {version} names whichever one a machine resolves"
+            ),
         );
     }
 
-    let remotes: &[Value] = root
-        .get("remotes")
+    let raw_packages = root.get("packages").filter(|p| !p.is_null());
+    if raw_packages.is_some_and(|p| !p.is_array()) {
+        return refuse(McpRefusalCode::Invalid, "its packages is a list");
+    }
+    let raw_remotes = root.get("remotes").filter(|r| !r.is_null());
+    if raw_remotes.is_some_and(|r| !r.is_array()) {
+        return refuse(McpRefusalCode::Invalid, "its remotes is a list");
+    }
+    let packages: &[Value] = raw_packages
         .and_then(Value::as_array)
         .map_or(&[], Vec::as_slice);
+    let remotes: &[Value] = raw_remotes
+        .and_then(Value::as_array)
+        .map_or(&[], Vec::as_slice);
+
     // FIRST streamable-http wins: a document may offer several transports, and the ordering is the
     // publisher's own preference. Which one is PLACED is decided here; which ones are JUDGED is
     // every one of them, below.
@@ -733,13 +1221,15 @@ pub(crate) fn validate_server_json(raw: &[u8]) -> Result<McpSummary, McpRefusal>
         e.get("type").and_then(Value::as_str) == Some(STREAMABLE_HTTP)
             && e.get("url").and_then(Value::as_str).is_some()
     });
-    let Some(placed) = placed else {
+    // NOTHING TO DELIVER is the refusal, not "no remote": a document may offer an address, a set
+    // of packages, or both. Only a document offering neither leaves an agent with nothing to run.
+    if placed.is_none() && packages.is_empty() {
         return refuse(
             McpRefusalCode::NoStreamableRemote,
-            "it declares no streamable-http remote — topos places servers an agent reaches over \
-             that transport",
+            "it declares no streamable-http remote and no packages — there is nothing here for an \
+             agent to run",
         );
-    };
+    }
 
     // EVERY remote runs the hygiene and credential rules, in document order — not just the one
     // that gets placed. A sibling entry (an `sse` fallback, a second endpoint) travels in the same
@@ -748,15 +1238,22 @@ pub(crate) fn validate_server_json(raw: &[u8]) -> Result<McpSummary, McpRefusal>
     let mut headers = Vec::new();
     for (i, entry) in remotes.iter().enumerate() {
         let found = check_remote(entry)?;
-        if i == placed {
+        if Some(i) == placed {
             headers = found;
         }
     }
-    let url = remotes[placed]
-        .get("url")
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_owned();
+    // …and every PACKAGE the same way, in document order. What a given machine can actually set up
+    // is answered where the entry is rendered; publishable is the question here.
+    for entry in packages {
+        check_package(entry)?;
+    }
+    let url = placed.map_or_else(String::new, |i| {
+        remotes[i]
+            .get("url")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned()
+    });
 
     let auth_hint = match root
         .get("_meta")
@@ -772,8 +1269,8 @@ pub(crate) fn validate_server_json(raw: &[u8]) -> Result<McpSummary, McpRefusal>
         name: name.to_owned(),
         description: description.to_owned(),
         version: version.to_owned(),
+        transport: if url.is_empty() { "" } else { STREAMABLE_HTTP },
         url,
-        transport: STREAMABLE_HTTP,
         headers,
         auth_hint,
     })
@@ -1265,6 +1762,158 @@ mod tests {
         .expect("ok");
         assert_eq!(summary.url, "https://clean.example/mcp");
         assert!(summary.headers.is_empty());
+    }
+
+    /// A PACKAGE-ONLY bundle is a publishable bundle, and it reports NO address: the two fields a
+    /// caller must ask about before printing one come back empty rather than lying.
+    #[test]
+    fn a_package_only_bundle_publishes_and_names_no_address() {
+        let root = fixtures_root();
+        let summary = validate_server_json(
+            &std::fs::read(root.join("valid/package-npm.json")).expect("a vector"),
+        )
+        .expect("a package-only bundle is publishable");
+        assert_eq!(summary.name, "io.github.acme/files");
+        assert_eq!(summary.url, "");
+        assert_eq!(summary.transport, "");
+        // …while a document offering BOTH still reports the remote it places.
+        let both = validate_server_json(
+            &std::fs::read(root.join("valid/package-and-remote.json")).expect("a vector"),
+        )
+        .expect("both ways at once");
+        assert_eq!(both.url, "https://mail.acme.example/mcp");
+        assert_eq!(both.transport, STREAMABLE_HTTP);
+    }
+
+    /// ONE IMMUTABLE THING per package — spelled differently per registry type, refused with one
+    /// code. The type vocabulary itself stays OPEN: an unknown type publishes.
+    #[test]
+    fn a_package_that_names_no_one_thing_refuses_unpinned() {
+        let doc = |package: &str| {
+            format!(
+                r#"{{"name":"io.github.a/b","description":"d","version":"1.0.0","packages":[{package}]}}"#
+            )
+        };
+        let code = |package: &str| {
+            validate_server_json(doc(package).as_bytes())
+                .map(|_| ())
+                .map_err(|e| e.code)
+        };
+        let npm = |version: &str| {
+            format!(
+                r#"{{"registryType":"npm","identifier":"@a/x","version":"{version}","transport":{{"type":"stdio"}}}}"#
+            )
+        };
+        assert_eq!(code(&npm("1.2.3")), Ok(()));
+        for unpinned in ["^1.2.3", "~1.2", ">=1.0.0", "1.x", "1.2.*", "latest"] {
+            assert_eq!(
+                code(&npm(unpinned)),
+                Err(McpRefusalCode::PackageUnpinned),
+                "{unpinned}"
+            );
+        }
+        // npm and pypi carry the version in a FIELD, so its absence is the same refusal.
+        assert_eq!(
+            code(r#"{"registryType":"pypi","identifier":"a-b","transport":{"type":"stdio"}}"#),
+            Err(McpRefusalCode::PackageUnpinned)
+        );
+        // An OCI package pins inside its identifier — a tag is enough, `latest` is not, and a
+        // registry host's port is not a tag.
+        let oci = |identifier: &str| {
+            format!(
+                r#"{{"registryType":"oci","identifier":"{identifier}","transport":{{"type":"stdio"}}}}"#
+            )
+        };
+        assert_eq!(code(&oci("ghcr.io/a/x:1.2.3")), Ok(()));
+        assert_eq!(
+            code(&oci(&format!(
+                "ghcr.io/a/x@sha256:{}",
+                "0123456789abcdef".repeat(4)
+            ))),
+            Ok(())
+        );
+        assert_eq!(
+            code(&oci("ghcr.io/a/x:latest")),
+            Err(McpRefusalCode::PackageUnpinned)
+        );
+        assert_eq!(
+            code(&oci("ghcr.io/a/x")),
+            Err(McpRefusalCode::PackageUnpinned)
+        );
+        assert_eq!(
+            code(&oci("localhost:5000/a/x")),
+            Err(McpRefusalCode::PackageUnpinned)
+        );
+        // A type this build never heard of publishes — the vocabulary is the format's, not ours.
+        assert_eq!(
+            code(
+                r#"{"registryType":"cargo","identifier":"acme-mcp","version":"0.3.1","transport":{"type":"stdio"}}"#
+            ),
+            Ok(())
+        );
+        // …and is still held to the one rule that reads the same everywhere.
+        assert_eq!(
+            code(
+                r#"{"registryType":"cargo","identifier":"acme-mcp","version":"^0.3","transport":{"type":"stdio"}}"#
+            ),
+            Err(McpRefusalCode::PackageUnpinned)
+        );
+    }
+
+    /// A package's environment variables and flags are SLOTS the running machine fills. Naming one
+    /// for a credential is fine — `isSecret` and all; arriving with the value in it is not.
+    #[test]
+    fn a_package_slot_is_a_slot_until_somebody_fills_it_in() {
+        let doc = |env: &str| {
+            format!(
+                r#"{{"name":"io.github.a/b","description":"d","version":"1.0.0","packages":[{{"registryType":"npm","identifier":"@a/x","version":"1.0.0","transport":{{"type":"stdio"}},"environmentVariables":[{env}]}}]}}"#
+            )
+        };
+        let code = |env: &str| {
+            validate_server_json(doc(env).as_bytes())
+                .map(|_| ())
+                .map_err(|e| e.code)
+        };
+        assert_eq!(
+            code(r#"{"name":"GITHUB_TOKEN","isSecret":true,"isRequired":true}"#),
+            Ok(())
+        );
+        assert_eq!(code(r#"{"name":"ACME_ROOT","value":"/srv"}"#), Ok(()));
+        for name in ["GITHUB_TOKEN", "github-token", "acmeApiKey", "DB_PASSWORD"] {
+            assert_eq!(
+                code(&format!(r#"{{"name":"{name}","value":"filled-in"}}"#)),
+                Err(McpRefusalCode::SecretRefused),
+                "{name}"
+            );
+        }
+        // A nameless slot is malformed, not secret.
+        assert_eq!(
+            code(r#"{"value":"anything"}"#),
+            Err(McpRefusalCode::Invalid)
+        );
+    }
+
+    /// A sha-256 is 64 hex characters, which is exactly the shape the entropy belt refuses — and
+    /// the format publishes digests in two ordinary places. Both are integrity, not credentials;
+    /// a 64-hex run anywhere ELSE still refuses.
+    #[test]
+    fn integrity_digests_are_not_credentials() {
+        let hex = "0123456789abcdef".repeat(4);
+        assert_eq!(find_secret(&format!("ghcr.io/a/x@sha256:{hex}")), None);
+        assert_eq!(find_secret(&format!(r#"{{"fileSha256": "{hex}"}}"#)), None);
+        assert_eq!(
+            find_secret(&format!(r#"{{"value":"{hex}"}}"#)),
+            Some("high-entropy value")
+        );
+        // The DECODED walk answers the same way — a digest key spares its own value only.
+        let root = fixtures_root();
+        for vector in [
+            "valid/package-oci-digest.json",
+            "valid/package-mcpb-hash.json",
+        ] {
+            validate_server_json(&std::fs::read(root.join(vector)).expect("a vector"))
+                .unwrap_or_else(|e| panic!("{vector}: {} — {}", e.code.as_str(), e.message));
+        }
     }
 
     /// The three spellings a WHATWG parser SILENTLY REPAIRS and this hand-parse does not. Each

@@ -1,0 +1,27 @@
+{
+  "name": "io.github.acme/notes",
+  "description": "Notes over stdio, installed with uvx.",
+  "version": "0.4.2",
+  "packages": [
+    {
+      "registryType": "pypi",
+      "identifier": "acme-mcp-notes",
+      "version": "0.4.2",
+      "runtimeHint": "uvx",
+      "transport": {
+        "type": "stdio"
+      },
+      "packageArguments": [
+        {
+          "type": "named",
+          "name": "--root",
+          "value": "/srv/notes"
+        },
+        {
+          "type": "positional",
+          "valueHint": "workspace_dir"
+        }
+      ]
+    }
+  ]
+}

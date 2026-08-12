@@ -305,7 +305,15 @@ export async function action({ request, params }: ActionFunctionArgs) {
           details: {
             server: validated.summary.name,
             version: validated.summary.version,
-            url: validated.summary.url,
+            // WHAT LANDED, as the document actually spells it: an address, or the packages a
+            // machine installs. A `url: null` in the audit trail would record neither.
+            ...(validated.summary.url === null
+              ? {
+                  packages: validated.summary.packages.map(
+                    (pkg) => `${pkg.registryType}:${pkg.identifier}`,
+                  ),
+                }
+              : { url: validated.summary.url }),
           },
         });
       },
@@ -364,10 +372,10 @@ export default function McpNew() {
         }
       />
       <p className="max-w-3xl text-dim text-sm leading-relaxed">
-        An MCP server shared here is a <em className="text-ink not-italic">remote</em> address every
-        agent on the team can reach — one <code className="font-mono text-[13px]">server.json</code>
-        , the same bytes everywhere. Nothing that installs locally and nothing carrying a key: a
-        credential belongs on the machine that uses it, never in something the whole team receives.
+        An MCP server shared here is one <code className="font-mono text-[13px]">server.json</code>,
+        the same bytes everywhere — a remote address every agent on the team can reach, or a package
+        pinned to one version that each machine installs. Nothing carrying a key: a credential
+        belongs on the machine that uses it, never in something the whole team receives.
       </p>
       <ServerPicker servers={curated} onPick={setPicked} />
       {picked !== null && (
@@ -819,13 +827,28 @@ export function PreviewCard({ preview }: { preview: PreviewData }) {
         <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
           <span className="font-mono text-[13px] text-ink">{summary.name}</span>
           <span className="text-faint text-xs">{summary.version}</span>
-          <Chip tone="neutral">{summary.transport}</Chip>
+          {summary.transport !== null && <Chip tone="neutral">{summary.transport}</Chip>}
           <AuthChip auth={summary.authHint} />
         </div>
         <p className="text-dim text-sm">{summary.description}</p>
-        <p className="break-all font-mono text-[13px] text-dim" data-testid="mcp-preview-url">
-          {summary.url}
-        </p>
+        {/* AN ADDRESS OR A PACKAGE LIST — never a blank line where an address would be. A document
+            may offer a remote endpoint, a set of packages each machine installs, or both; the
+            preview shows what this one actually holds. */}
+        {summary.url !== null && (
+          <p className="break-all font-mono text-[13px] text-dim" data-testid="mcp-preview-url">
+            {summary.url}
+          </p>
+        )}
+        {summary.packages.length > 0 && (
+          <ul className="space-y-0.5 text-dim text-xs" data-testid="mcp-preview-packages">
+            {summary.packages.map((pkg) => (
+              <li key={`${pkg.registryType}:${pkg.identifier}`} className="break-all font-mono">
+                {pkg.registryType} {pkg.identifier}
+                {pkg.version === null ? "" : ` ${pkg.version}`} · {pkg.transport}
+              </li>
+            ))}
+          </ul>
+        )}
         <p className="text-faint text-xs">
           from {preview.origin === "" ? "the pasted document" : preview.origin}
           {summary.authHint === "oauth" && (

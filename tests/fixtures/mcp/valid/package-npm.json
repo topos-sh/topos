@@ -1,0 +1,28 @@
+{
+  "name": "io.github.acme/files",
+  "description": "Files the agent is pointed at, over stdio.",
+  "version": "2.1.0",
+  "packages": [
+    {
+      "registryType": "npm",
+      "identifier": "@acme/mcp-files",
+      "version": "2.1.0",
+      "runtimeHint": "npx",
+      "transport": {
+        "type": "stdio"
+      },
+      "environmentVariables": [
+        {
+          "name": "ACME_API_TOKEN",
+          "description": "Each machine supplies its own.",
+          "isSecret": true,
+          "isRequired": true
+        },
+        {
+          "name": "ACME_ROOT",
+          "value": "/srv/files"
+        }
+      ]
+    }
+  ]
+}

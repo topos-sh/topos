@@ -1,0 +1,14 @@
+{
+  "name": "io.github.acme/desk",
+  "description": "A downloadable bundle with nothing to check it against.",
+  "version": "1.2.0",
+  "packages": [
+    {
+      "registryType": "mcpb",
+      "identifier": "https://github.com/acme/mcp-desk/releases/download/v1.2.0/mcp-desk.mcpb",
+      "transport": {
+        "type": "stdio"
+      }
+    }
+  ]
+}
